@@ -9,6 +9,11 @@ if (args.Length > 0 && args[0] == "--synthetic-access-child-v1") {
     Environment.ExitCode = await AccessSessionTests.RunChildAsync(args);
     return;
 }
+if (args.Length == 3 && args[0] == "--windows-release-offer-fixture") {
+    try { await WindowsAppReleaseClientTests.RunOfferFixtureAsync(args[1], args[2]); }
+    catch (Exception error) { Console.Error.WriteLine("FAIL Windows release offer fixture: " + error.GetType().Name); Environment.ExitCode = 1; }
+    return;
+}
 
 var passed = 0;
 var tests = new (string Name, Func<Task> Run)[] {
@@ -31,7 +36,11 @@ var tests = new (string Name, Func<Task> Run)[] {
 }.Concat(AccessSessionTests.Groups).Concat(PortalClientTests.Groups).Concat(PortalClientDeadlineTests.Groups).Concat(EmployeeClientTests.Groups)
     .Concat(TransferQueueTests.Groups).Concat(DownloadProgressTests.Groups).Concat(QueuedDownloadSourceTests.Groups)
     .Concat(PlaceholderHydrationTests.Groups).Concat(CloudFilesProbeTests.Groups)
-    .Concat(CloudFilesNativeTransferTests.Groups).Concat(CloudFilesCallbackTests.Groups).Concat(DownloaderInactivityTests.Groups).ToArray();
+    .Concat(CloudFilesNativeTransferTests.Groups).Concat(CloudFilesCallbackTests.Groups).Concat(DownloaderInactivityTests.Groups)
+    .Concat(CloudFilesConnectionTests.Groups).Concat(ExplorerDemoSourceTests.Groups).Concat(WindowsAppReleaseClientTests.Groups)
+    .Concat(PlaceholderCacheEvictionTests.Groups).ToArray();
+if (args.Length == 1 && args[0] == "--cache-reclamation-only") tests = PlaceholderCacheEvictionTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--windows-release-client-only") tests = WindowsAppReleaseClientTests.Groups.ToArray();
 foreach (var test in tests) {
     try { await test.Run(); passed++; Console.WriteLine("PASS " + test.Name); }
     catch (Exception error) { Console.Error.WriteLine("FAIL " + test.Name + ": " + error.GetType().Name + " " + error.Message); Environment.ExitCode = 1; }
@@ -128,7 +137,7 @@ static async Task InvalidBodies() {
 }
 
 static async Task UnsafeInputs() {
-    foreach (var name in new[] { "../outside.bin", "..\\outside.bin", "C:\\outside", "file:stream", "CON.txt", "LPT1", "COM¹.dat", "trailing.", "trailing ", "bad\0name", ".ltds-downloads-v1",
+    foreach (var name in new[] { "../outside.bin", "..\\outside.bin", "C:\\outside", "file:stream", "CON.txt", "LPT1", "COM¹.dat", "trailing.", "trailing ", "bad\0name", ".ltds-downloads-v1", ".LTDS-Downloads-V1",
         "invoice\u202Efdp.exe", "zero\u200Bwidth.pdf", "isolate\u2066name.pdf", "isolate\u2067name.pdf",
         "isolate\u2068name.pdf", "isolate\u2069name.pdf", "\uFEFFinvoice.pdf", "bad\uD800name.pdf", "bad\uDC00name.pdf" }) {
         using var root = new DirectoryFixture(); var handler = new FakeHandler((_, _) => throw new Exception("Unexpected HTTP"));

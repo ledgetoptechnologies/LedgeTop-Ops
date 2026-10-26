@@ -10,7 +10,8 @@ public sealed record StartupPlan(IFilesBackend? Backend, string? Problem, string
 /// Real sources open one kind of files at a time. <see cref="Create"/> builds only the chosen source from the fixed,
 /// trusted setup; nothing signs in until the person has chosen. The remembered choice is a convenience, not authority.
 /// </summary>
-public sealed record AccessChoice(Func<AccessMode, IFilesBackend> Create, IReadOnlyList<AccessMode> Modes, AccessPreference Preference);
+public sealed record AccessChoice(Func<AccessMode, IFilesBackend> Create, IReadOnlyList<AccessMode> Modes, AccessPreference Preference,
+    IReadOnlyDictionary<AccessMode, Uri>? TrustedOrigins = null);
 
 /// <summary>
 /// Chooses how this copy runs. A packaged release (channel compiled in) uses only its compiled profile and its own
@@ -72,15 +73,19 @@ public static class Startup
 
     /// <summary>
     /// Offers client deliveries, plus company files when this setup includes the staff application. The pinned helper
-    /// is checked now, so a missing or changed helper is reported before anyone is asked to choose or sign in.
+    /// is checked now; missing/changed helpers are reported while keeping local connection cleanup available.
+    /// Backend construction rechecks the helper before sign-in can run.
     /// </summary>
     private static StartupPlan? Choice(LiveSettings settings, string localAppData, string folder, string downloads, string? tag)
     {
         var root = StateRoot(localAppData, folder);
-        // Check the helper itself, without building either source: each source is only built after it is chosen,
-        // and the chosen source checks the helper again before it is used.
-        if (!HelperTrusted(settings.CloudflaredPath, settings.CloudflaredSha256)) return null;
+        // Report helper problems without hiding local connection cleanup. Neither source is built
+        // here; its real constructor still rechecks the pinned helper before any authentication.
+        var helperProblem = HelperTrusted(settings.CloudflaredPath, settings.CloudflaredSha256) ? null : HelperProblem;
         AccessMode[] modes = settings.StaffApplicationUrl is null ? [AccessMode.Client] : [AccessMode.Client, AccessMode.Employee];
-        return new(null, null, downloads, tag, new AccessChoice(mode => new LiveBackend(settings, root, mode), modes, AccessPreference.For(localAppData, folder)));
+        var origins = new System.Collections.ObjectModel.ReadOnlyDictionary<AccessMode, Uri>(modes.ToDictionary(mode => mode,
+            mode => new Uri((mode == AccessMode.Client ? settings.PortalApplicationUrl : settings.StaffApplicationUrl!).GetLeftPart(UriPartial.Authority))));
+        return new(null, helperProblem, downloads, tag, new AccessChoice(mode => new LiveBackend(settings, root, mode), modes,
+            AccessPreference.For(localAppData, folder), origins));
     }
 }

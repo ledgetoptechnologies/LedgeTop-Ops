@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- The OS-qualified TFM supplies Microsoft's WinRT projection; no hand-written registry registration. -->
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AssemblyName>LedgeTop.Files.Explorer</AssemblyName>
+    <RootNamespace>LedgeTop.Files.Explorer</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Core/WindowsDownload.Core.csproj" />
+    <!-- Reuse the approved Operations favicon byte-for-byte; do not depend on an installed package's versioned path. -->
+    <EmbeddedResource Include="../../operations/public/favicon.ico" LogicalName="LedgeTop.Files.Explorer.Brand.ico" />
+    <InternalsVisibleTo Include="WindowsDownload.Explorer.Tests" />
+  </ItemGroup>
+</Project>

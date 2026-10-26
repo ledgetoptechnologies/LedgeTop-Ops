@@ -21,6 +21,10 @@ public sealed class CloudflareAccessSession
     private readonly string binaryPath;
     private readonly string binarySha256;
     private readonly IAccessCommandRunner runner;
+    private readonly object tokenPins = new();
+    private byte[]? pinnedTokenDigest;
+    private int pinCount, pendingPins, activeLogins;
+    private bool pinInvalidated;
     public Uri Origin { get; }
     public Uri ProtectedApplicationUrl { get; }
 
@@ -64,9 +68,72 @@ public sealed class CloudflareAccessSession
 
     public async Task ExplicitLoginAsync(CancellationToken cancellationToken = default)
     {
-        // This is the only operation allowed to trigger cloudflared's interactive browser login.
-        var result = await RunAsync(["access", "login", "--app", ProtectedApplicationUrl.AbsoluteUri, "--quiet"], cancellationToken);
-        if (result.ExitCode != 0) throw new LoginRequiredException();
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (tokenPins) {
+            // Reserve before awaiting: a pin cannot race an interactive login already in progress,
+            // and login cannot enter between a cached pin read and its publication.
+            if (pinCount != 0 || pendingPins != 0) throw new LoginRequiredException();
+            activeLogins++;
+        }
+        try {
+            // This is the only operation allowed to trigger cloudflared's interactive browser login.
+            var result = await RunAsync(["access", "login", "--app", ProtectedApplicationUrl.AbsoluteUri, "--quiet"], cancellationToken);
+            if (result.ExitCode != 0) throw new LoginRequiredException();
+        } finally { lock (tokenPins) activeLogins--; }
+    }
+
+    /// <summary>Reads the normal cached credential without browser interaction and pins its identity
+    /// in memory for a bounded operation. Any different credential observed before an HTTP header
+    /// is returned invalidates all overlapping leases, even if the cache later switches back.
+    /// The lease exposes no credential or digest and must be disposed when the operation finishes.</summary>
+    public async Task<IDisposable> PinCachedTokenAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (tokenPins) {
+            if (activeLogins != 0 || pinInvalidated) throw new LoginRequiredException();
+            pendingPins++;
+        }
+        byte[]? digest = null;
+        try {
+            var token = await GetTokenAsync(cancellationToken);
+            digest = TokenDigest(token);
+            lock (tokenPins) {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (pinInvalidated || pinnedTokenDigest is not null &&
+                    !CryptographicOperations.FixedTimeEquals(pinnedTokenDigest, digest)) {
+                    pinInvalidated = pinCount != 0;
+                    throw new LoginRequiredException();
+                }
+                if (pinCount == 0) { pinnedTokenDigest = digest; digest = null; }
+                pinCount++;
+                return new TokenPin(this);
+            }
+        } finally {
+            if (digest is not null) CryptographicOperations.ZeroMemory(digest);
+            lock (tokenPins) pendingPins--;
+        }
+    }
+
+    private static byte[] TokenDigest(string token)
+    {
+        var bytes = Encoding.UTF8.GetBytes(token);
+        try { return SHA256.HashData(bytes); }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
+    }
+
+    private void ReleaseTokenPin()
+    {
+        lock (tokenPins) {
+            if (--pinCount != 0) return;
+            CryptographicOperations.ZeroMemory(pinnedTokenDigest!);
+            pinnedTokenDigest = null; pinInvalidated = false;
+        }
+    }
+
+    private sealed class TokenPin(CloudflareAccessSession owner) : IDisposable
+    {
+        private CloudflareAccessSession? current = owner;
+        public void Dispose() => Interlocked.Exchange(ref current, null)?.ReleaseTokenPin();
     }
 
     internal async Task<string> GetTokenAsync(CancellationToken cancellationToken = default)
@@ -85,6 +152,18 @@ public sealed class CloudflareAccessSession
                 || expiry <= DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 5) throw new FormatException();
         } catch (Exception error) when (error is FormatException or JsonException or InvalidOperationException) {
             throw new LoginRequiredException();
+        }
+        lock (tokenPins) {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (pinCount != 0) {
+                var digest = TokenDigest(token);
+                try {
+                    if (pinInvalidated || !CryptographicOperations.FixedTimeEquals(pinnedTokenDigest!, digest)) {
+                        pinInvalidated = true;
+                        throw new LoginRequiredException();
+                    }
+                } finally { CryptographicOperations.ZeroMemory(digest); }
+            }
         }
         return token;
     }

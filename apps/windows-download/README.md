@@ -1,11 +1,57 @@
-# Windows download foundation (prototype)
+# LedgeTop Files Windows read-only pilot
 
-This contains a BCL-only .NET 10 transfer library, a Windows WPF desktop
-prototype and synthetic acceptance harnesses, with a human Cloudflare Access
-bridge and separate portal and employee read adapters.
-It is **not a released Windows desktop application, installer or sync client**.
-Tests use synthetic identities and handlers, install no software and make no
-production connections. No NuGet packages are required.
+This contains the .NET 10 transfer library, Windows settings/activity app,
+system tray, branded Explorer connection and files-on-demand provider, with
+human Cloudflare Access and separate portal and employee read adapters.
+The unsigned per-user pilot installer is available in
+`S:\LedgeTop Operations\Sync App`. Start with `LATEST-PREVIEW.txt` and
+`CURRENT-STAGING-STATUS.txt`; versioned receipts retain their original build-time
+observations. Code signing is intentionally off. Uploads, automatic catalog
+refresh and automatic updates are not implemented.
+
+## Current verification — October 26, 2026
+
+- Installer 0.5.2.0 completed on the desktop; all 524 payload files, registry,
+  ownership marker and Start menu targets matched. Setup did not launch the app.
+- Actual authenticated Company-file native acceptance passed ordinary open,
+  content verification, keep, free-space cache removal without source calls,
+  redownload and exact owned registration cleanup for two approved staging
+  files, including the largest at 126,453,788 bytes. The largest-file run also
+  released its final downloaded payload and verified its source hash and the
+  inventory unchanged.
+- Generated native acceptance also covers recursive keep/free, edited-file
+  preservation and provider shutdown. These results are separate from laptop UI
+  confirmation and do not establish acceptance of every real file.
+- The server headroom fix is active and independently verified. The recovered
+  gateway's source mount is read-only, with original roots/grants retained.
+  Actual production catalog capture passed the exact 19-file approved inventory,
+  one directory and 1,919,807,773 total bytes. This resolved real manifests without
+  downloading every file body to Windows; it does not prove an atomic catalog
+  revision or retention of every gateway snapshot.
+- The current laptop's Explorer connection, logo, context-menu actions and tray
+  close/quit/reconnect lifecycle remain acceptance gates. Actual uninstall has
+  not been tested; relocating the real uninstaller does not isolate its use of
+  current-user profiles. Restart-policy improvements are separately proposed,
+  with no policy change or boot acceptance claimed.
+
+The current installed/shared Windows payload remains 0.5.2.0 from source
+`e654af09379b3862a84563bed791868eb9caf77e`. The later backend-only commit
+`1d85aa18e89d326f1222618a9163acb694aefa1c` does not constitute a new Windows
+installer. Its maintainable change merged through PR #294 as
+`75ca5453e1c511d4c295df9862397b8dafd4732e`; the separately qualified staging
+runtime is `bba93046-3a9f-4df5-a987-3c35d9af9dab`. Shared current instructions now
+mark the unchanged installer ready for laptop acceptance.
+
+Working files appear in Explorer; the app contains connection controls and
+activity. Closing Settings keeps a working tray connection running; Quit drains
+the provider. Reconnect restores the saved inventory. Explicit Remove and a new
+connection prepare a fresh inventory and logo generation, preserving old local
+files. Installation creates no startup task or Windows service.
+
+The harness commands below use synthetic identities and handlers; they do not
+install software or establish live-source acceptance. Core uses the SDK alone;
+the Windows desktop and Explorer projects also require the exact Windows SDK
+reference package described below.
 
 The desktop offers **Client deliveries** or **Company files** before sign-in.
 It remembers an offered choice per release channel. Switching stops and saves
@@ -13,13 +59,14 @@ the previous transfers before opening the other source; a denied sign-in never
 falls back to the other mode. The preference grants no access. Each service
 still checks its own current identity and grants.
 
-The combined desktop checkpoint `3250e1ed` passed 38/38 synthetic App groups on
+The historical desktop checkpoint `3250e1ed` passed 38/38 synthetic App groups on
 2026-10-23, including selection, switching, pause/resume and shutdown races.
 That result does not qualify a live login, installed package or files on demand.
-Run the desktop harness on Windows with the pinned SDK:
+Run the desktop harness on Windows with the pinned SDK and local feed prepared
+below:
 
 ```powershell
-dotnet run --project AppTests/WindowsDownload.App.Tests.csproj -c Release -p:UseSharedCompilation=false
+dotnet run --project AppTests/WindowsDownload.App.Tests.csproj -c Release -p:UseSharedCompilation=false -p:RestoreConfigFile="$sdkConfig"
 ```
 
 ## Run the synthetic acceptance harness
@@ -42,6 +89,30 @@ Windows reparse tests use unprivileged temporary directory junctions, without
 changing developer mode or requesting elevation. Unix uses symbolic links.
 Windows file-symlink creation is not tested on machines without that privilege.
 
+For a fresh Windows checkout, bootstrap `Microsoft.Windows.SDK.NET.Ref`
+`10.0.22621.57` into a new local feed. The script downloads only that official
+NuGet package, verifies its pinned length/SHA256 and NuGet signature, and retains
+the qualified SDK/CsWinRT licenses. It does not change global NuGet settings:
+
+```powershell
+$sdkFeed=Join-Path $env:TEMP ('ledgetop-sdk-'+[Guid]::NewGuid().ToString('N'))
+../../scripts/windows-bootstrap-sdk-reference.ps1 -OutputDirectory $sdkFeed -DotnetPath (Get-Command dotnet).Source
+$sdkConfig=Join-Path $sdkFeed 'NuGet.Config'
+```
+
+Use `-p:RestoreConfigFile="$sdkConfig"` on desktop, Explorer and retained live
+acceptance builds. For offline reuse, pass `-SourcePackagePath` to the bootstrap
+script with the already qualified package; the same hash and signature checks
+still apply. The workflow starts with an isolated NuGet cache and uses this
+explicit local feed; a previously populated user cache is not a prerequisite.
+For self-contained notice verification, add `-IncludeRuntimePacks` to download
+the three exact signed `10.0.13` Windows runtime packs requested by SDK restore.
+Their lengths, hashes and bundled licenses are checked as well. An explicit
+`-RuntimePackageDirectory` can reuse those public NuGet package files offline.
+The WPF payload deploys the .NET Core and Windows Desktop runtimes; the ASP.NET
+pack is a restore prerequisite and is not deployed by this app. These steps only
+build files; they never execute or install the generated application.
+
 The console prints its acceptance groups and returns nonzero on failure.
 They cover interruption/resume, strict version/range checks, hash mismatch,
 truncation and overflow bounds, cancellation, unsafe names/origins, redirects,
@@ -54,7 +125,7 @@ discovery/folders/manifests, safe renewal and credentialless transfer state.
 On Windows, run the separate desktop acceptance harness with:
 
 ```powershell
-dotnet run --project AppTests/WindowsDownload.App.Tests.csproj -c Release -p:UseSharedCompilation=false
+dotnet run --project AppTests/WindowsDownload.App.Tests.csproj -c Release -p:UseSharedCompilation=false -p:RestoreConfigFile="$sdkConfig"
 ```
 
 For an interactive synthetic preview, explicitly build the developer variant:
@@ -68,7 +139,21 @@ does not opt into developer/demo behavior. Packaged builds use compiled trusted
 profiles and ignore arguments and developer settings; this command is not a
 client installer or live sign-in acceptance.
 
-## Authenticated portal adapter (not deployed or live-qualified)
+Offline installer-input and release-offer tests take explicit fixture paths;
+they do not default to an operator's private release artifacts. The optional
+`scripts/windows-release-test-fixture.ps1` helper accepts an explicit reviewed
+commit, pinned public cloudflared binary, pinned NSIS compiler, SDK path and
+locally built Core assembly. It creates a synthetic metadata assembly and an
+Abort-only test PE in a new directory. It never executes either generated file
+or cloudflared. Pass its returned directories to
+`scripts/windows-app-release-offer.test.ps1`; these checks qualify validation
+contracts, not a usable installer or a published release.
+
+## Authenticated portal adapter
+
+Company-file acceptance above does not qualify the current Client deliveries
+path or its files-on-demand behavior. Each source needs its own current grants
+and acceptance evidence.
 
 `CloudflareAccessSession` runs an absolute, hash-pinned official cloudflared
 binary directly, without a shell. Only `ExplicitLoginAsync` can launch its human
@@ -83,8 +168,9 @@ copies that cache and stores no token itself. Local JWT decoding checks expiry
 only; Cloudflare and the portal validate identity and current resource grants.
 The token retains the person's portal authority. The adapter's GET-only interface
 is a local restriction, not a new server-enforced download-only credential.
-The bundled cloudflared version, official provenance, license and SHA-256 still
-require a reviewed packaging decision and real staging login acceptance.
+The pilot bundles the reviewed, hash-pinned official cloudflared helper and its
+license. Compiled release profiles select the application and helper pin;
+current source-specific live acceptance remains separate from packaging.
 
 `PortalClient` uses the existing native delivery discovery and folder routes.
 Each portal metadata request has one 60-second linked cancellation deadline
@@ -104,9 +190,10 @@ The server currently requires R2's stored full-file SHA-256. A missing checksum
 returns `download-checksum-unavailable`; it does not trigger a large download in
 a Worker or substitute an ETag. Older and multipart files still need a separate
 version-fenced checksum backfill/ingest implementation before broad acceptance.
-Employee server-folder access has a separate explicit read-grant and Docker
-gateway prototype in this draft. Its live enrollment/TLS and staging activation
-are still pending. Neither limitation is cleared by synthetic tests.
+Employee server-folder access has a separate explicit read grant and private
+Docker gateway. The current staging test covers only its approved Test Data
+root; installation alone grants no access to other folders. Broader deployment
+and Client deliveries qualification are separate from this test.
 
 Employee ownership is independent: Ops manages Ops staff, and each PA manages
 its own people. PA employee snapshots/entitlements cannot provision or change
@@ -147,7 +234,7 @@ Existing output files are never replaced, even if created after HTTP starts.
 Promotion is the completion boundary: locked state metadata can remain for later
 cleanup without incorrectly reporting that the verified final file failed.
 
-## Employee read adapter (unmounted server draft)
+## Employee read adapter
 
 `EmployeeClient` uses the human `CloudflareAccessSession` against one fixed Ops
 HTTPS origin. It discovers at most 100 explicitly granted labeled roots, reads
@@ -163,9 +250,10 @@ SHA ETag. Download state uses logical file identity plus SHA, so renewing a
 snapshot handle can resume the same version while changed content starts a
 separate transfer. HTTP 401 requires explicit human login, 403 denies access,
 and 404/409 requires rediscovery or manifest renewal; none launches a browser.
-Synthetic acceptance includes the actual owned test apphost subprocess and
-the verified downloader. Public employee route factories remain unmounted;
-live provisioning, staging sign-in and large-file acceptance are still gates.
+Synthetic acceptance includes the owned test apphost subprocess and verified
+downloader. Route factories require explicit server configuration and authority.
+The approved staging root is activated separately; current single-file and
+full-folder acceptance status is recorded above.
 
 ## Filesystem boundary
 
@@ -185,7 +273,7 @@ current authorization or whether a future server adapter may issue a manifest.
 `TransferQueue` now persists an app-owned queue for one trusted source alias and
 server-derived principal. `EmployeeQueuedDownloadSource` and
 `PortalQueuedDownloadSource` obtain non-authorizing references and fresh manifests
-from the unmounted queue APIs. No JWT, cookie, expiring byte handle or download
+from the configured queue APIs. No JWT, cookie, expiring byte handle or download
 URL is stored in queue state. Keep the state directory private to the Windows
 user; it must be an existing empty directory on first use. The UI can aggregate
 multiple source queues without presenting a workspace switch.
@@ -209,7 +297,7 @@ the app does not guess which files to delete.
 
 ```csharp
 // session, rootId/path and directories come from trusted app configuration
-// and the current authorized file list. These APIs are not activated yet.
+// and the current authorized file list. Server activation and grants are separate.
 using var source = new EmployeeQueuedDownloadSource("ltds-employee", session);
 var selection = await source.GetReferenceAsync(rootId, path, cancellationToken);
 await using var queue = await TransferQueue.OpenAsync(stateDirectory, source, cancellationToken);
@@ -225,31 +313,37 @@ reviewed publication updates only while every intermediate publication preserves
 the original authorized mapping. Omission followed by restoration breaks that
 continuity. See the source API contract for its bounded history and independent
 current authorization checks; do not infer continuity from a matching path.
-Routes remain unmounted. Installed desktop and live enrollment acceptance remain
-unfinished, so this source evidence is not a promise of live automatic restart.
+Queue persistence does not establish current authorization after restart.
+The saved connection must still pass the current source/session checks; it
+does not refresh its catalog automatically.
 
 ## Remaining product work
 
-- Real staging human sign-in, expiry/identity-change and revocation acceptance;
-  live queue/session acceptance and reviewed cloudflared distribution. No
-  browser-profile copying, service tokens or bucket credentials belong here.
+- Full real-folder capture and laptop acceptance after the staging expiry fix;
+  current live expiry, identity-change and revocation scenarios still require
+  their own evidence. Browser-profile copying, service tokens and bucket
+  credentials are not client setup mechanisms.
 - Version-fenced checksum coverage for existing and multipart files. Native
   selectors remain expiring person/grant-bound selectors, not bearer credentials
   or durable queue identifiers; the manifest supplies the separate stable ID.
 - Server-controlled routing: employees read from an approved Docker/server
   gateway, while clients read only their authorized R2-backed portal content.
-  Both adapters are implemented and synthetically tested; employee route
-  activation and live deployment acceptance remain pending.
-- Live acceptance of the Claude-owned desktop UI, trusted signed packaging,
-  publication of the planned update channel, installation/uninstallation checks
-  and real large-media transfers. Local unsigned package construction and the
-  installer plan are evidence for preparation, not distribution readiness.
-- Windows Cloud Files API / Explorer placeholders, online-only hydration,
-  explicit offline pinning, eviction, cache lifecycle and revocation behavior.
+  Both adapters are implemented; current approved employee staging acceptance
+  does not qualify unrelated roots or portal content.
+- Current laptop UI/lifecycle and uninstall acceptance, broader large-media
+  qualification, and publication/integration of the update channel. Signing is
+  an optional future rollout decision; it is deliberately off for this pilot.
+- Connected Explorer behavior for the complete approved catalog and laptop
+  confirmation of branding, online-only opening, keep/free/reopen and restart.
+  Cloud Files support is implemented and the bounded actual native test passed;
+  those results do not substitute for these remaining acceptance checks.
 - Writable employee synchronization, conflict handling and durable revisions.
   The separate Nextcloud pilot's preserved-mtime stale-overwrite failure is
   unresolved; this read-only foundation does not clear that writable gate.
 
-No production service, TrueNAS stack, public link or client access policy is
-changed by this package.
-`CloudFilesNativeTransfer` adds an unactivated, internal x64 transfer/progress boundary. See [native boundary limits and ABI evidence](../../docs/windows-cloud-files-native-transfer.md). No registered placeholder hydration or offline/pin feature is enabled.
+Installing the package does not change a production service, TrueNAS stack,
+public link or server access policy. Approved staging authority is provisioned
+separately through the authenticated Operations administration API.
+`CloudFilesNativeTransfer` provides the internal x64 transfer/progress boundary
+used by the provider. See [native boundary limits and ABI evidence](../../docs/windows-cloud-files-native-transfer.md)
+and the current verification scope above.

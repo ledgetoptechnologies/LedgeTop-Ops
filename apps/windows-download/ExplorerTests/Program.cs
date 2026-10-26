@@ -1,0 +1,325 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using LedgeTop.Files.Explorer;
+using LedgeTop.WindowsDownload;
+
+if (args.Length == 1 && args[0] == "--branding-policy-tests") return await ExplorerBrandIconTests.RunAsync();
+
+if (args.Length == 1 && args[0] == "--empty-inventory-acceptance") return await EmptyInventoryAcceptance.RunAsync();
+if (args.Length >= 1 && args[0] == "--connected-root-acceptance") return await ConnectedRootAcceptance.RunAsync(args[1..]);
+if (args.Length == 1 && args[0] == "--connected-preflight-acceptance") return await ConnectedPreflightAcceptance.RunAsync();
+
+if (args.Length == 1 && args[0] == "--remove-default-owned-preview") {
+    await using var defaultPreview = new ExplorerPreviewSession();
+    await defaultPreview.RemoveAsync();
+    Console.WriteLine(JsonSerializer.Serialize(new { state = defaultPreview.State.ToString(), root = defaultPreview.RootPath, localFilesPreserved = true }));
+    return defaultPreview.State == ExplorerPreviewState.Removed ? 0 : 1;
+}
+
+if (args.Length == 2 && args[0] is "--session-seed" or "--session-resume") {
+    var sessionId = Guid.ParseExact(args[1], "N");
+    var sessionDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LedgeTopFilesExplorerSessionTests", sessionId.ToString("N"));
+    var profileDirectory = Path.Combine(sessionDirectory, "Profile");
+    var testRoot = Path.Combine(sessionDirectory, "Files");
+    await using var session = new ExplorerPreviewSession(profileDirectory, testRoot);
+    session.Changed += (_, _) => { var last = session.Activity.LastOrDefault(); if (last is not null) Console.WriteLine(last); };
+    try {
+        await session.StartAsync();
+        Require(session.State == (args[0] == "--session-seed" ? ExplorerPreviewState.Running : ExplorerPreviewState.Paused), "Persisted pause state did not survive process restart.");
+        if (args[0] == "--session-seed") {
+            Require((await File.ReadAllBytesAsync(Path.Combine(session.RootPath, "Samples", "sample.csv"))).Length > 600000, "Seed CSV download failed.");
+            await File.WriteAllTextAsync(Path.Combine(session.RootPath, "my-local-notes.txt"), "Local acceptance notes must survive removal.\r\n");
+            await session.PauseAsync();
+            await session.DisposeAsync();
+            Console.WriteLine("PASS seed: actual native session disconnected, pause/profile/root/navigation retained for a separate process.");
+        } else {
+            Require((await File.ReadAllBytesAsync(Path.Combine(session.RootPath, "Samples", "sample.csv"))).Length > 600000, "Cached CSV was not readable while source paused after restart.");
+            await session.ResumeAsync();
+            Require((await File.ReadAllTextAsync(Path.Combine(session.RootPath, "README.txt"))).Contains("generated test files", StringComparison.Ordinal), "Resumed sample open failed.");
+            var oldRoot = session.RootPath;
+            await session.RemoveAsync();
+            Require(session.State == ExplorerPreviewState.Removed && (await File.ReadAllTextAsync(Path.Combine(oldRoot, "my-local-notes.txt"))).StartsWith("Local acceptance notes", StringComparison.Ordinal), "Explicit removal changed local files.");
+            await session.StartAsync();
+            Require(session.RootPath != oldRoot && session.State == ExplorerPreviewState.Running, "Fresh preview reused a removed generation's files.");
+            await session.RemoveAsync();
+            Console.WriteLine("PASS resume: separate-process reconnect, cached paused read, resume hydration, safe removal and fresh generation.");
+        }
+        return 0;
+    } catch (Exception error) {
+        Console.Error.WriteLine(error);
+        try { await session.RemoveAsync(); Console.Error.WriteLine("Failed session's exact owned integration removed; local files retained."); } catch (Exception cleanup) { Console.Error.WriteLine("Session integration retained for reconciliation: " + cleanup); }
+        return 1;
+    }
+}
+
+if (args.Length == 2 && args[0] == "--reconcile-native-only") {
+    var previous = Guid.ParseExact(args[1], "N");
+    var previousRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LedgeTopFilesExplorerTests", previous.ToString("N"), "Files");
+    var context = Encoding.UTF8.GetBytes("LedgeTop.Files.Explorer.NativeAcceptance.v1:" + previous);
+    Console.WriteLine(JsonSerializer.Serialize(NativeRootRegistration.Inspect(previousRoot, context)));
+    var recovered = NativeRootRegistration.OpenOwned(previousRoot, context);
+    recovered.Unregister();
+    Console.WriteLine(JsonSerializer.Serialize(NativeRootRegistration.Inspect(previousRoot, context)));
+    Console.WriteLine("Exact native registration removed after prior acceptance process exited. No reconnect or Register attempted.");
+    return 0;
+}
+
+if (args.Length == 2 && args[0] == "--reconcile-native-preview") {
+    var previous = Guid.ParseExact(args[1], "N");
+    var previousRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LedgeTopFilesExplorerTests", previous.ToString("N"), "Files");
+    var previousId = ShellRegistration.CreateId(previous);
+    var context = Encoding.UTF8.GetBytes("LedgeTop.Files.Explorer.NativeAcceptance.v1:" + previous);
+    // Historical acceptance did not persist the shell namespace CLSID/root file ID. A negative
+    // broker enumeration cannot prove absence, and a partial positive result cannot replace that
+    // durable receipt. Keep this legacy operation observation-only instead of adopting old roots.
+    try {
+        Console.WriteLine(JsonSerializer.Serialize(new {
+            shellId = previousId, native = NativeRootRegistration.Inspect(previousRoot, context),
+            observationOnly = true, registrationAbsenceProven = false, mutationsPerformed = false
+        }));
+    } catch (Exception error) when (error is IOException or ArgumentException or UnauthorizedAccessException) {
+        Console.Error.WriteLine("Read-only legacy preview inspection was unavailable: " + error.Message);
+    }
+    Console.Error.WriteLine("Legacy shell cleanup refused: reconcile the exact durable namespace and native ownership receipts. No registration was changed.");
+    return 1;
+}
+
+// This executable deliberately creates one disposable, current-user Windows provider registration.
+// It is never part of normal unit tests and must be invoked explicitly.
+if (!args.Contains("--owned-native-preview", StringComparer.Ordinal)) {
+    Console.Error.WriteLine("Pass --owned-native-preview to test one isolated generated-data Windows root.");
+    return 2;
+}
+var previewId = Guid.NewGuid();
+var explicitArtifactRoot = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
+var owned = explicitArtifactRoot is null
+    ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LedgeTopFilesExplorerTests", previewId.ToString("N"))
+    : Path.Combine(CheckedArtifactRoot(explicitArtifactRoot), "fixtures", previewId.ToString("N"));
+var root = Path.Combine(owned, "Files");
+var cache = Path.Combine(owned, "Cache");
+Directory.CreateDirectory(root);
+Directory.CreateDirectory(cache);
+using var source = new CountedExplorerDemoSource();
+source.SignIn();
+IPreviewRootRegistration? registration = null;
+NativePlaceholderProvider? provider = null;
+ExplorerNavigation? navigation = null;
+var phases = new List<string>();
+var failures = new List<string>();
+var safeToUnregister = true;
+var explicitFreeSpaceWasPendingAtStop = false;
+var cloudRootAttributesMasked = false;
+try {
+    registration = args.Contains("--native-only", StringComparer.Ordinal) ? NativeRootRegistration.Register(root,
+        Encoding.UTF8.GetBytes("LedgeTop.Files.Explorer.NativeAcceptance.v1:" + previewId)) : await ShellRegistration.RegisterAsync(root, ShellRegistration.CreateId(previewId),
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "shell32.dll") + ",3",
+        Encoding.UTF8.GetBytes("LedgeTop.Files.Explorer.NativeAcceptance.v1:" + previewId));
+    phases.Add(args.Contains("--native-only", StringComparer.Ordinal) ? "actual native-only registration and identity readback (no branded node)" : "actual shell registration and identity readback");
+    var manifest = source.Entries.ToDictionary(e => e.RelativePath.Replace('/', '\\'), e => e.Identity, StringComparer.OrdinalIgnoreCase);
+    string[] explicitDirectories = ["Empty folder\\Nested empty"];
+    provider = new(registration, cache, source, source.Channel, source.PrincipalId, manifest, explicitDirectories);
+    provider.Activity += text => Console.WriteLine("Reconnect: " + text);
+    provider.Activity += text => Console.WriteLine(text);
+    safeToUnregister = false;
+    await provider.ConnectAndPopulateAsync();
+    var ordinaryRootAttributes = File.GetAttributes(root);
+    var exposedRootAttributes = PlaceholderVisibility.Run(() => File.GetAttributes(root));
+    cloudRootAttributesMasked = (ordinaryRootAttributes & FileAttributes.ReparsePoint) == 0 &&
+        (exposedRootAttributes & FileAttributes.ReparsePoint) != 0;
+    phases.Add("actual native connection and placeholder creation");
+    Require(Directory.Exists(Path.Combine(root, "Empty folder", "Nested empty")) &&
+        Directory.GetFileSystemEntries(Path.Combine(root, "Empty folder", "Nested empty")).Length == 0,
+        "Explicit empty catalog directories were not preserved.");
+    provider.SetFolderAvailabilityIntent("Empty folder", true);
+    provider.SetFolderAvailabilityIntent("Empty folder", false);
+    phases.Add("explicit nested empty catalog directories exist and accept native keep/free intent");
+    if (args.Contains("--navigation", StringComparer.Ordinal)) {
+        navigation = ExplorerNavigation.Register(registration, previewId,
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "shell32.dll") + ",3");
+        navigation.VerifyOwned();
+        phases.Add("actual per-user Explorer namespace registration and exact ownership readback");
+    }
+    var diagram = Path.Combine(root, "Samples", "diagram.svg");
+    await using (var tinyRead = new FileStream(diagram, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, true)) {
+        tinyRead.Position = 17;
+        var single = new byte[1];
+        Require(await tinyRead.ReadAsync(single).AsTask().WaitAsync(TimeSpan.FromSeconds(30)) == 1, "Unaligned single-byte open failed.");
+    }
+    Require(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(diagram))) == manifest["Samples\\diagram.svg"].Sha256, "Unaligned read hydration SHA mismatch.");
+    phases.Add("unaligned single-byte initial read hydrates exact full content");
+    var readme = Path.Combine(root, "README.txt");
+    string[] CachedContent(string relative) => Directory.GetFiles(cache, Path.GetFileName(relative), SearchOption.AllDirectories);
+    void RequireCachedContent(string relative) {
+        var candidates = CachedContent(relative);
+        Require(candidates.Length == 1 && Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(candidates[0]))) == manifest[relative].Sha256,
+            "The exact private verified content cache was not present: " + relative);
+    }
+    Require(((uint)provider.InspectAttributes("README.txt") & 0x1000) != 0, "Initial README must be online only.");
+    var bytes = await File.ReadAllBytesAsync(readme).WaitAsync(TimeSpan.FromSeconds(30));
+    Require(Convert.ToHexStringLower(SHA256.HashData(bytes)) == manifest["README.txt"].Sha256, "Read-on-open SHA mismatch.");
+    RequireCachedContent("README.txt");
+    phases.Add("ordinary file read hydrates exact verified bytes");
+    provider.KeepOnDevice("Samples\\sample.csv");
+    var csvPath = Path.Combine(root, "Samples", "sample.csv");
+    Require(((uint)provider.InspectAttributes("Samples\\sample.csv") & 0x80000) != 0, "Explicit keep must set pin intent.");
+    Require(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(csvPath))) == manifest["Samples\\sample.csv"].Sha256, "Pinned content SHA mismatch.");
+    phases.Add("actual pin and verified full hydration");
+    var readmeDownloads = source.DownloadCount("README.txt");
+    var beforeFreeCalls = source.Calls;
+    await provider.FreeSpaceAsync("README.txt");
+    Require(((uint)provider.InspectAttributes("README.txt") & 0x1000) != 0, "Free space must return README to online only.");
+    Require(CachedContent("README.txt").Length == 0 && source.Calls == beforeFreeCalls,
+        "Free space did not remove private content cache offline without source calls.");
+    Require(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(readme))) == manifest["README.txt"].Sha256, "Read after eviction SHA mismatch.");
+    Require(source.DownloadCount("README.txt") == readmeDownloads + 1, "Read after free space reused a hidden full-file cache instead of redownloading.");
+    phases.Add("actual dehydration removes exact private content cache offline and next open downloads source bytes again");
+    Require((await File.ReadAllBytesAsync(Path.Combine(root, "Samples", "empty.txt"))).Length == 0, "Empty placeholder read failed.");
+    provider.KeepOnDevice("Samples\\empty.txt");
+    phases.Add("zero-length placeholder opens without invented fetch completion");
+    var sampleFiles = manifest.Where(entry => entry.Key.StartsWith("Samples\\", StringComparison.Ordinal)).ToArray();
+    Require(sampleFiles.Length == 4 && sampleFiles.Any(entry => entry.Key.StartsWith("Samples\\Nested\\", StringComparison.Ordinal)),
+        "The recursive acceptance fixture must include a nested child and an empty file.");
+    string SampleAvailability() => string.Join(", ", sampleFiles.Select(entry => entry.Key + "=0x" + ((uint)provider.InspectAttributes(entry.Key)).ToString("X8")));
+    provider.SetFolderAvailabilityIntent("Samples", keepOffline: true);
+    await WaitForAsync(() => sampleFiles.All(entry => {
+        var attributes = (uint)provider.InspectAttributes(entry.Key);
+        return (attributes & 0x80000) != 0 && (attributes & 0x100000) == 0 &&
+            (entry.Value.Length == 0 || (attributes & (0x1000u | 0x40000u | 0x400000u)) == 0);
+    }), "Recursive keep intent did not converge to pinned local files.", SampleAvailability);
+    foreach (var entry in sampleFiles) {
+        var pinnedBytes = await File.ReadAllBytesAsync(Path.Combine(root, entry.Key)).WaitAsync(TimeSpan.FromSeconds(30));
+        Require(Convert.ToHexStringLower(SHA256.HashData(pinnedBytes)) == entry.Value.Sha256,
+            "Recursive pinned sample SHA mismatch: " + entry.Key);
+    }
+    phases.Add("recursive folder keep pins and fully hydrates every child including nested and empty samples");
+    provider.SetFolderAvailabilityIntent("Samples", keepOffline: false);
+    await WaitForAsync(() => sampleFiles.All(entry => {
+        var attributes = (uint)provider.InspectAttributes(entry.Key);
+        return (attributes & 0x100000) != 0 && (attributes & 0x80000) == 0 &&
+            (entry.Value.Length == 0 || (attributes & 0x1000) != 0);
+    }), "Recursive free-space intent did not converge to online-only files.", SampleAvailability);
+    await WaitForAsync(() => sampleFiles.All(entry => CachedContent(entry.Key).Length == 0),
+        "Recursive free-space intent retained hidden private content caches.", SampleAvailability);
+    phases.Add("recursive folder free removes local nonempty data and exact private content caches while preserving children");
+    // Restore the existing independent offline-read check after exercising recursive free space.
+    provider.KeepOnDevice("Samples\\sample.csv");
+    Require(((uint)provider.InspectAttributes("Samples\\sample.csv") & 0x80000) != 0 &&
+        Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(csvPath))) == manifest["Samples\\sample.csv"].Sha256,
+        "CSV was not restored to verified pinned content after recursive free space.");
+    var notes = Path.Combine(root, "Samples", "Nested", "notes.txt");
+    _ = await File.ReadAllBytesAsync(notes);
+    File.SetAttributes(notes, File.GetAttributes(notes) & ~FileAttributes.ReadOnly);
+    const string localEdit = "Generated acceptance test local edit; never discard.\r\n";
+    await File.WriteAllTextAsync(notes, localEdit);
+    var refusedDirty = false;
+    try { provider.FreeSpace("Samples\\Nested\\notes.txt"); } catch (IOException) { refusedDirty = true; }
+    Require(refusedDirty && await File.ReadAllTextAsync(notes) == localEdit, "Dirty sample data was not preserved during refused eviction.");
+    phases.Add("modified local sample survives refused dehydration");
+    await provider.DisposeAsync(); provider = null; safeToUnregister = true;
+    Require(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(csvPath))) == manifest["Samples\\sample.csv"].Sha256, "Pinned content unavailable after provider disconnect.");
+    phases.Add("pinned sample remains readable with provider disconnected");
+    provider = new(registration, cache, source, source.Channel, source.PrincipalId, manifest, explicitDirectories);
+    safeToUnregister = false;
+    await provider.ConnectExistingAsync();
+    Require(Directory.GetFileSystemEntries(Path.Combine(root, "Empty folder", "Nested empty")).Length == 0,
+        "Reconnect changed an explicit empty directory.");
+    provider.ValidateForRemoval();
+    await provider.FreeSpaceAsync("README.txt");
+    Require(CachedContent("README.txt").Length == 0, "Reconnect free-space left hidden README cache.");
+    Require(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(readme))) == manifest["README.txt"].Sha256, "Reconnected placeholder SHA mismatch.");
+    Require(await File.ReadAllTextAsync(notes) == localEdit, "Reconnect changed local edits.");
+    phases.Add("validated existing placeholders reconnect without rewriting local edits");
+    source.Revoke();
+    var beforeOfflineFree = source.Calls;
+    await provider.FreeSpaceAsync("README.txt");
+    Require(source.Calls == beforeOfflineFree && CachedContent("README.txt").Length == 0,
+        "Revoked source prevented offline cache reclamation or was contacted during free space.");
+    var beforeDeniedDownloads = source.DownloadCount("README.txt");
+    var revokedDenied = false;
+    try { _ = await File.ReadAllBytesAsync(readme).WaitAsync(TimeSpan.FromSeconds(30)); } catch (IOException) { revokedDenied = true; }
+    Require(revokedDenied, "Revoked simulated source still hydrated an online-only sample.");
+    Require(CachedContent("README.txt").Length == 0 && source.DownloadCount("README.txt") == beforeDeniedDownloads,
+        "Denied source repopulated private content cache.");
+    phases.Add("offline free space removes content cache after simulated revocation; later open is denied without cached bytes");
+    var beforeStoppingFree = source.Calls;
+    var stoppingProvider = provider;
+    var explicitFree = stoppingProvider.FreeSpaceAsync("Samples\\sample.csv");
+    explicitFreeSpaceWasPendingAtStop = !explicitFree.IsCompleted;
+    await stoppingProvider.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(30));
+    Require(explicitFree.IsCompleted, "Provider disposal returned before explicit asynchronous free-space drained.");
+    try { await explicitFree; } catch (Exception error) when (error is OperationCanceledException or IOException or TransferException) { }
+    var refusedAfterStop = false;
+    try { await stoppingProvider.FreeSpaceAsync("README.txt"); } catch (IOException) { refusedAfterStop = true; }
+    Require(refusedAfterStop && source.Calls == beforeStoppingFree, "Stopped provider admitted availability work or contacted revoked source.");
+    provider = null; safeToUnregister = true;
+    phases.Add("provider stop joins explicit asynchronous free-space and rejects later availability work without source calls");
+} catch (Exception error) {
+    if (error is ExplorerNavigationRegistrationException { OwnedPartial: { } partial }) navigation = partial;
+    if (provider?.LastCreationDiagnostic is { } creation) Console.Error.WriteLine(creation);
+    if (provider?.LastNativeTransferDiagnostic is { } transfer) Console.Error.WriteLine(transfer);
+    failures.Add(error.GetType().Name + ": " + error.Message);
+    Console.Error.WriteLine(error.ToString());
+} finally {
+    if (provider is not null) { try { await provider.DisposeAsync(); safeToUnregister = true; } catch (Exception error) { failures.Add("Disconnect: " + error.Message); } }
+    if (navigation is not null && safeToUnregister) { try { navigation.Remove(); phases.Add("exact owned Explorer namespace removed"); } catch (Exception error) { failures.Add("Navigation removal: " + error.Message); safeToUnregister = false; } }
+    if (registration is not null && safeToUnregister) { try { registration.Unregister(); phases.Add("exact owned registration removed and absence verified"); } catch (Exception error) { failures.Add("Unregister: " + error.Message); } }
+    if (registration is not null && !safeToUnregister) failures.Add("Registration retained for reconciliation because disconnect was not confirmed.");
+    // Keep this owned test directory and receipt for diagnosis. No recursive deletion of provider content.
+    await File.WriteAllTextAsync(Path.Combine(owned, "receipt.json"), JsonSerializer.Serialize(new {
+        previewId, root, phases, failures, explicitFreeSpaceWasPendingAtStop, cloudRootAttributesMasked, generatedDataOnly = true, productionAccess = false
+    }, new JsonSerializerOptions { WriteIndented = true }));
+}
+Console.WriteLine(JsonSerializer.Serialize(new { passed = failures.Count == 0, phases, failures, receipt = Path.Combine(owned, "receipt.json") }));
+return failures.Count == 0 ? 0 : 1;
+
+static void Require(bool value, string message) { if (!value) throw new IOException(message); }
+
+static string CheckedArtifactRoot(string value)
+{
+    if (string.IsNullOrWhiteSpace(value) || !Path.IsPathFullyQualified(value) || value.StartsWith(@"\\", StringComparison.Ordinal) ||
+        value.Replace('/', '\\').Split('\\').Any(part => part is "." or ".." || part.EndsWith(' ') || part.EndsWith('.')))
+        throw new IOException("The test artifact root must be an existing canonical local directory.");
+    var full = Path.GetFullPath(value);
+    if (!Directory.Exists(full) || Path.TrimEndingDirectorySeparator(full) == Path.TrimEndingDirectorySeparator(Path.GetPathRoot(full)!) ||
+        new DriveInfo(Path.GetPathRoot(full)!).DriveType != DriveType.Fixed)
+        throw new IOException("The test artifact root must already exist on a local fixed drive.");
+    for (string? part = full; part is not null; part = Path.GetDirectoryName(part))
+        if ((File.GetAttributes(part) & FileAttributes.ReparsePoint) != 0) throw new IOException("The test artifact root contains an alias.");
+    return full;
+}
+
+static async Task WaitForAsync(Func<bool> condition, string failure, Func<string> detail)
+{
+    var deadline = System.Diagnostics.Stopwatch.StartNew();
+    while (!condition()) {
+        if (deadline.Elapsed > TimeSpan.FromSeconds(30)) throw new IOException(failure + " " + detail());
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+    }
+}
+
+sealed class CountedExplorerDemoSource : IQueuedDownloadSource, IDisposable
+{
+    private readonly ExplorerDemoSource inner = new(chunkDelay: TimeSpan.Zero);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> downloads = new(StringComparer.Ordinal);
+    private int sessions, resolutions, downloadCalls;
+    public string Alias => inner.Alias;
+    public Uri Origin => inner.Origin;
+    internal string Channel => inner.Channel;
+    internal string PrincipalId => inner.PrincipalId;
+    internal IReadOnlyList<ExplorerDemoEntry> Entries => inner.Entries;
+    internal (int Sessions, int Resolutions, int Downloads) Calls => (Volatile.Read(ref sessions), Volatile.Read(ref resolutions), Volatile.Read(ref downloadCalls));
+    internal int DownloadCount(string relative) {
+        var identity = Entries.Single(entry => entry.RelativePath.Replace('/', '\\') == relative).Identity;
+        return downloads.GetValueOrDefault(identity.LogicalFileId + ":" + identity.RemoteVersion);
+    }
+    internal void SignIn() => inner.SignIn();
+    internal void Revoke() => inner.Revoke();
+    public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken = default) { Interlocked.Increment(ref sessions); return inner.GetSessionAsync(cancellationToken); }
+    public Task<ResolvedQueuedDownload> ResolveAsync(string reference, CancellationToken cancellationToken = default) { Interlocked.Increment(ref resolutions); return inner.ResolveAsync(reference, cancellationToken); }
+    public Task<string> DownloadAsync(DownloadSpec spec, string destination, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default) {
+        Interlocked.Increment(ref downloadCalls); downloads.AddOrUpdate(spec.OpaqueIdentity, 1, (_, count) => count + 1);
+        return inner.DownloadAsync(spec, destination, progress, cancellationToken);
+    }
+    public void Dispose() => inner.Dispose();
+}

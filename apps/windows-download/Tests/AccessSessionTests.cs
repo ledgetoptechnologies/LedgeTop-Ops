@@ -15,6 +15,10 @@ internal static class AccessSessionTests
         ("Access command failures and malformed tokens are redacted", TokenFailures),
         ("Access token is attached only to exact origin and refreshed per request", Headers),
         ("Access redirects, authorization denial and cancellation never launch login", Responses),
+        ("Access cached token pins block A-B-A before HTTP credential use", TokenPins),
+        ("Access overlapping token leases share sticky failure and dispose independently", PinOverlap),
+        ("Access pin and login reservations fence delayed credential races", PinRaces),
+        ("Access failed and cancelled pin acquisition leaves no login reservation", PinFailures),
         ("real synthetic subprocess preserves arguments bounds both outputs and cancels", RealSubprocess)
     ];
 
@@ -115,6 +119,100 @@ internal static class AccessSessionTests
         Assert(blocking.Calls.Single()[1] == "token" && noHttp.Calls == 0);
     }
 
+    private static async Task TokenPins() {
+        using var fixture = new Fixture(); var runner = new Runner(); var session = fixture.Session(runner);
+        var a = runner.Result.Stdout; var b = Token(DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 7200);
+        using var lease = await session.PinCachedTokenAsync();
+        var handler = new Handler(request => { Assert(request.Headers.GetValues("Cf-Access-Token").Single() == a); return Good(); });
+        using var engine = new Downloader(handler, [session.Origin], session: session);
+        await engine.DownloadAsync(Spec("pinned-a.bin"), fixture.Root); Assert(handler.Calls == 1);
+        runner.Result = new(0, b, "");
+        await Throws<LoginRequiredException>(() => engine.DownloadAsync(Spec("changed-b.bin"), fixture.Root));
+        runner.Result = new(0, a, "");
+        await Throws<LoginRequiredException>(() => engine.DownloadAsync(Spec("restored-a.bin"), fixture.Root));
+        await Throws<LoginRequiredException>(() => session.PinCachedTokenAsync());
+        Assert(handler.Calls == 1 && runner.Calls.All(call => call[1] == "token"));
+        lease.Dispose();
+        runner.Result = new(0, b, ""); Assert(await session.GetTokenAsync() == b);
+        foreach (var state in Directory.GetFiles(Path.Combine(fixture.Root, ".ltds-downloads-v1")))
+            Assert(!File.ReadAllText(state).Contains(a) && !File.ReadAllText(state).Contains(b));
+    }
+
+    private static async Task PinOverlap() {
+        using var fixture = new Fixture(); var runner = new Runner(); var session = fixture.Session(runner);
+        var a = runner.Result.Stdout; var b = Token(DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 7200);
+        var one = await session.PinCachedTokenAsync(); var two = await session.PinCachedTokenAsync();
+        one.Dispose(); one.Dispose();
+        var before = runner.Calls.Count;
+        await Throws<LoginRequiredException>(() => session.ExplicitLoginAsync()); Assert(runner.Calls.Count == before);
+        runner.Result = new(0, b, ""); await Throws<LoginRequiredException>(() => session.GetTokenAsync());
+        runner.Result = new(0, a, ""); await Throws<LoginRequiredException>(() => session.GetTokenAsync());
+        two.Dispose(); two.Dispose();
+        runner.Result = new(0, b, "");
+        using (await session.PinCachedTokenAsync()) Assert(await session.GetTokenAsync() == b);
+        await session.ExplicitLoginAsync(); Assert(runner.Calls.Last()[1] == "login");
+        // A different session instance has its own guard, even for the same protected application.
+        using var pin = await session.PinCachedTokenAsync();
+        var separate = fixture.Session(new Runner { Result = new(0, a, "") });
+        Assert(await separate.GetTokenAsync() == a);
+    }
+
+    private static async Task PinRaces() {
+        using var fixture = new Fixture(); var runner = new Runner(); var session = fixture.Session(runner);
+        var a = runner.Result; var b = new AccessCommandResult(0, Token(DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 7200), "");
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<AccessCommandResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        runner.OnRun = (_, _) => { entered.TrySetResult(); return release.Task; };
+        var pendingPin = session.PinCachedTokenAsync(); await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Throws<LoginRequiredException>(() => session.ExplicitLoginAsync()); Assert(runner.Calls.Count == 1);
+        release.SetResult(a); using (await pendingPin) { }
+
+        entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pendingLogin = session.ExplicitLoginAsync(); await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Throws<LoginRequiredException>(() => session.PinCachedTokenAsync()); Assert(runner.Calls.Count == 2);
+        release.SetResult(a); await pendingLogin;
+
+        // A read begun before lease publication must still compare at its eventual return boundary.
+        entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var delayed = session.GetTokenAsync(); await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        runner.OnRun = null;
+        using var lease = await session.PinCachedTokenAsync();
+        release.SetResult(b); await Throws<LoginRequiredException>(() => delayed);
+        await Throws<LoginRequiredException>(() => session.GetTokenAsync());
+    }
+
+    private static async Task PinFailures() {
+        using var fixture = new Fixture(); var runner = new Runner(); var session = fixture.Session(runner);
+        using (var cancelled = new CancellationTokenSource()) {
+            cancelled.Cancel(); await Throws<OperationCanceledException>(() => session.PinCachedTokenAsync(cancelled.Token));
+            Assert(runner.Calls.Count == 0);
+        }
+        using (var cancellation = new CancellationTokenSource()) {
+            runner.WaitForCancellation = true;
+            var pending = session.PinCachedTokenAsync(cancellation.Token); cancellation.Cancel();
+            await Throws<OperationCanceledException>(() => pending);
+            runner.WaitForCancellation = false; await session.ExplicitLoginAsync();
+        }
+        foreach (var result in new[] { new AccessCommandResult(1, Token(), "synthetic-private-error"), new(0, "invalid", ""), new(0, Token(0), "") }) {
+            runner.Result = result;
+            await Throws<LoginRequiredException>(() => session.PinCachedTokenAsync());
+            runner.Result = new(0, Token(), ""); await session.ExplicitLoginAsync();
+        }
+        runner.Error = new IOException("synthetic-private-error");
+        await Throws<LoginRequiredException>(() => session.PinCachedTokenAsync());
+        runner.Error = null; await session.ExplicitLoginAsync();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<AccessCommandResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        runner.OnRun = (_, _) => { entered.SetResult(); return release.Task; };
+        using var late = new CancellationTokenSource();
+        var ignoredCancellation = session.PinCachedTokenAsync(late.Token);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); late.Cancel(); release.SetResult(new(0, Token(), ""));
+        await Throws<OperationCanceledException>(() => ignoredCancellation);
+        runner.OnRun = null; await session.ExplicitLoginAsync();
+    }
+
     // Reserved test-only entry point in this test assembly. No cloudflared binary is executed.
     internal static async Task<int> RunChildAsync(string[] arguments) {
         if (arguments.Length < 2) return 64;
@@ -184,9 +282,11 @@ internal static class AccessSessionTests
         internal AccessCommandResult Result = new(0, Token(), "");
         internal Exception? Error;
         internal bool WaitForCancellation;
+        internal Func<IReadOnlyList<string>, CancellationToken, Task<AccessCommandResult>>? OnRun;
         internal List<string[]> Calls = [];
         public async Task<AccessCommandResult> RunAsync(string path, IReadOnlyList<string> arguments, CancellationToken cancellationToken) {
             Calls.Add(arguments.ToArray()); if (Error is not null) throw Error;
+            if (OnRun is not null) return await OnRun(arguments, cancellationToken);
             if (WaitForCancellation) await Task.Delay(Timeout.Infinite, cancellationToken);
             return Result;
         }

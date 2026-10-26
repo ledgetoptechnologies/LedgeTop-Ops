@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
 namespace LedgeTop.WindowsDownload;
 
@@ -16,22 +18,68 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 {
     private readonly IQueuedDownloadSource source;
     private readonly string channel, root;
+    private readonly string? principal;
     private readonly long maximumFileBytes, maximumCacheBytes;
     private readonly SemaphoreSlim serial = new(1, 1);
     private const string Marker = ".verified-hydration-owner";
     private const string Owner = "LedgeTop.VerifiedHydration/1\n";
 
     public PlaceholderHydrationCoordinator(IQueuedDownloadSource source, string channel, string applicationStateRoot,
-        long maximumFileBytes = 64L << 30, long maximumCacheBytes = 128L << 30)
+        long maximumFileBytes = 64L << 30, long maximumCacheBytes = 128L << 30, string? expectedPrincipal = null)
     {
         if (channel is not ("pilot" or "stable") || maximumFileBytes < 0 || maximumCacheBytes < maximumFileBytes
             || !Path.IsPathFullyQualified(applicationStateRoot) || applicationStateRoot.StartsWith("\\\\", StringComparison.Ordinal))
             throw new TransferException("Hydration configuration is invalid.");
-        this.source = source; this.channel = channel; this.maximumFileBytes = maximumFileBytes; this.maximumCacheBytes = maximumCacheBytes;
+        if (expectedPrincipal is not null && !System.Text.RegularExpressions.Regex.IsMatch(expectedPrincipal, "\\Aodqp1_[a-f0-9]{64}\\z"))
+            throw new TransferException("Hydration principal is invalid.");
+        this.source = source; this.channel = channel; principal = expectedPrincipal; this.maximumFileBytes = maximumFileBytes; this.maximumCacheBytes = maximumCacheBytes;
         root = Path.Combine(Path.GetFullPath(applicationStateRoot), "verified-hydration-v1");
         RequireSafe(applicationStateRoot);
         if (!Directory.Exists(applicationStateRoot)) throw new TransferException("Application state root must already exist.");
         Owned(root);
+    }
+    /// <summary>Offline exact-cache reclamation after successful native dehydration. Never authenticates or touches placeholders.</summary>
+    internal async Task EvictVerifiedCacheAsync(PlaceholderIdentity identity, CancellationToken cancellationToken = default)
+    {
+        identity.Encode();
+        if (principal is null || identity.PrincipalId != principal || identity.Channel != channel || identity.Length > maximumFileBytes)
+            throw new TransferException("Cache eviction does not match this provider.");
+        ValidateSource(identity);
+        await serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try {
+            cancellationToken.ThrowIfCancellationRequested(); ValidateSource(identity);
+            if (!OwnedExisting(root)) return;
+            var scope = Path.Combine(root, identity.ScopeKey);
+            if (!OwnedExisting(scope)) return;
+            var entry = Path.Combine(scope, identity.CacheKey);
+            if (!OwnedExisting(entry)) return;
+            var file = Path.Combine(entry, identity.FileName); RequireSafe(file);
+            if (!File.Exists(file)) { if (Directory.Exists(file)) throw new TransferException("Cache entry changed type."); return; }
+            // Missing leases are ambiguous, never create locks/directories during offline eviction.
+            var quotaLock = Path.Combine(root, ".hydration-cache.lock"); RequireSafe(quotaLock);
+            using var capacityLease = new FileStream(quotaLock, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            var lockPath = Path.Combine(entry, ".hydration.lock"); RequireSafe(lockPath);
+            using var held = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            _ = OwnedExisting(root); _ = OwnedExisting(scope); _ = OwnedExisting(entry); RequireSafe(file);
+            if (!OperatingSystem.IsWindows()) throw new TransferException("Verified cache reclamation requires Windows.");
+            // DELETE access binds deletion to this verified file handle. Writes/rename/replacement are
+            // excluded through hashing and setting delete disposition; no hash-close-path-delete race.
+            using var handle = CacheNative.CreateFileW(file, 0x80010000, 1, 0, 3, 0x40200000, 0);
+            if (handle.IsInvalid) throw new IOException("Verified cache file could not be exclusively inspected.");
+            await using (var input = new FileStream(handle, FileAccess.Read, 65536, isAsync: true)) {
+                if (input.Length != identity.Length || !CryptographicOperations.FixedTimeEquals(
+                    await SHA256.HashDataAsync(input, cancellationToken).ConfigureAwait(false), Convert.FromHexString(identity.Sha256)))
+                    throw new TransferException("Modified cache data was preserved.");
+                cancellationToken.ThrowIfCancellationRequested(); ValidateSource(identity);
+                if (!OwnedExisting(root) || !OwnedExisting(scope) || !OwnedExisting(entry))
+                    throw new TransferException("Cache ownership changed during eviction.");
+                // FILE_DISPOSITION_INFO is one BOOLEAN byte, not a four-byte Win32 BOOL.
+                // https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_disposition_info
+                byte disposition = 1;
+                if (!CacheNative.SetFileInformationByHandle(handle, 4, ref disposition, 1))
+                    throw new IOException("Verified cache deletion was not confirmed.");
+            }
+        } finally { serial.Release(); }
     }
     public async Task HydrateAsync(PlaceholderIdentity identity, long offset, long length, IPlaceholderTransferSink sink, CancellationToken cancellationToken = default)
     {
@@ -100,6 +148,8 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         return r;
     }
     private void ValidateSource(PlaceholderIdentity id) {
+        if (new[] { Marker, ".hydration.lock", ".hydration-cache.lock" }.Contains(id.FileName, StringComparer.OrdinalIgnoreCase))
+            throw new TransferException("A source basename collides with hydration metadata.");
         if (source.Alias != id.SourceAlias || source.Origin.GetLeftPart(UriPartial.Authority) != id.Origin) throw new AccessDeniedException();
     }
     private long CacheBytes()
@@ -125,6 +175,28 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         }
         var path = Path.Combine(directory, Marker); RequireSafe(path);
         if (!File.Exists(path) || new FileInfo(path).Length > 128 || File.ReadAllText(path) != Owner) throw new TransferException("Hydration cache is not owned by this application.");
+    }
+    private static bool OwnedExisting(string directory)
+    {
+        RequireSafe(directory);
+        if (!Directory.Exists(directory)) {
+            if (File.Exists(directory)) throw new TransferException("Cache directory changed type.");
+            return false;
+        }
+        var path = Path.Combine(directory, Marker); RequireSafe(path);
+        if (!File.Exists(path) || new FileInfo(path).Length > 128 || File.ReadAllText(path) != Owner)
+            throw new TransferException("Cache ownership is unavailable.");
+        return true;
+    }
+    private static class CacheNative
+    {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        internal static extern SafeFileHandle CreateFileW(string path, uint access, uint share, nint security, uint disposition, uint flags, nint template);
+        [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool SetFileInformationByHandle(SafeFileHandle file, int kind, ref byte disposition, uint size);
     }
     private static void RequireSafe(string path)
     {

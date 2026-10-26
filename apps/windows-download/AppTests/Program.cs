@@ -8,6 +8,9 @@ using LedgeTop.Files.Backends;
 using LedgeTop.Files.Presentation;
 using LedgeTop.WindowsDownload;
 
+if (args.FirstOrDefault() == "--single-instance-helper") return SingleInstanceTests.Helper(args);
+if (args.FirstOrDefault() == "--folder-launcher-exit-helper") return BackgroundFolderLauncherTests.ExitHelper(args);
+
 // Synthetic UI acceptance for Ledge Top Files: real TransferQueue on temporary folders, demo sources,
 // no network, no sign-in, no installer. Optional first argument: a folder for rendered screenshots
 // (otherwise they go to a new temporary folder, which is printed and kept as evidence).
@@ -58,8 +61,34 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("a switch whose old view can't close cleanly opens nothing and asks for a restart", SwitchFailsClosed),
     ("the choice screen renders and returns only what was clicked", ChooserWindow),
     ("the window renders sign-in and files screens", Render),
-};
-var selectedGroups = args.Contains("--pause-all-review-only")
+    ("closing to a working tray keeps the access choice alive; activation and tray loss restore the window", TrayChoiceLifecycle),
+    ("tray pause and resume control active downloads; explicit quit drains and removes the icon", TrayDownloadLifecycle),
+    ("failed tray registration never traps a hidden application", TrayUnavailable),
+    ("single instance restores its owner across processes, isolates modes and recovers after a crash", SingleInstanceTests.Run),
+    ("Explorer settings require explicit start, preserve files on removal and drain on quit", () => ExplorerPreviewWindowTests.Run(screenshots)),
+    ("Connected Explorer coordinates selected sign-in frozen inventory offline removal and cancellation", ConnectedExplorerSessionTests.Run),
+    ("Installed updates validate cached policy and drain before replacement", InstalledUpdateCoordinatorTests.Run),
+    ("Installer maintenance validates fixed pilot ownership and drains offline cleanup", InstallerMaintenanceTests.Run),
+    ("Folder launcher keeps dispatcher and Quit responsive while Windows Shell is blocked", () => BackgroundFolderLauncherTests.Run(screenshots)),
+}.Concat(ExplorerCatalogSnapshotTests.Groups).ToArray();
+var selectedGroups = args.Contains("--folder-launcher-only")
+    ? groups.Where(group => group.Name.StartsWith("Folder launcher", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--installer-maintenance-only")
+    ? groups.Where(group => group.Name.StartsWith("Installer maintenance", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--installed-updates-only")
+    ? groups.Where(group => group.Name.StartsWith("Installed updates", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--explorer-catalog-only")
+    ? groups.Where(group => group.Name.StartsWith("Explorer catalog", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--connected-coordinator-only")
+    ? groups.Where(group => group.Name.StartsWith("Connected Explorer coordinates", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--explorer-settings-only")
+    ? groups.Where(group => group.Name.StartsWith("Explorer settings", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--single-instance-only")
+    ? groups.Where(group => group.Name.StartsWith("single instance", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--tray-native-probe")
+    ? new (string Name, Func<Task> Run)[] { ("the actual Windows notification icon registers, updates and disposes", NativeTrayProbe) }
+    : args.Contains("--tray-only") ? groups.Where(group => group.Name.Contains("tray", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--pause-all-review-only")
     ? groups.Where(group => group.Name is "pause all holds a new queued item before the displayed snapshot catches up"
         or "an enqueue committed across pause all is saved paused before scheduling"
         or "resume all releases a crossing enqueue unless a newer pause all supersedes it"
@@ -73,6 +102,86 @@ Console.WriteLine($"{passed}/{selectedGroups.Length} app groups passed. Demo dat
 return failed == 0 ? 0 : 1;
 
 // ---------------------------------------------------------------------------------------------
+
+async Task TrayChoiceLifecycle()
+{
+    var tray = new FakeTrayIcon();
+    var window = new MainWindow { ShowInTaskbar = false, Left = -20000, Top = -20000 };
+    var closed = 0; window.Closed += (_, _) => closed++;
+    window.Show();
+    try {
+        True(window.EnableTray(Path.GetTempPath(), "Demo data", _ => tray), "registered fake tray");
+        var pending = window.ChooseAccessAsync([AccessMode.Client, AccessMode.Employee]);
+        window.Close(); Pump();
+        True(!window.IsVisible && !pending.IsCompleted && closed == 0, "close hides without abandoning source selection");
+        tray.Activate(); Pump();
+        True(window.IsVisible, "tray activation restores window");
+        window.Close(); Pump();
+        tray.Lose(); Pump();
+        True(window.IsVisible, "loss of the tray restores hidden window");
+        window.Close();
+        await Until(() => closed == 1, "unavailable tray closes normally");
+        True(pending.IsCanceled, "real close cancels source selection");
+        Equal(1, tray.Disposals);
+    } finally { window.Quit(); }
+}
+
+async Task TrayDownloadLifecycle()
+{
+    await using var env = Env.Create(signedIn: true, rate: 600_000);
+    var window = env.Window();
+    var tray = new FakeTrayIcon();
+    var closed = 0; window.Closed += (_, _) => closed++;
+    try {
+        True(window.EnableTray(env.Downloads, "Demo data", _ => tray), "tray enabled");
+        await env.Model.StartAsync();
+        await env.OpenAsync("deliveries", "land-script");
+        env.Check("ortho-full.tif");
+        env.Model.DownloadSelected.Execute(null);
+        await Until(() => env.Model.Transfers.Any(row => row.IsActive && row.Percent > 1), "download running");
+        window.Close(); Pump();
+        True(!window.IsVisible && closed == 0, "download window hides, not closes");
+        True(tray.LastStatus.Contains("Demo data", StringComparison.Ordinal), "tray retains demo label");
+        var pause = window.TrayActions().Single(item => item.Label == "Pause downloads");
+        True(pause.Enabled, "tray pause enabled"); pause.Run!();
+        await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Paused) && env.Backend.Writing == 0,
+            "tray pause stops bytes and saves paused state");
+        var resume = window.TrayActions().Single(item => item.Label == "Resume downloads");
+        True(resume.Enabled, "tray resume enabled"); resume.Run!();
+        await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running), "tray resumes transfer");
+        var quit = window.TrayActions().Single(item => item.Label == "Quit LedgeTop Files");
+        quit.Run!(); quit.Run!();
+        await Until(() => closed == 1 && env.Backend.Writing == 0 && Locks.Free(env.Backend.StateDirectory), "quit drains hidden downloads", seconds: 30);
+        Equal(1, tray.Disposals);
+        True(!window.IsVisible, "quit leaves no hidden window");
+    } finally { window.Quit(); }
+}
+
+async Task TrayUnavailable()
+{
+    foreach (var throws in new[] { false, true }) {
+        var tray = new FakeTrayIcon { Available = false };
+        var window = new MainWindow { ShowInTaskbar = false, Left = -20000, Top = -20000 };
+        var closed = 0; window.Closed += (_, _) => closed++;
+        window.Show();
+        True(!window.EnableTray(Path.GetTempPath(), null, _ => throws ? throw new InvalidOperationException("simulated tray failure") : tray),
+            "failure reported to composition");
+        window.Close();
+        await Until(() => closed == 1, "window still closes with failed tray");
+        Equal(throws ? 0 : 1, tray.Disposals);
+    }
+}
+
+Task NativeTrayProbe()
+{
+    using var tray = new ShellTrayIcon(() => [new("LedgeTop Files · native tray acceptance", false)]);
+    True(tray.IsAvailable, "Windows accepted Shell_NotifyIcon ADD");
+    tray.Update("LedgeTop Files · Demo data · native tray acceptance");
+    True(tray.IsAvailable, "Windows accepted Shell_NotifyIcon MODIFY");
+    tray.Dispose(); tray.Dispose();
+    True(!tray.IsAvailable, "native icon removed idempotently");
+    return Task.CompletedTask;
+}
 
 Task TextLabels()
 {
@@ -406,6 +515,8 @@ async Task PackagedReleases()
         // Packaged releases offer a choice and sign in to nothing until one is made; each choice builds one source only.
         True(plan.Backend is null && plan.Problem is null && plan.Access is not null, "packaged release offers a choice: " + plan.Problem);
         True(plan.Access!.Modes.SequenceEqual([AccessMode.Client, AccessMode.Employee]), "client and company files offered");
+        Equal("https://portal.example.test/", plan.Access.TrustedOrigins![AccessMode.Client].AbsoluteUri);
+        Equal("https://ops.example.test/", plan.Access.TrustedOrigins[AccessMode.Employee].AbsoluteUri);
         Equal(Path.Combine(local, "LedgeTop", "Files", "pilot", "access-mode.json"), plan.Access.Preference.Path);
         var live = plan.Access.Create(AccessMode.Client) as LiveBackend ?? throw new Exception("Expected the live backend");
         Equal("portal", live.Sources.Single().Alias);
@@ -464,6 +575,12 @@ async Task PackagedReleases()
         True(wrong.Backend is null && wrong.Problem == Startup.HelperProblem, "changed helper refused");
         var missing = Run(pilot, channel => Profile(channel, relative: @"helper\missing.exe"));
         True(missing.Backend is null && missing.Problem == Startup.HelperProblem, "missing helper refused");
+        True(missing.Access is not null && missing.Access.TrustedOrigins![AccessMode.Client].Host == "portal.example.test",
+            "missing helper keeps local source selection and offline cleanup available");
+        var missingRefused = false;
+        try { await using var unexpected = missing.Access!.Create(AccessMode.Client); }
+        catch (TransferException) { missingRefused = true; }
+        True(missingRefused, "helper integrity still refuses backend creation before sign-in");
 
         // Compiled channel parsing: exact lowercase values only; anything else is an unknown release.
         static System.Reflection.AssemblyMetadataAttribute M(string value) => new(ReleaseProfiles.ChannelKey, value);
@@ -1523,7 +1640,6 @@ static Task Sta(Func<Task> test)
     return done.Task;
 }
 
-/// <summary>A fresh demo backend, view model and folders for one test.</summary>
 /// <summary>A demo backend whose release reports a failure, as if saving the queue had failed while closing.</summary>
 sealed class ThrowOnDisposeBackend(DemoBackend inner) : IFilesBackend
 {
@@ -1532,6 +1648,20 @@ sealed class ThrowOnDisposeBackend(DemoBackend inner) : IFilesBackend
     public IReadOnlyList<IQueuedDownloadSource> Sources => inner.Sources;
     public string StateDirectory => inner.StateDirectory;
     public async ValueTask DisposeAsync() { await inner.DisposeAsync(); throw new IOException("synthetic close failure"); }
+}
+
+sealed class FakeTrayIcon : ITrayIcon
+{
+    internal bool Available = true;
+    internal int Disposals;
+    internal string LastStatus = "";
+    public bool IsAvailable => Available;
+    public event Action? Activated;
+    public event Action? Unavailable;
+    public void Update(string status) => LastStatus = status;
+    public void Dispose() { Disposals++; Available = false; }
+    internal void Activate() => Activated?.Invoke();
+    internal void Lose() { Available = false; Unavailable?.Invoke(); }
 }
 
 sealed class ChooserShell : IAccessWindow

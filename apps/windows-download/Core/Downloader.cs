@@ -83,7 +83,7 @@ public sealed class Downloader : IDisposable
 
     internal static void SafeFileName(string name)
     {
-        if (string.IsNullOrWhiteSpace(name) || name.Length > 150 || name is "." or ".." or StateDirectory
+        if (string.IsNullOrWhiteSpace(name) || name.Length > 150 || name is "." or ".." || string.Equals(name, StateDirectory, StringComparison.OrdinalIgnoreCase)
             || name.EndsWith('.') || name.EndsWith(' ') || name.Any(c => "<>:\"/\\|?*".Contains(c)))
             throw new TransferException("Choose a plain safe file basename.");
         // Invisible direction/format controls can disguise the extension. Decode

@@ -1,5 +1,13 @@
 # Windows files app: installer and release plan
 
+October 25 update: Beau explicitly requested installed distribution and scheduled
+Operations-managed upgrades, supplied legal publisher **Ledge Top Technologies
+LLC**, and confirmed Azure setup is needed. Current construction evidence,
+update-policy code and remaining signing/install/update gates are recorded in
+[windows-installed-updates.md](windows-installed-updates.md). The current
+unsigned Build Preview package remains a construction artifact, not a trusted
+installer. No paid signing resource or Azure account has been created.
+
 Decision record, 2026-10-22. This is a release plan, not a published installer.
 The existing .NET transfer core and human portal adapter remain reusable by
 Claude's desktop UI. Do not make a signing purchase, publish binaries or register

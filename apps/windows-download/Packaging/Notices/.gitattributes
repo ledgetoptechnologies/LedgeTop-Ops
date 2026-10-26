@@ -1,2 +1,3 @@
 # Preserve vendor files byte-for-byte; their SHA256 values are package inputs.
 *.txt -text whitespace=-trailing-space
+*.rtf -text whitespace=-trailing-space

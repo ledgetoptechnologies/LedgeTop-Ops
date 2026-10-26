@@ -409,3 +409,57 @@ This small live slice does not prove existing/multipart R2 checksum coverage,
 snapshots, clean-machine signed installation/update/uninstall, or Cloud Files
 hydration/pinning/eviction. Keep each gate explicit. Employee writes remain
 disabled until the preserved-mtime stale-overwrite failure is resolved.
+
+## Source-mapping audit addendum — 2026-10-25
+
+Beau explicitly approved a read-only staging test of exactly
+`S:/LedgeTop Operations/Sync App/Test Data`. This exception supersedes this
+packet's generic synthetic-only source restriction for that folder alone. It
+does not authorize sibling folders, broader share access, employee writes,
+grants, database edits, gateway configuration or deployment changes as part of
+this source audit. The current employee connection's frozen catalog contains
+zero files and zero directories; it is not evidence that this folder is mapped.
+
+Tracked gateway source supports an enrolled Linux filesystem directory, so a
+read-only NAS mount can fit the architecture without R2 ingestion. Windows
+drive-letter correspondence to the actual gateway namespace remains unknown.
+The gateway owner must prove the mount corresponds to this exact folder, is
+read-only, and satisfies the gateway's no-symlink, no-nested-mount and regular
+single-link file checks. Enrollment must come from that intended namespace,
+with actual root ID, generation, device, inode and fingerprint. Existing root
+enrollment is reusable only if its directory is exactly the approved folder:
+employee grants cover the entire enrolled root and contain no subfolder-prefix
+restriction. A broader Staging/share grant would exceed this approval.
+
+Before activation, the gateway/deployment owner must verify the deployed
+gateway version, fixed HTTPS identity, private dedicated signing configuration,
+source mount and spool capacity. The Ops authority owner must verify the
+staging worker version, router composition, database/schema identity and
+staging Access audience, then separately authorize any required registration
+and expiring exact-root grant through supported flows. That grant must match
+current staff ID, verified Access subject, admission version, root generation
+and fingerprint; administrator status alone grants no file bytes. Keep private
+configuration and credential values out of evidence. A fresh catalog capture
+is required to observe a newly authorized mapping; an existing frozen empty
+catalog does not grow automatically.
+
+Manifest preparation copies each entire source file into private temporary
+gateway spool before advertising its digest. Capturing the approved 19-file
+set can therefore read and temporarily spool approximately 1.92 GB even before
+Windows hydrates a file. This is not a permanent archive or an atomic source
+snapshot. Verify actual free space, retention, filesystem identity behavior and
+preparation/ingress deadlines rather than treating configured limits as
+throughput evidence.
+
+Source evidence: `apps/employee-read-gateway/README.md` (enrollment/configuration
+and snapshot limits), `employee_read_gateway/core.py` (fingerprint at lines
+109–134 and root traversal at 302–328),
+`apps/operations/src/worker/employee-read-provisioning.ts` (command fields at
+33–47 and manager authority at 69–94), `employee-read-authority.ts` (root/grant
+checks at 39–52 and discovery at 96–145), and `employee-read-routes.ts` (routes
+at 98–121). `windows-files-staging.ts:58–78` supplies a source-only composition
+and explicitly states that neither entrypoint mounts it. These are tracked
+source observations, not a claim that deployed staging lacks or has those
+routes or this mount. The actual deployed mapping remains an owner-verification
+blocker. This audit performed no source-data, private-config, network, grant,
+database or deployment operations.

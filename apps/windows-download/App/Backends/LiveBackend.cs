@@ -77,7 +77,8 @@ public sealed class LiveBackend : IFilesBackend
     // Only the chosen source is constructed, authenticated and disposed. The test seam cannot
     // replace the production factory exposed by the public constructors.
     internal sealed record SelectedBackend(ISessionGateway Session, IFileCatalog Catalog,
-        IQueuedDownloadSource Source, Action Dispose);
+        IQueuedDownloadSource Source, Action Dispose,
+        Func<CancellationToken, Task<IDisposable>>? PinCatalogSession = null);
     private readonly SelectedBackend selected;
     private int disposed;
 
@@ -131,13 +132,13 @@ public sealed class LiveBackend : IFilesBackend
             var source = new PortalQueuedDownloadSource("portal", access);
             var client = new PortalClient(access);
             return new(new LiveSession(access, source), new LiveCatalog(client, null, source, null), source,
-                () => { client.Dispose(); source.Dispose(); });
+                () => { client.Dispose(); source.Dispose(); }, access.PinCachedTokenAsync);
         }
         else {
             var source = new EmployeeQueuedDownloadSource("employee", access);
             var client = new EmployeeClient(access);
             return new(new LiveSession(access, source), new LiveCatalog(null, client, null, source), source,
-                () => { client.Dispose(); source.Dispose(); });
+                () => { client.Dispose(); source.Dispose(); }, access.PinCachedTokenAsync);
         }
     }
 
@@ -147,6 +148,15 @@ public sealed class LiveBackend : IFilesBackend
     public IFileCatalog Catalog { get; }
     public IReadOnlyList<IQueuedDownloadSource> Sources { get; }
     public string StateDirectory { get; }
+
+    /// <summary>Pin every catalog/source request to the same cached helper credential during capture.
+    /// The server still verifies that credential and file authority; no browser or credential is exposed.</summary>
+    internal Task<IDisposable> PinCatalogSessionAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        return selected.PinCatalogSession is { } pin ? pin(cancellationToken)
+            : throw new InvalidOperationException("The selected backend cannot bind an Explorer catalog capture.");
+    }
 
     public ValueTask DisposeAsync()
     {
