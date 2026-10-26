@@ -7,6 +7,7 @@ const vm = require('node:vm');
 const { createMeasurementDraftRecovery } = require('../measurement-draft-recovery.mjs');
 const { renderStaffNavigation } = require('../viewer-staff-navigation.mjs');
 const { createViewerSessionCapabilityStore, VIEWER_SESSION_STORAGE_PREFIX: PREFIX } = require('../viewer-session-capability-store.mjs');
+const { measurementCollection } = require('../measurement-document.mjs');
 const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
 const workspaceSource = fs.readFileSync(path.join(__dirname, '..', 'measurement-workspace.mjs'), 'utf8');
 const REQUEST = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
@@ -71,6 +72,23 @@ function fixture({ controller = true } = {}) {
     return invalidate;
   })()`,context);
   return { context, timers, posts, resets, measurements };
+}
+
+function drawWorkspaceWithCurrentPermission(f) {
+  // Execute the configured production permission callback and actual workspace
+  // draw function through its real invalidate/onAccessLost callback. Projection
+  // work is not needed for the early permission-denial path being exercised.
+  const line = source.split('\n').find(value => value.includes('permitted:()=>SHARE_PERMISSIONS.measure'));
+  const permitted = vm.runInContext(`(${line.trim().slice('permitted:'.length).split(',coordinateReference:')[0]})`, f.context);
+  const scope = vm.createContext({
+    disposed: false, bind() {}, context: () => null, bound: null,
+    measurementCollection, lastCollection: measurementCollection(null), permitted,
+    invalidated: false, store: { isInvalidated: () => f.measurements.invalidated },
+    onBeforeAccessLost() {}, invalidate: reason => f.context.measurementWorkspace.invalidate(reason),
+  });
+  const start = workspaceSource.indexOf('  function draw(');
+  vm.runInContext(workspaceSource.slice(start, workspaceSource.indexOf('\n  const timer=setInterval(draw,', start)), scope);
+  scope.draw();
 }
 
 test('parallel tile/cloud authorization failures coalesce and successful renewal resumes both runtimes', async () => {
@@ -160,9 +178,48 @@ test('proactive renewal clears the cloud access label even without a denied EPT 
 
 test('measurement denial far before expiry cannot start an ignored early renewal',()=>{
   const f=fixture();f.context.activeViewerSession.expiresAt=new Date(Date.now()+1800000).toISOString();
+  f.context.SHARE_PERMISSIONS = { view: true, measure: true };
   f.context.measurementWorkspace.invalidate('HTTP 403');
   assert.equal(f.context.sessionRenewalBlocked,true);assert.equal(f.posts.length,0);
   assert.equal(f.context.sessionRenewalPending,false);assert.equal(f.measurements.invalidations,1);
+  assert.equal(f.context.sessionAccessState,'unavailable');
+  assert.equal(f.context.sessionAccessReason,'authorization-required');
+});
+
+test('intentionally disabled measurement drawing clears private data without denying a valid view-only session', () => {
+  const f = fixture();
+  f.context.activeViewerSession.expiresAt = new Date(Date.now() + 600_000).toISOString();
+  f.context.activeViewerSession.audience = 'client';
+  f.context.activeViewerSession.permissions = { view: true, measure: false };
+  f.context.SHARE_PERMISSIONS = f.context.activeViewerSession.permissions;
+  drawWorkspaceWithCurrentPermission(f);
+  assert.equal(f.measurements.invalidations, 1);
+  assert.equal(f.measurements.records.size, 0);
+  assert.equal(f.measurements.displayAborts, 1);
+  assert.equal(f.context.sessionAccessState, 'active');
+  assert.equal(f.context.sessionAccessReason, null);
+  assert.equal(f.context.sessionAccessLabel(), null);
+  assert.equal(f.context.sessionRenewalBlocked, false);
+  assert.equal(f.context.sessionRenewalPending, false);
+  assert.equal(f.posts.length, 0);
+  assert.equal(f.measurements.sliceResets, 0);
+  assert.equal(f.resets.length, 0);
+});
+
+test('reenabled measurement permission still treats a genuine access loss as an authorization failure', () => {
+  const f = fixture();
+  f.context.activeViewerSession.expiresAt = new Date(Date.now() + 600_000).toISOString();
+  f.context.SHARE_PERMISSIONS = { view: true, measure: false };
+  f.context.measurementAccessLost();
+  assert.equal(f.context.sessionAccessState, 'active');
+  assert.equal(f.context.sessionRenewalBlocked, false);
+  f.context.SHARE_PERMISSIONS = { view: true, measure: true };
+  f.context.measurementWorkspace.invalidate('HTTP 403 after permission was reenabled');
+  assert.equal(f.context.sessionAccessState, 'unavailable');
+  assert.equal(f.context.sessionAccessReason, 'authorization-required');
+  assert.equal(f.context.sessionRenewalBlocked, true);
+  assert.equal(f.posts.length, 0);
+  assert.equal(f.measurements.records.size, 0);
 });
 
 test('expired timeout invalidates once without recursive measurement-triggered renewal',()=>{

@@ -1514,7 +1514,10 @@ function retrySessionAccess(reason) {
 }
 
 function measurementAccessLost() {
-  if (VIEW_MODE === 'session' && !sessionRenewalBlocked) requestSessionRenewal('measurements');
+  // A disabled measurement feature may clear its private workspace without
+  // invalidating otherwise authorized model viewing. Real access loss while
+  // measurement is enabled still follows the existing authorization path.
+  if (VIEW_MODE === 'session' && SHARE_PERMISSIONS.measure !== false && !sessionRenewalBlocked) requestSessionRenewal('measurements');
 }
 
 function clearSessionRenewalPending(attempt = sessionRenewalAttempt) {
