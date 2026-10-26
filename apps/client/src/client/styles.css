@@ -776,6 +776,11 @@
   background: var(--orange);
 }
 .client-portal-top-nav a:focus-visible { outline: 3px solid #ee500752; outline-offset: 2px; }
+/* A page opened from an Operations-only home keeps Home visible at every width. */
+.operations-home-nav { display: flex; margin-right: auto; min-width: 0; }
+.operations-home-nav a { padding: .6rem .75rem; border-radius: 8px; color: #bdc7ce; font-weight: 700; text-decoration: none; }
+.operations-home-nav a:hover { color: #fff; background: #ffffff10; }
+.operations-home-nav a:focus-visible { outline: 3px solid #ee500752; outline-offset: 2px; }
 
 .portal-account-menu { position: relative; justify-self: end; min-width: 0; }
 .portal-account-menu .account-menu-trigger {

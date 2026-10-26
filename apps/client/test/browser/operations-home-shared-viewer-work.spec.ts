@@ -132,3 +132,27 @@ test("a direct link to an Operations home's task whose access was removed never 
   await expect(page.getByRole("alert")).toContainText("This shared 3D model isn’t available here yet.");
   expect(calls.filter(call => call.method === "POST")).toEqual([]);
 });
+
+for (const [label, width] of [["desktop", 1280], ["phone", 390]] as const) test(`an Operations-only client's shared 3D model keeps Home navigation back to their shared work (${label})`, async ({page}) => {
+  await page.setViewportSize({width, height: 800});
+  await page.context().route(`${viewerOrigin}/**`, route => route.fulfill({contentType: "text/html", body: "<!doctype html><body><div id=\"loaded\">direct model</div></body>"}));
+  const calls = await mock(page, {clientAccounts: null, homes: () => [opsHome]});
+  await page.goto("/portal/viewer/grant-workspace-ops/tasks/task-workspace-ops?workspace=workspace-ops");
+  await expect(page.frameLocator("iframe").locator("#loaded")).toHaveText("direct model");
+  const nav = page.getByRole("navigation", {name: "Client portal"});
+  const home = nav.getByRole("link", {name: "Home"});
+  await expect(home).toBeVisible();
+  await expect(home).toHaveAttribute("href", "/portal");
+  await home.click();
+  await expect(page).toHaveURL(/\/portal$/);
+  await expect(page.getByRole("heading", {level: 1, name: "Your services"})).toBeVisible();
+  // The home itself stays free of navigation that could suggest projects, files or billing.
+  await expect(page.getByRole("navigation")).toHaveCount(0);
+  await expect(rows(page)).toHaveCount(1);
+  await expect(rows(page).first()).toContainText("Quarry survey");
+  // Navigation needs no client account or business project: only the exact Operations home is ever asked.
+  expect(calls.some(call => /\/api\/client\/v2\/workspaces\/(?!workspace-ops\/)/.test(call.path))).toBe(false);
+  expect(calls.filter(call => call.method === "POST").map(call => call.path))
+    .toEqual(["/api/client/v2/workspaces/workspace-ops/viewer/grant-workspace-ops/tasks/task-workspace-ops/session"]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
