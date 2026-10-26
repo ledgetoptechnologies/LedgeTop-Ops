@@ -1,6 +1,6 @@
 # Default two-service TrueNAS Custom App. No decoder/broker credentials required.
-# Use digest-qualified images from the corresponding GitHub release receipts.
-name: ltds-media-generation
+# latest advances only after the corresponding verified main release; pull on update/redeploy.
+name: ltds-proxy-generation
 
 x-service: &service
   user: "${PUID:-568}:${PGID:-568}"
@@ -19,7 +19,8 @@ x-service: &service
 services:
   proxy-generator:
     <<: *service
-    image: ${LTDSPROXY_IMAGE:?Set the digest-qualified proxy-generator image}
+    image: ghcr.io/ledgetoptechnologies/ltds-proxy-generator:latest
+    pull_policy: always
     network_mode: none
     cpus: "${LTDSPROXY_CPU_LIMIT:-12.0}"
     mem_limit: ${LTDSPROXY_MEMORY_LIMIT:-12g}
@@ -57,9 +58,17 @@ services:
 
   queue-renderer:
     <<: *service
-    image: ${LTDSTHUMB_QUEUE_WORKER_IMAGE:?Set the digest-qualified thumbnail queue-worker image}
-    cpus: "${LTDSTHUMB_QUEUE_WORKER_CPU_LIMIT:-4.0}"
-    mem_limit: ${LTDSTHUMB_QUEUE_WORKER_MEMORY_LIMIT:-5g}
+    image: ghcr.io/ledgetoptechnologies/ltds-thumbnail-queue-worker:latest
+    pull_policy: always
+    container_name: ltds-thumbnail-gen
+    pids_limit: 256
+    cpus: "${LTDSTHUMB_QUEUE_WORKER_CPU_LIMIT:-8.0}"
+    mem_limit: ${LTDSTHUMB_QUEUE_WORKER_MEMORY_LIMIT:-10g}
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     stop_grace_period: 5m
     environment:
       LTDSTHUMB_API_BASE: ${LTDSTHUMB_API_BASE:-https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1}

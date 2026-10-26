@@ -1,7 +1,7 @@
 # LTDS TrueNAS thumbnail app
 
 For one TrueNAS Custom App containing the thumbnail queue and Resolve proxy
-generation, use the [media generation stack](../media-generation/README.md).
+generation, use [LTDS Proxy Generation](../media-generation/README.md).
 Its default YAML runs those two independent services; a separate optional
 overlay adds the local decoder and broker described here.
 
@@ -37,8 +37,8 @@ The local pre-generator does not decode videos; the repository-owned
 `queue-renderer` handles video plus R2-only still/PDF jobs through
 `/api/internal/thumbnail-renderer/v1`. The version-controlled queue runtime is
 [`truenas/thumbnail-generation/thumbnail-queue-worker.sh`](truenas/thumbnail-generation/thumbnail-queue-worker.sh),
-but production must deploy only the immutable, digest-qualified `queue-worker`
-image published and canary-tested by this repository. Never copy or layer the
+and production uses the repository's `queue-worker:latest` image, promoted only
+after the verified `main` publication and container canary pass. Never copy or layer the
 script onto an unrelated image.
 
 ## TrueNAS SCALE installation (UI only)
@@ -47,14 +47,17 @@ Do not use the TrueNAS system shell. Install through **Apps > Discover Apps >
 Custom App > Install via YAML** using `compose.truenas.yaml` (labels vary by
 SCALE version).
 
-The YAML expects three prebuilt immutable images. The repository's **Publish
+The YAML uses three prebuilt `:latest` images. The repository's **Publish
 TrueNAS thumbnail renderer images** GitHub workflow builds the `decoder`,
-`broker`, and `queue-worker` targets for `linux/amd64` on changes to this package or an authorized
-manual dispatch from `main`. It publishes commit tags without overwriting them
-and records each digest-qualified reference in the run summary and receipt
-artifact. Copy those `ghcr.io/ledgetoptechnologies/ltds-thumbnail-...@sha256:...`
-references into the TrueNAS UI; never use `latest`. Configure a private registry
-credential in the TrueNAS Apps UI if the packages are not anonymously readable.
+`broker`, and `queue-worker` targets for `linux/amd64` on relevant changes pushed
+to `main`. It publishes commit tags without overwriting them,
+records digest-qualified references for traceability, and advances each
+`:latest` tag only after its required verification succeeds. The YAML sets
+`pull_policy: always`, so an app update/redeploy pulls the newest verified
+release. A plain container restart does not pull images; this configuration
+does not install a live automatic updater. Image references are already in the
+YAML, with no digest/image environment values required. Configure a private
+registry credential in the TrueNAS Apps UI if the packages are not anonymously readable.
 
 Enter these values through the Custom App environment/substitution UI. If the
 installed SCALE version does not expose Compose substitutions, replace the
@@ -63,9 +66,6 @@ filled YAML or `.env` file.
 
 | Value | Purpose |
 | --- | --- |
-| `LTDSTHUMB_DECODER_IMAGE` | Pinned image built from Docker target `decoder` |
-| `LTDSTHUMB_BROKER_IMAGE` | Pinned image built from Docker target `broker` |
-| `LTDSTHUMB_QUEUE_WORKER_IMAGE` | Pinned image built from Docker target `queue-worker` |
 | `LTDSTHUMB_JOBS_HOST_PATH` | Existing local Jobs upload dataset, mounted read-only |
 | `LTDSTHUMB_ARTIFACTS_HOST_PATH` | Persistent private prebuilt cache and receipts |
 | `LTDSTHUMB_WORK_HOST_PATH` | Quota-limited decoder scratch dataset |

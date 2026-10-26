@@ -34,11 +34,12 @@ new images use the explicit `includeKind=all` contract.
 
 ## Deployment
 
-Use the canary-verified `ltds-thumbnail-queue-worker:stable` reference for the
-standalone updating Compose, or a digest-qualified reference for a pinned
-rollout. The publish workflow advances `stable` only after its exact published
-queue image passes the all-media container smoke test. `pull_policy: always`
-applies to Compose up/redeploy, not a plain container restart. Configure the
+Use `ltds-thumbnail-queue-worker:latest` in the supplied deployment YAML. The
+publish workflow advances `latest` only after the verified `main` queue image
+passes the all-media container smoke test. Commit tags and digest receipts
+remain available for traceability; they are not required deployment pins.
+`pull_policy: always` applies to an app update/redeploy, not a plain container
+restart, and does not install a live automatic updater. Configure the
 `queue-renderer` service from `compose.truenas.yaml`; do not mount a Jobs dataset
 or grant R2 credentials. It needs only the dedicated renderer bearer and,
 when using the Access-protected Operations host, the paired Cloudflare Access

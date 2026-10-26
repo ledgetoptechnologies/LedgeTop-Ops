@@ -132,6 +132,16 @@ jobs:
           docker buildx imagetools inspect "${IMAGE}:stable" --format '{{json .Manifest}}' > stable-manifest.json
           node -e 'const fs=require("fs"); const m=JSON.parse(fs.readFileSync("stable-manifest.json","utf8")); if(m.digest !== process.env.EXPECTED_DIGEST) throw new Error("stable digest does not match canary-tested image")'
 
+      - name: Promote verified main image to latest
+        shell: bash
+        env:
+          IMAGE: ${{ steps.names.outputs.image }}
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:latest" "${IMAGE}@${EXPECTED_DIGEST}"
+          docker buildx imagetools inspect "${IMAGE}:latest" --format '{{json .Manifest}}' > latest-manifest.json
+          node -e 'const fs=require("fs"); const m=JSON.parse(fs.readFileSync("latest-manifest.json","utf8")); if(m.digest !== process.env.EXPECTED_DIGEST) throw new Error("latest digest does not match verified main image")'
+
       - name: Write the immutable deployment receipt
         id: receipt
         shell: bash
@@ -148,7 +158,8 @@ jobs:
             --arg image "${IMAGE}" \
             --arg digest "${DIGEST}" \
             --arg reference "${IMAGE}@${DIGEST}" \
-            '{schemaVersion:1,target:$target,platform:$platform,commit:$commit,image:$image,digest:$digest,reference:$reference}' \
+            --arg deploymentReference "${IMAGE}:latest" \
+            '{schemaVersion:1,target:$target,platform:$platform,commit:$commit,image:$image,digest:$digest,reference:$reference,deploymentReference:$deploymentReference}' \
             > "${receipt}"
           echo "path=${receipt}" >> "${GITHUB_OUTPUT}"
           {
@@ -157,7 +168,7 @@ jobs:
             echo "- Commit: \`${GITHUB_SHA}\`"
             echo "- Platform: \`linux/amd64\`"
             echo "- Digest: \`${DIGEST}\`"
-            echo "- TrueNAS image: \`${IMAGE}@${DIGEST}\`"
+            echo "- TrueNAS image: \`${IMAGE}:latest\`"
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload the deployment receipt

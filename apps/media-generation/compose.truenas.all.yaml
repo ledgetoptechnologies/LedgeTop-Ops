@@ -1,6 +1,6 @@
 # Single-file four-service TrueNAS Custom App. Requires all prebuilt prerequisites.
-# Use digest-qualified images from the corresponding GitHub release receipts.
-name: ltds-media-generation
+# latest advances only after the corresponding verified main release; pull on update/redeploy.
+name: ltds-proxy-generation
 
 x-service: &service
   user: "568:568"
@@ -33,7 +33,8 @@ x-prebuilt-service: &prebuilt-service
 services:
   proxy-generator:
     <<: *service
-    image: ${LTDSPROXY_IMAGE:?Set the digest-qualified proxy-generator image}
+    image: ghcr.io/ledgetoptechnologies/ltds-proxy-generator:latest
+    pull_policy: always
     network_mode: none
     cpus: "${LTDSPROXY_CPU_LIMIT:-12.0}"
     mem_limit: ${LTDSPROXY_MEMORY_LIMIT:-12g}
@@ -71,9 +72,17 @@ services:
 
   queue-renderer:
     <<: *service
-    image: ${LTDSTHUMB_QUEUE_WORKER_IMAGE:?Set the digest-qualified thumbnail queue-worker image}
-    cpus: "${LTDSTHUMB_QUEUE_WORKER_CPU_LIMIT:-4.0}"
-    mem_limit: ${LTDSTHUMB_QUEUE_WORKER_MEMORY_LIMIT:-5g}
+    image: ghcr.io/ledgetoptechnologies/ltds-thumbnail-queue-worker:latest
+    pull_policy: always
+    container_name: ltds-thumbnail-gen
+    pids_limit: 256
+    cpus: "${LTDSTHUMB_QUEUE_WORKER_CPU_LIMIT:-8.0}"
+    mem_limit: ${LTDSTHUMB_QUEUE_WORKER_MEMORY_LIMIT:-10g}
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     stop_grace_period: 5m
     environment:
       LTDSTHUMB_API_BASE: ${LTDSTHUMB_API_BASE:-https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1}
@@ -91,7 +100,8 @@ services:
 
   decoder:
     <<: *prebuilt-service
-    image: ${LTDSTHUMB_DECODER_IMAGE:?Set the pinned decoder image in the TrueNAS UI}
+    image: ghcr.io/ledgetoptechnologies/ltds-thumbnail-decoder:latest
+    pull_policy: always
     network_mode: none
     cpus: "${LTDSTHUMB_DECODER_CPU_LIMIT:-2.0}"
     mem_limit: ${LTDSTHUMB_DECODER_MEMORY_LIMIT:-2g}
@@ -145,7 +155,8 @@ services:
 
   broker:
     <<: *prebuilt-service
-    image: ${LTDSTHUMB_BROKER_IMAGE:?Set the pinned broker image in the TrueNAS UI}
+    image: ghcr.io/ledgetoptechnologies/ltds-thumbnail-broker:latest
+    pull_policy: always
     cpus: "${LTDSTHUMB_BROKER_CPU_LIMIT:-0.5}"
     mem_limit: ${LTDSTHUMB_BROKER_MEMORY_LIMIT:-256m}
     environment:

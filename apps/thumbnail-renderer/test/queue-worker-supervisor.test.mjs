@@ -10,6 +10,7 @@ const compose = await readFile(new URL("../compose.truenas.yaml", import.meta.ur
 const queueCompose = await readFile(new URL("../compose.truenas.queue-renderer.yaml", import.meta.url), "utf8");
 const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");
 const publishWorkflow = await readFile(new URL("../../../.github/workflows/publish-thumbnail-renderer.yml", import.meta.url), "utf8");
+const proxyPublishWorkflow = await readFile(new URL("../../../.github/workflows/publish-proxy-generator.yml", import.meta.url), "utf8");
 
 test("queue renderer uses a bounded isolated worker pool on RAM scratch", () => {
   assert.match(supervisor, /LTDSTHUMB_WORKER_CONCURRENCY:=4/);
@@ -31,19 +32,19 @@ test("published queue-worker image owns every required decoder", () => {
 
 test("TrueNAS service has no source mount and uses bounded tmpfs", () => {
   const service = compose.slice(compose.indexOf("  queue-renderer:"), compose.indexOf("\nnetworks:"));
-  assert.match(service, /LTDSTHUMB_QUEUE_WORKER_IMAGE/);
+  assert.match(service, /image: "?ghcr\.io\/ledgetoptechnologies\/ltds-thumbnail-queue-worker:latest"?/);
   assert.match(service, /LTDSTHUMB_WORKER_CONCURRENCY/);
   assert.match(service, /\/scratch:rw,nosuid,nodev,noexec,size=/);
   assert.doesNotMatch(service, /volumes:/);
   assert.doesNotMatch(service, /R2_ACCESS_KEY|R2_SECRET/);
 });
 
-test("standalone queue renderer follows verified stable and remains hardened", () => {
+test("standalone queue renderer follows verified main latest and remains hardened", () => {
   const service = queueCompose.slice(queueCompose.indexOf("  queue-renderer:"));
-  assert.match(service, /image: "ghcr\.io\/ledgetoptechnologies\/ltds-thumbnail-queue-worker:stable"/);
+  assert.match(service, /image: "ghcr\.io\/ledgetoptechnologies\/ltds-thumbnail-queue-worker:latest"/);
   assert.match(service, /pull_policy: always/);
   assert.match(service, /container_name: ltds-thumbnail-gen/);
-  assert.doesNotMatch(service, /:latest\b/);
+  assert.doesNotMatch(service, /:stable\b|@sha256:/);
   assert.match(service, /user: "568:568"/);
   assert.match(service, /init: true/);
   assert.match(service, /read_only: true/);
@@ -78,11 +79,29 @@ test("publish is blocked on source checks and proves the exact published all-med
   assert.ok(readback > publishWorkflow.indexOf("Build and publish the linux/amd64 image"));
   assert.ok(smoke > readback);
   const promotion = publishWorkflow.indexOf("Promote canary-verified queue worker to stable");
+  const latest = publishWorkflow.indexOf("Promote verified main image to latest");
   assert.ok(promotion > smoke);
-  assert.ok(receipt > promotion);
+  assert.ok(latest > promotion);
+  assert.ok(receipt > latest);
   assert.match(publishWorkflow, /docker buildx imagetools create --tag "\$\{IMAGE\}:stable"/);
   assert.match(publishWorkflow, /stable digest does not match canary-tested image/);
   assert.match(publishWorkflow, /docker buildx imagetools inspect "\$\{TAG\}"/);
   assert.match(publishWorkflow, /"\$\{resolved_digest\}" != "\$\{EXPECTED_DIGEST\}"/);
   assert.match(publishWorkflow, /LTDSTHUMB_SMOKE_IMAGE: \$\{\{ steps\.names\.outputs\.image \}\}@\$\{\{ steps\.build\.outputs\.digest \}\}/);
+  assert.match(publishWorkflow, /imagetools create --prefer-index=false --tag "\$\{IMAGE\}:latest" "\$\{IMAGE\}@\$\{EXPECTED_DIGEST\}"/);
+  assert.match(publishWorkflow, /latest digest does not match verified main image/);
+});
+
+test("proxy latest promotes the canary-tested main image without changing its digest", () => {
+  const canary = proxyPublishWorkflow.indexOf("Run regression and synthetic media tests in the runtime");
+  const validation = proxyPublishWorkflow.indexOf("Validate combined stack without credentials or host mounts");
+  const publication = proxyPublishWorkflow.indexOf("Publish only the canary-tested image and retain its digest");
+  const promotion = proxyPublishWorkflow.indexOf('imagetools create --prefer-index=false --tag "${image}:latest"');
+  assert.ok(canary >= 0 && validation > canary && publication > validation && promotion > publication);
+  const block = proxyPublishWorkflow.slice(publication, proxyPublishWorkflow.indexOf("Upload immutable deployment receipt"));
+  assert.match(block, /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
+  assert.match(block, /docker tag ltds-proxy-generator:canary "\$tag"/);
+  assert.match(block, /"\$\{image\}:latest" "\$\{image\}@\$\{digest\}"/);
+  assert.match(block, /"\$latest_digest" != "\$digest"/);
+  assert.match(proxyPublishWorkflow, /cancel-in-progress: false/);
 });

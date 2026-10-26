@@ -13,17 +13,14 @@ ROOT = Path(__file__).resolve().parent
 BASE = ROOT / "compose.truenas.yaml"
 PREBUILT = ROOT / "compose.truenas.prebuilt.yaml"
 ALL = ROOT / "compose.truenas.all.yaml"
-DIGEST = "0" * 64
+THUMBNAIL = ROOT.parent / "thumbnail-renderer" / "compose.truenas.yaml"
+STANDALONE = ROOT.parent / "thumbnail-renderer" / "compose.truenas.queue-renderer.yaml"
 VALUES = {
-    "LTDSPROXY_IMAGE": f"ghcr.io/ledgetoptechnologies/ltds-proxy-generator@sha256:{DIGEST}",
-    "LTDSTHUMB_QUEUE_WORKER_IMAGE": f"ghcr.io/ledgetoptechnologies/ltds-thumbnail-queue-worker@sha256:{DIGEST}",
     "MEDIA_JOBS_HOST_PATH": "/synthetic/jobs",
     "LTDSPROXY_STATE_HOST_PATH": "/synthetic/proxy-state",
     "THUMBNAIL_INGEST_SECRET": "synthetic-renderer-token",
 }
 OPTIONAL = {
-    "LTDSTHUMB_DECODER_IMAGE": f"ghcr.io/ledgetoptechnologies/ltds-thumbnail-decoder@sha256:{DIGEST}",
-    "LTDSTHUMB_BROKER_IMAGE": f"ghcr.io/ledgetoptechnologies/ltds-thumbnail-broker@sha256:{DIGEST}",
     "LTDSTHUMB_ARTIFACTS_HOST_PATH": "/synthetic/artifacts",
     "LTDSTHUMB_WORK_HOST_PATH": "/synthetic/work",
     "LTDSTHUMB_CACHE_HOST_PATH": "/synthetic/cache",
@@ -40,8 +37,8 @@ OPTIONAL = {
 
 def render(files, values, expect_success=True):
     # Do not inherit operator substitution values or .env contents.
-    names = set(re.findall(r"\$\{([A-Z0-9_]+)", BASE.read_text() + PREBUILT.read_text() + ALL.read_text()))
-    env = {key: value for key, value in os.environ.items() if key not in names}
+    names = set(re.findall(r"\$\{([A-Z0-9_]+)", "".join(file.read_text() for file in (BASE, PREBUILT, ALL, THUMBNAIL, STANDALONE))))
+    env = {key: value for key, value in os.environ.items() if key not in names and key != "COMPOSE_PROJECT_NAME"}
     with tempfile.TemporaryDirectory(prefix="ltds-compose-test-") as temp:
         env_file = Path(temp) / "synthetic.env"
         env_file.write_text("".join(f"{key}={value}\n" for key, value in values.items()))
@@ -88,7 +85,8 @@ class MediaComposeTests(unittest.TestCase):
                 self.assertFalse(service.get("privileged", False))
                 self.assertGreater(float(service["cpus"]), 0)
                 self.assertRegex(str(service["mem_limit"]), r"^[1-9][0-9]*(?:[bkmgBKMG])?$")
-                self.assertRegex(service["image"], r"^ghcr\.io/ledgetoptechnologies/ltds-[a-z-]+@sha256:[a-f0-9]{64}$")
+                self.assertRegex(service["image"], r"^ghcr\.io/ledgetoptechnologies/ltds-[a-z-]+:latest$")
+                self.assertEqual(service["pull_policy"], "always")
                 for volume in service.get("volumes", []):
                     # Some Compose versions omit explicit false values when
                     # serializing normalized configuration. Also inspect the
@@ -123,7 +121,7 @@ class MediaComposeTests(unittest.TestCase):
         self.assertTrue(any(mount.startswith("/scratch:") for mount in queue["tmpfs"]))
 
     def test_required_values_fail_closed(self):
-        for missing in ("LTDSPROXY_IMAGE", "MEDIA_JOBS_HOST_PATH", "LTDSPROXY_STATE_HOST_PATH", "THUMBNAIL_INGEST_SECRET"):
+        for missing in ("MEDIA_JOBS_HOST_PATH", "LTDSPROXY_STATE_HOST_PATH", "THUMBNAIL_INGEST_SECRET"):
             with self.subTest(missing=missing):
                 render([BASE], {key: value for key, value in VALUES.items() if key != missing}, expect_success=False)
         render([BASE, PREBUILT], VALUES, expect_success=False)
@@ -149,6 +147,48 @@ class MediaComposeTests(unittest.TestCase):
     def test_smaller_proxy_profile_override(self):
         smaller = render([ALL], VALUES | OPTIONAL | {"LTDSPROXY_MAX_HEIGHT": "540"})["services"]
         self.assertEqual(smaller["proxy-generator"]["environment"]["PROXY_MAX_HEIGHT"], "540")
+
+    def test_latest_images_and_queue_profile_in_every_deployment(self):
+        expected = {
+            "proxy-generator": "ghcr.io/ledgetoptechnologies/ltds-proxy-generator:latest",
+            "queue-renderer": "ghcr.io/ledgetoptechnologies/ltds-thumbnail-queue-worker:latest",
+            "decoder": "ghcr.io/ledgetoptechnologies/ltds-thumbnail-decoder:latest",
+            "broker": "ghcr.io/ledgetoptechnologies/ltds-thumbnail-broker:latest",
+        }
+        thumbnail_values = VALUES | OPTIONAL | {
+            "LTDSTHUMB_JOBS_HOST_PATH": "/synthetic/jobs",
+            "CF_ACCESS_CLIENT_ID": "synthetic-access-id",
+            "CF_ACCESS_CLIENT_SECRET": "synthetic-access-secret",
+        }
+        deployments = [self.base, self.full, self.all,
+            render([THUMBNAIL], thumbnail_values)["services"],
+            render([STANDALONE], {})["services"]]
+        for services in deployments:
+            for name, service in services.items():
+                with self.subTest(service=name):
+                    self.assertEqual(service["image"], expected[name])
+                    self.assertEqual(service["pull_policy"], "always")
+        for services in (self.base, self.all):
+            queue = services["queue-renderer"]
+            self.assertEqual(queue["container_name"], "ltds-thumbnail-gen")
+            self.assertEqual(float(queue["cpus"]), 8.0)
+            self.assertEqual(int(queue["mem_limit"]), 10 * 1024**3)
+            self.assertEqual(queue["pids_limit"], 256)
+            self.assertEqual(queue["logging"]["options"]["max-file"], "3")
+
+    def test_proxy_generation_name_and_image_baked_runtime(self):
+        for files, values in (([BASE], VALUES), ([ALL], VALUES | OPTIONAL)):
+            configuration = render(files, values)
+            self.assertEqual(configuration["name"], "ltds-proxy-generation")
+            proxy = configuration["services"]["proxy-generator"]
+            self.assertIsNone(proxy.get("entrypoint"))
+            self.assertIsNone(proxy.get("command"))
+            self.assertEqual({mount["target"] for mount in proxy["volumes"]}, {"/data/jobs", "/state"})
+            self.assertFalse(any("SCRIPT" in key for key in proxy["environment"]))
+            self.assertFalse(any("ffmpeg" in mount["source"].lower() or mount["source"].endswith(".sh") for mount in proxy["volumes"]))
+        dockerfile = (ROOT.parent / "proxy-generator" / "Dockerfile").read_text()
+        self.assertIn("COPY --chown=568:568 proxy_generator.py /app/proxy_generator.py", dockerfile)
+        self.assertIn('ENTRYPOINT ["/usr/bin/tini", "--", "python3", "/app/proxy_generator.py"]', dockerfile)
 
 
 if __name__ == "__main__":

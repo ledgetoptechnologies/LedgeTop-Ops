@@ -1,6 +1,6 @@
 # Standalone TrueNAS SCALE app for the Operations claim queue.
 #
-# stable advances only after the publish workflow passes its container canary.
+# latest advances only after the verified main publish workflow passes its container canary.
 # pull_policy applies to Compose up/redeploy, not docker restart. Replace
 # the renderer token before installing this YAML. Cloudflare Access
 # credentials are optional and should remain empty unless the renderer API is
@@ -9,7 +9,7 @@ name: ledgetop-thumbnail-queue
 
 services:
   queue-renderer:
-    image: "ghcr.io/ledgetoptechnologies/ltds-thumbnail-queue-worker:stable"
+    image: "ghcr.io/ledgetoptechnologies/ltds-thumbnail-queue-worker:latest"
     pull_policy: always
     container_name: ltds-thumbnail-gen
     user: "568:568"

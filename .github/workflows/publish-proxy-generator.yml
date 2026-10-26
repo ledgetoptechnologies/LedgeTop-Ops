@@ -86,11 +86,17 @@ jobs:
           docker push "$tag"
           docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' > proxy-manifest.json
           digest=$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' proxy-manifest.json)
+          docker buildx imagetools create --prefer-index=false --tag "${image}:latest" "${image}@${digest}"
+          latest_digest=$(docker buildx imagetools inspect "${image}:latest" --format '{{json .Manifest}}' | jq -er '.digest')
+          if [[ "$latest_digest" != "$digest" ]]; then
+            echo 'latest digest does not match the canary-tested proxy image.' >&2
+            exit 1
+          fi
           jq -n --arg commit "$GITHUB_SHA" --arg image "$image" --arg digest "$digest" \
-            --arg reference "${image}@${digest}" \
-            '{schemaVersion:1,platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:$reference}' \
+            --arg reference "${image}@${digest}" --arg deploymentReference "${image}:latest" \
+            '{schemaVersion:1,platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:$reference,deploymentReference:$deploymentReference}' \
             > proxy-generator-release.json
-          echo "Published canary-tested image: ${image}@${digest}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Published canary-tested main release: ${image}:latest (${digest})" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload immutable deployment receipt
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
