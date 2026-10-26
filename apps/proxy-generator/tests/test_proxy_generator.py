@@ -77,7 +77,7 @@ class RuntimeTests(unittest.TestCase):
             for now in (2002, 2005, 2008, 2011, 2014):
                 self.generator.scan(now=now)
             self.assertEqual(render.call_count, 3)
-            self.generator.config = dataclasses.replace(self.config, version="6")
+            self.generator.config = dataclasses.replace(self.config, version="7")
             self.generator.scan(now=2017)
             self.assertEqual(render.call_count, 4)
             self.generator.scan(now=2018)
@@ -111,9 +111,9 @@ class RuntimeTests(unittest.TestCase):
         output = self.folder / "Proxy" / "clip.mov"
         output.parent.mkdir()
         output.write_bytes(b"healthy legacy proxy")
-        (output.parent / ".proxy-gen-v5").touch()
+        (output.parent / ".proxy-gen-v6").touch()
         self.generator.scan(now=2000)
-        with mock.patch.object(app, "probe", side_effect=[media(), media(height=1080)]), mock.patch.object(app, "run_process") as run:
+        with mock.patch.object(app, "probe", side_effect=[media(), media(height=720)]), mock.patch.object(app, "run_process") as run:
             counts = self.generator.scan(now=2002)
             self.assertEqual(counts["adopted"], 1)
             run.assert_not_called()
@@ -124,19 +124,19 @@ class RuntimeTests(unittest.TestCase):
 
     def test_rejects_bad_legacy_codec_duration_fps_and_timecode(self):
         source = media()
-        self.assertFalse(app.validate_proxy(source, media(height=1080, fps="30")))
-        self.assertFalse(app.validate_proxy(source, media(height=1080, duration=10)))
-        self.assertFalse(app.validate_proxy(source, media(height=1080, timecode="02:00:00:00")))
-        wrong = media(height=1080)
+        self.assertFalse(app.validate_proxy(source, media(height=720, fps="30")))
+        self.assertFalse(app.validate_proxy(source, media(height=720, duration=10)))
+        self.assertFalse(app.validate_proxy(source, media(height=720, timecode="02:00:00:00")))
+        wrong = media(height=720)
         wrong["video"]["codec_name"] = "h264"
         self.assertFalse(app.validate_proxy(source, wrong))
-        wrong = media(height=1080)
+        wrong = media(height=720)
         wrong["video"]["start_time"] = "12"
         self.assertFalse(app.validate_proxy(source, wrong))
-        wrong = media(height=1080)
-        wrong["video"]["width"] = 1280
+        wrong = media(height=720)
+        wrong["video"]["width"] = 1920
         self.assertFalse(app.validate_proxy(source, wrong))
-        wrong = media(height=1080)
+        wrong = media(height=720)
         wrong["video"]["pix_fmt"] = "yuv420p"
         self.assertFalse(app.validate_proxy(source, wrong))
 
@@ -164,6 +164,35 @@ class RuntimeTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"MAX_CONCURRENT": "0"}):
             with self.assertRaises(app.JobError):
                 app.Config.environment()
+
+    def test_smaller_profile_height_validation_and_legacy_rejection(self):
+        self.assertEqual(app.target_height(media()), 720)
+        self.assertEqual(app.target_height(media(height=1080)), 540)
+        self.assertEqual(app.target_height(media(), dataclasses.replace(self.config, max_height=1080)), 1080)
+        self.assertTrue(app.validate_proxy(media(), media(height=720), self.config))
+        self.assertFalse(app.validate_proxy(media(), media(height=1080), self.config))
+        for height in ("0", "143", "719", "1082", "bad"):
+            with self.subTest(height=height), mock.patch.dict(os.environ, {"PROXY_MAX_HEIGHT": height}):
+                with self.assertRaises(app.JobError):
+                    app.Config.environment()
+
+    def test_height_change_invalidates_receipt_and_resets_failure_budget(self):
+        output = self.folder / "Proxy" / "clip.mov"
+        output.parent.mkdir()
+        output.write_bytes(b"existing1080proxy")
+        self.generator.scan(now=2000)
+        key = app.key_for(self.root, self.path)
+        old = dataclasses.replace(self.config, max_height=1080)
+        self.generator.store.success(key, old.render_version, app.identity(output))
+        with mock.patch.object(self.generator, "render", return_value=("failed", None)) as render:
+            for now in (2002, 2005, 2008, 2011):
+                self.generator.scan(now=now)
+            self.assertEqual(render.call_count, 3)
+            row = self.generator.store.observe(key, app.identity(self.path), 2011)
+            self.assertEqual(row[2], self.config.render_version)
+            self.generator.config = old
+            self.generator.scan(now=2014)
+            self.assertEqual(render.call_count, 4)
 
     def test_invalid_timebase_failure_is_isolated_per_file(self):
         second = self.folder / "second.mp4"
@@ -238,6 +267,25 @@ class RuntimeTests(unittest.TestCase):
 @unittest.skipUnless(os.name != "nt" and shutil.which("ffmpeg") and shutil.which("ffprobe"), "Linux ffmpeg and ffprobe required for media smoke")
 class RealMediaSmokeTests(unittest.TestCase):
     setUp = RuntimeTests.setUp
+    def test_real_4k_smaller_profile_size_and_metadata(self):
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=3840x2160:rate=25", "-t", "0.24", "-c:v", "mpeg4", "-threads", "2", "-q:v", "4", "-timecode", "01:00:00:00", str(self.path)], check=True, timeout=30)
+        source = app.probe(self.path, self.config)
+        sizes = {}
+        for height in (1080, 720):
+            config = dataclasses.replace(self.config, max_height=height)
+            output = self.folder / f"synthetic-proxy-{height}.mov"
+            app.run_process(app.encode_args(self.path, output, source, config), 30)
+            result = app.probe(output, config)
+            self.assertTrue(app.validate_proxy(source, result, config))
+            self.assertEqual(result["video"]["height"], height)
+            self.assertEqual(result["video"]["width"], height * 16 // 9)
+            self.assertEqual(result["video"]["codec_name"], "prores")
+            self.assertEqual(result["video"]["profile"], "Proxy")
+            self.assertEqual(result["timecode"], "01:00:00:00")
+            sizes[height] = output.stat().st_size
+        self.assertLess(sizes[720], sizes[1080])
+        print(json.dumps({"event": "synthetic_size_comparison", "proxy_1080_bytes": sizes[1080], "proxy_720_bytes": sizes[720]}), flush=True)
+
     def test_real_fractional_fps_audio_timecode_render_and_reuse(self):
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30000/1001", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "1", "-c:v", "mpeg4", "-q:v", "4", "-c:a", "aac", "-timecode", "01:00:00:00", str(self.path)], check=True, timeout=30)
         os.utime(self.path, (1000, 1000))

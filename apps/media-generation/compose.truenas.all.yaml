@@ -1,0 +1,177 @@
+# Single-file four-service TrueNAS Custom App. Requires all prebuilt prerequisites.
+# Use digest-qualified images from the corresponding GitHub release receipts.
+name: ltds-media-generation
+
+x-service: &service
+  user: "568:568"
+  init: true
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 512
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
+x-prebuilt-service: &prebuilt-service
+  user: "568:568"
+  init: true
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 256
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
+services:
+  proxy-generator:
+    <<: *service
+    image: ${LTDSPROXY_IMAGE:?Set the digest-qualified proxy-generator image}
+    network_mode: none
+    cpus: "${LTDSPROXY_CPU_LIMIT:-12.0}"
+    mem_limit: ${LTDSPROXY_MEMORY_LIMIT:-12g}
+    stop_grace_period: 45s
+    environment:
+      JOBS_ROOT: /data/jobs
+      STATE_DIR: /state
+      MAX_CONCURRENT: "${LTDSPROXY_MAX_CONCURRENT:-6}"
+      FFMPEG_THREADS: "${LTDSPROXY_FFMPEG_THREADS:-2}"
+      PROXY_MAX_HEIGHT: "${LTDSPROXY_MAX_HEIGHT:-720}"
+      SLEEP_SECONDS: "${LTDSPROXY_SLEEP_SECONDS:-900}"
+      SOURCE_STABLE_SECONDS: "${LTDSPROXY_SOURCE_STABLE_SECONDS:-60}"
+      PROXY_SCAN_DIRS: "${LTDSPROXY_SCAN_DIRS:-Clients Recurring Extended 2024 2025 2026}"
+      PROXY_INCLUDE_SEGMENTS: "${LTDSPROXY_INCLUDE_SEGMENTS:-Dump Unedited Raw Stabilized}"
+      FORCE_PROXY_REGENERATION_VERSION: "${LTDSPROXY_REGENERATION_VERSION:-6}"
+      PROBE_TIMEOUT_SECONDS: "${LTDSPROXY_PROBE_TIMEOUT_SECONDS:-30}"
+      ENCODE_TIMEOUT_SECONDS: "${LTDSPROXY_ENCODE_TIMEOUT_SECONDS:-7200}"
+      RETRY_BASE_SECONDS: "${LTDSPROXY_RETRY_BASE_SECONDS:-60}"
+      RETRY_MAX_SECONDS: "${LTDSPROXY_RETRY_MAX_SECONDS:-3600}"
+      MAX_ATTEMPTS: "${LTDSPROXY_MAX_ATTEMPTS:-3}"
+    volumes:
+      - type: bind
+        source: ${MEDIA_JOBS_HOST_PATH:?Select the existing Jobs dataset}
+        target: /data/jobs
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${LTDSPROXY_STATE_HOST_PATH:?Select the private persistent proxy state dataset}
+        target: /state
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777
+
+  queue-renderer:
+    <<: *service
+    image: ${LTDSTHUMB_QUEUE_WORKER_IMAGE:?Set the digest-qualified thumbnail queue-worker image}
+    cpus: "${LTDSTHUMB_QUEUE_WORKER_CPU_LIMIT:-4.0}"
+    mem_limit: ${LTDSTHUMB_QUEUE_WORKER_MEMORY_LIMIT:-5g}
+    stop_grace_period: 5m
+    environment:
+      LTDSTHUMB_API_BASE: ${LTDSTHUMB_API_BASE:-https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1}
+      LTDSTHUMB_API_TOKEN: ${THUMBNAIL_INGEST_SECRET:?Set the dedicated Operations renderer token}
+      CF_ACCESS_CLIENT_ID: ${CF_ACCESS_CLIENT_ID:-}
+      CF_ACCESS_CLIENT_SECRET: ${CF_ACCESS_CLIENT_SECRET:-}
+      LTDSTHUMB_WORKER_CONCURRENCY: "${LTDSTHUMB_WORKER_CONCURRENCY:-4}"
+      LTDSTHUMB_IDLE_SECONDS: "${LTDSTHUMB_IDLE_SECONDS:-5}"
+      LTDSTHUMB_RENDER_TIMEOUT_SECONDS: "${LTDSTHUMB_RENDER_TIMEOUT_SECONDS:-600}"
+      LTDSTHUMB_RENDERER_VERSION: ${LTDSTHUMB_RENDERER_VERSION:-truenas-0.2.0}
+    tmpfs:
+      - /scratch:rw,nosuid,nodev,noexec,size=${LTDSTHUMB_QUEUE_SCRATCH_SIZE:-4g},mode=0700,uid=568,gid=568
+      - /cache:rw,nosuid,nodev,noexec,size=256m,mode=0700,uid=568,gid=568
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777
+
+  decoder:
+    <<: *prebuilt-service
+    image: ${LTDSTHUMB_DECODER_IMAGE:?Set the pinned decoder image in the TrueNAS UI}
+    network_mode: none
+    cpus: "${LTDSTHUMB_DECODER_CPU_LIMIT:-2.0}"
+    mem_limit: ${LTDSTHUMB_DECODER_MEMORY_LIMIT:-2g}
+    environment:
+      LTDSTHUMB_JOBS_ROOT: /data/jobs
+      LTDSTHUMB_R2_ROOT_PREFIX: Jobs
+      LTDSTHUMB_ARTIFACTS_DIR: /artifacts
+      LTDSTHUMB_WORK_DIR: /work/jobs
+      LTDSTHUMB_CACHE_DIR: /cache
+      LTDSTHUMB_STATE_DIR: /state/decoder
+      LTDSTHUMB_RENDERER_VERSION: ${LTDSTHUMB_RENDERER_VERSION:-truenas-0.1.0}
+      LTDSTHUMB_IMAGE_MAX_BYTES: "536870912"
+      LTDSTHUMB_PDF_MAX_BYTES: "268435456"
+      LTDSTHUMB_IMAGE_MAX_PIXELS: "512000000"
+      LTDSTHUMB_RENDER_TIMEOUT_MS: "120000"
+      LTDSTHUMB_RENDER_MAX_ATTEMPTS: "3"
+      LTDSTHUMB_RENDER_RETRY_BASE_MS: "60000"
+      LTDSTHUMB_RENDER_RETRY_MAX_MS: "3600000"
+      LTDSTHUMB_SCAN_INTERVAL_MS: "60000"
+      LTDSTHUMB_PRUNE_GRACE_MS: "86400000"
+      LTDSTHUMB_HEALTH_STALE_MS: "900000"
+      NODE_OPTIONS: --max-old-space-size=768
+    volumes:
+      - type: bind
+        source: ${MEDIA_JOBS_HOST_PATH:?Select the existing Jobs dataset}
+        bind:
+          create_host_path: false
+        target: /data/jobs
+        read_only: true
+      - type: bind
+        source: ${LTDSTHUMB_ARTIFACTS_HOST_PATH:?Select the private artifact queue dataset}
+        bind:
+          create_host_path: false
+        target: /artifacts
+      - type: bind
+        source: ${LTDSTHUMB_WORK_HOST_PATH:?Select the quota-limited scratch dataset}
+        bind:
+          create_host_path: false
+        target: /work
+      - type: bind
+        source: ${LTDSTHUMB_CACHE_HOST_PATH:?Select the cache dataset}
+        bind:
+          create_host_path: false
+        target: /cache
+      - type: bind
+        source: ${LTDSTHUMB_STATE_HOST_PATH:?Select the state dataset}
+        bind:
+          create_host_path: false
+        target: /state
+    tmpfs: [/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777]
+
+  broker:
+    <<: *prebuilt-service
+    image: ${LTDSTHUMB_BROKER_IMAGE:?Set the pinned broker image in the TrueNAS UI}
+    cpus: "${LTDSTHUMB_BROKER_CPU_LIMIT:-0.5}"
+    mem_limit: ${LTDSTHUMB_BROKER_MEMORY_LIMIT:-256m}
+    environment:
+      LTDSTHUMB_ARTIFACTS_DIR: /artifacts
+      LTDSTHUMB_STATE_DIR: /state/broker
+      LTDSTHUMB_INGEST_URL: ${LTDSTHUMB_INGEST_URL:?Set the exact Operations ingest HTTPS URL}
+      THUMBNAIL_INGEST_SECRET: ${THUMBNAIL_INGEST_SECRET:?Set the dedicated Operations ingest secret}
+      CF_ACCESS_CLIENT_ID: ${LTDSTHUMB_BROKER_ACCESS_CLIENT_ID:?Set the broker Cloudflare Access service-token client ID}
+      CF_ACCESS_CLIENT_SECRET: ${LTDSTHUMB_BROKER_ACCESS_CLIENT_SECRET:?Set the broker Cloudflare Access service-token secret}
+      LTDSTHUMB_RENDERER_VERSION: ${LTDSTHUMB_RENDERER_VERSION:-truenas-0.1.0}
+      LTDSTHUMB_R2_ACCOUNT_ID: ${LTDSTHUMB_R2_ACCOUNT_ID:?Set the Cloudflare account ID}
+      LTDSTHUMB_R2_BUCKET_NAME: ${LTDSTHUMB_R2_BUCKET_NAME:?Set the original bucket name}
+      LTDSTHUMB_R2_ACCESS_KEY_ID: ${LTDSTHUMB_R2_ACCESS_KEY_ID:?Set the broker-only R2 Object Read access key}
+      LTDSTHUMB_R2_SECRET_ACCESS_KEY: ${LTDSTHUMB_R2_SECRET_ACCESS_KEY:?Set the broker-only R2 Object Read secret}
+      LTDSTHUMB_HEALTH_STALE_MS: "900000"
+      NODE_OPTIONS: --max-old-space-size=128
+    volumes:
+      - type: bind
+        source: ${LTDSTHUMB_ARTIFACTS_HOST_PATH:?Select the private artifact queue dataset}
+        bind:
+          create_host_path: false
+        target: /artifacts
+      - type: bind
+        source: ${LTDSTHUMB_STATE_HOST_PATH:?Select the state dataset}
+        bind:
+          create_host_path: false
+        target: /state
+    tmpfs: [/tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777]
+

@@ -12,6 +12,7 @@ import unittest
 ROOT = Path(__file__).resolve().parent
 BASE = ROOT / "compose.truenas.yaml"
 PREBUILT = ROOT / "compose.truenas.prebuilt.yaml"
+ALL = ROOT / "compose.truenas.all.yaml"
 DIGEST = "0" * 64
 VALUES = {
     "LTDSPROXY_IMAGE": f"ghcr.io/ledgetoptechnologies/ltds-proxy-generator@sha256:{DIGEST}",
@@ -39,7 +40,7 @@ OPTIONAL = {
 
 def render(files, values, expect_success=True):
     # Do not inherit operator substitution values or .env contents.
-    names = set(re.findall(r"\$\{([A-Z0-9_]+)", BASE.read_text() + PREBUILT.read_text()))
+    names = set(re.findall(r"\$\{([A-Z0-9_]+)", BASE.read_text() + PREBUILT.read_text() + ALL.read_text()))
     env = {key: value for key, value in os.environ.items() if key not in names}
     with tempfile.TemporaryDirectory(prefix="ltds-compose-test-") as temp:
         env_file = Path(temp) / "synthetic.env"
@@ -63,6 +64,7 @@ class MediaComposeTests(unittest.TestCase):
     def setUpClass(cls):
         cls.base = render([BASE], VALUES)["services"]
         cls.full = render([BASE, PREBUILT], VALUES | OPTIONAL)["services"]
+        cls.all = render([ALL], VALUES | OPTIONAL)["services"]
 
     def test_default_requires_no_prebuilt_configuration(self):
         self.assertEqual(set(self.base), {"proxy-generator", "queue-renderer"})
@@ -70,6 +72,8 @@ class MediaComposeTests(unittest.TestCase):
         for name in self.base:
             self.assertEqual(self.base[name], self.full[name])
         self.assertEqual(self.base["proxy-generator"]["environment"]["MAX_CONCURRENT"], "6")
+        self.assertEqual(self.base["proxy-generator"]["environment"]["PROXY_MAX_HEIGHT"], "720")
+        self.assertEqual(self.base["proxy-generator"]["environment"]["FORCE_PROXY_REGENERATION_VERSION"], "6")
         self.assertEqual(self.base["queue-renderer"]["environment"]["LTDSTHUMB_WORKER_CONCURRENCY"], "4")
 
     def test_independent_hardened_services(self):
@@ -123,6 +127,20 @@ class MediaComposeTests(unittest.TestCase):
         for mount in custom["queue-renderer"]["tmpfs"]:
             if mount.startswith(("/scratch:", "/cache:")):
                 self.assertIn("uid=1234,gid=5678", mount)
+
+    def test_single_document_matches_full_stack_and_pins_user(self):
+        self.assertEqual(self.all, self.full)
+        fixed_user = render([ALL], VALUES | OPTIONAL | {"PUID": "1234", "PGID": "5678"})["services"]
+        for service in fixed_user.values():
+            self.assertEqual(service["user"], "568:568")
+        for mount in fixed_user["queue-renderer"]["tmpfs"]:
+            if mount.startswith(("/scratch:", "/cache:")):
+                self.assertIn("uid=568,gid=568", mount)
+        render([ALL], VALUES, expect_success=False)
+
+    def test_smaller_proxy_profile_override(self):
+        smaller = render([ALL], VALUES | OPTIONAL | {"LTDSPROXY_MAX_HEIGHT": "540"})["services"]
+        self.assertEqual(smaller["proxy-generator"]["environment"]["PROXY_MAX_HEIGHT"], "540")
 
 
 if __name__ == "__main__":

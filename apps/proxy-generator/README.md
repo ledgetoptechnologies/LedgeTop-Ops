@@ -18,8 +18,12 @@ has actually completed; this source change does not activate it on TrueNAS.
 - QuickTime `.mov` using ProRes 422 Proxy, 10-bit 4:2:2, with PCM 48 kHz audio.
   This preserves the actual supplied script's codec; its older README described
   an H.264 implementation that the supplied script no longer uses.
-- Half the source height, rounded to an even value, capped at 1080 and floored
-  at 144. Width preserves aspect ratio and remains even.
+- Half the source height, rounded to an even value, capped at 720 by default
+  and floored at 144. Width preserves aspect ratio and remains even. A
+  3840x2160 source produces 1280x720. The codec remains the lowest-bitrate
+  ProRes profile; file size still depends on source content, duration, frame
+  rate and audio. Use `PROXY_MAX_HEIGHT=540` for a smaller profile after a
+  synthetic Resolve linking/quality check.
 - The first video stream and all available audio streams are mapped. Rational
   frame rate, source timecode notation and video start offset are retained.
   The generator does not infer drop-frame timecode solely from frame rate.
@@ -49,11 +53,12 @@ These are container environment values; the combined stack exposes most under
 | `STATE_DIR` | `/state` | Private persistent SQLite receipts, retries and lock |
 | `MAX_CONCURRENT` | `6` | Simultaneous proxy jobs |
 | `FFMPEG_THREADS` | `2` | Requested decoder/encoder threads per FFmpeg process |
+| `PROXY_MAX_HEIGHT` | `720` | Maximum proxy height, retaining half-source scaling below the cap |
 | `SLEEP_SECONDS` | `900` | Pause after each completed scan |
 | `SOURCE_STABLE_SECONDS` | `60` | Minimum source age and unchanged observation window |
 | `PROXY_SCAN_DIRS` | `Clients Recurring Extended 2024 2025 2026` | Whitespace-separated top-level directories |
 | `PROXY_INCLUDE_SEGMENTS` | `Dump Unedited Raw Stabilized` | Eligible directory segments, case-insensitive |
-| `FORCE_PROXY_REGENERATION_VERSION` | `5` | Per-file output revision; preserve during ordinary upgrades |
+| `FORCE_PROXY_REGENERATION_VERSION` | `6` | Per-file output revision; preserve during ordinary upgrades |
 | `PROBE_TIMEOUT_SECONDS` | `30` | Deadline for each FFprobe process |
 | `ENCODE_TIMEOUT_SECONDS` | `7200` | Deadline for each FFmpeg encode |
 | `MAX_ATTEMPTS` | `3` | Failed attempts before deferring that source/version |
@@ -97,16 +102,20 @@ while waiting for jobs; inspect scan outcome counts and actual media as well.
 
 ## Adopting existing proxies
 
-Keep `FORCE_PROXY_REGENERATION_VERSION=5` when migrating from the supplied
-version-five script. On a source's first discovery the generator can adopt an
+The smaller default profile uses `FORCE_PROXY_REGENERATION_VERSION=6`; the
+supplied script used revision five and a 1080 cap. Start migration with a
+narrow synthetic scan scope and concurrency one, not the entire library.
+On a source's first discovery the generator can adopt an
 existing newer proxy after compatibility checks if the folder has no legacy
 version marker or has the matching version marker. A mismatching legacy
 folder marker prevents adoption. It records a per-file receipt after
 successful adoption or generation; it does not mark the whole folder as
 complete before the work finishes.
 
-A known source whose identity changes must be processed again. An intentional
-version bump requests regeneration of tracked outputs. Keep state across
+A known source whose identity changes must be processed again. Receipts also
+track the render profile: changing the maximum height requests an updated
+output for tracked sources. An intentional version bump requests regeneration
+of tracked outputs. Keep state across
 upgrades so receipts and failure history remain reliable. If state is lost,
 healthy existing legacy outputs may be adopted again on first discovery;
 resetting state is not a reliable way to request regeneration. This migration

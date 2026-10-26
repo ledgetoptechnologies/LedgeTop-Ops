@@ -8,6 +8,12 @@ processing as independent services. The default deployment contains two services
 | `proxy-generator` | Resolve editing proxies from local videos | Jobs read/write; writes sibling `Proxy/` files | None |
 | `queue-renderer` | Operations image, PDF and video thumbnail jobs from R2 | None; temporary sources stay in RAM | Outbound HTTPS |
 
+The [single-file four-service stack](compose.truenas.all.yaml) includes proxy
+generation, the thumbnail queue, local decoder, and broker in one YAML document
+with the requested fixed user/group `568:568`. Use it for the combined test
+after configuring the local-prebuilt prerequisites below; it needs no Compose
+profiles, file merge, or dependency on the Viewer.
+
 The [optional prebuilt overlay](compose.truenas.prebuilt.yaml) adds the existing
 local thumbnail `decoder` and registration `broker`. It is separate from the
 default YAML so the default installation never requires their images,
@@ -64,13 +70,26 @@ starting the replacement. An interrupted thumbnail lease recovers through
 Operations' normal lease expiry, not by manually editing queue state.
 
 Use a synthetic media folder first, with a narrow scan scope and concurrency
-one. Confirm a proxy opens in Resolve and links correctly, a second scan
+one. Set `LTDSPROXY_SCAN_DIRS` to that synthetic top-level directory and
+`LTDSPROXY_MAX_CONCURRENT=1` in the UI before the first start. The smaller
+720-high profile uses regeneration revision six; do not begin testing with
+the entire production library selected. Confirm a proxy opens in Resolve and links correctly, a second scan
 skips it, and a synthetic Operations thumbnail completes. Then restore the
 normal scan scope and the intended pool sizes. Keep the persistent state
 dataset across restarts. Changing the regeneration version is an explicit
 request to regenerate proxies, so do not bump it merely for an image upgrade.
 Follow the [proxy runtime migration behavior](../proxy-generator/README.md)
 when adopting existing script-generated outputs.
+
+The proxy codec remains ProRes 422 Proxy, the lowest-bitrate ProRes profile.
+The default maximum height is now 720 rather than 1080, retaining the source's
+half-resolution rule below the cap. A 3840x2160 source produces 1280x720.
+Actual file size depends on duration, frame rate, content and audio; it is
+not guaranteed to be smaller than a heavily compressed original. Set
+`LTDSPROXY_MAX_HEIGHT=540` for a further size reduction after checking quality
+and linking in Resolve. The runtime tracks the output profile in per-file
+receipts, so changing the height applies to tracked proxies without relying
+on a folder-wide completion marker.
 
 The default proxy pool is six jobs, with two FFmpeg encoder threads per job;
 the thumbnail pool is four. They share server CPU, memory and storage, even
@@ -103,9 +122,17 @@ two default services or add startup dependencies.
 | `decoder` | Scans local stills/PDFs and builds immutable WebP thumbnails | Jobs read-only, private cache/scratch/state; no network or credentials |
 | `broker` | Verifies exact source/derivative identities and registers with Operations | Artifact/state datasets and outbound HTTPS; no Jobs bind or media decoder |
 
-Compose profiles are intentionally unnecessary. For a TrueNAS editor accepting
-one document, combine the files locally with Docker Compose and paste the
-result into the UI:
+For a TrueNAS editor accepting one document, use
+[compose.truenas.all.yaml](compose.truenas.all.yaml) directly. It runs all four
+services as `568:568`, including the queue scratch/cache ownership. Enter its
+required image references, host paths, token and broker credentials through
+the UI. Confirm all selected datasets already exist with that user's access.
+The decoder/broker credentials and rclone proof prerequisites still apply;
+starting all four does not bypass them.
+
+The separate overlay remains available for installations maintaining a
+two-service base. Compose profiles are unnecessary. To render that variant
+locally without resolving credentials:
 
 ```powershell
 docker compose -f apps/media-generation/compose.truenas.yaml -f apps/media-generation/compose.truenas.prebuilt.yaml config --no-interpolate

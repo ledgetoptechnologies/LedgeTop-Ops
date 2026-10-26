@@ -47,9 +47,15 @@ class Config:
     attempts: int = 3
     retry_base: int = 60
     retry_max: int = 3600
-    version: str = "5"
+    version: str = "6"
     scan_dirs: tuple = ("Clients", "Recurring", "Extended", "2024", "2025", "2026")
     include: frozenset = frozenset(("dump", "unedited", "raw", "stabilized"))
+    max_height: int = 720
+
+    @property
+    def render_version(self):
+        # Receipts and retry budgets belong to the complete output profile.
+        return f"{self.version}-prores-proxy-h{self.max_height}"
 
     @classmethod
     def environment(cls):
@@ -63,7 +69,10 @@ class Config:
                 raise JobError("invalid_configuration") from None
         dirs = tuple(os.environ.get("PROXY_SCAN_DIRS", "Clients Recurring Extended 2024 2025 2026").split())
         include = frozenset(os.environ.get("PROXY_INCLUDE_SEGMENTS", "Dump Unedited Raw Stabilized").casefold().split())
-        version = os.environ.get("FORCE_PROXY_REGENERATION_VERSION", "5")
+        version = os.environ.get("FORCE_PROXY_REGENERATION_VERSION", "6")
+        max_height = number("PROXY_MAX_HEIGHT", 720, 1080)
+        if max_height < 144 or max_height % 2:
+            raise JobError("invalid_configuration")
         if not dirs or not include or any(x in (".", "..") or "/" in x or "\\" in x for x in dirs) or not version.isdecimal() or len(version) > 8:
             raise JobError("invalid_configuration")
         return cls(pathlib.Path(os.environ.get("JOBS_ROOT", "/data/jobs")),
@@ -72,7 +81,7 @@ class Config:
             number("SOURCE_STABLE_SECONDS", 60, 86400), number("PROBE_TIMEOUT_SECONDS", 30, 600),
             number("ENCODE_TIMEOUT_SECONDS", 7200, 86400), number("FFMPEG_THREADS", 2, 64),
             number("MAX_ATTEMPTS", 3, 10), number("RETRY_BASE_SECONDS", 60, 86400),
-            number("RETRY_MAX_SECONDS", 3600, 86400), version, dirs, include)
+            number("RETRY_MAX_SECONDS", 3600, 86400), version, dirs, include, max_height)
 
 
 def identity(path):
@@ -168,13 +177,13 @@ def probe(path, config):
         raise JobError("invalid_media") from None
 
 
-def target_height(media):
+def target_height(media, config=None):
     half = int(media["video"]["height"]) // 2
-    return max(144, min(1080, half + half % 2))
+    return max(144, min(config.max_height if config else 720, half + half % 2))
 
 
-def validate_proxy(source, output):
-    height = target_height(source)
+def validate_proxy(source, output, config=None):
+    height = target_height(source, config)
     video = output["video"]
     expected_width = int(source["video"]["width"]) * height / int(source["video"]["height"])
     width = int(video["width"])
@@ -201,7 +210,7 @@ def validate_proxy(source, output):
 def encode_args(source, tmp, media, config):
     args = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-n", "-threads", str(config.threads), "-i", str(source),
         "-map", "0:v:0", "-map", "0:a?", "-map_metadata", "0",
-        "-vf", f"scale=-2:{target_height(media)},format=yuv422p10le", "-c:v", "prores_ks", "-profile:v", "0", "-vendor", "apl0",
+        "-vf", f"scale=-2:{target_height(media, config)},format=yuv422p10le", "-c:v", "prores_ks", "-profile:v", "0", "-vendor", "apl0",
         "-threads", str(config.threads), "-c:a", "pcm_s16le", "-ar", "48000", "-r", str(media["fps"])]
     tb = fractions.Fraction(media["video"].get("time_base", "1/60000"))
     if tb > 0 and tb.denominator <= 2147483647:
@@ -232,7 +241,7 @@ class Store:
         self.db.commit()
 
     def failure(self, key, now, config):
-        self.db.execute("UPDATE jobs SET version=?,output_identity=NULL,failures=failures+1,retry_at=?+MIN(?,?*(1 << MIN(failures,16))),legacy_eligible=0 WHERE key=?", (config.version, now, config.retry_max, config.retry_base, key))
+        self.db.execute("UPDATE jobs SET version=?,output_identity=NULL,failures=failures+1,retry_at=?+MIN(?,?*(1 << MIN(failures,16))),legacy_eligible=0 WHERE key=?", (config.render_version, now, config.retry_max, config.retry_base, key))
         self.db.commit()
 
     def close(self):
@@ -300,7 +309,7 @@ class Generator:
             version_ok = not version_markers or (output.parent / (".proxy-gen-v" + config.version)).is_file()
             if output.is_file() and row[6] and row[2] is None and version_ok and output.stat().st_mtime_ns >= path.stat().st_mtime_ns:
                 try:
-                    if validate_proxy(media, probe(output, config)) and identity(path) == source_id:
+                    if validate_proxy(media, probe(output, config), config) and identity(path) == source_id:
                         return "adopted", identity(output)
                 except JobError:
                     pass
@@ -310,7 +319,7 @@ class Generator:
             # ffmpeg -n requires an absent output; the private random name is owned by this attempt.
             temp.unlink()
             run_process(encode_args(path, temp, media, config), config.encode_timeout)
-            if not safe_path(config.root, temp) or not validate_proxy(media, probe(temp, config)):
+            if not safe_path(config.root, temp) or not validate_proxy(media, probe(temp, config), config):
                 raise JobError("invalid_output")
             if STOP.is_set() or not safe_path(config.root, path) or not safe_path(config.root, output) or identity(path) != source_id:
                 raise JobError("source_changed_or_unsafe")
@@ -344,7 +353,7 @@ class Generator:
                     outcome, output_id = future.result()
                     counts[outcome] += 1
                     if output_id:
-                        self.store.success(key, config.version, output_id)
+                        self.store.success(key, config.render_version, output_id)
                     elif not STOP.is_set():
                         self.store.failure(key, now, config)
                     self.store_snapshot.pop(key, None)
@@ -362,11 +371,11 @@ class Generator:
                     if not safe_path(config.root, output):
                         counts["deferred"] += 1
                         continue
-                    if row[2] == config.version and row[3] and output.exists() and row[3] == identity(output):
+                    if row[2] == config.render_version and row[3] and output.exists() and row[3] == identity(output):
                         counts["current"] += 1
                         continue
                     # A version change is an explicit retry/reset request, even after exhaustion.
-                    if row[2] and row[2] != config.version:
+                    if row[2] and row[2] != config.render_version:
                         self.store.db.execute("UPDATE jobs SET failures=0,retry_at=0 WHERE key=?", (key,))
                         self.store.db.commit()
                     elif row[4] >= config.attempts or now < row[5]:
