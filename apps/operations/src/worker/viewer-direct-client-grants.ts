@@ -22,6 +22,23 @@ export class DirectViewerGrantError extends HTTPException {
 }
 function fail(status:400|403|404|409|503,code:string,message:string):never{throw new DirectViewerGrantError(status,code,message);}
 function db(env:Env){return env.DELIVERY_DB.withSession('first-primary');}
+/** Operations shares Client's D1 authority table but only has its own
+ * APPLICATION_KEY. Default this read path to the existing private-ingress pin;
+ * explicit legacy mode/HMAC configuration retains the shared helper behavior. */
+function directViewerSourceProofEnvironment(env:Env):Env{
+ const effective={...env};
+ if(effective.PROJECT_ALPHA_PORTAL_APPLICATION_KEY===undefined)
+  effective.PROJECT_ALPHA_PORTAL_APPLICATION_KEY=effective.APPLICATION_KEY;
+ const hasExplicitMode=env.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED!==undefined;
+ const hasLegacyHmacConfig=env.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID!==undefined
+  ||env.PROJECT_ALPHA_PORTAL_HMAC_SECRET!==undefined||env.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID!==undefined
+  ||env.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET!==undefined;
+ if(!hasExplicitMode&&!hasLegacyHmacConfig)effective.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED='false';
+ return effective;
+}
+async function readDirectViewerSourceProof(env:Env,database:Pick<D1Database,'prepare'|'batch'>,sourceId:string){
+ return readPortalProjectionSourceProof(directViewerSourceProofEnvironment(env),database,sourceId);
+}
 export async function readDirectViewerClientBusinessName(env:Env,sourceId:string):Promise<string>{
  const row=await env.OPS_DB.withSession('first-primary').prepare(`SELECT display_name FROM pa_connectors WHERE source_id=? AND read_visible=1`)
   .bind(sourceId).first<{display_name:string}>();
@@ -99,7 +116,7 @@ async function readCurrentOperationsWorkspaceAuthority(env:Env,row:Recipient):Pr
 async function recipient(env:Env,sourceId:string,workspaceId:string){
  const database=db(env);const row=await database.prepare(`${recipientSql(env)} AND w.id=? AND w.project_alpha_source_id=?`)
  .bind(workspaceId,sourceId).first<Recipient>();
- const proof=row&&await readPortalProjectionSourceProof(env,database,sourceId);
+ const proof=row&&await readDirectViewerSourceProof(env,database,sourceId);
  if(!row||!proof)fail(409,'relationship_missing','Client connection is unavailable; refresh the client connection');
  if(row.claim_authority_id!==null&&(row.claim_source_id!==sourceId||row.claim_source_workspace_id!==row.source_workspace_id
   ||!Number.isSafeInteger(row.claim_ownership_epoch)||row.claim_ownership_epoch! < 1))
@@ -132,7 +149,7 @@ export async function listDirectViewerClientGrantWorkspace(env:Env,principal:Sta
  for(const row of page){
   if(row.claim_authority_id!==null&&!await readCurrentOperationsWorkspaceAuthority(env,row))continue;
   if(!sourceReadiness.has(row.project_alpha_source_id))sourceReadiness.set(row.project_alpha_source_id,
-   !!await readPortalProjectionSourceProof(env,database,row.project_alpha_source_id));
+   !!await readDirectViewerSourceProof(env,database,row.project_alpha_source_id));
   if(!sourceReadiness.get(row.project_alpha_source_id))continue;
   if(!businessNames.has(row.project_alpha_source_id))businessNames.set(row.project_alpha_source_id,await readDirectViewerClientBusinessName(env,row.project_alpha_source_id));
   clients.push({sourceId:row.project_alpha_source_id,workspaceId:row.id,displayName:row.display_name,
