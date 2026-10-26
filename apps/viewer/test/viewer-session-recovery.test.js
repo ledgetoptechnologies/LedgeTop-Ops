@@ -6,6 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createMeasurementDraftRecovery } = require('../measurement-draft-recovery.mjs');
 const { renderStaffNavigation } = require('../viewer-staff-navigation.mjs');
+const { createViewerSessionCapabilityStore, VIEWER_SESSION_STORAGE_PREFIX: PREFIX } = require('../viewer-session-capability-store.mjs');
 const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
 const workspaceSource = fs.readFileSync(path.join(__dirname, '..', 'measurement-workspace.mjs'), 'utf8');
 const REQUEST = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
@@ -15,6 +16,8 @@ function fixture({ controller = true } = {}) {
   let timerId = 0;
   const window = {};
   window.parent = window;
+  const stored = new Map();
+  const storage = { getItem: key => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value), removeItem: key => stored.delete(key) };
   const session = { sessionId: 'session-id', sessionMode: 'published', accessToken: 'private-token',subject:'person-one',audience:'ops',permissions:{view:true,measure:true},
     model: { id: 'model-one',activeVersion:{id:'version-one'} }, expiresAt: new Date(Date.now() + 60_000).toISOString() };
   const context = vm.createContext({
@@ -25,7 +28,8 @@ function fixture({ controller = true } = {}) {
     REVIEW_CONTROLLER_ID: REQUEST,
     reviewControllerCandidate: REQUEST,
     activeViewerSession: session, sessionAccessGeneration: 0, PROJECT: session.model, TILES_URL: '/stable/tileset.json', EPT_URL: '/stable/ept.json',
-    sessionStorage: { setItem() {} }, SESSION_STORAGE_PREFIX: 'test:', sessionStorageKey: 'test:session-id',
+    sessionCapabilities: createViewerSessionCapabilityStore({ storage: () => storage }),
+    SESSION_STORAGE_PREFIX: PREFIX, sessionStorageKey: `${PREFIX}session-id`,
     sessionAllowedOrigins: [], sessionAccessState: 'active', sessionAccessReason: null,
     lastSessionAccessFailure: null, modeEpoch: 0,
     sessionRenewalBlocked: false, sessionRenewalPending: false, sessionRenewalAttempt: null,

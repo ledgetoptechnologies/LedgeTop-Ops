@@ -9,6 +9,7 @@ import { createMeasurementDraftRecovery } from './measurement-draft-recovery.mjs
 import { captureMeasurementReportOrtho } from './measurement-report-ortho.mjs';
 import { installSidebarResize } from './viewer-sidebar-resize.mjs';
 import { renderStaffNavigation } from './viewer-staff-navigation.mjs';
+import { createViewerSessionCapabilityStore, VIEWER_SESSION_STORAGE_PREFIX as SESSION_STORAGE_PREFIX } from './viewer-session-capability-store.mjs';
 import { projectMeasurementBoundary } from './measurement-projection.mjs';
 import { createMeasurementAdminClient } from './measurement-admin-client.mjs';
 import { createMeasurementSurfaceClient, measurementAssetBearer } from './measurement-surface-client.mjs';
@@ -170,7 +171,7 @@ const ACTIVE_SESSION_ID = VIEW_MODE === 'session' && SESSION_PATH_PARTS[2] === '
   ? decodeURIComponent(SESSION_PATH_PARTS[3] || '') : null;
 const SESSION_GRANT = VIEW_MODE === 'session' && !ACTIVE_SESSION_ID
   ? decodeURIComponent(SESSION_PATH_PARTS[2] || '') : null;
-const SESSION_STORAGE_PREFIX = 'ltds-viewer-access-token:';
+const sessionCapabilities = createViewerSessionCapabilityStore();
 let sessionStorageKey = ACTIVE_SESSION_ID ? `${SESSION_STORAGE_PREFIX}${ACTIVE_SESSION_ID}` : null;
 let PROJECT_SHARE_CATALOG = null;
 // What the active share link allows; stays fully-open in admin mode.
@@ -1297,7 +1298,7 @@ const reviewSessionChannel = REVIEW_CONTROLLER_ID && typeof BroadcastChannel ===
   ? new BroadcastChannel(`ltds-viewer-review:${REVIEW_CONTROLLER_ID}`) : null;
 const measurementAdminClient = createMeasurementAdminClient({
   context: () => ({ modelId: PROJECT?.id, modelVersionId: PROJECT?.activeVersion?.id }),
-  token: () => VIEW_MODE === 'session' && sessionStorageKey ? sessionStorage.getItem(sessionStorageKey) : null,
+  token: () => VIEW_MODE === 'session' && sessionStorageKey ? sessionCapabilities.read(sessionStorageKey) : null,
   // Administrative requests use only the registered workspace channel, never
   // an arbitrary embedding parent. The privileged bearer stays in workspace.
   send: message => { if (!reviewSessionChannel) return false; reviewSessionChannel.postMessage(message); return true; },
@@ -1308,7 +1309,7 @@ let lodAvailabilityTimer = null;
 let lodAvailabilityRefreshInFlight = false;
 
 async function redeemViewerGrant(grant, { signal } = {}) {
-  const accessToken = sessionStorageKey ? sessionStorage.getItem(sessionStorageKey) : null;
+  const accessToken = sessionStorageKey ? sessionCapabilities.read(sessionStorageKey) : null;
   const res = await fetch('/api/v1/sessions/redeem', {
     method: 'POST',
     headers: {
@@ -1324,7 +1325,7 @@ async function redeemViewerGrant(grant, { signal } = {}) {
 }
 
 async function currentViewerSession() {
-  const accessToken = sessionStorageKey ? sessionStorage.getItem(sessionStorageKey) : null;
+  const accessToken = sessionStorageKey ? sessionCapabilities.read(sessionStorageKey) : null;
   const res = await fetch('/api/v1/sessions/current', {
     headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
   });
@@ -1572,7 +1573,7 @@ function applyViewerSession(session, { initialize = false } = {}) {
   const previousTilesUrl = TILES_URL;
   setDisplayUnits(session.displayUnits);
   if (session.sessionId) sessionStorageKey = `${SESSION_STORAGE_PREFIX}${session.sessionId}`;
-  if (session.accessToken && sessionStorageKey) sessionStorage.setItem(sessionStorageKey, session.accessToken);
+  if (session.accessToken && sessionStorageKey) sessionCapabilities.write(sessionStorageKey, session.accessToken);
   sessionAllowedOrigins = Array.isArray(session.allowedEmbedOrigins) ? session.allowedEmbedOrigins : [];
   renderStaffNavigation({ container: dom.staffNavigation, dashboard: dom.staffDashboard, models: dom.staffModels },
     session, { viewMode: VIEW_MODE, topLevel: window.parent === window });
@@ -1625,7 +1626,7 @@ async function bootstrapSession() {
     }
     applyViewerSession(session, { initialize: true });
   } catch (error) {
-    if (sessionStorageKey) sessionStorage.removeItem(sessionStorageKey);
+    if (sessionStorageKey) sessionCapabilities.clear(sessionStorageKey);
     updateLoading('Viewer session unavailable', String(error.message || error));
   }
 }
@@ -2453,7 +2454,7 @@ function installMeasurementWorkspace() {
     panel:document.getElementById('panel-measure'),context:measurementViewContext,
     reportMetadata:()=>({modelName:PROJECT?.title||PROJECT?.id||'Model'}),
     captureReportOrtho:async({records,signal})=>{if(!ORTHO_URL)return null;const dataset=await getDataset(ORTHO_URL,false,{signal});return captureMeasurementReportOrtho({dataset,records,signal,pool:geoPool,expectedCrs:measurementCoordinateReference().crs});},
-    token:()=>VIEW_MODE==='session'&&sessionStorageKey?sessionStorage.getItem(sessionStorageKey):null,
+    token:()=>VIEW_MODE==='session'&&sessionStorageKey?sessionCapabilities.read(sessionStorageKey):null,
     accessGeneration:()=>sessionAccessGeneration,
     onBeforeAccessLost:()=>{if(VIEW_MODE==='session'&&activeViewerSession&&Date.parse(activeViewerSession.expiresAt)<=Date.now())measurementDraftRecovery.capture('session-expired',activeViewerSession,measurementWorkspace);},
     permitted:()=>SHARE_PERMISSIONS.measure!==false&&sessionAccessState!=='unavailable'&&(VIEW_MODE!=='session'||!activeViewerSession||Date.parse(activeViewerSession.expiresAt)>Date.now()),coordinateReference:measurementCoordinateReference,
@@ -2463,7 +2464,7 @@ function installMeasurementWorkspace() {
     resolveDisplayVertices:resolveMeasurementDisplayVertices,
     adminRequest:reviewSessionChannel ? measurementAdminClient.request : undefined,
     surfaceRequest:createMeasurementSurfaceClient({
-      token:()=>VIEW_MODE==='session'&&sessionStorageKey?sessionStorage.getItem(sessionStorageKey):measurementAssetBearer(DSM_URL||DTM_URL||TILES_URL||EPT_URL||ORTHO_URL),
+      token:()=>VIEW_MODE==='session'&&sessionStorageKey?sessionCapabilities.read(sessionStorageKey):measurementAssetBearer(DSM_URL||DTM_URL||TILES_URL||EPT_URL||ORTHO_URL),
       context:()=>({modelId:PROJECT?.id,modelVersionId:PROJECT?.activeVersion?.id,audience:activeViewerSession?.audience,subject:activeViewerSession?.subject,temporary:VIEW_MODE!=='session'||(activeViewerSession?.audience!=='ops'&&activeViewerSession?.permissions?.personalMeasurements!==true)}),
     }),
     onAccessLost:measurementAccessLost,

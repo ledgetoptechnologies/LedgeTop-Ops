@@ -6,6 +6,7 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 const { renderStaffNavigation } = require('../viewer-staff-navigation.mjs');
+const { createViewerSessionCapabilityStore, VIEWER_SESSION_STORAGE_PREFIX: PREFIX } = require('../viewer-session-capability-store.mjs');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
 const ORIGIN = 'https://ops.example.test';
@@ -88,8 +89,8 @@ test('the first redeemed session establishes popup routing before initialization
   };
   Object.assign(f.context, {
     renderStaffNavigation, dom: {},
-    TILES_URL: null, EPT_URL: null, sessionStorageKey: null, SESSION_STORAGE_PREFIX: 'test:',
-    sessionStorage: { setItem: (...args) => writes.push(args) }, SHARE_PERMISSIONS: {},
+    TILES_URL: null, EPT_URL: null, sessionStorageKey: null, SESSION_STORAGE_PREFIX: PREFIX,
+    sessionCapabilities: createViewerSessionCapabilityStore({ storage: () => ({ setItem: (...args) => writes.push(args) }) }), SHARE_PERMISSIONS: {},
     setDisplayUnits() {}, applyProjectConfig() {},
     init: () => initialized.push(f.context.activeViewerSession),
     state: { meshSource: 'none' }, tilesRenderer: null, viewerProductDownloads: null,
