@@ -5,7 +5,7 @@ import type { Env } from "./types";
 import type { Env as ClientEnv } from "../../../client/src/worker/types";
 import { nativePortalScopesAllowed } from "../../../client/src/worker/client-portal/workspace-v2";
 import { resolveDirectViewerWorkspaceContext } from "../../../client/src/worker/client-portal/direct-viewer-workspace-context";
-import { directViewerGrantMatchesRecipientAuthority, readDirectViewerClientGrantAuthorityPin,
+import { directViewerSourceProofEnvironment, directViewerGrantMatchesRecipientAuthority, readDirectViewerClientGrantAuthorityPin,
   readDirectViewerClientGrants, readDirectViewerClientBusinessName } from "./viewer-direct-client-grants";
 import { viewerServiceClient } from "./viewer-integration";
 import { base64Url, sha256 } from "./crypto";
@@ -36,7 +36,7 @@ function codeFor(error: unknown): FailureCode {
   return error instanceof Error && /no such table/.test(error.message) ? "configuration_error" : "temporarily_unavailable";
 }
 async function contextFor(env: Env, input: Auth) {
-  const context = await resolveDirectViewerWorkspaceContext(env as unknown as ClientEnv,
+  const context = await resolveDirectViewerWorkspaceContext(directViewerSourceProofEnvironment(env) as unknown as ClientEnv,
     { issuer: input.principalIssuer, subject: input.principalSubject, email: input.verifiedEmail }, input.workspaceId);
   if (!context || context.identityId !== input.identityId || context.sourceId !== input.sourceId || context.contextVersion !== input.contextVersion)
     return null;

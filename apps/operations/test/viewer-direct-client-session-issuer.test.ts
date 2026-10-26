@@ -34,7 +34,7 @@ function database(){return {prepare(sql:string){let values:unknown[]=[];return {
     {request_fingerprint:String(values[4]),authorization_expires_at:String(values[5])});}
     else receipts.set(String(values[1]),{request_fingerprint:String(values[2]),response_json:String(values[3]),expires_at:String(values[4])});return {meta:{changes:1}};}};}};}
 function env():Env{return {CLIENT_VIEWER_SESSION_ISSUER_ENABLED:"true",VIEWER_SERVICE_HMAC_SECRET:"synthetic-secret-for-direct-cursor-tests-only",
-  DELIVERY_DB:{withSession:()=>database()}} as unknown as Env;}
+  APPLICATION_KEY:"ltds_ops",DELIVERY_DB:{withSession:()=>database()}} as unknown as Env;}
 beforeEach(()=>{vi.resetAllMocks();intents=new Map();receipts=new Map();mock.allowed.mockReturnValue(true);
   mock.context.mockResolvedValue(nativeContext);mock.pin.mockResolvedValue(null);
   mock.rows.mockResolvedValue([row()]);mock.catalog.mockResolvedValue({schemaVersion:1,project:{id:"project-one",displayName:"Property survey"},tasks:[task],nextCursor:null});
@@ -42,6 +42,25 @@ beforeEach(()=>{vi.resetAllMocks();intents=new Map();receipts=new Map();mock.all
     sessionTtlSeconds:1800,redeemUrl:"https://viewer.example.test/redeem",embedUrl:"https://viewer.example.test/session"});});
 
 describe("direct Viewer recipient authorization",()=>{
+  it("passes the default primary private-proof selector and Operations application pin to Client context reads",async()=>{
+    const sourceEnv=env();
+    expect(await listDirectClientViewerItems(sourceEnv,auth)).toMatchObject({ok:true});
+    const proofEnv=mock.context.mock.calls[0]?.[0] as Partial<Env>;
+    expect(proofEnv).toMatchObject({APPLICATION_KEY:"ltds_ops",PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED:"false",
+      PROJECT_ALPHA_PORTAL_APPLICATION_KEY:"ltds_ops"});
+    expect(sourceEnv.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED).toBeUndefined();
+    expect(sourceEnv.PROJECT_ALPHA_PORTAL_APPLICATION_KEY).toBeUndefined();
+  });
+  it("preserves explicitly configured legacy HMAC proof mode for Client context reads",async()=>{
+    const sourceEnv={...env(),PROJECT_ALPHA_PORTAL_HMAC_KEY_ID:"ops-v1",
+      PROJECT_ALPHA_PORTAL_HMAC_SECRET:"synthetic-primary-hmac-secret-with-at-least-32-bytes"} as Env;
+    expect(await listDirectClientViewerItems(sourceEnv,auth)).toMatchObject({ok:true});
+    const proofEnv=mock.context.mock.calls[0]?.[0] as Partial<Env>;
+    expect(proofEnv.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED).toBeUndefined();
+    expect(proofEnv.PROJECT_ALPHA_PORTAL_APPLICATION_KEY).toBe("ltds_ops");
+    expect(proofEnv.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID).toBe("ops-v1");
+    expect(proofEnv.PROJECT_ALPHA_PORTAL_HMAC_SECRET).toBe(sourceEnv.PROJECT_ALPHA_PORTAL_HMAC_SECRET);
+  });
   it("lists a minimal task DTO without a PA project or sibling catalog",async()=>{
     const result=await listDirectClientViewerItems(env(),auth);expect(result).toMatchObject({ok:true,nextCursor:null,items:[{title:"Property map",projectName:"Property survey"}]});
     expect(mock.catalog).toHaveBeenCalledWith({projectId:"project-one",taskId:"task-one",limit:25});
