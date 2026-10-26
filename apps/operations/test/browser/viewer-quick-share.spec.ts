@@ -223,3 +223,65 @@ test("view-only staff see totals but no Quick share or connection tools", async 
   await expect(page.getByText("Connection details")).toHaveCount(0);
   expect(calls.some(call => call.path.startsWith("/api/viewer/direct-"))).toBe(false);
 });
+
+test("a slower earlier search can't replace a newer one, and a failed search hides the old list", async ({ page }) => {
+  await mockOps(page, MANAGER, (url, _method, route) => {
+    if (url.pathname !== "/api/viewer/direct-share-catalog") return undefined;
+    const q = url.searchParams.get("q");
+    if (q === "sea") return new Promise<void>(resolve => setTimeout(() => void route.fulfill({ json: { projects: [projects.projects[0]], nextCursor: null } }).then(resolve), 1_500));
+    if (q === "ranch") return route.fulfill({ json: { projects: [projects.projects[1]], nextCursor: null } });
+    if (q === "broken") return route.fulfill({ status: 500, json: { error: "Viewer unavailable" } });
+    return undefined;
+  });
+  await page.goto("/viewer");
+  const list = page.getByRole("list", { name: "Viewer projects" });
+  await expect(list.getByRole("button")).toHaveCount(2);
+  const search = page.getByRole("searchbox", { name: "Search Viewer projects" });
+  await search.fill("sea");
+  await expect(list).toHaveCount(0);
+  await page.waitForTimeout(400);
+  await search.fill("ranch");
+  await expect(list.getByRole("button", { name: "Ranch mapping", exact: true })).toBeVisible();
+  // Let the earlier "sea" answer arrive; it must not replace the current results.
+  await page.waitForTimeout(1_500);
+  await expect(list.getByRole("button")).toHaveCount(1);
+  await expect(list.getByRole("button", { name: /Seawall survey/ })).toHaveCount(0);
+  await search.fill("broken");
+  await expect(page.getByRole("alert")).toContainText("Viewer projects couldn't be loaded");
+  await expect(list).toHaveCount(0);
+});
+
+test("an unconfirmed public link is retried with the identical body and key, never duplicated", async ({ page }) => {
+  let attempts = 0;
+  const calls = await mockOps(page, MANAGER, (url, method, route) => {
+    if (url.pathname !== "/api/viewer/models/model-ortho/shares") return undefined;
+    if (method === "GET") return route.fulfill({ json: { shares: [] } });
+    attempts += 1;
+    return attempts === 1 ? route.fulfill({ status: 504, json: { error: "Gateway timeout" } })
+      : route.fulfill({ status: 201, json: { share: { id: "share-1", label: "Board review", hasPassword: true, expiresAt: null, displayUnits: "metric",
+        accessCount: 0, lastAccessedAt: null, revokedAt: null, createdAt: date }, viewUrl: `${VIEWER}/s/abc` } });
+  });
+  const dialog = await openShare(page, "Seawall orthomosaic");
+  await dialog.getByRole("tab", { name: "Public link" }).click();
+  await dialog.getByLabel("Label (optional)").fill("Board review");
+  await dialog.getByRole("checkbox", { name: "Never expires" }).check();
+  await dialog.getByLabel("Password (optional)").fill("correct horse");
+  await dialog.getByRole("combobox", { name: "Measurement units" }).selectOption("metric");
+  page.once("dialog", confirm => void confirm.accept());
+  await dialog.getByRole("button", { name: "Create link" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("couldn't confirm the link was created");
+  await expect(dialog.getByLabel("Label (optional)")).toBeDisabled();
+  await expect(dialog.getByRole("checkbox", { name: "Allow model download" })).toBeDisabled();
+  await expect(dialog.getByRole("tab", { name: "Client Workspace" })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Close" })).toBeDisabled();
+  await dialog.getByRole("button", { name: "Try again" }).click();
+  await expect(dialog.getByLabel("New link")).toHaveValue(`${VIEWER}/s/abc`);
+  await expect(dialog.getByRole("button", { name: "Close" })).toBeEnabled();
+  const sent = calls.filter(call => call.method === "POST" && call.path === "/api/viewer/models/model-ortho/shares");
+  expect(sent).toHaveLength(2);
+  expect(sent[0]!.key).toMatch(/^[0-9a-f-]{36}$/);
+  expect(sent[1]!.key).toBe(sent[0]!.key);
+  expect(sent[1]!.body).toEqual(sent[0]!.body);
+  expect(sent[0]!.body).toEqual({ label: "Board review", expiresAt: null, displayUnits: "metric", password: "correct horse",
+    permissions: { view: true, measure: true, cameras: true, download: false } });
+});

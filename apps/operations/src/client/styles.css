@@ -1618,6 +1618,7 @@ tbody tr:last-child td { border: 0; }
 .viewer-direct-share-review { display: grid; gap: .6rem; padding: .85rem 1rem; border: 1px solid var(--orange, #ee5007); border-radius: 10px; }
 .viewer-direct-share-review p { margin: 0; overflow-wrap: anywhere; }
 .viewer-direct-share-review .actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.viewer-share-fields { display: contents; }
 .viewer-connection-details { display: grid; gap: .6rem; color: var(--muted); }
 .viewer-connection-details summary { cursor: pointer; font-weight: 700; min-height: 44px; display: flex; align-items: center; }
 @media (max-width: 640px) {

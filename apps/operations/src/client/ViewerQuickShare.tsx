@@ -124,6 +124,7 @@ export function ViewerQuickShare({ canCreatePublic, canRevokePublic }: { canCrea
       setProjects(current => cursor && current ? { projects: [...current.projects, ...value.projects], nextCursor: value.nextCursor } : value);
     } catch (caught) {
       if (run !== projectRun.current) return;
+      if (!cursor) setProjects(null);
       if (statusOf(caught) === 404) { setOff(true); return; }
       setProjectError(statusOf(caught) === 403 ? "You don't have permission to share Viewer models." : "Viewer projects couldn't be loaded. Try again.");
     }
@@ -133,6 +134,8 @@ export function ViewerQuickShare({ canCreatePublic, canRevokePublic }: { canCrea
     return () => window.clearTimeout(timer);
   }, [query, loadProjects]);
   useEffect(() => () => { projectRun.current += 1; taskRun.current += 1; }, []);
+  // A new search drops the previous one at once, so a late answer can't replace or outlive it.
+  const changeQuery = (value: string) => { projectRun.current += 1; setProjects(null); setProjectError(""); setQuery(value); };
 
   const loadTasks = useCallback(async (selected: ViewerCatalogProject, cursor: string | null) => {
     const run = ++taskRun.current;
@@ -144,6 +147,7 @@ export function ViewerQuickShare({ canCreatePublic, canRevokePublic }: { canCrea
       setTasks(current => cursor && current ? { ...value, tasks: [...current.tasks, ...value.tasks] } : value);
     } catch (caught) {
       if (run !== taskRun.current) return;
+      if (!cursor) setTasks(null);
       setTaskError(statusOf(caught) === 404 ? "This project is no longer available in the Viewer." : "Published models couldn't be loaded. Try again.");
     }
   }, []);
@@ -157,7 +161,7 @@ export function ViewerQuickShare({ canCreatePublic, canRevokePublic }: { canCrea
     <header><h3 id="viewer-quick-share-heading">Quick share</h3><p>Pick a Viewer project, choose a published model, and share it with a client or by link.</p></header>
     {!project ? <>
       <label className="viewer-quick-share-search">Search Viewer projects
-        <input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Project name" maxLength={120} /></label>
+        <input type="search" value={query} onChange={event => changeQuery(event.target.value)} placeholder="Project name" maxLength={120} /></label>
       {projectError && <div className="notice error" role="alert">{projectError} <button type="button" className="button-ghost button-small" onClick={() => void loadProjects(query, null)}>Retry</button></div>}
       {!projects && !projectError && <p className="viewer-quick-share-loading" role="status">Loading projects…</p>}
       {projects && (projects.projects.length ? <ul className="viewer-quick-share-list" aria-label="Viewer projects">{projects.projects.map(item =>
@@ -234,6 +238,7 @@ function DirectClientSharePanel({ target, onBusyChange }: { target: ViewerShareT
   const [query, setQuery] = useState("");
   const [workspace, setWorkspace] = useState<GrantWorkspace | null>(null);
   const [loadError, setLoadError] = useState("");
+  const [blocked, setBlocked] = useState("");
   const [client, setClient] = useState<DirectShareClient | null>(null);
   const [permissions, setPermissions] = useState(DEFAULT_PERMISSIONS);
   const [neverExpires, setNeverExpires] = useState(true);
@@ -262,9 +267,11 @@ function DirectClientSharePanel({ target, onBusyChange }: { target: ViewerShareT
       setWorkspace(value);
     } catch (caught) {
       if (current !== run.current) return;
+      setWorkspace(null);
       const status = statusOf(caught);
-      setLoadError(status === 404 ? "Client Workspace sharing isn't turned on yet." : status === 403
-        ? "Administrator access is required to share with clients." : "Clients couldn't be loaded. Try again.");
+      if (status === 404) setBlocked("Client Workspace sharing isn't turned on yet.");
+      else if (status === 403) setBlocked("Administrator access is required to share with clients.");
+      else setLoadError("Clients couldn't be loaded. Try again.");
     }
   }, [target.project.viewerProjectId]);
   useEffect(() => {
@@ -272,6 +279,7 @@ function DirectClientSharePanel({ target, onBusyChange }: { target: ViewerShareT
     return () => window.clearTimeout(timer);
   }, [query, load]);
   useEffect(() => () => { run.current += 1; }, []);
+  const changeQuery = (value: string) => { run.current += 1; setWorkspace(null); setLoadError(""); setQuery(value); };
 
   const existing = workspace ? grantsForTarget(workspace.grants, target) : [];
   const expiresAt = neverExpires ? null : chicagoEndOfDay(expiryDay);
@@ -325,17 +333,16 @@ function DirectClientSharePanel({ target, onBusyChange }: { target: ViewerShareT
     finally { setBusy(false); }
   };
 
-  if (loadError && !workspace) return <div className="notice" role="status">{loadError} {!loadError.includes("turned on") && !loadError.includes("Administrator")
-    && <button type="button" className="button-ghost button-small" onClick={() => void load(query)}>Retry</button>}</div>;
+  if (blocked) return <div className="notice" role="status">{blocked}</div>;
   return <div className="viewer-direct-share">
     {existing.length > 0 && <div className="viewer-direct-share-existing"><strong>Already shared with</strong><ul>{existing.map(grant => <li key={grant.grantId}>
       <div><span>{grant.clientDisplayName ?? "Client"}</span><small>{grant.scopeType === "project" ? "Whole project" : "This model"} · {chicagoDate(grant.expiresAt)}{grant.permissions.download ? " · downloads allowed" : ""}</small></div>
       <button type="button" className="button-danger button-small" disabled={busy || unconfirmed} onClick={() => void revoke(grant)}>Stop sharing</button>
     </li>)}</ul></div>}
     {!client ? <>
-      <label>Client or organization<input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search clients" maxLength={120} /></label>
-      {loadError && <div className="notice error" role="alert">{loadError}</div>}
-      {!workspace ? <p role="status">Loading clients…</p> : workspace.clients.length
+      <label>Client or organization<input type="search" value={query} onChange={event => changeQuery(event.target.value)} placeholder="Search clients" maxLength={120} /></label>
+      {loadError && <div className="notice error" role="alert">{loadError} <button type="button" className="button-ghost button-small" onClick={() => void load(query)}>Retry</button></div>}
+      {!workspace ? !loadError && <p role="status">Loading clients…</p> : workspace.clients.length
         ? <ul className="viewer-direct-share-clients" role="listbox" aria-label="Clients">{workspace.clients.map(item => <li key={`${item.sourceId}/${item.workspaceId}`}>
           <button type="button" role="option" aria-selected={false} onClick={() => pick(item)}><strong>{item.displayName}</strong><small>{item.businessName}</small></button>
         </li>)}</ul>
@@ -395,7 +402,10 @@ export function ViewerPublicLinkPanel({ modelId, canCreate, canRevoke, onBusyCha
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  useEffect(() => { onBusyChange(busy); }, [busy, onBusyChange]);
+  // An unconfirmed link is retried with the identical body and key, so it can't be created twice.
+  const pending = useRef<{ body: string; key: string } | null>(null);
+  const [unconfirmed, setUnconfirmed] = useState(false);
+  useEffect(() => { onBusyChange(busy || unconfirmed); }, [busy, unconfirmed, onBusyChange]);
   const path = `/api/viewer/models/${encodeURIComponent(modelId)}/shares`;
   const load = useCallback(async () => {
     setLoadError("");
@@ -408,25 +418,35 @@ export function ViewerPublicLinkPanel({ modelId, canCreate, canRevoke, onBusyCha
 
   const create = async (event: FormEvent) => {
     event.preventDefault();
-    if (busy || (!neverExpires && !expiry)) return;
-    if (neverExpires && !window.confirm("Create a link that never expires? It stays active until you revoke it.")) return;
+    if (busy) return;
+    if (!unconfirmed) {
+      if (!neverExpires && !expiry) return;
+      if (neverExpires && !window.confirm("Create a link that never expires? It stays active until you revoke it.")) return;
+      pending.current = { key: crypto.randomUUID(), body: JSON.stringify({
+        label: label.trim() || null, expiresAt: neverExpires ? null : new Date(expiry).toISOString(), displayUnits: units,
+        ...(password ? { password } : {}), permissions: { view: true, measure: true, cameras: true, download },
+      }) };
+    }
+    const attempt = pending.current;
+    if (!attempt) return;
     setBusy(true); setError(""); setMessage(""); setCreatedUrl("");
     try {
       const created = await api<{ share: ViewerPublicShareSummary; viewUrl: string }>(path, {
-        method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify({
-          label: label.trim() || null, expiresAt: neverExpires ? null : new Date(expiry).toISOString(), displayUnits: units,
-          ...(password ? { password } : {}), permissions: { view: true, measure: true, cameras: true, download },
-        }),
+        method: "POST", headers: { "Idempotency-Key": attempt.key }, body: attempt.body,
       });
+      pending.current = null; setUnconfirmed(false);
       setShares(current => [created.share, ...(current ?? []).filter(share => share.id !== created.share.id)]);
       setCreatedUrl(created.viewUrl); setPassword("");
       setMessage("Link created. Copy it now — it can't be shown again.");
-    } catch (caught) { setError((caught as Error).message); }
-    finally { setBusy(false); }
+    } catch (caught) {
+      if (uncertain(caught)) {
+        setUnconfirmed(true);
+        setError("We couldn't confirm the link was created. Try again to finish it — the same link is requested, so it won't be duplicated.");
+      } else { pending.current = null; setUnconfirmed(false); setError((caught as Error).message); }
+    } finally { setBusy(false); }
   };
   const revoke = async (share: ViewerPublicShareSummary) => {
-    if (busy || !window.confirm(`Revoke ${share.label || "this link"}? Anyone using it loses access right away.`)) return;
+    if (busy || unconfirmed || !window.confirm(`Revoke ${share.label || "this link"}? Anyone using it loses access right away.`)) return;
     setBusy(true); setError(""); setMessage("");
     try {
       const value = await api<{ share: ViewerPublicShareSummary }>(`/api/viewer/shares/${encodeURIComponent(share.id)}`, {
@@ -444,16 +464,18 @@ export function ViewerPublicLinkPanel({ modelId, canCreate, canRevoke, onBusyCha
     {loadError && <div className="notice error" role="alert">{loadError} <button type="button" className="button-ghost button-small" onClick={() => void load()}>Retry</button></div>}
     {active.length > 0 && <div className="viewer-direct-share-existing"><strong>Active links</strong><ul>{active.map(share => <li key={share.id}>
       <div><span>{share.label || "Unlabeled link"}</span><small>{share.hasPassword ? "Password protected" : "No password"} · {share.expiresAt ? `expires ${chicagoDate(share.expiresAt)}` : "never expires"} · {share.accessCount} open{share.accessCount === 1 ? "" : "s"}</small></div>
-      {canRevoke && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => void revoke(share)}>Revoke</button>}
+      {canRevoke && <button type="button" className="button-danger button-small" disabled={busy || unconfirmed} onClick={() => void revoke(share)}>Revoke</button>}
     </li>)}</ul></div>}
     {canCreate ? <form className="viewer-share-form" onSubmit={create}>
+      <fieldset className="viewer-share-fields" disabled={busy || unconfirmed}>
       <label>Label (optional)<input maxLength={120} value={label} onChange={event => setLabel(event.target.value)} placeholder="Client review or demo" /></label>
       <label>Expires<input type="datetime-local" required={!neverExpires} disabled={neverExpires} value={expiry} min={shareExpiryValue(5 / 1440)} max={shareExpiryValue(30)} onChange={event => setExpiry(event.target.value)} /></label>
       <label className="viewer-share-check"><input type="checkbox" checked={neverExpires} onChange={event => setNeverExpires(event.target.checked)} /> Never expires</label>
       <label>Password (optional)<input type="password" minLength={8} maxLength={128} autoComplete="new-password" value={password} onChange={event => setPassword(event.target.value)} placeholder="At least 8 characters" /></label>
       <label>Measurement units<select value={units} onChange={event => setUnits(event.target.value as "imperial" | "metric")}><option value="imperial">Imperial</option><option value="metric">Metric</option></select></label>
       <label className="viewer-share-check"><input type="checkbox" checked={download} onChange={event => setDownload(event.target.checked)} /> Allow model download</label>
-      <button type="submit" className="button-orange" disabled={busy || (!neverExpires && !expiry)}>{busy ? "Creating…" : "Create link"}</button>
+      </fieldset>
+      <button type="submit" className="button-orange" disabled={busy || (!unconfirmed && !neverExpires && !expiry)}>{busy ? "Creating…" : unconfirmed ? "Try again" : "Create link"}</button>
     </form> : <p className="notice" role="status">You don't have permission to create public links.</p>}
     {createdUrl && <div className="viewer-created-share" role="status">
       <label>New link<input readOnly value={createdUrl} onFocus={event => event.currentTarget.select()} /></label>
