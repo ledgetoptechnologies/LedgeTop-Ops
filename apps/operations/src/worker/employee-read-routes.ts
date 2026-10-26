@@ -61,7 +61,8 @@ export async function employeeReadManifest(config: ReadConfiguration, dependenci
   }, signal);
     if (response.status !== 200) return response;
     const value = await response.json() as { sha256: string; size: number; snapshotId: string; snapshotExpiresAt: number };
-    const expiresAt = Math.min(Math.floor(Date.now() / 1000) + 900, Math.floor(Date.parse(proof.verifiedUntil) / 1000), value.snapshotExpiresAt - 30);
+    // Leave clock-skew and rounding headroom below the Windows client's 900-second ceiling.
+    const expiresAt = Math.min(Math.floor(Date.now() / 1000) + 870, Math.floor(Date.parse(proof.verifiedUntil) / 1000), value.snapshotExpiresAt - 30);
     if (expiresAt <= Math.floor(Date.now() / 1000) + 5) return fail(409, "employee_read_renew_manifest");
     const handle = await encodeEmployeeFileHandle(employeeHandleContext({ opsOrigin: config.opsOrigin, issuer: config.access.issuer, audience: config.access.staffAudience, key: config.handleKey }), { v: 1, proof, path: path, snapshotId: value.snapshotId, sha256: value.sha256, size: value.size, expiresAt });
     const logicalFileId = await employeeLogicalFileId(employeeHandleContext({ opsOrigin: config.opsOrigin, issuer: config.access.issuer, audience: config.access.staffAudience, key: config.handleKey }), proof, path);
