@@ -50,6 +50,25 @@ describe("real Operations entrypoint canonical navigation mount",()=>{
     const api=await f.request(`${OLD}/api/session`);expect(api.status).toBe(503);expect(api.headers.get("Location")).toBeNull();
     const post=await f.request(`${OLD}/clients`,{method:"POST",body:"synthetic"});expect(post.headers.get("Location")).toBeNull();
   });
+  it("canonicalizes each ordinary Models, Intel, account and administration page without covering signed namespaces",async()=>{
+    const f=fixture(NEW);
+    const pages=["/viewer","/viewer/models","/viewer/sharing","/viewer/processing","/operations/processing",
+      "/intel","/account","/configurations","/notifications","/jobs","/projects","/tasks","/sops",
+      "/operations/projects","/operations/tasks","/operations/sops","/operations/notifications",
+      "/operations/client-requests","/operations/feedback","/operations/inbox","/operations/invitation-requests",
+      "/operations/client-requests/synthetic-id","/operations/feedback/synthetic-id","/operations/invitation-requests/synthetic-id",
+      "/clients/requests","/clients/feedback","/clients/invitation-requests","/clients/invitation-requests/synthetic-id",
+      "/delivery/incoming","/delivery/links"];
+    for(const origin of [OLD,LTT]) for(const page of pages) {
+      const query=page==="/intel"?"?business=synthetic-business&view=search-console&range=28d":"";
+      const response=await f.request(origin+page+query);
+      expect(response.status).toBe(302);expect(response.headers.get("Location")).toBe(NEW+page+query);
+    }
+    for(const path of ["/viewer/workspace/synthetic","/viewer/session/synthetic","/viewer/attempts/synthetic",
+      "/intel?token=synthetic","/account?intentId=synthetic","/operations/processing?reviewToken=synthetic"]) {
+      expect((await f.request(OLD+path)).headers.get("Location")).toBeNull();
+    }
+  });
   it("keeps legacy public link paths, APIs and signed callbacks local on an admitted old origin",async()=>{
     const f=fixture(NEW);
     for(const url of [
