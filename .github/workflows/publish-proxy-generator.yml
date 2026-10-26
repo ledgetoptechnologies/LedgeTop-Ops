@@ -47,7 +47,7 @@ jobs:
           platforms: linux/amd64
           load: true
           push: false
-          tags: ltds-proxy-generator:canary
+          tags: proxy-generator:canary
           provenance: false
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
@@ -58,11 +58,14 @@ jobs:
           --security-opt no-new-privileges --pids-limit 256
           --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777
           --mount type=bind,source="$PWD/apps/proxy-generator/tests",target=/app/tests,readonly
-          --entrypoint python3 ltds-proxy-generator:canary
+          --entrypoint python3 proxy-generator:canary
           -B -m unittest discover -s tests -v
 
       - name: Validate combined stack without credentials or host mounts
         run: python3 apps/media-generation/test_compose.py
+
+      - name: Verify first start creates shared dataset folders as 568
+        run: python3 apps/media-generation/test_empty_dataset.py --proxy-image proxy-generator:canary
 
       - name: Authenticate to GHCR for main publication
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -76,13 +79,13 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: bash
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ltds-proxy-generator"
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/proxy-generator"
           tag="${image}:sha-${GITHUB_SHA}"
           if docker buildx imagetools inspect "$tag" >/dev/null 2>&1; then
             echo 'Refusing to overwrite an existing commit tag.' >&2
             exit 1
           fi
-          docker tag ltds-proxy-generator:canary "$tag"
+          docker tag proxy-generator:canary "$tag"
           docker push "$tag"
           docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' > proxy-manifest.json
           digest=$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' proxy-manifest.json)

@@ -18,4 +18,4 @@ ENTRYPOINT ["/usr/bin/tini", "--", "python3", "-B", "-m", "unittest", "discover"
 
 FROM runtime AS production
 LABEL org.opencontainers.image.source="https://github.com/ledgetoptechnologies/LedgeTop-Ops" \
-    org.opencontainers.image.title="LTDS Resolve proxy generator"
+    org.opencontainers.image.title="Resolve proxy generator"

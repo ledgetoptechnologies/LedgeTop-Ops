@@ -17,7 +17,7 @@ x-prebuilt-service: &prebuilt-service
 services:
   decoder:
     <<: *prebuilt-service
-    image: ghcr.io/ledgetoptechnologies/ltds-thumbnail-decoder:latest
+    image: ghcr.io/ledgetoptechnologies/thumbnail-decoder:latest
     pull_policy: always
     network_mode: none
     cpus: "${LTDSTHUMB_DECODER_CPU_LIMIT:-2.0}"
@@ -25,10 +25,10 @@ services:
     environment:
       LTDSTHUMB_JOBS_ROOT: /data/jobs
       LTDSTHUMB_R2_ROOT_PREFIX: Jobs
-      LTDSTHUMB_ARTIFACTS_DIR: /artifacts
-      LTDSTHUMB_WORK_DIR: /work/jobs
-      LTDSTHUMB_CACHE_DIR: /cache
-      LTDSTHUMB_STATE_DIR: /state/decoder
+      LTDSTHUMB_ARTIFACTS_DIR: /app-data/thumbnail-artifacts
+      LTDSTHUMB_WORK_DIR: /app-data/thumbnail-work/jobs
+      LTDSTHUMB_CACHE_DIR: /app-data/thumbnail-cache
+      LTDSTHUMB_STATE_DIR: /app-data/thumbnail-state/decoder
       LTDSTHUMB_RENDERER_VERSION: ${LTDSTHUMB_RENDERER_VERSION:-truenas-0.1.0}
       LTDSTHUMB_IMAGE_MAX_BYTES: "536870912"
       LTDSTHUMB_PDF_MAX_BYTES: "268435456"
@@ -49,36 +49,21 @@ services:
         target: /data/jobs
         read_only: true
       - type: bind
-        source: ${LTDSTHUMB_ARTIFACTS_HOST_PATH:?Select the private artifact queue dataset}
+        source: ${WORKERS_APP_DATA_HOST_PATH:?Select the existing shared workers application dataset}
         bind:
           create_host_path: false
-        target: /artifacts
-      - type: bind
-        source: ${LTDSTHUMB_WORK_HOST_PATH:?Select the quota-limited scratch dataset}
-        bind:
-          create_host_path: false
-        target: /work
-      - type: bind
-        source: ${LTDSTHUMB_CACHE_HOST_PATH:?Select the cache dataset}
-        bind:
-          create_host_path: false
-        target: /cache
-      - type: bind
-        source: ${LTDSTHUMB_STATE_HOST_PATH:?Select the state dataset}
-        bind:
-          create_host_path: false
-        target: /state
+        target: /app-data
     tmpfs: [/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777]
 
   broker:
     <<: *prebuilt-service
-    image: ghcr.io/ledgetoptechnologies/ltds-thumbnail-broker:latest
+    image: ghcr.io/ledgetoptechnologies/thumbnail-broker:latest
     pull_policy: always
     cpus: "${LTDSTHUMB_BROKER_CPU_LIMIT:-0.5}"
     mem_limit: ${LTDSTHUMB_BROKER_MEMORY_LIMIT:-256m}
     environment:
-      LTDSTHUMB_ARTIFACTS_DIR: /artifacts
-      LTDSTHUMB_STATE_DIR: /state/broker
+      LTDSTHUMB_ARTIFACTS_DIR: /app-data/thumbnail-artifacts
+      LTDSTHUMB_STATE_DIR: /app-data/thumbnail-state/broker
       LTDSTHUMB_INGEST_URL: ${LTDSTHUMB_INGEST_URL:?Set the exact Operations ingest HTTPS URL}
       THUMBNAIL_INGEST_SECRET: ${THUMBNAIL_INGEST_SECRET:?Set the dedicated Operations ingest secret}
       CF_ACCESS_CLIENT_ID: ${LTDSTHUMB_BROKER_ACCESS_CLIENT_ID:?Set the broker Cloudflare Access service-token client ID}
@@ -92,14 +77,9 @@ services:
       NODE_OPTIONS: --max-old-space-size=128
     volumes:
       - type: bind
-        source: ${LTDSTHUMB_ARTIFACTS_HOST_PATH:?Select the private artifact queue dataset}
+        source: ${WORKERS_APP_DATA_HOST_PATH:?Select the existing shared workers application dataset}
         bind:
           create_host_path: false
-        target: /artifacts
-      - type: bind
-        source: ${LTDSTHUMB_STATE_HOST_PATH:?Select the state dataset}
-        bind:
-          create_host_path: false
-        target: /state
+        target: /app-data
     tmpfs: [/tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777]
 

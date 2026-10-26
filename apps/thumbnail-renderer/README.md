@@ -1,7 +1,7 @@
-# LTDS TrueNAS thumbnail app
+# TrueNAS thumbnail app
 
 For one TrueNAS Custom App containing the thumbnail queue and Resolve proxy
-generation, use [LTDS Proxy Generation](../media-generation/README.md).
+generation, use [Proxy Generation](../media-generation/README.md).
 Its default YAML runs those two independent services; a separate optional
 overlay adds the local decoder and broker described here.
 

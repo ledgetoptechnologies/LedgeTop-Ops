@@ -5,7 +5,7 @@ const testDir = fileURLToPath(new URL("./", import.meta.url));
 const server = fileURLToPath(new URL("./video-worker-smoke-server.py", import.meta.url));
 const runner = fileURLToPath(new URL("./video-worker-smoke-runner.sh", import.meta.url));
 const appDir = fileURLToPath(new URL("../", import.meta.url));
-const image = process.env.LTDSTHUMB_SMOKE_IMAGE || "ltds-thumbnail-queue-worker:smoke";
+const image = process.env.LTDSTHUMB_SMOKE_IMAGE || "thumbnail-queue-worker:smoke";
 if (!process.env.LTDSTHUMB_SMOKE_IMAGE) {
   const build = spawnSync("docker", ["build", "--target", "queue-worker", "-t", image, "."], {
     cwd: appDir, encoding: "utf8", stdio: "inherit",

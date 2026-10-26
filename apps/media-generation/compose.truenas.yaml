@@ -1,6 +1,6 @@
 # Default two-service TrueNAS Custom App. No decoder/broker credentials required.
 # latest advances only after the corresponding verified main release; pull on update/redeploy.
-name: ltds-proxy-generation
+name: proxy-generation
 
 x-service: &service
   user: "${PUID:-568}:${PGID:-568}"
@@ -19,7 +19,7 @@ x-service: &service
 services:
   proxy-generator:
     <<: *service
-    image: ghcr.io/ledgetoptechnologies/ltds-proxy-generator:latest
+    image: ghcr.io/ledgetoptechnologies/proxy-generator:latest
     pull_policy: always
     network_mode: none
     cpus: "${LTDSPROXY_CPU_LIMIT:-12.0}"
@@ -27,7 +27,7 @@ services:
     stop_grace_period: 45s
     environment:
       JOBS_ROOT: /data/jobs
-      STATE_DIR: /state
+      STATE_DIR: /app-data/proxy-state
       MAX_CONCURRENT: "${LTDSPROXY_MAX_CONCURRENT:-6}"
       FFMPEG_THREADS: "${LTDSPROXY_FFMPEG_THREADS:-2}"
       PROXY_MAX_HEIGHT: "${LTDSPROXY_MAX_HEIGHT:-720}"
@@ -49,8 +49,8 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: ${LTDSPROXY_STATE_HOST_PATH:?Select the private persistent proxy state dataset}
-        target: /state
+        source: ${WORKERS_APP_DATA_HOST_PATH:?Select the existing shared workers application dataset}
+        target: /app-data
         bind:
           create_host_path: false
     tmpfs:
@@ -58,9 +58,9 @@ services:
 
   queue-renderer:
     <<: *service
-    image: ghcr.io/ledgetoptechnologies/ltds-thumbnail-queue-worker:latest
+    image: ghcr.io/ledgetoptechnologies/thumbnail-queue-worker:latest
     pull_policy: always
-    container_name: ltds-thumbnail-gen
+    container_name: thumbnail-gen
     pids_limit: 256
     cpus: "${LTDSTHUMB_QUEUE_WORKER_CPU_LIMIT:-8.0}"
     mem_limit: ${LTDSTHUMB_QUEUE_WORKER_MEMORY_LIMIT:-10g}

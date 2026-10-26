@@ -1,4 +1,4 @@
-name: ltds-thumbnails
+name: thumbnails
 
 x-hardened: &hardened
   user: "${PUID:-568}:${PGID:-568}"
@@ -12,9 +12,9 @@ x-hardened: &hardened
 services:
   decoder:
     <<: *hardened
-    image: ghcr.io/ledgetoptechnologies/ltds-thumbnail-decoder:latest
+    image: ghcr.io/ledgetoptechnologies/thumbnail-decoder:latest
     pull_policy: always
-    container_name: ltds-thumbnail-decoder
+    container_name: thumbnail-decoder
     network_mode: none
     cpus: "${LTDSTHUMB_DECODER_CPU_LIMIT:-2.0}"
     mem_limit: ${LTDSTHUMB_DECODER_MEMORY_LIMIT:-2g}
@@ -58,9 +58,9 @@ services:
 
   broker:
     <<: *hardened
-    image: ghcr.io/ledgetoptechnologies/ltds-thumbnail-broker:latest
+    image: ghcr.io/ledgetoptechnologies/thumbnail-broker:latest
     pull_policy: always
-    container_name: ltds-thumbnail-broker
+    container_name: thumbnail-broker
     cpus: "${LTDSTHUMB_BROKER_CPU_LIMIT:-0.5}"
     mem_limit: ${LTDSTHUMB_BROKER_MEMORY_LIMIT:-256m}
     environment:
@@ -88,9 +88,9 @@ services:
 
   queue-renderer:
     <<: *hardened
-    image: ghcr.io/ledgetoptechnologies/ltds-thumbnail-queue-worker:latest
+    image: ghcr.io/ledgetoptechnologies/thumbnail-queue-worker:latest
     pull_policy: always
-    container_name: ltds-thumbnail-queue-renderer
+    container_name: thumbnail-queue-renderer
     cpus: "${LTDSTHUMB_QUEUE_WORKER_CPU_LIMIT:-4.0}"
     mem_limit: ${LTDSTHUMB_QUEUE_WORKER_MEMORY_LIMIT:-5g}
     environment:
@@ -109,4 +109,4 @@ services:
 
 networks:
   default:
-    name: ltds-thumbnails-outbound
+    name: thumbnails-outbound

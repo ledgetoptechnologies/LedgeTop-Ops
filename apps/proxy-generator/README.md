@@ -1,16 +1,19 @@
-# LTDS Resolve proxy generator
+# Resolve proxy generator
 
 This package turns local editing originals into DaVinci Resolve proxies. It
 replaces the loose host-mounted script with a repository-owned container image
 and a Python standard-library supervisor. It does not generate thumbnails,
 upload media, modify originals, or manage the Viewer.
 
-Use [LTDS Proxy Generation](../media-generation/README.md) to run it with
+Use [Proxy Generation](../media-generation/README.md) to run it with
 the existing Operations thumbnail queue worker in one TrueNAS Custom App.
 The runtime is copied into the Docker image at build time; installation
 requires no host script bind or old proxy-script directory. Keep only the
-Jobs and private state mounts specified in the deployment YAML.
-The published package is `ghcr.io/ledgetoptechnologies/ltds-proxy-generator`.
+Jobs and shared application-data mounts specified in the deployment YAML. The
+combined stack uses `/app-data/proxy-state` for its persistent state, created
+automatically below the shared workers dataset; no separate state bind or
+pre-created child folder is required.
+The published package is `ghcr.io/ledgetoptechnologies/proxy-generator`.
 The **Verify and publish Resolve proxy generator** workflow tests pull
 requests, then publishes a commit tag, digest-qualified receipt and `:latest`
 after a successful verified `main` build. Deployment YAML uses `:latest` with
@@ -58,7 +61,7 @@ These are container environment values; the combined stack exposes most under
 | Container value | Default | Purpose |
 | --- | --- | --- |
 | `JOBS_ROOT` | `/data/jobs` | Existing local Jobs mount |
-| `STATE_DIR` | `/state` | Private persistent SQLite receipts, retries and lock |
+| `STATE_DIR` | `/state` | SQLite receipts, retries and lock; combined stack sets `/app-data/proxy-state` |
 | `MAX_CONCURRENT` | `6` | Simultaneous proxy jobs |
 | `FFMPEG_THREADS` | `2` | Requested decoder/encoder threads per FFmpeg process |
 | `PROXY_MAX_HEIGHT` | `720` | Maximum proxy height, retaining half-source scaling below the cap |
@@ -134,8 +137,8 @@ does not delete old proxies or the old generator script.
 From the repository root:
 
 ```text
-docker build --target test -t ltds-proxy-generator-test apps/proxy-generator
-docker run --rm --network none ltds-proxy-generator-test
+docker build --target test -t proxy-generator-test apps/proxy-generator
+docker run --rm --network none proxy-generator-test
 python apps/media-generation/test_compose.py
 ```
 

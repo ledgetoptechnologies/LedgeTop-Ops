@@ -9,9 +9,9 @@ name: ledgetop-thumbnail-queue
 
 services:
   queue-renderer:
-    image: "ghcr.io/ledgetoptechnologies/ltds-thumbnail-queue-worker:latest"
+    image: "ghcr.io/ledgetoptechnologies/thumbnail-queue-worker:latest"
     pull_policy: always
-    container_name: ltds-thumbnail-gen
+    container_name: thumbnail-gen
     user: "568:568"
     init: true
     restart: unless-stopped
