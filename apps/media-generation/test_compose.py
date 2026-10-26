@@ -94,6 +94,31 @@ class MediaComposeTests(unittest.TestCase):
             self.assertEqual(len(re.findall(r"(?m)^\s*- type: bind\s*$", text)),
                 len(re.findall(r"(?m)^\s*create_host_path: false\s*$", text)))
 
+    def test_tmpfs_options_are_part_of_each_absolute_mount_spec(self):
+        thumbnail_values = VALUES | OPTIONAL | {
+            "LTDSTHUMB_JOBS_HOST_PATH": "/synthetic/jobs",
+            "LTDSTHUMB_ARTIFACTS_HOST_PATH": "/synthetic/artifacts",
+            "LTDSTHUMB_WORK_HOST_PATH": "/synthetic/work",
+            "LTDSTHUMB_CACHE_HOST_PATH": "/synthetic/cache",
+            "LTDSTHUMB_STATE_HOST_PATH": "/synthetic/state",
+            "CF_ACCESS_CLIENT_ID": "synthetic-access-id",
+            "CF_ACCESS_CLIENT_SECRET": "synthetic-access-secret",
+        }
+        deployments = [self.base, self.full, self.all,
+            render([THUMBNAIL], thumbnail_values)["services"],
+            render([STANDALONE], {})["services"]]
+        for services in deployments:
+            for name, service in services.items():
+                with self.subTest(service=name):
+                    mounts = service["tmpfs"]
+                    self.assertEqual(len(mounts), 3 if name == "queue-renderer" else 1)
+                    for mount in mounts:
+                        target, separator, options = mount.partition(":")
+                        self.assertTrue(target.startswith("/"), mount)
+                        self.assertEqual(separator, ":")
+                        self.assertTrue({"rw", "nosuid", "nodev", "noexec"}.issubset(options.split(",")))
+                        self.assertRegex(options, r"(?:^|,)size=[1-9][0-9]*[kmg](?:,|$)")
+
     def test_media_and_credential_boundaries(self):
         proxy = self.full["proxy-generator"]
         decoder = self.full["decoder"]

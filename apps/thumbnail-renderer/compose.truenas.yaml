@@ -54,7 +54,8 @@ services:
       - type: bind
         source: ${LTDSTHUMB_STATE_HOST_PATH:?Select the state dataset}
         target: /state
-    tmpfs: [/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777]
+    tmpfs:
+      - "/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777"
 
   broker:
     <<: *hardened
@@ -84,7 +85,8 @@ services:
       - type: bind
         source: ${LTDSTHUMB_STATE_HOST_PATH:?Select the state dataset}
         target: /state
-    tmpfs: [/tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777]
+    tmpfs:
+      - "/tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777"
 
   queue-renderer:
     <<: *hardened

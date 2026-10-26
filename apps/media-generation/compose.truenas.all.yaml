@@ -136,7 +136,8 @@ services:
         bind:
           create_host_path: false
         target: /app-data
-    tmpfs: [/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777]
+    tmpfs:
+      - "/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777"
 
   broker:
     <<: *prebuilt-service
@@ -164,5 +165,6 @@ services:
         bind:
           create_host_path: false
         target: /app-data
-    tmpfs: [/tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777]
+    tmpfs:
+      - "/tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777"
 
