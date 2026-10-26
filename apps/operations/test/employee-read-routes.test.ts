@@ -1,7 +1,8 @@
 import "./node-fixed-length-stream";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
-import { createEmployeeReadRouter, employeeWindowsFileName } from "../src/worker/employee-read-routes";
+import { createEmployeeReadRouter, employeeReadManifest, employeeWindowsFileName } from "../src/worker/employee-read-routes";
+import { employeeHandleContext, encodeEmployeeFileHandle } from "../src/worker/employee-read-handles";
 import type { EmployeeReadProof } from "../src/worker/employee-read-transport";
 
 const mocks = vi.hoisted(() => ({ keys: vi.fn(), identity: vi.fn(), resolve: vi.fn(), recheck: vi.fn(), roots: vi.fn(), audit: vi.fn() }));
@@ -47,6 +48,81 @@ function harness() {
   return { fetcher, cancel, cfg, router, call, manifest };
 }
 describe("unmounted employee read HTTP factory with real RS256 verification", () => {
+  it("issues clock headroom under the unchanged independent Windows client expiry predicate", async () => {
+    const captured = Date.now(), clientNow = Math.floor(captured / 1000);
+    // A separate client clock can be one second behind the issuer, including
+    // opposite sides of a whole-second boundary. This models the predicate;
+    // it does not execute or replace either production C# parser.
+    const clock = vi.spyOn(Date, "now").mockReturnValue((clientNow + 1) * 1000 + 999);
+    try {
+      const h = harness(), p = proof();
+      const response = await employeeReadManifest(h.cfg, { database: {} as D1Database, fetch: h.fetcher as typeof fetch }, p, "photo.raw", new AbortController().signal);
+      expect(response.status).toBe(200);
+      const body = await response.json() as { expiresAt: number };
+      expect(body.expiresAt).toBe(clientNow + 1 + 870);
+      const clientAccepts = (expiry: number) => expiry > clientNow + 5 && expiry <= clientNow + 900;
+      expect(clientAccepts(body.expiresAt)).toBe(true);
+      expect(clientAccepts(clientNow + 1 + 900)).toBe(false);
+      expect(mocks.audit).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
+  });
+  it.each([
+    { auth: 80, snapshot: 1800, expected: 80 },
+    { auth: 3600, snapshot: 230, expected: 200 },
+    { auth: 80, snapshot: 100, expected: 70 },
+    { auth: 60, snapshot: 100, expected: 60 },
+    { auth: 3600, snapshot: 36, expected: 6 },
+    { auth: 6, snapshot: 1800, expected: 6 },
+  ])("retains exact auth/snapshot lifetime clipping: %j", async ({ auth, snapshot, expected }) => {
+    const now = Math.floor(Date.now() / 1000), clock = vi.spyOn(Date, "now").mockReturnValue(now * 1000 + 750);
+    try {
+      const h = harness(), p = { ...proof(), verifiedUntil: new Date((now + auth) * 1000 + 999).toISOString() };
+      h.fetcher.mockResolvedValueOnce(Response.json({ schemaVersion: 1, sha256: sha, size: 3, etag: `"${sha}"`, snapshotId, snapshotExpiresAt: now + snapshot }));
+      const response = await employeeReadManifest(h.cfg, { database: {} as D1Database, fetch: h.fetcher as typeof fetch }, p, "photo.raw", new AbortController().signal);
+      expect(response.status).toBe(200);
+      expect((await response.json() as { expiresAt: number }).expiresAt).toBe(now + expected);
+      expect(mocks.audit).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
+  });
+  it.each([{ auth: 3600, snapshot: 35 }, { auth: 3600, snapshot: 30 }, { auth: 5, snapshot: 1800 }])(
+    "still denies unusable lifetime without issuing a descriptor: %j", async ({ auth, snapshot }) => {
+      const now = Math.floor(Date.now() / 1000), clock = vi.spyOn(Date, "now").mockReturnValue(now * 1000);
+      try {
+        const h = harness(), p = { ...proof(), verifiedUntil: new Date((now + auth) * 1000).toISOString() };
+        h.fetcher.mockResolvedValueOnce(Response.json({ schemaVersion: 1, sha256: sha, size: 3, etag: `"${sha}"`, snapshotId, snapshotExpiresAt: now + snapshot }));
+        await expect(employeeReadManifest(h.cfg, { database: {} as D1Database, fetch: h.fetcher as typeof fetch }, p, "photo.raw", new AbortController().signal))
+          .rejects.toMatchObject({ status: 409, code: "employee_read_renew_manifest" });
+        expect(mocks.audit).not.toHaveBeenCalled();
+      } finally { clock.mockRestore(); }
+    });
+  it.each(["expiry", "revocation"])("refuses %s at the final manifest authority handoff", async failure => {
+    const now = Math.floor(Date.now() / 1000), clock = vi.spyOn(Date, "now").mockReturnValue(now * 1000);
+    try {
+      const h = harness(), p = proof(); let checks = 0;
+      // Four transport checks precede the manifest's final post-codec check.
+      // Assert the count so an earlier denial cannot masquerade as this race.
+      mocks.recheck.mockImplementation(async () => {
+        if (++checks !== 5) return true;
+        if (failure === "expiry") clock.mockReturnValue((now + 870) * 1000);
+        return failure !== "revocation";
+      });
+      await expect(employeeReadManifest(h.cfg, { database: {} as D1Database, fetch: h.fetcher as typeof fetch }, p, "photo.raw", new AbortController().signal))
+        .rejects.toMatchObject({ status: 403, code: "employee_read_denied" });
+      expect(checks).toBe(5); expect(h.fetcher).toHaveBeenCalledOnce(); expect(mocks.audit).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
+  });
+  it("keeps a previously issued 900-second handle readable before its original expiry", async () => {
+    const now = Math.floor(Date.now() / 1000), clock = vi.spyOn(Date, "now").mockReturnValue(now * 1000);
+    try {
+      const h = harness(), p = proof(); mocks.resolve.mockResolvedValue(p);
+      const handle = await encodeEmployeeFileHandle(employeeHandleContext({ opsOrigin: origin, issuer, audience, key: h.cfg.handleKey }),
+        { v: 1, proof: p, path: "photo.raw", snapshotId, sha256: sha, size: 3, expiresAt: now + 900 });
+      clock.mockReturnValue((now + 1) * 1000);
+      const response = await h.call(`${base}/downloads/${handle}`, { "If-Match": `"${sha}"` });
+      expect(response.status).toBe(200); expect([...new Uint8Array(await response.arrayBuffer())]).toEqual([7, 7, 7]);
+      expect(mocks.audit).toHaveBeenCalledOnce();
+    } finally { clock.mockRestore(); }
+  });
   it("discovers only authorized labeled roots and never provisions a grant", async () => {
     const h = harness(), response = await h.call(base + "/roots");
     expect(response.status).toBe(200); expect(await response.json()).toEqual({ schemaVersion: 1, roots: [{ rootId, gatewayId, displayName: "Synthetic files" }] });
