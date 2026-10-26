@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
-import { OPERATIONS_APP_API, projectAlphaSourceName, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerModelSummary, type ViewerPlatformOverview, type ViewerPublicShareSummary } from "@ltds/shared";
+import { OPERATIONS_APP_API, projectAlphaSourceName, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerPlatformOverview } from "@ltds/shared";
 import { AccountMenu, Brand, Card, EmptyState, Loading, LtMark, Skeleton, StatusPill, openViewerShell, requestChoice, requestText, type TextRequest } from "@ltds/ui";
 import { FinanceSummaryPanel } from "./FinanceSummaryPanel";
 import { SessionExpiry } from "./SessionExpiry";
@@ -58,7 +58,7 @@ import { ViewerProcessingPanel } from "./ViewerProcessingPanel";
 import { SignInProblem, type StartupFailure } from "./SignInProblem";
 import { AccountPage } from "./AccountPage";
 import { IntelPage } from "./IntelPage";
-import { NativeViewerModels } from "./NativeViewerModels";
+import { ViewerQuickShare } from "./ViewerQuickShare";
 import {
   activateDeliveryFolderCache,
   deactivateDeliveryFolderCache,
@@ -528,7 +528,7 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
     ],
     viewer: [
       "3D Viewer",
-      "Link models to client projects, run and recover processing, and manage sharing — or open the full Viewer workspace.",
+      "Totals and health across the Viewer, quick sharing with clients, and the full Viewer workspace.",
     ],
     team: [
       "Team",
@@ -3784,45 +3784,26 @@ function exactViewerWorkspaceMessage(
     : null;
 }
 
-const VIEWER_SECTIONS = [
-  { id: "overview", label: "Overview", path: "/viewer" },
-  { id: "models", label: "Client models", path: "/viewer/models" },
-  { id: "processing", label: "Processing", path: "/viewer/processing" },
-  { id: "sharing", label: "Sharing & setup", path: "/viewer/sharing" },
-] as const;
-type ViewerSection = typeof VIEWER_SECTIONS[number]["id"];
-/** /operations/processing (processing notifications and attempt deep links) opens the Processing section. */
-export function viewerSectionFromPath(pathname: string): ViewerSection {
-  if (pathname === "/operations/processing" || pathname === "/viewer/processing") return "processing";
-  if (pathname === "/viewer/models") return "models";
-  if (pathname === "/viewer/sharing") return "sharing";
-  return "overview";
+/**
+ * The 3D models page is one overview. Old section URLs land on it; a processing
+ * notification's attempt link (?attemptId=) still opens that attempt's review.
+ */
+export function viewerPageRoute(pathname: string, search: string): { attemptReview: boolean; redirect: string | null } {
+  const processing = pathname === "/operations/processing" || pathname === "/viewer/processing";
+  if (processing && new URLSearchParams(search).has("attemptId")) return { attemptReview: true, redirect: null };
+  if (processing || pathname === "/viewer/models" || pathname === "/viewer/sharing") return { attemptReview: false, redirect: "/viewer" };
+  return { attemptReview: false, redirect: null };
 }
 
-/** One Ops page for the Ledge Top Viewer: overview, native client models, processing and sharing. */
+/** One Ops page for the Ledge Top Viewer: totals and health, the Viewer workspace, and quick sharing. */
 function ViewerPage({ session }: { session: Session }) {
-  const [section, setSection] = useState<ViewerSection>(() => viewerSectionFromPath(location.pathname));
-  useEffect(() => {
-    const sync = () => setSection(viewerSectionFromPath(location.pathname));
-    window.addEventListener("popstate", sync);
-    return () => window.removeEventListener("popstate", sync);
-  }, []);
-  const choose = (next: ViewerSection) => {
-    if (next === section) return;
-    const target = VIEWER_SECTIONS.find(item => item.id === next)!;
-    // A section change drops attempt deep-link and reauthorization parameters.
-    window.history.pushState(null, "", target.path);
-    setSection(next);
-  };
-  return <div className="viewer-page">
-    <nav className="viewer-page-sections ltds-segmented" aria-label="3D Viewer sections">
-      {VIEWER_SECTIONS.map(item => <button type="button" key={item.id} aria-current={section === item.id ? "page" : undefined} onClick={() => choose(item.id)}>{item.label}</button>)}
-    </nav>
-    {section === "overview" && <ViewerDataOverview session={session} />}
-    {section === "models" && <NativeViewerModels canManage={allowed(session.user, "viewer.manage")} />}
-    {section === "processing" && <ViewerProcessingPanel mapToken={session.mapboxPublicToken} initialTab={new URLSearchParams(location.search).get("tab") === "tasks" ? "tasks" : undefined} />}
-    {section === "sharing" && <ViewerModels session={session} />}
+  const [route] = useState(() => viewerPageRoute(location.pathname, location.search));
+  useEffect(() => { if (route.redirect) history.replaceState(null, "", route.redirect); }, [route.redirect]);
+  if (route.attemptReview) return <div className="viewer-page">
+    <a className="button-ghost button-small viewer-page-back" href="/viewer">Back to 3D models</a>
+    <ViewerProcessingPanel mapToken={session.mapboxPublicToken} />
   </div>;
+  return <div className="viewer-page"><ViewerDataOverview session={session} /></div>;
 }
 
 function ViewerDataOverview({session}:{session:Session}) {
@@ -3940,14 +3921,15 @@ function ViewerDataOverview({session}:{session:Session}) {
   if (!data && !error) return <Card><PanelSkeleton /></Card>;
   if (reauthorizationState) return <Card><ErrorLine error={error || actionError} />{opening && <Loading />}{!opening && !error && !actionError && <p>Reauthorizing the Viewer workspace…</p>}</Card>;
   if (error) return <><ErrorLine error={error} /><button type="button" className="button-ghost" onClick={() => void reload()}>Retry overview</button></>;
-  if (!data?.enabled || !data.overview) return <Card><EmptyState title="3D Viewer overview is off" detail="The Viewer integration remains unavailable until its reviewed runtime flags are enabled." /></Card>;
+  if (!data?.enabled || !data.overview) return <><Card><EmptyState title="3D Viewer overview is off" detail="The Viewer integration remains unavailable until its reviewed runtime flags are enabled." /></Card>
+    {allowed(session.user, "viewer.manage") && <ViewerConnectionDetails />}</>;
   const value = data.overview;
   return <div className="viewer-overview">
     {popupBlocked
       ? <div className="notice warning viewer-popup-fallback" role="alert"><span>{actionError}</span><button type="button" className="button-orange button-small" disabled={opening} onClick={() => void openWorkspace(true)}>Open Viewer in this tab</button></div>
       : <ErrorLine error={actionError} />}
     <div className="viewer-overview-actions">
-      <div><h2>3D models</h2><p>Open client models, review processing, and manage sharing here. Use the Viewer workspace for imports and advanced project management.</p></div>
+      <div><h2>Viewer workspace</h2><p>Processing, models, measurements and detailed sharing live in the Viewer.</p></div>
       <button type="button" className="button-orange" disabled={opening} onClick={() => void openWorkspace()}>{opening ? "Opening…" : "Open Viewer workspace"}</button>
     </div>
     <div className="viewer-overview-grid" aria-label="3D Viewer platform overview">
@@ -3958,8 +3940,10 @@ function ViewerDataOverview({session}:{session:Session}) {
       <Card title="Storage"><strong>{bytes(value.storage.usedBytes)}</strong><small>{value.storage.availableBytes === null ? "Available space unavailable" : `${bytes(value.storage.availableBytes)} available`}</small></Card>
       <Card title="Platform"><StatusPill tone={value.platform.ready && value.platform.workerLive && !value.platform.lifecycleBlocked ? "success" : "warning"}>{value.platform.ready ? "ready" : "attention"}</StatusPill><small>{value.platform.workerLive ? "Worker online" : "Worker offline"}{value.platform.lifecycleBlocked ? " · lifecycle blocked" : ""}</small></Card>
     </div>
-    {value.jobs.failed > 0 && <p className="notice warning">{value.jobs.failed} processing job{value.jobs.failed === 1 ? " needs" : "s need"} attention in Viewer. <a href="/viewer/processing?tab=tasks">Review failed jobs</a></p>}
-    <small>Updated {date(value.generatedAt)}. This overview contains totals only; no model files or internal storage paths pass through Operations.</small>
+    {value.jobs.failed > 0 && <p className="notice warning">{value.jobs.failed} processing job{value.jobs.failed === 1 ? " needs" : "s need"} attention. <button type="button" className="button-ghost button-small" disabled={opening} onClick={() => void openWorkspace()}>Review in Viewer</button></p>}
+    <small>Updated {date(value.generatedAt)}. Totals only; no model files or internal storage paths pass through Operations.</small>
+    {allowed(session.user, "viewer.manage") && <ViewerQuickShare canCreatePublic={allowed(session.user, "viewer.share.create")} canRevokePublic={allowed(session.user, "viewer.share.revoke")} />}
+    {allowed(session.user, "viewer.manage") && <ViewerConnectionDetails />}
   </div>;
 }
 
@@ -7055,32 +7039,6 @@ function PortalIdentityDenyAdministration() {
   </Card>;
 }
 
-interface ViewerAssociation {
-  id: string;
-  projectId: string;
-  projectName: string;
-  clientName: string;
-  viewerModelId: string;
-  viewerModelVersionId: string;
-  modelTitle: string;
-  modelProvider: string;
-  state: "active" | "revoked" | "source_stale";
-  updatedAt: string;
-}
-interface ViewerProjectOption {
-  id: string;
-  project_alpha_project_id: string;
-  project_name: string;
-  client_name: string;
-  source_updated_at: string;
-}
-interface ViewerAdminData {
-  enabled: boolean;
-  publicSharesEnabled: boolean;
-  models: ViewerModelSummary[];
-  projects: ViewerProjectOption[];
-  associations: ViewerAssociation[];
-}
 interface ViewerConnectionPreflight {
   integrationEnabled: boolean;
   configured: boolean;
@@ -7109,233 +7067,30 @@ function viewerServiceAuthGuidance(status: ViewerConnectionPreflight["serviceAut
   return null;
 }
 
-function viewerShareExpiryValue(days = 7): string {
-  const value = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
-  value.setSeconds(0, 0);
-  return new Date(value.getTime() - value.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
-}
-
-function ViewerModels({ session }: { session: Session }) {
-  const { data, error, reload, loading } = useLoad(() => api<ViewerAdminData>("/api/viewer"), []);
-  const [modelId, setModelId] = useState("");
-  const [projectId, setProjectId] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [actionError, setActionError] = useState("");
-  const [shareModelId, setShareModelId] = useState("");
-  const [shares, setShares] = useState<ViewerPublicShareSummary[]>([]);
-  const [sharesLoaded, setSharesLoaded] = useState(false);
-  const [shareLabel, setShareLabel] = useState("");
-  const [shareExpiry, setShareExpiry] = useState(() => viewerShareExpiryValue());
-  const [shareNeverExpires, setShareNeverExpires] = useState(false);
-  const [sharePassword, setSharePassword] = useState("");
-  const [shareDownload, setShareDownload] = useState(false);
-  const [shareDisplayUnits, setShareDisplayUnits] = useState<"imperial" | "metric">("imperial");
-  const [createdShareUrl, setCreatedShareUrl] = useState("");
-  const [shareMessage, setShareMessage] = useState("");
-  const [connectionPreflight, setConnectionPreflight] = useState<ViewerConnectionPreflight | null>(null);
-  const [connectionPreflightBusy, setConnectionPreflightBusy] = useState(false);
-  const canManage = allowed(session.user, "viewer.manage");
-  const canCreateShare = allowed(session.user, "viewer.share.create");
-  const canRevokeShare = allowed(session.user, "viewer.share.revoke");
-  const readyModels = useMemo(
-    () => data?.models.filter(model => model.available && model.status === "ready" && model.activeVersion) ?? [],
-    [data?.models],
-  );
-
-  useEffect(() => {
-    if (!modelId && readyModels[0]) setModelId(readyModels[0].id);
-    if (!shareModelId && readyModels[0]) setShareModelId(readyModels[0].id);
-    if (!projectId && data?.projects[0]) setProjectId(data.projects[0].id);
-  }, [data, modelId, projectId, readyModels, shareModelId]);
-
-  useEffect(() => {
-    setShares([]);
-    setSharesLoaded(false);
-    setCreatedShareUrl("");
-    setShareMessage("");
-  }, [shareModelId]);
-
-  const associate = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!modelId || !projectId || busy) return;
-    setBusy(true); setActionError("");
-    try {
-      await api("/api/viewer/associations", {
-        method: "POST",
-        headers: { "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify({ projectId, viewerModelId: modelId }),
-      });
-      await reload();
-    } catch (caught) { setActionError((caught as Error).message); }
+/** Admin-only signed-connection check, collapsed below the overview. */
+function ViewerConnectionDetails() {
+  const [result, setResult] = useState<ViewerConnectionPreflight | null>(null);
+  const [busy, setBusy] = useState(false), [error, setError] = useState("");
+  const test = async () => {
+    if (busy) return;
+    setBusy(true); setError(""); setResult(null);
+    try { setResult(await api<ViewerConnectionPreflight>("/api/viewer/connection-preflight")); }
+    catch (caught) { setError((caught as Error).message); }
     finally { setBusy(false); }
   };
-
-  const revoke = async (association: ViewerAssociation) => {
-    if (!window.confirm(`Remove ${association.modelTitle} from ${association.projectName}?`)) return;
-    setBusy(true); setActionError("");
-    try {
-      await api(`/api/viewer/associations/${encodeURIComponent(association.id)}`, {
-        method: "DELETE",
-        headers: { "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify({ reason: "Removed by Operations administrator" }),
-      });
-      await reload();
-    } catch (caught) { setActionError((caught as Error).message); }
-    finally { setBusy(false); }
-  };
-
-  const open = async (association: ViewerAssociation) => {
-    setBusy(true); setActionError("");
-    try {
-      openViewerShell(operationsViewerShellPath({ associationId: association.id, modelId: association.viewerModelId }));
-    }
-    catch (caught) { setActionError((caught as Error).message); }
-    finally { setBusy(false); }
-  };
-
-  const loadShares = async () => {
-    if (!shareModelId || busy) return;
-    setBusy(true); setActionError(""); setShareMessage("");
-    try {
-      const value = await api<{ shares: ViewerPublicShareSummary[] }>(
-        `/api/viewer/models/${encodeURIComponent(shareModelId)}/shares`,
-      );
-      setShares(value.shares); setSharesLoaded(true);
-    } catch (caught) { setActionError((caught as Error).message); }
-    finally { setBusy(false); }
-  };
-
-  const createPublicShare = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!shareModelId || (!shareNeverExpires && !shareExpiry) || busy) return;
-    if (shareNeverExpires && !window.confirm("Create a link that never expires? It will remain active until explicitly revoked.")) return;
-    setBusy(true); setActionError(""); setShareMessage(""); setCreatedShareUrl("");
-    try {
-      const created = await api<{ share: ViewerPublicShareSummary; viewUrl: string }>(
-        `/api/viewer/models/${encodeURIComponent(shareModelId)}/shares`,
-        {
-          method: "POST",
-          headers: { "Idempotency-Key": crypto.randomUUID() },
-          body: JSON.stringify({
-            label: shareLabel.trim() || null,
-            expiresAt: shareNeverExpires ? null : new Date(shareExpiry).toISOString(),
-            displayUnits: shareDisplayUnits,
-            ...(sharePassword ? { password: sharePassword } : {}),
-            permissions: { view: true, measure: true, cameras: true, download: shareDownload },
-          }),
-        },
-      );
-      setShares(current => [created.share, ...current.filter(share => share.id !== created.share.id)]);
-      setSharesLoaded(true);
-      setCreatedShareUrl(created.viewUrl);
-      setSharePassword("");
-      setShareMessage("Demo link created. Copy it now—the bearer URL cannot be recovered from the share list.");
-    } catch (caught) { setActionError((caught as Error).message); }
-    finally { setBusy(false); }
-  };
-
-  const revokePublicShare = async (share: ViewerPublicShareSummary) => {
-    if (!window.confirm(`Revoke ${share.label || "this demo link"}? Anyone using it will lose access immediately.`)) return;
-    setBusy(true); setActionError(""); setShareMessage("");
-    try {
-      const value = await api<{ share: ViewerPublicShareSummary }>(
-        `/api/viewer/shares/${encodeURIComponent(share.id)}`,
-        {
-          method: "DELETE",
-          headers: { "Idempotency-Key": crypto.randomUUID() },
-          body: JSON.stringify({ reason: "Revoked by Operations staff" }),
-        },
-      );
-      setShares(current => current.map(item => item.id === value.share.id ? value.share : item));
-      setShareMessage("Demo link revoked.");
-    } catch (caught) { setActionError((caught as Error).message); }
-    finally { setBusy(false); }
-  };
-
-  const testViewerConnection = async () => {
-    if (connectionPreflightBusy) return;
-    setConnectionPreflightBusy(true); setActionError(""); setConnectionPreflight(null);
-    try { setConnectionPreflight(await api<ViewerConnectionPreflight>("/api/viewer/connection-preflight")); }
-    catch (caught) { setActionError((caught as Error).message); }
-    finally { setConnectionPreflightBusy(false); }
-  };
-
-  if (loading && !data) return <Loading />;
-  return <div className="viewer-admin-layout">
-    <ErrorLine error={error || actionError} />
-    {data && !data.enabled && <Card title="3D Viewer is disabled">
-      <p>Enable the Viewer integration only after its URL, service key, routes, and database migration are ready.</p>
-      {canManage && <button type="button" className="button-orange" disabled={connectionPreflightBusy} onClick={() => void testViewerConnection()}>
-        {connectionPreflightBusy ? "Testing Viewer connection…" : "Test Viewer connection"}
-      </button>}
-      {connectionPreflight && <div role="status" aria-live="polite" className="viewer-association-help">
-        <p><strong>Configuration:</strong> {connectionPreflight.configured ? "ready" : "incomplete"}</p>
-        <p><strong>Public health:</strong> {connectionPreflight.publicHealthOk ? "healthy" : connectionPreflight.publicHealthReachable ? "responded but unhealthy" : "unreachable"}</p>
-        <p><strong>Public readiness:</strong> {connectionPreflight.publicReady ? "ready" : connectionPreflight.publicReadyReachable ? `not ready${connectionPreflight.readinessIssueCount === null ? "" : ` (${connectionPreflight.readinessIssueCount} checks failed)`}` : "unreachable"}</p>
-        <p><strong>Signed service authentication:</strong> {connectionPreflight.serviceAuthReachable ? "connected" : "failed"}</p>
-        {viewerServiceAuthGuidance(connectionPreflight.serviceAuthStatus) && <p>{viewerServiceAuthGuidance(connectionPreflight.serviceAuthStatus)}</p>}
-        {connectionPreflight.modelCount !== null && <p><strong>Catalog:</strong> {connectionPreflight.readyModelCount} ready of {connectionPreflight.modelCount} models</p>}
-      </div>}
-    </Card>}
-    {data?.enabled && canManage && <Card title="Associate a model with a client project">
-      <form className="viewer-association-form" onSubmit={associate}>
-        <label>Viewer model<select value={modelId} onChange={event => setModelId(event.target.value)} required>
-          {!readyModels.length && <option value="">No ready Viewer models</option>}
-          {readyModels.map(model => <option key={model.id} value={model.id}>{model.title} ({model.provider})</option>)}
-        </select></label>
-        <label>Client project<select value={projectId} onChange={event => setProjectId(event.target.value)} required>
-          {!data.projects.length && <option value="">No synchronized client projects</option>}
-          {data.projects.map(project => <option key={project.id} value={project.id}>{project.client_name} · {project.project_name}</option>)}
-        </select></label>
-        <button type="submit" className="button-orange" disabled={busy || !modelId || !projectId}>{busy ? "Saving…" : "Associate model"}</button>
-      </form>
-      <p className="viewer-association-help">Client access requires this model association, an explicit Viewer grant, and current client project membership.</p>
-    </Card>}
-    {data?.enabled && <Card title="Model associations"><p>Associations connect models to projects. Client access is checked separately against current project permissions.</p>
-      {!data.associations.length ? <EmptyState title="No model associations" detail="Associate a ready Viewer model with an active client project, then grant client access." /> :
-        <div className="viewer-association-list">{data.associations.map(association => <article key={association.id}>
-          <div><StatusPill tone={association.state === "active" ? "success" : association.state === "source_stale" ? "warning" : "danger"}>{association.state.replace("_", " ")}</StatusPill><h3>{association.modelTitle}</h3><p>{association.clientName} · {association.projectName}</p><small>{association.modelProvider} · model version {association.viewerModelVersionId}</small></div>
-          <div>{association.state === "active" && <button type="button" className="button-orange button-small" disabled={busy} onClick={() => void open(association)}>Open model</button>}{canManage && association.state === "active" && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => void revoke(association)}>Remove association</button>}</div>
-        </article>)}</div>}
-    </Card>}
-    {data?.enabled && data.publicSharesEnabled && <section id="viewer-public-shares"><Card title="Public demo links">
-      <div className="viewer-share-toolbar">
-        <label>Viewer model<select value={shareModelId} onChange={event => setShareModelId(event.target.value)}>
-          {!readyModels.length && <option value="">No ready Viewer models</option>}
-          {readyModels.map(model => <option key={model.id} value={model.id}>{model.title} ({model.provider})</option>)}
-        </select></label>
-        <button type="button" className="button-ghost" disabled={busy || !shareModelId} onClick={() => void loadShares()}>{busy ? "Loading…" : "Load links"}</button>
-      </div>
-      {canCreateShare && <form className="viewer-share-form" onSubmit={createPublicShare}>
-        <label>Label (optional)<input maxLength={120} value={shareLabel} onChange={event => setShareLabel(event.target.value)} placeholder="Client review or demo" /></label>
-        <label>Expires<input type="datetime-local" required={!shareNeverExpires} disabled={shareNeverExpires} value={shareExpiry} min={viewerShareExpiryValue(5 / 1440)} max={viewerShareExpiryValue(30)} onChange={event => setShareExpiry(event.target.value)} /></label>
-        <label className="viewer-share-check"><input type="checkbox" checked={shareNeverExpires} onChange={event => setShareNeverExpires(event.target.checked)} /> Never expires</label>
-        <label>Password (optional)<input type="password" minLength={8} maxLength={128} autoComplete="new-password" value={sharePassword} onChange={event => setSharePassword(event.target.value)} placeholder="At least 8 characters" /></label>
-        <label>Measurement units<select value={shareDisplayUnits} onChange={event => setShareDisplayUnits(event.target.value as "imperial" | "metric")}><option value="imperial">Imperial</option><option value="metric">Metric</option></select></label>
-        <label className="viewer-share-check"><input type="checkbox" checked={shareDownload} onChange={event => setShareDownload(event.target.checked)} /> Allow model download</label>
-        <button type="submit" className="button-orange" disabled={busy || !shareModelId || (!shareNeverExpires && !shareExpiry)}>{busy ? "Creating…" : "Create demo link"}</button>
-      </form>}
-      {createdShareUrl && <div className="viewer-created-share" role="status">
-        <label>New demo link<input readOnly value={createdShareUrl} onFocus={event => event.currentTarget.select()} /></label>
-        <button type="button" className="button-orange button-small" onClick={() => void navigator.clipboard.writeText(createdShareUrl).then(() => setShareMessage("Demo link copied."), () => setShareMessage("Select and copy the link manually."))}>Copy link</button>
-        <a className="button-ghost button-small" href={createdShareUrl} target="_blank" rel="noreferrer">Open link</a>
-      </div>}
-      {shareMessage && <div className="notice" role="status">{shareMessage}</div>}
-      {sharesLoaded && (shares.length ? <div className="viewer-share-list">{shares.map(share => {
-        const expired = Boolean(share.expiresAt && Date.parse(share.expiresAt) <= Date.now());
-        const status = share.revokedAt ? "revoked" : expired ? "expired" : "active";
-        return <article key={share.id}>
-          <div><StatusPill tone={status === "active" ? "success" : status === "expired" ? "warning" : "danger"}>{status}</StatusPill>
-            <h3>{share.label || "Unlabeled demo link"}</h3>
-            <p>{share.hasPassword ? "Password protected" : "No password"} · {share.expiresAt ? `expires ${date(share.expiresAt)}` : "never expires"} · {share.displayUnits === "metric" ? "metric" : "imperial"}</p>
-            <small>{share.accessCount} access{share.accessCount === 1 ? "" : "es"}{share.lastAccessedAt ? ` · last ${date(share.lastAccessedAt)}` : ""}</small>
-          </div>
-          {status === "active" && canRevokeShare && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => void revokePublicShare(share)}>Revoke link</button>}
-        </article>;
-      })}</div> : <EmptyState title="No demo links" detail="Create an expiring link above. Existing links cannot reveal their bearer URL." />)}
-    </Card></section>}
-    {data?.enabled && !data.publicSharesEnabled && (canCreateShare || canRevokeShare) && <Card><EmptyState title="Public Viewer links are disabled" detail="Enable the separate public-share rollout gate after the Viewer hostname, rate limits, and public-route policy are verified." /></Card>}
-  </div>;
+  return <details className="viewer-connection-details">
+    <summary>Connection details</summary>
+    <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void test()}>{busy ? "Testing Viewer connection…" : "Test Viewer connection"}</button>
+    <ErrorLine error={error} />
+    {result && <div role="status" aria-live="polite" className="viewer-association-help">
+      <p><strong>Configuration:</strong> {result.configured ? "ready" : "incomplete"}</p>
+      <p><strong>Public health:</strong> {result.publicHealthOk ? "healthy" : result.publicHealthReachable ? "responded but unhealthy" : "unreachable"}</p>
+      <p><strong>Public readiness:</strong> {result.publicReady ? "ready" : result.publicReadyReachable ? `not ready${result.readinessIssueCount === null ? "" : ` (${result.readinessIssueCount} checks failed)`}` : "unreachable"}</p>
+      <p><strong>Signed service authentication:</strong> {result.serviceAuthReachable ? "connected" : "failed"}</p>
+      {viewerServiceAuthGuidance(result.serviceAuthStatus) && <p>{viewerServiceAuthGuidance(result.serviceAuthStatus)}</p>}
+      {result.modelCount !== null && <p><strong>Catalog:</strong> {result.readyModelCount} ready of {result.modelCount} models</p>}
+    </div>}
+  </details>;
 }
 
 function Configurations({ session }: { session: Session }) {
