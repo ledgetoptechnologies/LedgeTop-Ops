@@ -50,12 +50,21 @@ Cloudflare Workers. See the [Viewer migration runbook](apps/viewer/docs/OPERATIO
 before changing an existing stack. Its services, storage, database, and settings
 stay in place when switching the image name.
 
+TrueNAS proxy generation for DaVinci Resolve lives in
+[`apps/proxy-generator`](apps/proxy-generator/README.md). The
+[combined media-generation stack](apps/media-generation/README.md) runs it
+alongside the thumbnail queue worker, with an optional local thumbnail
+pre-generation overlay. The Viewer remains separately deployed.
+
 ```text
 apps/
   operations/  React/Vite staff UI + Hono Worker API
   client/      React/Vite client UI + Hono Worker API
   ops-sync/    Project Alpha webhook + Cloudflare Access reconciliation Worker
   viewer/      3D Viewer browser app, Node API, worker, and Docker image
+  proxy-generator/  Local Resolve ProRes Proxy generator and Docker image
+  thumbnail-renderer/  Local prebuilt thumbnails and cloud-job thumbnail renderer
+  media-generation/  Combined TrueNAS proxy and thumbnail deployment
 packages/
   shared/      permission and API contracts
   ui/          LTDS branding and reusable React UI
