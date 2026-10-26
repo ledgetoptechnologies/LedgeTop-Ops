@@ -57,7 +57,17 @@ internal static class InstallerMaintenanceTests
                 "unknown ownership/unconfirmed cleanup/disposal failure returns refusal and retains drain ordering");
             if (failure == "ownership") Require(sources.All(source => source.Removals == 0), "failed ownership preflight never begins either removal");
         }
-        Console.WriteLine("Installer maintenance: fake session lifecycle and original-thread singleton drain passed; isolated native absence reads preserved ordinary folders. No registration or real connection cleanup.");
+        foreach (var unavailableMode in new[] { AccessMode.Client, AccessMode.Employee }) {
+            log.Clear(); owner = new Owner(log, thread); sources.Clear();
+            var result = await InstallerMaintenance.RunAsync((true, ReleaseChannel.Pilot), [InstallerMaintenance.RemoveArgument], () => owner, mode => {
+                if (mode == unavailableMode) throw new IOException("Synthetic unknown native registration state.");
+                var session = new FakeSession(log, mode.ToString()); sources.Add(session); return session;
+            });
+            Require(result == 20 && sources.Count == (unavailableMode == AccessMode.Client ? 0 : 1) &&
+                sources.All(source => source.Removals == 0 && source.Disposals == 1) && owner.Disposals == 1,
+                "unavailable native ownership during either source preflight refuses cleanup and drains earlier sessions");
+        }
+        Console.WriteLine("Installer maintenance: injected absence/unknown observations, fake session lifecycle and original-thread drain passed. No native registration queries or real connection cleanup.");
     }
 
     private static void InstallerStartupGate()
@@ -100,10 +110,22 @@ internal static class InstallerMaintenanceTests
             InstallerMaintenance.RefuseUntrackedRootAliases(root, candidate => { calls.Add(candidate); return unchecked((int)0x80070186); });
             Require(calls.Order().SequenceEqual(expected.Order()) && File.ReadAllText(retained) == "keep local bytes",
                 "only canonical known root generations are observed; exact native absence permits ordinary retained folders unchanged");
-            foreach (var status in new[] { 0, 390, 1, unchecked((int)0x80070005), unchecked((int)0x80070185), unchecked((int)0x80070187) }) {
+            foreach (var status in new[] { 0, 390, 1, unchecked((int)0x80070005), unchecked((int)0x80004001), unchecked((int)0x80070185), unchecked((int)0x80070187) }) {
                 var refused = false;
                 try { InstallerMaintenance.RefuseUntrackedRootAliases(root, _ => status); } catch (IOException) { refused = true; }
                 Require(refused, "registered root with any context, raw Win32 code, neighboring/unknown HRESULT cannot prove native absence");
+            }
+            foreach (var unknownCandidate in expected) {
+                calls.Clear(); var refused = false;
+                try {
+                    InstallerMaintenance.RefuseUntrackedRootAliases(root, candidate => {
+                        calls.Add(candidate);
+                        return candidate == unknownCandidate ? unchecked((int)0x80004001) : unchecked((int)0x80070186);
+                    });
+                } catch (IOException) { refused = true; }
+                Require(refused && calls.Contains(unknownCandidate) && calls.All(expected.Contains) &&
+                    expected.All(Directory.Exists) && File.ReadAllText(retained) == "keep local bytes",
+                    "one unavailable canonical generation refuses the whole observation even when other generations report exact absence");
             }
             foreach (var error in new Exception[] { new IOException("Native leaf/ancestor alias refused."), new UnauthorizedAccessException("Native observation unavailable.") }) {
                 var refused = false;
@@ -112,8 +134,9 @@ internal static class InstallerMaintenanceTests
                 Require(refused, "native alias validation/access errors propagate as maintenance refusal without adopting or unregistering");
             }
             Require(File.ReadAllText(retained) == "keep local bytes", "all observations preserve retained content");
-            InstallerMaintenance.RefuseUntrackedRootAliases(root);
-            Require(File.ReadAllText(retained) == "keep local bytes", "real native absence reads preserve ordinary retained folders");
+            // Synthetic acceptance must not call the default native inspector: a hosted runner can
+            // legitimately lack Cloud Files support. Production must continue refusing that unknown
+            // state; only the injected exact absence status above proves the success branch here.
         } finally {
             var full = Path.GetFullPath(parent);
             if (!full.StartsWith(Path.GetFullPath(Path.GetTempPath()) + "ltfiles-maintenance-observe-", StringComparison.OrdinalIgnoreCase))

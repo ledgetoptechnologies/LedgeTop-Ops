@@ -68,6 +68,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("Explorer settings require explicit start, preserve files on removal and drain on quit", () => ExplorerPreviewWindowTests.Run(screenshots)),
     ("Connected Explorer coordinates selected sign-in frozen inventory offline removal and cancellation", ConnectedExplorerSessionTests.Run),
     ("Installed updates validate cached policy and drain before replacement", InstalledUpdateCoordinatorTests.Run),
+    ("EXE update handoff preserves maintenance and recovery boundaries without installation", ExeUpdateHandoffTests.Run),
     ("Installer maintenance validates fixed pilot ownership and drains offline cleanup", InstallerMaintenanceTests.Run),
     ("Folder launcher keeps dispatcher and Quit responsive while Windows Shell is blocked", () => BackgroundFolderLauncherTests.Run(screenshots)),
 }.Concat(ExplorerCatalogSnapshotTests.Groups).ToArray();
@@ -77,6 +78,8 @@ var selectedGroups = args.Contains("--folder-launcher-only")
     ? groups.Where(group => group.Name.StartsWith("Installer maintenance", StringComparison.Ordinal)).ToArray()
     : args.Contains("--installed-updates-only")
     ? groups.Where(group => group.Name.StartsWith("Installed updates", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--exe-update-handoff-only")
+    ? groups.Where(group => group.Name.StartsWith("EXE update handoff", StringComparison.Ordinal)).ToArray()
     : args.Contains("--explorer-catalog-only")
     ? groups.Where(group => group.Name.StartsWith("Explorer catalog", StringComparison.Ordinal)).ToArray()
     : args.Contains("--connected-coordinator-only")
