@@ -51,9 +51,9 @@ export function directShareErrorText(error){
 }
 
 export function directShareForm({projectName,tasks,access,query='',taskId=null}){
-  const clients=access.clients||[],taskMode=Boolean(taskId);
+  const clients=access.clients||[];
   const options=clients.map(client=>`<option value="${esc(directClientKey(client))}">${esc(directClientLabel(client))}</option>`).join('');
-  const taskList=tasks.length?tasks.map(task=>`<label class="check"><input type="checkbox" name="taskId" value="${esc(task.id)}" ${task.id===taskId?'checked':''} ${taskMode?'':'disabled'}> ${esc(task.name)}</label>`).join('')
+  const taskList=tasks.length?tasks.map(task=>`<label class="check"><input type="checkbox" name="taskId" value="${esc(task.id)}" ${task.id===taskId?'checked':''}> ${esc(task.name)}</label>`).join('')
     :'<p class="form-note">No tasks in this project have a published model yet.</p>';
   return `<form id="direct-client-grant-form" class="manage-form direct-share-form">
 <fieldset><legend>Client</legend>
@@ -63,8 +63,8 @@ ${access.clientsNextCursor?'<button type="button" class="secondary-button" data-
 <p class="form-note">Authorized members of this client’s portal account can open what you share.</p>
 </fieldset>
 <fieldset><legend>What to share</legend>
-<label class="check"><input type="radio" name="scope" value="project" ${taskMode?'':'checked'}> The whole project, including tasks published later</label>
-<label class="check"><input type="radio" name="scope" value="tasks" ${taskMode?'checked':''} ${tasks.length?'':'disabled'}> Only the tasks I choose</label>
+<label class="check"><input type="radio" name="scope" value="project"> The whole project, including tasks published later</label>
+<label class="check"><input type="radio" name="scope" value="tasks" checked ${tasks.length?'':'disabled'}> Only the tasks I choose</label>
 <div class="direct-share-tasks" data-direct-task-list>${taskList}</div>
 </fieldset>
 <label><span>Expiry (optional)</span><input name="expiresAt" type="datetime-local"></label>
@@ -77,7 +77,7 @@ ${PERMISSIONS.map(([name,label,checked])=>`<label class="check"><input type="che
 
 export function readDirectShareForm(form,{projectId,projectName,tasks,clients}){
   const client=clients.find(item=>directClientKey(item)===form.elements.client.value)||null;
-  const scope=form.querySelector('input[name="scope"]:checked')?.value==='tasks'?'tasks':'project';
+  const scope=form.querySelector('input[name="scope"]:checked')?.value==='project'?'project':'tasks';
   const chosen=scope==='tasks'?[...form.querySelectorAll('input[name="taskId"]')].filter(input=>input.checked).map(input=>input.value):[];
   const taskNames=chosen.map(id=>tasks.find(task=>task.id===id)?.name||'Task');
   return {client,scope,chosen,summary:directScopeSummary({clientName:client?directClientLabel(client):'',projectName,scope,taskNames}),
