@@ -17,14 +17,10 @@ THUMBNAIL = ROOT.parent / "thumbnail-renderer" / "compose.truenas.yaml"
 STANDALONE = ROOT.parent / "thumbnail-renderer" / "compose.truenas.queue-renderer.yaml"
 VALUES = {
     "MEDIA_JOBS_HOST_PATH": "/synthetic/jobs",
-    "LTDSPROXY_STATE_HOST_PATH": "/synthetic/proxy-state",
+    "WORKERS_APP_DATA_HOST_PATH": "/synthetic/workers-app-data",
     "THUMBNAIL_INGEST_SECRET": "synthetic-renderer-token",
 }
 OPTIONAL = {
-    "LTDSTHUMB_ARTIFACTS_HOST_PATH": "/synthetic/artifacts",
-    "LTDSTHUMB_WORK_HOST_PATH": "/synthetic/work",
-    "LTDSTHUMB_CACHE_HOST_PATH": "/synthetic/cache",
-    "LTDSTHUMB_STATE_HOST_PATH": "/synthetic/thumbnail-state",
     "LTDSTHUMB_INGEST_URL": "https://ops.example.test/api/internal/thumbnail-ingest/v1",
     "LTDSTHUMB_BROKER_ACCESS_CLIENT_ID": "synthetic-access-id",
     "LTDSTHUMB_BROKER_ACCESS_CLIENT_SECRET": "synthetic-access-secret",
@@ -39,7 +35,7 @@ def render(files, values, expect_success=True):
     # Do not inherit operator substitution values or .env contents.
     names = set(re.findall(r"\$\{([A-Z0-9_]+)", "".join(file.read_text() for file in (BASE, PREBUILT, ALL, THUMBNAIL, STANDALONE))))
     env = {key: value for key, value in os.environ.items() if key not in names and key != "COMPOSE_PROJECT_NAME"}
-    with tempfile.TemporaryDirectory(prefix="ltds-compose-test-") as temp:
+    with tempfile.TemporaryDirectory(prefix="proxy-compose-test-") as temp:
         env_file = Path(temp) / "synthetic.env"
         env_file.write_text("".join(f"{key}={value}\n" for key, value in values.items()))
         command = ["docker", "compose", "--env-file", str(env_file)]
@@ -85,7 +81,7 @@ class MediaComposeTests(unittest.TestCase):
                 self.assertFalse(service.get("privileged", False))
                 self.assertGreater(float(service["cpus"]), 0)
                 self.assertRegex(str(service["mem_limit"]), r"^[1-9][0-9]*(?:[bkmgBKMG])?$")
-                self.assertRegex(service["image"], r"^ghcr\.io/ledgetoptechnologies/ltds-[a-z-]+:latest$")
+                self.assertRegex(service["image"], r"^ghcr\.io/ledgetoptechnologies/[a-z-]+:latest$")
                 self.assertEqual(service["pull_policy"], "always")
                 for volume in service.get("volumes", []):
                     # Some Compose versions omit explicit false values when
@@ -110,10 +106,24 @@ class MediaComposeTests(unittest.TestCase):
         decoder_mounts = {volume["target"]: volume for volume in decoder["volumes"]}
         self.assertFalse(proxy_mounts["/data/jobs"].get("read_only", False))
         self.assertEqual(proxy_mounts["/data/jobs"]["source"], "/synthetic/jobs")
-        self.assertEqual(proxy_mounts["/state"]["source"], "/synthetic/proxy-state")
+        self.assertEqual(proxy_mounts["/app-data"]["source"], "/synthetic/workers-app-data")
+        self.assertEqual(proxy["environment"]["STATE_DIR"], "/app-data/proxy-state")
         self.assertTrue(decoder_mounts["/data/jobs"]["read_only"])
         self.assertEqual(decoder_mounts["/data/jobs"]["source"], "/synthetic/jobs")
         self.assertNotIn("/data/jobs", {volume["target"] for volume in broker["volumes"]})
+        for service in (proxy, decoder, broker):
+            app_mounts = [volume for volume in service["volumes"] if volume["target"] == "/app-data"]
+            self.assertEqual(len(app_mounts), 1)
+            self.assertEqual(app_mounts[0]["source"], "/synthetic/workers-app-data")
+            self.assertFalse(app_mounts[0].get("read_only", False))
+        self.assertEqual(set(decoder_mounts), {"/data/jobs", "/app-data"})
+        self.assertEqual({volume["target"] for volume in broker["volumes"]}, {"/app-data"})
+        self.assertEqual(decoder["environment"]["LTDSTHUMB_ARTIFACTS_DIR"], "/app-data/thumbnail-artifacts")
+        self.assertEqual(decoder["environment"]["LTDSTHUMB_WORK_DIR"], "/app-data/thumbnail-work/jobs")
+        self.assertEqual(decoder["environment"]["LTDSTHUMB_CACHE_DIR"], "/app-data/thumbnail-cache")
+        self.assertEqual(decoder["environment"]["LTDSTHUMB_STATE_DIR"], "/app-data/thumbnail-state/decoder")
+        self.assertEqual(broker["environment"]["LTDSTHUMB_ARTIFACTS_DIR"], "/app-data/thumbnail-artifacts")
+        self.assertEqual(broker["environment"]["LTDSTHUMB_STATE_DIR"], "/app-data/thumbnail-state/broker")
         self.assertFalse(queue.get("volumes"))
         self.assertEqual(queue["environment"]["CF_ACCESS_CLIENT_ID"], "")
         self.assertEqual(broker["environment"]["CF_ACCESS_CLIENT_ID"], "synthetic-access-id")
@@ -121,9 +131,10 @@ class MediaComposeTests(unittest.TestCase):
         self.assertTrue(any(mount.startswith("/scratch:") for mount in queue["tmpfs"]))
 
     def test_required_values_fail_closed(self):
-        for missing in ("MEDIA_JOBS_HOST_PATH", "LTDSPROXY_STATE_HOST_PATH", "THUMBNAIL_INGEST_SECRET"):
+        for missing in ("MEDIA_JOBS_HOST_PATH", "WORKERS_APP_DATA_HOST_PATH", "THUMBNAIL_INGEST_SECRET"):
             with self.subTest(missing=missing):
                 render([BASE], {key: value for key, value in VALUES.items() if key != missing}, expect_success=False)
+                render([ALL], {key: value for key, value in (VALUES | OPTIONAL).items() if key != missing}, expect_success=False)
         render([BASE, PREBUILT], VALUES, expect_success=False)
 
     def test_custom_user_owns_queue_tmpfs(self):
@@ -150,13 +161,17 @@ class MediaComposeTests(unittest.TestCase):
 
     def test_latest_images_and_queue_profile_in_every_deployment(self):
         expected = {
-            "proxy-generator": "ghcr.io/ledgetoptechnologies/ltds-proxy-generator:latest",
-            "queue-renderer": "ghcr.io/ledgetoptechnologies/ltds-thumbnail-queue-worker:latest",
-            "decoder": "ghcr.io/ledgetoptechnologies/ltds-thumbnail-decoder:latest",
-            "broker": "ghcr.io/ledgetoptechnologies/ltds-thumbnail-broker:latest",
+            "proxy-generator": "ghcr.io/ledgetoptechnologies/proxy-generator:latest",
+            "queue-renderer": "ghcr.io/ledgetoptechnologies/thumbnail-queue-worker:latest",
+            "decoder": "ghcr.io/ledgetoptechnologies/thumbnail-decoder:latest",
+            "broker": "ghcr.io/ledgetoptechnologies/thumbnail-broker:latest",
         }
         thumbnail_values = VALUES | OPTIONAL | {
             "LTDSTHUMB_JOBS_HOST_PATH": "/synthetic/jobs",
+            "LTDSTHUMB_ARTIFACTS_HOST_PATH": "/synthetic/artifacts",
+            "LTDSTHUMB_WORK_HOST_PATH": "/synthetic/work",
+            "LTDSTHUMB_CACHE_HOST_PATH": "/synthetic/cache",
+            "LTDSTHUMB_STATE_HOST_PATH": "/synthetic/thumbnail-state",
             "CF_ACCESS_CLIENT_ID": "synthetic-access-id",
             "CF_ACCESS_CLIENT_SECRET": "synthetic-access-secret",
         }
@@ -168,9 +183,13 @@ class MediaComposeTests(unittest.TestCase):
                 with self.subTest(service=name):
                     self.assertEqual(service["image"], expected[name])
                     self.assertEqual(service["pull_policy"], "always")
+                    self.assertFalse(service.get("container_name", "").startswith("ltds-"))
+        thumbnail_configuration = render([THUMBNAIL], thumbnail_values)
+        self.assertEqual(thumbnail_configuration["name"], "thumbnails")
+        self.assertTrue(all(not network["name"].startswith("ltds-") for network in thumbnail_configuration["networks"].values()))
         for services in (self.base, self.all):
             queue = services["queue-renderer"]
-            self.assertEqual(queue["container_name"], "ltds-thumbnail-gen")
+            self.assertEqual(queue["container_name"], "thumbnail-gen")
             self.assertEqual(float(queue["cpus"]), 8.0)
             self.assertEqual(int(queue["mem_limit"]), 10 * 1024**3)
             self.assertEqual(queue["pids_limit"], 256)
@@ -179,16 +198,17 @@ class MediaComposeTests(unittest.TestCase):
     def test_proxy_generation_name_and_image_baked_runtime(self):
         for files, values in (([BASE], VALUES), ([ALL], VALUES | OPTIONAL)):
             configuration = render(files, values)
-            self.assertEqual(configuration["name"], "ltds-proxy-generation")
+            self.assertEqual(configuration["name"], "proxy-generation")
             proxy = configuration["services"]["proxy-generator"]
             self.assertIsNone(proxy.get("entrypoint"))
             self.assertIsNone(proxy.get("command"))
-            self.assertEqual({mount["target"] for mount in proxy["volumes"]}, {"/data/jobs", "/state"})
+            self.assertEqual({mount["target"] for mount in proxy["volumes"]}, {"/data/jobs", "/app-data"})
             self.assertFalse(any("SCRIPT" in key for key in proxy["environment"]))
             self.assertFalse(any("ffmpeg" in mount["source"].lower() or mount["source"].endswith(".sh") for mount in proxy["volumes"]))
         dockerfile = (ROOT.parent / "proxy-generator" / "Dockerfile").read_text()
         self.assertIn("COPY --chown=568:568 proxy_generator.py /app/proxy_generator.py", dockerfile)
         self.assertIn('ENTRYPOINT ["/usr/bin/tini", "--", "python3", "/app/proxy_generator.py"]', dockerfile)
+        self.assertIn("WORKERS_APP_DATA_HOST_PATH=/mnt/Plugins/App_Data/LedgeTop-Ops-Workers", (ROOT / ".env.example").read_text())
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-# LTDS Proxy Generation
+# Proxy Generation
 
 One TrueNAS SCALE Custom App can run proxy generation and Operations thumbnail
 processing as independent services. The default deployment contains two services:
@@ -8,11 +8,11 @@ processing as independent services. The default deployment contains two services
 | `proxy-generator` | Resolve editing proxies from local videos | Jobs read/write; writes sibling `Proxy/` files | None |
 | `queue-renderer` | Operations image, PDF and video thumbnail jobs from R2 | None; temporary sources stay in RAM | Outbound HTTPS |
 
-Name the app **LTDS Proxy Generation** in the TrueNAS UI; the Compose project
-name is `ltds-proxy-generation`. All proxy runtime code is baked into the
+Name the app **Proxy Generation** in the TrueNAS UI; the Compose project
+name is `proxy-generation`. All proxy runtime code is baked into the
 published Docker image. No host-mounted `proxy-generator.sh`, old script
 directory, or FFmpeg installation on the server is required. The only proxy
-binds are the existing Jobs dataset and its own persistent state dataset.
+binds are the existing Jobs dataset and the shared workers application dataset.
 
 The [single-file four-service stack](compose.truenas.all.yaml) includes proxy
 generation, the thumbnail queue, local decoder, and broker in one YAML document
@@ -22,8 +22,8 @@ profiles, file merge, or dependency on the Viewer.
 
 The [optional prebuilt overlay](compose.truenas.prebuilt.yaml) adds the existing
 local thumbnail `decoder` and registration `broker`. It is separate from the
-default YAML so the default installation never requires their images,
-credentials, or datasets. The Viewer remains in its existing app; it is not a
+default YAML so the default installation never requires their images or
+credentials. The Viewer remains in its existing app; it is not a
 dependency of these services. No service waits for another at startup.
 
 ## Default installation
@@ -40,10 +40,12 @@ alter the Jobs dataset, or stop any existing app.
    and this stack is not a live automatic updater. Configure a private registry
    credential in the Apps UI if required. Commit tags and digest receipts remain
    available for traceability; deployment requires no image substitutions.
-2. Create a private persistent proxy-state dataset under the dedicated
-   `apps/ltds-proxy-generation/` application area and give the selected
-   non-root user/group ownership. The default IDs are `568:568`. Keep that
-   state when upgrading or rolling back: it contains instance locking,
+2. Select the existing shared dataset
+   `/mnt/Plugins/App_Data/LedgeTop-Ops-Workers` as
+   `WORKERS_APP_DATA_HOST_PATH`. Give user/group `568:568` read/write/traverse
+   access to its root. No child directories need to be created manually: the
+   runtimes create their own application folders at startup. Keep this dataset
+   across upgrades and rollbacks because it contains instance locking,
    per-file completion receipts, retries, and health state.
 3. Select the existing Jobs dataset explicitly with `MEDIA_JOBS_HOST_PATH`.
    The supplied reference path is `/mnt/L.T.D.S./Drone_Jobs/Jobs`; verify it
@@ -69,7 +71,38 @@ normal writes to `Proxy/` output, but the mount itself is not a read-only
 security boundary. The thumbnail queue has no Jobs mount and no R2 credential.
 Neither service publishes a port.
 
+## Persistent storage paths
+
+The existing Jobs dataset remains separate. All three disk-using services bind
+the one existing application dataset
+`/mnt/Plugins/App_Data/LedgeTop-Ops-Workers` to `/app-data`. The root dataset
+must exist and be writable by `568:568`; child folders are created recursively
+by the images, with no host setup script required.
+
+| Folder created beneath the application dataset | Used by |
+| --- | --- |
+| `proxy-state` | Proxy completion receipts, retries, lock and health |
+| `thumbnail-artifacts` | Decoder's prebuilt outputs and broker's receipts |
+| `thumbnail-work` | Decoder scratch, including its `jobs/` child |
+| `thumbnail-cache` | Decoder tool cache |
+| `thumbnail-state` | Decoder and broker state in separate child folders |
+
+The default two-service stack creates only `proxy-state`; the full stack creates
+all five. The queue's scratch and cache stay in RAM-backed tmpfs and add no
+persistent host paths. The folder names organize data but do not isolate the
+services from each other's files: proxy, decoder and broker intentionally share
+the same root bind and user. Keep credentials in TrueNAS environment/secret
+configuration, never in this application dataset. Runtime code remains baked
+into the images, rather than stored in an old FFmpeg script directory.
+
 ## Migration from the two existing apps
+
+Switch existing `ltds-*` image references to the unprefixed image names in this
+YAML to receive future releases. Historical prefixed packages remain available,
+but their tags no longer advance. The new dataset layout does not transfer old
+state automatically: if this app was already running, stop it and preserve or
+copy its existing proxy receipts into `<workers dataset>/proxy-state` before
+starting the replacement. Keep the prior state as a rollback copy.
 
 Keep the old app definitions, script, image references, and existing proxies
 for rollback. Do not run both old and new proxy generators against the same
@@ -85,7 +118,7 @@ one. Set `LTDSPROXY_SCAN_DIRS` to that synthetic top-level directory and
 720-high profile uses regeneration revision six; do not begin testing with
 the entire production library selected. Confirm a proxy opens in Resolve and links correctly, a second scan
 skips it, and a synthetic Operations thumbnail completes. Then restore the
-normal scan scope and the intended pool sizes. Keep the persistent state
+normal scan scope and the intended pool sizes. Keep the shared application
 dataset across restarts. Changing the regeneration version is an explicit
 request to regenerate proxies, so do not bump it merely for an image upgrade.
 Follow the [proxy runtime migration behavior](../proxy-generator/README.md)
@@ -105,7 +138,7 @@ The default proxy pool is six jobs, with two FFmpeg encoder threads per job;
 the thumbnail pool is four. They share server CPU, memory and storage, even
 though they do not depend on each other. Defaults cap the proxy container at
 12 CPUs/12 GiB and the queue at 8 CPUs/10 GiB. The queue preserves the supplied
-`ltds-thumbnail-gen` name, 256 PID limit and three rotated logs. Its 4 GiB scratch tmpfs
+`thumbnail-gen` name, 256 PID limit and three rotated logs. Its 4 GiB scratch tmpfs
 counts toward its memory use. Adjust pool sizes and limits together in the
 UI after checking headroom; adding local pre-generation adds more load.
 
@@ -130,14 +163,15 @@ two default services or add startup dependencies.
 
 | Additional service | Work | Access |
 | --- | --- | --- |
-| `decoder` | Scans local stills/PDFs and builds immutable WebP thumbnails | Jobs read-only, private cache/scratch/state; no network or credentials |
-| `broker` | Verifies exact source/derivative identities and registers with Operations | Artifact/state datasets and outbound HTTPS; no Jobs bind or media decoder |
+| `decoder` | Scans local stills/PDFs and builds immutable WebP thumbnails | Jobs read-only and shared application data; no network or credentials |
+| `broker` | Verifies exact source/derivative identities and registers with Operations | Shared application data and outbound HTTPS; no Jobs bind or media decoder |
 
 For a TrueNAS editor accepting one document, use
 [compose.truenas.all.yaml](compose.truenas.all.yaml) directly. It runs all four
 services as `568:568`, including the queue scratch/cache ownership. Enter its
 required host paths, token and broker credentials through
-the UI. Confirm all selected datasets already exist with that user's access.
+the UI. Confirm Jobs and the shared application dataset already exist with
+that user's access; child application folders are created by the images.
 The decoder/broker credentials and rclone proof prerequisites still apply;
 starting all four does not bypass them.
 
@@ -156,16 +190,18 @@ file. If inspecting an interpolated configuration locally, its output contains
 secrets: never paste it into chat, logs, or the repository. Do not run `up` or
 other deployment commands on the workstation as part of this rendering step.
 
-The overlay needs the four private thumbnail datasets, two extra `:latest` images,
+The overlay reuses the same shared application dataset and needs two extra `:latest` images,
 broker-only bucket-scoped Object Read credentials, the exact ingest endpoint,
 and a Cloudflare Access service-token pair. Broker Access settings use separate
 `LTDSTHUMB_BROKER_ACCESS_*` substitutions so enabling the broker does not add
 Access headers to the queue's incoming endpoint. Read the current
 [thumbnail installation and storage requirements](../thumbnail-renderer/README.md)
-before enabling it.
+before enabling it. That standalone deployment uses separate binds; this
+combined stack uses the one shared workers dataset described above.
 
 The broker does not upload derivatives. A separately configured one-way
-TrueNAS Cloud Sync/rclone task must map only the persistent `prebuilt/` cache
+TrueNAS Cloud Sync/rclone task must map only
+`/mnt/Plugins/App_Data/LedgeTop-Ops-Workers/thumbnail-artifacts/prebuilt/`
 to `_ltds/derivatives/thumbnails/v1/prebuilt/`. It must never target the parent
 derivative namespace, `managed/`, or original files. This stack creates no
 Cloud Sync task and changes no existing task.

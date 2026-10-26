@@ -32,7 +32,7 @@ test("published queue-worker image owns every required decoder", () => {
 
 test("TrueNAS service has no source mount and uses bounded tmpfs", () => {
   const service = compose.slice(compose.indexOf("  queue-renderer:"), compose.indexOf("\nnetworks:"));
-  assert.match(service, /image: "?ghcr\.io\/ledgetoptechnologies\/ltds-thumbnail-queue-worker:latest"?/);
+  assert.match(service, /image: "?ghcr\.io\/ledgetoptechnologies\/thumbnail-queue-worker:latest"?/);
   assert.match(service, /LTDSTHUMB_WORKER_CONCURRENCY/);
   assert.match(service, /\/scratch:rw,nosuid,nodev,noexec,size=/);
   assert.doesNotMatch(service, /volumes:/);
@@ -41,9 +41,9 @@ test("TrueNAS service has no source mount and uses bounded tmpfs", () => {
 
 test("standalone queue renderer follows verified main latest and remains hardened", () => {
   const service = queueCompose.slice(queueCompose.indexOf("  queue-renderer:"));
-  assert.match(service, /image: "ghcr\.io\/ledgetoptechnologies\/ltds-thumbnail-queue-worker:latest"/);
+  assert.match(service, /image: "ghcr\.io\/ledgetoptechnologies\/thumbnail-queue-worker:latest"/);
   assert.match(service, /pull_policy: always/);
-  assert.match(service, /container_name: ltds-thumbnail-gen/);
+  assert.match(service, /container_name: thumbnail-gen/);
   assert.doesNotMatch(service, /:stable\b|@sha256:/);
   assert.match(service, /user: "568:568"/);
   assert.match(service, /init: true/);
@@ -100,8 +100,15 @@ test("proxy latest promotes the canary-tested main image without changing its di
   assert.ok(canary >= 0 && validation > canary && publication > validation && promotion > publication);
   const block = proxyPublishWorkflow.slice(publication, proxyPublishWorkflow.indexOf("Upload immutable deployment receipt"));
   assert.match(block, /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
-  assert.match(block, /docker tag ltds-proxy-generator:canary "\$tag"/);
+  assert.match(block, /docker tag proxy-generator:canary "\$tag"/);
   assert.match(block, /"\$\{image\}:latest" "\$\{image\}@\$\{digest\}"/);
   assert.match(block, /"\$latest_digest" != "\$digest"/);
   assert.match(proxyPublishWorkflow, /cancel-in-progress: false/);
+});
+
+test("publishers use the unprefixed image names expected by deployment", () => {
+  assert.match(proxyPublishWorkflow, /image="ghcr\.io\/\$\{GITHUB_REPOSITORY_OWNER,,\}\/proxy-generator"/);
+  assert.match(publishWorkflow, /image="ghcr\.io\/\$\{owner\}\/thumbnail-\$\{\{ matrix\.target \}\}"/);
+  assert.doesNotMatch(proxyPublishWorkflow, /\/ltds-proxy-generator|tag ltds-proxy-generator/);
+  assert.doesNotMatch(publishWorkflow, /\/ltds-thumbnail-/);
 });

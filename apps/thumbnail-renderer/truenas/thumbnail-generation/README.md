@@ -34,7 +34,7 @@ new images use the explicit `includeKind=all` contract.
 
 ## Deployment
 
-Use `ltds-thumbnail-queue-worker:latest` in the supplied deployment YAML. The
+Use `thumbnail-queue-worker:latest` in the supplied deployment YAML. The
 publish workflow advances `latest` only after the verified `main` queue image
 passes the all-media container smoke test. Commit tags and digest receipts
 remain available for traceability; they are not required deployment pins.
