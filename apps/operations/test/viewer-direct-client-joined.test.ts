@@ -127,7 +127,7 @@ async function fixture(){
 }
 describe('joined direct Viewer transport, native Client RPC and real D1 authority',()=>{
  it('creates through signed Viewer transport and exposes only the recipient exact task through the native Client issuer',async()=>{
-  const f=await fixture();const created=await f.request(publicPath,{method:'POST',body:{grant:taskGrant}});
+  const f=await fixture();const created=await f.request(publicPath,{method:'POST',body:taskGrant});
   expect(created.status).toBe(201);const {grant}=await created.json() as any;
   expect(grant).toMatchObject({sourceId:context.sourceId,workspaceId:context.workspaceId,taskId:task.id,scopeType:'task'});
   expect(await f.delivery.prepare('SELECT created_by_staff_id FROM viewer_direct_client_grants').first<string>('created_by_staff_id')).toBe('staff-one');
@@ -148,10 +148,10 @@ describe('joined direct Viewer transport, native Client RPC and real D1 authorit
  });
  it('rejects tampered HMAC and replayed machine nonces before new grant writes, and rehydrates current staff status',async()=>{
   const f=await fixture();f.setTamper(true);
-  expect((await f.request(publicPath,{method:'POST',body:{grant:taskGrant}})).status).toBe(401);
+  expect((await f.request(publicPath,{method:'POST',body:taskGrant})).status).toBe(401);
   expect(await f.delivery.prepare('SELECT count(*) n FROM viewer_direct_client_grants').first<number>('n')).toBe(0);
   expect(await f.ops.prepare('SELECT count(*) n FROM viewer_event_nonces').first<number>('n')).toBe(0);
-  f.setTamper(false);expect((await f.request(publicPath,{method:'POST',body:{grant:taskGrant}})).status).toBe(201);
+  f.setTamper(false);expect((await f.request(publicPath,{method:'POST',body:taskGrant})).status).toBe(201);
   expect((await f.replay()).status).toBe(409);
   expect(await f.delivery.prepare('SELECT count(*) n FROM viewer_direct_client_grant_audit').first<number>('n')).toBe(1);
   await f.ops.prepare("UPDATE staff_users SET status='inactive' WHERE id='staff-one'").run();
@@ -160,16 +160,16 @@ describe('joined direct Viewer transport, native Client RPC and real D1 authorit
  it('shares the whole Viewer project without a PA project and dynamically includes later publication',async()=>{
   const f=await fixture(),projectGrant={...taskGrant,scopeType:'project',taskId:null,includeFuturePublished:true};
   boundary.catalog.mockResolvedValue({schemaVersion:1,project:{id:'viewer-project',displayName:'Property survey'},tasks:[],nextCursor:null});
-  expect((await f.request(publicPath,{method:'POST',body:{grant:projectGrant}})).status).toBe(201);
+  expect((await f.request(publicPath,{method:'POST',body:projectGrant})).status).toBe(201);
   expect((await (await f.client('/viewer')).json() as any).items).toEqual([]);
   boundary.catalog.mockResolvedValue({schemaVersion:1,project:{id:'viewer-project',displayName:'Property survey'},tasks:[task,{...task,id:'future-task',displayName:'Later flight'}],nextCursor:null});
   expect((await (await f.client('/viewer')).json() as any).items.map((item:any)=>item.taskId)).toEqual(['task-one','future-task']);
   boundary.catalog.mockResolvedValueOnce({schemaVersion:1,project:{id:'viewer-project',displayName:'Property survey'},tasks:[task],nextCursor:null});
-  const wrong=await f.request(publicPath,{method:'POST',key:'joined-wrong-recipient-01',body:{grant:{...taskGrant,workspaceId:'workspace-two'}}});
+  const wrong=await f.request(publicPath,{method:'POST',key:'joined-wrong-recipient-01',body:{...taskGrant,workspaceId:'workspace-two'}});
   expect(wrong.status).toBe(409);expect(await wrong.json()).toMatchObject({code:'relationship_missing'});
  });
  it('propagates pending202 and completed200 revocation across the real signed bridge and denies local reads immediately',async()=>{
-  const f=await fixture();const {grant}=await (await f.request(publicPath,{method:'POST',body:{grant:taskGrant}})).json() as any;
+  const f=await fixture();const {grant}=await (await f.request(publicPath,{method:'POST',body:taskGrant})).json() as any;
   boundary.revoke.mockRejectedValueOnce(new Error('Controlled remote outage'));
   const revoke=()=>f.request(`${publicPath}/${grant.grantId}`,{method:'DELETE',key:'joined-revoke-key-0001',body:{reason:'Synthetic owner revoke'}});
   const pending=await revoke();expect(pending.status).toBe(202);expect(await pending.json()).toMatchObject({sessionRevocation:{pending:true}});
