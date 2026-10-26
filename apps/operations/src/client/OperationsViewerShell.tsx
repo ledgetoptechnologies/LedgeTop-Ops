@@ -78,6 +78,6 @@ export function OperationsViewerShell({ route }: { route: OperationsViewerShellR
         : api<ViewerShellSessionGrant>(`/api/viewer/associations/${encodeURIComponent(route.associationId)}/session`,
           { method: "POST", headers: { "Idempotency-Key": key } });
     }}
-    onExit={() => window.location.assign(native ? "/viewer/models" : "/viewer")}
+    onExit={() => window.location.assign("/viewer")}
   />;
 }

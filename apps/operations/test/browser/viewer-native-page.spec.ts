@@ -12,12 +12,6 @@ function session(permissions: string[]) {
 const target = (workspaceId: string, workspaceName: string, sourceId = "project-alpha:primary") => ({ sourceId, workspaceId, workspaceName,
   projectPublicId: "pa-project-7", projectId: "project-7", projectName: "Seawall survey", clientName: "Coastal Engineering",
   generationId: "generation-3", sourceVersion: "2026-10-19T00:00:00.000Z" });
-const model = (id: string, title: string) => ({ id, title, provider: "webodm", status: "ready", available: true,
-  activeVersion: { id: `${id}-v1`, providerVersionId: "1", createdAt: date, updatedAt: date }, updatedAt: date });
-const association = { id: "association-7", projectId: "project-7", projectAlphaProjectId: "pa-project-7", projectSourceVersion: "2026-10-19T00:00:00.000Z",
-  projectName: "Seawall survey", clientName: "Coastal Engineering", viewerModelId: "model-seawall", viewerModelVersionId: "model-seawall-v1",
-  viewerResourceVersion: "1", modelTitle: "Seawall orthomosaic", modelProvider: "webodm", modelStatus: "ready", state: "active", version: 1,
-  createdAt: date, updatedAt: date, revokedAt: null };
 
 async function record(route: Route, calls: Call[]) {
   const request = route.request(), url = new URL(request.url());
@@ -88,11 +82,12 @@ const grant = { grant: "g".repeat(43), grantExpiresAt: new Date(Date.now() + 60_
 const processingRoutes = (url: URL, method: string, route: Route) => url.pathname === "/api/viewer/processing" ? route.fulfill({ json: processingBootstrap })
   : url.pathname === "/api/viewer/admin-grant" && method === "POST" ? route.fulfill({ status: 201, json: grant }) : undefined;
 
-test("a processing notification link opens the attempt in the native Processing section with the advertised recovery", async ({ page, context }) => {
+test("a processing notification link still opens the attempt review with the advertised recovery", async ({ page, context }) => {
   const ops = await mockOps(page, ["viewer.view"], processingRoutes);
   const viewer = await mockViewer(context, { recovery: { "attempt-ben": true }, recoverStatuses: [503, 202] });
   await page.goto("/operations/processing?attemptId=attempt-ben");
-  await expect(page.getByRole("navigation", { name: "3D Viewer sections" }).getByRole("button", { name: "Processing" })).toHaveAttribute("aria-current", "page");
+  await expect(page).toHaveURL(/\/operations\/processing\?attemptId=attempt-ben$/);
+  await expect(page.getByRole("link", { name: "Back to 3D models" })).toHaveAttribute("href", "/viewer");
   const review = page.locator(".ltds-card").filter({ has: page.getByRole("heading", { name: "Requested processing review" }) });
   await expect(review.getByRole("heading", { name: "Ben's ranch survey" })).toBeVisible();
   const recovery = review.getByRole("region", { name: "Model import recovery" });
@@ -113,7 +108,7 @@ test("a processing notification link opens the attempt in the native Processing 
 test("Retry never reprocesses an attempt whose finished import can be recovered", async ({ page, context }) => {
   await mockOps(page, ["viewer.view"], processingRoutes);
   const viewer = await mockViewer(context, { recovery: { "attempt-ben": true, "attempt-other": false } });
-  await page.goto("/viewer/processing");
+  await page.goto("/viewer/processing?attemptId=attempt-other");
   await page.getByRole("navigation", { name: "Processing sections" }).getByRole("button", { name: "Tasks" }).click();
   const ben = page.locator("article").filter({ has: page.getByRole("heading", { name: "Ben's ranch survey" }) });
   await ben.getByRole("button", { name: "Retry" }).click();
@@ -126,105 +121,6 @@ test("Retry never reprocesses an attempt whose finished import can be recovered"
   await other.getByRole("button", { name: "Retry" }).click();
   await expect.poll(() => viewer.filter(call => call.path.endsWith("/attempt-other/retry")).length).toBe(1);
   await expect(other.getByRole("region", { name: "Model import recovery" })).toHaveCount(0);
-});
-
-const nativeData = (associations: unknown[] = [association]) => ({ enabled: true,
-  projects: [target("workspace-coastal", "Coastal Engineering"), target("workspace-harbor", "Harbor Authority")],
-  models: [model("model-seawall", "Seawall orthomosaic"), model("model-ranch", "Ranch 3D mesh"), { ...model("model-busy", "Still processing"), status: "processing" }],
-  associations });
-
-test("staff link a ready model to a native client project with the exact returned target and a retained key", async ({ page }) => {
-  let posts = 0;
-  const ops = await mockOps(page, ["viewer.view", "viewer.manage"], (url, method, route) => {
-    if (url.pathname === "/api/viewer/overview") return route.fulfill({ json: { enabled: false, viewerBaseUrl: null, overview: null } });
-    if (url.pathname === "/api/viewer/native-associations" && method === "GET") return route.fulfill({ json: nativeData() });
-    if (url.pathname === "/api/viewer/native-associations" && method === "POST") { posts += 1; return route.fulfill(posts === 1 ? { status: 503, json: { error: "Viewer unavailable" } } : { status: 201, json: { association, replayed: false } }); }
-    return undefined;
-  });
-  await page.goto("/viewer");
-  await page.getByRole("button", { name: "Client models" }).click();
-  await expect(page).toHaveURL(/\/viewer\/models$/);
-  const form = page.locator("form.viewer-association-form");
-  await expect(form.getByRole("combobox", { name: "Model" }).locator("option", { hasText: "Still processing" })).toHaveCount(0);
-  await form.getByRole("combobox", { name: "Client project" }).selectOption({ label: "Harbor Authority · Seawall survey" });
-  await form.getByRole("combobox", { name: "Model" }).selectOption({ label: "Ranch 3D mesh" });
-  await form.getByRole("button", { name: "Link model" }).click();
-  await expect(page.getByRole("alert")).toContainText("isn't confirmed");
-  await expect(form.getByRole("combobox", { name: "Client project" })).toBeDisabled();
-  await form.getByRole("button", { name: "Retry same link" }).click();
-  await expect(page.getByRole("status").filter({ hasText: "Ranch 3D mesh is linked to Seawall survey" })).toBeVisible();
-  const links = ops.filter(call => call.method === "POST" && call.path === "/api/viewer/native-associations");
-  expect(links).toHaveLength(2);
-  expect(links[1]!.key).toBe(links[0]!.key);
-  const { workspaceName: _name, projectName: _project, clientName: _client, ...exact } = target("workspace-harbor", "Harbor Authority");
-  expect(links[0]!.body).toEqual({ ...exact, viewerModelId: "model-ranch" });
-  expect(links[1]!.body).toEqual(links[0]!.body);
-});
-
-test("an unconfirmed link can't be stranded by a refreshed catalog and retries exactly as sent", async ({ page }) => {
-  let reads = 0, posts = 0;
-  const ops = await mockOps(page, ["viewer.view", "viewer.manage"], (url, method, route) => {
-    if (url.pathname === "/api/viewer/native-associations" && method === "GET") {
-      reads += 1;
-      // After the first read the project has a newer generation.
-      return route.fulfill({ json: reads === 1 ? nativeData() : { ...nativeData(), projects: nativeData().projects.map(project => ({ ...project, generationId: "generation-4" })) } });
-    }
-    if (url.pathname === "/api/viewer/native-associations" && method === "POST") { posts += 1; return route.fulfill(posts === 1 ? { status: 503, json: { error: "Viewer unavailable" } } : { status: 201, json: { association, replayed: false } }); }
-    return undefined;
-  });
-  await page.goto("/viewer/models");
-  const form = page.locator("form.viewer-association-form");
-  await form.getByRole("combobox", { name: "Client project" }).selectOption({ label: "Harbor Authority · Seawall survey" });
-  await form.getByRole("combobox", { name: "Model" }).selectOption({ label: "Ranch 3D mesh" });
-  await form.getByRole("button", { name: "Link model" }).click();
-  await expect(form.getByRole("button", { name: "Retry same link" })).toBeEnabled();
-  // A catalog read can't run while the link is unconfirmed, so it can't strand the retry.
-  await expect(page.getByRole("button", { name: "Refresh" })).toBeDisabled();
-  expect(reads).toBe(1);
-  await form.getByRole("button", { name: "Retry same link" }).click();
-  await expect(page.getByRole("status").filter({ hasText: "Ranch 3D mesh is linked to Seawall survey" })).toBeVisible();
-  const links = ops.filter(call => call.method === "POST" && call.path === "/api/viewer/native-associations");
-  expect(links).toHaveLength(2);
-  expect(links[1]!.key).toBe(links[0]!.key);
-  expect(links[1]!.body).toEqual(links[0]!.body);
-  expect((links[1]!.body as { generationId: string }).generationId).toBe("generation-3");
-  // Afterwards the list is current again and a new link would use the newer generation.
-  await expect(page.getByRole("button", { name: "Refresh" })).toBeEnabled();
-  expect(reads).toBe(2);
-});
-
-test("a changed client project is reloaded and never substituted", async ({ page }) => {
-  let reads = 0;
-  const ops = await mockOps(page, ["viewer.view", "viewer.manage"], (url, method, route) => {
-    if (url.pathname === "/api/viewer/native-associations" && method === "GET") { reads += 1; return route.fulfill({ json: reads === 1 ? nativeData() : { ...nativeData(), projects: [target("workspace-coastal", "Coastal Engineering")] } }); }
-    if (url.pathname === "/api/viewer/native-associations" && method === "POST") return route.fulfill({ status: 409, json: { error: "Native client project changed or is unavailable" } });
-    return undefined;
-  });
-  await page.goto("/viewer/models");
-  const form = page.locator("form.viewer-association-form");
-  await form.getByRole("combobox", { name: "Client project" }).selectOption({ label: "Harbor Authority · Seawall survey" });
-  await form.getByRole("combobox", { name: "Model" }).selectOption({ label: "Ranch 3D mesh" });
-  await form.getByRole("button", { name: "Link model" }).click();
-  await expect(page.getByRole("alert")).toContainText("changed or is no longer available");
-  await expect(form.getByRole("combobox", { name: "Client project" })).toHaveValue("");
-  await expect(form.getByRole("combobox", { name: "Client project" }).locator("option", { hasText: "Harbor Authority" })).toHaveCount(0);
-  expect(reads).toBe(2);
-  expect(ops.filter(call => call.method === "POST")).toHaveLength(1);
-});
-
-test("a linked model opens for each client account it belongs to, and view-only staff can't link", async ({ page, context }) => {
-  await mockOps(page, ["viewer.view"], (url, method, route) =>
-    url.pathname === "/api/viewer/native-associations" && method === "GET" ? route.fulfill({ json: nativeData() }) : undefined);
-  await page.goto("/viewer/models");
-  await expect(page.getByRole("heading", { name: "Link a model to a client project" })).toHaveCount(0);
-  const row = page.locator("article").filter({ has: page.getByRole("heading", { name: "Seawall orthomosaic" }) });
-  await expect(row).toContainText("Coastal Engineering · Seawall survey");
-  await row.getByRole("button", { name: "Open for Harbor Authority" }).click();
-  const opened = page;
-  await expect.poll(() => opened.url()).toContain("/viewer/session/native/association-7/model-seawall?");
-  const query = new URL(opened.url()).searchParams;
-  expect(Object.fromEntries(query)).toEqual({ sourceId: "project-alpha:primary", workspaceId: "workspace-harbor", projectPublicId: "pa-project-7",
-    projectId: "project-7", generationId: "generation-3", sourceVersion: "2026-10-19T00:00:00.000Z" });
 });
 
 test("the native model shell opens a session only for its exact target", async ({ page }) => {
@@ -247,19 +143,26 @@ test("the native model shell opens a session only for its exact target", async (
   expect(bodies).toEqual([exact]);
 });
 
-for (const width of [320, 390]) test(`the Viewer page sections fit ${width}px without horizontal scrolling`, async ({ page, context }) => {
+const overview = (failed = 0) => ({ enabled: true, viewerBaseUrl: VIEWER, overview: { generatedAt: date,
+  projects: { active: 1, total: 1 }, models: { published: 1, total: 1, bytes: 0 },
+  jobs: { queued: 0, running: 0, reviewReady: 0, failed }, providers: { enabled: 1, healthy: 1, total: 1 },
+  storage: { usedBytes: 0, availableBytes: null }, platform: { ready: true, workerLive: true, lifecycleBlocked: false } } });
+
+for (const width of [320, 390]) test(`the 3D models page and attempt review fit ${width}px without horizontal scrolling`, async ({ page, context }) => {
   await page.setViewportSize({ width, height: 844 });
   await mockOps(page, ["viewer.view", "viewer.manage"], (url, method, route) =>
-    url.pathname === "/api/viewer/native-associations" && method === "GET" ? route.fulfill({ json: nativeData() }) : processingRoutes(url, method, route));
+    url.pathname === "/api/viewer/overview" ? route.fulfill({ json: overview() })
+      : url.pathname === "/api/viewer/direct-share-catalog" ? route.fulfill({ json: { projects: [{ viewerProjectId: "vp-1",
+        name: "A very long Viewer project name for the Seawall and Harbor survey", publishedTaskCount: 3, updatedAt: date }], nextCursor: null } })
+        : processingRoutes(url, method, route));
   await mockViewer(context, { recovery: { "attempt-ben": true } });
-  for (const path of ["/viewer/models", "/operations/processing?attemptId=attempt-ben"]) {
-    await page.goto(path);
-    await expect(page.getByRole("navigation", { name: "3D Viewer sections" })).toBeVisible();
-    await expect(page.locator(".viewer-association-list, .viewer-ingest-recovery").first()).toBeVisible();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  }
+  await page.goto("/viewer");
+  await expect(page.getByRole("list", { name: "Viewer projects" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.goto("/operations/processing?attemptId=attempt-ben");
+  await expect(page.locator(".viewer-ingest-recovery").first()).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
-
 
 test("authenticated model routes retain Operations navigation through denied sessions and browser Back", async ({ page }) => {
   await mockOps(page, ["viewer.view", "operations.view"], (url, method, route) =>
@@ -279,18 +182,14 @@ test("authenticated model routes retain Operations navigation through denied ses
 });
 
 
-test("failed processing totals link to the real processing task list", async ({ page, context }) => {
-  await mockOps(page, ["viewer.view"], (url, method, route) => url.pathname === "/api/viewer/overview"
-    ? route.fulfill({ json: { enabled: true, overview: { generatedAt: date,
-      projects: { active: 1, total: 1 }, models: { published: 1, total: 1, bytes: 0 },
-      jobs: { queued: 0, running: 0, reviewReady: 0, failed: 2 }, providers: { enabled: 1, healthy: 1, total: 1 },
-      storage: { usedBytes: 0, availableBytes: null }, platform: { ready: true, workerLive: true, lifecycleBlocked: false } } } })
-    : processingRoutes(url, method, route));
-  await mockViewer(context, { recovery: { "attempt-ben": true } });
+test("failed processing totals open the Viewer workspace, which owns processing", async ({ page, context }) => {
+  const ops = await mockOps(page, ["viewer.view"], (url, method, route) => url.pathname === "/api/viewer/overview"
+    ? route.fulfill({ json: overview(2) }) : processingRoutes(url, method, route));
+  await context.route(`${VIEWER}/**`, route => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Viewer</title>" }));
   await page.goto("/viewer");
-  await expect(page.getByText("2 processing jobs need attention in Viewer.", { exact: false })).toBeVisible();
-  await page.getByRole("link", { name: "Review failed jobs" }).click();
-  await expect(page).toHaveURL(/\/viewer\/processing\?tab=tasks$/);
-  await expect(page.getByRole("navigation", { name: "3D Viewer sections" }).getByRole("button", { name: "Processing" })).toHaveAttribute("aria-current", "page");
-  await expect(page.getByText("Ben's ranch survey", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("2 processing jobs need attention.", { exact: false })).toBeVisible();
+  const popup = context.waitForEvent("page");
+  await page.getByRole("button", { name: "Review in Viewer" }).click();
+  await expect.poll(async () => (await popup).url()).toBe(grant.workspaceUrl);
+  expect(ops.filter(call => call.path === "/api/viewer/admin-grant" && call.method === "POST")).toHaveLength(1);
 });
