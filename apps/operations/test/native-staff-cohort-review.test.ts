@@ -123,10 +123,10 @@ describe("owner current-cohort review preparation on actual Operations 0221 sche
     await db.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('review-area','Review Area',1)").run();
     const after = await prepareNativeStaffCohortReview(db, { staffId: owner.id });
     expect(after.packet.snapshotSha256).not.toBe(before.packet.snapshotSha256);
-    expect(after.packet.tables.native_business_areas).toContainEqual(expect.objectContaining({
+    expect((after.packet.tables as Record<string, unknown>).native_business_areas).toContainEqual(expect.objectContaining({
       business_area_ref_sha256: createHash("sha256").update(JSON.stringify("review-area")).digest("hex"), active: 1,
     }));
-    expect(after.packet.tables.native_directory_resource_scopes).toEqual(expect.any(Array));
+    expect((after.packet.tables as Record<string, unknown>).native_directory_resource_scopes).toEqual(expect.any(Array));
   }, 20_000);
 
   it("denies a non-owner, an alternate subject, and a missing CSRF proof", async () => {
@@ -150,7 +150,7 @@ describe("owner current-cohort review preparation on actual Operations 0221 sche
       VALUES('review-exact-target',?,'staff.profile.edit','allow','exact_staff',?,?)`)
       .bind(owner.id, owner.id, owner.id).run();
     const result = await prepareNativeStaffCohortReview(db, { staffId: owner.id });
-    expect(result.packet.tables.native_staff_admin_delegations).toContainEqual(expect.objectContaining({
+    expect((result.packet.tables as Record<string, unknown>).native_staff_admin_delegations).toContainEqual(expect.objectContaining({
       id: "review-exact-target", target_staff_id: owner.id,
     }));
     expect(result.packet.cohort).toContainEqual(expect.objectContaining({ staffId: owner.id }));
