@@ -36,25 +36,29 @@ def main():
             "--entrypoint", "python3", args.proxy_image,
             "-c", "import os; os.chown('/app-data', 568, 568)"])
 
-        def container(image, environment, command, source=False):
+        def container(image, environment, command, source=False, tmpfs=()):
             options = ["docker", "run", "--rm", "--network", "none", "--read-only",
                 "--user", "568:568", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                 "--pids-limit", "128", "--mount", f"type=volume,source={data},target=/app-data",
                 "--mount", f"type=volume,source={jobs},target=/data/jobs,readonly"]
             for key, value in environment.items():
                 options += ["--env", f"{key}={value}"]
+            for specification in tmpfs:
+                options += ["--tmpfs", specification]
             if source:
                 module_root = (Path(__file__).resolve().parent.parent / "thumbnail-renderer").as_posix()
                 options += ["--mount", f"type=bind,source={module_root},target=/app,readonly"]
             return run(options + command[:2] + [image] + command[2:])
 
         container(args.proxy_image, services["proxy-generator"]["environment"],
-            ["--entrypoint", "python3", "/app/proxy_generator.py", "--once"])
+            ["--entrypoint", "python3", "/app/proxy_generator.py", "--once"],
+            tmpfs=services["proxy-generator"]["tmpfs"])
         decoder = services["decoder"]["environment"]
         container("node:24-bookworm-slim", decoder, ["--entrypoint", "node", "--input-type=module", "-e",
             "import {readDecoderConfig} from '/app/src/config.mjs';"
             "import {runWatcher} from '/app/src/watcher.mjs';"
-            "await runWatcher(readDecoderConfig(), {signal:AbortSignal.abort()});"], source=True)
+            "await runWatcher(readDecoderConfig(), {signal:AbortSignal.abort()});"], source=True,
+            tmpfs=services["decoder"]["tmpfs"])
         broker = services["broker"]["environment"] | {
             "THUMBNAIL_INGEST_SECRET": "synthetic-" + "s" * 40,
             "CF_ACCESS_CLIENT_ID": "synthetic-" + "i" * 20,
@@ -66,7 +70,13 @@ def main():
         container("node:24-bookworm-slim", broker, ["--entrypoint", "node", "--input-type=module", "-e",
             "import {readBrokerConfig} from '/app/src/config.mjs';"
             "import {runBroker} from '/app/src/broker.mjs';"
-            "await runBroker(readBrokerConfig(), {signal:AbortSignal.abort()});"], source=True)
+            "await runBroker(readBrokerConfig(), {signal:AbortSignal.abort()});"], source=True,
+            tmpfs=services["broker"]["tmpfs"])
+        container(args.proxy_image, {}, ["--entrypoint", "python3", "-c",
+            "from pathlib import Path; "
+            "[(Path(p)/'mount-write-test').write_bytes(b'ok') for p in ('/scratch','/cache','/tmp')]; "
+            "assert all((Path(p)/'mount-write-test').stat().st_uid==568 for p in ('/scratch','/cache','/tmp'))"],
+            tmpfs=services["queue-renderer"]["tmpfs"])
         print(container(args.proxy_image, {}, ["--entrypoint", "python3", "-c",
             "from pathlib import Path; p=Path('/app-data'); "
             "expected={'proxy-state','thumbnail-artifacts','thumbnail-work','thumbnail-cache','thumbnail-state'}; "
