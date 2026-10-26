@@ -332,11 +332,17 @@ function RenewableViewerShellRoute<T extends ViewerShellSessionGrant>({
     return () => { mounted.current = false; };
   }, [start]);
 
+  // A Viewer that never became ready is retried with a newly issued grant, never the consumed one.
+  const restart = useCallback(() => {
+    setSession(null);
+    void start();
+  }, [start]);
+
   if (loading && !session)
     return <section className="viewer-shell-page" aria-label="3D Viewer"><Loading /></section>;
   if (!session)
     return <section className="viewer-shell-page" aria-label="3D Viewer"><Card title="Secure 3D Viewer"><p className="viewer-session-error" role="alert">{error}</p><div className="actions"><button type="button" className="button-orange" onClick={() => void start()}>Retry secure session</button>{onExit && <button type="button" className="button-ghost" onClick={onExit}>Back</button>}</div></Card></section>;
-  return <section className="viewer-shell-page" aria-label="3D Viewer"><ViewerEmbed modelId={modelId} title={title} session={session} renew={issue} onClose={onExit} /></section>;
+  return <section className="viewer-shell-page" aria-label="3D Viewer"><ViewerEmbed key={session.grant} modelId={modelId} title={title} session={session} renew={issue} onClose={onExit} onRetry={restart} /></section>;
 }
 
 /**
@@ -491,18 +497,26 @@ export function openViewerWindow<T extends ViewerSessionGrant>({
  * Camera/layer/loader state therefore survives renewal. The parent accepts
  * messages only from this exact iframe and the exact configured Viewer origin.
  */
+/** How long the embedded Viewer has to report ready before the page offers a retry. */
+export const VIEWER_STARTUP_TIMEOUT_MS = 45_000;
+
 export function ViewerEmbed({
   modelId,
   title,
   session,
   renew,
   onClose,
+  onRetry,
+  startupTimeoutMs = VIEWER_STARTUP_TIMEOUT_MS,
 }: {
   modelId: string;
   title: string;
   session: ViewerSessionGrant;
   renew: () => Promise<ViewerSessionGrant>;
   onClose?: () => void;
+  /** Starts over with a freshly issued session; the consumed grant is never reused. */
+  onRetry?: () => void;
+  startupTimeoutMs?: number;
 }) {
   const frame = useRef<HTMLIFrameElement>(null);
   const renewing = useRef<Promise<void> | null>(null);
@@ -510,7 +524,7 @@ export function ViewerEmbed({
   const retryAttempt = useRef(0);
   const currentExpiry = useRef("");
   const acknowledgementTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [state, setState] = useState<"loading" | "ready" | "renewing" | "at-risk">("loading");
+  const [state, setState] = useState<"loading" | "ready" | "renewing" | "at-risk" | "startup-failed">("loading");
   const [message, setMessage] = useState("");
   const viewerOrigin = new URL(session.embedUrl).origin;
 
@@ -557,6 +571,13 @@ export function ViewerEmbed({
     return renewing.current;
   }, [renew, viewerOrigin]);
 
+  // The Viewer must report ready within a finite time; otherwise say so instead of spinning forever.
+  useEffect(() => {
+    if (state !== "loading") return;
+    const timer = setTimeout(() => setState(current => current === "loading" ? "startup-failed" : current), startupTimeoutMs);
+    return () => clearTimeout(timer);
+  }, [state, startupTimeoutMs]);
+
   useEffect(() => {
     const receive = (event: MessageEvent<ViewerMessage>) => {
       if (event.origin !== viewerOrigin || event.source !== frame.current?.contentWindow || event.data?.version !== 1 ||
@@ -597,6 +618,16 @@ export function ViewerEmbed({
     </header>
     <div className="ltds-viewer-stage" aria-busy={state === "loading"}>
       {state === "loading" && <span className="ltds-viewer-loading" role="status">Opening 3D model…</span>}
+      {state === "startup-failed" && <div className="ltds-viewer-loading ltds-viewer-startup-failed" role="alert">
+        <div>
+          <strong>The 3D model didn't open</strong>
+          <p>The secure Viewer didn't respond in time. {onRetry ? "Try again to start a new secure session." : "Close the viewer and open the model again."}</p>
+          <div className="actions">
+            {onRetry && <button type="button" className="button-orange" onClick={onRetry}>Try again</button>}
+            {onClose && <button type="button" className="button-ghost" onClick={onClose}>Close viewer</button>}
+          </div>
+        </div>
+      </div>}
       <iframe
         ref={frame}
         src={session.embedUrl}
