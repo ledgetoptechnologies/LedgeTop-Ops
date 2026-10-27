@@ -7,11 +7,22 @@ The unsigned per-user pilot installer is available in
 `S:\LedgeTop Operations\Sync App`. Start with `LATEST-PREVIEW.txt` and
 `CURRENT-STAGING-STATUS.txt`; versioned receipts retain their original build-time
 observations. Code signing is intentionally off. Uploads and automatic catalog
-refresh are not implemented. Shared 0.5.4 is a diagnostic candidate for manual laptop
+refresh are not implemented. Shared 0.5.5 is a diagnostic candidate for manual laptop
 acceptance. It includes client-side scheduled update checks, but the update feed
 is still off and automatic delivery/installation is not accepted end to end.
 
 ## Current verification — October 27, 2026
+- Candidate 0.5.5.0 is published from source 9481f7e2 with independently
+  verified installer/payload bytes and passing hosted Windows checks. Its
+  hydration diagnostics identify AuthorizationBefore/LoginRequired on the
+  laptop even after successful sign-in and Resume. The specific helper/server
+  failure remains unresolved. Current source distinguishes paused availability
+  from authentication and records bounded sign-in operation/reason details;
+  those new details still require a new candidate and laptop acceptance.
+- A separate approved one-photo read through immutable production 0.5.4
+  adapters succeeded with a fresh reference and authenticated manifest hash.
+  This proves that delivery at that time, not the laptop's saved-reference or
+  native callback path. Do not reset the connection based on that result alone.
 
 - Candidate 0.5.4.0 is published with the schema-3/schema-4-compatible Shell
   diagnostic v2. Its source archive, all 524 payload files, inventory sidecar,

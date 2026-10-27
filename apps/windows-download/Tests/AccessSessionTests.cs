@@ -9,6 +9,7 @@ using LedgeTop.WindowsDownload;
 internal static class AccessSessionTests
 {
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
+        ("Access bounded auth diagnostics retain no helper data", BoundedDiagnostics),
         ("Access cached lookup never invokes interactive login", Commands),
         ("Access binary pin and protected application URL fail closed", Configuration),
         ("Access wrong content origin fails before token acquisition", WrongOrigin),
@@ -30,6 +31,61 @@ internal static class AccessSessionTests
         try { await action(); } catch (T) { return; }
         throw new Exception("Expected safe Access failure.");
     }
+    private static async Task BoundedDiagnostics() {
+        using var f = new Fixture(); var runner = new Runner(); var session = f.Session(runner);
+        async Task Expect(Func<Task> action, LoginFailureReason reason, LoginFailureOperation operation) {
+            try { await action(); throw new Exception("Expected bounded login failure."); }
+            catch (LoginRequiredException error) {
+                Assert(error.Reason == reason && error.Operation == operation && error.InnerException is null);
+                Assert(!error.ToString().Contains("PRIVATE") && !error.ToString().Contains("eyJ"));
+                Assert(error.Message == new LoginRequiredException().Message);
+            }
+        }
+        var old = new LoginRequiredException(); Assert(old.Reason == LoginFailureReason.Unknown && old.Operation == LoginFailureOperation.Unknown);
+        await Throws<ArgumentOutOfRangeException>(() => Task.FromResult(new LoginRequiredException((LoginFailureReason)999, LoginFailureOperation.CachedToken)));
+        await Throws<ArgumentOutOfRangeException>(() => Task.FromResult(new LoginRequiredException(LoginFailureReason.Unknown, (LoginFailureOperation)999)));
+        runner.Result = new(17, "PRIVATE token", "PRIVATE stderr");
+        await Expect(() => session.GetTokenAsync(), LoginFailureReason.HelperExitedUnsuccessfully, LoginFailureOperation.CachedToken);
+        await Expect(() => session.ExplicitLoginAsync(), LoginFailureReason.HelperExitedUnsuccessfully, LoginFailureOperation.ExplicitLogin);
+        runner.Result = new(0, "PRIVATE malformed", "PRIVATE stderr");
+        await Expect(() => session.GetTokenAsync(), LoginFailureReason.TokenMalformed, LoginFailureOperation.CachedToken);
+        runner.Result = new(0, Token(0), "PRIVATE stderr");
+        await Expect(() => session.GetTokenAsync(), LoginFailureReason.TokenExpired, LoginFailureOperation.CachedToken);
+        runner.Result = new(0, Token(), new string('x', 32769));
+        await Expect(() => session.GetTokenAsync(), LoginFailureReason.HelperOutputInvalid, LoginFailureOperation.CachedToken);
+        runner.Error = new LoginRequiredException(LoginFailureReason.HelperLaunchFailed, LoginFailureOperation.Unknown);
+        await Expect(() => session.GetTokenAsync(), LoginFailureReason.HelperLaunchFailed, LoginFailureOperation.CachedToken);
+        await Expect(() => session.ExplicitLoginAsync(), LoginFailureReason.HelperLaunchFailed, LoginFailureOperation.ExplicitLogin);
+        runner.Error = new IOException("PRIVATE runner fault");
+        await Expect(() => session.GetTokenAsync(), LoginFailureReason.Unknown, LoginFailureOperation.CachedToken);
+        runner.Error = new OperationCanceledException("PRIVATE unrelated cancel");
+        await Expect(() => session.GetTokenAsync(), LoginFailureReason.Unknown, LoginFailureOperation.CachedToken);
+        runner.Error = null; runner.Result = new(0, Token(), "");
+        using (var pin = await session.PinCachedTokenAsync()) {
+            await Expect(() => session.ExplicitLoginAsync(), LoginFailureReason.CredentialBusy, LoginFailureOperation.ExplicitLogin);
+            runner.Result = new(0, Token(DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 7200), "");
+            await Expect(() => session.GetTokenAsync(), LoginFailureReason.CredentialPinChanged, LoginFailureOperation.CachedToken);
+            await Expect(async () => { using var ignored = await session.PinCachedTokenAsync(); }, LoginFailureReason.CredentialPinChanged, LoginFailureOperation.CachedToken);
+        }
+        var entered = new TaskCompletionSource(); var release = new TaskCompletionSource();
+        runner.OnRun = async (_, _) => { entered.SetResult(); await release.Task; return new(0, "", ""); };
+        var login = session.ExplicitLoginAsync(); await entered.Task;
+        await Expect(async () => { using var ignored = await session.PinCachedTokenAsync(); }, LoginFailureReason.CredentialBusy, LoginFailureOperation.CachedToken);
+        release.SetResult(); await login; runner.OnRun = null;
+        runner.Result = new(0, Token(), ""); runner.WaitForCancellation = true;
+        var timed = new CloudflareAccessSession(new Uri("https://files.example.invalid/portal"), f.Binary, f.Pin, runner, TimeSpan.FromMilliseconds(20));
+        await Expect(() => timed.GetTokenAsync(), LoginFailureReason.HelperTimedOut, LoginFailureOperation.CachedToken);
+        foreach (var invalidTimeout in new[] { TimeSpan.Zero, TimeSpan.FromTicks(-1), TimeSpan.FromSeconds(61) })
+            await Throws<ArgumentOutOfRangeException>(() => Task.FromResult(new CloudflareAccessSession(new Uri("https://files.example.invalid/portal"), f.Binary, f.Pin, runner, invalidTimeout)));
+        var timeoutField = typeof(CloudflareAccessSession).GetField("cachedCommandTimeout", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        Assert((TimeSpan)timeoutField.GetValue(session)! == TimeSpan.FromMinutes(1));
+        using var cancel = new CancellationTokenSource();
+        var pending = session.GetTokenAsync(cancel.Token); cancel.Cancel();
+        try { await pending; throw new Exception("Expected caller cancellation."); }
+        catch (OperationCanceledException error) { Assert(error.CancellationToken == cancel.Token || cancel.IsCancellationRequested); }
+        Assert(runner.Calls.All(call => call[1] is "token" or "login"));
+    }
+
     private static async Task Commands() {
         using var fixture = new Fixture(); var runner = new Runner(); var session = fixture.Session(runner);
         Assert(await session.GetTokenAsync() == runner.Result.Stdout);

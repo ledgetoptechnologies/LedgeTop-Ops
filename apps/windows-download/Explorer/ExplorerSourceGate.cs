@@ -52,9 +52,10 @@ internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IDisposable
     }
     private (CancellationTokenSource Linked, CancellationToken Epoch) Lease(CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         lock (sync) {
             ObjectDisposedException.ThrowIf(disposed, this);
-            if (!enabled) throw new LoginRequiredException();
+            if (!enabled) throw new DownloadsPausedException();
             Configuration();
             return (CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, epoch.Token), epoch.Token);
         }
@@ -62,7 +63,7 @@ internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IDisposable
     private void Current(CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        lock (sync) { if (disposed || !enabled || token != epoch.Token) throw new LoginRequiredException(); }
+        lock (sync) { if (disposed || !enabled || token != epoch.Token) throw new DownloadsPausedException(); }
         Configuration();
     }
     public async Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken = default)

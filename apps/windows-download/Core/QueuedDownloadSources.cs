@@ -35,7 +35,7 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
     }
     public async Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken = default)
     {
-        using var doc = await GetAsync("/session", cancellationToken);
+        using var doc = await GetAsync("/session", LoginFailureOperation.QueueSession, cancellationToken);
         try {
             var root = doc.RootElement; Exact(root, "schemaVersion", "principalId", "expiresAt"); Version(root);
             var expiry = Number(root, "expiresAt", 8_640_000_000_000);
@@ -46,12 +46,12 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
     public async Task<ResolvedQueuedDownload> ResolveAsync(string resourceReference, CancellationToken cancellationToken = default)
     {
         Reference(resourceReference);
-        using var doc = await GetAsync("/resolve?resourceRef=" + Uri.EscapeDataString(resourceReference), cancellationToken);
+        using var doc = await GetAsync("/resolve?resourceRef=" + Uri.EscapeDataString(resourceReference), LoginFailureOperation.QueueResolve, cancellationToken);
         return Parse(doc.RootElement);
     }
     protected async Task<QueuedDownloadReference> SelectAsync(string query, CancellationToken cancellationToken)
     {
-        using var doc = await GetAsync("/reference?" + query, cancellationToken);
+        using var doc = await GetAsync("/reference?" + query, LoginFailureOperation.QueueReference, cancellationToken);
         try {
             var root = doc.RootElement; Exact(root, "schemaVersion", "principalId", "resourceRef"); Version(root);
             return new(Principal(root), Reference(Text(root, "resourceRef", 16384)));
@@ -93,7 +93,7 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
         if (path.Length - prefix.Length - suffix > (employee ? 16384 : 8192) || !Regex.IsMatch(path, pattern)) throw Invalid();
         return path;
     }
-    private async Task<JsonDocument> GetAsync(string tail, CancellationToken cancellationToken)
+    private async Task<JsonDocument> GetAsync(string tail, LoginFailureOperation operation, CancellationToken cancellationToken)
     {
         const int limit = 96 * 1024;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken); deadline.CancelAfter(tail.StartsWith("/resolve?", StringComparison.Ordinal) ? TimeSpan.FromMinutes(15) : TimeSpan.FromSeconds(60));
@@ -102,7 +102,7 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
             request.Headers.Accept.ParseAdd("application/json"); request.Headers.AcceptEncoding.ParseAdd("identity");
             request.Headers.Add("Cf-Access-Token", await session.GetTokenAsync(deadline.Token));
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
-            if (response.StatusCode == HttpStatusCode.Unauthorized) throw new LoginRequiredException();
+            if (response.StatusCode == HttpStatusCode.Unauthorized) throw new LoginRequiredException(LoginFailureReason.HttpUnauthorized, operation);
             if (response.StatusCode == HttpStatusCode.Forbidden) throw new AccessDeniedException();
             if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Conflict) throw new ResourceUnavailableException();
             if ((int)response.StatusCode is < 100 or > 599) throw Invalid();

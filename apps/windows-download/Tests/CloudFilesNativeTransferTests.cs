@@ -96,6 +96,36 @@ internal static class CloudFilesNativeTransferTests {
         }
     }
     private static async Task Diagnostics(){
+        foreach(var reason in new[]{LoginFailureReason.TokenExpired,LoginFailureReason.HttpUnauthorized,LoginFailureReason.Unknown})using(var f=new Fixture()){
+            var operation=reason==LoginFailureReason.HttpUnauthorized?LoginFailureOperation.QueueResolve:reason==LoginFailureReason.Unknown?LoginFailureOperation.Unknown:LoginFailureOperation.CachedToken;
+            f.Source.ResolveFailure=reason==LoginFailureReason.Unknown?new LoginRequiredException():new LoginRequiredException(reason,operation);
+            var b=new Boundary{SettlementResult=unchecked((int)0x80070057)};
+            try{await Run(f,b);throw new Exception("Expected bounded auth diagnostic.");}
+            catch(TransferException error){
+                var d=error.HydrationFailure??throw new Exception("Auth diagnostic lost.");
+                Assert(d.Stage==HydrationStage.AuthorizationBefore&&d.Category==HydrationFailureCategory.LoginRequired&&d.LoginReason==reason&&d.LoginOperation==operation);
+                Assert(d.HttpStatus is null&&d.Reason==TransferFailureReason.Unknown&&d.SettlementHResult==unchecked((int)0x80070057));
+                Assert(d.ActivityText.Contains("auth="+operation+"/"+reason)&&d.ActivityText.Contains("HTTP 401")== (reason==LoginFailureReason.HttpUnauthorized));
+                Assert(error.InnerException is null&&!d.ActivityText.Contains("https://")&&!d.ActivityText.Contains("SECRET"));
+            }
+            Assert(b.Failures.Count==1&&b.Successes.Count==0);
+        }
+        foreach(var invalid in new Action[]{
+            ()=>_ = new HydrationFailureDiagnostic(HydrationStage.AuthorizationBefore,HydrationFailureCategory.Transfer,loginReason:LoginFailureReason.TokenExpired,loginOperation:LoginFailureOperation.CachedToken),
+            ()=>_ = new HydrationFailureDiagnostic(HydrationStage.AuthorizationBefore,HydrationFailureCategory.LoginRequired,loginReason:(LoginFailureReason)999,loginOperation:LoginFailureOperation.CachedToken),
+            ()=>_ = new HydrationFailureDiagnostic(HydrationStage.AuthorizationBefore,HydrationFailureCategory.LoginRequired,loginReason:LoginFailureReason.TokenExpired),
+            ()=>_ = new HydrationFailureDiagnostic(HydrationStage.AuthorizationBefore,HydrationFailureCategory.LoginRequired,loginReason:LoginFailureReason.TokenExpired,loginOperation:(LoginFailureOperation)999)
+        }){var refused=false;try{invalid();}catch(ArgumentException){refused=true;}Assert(refused);}
+        using(var f=new Fixture()){
+            f.Source.ResolveFailure=new DownloadsPausedException();var b=new Boundary();
+            try{await Run(f,b);throw new Exception("Expected paused diagnostic.");}
+            catch(TransferException error){
+                var d=error.HydrationFailure??throw new Exception("Paused diagnostic lost.");
+                Assert(d.Stage==HydrationStage.AuthorizationBefore&&d.Category==HydrationFailureCategory.DownloadsPaused);
+                Assert(d.ActivityText.StartsWith("Downloads are paused.")&&!d.ActivityText.Contains("LoginRequired")&&d.HttpStatus is null);
+            }
+            Assert(b.Failures.Count==1&&b.Successes.Count==0);
+        }
         foreach(var before in new[]{true,false})using(var f=new Fixture()){
             var failure=new TransferException("SECRET https://private.invalid/token/path",TransferFailureReason.UnexpectedHttpStatus,before?502:503);
             if(before)f.Source.ResolveFailure=failure;else f.Source.DownloadFailure=failure;

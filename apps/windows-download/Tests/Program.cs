@@ -45,6 +45,8 @@ if (args.Length == 1 && args[0] == "--metadata-diagnostics-only")
     tests = EmployeeClientTests.Groups.Concat(QueuedDownloadSourceTests.Groups).Where(test => test.Name.Contains("metadata diagnostics", StringComparison.Ordinal)).ToArray();
 if (args.Length == 1 && args[0] == "--hydration-diagnostics-only")
     tests = CloudFilesNativeTransferTests.Groups.Concat(PlaceholderHydrationTests.Groups).Concat(DownloaderInactivityTests.Groups).ToArray();
+if (args.Length == 1 && args[0] == "--auth-diagnostics-only")
+    tests = AccessSessionTests.Groups.Concat(QueuedDownloadSourceTests.Groups).Where(test => test.Name.Contains("bounded auth diagnostics", StringComparison.Ordinal)).ToArray();
 foreach (var test in tests) {
     try { await test.Run(); passed++; Console.WriteLine("PASS " + test.Name); }
     catch (Exception error) { Console.Error.WriteLine("FAIL " + test.Name + ": " + error.GetType().Name + " " + error.Message); Environment.ExitCode = 1; }

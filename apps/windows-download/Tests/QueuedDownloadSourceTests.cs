@@ -12,6 +12,7 @@ internal static class QueuedDownloadSourceTests
     private static byte[] Bytes => "synthetic durable source verified content"u8.ToArray();
     private static string Sha => Convert.ToHexStringLower(SHA256.HashData(Bytes));
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
+        ("queue bounded auth diagnostics distinguish actual HTTP401 operations", AuthDiagnostics),
         ("queue source employee and portal metadata renews exact identity with human fixed-origin GETs", Metadata),
         ("queue source selection queries encode once and unsafe selectors reject before authentication", Selection),
         ("queue source manifests reject foreign URLs weak metadata and unknown JSON fields", InvalidManifests),
@@ -71,6 +72,33 @@ internal static class QueuedDownloadSourceTests
         if(selected) { result.Remove("manifest"); result["resourceRef"]=Reference; } return result;
     }
     private static HttpResponseMessage Json(object value) => new(HttpStatusCode.OK) {Content=new StringContent(JsonSerializer.Serialize(value),Encoding.UTF8,"application/json")};
+    private static async Task AuthDiagnostics() {
+        foreach (var employee in new[] { true, false }) {
+            using var f = new Fixture(); var calls = 0;
+            using var source = f.Source(employee, new Handler((_, _) => { calls++; return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Unauthorized) { Content = new StringContent("PRIVATE response token") }); }));
+            async Task Expect(Func<Task> action, LoginFailureOperation operation) {
+                try { await action(); throw new Exception("Expected HTTP401."); }
+                catch (LoginRequiredException error) {
+                    Assert(error.Reason == LoginFailureReason.HttpUnauthorized && error.Operation == operation);
+                    Assert(error.InnerException is null && !error.ToString().Contains("PRIVATE") && !error.ToString().Contains(f.Runner.Token));
+                }
+            }
+            await Expect(() => source.GetSessionAsync(), LoginFailureOperation.QueueSession);
+            await Expect(() => source.ResolveAsync(Reference), LoginFailureOperation.QueueResolve);
+            if (employee) await Expect(() => ((EmployeeQueuedDownloadSource)source).GetReferenceAsync("20000000-0000-4000-8000-000000000001", "synthetic.bin"), LoginFailureOperation.QueueReference);
+            else await Expect(() => ((PortalQueuedDownloadSource)source).GetReferenceAsync("ond1_current"), LoginFailureOperation.QueueReference);
+            Assert(calls == 3 && f.Runner.Calls == 3 && f.Runner.Logins == 0);
+            f.Runner.Error = new LoginRequiredException(LoginFailureReason.HelperExitedUnsuccessfully, LoginFailureOperation.Unknown);
+            try { await source.GetSessionAsync(); throw new Exception("Expected helper failure before HTTP."); }
+            catch (LoginRequiredException error) { Assert(error.Reason == LoginFailureReason.HelperExitedUnsuccessfully && error.Operation == LoginFailureOperation.CachedToken); }
+            Assert(calls == 3 && f.Runner.Logins == 0);
+            f.Runner.Error = null;
+            using var cancellation = new CancellationTokenSource();
+            using var waiting = f.Source(employee, new Handler(async (_, ct) => { cancellation.Cancel(); await Task.Delay(Timeout.Infinite, ct); return new(HttpStatusCode.Unauthorized); }));
+            await Throws<OperationCanceledException>(() => waiting.GetSessionAsync(cancellation.Token));
+        }
+    }
+
     private static async Task Metadata() {
         foreach(var employee in new[]{true,false}) {
             using var f = new Fixture(); var requests = new List<string>();
@@ -253,9 +281,9 @@ internal static class QueuedDownloadSourceTests
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken) { Calls++; return action(request,cancellationToken); }
     }
     private sealed class Runner:IAccessCommandRunner {
-        internal int Calls,Logins;internal string Token="";
+        internal int Calls,Logins;internal string Token=""; internal Exception? Error;
         public Task<AccessCommandResult> RunAsync(string path,IReadOnlyList<string> arguments,CancellationToken ct) {
-            Calls++;if(arguments.Contains("login"))Logins++;
+            Calls++;if(arguments.Contains("login"))Logins++; if (Error is not null) throw Error;
             Token="eyJhbGciOiJSUzI1NiJ9."+Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(new{sub="synthetic-person",exp=DateTimeOffset.UtcNow.ToUnixTimeSeconds()+3600})).TrimEnd('=').Replace('+','-').Replace('/','_')+".c2ln";
             return Task.FromResult(new AccessCommandResult(0,Token,""));
         }
