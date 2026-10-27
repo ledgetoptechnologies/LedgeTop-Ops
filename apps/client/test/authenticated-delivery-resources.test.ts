@@ -90,6 +90,27 @@ describe("authenticated delivery resources — migrated effective workspace", { 
       .toEqual(["Shared delivery", "📷"]);
   });
 
+  it("serves the exact default-off native Windows release DTO through the joined portal router", async () => {
+    const response = await app().request(
+      `${origin}/app/latest?platform=windows&channel=pilot&schemaVersion=1`,
+      { method: "GET", headers: { "X-LTDS-Workspace-ID": "ad1-workspace" } },
+      { ...env, ENVIRONMENT: "staging" },
+    );
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(await response.json()).toEqual({ schemaVersion: 1, available: false });
+  });
+
+  it("rejects unexpected native query shape before looking up release state", async () => {
+    const response = await app().request(
+      `${origin}/app/latest?platform=windows&channel=stable&schemaVersion=1`,
+      { method: "GET", headers: { "X-LTDS-Workspace-ID": "ad1-workspace" } },
+      { ...env, ENVIRONMENT: "staging" },
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "app_release_query_invalid" });
+  });
+
   it("derives headerless media workspace from the AD1 coordinate and rejects cross-actor or conflicting workspace requests", async () => {
     const fileHandle = await currentFileHandle();
     const full = await request(`/authenticated-deliveries/download?file=${encodeURIComponent(fileHandle)}`);
