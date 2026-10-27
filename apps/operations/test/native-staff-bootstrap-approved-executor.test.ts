@@ -20,7 +20,7 @@ vi.mock("../../../scripts/native-staff-bootstrap-approved-executor-config.mjs", 
 // Test-only trust root: pins the checked-in manifest bytes independently while
 // leaving the distribution checker and all file/hash verification real.
 vi.mock("../../../scripts/native-staff-bootstrap-owner-approval-distribution-pin-value.mjs", () => ({
-  PINNED_OWNER_APPROVAL_DISTRIBUTION_SHA256: "a9222381dab3bb71c6e58aec9f283706be84e3c66e7557806c6a28c127fca45c",
+  PINNED_OWNER_APPROVAL_DISTRIBUTION_SHA256: "1f60d6063eff92bfdc540ae3f1fb2ec7ee3a5b629881ebb0bbb4bbd0b7ed1e86",
 }));
 
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
