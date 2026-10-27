@@ -414,7 +414,9 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(draft.kind==='distance'&&draft.vertices.length===2)void finish();
   }
   function keyDown(event){
-    if(field(event))return;
+    // Modal controls own Escape/Enter. A window-capture shortcut must not
+    // discard or save the measurement behind a Stay/Leave confirmation.
+    if(field(event)||event.target?.closest?.('dialog[open]'))return;
     if(event.key==='Shift'){shift=true;pendingPick=null;updateCursor();}
     if(!draft)return;
     if(event.code==='Space'){space=true;updateCursor();stop(event);}

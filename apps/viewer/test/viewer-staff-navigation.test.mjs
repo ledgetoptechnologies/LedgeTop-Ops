@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { staffNavigationTargets, renderStaffNavigation } from '../viewer-staff-navigation.mjs';
+import { staffNavigationTargets, renderStaffNavigation, hasUnfinishedMeasurements } from '../viewer-staff-navigation.mjs';
+import { createMeasurementStore } from '../measurement-store.mjs';
 
 const context = { viewMode: 'session', topLevel: true };
 const staff = { audience: 'ops', operationsOrigin: 'https://ops.example.test' };
@@ -47,4 +48,49 @@ test('rendering hides and clears stale staff destinations when the current sessi
   assert.equal(nodes.dashboard.href, undefined);
   assert.equal(nodes.models.href, undefined);
   assert.equal(renderStaffNavigation({ container: null }, staff, context), false);
+});
+
+test('breadcrumb and logo use the same server-origin gate and restore plain branding for other audiences', () => {
+  const node = () => ({ hidden: false, attrs: {}, setAttribute(k,v) { this.attrs[k]=v; }, removeAttribute(k) { delete this.attrs[k]; if(k==='href')delete this.href; } });
+  const nodes = { container: node(), company: node(), dashboard: node(), models: node(), logo: node() };
+  assert.equal(renderStaffNavigation(nodes, staff, context), true);
+  assert.equal(nodes.logo.href, nodes.dashboard.href);
+  assert.equal(nodes.logo.attrs['aria-label'], 'Dashboard');
+  assert.equal(nodes.company.hidden, true);
+  for (const session of [{...staff,audience:'client'},{...staff,operationsOrigin:'https://ops.example.test/bad'},null]) {
+    renderStaffNavigation(nodes, session, context);
+    assert.equal(nodes.container.hidden, true);
+    assert.equal(nodes.company.hidden, false);
+    assert.equal(nodes.logo.href, undefined);
+    assert.equal(nodes.logo.attrs['aria-label'], undefined);
+    renderStaffNavigation(nodes, staff, context);
+  }
+});
+
+test('unfinished predicate includes drawing, editing snapshots and memory-only renewal recovery', () => {
+  assert.equal(hasUnfinishedMeasurements(null, null), false);
+  assert.equal(hasUnfinishedMeasurements({isDrawing:()=>true}), true);
+  assert.equal(hasUnfinishedMeasurements({isDrawing:()=>false},{hasPending:()=>true}), true);
+  const workspace = {isDrawing:()=>false,store:{statuses:new Map([['a','Saved'],['b','Temporary — resets on refresh']])}};
+  assert.equal(hasUnfinishedMeasurements(workspace), false, 'saved viewing does not prompt');
+  workspace.store.statuses.set('a','Not saved: offline');
+  assert.equal(hasUnfinishedMeasurements(workspace), true);
+});
+
+test('real store pending save remains guarded after a draft disarms; settlement clears it, failure keeps it', async () => {
+  let settle;
+  const store = createMeasurementStore({token:()=> 'test-only-credential',fetcher:()=>new Promise(resolve=>{settle=resolve;})});
+  const workspace={isDrawing:()=>false,store};
+  const record={id:'nav-test',collection:'map',kind:'distance',vertices:[[0,0,0],[1,0,0]],coordinateReference:{crs:'EPSG:32616'}};
+  const saving=store.save(record);
+  assert.equal(hasUnfinishedMeasurements(workspace), true);
+  await Promise.resolve();
+  settle({ok:true,status:200,json:async()=>({measurement:{...record,revision:1}})});
+  await saving;
+  assert.equal(hasUnfinishedMeasurements(workspace), false);
+  const failed=store.save({...record,revision:1});
+  await Promise.resolve();
+  settle({ok:false,status:503,json:async()=>({error:'test service unavailable'})});
+  await assert.rejects(failed,/test service unavailable/);
+  assert.equal(hasUnfinishedMeasurements(workspace), true);
 });
