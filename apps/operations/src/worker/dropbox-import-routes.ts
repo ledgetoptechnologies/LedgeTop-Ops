@@ -54,8 +54,18 @@ function requireDropboxImportCapability(env: Env): void {
   });
 }
 
-function redirectUri(env: Env): string {
+export function dropboxImportCallbackUrl(env: Pick<Env, "PUBLIC_BASE_URL">): string {
   return `${env.PUBLIC_BASE_URL}/api/dropbox-import/oauth/callback`;
+}
+
+export function dropboxImportCallbackUrlForState(
+  originalCallbackUrl: string | undefined,
+  env: Pick<Env, "PUBLIC_BASE_URL">,
+): string {
+  // OAuth states started before a canonical-origin cutover must exchange their
+  // code against the exact URI used at authorization time. Existing encrypted
+  // rows without this value retain the legacy fallback during the drain window.
+  return originalCallbackUrl ?? dropboxImportCallbackUrl(env);
 }
 
 export function registerDropboxImportRoutes(app: App): void {
@@ -71,7 +81,8 @@ export function registerDropboxImportRoutes(app: App): void {
     const state = randomSecret(32);
     const stateHash = await sha256(state);
 
-    const encrypted = await encryptImportSecret({ verifier, staffId: principal.id }, secret, `oauth-state:${stateHash}`);
+    const encrypted = await encryptImportSecret({ verifier, staffId: principal.id,
+      redirectUri: dropboxImportCallbackUrl(c.env) }, secret, `oauth-state:${stateHash}`);
 
     await c.env.OPS_DB.prepare(
       "INSERT INTO dropbox_import_oauth_states (state_hash,staff_id,pkce_ciphertext,pkce_iv,key_id,expires_at) VALUES (?,?,?,?,?,datetime('now','+10 minutes'))",
@@ -80,7 +91,7 @@ export function registerDropboxImportRoutes(app: App): void {
     const url = new URL("https://www.dropbox.com/oauth2/authorize");
     url.search = new URLSearchParams({
       client_id: c.env.DROPBOX_CLIENT_ID!,
-      redirect_uri: redirectUri(c.env),
+      redirect_uri: dropboxImportCallbackUrl(c.env),
       response_type: "code",
       state,
       code_challenge: challenge,
@@ -111,7 +122,7 @@ export function registerDropboxImportRoutes(app: App): void {
     if (!consumed.meta.changes) throw new HTTPException(400, { message: "Dropbox authorization was already used" });
 
     const secret = importTokenSecret(c.env);
-    const pkce = await decryptImportSecret<{ verifier: string; staffId: string }>(
+    const pkce = await decryptImportSecret<{ verifier: string; staffId: string; redirectUri?: string }>(
       row.pkce_ciphertext, row.pkce_iv, secret, `oauth-state:${stateHash}`,
     );
 
@@ -125,7 +136,7 @@ export function registerDropboxImportRoutes(app: App): void {
         code_verifier: pkce.verifier,
         client_id: c.env.DROPBOX_CLIENT_ID!,
         client_secret: c.env.DROPBOX_CLIENT_SECRET!,
-        redirect_uri: redirectUri(c.env),
+        redirect_uri: dropboxImportCallbackUrlForState(pkce.redirectUri, c.env),
       }),
     });
     if (!tokenResponse.ok) {

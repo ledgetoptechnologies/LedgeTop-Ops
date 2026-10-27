@@ -70,7 +70,7 @@ function productionFixture() {
   const productionViewer = "https://viewer.ledgetopdroneservices.com";
   return {
     viewerOrigin: productionViewer,
-    env: { ...env, ENVIRONMENT: "production", EXPECTED_HOST: "ops.ledgetopdroneservices.com",
+    env: { ...env, ENVIRONMENT: "production", EXPECTED_HOST: "ops.ledgetopdroneservices.com", PUBLIC_BASE_URL: productionOps,
       OPERATIONS_ORIGINS: productionOps, VIEWER_BASE_URL: productionViewer } as Env,
     request: (path: string, init: RequestInit = {}) => new Request(productionOps + path, {
       ...init, headers: { Origin: productionViewer, ...(init.headers as Record<string, string> || {}) },
@@ -185,7 +185,7 @@ describe("Viewer workspace renewal Worker routing", () => {
   it.each(["https://ops.ledgetopdroneservices.com","https://ops.ledgetop.app"])(
     "binds renewal grants to the actual verified staff URL %s, not the Viewer Origin header or canonical primary",async controllerOrigin=>{
       const production=productionFixture();
-      const candidate={...production.env,EXPECTED_HOST:"ops.ledgetop.app",
+      const candidate={...production.env,PUBLIC_BASE_URL:"https://ops.ledgetop.app",EXPECTED_HOST:"ops.ledgetop.app",
         OPERATIONS_ORIGINS:"https://ops.ledgetop.app,https://ops.ledgetopdroneservices.com"} as Env;
       const makeRequest=(path:string,init:RequestInit={})=>new Request(controllerOrigin+path,{...init,
         headers:{Origin:production.viewerOrigin,...init.headers as Record<string,string>}});

@@ -39,7 +39,8 @@ vi.mock("../src/worker/client-onboarding-shared-company-plan",async original=>({
 import worker from "../src/worker/index";
 import { clientOnboardingStaffHttpRequest } from "../src/worker/client-onboarding-staff-http";
 
-const origin = "https://ops.example.test";
+const origin = "https://ops.ledgetopdroneservices.com";
+const canonicalOrigin = "https://ops.ledgetop.app";
 const keyring = { activeKeyId: "current", keys: { current: "ab".repeat(32) } };
 const actor = { identity: { kind: "native" as const, staffId: "staff:onboarding",
   verifiedAccessSubject: "access|staff:onboarding", email: "staff@example.test",
@@ -49,7 +50,7 @@ const unavailable = (): never => { throw Error("unexpected database use"); };
 const database: D1Database = { prepare: unavailable, batch: unavailable, exec: unavailable,
   withSession: unavailable, dump: unavailable };
 function env(enabled = "true"): Env {
-  return { ENVIRONMENT: "production", EXPECTED_HOST: "ops.example.test", OPERATIONS_ORIGINS: origin,
+  return { ENVIRONMENT: "production", EXPECTED_HOST: "ops.ledgetopdroneservices.com", OPERATIONS_ORIGINS: `${canonicalOrigin},${origin}`,
     PUBLIC_BASE_URL: origin, DELIVERY_BASE_URL: "https://portal.example.test",
     PUBLIC_SHARE_ORIGIN: "https://delivery.example.test", INCOMING_EXPECTED_HOST: "incoming.example.test",
     INCOMING_BASE_URL: "https://incoming.example.test", OPS_DB: database,
@@ -61,14 +62,14 @@ function env(enabled = "true"): Env {
 const context: ExecutionContext = { waitUntil() {}, passThroughOnException() {}, props: {},
   get exports(): Cloudflare.Exports { return unavailable(); }, get tracing(): Tracing { return unavailable(); } };
 function send(path: string, method = "GET", body?: unknown, csrf?: string,
-  environment = env(), requestOrigin = origin) {
-  return worker.fetch(new Request(`${origin}${path}`, { method,
+  environment = env(), requestOrigin = origin, urlOrigin = origin) {
+  return worker.fetch(new Request(`${urlOrigin}${path}`, { method,
     headers: { "X-Native-Staff-Request": "1", "Sec-Fetch-Site": "same-origin",
       Origin: requestOrigin, "Content-Type": "application/json", ...(csrf ? { "X-CSRF-Token": csrf } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }) }), environment, context);
 }
-async function session(environment = env()): Promise<string> {
-  const reply = await send("/api/client-onboarding/staff/session", "GET", undefined, undefined, environment);
+async function session(environment = env(), requestOrigin = origin, urlOrigin = origin): Promise<string> {
+  const reply = await send("/api/client-onboarding/staff/session", "GET", undefined, undefined, environment, requestOrigin, urlOrigin);
   expect(reply.status).toBe(200);
   return (await reply.json() as { csrfToken: string }).csrfToken;
 }
@@ -106,6 +107,46 @@ beforeEach(() => {
 });
 
 describe("native client onboarding staff route", () => {
+  it("finishes an old-origin onboarding intent after canonical Ops config changes without rebinding its origin signature", async () => {
+    const before = env();
+    const oldCsrf = await session(before);
+    const command = { commandId: "22222222-2222-4222-8222-222222222222",
+      expiresAt: "2099-01-01T00:00:00.000Z", targetClientRecordId: null,
+      scopes: [{ businessAreaId: "area:onboarding", divisionId: null }] };
+    const created = await send("/api/client-onboarding/staff/create", "POST", command, oldCsrf, before);
+    expect(created.status).toBe(200);
+    expect(calls.issue).toHaveBeenCalledOnce();
+
+    const after = { ...before, PUBLIC_BASE_URL: canonicalOrigin, EXPECTED_HOST: "ops.ledgetop.app",
+      CLIENT_ONBOARDING_ADMIN_ORIGIN: canonicalOrigin,
+      OPERATIONS_ORIGINS: `${canonicalOrigin},${origin}` } as Env;
+    const revealPath = "/api/client-onboarding/staff/reveal";
+    const revealed = await send(revealPath, "POST", { commandId: command.commandId }, oldCsrf, after);
+    expect(revealed.status).toBe(200);
+    expect(calls.reveal).toHaveBeenCalledWith(database, { authenticatedNativeStaff: {
+      identity: actor.identity, verifiedUntil: actor.verifiedUntil,
+    }, commandId: command.commandId }, keyring);
+    expect(calls.issue).toHaveBeenCalledOnce();
+
+    const movedCsrf = await session(after, canonicalOrigin, canonicalOrigin);
+    const movedReveal = await send(revealPath, "POST", { commandId: command.commandId }, movedCsrf,
+      after, canonicalOrigin, canonicalOrigin);
+    expect(movedReveal.status).toBe(200);
+    expect(calls.issue).toHaveBeenCalledOnce();
+
+    const oldTokenOnNewOrigin = await send(revealPath, "POST", { commandId: command.commandId }, oldCsrf,
+      after, canonicalOrigin, canonicalOrigin);
+    expect(oldTokenOnNewOrigin.status).toBe(403);
+    expect(calls.reveal).toHaveBeenCalledTimes(2);
+
+    const refresh = await worker.fetch(new Request(`${origin}/clients?view=list`, { headers: {
+      Accept: "text/html", "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate",
+      Cookie: "CF_Authorization=old-host-session",
+    } }), after, context);
+    expect(refresh.status).toBe(302);
+    expect(refresh.headers.get("Location")).toBe(`${canonicalOrigin}/clients?view=list`);
+    expect(refresh.headers.get("Set-Cookie")).toBeNull();
+  });
   it("matches scope choices only at the exact POST route", () => {
     const path = "/api/client-onboarding/staff/scope-choices";
     expect(clientOnboardingStaffHttpRequest("POST", path)).toBe("scope-choices");

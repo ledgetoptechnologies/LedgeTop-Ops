@@ -72,3 +72,44 @@ export function compileDeliveryPublicLinkTransition(snapshot, baseline = PROFILE
     settingsDraft: structuredClone(expected.operations.settings),
     clientPublicAcceptanceRequiredBeforeApply: true, liveAcceptanceStillRequired: true };
 }
+
+/** Offline final Ops transition. Public link generation has its own earlier
+ * phase, so this changes only the existing Ops entry/callback origin scalars.
+ * It is a plan for review, never a settings writer. */
+export function compileOperationsCanonicalTransition(snapshot, baseline = PROFILE) {
+  const from = 'delivery-links-canonical', to = 'staff-canonical';
+  const beforeProfile = domainRecognitionProfile(from, baseline);
+  const afterProfile = domainRecognitionProfile(to, baseline);
+  validateInstallation(snapshot, { profile: beforeProfile });
+  const current = varsOf(snapshot.operations);
+  const target = domainPhaseValues(to).operations;
+  const names = ['PUBLIC_BASE_URL', 'EXPECTED_HOST', 'CLIENT_ONBOARDING_ADMIN_ORIGIN'];
+  const old = {
+    PUBLIC_BASE_URL: 'https://ops.ledgetopdroneservices.com',
+    EXPECTED_HOST: 'ops.ledgetopdroneservices.com',
+    CLIENT_ONBOARDING_ADMIN_ORIGIN: 'https://ops.ledgetopdroneservices.com',
+  };
+  const changes = Object.fromEntries(names.map(name => {
+    need(current[name] === old[name], 'Ops canonical transition must start at the complete old staff-origin tuple');
+    need(typeof target[name] === 'string', 'Ops canonical transition requires existing exact scalars');
+    return [name, target[name]];
+  }));
+  const expected = structuredClone(snapshot);
+  for (const bindings of [expected.operations.version.resources.bindings, expected.operations.settings.bindings])
+    for (const [name, value] of Object.entries(changes)) {
+      const binding = bindings.find(row => row.name === name);
+      need(binding?.type === 'plain_text', 'Ops canonical transition cannot create or retype a binding');
+      binding.text = value;
+    }
+  validateInstallation(expected, { profile: afterProfile });
+  return { from, to, worker: 'operations', writesPerformed: false, activationEnabled: false,
+    redirectEnabled: false, changes, expected, beforeProfile, afterProfile,
+    settingsDraft: structuredClone(expected.operations.settings),
+    publicShareOriginPreserved: 'https://delivery.ledgetop.app',
+    clientPublicAcceptanceRequiredBeforeApply: true,
+    operationsCanonicalWorkerCandidateRequiredBeforeApply: true,
+    callbackPreservationWorkerMustPrecedeScalarTransition: true,
+    preCallbackPreservationStatesMustExpireOrSettle: true,
+    providerMustAllowCanonicalCallbackUriBeforeTransition: true,
+    liveAcceptanceStillRequired: true };
+}

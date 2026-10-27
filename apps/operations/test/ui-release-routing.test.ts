@@ -49,7 +49,7 @@ describe("Operations additive UI through the actual Worker entrypoint", () => {
     expect(f.assets).toHaveBeenCalledTimes(4); expect(f.fetchRelease).not.toHaveBeenCalled(); expect(f.prepare).not.toHaveBeenCalled();
   });
 
-  it.each(["/", "/dashboard", "/viewer/session/association/model"])("selects registered HTML after normal host middleware: %s", async path => {
+  it.each(["/", "/dashboard", "/viewer/session/association/model", "/intel", "/account"])("selects registered HTML after normal host middleware: %s", async path => {
     const f = fixture(); f.env.UI_ACTIVE_RELEASE = release.id;
     const response = await f.request(`${path}?private=query`, { headers: {
       Cookie: "staff-session=private", Authorization: "Bearer private", "Cf-Access-Jwt-Assertion": "private", Referer: `${origin}/private`,

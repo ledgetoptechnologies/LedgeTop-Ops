@@ -5,6 +5,7 @@ import { createSessionCookie, hmac, sha256 } from "../src/worker/security";
 import type { PublicShareLifecycleRow } from "../src/worker/public-share-lifecycle";
 
 const fragment="f".repeat(48),sessionSecret="s".repeat(48),pepper="p".repeat(48);
+const OLD_PUBLIC_HOST="https://portal.ledgetopdroneservices.com";
 
 async function fixture(patch:Partial<PublicShareLifecycleRow>={},options:{missing?:boolean;accessCode?:string;raceAccessCodeChange?:boolean}={}){
   const base:PublicShareLifecycleRow={id:"share-a",public_id:"public-a",project_id:"project-a",token_hash:await sha256(fragment),label:null,password_hash:null,password_salt:null,password_iterations:null,password_algorithm:null,expires_at:null,revoked_at:null,revoked_reason:null,unavailable_since:null,share_version:3,client_name:"Acme",project_name:"Site",r2_prefix:"jobs/acme/",project_active:1,project_exists:1};
@@ -30,14 +31,26 @@ async function fixture(patch:Partial<PublicShareLifecycleRow>={},options:{missin
   return{env,ctx,share,statements};
 }
 
-async function exchange(value:Awaited<ReturnType<typeof fixture>>,secret=fragment,accessCode?:string){
-  return worker.fetch(new Request("https://client.example/api/public/shares/public-a/session",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({secret,accessCode})}),value.env,value.ctx);
+async function exchange(value:Awaited<ReturnType<typeof fixture>>,secret=fragment,accessCode?:string,origin="https://client.example"){
+  return worker.fetch(new Request(`${origin}/api/public/shares/public-a/session`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({secret,accessCode})}),value.env,value.ctx);
 }
 
 describe("public share session lifecycle routes",()=>{
   it("exchanges a valid never-expire fragment and issues a host-only session",async()=>{
     const response=await exchange(await fixture());
     expect(response.status).toBe(200);expect(response.headers.get("Set-Cookie")).toContain("__Host-ltds_delivery=");expect(response.headers.get("Set-Cookie")).toMatch(/Max-Age=43(?:199|200)/);
+  });
+  it("keeps an old public link usable on its legacy host after delivery.app becomes canonical",async()=>{
+    const value=await fixture();
+    Object.assign(value.env,{ENVIRONMENT:"production",EXPECTED_HOST:"delivery.ledgetop.app",
+      PUBLIC_BASE_URL:"https://delivery.ledgetop.app",PUBLIC_SHARE_ORIGIN:"https://delivery.ledgetop.app",
+      CLIENT_PORTAL_ORIGIN:"https://portal.ledgetop.app",
+      CLIENT_PORTAL_ORIGINS:"https://portal.ledgetop.app,https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com",
+      LEGACY_CLIENT_ORIGINS:"https://portal.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com",
+      CLIENT_PORTAL_RETIRED_ORIGINS:"",CANONICAL_BROWSER_NAVIGATION_ENABLED:"true"});
+    const response=await exchange(value,fragment,undefined,OLD_PUBLIC_HOST);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Set-Cookie")).toContain("__Host-ltds_delivery=");
   });
   it.each([
     [{expires_at:"2000-01-01T00:00:00Z"},"SHARE_EXPIRED"],

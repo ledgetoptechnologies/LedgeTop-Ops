@@ -1,8 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { activeShareForPrefix, deriveShareMetadata, resolveAccessCodeChange, resolveDivisionAssociation, resolveShareExpiration, resolveShareUpdateSecurity } from "../src/worker/delivery";
+import { activeShareForPrefix, deriveShareMetadata, resolveAccessCodeChange, resolveDivisionAssociation, resolveShareExpiration, resolveShareUpdateSecurity, shareUrl } from "../src/worker/delivery";
 import { accessCodeMatches, decryptDeliveryToken, encryptDeliveryToken, hashAccessCode } from "../src/worker/crypto";
 
 describe("delivery share metadata", () => {
+  it("uses the configured public-share origin when generating new delivery links", () => {
+    const secret = "legacy-fragment-secret";
+    const canonical = { ENVIRONMENT: "production", PUBLIC_SHARE_ORIGIN: "https://delivery.ledgetop.app" } as never;
+    const legacy = { ENVIRONMENT: "production", PUBLIC_SHARE_ORIGIN: "https://portal.ledgetopdroneservices.com" } as never;
+    expect(shareUrl(canonical, "public-id", secret)).toBe(`https://delivery.ledgetop.app/s/public-id#${secret}`);
+    expect(shareUrl(legacy, "public-id", secret)).toBe(`https://portal.ledgetopdroneservices.com/s/public-id#${secret}`);
+  });
+
   it("derives required legacy project metadata from the shared folder", () => {
     expect(deriveShareMetadata("jobs/2026/Client/Real Estate photos/")).toEqual({
       clientName: "Real Estate photos",
