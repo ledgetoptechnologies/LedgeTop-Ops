@@ -60,11 +60,16 @@ two-way design, nor the missing Explorer menu/status behavior.
 1. Operations owns stable client/folder identifiers and explicit mappings to a
    fixed NAS subtree and R2 namespace. Access checks apply to list, read, upload,
    rename, delete and restore, not just which folders the UI displays. SMB, if
-   requested, requires corresponding NAS ACL enforcement.
+   requested, requires corresponding NAS ACL enforcement. "All clients" means
+   the union of explicitly mapped published client folders, never the entire
+   bucket. HR, private application data, quarantine and unrelated sibling prefixes
+   remain excluded even for all-client access.
 2. The connector keeps a durable local journal, mount identity, scan checkpoints,
    transfer checkpoints and acknowledged remote revisions. An unavailable mount,
    partial scan, permission error or outage never becomes evidence of deletion.
 3. Each change carries a stable operation ID, origin and observed base revision.
+   Freeze a logical file ID and the exact NAS/R2 base-version pair in the protocol;
+   an index revision alone is not a retained copy of the object's earlier body.
    Duplicate notifications and retries are idempotent. Notifications trigger
    reconciliation against current state; they do not establish authoritative
    ordering. Checkpoints advance only after confirmed publication/local commit.
@@ -77,6 +82,8 @@ two-way design, nor the missing Explorer menu/status behavior.
    for an authorized employee. Keep an explicit revision archive/reference so a
    crash between object storage and metadata commit is reconcilable. Exact
    retention duration and storage budget remain to be decided before activation.
+   Explicitly test successful R2 publication followed by failed metadata commit:
+   recovery reconciles that original operation and never blindly republishes.
 6. Deletion is an explicit authorized tombstone with a revision and recoverable
    retention, not an absent listing entry. An edit versus deletion is a conflict.
    Cross-folder moves recheck both scopes; a failed/partial move cannot silently
@@ -113,6 +120,9 @@ Then qualify one approved staging mapping with copy/update only: portal upload
 appears on NAS, employee edit appears in R2 and on another admitted device, and a
 NAS outage leaves published client reads/cloud uploads working. Prove restart and
 conflict recovery before adding rename/delete propagation and wider scopes.
+Include an existing public share and an existing authorized download in outage
+and cutover acceptance, preserving their current access and bytes; a newly created
+synthetic share alone cannot establish compatibility of existing client access.
 
 Windows acceptance remains separate: Explorer status and pin/free verbs, owned
 legacy-preview removal with all local content preserved, install Finish/start,

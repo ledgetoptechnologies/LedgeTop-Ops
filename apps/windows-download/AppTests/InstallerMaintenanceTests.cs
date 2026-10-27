@@ -8,6 +8,7 @@ internal static class InstallerMaintenanceTests
     {
         InstallerStartupGate();
         UntrackedRootObservations();
+        await LegacyCleanupIntegration();
         foreach (var compiled in new (bool Packaged, ReleaseChannel? Channel)[] { (false, null), (true, null), (true, ReleaseChannel.Stable) }) {
             Require(await InstallerMaintenance.RunAsync(compiled, [InstallerMaintenance.CheckArgument],
                 () => throw new InvalidOperationException(), _ => throw new InvalidOperationException()) == 20,
@@ -68,6 +69,63 @@ internal static class InstallerMaintenanceTests
                 "unavailable native ownership during either source preflight refuses cleanup and drains earlier sessions");
         }
         Console.WriteLine("Installer maintenance: injected absence/unknown observations, fake session lifecycle and original-thread drain passed. No native registration queries or real connection cleanup.");
+    }
+
+    private static async Task LegacyCleanupIntegration()
+    {
+        var log = new List<string>();
+        var sources = new List<FakeSession>();
+        var thread = Environment.CurrentManagedThreadId;
+        foreach (var outcome in Enum.GetValues<LegacyExplorerPreviewCleanupResult>()) {
+            var calls = 0;
+            var code = await InstallerMaintenance.RunAsync((true, ReleaseChannel.Pilot), [InstallerMaintenance.LegacyRemoveArgument],
+                () => new Owner(log, thread), _ => throw new Exception("Legacy-only repair must not prepare connected sources."), remove => {
+                    Require(remove && calls++ == 0, "legacy-only repair executes one explicit owned cleanup");
+                    return Task.FromResult(outcome);
+                });
+            var expected = outcome is LegacyExplorerPreviewCleanupResult.Removed or LegacyExplorerPreviewCleanupResult.AlreadyRemovedVerified
+                ? 0 : outcome == LegacyExplorerPreviewCleanupResult.Busy ? 10 : 20;
+            Require(code == expected && calls == 1, "legacy-only repair refuses missing/unknown receipts without touching connected roots");
+        }
+        FakeSession Prepare(AccessMode mode) { var session = new FakeSession(log, mode.ToString()); sources.Add(session); return session; }
+        async Task<int> Execute(string argument, Func<bool, Task<LegacyExplorerPreviewCleanupResult>> cleanup) =>
+            await InstallerMaintenance.RunAsync((true, ReleaseChannel.Pilot), [argument], () => new Owner(log, thread), Prepare, cleanup);
+
+        Require(await Execute(InstallerMaintenance.CheckArgument, _ => throw new Exception("Installation must not inspect/migrate the old demo.")) == 0,
+            "ordinary installer preflight does not adopt the legacy portable demo");
+        foreach (var outcome in new[] { LegacyExplorerPreviewCleanupResult.Removed,
+            LegacyExplorerPreviewCleanupResult.AlreadyRemovedVerified, LegacyExplorerPreviewCleanupResult.NoKnownReceipt }) {
+            log.Clear(); sources.Clear();
+            var legacyCalls = 0;
+            Require(await Execute(InstallerMaintenance.RemoveArgument, remove => {
+                log.Add("legacy-remove");
+                Require(remove && legacyCalls++ == 0 && sources.Count == 2 && sources.All(source => source.Removals == 0),
+                    "connected sources are prepared before one singleton-held legacy validation/removal");
+                return Task.FromResult(outcome);
+            }) == 0 && legacyCalls == 1 && sources.All(source => source.Removals == 1 && source.Disposals == 1) &&
+                log.IndexOf("legacy-remove") < log.IndexOf("remove-Client") && log.Last() == "owner-dispose",
+                "explicit uninstall handles one exact legacy operation then drains captured connected sources");
+        }
+        foreach (var refusal in new[] { LegacyExplorerPreviewCleanupResult.Busy, LegacyExplorerPreviewCleanupResult.NeedsOwnershipReview,
+            LegacyExplorerPreviewCleanupResult.Postponed, LegacyExplorerPreviewCleanupResult.RecordedProfile }) {
+            log.Clear(); sources.Clear();
+            var calls = 0;
+            Require(await Execute(InstallerMaintenance.RemoveArgument, _ => { calls++; return Task.FromResult(refusal); }) ==
+                (refusal == LegacyExplorerPreviewCleanupResult.Busy ? 10 : 20) && calls == 1 &&
+                sources.All(source => source.Removals == 0 && source.Disposals == 1),
+                "legacy refusal never begins connected cleanup or retries legacy removal");
+        }
+        log.Clear(); sources.Clear();
+        Require(await Execute(InstallerMaintenance.RemoveArgument, _ => {
+            sources[1].FailRemove = true;
+            return Task.FromResult(LegacyExplorerPreviewCleanupResult.Removed);
+        }) == 20 && sources.All(source => source.Removals == 1 && source.Disposals == 1),
+            "a later connected failure retains non-success after confirmed legacy removal for an idempotent retry");
+        log.Clear(); sources.Clear();
+        Require(await Execute(InstallerMaintenance.RemoveArgument, _ => {
+            sources[0].FailDispose = true;
+            return Task.FromResult(LegacyExplorerPreviewCleanupResult.Busy);
+        }) == 20, "session drain failure cannot be hidden by the normal legacy-busy exit code");
     }
 
     private static void InstallerStartupGate()

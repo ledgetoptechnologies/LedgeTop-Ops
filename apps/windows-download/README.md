@@ -74,6 +74,32 @@ Actual connected replacement/relaunch/reconnect and Shell-menu repair remain
 release gates. Automatic client/employee discovery is under backend contract
 review; it is not a deployed endpoint or a reason to guess roles from email.
 
+### Unpublished legacy Preview cleanup
+
+The older portable `LedgeTop Files Preview` has a separate generated V2 ownership
+receipt, so uninstalling shared 0.5.2 does not remove it. The draft's explicit
+uninstall path now includes that exact recorded preview after checking ownership;
+ordinary installation/startup does not migrate or start the demo. Uninstall keeps
+local folders and all downloaded, modified and added files. It does not download
+online-only files or promise that unhydrated placeholders become local copies.
+
+The draft also accepts `--installer-remove-legacy-preview` in a packaged pilot to
+remove only that recorded demo, without preparing/removing Company or Client
+connections. Both applications must be quit first. This command is not present in
+the shared installer yet. Missing/invalid receipts are refused for this dedicated
+repair; do not delete registry entries or restart an unknown old demo to recreate
+ownership. Normal uninstall handles known receipts only and cannot prove that an
+untracked old entry is absent.
+
+Retries verify the saved physical-root identity and exact native/Shell absence
+without repeating unregister. A changed, missing or uncertain root is refused.
+Compilation and injected lifecycle tests are separate from actual owned removal
+and real uninstall acceptance, which remain release gates.
+
+The proposed NAS/R2 replacement is described in
+[`nas-r2-bidirectional-sync-design.md`](../../docs/nas-r2-bidirectional-sync-design.md).
+It is source-only; this pilot still has no upload or bidirectional engine.
+
 The harness commands below use synthetic identities and handlers; they do not
 install software or establish live-source acceptance. Core uses the SDK alone;
 the Windows desktop and Explorer projects also require the exact Windows SDK

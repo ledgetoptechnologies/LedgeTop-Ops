@@ -139,6 +139,25 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
     });
     public Task RemoveAsync() => OperateAsync(RemoveCoreAsync);
 
+    /// <summary>Read-only generated-preview retry proof. A Removed journal alone is not absence.
+    /// Uses the original strict receipt parser and exact physical/native/namespace identities;
+    /// never starts, reconnects, unregisters, or changes the saved removal journal.</summary>
+    public bool VerifyRecordedRemovedAbsence()
+    {
+        if (!operations.Wait(0)) return false; // Never block a UI caller behind an async session operation.
+        try {
+            if (disposed || !generated) return false;
+            var p = ReadProfile();
+            if (p.Phase != Phase.Removed || p.RootFileId == 0 || p.NamespaceClsid == Guid.Empty ||
+                !NativeRootRegistration.HasExactRootFileId(p.Root, p.RootFileId)) return false;
+            var absent = ShellRegistration.Inspect(p.Root, ShellRegistration.CreateId(p.Identity), Context(p),
+                p.NamespaceClsid, p.Icon).CompleteAbsenceVerified;
+            // Recheck the physical pin after namespace/native observations as well. This is a
+            // bounded read-only snapshot, not permission to clean up any newly appearing root.
+            return absent && NativeRootRegistration.HasExactRootFileId(p.Root, p.RootFileId);
+        } finally { operations.Release(); }
+    }
+
     private async Task OperateAsync(Func<Task> operation)
     {
         await operations.WaitAsync();

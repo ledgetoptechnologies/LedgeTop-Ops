@@ -22,5 +22,6 @@ public sealed class ExplorerPreviewSession : IExplorerPreviewSession
     public Task PauseAsync() => owned.PauseAsync();
     public Task ResumeAsync() => owned.ResumeAsync();
     public Task RemoveAsync() => owned.RemoveAsync();
+    public bool VerifyRecordedRemovedAbsence() => owned.VerifyRecordedRemovedAbsence();
     public ValueTask DisposeAsync() => owned.DisposeAsync();
 }

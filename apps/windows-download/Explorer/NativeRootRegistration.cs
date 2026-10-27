@@ -218,6 +218,15 @@ public sealed class NativeRootRegistration : IPreviewRootRegistration
         return full;
     }
 
+    /// <summary>Read-only exact physical identity check for a retained removed-root receipt.</summary>
+    internal static bool HasExactRootFileId(string root, long expectedFileId)
+    {
+        AssertAbi();
+        if (expectedFileId == 0) return false;
+        var canonical = ValidateRoot(root, requireEmpty: false);
+        return ActualRootFileId(canonical) == expectedFileId;
+    }
+
     private static long ActualRootFileId(string root)
     {
         using var handle = Native.CreateFileW(root, 0x80, 7, 0, 3, 0x02200000, 0);
