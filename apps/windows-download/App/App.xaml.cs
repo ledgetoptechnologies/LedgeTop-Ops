@@ -3,6 +3,7 @@ using System.Reflection;
 using LedgeTop.Files.Backends;
 using LedgeTop.Files.Presentation;
 using LedgeTop.Files.Explorer;
+using LedgeTop.Files.Updates;
 
 namespace LedgeTop.Files;
 
@@ -20,10 +21,23 @@ public partial class App : Application
         base.OnStartup(e);
         var metadata = typeof(App).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>().ToArray();
         var compiled = ReleaseProfiles.Compiled(metadata);
+        if (ExeUpdateWindowsHelperEntry.Requested(e.Args)) {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            var exitCode = await ExeUpdateWindowsHelperEntry.RunAsync(e.Args, CancellationToken.None);
+            Shutdown(exitCode);
+            return;
+        }
         if (InstallerMaintenance.Requested(e.Args)) {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             var exitCode = await InstallerMaintenance.RunAsync(compiled, e.Args);
             Shutdown(exitCode);
+            return;
+        }
+        if (compiled.Packaged && compiled.Channel == ReleaseChannel.Pilot &&
+            ExeUpdateWindowsPlatform.HasPendingOperation("pilot")) {
+            MessageBox.Show("A LedgeTop Files update is running, or its status couldn't be checked. Let setup finish, then open LedgeTop Files again. If this keeps appearing, ask your LedgeTop contact to check the update.",
+                "LedgeTop Files", MessageBoxButton.OK, MessageBoxImage.Information);
+            Shutdown(20);
             return;
         }
         if (InstallerActivity.BlocksStartup(compiled, e.Args)) {

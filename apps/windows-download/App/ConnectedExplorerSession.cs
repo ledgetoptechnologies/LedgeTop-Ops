@@ -15,6 +15,7 @@ internal sealed record ConnectedExplorerEngineRequest(string ProfileDirectory, s
     IQueuedDownloadSource Source, ExplorerRootScope Scope, ExplorerRootManifest? InitialManifest);
 internal sealed record ConnectedExplorerEngine(IExplorerPreviewSession Session, Func<ExplorerRootManifest?> ReadFrozenManifest,
     Func<bool> HasOwnedProfileReceipt);
+internal sealed record ConnectedExplorerUpdateBinding(string Channel, string SourceAlias, string PrincipalId);
 internal interface ICachedExplorerReconnect
 {
     bool CanReconnectCached { get; }
@@ -185,6 +186,25 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         try { await CurrentPersonAsync(backend, SelectedSource(backend), token, index.PrincipalId); }
         catch { Add("Your sign-in or file access changed. New downloads have stopped; reconnect the same account or remove this connection before choosing another."); throw; }
     });
+    // This identity comes from the current selected server session, never saved UI text or a caller argument.
+    // The updater must independently recheck the same principal under its own cached-session pin.
+    internal async Task<ConnectedExplorerUpdateBinding> GetUpdateBindingAsync()
+    {
+        ConnectedExplorerUpdateBinding? result = null;
+        await OperateAsync(async token => {
+            if (channel != "pilot" || alias is not ("portal" or "employee") || backend is null || index is null || engine is null ||
+                State is not (ExplorerPreviewState.Running or ExplorerPreviewState.Paused) || ValidatePreviousRemoval() ||
+                engine.ReadFrozenManifest()?.Scope != Scope(index))
+                throw new LoginRequiredException();
+            var selected = backend;
+            var source = SelectedSource(selected);
+            using var pin = selected is LiveBackend live ? await live.PinCatalogSessionAsync(token).ConfigureAwait(false) : null;
+            var principal = await CurrentPersonAsync(selected, source, token, index.PrincipalId).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            result = new(channel, alias, principal);
+        }).ConfigureAwait(false);
+        return result ?? throw new AccessDeniedException();
+    }
     public Task RemoveAsync() => OperateAsync(async token => {
         token.ThrowIfCancellationRequested();
         _ = ValidatePreviousRemoval();

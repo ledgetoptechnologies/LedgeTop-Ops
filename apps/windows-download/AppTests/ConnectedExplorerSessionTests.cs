@@ -23,7 +23,29 @@ internal static class ConnectedExplorerSessionTests
         await CancelEngineDefaultTokenRead(); count++;
         await DurableRemovalBeforeProfileCreation(); count++;
         await CachedReconnect(); count++;
-        Console.WriteLine($"Connected Explorer coordinator: {count}/11 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+        await UpdateIdentityBinding(); count++;
+        Console.WriteLine($"Connected Explorer coordinator: {count}/12 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+    }
+
+    private static async Task UpdateIdentityBinding()
+    {
+        await using var fixture = new Fixture();
+        var session = fixture.Create();
+        await Refuses(async () => { _ = await session.GetUpdateBindingAsync(); });
+        Check(fixture.Backends == 0 && fixture.SignIns == 0 && fixture.Captures == 0, "update identity cannot construct or sign into a disconnected source");
+        await session.StartAsync();
+        var before = File.ReadAllBytes(fixture.IndexPath);
+        var signs = fixture.SignIns; var captures = fixture.Captures;
+        var binding = await session.GetUpdateBindingAsync();
+        Check(binding == new ConnectedExplorerUpdateBinding("pilot", "portal", Fixture.PersonA) &&
+            fixture.SignIns == signs && fixture.Captures == captures && before.AsSpan().SequenceEqual(File.ReadAllBytes(fixture.IndexPath)),
+            "update identity checks the selected account without login, recapture or index mutation");
+        await session.PauseAsync();
+        Check(await session.GetUpdateBindingAsync() == binding, "a paused connected source retains the same verified update identity");
+        fixture.Person = Fixture.PersonB;
+        await Refuses(async () => { _ = await session.GetUpdateBindingAsync(); });
+        Check(session.State == ExplorerPreviewState.Failed && fixture.SignIns == signs && fixture.Captures == captures &&
+            before.AsSpan().SequenceEqual(File.ReadAllBytes(fixture.IndexPath)), "a changed account cannot export the old identity or rewrite its saved ownership");
     }
 
     private static async Task SelectionAndFrozenReopen()

@@ -70,6 +70,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("Installed updates validate cached policy and drain before replacement", InstalledUpdateCoordinatorTests.Run),
     ("EXE update handoff preserves maintenance and recovery boundaries without installation", ExeUpdateHandoffTests.Run),
     ("EXE update helper refuses unsafe protocol exit and installation transitions", ExeUpdateHelperTests.Run),
+    ("EXE Windows update policies preserve peer exit and installer ownership", ExeUpdateWindowsPolicyTests.Run),
     ("Installed payload verifier binds exact inventory and retained filesystem handles", InstalledPayloadVerifierTests.Run),
     ("Installer maintenance validates fixed pilot ownership and drains offline cleanup", InstallerMaintenanceTests.Run),
     ("Folder launcher keeps dispatcher and Quit responsive while Windows Shell is blocked", () => BackgroundFolderLauncherTests.Run(screenshots)),
@@ -86,6 +87,8 @@ var selectedGroups = args.Contains("--folder-launcher-only")
     ? groups.Where(group => group.Name.StartsWith("EXE update helper", StringComparison.Ordinal)).ToArray()
     : args.Contains("--installed-payload-only")
     ? groups.Where(group => group.Name.StartsWith("Installed payload verifier", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--exe-update-windows-policy-only")
+    ? groups.Where(group => group.Name.StartsWith("EXE Windows update policies", StringComparison.Ordinal)).ToArray()
     : args.Contains("--explorer-catalog-only")
     ? groups.Where(group => group.Name.StartsWith("Explorer catalog", StringComparison.Ordinal)).ToArray()
     : args.Contains("--connected-coordinator-only")

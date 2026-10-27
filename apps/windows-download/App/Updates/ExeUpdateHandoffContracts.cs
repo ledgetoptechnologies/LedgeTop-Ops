@@ -20,9 +20,9 @@ internal sealed record ExeUpdateCandidate(ExeUpdateInstalledOwner InstalledOwner
     string CurrentVersion, ExeUpdateParentIdentity Parent, WindowsAppReleasePins Release, string InstallerPath);
 internal sealed record ExeUpdatePreparation(WindowsAppReleaseStatus Status, ExeUpdateCandidate? Candidate = null);
 
-// Bounded nonsecret model only: no token, credentials, principal name, launch arguments or arbitrary command.
-// This is NOT an on-disk or IPC protocol. A separately reviewed adapter must define atomic owned storage,
-// helper authentication/readiness, expiration and receipt cleanup before production use.
+// Bounded nonsecret proposal: no token, credentials, principal name or arbitrary command. The Windows
+// adapter stages it in memory and carries it only inside authenticated bounded IPC, never a restartable
+// on-disk authority. Private account binding is a separate IPC-only value, not part of this record.
 internal sealed record ExeUpdateHandoff(Guid Id, ExeUpdateCandidate Candidate)
 {
     internal const int SchemaVersion = 1;
@@ -67,7 +67,8 @@ internal interface IExeUpdateHandoffPlatform
     // Revalidate exact current identity, installed ownership/version and staged bytes; hold a stable
     // artifact/session fence until disposal. Null refuses. Must not silently refresh another identity.
     Task<IExeUpdateBoundary?> VerifyBoundaryAsync(ExeUpdateCandidate candidate, CancellationToken cancellationToken);
-    // No adapter is implemented. A throwing/null launch MUST confirm no install-capable child remains.
+    // A throwing/null launch MUST confirm no install-capable child remains. Once a real process is
+    // created, the Windows adapter returns a reservation retaining its actual handle even before READY.
     Task<IExeUpdateHelperReservation?> LaunchHelperAsync(ExeUpdateHandoff handoff, IExeUpdateBoundary boundary,
         CancellationToken cancellationToken);
     // Cancellation is checked before this commit point. Exceptions are uncertain, never a safe rejection.

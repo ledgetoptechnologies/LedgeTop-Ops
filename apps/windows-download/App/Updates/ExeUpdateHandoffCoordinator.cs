@@ -6,8 +6,8 @@ using LedgeTop.WindowsDownload;
 namespace LedgeTop.Files.Updates;
 
 /// <summary>
-/// Source-only EXE parent orchestration. No platform/helper, install, parent termination, relaunch,
-/// scheduling or UI wiring is provided. Injected adapters must satisfy the contracts before activation.
+/// EXE parent orchestration, separate from the concrete Windows adapter/helper. Application entry,
+/// startup UI, scheduling and activation remain unwired; adapters require independent acceptance.
 /// </summary>
 internal sealed class ExeUpdateHandoffCoordinator
 {
