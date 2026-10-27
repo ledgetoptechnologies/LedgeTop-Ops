@@ -313,4 +313,3 @@ test('rejects stale, future, source-drifted and target-swapped readiness receipt
   drift.databases[1].sourceInventorySha256 = 'x'.repeat(64);
   assert.throws(() => validateProductionMigrationReadiness(drift, { sourceCommit: COMMIT, now: fixedNow.getTime() }));
 });
-

@@ -361,4 +361,3 @@ export async function readProductionMigrationReadiness({
   };
   return validateProductionMigrationReadiness(result, { sourceCommit, now: endWall });
 }
-
