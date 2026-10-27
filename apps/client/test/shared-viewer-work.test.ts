@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { loadNativeViewerWork, openNativeViewerTaskSession, type NativeViewerWorkItem } from "../src/client/native-portal-api";
-import { directViewerTaskPath, operationsHomeViewerWorkspaceIds, sharedViewerRows, showsBusinessName, viewerWorkAccounts } from "../src/client/shared-viewer-work";
+import { directViewerTaskPath, operationsHomeViewerWorkspaceIds, sharedViewerRows, viewerWorkAccounts } from "../src/client/shared-viewer-work";
 import { parseClientViewerShellRoute, directClientViewerShellPath, clientViewerShellPath } from "../src/client/ClientViewerShell";
 import type { PortalWorkspace } from "../src/client/portal-api";
 
@@ -23,8 +23,6 @@ describe("shared 3D work rows", () => {
   it("never merges the same task across different client accounts", () => {
     const rows = sharedViewerRows([item(), item({ workspaceId: "workspace-c", grantId: "grant-c", businessName: "Mountain Engineering" })]);
     expect(rows).toHaveLength(2);
-    expect(showsBusinessName(rows)).toBe(true);
-    expect(showsBusinessName([item(), item({ taskId: "task-2" }), item({ taskId: "task-3", businessName: null })])).toBe(false);
   });
   it("only uses native accounts, once each", () => {
     const native: PortalWorkspace = { id: "workspace-b", rootType: "organization", rootPublicId: "org", displayName: "Internal test label", resourceMode: "native", sourceId: "project-alpha:secondary" };

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type MouseEvent, type ReactNode } from "react";
 import { EmptyState, Skeleton } from "@ltds/ui";
 import { UNKNOWN_REASON_TEXT, type EvidenceState, type FetchStatus, type StaffTenantView, type UnknownReason } from "@ltds/shared/competitor-intel";
 import { ApiError } from "./api";
@@ -29,12 +29,17 @@ const stamp = (value: string) => {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 };
 
-/** Reads business/view/range from the address so a refresh or shared link opens the same Intel view. */
+/** Reads business/view/range from the address so a refresh or shared link opens the same Intel view. No business means the overview. */
 function readLocation() {
   const params = new URLSearchParams(location.search);
   const view = params.get("view"), range = params.get("range");
-  return { business: params.get("business"), view: isView(view) ? view : "competitors", range: isRange(range) ? range : "28d" as IntelRange };
+  return { business: params.get("business"), view: isView(view) ? view : "competitors", range: isRange(range) ? range : "28d" as IntelRange,
+    overview: !params.has("business") };
 }
+const detailHref = (business: string, view: View, range: IntelRange) => `/intel?${new URLSearchParams({ business, view, range })}`;
+/** A plain click stays in the page and keeps history; a modified click opens the link as the browser would. */
+const plainClick = (event: MouseEvent) => event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
+type Go = (href: string) => (event: MouseEvent) => void;
 
 type Load<T> = { kind: "loading" } | { kind: "unavailable"; code: string } | { kind: "error"; message: string } | { kind: "ready"; value: T };
 
@@ -58,8 +63,8 @@ function useSection<T>(load: (signal: AbortSignal) => Promise<T>, deps: unknown[
 }
 
 /**
- * Internal Intel for Ledge Top's own businesses: pick Drone Services or Technologies, then competitor monitoring,
- * own-site monitoring or Search Console. Entirely read-only.
+ * Internal Intel for Ledge Top's own businesses: an overview of every business, each linking to its competitor
+ * monitoring, own-site monitoring or Search Console. Entirely read-only.
  */
 export function IntelPage() {
   const [businesses, setBusinesses] = useState<Load<IntelBusiness[]>>({ kind: "loading" });
@@ -87,6 +92,13 @@ export function IntelPage() {
     return <EmptyState title="Intel isn't available" detail="No Ledge Top business is set up for Intel on your account yet." />;
 
   const list = businesses.value;
+  const go: Go = href => event => {
+    if (!plainClick(event)) return;
+    event.preventDefault();
+    history.pushState(null, "", href);
+    setSelection(readLocation());
+  };
+  if (selection.overview) return <IntelOverview businesses={list} go={go} />;
   const business = list.find(item => item.key === selection.business) ?? list[0]!;
   const choose = (next: Partial<typeof selection>) => {
     const merged = { ...selection, business: business.key, ...next };
@@ -96,6 +108,7 @@ export function IntelPage() {
   };
 
   return <div className="intel-page">
+    <a className="intel-back" href="/intel" onClick={go("/intel")}>← All businesses</a>
     <div className="intel-controls">
       {list.length > 1 && <div className="ltds-segmented intel-business" role="group" aria-label="Business">
         {list.map(item => <button key={item.key} type="button" aria-pressed={item.key === business.key}
@@ -117,6 +130,56 @@ export function IntelPage() {
       {selection.view === "search" && <Search key={`${business.key}-${selection.range}`} business={business} range={selection.range} />}
     </section>
   </div>;
+}
+
+const OVERVIEW_RANGE: IntelRange = "28d";
+
+/** Every business side by side. Each section loads on its own, so one that fails or isn't connected never hides the rest. */
+function IntelOverview({ businesses, go }: { businesses: IntelBusiness[]; go: Go }) {
+  return <div className="intel-page">
+    <p className="intel-note">Each Ledge Top business at a glance. Site and search figures cover the last {rangeLabel(OVERVIEW_RANGE)}.</p>
+    <div className="intel-overview">{businesses.map(business => <BusinessSummary key={business.key} business={business} go={go} />)}</div>
+  </div>;
+}
+
+const plural = (value: number, one: string, many: string) => `${count(value)} ${value === 1 ? one : many}`;
+
+function BusinessSummary({ business, go }: { business: IntelBusiness; go: Go }) {
+  const headingId = useId();
+  const [competitors, retryCompetitors] = useSection<StaffTenantView>(signal => loadCompetitors(business.key, signal), [business.key]);
+  const [site, retrySite] = useSection<WebsiteMonitor>(signal => loadWebsiteMonitor(business.key, OVERVIEW_RANGE, signal), [business.key]);
+  const [search, retrySearch] = useSection<SearchStats>(signal => loadSearchStats(business.key, OVERVIEW_RANGE, signal), [business.key]);
+  const row = (view: View) => ({ label: VIEWS.find(item => item.value === view)!.label, href: detailHref(business.key, view, OVERVIEW_RANGE), go });
+  return <section className="intel-overview-card" aria-labelledby={headingId}>
+    <h2 id={headingId}>{business.name}</h2>
+    <ul>
+      <SummaryRow {...row("competitors")} state={competitors} retry={retryCompetitors} summary={view => [
+        `${plural(view.competitors.length, "competitor", "competitors")} tracked`,
+        view.latestScan?.completedAt ? `Last scan ${stamp(view.latestScan.completedAt)}` : "No completed scan yet"]} />
+      <SummaryRow {...row("website")} state={site} retry={retrySite} summary={value => [
+        `${plural(value.monitoredPages.length, "page", "pages")} monitored`,
+        plural(value.changesSincePrevious.length, "change", "changes"),
+        value.freshness.stale ? "Out of date" : ""]} />
+      <SummaryRow {...row("search")} state={search} retry={retrySearch} summary={value => [
+        value.totals.clicks === null ? "Clicks not available" : plural(value.totals.clicks, "click", "clicks"),
+        value.totals.impressions === null ? "Impressions not available" : plural(value.totals.impressions, "impression", "impressions"),
+        value.freshness.stale ? "Out of date" : ""]} />
+    </ul>
+  </section>;
+}
+
+/** What a section says when it has no figures: never a zero. */
+const overviewUnavailable = (code: string) => code === "intel_awaiting_first_data" ? "Waiting for the first data"
+  : code === "intel_range_unavailable" ? `Nothing reported for the last ${rangeLabel(OVERVIEW_RANGE)}` : "Not set up yet";
+
+function SummaryRow<T>({ label, href, go, state, retry, summary }: { label: string; href: string; go: Go; state: Load<T>; retry: () => void; summary: (value: T) => string[] }) {
+  return <li className="intel-overview-row">
+    <a href={href} onClick={go(href)}>{label} →</a>
+    {state.kind === "loading" ? <p className="intel-unknown">Loading…</p>
+      : state.kind === "unavailable" ? <p className="intel-unknown">{overviewUnavailable(state.code)}</p>
+      : state.kind === "error" ? <p className="intel-overview-error">{state.message} <button type="button" className="button-ghost button-small" onClick={retry}>Try again</button></p>
+      : <p>{summary(state.value).filter(Boolean).join(" · ")}</p>}
+  </li>;
 }
 
 function Status<T>({ state, retry, unavailable, children }: { state: Load<T>; retry: () => void; unavailable: (code: string) => [string, string]; children: (value: T) => ReactNode }) {

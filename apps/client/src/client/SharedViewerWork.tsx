@@ -3,7 +3,7 @@ import { Card, EmptyState, Skeleton } from "@ltds/ui";
 import type { RequestError } from "./bulk-download";
 import { loadNativeViewerWork, type NativeViewerWorkItem } from "./native-portal-api";
 import type { PortalWorkspace } from "./portal-api";
-import { directViewerTaskPath, sharedViewerRows, showsBusinessName, viewerWorkAccounts } from "./shared-viewer-work";
+import { directViewerTaskPath, sharedViewerRows, viewerWorkAccounts } from "./shared-viewer-work";
 
 const ACCOUNT_CONCURRENCY = 4;
 type AccountWork =
@@ -79,7 +79,6 @@ export function SharedViewerWork({ workspaces, operationsHomeWorkspaceIds = [] }
 
   const states = accounts.map(account => ({ account, state: work.get(account) ?? { status: "loading" as const } }));
   const rows = sharedViewerRows(states.flatMap(({ state }) => state.status === "ready" ? state.items : []));
-  const withBusiness = showsBusinessName(rows);
   const loading = states.some(({ state }) => state.status === "loading");
   const failed = states.filter(({ state }) => state.status === "error");
   const unchecked = states.filter(({ state }) => state.status === "unavailable");
@@ -93,7 +92,7 @@ export function SharedViewerWork({ workspaces, operationsHomeWorkspaceIds = [] }
     </div>}
     {rows.length > 0 && <ul className="shared-viewer-work-list">{rows.map(row => <li key={`${row.workspaceId}:${row.taskId}`}>
       <div><strong>{row.title}</strong>
-        {(row.projectName || (withBusiness && row.businessName)) && <span>{[row.projectName, withBusiness ? row.businessName : null].filter(Boolean).join(" · ")}</span>}
+        {row.projectName && <span>{row.projectName}</span>}
         <small>Shared {shortDate(row.sharedAt)}{row.expiresAt ? ` · Available until ${shortDate(row.expiresAt)}` : ""}</small></div>
       <a className="button button-orange" href={directViewerTaskPath(row)}>Open 3D model<span className="visually-hidden">: {row.title}</span></a>
     </li>)}</ul>}

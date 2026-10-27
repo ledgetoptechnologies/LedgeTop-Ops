@@ -26,6 +26,16 @@
 .intel-page-cell { display: grid; gap: .1rem; }
 .intel-page-cell small { color: var(--muted); }
 .intel-empty { color: var(--muted); text-align: center; }
+.intel-back { justify-self: start; display: inline-flex; align-items: center; min-height: 44px; font-weight: 650; }
+.intel-overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); gap: 1rem; }
+.intel-overview-card { min-width: 0; padding: 1rem 1.15rem; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.intel-overview-card h2 { margin: 0 0 .5rem; font-size: 1.15rem; overflow-wrap: anywhere; }
+.intel-overview-card ul { display: grid; margin: 0; padding: 0; list-style: none; }
+.intel-overview-row { display: grid; gap: .15rem; padding: .65rem 0; border-top: 1px solid var(--line); }
+.intel-overview-row > a { display: inline-flex; align-items: center; min-height: 44px; justify-self: start; font-weight: 700; }
+.intel-overview-row > p { margin: 0; color: var(--ink); font-size: .92rem; overflow-wrap: anywhere; }
+.intel-overview-row > p.intel-unknown { color: var(--muted); font-size: .92rem; font-weight: 400; }
+.intel-overview-error { color: #a72d39; }
 .intel-note { margin: 0 0 .75rem; color: var(--muted); }
 .intel-unknown { color: var(--muted); font-size: 1rem; font-weight: 650; }
 .intel-table .intel-unknown { font-size: inherit; font-weight: 400; }

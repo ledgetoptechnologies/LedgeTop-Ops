@@ -1252,6 +1252,8 @@ for (const width of [1280, 390, 320]) {
     await page.setViewportSize({ width, height: width < 600 ? 844 : 900 });
     await page.goto("/portal/account");
     await expect(page.getByRole("heading", { name: "Invite a collaborator" })).toBeVisible();
+    // Team access is here, so the account card doesn't send them to Ledge Top to add a colleague.
+    await expect(page.locator(".client-portal-main")).not.toContainText(/add a colleague|pilot/i);
     const hierarchy = page.getByRole("radiogroup", { name: "Client hierarchy" });
     const defaultProject = hierarchy.getByRole("radio", { name: /North Site/ });
     await expect(defaultProject).toBeChecked();
@@ -1422,6 +1424,8 @@ test("client shell contains very long account text and reflows at a 200% zoom eq
   const accountCard = page.locator(".portal-account-card");
   await expect(accountCard.getByText(longName, { exact: true })).toBeVisible();
   await expect(accountCard.getByText(longEmail, { exact: true })).toBeVisible();
+  await expect(page.locator(".client-portal-main")).toContainText("Contact Ledge Top to add a colleague");
+  await expect(page.locator(".client-portal-main")).not.toContainText(/pilot/i);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
 
   // A 640 CSS-pixel viewport is the reflow equivalent of 200% browser zoom
@@ -2123,6 +2127,41 @@ test("client can edit before review, create a child change, and answer an estima
   await confirmInPage(page, "Accept operational estimate?", "Accept estimate");
   await expect.poll(() => workflowEvents.estimateAccepted).toBe(true);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("clients never set a request category; edits and changes keep the existing one", async ({ page }) => {
+  const baseRequest = requests[0]!;
+  const categorized: PortalServiceRequest[] = [
+    { ...baseRequest, serviceCategory: "Roof imaging" },
+    { ...baseRequest, id: "request-b", requestType: "service" as const, title: "Reviewed model update", details: "Update the reviewed site model.",
+      status: "under_review" as const, serviceCategory: "Model update" },
+  ];
+  await mockAuthorizedPortal(page, null, categorized, {});
+  const bodies: Record<string, { serviceCategory?: unknown }> = {};
+  await page.route("**/api/client/service-requests/request-a", async route => {
+    if (route.request().method() !== "PATCH") return route.fallback();
+    bodies.edit = route.request().postDataJSON();
+    await route.fulfill({ json: { request: { ...categorized[0], ...bodies.edit, updatedAt: "2026-08-01T13:00:00.000Z" } } });
+  });
+  await page.route("**/api/client/service-requests/request-b/change-request", async route => {
+    bodies.change = route.request().postDataJSON();
+    await route.fulfill({ status: 201, json: { request: { ...categorized[1], ...bodies.change, id: "request-child", parentRequestId: "request-b", status: "submitted" } } });
+  });
+  await page.goto("/portal/requests");
+
+  await page.getByRole("button", { name: "Edit" }).click();
+  await expect(page.getByLabel("Service request title")).toBeVisible();
+  await expect(page.getByText("Service category")).toHaveCount(0);
+  await page.getByLabel("Service request title").fill("Edited before review");
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect.poll(() => bodies.edit?.serviceCategory).toBe("Roof imaging");
+  await page.goto("/portal/requests");
+
+  await page.getByRole("button", { name: "Request a change" }).click();
+  await expect(page.getByText("Service category")).toHaveCount(0);
+  await page.getByLabel("What do you need?").fill("Add the east parcel to the reviewed scope.");
+  await page.getByRole("button", { name: "Submit change request" }).click();
+  await expect.poll(() => bodies.change?.serviceCategory).toBe("Model update");
 });
 
 test("estimate change requests use an in-app text dialog, not the unsupported native prompt", async ({ page }) => {
