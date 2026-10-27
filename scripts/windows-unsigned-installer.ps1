@@ -48,11 +48,11 @@ function LocalPath([string]$Path, [bool]$AllowMissingLeaf = $false) {
 }
 function RelativePath([string]$Path) {
   if ([string]::IsNullOrWhiteSpace($Path)) { throw 'Unsafe payload relative path.' }
-  $Path = $Path.Replace('\','/')
+  if ($Path.Contains('\')) { throw 'Payload inventory paths must use canonical forward-slash spelling.' }
   if ($Path.Length -gt 240 -or
       [IO.Path]::IsPathRooted($Path) -or $Path.IndexOfAny([char[]]@('$','"','`','!',"`r","`n")) -ge 0) { throw 'Unsafe payload relative path.' }
   foreach ($part in $Path.Split('/')) { Leaf $part }
-  if ($Path -ieq 'installer-owned.ini' -or $Path -ieq 'uninstall.exe' -or $Path.Split('/')[0] -ieq $inventoryLeaf) { throw 'Payload collides with installer-owned files.' }
+  if ($Path.Split('/')[0] -in @('installer-owned.ini','uninstall.exe',$inventoryLeaf)) { throw 'Payload collides with installer-owned files.' }
   $Path
 }
 function UniqueJson($Element) {
@@ -156,6 +156,7 @@ if ($build.status -cne 'private_connected_staging_pilot' -or $build.sourceCommit
     $build.sourceArchiveSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'Build receipt is outside the approved unsigned pilot construction scope.' }
 if ($inventory.Count -lt 1 -or $inventory.Count -gt 4096) { throw 'Payload inventory count is unsupported.' }
 $listed = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
+$prefixSpellings = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
 $directories = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 $total = 0L
 foreach ($item in $inventory) {
@@ -165,6 +166,14 @@ foreach ($item in $inventory) {
   $relative = RelativePath $item.path
   $item.path = $relative
   if (-not $listed.TryAdd($relative,$item)) { throw 'Duplicate/case-colliding inventory paths.' }
+  $prefix = ''
+  foreach ($part in $relative.Split('/')) {
+    $prefix = if ($prefix) { $prefix+'/'+$part } else { $part }
+    $spelling = ''
+    if ($prefixSpellings.TryGetValue($prefix,[ref]$spelling)) {
+      if ($spelling -cne $prefix) { throw 'Case-inconsistent inventory path prefix.' }
+    } else { $prefixSpellings.Add($prefix,$prefix) }
+  }
   for ($parent = [IO.Path]::GetDirectoryName($relative.Replace('/','\')); $parent; $parent = [IO.Path]::GetDirectoryName($parent)) { $null = $directories.Add($parent.Replace('\','/')) }
   $path = LocalPath (Join-Path $PayloadDirectory $relative)
   $actual = Get-Item -LiteralPath $path

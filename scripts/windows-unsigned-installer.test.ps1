@@ -103,11 +103,13 @@ Reject 'protocol string cannot claim numeric evidence' @{} 'JSON integers'
 $build.installerMaintenanceProtocol=1;SaveFixtures
 $originalPath=$inventory[0].path;$inventory[0].path='../outside';SaveFixtures
 Reject 'inventory traversal' @{} 'Unsafe Windows filename'
+$inventory[0].path='helper\cloudflared.exe';SaveFixtures
+Reject 'raw inventory backslash cannot be normalized under byte anchor' @{} 'canonical forward-slash'
 $inventory[0].path='evil$0.txt';SaveFixtures
 Reject 'NSIS variable input' @{} 'Unsafe payload relative'
 $inventory[0].path='uninstall.exe';SaveFixtures
 Reject 'installer filename collision' @{} 'installer-owned'
-foreach($reserved in @('installed-payload-inventory.json','INSTALLED-PAYLOAD-INVENTORY.JSON','installed-payload-inventory.json/nested.txt')){
+foreach($reserved in @('installed-payload-inventory.json','INSTALLED-PAYLOAD-INVENTORY.JSON','installed-payload-inventory.json/nested.txt','uninstall.exe/nested.txt','INSTALLER-OWNED.INI/nested.txt')){
   $inventory[0].path=$reserved;SaveFixtures
   Reject "inventory sidecar reserved $reserved" @{} 'installer-owned'
 }
@@ -122,6 +124,16 @@ $duplicate=[ordered]@{path=$inventory[0].path.ToUpperInvariant();bytes=$inventor
 $originalInventory=$inventory;$inventory=@($inventory)+@($duplicate);SaveFixtures
 Reject 'Windows case duplicate' @{} 'Duplicate/case-colliding'
 $inventory=$originalInventory;SaveFixtures
+$caseFolder=Join-Path $payload 'A';[IO.Directory]::CreateDirectory($caseFolder)|Out-Null
+$extra=@();foreach($leaf in @('one.txt','two.txt')){
+  $path=Join-Path $caseFolder $leaf;[IO.File]::WriteAllText($path,'Synthetic case-prefix fixture.')
+  $spelling=if($leaf-eq'one.txt'){'A/one.txt'}else{'a/two.txt'}
+  $extra+= [pscustomobject]@{path=$spelling;bytes=(Get-Item $path).Length;sha256=(Get-FileHash $path).Hash.ToLowerInvariant()}
+}
+$inventory=@($inventory)+$extra;$build.payloadFiles=$inventory.Count;$build.payloadBytes=($inventory|Measure-Object bytes -Sum).Sum;SaveFixtures
+Reject 'shared directory prefix must have one exact case spelling' @{} 'Case-inconsistent inventory path prefix'
+$inventory=$originalInventory;$build.payloadFiles=$inventory.Count;$build.payloadBytes=($inventory|Measure-Object bytes -Sum).Sum;SaveFixtures
+foreach($leaf in @('one.txt','two.txt')){[IO.File]::Delete((Join-Path $caseFolder $leaf))};[IO.Directory]::Delete($caseFolder)
 [IO.File]::WriteAllText((Join-Path $payload 'unexpected.txt'),'retain')
 Reject 'unlisted payload file' @{} 'Unlisted payload file'
 [IO.File]::Delete((Join-Path $payload 'unexpected.txt'))
