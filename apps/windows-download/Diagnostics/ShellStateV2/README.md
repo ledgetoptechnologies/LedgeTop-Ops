@@ -1,7 +1,11 @@
 # Company-files Shell diagnostic, revision 2
 
-Source only. This is not a new published laptop download. The existing staged
-revision 1 ZIP remains unchanged and supports the current schema3 pilot.
+Packaged on October 27, 2026 as `LedgeTop-Files-Explorer-Diagnostics-v2.zip`
+alongside Pilot 0.5.4 in the existing staging share. The three collector/wrapper
+source files match the immutable installer source commit
+`97186ac096b9d4627555fe99417c9d04d2855284`. The existing revision 1 ZIP remains
+unchanged and supports only schema3. Live v2 collection on the laptop is still
+unverified; its report is the next diagnostic after successful Company connection.
 
 This Windows PowerShell 5.1 diagnostic admits only the current user's fixed pilot
 Company-files index and its derived credentialless profile path. Schema3 requires
@@ -35,8 +39,9 @@ authority-tamper, path, JSON and ABI fixtures. It does not call `ReadBinding`,
 `Collect` or `SaveReport`, inspect a real profile, query registry/Shell/native file
 metadata, or create a provider. Successful pure tests do not qualify live collection.
 
-The unchanged drag-and-drop CMD is retained as future packaging source. It uses a
+The unchanged drag-and-drop CMD is included in the versioned ZIP. It uses a
 process-only execution-policy bypass inherited from revision 1; it does not change
 persisted Windows policy and cannot override organization policy. CI uses the
-PowerShell wrapper directly without that override. Review and qualify a new
-versioned ZIP before distributing it; do not replace an existing version in place.
+PowerShell wrapper directly without that override. The published ZIP was inspected
+and its source hashes checked before sharing. Future changes require a new
+versioned ZIP; do not replace an existing version in place.

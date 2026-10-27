@@ -7,11 +7,23 @@ The unsigned per-user pilot installer is available in
 `S:\LedgeTop Operations\Sync App`. Start with `LATEST-PREVIEW.txt` and
 `CURRENT-STAGING-STATUS.txt`; versioned receipts retain their original build-time
 observations. Code signing is intentionally off. Uploads and automatic catalog
-refresh are not implemented. Shared 0.5.3 is a staging candidate for manual laptop
+refresh are not implemented. Shared 0.5.4 is a diagnostic candidate for manual laptop
 acceptance. It includes client-side scheduled update checks, but the update feed
 is still off and automatic delivery/installation is not accepted end to end.
 
-## Current verification — October 26, 2026
+## Current verification — October 27, 2026
+
+- Candidate 0.5.4.0 is published with the schema-3/schema-4-compatible Shell
+  diagnostic v2. Its source archive, all 524 payload files, inventory sidecar,
+  helper/notices and installer bytes were independently verified. Beau confirmed
+  that the checked Finish option opens the installed app on the laptop.
+- Company-file preparation previously failed after browser sign-in. Version
+  0.5.4 reports a bounded operation/boundary/reason support code and the actual
+  unexpected HTTP status. This is diagnostic evidence, not a confirmed repair.
+  The separately approved read-only Test Data access renewal was applied through
+  the supported staging API and independently read back; the new laptop
+  connection attempt is pending. See the current shared status for access expiry
+  and test instructions. Installation itself does not grant file access.
 
 - Installer 0.5.2.0 completed on the desktop; all 524 payload files, registry and
   ownership marker matched. Later native-path checks found the Start-menu reads
@@ -22,8 +34,8 @@ is still off and automatic delivery/installation is not accepted end to end.
   inventory sidecar, helper/notices and installer metadata. Its real staged
   maintenance check exited 0 and preserved three ownership JSON files. Desktop
   forward-install testing stopped BEFORE setup dispatch because the physical
-  shortcut-path fence refused the redirected view. Laptop installation, Finish
-  launch and optional old-Preview cleanup remain pending manual acceptance.
+  shortcut-path fence refused the redirected view. The later 0.5.4 laptop Finish
+  acceptance above does not qualify desktop installation or old-Preview cleanup.
 - Actual authenticated Company-file native acceptance passed ordinary open,
   content verification, keep, free-space cache removal without source calls,
   redownload and exact owned registration cleanup for two approved staging
@@ -39,7 +51,7 @@ is still off and automatic delivery/installation is not accepted end to end.
   one directory and 1,919,807,773 total bytes. This resolved real manifests without
   downloading every file body to Windows; it does not prove an atomic catalog
   revision or retention of every gateway snapshot.
-- Current laptop testing confirmed the Company connection and all 19 photos,
+- Earlier laptop testing confirmed the Company connection and all 19 photos,
   with real download-on-open. The laptop's standard keep/free context-menu
   actions are missing, and its Status column is blank or unavailable. This is
   an unresolved Shell-integration defect; native API tests do not qualify menus.
@@ -49,8 +61,10 @@ is still off and automatic delivery/installation is not accepted end to end.
   retired gateway `no` restart; actual reboot/crash acceptance remains untested.
 
 The desktop installed payload remains 0.5.2.0 from source
-`e654af09379b3862a84563bed791868eb9caf77e`. Shared candidate 0.5.3.0 is built from
-`a6e86474fdcb058262dea4613ff5d33b13835df0`; see `READ-ME-0.5.3.txt` on the share.
+`e654af09379b3862a84563bed791868eb9caf77e`. Shared candidate 0.5.4.0 is built from
+`97186ac096b9d4627555fe99417c9d04d2855284`; see `READ-ME-0.5.4.txt` plus the
+current shared status. The retained 0.5.3.0 was built from
+`a6e86474fdcb058262dea4613ff5d33b13835df0`.
 The later backend-only commit
 `1d85aa18e89d326f1222618a9163acb694aefa1c` does not constitute a new Windows
 installer. Its maintainable change merged through PR #294 as
@@ -81,8 +95,8 @@ update reconnect opens a browser or substitutes another source/account.
 Local synthetic schedule, startup, resume, cancellation and settings tests pass.
 Twenty actual isolated NSIS registry cases passed against a new private test
 key; this is not real startup/logon, interactive Finish or installed upgrade
-acceptance. The backend feed remains default-off. Candidate 0.5.3 is shared for
-manual install/Finish and lifecycle testing; this does not qualify update delivery.
+acceptance. The backend feed remains default-off. Candidate 0.5.4 has manual
+Finish-launch acceptance; this does not qualify startup, lifecycle or update delivery.
 Actual connected replacement/relaunch/reconnect and Shell-menu repair remain
 release gates. Automatic client/employee discovery is under backend contract
 review; it is not a deployed endpoint or a reason to guess roles from email.
@@ -100,8 +114,9 @@ recorded label as well as root/context/namespace ownership.
 
 Older binaries and the shared v1 diagnostic do not understand schema 4. Do not
 publish a schema-4 candidate without a compatible diagnostic and forward-only
-upgrade instructions; do not downgrade it into an older binary. The shared 0.5.3
-installer and diagnostic remain unchanged. This naming change does not fix or
+upgrade instructions; do not downgrade it into an older binary. Shared 0.5.4
+includes the compatible v2 diagnostic; the older installer and v1 diagnostic
+remain unchanged. This naming change does not fix or
 verify native Explorer menu visibility.
 
 The older portable `LedgeTop Files Preview` has a separate generated V2 ownership
@@ -114,8 +129,9 @@ online-only files or promise that unhydrated placeholders become local copies.
 The draft also accepts `--installer-remove-legacy-preview` in a packaged pilot to
 remove only that recorded demo, without preparing/removing Company or Client
 connections. Both applications must be quit first. This command is present in
-the 0.5.3 candidate; the share has an optional reviewed cleanup ZIP that checks
-its exact installed bytes before invoking it. Laptop cleanup is not yet accepted.
+the 0.5.3 and 0.5.4 candidates. The optional shared cleanup ZIP checks exact
+0.5.3 installed bytes and must not be used against 0.5.4. The 0.5.4 uninstaller
+contains the owned cleanup path; actual laptop cleanup is not yet accepted.
 Missing/invalid receipts are refused for this dedicated
 repair; do not delete registry entries or restart an unknown old demo to recreate
 ownership. Normal uninstall handles known receipts only and cannot prove that an
