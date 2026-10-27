@@ -5,6 +5,15 @@ using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
 if (args.Length == 1 && args[0] == "--branding-policy-tests") return await ExplorerBrandIconTests.RunAsync();
+if (args.Length >= 1 && args[0] == "--package-context-policy-tests")
+    return args.Length == 1 ? CurrentProcessPackageContextTests.Run() : 2;
+if (args.Length >= 1 && args[0] == "--package-context-observation") {
+    if (args.Length != 1) return 2;
+    var observation = CurrentProcessPackageContextObserver.Observe();
+    Console.WriteLine(JsonSerializer.Serialize(new { scope = "current-process-only", kind = observation.Kind.ToString(),
+        observation.QueryStatus, observation.ReadStatus }));
+    return observation.Kind == CurrentProcessPackageContextKind.Unknown ? 1 : 0;
+}
 if (args.Length >= 1 && args[0] == "--generated-removed-absence-acceptance")
     return args.Length == 1 ? await GeneratedRemovedAbsenceAcceptance.RunAsync() : 2;
 
