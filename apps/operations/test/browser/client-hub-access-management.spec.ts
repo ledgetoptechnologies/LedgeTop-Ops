@@ -60,16 +60,23 @@ test("administrator manages invitation delivery and portal eligibility from clie
   await expect(page.getByRole("heading", { name: "Acme" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Portal logins" })).toBeVisible();
 
-  page.on("dialog", dialog => dialog.accept());
+  page.on("dialog", dialog => { void dialog.dismiss(); throw new Error("Native browser dialog is forbidden"); });
+  const confirmInPage = async () => {
+    const dialog = page.getByRole("dialog", { name: "Confirm action" });
+    await dialog.getByRole("button", { name: "Confirm", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+  };
   await page.getByRole("button", { name: "Retry invitation delivery" }).click();
   await expect.poll(() => invitationRetries).toBe(1);
   await expect.poll(() => detailRequests).toBeGreaterThan(1);
 
   await page.getByRole("button", { name: "Block portal sign-in" }).click();
+  await confirmInPage();
   await expect.poll(() => blocksCreated).toBe(1);
   await expect(page.getByRole("button", { name: "Remove sign-in block" })).toBeVisible();
 
   await page.getByRole("button", { name: "Remove sign-in block" }).click();
+  await confirmInPage();
   await expect.poll(() => blocksRevoked).toBe(1);
   await expect(page.getByRole("button", { name: "Block portal sign-in" })).toBeVisible();
 });

@@ -63,6 +63,15 @@ const panel = (page: Page) => page.getByRole("region", { name: "Portal logins", 
 const person = (page: Page, name = "Alice Client") => panel(page).getByRole("article", { name: `Portal login for ${name}`, exact: true });
 async function open(page: Page, suffix = "") { await page.goto(`${path}${suffix}`); await expect(panel(page)).toBeVisible(); }
 async function late(route: Route, json: unknown) { await route.fulfill({ json }).catch(() => undefined); }
+const confirmation = (page: Page) => page.getByRole("dialog", { name: "Confirm action" });
+async function confirmInPage(page: Page, ...wording: string[]) {
+  const dialog = confirmation(page);
+  await expect(dialog).toBeVisible();
+  for (const text of wording) await expect(dialog).toContainText(text);
+  await dialog.getByRole("button", { name: "Confirm", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+}
+const forbidNativeDialogs = (page: Page) => page.on("dialog", dialog => { void dialog.dismiss(); throw new Error(`Native browser dialog is forbidden: ${dialog.message()}`); });
 
 test("an administrator can revoke the whole client workspace and sees the durable blocked state", async ({ page }) => {
   const activeRoot = { available: true, state: "active", version: 0, reasonCode: null, updatedAt: null,
@@ -74,15 +83,30 @@ test("an administrator can revoke the whole client workspace and sees the durabl
       json: { outcome: "root_access_revoked", version: 1, replayed: false } });
     return route.fulfill({ status: 404 });
   }, count => detail(identityPage(), count === 1 ? activeRoot : revokedRoot));
-  page.on("dialog", dialog => dialog.accept());
+  forbidNativeDialogs(page);
 
   await open(page);
   await expect(panel(page).getByText("Portal access enabled for this client workspace", { exact: true })).toBeVisible();
-  await panel(page).getByRole("button", { name: "Revoke workspace portal access", exact: true }).click();
+  const revoke = panel(page).getByRole("button", { name: "Revoke workspace portal access", exact: true });
+  await revoke.click();
+  const dialog = confirmation(page);
+  await expect(dialog.getByText("Revoke portal access for this entire client workspace, including current and future people? Memberships and shared content will be preserved.", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(revoke).toBeFocused();
+  await revoke.click();
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(state.requests.filter(item => item.url.pathname === `${base}/portal-access/revoke`)).toHaveLength(0);
+  await revoke.click();
+  // A repeated confirm click must not dispatch a second revocation.
+  await dialog.getByRole("button", { name: "Confirm", exact: true }).dblclick();
   await expect(page.locator(".client-hub-title-status").getByText("Portal access revoked", { exact: true })).toBeVisible();
   await expect(panel(page).getByText("Portal access revoked for this client workspace", { exact: true })).toBeVisible();
   await expect(panel(page).getByText("Current and future people cannot enter this workspace.", { exact: false })).toBeVisible();
-  const request = state.requests.find(item => item.url.pathname === `${base}/portal-access/revoke`)!;
+  const revocations = state.requests.filter(item => item.url.pathname === `${base}/portal-access/revoke`);
+  expect(revocations).toHaveLength(1);
+  const request = revocations[0]!;
   expect(request.method).toBe("POST");
   expect(request.key).toMatch(/^[0-9a-f-]{36}$/i);
   expect(state.details()).toBe(2);
@@ -203,15 +227,18 @@ test("global email blocks require confirmation and uncertain retry reuses the ex
     return route.fulfill({ status: 404 });
   }, () => detail(identityPage([identity("alice", "Alice Client", { blocked: blocked ? 1 : 0, has_workspace_access: blocked ? 0 : 1 })], false)));
   await open(page);
-  page.once("dialog", async dialog => { expect(dialog.message()).toContain("ALL client workspaces"); await dialog.dismiss(); });
+  forbidNativeDialogs(page);
   await person(page).getByRole("button", { name: "Block portal sign-in", exact: true }).click();
+  await expect(confirmation(page)).toContainText("ALL client workspaces");
+  await confirmation(page).getByRole("button", { name: "Cancel", exact: true }).click();
   expect(mutationCount).toBe(0);
-  page.on("dialog", dialog => dialog.accept());
   await person(page).getByRole("button", { name: "Block portal sign-in", exact: true }).click();
+  await confirmInPage(page, "ALL client workspaces");
   await expect.poll(() => Boolean(pending)).toBe(true);
   await expect(person(page).getByRole("button", { name: "Block portal sign-in", exact: true })).toBeDisabled();
   await pending!.fulfill({ status: 503, json: { error: "Outcome could not be confirmed" } });
   await person(page).getByRole("button", { name: "Retry action", exact: true }).click();
+  await confirmInPage(page);
   await expect.poll(() => state.details()).toBe(2);
   await expect(person(page).getByText("Sign-in blocked", { exact: true })).toBeVisible();
   const mutations = state.requests.filter(request => request.method === "POST");
@@ -246,17 +273,20 @@ test("workspace access pause and restore stay scoped, version-fenced and idempot
       canSuspendWorkspaceAccess: false, canReactivateWorkspaceAccess: true },
   } : {})], false)));
   await open(page);
-  page.on("dialog", dialog => dialog.accept());
+  forbidNativeDialogs(page);
   await person(page).getByRole("button", { name: "Pause access to this workspace", exact: true }).click();
+  await confirmInPage(page, "Pause portal access for Alice Client");
   await expect.poll(() => Boolean(first)).toBe(true);
   await first!.fulfill({ status: 503, json: { error: "Outcome could not be confirmed" } });
   await person(page).getByRole("button", { name: "Retry action", exact: true }).click();
+  await confirmInPage(page);
   await expect(person(page).getByText("Access paused for this workspace", { exact: true })).toBeVisible();
   const suspendRequests = state.requests.filter(request => request.url.pathname.endsWith("/workspace-access/suspend"));
   expect(suspendRequests).toHaveLength(2);
   expect(suspendRequests[0]!.key).toBeTruthy();
   expect(suspendRequests[1]!.key).toBe(suspendRequests[0]!.key);
   await person(page).getByRole("button", { name: "Restore access to this workspace", exact: true }).click();
+  await confirmInPage(page, "Restore portal access for Alice Client");
   await expect.poll(() => state.requests.some(request => request.url.pathname.endsWith("/workspace-access/reactivate"))).toBe(true);
   await expect(person(page).getByText("Portal membership active", { exact: true })).toBeVisible();
 });
@@ -275,8 +305,9 @@ test("block actions come from exact server descriptors rather than partial or ex
   await expect(person(page).getByRole("button", { name: "Remove sign-in block", exact: true })).toHaveCount(0);
   await person(page).getByRole("button", { name: "Sign-in blocks", exact: true }).click();
   await expect(person(page).getByRole("button", { name: "Remove sign-in block", exact: true })).toHaveCount(1);
-  page.once("dialog", async dialog => { expect(dialog.message()).toContain("GLOBAL"); expect(dialog.message()).toContain("all client workspaces"); await dialog.accept(); });
+  forbidNativeDialogs(page);
   await person(page).getByRole("button", { name: "Remove sign-in block", exact: true }).click();
+  await confirmInPage(page, "GLOBAL", "all client workspaces");
   await expect.poll(() => revoked).toBe("/api/team/clients/eligibility-blocks/exact-effective/revoke");
 });
 
@@ -310,8 +341,9 @@ test("an old mutation success cannot reopen an invalidated identity workspace", 
     return route.fulfill({ status: 409, json: { error: "Identity binding changed" } });
   });
   await open(page);
-  page.on("dialog", dialog => dialog.accept());
+  forbidNativeDialogs(page);
   await person(page).getByRole("button", { name: "Block portal sign-in", exact: true }).click();
+  await confirmInPage(page);
   await expect.poll(() => Boolean(pending)).toBe(true);
   await person(page, "Bob Client").getByRole("button", { name: "Show access", exact: true }).click();
   await expect(page.getByRole("button", { name: "Refresh client workspace", exact: true })).toBeVisible();
