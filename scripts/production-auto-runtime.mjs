@@ -12,6 +12,7 @@ import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVe
 import { collectFrontendAssets, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
 import { createAssetVerificationNonce, executeAssetVerification } from './production-auto-verify.mjs';
 import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+import { readProductionMigrationReadiness, validateProductionMigrationReadiness } from './production-auto-migration-readiness.mjs';
 import { ProductionAutoJournal, loadPinnedProductionAutoRecipient } from './production-auto-journal.mjs';
 import { coordinateProductionAutoRelease } from './production-auto-coordinate.mjs';
 import { isProviderUtcTimestamp } from './production-auto-time.mjs';
@@ -144,7 +145,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   profile = PROFILE, providerFactory = options => new ProductionCloudflareProvider(options), ciFactory = options => new ProductionMainCI(options),
   journalFactory = options => new ProductionAutoJournal(options), recipientLoader = loadPinnedProductionAutoRecipient,
   readinessReader = readNativeStaffCutoverReadiness, sourceReader = deploymentSourceCommit, buildRunner = runBuild,
-  buildArtifactsReader } = {}) {
+  buildArtifactsReader, migrationReader = readProductionMigrationReadiness } = {}) {
   need(Object.values(WORKERS).some(row => row.name === workerName) && /^[a-f0-9]{40}$/u.test(sourceCommit ?? '')
     && typeof fetchImpl === 'function' && profile === PROFILE, 'runtime_target_or_profile_refused');
   const app = workerName === 'ledgetop-ops' ? 'operations' : 'client', target = WORKERS[app];
@@ -155,6 +156,14 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   const mainCI = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl });
   need(triggerRun.sourceCommit === sourceCommit, 'runtime_trigger_source_mismatch');
   const token = env.CLOUDFLARE_API_TOKEN;
+  let migrationPins;
+  const checkMigrations = async () => {
+    const observed = validateProductionMigrationReadiness(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl }), { sourceCommit });
+    const { observedAt: _observedAt, ...pins } = observed;
+    need(migrationPins === undefined || canonical(pins) === canonical(migrationPins), 'runtime_migration_readiness_drift');
+    migrationPins = pins;
+    return observed;
+  };
   let provider, journal, build, baselineCapture, expectedCapture, previousLedger, candidateVersionId, verifiedCI;
   let durableRuntime = null, candidateReadbackVerified = false;
   let pendingCoordinatorFence = null, pendingTransition = null, verifiedDeploymentVersions = null;
@@ -175,6 +184,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       versions: deployment.versions.map(row => ({ versionId: row.version_id, percentage: row.percentage })) } };
   };
   const assertFence = async () => {
+    await checkMigrations();
     verifiedCI = await mainCI.verify(sourceCommit);
     need(sourceReader(ROOT, env) === sourceCommit && verifiedCI.passed === true,
       'runtime_source_or_main_drift');
@@ -184,6 +194,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     return observed;
   };
   const createJournalBeforeOldAssetRead = async baseline => {
+    await checkMigrations();
     need(!journal, 'runtime_preparation_journal_already_claimed');
     need(build, 'runtime_preparation_build_missing');
     need(previousLedger, 'runtime_preparation_ledger_missing');
@@ -239,6 +250,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   const adapter = {
     sourceFence: async () => ({ sourceCommit: sourceReader(ROOT, env), mainCommit: await mainCI.mainCommit(), clean: true }),
     ciGate: async () => {
+      await checkMigrations();
       verifiedCI = await mainCI.verify(sourceCommit);
       need(verifiedCI.runId === triggerRun.runId && verifiedCI.runAttempt === triggerRun.runAttempt, 'runtime_trigger_ci_run_superseded');
       return verifiedCI;

@@ -10,9 +10,17 @@ import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness
 import { completeProductionAutoArtifact } from './production-auto-journal-artifact.mjs';
 import { PROFILE, canonical } from './production-deploy.mjs';
 import { ledgerBytes } from './production-auto-assets.mjs';
+import { ProductionCloudflareProvider } from './production-auto-provider.mjs';
 
 const sourceCommit = 'a'.repeat(40), runId = 456, attempt = 2;
 const hash = value => createHash('sha256').update(value).digest('hex');
+function migrationFixture(commit = sourceCommit) {
+  return { schemaVersion: 1, sourceCommit: commit, accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
+    observedAt: new Date().toISOString(), databases: [
+      { databaseId: NATIVE_STAFF_PRODUCTION_TARGET.databaseId, sourceInventorySha256: '1'.repeat(64), ledgerNamesSha256: '2'.repeat(64), migrationCount: 231 },
+      { databaseId: '7f40a7b7-c3ec-470e-a626-e798867f71f8', sourceInventorySha256: '3'.repeat(64), ledgerNamesSha256: '4'.repeat(64), migrationCount: 160 },
+    ] };
+}
 function withEvent(change = value => value, verify = () => {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-trigger-'));
   try {
@@ -165,23 +173,6 @@ function configuredSnapshotFixture() {
   return { snapshots, restore: () => Object.assign(PROFILE, original) };
 }
 
-test('real runtime adapter drives provider protocol over fake HTTP with microsecond deployment timestamps', async () => {
-  const fixture = configuredSnapshotFixture();
-  const calls = [], intents = [], publicReceipts = [], privateResponses = [], verifierVersions = new Map();
-  const sourceCommit = 'a'.repeat(40), candidateId = '44444444-4444-4444-8444-444444444444';
-  const moduleBytes = Buffer.from('export default {fetch(){return new Response("synthetic")}};');
-  const sourceMap = { version: 3, file: 'index.js', sources: ['synthetic.ts'], sourcesContent: ['export default {};'], names: [], mappings: 'AAAA' };
-  const sourceMapBytes = Buffer.from(JSON.stringify(sourceMap)), newAsset = Buffer.from('new');
-  const artifact = { moduleBytes, sourceMapBytes, sourceMap, assets: {
-    entries: [{ path: '/index.html', size: newAsset.length, sha256: hash(newAsset), mime: 'text/html', providerHash: hash(newAsset).slice(0, 32) }],
-    payloads: new Map([['/index.html', newAsset]]),
-  } };
-  const ciRun = { id: 678, run_number: 99, run_attempt: 3, name: 'CI', path: '.github/workflows/ci.yml@main', head_sha: sourceCommit,
-    head_branch: 'main', event: 'push', status: 'completed', conclusion: 'success', repository: { full_name: 'ledgetoptechnologies/LedgeTop-Ops' },
-    head_repository: { full_name: 'ledgetoptechnologies/LedgeTop-Ops' } };
-  const jobs = (await import('./production-auto-ci.mjs')).REQUIRED_MAIN_JOBS.map(name => ({ name, status: 'completed', conclusion: 'success', run_id: ciRun.id, head_sha: sourceCommit }));
-  const ok = result => Response.json({ success: true, errors: [], result });
-
 test('deployment transition intent binds verified candidate, original parent, coordinator fence and exact weights', () => {
   const parentVersionId = '11111111-1111-4111-8111-111111111111';
   const candidateVersionId = '22222222-2222-4222-8222-222222222222';
@@ -207,10 +198,33 @@ test('deployment transition intent binds verified candidate, original parent, co
   activate.intent.versions.push({ version_id: parentVersionId, percentage: 0 });
   assert.throws(() => validateDeploymentTransitionIntent(activate));
 });
+
+for (const scenario of ['success', 'first-write-drift', 'activation-drift']) test(
+  scenario === 'activation-drift'
+    ? 'frontend migration drift at activation intent blocks dispatch after earlier writes without retry'
+    : scenario === 'first-write-drift'
+      ? 'frontend migration drift before first mutation prevents journal claim and provider writes'
+      : 'real runtime adapter drives provider protocol over fake HTTP with microsecond deployment timestamps', async () => {
+  const fixture = configuredSnapshotFixture();
+  const calls = [], intents = [], publicReceipts = [], privateResponses = [], verifierVersions = new Map();
+  const sourceCommit = 'a'.repeat(40), candidateId = '44444444-4444-4444-8444-444444444444';
+  const moduleBytes = Buffer.from('export default {fetch(){return new Response("synthetic")}};');
+  const sourceMap = { version: 3, file: 'index.js', sources: ['synthetic.ts'], sourcesContent: ['export default {};'], names: [], mappings: 'AAAA' };
+  const sourceMapBytes = Buffer.from(JSON.stringify(sourceMap)), newAsset = Buffer.from('new');
+  const artifact = { moduleBytes, sourceMapBytes, sourceMap, assets: {
+    entries: [{ path: '/index.html', size: newAsset.length, sha256: hash(newAsset), mime: 'text/html', providerHash: hash(newAsset).slice(0, 32) }],
+    payloads: new Map([['/index.html', newAsset]]),
+  } };
+  const ciRun = { id: 678, run_number: 99, run_attempt: 3, name: 'CI', path: '.github/workflows/ci.yml@main', head_sha: sourceCommit,
+    head_branch: 'main', event: 'push', status: 'completed', conclusion: 'success', repository: { full_name: 'ledgetoptechnologies/LedgeTop-Ops' },
+    head_repository: { full_name: 'ledgetoptechnologies/LedgeTop-Ops' } };
+  const jobs = (await import('./production-auto-ci.mjs')).REQUIRED_MAIN_JOBS.map(name => ({ name, status: 'completed', conclusion: 'success', run_id: ciRun.id, head_sha: sourceCommit }));
+  const ok = result => Response.json({ success: true, errors: [], result });
+
   const apiBase = `https://api.cloudflare.com/client/v4/accounts/${NATIVE_STAFF_PRODUCTION_TARGET.accountId}`;
   const appByWorker = Object.fromEntries(Object.entries(PROFILE.workers).map(([app, spec]) => [spec.name, app]));
   const now = () => fixture.snapshots.client;
-  let candidateLegacyReadAttempts = 0, candidateVisibility404s = 1;
+  let candidateLegacyReadAttempts = 0, candidateVisibility404s = 1, migrationDrift = false, activationMethodCalls = 0, activationDispatches = 0;
   const fetchImpl = async (url, init = {}) => {
     const parsed = new URL(url); calls.push({ url, method: init.method ?? 'GET', headers: init.headers });
     if (parsed.origin === 'https://api.github.com') {
@@ -259,7 +273,7 @@ test('deployment transition intent binds verified candidate, original parent, co
         const app = appByWorker[deploymentMatch[1]], state = fixture.snapshots[app], requested = JSON.parse(init.body).versions;
         const candidateRow = requested.find(row => row.version_id === candidateId);
         if (candidateRow?.percentage === 0) state.deployment = { id: '66666666-6666-4666-8666-666666666666', created_on: '2026-10-27T06:00:00.123456Z', versions: requested };
-        else state.deployment = { id: '77777777-7777-4777-8777-777777777777', created_on: '2026-10-27T07:20:51.938465Z', versions: requested };
+        else { activationDispatches++; state.deployment = { id: '77777777-7777-4777-8777-777777777777', created_on: '2026-10-27T07:20:51.938465Z', versions: requested }; }
         return ok({ id: state.deployment.id });
       }
       const match = suffix.match(/^\/workers\/(scripts|workers)\/([^/]+)(?:\/(.*))?$/u);
@@ -309,36 +323,96 @@ test('deployment transition intent binds verified candidate, original parent, co
         recordIntent: async row => { intents.push(structuredClone(row)); },
         persistResponse: async row => { privateResponses.push({ path: row.path, method: row.method, status: row.status, rawResponseBytes: row.rawResponse?.length ?? 0 }); },
       });
+      let migrationCalls = 0;
       const adapterFactory = options => createProductionAutoReleaseAdapter({ ...options, fetchImpl, journalFactory,
-        recipientLoader: () => ({ synthetic: true }), sourceReader: () => sourceCommit, buildRunner: () => {},
-        buildArtifactsReader: () => artifact });
-      const result = await runProductionAutoRelease({ workerName: 'ledgetop-clients', env, fetchImpl,
+        migrationReader: async input => { assert.equal(input.token, env.CLOUDFLARE_API_TOKEN); assert.equal(input.sourceCommit, sourceCommit);
+          migrationCalls++; const value = migrationFixture(sourceCommit);
+          if (migrationDrift) value.databases[1].ledgerNamesSha256 = '5'.repeat(64);
+          return value; },
+        providerFactory: providerOptions => {
+          const provider = new ProductionCloudflareProvider(providerOptions);
+          if (scenario === 'activation-drift') {
+            const activate = provider.activateCandidate.bind(provider);
+            provider.activateCandidate = input => { activationMethodCalls++; migrationDrift = true; return activate(input); };
+          }
+          return provider;
+        },
+        recipientLoader: () => ({ synthetic: true }), sourceReader: () => sourceCommit,
+        buildRunner: () => {},
+        buildArtifactsReader: () => { if (scenario === 'first-write-drift') migrationDrift = true; return artifact; } });
+      const release = runProductionAutoRelease({ workerName: 'ledgetop-clients', env, fetchImpl,
         recipientLoader: () => ({ synthetic: true }), triggerReader: () => ({ sourceCommit, runId: ciRun.id, runAttempt: ciRun.run_attempt }),
         sourceReader: () => sourceCommit, runtimeFactory: adapterFactory });
-      assert.equal(result.verifiedActive, true);
-      assert.equal(result.cutoverObservedAt, '2026-10-27T07:20:51.938465Z');
-      assert.equal(result.earliestPermittedPruningAt, '2026-10-29T07:20:51.939Z');
-      assert.equal(result.minimumRetentionHours, 48);
-      assert.equal(result.automaticPruning, false);
-      assert(candidateLegacyReadAttempts >= 3, 'one transient candidate GET is retried and later captures remain complete');
-      assert.equal(candidateVisibility404s, 0);
-      assert.ok(intents.some(row => row.phase === 'temporary-verifier-create'));
-      assert.ok(intents.some(row => row.phase === 'asset-session'));
-      assert.ok(intents.some(row => row.phase === 'worker-version-upload'));
-      assert.ok(intents.some(row => row.phase === 'stage-zero-percent'));
-      assert.ok(intents.some(row => row.phase === 'activate-candidate'));
-      assert.equal(publicReceipts.at(-1).status, 'verified');
-      assert.ok(privateResponses.length > 0);
-      assert.ok(privateResponses.some(row => row.path.endsWith('/assets-upload-session') && row.rawResponseBytes > 0));
-      assert.equal(JSON.stringify([...intents, ...publicReceipts]).includes('synthetic.uploadsession.jwt'), false);
-      assert.equal(JSON.stringify([...intents, ...publicReceipts]).includes(env.CLOUDFLARE_API_TOKEN), false);
-      assert.ok(calls.some(call => call.url.includes('assets-upload-session') && call.headers.Authorization === `Bearer ${env.CLOUDFLARE_API_TOKEN}`));
-      assert.ok(calls.some(call => call.method === 'POST' && call.url.endsWith('/assets-upload-session')));
-      assert.ok(calls.some(call => call.method === 'POST' && call.url.endsWith('/deployments')));
-      assert.ok(calls.some(call => call.method === 'PUT' && call.url.includes('/ops-ui-verify-')));
-      assert.ok(calls.some(call => call.url.startsWith('https://ops-ui-verify-')));
+      if (scenario === 'first-write-drift') {
+        await assert.rejects(release, /Automatic release held/);
+        assert.equal(intents.length, 0, 'no mutation intent is persisted');
+        assert.equal(publicReceipts.length, 0, 'journal is not claimed before the migration fence passes');
+        assert.equal(privateResponses.length, 0);
+        assert.equal(calls.some(call => call.url.startsWith(apiBase) && call.method !== 'GET'), false,
+          'the preflight migration drift stops before any Cloudflare write');
+        assert.equal(activationMethodCalls, 0);
+        assert.equal(activationDispatches, 0);
+        assert.ok(migrationCalls >= 2, 'the ledger is rechecked after build and before first mutation preparation');
+      } else if (scenario === 'activation-drift') {
+        await assert.rejects(release, /Automatic release held/);
+        assert.equal(activationMethodCalls, 1, 'the provider path reaches the activation intent boundary');
+        assert.equal(activationDispatches, 0, 'migration drift is checked before activation HTTP dispatch');
+        assert.equal(intents.some(row => row.phase === 'activate-candidate'), false, 'the activation intent is not journaled after drift');
+        assert.ok(intents.some(row => row.phase === 'worker-version-upload'));
+        assert.ok(intents.some(row => row.phase === 'stage-zero-percent'));
+        assert.equal(publicReceipts.at(-1).status, 'held');
+        assert.equal(publicReceipts.at(-1).writesAttempted, true);
+        assert.equal(migrationCalls > 2, true, 'migration state is reread after earlier writes');
+        assert.equal(activationDispatches, 0, 'there is no automatic activation retry');
+      } else {
+        const result = await release;
+        assert.equal(result.verifiedActive, true);
+        assert.ok(migrationCalls >= intents.length + 2, 'both migration ledgers are checked before provider mutations and during preparation');
+        assert.equal(result.cutoverObservedAt, '2026-10-27T07:20:51.938465Z');
+        assert.equal(result.earliestPermittedPruningAt, '2026-10-29T07:20:51.939Z');
+        assert.equal(result.minimumRetentionHours, 48);
+        assert.equal(result.automaticPruning, false);
+        assert(candidateLegacyReadAttempts >= 3, 'one transient candidate GET is retried and later captures remain complete');
+        assert.equal(candidateVisibility404s, 0);
+        assert.ok(intents.some(row => row.phase === 'temporary-verifier-create'));
+        assert.ok(intents.some(row => row.phase === 'asset-session'));
+        assert.ok(intents.some(row => row.phase === 'worker-version-upload'));
+        assert.ok(intents.some(row => row.phase === 'stage-zero-percent'));
+        assert.ok(intents.some(row => row.phase === 'activate-candidate'));
+        assert.equal(activationDispatches, 1);
+        assert.equal(publicReceipts.at(-1).status, 'verified');
+      }
+      if (scenario !== 'first-write-drift') {
+        assert.ok(privateResponses.length > 0);
+        assert.ok(privateResponses.some(row => row.path.endsWith('/assets-upload-session') && row.rawResponseBytes > 0));
+        assert.equal(JSON.stringify([...intents, ...publicReceipts]).includes('synthetic.uploadsession.jwt'), false);
+        assert.equal(JSON.stringify([...intents, ...publicReceipts]).includes(env.CLOUDFLARE_API_TOKEN), false);
+        assert.ok(calls.some(call => call.url.includes('assets-upload-session') && call.headers.Authorization === `Bearer ${env.CLOUDFLARE_API_TOKEN}`));
+        assert.ok(calls.some(call => call.method === 'POST' && call.url.endsWith('/assets-upload-session')));
+        assert.ok(calls.some(call => call.method === 'POST' && call.url.endsWith('/deployments')));
+        assert.ok(calls.some(call => call.method === 'PUT' && call.url.includes('/ops-ui-verify-')));
+        assert.ok(calls.some(call => call.url.startsWith('https://ops-ui-verify-')));
+      }
     } finally { fs.rmSync(eventPathDir, { recursive: true, force: true }); }
   } finally { fixture.restore(); }
+});
+
+test('frontend migration refusal and later ledger drift stop before provider construction', async () => {
+  const env = { CLOUDFLARE_ACCOUNT_ID: NATIVE_STAFF_PRODUCTION_TARGET.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32),
+    GITHUB_TOKEN: 'g'.repeat(32), GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1' };
+  let providers = 0, journals = 0;
+  const make = migrationReader => createProductionAutoReleaseAdapter({ workerName: 'ledgetop-clients', sourceCommit, env,
+    triggerRun: { sourceCommit, runId, runAttempt: attempt }, migrationReader,
+    providerFactory: () => { providers++; throw Error('provider must not be created'); },
+    journalFactory: () => { journals++; throw Error('journal must not be created'); },
+    ciFactory: () => ({ verify: async () => ({ sourceCommit, passed: true, runId, runAttempt: attempt }) }) }).adapter;
+  await assert.rejects(make(async () => { throw Error('ledger missing'); }).ciGate(), /ledger missing/);
+  await assert.rejects(make(async () => ({ ...migrationFixture(), sourceCommit: 'b'.repeat(40) })).ciGate());
+  let checks = 0;
+  const drift = make(async () => { const result = migrationFixture(); if (++checks > 1) result.databases[1].ledgerNamesSha256 = '5'.repeat(64); return result; });
+  await drift.ciGate();
+  await assert.rejects(drift.ciGate(), /runtime_migration_readiness_drift/);
+  assert.equal(providers, 0); assert.equal(journals, 0);
 });
 
 test('unprovisioned recipient stops release and artifact completion before provider or GitHub requests', async () => {
