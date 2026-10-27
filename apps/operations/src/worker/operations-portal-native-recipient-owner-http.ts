@@ -10,6 +10,7 @@ import { materializeOperationsPortalNativeRecipientAuthority, dispatchOperations
   type OperationsPortalNativeRecipientAuthorityDispatchEnv } from "./operations-portal-native-recipient-authority-dispatch";
 import { reserveOperationsPortalNativeWorkspaceCleanupRecovery } from "./operations-portal-native-workspace-cleanup";
 import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
+import { admittedOperationsRequestOrigin } from "./host-admission";
 
 const BASE = "/api/native-client-portal/operations-recipient-enrollment";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -17,7 +18,7 @@ const encoder = new TextEncoder();
 type Actor = AuthenticatedNativeStaffWithAdmissionVersion;
 type Configuration = NativeStaffAccessConfiguration & Readonly<{ origin: string; recipientOrigin: string; csrfSecret: string }>;
 export type OperationsNativeRecipientOwnerHttpDependencies = Readonly<{
-  environment: string; expectedHost: string; configuration: Configuration;
+  environment: string; expectedHost: string; operationsOrigins?: string; configuration: Configuration;
   database: D1Database; dispatch: OperationsPortalNativeRecipientAuthorityDispatchEnv;
 }>;
 class Failure extends Error { constructor(readonly status: number, readonly code: string) { super(code); } }
@@ -88,7 +89,9 @@ function uuid(value: unknown): value is string { return typeof value === "string
 export async function handleOperationsNativeRecipientOwnerHttp(request: Request, d: OperationsNativeRecipientOwnerHttpDependencies): Promise<Response> {
   try {
     const config = configuration(d), url = new URL(request.url);
-    if (url.origin !== config.origin || url.search || url.hash || request.headers.get("Sec-Fetch-Site") !== "same-origin")
+    const requestOrigin = admittedOperationsRequestOrigin(request.url, { ENVIRONMENT: d.environment,
+      EXPECTED_HOST: d.expectedHost, OPERATIONS_ORIGINS: d.operationsOrigins }, config.origin);
+    if (!requestOrigin || url.origin !== requestOrigin || url.search || url.hash || request.headers.get("Sec-Fetch-Site") !== "same-origin")
       throw new Failure(403, "denied");
     const relative = url.pathname.startsWith(`${BASE}/`) ? url.pathname.slice(BASE.length) : "";
     const session = request.method === "GET" && relative === "/session";
@@ -103,14 +106,14 @@ export async function handleOperationsNativeRecipientOwnerHttp(request: Request,
     const workspaceTargetId = workspaceRead || workspaceMutation ? relative.split("/")[2]! : null;
     if (workspaceTargetId && !uuid(workspaceTargetId)) throw new Failure(404, "not_found");
     if (session && request.headers.get("X-Native-Staff-Request") !== "1"
-      || request.method === "POST" && request.headers.get("Origin") !== config.origin
-      || request.headers.has("Origin") && request.headers.get("Origin") !== config.origin) throw new Failure(403, "denied");
+      || request.method === "POST" && request.headers.get("Origin") !== requestOrigin
+      || request.headers.has("Origin") && request.headers.get("Origin") !== requestOrigin) throw new Failure(403, "denied");
     let actor: Actor;
     try { actor = await authenticateNativeStaffWithAdmissionVersion(request, d.database, config.access); }
     catch { throw new Failure(403, "denied"); }
     alive(actor);
     if (session) {
-      const csrfToken = await csrf(config.secret, config.origin, actor); alive(actor);
+      const csrfToken = await csrf(config.secret, requestOrigin, actor); alive(actor);
       return response(200, { csrfToken, verifiedUntil: actor.verifiedUntil, recipientOrigin: config.recipientOrigin });
     }
     if (read) {
@@ -121,7 +124,7 @@ export async function handleOperationsNativeRecipientOwnerHttp(request: Request,
       const workspace = await readOperationsPortalNativeWorkspaceCleanupForOwner(d.database, workspaceTargetId!, actor);
       alive(actor); return response(200, { workspace });
     }
-    await csrf(config.secret, config.origin, actor, request); alive(actor);
+    await csrf(config.secret, requestOrigin, actor, request); alive(actor);
     if (workspaceMutation) {
       const action = relative.split("/")[3]!;
       const value = await body(request, action === "revoke"

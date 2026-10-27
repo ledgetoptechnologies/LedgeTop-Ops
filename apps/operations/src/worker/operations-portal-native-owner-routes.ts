@@ -4,6 +4,7 @@ import { handleOperationsPortalNativeBillingSourceAuthorityOwnerHttp } from "./o
 import { reviewNativeBillingSourceAuthority,grantNativeBillingSourceAuthority,revokeNativeBillingSourceAuthority,
   readNativeBillingSourceAuthorityStatus } from "./operations-portal-native-billing-source-authority-issuer";
 import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
+import { admittedOperationsRequestOrigin } from "./host-admission";
 import { handleOperationsPortalNativeDeliveryAuthorityOwnerHttp } from "./operations-portal-native-delivery-authority-owner-http";
 import type { OperationsPortalNativeDeliveryAuthorityDispatchEnv } from "./operations-portal-native-delivery-authority-dispatch";
 import { handleOperationsPortalNativeBillingAuthorityOwnerHttp } from "./operations-portal-native-billing-authority-owner-http";
@@ -65,7 +66,12 @@ export async function dispatchOperationsPortalNativeOwnerRequest(request: Reques
 
   const origin = configuredDeploymentOrigin({ environment: env.ENVIRONMENT,
     origin: env.PUBLIC_BASE_URL, expectedHost: env.EXPECTED_HOST });
-  if (!origin || new URL(request.url).origin !== origin) return notFound();
+  // Keep page presentation on its existing canonical-origin policy. Browser
+  // APIs separately admit reviewed legacy origins and bind their CSRF there.
+  const requestOrigin = origin && (pathname.startsWith("/api/")
+    ? admittedOperationsRequestOrigin(request.url, env, origin)
+    : new URL(request.url).origin === origin ? origin : null);
+  if (!origin || !requestOrigin) return notFound();
   const configuration = { enabled: true, issuer: env.TEAM_DOMAIN ?? "", staffAudience: env.OPERATIONS_AUD,
     origin, csrfSecret: env.OPERATIONS_SESSION_SECRET };
 
@@ -82,7 +88,7 @@ export async function dispatchOperationsPortalNativeOwnerRequest(request: Reques
     if (env.OPERATIONS_PORTAL_NATIVE_DELIVERY_OWNER_ENABLED !== "true") return notFound();
     if (pathname === DELIVERY_PAGE) return serveOperationsUiShell(request, env);
     return handleOperationsPortalNativeDeliveryAuthorityOwnerHttp(request, { environment: env.ENVIRONMENT,
-      expectedHost: env.EXPECTED_HOST, configuration, database: env.OPS_DB, dispatch: env });
+      expectedHost: env.EXPECTED_HOST, operationsOrigins: env.OPERATIONS_ORIGINS, configuration, database: env.OPS_DB, dispatch: env });
   }
   if (workspace) {
     if (env.OPERATIONS_PORTAL_WORKSPACE_OWNER_ENABLED !== "true"
@@ -91,24 +97,25 @@ export async function dispatchOperationsPortalNativeOwnerRequest(request: Reques
       || typeof env.OPERATIONS_PORTAL_WORKSPACE_PUBLICATION?.getPublicationStatus !== "function") return notFound();
     if (pathname === WORKSPACE_PAGE) return serveOperationsUiShell(request, env);
     return handleOperationsPortalWorkspaceOwnerHttp(request, { environment: env.ENVIRONMENT,
-      expectedHost: env.EXPECTED_HOST, configuration, database: env.OPS_DB,
+      expectedHost: env.EXPECTED_HOST, operationsOrigins: env.OPERATIONS_ORIGINS, configuration, database: env.OPS_DB,
       publication: env.OPERATIONS_PORTAL_WORKSPACE_PUBLICATION,folderAuthority:env });
   }
   if (env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED !== "true") return notFound();
   if(billingSource)return handleOperationsPortalNativeBillingSourceAuthorityOwnerHttp(request,{
-    environment:env.ENVIRONMENT,expectedHost:env.EXPECTED_HOST,lifecycleFlag:env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED,
+    environment:env.ENVIRONMENT,expectedHost:env.EXPECTED_HOST,operationsOrigins:env.OPERATIONS_ORIGINS,lifecycleFlag:env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED,
     configuration,database:env.OPS_DB,core:{review:(_db,a,i)=>reviewNativeBillingSourceAuthority(env,a,i),
       grant:(_db,a,i)=>grantNativeBillingSourceAuthority(env,a,i),revoke:(_db,a,i)=>revokeNativeBillingSourceAuthority(env,a,i),
       readStatus:(_db,a,id)=>readNativeBillingSourceAuthorityStatus(env,a,id)}});
   if (pathname === BILLING_PAGE || pathname === BILLING_PERMISSION_PAGE) return serveOperationsUiShell(request, env);
   if (billingPermission) return handleOperationsPortalNativeBillingPermissionOwnerHttp(request, {
     environment: env.ENVIRONMENT, expectedHost: env.EXPECTED_HOST,
+    operationsOrigins: env.OPERATIONS_ORIGINS,
     delegationFlag: env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED,
     diagnosticFlag: env.OPERATIONS_PORTAL_NATIVE_BILLING_PERMISSION_DIAGNOSTIC_ENABLED,
     configuration, database: env.OPS_DB,
   });
   return handleOperationsPortalNativeBillingAuthorityOwnerHttp(request, { environment: env.ENVIRONMENT,
-    expectedHost: env.EXPECTED_HOST, lifecycleFlag: env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED,
+    expectedHost: env.EXPECTED_HOST, operationsOrigins: env.OPERATIONS_ORIGINS, lifecycleFlag: env.OPERATIONS_PORTAL_NATIVE_BILLING_OWNER_ENABLED,
     configuration, database: env.OPS_DB, core: { review: reviewOperationsPortalNativeBillingCandidate,
       grant: grantOperationsPortalNativeBillingAuthority, revoke: revokeOperationsPortalNativeBillingAuthority,
       readStatus: readOperationsPortalNativeBillingAuthorityStatus } });

@@ -3,12 +3,13 @@ import { readBoundedJson } from "./bounded-json";
 import { manageOperationsPortalNativeBillingPermission, type NativeBillingPermissionChange } from "./operations-portal-native-billing-permission-issuer";
 import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
 import { billingPermissionDiagnosticEnabled } from "./operations-portal-native-billing-permission-diagnostic";
+import { admittedOperationsRequestOrigin } from "./host-admission";
 
 export const OPERATIONS_NATIVE_BILLING_PERMISSION_OWNER_BASE = "/api/native-client-portal/operations-billing-permissions";
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const ID=/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,190}$/u;
 export type OperationsPortalNativeBillingPermissionOwnerHttpDependencies=Readonly<{
-  environment:string;expectedHost:string;delegationFlag:string;database:D1Database;
+  environment:string;expectedHost:string;operationsOrigins?:string;delegationFlag:string;database:D1Database;
   diagnosticFlag?:string;
   configuration:Readonly<{enabled:boolean;origin:string;issuer:string;staffAudience:string;csrfSecret:string}>;
   authenticate?:typeof authenticateNativeStaffWithAdmissionVersion;
@@ -104,17 +105,19 @@ async function review(db:Db,actor:Actor,staffId:string,resourceId:string){
 export async function handleOperationsPortalNativeBillingPermissionOwnerHttp(request:Request,d:OperationsPortalNativeBillingPermissionOwnerHttpDependencies):Promise<Response>{
   try{
     const configuration=config(d),url=new URL(request.url),base=OPERATIONS_NATIVE_BILLING_PERMISSION_OWNER_BASE;
-    if(url.origin!==configuration.origin||url.hash||request.headers.get("Sec-Fetch-Site")!=="same-origin")throw new Failure(403,"denied");
+    const requestOrigin=admittedOperationsRequestOrigin(request.url,{ENVIRONMENT:d.environment,EXPECTED_HOST:d.expectedHost,
+      OPERATIONS_ORIGINS:d.operationsOrigins},configuration.origin);
+    if(!requestOrigin||url.origin!==requestOrigin||url.hash||request.headers.get("Sec-Fetch-Site")!=="same-origin")throw new Failure(403,"denied");
     const route=url.pathname.startsWith(`${base}/`)?url.pathname.slice(base.length):"";
     const session=request.method==="GET"&&route==="/session",read=request.method==="POST"&&route==="/review",
       issue=request.method==="POST"&&route==="/grants",revoke=request.method==="POST"&&/^\/grants\/[0-9a-f-]{36}\/revoke$/u.test(route);
     if(!session&&!read&&!issue&&!revoke)throw new Failure(404,"not_found");
     if(url.search)throw new Failure(400,"invalid_request");
-    if(request.headers.has("Origin")&&request.headers.get("Origin")!==configuration.origin||request.method==="POST"&&request.headers.get("Origin")!==configuration.origin
+    if(request.headers.has("Origin")&&request.headers.get("Origin")!==requestOrigin||request.method==="POST"&&request.headers.get("Origin")!==requestOrigin
       ||request.method==="GET"&&request.headers.get("X-Native-Staff-Request")!=="1")throw new Failure(403,"denied");
     let actor:Actor;try{actor=await(d.authenticate??authenticateNativeStaffWithAdmissionVersion)(request,d.database,configuration.access);}catch{throw new Failure(403,"denied");}
-    alive(actor);if(session)return reply(200,{csrfToken:await csrf(configuration.secret,configuration.origin,actor)});
-    await csrf(configuration.secret,configuration.origin,actor,request);const db=d.database.withSession("first-primary");
+    alive(actor);if(session)return reply(200,{csrfToken:await csrf(configuration.secret,requestOrigin,actor)});
+    await csrf(configuration.secret,requestOrigin,actor,request);const db=d.database.withSession("first-primary");
     if(read){const value=await body(request,["staffId","resourceId"]);
       if(!identifier(value.staffId)||!identifier(value.resourceId))throw new Failure(400,"invalid_request");
       return reply(200,{review:await review(db,actor,value.staffId,value.resourceId)});

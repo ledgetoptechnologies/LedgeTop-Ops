@@ -1,5 +1,6 @@
 import { readBoundedJson } from "./bounded-json";
 import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
+import { admittedOperationsRequestOrigin } from "./host-admission";
 import { authenticateNativeStaffWithAdmissionVersion, type AuthenticatedNativeStaffWithAdmissionVersion,
   type NativeStaffAccessConfiguration } from "./native-staff-auth";
 
@@ -16,7 +17,7 @@ type GrantInput = Selection & Readonly<{ operationId: string; grantId: string; e
 type RevokeInput = Readonly<{ operationId: string; grantId: string; expectedRevision: number }>;
 type Configuration = NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
 export type OperationsPortalNativeBillingAuthorityOwnerHttpDependencies = Readonly<{
-  environment: string; expectedHost: string; lifecycleFlag: string;
+  environment: string; expectedHost: string; operationsOrigins?: string; lifecycleFlag: string;
   configuration: Configuration; database: D1Database;
   core: Readonly<{
     review: (db: D1Database, actor: Actor, input: ReviewInput) => Promise<unknown>;
@@ -159,7 +160,9 @@ export async function handleOperationsPortalNativeBillingAuthorityOwnerHttp(requ
   d: OperationsPortalNativeBillingAuthorityOwnerHttpDependencies): Promise<Response> {
   try {
     const config = configuration(d), url = new URL(request.url);
-    if (url.origin !== config.origin || url.hash || request.headers.get("Sec-Fetch-Site") !== "same-origin")
+    const requestOrigin = admittedOperationsRequestOrigin(request.url, { ENVIRONMENT: d.environment,
+      EXPECTED_HOST: d.expectedHost, OPERATIONS_ORIGINS: d.operationsOrigins }, config.origin);
+    if (!requestOrigin || url.origin !== requestOrigin || url.hash || request.headers.get("Sec-Fetch-Site") !== "same-origin")
       throw new Failure(403, "denied");
     const relative = url.pathname.startsWith(`${BASE}/`) ? url.pathname.slice(BASE.length) : "";
     const session = request.method === "GET" && relative === "/session";
@@ -169,8 +172,8 @@ export async function handleOperationsPortalNativeBillingAuthorityOwnerHttp(requ
     const revoke = request.method === "POST" && /^\/grants\/[0-9a-f-]{36}\/revoke$/u.test(relative);
     if (!session && !review && !grant && !read && !revoke) throw new Failure(404, "not_found");
     if (url.search) throw new Failure(400, "invalid_request");
-    if (request.headers.has("Origin") && request.headers.get("Origin") !== config.origin
-      || request.method === "POST" && request.headers.get("Origin") !== config.origin
+    if (request.headers.has("Origin") && request.headers.get("Origin") !== requestOrigin
+      || request.method === "POST" && request.headers.get("Origin") !== requestOrigin
       || request.method === "GET" && request.headers.get("X-Native-Staff-Request") !== "1")
       throw new Failure(403, "denied");
     let actor: Actor;
@@ -178,14 +181,14 @@ export async function handleOperationsPortalNativeBillingAuthorityOwnerHttp(requ
       d.database, config.access); }
     catch { throw new Failure(403, "denied"); }
     alive(actor);
-    if (session) return response(200, { csrfToken: await csrf(config.secret, config.origin, actor) });
+    if (session) return response(200, { csrfToken: await csrf(config.secret, requestOrigin, actor) });
     if (read) {
       const grantId = relative.split("/")[2]!;
       if (!uuid(grantId)) throw new Failure(404, "not_found");
       const status = await d.core.readStatus(d.database, actor, grantId); alive(actor);
       return response(200, { authority: statusOutput(status, grantId) });
     }
-    await csrf(config.secret, config.origin, actor, request); alive(actor);
+    await csrf(config.secret, requestOrigin, actor, request); alive(actor);
     if (review) {
       const value = await body(request, ["targetId", "recipientBindingId", "entity", "expiresAt"]);
       const candidate = await d.core.review(d.database, actor, selection(value)); alive(actor);

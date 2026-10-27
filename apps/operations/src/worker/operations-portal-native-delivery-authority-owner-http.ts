@@ -15,6 +15,7 @@ import { reserveOperationsPortalNativeDeliveryRecoveryInvocation }
 import { OPERATIONS_PORTAL_NATIVE_DELIVERY_FEATURES,
   type OperationsPortalNativeDeliveryCancellationBinding, type OperationsPortalNativeDeliveryFeature } from "@ltds/shared/operations-portal-native-delivery-authority";
 import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
+import { admittedOperationsRequestOrigin } from "./host-admission";
 
 const BASE = "/api/native-client-portal/operations-delivery-authority";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -25,7 +26,7 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
 type Actor = AuthenticatedNativeStaffWithAdmissionVersion;
 type Configuration = NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
 export type OperationsPortalNativeDeliveryAuthorityOwnerHttpDependencies = Readonly<{
-  environment: string; expectedHost: string; configuration: Configuration;
+  environment: string; expectedHost: string; operationsOrigins?: string; configuration: Configuration;
   database: D1Database; dispatch: OperationsPortalNativeDeliveryAuthorityDispatchEnv;
 }>;
 
@@ -195,7 +196,9 @@ export async function handleOperationsPortalNativeDeliveryAuthorityOwnerHttp(req
   d: OperationsPortalNativeDeliveryAuthorityOwnerHttpDependencies): Promise<Response> {
   try {
     const config = configuration(d), url = new URL(request.url);
-    if (url.origin !== config.origin || url.hash || request.headers.get("Sec-Fetch-Site") !== "same-origin")
+    const requestOrigin = admittedOperationsRequestOrigin(request.url, { ENVIRONMENT: d.environment,
+      EXPECTED_HOST: d.expectedHost, OPERATIONS_ORIGINS: d.operationsOrigins }, config.origin);
+    if (!requestOrigin || url.origin !== requestOrigin || url.hash || request.headers.get("Sec-Fetch-Site") !== "same-origin")
       throw new Failure(403, "denied");
     const relative = url.pathname.startsWith(`${BASE}/`) ? url.pathname.slice(BASE.length) : "";
     const sessionRoute = request.method === "GET" && relative === "/session";
@@ -210,15 +213,15 @@ export async function handleOperationsPortalNativeDeliveryAuthorityOwnerHttp(req
     const collectionRoute = candidatesRoute || authoritiesRoute;
     if (!collectionRoute && url.search || collectionRoute && [...url.searchParams.keys()]
       .some(key => key !== "targetId" && key !== "cursor")) throw new Failure(400, "invalid_request");
-    if (request.headers.has("Origin") && request.headers.get("Origin") !== config.origin
-      || request.method === "POST" && request.headers.get("Origin") !== config.origin
+    if (request.headers.has("Origin") && request.headers.get("Origin") !== requestOrigin
+      || request.method === "POST" && request.headers.get("Origin") !== requestOrigin
       || request.method === "GET" && request.headers.get("X-Native-Staff-Request") !== "1")
       throw new Failure(403, "denied");
     let actor: Actor;
     try { actor = await authenticateNativeStaffWithAdmissionVersion(request, d.database, config.access); }
     catch { throw new Failure(403, "denied"); }
     alive(actor);
-    if (sessionRoute) return response(200, { csrfToken: await csrf(config.secret, config.origin, actor),
+    if (sessionRoute) return response(200, { csrfToken: await csrf(config.secret, requestOrigin, actor),
       verifiedUntil: actor.verifiedUntil });
     if (candidatesRoute) {
       const targetId = url.searchParams.get("targetId");
@@ -248,7 +251,7 @@ export async function handleOperationsPortalNativeDeliveryAuthorityOwnerHttp(req
         cancellationOperationId: d.dispatch.OPERATIONS_PORTAL_NATIVE_DELIVERY_CANCELLATION_ENABLED === "true"
           ? status.cancellationOperationId : null }) });
     }
-    await csrf(config.secret, config.origin, actor, request); alive(actor);
+    await csrf(config.secret, requestOrigin, actor, request); alive(actor);
     if (issueRoute) {
       const value = await body(request, ["operationId", "authorityId", "recipientBindingId", "folderReservationId",
         "expectedRevision", "expectedCandidateFingerprint", "features", "expiresAt", "reasonCode"]);

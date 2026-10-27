@@ -16,12 +16,15 @@ import { approveNewNativeOnlyClientOnboarding } from "./client-onboarding-approv
 import { readClientOnboardingEnrollmentChoices } from "./client-onboarding-enrollment-discovery";
 import { parseClientOnboardingEnrollmentSourceIds } from "./client-onboarding-enrollment-selection";
 import { readClientOnboardingScopeChoices } from "./client-onboarding-scope-choices";
+import { admittedOperationsRequestOrigin } from "./host-admission";
 
 export type ClientOnboardingStaffRoute = "session" | "scope-choices" | "create" | "reveal" | "review" | "approve" | "enrollment-choices" | "inbox" | "activation-status" | "existing-companies" | "shared-company-plan" | "shared-company-choices" | "approve-shared-company";
 export type ClientOnboardingStaffHttpDependencies = Readonly<{
+  environment: string;
+  expectedHost: string;
   configuration: NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
   database: D1Database;
-  /** Exact Worker-admitted Ops origins let open tabs finish origin-bound requests during the host migration. */
+  /** Configured Ops aliases remain constrained by the shared finite host policy. */
   operationsOrigins?: string;
   handoffKeyringJson?: string;
   /** Canonical portal origin, supplied by deployment configuration, never browser input. */
@@ -109,23 +112,6 @@ function snapshot(dependencies: ClientOnboardingStaffHttpDependencies) {
     if (error instanceof HttpFailure) throw error;
     throw new HttpFailure(503, "client_onboarding_unavailable");
   }
-}
-function configuredStaffOrigins(value: string | undefined, primary: string): Set<string> {
-  if (value === undefined) return new Set([primary]);
-  const values = value.split(",").map(item => item.trim());
-  if (!values.length || values.length > 4 || values.some(item => !item))
-    throw new HttpFailure(503, "client_onboarding_unavailable");
-  const origins = values.map(item => {
-    try {
-      const parsed = new URL(item);
-      if (parsed.protocol !== "https:" || parsed.origin !== item || parsed.pathname !== "/"
-        || parsed.search || parsed.hash || parsed.username || parsed.password || parsed.port) throw Error();
-      return parsed.origin;
-    } catch { throw new HttpFailure(503, "client_onboarding_unavailable"); }
-  });
-  if (new Set(origins).size !== origins.length || !origins.includes(primary))
-    throw new HttpFailure(503, "client_onboarding_unavailable");
-  return new Set(origins);
 }
 function keyring(value: unknown): ClientOnboardingKeyring {
   try {
@@ -246,14 +232,14 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     const route = clientOnboardingStaffHttpRequest(request.method, url.pathname);
     if (!route) throw new HttpFailure(404, "not_found");
     const authority = snapshot(dependencies);
-    const staffOrigins = configuredStaffOrigins(dependencies.operationsOrigins, authority.origin);
     // Capture deployment configuration before authentication/CSRF awaits so a
     // mutable test or host object cannot change the selected destinations.
     const projectAlphaApiV2Connections = dependencies.projectAlphaApiV2Connections;
     const recipientOrigin = dependencies.recipientOrigin;
     const handoff = route === "create" || route === "reveal" ? keyring(dependencies.handoffKeyringJson) : undefined;
-    const requestOrigin = url.origin;
-    if (!staffOrigins.has(requestOrigin) || url.search || url.hash)
+    const requestOrigin = admittedOperationsRequestOrigin(request.url, { ENVIRONMENT: dependencies.environment,
+      EXPECTED_HOST: dependencies.expectedHost, OPERATIONS_ORIGINS: dependencies.operationsOrigins }, authority.origin);
+    if (!requestOrigin || url.origin !== requestOrigin || url.search || url.hash)
       throw new HttpFailure(403, "client_onboarding_denied");
     const origin = request.headers.get("Origin");
     const fetchSite = request.headers.get("Sec-Fetch-Site");

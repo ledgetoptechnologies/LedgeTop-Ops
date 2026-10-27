@@ -3,6 +3,7 @@ import { authenticateNativeStaffWithAdmissionVersion, type AuthenticatedNativeSt
   type NativeStaffAccessConfiguration } from "./native-staff-auth";
 import { executeOperationsStaffLifecycleCommand } from "./native-staff-management-command";
 import { readNativeStaffManagement } from "./native-staff-management-read";
+import { admittedOperationsRequestOrigin } from "./host-admission";
 
 export const OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE = "/api/native-staff";
 const BASE = OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE;
@@ -12,7 +13,7 @@ const HEADERS = { "Cache-Control": "private, no-store", "Cloudflare-CDN-Cache-Co
   "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY" };
 type Actor = AuthenticatedNativeStaffWithAdmissionVersion;
 export type OperationsNativeStaffLifecycleHttpDependencies = Readonly<{
-  enabledFlag: string; expectedHost: string;
+  enabledFlag: string; environment?: string; expectedHost: string; operationsOrigins?: string;
   configuration: NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
   database: D1Database;
   authenticate?: typeof authenticateNativeStaffWithAdmissionVersion;
@@ -78,15 +79,17 @@ export async function handleOperationsNativeStaffLifecycleHttp(request: Request,
   d: OperationsNativeStaffLifecycleHttpDependencies): Promise<Response> {
   try {
     const c = config(d), url = new URL(request.url);
+    const requestOrigin = admittedOperationsRequestOrigin(request.url, { ENVIRONMENT: d.environment ?? "",
+      EXPECTED_HOST: d.expectedHost, OPERATIONS_ORIGINS: d.operationsOrigins }, c.origin);
     const session = request.method === "GET" && url.pathname === `${BASE}/session`;
     const match = new RegExp(`^${BASE}/([^/]+)(?:/(disable|enable|profile))?$`, "u").exec(url.pathname);
     const targetId = match?.[1];
     const read = request.method === "GET" && !!targetId && !match?.[2] && ID.test(targetId);
     const mutation = request.method === "POST" && !!targetId && !!match?.[2] && ID.test(targetId);
     if (!session && !read && !mutation) throw new Failure(404, "not_found");
-    if (url.origin !== c.origin || url.search || url.hash || request.headers.get("Sec-Fetch-Site") !== "same-origin"
-      || request.headers.has("Origin") && request.headers.get("Origin") !== c.origin
-      || mutation && request.headers.get("Origin") !== c.origin
+    if (!requestOrigin || url.origin !== requestOrigin || url.search || url.hash || request.headers.get("Sec-Fetch-Site") !== "same-origin"
+      || request.headers.has("Origin") && request.headers.get("Origin") !== requestOrigin
+      || mutation && request.headers.get("Origin") !== requestOrigin
       || !mutation && request.headers.get("X-Native-Staff-Request") !== "1") throw new Failure(403, "denied");
     const enabled = await d.database.withSession("first-primary").prepare(
       "SELECT 1 ok FROM native_staff_access_reconciliation WHERE singleton=1 AND enabled=1").first("ok");
@@ -97,7 +100,7 @@ export async function handleOperationsNativeStaffLifecycleHttp(request: Request,
     alive(actor);
     if (!await currentBridge(d, actor)) throw new Failure(403, "denied");
     if (session) {
-      const csrfToken = await csrf(c.secret, c.origin, actor); alive(actor);
+      const csrfToken = await csrf(c.secret, requestOrigin, actor); alive(actor);
       return response(200, { csrfToken, verifiedUntil: actor.verifiedUntil });
     }
     if (read) {
@@ -106,7 +109,7 @@ export async function handleOperationsNativeStaffLifecycleHttp(request: Request,
       alive(actor); if (!await currentBridge(d, actor)) throw new Failure(403, "denied");
       return response(200, value);
     }
-    await csrf(c.secret, c.origin, actor, request); alive(actor);
+    await csrf(c.secret, requestOrigin, actor, request); alive(actor);
     if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/iu.test(request.headers.get("Content-Type") ?? "")) throw new Failure(400, "invalid_request");
     let value: unknown;
     try { value = await readBoundedJson(request, 2_048, "staff lifecycle"); }

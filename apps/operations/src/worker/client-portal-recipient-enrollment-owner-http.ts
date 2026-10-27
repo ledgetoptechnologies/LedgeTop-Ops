@@ -6,12 +6,13 @@ import {cancelRecipientEnrollmentIntent,confirmRecipientEnrollmentIntent,issueRe
   readRecipientEnrollmentIntentForOwner,reconcileRecipientEnrollmentRevocation,revokeRecipientEnrollmentBinding}
   from "./client-portal-recipient-enrollment-ledger";
 import {dispatchNextClientPortalAuthorityV2,type AuthorityV2Env} from "./client-portal-authority-v2-outbox";
+import {admittedOperationsRequestOrigin} from "./host-admission";
 
 const BASE="/api/native-client-portal/recipient-enrollment",UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const LIMIT=4_096,BUCKET=600,HEX=/^[0-9a-f]{64}$/,AUD=/^[A-Za-z0-9_-]{16,128}$/,encoder=new TextEncoder();
 const HEADERS={"Cache-Control":"no-store","Referrer-Policy":"no-referrer","X-Content-Type-Options":"nosniff","X-Frame-Options":"DENY"};
 type Config=NativeStaffAccessConfiguration&Readonly<{origin:string;recipientOrigin:string;csrfSecret:string}>;
-export type RecipientEnrollmentOwnerHttpDependencies=Readonly<{environment?:string;expectedHost?:string;configuration:Config;
+export type RecipientEnrollmentOwnerHttpDependencies=Readonly<{environment?:string;expectedHost?:string;operationsOrigins?:string;configuration:Config;
   database:D1Database;dispatch:AuthorityV2Env}>;
 class Failure extends Error{constructor(readonly status:number,readonly code:string){super(code)}}
 const json=(status:number,body:unknown)=>new Response(JSON.stringify(body),{status,headers:{...HEADERS,"Content-Type":"application/json; charset=utf-8"}});
@@ -48,22 +49,23 @@ async function body(request:Request,names:readonly string[]){if(!/^application\/
 const alive=(until:string)=>{if(Date.parse(until)<=Date.now())throw new Failure(403,"denied")};
 
 export async function handleRecipientEnrollmentOwnerHttp(request:Request,d:RecipientEnrollmentOwnerHttpDependencies){try{
-  const config=snapshot(d),url=new URL(request.url);if(url.origin!==config.origin||url.search||url.hash)throw new Failure(403,"denied");
+  const config=snapshot(d),url=new URL(request.url),requestOrigin=admittedOperationsRequestOrigin(request.url,{ENVIRONMENT:d.environment??"",
+    EXPECTED_HOST:d.expectedHost??"",OPERATIONS_ORIGINS:d.operationsOrigins},config.origin);if(!requestOrigin||url.origin!==requestOrigin||url.search||url.hash)throw new Failure(403,"denied");
   if(url.pathname!==BASE&&!url.pathname.startsWith(`${BASE}/`))throw new Failure(404,"not_found");
   if(request.headers.get("Sec-Fetch-Site")!=="same-origin")throw new Failure(403,"denied");
   const relative=url.pathname.slice(BASE.length),session=request.method==="GET"&&relative==="/session",listing=request.method==="GET"&&relative==="/intents";
   const read=request.method==="GET"&&/^\/intents\/[0-9a-f-]{36}$/.test(relative),issue=request.method==="POST"&&relative==="/intents";
   const mutation=request.method==="POST"&&/^\/intents\/[0-9a-f-]{36}\/(confirm|revoke|reconcile|cancel)$/.test(relative);
   if(!session&&!listing&&!read&&!issue&&!mutation)throw new Failure(404,"not_found");
-  if(session){if(request.headers.get("X-Native-Staff-Request")!=="1"||(request.headers.get("Origin")!==null&&request.headers.get("Origin")!==config.origin))throw new Failure(403,"denied")}
-  else if((issue||mutation)&&request.headers.get("Origin")!==config.origin)throw new Failure(403,"denied");
+  if(session){if(request.headers.get("X-Native-Staff-Request")!=="1"||(request.headers.get("Origin")!==null&&request.headers.get("Origin")!==requestOrigin))throw new Failure(403,"denied")}
+  else if((issue||mutation)&&request.headers.get("Origin")!==requestOrigin)throw new Failure(403,"denied");
   let actor;try{actor=await authenticateNativeStaffWithAdmissionVersion(request,d.database,config.access)}catch{throw new Failure(403,"denied")}alive(actor.verifiedUntil);
-  if(session){const csrfToken=await csrf(config.secret,config.origin,actor);alive(actor.verifiedUntil);
+  if(session){const csrfToken=await csrf(config.secret,requestOrigin,actor);alive(actor.verifiedUntil);
     return json(200,{csrfToken,verifiedUntil:actor.verifiedUntil,recipientOrigin:config.recipientOrigin})}
   if(listing){const intents=await listRecipientEnrollmentIntentsForOwner(d.database,actor);alive(actor.verifiedUntil);return json(200,{intents})}
   const intentId=read?relative.slice(9):mutation?relative.split("/")[2]! : null;
   if(read){const intent=await readRecipientEnrollmentIntentForOwner(d.database,intentId!,actor);alive(actor.verifiedUntil);return json(200,{intent})}
-  await csrf(config.secret,config.origin,actor,request);alive(actor.verifiedUntil);
+  await csrf(config.secret,requestOrigin,actor,request);alive(actor.verifiedUntil);
   if(issue){const value=await body(request,["operationId","selectionId","clientRecordId","expiresAt"]);
     if(typeof value.operationId!=="string"||!UUID.test(value.operationId)||typeof value.selectionId!=="string"||!UUID.test(value.selectionId)
       ||typeof value.clientRecordId!=="string"||value.clientRecordId.length<1||value.clientRecordId.length>200

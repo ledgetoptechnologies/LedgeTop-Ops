@@ -4,6 +4,7 @@ import { authenticateNativeStaffWithAdmissionVersion,
   type NativeStaffAccessConfiguration } from "./native-staff-auth";
 import { writeNativeDirectoryLifecycle, type NativeDirectoryLifecycleActor,
   type NativeDirectoryLifecycleWriteOutcome } from "./native-directory-lifecycle-writer";
+import { admittedOperationsRequestOrigin } from "./host-admission";
 
 export const OPERATIONS_NATIVE_DIRECTORY_LIFECYCLE_OWNER_BASE = "/api/native-client-portal/directory-lifecycle";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -20,7 +21,7 @@ type SelectedAuthority = Readonly<{ selectedProfileGrantId: string; selectedEnro
 type Route = Readonly<{ kind: "client" | "organization"; action: "archive" | "restore"; recordId: string }>;
 
 export type OperationsNativeDirectoryLifecycleOwnerHttpDependencies = Readonly<{
-  environment: string; enabledFlag: string; expectedHost: string;
+  environment: string; enabledFlag: string; expectedHost: string; operationsOrigins?: string;
   configuration: NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
   database: D1Database;
   authenticate?: typeof authenticateNativeStaffWithAdmissionVersion;
@@ -142,20 +143,22 @@ export async function handleOperationsNativeDirectoryLifecycleOwnerHttp(request:
   d: OperationsNativeDirectoryLifecycleOwnerHttpDependencies): Promise<Response> {
   try {
     const configuration = config(d), url = new URL(request.url), selectedRoute = route(url, request.method);
+    const requestOrigin = admittedOperationsRequestOrigin(request.url, { ENVIRONMENT: d.environment,
+      EXPECTED_HOST: d.expectedHost, OPERATIONS_ORIGINS: d.operationsOrigins }, configuration.origin);
     if (!selectedRoute) throw new Failure(404, "not_found");
-    if (url.origin !== configuration.origin || url.search || url.hash || request.headers.get("Sec-Fetch-Site") !== "same-origin")
+    if (!requestOrigin || url.origin !== requestOrigin || url.search || url.hash || request.headers.get("Sec-Fetch-Site") !== "same-origin")
       throw new Failure(403, "denied");
     if (selectedRoute === "session") {
       if (request.headers.get("X-Native-Staff-Request") !== "1"
-        || request.headers.has("Origin") && request.headers.get("Origin") !== configuration.origin) throw new Failure(403, "denied");
-    } else if (request.headers.get("Origin") !== configuration.origin) throw new Failure(403, "denied");
+        || request.headers.has("Origin") && request.headers.get("Origin") !== requestOrigin) throw new Failure(403, "denied");
+    } else if (request.headers.get("Origin") !== requestOrigin) throw new Failure(403, "denied");
     let actor: Actor;
     try { actor = await (d.authenticate ?? authenticateNativeStaffWithAdmissionVersion)(request, d.database, configuration.access); }
     catch { throw new Failure(403, "denied"); }
     alive(actor);
-    if (selectedRoute === "session") return response(200, { csrfToken: await csrf(configuration.secret, configuration.origin, actor),
+    if (selectedRoute === "session") return response(200, { csrfToken: await csrf(configuration.secret, requestOrigin, actor),
       verifiedUntil: actor.verifiedUntil });
-    await csrf(configuration.secret, configuration.origin, actor, request); alive(actor);
+    await csrf(configuration.secret, requestOrigin, actor, request); alive(actor);
     const value = await body(request);
     if (typeof value.mutationId !== "string" || !UUID.test(value.mutationId)
       || !Number.isSafeInteger(value.expectedLifecycleVersion) || Number(value.expectedLifecycleVersion) < 0
