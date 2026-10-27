@@ -54,6 +54,11 @@ describe("authenticated delivery resources — migrated effective workspace", { 
   function app() {
     return createClientPortalRouter({ resolvePrincipal: async () => currentPrincipal });
   }
+  function joinedApp() {
+    const worker = new Hono<{ Bindings: Env }>();
+    worker.route("/api/client", app());
+    return worker;
+  }
   async function request(path: string, init: RequestInit = {}) {
     return app().request(`${origin}${path}`, init, env);
   }
@@ -93,18 +98,18 @@ describe("authenticated delivery resources — migrated effective workspace", { 
   });
 
   it("serves the exact default-off native Windows release DTO through the joined portal router", async () => {
-    const response = await app().request(
-      `${origin}/app/latest?platform=windows&channel=pilot&schemaVersion=1`,
-      { method: "GET", headers: { "X-LTDS-Workspace-ID": "ad1-workspace" } },
+    const response = await joinedApp().request(
+      `${origin}/api/client/app/latest?platform=windows&channel=pilot&schemaVersion=1`,
+      { method: "GET" },
       { ...env, ENVIRONMENT: "staging" },
     );
     expect(response.status, await response.clone().text()).toBe(200);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(await response.json()).toEqual({ schemaVersion: 1, available: false });
     for (const platform of ["macos", "linux"]) {
-      const unsupported = await app().request(
-        `${origin}/app/latest?platform=${platform}`,
-        { method: "GET", headers: { "X-LTDS-Workspace-ID": "ad1-workspace" } },
+      const unsupported = await joinedApp().request(
+        `${origin}/api/client/app/latest?platform=${platform}`,
+        { method: "GET" },
         { ...env, ENVIRONMENT: "staging" },
       );
       expect(unsupported.status).toBe(200);
@@ -113,13 +118,19 @@ describe("authenticated delivery resources — migrated effective workspace", { 
   });
 
   it("rejects unexpected native query shape before looking up release state", async () => {
-    const response = await app().request(
-      `${origin}/app/latest?platform=windows&channel=stable&schemaVersion=1`,
-      { method: "GET", headers: { "X-LTDS-Workspace-ID": "ad1-workspace" } },
+    const response = await joinedApp().request(
+      `${origin}/api/client/app/latest?platform=windows&channel=stable&schemaVersion=1`,
+      { method: "GET" },
       { ...env, ENVIRONMENT: "staging" },
     );
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "app_release_query_invalid" });
+    const workspaceBoundResource = await joinedApp().request(
+      `${origin}/api/client/notification-history`,
+      { method: "GET" },
+      { ...env, ENVIRONMENT: "staging" },
+    );
+    expect(workspaceBoundResource.status).toBe(403);
   });
 
   it("follows the authorized browser offer link to a full authenticated byte response", async () => {
@@ -144,30 +155,36 @@ describe("authenticated delivery resources — migrated effective workspace", { 
        'pilot','synthetic-cohort',1,'2026-10-26T12:00:00Z')`).run();
 
     const envWithReleaseBucket = { ...env, ENVIRONMENT: "staging", APP_RELEASE_BUCKET: bucket } as Env;
-    const offerResponse = await app().request(
-      `${origin}/app/latest?platform=windows`,
-      { method: "GET", headers: { "X-LTDS-Workspace-ID": "ad1-workspace" } },
-      envWithReleaseBucket,
-    );
+    const worker = joinedApp();
+    const offerResponse = await worker.request(`${origin}/api/client/app/latest?platform=windows`, {}, envWithReleaseBucket);
     expect(offerResponse.status, await offerResponse.clone().text()).toBe(200);
     const offer = await offerResponse.json() as { available: boolean; downloadUrl: string };
     expect(offer.available).toBe(true);
     expect(offer.downloadUrl).toBe(`/api/client/app/download/${version}?platform=windows&channel=pilot`);
     for (const platform of ["macos", "linux"]) {
-      const unsupported = await app().request(`${origin}/app/latest?platform=${platform}`, {
-        method: "GET", headers: { "X-LTDS-Workspace-ID": "ad1-workspace" },
-      }, envWithReleaseBucket);
+      const unsupported = await worker.request(`${origin}/api/client/app/latest?platform=${platform}`, {}, envWithReleaseBucket);
       expect(unsupported.status).toBe(200);
       expect(await unsupported.json()).toEqual({ available: false });
     }
-    const joinedWorker = new Hono<{ Bindings: Env }>();
-    joinedWorker.route("/api/client", app());
-    const downloadResponse = await joinedWorker.request(`${origin}${offer.downloadUrl}`, {
-      method: "GET", headers: { "X-LTDS-Workspace-ID": "ad1-workspace" },
-    }, envWithReleaseBucket);
+    const nativeResponse = await worker.request(`${origin}/api/client/app/latest?platform=windows&channel=pilot&schemaVersion=1`, {}, envWithReleaseBucket);
+    expect(nativeResponse.status, await nativeResponse.clone().text()).toBe(200);
+    const nativeOffer = await nativeResponse.json() as { available: boolean; downloadUrl: string; strongETag: string };
+    expect(nativeOffer.available).toBe(true);
+    expect(nativeOffer.downloadUrl).toBe(offer.downloadUrl);
+    const downloadResponse = await worker.request(`${origin}${offer.downloadUrl}`, {}, envWithReleaseBucket);
     expect(downloadResponse.status, await downloadResponse.clone().text()).toBe(200);
     expect(Number(downloadResponse.headers.get("content-length"))).toBe(bytes.byteLength);
     expect(await downloadResponse.bytes()).toEqual(bytes);
+    const nativeUrl = `${origin}${nativeOffer.downloadUrl}`;
+    const nativeHeaders = { "If-Match": nativeOffer.strongETag };
+    const nativeHead = await worker.request(nativeUrl, { method: "HEAD", headers: nativeHeaders }, envWithReleaseBucket);
+    expect(nativeHead.status).toBe(200);
+    expect(nativeHead.headers.get("content-length")).toBe(String(bytes.byteLength));
+    expect(await nativeHead.text()).toBe("");
+    const nativeRange = await worker.request(nativeUrl, { headers: { ...nativeHeaders, "If-Range": nativeOffer.strongETag, Range: "bytes=0-4" } }, envWithReleaseBucket);
+    expect(nativeRange.status).toBe(206);
+    expect(nativeRange.headers.get("content-range")).toBe(`bytes 0-4/${bytes.byteLength}`);
+    expect(await nativeRange.bytes()).toEqual(bytes.slice(0, 5));
   });
 
   it("derives headerless media workspace from the AD1 coordinate and rejects cross-actor or conflicting workspace requests", async () => {

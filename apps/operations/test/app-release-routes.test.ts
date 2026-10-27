@@ -29,7 +29,9 @@ function app(principal: StaffPrincipal = owner, environment = "staging") {
     { ...contextEnv(), ENVIRONMENT: environment } as Env) };
 }
 
-async function seedRelease() {
+async function seedRelease(optional: { minSupported?: string | null; notes?: string | null } = {}) {
+  const minSupported = optional.minSupported === undefined ? "Windows 10/11 x64" : optional.minSupported;
+  const notes = optional.notes === undefined ? "Pilot candidate" : optional.notes;
   await db.prepare(`UPDATE app_release_control SET enabled=1,storage_accepted=1 WHERE singleton=1`).run();
   await bucket.put("windows/pilot/1.2.3.4/setup.exe", BYTES, {
     sha256: await crypto.subtle.digest("SHA-256", BYTES),
@@ -41,8 +43,8 @@ async function seedRelease() {
   await db.prepare(`INSERT INTO app_release_catalog
     (release_id,platform,channel,version,version_major,version_minor,version_patch,version_revision,
      installer_type,artifact_key,size_bytes,sha256,strong_etag,source_commit,min_supported,notes,reviewed_by_staff_id,reviewed_at)
-    VALUES('release-1','windows','pilot',?,1,2,3,4,'exe','windows/pilot/1.2.3.4/setup.exe',?,?,?,?,'Windows 10/11 x64','Pilot candidate',?,'2026-10-26T12:00:00Z')`)
-    .bind(VERSION, BYTES.byteLength, SHA, etag, COMMIT, owner.id).run();
+    VALUES('release-1','windows','pilot',?,1,2,3,4,'exe','windows/pilot/1.2.3.4/setup.exe',?,?,?,?,?,?,?,'2026-10-26T12:00:00Z')`)
+    .bind(VERSION, BYTES.byteLength, SHA, etag, COMMIT, minSupported, notes, owner.id).run();
   await db.prepare(`INSERT INTO app_release_head VALUES('windows','pilot','release-1',1,'2026-10-26T12:00:00Z')`).run();
   await db.prepare(`INSERT INTO app_release_pilot_eligibilities
     (eligibility_id,principal_id,channel,cohort_id,cohort_revision,granted_at)
@@ -102,6 +104,15 @@ describe("staging Operations Windows app release feed", () => {
     expect(await browserDownload.bytes()).toEqual(BYTES);
   });
 
+  it("omits genuinely absent optional native text fields", async () => {
+    await seedRelease({ minSupported: null, notes: null });
+    const response = await app().fetch("/api/app/latest?platform=windows&channel=pilot&schemaVersion=1");
+    expect(response.status).toBe(200);
+    const offer = await response.json() as Record<string, unknown>;
+    expect(offer).not.toHaveProperty("minSupported");
+    expect(offer).not.toHaveProperty("notes");
+  });
+
   it("returns no-off only for eligible owners without a pilot cohort or approved head", async () => {
     await db.prepare("UPDATE app_release_control SET enabled=1,storage_accepted=1").run();
     const native = await app().fetch("/api/app/latest?platform=windows&channel=pilot&schemaVersion=1");
@@ -111,6 +122,24 @@ describe("staging Operations Windows app release feed", () => {
     expect(noHead.status).toBe(200); expect(await noHead.json()).toEqual({ schemaVersion: 1, available: false });
     const legacyNoOffer = await app().fetch("/api/app/latest?platform=windows");
     expect(await legacyNoOffer.json()).toEqual({ available: false });
+  });
+
+  it("fails closed on optional text the native client rejects", async () => {
+    const invalidOptionalValues: Array<{ minSupported?: string; notes?: string }> = [
+      { notes: "" },
+      { notes: "   " },
+      { notes: "pilot\nnotes" },
+      { minSupported: " Windows 11" },
+      { minSupported: "\u0085Windows 11" },
+    ];
+    for (const optional of invalidOptionalValues) {
+      await runtime.dispose();
+      await initializeDatabase();
+      await seedRelease(optional);
+      const response = await app().fetch("/api/app/latest?platform=windows&channel=pilot&schemaVersion=1");
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: "app_release_catalog_invalid" });
+    }
   });
 
   it("denies non-owner, revoked cohort, production, and malformed query without offering", async () => {

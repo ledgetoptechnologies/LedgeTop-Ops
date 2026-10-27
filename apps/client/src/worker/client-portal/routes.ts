@@ -412,6 +412,11 @@ export function createClientPortalRouter(
 
   router.use("*", async (c, next) => {
     const sessionTimingRequest = c.req.method === "GET" && /^(?:\/api\/client)?\/session\/status$/.test(c.req.path);
+    // The app feed is authorized against the verified global portal identity
+    // and its own explicit pilot recipient grant. Desktop requests carry no
+    // workspace selection; do not make that unrelated header a prerequisite.
+    const appReleaseReadRequest = ["GET", "HEAD"].includes(c.req.method)
+      && /^(?:\/api\/client)?\/app\/(?:latest|download\/[^/]+)$/.test(c.req.path);
     if (sessionTimingRequest) c.header("Cache-Control", "no-store");
     if (c.env.CLIENT_PORTAL_ENABLED !== "true")
       return c.json({ error: "Not found" }, 404);
@@ -439,10 +444,10 @@ export function createClientPortalRouter(
     const invitationRequest = /\/v2\/invitations(?:\/|$)/.test(c.req.path);
     if (portalHierarchyV2Enabled(c.env) && !invitationRequest && !(await portalIdentityAccepted(c.env, principal)))
       throw new HTTPException(403, { message: "Client access is not provisioned" });
-    let session = await repository.resolveSession(c.env, principal);
+    let session = appReleaseReadRequest ? null : await repository.resolveSession(c.env, principal);
     const workspaceV2Request = /\/v2\/(?:workspaces|invitations)(?:\/|$)/.test(c.req.path);
     let workspace: EffectivePortalWorkspaceContext | null = null;
-    if (portalHierarchyV2Enabled(c.env) && !workspaceV2Request && !sessionTimingRequest) {
+    if (portalHierarchyV2Enabled(c.env) && !workspaceV2Request && !sessionTimingRequest && !appReleaseReadRequest) {
       let selectedWorkspace = c.req.header(PORTAL_WORKSPACE_HEADER);
       // Browser image/iframe/download requests cannot carry the JSON client's
       // workspace header. The encrypted coordinate selects a workspace only;
@@ -505,7 +510,7 @@ export function createClientPortalRouter(
         }
       }
     }
-    if (!session && !(portalHierarchyV2Enabled(c.env) && (workspaceV2Request || sessionTimingRequest || c.req.path.endsWith("/session"))))
+    if (!session && !(portalHierarchyV2Enabled(c.env) && (workspaceV2Request || sessionTimingRequest || appReleaseReadRequest || c.req.path.endsWith("/session"))))
       throw new HTTPException(403, { message: "Client access is not provisioned" });
     // Workspace-v2 can resolve a global identity that deliberately has no
     // single legacy account. The sentinel is unreachable from legacy routes.

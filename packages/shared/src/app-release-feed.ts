@@ -33,6 +33,14 @@ const hex = (bytes: ArrayBuffer | undefined): string | null => bytes
 const sha256Pattern = /^[0-9a-f]{64}$/;
 const sourceCommitPattern = /^[0-9a-f]{40}$/;
 const strongETagPattern = /^"[\x21\x23-\x7e]*"$/;
+// Match the Unicode whitespace used by System.Char.IsWhiteSpace/Trim rather
+// than JavaScript's slightly different String.trim set (notably U+0085/U+FEFF).
+const dotNetTrimBoundary = /^[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]$/u;
+
+function validOptionalNativeText(value: string | null, maximum: number): boolean {
+  return value === null || typeof value === "string" && value.length > 0 && value.length <= maximum
+    && !dotNetTrimBoundary.test(value) && !/\p{Cc}/u.test(value);
+}
 
 export function parseCanonicalWindowsAppVersion(value: unknown): [number, number, number, number] | null {
   if (typeof value !== "string") return null;
@@ -53,8 +61,8 @@ function validCatalogRow(value: AppReleaseCatalogRow): boolean {
     && Number.isSafeInteger(value.size_bytes) && value.size_bytes >= 1 && value.size_bytes <= 1073741824
     && sha256Pattern.test(value.sha256) && strongETagPattern.test(value.strong_etag) && value.strong_etag.length <= 512
     && sourceCommitPattern.test(value.source_commit)
-    && (value.min_supported === null || typeof value.min_supported === "string" && value.min_supported.length <= 120)
-    && (value.notes === null || typeof value.notes === "string" && value.notes.length <= 600);
+    && validOptionalNativeText(value.min_supported, 120)
+    && validOptionalNativeText(value.notes, 600);
 }
 
 /** R2 checksums are provider verified at write time; HTTP ETag remains a

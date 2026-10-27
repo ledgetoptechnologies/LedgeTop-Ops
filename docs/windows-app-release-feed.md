@@ -36,6 +36,11 @@ immutable catalog. Client eligibility is rechecked before bytes are read. Ops
 checks current owner status and explicit pilot eligibility on each request and
 before returning a byte stream.
 
+When `minSupported` or `notes` is present, it must be a nonempty string within
+the consumer's limit, unchanged by .NET `Trim()`, and contain no Unicode control
+characters. Catalog nulls are omitted from the native offer; empty or malformed
+text makes the catalog unavailable instead of producing a DTO the EXE rejects.
+
 ## Storage and authority
 
 The feed reads only the optional dedicated `APP_RELEASE_BUCKET` binding. It does
