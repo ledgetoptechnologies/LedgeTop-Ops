@@ -172,9 +172,11 @@ Backend mode retains the *existing opaque asset association*, including its
 historical paths. It deliberately does not upload a newly built `dist/client`.
 The committed fingerprint covers both frontends, their public files and build
 dependencies/configuration, root package/lock files and shared source. Its
-backend-only check remains unchanged. Retaining every obsolete static URL was
-an additional precaution of the additive release design, not a requirement for
-ordinary versioned frontend releases.
+backend-only check remains unchanged. For Operations and Client Portal releases,
+the current owner policy requires preserving browser asset URLs and exact bytes
+served within the previous48hours (Hub decision
+`3d123090-2522-4d78-956c-4da7e2ab7a53`). A previous immutable Worker version alone
+does not keep those URLs available in the active asset namespace.
 
 `scripts/ordinary-frontend-release-plan.mjs` provides a separate **offline
 compiler**, with no authentication, upload or activation command. It accepts an
@@ -207,11 +209,28 @@ and its previous asset bytes. Native-staff/source readiness checks applicable to
 the exact application source remain separate release requirements; this compiler
 does not execute, waive or fabricate their evidence.
 
-Ordinary releases replace the asset set with the complete reviewed current build.
-An already open browser tab may request an obsolete hashed URL and need a reload.
-Rolling back the whole previous Worker version restores that version's asset set;
-changing a shell selector alone is not this rollback mechanism. Retaining an
-additional historical union remains an optional separately reviewed strategy.
+The ordinary compiler alone replaces the asset set with the reviewed current
+build. It is not an executable release path and does not meet the48-hour policy
+without a retained union and live byte verification. Do not activate its output
+as-is. Record the actual cutover and earliest permitted pruning time, carry all
+unexpired assets into subsequent releases, and verify both new and retained
+bytes in the active namespace. No automatic pruning is authorized.
+
+Automatic production release components are being qualified separately in
+`scripts/production-auto-*.mjs`; they are not an installed deploy command.
+The retention ledger carries all historical non-index paths, so it does not
+silently prune older releases. The uploader uses the actual provider completion
+JWT, and the coordinator requires exact main CI, unchanged protected controls,
+inactive candidate readback and byte checks before and after activation. A
+failed or ambiguous write stops mutations and permits read-only reconciliation.
+None of these components supplies or bypasses the native staff review gate.
+
+Cloudflare Builds has a20-minute limit. The complete GitHub CI can take longer,
+so production deployment must be initiated after successful main CI through a
+qualified completion-event path. A successful build or restored toggle is not
+proof that production has deployed. Do not enable the old backend-only command
+for frontend releases or claim the new components are live before an end-to-end
+release and build-trigger readback have been verified.
 
 Run the offline compiler checks with:
 
