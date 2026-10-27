@@ -6,14 +6,69 @@ const origin = 'https://viewer.ledgetopdroneservices.com';
 const nonce = '0123456789abcdef0123456789abcdef';
 function fixture() {
   let time = 1000;
-  const sent = [], snapshots = [];
+  const sent = [], snapshots = [], timers = new Map();
+  let nextTimer = 0;
   const target = { postMessage: (...args) => sent.push(args) };
   let current = target;
-  const controller = createViewerStartupDiagnostics({ origin, nonce, source: () => current, now: () => time, onChange: value => snapshots.push(value) });
+  const controller = createViewerStartupDiagnostics({ origin, nonce, source: () => current, now: () => time, onChange: value => snapshots.push(value),
+    setTimer: (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, at: time + delay }); return id; },
+    clearTimer: id => timers.delete(id),
+  });
   const message = (phase = 'shell-loaded', sequence = 1, extra = {}) => ({ origin, source: target,
     data: { version: 1, type: 'ltds-viewer:startup-phase', nonce, phase, sequence, ...extra } });
-  return { controller, sent, snapshots, target, message, time: value => { time = value; }, source: value => { current = value; } };
+  const tick = value => {
+    while (true) {
+      const due = [...timers].filter(([, timer]) => timer.at <= value).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!due) break;
+      time = due[1].at; timers.delete(due[0]); due[1].callback();
+    }
+    time = value;
+  };
+  return { controller, sent, snapshots, target, message, timers, tick,
+    time: value => { time = value; }, source: value => { current = value; } };
 }
+
+test('startup schedules independent probes at fixed offsets once within the existing four-send budget', () => {
+  const f = fixture();
+  f.controller.startProbes(); f.controller.startProbes();
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.timers.size, 3);
+  f.tick(1999); assert.equal(f.sent.length, 1);
+  f.tick(2000); assert.equal(f.sent.length, 2);
+  f.tick(6000); assert.equal(f.sent.length, 3);
+  f.tick(21000); assert.equal(f.sent.length, 4);
+  assert.equal(f.timers.size, 0);
+  assert.equal(f.controller.probe(), false);
+  const loaded = fixture(); loaded.controller.startProbes(); loaded.controller.frameLoaded(); loaded.controller.probe();
+  loaded.tick(21000);
+  assert.equal(loaded.sent.length, 4, 'onLoad and timed probes share one cap');
+});
+
+test('the first validated child reply cancels timers without accepting ready or sending any new authority', () => {
+  const f = fixture(); f.controller.startProbes();
+  assert.equal(f.controller.receive({ ...f.message(), origin: 'https://wrong.example' }), false);
+  assert.equal(f.timers.size, 3, 'spoofed messages cannot stop the diagnostic schedule');
+  assert.equal(f.controller.receive(f.message()), true);
+  assert.equal(f.timers.size, 0);
+  f.tick(21000);
+  assert.equal(f.sent.length, 1);
+  assert.deepEqual(f.controller.snapshot().stages, ['shell-loaded']);
+  assert.ok(f.sent.every(([data]) => data.type === 'ltds-viewer:startup-probe' && Object.keys(data).sort().join(',') === 'nonce,type,version'));
+});
+
+test('close, replacement document and fixed expiry cancel remaining timers permanently', () => {
+  for (const reason of ['unmount-or-source-change', 'reload', 'expiry', 'rollback']) {
+    const f = fixture(); f.controller.startProbes();
+    if (reason === 'unmount-or-source-change') f.controller.close();
+    if (reason === 'reload') { f.controller.frameLoaded(); f.controller.frameLoaded(); }
+    if (reason === 'expiry') { f.time(1000 + VIEWER_DIAGNOSTICS_TTL_MS); f.controller.probe(); }
+    if (reason === 'rollback') { f.time(999); f.controller.probe(); }
+    assert.equal(f.timers.size, 0, reason);
+    f.tick(1000 + VIEWER_DIAGNOSTICS_TTL_MS + 1);
+    assert.equal(f.sent.length, 1, reason);
+    assert.equal(f.controller.receive(f.message()), false, reason);
+  }
+});
 
 test('probes target only the exact bound Viewer; no URL, grant or identity is transmitted', () => {
   const f = fixture();
