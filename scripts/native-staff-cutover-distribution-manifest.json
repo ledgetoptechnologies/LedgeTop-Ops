@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "kind": "operations-native-staff-cutover-runtime-manifest-v1",
+  "files": [
+    {
+      "path": "apps/operations/node_modules/wrangler/wrangler-dist/cli.js",
+      "sha256": "a1a7a98e0b073d39dc3229b1b89f66accb51ae557fb34552250f914f12a81efd"
+    },
+    {
+      "path": "scripts/native-staff-bootstrap-approved-executor-config.mjs",
+      "sha256": "27e034c3026a3ed877dadc302910c150722b0b10509f9539fa54b1ce4e40edc1"
+    },
+    {
+      "path": "scripts/native-staff-bootstrap-approved-executor.mjs",
+      "sha256": "03734e9805cba629edd820efd41354e876590e99cfb3e18e3f6e453cc0f47dfa"
+    },
+    {
+      "path": "scripts/native-staff-bootstrap-d1.mjs",
+      "sha256": "8b75f42bae5bafd84105dc9a8aa72a5e8235abe22138a26b251dbfb3a87622af"
+    },
+    {
+      "path": "scripts/native-staff-bootstrap-owner-approval-distribution-manifest.json",
+      "sha256": "8a8a1783ace9351b964fe796eeb12fb1754ff0950c54b5666094e220669990a8"
+    },
+    {
+      "path": "scripts/native-staff-bootstrap-owner-approval-distribution-pin-value.mjs",
+      "sha256": "03a0c3e0dc1e006094c671f0dff3079caaee3e036cf1046287ce9f3e72018d2e"
+    },
+    {
+      "path": "scripts/native-staff-bootstrap-owner-approval-distribution-pin.mjs",
+      "sha256": "1318a580103853dba89c48938af82ca4cbdf35ab957283c9fcd6267cad3e7cae"
+    },
+    {
+      "path": "scripts/native-staff-bootstrap-owner-approval.mjs",
+      "sha256": "9c6cd296ce075455d19b593d31f746e5348e38a4e5757214bcf9fc33665610db"
+    },
+    {
+      "path": "scripts/native-staff-cutover-approved-executor-config.mjs",
+      "sha256": "fe61cd98c9ac8654deb5ebcd606847733dbf9fefab5a27d638a6e42328f94552"
+    },
+    {
+      "path": "scripts/native-staff-cutover-approved-executor.mjs",
+      "sha256": "030fddfeaa0946e3be8018a7a0d7b290001a954b6a39aa61abbd4c9082a6be14"
+    },
+    {
+      "path": "scripts/native-staff-cutover-distribution-pin.mjs",
+      "sha256": "5ffea693c98f97579a385e81073f4a577c41e009c5b36d5a4d014126e4662b89"
+    },
+    {
+      "path": "scripts/native-staff-cutover-owner-approval-cli.mjs",
+      "sha256": "0142f6f3b7028526a4865da1dbf7a22730d6c74753907bad84d2ea01fc6f67c9"
+    },
+    {
+      "path": "scripts/native-staff-cutover-owner-approval.mjs",
+      "sha256": "e8e33b24090fefd079ae648dad38e5a01f9f948f1305e89a3866c6f6babda15d"
+    },
+    {
+      "path": "scripts/native-staff-cutover-v1.mjs",
+      "sha256": "8e348d934f1babb42851a44ac5e4d1373a2a2985e33fef29c2b6fca0fa7b7da5"
+    },
+    {
+      "path": "scripts/native-staff-sync-preparation.mjs",
+      "sha256": "dcbc7854408bcfd8fc6b5877471abc8e8a0ec4f8ec54f0ded359c715f660db90"
+    }
+  ]
+}

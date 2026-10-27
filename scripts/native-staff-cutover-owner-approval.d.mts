@@ -1,0 +1,17 @@
+export const NATIVE_STAFF_CUTOVER_OWNER_APPROVAL_KIND: string;
+export const NATIVE_STAFF_CUTOVER_APPROVAL_STATE_KIND: string;
+export const NATIVE_STAFF_CUTOVER_CONSENT_PREFIX: string;
+export function assertPinnedNativeStaffCutoverSource(config: any, options?: { cwd?: string; run?: typeof import('node:child_process').execFileSync;
+  read?: typeof import('node:fs').readFileSync }): true;
+export function compileNativeStaffCutoverApprovalContext(artifact: any, config: any): any;
+export function verifyCurrentNativeStaffCutoverOwnerSession(config: any, token: string, options?: { fetchImpl?: typeof fetch; now?: number }): Promise<any>;
+export function nativeStaffCutoverConsentText(artifact: any, config: any): string;
+export function buildNativeStaffCutoverOwnerApprovalReceipt(options: { config: any; artifact: any; ownerSession: any;
+  typedConsent: string; now?: number; authorizationChallenge?: string }): any;
+export function verifyNativeStaffCutoverOwnerApprovalReceipt(receipt: any, options: { config: any; expectedArtifact?: any; now?: number }): any;
+export function readNativeStaffCutoverApprovalRegistry(config: any): { envelope: any; stateSha256: string };
+export function initializeNativeStaffCutoverApprovalRegistry(config: any): any;
+export function issueNativeStaffCutoverApproval(config: any, receipt: any): any;
+export function revokeNativeStaffCutoverApproval(config: any, receipt: any, expectedStateSha256: string): any;
+export function acquireNativeStaffCutoverApprovalLease(config: any, receipt: any): { stateSha256: string; finish(outcome: 'consumed' | 'uncertain'): void };
+export function writeNativeStaffCutoverReceiptFile(config: any, receipt: any): string;
