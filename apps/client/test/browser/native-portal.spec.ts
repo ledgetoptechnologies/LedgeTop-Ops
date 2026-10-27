@@ -1088,13 +1088,46 @@ test.describe("unified home without business switching", () => {
     await expect(page).toHaveURL(/\/portal$/);
   });
 
+  for (const second of ["still loading", "failed"] as const)
+    test(`without the one-step form, an account that ${second === "failed" ? "failed to load" : "is still loading"} keeps the neutral retry instead of opening the other account`, async ({page}) => {
+      await mockBoth(page);
+      // The plain context: services aren't offered here, so this account can't take requests.
+      const ineligible = () => ({json: {...context("workspace-b"), workspace: listed.find(item => item.id === "workspace-b")}});
+      const held: import("@playwright/test").Route[] = [];
+      let answer: "hold" | "fail" | "ineligible" = second === "failed" ? "fail" : "hold";
+      await page.route("**/api/client/v2/workspaces/workspace-b/context", route => {
+        if (answer === "hold") { held.push(route); return; }
+        return route.fulfill(answer === "fail" ? {status: 503, json: {error: "Unavailable"}} : ineligible());
+      });
+      await page.goto("/portal");
+      const chooser = page.locator(".unified-portal-chooser");
+      const problems = page.locator(".unified-portal-problems");
+      if (second === "failed") await expect(problems).toBeVisible();
+      else await expect.poll(() => held.length).toBeGreaterThan(0);
+      await page.getByRole("button", {name: "New request"}).first().click();
+      await expect(chooser.getByRole("heading", {name: "New requests are unavailable"})).toBeVisible();
+      await chooser.getByRole("button", {name: "Try again"}).click();
+      await expect(chooser.getByRole("heading", {name: "New requests are unavailable"})).toBeVisible();
+      await expect(page).toHaveURL(/\/portal$/);
+      await expect(page.getByLabel("Service request title")).toHaveCount(0);
+
+      answer = "ineligible";
+      if (second === "failed") await problems.getByRole("button", {name: "Try again"}).click();
+      else for (const route of held.splice(0)) await route.fulfill(ineligible());
+      await expect(page.getByRole("button", {name: /Coastal seawall construction documentation/})).toBeVisible();
+      await expect(problems).toHaveCount(0);
+      await chooser.getByRole("button", {name: "Try again"}).click();
+      await expect(page).toHaveURL(/\/portal\/requests\/new\?workspace=workspace-c$/);
+    });
+
   test("without the one-step form, the only account that can take requests opens its own form", async ({page}) => {
     await mockBoth(page);
-    await page.route("**/api/client/v2/workspaces/workspace-b/context", route => {
-      const value = requestContext("workspace-b") as {capabilities: Record<string, unknown>};
-      return route.fulfill({json: {...value, workspace: listed.find(item => item.id === "workspace-b"), capabilities: {...value.capabilities, requestV2: false}}});
-    });
+    // The plain context: services aren't offered here, so this account can't take requests.
+    await page.route("**/api/client/v2/workspaces/workspace-b/context", route =>
+      route.fulfill({json: {...context("workspace-b"), workspace: listed.find(item => item.id === "workspace-b")}}));
     await page.goto("/portal");
+    await expect(page.getByRole("button", {name: /Coastal seawall construction documentation/})).toBeVisible();
+    await expect(page.locator(".unified-portal-problems")).toHaveCount(0);
     await page.getByRole("button", {name: "New request"}).first().click();
     await expect(page).toHaveURL(/\/portal\/requests\/new\?workspace=workspace-c$/);
     await expect(page.locator(".unified-portal-chooser")).toHaveCount(0);

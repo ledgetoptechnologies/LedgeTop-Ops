@@ -93,7 +93,9 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   const projects = ready.flatMap(result => result.projects).sort(byName);
   const requests = ready.flatMap(result => result.requests).sort(byUpdated);
   const requestAccounts = ready.filter(result => result.canRequest).map(result => result.account);
-  const onlyRequestAccount = requestAccounts.length === 1 ? requestAccounts[0]! : null;
+  // Going straight to one account's form needs every account answered: one still loading or failed may also take requests.
+  const allAccountsReady = accounts.length > 0 && accounts.every(account => results.get(account.workspace.id)?.status === "ready");
+  const onlyRequestAccount = allAccountsReady && requestAccounts.length === 1 ? requestAccounts[0]! : null;
 
   const startRequest = () => {
     setNotice(null);
