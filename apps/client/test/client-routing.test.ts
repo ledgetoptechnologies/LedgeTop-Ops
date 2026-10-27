@@ -28,7 +28,7 @@ describe("delivery client routing", () => {
     expect(navigate).not.toHaveBeenCalled();
   });
 
-  it.each(["?token=capability", "?signature=signed&folder=ref", "?download=1", "?file=opaque_ref", "?redirect=https%3A%2F%2Fexample.com"])("keeps non-presentation queries at their original host: %s", search => {
+  it.each(["?token=capability", "?signature=signed&folder=ref", "?download=1", "?capability=opaque_ref", "?redirect=https%3A%2F%2Fexample.com"])("keeps non-presentation queries at their original host: %s", search => {
     const navigate = vi.fn();
     expect(handoffLegacyPublicShare({ hostname: "portal.ledgetopdroneservices.com", pathname: "/s/public-id", search, hash: "#secret" }, navigate)).toBe(false);
     expect(navigate).not.toHaveBeenCalled();
@@ -46,6 +46,23 @@ describe("delivery client routing", () => {
     const hash = "#private%2Dsecret_-";
     expect(handoffLegacyPublicShare({ hostname: "CLIENT.LEDGETOPDRONESERVICES.COM", pathname: "/s/id", search, hash }, navigate)).toBe(true);
     expect(navigate).toHaveBeenCalledExactlyOnceWith(`https://delivery.ledgetop.app/s/id${search}${hash}`);
+  });
+
+  it("hands off the app-generated selected-file browse query while still rejecting signed query keys", () => {
+    const navigate = vi.fn();
+    const browsePath = deliveryBrowsePath("public-id", { folderId: "folder_ref-1", fileId: "file_ref-2", view: "list" });
+    const separator = browsePath.indexOf("?");
+    const location = {
+      hostname: "client.ledgetopdroneservices.com",
+      pathname: browsePath.slice(0, separator),
+      search: browsePath.slice(separator),
+      hash: "#private-secret",
+    };
+
+    expect(handoffLegacyPublicShare(location, navigate)).toBe(true);
+    expect(navigate).toHaveBeenCalledExactlyOnceWith(`https://delivery.ledgetop.app${browsePath}#private-secret`);
+    expect(handoffLegacyPublicShare({ ...location, search: `${location.search}&signature=signed` }, navigate)).toBe(false);
+    expect(navigate).toHaveBeenCalledExactlyOnceWith(`https://delivery.ledgetop.app${browsePath}#private-secret`);
   });
 
   it("treats the public root as an informational landing page", () => {

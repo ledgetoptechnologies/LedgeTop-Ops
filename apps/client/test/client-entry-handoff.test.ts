@@ -20,20 +20,20 @@ afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); vi.resetModules(); 
 
 describe("actual Client entry handoff", () => {
   it.each([
-    ["client.ledgetopdroneservices.com", "/s/public-id"],
-    ["portal.ledgetopdroneservices.com", "/client-share/public-id"],
-  ])("navigates %s%s before consuming its fragment or starting the app", async (hostname, pathname) => {
+    ["client.ledgetopdroneservices.com", "/s/public-id", "?folder=ref"],
+    ["portal.ledgetopdroneservices.com", "/client-share/public-id", "?folder=ref&file=file_ref-2"],
+  ])("navigates %s%s before consuming its fragment or starting the app", async (hostname, pathname, search) => {
     const replace = vi.fn();
     const replaceState = vi.fn();
     const getElementById = vi.fn();
     const consume = vi.spyOn(deliveryRoute, "consumeDeliveryRoute");
-    vi.stubGlobal("window", { location: { hostname, pathname, search: "?folder=ref", hash: "#private-secret", replace },
+    vi.stubGlobal("window", { location: { hostname, pathname, search, hash: "#private-secret", replace },
       history: { state: null, replaceState } });
     vi.stubGlobal("document", { getElementById });
 
     await import("../src/client/main");
 
-    expect(replace).toHaveBeenCalledExactlyOnceWith(`https://delivery.ledgetop.app${pathname}?folder=ref#private-secret`);
+    expect(replace).toHaveBeenCalledExactlyOnceWith(`https://delivery.ledgetop.app${pathname}${search}#private-secret`);
     expect(consume).not.toHaveBeenCalled();
     expect(replaceState).not.toHaveBeenCalled();
     expect(getElementById).not.toHaveBeenCalled();

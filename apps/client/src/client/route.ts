@@ -5,7 +5,7 @@ const legacyPublicHostRedirects: Readonly<Record<string, string>> = {
   "portal.ledgetopdroneservices.com": "https://delivery.ledgetop.app",
 };
 const presentationQueryKeys = new Set([
-  "folder", "view", "q", "search", "sort", "order", "page", "limit", "cursor", "prefix",
+  "folder", "file", "view", "q", "search", "sort", "order", "page", "limit", "cursor", "prefix",
 ]);
 
 /** Moves a first-use fragment-bearing legacy link to the canonical host before
