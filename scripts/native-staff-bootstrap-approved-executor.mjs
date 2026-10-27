@@ -101,7 +101,15 @@ async function boundedBody(response) {
 function normalizedD1Results(payload, expectedCount) {
   if (payload?.success !== true || !Array.isArray(payload.result) || payload.result.length !== expectedCount
     || payload.result.some(item => item?.success !== true || !Array.isArray(item.results))) stop('d1_batch_outcome_uncertain');
-  return payload.result.map(item => ({ success: true, results: item.results }));
+  return payload.result.map(item => {
+    if (!Object.hasOwn(item, 'meta')) return { success: true, results: item.results };
+    const metadata = item.meta;
+    if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)
+      || Object.getPrototypeOf(metadata) !== Object.prototype) stop('d1_batch_outcome_uncertain');
+    if (!Object.hasOwn(metadata, 'changes')) return { success: true, results: item.results };
+    if (!Number.isSafeInteger(metadata.changes) || metadata.changes < 0) stop('d1_batch_outcome_uncertain');
+    return { success: true, results: item.results, meta: { changes: metadata.changes } };
+  });
 }
 
 /** Fixed-target REST transport. It never retries and binds every SQL request to the configured D1 UUID. */

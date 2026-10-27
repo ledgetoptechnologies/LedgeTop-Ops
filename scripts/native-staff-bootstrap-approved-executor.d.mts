@@ -1,6 +1,11 @@
 export interface ApprovedExecutorD1Config {
   target: { accountId: string; databaseId: string };
 }
+export interface ApprovedExecutorD1Result {
+  success: true;
+  results: any[];
+  meta?: { changes: number };
+}
 export function createApprovedExecutorD1Provider(options: {
   config: ApprovedExecutorD1Config;
   getBearerToken: () => Promise<string> | string;
@@ -12,11 +17,11 @@ export function createApprovedExecutorD1Provider(options: {
     readonly sql: string;
     readonly params: unknown[];
     bind(...values: Array<string | number | null>): any;
-    all(): Promise<{ success: true; results: any[] }>;
+    all(): Promise<ApprovedExecutorD1Result>;
     first(): Promise<any | null>;
-    run(): Promise<{ success: true; results: any[] }>;
+    run(): Promise<ApprovedExecutorD1Result>;
   };
-  batch(statements: Array<{ sql: string; params?: Array<string | number | null> }>): Promise<Array<{ success: true; results: any[] }>>;
+  batch(statements: Array<{ sql: string; params?: Array<string | number | null> }>): Promise<ApprovedExecutorD1Result[]>;
 };
 export function runNativeStaffBootstrapApprovedExecutor(options: {
   artifact: any;
