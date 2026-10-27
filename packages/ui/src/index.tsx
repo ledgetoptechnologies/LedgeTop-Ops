@@ -9,6 +9,7 @@ export { GetAppDialog } from "./GetAppDialog";
 export { ACCESS_LOGOUT, useAccessEmail, useAccessSignOut } from "./access-session";
 export { LEDGE_TOP_SUPPORT_EMAIL, SignInRecovery } from "./SignInRecovery";
 import { useAccessSignOut } from "./access-session";
+import { createViewerStartupDiagnostics, VIEWER_DIAGNOSTICS_TTL_MS, type ViewerStartupSnapshot } from "./viewer-startup-diagnostics";
 
 /** Generic Ledge Top mark, identical on every domain and product. */
 const LT_MARK_BOX = "238.5 226 776 776", LT_MARK_WHITE = "#f5f3ef", LT_MARK_ORANGE = "#ee5007";
@@ -527,6 +528,30 @@ export function ViewerEmbed({
   const [state, setState] = useState<"loading" | "ready" | "renewing" | "at-risk" | "startup-failed">("loading");
   const [message, setMessage] = useState("");
   const viewerOrigin = new URL(session.embedUrl).origin;
+  const startupDiagnostics = useRef<ReturnType<typeof createViewerStartupDiagnostics> | null>(null);
+  const [startupSnapshot, setStartupSnapshot] = useState<ViewerStartupSnapshot>({ phase: "awaiting-shell", sequence: 0, frameLoads: 0, stages: [] });
+
+  // Diagnostics are content-free, finite, and independent of session authority.
+  useEffect(() => {
+    const diagnostics = createViewerStartupDiagnostics({
+      origin: viewerOrigin,
+      nonce: crypto.randomUUID().replaceAll("-", ""),
+      source: () => frame.current?.contentWindow,
+      onChange: setStartupSnapshot,
+    });
+    startupDiagnostics.current = diagnostics;
+    setStartupSnapshot(diagnostics.snapshot());
+    const receive = (event: MessageEvent) => { diagnostics.receive(event); };
+    window.addEventListener("message", receive);
+    diagnostics.probe();
+    const stop = () => { diagnostics.close(); window.removeEventListener("message", receive); };
+    const expiry = setTimeout(stop, VIEWER_DIAGNOSTICS_TTL_MS);
+    return () => {
+      clearTimeout(expiry);
+      stop();
+      if (startupDiagnostics.current === diagnostics) startupDiagnostics.current = null;
+    };
+  }, [viewerOrigin, session.embedUrl]);
 
   const requestRenewal = useCallback((expiresAt: string) => {
     const remaining = Date.parse(expiresAt) - Date.now();
@@ -616,7 +641,12 @@ export function ViewerEmbed({
       <div><strong>{title}</strong><small>Secure 3D Viewer</small></div>
       <div>{message && <span role="status" className={state === "at-risk" ? "viewer-session-error" : "viewer-session-status"}>{message}</span>}{onClose && <button type="button" className="button-ghost button-small" onClick={onClose}>Close viewer</button>}</div>
     </header>
-    <div className="ltds-viewer-stage" aria-busy={state === "loading"}>
+    <div className="ltds-viewer-stage" aria-busy={state === "loading"}
+      data-viewer-startup-phase={startupSnapshot.phase}
+      data-viewer-startup-sequence={startupSnapshot.sequence}
+      data-viewer-startup-stages={JSON.stringify(startupSnapshot.stages)}
+      data-viewer-frame-loads={startupSnapshot.frameLoads}
+      data-viewer-redeem-status={startupSnapshot.status}>
       {state === "loading" && <span className="ltds-viewer-loading" role="status">Opening 3D model…</span>}
       {state === "startup-failed" && <div className="ltds-viewer-loading ltds-viewer-startup-failed" role="alert">
         <div>
@@ -630,6 +660,7 @@ export function ViewerEmbed({
       </div>}
       <iframe
         ref={frame}
+        onLoad={() => { startupDiagnostics.current?.frameLoaded(); startupDiagnostics.current?.probe(); }}
         src={session.embedUrl}
         title={`3D model: ${title}`}
         allow="fullscreen"
