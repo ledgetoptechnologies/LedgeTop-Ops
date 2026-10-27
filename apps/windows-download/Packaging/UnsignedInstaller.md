@@ -115,3 +115,28 @@ Primary references:
 https://nsis.sourceforge.io/Reference/RequestExecutionLevel
 https://nsis.sourceforge.io/Docs/Chapter4.html
 https://github.com/nsis-dev/nsis/blob/master/Include/WinVer.nsh
+
+## Current template isolated acceptance — October 27, 2026 UTC
+
+`scripts/windows-installer-isolated-current-acceptance.ps1` qualifies the exact
+template from commit `5c751732990614beb069160806f7d4668876ffe9` (SHA256
+`7dee786a53f301ab41187cd2e3866950161f5190b7f9a1dc2f6a2e6071be7200`).
+The historical isolated acceptance script above must not be used unchanged for
+this template: it lacks current sidecar/source anchors and startup isolation.
+The new script requires explicit `-ExecuteReviewedAcceptance`, fresh review and
+a new hidden GUID fixture; it is not part of normal test execution.
+
+One actual isolated run passed preflight refusal/retry, install, newer upgrade,
+old-uninstaller refusal, cleanup refusal, nested-junction refusal and active
+uninstall. Exact synthetic startup opt-in migrated to the newer version and was
+removed on uninstall. Payload inventory/source anchors matched; local fixture
+notes, profile, sentinel and unknown residual survived. Silent setup never invoked
+the synthetic app's normal-launch branch. The caller independently confirmed the
+exact synthetic activation key and startup value absent afterward.
+
+Only namespace literals were replaced, including all three installer mutex uses
+and the startup key/value. All 441 extracted compiler/toolchain files matched the
+pinned archive before execution. The payload was a synthetic maintenance stub;
+these results do not establish real installed-app, interactive Finish, connected
+update, native file-provider, or laptop Explorer acceptance. Failed or uncertain
+runs retain their state and must not be blindly replayed or cleaned up.
