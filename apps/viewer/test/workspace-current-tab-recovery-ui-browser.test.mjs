@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
 import { describeDiscardedWork } from '../workspace-current-tab-recovery-ui.mjs';
 import { waitForDevToolsPort } from './devtools-port.mjs';
+import { legacyUploadModuleSource } from './legacy-upload-fixture.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -80,16 +81,30 @@ async function until(check, message, timeout = 10_000) {
 }
 
 const HARNESS = `<!doctype html><html><head><meta charset="utf-8"></head><body>
+<a id="other-navigation" href="/next.html">Leave workspace</a>
 <dialog class="workspace-recovery" open><h2>Sign in to continue</h2></dialog>
 <script type="module">
 import { renderCurrentTabRecoveryOffer } from '/workspace-current-tab-recovery-ui.mjs';
+import { createWorkspaceNavigationWork, workspaceNavigationState } from '/workspace-navigation-state.mjs';
+import { createLegacyUploader } from '/legacy-uploader.mjs';
 const params = new URLSearchParams(location.search);
 window.__calls = 0;
-// Mirrors the workspace's pending-upload guard: recovery must never remove it.
-if (params.get('busy') === '1') addEventListener('beforeunload', event => { event.preventDefault(); event.returnValue = ''; });
+const work = createWorkspaceNavigationWork({windowRef:window}), state = {busy:false,token:'test-only'};
+const files = params.get('busy') === '1' ? Array.from({length:3}, (_,index)=>new File(['payload'],'model-'+index+'.obj')) : [];
+let completeCreation, specs, requests=0;
+const creation = new Promise(resolve=>{completeCreation=resolve;});
+const upload = createLegacyUploader({navigationWork:work,state,sessionStorage,modal:{close(){}},toast(){},load:async()=>{},
+  digest:async()=> 'test-digest',workspaceFetch:async()=>({ok:true}),
+  api:async(path,init)=>{requests++;if(path.endsWith('/uploads')){specs=init.body.files;return creation;}return {};}});
+const result = files.length ? upload({elements:{files:{files},datasetId:{value:'dataset'},processingRole:{value:'model'}},querySelector:()=>({value:0})}) : Promise.resolve();
+window.__uploadDone=false;result.then(()=>{window.__uploadDone=true;});
+window.__uploadState=()=>({pending:work.snapshot().pendingLegacyUpload,busy:state.busy,selectedFiles:files.length,requests});
+window.__finishLegacyUpload=async()=>{completeCreation({uploadToken:'test-upload',upload:{id:'upload',chunkSize:1024,
+  files:specs.map(spec=>({...spec,chunkCount:1,missingChunks:[0]}))}});await result;};
+const supplied = JSON.parse(params.get('state') || '{}');
 renderCurrentTabRecoveryOffer({
   container: document.querySelector('dialog'),
-  navigationState: JSON.parse(params.get('state') || '{}'),
+  navigationState: workspaceNavigationState({work:work.snapshot(),newTask:{unsavedTaskDraft:Boolean(supplied.unsavedTaskDraft)}}),
   continueInCurrentTab: () => { window.__calls += 1; if (params.get('throw') === '1') throw new Error('invalid'); location.assign('/next.html'); },
   resetDelayMs: 400,
 });
@@ -97,10 +112,12 @@ window.__ready = true;
 </script></body></html>`;
 
 async function startServer() {
-  const moduleSource = readFileSync(path.join(root, 'workspace-current-tab-recovery-ui.mjs'));
+  const modules = new Map(['workspace-current-tab-recovery-ui.mjs','workspace-navigation-state.mjs']
+    .map(name=>['/'+name,readFileSync(path.join(root,name))]));
+  modules.set('/legacy-uploader.mjs',legacyUploadModuleSource);
   const server = createServer((request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1');
-    if (url.pathname === '/workspace-current-tab-recovery-ui.mjs') { response.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' }); response.end(moduleSource); return; }
+    if (modules.has(url.pathname)) { response.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' }); response.end(modules.get(url.pathname)); return; }
     if (url.pathname === '/harness.html') { response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); response.end(HARNESS); return; }
     if (url.pathname === '/next.html') { response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); response.end('<!doctype html><title>next</title><p>Operations sign-in</p>'); return; }
     response.writeHead(404).end();
@@ -180,6 +197,21 @@ test('"Renew in this tab" gates on discarded work and honours the real beforeunl
       await client.command('Page.handleJavaScriptDialog', { accept: true });
       await click.released;
       await until(() => client.evaluate('location.pathname === "/next.html"'), 'Confirm did not navigate');
+    });
+
+    await t.test('real legacy uploader protects unrelated navigation, Cancel preserves upload, completion removes the guard', async () => {
+      await open(client, origin, 'busy=1');
+      await until(()=>client.evaluate('window.__uploadState().requests === 1'),'actual uploader did not reach creation');
+      const since=client.events.length,click=await clickReal(client,'#other-navigation');
+      await until(()=>dialogEvents(client,since).find(event=>event.params.type==='beforeunload'),'legacy upload did not guard ordinary navigation');
+      await client.command('Page.handleJavaScriptDialog',{accept:false});await click.released;
+      assert.deepEqual(await client.evaluate('window.__uploadState()'),{pending:true,busy:true,selectedFiles:3,requests:1});
+      assert.equal(await client.evaluate('location.pathname'),'/harness.html');
+      await client.evaluate('window.__finishLegacyUpload()');
+      assert.deepEqual(await client.evaluate('window.__uploadState()'),{pending:false,busy:false,selectedFiles:3,requests:2});
+      const after=client.events.length;await clickReal(client,'#other-navigation');
+      await until(()=>client.evaluate('location.pathname === "/next.html"'),'completed upload still blocked navigation');
+      assert.equal(dialogEvents(client,after).length,0);
     });
 
     await t.test('no pending work: no warning or acknowledgement, and the button navigates without a prompt', async () => {

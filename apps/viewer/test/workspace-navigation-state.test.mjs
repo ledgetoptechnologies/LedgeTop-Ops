@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {hasUnsavedGcpMark,createWorkspaceNavigationWork,workspaceNavigationState} from '../workspace-navigation-state.mjs';
+import {createLegacyUploader} from './legacy-upload-fixture.mjs';
 const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
 const mark={id:'mark',pointId:'point',imageFileId:'image',pixelX:10,pixelY:20};
 const workspace={pointId:'point',activeImage:{id:'image'},editingId:'mark',draftPixel:{pixelX:10,pixelY:20}};
@@ -64,4 +65,57 @@ test('New Task flags survive aggregation and selected legacy files are counted b
   assert.equal(workspaceNavigationState({legacySelectedFileCount:2}).pendingUpload,false);
   assert.match(source,/getNavigationState:currentWorkspaceNavigationState/);
   assert.match(source,/legacySelectedFileCount:modalContent\.querySelector\('#upload-form input\[type="file"\]'\)\?\.files\?\.length\|\|0/);
+});
+
+function uploadWindow(){
+  const handlers=new Set(),removed=[];
+  return {handlers,removed,
+    addEventListener(type,handler){assert.equal(type,'beforeunload');handlers.add(handler);},
+    removeEventListener(type,handler){assert.equal(type,'beforeunload');removed.push(handler);handlers.delete(handler);},
+    leave(){const event={prevented:false,preventDefault(){this.prevented=true;}};for(const handler of handlers)handler(event);return event;},
+  };
+}
+
+test('actual legacy uploader guards all navigation until upload settles and preserves unrelated unload handlers',async()=>{
+  for(const outcome of ['success','creation-failed','chunk-failed','finalize-failed']){
+    const windowRef=uploadWindow(),unrelated=()=>{},work=createWorkspaceNavigationWork({windowRef});
+    windowRef.handlers.add(unrelated);
+    const entered=deferred(),create=deferred(),state={busy:false,token:'test-only'},calls=[],messages=[];
+    let specs;
+    const upload=createLegacyUploader({navigationWork:work,state,sessionStorage:{setItem(){},removeItem(){}},
+      modal:{close(){}},toast:message=>messages.push(message),load:async()=>{},digest:async()=> 'test-digest',
+      api:async(path,init)=>{
+        calls.push(path);
+        if(path.endsWith('/uploads')){specs=init.body.files;entered.resolve();return create.promise;}
+        if(outcome==='finalize-failed')throw Error('Finalize unavailable');
+        return {};
+      },workspaceFetch:async()=>({ok:outcome!=='chunk-failed',status:outcome==='chunk-failed'?503:200}),
+    });
+    const files=[new File(['payload'],'model.obj')],form={elements:{files:{files},datasetId:{value:'dataset'},processingRole:{value:'model'}},querySelector:()=>({value:0})};
+    const result=upload(form);await entered.promise;
+    assert.equal(windowRef.handlers.size,2,outcome);
+    const guard=[...windowRef.handlers].find(handler=>handler!==unrelated);
+    const leave=windowRef.leave();assert.equal(leave.prevented,true);assert.equal(leave.returnValue,'');
+    assert.equal(work.snapshot().pendingLegacyUpload,true,'a cancelled leave does not dispose the upload');
+    assert.equal(form.elements.files.files,files);assert.equal(calls.length,1,'unload guard sends or retries nothing');
+    if(outcome==='creation-failed')create.reject(Error('Create unavailable'));
+    else create.resolve({uploadToken:'test-upload',upload:{id:'upload',chunkSize:1024,files:specs.map(spec=>({...spec,chunkCount:1,missingChunks:[0]}))}});
+    await result;
+    assert.equal(state.busy,false);assert.equal(work.snapshot().pendingLegacyUpload,false);
+    assert.deepEqual([...windowRef.handlers],[unrelated],outcome);
+    assert.equal(windowRef.removed.includes(guard),true);
+    assert.equal(windowRef.leave().prevented,false,'completed/failed uploads stop blocking navigation');
+    assert.equal(messages.some(message=>message.includes('Reselect')),outcome!=='success');
+  }
+});
+
+test('concurrent tracked uploads share one unload guard until the last completion, including synchronous failure',async()=>{
+  const windowRef=uploadWindow(),work=createWorkspaceNavigationWork({windowRef}),first=deferred(),second=deferred();
+  const a=work.trackLegacyUpload(1,()=>first.promise),b=work.trackLegacyUpload(2,()=>second.promise);
+  assert.equal(windowRef.handlers.size,1);
+  first.resolve();await a;assert.equal(windowRef.handlers.size,1);assert.equal(windowRef.leave().prevented,true);
+  second.reject(Error('Failed'));await assert.rejects(b);
+  assert.equal(windowRef.handlers.size,0);assert.equal(windowRef.removed.length,1);
+  await assert.rejects(work.trackLegacyUpload(1,()=>{throw Error('Synchronous failure');}));
+  assert.equal(windowRef.handlers.size,0);assert.equal(work.snapshot().pendingLegacyUpload,false);
 });

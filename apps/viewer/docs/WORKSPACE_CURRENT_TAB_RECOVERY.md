@@ -63,6 +63,14 @@ launch/iframe fallback is outside this change.
 - `unsavedGcpMark`: current valid GCP draft has no exact saved correspondence, or its pixel X/Y differ from that correspondence. Saved seeds and reverted edits are clean. Acknowledged saves update the local correspondence baseline before optional refresh, so a refresh failure does not make an acknowledged mark look unsaved.
 - `pendingGcpSave`: specifically a GCP save request is pending, independent of generic workspace busy state. It resets on success, rejection and synchronous failure. The request may already have reached the server; check saved marks after renewal before retrying.
 
+The workspace tracker registers its own `beforeunload` handler while any legacy
+upload is active. It guards ordinary navigation and tab closing as well as
+same-tab recovery. Cancelling navigation keeps the upload and selected files;
+settling the last upload removes only that tracker’s handler. New Task's
+existing upload guard remains independent. The browser regression uses the
+actual legacy uploader and production tracker with mocked endpoint responses,
+rather than installing a test-only guard.
+
 These fields grant no access, persist no File handles, and report no inner-model measurement state. They do not preserve arbitrary form input. The recovery offer consumes these fields and requires acknowledgement when work would be discarded. Full HTTPS recovery remains a separate acceptance check.
 
 ## Operations source port and qualification

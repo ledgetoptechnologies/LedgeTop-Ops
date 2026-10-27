@@ -11,12 +11,25 @@ export function hasUnsavedGcpMark(gcpWorkspaces={},taskDetails={}){
     return !saved||saved.pixelX!==draft.pixelX||saved.pixelY!==draft.pixelY;
   });
 }
-export function createWorkspaceNavigationWork(){
+export function createWorkspaceNavigationWork({windowRef=globalThis.window}={}){
   let gcpSaves=0;
   const uploads=new Map();
+  const warnBeforeUnload=event=>{
+    if(!uploads.size)return;
+    event.preventDefault();event.returnValue='';
+  };
   return {
     async trackGcpSave(run){gcpSaves++;try{return await run();}finally{gcpSaves--; }},
-    async trackLegacyUpload(fileCount,run){const id=Symbol();uploads.set(id,count(fileCount));try{return await run();}finally{uploads.delete(id);}},
+    async trackLegacyUpload(fileCount,run){
+      const id=Symbol();uploads.set(id,count(fileCount));
+      try{
+        if(uploads.size===1)windowRef?.addEventListener('beforeunload',warnBeforeUnload);
+        return await run();
+      }finally{
+        uploads.delete(id);
+        if(!uploads.size)windowRef?.removeEventListener('beforeunload',warnBeforeUnload);
+      }
+    },
     snapshot(){return {pendingGcpSave:gcpSaves>0,pendingLegacyUpload:uploads.size>0,legacyUploadFileCount:[...uploads.values()].reduce((sum,n)=>sum+n,0)};},
   };
 }
