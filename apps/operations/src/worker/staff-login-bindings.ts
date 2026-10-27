@@ -105,10 +105,19 @@ export async function assertCurrentStaffLogin(db:D1Database,value:StaffLoginProo
   .bind(p.bindingId,p.staffId,p.bindingVersion,p.issuer,p.email,p.subject,p.canonicalEmail,p.canonicalSubject).first('ok')===1;
 });}
 async function owner(db:D1Database,value:StaffLoginProof):Promise<StaffLoginProof>{
- const p=snapshotStaffLoginProof(value);if(!p||p.kind!=='primary'||!await assertCurrentStaffLogin(db,p))return fail('staff_login_denied',403);
+ const p=await assertStaffLoginPrimaryOwner(db,value);
  if(!await schemaReady(db))return fail('staff_login_unavailable',503);
- if(await db.withSession('first-primary').prepare(`SELECT 1 ok FROM staff_users s WHERE s.id=? AND ${ownerSql}`).bind(p.staffId).first('ok')!==1)return fail('staff_login_denied',403);return p;
+ return p;
 }
+/** Verify the canonical primary Access proof and current global owner role.
+ * Unlike login-binding mutations this read guard also works before migration
+ * 0226, so owner review can safely prepare evidence against the existing 0221
+ * Operations schema without requiring the alternate-login feature tables. */
+export async function assertStaffLoginPrimaryOwner(db:D1Database,value:StaffLoginProof):Promise<StaffLoginProof>{return boundary(async()=>{
+ const p=snapshotStaffLoginProof(value);if(!p||p.kind!=='primary'||!await assertCurrentStaffLogin(db,p))return fail('staff_login_denied',403);
+ if(await db.withSession('first-primary').prepare(`SELECT 1 ok FROM staff_users s WHERE s.id=? AND ${ownerSql}`).bind(p.staffId).first('ok')!==1)return fail('staff_login_denied',403);
+ return p;
+});}
 function bytesHex(bytes:Uint8Array){return [...bytes].map(n=>n.toString(16).padStart(2,'0')).join('');}
 const hash=async(value:string)=>bytesHex(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))));
 export async function createStaffLoginBindingIntent(db:D1Database,primary:StaffLoginProof,targetEmail:string):Promise<{intentId:string;verificationToken:string;expiresAt:string}>{return boundary(async()=>{
