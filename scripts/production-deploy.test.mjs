@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { domainPhaseValues, domainRecognitionProfile, domainRecognitionDiff } from './production-domain-recognition.mjs';
-import { PROFILE, hash, canonical, validateInstallation, compileConfig, checkMode, capture, CloudflareReader, verifyCandidate, verifySourceMap, executeDeployment, validateBuildEnvironment, frontendInputHash, reviewedFrontendDigest, frontendFingerprint, parseDeploymentArguments, inspectProductionInstallation, buildModulePath, readStaffCutoverReview, deploymentSourceCommit } from './production-deploy.mjs';
+import { PROFILE, hash, canonical, validateInstallation, compileConfig, checkMode, capture, CloudflareReader, readCandidateVersionWithVisibilityRetry, verifyCandidate, verifySourceMap, executeDeployment, validateBuildEnvironment, frontendInputHash, reviewedFrontendDigest, frontendFingerprint, parseDeploymentArguments, inspectProductionInstallation, buildModulePath, readStaffCutoverReview, deploymentSourceCommit } from './production-deploy.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ids = { operations: '11111111-1111-4111-8111-111111111111', client: '22222222-2222-4222-8222-222222222222', 'ops-sync': '33333333-3333-4333-8333-333333333333' };
 const NEW = '44444444-4444-4444-8444-444444444444';
@@ -132,8 +132,15 @@ function fixture() {
   }
   return { profile, snapshot };
 }
-function readerFor(snapshot, candidate) {
-  return { calls: [], async get(suffix) {
+function readerFor(snapshot, candidate, { candidateVisibilityFailures = 0 } = {}) {
+  return { calls: [], candidateAttempts: 0, async getCandidateVersion(workerName, candidateVersionId) {
+    this.candidateAttempts++;
+    assert.ok(Object.values(PROFILE.workers).some(row => row.name === workerName));
+    assert.equal(candidateVersionId, NEW);
+    if (this.candidateAttempts <= candidateVisibilityFailures) throw Object.assign(new Error('synthetic transient visibility'), { code: 'candidate_version_not_visible' });
+    const app = Object.keys(PROFILE.workers).find(k => PROFILE.workers[k].name === workerName);assert.ok(app);
+    return clone(candidate.version);
+  }, async get(suffix) {
     this.calls.push(suffix);
     const app = Object.keys(PROFILE.workers).find(k => suffix.includes(PROFILE.workers[k].name + '/'));
     assert.ok(app, `Unexpected path ${suffix}`);const s = snapshot[app];
@@ -318,6 +325,47 @@ test('reader only sends fixed official GET with no redirect/retry or arbitrary e
   await assert.rejects(reader.get('/workers/scripts'), /Incomplete/);
 });
 
+test('new candidate legacy GET retries only exact 404/100146 and strict validation still gates it', async () => {
+  const calls = [], pauses = [], version = { id: NEW, resources: { script: { last_deployed_from: 'wrangler' } } };
+  const reader = new CloudflareReader('a'.repeat(32), 'synthetic-token-for-tests-only', async (url, args) => {
+    calls.push({ url, args });
+    if (calls.length === 1) return { status: 404, async arrayBuffer() { return Buffer.from(JSON.stringify({ success: false, result: null, errors: [{ code: 100146, message: 'synthetic' }] })); } };
+    return { status: 200, async arrayBuffer() { return Buffer.from(JSON.stringify({ success: true, result: version })); } };
+  });
+  const observed = await readCandidateVersionWithVisibilityRetry(reader, 'ledgetop-ops', NEW, { pause: async ms => pauses.push(ms) });
+  assert.equal(observed.id, NEW);assert.equal(calls.length, 2);assert.deepEqual(pauses, [250]);
+  assert.ok(calls.every(x => x.args.method === 'GET' && x.args.redirect === 'error'));
+  assert.ok(calls.every(x => new URL(x.url).pathname.endsWith(`/workers/scripts/ledgetop-ops/versions/${NEW}`)));
+  const { snapshot } = fixture(), checked = clone(snapshot.operations);
+  checked.version = clone(version);checked.version.id = NEW;checked.version.resources = clone(snapshot.operations.version.resources);
+  checked.version.resources.script.last_deployed_from = 'wrangler';
+  checked.version.resources.script.etag = snapshot.operations.version.resources.script.etag;
+  const modern = { id: NEW, assets: snapshot.operations.modern.assets, modules: [{ name: 'index.js', content_base64: Buffer.from('new').toString('base64') }] };
+  assert.doesNotThrow(() => verifyCandidate(snapshot, 'operations', checked.version, modern, Buffer.from('new')));
+  assert.throws(() => verifyCandidate(snapshot, 'operations', checked.version, modern, Buffer.from('wrong')), /bytes differ/u);
+});
+
+test('candidate visibility retries stop after the fixed read bound and reject every other API failure immediately', async () => {
+  const pauses = [];let reads = 0;
+  const reader = { async getCandidateVersion() { reads++;throw Object.assign(new Error('exact synthetic transient'), { code: 'candidate_version_not_visible' }); } };
+  await assert.rejects(readCandidateVersionWithVisibilityRetry(reader, 'ledgetop-ops', NEW, { pause: async ms => pauses.push(ms) }), /visibility unresolved/u);
+  assert.equal(reads, 8);assert.deepEqual(pauses, [250,500,1000,2000,3000,3000,3000]);
+  let calls = 0;const wrongCode = new CloudflareReader('a'.repeat(32), 'synthetic-token-for-tests-only', async () => {
+    calls++;return { status: 404, async arrayBuffer() { return Buffer.from(JSON.stringify({ success: false, result: null, errors: [{ code: 100147, message: 'synthetic' }] })); } };
+  });
+  await assert.rejects(readCandidateVersionWithVisibilityRetry(wrongCode, 'ledgetop-ops', NEW, { pause: async () => assert.fail('unexpected retry') }), /no automatic retry/u);
+  assert.equal(calls, 1);
+  calls = 0;
+  await assert.rejects(wrongCode.get(`/workers/scripts/ledgetop-ops/versions/${NEW}`), /no automatic retry/u);
+  assert.equal(calls, 1, 'ordinary GET does not classify/retry candidate visibility');
+  calls = 0;const exactCodeNoRetry = new CloudflareReader('a'.repeat(32), 'synthetic-token-for-tests-only', async () => {
+    calls++;return { status: 404, async arrayBuffer() { return Buffer.from(JSON.stringify({ success: false, result: null, errors: [{ code: 100146, message: 'synthetic' }] })); } };
+  });
+  await assert.rejects(exactCodeNoRetry.get(`/workers/scripts/ledgetop-ops/versions/${NEW}`), /no automatic retry/u);
+  assert.equal(calls, 1, 'ordinary GET does not classify/retry even the known code');
+  await assert.rejects(readCandidateVersionWithVisibilityRetry(wrongCode, 'ledgetop-clients', 'not-a-uuid'), /read scope invalid/u);
+});
+
 test('malformed conventional tokens fail generically before Headers or transport can echo them', () => {
   const marker = 'OFFLINE-SECRET-MARKER-1234567890';
   for (const suffix of ['\r\nBAD', '\n', '\r', '\r\n', '\tBAD', ' BAD', '\x7f', '\u00e9', '\u200b']) {
@@ -418,7 +466,7 @@ async function flow(t, fail = null, app = 'operations', staffOptions = {}) {
   fs.writeFileSync(main, staffOptions.unchanged ? 'old' : 'new');fs.writeFileSync(main + '.map', JSON.stringify(genuineMap()));
   const { profile, snapshot } = fixture();const version = clone(snapshot[app].version);version.id = NEW;version.resources.script.etag = 'b'.repeat(64);
   const modern = { id: NEW, assets: clone(snapshot[app].modern.assets), modules: [{ name: 'index.js', content_base64: Buffer.from('new').toString('base64') }, { name: 'index.js.map', content_base64: Buffer.from(JSON.stringify(genuineMap())).toString('base64') }] };
-  const reader = readerFor(snapshot, { version, modern });const calls = [];
+  const reader = readerFor(snapshot, { version, modern }, { candidateVisibilityFailures: staffOptions.candidateVisibilityFailures ?? 0 });const calls = [];
   const runNative = async (cli, argv, out, phase) => {
     calls.push(phase);assert.equal(cli, 'fixture-cli');assert.ok(argv.includes('--config'));
     if (phase === 'upload') {
@@ -459,8 +507,15 @@ async function flow(t, fail = null, app = 'operations', staffOptions = {}) {
   const operation = executeDeployment({ app, mode: 'backend', cli: 'fixture-cli', main, directory: path.join(directory, 'journal'), reader, runNative,
     fingerprint: PROFILE.frontendSHA256, profile, sourceCommit,
     staffCutoverReview: staffOptions.missing ? undefined : review, readStaffCutover });
-  return { operation, calls, directory, staffCalls };
+  return { operation, calls, directory, staffCalls, reader };
 }
+
+test('manual deploy candidate readback waits for exact visibility error without repeating upload or activation', async t => {
+  const { operation, calls, reader } = await flow(t, null, 'operations', { candidateVisibilityFailures: 1 });
+  assert.equal((await operation).verifiedActive, true);
+  assert.equal(reader.candidateAttempts, 2);
+  assert.deepEqual(calls, ['upload', 'activate']);
+});
 
 test('Ops and Sync qualify staff handoff before upload, before activation and after activation', async t => {
   for (const app of ['operations','ops-sync']) {

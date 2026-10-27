@@ -187,6 +187,46 @@ export function buildModulePath(app, root = ROOT) {
   return path.join(root, 'apps', app, 'dist', relative);
 }
 
+const CANDIDATE_VISIBILITY_ERROR_CODE = 100146;
+const CANDIDATE_VISIBILITY_BACKOFF_MS = Object.freeze([250, 500, 1000, 2000, 3000, 3000, 3000]);
+const CANDIDATE_VISIBILITY_MAX_MS = 15_000;
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Bounded read-only wait for the one legacy candidate-version endpoint. Only
+ * Cloudflare's exact 404/100146 response is transient; all other failures are
+ * returned immediately. This never retries an upload or deployment mutation.
+ */
+export async function readCandidateVersionWithVisibilityRetry(reader, workerName, candidateVersionId,
+  { pause = sleep } = {}) {
+  need(reader && typeof reader.getCandidateVersion === 'function' && typeof pause === 'function'
+    && Object.values(PROFILE.workers).some(row => row.name === workerName)
+    && UUID.test(candidateVersionId ?? ''), 'Candidate visibility read scope invalid');
+  const deadline = Date.now() + CANDIDATE_VISIBILITY_MAX_MS;
+  for (let attempt = 0; attempt <= CANDIDATE_VISIBILITY_BACKOFF_MS.length; attempt++) {
+    const remaining = deadline - Date.now();
+    need(remaining > 0, 'Candidate version visibility wait expired; GET-only reconciliation required');
+    const controller = new AbortController(); let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => { controller.abort(); reject(Error('Candidate version GET timed out; no retry')); }, remaining);
+    });
+    try {
+      const result = await Promise.race([
+        reader.getCandidateVersion(workerName, candidateVersionId, { signal: controller.signal }), timeout,
+      ]);
+      return result;
+    } catch (error) {
+      if (error?.code !== 'candidate_version_not_visible') throw error;
+      if (attempt === CANDIDATE_VISIBILITY_BACKOFF_MS.length)
+        throw Error('Candidate version visibility unresolved; GET-only reconciliation required');
+      const delay = CANDIDATE_VISIBILITY_BACKOFF_MS[attempt];
+      need(Date.now() + delay < deadline, 'Candidate version visibility wait expired; GET-only reconciliation required');
+      await pause(delay);
+    } finally { clearTimeout(timer); }
+  }
+  throw Error('Candidate version visibility unresolved; GET-only reconciliation required');
+}
+
 export class CloudflareReader {
   constructor(account, token, fetchImpl = fetch) {
     // Reject malformed header values before fetch/Headers can echo them in an
@@ -202,6 +242,25 @@ export class CloudflareReader {
     need(response.status === 200 && body.success === true && body.result, 'Cloudflare metadata GET failed; no automatic retry');
     // Only the two lists intentionally consumed as head0 may be paginated.
     if (body.result_info?.total_pages > 1) need(/^\/workers\/scripts\/[a-z-]+\/(deployments|versions)\?per_page=1$/.test(suffix), 'Incomplete metadata inventory');
+    return body.result;
+  }
+  async getCandidateVersion(workerName, candidateVersionId, { signal } = {}) {
+    const spec = Object.values(PROFILE.workers).find(row => row.name === workerName);
+    need(spec && UUID.test(candidateVersionId ?? ''), 'Candidate version GET scope invalid');
+    const suffix = `/workers/scripts/${workerName}/versions/${candidateVersionId}`;
+    const response = await this.fetch(`https://api.cloudflare.com/client/v4/accounts/${this.account}${suffix}`, {
+      method: 'GET', headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/json' },
+      redirect: 'error', signal: signal ?? AbortSignal.timeout(30_000),
+    });
+    const bytes = await response.arrayBuffer(); need(bytes.byteLength <= 32 * 1024 * 1024, 'Read response bound exceeded');
+    let body; try { body = JSON.parse(Buffer.from(bytes)); } catch { throw new Error('Cloudflare returned invalid JSON'); }
+    if (response.status === 404 && body?.success === false && body.result == null
+      && Array.isArray(body.errors) && body.errors.length === 1 && body.errors[0]?.code === CANDIDATE_VISIBILITY_ERROR_CODE) {
+      const error = Error('New candidate legacy metadata is not visible yet');
+      error.code = 'candidate_version_not_visible';
+      throw error;
+    }
+    need(response.status === 200 && body.success === true && body.result, 'Cloudflare candidate metadata GET failed; no automatic retry');
     return body.result;
   }
 }
@@ -375,7 +434,7 @@ export async function executeDeployment({ app, mode, cli, main, directory, reade
   need(matches.length === 1 && UUID.test(matches[0]), 'Candidate ID not uniquely proven; GET-only reconciliation required');
   const cid = matches[0], name = PROFILE.workers[app].name, pre = `/workers/scripts/${name}`;
   save('candidate.json', { candidate: cid });
-  const candidate = await reader.get(`${pre}/versions/${cid}`);
+  const candidate = await readCandidateVersionWithVisibilityRetry(reader, name, cid);
   const modern = await reader.get(`/workers/workers/${name}/versions/${cid}?include=modules`);
   const mapsProof = verifyCandidate(before, app, candidate, modern, js, sourceMap);
   const inactive = await capture(reader, { selectedApp: app });validateInstallation(inactive, { allowLatest: { [app]: cid }, profile, selectedApp: app });
