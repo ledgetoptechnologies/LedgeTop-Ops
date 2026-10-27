@@ -188,7 +188,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     });
     // This identity comes from the current selected server session, never saved UI text or a caller argument.
     // The updater must independently recheck the same principal under its own cached-session pin.
-    internal async Task<ConnectedExplorerUpdateBinding> GetUpdateBindingAsync()
+    internal async Task<ConnectedExplorerUpdateBinding> GetUpdateBindingAsync(CancellationToken cancellationToken = default)
     {
         ConnectedExplorerUpdateBinding? result = null;
         await OperateAsync(async token => {
@@ -202,7 +202,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             var principal = await CurrentPersonAsync(selected, source, token, index.PrincipalId).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             result = new(channel, alias, principal);
-        }).ConfigureAwait(false);
+        }, cancellationToken).ConfigureAwait(false);
         return result ?? throw new AccessDeniedException();
     }
     public Task RemoveAsync() => OperateAsync(async token => {
@@ -223,10 +223,12 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         Add("The Explorer connection was removed. Downloaded and modified local files have been kept.");
     });
 
-    private async Task OperateAsync(Func<CancellationToken, Task> action)
+    private async Task OperateAsync(Func<CancellationToken, Task> action, CancellationToken requestedCancellation = default)
     {
-        CancellationToken token;
-        lock (lifetime) { ObjectDisposedException.ThrowIf(disposed || closeRequested, this); token = cancellation.Token; }
+        CancellationToken connectionToken;
+        lock (lifetime) { ObjectDisposedException.ThrowIf(disposed || closeRequested, this); connectionToken = cancellation.Token; }
+        using var linked = requestedCancellation.CanBeCanceled ? CancellationTokenSource.CreateLinkedTokenSource(connectionToken, requestedCancellation) : null;
+        var token = linked?.Token ?? connectionToken;
         await operations.WaitAsync(token).ConfigureAwait(false);
         try {
             token.ThrowIfCancellationRequested();

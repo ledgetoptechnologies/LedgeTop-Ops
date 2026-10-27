@@ -39,6 +39,11 @@ internal sealed class ExeUpdateWindowsAuthority : IDisposable
         var selected = await source.GetSessionAsync(token).ConfigureAwait(false);
         if (selected.PrincipalId != principal || selected.ExpiresAt <= DateTimeOffset.UtcNow) throw new AccessDeniedException();
     }
+    internal Task VerifySelectedSessionAsync(CancellationToken token)
+    {
+        if (pin is null) throw new IOException("Update session not pinned.");
+        return CheckPrincipalAsync(token);
+    }
     internal async Task<WindowsAppReleaseStage> StageAsync(string directory, CancellationToken token)
     {
         if (pin is null) throw new IOException("Update session not pinned.");
@@ -47,12 +52,19 @@ internal sealed class ExeUpdateWindowsAuthority : IDisposable
         await CheckPrincipalAsync(token).ConfigureAwait(false);
         return result;
     }
+    // Metadata only: no stage directory, artifact transfer or maintenance/provider callback.
+    internal async Task<WindowsAppReleaseCheck> CheckAsync(CancellationToken token)
+    {
+        if (pin is null) throw new IOException("Update session not pinned.");
+        await CheckPrincipalAsync(token).ConfigureAwait(false);
+        var result = await releases.CheckAsync(token).ConfigureAwait(false);
+        await CheckPrincipalAsync(token).ConfigureAwait(false);
+        return result;
+    }
     internal async Task<bool> CheckExactAsync(ExeUpdateCandidate expected, CancellationToken token)
     {
         if (pin is null || expected.Origin != session.Origin) return false;
-        await CheckPrincipalAsync(token).ConfigureAwait(false);
-        var current = await releases.CheckAsync(token).ConfigureAwait(false);
-        await CheckPrincipalAsync(token).ConfigureAwait(false);
+        var current = await CheckAsync(token).ConfigureAwait(false);
         return current.Status == WindowsAppReleaseStatus.Available && current.CurrentVersion == expected.CurrentVersion && current.Release == expected.Release;
     }
     public void Dispose() { pin?.Dispose(); pin = null; source.Dispose(); releases.Dispose(); }

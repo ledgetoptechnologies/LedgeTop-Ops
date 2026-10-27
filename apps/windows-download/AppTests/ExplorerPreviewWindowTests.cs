@@ -6,6 +6,8 @@ using System.Windows.Threading;
 using LedgeTop.Files;
 using LedgeTop.Files.Backends;
 using LedgeTop.Files.Explorer;
+using LedgeTop.Files.Updates;
+using LedgeTop.WindowsDownload;
 
 internal static class ExplorerPreviewWindowTests
 {
@@ -144,6 +146,7 @@ internal static class ExplorerPreviewWindowTests
             cachedWindow.Quit(); await Until(() => cachedClosed); await pendingReconnect;
             True(cachedPending.Disposals == 1 && cachedPending.Starts == 0 && cachedPending.State != ExplorerPreviewState.Running,
                 "Quit cancels and drains cached reconnect before closing without explicit sign-in");
+            await UpdateLifecycle(root, screenshots);
             var choice = new ExplorerSourceChoiceWindow([LedgeTop.Files.Backends.AccessMode.Client, LedgeTop.Files.Backends.AccessMode.Employee], "Pilot") {
                 ShowInTaskbar = false, Left = -20000, Top = -20000, WindowStartupLocation = WindowStartupLocation.Manual
             };
@@ -163,11 +166,148 @@ internal static class ExplorerPreviewWindowTests
         }
     }
 
-    private static ExplorerPreviewWindow Window(Func<Task<IExplorerPreviewSession>> factory, FakeTrayIcon tray,
-        ExplorerWindowContent? presentation = null, IExplorerPreviewSession? prepared = null)
+    private static WindowsAppReleaseCheck AvailableUpdate() => new(WindowsAppReleaseStatus.Available, "0.5.2.0",
+        new("pilot", "0.5.3.0", 100, new string('a', 64), "\"synthetic\"", new string('b', 40), "exe"));
+    private static Task<ConnectedExplorerUpdateBinding> FakeBinding(IExplorerPreviewSession source, CancellationToken token)
     {
-        var window = new ExplorerPreviewWindow(factory, _ => tray, presentation, prepared) { ShowInTaskbar = false, Left = -20000, Top = -20000,
+        token.ThrowIfCancellationRequested();
+        return source is FakeSession fake && fake.State is ExplorerPreviewState.Running or ExplorerPreviewState.Paused
+            ? Task.FromResult(fake.Binding) : throw new LoginRequiredException();
+    }
+
+    private static async Task UpdateLifecycle(string root, string screenshots)
+    {
+        var demo = Window(() => Task.FromResult<IExplorerPreviewSession>(new FakeSession(root)), new FakeTrayIcon());
+        True(demo.CheckUpdatesButton.Visibility == Visibility.Collapsed && demo.InstallUpdateButton.Visibility == Visibility.Collapsed, "generated preview hides updates");
+        demo.Quit(); await Until(() => !demo.IsVisible);
+
+        var content = ExplorerWindowContent.Connected("Pilot", AccessMode.Employee);
+        var check = new WindowsAppReleaseCheck(WindowsAppReleaseStatus.NoRelease, "0.5.2.0");
+        var failCheck = false; var initial = new FakeSession(root);
+        var checks = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), content, initial,
+            new("0.5.2.0", _ => failCheck ? throw new IOException("private-principal/header/path") : Task.FromResult(check),
+                _ => Task.FromResult(new ExeUpdateHandoffResult(ExeUpdateHandoffStatus.PreparationFailed, false))), FakeBinding);
+        try {
+            await checks.StartPreviewAsync(); await checks.CheckForUpdatesAsync();
+            True(!checks.InstallUpdateButton.IsEnabled && checks.UpdateStatusText.Contains("No approved"), "no eligible offer is not an installed-success claim");
+            check = new(WindowsAppReleaseStatus.Current, "0.5.2.0"); await checks.CheckForUpdatesAsync();
+            True(!checks.InstallUpdateButton.IsEnabled && checks.UpdateStatusText == "This version is current.", "current release disables install");
+            check = AvailableUpdate(); await checks.CheckForUpdatesAsync();
+            True(checks.InstallUpdateButton.IsEnabled && checks.UpdateStatusText.Contains("0.5.3.0"), "available version offers explicit install and restart");
+            if (((System.Windows.Controls.TabItem)checks.Pages.Items[0]).Content is System.Windows.Controls.ScrollViewer scroll) scroll.ScrollToVerticalOffset(400);
+            Snap(checks, Path.Combine(screenshots, "connected-settings-update-available.png"));
+            await checks.InstallUpdateAsync();
+            True(!checks.UpdateMaintenanceOwned && initial.Pauses == 0 && checks.PauseButton.IsEnabled, "safe preparation refusal restores ordinary controls without touching provider");
+            failCheck = true; await checks.CheckForUpdatesAsync();
+            True(!checks.UpdateStatusText.Contains("private") && !checks.InstallUpdateButton.IsEnabled, "check exceptions are sanitized");
+        } finally { checks.Quit(); await Until(() => !checks.IsVisible); }
+
+        var checkEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); var checkCancelled = false;
+        var checking = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), content, new FakeSession(root),
+            new("0.5.2.0", async token => { checkEntered.SetResult(); try { await Task.Delay(Timeout.Infinite, token); } catch (OperationCanceledException) { checkCancelled = true; throw; } return AvailableUpdate(); },
+                _ => throw new InvalidOperationException()), FakeBinding);
+        var checkWork = checking.CheckForUpdatesAsync(); await checkEntered.Task; checking.Quit(); await checkWork;
+        await Until(() => !checking.IsVisible); True(checkCancelled, "Quit cancels a pending check and stays responsive");
+
+        var old = new FakeSession(root); var bad = new FakeSession(root) { SavedReady = true };
+        bad.Binding = bad.Binding with { PrincipalId = "odqp1_" + new string('2', 64) };
+        var good = new FakeSession(root) { SavedReady = true, ReconnectPaused = true };
+        var replacements = new Queue<IExplorerPreviewSession>([bad, good]);
+        ExplorerPreviewWindow recovery = null!;
+        recovery = Window(() => Task.FromResult(replacements.Dequeue()), new FakeTrayIcon(), content, old,
+            new("0.5.2.0", _ => Task.FromResult(AvailableUpdate()), async _ => {
+                var binding = await recovery.GetVerifiedUpdateBindingAsync(); await recovery.DrainForUpdateAsync();
+                True(!await recovery.RecoverForUpdateAsync(binding), "changed cached identity is not recovery");
+                return new(ExeUpdateHandoffStatus.NeedsReconnect, true);
+            }), FakeBinding);
+        try {
+            await recovery.StartPreviewAsync(); await recovery.CheckForUpdatesAsync(); await recovery.InstallUpdateAsync();
+            True(old.Disposals == 1 && old.Removals == 0 && bad.Reconnects == 1 && bad.Starts == 0 && bad.Disposals == 1,
+                "update drain disposes off-thread without remove; mismatched cached recovery is drained, never adopted");
+            True(recovery.ReconnectButton.IsEnabled && recovery.StartButton.Visibility == Visibility.Collapsed, "failed recovery offers saved reconnect, not interactive fallback");
+            await recovery.StartPreviewAsync(); True(old.Starts == 1 && good.Starts == 0, "direct start cannot bypass saved recovery identity");
+            await recovery.ReconnectPreviewAsync();
+            True(good.Reconnects == 1 && good.Starts == 0 && recovery.ResumeButton.IsEnabled, "fresh same-source cached recovery preserves pause without a browser");
+        } finally { recovery.Quit(); await Until(() => !recovery.IsVisible); }
+
+        foreach (var outcome in new[] { ExeUpdateHandoffStatus.RecoveryBlocked, ExeUpdateHandoffStatus.ExitUncertain }) {
+            var owned = new FakeSession(root); ExplorerPreviewWindow uncertain = null!;
+            uncertain = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), content, owned,
+                new("0.5.2.0", _ => Task.FromResult(AvailableUpdate()), async _ => { await uncertain.DrainForUpdateAsync(); return new(outcome, true); }), FakeBinding);
+            try {
+                await uncertain.StartPreviewAsync(); await uncertain.CheckForUpdatesAsync(); await uncertain.InstallUpdateAsync();
+                True(uncertain.UpdateMaintenanceOwned && !uncertain.StartButton.IsEnabled && !uncertain.ReconnectButton.IsEnabled && !uncertain.RemoveButton.IsEnabled && !uncertain.CheckUpdatesButton.IsEnabled,
+                    "uncertain helper outcome keeps sticky controls after busy resets");
+                await uncertain.ReconnectPreviewAsync(); await uncertain.PausePreviewAsync(); uncertain.Quit();
+                True(uncertain.IsVisible && owned.Removals == 0 && owned.Pauses == 0 && owned.Disposals == 1, "Quit and ordinary actions cannot race an unknown armed helper");
+                var timer = (DispatcherTimer?)typeof(ExplorerPreviewWindow).GetField("sessionCheck", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(uncertain);
+                True(timer is { IsEnabled: false }, "session timer remains stopped during sticky maintenance");
+            } finally { CloseFakeUpdateWindow(uncertain); }
+        }
+
+        foreach (var finalAcknowledgementFails in new[] { false, true }) {
+            ExplorerPreviewWindow failed = null!;
+            failed = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), content, new FakeSession(root),
+                new("0.5.2.0", _ => Task.FromResult(AvailableUpdate()), async _ => {
+                    if (!finalAcknowledgementFails) throw new IOException("private-principal/header/path");
+                    await failed.DrainForUpdateAsync();
+                    True(await failed.RequestUpdateExitAsync(() => throw new IOException("private-principal/header/path")) == ExeUpdateParentExitDecision.Uncertain,
+                        "lost final acknowledgement cannot be labelled a safe rejection");
+                    return new(ExeUpdateHandoffStatus.ExitUncertain, true);
+                }), FakeBinding);
+            try {
+                await failed.StartPreviewAsync(); await failed.CheckForUpdatesAsync(); await failed.InstallUpdateAsync();
+                True(failed.IsVisible && failed.UpdateMaintenanceOwned && !failed.UpdateStatusText.Contains("private") && !failed.ReconnectButton.IsEnabled,
+                    "unexpected install failure or lost final acknowledgement remains sanitized and sticky");
+            } finally { CloseFakeUpdateWindow(failed); }
+        }
+        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); var finalCalls = 0;
+        ExplorerPreviewWindow cancelling = null!;
+        cancelling = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), content, new FakeSession(root),
+            new("0.5.2.0", _ => Task.FromResult(AvailableUpdate()), async _ => {
+                await cancelling.DrainForUpdateAsync(); drained.SetResult(); await stopped.Task;
+                True(await cancelling.RequestUpdateExitAsync(() => { finalCalls++; return Task.CompletedTask; }) == ExeUpdateParentExitDecision.Rejected, "Quit rejects before final commit delegate");
+                return new(ExeUpdateHandoffStatus.Postponed, false);
+            }), FakeBinding);
+        await cancelling.StartPreviewAsync(); await cancelling.CheckForUpdatesAsync(); var install = cancelling.InstallUpdateAsync(); await drained.Task;
+        cancelling.Quit(); True(cancelling.IsVisible && !install.IsCompleted, "Quit waits for confirmed update cancellation without blocking dispatcher");
+        stopped.SetResult(); await install; await Until(() => !cancelling.IsVisible); True(finalCalls == 0, "cancelled exit never sends final intent");
+
+        foreach (var veto in new[] { false, true }) {
+            ExplorerPreviewWindow final = null!; var acknowledgements = 0; var decision = ExeUpdateParentExitDecision.Rejected;
+            final = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), content, new FakeSession(root),
+                new("0.5.2.0", _ => Task.FromResult(AvailableUpdate()), async _ => {
+                    True(await final.RequestUpdateExitAsync(() => throw new InvalidOperationException()) == ExeUpdateParentExitDecision.Rejected, "undrained provider rejects before delegate");
+                    await final.DrainForUpdateAsync();
+                    decision = await final.RequestUpdateExitAsync(() => { acknowledgements++; return Task.CompletedTask; });
+                    return new(decision == ExeUpdateParentExitDecision.Accepted ? ExeUpdateHandoffStatus.ParentExitRequested : ExeUpdateHandoffStatus.ExitUncertain, true);
+                }), FakeBinding);
+            System.ComponentModel.CancelEventHandler handler = (_, e) => e.Cancel = true;
+            if (veto) final.Closing += handler;
+            try {
+                await final.StartPreviewAsync(); await final.CheckForUpdatesAsync(); await final.InstallUpdateAsync();
+                True(acknowledgements == 1 && decision == (veto ? ExeUpdateParentExitDecision.Uncertain : ExeUpdateParentExitDecision.Accepted), "final acknowledgment is one-shot and cancelled close is uncertain");
+                True(veto ? final.IsVisible && final.UpdateMaintenanceOwned : !final.IsVisible, "final hook closes without awaiting its own update operation");
+            } finally { final.Closing -= handler; if (veto) CloseFakeUpdateWindow(final); }
+        }
+    }
+
+    private static void CloseFakeUpdateWindow(ExplorerPreviewWindow window)
+    {
+        // Teardown ONLY after a completed, pure fake update. No actual helper exists; production
+        // intentionally has no user action that clears an uncertain handoff's ownership guard.
+        typeof(ExplorerPreviewWindow).GetField("readyToClose", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(window, true);
+        window.Close();
+    }
+
+    private static ExplorerPreviewWindow Window(Func<Task<IExplorerPreviewSession>> factory, FakeTrayIcon tray,
+        ExplorerWindowContent? presentation = null, IExplorerPreviewSession? prepared = null, ExplorerUpdateActions? updates = null,
+        Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? binding = null)
+    {
+        var window = new ExplorerPreviewWindow(factory, _ => tray, presentation, prepared, readUpdateBindingForTests: binding) { ShowInTaskbar = false, Left = -20000, Top = -20000,
             WindowStartupLocation = WindowStartupLocation.Manual };
+        if (updates is not null) window.SetUpdateActions(updates);
         window.Show(); Pump(); return window;
     }
     private static string Labels(DependencyObject element)
@@ -197,6 +337,7 @@ internal static class ExplorerPreviewWindowTests
         internal int Starts, Pauses, Resumes, Removals, Disposals;
         internal int Reconnects;
         internal bool SavedReady, ReconnectPaused;
+        internal ConnectedExplorerUpdateBinding Binding = new("pilot", "employee", "odqp1_" + new string('1', 64));
         internal int DisposeThread;
         internal bool RefuseFirstDispose;
         internal ManualResetEventSlim? DisposeGate;

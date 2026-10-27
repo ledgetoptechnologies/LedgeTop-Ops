@@ -71,6 +71,8 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("EXE update handoff preserves maintenance and recovery boundaries without installation", ExeUpdateHandoffTests.Run),
     ("EXE update helper refuses unsafe protocol exit and installation transitions", ExeUpdateHelperTests.Run),
     ("EXE Windows update policies preserve peer exit and installer ownership", ExeUpdateWindowsPolicyTests.Run),
+    ("Saved-source resume admits only the exact offered pilot coordinate", ExplorerResumeRequestTests.Run),
+    ("Installed update parent classifies cancellation before helper capability", ExplorerInstalledUpdateControllerTests.Run),
     ("Installed payload verifier binds exact inventory and retained filesystem handles", InstalledPayloadVerifierTests.Run),
     ("Installer maintenance validates fixed pilot ownership and drains offline cleanup", InstallerMaintenanceTests.Run),
     ("Folder launcher keeps dispatcher and Quit responsive while Windows Shell is blocked", () => BackgroundFolderLauncherTests.Run(screenshots)),
@@ -89,6 +91,10 @@ var selectedGroups = args.Contains("--folder-launcher-only")
     ? groups.Where(group => group.Name.StartsWith("Installed payload verifier", StringComparison.Ordinal)).ToArray()
     : args.Contains("--exe-update-windows-policy-only")
     ? groups.Where(group => group.Name.StartsWith("EXE Windows update policies", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--saved-source-resume-only")
+    ? groups.Where(group => group.Name.StartsWith("Saved-source resume", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--update-parent-only")
+    ? groups.Where(group => group.Name.StartsWith("Installed update parent", StringComparison.Ordinal)).ToArray()
     : args.Contains("--explorer-catalog-only")
     ? groups.Where(group => group.Name.StartsWith("Explorer catalog", StringComparison.Ordinal)).ToArray()
     : args.Contains("--connected-coordinator-only")

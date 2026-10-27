@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using LedgeTop.WindowsDownload;
 
 namespace LedgeTop.Files.Updates;
 
@@ -15,6 +16,12 @@ internal sealed record ExeUpdateInstallerAnchor(string PayloadManifestSha256, st
 internal sealed record ExeUpdateProcessObservation(int ProcessId, long StartTimeUtcTicks, string Sid, int SessionId, string ImagePath);
 internal static class ExeUpdateWindowsPolicy
 {
+    // UX coordinates only. Parent startup still must verify the existing saved source/owner and
+    // fresh cached human session; no account/token/path or execution authority travels in arguments.
+    internal const string ResumeSavedSourceArgument = "--reconnect-saved-source-v1";
+    internal static IReadOnlyList<string> RelaunchArguments(string? sourceAlias) => sourceAlias is "portal" or "employee"
+        ? Array.AsReadOnly(new[] { ResumeSavedSourceArgument, sourceAlias })
+        : throw new IOException("The saved update source is unsupported.");
     // Match the installer's AtLeastWin11 admission. The SDK reference target22621 is not a
     // runtime requirement for these Win32 process/pipe/event/registry/file updater operations.
     internal const int MinimumWindowsBuild = 22000;
@@ -28,6 +35,27 @@ internal static class ExeUpdateWindowsPolicy
         observed.ProcessId == expected.ProcessId && observed.StartTimeUtcTicks == expected.StartTimeUtcTicks &&
         observed.Sid == owner.WindowsSid && observed.SessionId == owner.SessionId &&
         string.Equals(observed.ImagePath, Path.Combine(owner.InstallRoot, "LedgeTop.Files.exe"), StringComparison.OrdinalIgnoreCase);
+}
+
+// The metadata path has no stage/install/drain/helper capability. Production readMetadata is the
+// cached-authorized Core.CheckAsync wrapper; local ownership verification brackets that read.
+internal static class ExeUpdateMetadataCheck
+{
+    internal static async Task<WindowsAppReleaseCheck> ReadAsync(
+        Func<CancellationToken, Task<WindowsAppReleaseCheck>> readMetadata,
+        Func<CancellationToken, Task> verifyOwner, Func<CancellationToken, Task> verifyAuthority, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        await verifyOwner(token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        var result = await readMetadata(token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        await verifyOwner(token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        await verifyAuthority(token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        return result;
+    }
 }
 
 internal static class ExeUpdateExitCommit

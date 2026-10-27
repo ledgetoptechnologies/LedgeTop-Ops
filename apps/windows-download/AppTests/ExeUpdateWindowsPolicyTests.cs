@@ -1,9 +1,22 @@
 using LedgeTop.Files.Updates;
+using LedgeTop.WindowsDownload;
 
 internal static class ExeUpdateWindowsPolicyTests
 {
     internal static async Task Run()
     {
+        foreach (var alias in new[] { "portal", "employee" }) {
+            var arguments = ExeUpdateWindowsPolicy.RelaunchArguments(alias);
+            Require(arguments.SequenceEqual([ExeUpdateWindowsPolicy.ResumeSavedSourceArgument, alias]) && arguments.Count == 2,
+                "fixed resume arguments contain only flag and selected source alias");
+            try { ((IList<string>)arguments)[1] = "other"; throw new Exception("Mutable relaunch arguments."); }
+            catch (NotSupportedException) { }
+        }
+        foreach (var badAlias in new string?[] { null, "", "Portal", "other", "portal employee", "--demo", @"C:\private\file", "credential-shaped-input" }) {
+            try { ExeUpdateWindowsPolicy.RelaunchArguments(badAlias); throw new Exception("Unsupported relaunch source accepted."); }
+            catch (IOException error) { Require(error.Message == "The saved update source is unsupported.", "unsupported aliases are refused without echoing private input"); }
+        }
+        await MetadataChecks();
         Require(ExeUpdateWindowsPolicy.MinimumWindowsBuild == 22000, "updater matches installed Windows11 compatibility");
         foreach (var version in new[] { new Version(10, 0, 19045), new Version(10, 0, 21999), new Version(6, 3, 9600) })
             Require(!ExeUpdateWindowsPolicy.SupportedHost(true, version, true), "pre-Windows11 host refused");
@@ -75,6 +88,44 @@ internal static class ExeUpdateWindowsPolicyTests
         Require(await ExeUpdateInstallerWait.ObserveAsync(new Child { CodeThrows = true }) == ExeUpdateInstallResult.Uncertain, "unknown exit code is not success");
         Console.WriteLine("Windows update pure policy tests passed; no process, pipe, registry, file, auth or installer operation executed.");
     }
+    private static async Task MetadataChecks()
+    {
+        foreach (var status in Enum.GetValues<WindowsAppReleaseStatus>()) {
+            var log = new List<string>();
+            var result = new WindowsAppReleaseCheck(status, "0.5.3.0", status == WindowsAppReleaseStatus.Available
+                ? new("pilot", "0.5.4.0", 100, new string('a', 64), "\"artifact\"", new string('b', 40), "exe") : null);
+            var read = await ExeUpdateMetadataCheck.ReadAsync(_ => { log.Add("metadata"); return Task.FromResult(result); },
+                _ => { log.Add("owner"); return Task.CompletedTask; }, _ => { log.Add("authority"); return Task.CompletedTask; }, default);
+            Require(ReferenceEquals(read, result) && string.Join(',', log) == "owner,metadata,owner,authority",
+                "all metadata statuses are checked/rechecked without stage, drain, helper or installer capabilities");
+        }
+        foreach (var fault in new[] { "before", "metadata", "after", "authority" }) {
+            var log = new List<string>(); var owners = 0;
+            await Fails(async () => await ExeUpdateMetadataCheck.ReadAsync(_ => {
+                log.Add("metadata"); if (fault == "metadata") throw new IOException();
+                return Task.FromResult(new WindowsAppReleaseCheck(WindowsAppReleaseStatus.Current, "0.5.3.0"));
+            }, _ => {
+                var step = ++owners == 1 ? "before" : "after"; log.Add(step);
+                if (fault == step) throw new IOException(); return Task.CompletedTask;
+            }, _ => { log.Add("authority"); if (fault == "authority") throw new IOException(); return Task.CompletedTask; }, default));
+            if (fault == "before") Require(!log.Contains("metadata"), "unknown installation makes no metadata request");
+            if (fault == "after") Require(!log.Contains("authority"), "owner mutation cannot return an apparently successful check");
+        }
+        foreach (var cancelAt in new[] { "before", "metadata", "after", "authority" }) {
+            using var cancel = new CancellationTokenSource(); var owners = 0; var returned = false;
+            try {
+                await ExeUpdateMetadataCheck.ReadAsync(_ => {
+                    if (cancelAt == "metadata") cancel.Cancel();
+                    return Task.FromResult(new WindowsAppReleaseCheck(WindowsAppReleaseStatus.NoRelease, "0.5.3.0"));
+                }, _ => { var step = ++owners == 1 ? "before" : "after"; if (step == cancelAt) cancel.Cancel(); return Task.CompletedTask; },
+                    _ => { if (cancelAt == "authority") cancel.Cancel(); return Task.CompletedTask; }, cancel.Token);
+                returned = true;
+            } catch (OperationCanceledException) { }
+            Require(!returned, "metadata cancellation never returns stale result at " + cancelAt);
+        }
+    }
+    private static async Task Fails(Func<Task> work)
+    { try { await work(); } catch (IOException) { return; } throw new Exception("Expected metadata verification refusal."); }
     private static void Require(bool value, string reason) { if (!value) throw new Exception(reason); }
     private sealed class Child : IExeUpdateInstallerProcess
     {

@@ -4,6 +4,8 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
 using LedgeTop.Files.Explorer;
+using LedgeTop.Files.Updates;
+using LedgeTop.WindowsDownload;
 
 namespace LedgeTop.Files;
 
@@ -22,6 +24,17 @@ internal sealed class ExplorerPreviewWindow : Window
     internal readonly Button PauseButton = new() { Content = "Pause downloads" };
     internal readonly Button ResumeButton = new() { Content = "Resume downloads" };
     internal readonly Button RemoveButton = new() { Content = "Remove Explorer preview" };
+    internal readonly Button CheckUpdatesButton = new() { Content = "Check for updates" };
+    internal readonly Button InstallUpdateButton = new() { Content = "Install and restart" };
+    private readonly TextBlock updateVersion = new(), updateStatus = new();
+    private readonly Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? readUpdateBindingForTests;
+    private ExplorerUpdateActions? updates;
+    private CancellationTokenSource? updateCancellation;
+    private ConnectedExplorerUpdateBinding? drainedBinding;
+    private string? drainedRoot;
+    private bool updateApplying, updateMaintenance, updateHelperUncertain, updateDrainUncertain, updateQuitRequested, finalExitAttempted, closed;
+    private bool updateAvailable;
+    private string updateMessage = "Updates are not available in this build.";
     internal readonly TabControl Pages = new();
     private IExplorerPreviewSession? session;
     private ITrayIcon? tray;
@@ -31,13 +44,17 @@ internal sealed class ExplorerPreviewWindow : Window
     private bool busy, quitting, readyToClose;
     private string problem = "";
     internal string StatusText => status.Text;
+    internal string UpdateStatusText => updateStatus.Text;
+    internal bool UpdateMaintenanceOwned => updateMaintenance;
 
     internal ExplorerPreviewWindow(Func<Task<IExplorerPreviewSession>> createSession,
         Func<Func<IReadOnlyList<TrayAction>>, ITrayIcon>? createTray = null,
         ExplorerWindowContent? presentation = null, IExplorerPreviewSession? preparedSession = null, string? setupProblem = null,
-        IBackgroundFolderLauncher? folderLauncher = null)
+        IBackgroundFolderLauncher? folderLauncher = null,
+        Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? readUpdateBindingForTests = null)
     {
         this.createSession = createSession;
+        this.readUpdateBindingForTests = readUpdateBindingForTests;
         this.folderLauncher = folderLauncher ?? new BackgroundFolderLauncher();
         this.presentation = presentation ?? ExplorerWindowContent.Demo;
         problem = setupProblem ?? "";
@@ -60,6 +77,8 @@ internal sealed class ExplorerPreviewWindow : Window
         ResumeButton.Click += async (_, _) => await ResumePreviewAsync();
         RemoveButton.Click += async (_, _) => await RemovePreviewAsync();
         OpenFolderButton.Click += (_, _) => OpenFolder();
+        CheckUpdatesButton.Click += async (_, _) => await CheckForUpdatesAsync();
+        InstallUpdateButton.Click += async (_, _) => await InstallUpdateAsync();
         KeyDown += (_, e) => { if (e.Key == System.Windows.Input.Key.Q && System.Windows.Input.Keyboard.Modifiers == System.Windows.Input.ModifierKeys.Control) { e.Handled = true; Quit(); } };
         try {
             tray = (createTray ?? (actions => new ShellTrayIcon(actions)))(TrayActions);
@@ -70,7 +89,7 @@ internal sealed class ExplorerPreviewWindow : Window
             var timer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher) { Interval = TimeSpan.FromSeconds(60) };
             sessionCheck = timer;
             timer.Tick += CheckSession;
-            Loaded += (_, _) => timer.Start();
+            Loaded += (_, _) => { if (!updateMaintenance && !quitting) timer.Start(); };
         }
         Refresh();
     }
@@ -126,6 +145,15 @@ internal sealed class ExplorerPreviewWindow : Window
         files.Children.Add(Body("Browse your files in File Explorer. Opening an online-only file downloads it. Right-click a file or folder to keep it on this device or free up space."));
         location.Margin = new Thickness(0, 12, 0, 0); location.Foreground = Brush("Ink"); location.FontSize = 12; location.TextWrapping = TextWrapping.Wrap;
         files.Children.Add(location); settings.Children.Add(Card(files));
+        var update = new StackPanel(); update.Children.Add(Heading("Application updates"));
+        updateVersion.Foreground = Brush("Muted"); updateVersion.Margin = new Thickness(0, 3, 0, 6);
+        updateStatus.TextWrapping = TextWrapping.Wrap; updateStatus.Margin = new Thickness(0, 0, 0, 12);
+        update.Children.Add(updateVersion); update.Children.Add(updateStatus);
+        var updateButtons = new WrapPanel();
+        foreach (var button in new[] { CheckUpdatesButton, InstallUpdateButton }) { button.Margin = new Thickness(0, 0, 10, 6); updateButtons.Children.Add(button); }
+        update.Children.Add(updateButtons);
+        if (!presentation.Generated) settings.Children.Add(Card(update));
+        else { CheckUpdatesButton.Visibility = Visibility.Collapsed; InstallUpdateButton.Visibility = Visibility.Collapsed; }
 
         var removal = new StackPanel(); removal.Children.Add(Heading(presentation.Generated ? "Manage this preview" : "Manage this connection"));
         removal.Children.Add(Body(presentation.Generated
@@ -181,6 +209,7 @@ internal sealed class ExplorerPreviewWindow : Window
     }
 
     internal Task StartPreviewAsync() => OperateAsync(async () => {
+        if (drainedBinding is not null) return; // A saved update recovery never falls back to interactive sign-in.
         if (session is null || session.State is ExplorerPreviewState.Removed or ExplorerPreviewState.Failed) {
             if (session is { } old) { await DisposeOnWorkerAsync(old); old.Changed -= SessionChanged; session = null; }
             var prepared = await createSession();
@@ -193,13 +222,24 @@ internal sealed class ExplorerPreviewWindow : Window
     internal Task ReconnectPreviewAsync() => OperateAsync(async () => {
         if (!presentation.Generated && session is ICachedExplorerReconnect { CanReconnectCached: true } saved)
             await saved.ReconnectCachedAsync();
+        else if (!presentation.Generated && session is null && drainedBinding is { } expected) {
+            if (!await RecoverForUpdateAsync(expected)) throw new LoginRequiredException();
+            updateMessage = "Your files are reconnected. Check for updates when ready.";
+        }
     });
     internal Task ResumePreviewAsync() => OperateAsync(async () => { if (session?.State == ExplorerPreviewState.Paused) await session.ResumeAsync(); });
-    internal Task RemovePreviewAsync() => OperateAsync(async () => { if (session is not null) await session.RemoveAsync(); });
+    internal Task RemovePreviewAsync() => OperateAsync(async () => {
+        if (session is null && drainedBinding is not null) {
+            var prepared = await createSession();
+            if (quitting) { await DisposeOnWorkerAsync(prepared); return; }
+            session = prepared; session.Changed += SessionChanged;
+        }
+        if (!quitting && session is not null) { await session.RemoveAsync(); if (session.State == ExplorerPreviewState.Removed) drainedBinding = null; }
+    });
 
     private Task OperateAsync(Func<Task> action)
     {
-        if (busy || quitting || readyToClose) return Task.CompletedTask;
+        if (busy || quitting || readyToClose || updateMaintenance) return Task.CompletedTask;
         busy = true; problem = ""; Refresh();
         operation = Run(); return operation;
         async Task Run()
@@ -213,6 +253,127 @@ internal sealed class ExplorerPreviewWindow : Window
             } finally { busy = false; Refresh(); }
         }
     }
+
+    internal void SetUpdateActions(ExplorerUpdateActions actions)
+    {
+        Dispatcher.VerifyAccess();
+        if (presentation.Generated || busy || quitting || readyToClose || updateMaintenance || updates is not null || !VersionText(actions.CurrentVersion))
+            throw new InvalidOperationException("Update actions are unavailable.");
+        updates = actions; updateMessage = "Check for an approved update using your saved sign-in."; Refresh();
+    }
+
+    internal Task CheckForUpdatesAsync() => RunUpdateAsync(install: false);
+    internal Task InstallUpdateAsync() => RunUpdateAsync(install: true);
+    private Task RunUpdateAsync(bool install)
+    {
+        Dispatcher.VerifyAccess();
+        if (presentation.Generated || updates is null || busy || quitting || readyToClose || updateMaintenance || install && !updateAvailable)
+            return Task.CompletedTask;
+        busy = true; updateApplying = install; updateAvailable = false;
+        if (install) { updateMaintenance = true; finalExitAttempted = false; sessionCheck?.Stop(); }
+        var cancellation = new CancellationTokenSource(); updateCancellation = cancellation;
+        updateMessage = install ? "Stopping downloads and preparing the update…" : "Checking for updates…";
+        Refresh(); operation = Run(); return operation;
+        async Task Run()
+        {
+            try {
+                if (!install) {
+                    var result = await updates.CheckAsync(cancellation.Token); cancellation.Token.ThrowIfCancellationRequested();
+                    if (result.CurrentVersion != updates.CurrentVersion || result.Status == WindowsAppReleaseStatus.Available &&
+                        (result.Release is null || !VersionText(result.Release.Version) || Version.Parse(result.Release.Version) <= Version.Parse(updates.CurrentVersion)))
+                        throw new InvalidOperationException();
+                    updateAvailable = result.Status == WindowsAppReleaseStatus.Available;
+                    updateMessage = result.Status switch {
+                        WindowsAppReleaseStatus.Available => "Version " + result.Release!.Version + " is available. Installing will stop downloads and restart this app.",
+                        WindowsAppReleaseStatus.Current => "This version is current.",
+                        WindowsAppReleaseStatus.NoRelease => "No approved update is available for this account.",
+                        _ => "The update could not be checked. Try again."
+                    };
+                } else {
+                    var result = await updates.InstallAsync(cancellation.Token);
+                    updateHelperUncertain = result.Status is ExeUpdateHandoffStatus.RecoveryBlocked or ExeUpdateHandoffStatus.ExitUncertain or ExeUpdateHandoffStatus.ParentExitRequested;
+                    updateMaintenance = updateHelperUncertain || updateDrainUncertain;
+                    updateMessage = result.Status switch {
+                        ExeUpdateHandoffStatus.NoUpdate => "No approved update is available.",
+                        ExeUpdateHandoffStatus.Busy => "Another update or installation is already in progress.",
+                        ExeUpdateHandoffStatus.Postponed => "Update postponed.",
+                        ExeUpdateHandoffStatus.NeedsReconnect => "The update stopped. Reconnect your files to continue.",
+                        ExeUpdateHandoffStatus.ExitRejected => "The app stayed open. Check for updates when you're ready.",
+                        ExeUpdateHandoffStatus.RecoveryBlocked or ExeUpdateHandoffStatus.ExitUncertain => "The update needs review. Keep this app open.",
+                        ExeUpdateHandoffStatus.ParentExitRequested => "Restarting for the update…",
+                        ExeUpdateHandoffStatus.DrainFailed => "Downloads could not stop safely. Keep the app open and try again.",
+                        _ => "The update could not be verified or started. Check your sign-in and try again."
+                    };
+                }
+            } catch (OperationCanceledException) when (!install) { updateMessage = "Update check cancelled."; }
+            catch {
+                if (install) { updateHelperUncertain = true; updateMaintenance = true; }
+                updateMessage = install ? "The update needs review. Keep this app open." : "The update could not be checked. Check your sign-in and try again.";
+            } finally {
+                updateApplying = false; busy = false;
+                updateCancellation = null; cancellation.Dispose();
+                if (!updateMaintenance && !quitting && !readyToClose) sessionCheck?.Start();
+                Refresh();
+                if (updateQuitRequested && !updateHelperUncertain) { updateQuitRequested = false; Quit(); }
+            }
+        }
+    }
+
+    internal Task<ConnectedExplorerUpdateBinding> GetVerifiedUpdateBindingAsync(CancellationToken token = default) => OnDispatcher(async () => {
+        token.ThrowIfCancellationRequested();
+        if (presentation.Generated || quitting || readyToClose || session is null) throw new LoginRequiredException();
+        var result = await ReadBindingAsync(session, token); token.ThrowIfCancellationRequested(); return result;
+    });
+    private Task<ConnectedExplorerUpdateBinding> ReadBindingAsync(IExplorerPreviewSession owned, CancellationToken token = default) => readUpdateBindingForTests is { } read
+        ? read(owned, token) : owned is ConnectedExplorerSession connected ? connected.GetUpdateBindingAsync(token) : throw new LoginRequiredException();
+
+    internal Task DrainForUpdateAsync() => OnDispatcher(async () => {
+        if (!updateApplying || !updateMaintenance || quitting || readyToClose || session is null) throw new InvalidOperationException("Update drain is unavailable.");
+        var owned = session; drainedBinding = await ReadBindingAsync(owned, updateCancellation?.Token ?? default); drainedRoot = owned.RootPath;
+        updateDrainUncertain = true;
+        await DisposeOnWorkerAsync(owned);
+        owned.Changed -= SessionChanged; session = null; updateDrainUncertain = false; Refresh();
+    });
+
+    internal Task<bool> RecoverForUpdateAsync(ConnectedExplorerUpdateBinding expected) => OnDispatcher(async () => {
+        if ((!updateApplying && !busy) || quitting || readyToClose || updateQuitRequested || drainedBinding != expected) return false;
+        IExplorerPreviewSession? replacement = null;
+        try {
+            if (session is { } old) { await DisposeOnWorkerAsync(old); old.Changed -= SessionChanged; session = null; updateDrainUncertain = false; }
+            replacement = await createSession();
+            if (quitting || updateQuitRequested || replacement is not ICachedExplorerReconnect { CanReconnectCached: true } cached) return false;
+            await cached.ReconnectCachedAsync();
+            if (replacement.State is not (ExplorerPreviewState.Running or ExplorerPreviewState.Paused) || await ReadBindingAsync(replacement) != expected || quitting || updateQuitRequested)
+                return false;
+            session = replacement; replacement.Changed += SessionChanged; replacement = null; Refresh(); return true;
+        } catch { return false; }
+        finally {
+            if (replacement is not null) {
+                try { await DisposeOnWorkerAsync(replacement); }
+                catch { session = replacement; replacement.Changed += SessionChanged; updateDrainUncertain = true; }
+            }
+        }
+    });
+
+    internal Task<ExeUpdateParentExitDecision> RequestUpdateExitAsync(Func<Task> commitFinalExit) => OnDispatcher(async () => {
+        if (!updateApplying || !updateMaintenance || quitting || readyToClose || updateQuitRequested || updateCancellation?.IsCancellationRequested != false ||
+            session is not null || updateDrainUncertain || finalExitAttempted) return ExeUpdateParentExitDecision.Rejected;
+        finalExitAttempted = true;
+        try {
+            await commitFinalExit();
+            updateHelperUncertain = true; sessionCheck?.Stop();
+            readyToClose = true; quitting = true; Close();
+            if (closed) return ExeUpdateParentExitDecision.Accepted;
+        } catch { /* The final intent may have crossed the process boundary; never label this rejection. */ }
+        readyToClose = false; quitting = false; updateHelperUncertain = true; updateMaintenance = true;
+        updateMessage = "The update needs review. Keep this app open."; Refresh();
+        return ExeUpdateParentExitDecision.Uncertain;
+    });
+
+    private Task OnDispatcher(Func<Task> action) => Dispatcher.CheckAccess() ? action() : Dispatcher.InvokeAsync(action).Task.Unwrap();
+    private Task<T> OnDispatcher<T>(Func<Task<T>> action) => Dispatcher.CheckAccess() ? action() : Dispatcher.InvokeAsync(action).Task.Unwrap();
+    private static bool VersionText(string value) => value is { Length: >= 7 and <= 23 } && value.Split('.').Length == 4 && Version.TryParse(value, out var version) && version.ToString(4) == value &&
+        value.Split('.').All(part => ushort.TryParse(part, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var number) && number.ToString(System.Globalization.CultureInfo.InvariantCulture) == part);
 
     // The native provider's stop path can call synchronous Windows APIs before its next await.
     // Keep the dispatcher responsive, but retain this window and instance ownership until real drain completes.
@@ -263,19 +424,23 @@ internal sealed class ExplorerPreviewWindow : Window
             status.Text = "Connected — no files shared yet";
             detail.Text = "You're signed in, but no folders or files are currently shared with this account in this source. Your LedgeTop contact can check source access.";
         }
-        var enabled = !busy && !quitting;
-        var canReconnect = !presentation.Generated && session is ICachedExplorerReconnect { CanReconnectCached: true };
+        var enabled = !busy && !quitting && !updateMaintenance;
+        updateVersion.Text = "Version " + (updates?.CurrentVersion ?? typeof(ExplorerPreviewWindow).Assembly.GetName().Version?.ToString(4) ?? "unavailable");
+        updateStatus.Text = updateMessage;
+        CheckUpdatesButton.IsEnabled = !presentation.Generated && updates is not null && enabled;
+        InstallUpdateButton.IsEnabled = !presentation.Generated && updates is not null && enabled && updateAvailable;
+        var canReconnect = !presentation.Generated && (session is ICachedExplorerReconnect { CanReconnectCached: true } || session is null && drainedBinding is not null && !updateDrainUncertain);
         ReconnectButton.Visibility = canReconnect ? Visibility.Visible : Visibility.Collapsed;
         ReconnectButton.IsEnabled = enabled && canReconnect;
         StartButton.IsEnabled = enabled && state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed;
-        StartButton.Visibility = state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed ? Visibility.Visible : Visibility.Collapsed;
-        OpenFolderButton.IsEnabled = enabled && session is not null && Directory.Exists(session.RootPath);
+        StartButton.Visibility = drainedBinding is null && state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed ? Visibility.Visible : Visibility.Collapsed;
+        OpenFolderButton.IsEnabled = !quitting && Directory.Exists(session?.RootPath ?? drainedRoot);
         PauseButton.IsEnabled = enabled && state == ExplorerPreviewState.Running;
         PauseButton.Visibility = state == ExplorerPreviewState.Running ? Visibility.Visible : Visibility.Collapsed;
         ResumeButton.IsEnabled = enabled && state == ExplorerPreviewState.Paused;
         ResumeButton.Visibility = state == ExplorerPreviewState.Paused ? Visibility.Visible : Visibility.Collapsed;
-        RemoveButton.IsEnabled = enabled && session is not null && state != ExplorerPreviewState.Removed;
-        location.Text = session is null ? "A dedicated local preview folder will be shown here after you start." : session.RootPath;
+        RemoveButton.IsEnabled = enabled && (session is not null || drainedBinding is not null) && state != ExplorerPreviewState.Removed;
+        location.Text = session?.RootPath ?? drainedRoot ?? "A dedicated local preview folder will be shown here after you start.";
         activity.ItemsSource = (session?.Activity ?? []).Concat(localActivity).TakeLast(100).DefaultIfEmpty(presentation.Generated
             ? "No preview activity yet. Start the Explorer preview when you're ready." : "No connection activity yet. Sign in when you're ready.").ToArray();
         footer.Text = tray?.IsAvailable == true
@@ -287,16 +452,17 @@ internal sealed class ExplorerPreviewWindow : Window
     private IReadOnlyList<TrayAction> TrayActions() => [
         new("LedgeTop Files · " + presentation.Badge, false), new(""),
         new("Open settings and activity", true, RestoreFromTray),
-        new("Open files folder", !quitting && session is not null && Directory.Exists(session.RootPath), OpenFolder),
-        new("Pause downloads", !busy && !quitting && session?.State == ExplorerPreviewState.Running, () => _ = PausePreviewAsync()),
-        new("Resume downloads", !busy && !quitting && session?.State == ExplorerPreviewState.Paused, () => _ = ResumePreviewAsync()),
+        new("Open files folder", !quitting && Directory.Exists(session?.RootPath ?? drainedRoot), OpenFolder),
+        new("Pause downloads", !busy && !quitting && !updateMaintenance && session?.State == ExplorerPreviewState.Running, () => _ = PausePreviewAsync()),
+        new("Resume downloads", !busy && !quitting && !updateMaintenance && session?.State == ExplorerPreviewState.Paused, () => _ = ResumePreviewAsync()),
         new(""), new("Quit LedgeTop Files", true, Quit)
     ];
 
     private void OpenFolder()
     {
-        if (quitting || session is null || !Directory.Exists(session.RootPath)) return;
-        try { folderLauncher.TryOpen(session.RootPath, FolderLaunchFailed); }
+        var root = session?.RootPath ?? drainedRoot;
+        if (quitting || root is null || !Directory.Exists(root)) return;
+        try { folderLauncher.TryOpen(root, FolderLaunchFailed); }
         catch (Exception) { FolderLaunchFailed(); }
     }
 
@@ -320,7 +486,7 @@ internal sealed class ExplorerPreviewWindow : Window
 
     private async void CheckSession(object? sender, EventArgs e)
     {
-        if (busy || quitting || readyToClose || session is not ConnectedExplorerSession connected ||
+        if (busy || quitting || readyToClose || updateMaintenance || session is not ConnectedExplorerSession connected ||
             connected.State is not (ExplorerPreviewState.Running or ExplorerPreviewState.Paused)) return;
         await OperateAsync(connected.RecheckSessionAsync);
     }
@@ -328,6 +494,12 @@ internal sealed class ExplorerPreviewWindow : Window
     internal void Quit()
     {
         if (quitting || readyToClose) return;
+        updateCancellation?.Cancel();
+        if (updateApplying || updateHelperUncertain) {
+            updateQuitRequested = updateApplying;
+            updateMessage = updateHelperUncertain ? "The update needs review. Keep this app open." : "Waiting for the update to stop safely before quitting…";
+            RestoreFromTray(); Refresh(); return;
+        }
         quitting = true; RestoreFromTray(); Close();
     }
 
@@ -337,6 +509,7 @@ internal sealed class ExplorerPreviewWindow : Window
         if (e.Cancel || readyToClose) return;
         e.Cancel = true;
         if (!quitting && tray?.IsAvailable == true) { Hide(); return; }
+        if (updateApplying || updateHelperUncertain) { Quit(); return; }
         if (shutdown is not null) return;
         quitting = true; Refresh(); shutdown = FinishCloseAsync();
     }
@@ -364,6 +537,7 @@ internal sealed class ExplorerPreviewWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        closed = true;
         readyToClose = true;
         folderLauncher.Dispose();
         if (sessionCheck is { } timer) { timer.Stop(); timer.Tick -= CheckSession; }

@@ -11,6 +11,8 @@ public partial class App : Application
 {
     private SingleInstance? instance;
     private bool restorePending;
+    // Retain uncertain helper/fence ownership for the lifetime of this process.
+    private ExplorerInstalledUpdateController? updateController;
 
     // ReleaseProfiles rejects mixed/duplicate markers; no flag can opt a packaged or unmarked build into OS preview registration.
     internal static bool ExplorerDemoRequested(IEnumerable<AssemblyMetadataAttribute> metadata, IReadOnlyList<string> arguments) =>
@@ -27,6 +29,8 @@ public partial class App : Application
             Shutdown(exitCode);
             return;
         }
+        var resume = ExplorerResumeRequest.Parse(e.Args);
+        if (!resume.AllowedIn(compiled)) { Shutdown(20); return; }
         if (InstallerMaintenance.Requested(e.Args)) {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             var exitCode = await InstallerMaintenance.RunAsync(compiled, e.Args);
@@ -84,7 +88,11 @@ public partial class App : Application
             // Pick one source without constructing either backend or starting browser authentication.
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             AccessMode? mode;
-            if (access.Modes.Count == 1) mode = access.Modes[0];
+            if (resume.SourceMode is { } requestedMode) {
+                if (!resume.AllowedIn(compiled, access.Modes)) { Shutdown(20); return; }
+                mode = requestedMode;
+            }
+            else if (access.Modes.Count == 1) mode = access.Modes[0];
             else {
                 var chooser = new ExplorerSourceChoiceWindow(access.Modes, plan.Tag ?? "Files");
                 MainWindow = chooser; chooser.Show(); RestoreWhenReady(chooser);
@@ -113,9 +121,20 @@ public partial class App : Application
                 Shutdown(); return;
             }
             MainWindow = settings; ShutdownMode = ShutdownMode.OnMainWindowClose;
+            if (compiled.Packaged && compiled.Channel == ReleaseChannel.Pilot) {
+                var currentVersion = typeof(App).Assembly.GetName().Version?.ToString(4) ?? "0.0.0.0";
+                updateController = new ExplorerInstalledUpdateController(settings.GetVerifiedUpdateBindingAsync,
+                    ExeUpdateWindowsPlatform.CheckAvailableAsync,
+                    binding => new ExeUpdateHandoffCoordinator(new ExeUpdateWindowsPlatform(
+                        binding.SourceAlias, binding.PrincipalId, settings.DrainForUpdateAsync,
+                        () => settings.RecoverForUpdateAsync(binding), settings.RequestUpdateExitAsync)));
+                settings.SetUpdateActions(updateController.Actions(currentVersion));
+            }
             settings.Show(); RestoreWhenReady(settings);
+            if (resume.Requested) await settings.ReconnectPreviewAsync();
             return;
         }
+        if (resume.Requested) { Shutdown(20); return; }
         var window = new MainWindow();
         window.EnableTray(plan.Downloads, plan.Tag);
         var notSetUp = plan.Backend is null; var setupProblem = plan.Problem;

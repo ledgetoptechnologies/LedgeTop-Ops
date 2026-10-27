@@ -21,6 +21,32 @@ internal sealed class ExeUpdateWindowsPlatform(string sourceAlias, string select
     private ExeUpdateHandoff? staged;
     private HelperReservation? helper;
 
+    // A UI check is deliberately separate from Apply: no gate creation, staging, drain, helper,
+    // installer or reconnect. All installation read handles and cached credential pins are scoped.
+    internal static async Task<WindowsAppReleaseCheck> CheckAvailableAsync(ConnectedExplorerUpdateBinding binding, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var principal = binding?.PrincipalId;
+        if (binding is null || binding.Channel != "pilot" || binding.SourceAlias is not ("portal" or "employee") ||
+            principal is null || !Regex.IsMatch(principal, @"\Aodqp1_[a-f0-9]{64}\z"))
+            throw new IOException("Select an authenticated source before checking updates.");
+        var profile = ExeUpdateWindowsTrust.Profile();
+        if (HasPendingOperation("pilot") || InstallerActivity.Exists(InstallerActivity.ObjectName))
+            throw new IOException("An update operation is already pending.");
+        var observed = await ExeUpdateWindowsTrust.ReadCurrentAsync(profile, token).ConfigureAwait(false);
+        await using var payload = observed.Payload;
+        using var authority = new ExeUpdateWindowsAuthority(profile, observed.Owner.InstallRoot, binding.SourceAlias, principal, observed.Owner.Version);
+        await authority.PinAsync(token).ConfigureAwait(false);
+        async Task VerifyOwner(CancellationToken verifyToken)
+        {
+            ExeUpdateWindowsTrust.CheckOwner(observed.Owner);
+            await payload.RevalidateAsync(verifyToken).ConfigureAwait(false);
+            if (HasPendingOperation("pilot") || InstallerActivity.Exists(InstallerActivity.ObjectName))
+                throw new IOException("An update operation became pending.");
+        }
+        return await ExeUpdateMetadataCheck.ReadAsync(authority.CheckAsync, VerifyOwner, authority.VerifySelectedSessionAsync, token).ConfigureAwait(false);
+    }
+
     // Parent startup hook: normal source/UI work must stay unavailable with a plain pending-update
     // message while this is true. Exact maintenance/helper entries have their independent admission.
     internal static bool HasPendingOperation(string channel)

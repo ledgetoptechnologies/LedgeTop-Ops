@@ -123,10 +123,11 @@ internal sealed class ExeUpdateWindowsHelperPlatform(ReleaseProfile profile, Exe
         if (accepted != offer || installedPayload is null || ExeUpdateWindowsTrust.ActiveVersion() != offer.Handoff.Candidate.Release.Version ||
             InstallerActivity.Exists(InstallerActivity.ObjectName)) return false;
         await installedPayload.RevalidateAsync(token).ConfigureAwait(false); token.ThrowIfCancellationRequested();
+        var resumeArguments = ExeUpdateWindowsPolicy.RelaunchArguments(offer.Account.SourceAlias);
         // No installer remains capable of acting. Release only our updater gate so the new normal
         // startup can proceed. Actual process creation is not readiness, profile reconnect or sync proof.
         gate?.Dispose(); gate = null;
-        using var next = ExeUpdateWindowsNative.Spawn(Path.Combine(installedPayload.InstallRoot, "LedgeTop.Files.exe"), [], false);
+        using var next = ExeUpdateWindowsNative.Spawn(Path.Combine(installedPayload.InstallRoot, "LedgeTop.Files.exe"), resumeArguments, false);
         return next.Id > 0;
     }
     public async ValueTask DisposeAsync()

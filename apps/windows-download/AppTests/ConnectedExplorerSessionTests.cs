@@ -42,6 +42,18 @@ internal static class ConnectedExplorerSessionTests
             "update identity checks the selected account without login, recapture or index mutation");
         await session.PauseAsync();
         Check(await session.GetUpdateBindingAsync() == binding, "a paused connected source retains the same verified update identity");
+        fixture.HoldCurrent = true;
+        using (var cancel = new CancellationTokenSource()) {
+            var pending = session.GetUpdateBindingAsync(cancel.Token);
+            Check(!pending.IsCompleted, "update identity waits for the fresh selected-session observation");
+            cancel.Cancel();
+            try { _ = await pending; throw new Exception("Cancelled identity check completed."); }
+            catch (OperationCanceledException) when (cancel.IsCancellationRequested) { }
+            Check(session.State == ExplorerPreviewState.Paused && fixture.SignIns == signs && fixture.Captures == captures,
+                "cancelled update identity checks stop without failing or restarting the connected source");
+        }
+        fixture.HoldCurrent = false;
+        Check(await session.GetUpdateBindingAsync() == binding, "a cancelled identity check can retry with fresh proof");
         fixture.Person = Fixture.PersonB;
         await Refuses(async () => { _ = await session.GetUpdateBindingAsync(); });
         Check(session.State == ExplorerPreviewState.Failed && fixture.SignIns == signs && fixture.Captures == captures &&
