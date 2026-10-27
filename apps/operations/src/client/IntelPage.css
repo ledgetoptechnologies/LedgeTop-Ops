@@ -26,6 +26,20 @@
 .intel-page-cell { display: grid; gap: .1rem; }
 .intel-page-cell small { color: var(--muted); }
 .intel-empty { color: var(--muted); text-align: center; }
+.intel-note { margin: 0 0 .75rem; color: var(--muted); }
+.intel-unknown { color: var(--muted); font-size: 1rem; font-weight: 650; }
+.intel-table .intel-unknown { font-size: inherit; font-weight: 400; }
+.intel-coverage { margin: 0 0 .75rem; padding: .6rem 1rem .6rem 2rem; border: 1px solid #f1d6a6; border-radius: 10px; background: #fff8eb; color: #6b4600; font-size: .9rem; }
+.intel-changes { margin-top: 1rem; padding: .75rem 1rem; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.intel-changes h3 { margin: 0 0 .5rem; font-size: 1rem; }
+.intel-changes > ul { margin: 0; padding: 0; list-style: none; display: grid; gap: .75rem; }
+.intel-changes > ul > li { padding-top: .75rem; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.intel-changes p { margin: 0 0 .35rem; }
+.intel-changes h4 { margin: .5rem 0 .25rem; font-size: .85rem; color: var(--muted); }
+.intel-change-head { color: var(--muted); font-size: .9rem; }
+.intel-change-head strong { color: var(--ink); }
+.intel-daily { margin-top: 1rem; }
+.intel-daily > summary { cursor: pointer; font-weight: 700; min-height: 44px; display: flex; align-items: center; }
 @media (max-width: 640px) {
   .intel-range { margin-left: 0; width: 100%; }
   .intel-range select { flex: 1; }
