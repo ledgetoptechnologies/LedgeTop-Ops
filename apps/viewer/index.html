@@ -41,11 +41,23 @@
     #brand-info .company { font-weight: 700; font-size: 16px; color: #fff; letter-spacing: 0.3px; }
     #brand-info .project { font-weight: 400; font-size: 12px; color: var(--brand-orange); margin-top: 2px; }
 
-    #staff-navigation { display: flex; flex-shrink: 0; align-items: center; gap: 6px; }
+    #staff-logo { display: flex; flex-shrink: 0; border-radius: 4px; }
+    #staff-logo[href]:focus-visible { outline: 2px solid var(--brand-orange); outline-offset: 4px; }
+    #staff-navigation { display: flex; align-items: center; gap: 7px; min-height: 18px; }
     #staff-navigation[hidden] { display: none; }
-    #staff-navigation a { color: #eee; font-size: 12px; font-weight: 600; text-decoration: none; padding: 7px 9px; border: 1px solid var(--panel-border); border-radius: 6px; }
-    #staff-navigation a:hover { color: var(--brand-orange); border-color: var(--brand-orange); }
+    #staff-navigation a { color: #b7b7be; font-size: 12px; font-weight: 600; text-decoration: none; padding: 2px 0; }
+    #staff-navigation a:hover, #staff-navigation a:focus-visible { color: var(--brand-orange); }
     #staff-navigation a:focus-visible { outline: 2px solid var(--brand-orange); outline-offset: 3px; }
+    #staff-navigation .separator { color: var(--brand-muted); }
+    #staff-models .back-arrow { display: none; }
+    .staff-leave-dialog { margin: auto; width: min(420px, calc(100vw - 32px)); padding: 24px; color: var(--brand-text); background: var(--brand-panel); border: 1px solid var(--panel-border); border-radius: var(--radius); box-shadow: var(--shadow); }
+    .staff-leave-dialog::backdrop { background: rgba(0,0,0,.65); }
+    .staff-leave-dialog h2 { font-size: 18px; margin-bottom: 12px; }
+    .staff-leave-dialog p { font-size: 14px; line-height: 1.5; color: #c0c0c0; }
+    .staff-leave-dialog .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+    .staff-leave-dialog button { padding: 9px 18px; border-radius: 6px; border: 1px solid var(--panel-border); background: #202024; color: #fff; font: inherit; cursor: pointer; }
+    .staff-leave-dialog button[data-leave] { background: var(--brand-orange); }
+    .staff-leave-dialog button:focus-visible { outline: 2px solid var(--brand-orange); outline-offset: 3px; }
 
     #project-switcher {
       margin-left: 6px; background: rgba(255,255,255,0.04); color: #eee;
@@ -389,7 +401,6 @@
       #topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; height: auto; padding: 8px 12px; gap: 8px 12px; }
       #brand { grid-column: 1; grid-row: 1; }
       #admin-controls { grid-column: 2; grid-row: 1; }
-      #staff-navigation { grid-column: 2; grid-row: 1; }
       #view-tabs { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
       #sidebar { position: absolute; top: 0; left: 0; bottom: 0; height: 100%; width: var(--sidebar-width,300px); }
       #sidebar-toggle { display: flex; }
@@ -398,6 +409,8 @@
       #topbar { height: auto; min-height: 54px; flex-wrap: wrap; gap: 10px; padding: 8px 12px; }
       #brand img { height: 30px; }
       #brand-info .company { font-size: 14px; }
+      #staff-dashboard, #staff-navigation .separator { display: none; }
+      #staff-models .back-arrow { display: inline; }
       .tab-btn { padding: 7px 10px; font-size: 11px; }
       .tab-btn span { display: none; }
       #statusbar { font-size: 10px; padding: 0 8px; }
@@ -411,17 +424,18 @@
 <div id="app">
   <header id="topbar">
     <div id="brand">
-      <img src="https://ledgetopdroneservices.com/images/DroneLogo01.webp" alt="LTDS Logo">
+      <a id="staff-logo"><img src="https://ledgetopdroneservices.com/images/DroneLogo01.webp" alt="LTDS Logo"></a>
       <div id="brand-info">
-        <span class="company">Ledge Top Drone Services</span>
+        <span class="company" id="brand-company">Ledge Top Drone Services</span>
+        <nav id="staff-navigation" aria-label="Operations navigation" hidden>
+          <a id="staff-dashboard">Dashboard</a>
+          <span class="separator" aria-hidden="true">›</span>
+          <a id="staff-models" aria-label="Back to Models"><span class="back-arrow" aria-hidden="true">‹ </span>Models</a>
+        </nav>
         <span class="project" id="brand-project">Loading project…</span>
       </div>
       <select id="project-switcher" aria-label="Switch project"></select>
     </div>
-    <nav id="staff-navigation" aria-label="Operations navigation" hidden>
-      <a id="staff-dashboard">Dashboard</a>
-      <a id="staff-models">Models</a>
-    </nav>
     <nav id="view-tabs">
       <button class="tab-btn active" data-mode="model" id="tab-model" aria-label="3D Model">
         <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>

@@ -24,6 +24,10 @@ function fixture({ controller = true } = {}) {
   const context = vm.createContext({
     createMeasurementDraftRecovery,
     renderStaffNavigation,
+    // This partial VM fixture exercises session renewal without a header DOM.
+    // The actual navigation installer and measurement-keyboard interaction are
+    // covered together in viewer-header-browser.test.mjs.
+    installStaffNavigationGuard() {},
     viewerSlice:{reset:()=>measurements.sliceResets++},
     window, VIEW_MODE: 'session', reviewSessionChannel: controller ? { postMessage: value => posts.push(value) } : null,
     REVIEW_CONTROLLER_ID: REQUEST,
