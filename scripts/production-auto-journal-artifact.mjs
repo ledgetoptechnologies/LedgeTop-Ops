@@ -52,7 +52,7 @@ export async function completeProductionAutoArtifact({ env = process.env, fetchI
   need(env.PRODUCTION_AUTO_RELEASE_ENABLED === 'true' && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.GITHUB_TOKEN ?? '')
     && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? '') && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? ''), 'artifact_completion_disabled');
   const trigger = triggerReader(env), sourceCommit = trigger.sourceCommit;
-  need(COMMIT.test(sourceCommit) && ['ledgetop-ops','ledgetop-clients'].includes(env.PRODUCTION_AUTO_WORKER), 'artifact_completion_identity_invalid');
+  need(COMMIT.test(sourceCommit) && ['ledgetop-ops','ledgetop-clients','ledgetop-ops-sync'].includes(env.PRODUCTION_AUTO_WORKER), 'artifact_completion_identity_invalid');
   const verified = await ciFactory({ token: env.GITHUB_TOKEN, fetchImpl }).verify(sourceCommit);
   need(verified.runId === trigger.runId && verified.runAttempt === trigger.runAttempt, 'artifact_trigger_ci_no_longer_latest');
   need(/^[1-9][0-9]*$/u.test(env.AUTO_ARTIFACT_ID ?? '') && DIGEST.test(env.AUTO_ARTIFACT_DIGEST ?? '')
@@ -65,7 +65,8 @@ export async function completeProductionAutoArtifact({ env = process.env, fetchI
     runId: Number(env.GITHUB_RUN_ID), name: `production-auto-${releaseId}`, digest: artifactDigest });
   need(artifact.digestSha256 === artifactDigest, 'artifact_digest_unconfirmed');
   const responseDirectory = path.join(ROOT, '.backups', 'production-auto-release', workerName, sourceCommit);
-  const journal = journalFactory({ token: env.GITHUB_TOKEN, workerName, sourceCommit, ciRunId: verified.runId,
+  const journal = journalFactory({ token: env.GITHUB_TOKEN, workerName,
+    ...(workerName === 'ledgetop-ops-sync' ? { releaseKind: 'backend-sync' } : {}), sourceCommit, ciRunId: verified.runId,
     ciRunAttempt: verified.runAttempt, workflowRunId: Number(env.GITHUB_RUN_ID), workflowRunAttempt: Number(env.GITHUB_RUN_ATTEMPT),
     recipient, responseDirectory, fetchImpl });
   await journal.attachArtifact({ artifactId: artifact.id, artifactDigest, runId: Number(env.GITHUB_RUN_ID),

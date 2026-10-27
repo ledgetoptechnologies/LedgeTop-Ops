@@ -11,7 +11,7 @@ import { ledgerBytes, validateAssetLedger } from "./production-auto-assets.mjs";
 import { createAssetVerifierSource } from "./production-auto-verify.mjs";
 
 const API = "https://api.cloudflare.com/client/v4/accounts/";
-const WORKERS = ["ledgetop-ops", "ledgetop-clients"];
+const WORKERS = ["ledgetop-ops", "ledgetop-clients", "ledgetop-ops-sync"];
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const SHA = /^[a-f0-9]{64}$/u, TEMP = /^ops-ui-verify-[a-f0-9]{24}$/u;
 const MAX_RESPONSE = 32 * 1024 * 1024, MAX_MODULE = 32 * 1024 * 1024;
@@ -182,6 +182,37 @@ export class ProductionCloudflareProvider {
       intent: { phase: "worker-version-upload", hashes: [], workerName, parentVersionId: parentId, modules: { "index.js": hash(js), "index.js.map": hash(sourceMap), "__ops_release_ledger.json": hash(json) } } });
     version(result.result?.id); need(result.result.id !== parentId); return result.result;
   }
+  async createInactiveBackendVersion({ workerName, state, modules, annotations }) {
+    need(workerName === 'ledgetop-ops-sync'); const spec = this.#profile.workers['ops-sync']; need(spec?.name === workerName);
+    const parentId = version(state?.version?.id);
+    need(state.latest === parentId && state.modern?.id === parentId
+      && same(state.deployment?.versions, [{ version_id: parentId, percentage: 100 }])
+      && same(state.version.resources?.script_runtime, spec.runtime)
+      && state.modern.assets == null && modules && Object.keys(modules).sort().join() === 'js,sourceMap');
+    const js = pinnedModule(modules.js), sourceMap = pinnedModule(modules.sourceMap);
+    let map; try { map = JSON.parse(sourceMap.toString('utf8')); } catch { fail(); }
+    need(map?.version === 3 && Array.isArray(map.sources) && Array.isArray(map.sourcesContent)
+      && map.sources.length > 0 && map.sources.length === map.sourcesContent.length
+      && map.sources.every(value => typeof value === 'string') && map.sourcesContent.every(value => typeof value === 'string')
+      && typeof map.mappings === 'string');
+    const bindings = state.version.resources?.bindings;
+    need(Array.isArray(bindings) && bindings.length > 0 && bindings.length <= 1024
+      && bindings.every(binding => binding && typeof binding.name === 'string' && /^[A-Za-z_$][A-Za-z0-9_$]{0,127}$/u.test(binding.name))
+      && new Set(bindings.map(binding => binding.name)).size === bindings.length
+      && same(bindings.map(binding => ({ name: binding.name, type: binding.type })).sort((a, b) => a.name.localeCompare(b.name)),
+        spec.bindings.map(binding => ({ name: binding.name, type: binding.type })).sort((a, b) => a.name.localeCompare(b.name))));
+    const metadata = { ...structuredClone(spec.metadata), main_module: 'index.js', compatibility_date: spec.runtime.compatibility_date,
+      compatibility_flags: [...spec.runtime.compatibility_flags], bindings: bindings.map(binding => ({ name: binding.name, type: 'inherit' })),
+      keep_bindings: [], annotations: ownAnnotations(annotations) };
+    delete metadata.keep_assets; delete metadata.assets; delete metadata.migrations;
+    const form = new FormData(); form.set('metadata', JSON.stringify(metadata));
+    form.set('index.js', new Blob([js], { type: 'application/javascript+module' }), 'index.js');
+    form.set('index.js.map', new Blob([sourceMap], { type: 'application/source-map' }), 'index.js.map');
+    const result = await this.#request(`/workers/scripts/${workerName}/versions?bindings_inherit=strict`, { method: 'POST', body: form,
+      intent: { phase: 'sync-version-upload', hashes: [], workerName, parentVersionId: parentId,
+        modules: { 'index.js': hash(js), 'index.js.map': hash(sourceMap) } } });
+    version(result.result?.id); need(result.result.id !== parentId); return result.result;
+  }
   async #deploy(workerName, versions, message, phase, { parentVersionId, candidateVersionId } = {}) {
     prod(workerName); need(typeof message === "string" && message.length > 0 && message.length <= 512 && !/[\x00-\x1f\x7f]/u.test(message));
     const body = { strategy: "percentage", versions, annotations: { "workers/message": message } };
@@ -198,6 +229,11 @@ export class ProductionCloudflareProvider {
     version(parentVersionId);
     return this.#deploy(workerName, [{ version_id: version(candidateVersionId), percentage: 100 }], message,
       "activate-candidate", { parentVersionId, candidateVersionId });
+  }
+  activateBackendCandidate({ workerName, parentVersionId, candidateVersionId, message }) {
+    need(workerName === 'ledgetop-ops-sync'); version(parentVersionId);
+    return this.#deploy(workerName, [{ version_id: version(candidateVersionId), percentage: 100 }], message,
+      'sync-activate-candidate', { parentVersionId, candidateVersionId });
   }
   readDeployment(workerName) { return this.get(`/workers/scripts/${prod(workerName)}/deployments?per_page=1`); }
   async createVerifier({ name, workerName, origin, entries, nonceHash, versionId }) {

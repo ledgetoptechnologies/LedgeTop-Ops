@@ -174,3 +174,87 @@ test('seal primitive binds ciphertext to request context and rejects an unpinned
   assert.throws(() => sealProductionProviderResponse(bytes, { releaseId: sha('release'), requestId: '22222222-2222-4222-8222-222222222222',
     method: 'POST', pathSha256: sha('/x'), status: 200 }, { schemaVersion: 1, keyIdSha256: '0'.repeat(64), publicKeyPem: '' }));
 });
+
+test('Ops Sync backend journal has only upload and activation writes, then verifies artifact association', async () => {
+  const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-sync-journal-'));
+  const parent = '11111111-1111-4111-8111-111111111111';
+  const candidate = '22222222-2222-4222-8222-222222222222';
+  const deployment = '33333333-3333-4333-8333-333333333333';
+  const runtime = { profileSha256: '1'.repeat(64), moduleSha256: '2'.repeat(64), ledgerSha256: null };
+  const run = new ProductionAutoJournal({ token: 'x'.repeat(32), workerName: 'ledgetop-ops-sync', releaseKind: 'backend-sync',
+    sourceCommit: COMMIT, ciRunId: 100, ciRunAttempt: 2, workflowRunId: 123, workflowRunAttempt: 1,
+    runtime, recipient: recipient(), responseDirectory: dir, fetchImpl: api.fetchImpl, now: () => '2026-10-27T12:00:00.000Z' });
+  const response = async (requestId, path, body) => run.persistResponse({ requestId, method: 'POST', path, status: 200,
+    rawResponse: Buffer.from(JSON.stringify({ success: true, result: body, errors: [] })) });
+  try {
+    await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-ops-sync', sourceCommit: COMMIT, status: 'started',
+      phase: 'sync-prepare', parentVersionId: parent, controlsSHA256: '4'.repeat(64), writesAttempted: false });
+    await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-ops-sync', sourceCommit: COMMIT, status: 'prepared',
+      phase: 'sync-prepare', parentVersionId: parent, controlsSHA256: '4'.repeat(64), moduleSHA256: runtime.moduleSha256 });
+    const uploadId = '44444444-4444-4444-8444-444444444444';
+    const uploadPath = '/workers/scripts/ledgetop-ops-sync/versions?bindings_inherit=strict';
+    await run.recordIntent({ requestId: uploadId, method: 'POST', path: uploadPath, phase: 'sync-version-upload',
+      workerName: 'ledgetop-ops-sync', parentVersionId: parent, modules: { 'index.js': runtime.moduleSha256, 'index.js.map': '5'.repeat(64) },
+      hashes: [], automaticRetry: false });
+    await response(uploadId, uploadPath, { id: candidate });
+    await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-ops-sync', sourceCommit: COMMIT, status: 'inactive-verified',
+      phase: 'sync-candidate-readback', parentVersionId: parent, candidateVersionId: candidate,
+      controlsSHA256: '4'.repeat(64), moduleSHA256: runtime.moduleSha256 });
+    const activationId = '55555555-5555-4555-8555-555555555555';
+    const activationPath = '/workers/scripts/ledgetop-ops-sync/deployments';
+    await run.recordIntent({ requestId: activationId, method: 'POST', path: activationPath, phase: 'sync-activate-candidate',
+      workerName: 'ledgetop-ops-sync', parentVersionId: parent, candidateVersionId: candidate,
+      versions: [{ version_id: candidate, percentage: 100 }], hashes: [], automaticRetry: false });
+    await response(activationId, activationPath, { id: deployment });
+    await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-ops-sync', sourceCommit: COMMIT, status: 'verified',
+      phase: 'sync-verify', parentVersionId: parent, candidateVersionId: candidate, deploymentId: deployment,
+      controlsSHA256: '4'.repeat(64), moduleSHA256: runtime.moduleSha256, verifiedActive: true, writesAttempted: true });
+    await run.attachArtifact({ artifactId: 904, artifactDigest: 'f'.repeat(64), runId: 123, runAttempt: 1,
+      name: `production-auto-${run.releaseId}`, status: 'success', releaseStatus: 'success' });
+    const operation = run.snapshot().operations[0];
+    assert.equal(operation.releaseKind, 'backend-sync');
+    assert.deepEqual(operation.intents.map(row => row.phase), ['sync-version-upload','sync-activate-candidate']);
+    assert.deepEqual(operation.receipts.map(row => row.status), ['started','prepared','inactive-verified','verified']);
+    assert.equal(operation.runtime.ledgerSha256, null);
+    assert.equal(operation.state, 'verified');
+    const restarted = new ProductionAutoJournal({ token: 'x'.repeat(32), workerName: 'ledgetop-ops-sync', releaseKind: 'backend-sync',
+      sourceCommit: COMMIT, ciRunId: 100, ciRunAttempt: 2, workflowRunId: 123, workflowRunAttempt: 1,
+      runtime, recipient: recipient(), responseDirectory: dir, fetchImpl: api.fetchImpl });
+    await assert.rejects(restarted.recordIntent({ requestId: '66666666-6666-4666-8666-666666666666', method: 'POST',
+      path: activationPath, phase: 'sync-activate-candidate', workerName: 'ledgetop-ops-sync', parentVersionId: parent,
+      candidateVersionId: candidate, versions: [{ version_id: candidate, percentage: 100 }], hashes: [], automaticRetry: false }));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Ops Sync ambiguous upload remains held and same-source retry cannot append another mutation', async () => {
+  const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-sync-held-'));
+  const parent = '11111111-1111-4111-8111-111111111111';
+  const runtime = { profileSha256: '1'.repeat(64), moduleSha256: '2'.repeat(64), ledgerSha256: null };
+  const create = () => new ProductionAutoJournal({ token: 'x'.repeat(32), workerName: 'ledgetop-ops-sync', releaseKind: 'backend-sync',
+    sourceCommit: COMMIT, ciRunId: 100, ciRunAttempt: 2, workflowRunId: 123, workflowRunAttempt: 1,
+    runtime, recipient: recipient(), responseDirectory: dir, fetchImpl: api.fetchImpl, now: () => '2026-10-27T12:00:00.000Z' });
+  try {
+    const run = create();
+    await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-ops-sync', sourceCommit: COMMIT, status: 'started',
+      phase: 'sync-prepare', parentVersionId: parent, controlsSHA256: '4'.repeat(64), writesAttempted: false });
+    await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-ops-sync', sourceCommit: COMMIT, status: 'prepared',
+      phase: 'sync-prepare', parentVersionId: parent, controlsSHA256: '4'.repeat(64), moduleSHA256: runtime.moduleSha256 });
+    await run.recordIntent({ requestId: '77777777-7777-4777-8777-777777777777', method: 'POST',
+      path: '/workers/scripts/ledgetop-ops-sync/versions?bindings_inherit=strict', phase: 'sync-version-upload',
+      workerName: 'ledgetop-ops-sync', parentVersionId: parent,
+      modules: { 'index.js': runtime.moduleSha256, 'index.js.map': '5'.repeat(64) }, hashes: [], automaticRetry: false });
+    await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-ops-sync', sourceCommit: COMMIT, status: 'held',
+      phase: 'sync-upload', parentVersionId: parent, controlsSHA256: '4'.repeat(64), moduleSHA256: runtime.moduleSha256,
+      writesAttempted: true, failureCode: 'release_sync_upload_failed', reconciliationCode: 'read_succeeded',
+      reconciliation: { readSucceeded: true, activeVersionId: parent, latestVersionId: parent,
+        deploymentId: parent, controlsUnchanged: true } });
+    const op = run.snapshot().operations[0];
+    assert.equal(op.state, 'held'); assert.equal(op.intents.length, 1); assert.equal(op.intents[0].phase, 'sync-version-upload');
+    assert.equal(op.receipts.at(-1).failureCode, 'release_sync_upload_failed');
+    const restart = create();
+    await assert.rejects(restart.recordIntent({ requestId: '88888888-8888-4888-8888-888888888888', method: 'POST',
+      path: '/workers/scripts/ledgetop-ops-sync/versions?bindings_inherit=strict', phase: 'sync-version-upload',
+      workerName: 'ledgetop-ops-sync', parentVersionId: parent,
+      modules: { 'index.js': runtime.moduleSha256, 'index.js.map': '5'.repeat(64) }, hashes: [], automaticRetry: false }));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

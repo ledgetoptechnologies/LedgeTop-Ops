@@ -67,6 +67,34 @@ test("wrong inheritance head/runtime/map/hash/ledger and production target are r
   }
 });
 
+test('Ops Sync backend version upload inherits its exact bindings and carries no asset or ledger payload', async () => {
+  const spec = PROFILE.workers['ops-sync'], js = Buffer.from('export default {fetch(){return new Response("sync")}};');
+  const map = Buffer.from(JSON.stringify({ version: 3, file: 'index.js', sources: ['src/index.ts'],
+    sourcesContent: ['export default {};'], mappings: '', names: [] }));
+  const state = { latest: parent, deployment: { versions: [{ version_id: parent, percentage: 100 }] },
+    version: { id: parent, resources: { script_runtime: structuredClone(spec.runtime),
+      bindings: structuredClone(spec.bindings), script: { handlers: ['fetch'], named_handlers: [] } } },
+    modern: { id: parent, assets: null } };
+  let metadata, formKeys;
+  const { provider, intents, persisted } = setup(async (url, init) => {
+    assert.match(url, /\/workers\/scripts\/ledgetop-ops-sync\/versions\?bindings_inherit=strict$/u);
+    assert.equal(init.method, 'POST'); assert.equal(init.redirect, 'error');
+    formKeys = [...init.body.keys()]; metadata = JSON.parse(init.body.get('metadata'));
+    assert.deepEqual(Buffer.from(await init.body.get('index.js').arrayBuffer()), js);
+    assert.deepEqual(Buffer.from(await init.body.get('index.js.map').arrayBuffer()), map);
+    return ok({ id: candidate });
+  }, { profile: PROFILE });
+  const result = await provider.createInactiveBackendVersion({ workerName: 'ledgetop-ops-sync', state,
+    modules: { js: { bytes: js, sha256: hash(js) }, sourceMap: { bytes: map, sha256: hash(map) } },
+    annotations: { 'workers/message': 'synthetic sync release', 'workers/tag': 'sync-test' } });
+  assert.equal(result.id, candidate);
+  assert.deepEqual(formKeys, ['metadata', 'index.js', 'index.js.map']);
+  assert.equal(metadata.assets, undefined); assert.equal(metadata.migrations, undefined); assert.deepEqual(metadata.keep_bindings, []);
+  assert.deepEqual(metadata.bindings, spec.bindings.map(row => ({ name: row.name, type: 'inherit' })));
+  assert.deepEqual(intents[0].modules, { 'index.js': hash(js), 'index.js.map': hash(map) });
+  assert.equal(intents[0].phase, 'sync-version-upload'); assert.equal(persisted.length, 1);
+});
+
 test("stage and activate use only exact deployments JSON and durable intent, no settings or routes", async () => {
   const bodies = []; const { provider, intents } = setup(async (url, init) => {
     assert.equal(intents.length, bodies.length + 1); assert(url.endsWith("/workers/scripts/ledgetop-ops/deployments"));

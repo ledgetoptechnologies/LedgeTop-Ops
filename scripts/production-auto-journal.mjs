@@ -17,11 +17,14 @@ import { isProviderUtcTimestamp, minimumRetainedUntil } from './production-auto-
 const REPO = 'ledgetoptechnologies/LedgeTop-Ops';
 const API = `https://api.github.com/repos/${REPO}`;
 const JOURNAL_PATH = 'production-auto-journal.json';
-const WORKERS = new Set(['ledgetop-ops', 'ledgetop-clients']);
+const WORKERS = new Set(['ledgetop-ops', 'ledgetop-clients', 'ledgetop-ops-sync']);
+const RELEASE_KINDS = new Set(['retained-assets', 'backend-sync']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const SHA = /^[0-9a-f]{64}$/u, COMMIT = /^[0-9a-f]{40}$/u;
-const PHASES = new Set(['asset-session','asset-bucket','worker-version-upload','stage-zero-percent','activate-candidate',
+const RETAINED_PHASES = new Set(['asset-session','asset-bucket','worker-version-upload','stage-zero-percent','activate-candidate',
   'temporary-verifier-create','temporary-verifier-enable','temporary-verifier-delete']);
+const SYNC_PHASES = new Set(['sync-version-upload','sync-activate-candidate']);
+const PHASES = new Set([...RETAINED_PHASES, ...SYNC_PHASES]);
 const METHODS = new Set(['POST','PUT','DELETE']);
 const MAX_RESPONSE = 32 * 1024 * 1024, MAX_GITHUB_BODY = 8 * 1024 * 1024, MAX_STATE = 4 * 1024 * 1024;
 const MAX_PRIVATE_ARTIFACT = 256 * 1024 * 1024;
@@ -110,7 +113,9 @@ function intentProjection(value) {
   if (value.parentVersionId !== undefined) { need(UUID.test(value.parentVersionId)); intent.parentVersionId = value.parentVersionId; }
   if (value.candidateVersionId !== undefined) { need(UUID.test(value.candidateVersionId)); intent.candidateVersionId = value.candidateVersionId; }
   if (value.modules !== undefined) {
-    need(exact(value.modules, ['index.js','index.js.map','__ops_release_ledger.json'])
+    const moduleKeys = value.phase === 'sync-version-upload' ? ['index.js','index.js.map']
+      : ['index.js','index.js.map','__ops_release_ledger.json'];
+    need(exact(value.modules, moduleKeys)
       && Object.values(value.modules).every(item => SHA.test(item)));
     intent.modules = structuredClone(value.modules);
   }
@@ -198,15 +203,18 @@ function writeSealedFile(directory, filename, bytes) {
   } catch { if (fd !== undefined) try { fs.closeSync(fd); } catch {} try { fs.unlinkSync(temporary); } catch {} throw Error('production_auto_response_seal_write_failed'); }
 }
 
-function safeReceipt(value, workerName, sourceCommit) {
+function safeReceipt(value, workerName, sourceCommit, releaseKind) {
   need(value && value.schemaVersion === 1 && value.workerName === workerName && value.sourceCommit === sourceCommit
     && ['started','prepared','inactive-verified','zero-percent-verified','candidate-assets-verified','verified','held'].includes(value.status)
     && typeof value.phase === 'string' && value.phase.length <= 32);
-  if (value.status === 'prepared') need(SHA.test(value.ledgerSHA256 ?? ''));
+  if (value.status === 'prepared') need(releaseKind === 'backend-sync'
+    ? SHA.test(value.moduleSHA256 ?? '') && value.ledgerSHA256 === undefined
+    : SHA.test(value.ledgerSHA256 ?? '') && value.moduleSHA256 === undefined);
   const out = { status: value.status, phase: value.phase };
   const copySha = key => { if (value[key] !== undefined) { need(SHA.test(value[key])); out[key] = value[key]; } };
   const copyUuid = key => { if (value[key] !== undefined) { need(UUID.test(value[key])); out[key] = value[key]; } };
   for (const key of ['controlsSHA256','ledgerSHA256']) copySha(key);
+  if (value.moduleSHA256 !== undefined) { need(releaseKind === 'backend-sync' && SHA.test(value.moduleSHA256)); out.moduleSHA256 = value.moduleSHA256; }
   for (const key of ['parentVersionId','candidateVersionId','deploymentId']) copyUuid(key);
   if (value.files !== undefined) { need(Number.isSafeInteger(value.files) && value.files >= 0 && value.files <= 20_000); out.files = value.files; }
   if (value.minimumRetentionHours !== undefined) { need(value.minimumRetentionHours === 48); out.minimumRetentionHours = 48; }
@@ -217,7 +225,8 @@ function safeReceipt(value, workerName, sourceCommit) {
   if (value.failureCode !== undefined) {
     need(['release_initial_failed','release_prepare_failed','release_upload_failed','release_candidate_readback_failed',
       'release_stage_zero_failed','release_candidate_assets_failed','release_activate_failed','release_active_assets_failed',
-      'release_complete_failed'].includes(value.failureCode));
+      'release_complete_failed','release_sync_prepare_failed','release_sync_upload_failed',
+      'release_sync_candidate_readback_failed','release_sync_activate_failed','release_sync_verify_failed'].includes(value.failureCode));
     out.failureCode = value.failureCode;
   }
   if (value.reconciliationCode !== undefined) {
@@ -241,8 +250,10 @@ function safeReceipt(value, workerName, sourceCommit) {
 
 function parseJsonResponse(bytes) { try { return JSON.parse(bytes.toString('utf8')); } catch { throw Error('production_auto_journal_api_refused_no_retry'); } }
 function storedOperation(op) {
-  need(exact(op, ['releaseId','workerName','sourceCommit','runtime','ci','workflow','state','createdAt','updatedAt','intents','receipts','responses','artifact'])
+  need(exact(op, ['releaseId','workerName','sourceCommit','releaseKind','runtime','ci','workflow','state','createdAt','updatedAt','intents','receipts','responses','artifact'])
     && SHA.test(op.releaseId) && WORKERS.has(op.workerName) && COMMIT.test(op.sourceCommit)
+    && RELEASE_KINDS.has(op.releaseKind) && (op.workerName === 'ledgetop-ops-sync'
+      ? op.releaseKind === 'backend-sync' : op.releaseKind === 'retained-assets')
     && ['in_progress','held','verified-pending-artifact','verified'].includes(op.state)
     && Number.isFinite(Date.parse(op.createdAt)) && new Date(op.createdAt).toISOString() === op.createdAt
     && Number.isFinite(Date.parse(op.updatedAt)) && new Date(op.updatedAt).toISOString() === op.updatedAt);
@@ -259,9 +270,23 @@ function storedOperation(op) {
       'candidateVersionId','modules','temporaryWorkerName','versions','sourceSHA256','coordinatorFence','intentRecordedAt'];
     need(row && Object.getPrototypeOf(row) === Object.prototype && Object.keys(row).every(key => allowed.includes(key))
       && row.sequence === i + 1 && UUID.test(row.requestId ?? '') && !ids.has(row.requestId)
-      && METHODS.has(row.method) && PHASES.has(row.phase) && SHA.test(row.pathSha256) && row.automaticRetry === false
+      && METHODS.has(row.method) && (op.releaseKind === 'backend-sync' ? SYNC_PHASES : RETAINED_PHASES).has(row.phase)
+      && SHA.test(row.pathSha256) && row.automaticRetry === false
       && Array.isArray(row.hashes) && row.hashes.length <= 20_000 && row.hashes.every(item => /^[a-f0-9]{32}$/u.test(item))
       && Number.isFinite(Date.parse(row.intentRecordedAt)) && new Date(row.intentRecordedAt).toISOString() === row.intentRecordedAt);
+    if (row.modules !== undefined) need(op.releaseKind === 'backend-sync'
+      ? exact(row.modules, ['index.js','index.js.map']) && Object.values(row.modules).every(item => SHA.test(item))
+      : exact(row.modules, ['index.js','index.js.map','__ops_release_ledger.json']) && Object.values(row.modules).every(item => SHA.test(item)));
+    if (op.releaseKind === 'backend-sync') {
+      if (row.phase === 'sync-version-upload') need(i === 0 && row.method === 'POST' && row.workerName === op.workerName
+        && UUID.test(row.parentVersionId ?? '') && row.candidateVersionId === undefined
+        && exact(row.modules, ['index.js','index.js.map']) && row.versions === undefined);
+      else need(i === 1 && row.phase === 'sync-activate-candidate' && row.method === 'POST'
+        && row.workerName === op.workerName && UUID.test(row.parentVersionId ?? '')
+        && UUID.test(row.candidateVersionId ?? '') && row.parentVersionId !== row.candidateVersionId
+        && Array.isArray(row.versions) && row.versions.length === 1
+        && row.versions[0].versionId === row.candidateVersionId && row.versions[0].percentage === 100);
+    }
     ids.add(row.requestId);
   }
   const responseIds = new Set();
@@ -277,7 +302,7 @@ function storedOperation(op) {
     responseIds.add(row.requestId);
   }
   for (const row of op.receipts) need(row && Object.getPrototypeOf(row) === Object.prototype
-    && Object.keys(row).every(key => ['status','phase','controlsSHA256','ledgerSHA256','parentVersionId','candidateVersionId','deploymentId','files',
+    && Object.keys(row).every(key => ['status','phase','controlsSHA256','ledgerSHA256','moduleSHA256','parentVersionId','candidateVersionId','deploymentId','files',
       'minimumRetentionHours','automaticPruning','allHistoricalAssetsCarried','verifiedActive','writesAttempted','cutoverObservedAt',
       'earliestPermittedPruningAt','reconciliation','failureCode','reconciliationCode','recordedAt'].includes(key))
     && ['started','prepared','inactive-verified','zero-percent-verified','candidate-assets-verified','verified','held'].includes(row.status)
@@ -285,12 +310,31 @@ function storedOperation(op) {
   for (const row of op.receipts) {
     if (row.failureCode !== undefined) need(['release_initial_failed','release_prepare_failed','release_upload_failed',
       'release_candidate_readback_failed','release_stage_zero_failed','release_candidate_assets_failed',
-      'release_activate_failed','release_active_assets_failed','release_complete_failed'].includes(row.failureCode));
+      'release_activate_failed','release_active_assets_failed','release_complete_failed','release_sync_prepare_failed',
+      'release_sync_upload_failed','release_sync_candidate_readback_failed','release_sync_activate_failed',
+      'release_sync_verify_failed'].includes(row.failureCode));
     if (row.reconciliationCode !== undefined) need(['not_attempted','read_succeeded','read_failed'].includes(row.reconciliationCode));
     if (row.status === 'held') need(row.failureCode !== undefined && row.reconciliationCode !== undefined
       && typeof row.writesAttempted === 'boolean');
   }
-  if (op.runtime.ledgerSha256 === null) need(!op.receipts.some(row => row.status === 'prepared' || row.status === 'verified')
+  if (op.releaseKind === 'backend-sync') {
+    const statuses = op.receipts.map(row => row.status);
+    const progress = statuses.filter(status => status !== 'held'), allowedProgress = ['started','prepared','inactive-verified','verified'];
+    need(op.receipts.every(row => ['started','prepared','inactive-verified','verified','held'].includes(row.status))
+      && progress.every((status, index) => status === allowedProgress[index])
+      && statuses.filter(status => status === 'held').length <= 1
+      && (!statuses.includes('held') || statuses.at(-1) === 'held')
+      && op.receipts.filter(row => row.status === 'prepared').every(row => row.moduleSHA256 === op.runtime.moduleSha256)
+      && op.receipts.filter(row => row.status === 'inactive-verified').every(row => row.moduleSHA256 === op.runtime.moduleSha256)
+      && op.receipts.filter(row => row.status === 'verified').every(row => row.moduleSHA256 === op.runtime.moduleSha256
+        && row.verifiedActive === true && UUID.test(row.candidateVersionId ?? '') && UUID.test(row.deploymentId ?? '')));
+    need(op.workerName === 'ledgetop-ops-sync' && op.runtime.ledgerSha256 === null
+      && op.receipts.every(row => row.ledgerSHA256 === undefined)
+      && op.receipts.filter(row => row.status === 'prepared').length <= 1
+      && op.receipts.filter(row => row.moduleSHA256 !== undefined).every(row => row.moduleSHA256 === op.runtime.moduleSha256)
+      && (!['verified-pending-artifact','verified'].includes(op.state)
+        || op.receipts.some(row => row.status === 'prepared' && row.moduleSHA256 === op.runtime.moduleSha256)));
+  } else if (op.runtime.ledgerSha256 === null) need(!op.receipts.some(row => row.status === 'prepared' || row.status === 'verified')
     && !['verified-pending-artifact','verified'].includes(op.state));
   else {
     const prepared = op.receipts.filter(row => row.status === 'prepared');
@@ -309,14 +353,17 @@ function storedOperation(op) {
  * not land, the release stops before the corresponding Cloudflare request. */
 export class ProductionAutoJournal {
   #token; #fetch; #runtime; #recipient; #responseDirectory; #identity; #document = null; #head = null; #claimed = false;
-  constructor({ token, workerName, sourceCommit, ciRunId, ciRunAttempt, workflowRunId, workflowRunAttempt, runtime, recipient, responseDirectory,
+  constructor({ token, workerName, releaseKind = workerName === 'ledgetop-ops-sync' ? 'backend-sync' : 'retained-assets',
+    sourceCommit, ciRunId, ciRunAttempt, workflowRunId, workflowRunAttempt, runtime, recipient, responseDirectory,
     fetchImpl = fetch, now = () => new Date().toISOString() } = {}) {
     need(typeof token === 'string' && /^[A-Za-z0-9_\-]{20,1024}$/u.test(token) && WORKERS.has(workerName)
       && COMMIT.test(sourceCommit ?? '') && Number.isSafeInteger(ciRunId) && ciRunId > 0
       && Number.isSafeInteger(ciRunAttempt) && ciRunAttempt > 0 && Number.isSafeInteger(workflowRunId) && workflowRunId > 0
       && Number.isSafeInteger(workflowRunAttempt) && workflowRunAttempt > 0 && typeof fetchImpl === 'function'
-      && typeof now === 'function' && typeof responseDirectory === 'string' && path.isAbsolute(responseDirectory));
-    this.#token = token; this.#fetch = fetchImpl; this.#identity = { workerName, sourceCommit, ciRunId, ciRunAttempt, workflowRunId, workflowRunAttempt };
+      && typeof now === 'function' && typeof responseDirectory === 'string' && path.isAbsolute(responseDirectory)
+      && RELEASE_KINDS.has(releaseKind) && (workerName === 'ledgetop-ops-sync'
+        ? releaseKind === 'backend-sync' : releaseKind === 'retained-assets'));
+    this.#token = token; this.#fetch = fetchImpl; this.#identity = { workerName, releaseKind, sourceCommit, ciRunId, ciRunAttempt, workflowRunId, workflowRunAttempt };
     this.#runtime = runtime === undefined ? null : safeRuntime(runtime); this.#recipient = recipient; checkedRecipient(recipient);
     this.#responseDirectory = responseDirectory; this.now = now;
     this.releaseId = hash(`${workerName}\n${sourceCommit}`);
@@ -422,7 +469,7 @@ export class ProductionAutoJournal {
       && !op.receipts.some(row => row.status === 'prepared')
       && next.operation.receipts.at(-1)?.status === 'prepared'
       && next.operation.receipts.at(-1)?.ledgerSHA256 === this.#runtime.ledgerSha256;
-    need(op.workerName === this.#identity.workerName && op.sourceCommit === this.#identity.sourceCommit
+    need(op.workerName === this.#identity.workerName && op.releaseKind === this.#identity.releaseKind && op.sourceCommit === this.#identity.sourceCommit
       && (canonical(op.runtime) === canonical(this.#runtime) || candidateLedgerBind) && op.ci.runId === this.#identity.ciRunId
       && op.ci.runAttempt === this.#identity.ciRunAttempt && op.workflow.runId === this.#identity.workflowRunId
       && op.workflow.runAttempt === this.#identity.workflowRunAttempt && ['in_progress','held','verified-pending-artifact','verified'].includes(op.state));
@@ -432,14 +479,17 @@ export class ProductionAutoJournal {
   #currentOperation() { return this.#document?.operations.find(row => row.releaseId === this.releaseId) ?? null; }
   async recordIntent(value) {
     need(this.#runtime !== null);
-    const projected = intentProjection(value); need(projected.workerName === undefined || projected.workerName === this.#identity.workerName);
+    const projected = intentProjection(value); need((projected.workerName === undefined || projected.workerName === this.#identity.workerName)
+      && (this.#identity.releaseKind === 'backend-sync' ? SYNC_PHASES : RETAINED_PHASES).has(projected.phase));
     const old = await this.#load();
     if (!old || !old.operations.some(row => row.releaseId === this.releaseId)) {
+      need(this.#identity.releaseKind !== 'backend-sync');
       // A release identity is one-shot across workflow reruns. A distinct
       // exact source commit can append a new operation to the same worker
       // journal; the Git ref update is the cross-run CAS claim.
       need(!old || old.operations.length < MAX_OPERATIONS);
-      const operation = { releaseId: this.releaseId, workerName: this.#identity.workerName, sourceCommit: this.#identity.sourceCommit,
+      const operation = { releaseId: this.releaseId, workerName: this.#identity.workerName, releaseKind: this.#identity.releaseKind,
+        sourceCommit: this.#identity.sourceCommit,
         runtime: this.#runtime, ci: { runId: this.#identity.ciRunId, runAttempt: this.#identity.ciRunAttempt },
         workflow: { runId: this.#identity.workflowRunId, runAttempt: this.#identity.workflowRunAttempt }, state: 'in_progress',
         createdAt: this.now(), updatedAt: this.now(), intents: [], receipts: [], responses: [], artifact: null };
@@ -456,9 +506,20 @@ export class ProductionAutoJournal {
     }
     need(this.#claimed); // A restarted or duplicate run never resumes after a prior durable intent.
     const operation = this.#currentOperation();
-    need(operation && operation.workerName === this.#identity.workerName && operation.sourceCommit === this.#identity.sourceCommit
+    need(operation && operation.workerName === this.#identity.workerName && operation.releaseKind === this.#identity.releaseKind
+      && operation.sourceCommit === this.#identity.sourceCommit
       && canonical(operation.runtime) === canonical(this.#runtime) && operation.state === 'in_progress'
       && operation.intents.length < MAX_INTENTS_PER_RELEASE);
+    if (this.#identity.releaseKind === 'backend-sync') {
+      const nextPhase = operation.intents.length === 0 ? 'sync-version-upload'
+        : operation.intents.length === 1 ? 'sync-activate-candidate' : null;
+      need(operation.receipts[0]?.status === 'started' && projected.phase === nextPhase
+        && (projected.phase !== 'sync-activate-candidate' || operation.receipts.some(row => row.status === 'inactive-verified')));
+      if (projected.phase === 'sync-activate-candidate') {
+        need(projected.candidateVersionId === operation.receipts.find(row => row.status === 'inactive-verified')?.candidateVersionId
+          && projected.parentVersionId === operation.receipts[0]?.parentVersionId);
+      }
+    }
     const last = operation.intents.at(-1), response = last && operation.responses.find(row => row.requestId === last.requestId);
     need(!last || response?.providerAcknowledged === true);
     operation.intents.push({ sequence: operation.intents.length + 1, ...projected, intentRecordedAt: this.now() });
@@ -481,12 +542,21 @@ export class ProductionAutoJournal {
     await this.#persist({ operation: op });
   }
   async receipt(value) {
-    const projected = safeReceipt(value, this.#identity.workerName, this.#identity.sourceCommit);
+    const projected = safeReceipt(value, this.#identity.workerName, this.#identity.sourceCommit, this.#identity.releaseKind);
+    if (this.#identity.releaseKind === 'backend-sync') {
+      const existing = this.#currentOperation()?.receipts ?? [];
+      const progress = existing.map(row => row.status).filter(status => status !== 'held');
+      const expected = progress.length === 0 ? 'started' : progress.length === 1 ? 'prepared'
+        : progress.length === 2 ? 'inactive-verified' : progress.length === 3 ? 'verified' : null;
+      need(projected.status === 'held' || projected.status === expected);
+      need(!existing.some(row => row.status === 'held' || row.status === 'verified'));
+    }
     if (!this.#claimed) {
       need(this.#runtime !== null);
       const old = await this.#load();
       need(!old || !old.operations.some(row => row.releaseId === this.releaseId));
       const now = this.now(), operation = { releaseId: this.releaseId, workerName: this.#identity.workerName,
+        releaseKind: this.#identity.releaseKind,
         sourceCommit: this.#identity.sourceCommit, runtime: this.#runtime,
         ci: { runId: this.#identity.ciRunId, runAttempt: this.#identity.ciRunAttempt },
         workflow: { runId: this.#identity.workflowRunId, runAttempt: this.#identity.workflowRunAttempt },
@@ -501,11 +571,12 @@ export class ProductionAutoJournal {
       this.#claimed = true; this.#emitOutput(this.releaseId); return;
     }
     const op = this.#currentOperation(); need(op);
-    if (projected.status === 'prepared' && this.#runtime?.ledgerSha256 === null) {
+    if (projected.status === 'prepared' && this.#identity.releaseKind === 'retained-assets' && this.#runtime?.ledgerSha256 === null) {
       need(SHA.test(projected.ledgerSHA256 ?? '') && op.runtime.ledgerSha256 === null);
       this.#runtime = safeRuntime({ ...this.#runtime, ledgerSha256: projected.ledgerSHA256 });
       op.runtime = this.#runtime;
-    } else if (projected.status === 'prepared') need(projected.ledgerSHA256 === this.#runtime?.ledgerSha256);
+    } else if (projected.status === 'prepared' && this.#identity.releaseKind === 'retained-assets') need(projected.ledgerSHA256 === this.#runtime?.ledgerSha256);
+    else if (projected.status === 'prepared') need(projected.moduleSHA256 === this.#runtime?.moduleSha256);
     if (projected.status === 'held') op.state = 'held';
     if (projected.status === 'verified') op.state = 'verified-pending-artifact';
     op.receipts.push({ ...projected, recordedAt: this.now() }); need(op.receipts.length <= 64);
@@ -531,7 +602,11 @@ export class ProductionAutoJournal {
     op.artifact = { artifactId, digestSha256: artifactDigest, name, runId, runAttempt,
       uploadStepConclusion: status, releaseStepConclusion: releaseStatus };
     const final = op.receipts.at(-1);
-    const finalReceipt = final?.status === 'verified' && final.verifiedActive === true
+    const finalReceipt = op.releaseKind === 'backend-sync'
+      ? final?.status === 'verified' && final.verifiedActive === true && SHA.test(final.moduleSHA256 ?? '')
+        && UUID.test(final.candidateVersionId ?? '') && UUID.test(final.deploymentId ?? '')
+        && JSON.stringify(op.receipts.map(row => row.status)) === JSON.stringify(['started','prepared','inactive-verified','verified'])
+      : final?.status === 'verified' && final.verifiedActive === true
       && final.allHistoricalAssetsCarried === true && final.automaticPruning === false
       && final.minimumRetentionHours === 48 && UUID.test(final.candidateVersionId ?? '')
       && UUID.test(final.deploymentId ?? '') && SHA.test(final.ledgerSHA256 ?? '')
@@ -540,7 +615,10 @@ export class ProductionAutoJournal {
       && JSON.stringify(op.receipts.map(row => row.status)) === JSON.stringify([
         'started','prepared','inactive-verified','zero-percent-verified','candidate-assets-verified','verified']);
     const phases = new Set(op.intents.map(intent => intent.phase));
-    const allWritesAcknowledged = op.intents.length > 0
+    const allWritesAcknowledged = op.releaseKind === 'backend-sync'
+      ? op.intents.length === 2 && phases.size === 2 && phases.has('sync-version-upload') && phases.has('sync-activate-candidate')
+        && op.intents.every(intent => op.responses.some(row => row.requestId === intent.requestId && row.providerAcknowledged))
+      : op.intents.length > 0
       && ['activate-candidate','temporary-verifier-create','temporary-verifier-enable','temporary-verifier-delete'].every(phase => phases.has(phase))
       && op.intents.every(intent => op.responses.some(row => row.requestId === intent.requestId && row.providerAcknowledged));
     if (op.state === 'verified-pending-artifact' && status === 'success' && releaseStatus === 'success'

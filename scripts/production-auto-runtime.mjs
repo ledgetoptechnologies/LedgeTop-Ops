@@ -106,7 +106,7 @@ function git(args, cwd = ROOT) {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true, shell: false, timeout: 10_000, maxBuffer: 1024 * 1024 });
   need(!result.error && result.status === 0, 'runtime_git_source_refused'); return result.stdout.trim();
 }
-function runBuild(app) {
+export function runBuild(app) {
   validateBuildEnvironment();
   const result = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build', '--prefix', `apps/${app}`], {
     cwd: ROOT, env: productionAutoBuildEnvironment(process.env), encoding: 'utf8', windowsHide: true, shell: false, timeout: 10 * 60_000, maxBuffer: 16 * 1024 * 1024,

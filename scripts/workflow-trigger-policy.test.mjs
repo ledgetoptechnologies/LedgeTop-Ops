@@ -66,7 +66,7 @@ for (const name of fs.readdirSync(directory).filter(name => /\.ya?ml$/.test(name
 
 function assertProductionAutoReleasePolicy(source) {
   const trigger = `on:\n  workflow_run:\n    workflows: [CI]\n    types: [completed]\n`;
-  assert.ok(source.startsWith(`name: Production automatic retained-asset release\n\n${trigger}`), 'only the exact CI-completion event is allowed');
+  assert.ok(source.startsWith(`name: Production automatic frontend and backend release\n\n${trigger}`), 'only the exact CI-completion event is allowed');
   assert.equal((source.match(/^  workflow_run:/gm) ?? []).length, 1);
   assert.ok(!/^  (?:push|pull_request|pull_request_target|schedule|workflow_dispatch|repository_dispatch):/m.test(source));
   assert.ok(source.includes("github.event.workflow_run.event == 'push'"));
@@ -84,8 +84,8 @@ function assertProductionAutoReleasePolicy(source) {
   assert.match(jobHeader, /^    permissions:\n      contents: write\n      actions: read$/m,
     'only the release job receives the exact minimum token permissions');
   assert.ok(source.includes('if-no-files-found: error') && source.includes('include-hidden-files: true'));
-  const dependencyInstall = source.split('- name: Install locked frontend build dependencies\n')[1]?.split('\n      - name:')[0] ?? '';
-  assert.ok(dependencyInstall.includes('npm ci --prefix apps/client') && dependencyInstall.includes('npm ci --prefix apps/operations'));
+  const dependencyInstall = source.split('- name: Install locked application build dependencies\n')[1]?.split('\n      - name:')[0] ?? '';
+  assert.ok(dependencyInstall.includes('npm ci --prefix apps/${{ matrix.app }}'));
   assert.ok(!dependencyInstall.includes('secrets.') && !dependencyInstall.includes('GITHUB_TOKEN')
     && !dependencyInstall.includes('CLOUDFLARE_API_TOKEN') && !dependencyInstall.includes('NATIVE_STAFF_CUTOVER_REVIEW_JSON'),
   'dependency lifecycle scripts receive no provider or GitHub token secrets');
@@ -96,6 +96,9 @@ function assertProductionAutoReleasePolicy(source) {
   assert.ok(source.includes('ref: ${{ github.event.workflow_run.head_sha }}'));
   assert.ok(source.includes('persist-credentials: false'));
   assert.ok(source.includes('node scripts/production-auto-runtime.mjs'));
+  assert.ok(source.includes('node scripts/production-auto-sync-runtime.mjs'));
+  for (const [worker, app] of [['ledgetop-ops','operations'],['ledgetop-clients','client'],['ledgetop-ops-sync','ops-sync']])
+    assert.ok(source.includes(`worker: ${worker}\n            app: ${app}`), `missing exact runtime lane ${worker}`);
   assert.ok(source.includes('node scripts/production-auto-journal-artifact.mjs'));
   assert.ok(source.includes('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'));
   assert.ok(source.includes('actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f'));
