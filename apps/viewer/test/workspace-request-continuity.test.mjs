@@ -7,12 +7,19 @@ const start=source.indexOf('async function workspaceFetch('),end=source.indexOf(
 assert.ok(start>=0&&end>start);
 
 test('private downloads, GCP images and legacy chunks all use the continuity wrapper, not raw authenticated fetch',()=>{
-  for(const name of ['authenticatedDownload','privateGcpImage','uploadFiles']){
-    const line=source.split(/\r?\n/).find(value=>value.startsWith(`async function ${name}(`));
+  const lines=source.split(/\r?\n/);
+  for(const name of ['authenticatedDownload','privateGcpImage','performLegacyUpload']){
+    const line=lines.find(value=>value.startsWith(`async function ${name}(`));
     assert.ok(line,`${name} exists`);
     assert.match(line,/await workspaceFetch\(/,`${name} uses the renewal-aware request path`);
-    assert.doesNotMatch(line,/await fetch\(/,`${name} must not bypass expiry handling`);
+    assert.doesNotMatch(line,/(?<![\w.])fetch\(/,`${name} must not bypass expiry handling`);
   }
+  // The legacy upload entry point only records the pending work for tab recovery and delegates
+  // the whole request to performLegacyUpload; it must not send anything itself.
+  const upload=lines.find(value=>value.startsWith('function uploadFiles('));
+  assert.ok(upload,'uploadFiles exists');
+  assert.match(upload,/^function uploadFiles\(form\)\{return navigationWork\.trackLegacyUpload\([^;]*\(\)=>performLegacyUpload\(form\)\);\}$/,'uploadFiles only tracks and delegates to performLegacyUpload');
+  assert.doesNotMatch(upload,/fetch\(/,'uploadFiles must not send requests itself');
   for(const name of ['redeemGrant','restoreWorkspaceSession']){
     const line=source.split(/\r?\n/).find(value=>value.startsWith(`async function ${name}(`));
     assert.match(line,/await fetch\(/,`${name} must not depend on authenticated recovery before initial authentication`);
