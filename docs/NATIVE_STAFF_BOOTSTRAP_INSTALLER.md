@@ -26,7 +26,10 @@ JSON error so the batch rolls back. Each allowlisted native insert is gated on
 the newly created approval; the final receipt insert checks unchanged Ops ACL
 rows and the exact 0225 lifecycle control-plane set. It never edits
 `staff_users`, legacy Ops/PA roles, permissions, scope grants, identity
-bindings, or existing native authority rows.
+bindings, or existing native authority rows. After the batch it compares the
+durable approval, receipt summary/hash, and every plan-owned row to the exact
+compiled canonical plan; a self-consistent but plan-divergent receipt is an
+uncertain outcome requiring reconciliation.
 The CAS intentionally ignores only `staff_users.last_seen_at`, which normal
 authenticated activity refreshes independently. It remains part of the exact
 schema fingerprint; status, email, access subject, profile, permission, and all

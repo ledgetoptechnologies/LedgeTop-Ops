@@ -319,4 +319,34 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
     await expect(execute(db,sixthPrepared,{verifyTrust:trusted})).rejects.toThrow(/snapshot_changed_schema_count/u);
     expect(await db.prepare("SELECT count(*) n FROM native_staff_bootstrap_approvals WHERE approval_id=?").bind(sixthInput.approval.approvalId).first("n")).toBe(0);
   },240_000);
+
+  it("treats a self-consistent but plan-divergent durable receipt as uncertain",async()=>{
+    const people=await fixture(),reviewed=await snapshot(db,[people.ops.id]),input=planFor(reviewed,people),prepared=await prepare(input,{verifyTrust:trusted});
+    let batchCount=0;
+    const tamperingDb:any={
+      prepare:(sql:string)=>db.prepare(sql),
+      batch:async(statements:any[])=>{
+        const result=await db.batch(statements);batchCount++;
+        if(batchCount===2){
+          const tamperedResult=stable({schemaVersion:1,approvalId:prepared.approval.approvalId,commandId:prepared.commandId,
+            canonicalPlanSha256:prepared.planSha256,bindingEvidenceSha256:prepared.bindingSha256,
+            installedStaffCount:99,insertedRowCount:prepared.plan.rows.length});
+          await db.prepare("DROP TRIGGER native_staff_bootstrap_receipts_no_update").run();
+          try{
+            await db.prepare("UPDATE native_staff_bootstrap_receipts SET result_json=?,result_sha256=? WHERE command_id=?")
+              .bind(tamperedResult,hash(tamperedResult),prepared.commandId).run();
+          }finally{
+            await db.prepare(`CREATE TRIGGER native_staff_bootstrap_receipts_no_update BEFORE UPDATE ON native_staff_bootstrap_receipts
+              BEGIN SELECT RAISE(ABORT,'native staff bootstrap receipt is immutable'); END`).run();
+          }
+        }
+        return result;
+      },
+    };
+    await expect(execute(tamperingDb,prepared,{verifyTrust:trusted})).rejects.toThrow(/commit_outcome_uncertain/u);
+    expect(batchCount).toBe(2);
+    const durable=await db.prepare("SELECT result_json,result_sha256 FROM native_staff_bootstrap_receipts WHERE command_id=?").bind(prepared.commandId).first() as any;
+    expect(hash(durable.result_json)).toBe(durable.result_sha256);
+    expect(JSON.parse(durable.result_json).installedStaffCount).toBe(99);
+  },120_000);
 });

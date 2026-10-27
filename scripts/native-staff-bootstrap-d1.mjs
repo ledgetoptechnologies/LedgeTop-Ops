@@ -315,11 +315,16 @@ function gatedInsert(item, approvalId) {
     params:[...columns.map(name=>item.row[name]),approvalId] };
 }
 
-function receiptStatement(input) {
+function receiptSummary(input){
   const result = { schemaVersion:1, approvalId:input.approval.approvalId, commandId:input.commandId,
     canonicalPlanSha256:input.planSha256,bindingEvidenceSha256:input.bindingSha256,
     installedStaffCount:input.plan.staffCohort.length,insertedRowCount:input.plan.rows.length };
   const resultJson = canonical(result);
+  return {resultJson,resultSha256:sha(resultJson)};
+}
+
+function receiptStatement(input) {
+  const {resultJson,resultSha256}=receiptSummary(input);
   const model=input.schemaModel;
   const legacyState=stateObjectSql(model,'null',LEGACY_TABLES);
   const parsed=JSON.parse(input.reviewedSnapshot.snapshotJson).rows;
@@ -334,7 +339,7 @@ function receiptStatement(input) {
       THEN ? ELSE NULL END,?,?,?,?,?,?,?,?,?`,
     params:[expectedLegacy,expectedControlPlane,input.approval.approvalId,input.commandId,input.approval.approvalId,
       input.approval.approvedOperatorStaffId,input.approval.approvedOperatorAccessSubject,input.canonicalPlanJson,input.planSha256,
-      input.bindingEvidenceJson,input.bindingSha256,resultJson,sha(resultJson)] };
+      input.bindingEvidenceJson,input.bindingSha256,resultJson,resultSha256] };
 }
 
 async function confirmDurableInstall(db,prepared){
@@ -351,10 +356,12 @@ async function confirmDurableInstall(db,prepared){
   const receipt=await db.prepare(`SELECT command_id,approval_id,operator_staff_id,operator_access_subject,canonical_plan_json,canonical_plan_sha256,
     independent_binding_verification_json,independent_binding_verification_sha256,result_json,result_sha256 FROM native_staff_bootstrap_receipts WHERE command_id=?`)
     .bind(prepared.commandId).first();
+  const expectedResult=receiptSummary(prepared);
   if(!receipt||receipt.approval_id!==prepared.approval.approvalId||receipt.operator_staff_id!==prepared.approval.approvedOperatorStaffId
     ||receipt.operator_access_subject!==prepared.approval.approvedOperatorAccessSubject||receipt.canonical_plan_json!==prepared.canonicalPlanJson
     ||receipt.canonical_plan_sha256!==prepared.planSha256||receipt.independent_binding_verification_json!==prepared.bindingEvidenceJson
-    ||receipt.independent_binding_verification_sha256!==prepared.bindingSha256||sha(receipt.result_json)!==receipt.result_sha256)return false;
+    ||receipt.independent_binding_verification_sha256!==prepared.bindingSha256||receipt.result_json!==expectedResult.resultJson
+    ||receipt.result_sha256!==expectedResult.resultSha256||sha(receipt.result_json)!==receipt.result_sha256)return false;
   for(const item of prepared.plan.rows){
     const columns=INSTALL_COLUMNS[item.table],key=ROW_KEYS[item.table];
     const row=await db.prepare(`SELECT ${columns.map(qid).join(',')} FROM ${qid(item.table)} WHERE ${qid(key)}=?`).bind(item.row[key]).first();
