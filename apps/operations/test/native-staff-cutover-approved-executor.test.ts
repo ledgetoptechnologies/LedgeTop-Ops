@@ -227,14 +227,14 @@ describe.skipIf(process.platform !== "win32")("purpose-bound approved native sta
     return {token,proof,writeBatches};
   }
 
-  async function makeCandidate(){
-    const operator=await seedOwner(),reviewedSnapshot=await readNativeStaffCutoverSnapshot(db);
+  async function makeCandidate(existingOperator?:Person){
+    const operator=existingOperator??await seedOwner(),reviewedSnapshot=await readNativeStaffCutoverSnapshot(db);
     return {candidate:cutoverCandidate(operator,reviewedSnapshot),operator};
   }
 
   it("issues, previews, dispatches once, and verifies the exact 0230 cutover via the fixed-target REST adapter",async()=>{
     miniflareBatchErrors=[];syntheticFetchRoutes=[];syntheticQueryBatches=[];
-    const {candidate:driftCandidate}=await makeCandidate(),{token:driftToken,proof:driftProof,writeBatches:driftWriteBatches}=await installFetch();
+    const {candidate:driftCandidate,operator}=await makeCandidate(),{token:driftToken,proof:driftProof,writeBatches:driftWriteBatches}=await installFetch();
     const readGroup=()=>accessGroupReader.readNativeStaffAccessGroupObservation({config,
       getBearerToken:async()=>"synthetic-cloudflare-read-token-not-a-real-credential",fetchImpl});
     const driftBound=ownerModule.bindNativeStaffCutoverObservedGroupToCandidate(driftCandidate,
@@ -246,10 +246,10 @@ describe.skipIf(process.platform !== "win32")("purpose-bound approved native sta
     const driftBearer="synthetic-d1-api-token-not-used-outside-fetch-fixture",expectedMembers=[...syntheticGroupMembers];
     syntheticGroupMembers=[...expectedMembers,"unexpected@example.test"];
     await expect(executorModule.runNativeStaffCutoverApprovedExecutor({candidate:driftBound,receipt:driftReceipt,mode:"preview",
-      getAccessToken:()=>driftToken,getBearerToken:()=>driftBearer,fetchImpl})).rejects.toThrow(/fresh_group_observation_invalid/u);
+      getAccessToken:()=>driftToken,getBearerToken:()=>driftBearer,fetchImpl})).rejects.toThrow(/group_state_changed/u);
     expect(driftWriteBatches).toHaveLength(0);
     syntheticGroupMembers=expectedMembers;
-    const {candidate:rawCandidate}=await makeCandidate(),{token,proof,writeBatches}=await installFetch();
+    const {candidate:rawCandidate}=await makeCandidate(operator),{token,proof,writeBatches}=await installFetch();
     const candidate=ownerModule.bindNativeStaffCutoverObservedGroupToCandidate(rawCandidate,
       {before:await readGroup(),after:await readGroup()},config).artifact;
     const receipt=ownerModule.buildNativeStaffCutoverOwnerApprovalReceipt({config,artifact:candidate,ownerSession:proof,

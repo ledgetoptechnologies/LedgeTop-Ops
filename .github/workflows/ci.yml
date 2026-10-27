@@ -36,7 +36,7 @@ jobs:
           npm ci --prefix apps/client
 
       - name: Verify guarded production deployment tooling without credentials
-        run: node --test scripts/production-deploy.test.mjs scripts/native-staff-cutover-readiness.test.mjs
+        run: node --test scripts/production-deploy.test.mjs scripts/native-staff-cutover-readiness.test.mjs scripts/native-staff-cutover-access-group-observation.test.mjs
 
       - name: Verify inactive additive UI binding preparation
         run: node --test scripts/ui-additive-release-plan.test.mjs
