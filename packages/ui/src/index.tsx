@@ -550,7 +550,7 @@ export function ViewerEmbed({
     setStartupSnapshot(diagnostics.snapshot());
     const receive = (event: MessageEvent) => { diagnostics.receive(event); };
     window.addEventListener("message", receive);
-    diagnostics.probe();
+    diagnostics.startProbes();
     const stop = () => { diagnostics.close(); window.removeEventListener("message", receive); };
     const expiry = setTimeout(stop, VIEWER_DIAGNOSTICS_TTL_MS);
     return () => {

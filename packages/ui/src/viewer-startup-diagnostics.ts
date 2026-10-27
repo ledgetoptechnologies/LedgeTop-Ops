@@ -5,6 +5,7 @@ const PHASES = new Set([
 ]);
 const HTTP_STATUSES = new Set<number | string>([200, 400, 401, 403, 404, 409, 410, 429, 500, 502, 503, 504, "other"]);
 export const VIEWER_DIAGNOSTICS_TTL_MS = 60_000;
+const STARTUP_PROBE_DELAYS_MS = [1_000, 5_000, 20_000] as const;
 
 export type ViewerStartupSnapshot = Readonly<{
   phase: string;
@@ -14,12 +15,15 @@ export type ViewerStartupSnapshot = Readonly<{
   status?: number | "other";
 }>;
 
-export function createViewerStartupDiagnostics({ origin, nonce, source, now = () => performance.now(), onChange }: {
+export function createViewerStartupDiagnostics({ origin, nonce, source, now = () => performance.now(), onChange,
+  setTimer = setTimeout, clearTimer = clearTimeout }: {
   origin: string;
   nonce: string;
   source: () => Window | null | undefined;
   now?: () => number;
   onChange: (snapshot: ViewerStartupSnapshot) => void;
+  setTimer?: (callback: () => void, delay: number) => ReturnType<typeof setTimeout>;
+  clearTimer?: (handle: ReturnType<typeof setTimeout>) => void;
 }) {
   const url = new URL(origin);
   if (url.protocol !== "https:" || url.origin !== origin || !/^[a-f0-9]{32}$/.test(nonce)) {
@@ -28,20 +32,42 @@ export function createViewerStartupDiagnostics({ origin, nonce, source, now = ()
   const startedAt = now();
   let closed = false;
   let probes = 0;
+  let startedProbes = false;
+  const timers = new Set<ReturnType<typeof setTimeout>>();
+  const stopTimers = () => { for (const timer of timers) clearTimer(timer); timers.clear(); };
   let snapshot: ViewerStartupSnapshot = Object.freeze({ phase: "awaiting-shell", sequence: 0, frameLoads: 0, stages: Object.freeze([]) });
-  const live = () => !closed && now() >= startedAt && now() - startedAt < VIEWER_DIAGNOSTICS_TTL_MS;
+  const live = () => {
+    const elapsed = now() - startedAt;
+    if (!closed && (elapsed < 0 || elapsed >= VIEWER_DIAGNOSTICS_TTL_MS)) {
+      closed = true;
+      stopTimers();
+    }
+    return !closed;
+  };
   const update = (next: ViewerStartupSnapshot) => { snapshot = Object.freeze(next); onChange(snapshot); };
+  const probe = () => {
+    const target = source();
+    if (!live() || !target || probes >= 4) return false;
+    probes += 1;
+    try {
+      target.postMessage({ version: 1, type: "ltds-viewer:startup-probe", nonce }, origin);
+      return true;
+    } catch {
+      // Optional diagnostics must never interrupt authorization or rendering.
+      return false;
+    }
+  };
   return {
-    probe() {
-      const target = source();
-      if (!live() || !target || probes >= 4) return false;
-      probes += 1;
-      try {
-        target.postMessage({ version: 1, type: "ltds-viewer:startup-probe", nonce }, origin);
-        return true;
-      } catch {
-        // Optional diagnostics must never interrupt authorization or rendering.
-        return false;
+    probe,
+    startProbes() {
+      if (startedProbes || !live()) return;
+      startedProbes = true;
+      probe();
+      // A pending module can delay iframe load after the classic listener starts.
+      // These probes share the same four-send budget as the onLoad probe.
+      for (const delay of STARTUP_PROBE_DELAYS_MS) {
+        const timer = setTimer(() => { timers.delete(timer); probe(); }, delay);
+        timers.add(timer);
       }
     },
     frameLoaded() {
@@ -50,6 +76,7 @@ export function createViewerStartupDiagnostics({ origin, nonce, source, now = ()
         // WindowProxy survives navigation. Never attribute a replacement document's
         // reset sequence (or an old queued reply) to this initial startup attempt.
         closed = true;
+        stopTimers();
         update({ ...snapshot, phase: "frame-reloaded", frameLoads: 2 });
         return;
       }
@@ -68,12 +95,13 @@ export function createViewerStartupDiagnostics({ origin, nonce, source, now = ()
         !Number.isInteger(value.sequence) || Number(value.sequence) < 1 || Number(value.sequence) > 16 ||
         Number(value.sequence) <= snapshot.sequence ||
         (http && !HTTP_STATUSES.has(value.status as number | string))) return false;
+      stopTimers();
       update({ ...snapshot, phase: value.phase, sequence: Number(value.sequence),
         stages: Object.freeze([...snapshot.stages, http ? `redeem-http:${value.status}` : value.phase]),
         ...(http ? { status: value.status as number | "other" } : {}) });
       return true;
     },
     snapshot: () => snapshot,
-    close() { closed = true; },
+    close() { closed = true; stopTimers(); },
   };
 }
