@@ -1,13 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import { readFileSync, readdirSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { constants, createHash, generateKeyPairSync, randomUUID, sign as signBytes } from "node:crypto";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { PERMISSIONS } from "@ltds/shared";
 import { evaluatePermission } from "../src/worker/acl";
 import { executeNativeStaffBootstrapD1 as execute, prepareNativeStaffBootstrapD1 as prepare,
   readNativeStaffBootstrapSnapshot as snapshot,compileNativeStaffBootstrapManagementBatch as compileManagementBatch,
   submitNativeStaffBootstrapManagementBatch as submitManagementBatch } from "../../../scripts/native-staff-bootstrap-d1.mjs";
+import { buildOwnerApprovalReceipt, canonicalJson as approvalCanonical,
+  verifyNativeStaffBootstrapOwnerApprovalReceipt } from "../../../scripts/native-staff-bootstrap-owner-approval.mjs";
 
 let runtime:Miniflare, db:D1Database, serial=0;
 const hash=(value:string)=>createHash("sha256").update(value).digest("hex");
@@ -360,4 +362,117 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
     expect(hash(durable.result_json)).toBe(durable.result_sha256);
     expect(JSON.parse(durable.result_json).installedStaffCount).toBe(99);
   },120_000);
+
+  it("pins global permission-defining division and resource-scope rows in the reviewed snapshot",async()=>{
+    const people=await fixture();
+    const area=(await db.prepare("SELECT id FROM native_business_areas ORDER BY id LIMIT 1").first<{id:string}>())?.id;
+    if(!area)throw new Error("native_staff_bootstrap_test_authority_area_missing");
+    await db.prepare("INSERT INTO native_business_divisions(id,business_area_id,name,active) VALUES(?,?,?,1)")
+      .bind(`snapshot-division:${people.ops.id}`,area,"Snapshot division").run();
+    await db.prepare("DROP TRIGGER operations_directory_records_write_guard_insert").run();
+    try {
+      await db.prepare("INSERT INTO operations_directory_records(record_id,record_kind,current_version) VALUES(?,'organization',1)")
+        .bind(`snapshot-resource:${people.ops.id}`).run();
+    } finally {
+      await db.prepare(`CREATE TRIGGER operations_directory_records_write_guard_insert BEFORE INSERT ON operations_directory_records
+        WHEN NOT EXISTS(SELECT 1 FROM operations_directory_live_write_fences fence WHERE fence.mutation_id IS NOT NULL
+          AND fence.operation_kind='create' AND fence.record_id=NEW.record_id AND fence.record_kind=NEW.record_kind
+          AND fence.expected_version=0 AND fence.record_writes=1 AND NEW.current_version=1)
+        BEGIN SELECT RAISE(ABORT,'directory create requires current native authority'); END`).run();
+    }
+    await db.prepare("DROP TRIGGER native_directory_resource_scopes_create_guard").run();
+    try {
+      await db.prepare(`INSERT INTO native_directory_resource_scopes(record_id,scope_kind,business_area_id,division_id,active)
+        VALUES(?,'business_area',?,NULL,1)`).bind(`snapshot-resource:${people.ops.id}`,area).run();
+    } finally {
+      await db.prepare(`CREATE TRIGGER native_directory_resource_scopes_create_guard BEFORE INSERT ON native_directory_resource_scopes
+        WHEN NOT EXISTS(SELECT 1 FROM operations_directory_live_write_fences fence,json_each(fence.scopes_json) scope
+          WHERE fence.operation_kind='create' AND fence.record_id=NEW.record_id AND fence.record_writes=0
+            AND json_extract(scope.value,'$.businessAreaId')=NEW.business_area_id
+            AND json_extract(scope.value,'$.divisionId') IS NEW.division_id)
+        BEGIN SELECT RAISE(ABORT,'native directory scope requires a create admission'); END`).run();
+    }
+
+    const divisionReview=await snapshot(db,[people.ops.id]),divisionPlan=planFor(divisionReview,people);
+    const divisionPrepared=await prepare(divisionPlan,{verifyTrust:trusted});
+    expect(JSON.parse(divisionReview.snapshotJson).rows.native_business_divisions)
+      .toContainEqual(expect.objectContaining({id:`snapshot-division:${people.ops.id}`,active:1}));
+    await db.prepare("UPDATE native_business_divisions SET active=0 WHERE id=?")
+      .bind(`snapshot-division:${people.ops.id}`).run();
+    await expect(execute(db,divisionPrepared,{verifyTrust:trusted})).rejects.toThrow(/snapshot_changed/u);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_bootstrap_approvals WHERE approval_id=?")
+      .bind(divisionPlan.approval.approvalId).first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_admissions WHERE staff_id=?")
+      .bind(people.ops.id).first("n")).toBe(0);
+
+    await db.prepare("UPDATE native_business_divisions SET active=1 WHERE id=?")
+      .bind(`snapshot-division:${people.ops.id}`).run();
+    const scopeReview=await snapshot(db,[people.ops.id]),scopePlan=planFor(scopeReview,people);
+    const scopePrepared=await prepare(scopePlan,{verifyTrust:trusted});
+    expect(JSON.parse(scopeReview.snapshotJson).rows.native_directory_resource_scopes)
+      .toContainEqual(expect.objectContaining({record_id:`snapshot-resource:${people.ops.id}`,active:1}));
+    await db.prepare("UPDATE native_directory_resource_scopes SET active=0 WHERE record_id=?")
+      .bind(`snapshot-resource:${people.ops.id}`).run();
+    await expect(execute(db,scopePrepared,{verifyTrust:trusted})).rejects.toThrow(/snapshot_changed/u);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_bootstrap_approvals WHERE approval_id=?")
+      .bind(scopePlan.approval.approvalId).first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_admissions WHERE staff_id=?")
+      .bind(people.ops.id).first("n")).toBe(0);
+  },120_000);
+
+  it("prepares and executes only under a genuine signed owner-receipt verifier",async()=>{
+    const fixtureData=await existingOwnerBootstrapFixture();
+    const reviewed=await snapshot(db,[fixtureData.employee.id]);
+    const installerInput=planForExistingOwner(reviewed,fixtureData);
+    const plan=JSON.parse(installerInput.canonicalPlanJson),approvalId=randomUUID(),commandId=randomUUID();
+    plan.approvalId=approvalId;
+    installerInput.canonicalPlanJson=stable(plan);installerInput.commandId=commandId;
+    const artifact={canonicalPlanJson:installerInput.canonicalPlanJson,bindingEvidenceJson:installerInput.bindingEvidenceJson,
+      reviewedSnapshot:reviewed,commandId};
+    const {privateKey,publicKey}=generateKeyPairSync("rsa",{modulusLength:3072});
+    const publicKeyPem=publicKey.export({type:"spki",format:"pem"}).toString();
+    const keyId=createHash("sha256").update(publicKey.export({type:"spki",format:"der"}).toString("base64"),"base64").digest("hex");
+    const config:any={target:{accountId:"a".repeat(32),databaseId:randomUUID()},
+      source:{commit:"b".repeat(40),migrationNamesSha256:reviewed.migrationNamesSha256},
+      access:{origin:"https://ops.example.test",issuer:"https://example.cloudflareaccess.com",audience:"A".repeat(32),
+        owner:{staffId:fixtureData.owner.id,accessSubject:fixtureData.owner.subject}},
+      signer:{algorithm:"RSA-PSS-SHA256",keyId,publicKeyPem}};
+    const state=JSON.parse(reviewed.snapshotJson),users=(await db.prepare("SELECT * FROM staff_users ORDER BY id").all()).results as any[];
+    const cohort=users.map(person=>{
+      const admission=(state.rows.native_staff_admissions??[]).find((row:any)=>row.staff_id===person.id)??null;
+      const profile=(state.rows.native_staff_profiles??[]).find((row:any)=>row.staff_id===person.id)??null;
+      return {staffId:person.id,email:person.email,displayName:person.display_name,accessSubject:person.access_subject,
+        status:person.status,bridgeStatus:!admission?"not_admitted":!profile?"profile_missing":"matched",admission,profile,
+        directoryGrantCount:(state.rows.native_directory_grants??[]).filter((row:any)=>row.staff_id===person.id).length,
+        projectGrantCount:(state.rows.native_project_grants??[]).filter((row:any)=>row.staff_id===person.id).length,
+        managementDelegationCount:(state.rows.native_staff_management_delegations??[]).filter((row:any)=>row.actor_staff_id===person.id).length};
+    });
+    const packet={schemaVersion:1,kind:"operations-current-staff-cohort-review-draft-v1",ownerStaffId:fixtureData.owner.id,
+      snapshotSha256:hash("synthetic advisory review"),schema:[],tables:{...state.rows,staff_users:users},cohort,status:"draft",
+      advisory:true,executionAuthority:false,bootstrapApproval:false,acceptedReceipt:false,installerClaim:false};
+    const liveReview={packet,packetSha256:hash(stable(packet))};
+    const ownerClaims={issuer:config.access.issuer,audience:config.access.audience,subject:fixtureData.owner.subject,
+      assertionSha256:hash("synthetic verified JWT"),issuedAt:Math.floor(Date.now()/1000)-30,
+      expiresAt:Math.floor(Date.now()/1000)+1200};
+    const signed=buildOwnerApprovalReceipt({config,artifact,liveReview,ownerClaims,authorizationChallenge:hash("synthetic typed consent challenge")});
+    const signature=signBytes("sha256",Buffer.from(signed.payloadJson),{key:privateKey,
+      padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32}).toString("base64");
+    const receipt={schemaVersion:1,kind:"operations-native-staff-bootstrap-owner-approval-v1",
+      algorithm:signed.algorithm,keyId:signed.keyId,payload:signed.payload,signature};
+    const verifyTrust=async(input:any)=>verifyNativeStaffBootstrapOwnerApprovalReceipt(receipt,{config,expected:input}).trusted===true;
+    const envelope=signed.payload.trustEnvelope;
+    const input={...installerInput,approval:{approvalId,approvedOperatorStaffId:fixtureData.owner.id,
+      approvedOperatorAccessSubject:fixtureData.owner.subject,issuedByStaffId:fixtureData.owner.id,
+      issuedByAccessSubject:fixtureData.owner.subject,issuedAt:envelope.authorizedAt,expiresAt:envelope.expiresAt},trustEnvelope:envelope};
+    const prepared=await prepare(input,{verifyTrust});
+    const result=await execute(db,prepared,{verifyTrust});
+    expect(result).toMatchObject({staffCount:1,approvalId,commandId});
+    expect(verifyNativeStaffBootstrapOwnerApprovalReceipt(receipt,{config,expected:input}).trusted).toBe(true);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_bootstrap_approvals WHERE approval_id=?")
+      .bind(approvalId).first("n")).toBe(1);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_bootstrap_receipts WHERE command_id=?")
+      .bind(commandId).first("n")).toBe(1);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_profiles WHERE staff_id=?")
+      .bind(fixtureData.owner.id).first("n")).toBe(1);
+  },240_000);
 });
