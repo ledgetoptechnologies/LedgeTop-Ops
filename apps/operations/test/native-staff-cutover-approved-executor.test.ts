@@ -143,8 +143,11 @@ function cutoverCandidate(operator:Person,reviewedSnapshot:any){
 let syncPrep:any,fetchImpl:typeof fetch;
 let miniflareBatchErrors:string[]=[];
 let syntheticFetchRoutes:string[]=[];
+let syntheticAuthorizationRoutes:Array<{path:string;method:string;authorization:string|null}>=[];
 let syntheticQueryBatches:any[]=[];
 let syntheticGroupMembers:string[]=[];
+const syntheticGroupReadToken="synthetic-group-read-token-not-a-real-credential";
+const syntheticD1ManagementToken="synthetic-d1-management-token-not-a-real-credential";
 describe.skipIf(process.platform !== "win32")("purpose-bound approved native staff cutover executor",()=>{
   beforeAll(async()=>{
     scratch=mkdtempSync(path.join(os.tmpdir(),"native-staff-cutover-approved-integration-"));
@@ -199,15 +202,24 @@ describe.skipIf(process.platform !== "win32")("purpose-bound approved native sta
     fetchImpl=async(input:any,init?:RequestInit)=>{
       const url=new URL(String(input));
       syntheticFetchRoutes.push(`${init?.method??"GET"} ${url.pathname}`);
+      const authorization=new Headers(init?.headers).get("authorization");
+      if(url.hostname==="api.cloudflare.com")syntheticAuthorizationRoutes.push({path:url.pathname,method:init?.method??"GET",authorization});
       if(url.pathname==="/cdn-cgi/access/certs")return response({keys:[jwk]});
       if(url.origin===config.access.origin&&url.pathname==="/api/session")return response({user:{id:config.access.owner.staffId},csrfToken:"s".repeat(48)});
       if(url.hostname==="api.cloudflare.com"&&url.pathname===`/client/v4/accounts/${config.target.accountId}/access/groups/${config.accessGroup.id}`
-        &&init?.method==="GET")return response({success:true,result:{id:config.accessGroup.id,name:config.accessGroup.name,
+        &&init?.method==="GET"){
+        if(authorization!==`Bearer ${syntheticGroupReadToken}`)throw new Error("synthetic_group_read_credential_mismatch");
+        return response({success:true,result:{id:config.accessGroup.id,name:config.accessGroup.name,
           include:syntheticGroupMembers.map(email=>({email:{email}})),exclude:[],require:[],is_default:[]}});
+      }
       if(url.hostname==="api.cloudflare.com"&&url.pathname.endsWith(`/d1/database/${config.target.databaseId}`)
-        &&init?.method==="GET")return response({success:true,result:{uuid:config.target.databaseId,name:config.target.databaseName}});
+        &&init?.method==="GET"){
+        if(authorization!==`Bearer ${syntheticD1ManagementToken}`)throw new Error("synthetic_d1_credential_mismatch");
+        return response({success:true,result:{uuid:config.target.databaseId,name:config.target.databaseName}});
+      }
       if(url.hostname==="api.cloudflare.com"&&url.pathname.endsWith(`/d1/database/${config.target.databaseId}/query`)
         &&init?.method==="POST"){
+        if(authorization!==`Bearer ${syntheticD1ManagementToken}`)throw new Error("synthetic_d1_credential_mismatch");
         const body=JSON.parse(String(init.body)) as {batch:Array<{sql:string;params:Array<string|number|null>}>};
         const summary:any={statementCount:body.batch.length,bodyBytes:Buffer.byteLength(String(init.body)),
           maxSqlBytes:Math.max(...body.batch.map(item=>Buffer.byteLength(item.sql))),parameterCount:body.batch.reduce((sum,item)=>sum+item.params.length,0)};
@@ -233,20 +245,23 @@ describe.skipIf(process.platform !== "win32")("purpose-bound approved native sta
   }
 
   it("issues, previews, dispatches once, and verifies the exact 0230 cutover via the fixed-target REST adapter",async()=>{
-    miniflareBatchErrors=[];syntheticFetchRoutes=[];syntheticQueryBatches=[];
+    miniflareBatchErrors=[];syntheticFetchRoutes=[];syntheticAuthorizationRoutes=[];syntheticQueryBatches=[];
     const {candidate:driftCandidate,operator}=await makeCandidate(),{token:driftToken,proof:driftProof,writeBatches:driftWriteBatches}=await installFetch();
     const readGroup=()=>accessGroupReader.readNativeStaffAccessGroupObservation({config,
-      getBearerToken:async()=>"synthetic-cloudflare-read-token-not-a-real-credential",fetchImpl});
+      getAccessGroupReadCredential:async()=>({schemaVersion:1,accountId:config.target.accountId,
+        groupId:config.accessGroup.id,groupName:config.accessGroup.name,token:syntheticGroupReadToken}),fetchImpl});
     const driftBound=ownerModule.bindNativeStaffCutoverObservedGroupToCandidate(driftCandidate,
       {before:await readGroup(),after:await readGroup()},config).artifact;
     ownerModule.initializeNativeStaffCutoverApprovalRegistry(config);
     const driftReceipt=ownerModule.buildNativeStaffCutoverOwnerApprovalReceipt({config,artifact:driftBound,ownerSession:driftProof,
       typedConsent:ownerModule.nativeStaffCutoverConsentText(driftBound,config)});
     ownerModule.writeNativeStaffCutoverReceiptFile(config,driftReceipt);ownerModule.issueNativeStaffCutoverApproval(config,driftReceipt);
-    const driftBearer="synthetic-d1-api-token-not-used-outside-fetch-fixture",expectedMembers=[...syntheticGroupMembers];
+    const expectedMembers=[...syntheticGroupMembers];
     syntheticGroupMembers=[...expectedMembers,"unexpected@example.test"];
     await expect(executorModule.runNativeStaffCutoverApprovedExecutor({candidate:driftBound,receipt:driftReceipt,mode:"preview",
-      getAccessToken:()=>driftToken,getBearerToken:()=>driftBearer,fetchImpl})).rejects.toThrow(/group_state_changed/u);
+      getAccessToken:()=>driftToken,getBearerToken:()=>syntheticD1ManagementToken,
+      getAccessGroupReadCredential:async()=>({schemaVersion:1,accountId:config.target.accountId,
+        groupId:config.accessGroup.id,groupName:config.accessGroup.name,token:syntheticGroupReadToken}),fetchImpl})).rejects.toThrow(/group_state_changed/u);
     expect(driftWriteBatches).toHaveLength(0);
     syntheticGroupMembers=expectedMembers;
     const {candidate:rawCandidate}=await makeCandidate(operator),{token,proof,writeBatches}=await installFetch();
@@ -255,13 +270,16 @@ describe.skipIf(process.platform !== "win32")("purpose-bound approved native sta
     const receipt=ownerModule.buildNativeStaffCutoverOwnerApprovalReceipt({config,artifact:candidate,ownerSession:proof,
       typedConsent:ownerModule.nativeStaffCutoverConsentText(candidate,config)});
     ownerModule.writeNativeStaffCutoverReceiptFile(config,receipt);ownerModule.issueNativeStaffCutoverApproval(config,receipt);
-    const bearer="synthetic-d1-api-token-not-used-outside-fetch-fixture";
     const preview=await executorModule.runNativeStaffCutoverApprovedExecutor({candidate,receipt,mode:"preview",
-      getAccessToken:()=>token,getBearerToken:()=>bearer,fetchImpl});
+      getAccessToken:()=>token,getBearerToken:()=>syntheticD1ManagementToken,
+      getAccessGroupReadCredential:async()=>({schemaVersion:1,accountId:config.target.accountId,
+        groupId:config.accessGroup.id,groupName:config.accessGroup.name,token:syntheticGroupReadToken}),fetchImpl});
     expect(preview.mode).toBe("preview");expect(preview.targetDatabaseId).toBe(config.target.databaseId);
     let result:any;
     try{result=await executorModule.runNativeStaffCutoverApprovedExecutor({candidate,receipt,mode:"execute",
-      preparedSha256:preview.preparedSha256,getAccessToken:()=>token,getBearerToken:()=>bearer,fetchImpl});}
+      preparedSha256:preview.preparedSha256,getAccessToken:()=>token,getBearerToken:()=>syntheticD1ManagementToken,
+      getAccessGroupReadCredential:async()=>({schemaVersion:1,accountId:config.target.accountId,
+        groupId:config.accessGroup.id,groupName:config.accessGroup.name,token:syntheticGroupReadToken}),fetchImpl});}
     catch(error){const snapshot=JSON.parse(candidate.reviewedSnapshot.snapshotJson);
       const expectedAtomicBatchMinimum=6+Math.ceil(snapshot.schema.length/20)+Object.keys(snapshot.rows).length;
       throw new Error("synthetic cutover execute failed; Miniflare batch diagnostics: "+JSON.stringify(miniflareBatchErrors)
@@ -284,8 +302,17 @@ describe.skipIf(process.platform !== "win32")("purpose-bound approved native sta
       accessGroupObservations:candidate.syncPreparationReceipt.accessGroupObservations});
     expect(JSON.stringify(JSON.parse(receiptRow!.result_json).accessGroupObservations)).not.toContain("historical-member@example.test");
     expect(syntheticFetchRoutes.filter(route=>route.includes("/access/groups/")).every(route=>route.startsWith("GET "))).toBe(true);
+    expect(syntheticAuthorizationRoutes.filter(row=>row.path.includes("/access/groups/")).length).toBeGreaterThan(0);
+    expect(syntheticAuthorizationRoutes.filter(row=>row.path.includes("/access/groups/")).every(row=>row.authorization===`Bearer ${syntheticGroupReadToken}`)).toBe(true);
+    expect(syntheticAuthorizationRoutes.filter(row=>row.path.includes("/d1/database/")).length).toBeGreaterThan(0);
+    expect(syntheticAuthorizationRoutes.filter(row=>row.path.includes("/d1/database/")).every(row=>row.authorization===`Bearer ${syntheticD1ManagementToken}`)).toBe(true);
+    expect(syntheticAuthorizationRoutes.some(row=>row.path.includes("/access/groups/")&&row.authorization===`Bearer ${syntheticD1ManagementToken}`)).toBe(false);
+    expect(syntheticAuthorizationRoutes.some(row=>row.path.includes("/d1/database/")&&row.authorization===`Bearer ${syntheticGroupReadToken}`)).toBe(false);
     const registry=ownerModule.readNativeStaffCutoverApprovalRegistry(config);
-    expect(registry.envelope.payload.entries[0]).toMatchObject({approvalId:candidate.approvalId,state:"consumed"});
+    expect(registry.envelope.payload.entries.find((entry:any)=>entry.approvalId===candidate.approvalId))
+      .toMatchObject({approvalId:candidate.approvalId,state:"consumed"});
+    expect(registry.envelope.payload.entries.find((entry:any)=>entry.approvalId===driftBound.approvalId))
+      .toMatchObject({approvalId:driftBound.approvalId,state:"issued"});
     expect(writeBatches).toHaveLength(1);
     expect(writeBatches[0]).toHaveLength(3);
   },300_000);

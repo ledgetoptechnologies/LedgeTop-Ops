@@ -7,6 +7,18 @@
       "sha256": "a1a7a98e0b073d39dc3229b1b89f66accb51ae557fb34552250f914f12a81efd"
     },
     {
+      "path": "scripts/access-group-read-capsule-pins.mjs",
+      "sha256": "30ddf6b02cd0904b117ecb29f74a5c3b0049ccaf975ec9264954a2546df2b013"
+    },
+    {
+      "path": "scripts/access-group-read-capsule-unseal.ps1",
+      "sha256": "9bbf44a8a66521c55b06c59c41d064d3dae6047e8b5b1f1d4d1d4ae859ed5a50"
+    },
+    {
+      "path": "scripts/access-group-read-capsule.mjs",
+      "sha256": "bd7a3d405fd4a205eff5a006844f834877591ccf5fbd5f707aa4b63d54619bfa"
+    },
+    {
       "path": "scripts/native-staff-bootstrap-approved-executor-config.mjs",
       "sha256": "27e034c3026a3ed877dadc302910c150722b0b10509f9539fa54b1ce4e40edc1"
     },
@@ -36,7 +48,7 @@
     },
     {
       "path": "scripts/native-staff-cutover-access-group-observation.mjs",
-      "sha256": "e8a1dde602778a2bfb9f1fe849dc809dc5aefe63f06d04fe3f00b5e1051f007c"
+      "sha256": "8e49ebd0ff8418496b19ada25211903632e37cc2a2f9980e750df245263f2856"
     },
     {
       "path": "scripts/native-staff-cutover-approved-executor-config.mjs",
@@ -44,15 +56,15 @@
     },
     {
       "path": "scripts/native-staff-cutover-approved-executor.mjs",
-      "sha256": "512e50a5d4fb1b9f9c37a3ba52cc6c4510c65816e83bf303cf7fe73aadf399d1"
+      "sha256": "8583cd49e38570aeaf510cead4c093d934636b6a702ed799af7f84f4092c7778"
     },
     {
       "path": "scripts/native-staff-cutover-distribution-pin.mjs",
-      "sha256": "77845bf612e39848b393256128249a981a94bf4a055b9595c724e502d26522b7"
+      "sha256": "c66179b5951a66652d731c2a34e7cab9acdb3af61e13577ad94063ba88dd1bb0"
     },
     {
       "path": "scripts/native-staff-cutover-owner-approval-cli.mjs",
-      "sha256": "57172b3f794bae475da04058401f8282fe9d85ed070653b255297953aea4d5ed"
+      "sha256": "df35872bd0d3ae8a3998803f7146f5f5d64b697ee512488f5b67ffea633a7a9f"
     },
     {
       "path": "scripts/native-staff-cutover-owner-approval.mjs",

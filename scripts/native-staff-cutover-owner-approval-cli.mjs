@@ -16,6 +16,7 @@ import { assertPinnedNativeStaffCutoverSource, buildNativeStaffCutoverOwnerAppro
 import { readNativeStaffCutoverSnapshot } from './native-staff-cutover-v1.mjs';
 import { assertFreshNativeStaffAccessGroup, readNativeStaffAccessGroupObservation } from './native-staff-cutover-access-group-observation.mjs';
 import { wranglerBearerToken } from './native-staff-cutover-approved-executor.mjs';
+import { loadPinnedAccessGroupReadCredential } from './access-group-read-capsule.mjs';
 
 const stop=code=>{throw new Error(`native_staff_cutover_issuer_${code}`);};
 const sha=value=>createHash('sha256').update(value).digest('hex');
@@ -68,8 +69,8 @@ async function main(argv){
   if(!sameSnapshot(before,candidate.reviewedSnapshot)||!ownerBound(before,config))stop('snapshot_or_owner_changed');
   let session=await verifyCurrentNativeStaffCutoverOwnerSession(config,runPinnedCloudflaredToken(config));
   if(session.staffId!==config.access.owner.staffId)stop('owner_session_mismatch');
-  const observedBefore=await readNativeStaffAccessGroupObservation({config,getBearerToken:wranglerBearerToken});
-  const observedAfter=await readNativeStaffAccessGroupObservation({config,getBearerToken:wranglerBearerToken});
+  const observedBefore=await readNativeStaffAccessGroupObservation({config,getAccessGroupReadCredential:loadPinnedAccessGroupReadCredential});
+  const observedAfter=await readNativeStaffAccessGroupObservation({config,getAccessGroupReadCredential:loadPinnedAccessGroupReadCredential});
   const approved=bindNativeStaffCutoverObservedGroupToCandidate(candidate,{before:observedBefore,after:observedAfter},config);
   const approvalCandidate=approved.artifact,compiled=approved.compiled;
   const observations=approvalCandidate.syncPreparationReceipt.accessGroupObservations;
@@ -94,7 +95,7 @@ async function main(argv){
   if(session.staffId!==config.access.owner.staffId||!sameSnapshot(before,after)||!sameSnapshot(after,candidate.reviewedSnapshot)||!ownerBound(after,config))
     stop('owner_or_snapshot_changed_after_consent');
   await assertFreshNativeStaffAccessGroup({config,reviewedBefore:observations.before,reviewedAfter:observations.after,
-    getBearerToken:wranglerBearerToken});
+    getAccessGroupReadCredential:loadPinnedAccessGroupReadCredential});
   const candidatePath=writeApprovedCandidateFile(config,approvalCandidate);
   const receipt=buildNativeStaffCutoverOwnerApprovalReceipt({config,artifact:approvalCandidate,ownerSession:session,typedConsent:typed});
   const receiptPath=writeNativeStaffCutoverReceiptFile(config,receipt);const registration=issueNativeStaffCutoverApproval(config,receipt);

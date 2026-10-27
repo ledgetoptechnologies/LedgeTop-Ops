@@ -157,16 +157,20 @@ async function readBoundedBody(response) {
 }
 
 /** One bounded GET. No retries, redirects, writes, or caller-supplied endpoint. */
-export async function readNativeStaffAccessGroupObservation({ config, getBearerToken, fetchImpl = globalThis.fetch,
+export async function readNativeStaffAccessGroupObservation({ config, getAccessGroupReadCredential, fetchImpl = globalThis.fetch,
   now = Date.now } = {}) {
   const target = validateTarget(config);
-  if (typeof getBearerToken !== 'function' || typeof fetchImpl !== 'function' || typeof now !== 'function') fail('reader_unavailable');
-  const token = await getBearerToken();
-  if (typeof token !== 'string' || token.length < 20 || token.length > 16_384 || !/^[\x21-\x7e]+$/u.test(token)) fail('provider_token_invalid');
+  if (typeof getAccessGroupReadCredential !== 'function' || typeof fetchImpl !== 'function' || typeof now !== 'function') fail('reader_unavailable');
+  const credential = await getAccessGroupReadCredential();
+  if (!exact(credential, ['schemaVersion','accountId','groupId','groupName','token'])
+    || credential.schemaVersion !== 1 || credential.accountId !== target.accountId
+    || credential.groupId !== target.groupId || credential.groupName !== target.groupName
+    || typeof credential.token !== 'string' || credential.token.length < 20 || credential.token.length > 1024
+    || !/^[\x21-\x7e]+$/u.test(credential.token)) fail('provider_credential_invalid');
   const endpoint = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(target.accountId)}/access/groups/${encodeURIComponent(target.groupId)}`;
   let response;
   try {
-    response = await fetchImpl(endpoint, { method: 'GET', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+    response = await fetchImpl(endpoint, { method: 'GET', headers: { Authorization: `Bearer ${credential.token}`, Accept: 'application/json' },
       redirect: 'manual', signal: AbortSignal.timeout(8_000) });
   } catch { fail('provider_read_failed'); }
   if (!response || response.redirected || response.status !== 200 || response.url && response.url !== endpoint) {
@@ -196,12 +200,12 @@ export async function readNativeStaffAccessGroupObservation({ config, getBearerT
 }
 
 /** Fresh GET compared to the reviewed pair; provider details remain in memory. */
-export async function assertFreshNativeStaffAccessGroup({ config, reviewedBefore, reviewedAfter, getBearerToken,
+export async function assertFreshNativeStaffAccessGroup({ config, reviewedBefore, reviewedAfter, getAccessGroupReadCredential,
   fetchImpl = globalThis.fetch, now = Date.now } = {}) {
   const before = validateNativeStaffAccessGroupObservation(reviewedBefore, { now: now() });
   const after = validateNativeStaffAccessGroupObservation(reviewedAfter, { now: now() });
   assertNativeStaffAccessGroupStateMatches(before, after, { now: now() });
-  const live = await readNativeStaffAccessGroupObservation({ config, getBearerToken, fetchImpl, now });
+  const live = await readNativeStaffAccessGroupObservation({ config, getAccessGroupReadCredential, fetchImpl, now });
   assertNativeStaffAccessGroupStateMatches(after, live, { now: now() });
   return live;
 }

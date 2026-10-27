@@ -1,8 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { NATIVE_STAFF_CUTOVER_DISTRIBUTION_FILES } from './native-staff-cutover-distribution-pin.mjs';
 import { assertFreshNativeStaffAccessGroup, assertNativeStaffAccessGroupStateMatches,
   readNativeStaffAccessGroupObservation, validateNativeStaffAccessGroupObservation } from './native-staff-cutover-access-group-observation.mjs';
+import { createApprovedExecutorD1Provider } from './native-staff-bootstrap-approved-executor.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(',')}]`
@@ -14,6 +19,8 @@ const group = () => ({id:config.accessGroup.id,name:config.accessGroup.name,
   include:[{email:{email:' Staff@Example.test '}},{email:{email:'owner@example.test'}}],
   exclude:[],require:[],is_default:[],
   created_at:'provider-metadata-is-covered-by-response-hash'});
+const credential = (token=`synthetic-bearer-${'x'.repeat(40)}`) => ({schemaVersion:1,accountId:config.target.accountId,
+  groupId:config.accessGroup.id,groupName:config.accessGroup.name,token});
 function response(body,{status=200}={}) {
   return new Response(JSON.stringify(body),{status,headers:{'content-type':'application/json'}});
 }
@@ -21,7 +28,7 @@ function fetchFor(result,{status=200}={}) {
   const calls=[];
   return { calls, fetchImpl:async (url,init)=>{calls.push({url:String(url),init});return response({success:status===200,result}, {status});} };
 }
-const read = (fetchImpl, clock=()=>now) => readNativeStaffAccessGroupObservation({config,getBearerToken:async()=>`synthetic-bearer-${'x'.repeat(40)}`,fetchImpl,now:clock});
+const read = (fetchImpl, clock=()=>now) => readNativeStaffAccessGroupObservation({config,getAccessGroupReadCredential:async()=>credential(),fetchImpl,now:clock});
 
 test('performs one exact GET and returns immutable hashed evidence without members or credentials',async()=>{
   const fake=fetchFor(group());
@@ -45,6 +52,16 @@ test('performs one exact GET and returns immutable hashed evidence without membe
   assert.equal(JSON.stringify(observation).includes('owner@example.test'),false);
   assert.equal(JSON.stringify(observation).includes('synthetic-bearer'),false);
   assert.equal(Object.isFrozen(observation),true);
+});
+
+test('rejects capsule identity metadata that does not match the reviewed group before fetching',async()=>{
+  for(const changes of [{accountId:'b'.repeat(32)},{groupId:'22222222-2222-4222-8222-222222222222'},{groupName:'Other group'}]){
+    let fetches=0;
+    await assert.rejects(readNativeStaffAccessGroupObservation({config,
+      getAccessGroupReadCredential:async()=>({...credential(),...changes}),
+      fetchImpl:async()=>{fetches++;throw new Error('must-not-fetch');},now:()=>now}),/provider_credential_invalid/u);
+    assert.equal(fetches,0);
+  }
 });
 
 for (const [label, mutate, code] of [
@@ -71,7 +88,7 @@ test('refuses redirects, non-200 responses, missing token and oversized response
   const unavailable=fetchFor(group(),{status:503});
   await assert.rejects(read(unavailable.fetchImpl),/provider_response_invalid/u);
   assert.equal(unavailable.calls.length,1);
-  await assert.rejects(readNativeStaffAccessGroupObservation({config,getBearerToken:async()=>'',fetchImpl:async()=>{throw new Error('no-fetch');},now:()=>now}),/provider_token_invalid/u);
+  await assert.rejects(readNativeStaffAccessGroupObservation({config,getAccessGroupReadCredential:async()=>credential(''),fetchImpl:async()=>{throw new Error('no-fetch');},now:()=>now}),/provider_credential_invalid/u);
   const oversized=await read(async()=>new Response('x'.repeat(2*1024*1024+1),{status:200,
     headers:{'content-length':String(2*1024*1024+1)}})).catch(error=>error);
   assert.match(oversized.message,/response_too_large/u);
@@ -150,10 +167,81 @@ test('freshness assertion performs a new pinned GET and rejects stale or cross-g
   const after=await read(fetchFor(group()).fetchImpl,()=>now);
   const live=fetchFor(group());
   assert.equal((await assertFreshNativeStaffAccessGroup({config,reviewedBefore:before,reviewedAfter:after,
-    getBearerToken:async()=>`synthetic-bearer-${'x'.repeat(40)}`,fetchImpl:live.fetchImpl,now:()=>now})).groupId,config.accessGroup.id);
+    getAccessGroupReadCredential:async()=>credential(),fetchImpl:live.fetchImpl,now:()=>now})).groupId,config.accessGroup.id);
   assert.equal(live.calls.length,1);
   const cross={...after,groupId:'22222222-2222-4222-8222-222222222222'};
   cross.evidenceSha256=sha(canonical(Object.fromEntries(Object.entries(cross).filter(([key])=>key!=='evidenceSha256'))));
   await assert.rejects(assertFreshNativeStaffAccessGroup({config,reviewedBefore:before,reviewedAfter:cross,
-    getBearerToken:async()=>`synthetic-bearer-${'x'.repeat(40)}`,fetchImpl:live.fetchImpl,now:()=>now}),/group_state_changed/u);
+    getAccessGroupReadCredential:async()=>credential(),fetchImpl:live.fetchImpl,now:()=>now}),/group_state_changed/u);
+});
+
+test('the cutover call path keeps Access Groups and D1 credentials separate and never falls back after group denial',async()=>{
+  const root=fileURLToPath(new URL('../',import.meta.url));
+  const cli=readFileSync(path.join(root,'scripts/native-staff-cutover-owner-approval-cli.mjs'),'utf8');
+  const executor=readFileSync(path.join(root,'scripts/native-staff-cutover-approved-executor.mjs'),'utf8');
+  assert.match(cli,/getAccessGroupReadCredential:loadPinnedAccessGroupReadCredential/u);
+  assert.match(cli,/createApprovedExecutorD1Provider\(\{config,getBearerToken:wranglerBearerToken\}\)/u);
+  assert.match(executor,/getAccessGroupReadCredential=loadPinnedAccessGroupReadCredential/u);
+  assert.match(executor,/createApprovedExecutorD1Provider\(\{config,getBearerToken,fetchImpl\}\)/u);
+  assert.match(executor,/getAccessGroupReadCredential,fetchImpl/u);
+
+  const extended={...config,target:{...config.target,databaseId:'22222222-2222-4222-8222-222222222222'}};
+  const groupToken='synthetic-group-read-token-never-real-123456';
+  const managementToken='synthetic-wrangler-management-token-never-real-123456';
+  const requests=[];
+  const fetchImpl=async(url,init)=>{
+    const target=String(url),authorization=new Headers(init?.headers).get('authorization');
+    requests.push({target,authorization,method:init?.method});
+    if(target.includes('/access/groups/')){
+      assert.equal(authorization,`Bearer ${groupToken}`);
+      return response({success:true,result:group()});
+    }
+    assert.match(target,/\/d1\/database\//u);
+    assert.equal(authorization,`Bearer ${managementToken}`);
+    return response({success:true,result:{uuid:extended.target.databaseId,name:'synthetic-cutover-db'}});
+  };
+  const observed=await readNativeStaffAccessGroupObservation({config:extended,
+    getAccessGroupReadCredential:async()=>credential(groupToken),fetchImpl,now:()=>now});
+  const provider=createApprovedExecutorD1Provider({config:{...extended,target:{...extended.target,databaseName:'synthetic-cutover-db'}},
+    getBearerToken:async()=>managementToken,fetchImpl});
+  await provider.assertTarget();
+  assert.equal(observed.groupId,config.accessGroup.id);
+  assert.deepEqual(requests.map(item=>item.authorization),[`Bearer ${groupToken}`,`Bearer ${managementToken}`]);
+  assert.equal(requests[0].method,'GET');
+  assert.equal(requests[1].method,'GET');
+
+  let groupReads=0,deniedCalls=0;
+  await assert.rejects(readNativeStaffAccessGroupObservation({config:extended,
+    getAccessGroupReadCredential:async()=>{groupReads++;return credential(groupToken);},
+    fetchImpl:async(url,init)=>{
+      deniedCalls++;
+      assert.match(String(url),/\/access\/groups\//u);
+      assert.equal(new Headers(init.headers).get('authorization'),`Bearer ${groupToken}`);
+      return response({success:false,errors:[{code:10000,message:'denied'}]},{status:403});
+    },now:()=>now}),/provider_response_invalid/u);
+  assert.equal(groupReads,1);
+  assert.equal(deniedCalls,1);
+  assert.equal(requests.length,2);
+});
+
+test('the closed cutover runtime manifest includes every capsule runtime dependency at its current byte hash',()=>{
+  const root=fileURLToPath(new URL('../',import.meta.url));
+  const manifest=JSON.parse(readFileSync(path.join(root,'scripts/native-staff-cutover-distribution-manifest.json'),'utf8'));
+  const entries=[...NATIVE_STAFF_CUTOVER_DISTRIBUTION_FILES].sort();
+  assert.deepEqual(manifest.files.map(entry=>entry.path),entries);
+  const changedRuntimePaths=new Set(['scripts/access-group-read-capsule.mjs','scripts/access-group-read-capsule-pins.mjs',
+    'scripts/access-group-read-capsule-unseal.ps1','scripts/native-staff-cutover-access-group-observation.mjs',
+    'scripts/native-staff-cutover-approved-executor.mjs','scripts/native-staff-cutover-distribution-pin.mjs',
+    'scripts/native-staff-cutover-owner-approval-cli.mjs']);
+  for(const entry of manifest.files){
+    if(entry.path==='apps/operations/node_modules/wrangler/wrangler-dist/cli.js'){
+      assert.equal(entry.sha256,'a1a7a98e0b073d39dc3229b1b89f66accb51ae557fb34552250f914f12a81efd');
+      continue;
+    }
+    if(process.platform==='win32'&&changedRuntimePaths.has(entry.path))
+      assert.equal(entry.sha256,sha(readFileSync(path.join(root,entry.path))),entry.path);
+  }
+  assert.ok(manifest.files.some(entry=>entry.path==='scripts/access-group-read-capsule.mjs'));
+  assert.ok(manifest.files.some(entry=>entry.path==='scripts/access-group-read-capsule-pins.mjs'));
+  assert.ok(manifest.files.some(entry=>entry.path==='scripts/access-group-read-capsule-unseal.ps1'));
 });

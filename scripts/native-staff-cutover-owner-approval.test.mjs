@@ -117,11 +117,13 @@ test('cutover trust config and both runtime distribution pins fail closed before
 });
 
 test('approved executor cannot reach Access or D1 while its independent distribution pins are unprovisioned',async()=>{
-  let accessCalls=0,bearerCalls=0;
+  let accessCalls=0,bearerCalls=0,groupTokenCalls=0;
   await assert.rejects(runNativeStaffCutoverApprovedExecutor({candidate:{},receipt:{},
     getAccessToken:async()=>{accessCalls++;return 'unused';},getBearerToken:async()=>{bearerCalls++;return 'unused';},
+    getAccessGroupReadCredential:async()=>{groupTokenCalls++;return {schemaVersion:1,accountId:'a'.repeat(32),
+      groupId:uuid(101),groupName:'Synthetic Ops Staff',token:'unused'};},
     fetchImpl:async()=>{throw new Error('must-not-fetch');}}),/distribution_pin_unprovisioned/u);
-  assert.equal(accessCalls,0);assert.equal(bearerCalls,0);
+  assert.equal(accessCalls,0);assert.equal(bearerCalls,0);assert.equal(groupTokenCalls,0);
 });
 
 test('owner consent artifact binds two actual fresh group observations and replaces candidate-supplied observation hashes',async()=>{
@@ -130,7 +132,8 @@ test('owner consent artifact binds two actual fresh group observations and repla
   // The group evidence is tested independently of signer use; the trust key fields
   // above are synthetic and this helper performs no provider or signing call.
   const candidate=candidateFor(config),reported=candidate.syncPreparationReceipt.accessGroupObservations.after;
-  const read=async(members,now)=>readNativeStaffAccessGroupObservation({config,getBearerToken:async()=>'synthetic-test-token-value',now:()=>now,
+  const read=async(members,now)=>readNativeStaffAccessGroupObservation({config,getAccessGroupReadCredential:async()=>({schemaVersion:1,
+    accountId:config.target.accountId,groupId:config.accessGroup.id,groupName:config.accessGroup.name,token:'synthetic-test-token-value'}),now:()=>now,
     fetchImpl:async()=>ok({success:true,result:{id:config.accessGroup.id,name:config.accessGroup.name,
       include:members.map(email=>({email:{email}})),exclude:[],require:[],is_default:[]}})});
   const before=await read(['owner@example.test'],Date.now()-1000),after=await read(['owner@example.test'],Date.now());
@@ -175,7 +178,8 @@ test('cutover receipt binds exact purpose, target/source, full preparation conte
     t.after(()=>rmSync(directory,{recursive:true,force:true}));
     const signer=makeProtectedSigner(directory),config=makeConfig(directory,signer),rawCandidate=candidateFor(config);
     const {token,fetchImpl,jwk}=makeAccessToken(config);
-    const read=()=>readNativeStaffAccessGroupObservation({config,getBearerToken:async()=>'synthetic-test-token-value',fetchImpl:async()=>ok({success:true,
+    const read=()=>readNativeStaffAccessGroupObservation({config,getAccessGroupReadCredential:async()=>({schemaVersion:1,accountId:config.target.accountId,
+      groupId:config.accessGroup.id,groupName:config.accessGroup.name,token:'synthetic-test-token-value'}),fetchImpl:async()=>ok({success:true,
       result:{id:config.accessGroup.id,name:config.accessGroup.name,include:[{email:{email:'owner@example.test'}}],exclude:[],require:[],is_default:[]}})});
     const candidate=bindNativeStaffCutoverObservedGroupToCandidate(rawCandidate,{before:await read(),after:await read()},config).artifact;
     const session=await verifyCurrentNativeStaffCutoverOwnerSession(config,token,{fetchImpl});
@@ -206,7 +210,8 @@ test('cutover registry is independently signed, purpose-specific, one-shot, and 
     t.after(()=>rmSync(directory,{recursive:true,force:true}));
     const signer=makeProtectedSigner(directory),config=makeConfig(directory,signer),rawCandidate=candidateFor(config,10);
     const {token,fetchImpl}=makeAccessToken(config),session=await verifyCurrentNativeStaffCutoverOwnerSession(config,token,{fetchImpl});
-    const read=()=>readNativeStaffAccessGroupObservation({config,getBearerToken:async()=>'synthetic-test-token-value',fetchImpl:async()=>ok({success:true,
+    const read=()=>readNativeStaffAccessGroupObservation({config,getAccessGroupReadCredential:async()=>({schemaVersion:1,accountId:config.target.accountId,
+      groupId:config.accessGroup.id,groupName:config.accessGroup.name,token:'synthetic-test-token-value'}),fetchImpl:async()=>ok({success:true,
       result:{id:config.accessGroup.id,name:config.accessGroup.name,include:[{email:{email:'owner@example.test'}}],exclude:[],require:[],is_default:[]}})});
     const candidate=bindNativeStaffCutoverObservedGroupToCandidate(rawCandidate,{before:await read(),after:await read()},config).artifact;
     const receipt=buildNativeStaffCutoverOwnerApprovalReceipt({config,artifact:candidate,ownerSession:session,

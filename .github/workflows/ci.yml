@@ -36,7 +36,7 @@ jobs:
           npm ci --prefix apps/client
 
       - name: Verify guarded production deployment tooling without credentials
-        run: node --test scripts/production-deploy.test.mjs scripts/native-staff-cutover-readiness.test.mjs scripts/native-staff-cutover-access-group-observation.test.mjs
+        run: node --test scripts/production-deploy.test.mjs scripts/native-staff-cutover-readiness.test.mjs scripts/native-staff-cutover-access-group-observation.test.mjs scripts/access-group-read-capsule.test.mjs
 
       - name: Verify content-free Viewer startup diagnostics
         run: node --test scripts/viewer-startup-diagnostics.test.mjs
