@@ -22,7 +22,7 @@ is still off and automatic delivery/installation is not accepted end to end.
   unexpected HTTP status. This is diagnostic evidence, not a confirmed repair.
   The separately approved read-only Test Data access renewal was applied through
   the supported staging API and independently read back; the new laptop
-  connection attempt is pending. See the current shared status for access expiry
+  connection now shows all 19 photos. See the current shared status for access expiry
   and test instructions. Installation itself does not grant file access.
 
 - Installer 0.5.2.0 completed on the desktop; all 524 payload files, registry and
@@ -51,10 +51,11 @@ is still off and automatic delivery/installation is not accepted end to end.
   one directory and 1,919,807,773 total bytes. This resolved real manifests without
   downloading every file body to Windows; it does not prove an atomic catalog
   revision or retention of every gateway snapshot.
-- Earlier laptop testing confirmed the Company connection and all 19 photos,
-  with real download-on-open. The laptop's standard keep/free context-menu
-  actions are missing, and its Status column is blank or unavailable. This is
-  an unresolved Shell-integration defect; native API tests do not qualify menus.
+- Latest laptop testing confirms the Company connection, all 19 photos, status
+  icons and both standard keep/free context-menu actions. Opening an online-only
+  109 MB photo fails with 0x80070185 and repeated generic WorkFailed messages;
+  keep/free behavior is not accepted on this laptop. Earlier native test results
+  do not establish that this current connection can hydrate files successfully.
   The remaining tray close/quit/reconnect lifecycle still needs acceptance. Actual uninstall has
   not been tested; relocating the real uninstaller does not isolate its use of
   current-user profiles. The current gateway now uses `unless-stopped` and the

@@ -7,6 +7,8 @@ using LedgeTop.WindowsDownload;
 if (args.Length == 1 && args[0] == "--branding-policy-tests") return await ExplorerBrandIconTests.RunAsync();
 if (args.Length >= 1 && args[0] == "--display-name-policy-tests")
     return args.Length == 1 ? ExplorerRootDisplayNameTests.Run() : 2;
+if (args.Length >= 1 && args[0] == "--availability-intent-policy-tests")
+    return args.Length == 1 ? FailedAvailabilityIntentTests.Run() : 2;
 if (args.Length >= 1 && args[0] == "--package-context-policy-tests")
     return args.Length == 1 ? CurrentProcessPackageContextTests.Run() : 2;
 if (args.Length >= 1 && args[0] == "--package-context-observation") {

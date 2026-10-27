@@ -14,6 +14,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     private readonly HashSet<string> directories = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> preservedLocalFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> reclaimedCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly FailedAvailabilityIntents failedAvailability;
     private readonly CancellationTokenSource stopping = new();
     private Task? pinWorker;
     private Task? closing;
@@ -58,11 +59,17 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
             foreach (var parent in Parents(directory)) AddDirectory(parent);
         }
         if (directories.Any(files.ContainsKey)) throw new TransferException("A provider path cannot be both a file and a directory.");
+        failedAvailability = new(files.Keys);
         connection = new(new NativeConnection(root), key => new CloudFilesCallbackDispatcher(source, channel, principal, key,
             cacheDirectory, async (coordinator, identity, context, token) => {
                 Notice("Downloading " + identity.FileName);
-                await CloudFilesNativeTransfer.HydrateForCallbackAsync(coordinator, identity, context, token,
-                    new TransferNative(value => LastNativeTransferDiagnostic = value), TimeSpan.FromSeconds(20));
+                try {
+                    await CloudFilesNativeTransfer.HydrateForCallbackAsync(coordinator, identity, context, token,
+                        new TransferNative(value => LastNativeTransferDiagnostic = value), TimeSpan.FromSeconds(20));
+                } catch (TransferException error) when (error.HydrationFailure is { } diagnostic) {
+                    Notice(diagnostic.ActivityText); // Bounded enums/statuses only, before the callback's generic WorkFailed notice.
+                    throw;
+                }
                 Notice("Available locally: " + identity.FileName);
             }), notice => Notice("Provider: " + notice), normalizeNativeRanges: true);
     }
@@ -215,24 +222,28 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
             foreach (var relative in files.Keys) {
                 if (stopping.IsCancellationRequested) break;
                 if (preservedLocalFiles.Contains(relative)) continue;
+                var intent = AvailabilityIntent.None;
                 try {
                     var path = CheckedPath(relative);
                     var attributes = (uint)PlaceholderVisibility.Run(() => File.GetAttributes(path));
+                    intent = FailedAvailabilityIntents.ObserveAttributes(attributes);
                     bool reclaimed;
                     lock (reclaimedCache) {
                         if ((attributes & 0x100000) == 0) reclaimedCache.Remove(relative);
                         reclaimed = reclaimedCache.Contains(relative);
                     }
-                    if ((attributes & 0x80000) != 0 && (attributes & (0x1000u | 0x40000u | 0x400000u)) != 0) {
+                    if (!failedAvailability.ShouldAttempt(relative, intent)) continue;
+                    if (intent == AvailabilityIntent.Keep && (attributes & (0x1000u | 0x40000u | 0x400000u)) != 0) {
                         Hydrate(relative);
                         Notice("Kept on this device: " + Path.GetFileName(relative));
-                    } else if ((attributes & 0x100000) != 0 && ((attributes & 0x1000) == 0 || !reclaimed)) {
+                    } else if (intent == AvailabilityIntent.Free && ((attributes & 0x1000) == 0 || !reclaimed)) {
                         // Shell may already have dehydrated the placeholder before our scan.
                         // Unpin intent still needs this provider's private cache reclaimed once.
                         await FreeSpaceAsync(relative, stopping.Token);
                     }
                 } catch (OperationCanceledException) when (stopping.IsCancellationRequested) { break; }
                 catch (Exception error) when (error is IOException or UnauthorizedAccessException or TransferException) {
+                    if (intent is AvailabilityIntent.Keep or AvailabilityIntent.Free) failedAvailability.MarkFailed(relative, intent);
                     Notice("Could not change local availability: " + Path.GetFileName(relative));
                 }
             }

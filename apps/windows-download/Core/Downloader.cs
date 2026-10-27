@@ -22,6 +22,7 @@ public sealed class TransferException : Exception
 {
     public TransferFailureReason Reason { get; }
     public int? HttpStatus { get; }
+    public HydrationFailureDiagnostic? HydrationFailure { get; }
     public TransferException(string message) : this(message, TransferFailureReason.Unknown) { }
     public TransferException(string message, TransferFailureReason reason, int? httpStatus = null) : base(message)
     {
@@ -30,6 +31,9 @@ public sealed class TransferException : Exception
             throw new ArgumentException("A bounded transfer failure reason and matching HTTP status are required.");
         Reason = reason; HttpStatus = httpStatus;
     }
+    public TransferException(string message, HydrationFailureDiagnostic diagnostic)
+        : this(message, (diagnostic ?? throw new ArgumentNullException(nameof(diagnostic))).Reason, diagnostic.HttpStatus)
+    { HydrationFailure = diagnostic; }
 }
 
 /// <summary>Read-only prototype. No upload, filesystem placeholders or automatic updates.</summary>
@@ -252,18 +256,25 @@ public sealed class Downloader : IDisposable
                 if (response.StatusCode == HttpStatusCode.Forbidden) throw new AccessDeniedException();
                 if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Conflict) throw new ResourceUnavailableException();
                 var remaining = spec.Length - offset;
+                if ((int)response.StatusCode is < 100 or > 599)
+                    throw new TransferException("The response status is unsupported.", TransferFailureReason.InvalidMetadata);
+                if (response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent)) {
+                    if ((int)response.StatusCode is >= 200 and <= 299)
+                        throw new TransferException("The response does not match the supported download contract.", TransferFailureReason.InvalidMetadata);
+                    throw new TransferException("The server returned an unexpected download status.", TransferFailureReason.UnexpectedHttpStatus, (int)response.StatusCode);
+                }
                 if ((offset > 0 && response.StatusCode != HttpStatusCode.PartialContent)
                     || (offset == 0 && response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent)))
-                    throw new TransferException("The server did not return the requested file version and range.");
+                    throw new TransferException("The server did not return the requested file version and range.", TransferFailureReason.InvalidMetadata);
                 if (response.Headers.ETag?.ToString() != spec.ETag || response.Headers.ETag.IsWeak
                     || response.Content.Headers.ContentLength != remaining || response.Content.Headers.ContentEncoding.Count != 0)
-                    throw new TransferException("The response version or length does not match trusted metadata.");
+                    throw new TransferException("The response version or length does not match trusted metadata.", TransferFailureReason.InvalidMetadata);
                 if (response.StatusCode == HttpStatusCode.PartialContent) {
                     var range = response.Content.Headers.ContentRange;
                     if (range is null || range.Unit != "bytes" || range.From != offset || range.To != spec.Length - 1 || range.Length != spec.Length)
-                        throw new TransferException("The response Content-Range does not match the requested range.");
+                        throw new TransferException("The response Content-Range does not match the requested range.", TransferFailureReason.InvalidMetadata);
                 } else if (response.Content.Headers.ContentRange is not null) {
-                    throw new TransferException("Unexpected Content-Range on a full response.");
+                    throw new TransferException("Unexpected Content-Range on a full response.", TransferFailureReason.InvalidMetadata);
                 }
                 RequireRegularFile(partialPath);
                 await using (var output = new FileStream(partialPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, 65536, FileOptions.Asynchronous)) {
@@ -310,11 +321,11 @@ public sealed class Downloader : IDisposable
             }
         } catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (OperationCanceledException) when (network.IsCancellationRequested) {
-            throw new TransferException("Download stalled; owned partial data can be retried.");
+            throw new TransferException("Download stalled; owned partial data can be retried.", TransferFailureReason.Timeout);
         }
         catch (TransferException) { throw; }
-        catch (HttpRequestException) { throw new TransferException("Download transport failed; authenticated content URLs are never logged."); }
-        catch (IOException) { throw new TransferException("Download interrupted or destination unavailable; owned partial data can be retried."); }
+        catch (HttpRequestException) { throw new TransferException("Download transport failed; authenticated content URLs are never logged.", TransferFailureReason.Network); }
+        catch (IOException) { throw new TransferException("Download interrupted or destination unavailable; owned partial data can be retried.", TransferFailureReason.ResponseRead); }
     }
 
     public void Dispose() => client.Dispose();

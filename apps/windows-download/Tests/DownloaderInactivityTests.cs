@@ -12,7 +12,8 @@ internal static class DownloaderInactivityTests
         ("download stream creation and final EOF probe have inactivity bounds", CreationAndEofStalls),
         ("download caller cancellation stays distinct from network inactivity", ExplicitCancellation),
         ("download progressing chunks may exceed one inactivity interval in total", ActiveProgress),
-        ("download network inactivity configuration rejects invalid or unbounded budgets", Configuration)
+        ("download network inactivity configuration rejects invalid or unbounded budgets", Configuration),
+        ("hydration diagnostics byte GET preserves actual HTTP versus invalid metadata and network", FailureFacts)
     ];
     private static readonly Uri Origin = new("https://synthetic-files.example.invalid");
     private static readonly byte[] Bytes = Enumerable.Range(0,32).Select(i => (byte)(i * 7)).ToArray();
@@ -31,6 +32,7 @@ internal static class DownloaderInactivityTests
         try { await transfer.WaitAsync(TimeSpan.FromSeconds(2)); throw new Exception("Stalled transfer unexpectedly completed."); }
         catch (TransferException error) {
             Assert(error.Message == "Download stalled; owned partial data can be retried.", "Inactivity must have a static retryable error.");
+            Assert(error.Reason == TransferFailureReason.Timeout && error.HttpStatus is null, "Inactivity diagnostic lost its bounded reason.");
         } catch (TimeoutException) {
             cleanup.Cancel(); try { await transfer; } catch (OperationCanceledException) { }
             throw new Exception("Network inactivity budget did not stop the stalled transfer.");
@@ -43,6 +45,32 @@ internal static class DownloaderInactivityTests
         var transfer = engine.DownloadAsync(Spec(),root.Path,cleanup.Token);
         await handler.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2)); await ExpectIdle(transfer,cleanup);
         Assert(handler.Cancelled && handler.RequestContent.Disposed,"Stalled header request was not cancelled/disposed."); NoFinal(root);
+    }
+    private static async Task FailureFacts() {
+        foreach(var status in new[]{302,429,502,503}) {
+            using var root=new DirectoryFixture();var calls=0;
+            using var engine=Engine(new AsyncHandler((_,_)=>{calls++;return Task.FromResult(new HttpResponseMessage((HttpStatusCode)status){Content=new StringContent("SECRET response")});}));
+            try{await engine.DownloadAsync(Spec(),root.Path);throw new Exception("Unexpected download success");}
+            catch(TransferException error){Assert(error.Reason==TransferFailureReason.UnexpectedHttpStatus&&error.HttpStatus==status&&error.InnerException is null&&!error.Message.Contains("SECRET"),"HTTP diagnostic lost or leaked");}
+            Assert(calls==1,"Failure was retried");NoFinal(root);
+        }
+        using(var root=new DirectoryFixture())using(var engine=Engine(new AsyncHandler((_,_)=>{
+            var response=Response(new ByteArrayContent(Bytes));response.Content.Headers.ContentLength=Bytes.Length+1;return Task.FromResult(response);
+        }))) {
+            try{await engine.DownloadAsync(Spec(),root.Path);throw new Exception("Invalid length accepted");}
+            catch(TransferException error){Assert(error.Reason==TransferFailureReason.InvalidMetadata&&error.HttpStatus is null,"A successful HTTP envelope with invalid length was misclassified");}
+            NoFinal(root);
+        }
+        using(var root=new DirectoryFixture())using(var engine=Engine(new AsyncHandler((_,_)=>Task.FromResult(new HttpResponseMessage(HttpStatusCode.Created){Content=new ByteArrayContent(Bytes)})))) {
+            try{await engine.DownloadAsync(Spec(),root.Path);throw new Exception("Unsupported successful HTTP contract accepted");}
+            catch(TransferException error){Assert(error.Reason==TransferFailureReason.InvalidMetadata&&error.HttpStatus is null,"A successful but unsupported response was called an HTTP service failure");}
+            NoFinal(root);
+        }
+        using(var root=new DirectoryFixture())using(var engine=Engine(new AsyncHandler((_,_)=>throw new HttpRequestException("SECRET transport URL")))) {
+            try{await engine.DownloadAsync(Spec(),root.Path);throw new Exception("Missing network refusal");}
+            catch(TransferException error){Assert(error.Reason==TransferFailureReason.Network&&error.HttpStatus is null&&error.InnerException is null&&!error.Message.Contains("SECRET"),"Network failure leaked or lost classification");}
+            NoFinal(root);
+        }
     }
     private static async Task BodyStallResume() {
         using var root = new DirectoryFixture(); using var cleanup = new CancellationTokenSource();

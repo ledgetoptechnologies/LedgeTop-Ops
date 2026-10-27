@@ -121,7 +121,8 @@ test('cleanup refusal cannot fall through to payload deletion', () => {
   assert.equal((uninstall.match(/!insertmacro ValidatePayloadPaths/g) ?? []).length, 2);
   before(uninstall, '--installer-remove-connections', '!insertmacro DeletePayload');
   before(uninstall, 'StrCmp $0 0', '!insertmacro DeletePayload');
-  assert.match(uninstall, /StrCmp \$0 0 un_cleanup_pass\n    MessageBox[^\n]*\n    SetErrorLevel \$0\n    Abort/);
+  assert.match(uninstall, /StrCmp \$0 0 un_cleanup_pass\n    StrCmp \$0 10 0 un_cleanup_review/);
+  assert.match(uninstall, /un_cleanup_refused:\n    SetErrorLevel \$0\n    Abort\n  un_cleanup_pass:/);
   before(uninstall, '"InstallLocation"', '!insertmacro DeletePayload');
 });
 test('temporary full-payload check precedes fixed-directory creation and permits retry', () => {
@@ -131,6 +132,34 @@ test('temporary full-payload check precedes fixed-directory creation and permits
   assert.equal((install.match(/!insertmacro InstallPayload/g) ?? []).length, 2);
   assert.equal((install.match(/--installer-check/g) ?? []).length, 2);
   assert.match(install, /StrCmp \$0 0 preflight_pass/);
+});
+
+test('only busy code10 gives tray Quit guidance at both setup checks and uninstall', () => {
+  for (const [section, pass, review, refused] of [
+    [install, 'preflight_pass', 'preflight_review', 'preflight_refused'],
+    [install, 'installed_payload_pass', 'installed_payload_review', 'installed_payload_refused'],
+    [uninstall, 'un_cleanup_pass', 'un_cleanup_review', 'un_cleanup_refused'],
+  ]) {
+    const start = section.indexOf(`StrCmp $0 0 ${pass}`);
+    const stop = section.indexOf('SetErrorLevel $0\n    Abort', start);
+    assert(start >= 0 && stop > start, 'nonzero maintenance result must still abort with its original code');
+    const block = section.slice(start, stop);
+    const split = block.indexOf(`${review}:`);
+    assert.match(block, new RegExp(`StrCmp \\$0 10 0 ${review}`));
+    const busy = block.slice(0, split), unknown = block.slice(split);
+    assert(busy.includes('LT tray icon') && busy.includes('choose Quit LedgeTop Files'));
+    assert(busy.includes('Closing Settings does not quit the app.'));
+    assert(busy.includes(`Goto ${refused}`));
+    assert(unknown.includes('Ask LedgeTop support for help before trying again.'));
+    assert(unknown.includes('code: $0'));
+    assert.doesNotMatch(unknown, /Then run (?:setup|uninstall) again/);
+    assert.doesNotMatch(block, /ExecWait|ExecShell|\bCall\b|WriteReg|Delete|CreateDirectory/);
+  }
+  const secondBusy = install.slice(install.indexOf('StrCmp $0 10 0 installed_payload_review'), install.indexOf('installed_payload_review:'));
+  assert(secondBusy.includes('If setup says this version already exists'));
+  const uninstallBusy = uninstall.slice(0, uninstall.indexOf('un_cleanup_review:'));
+  assert(uninstallBusy.includes('Also quit any old LedgeTop Files Preview tray icon.'));
+  assert.equal((active.match(/ExecWait/g) ?? []).length, 3, 'message clarification adds no process launch or retry');
 });
 test('silent refusal has safe default dialog and nonzero explicit exit status', () => {
   for (const line of active.split('\n').filter(s => s.trimStart().startsWith('MessageBox ')))

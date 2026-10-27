@@ -84,6 +84,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     public async Task HydrateAsync(PlaceholderIdentity identity, long offset, long length, IPlaceholderTransferSink sink, CancellationToken cancellationToken = default)
     {
         var completed = false;
+        var stage = HydrationStage.Context;
         try {
             identity.Encode(); // Enforce the 4096-byte native FileIdentity ceiling, even before authorization.
             if (identity.Channel != channel || identity.SourceAlias != source.Alias || identity.Origin != source.Origin.GetLeftPart(UriPartial.Authority)
@@ -91,7 +92,9 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 throw new TransferException("Hydration identity or range is unavailable.");
             await serial.WaitAsync(cancellationToken);
             try {
+                stage = HydrationStage.AuthorizationBefore;
                 var resolved = await Authorize(identity, cancellationToken);
+                stage = HydrationStage.CachePreparation;
                 RequireSafe(root); Owned(root);
                 var quotaLock = Path.Combine(root, ".hydration-cache.lock"); RequireSafe(quotaLock);
                 using var capacityLease = new FileStream(quotaLock, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
@@ -103,24 +106,31 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 if (!File.Exists(file)) {
                     var used = CacheBytes();
                     if (identity.Length > maximumCacheBytes - used) throw new TransferException("Hydration cache capacity exceeded.");
+                    stage = HydrationStage.Download;
                     var downloaded = await source.DownloadAsync(resolved.Spec, entry, cancellationToken: cancellationToken);
                     if (Path.GetFullPath(downloaded) != file) throw new TransferException("Hydration source returned an unexpected cache path.");
                 }
+                stage = HydrationStage.CacheVerification;
                 RequireSafe(file);
                 // Windows denies concurrent writes and replacement through verification and publication.
                 await using var input = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.Asynchronous);
                 if (input.Length != identity.Length || !CryptographicOperations.FixedTimeEquals(await SHA256.HashDataAsync(input, cancellationToken), Convert.FromHexString(identity.Sha256)))
                     throw new TransferException("Hydration cache integrity check failed.");
+                stage = HydrationStage.AuthorizationAfter;
                 await Authorize(identity, cancellationToken); // Download/hash may be lengthy; never treat cached bytes as authority.
+                stage = HydrationStage.Transfer;
                 await TransferVerifiedRange(input, offset, length, sink, cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
                 // Mark terminal before calling external code; its exception cannot cause a second terminal call.
                 completed = true; await sink.CompleteAsync(cancellationToken);
             } finally { serial.Release(); }
         } catch (Exception e) {
+            var diagnostic = HydrationFailureDiagnostic.FromException(stage, e);
+            if (sink is IPlaceholderFailureDiagnostics observer) observer.ObservePrimaryFailure(diagnostic);
             if (!completed) { completed = true; try { await sink.FailAsync(e is OperationCanceledException ? "cancelled" : "unavailable"); } catch { } }
             if (e is OperationCanceledException && cancellationToken.IsCancellationRequested) throw;
-            throw new TransferException("Hydration unavailable; no automatic sign-in or retry was attempted.");
+            throw new TransferException("Hydration unavailable; no automatic sign-in or retry was attempted.",
+                (sink as IPlaceholderFailureDiagnostics)?.PrimaryFailure ?? diagnostic);
         }
     }
     internal static async Task TransferVerifiedRange(Stream input, long offset, long length, IPlaceholderTransferSink sink, CancellationToken token) {

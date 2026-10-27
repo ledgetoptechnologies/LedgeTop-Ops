@@ -75,6 +75,12 @@ activation. A late second refusal still retains the new directory for review.
 `LedgeTop.Files.exe --installer-check` must perform the app's fixed-profile,
 read-only maintenance preflight before activation: exit 0 permits activation,
 10 means an app instance is running, 20 means ownership is ambiguous/refused.
+Only code 10 tells the user to open the LT system tray icon near the Windows
+clock, choose **Quit LedgeTop Files**, and rerun setup or uninstall. Closing
+Settings leaves the app running. Uninstall also mentions any old Preview tray.
+Other nonzero codes ask the user to contact support before retrying. If the app
+starts between the two setup checks, the second busy message explains that a
+retained version directory may require support before setup can run again.
 Launch failures and every other nonzero code abort. Existing activation is kept
 when extraction or this preflight fails. Registry/shortcut write failures after
 activation starts require explicit review; activation is not transactional.

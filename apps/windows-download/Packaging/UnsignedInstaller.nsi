@@ -466,7 +466,12 @@ Section "Install"
   ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-check' $0
   IfErrors preflight_failed
   StrCmp $0 0 preflight_pass
-    MessageBox MB_ICONSTOP "Close LedgeTop Files and resolve connection ownership before installing, then run this installer again. No fixed version directory was created. Check code: $0" /SD IDOK
+    StrCmp $0 10 0 preflight_review
+    MessageBox MB_ICONSTOP "LedgeTop Files is still running.$\r$\n$\r$\nNear the Windows clock, open the LT tray icon and choose Quit LedgeTop Files. Check the hidden tray icons if needed. Closing Settings does not quit the app.$\r$\n$\r$\nThen run setup again." /SD IDOK
+    Goto preflight_refused
+  preflight_review:
+    MessageBox MB_ICONSTOP "Setup could not verify this PC's file connections. Ask LedgeTop support for help before trying again. Setup code: $0" /SD IDOK
+  preflight_refused:
     SetErrorLevel $0
     Abort
   preflight_failed:
@@ -496,7 +501,12 @@ Section "Install"
   ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-check' $0
   IfErrors install_failed
   StrCmp $0 0 installed_payload_pass
-    MessageBox MB_ICONSTOP "Close LedgeTop Files and resolve any connection ownership warning before installing. The existing activation was kept. Check code: $0" /SD IDOK
+    StrCmp $0 10 0 installed_payload_review
+    MessageBox MB_ICONSTOP "LedgeTop Files started running while setup was checking.$\r$\n$\r$\nNear the Windows clock, open the LT tray icon and choose Quit LedgeTop Files. Closing Settings does not quit the app. Then run setup again.$\r$\n$\r$\nIf setup says this version already exists, ask LedgeTop support for help." /SD IDOK
+    Goto installed_payload_refused
+  installed_payload_review:
+    MessageBox MB_ICONSTOP "Setup could not verify this PC's file connections and did not finish. Ask LedgeTop support for help before trying again. Setup code: $0" /SD IDOK
+  installed_payload_refused:
     SetErrorLevel $0
     Abort
   installed_payload_pass:
@@ -635,7 +645,12 @@ Section "Uninstall"
   ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-remove-connections' $0
   IfErrors un_failed
   StrCmp $0 0 un_cleanup_pass
-    MessageBox MB_ICONSTOP "Close LedgeTop Files or resolve connection ownership before uninstalling. Nothing was deleted. Cleanup code: $0" /SD IDOK
+    StrCmp $0 10 0 un_cleanup_review
+    MessageBox MB_ICONSTOP "A LedgeTop Files app is still running.$\r$\n$\r$\nNear the Windows clock, open the LT tray icon and choose Quit LedgeTop Files. Also quit any old LedgeTop Files Preview tray icon. Closing Settings does not quit the app.$\r$\n$\r$\nThen run uninstall again." /SD IDOK
+    Goto un_cleanup_refused
+  un_cleanup_review:
+    MessageBox MB_ICONSTOP "Uninstall could not verify this PC's file connections. No installed files were deleted. Ask LedgeTop support for help before trying again. Cleanup code: $0" /SD IDOK
+  un_cleanup_refused:
     SetErrorLevel $0
     Abort
   un_cleanup_pass:
