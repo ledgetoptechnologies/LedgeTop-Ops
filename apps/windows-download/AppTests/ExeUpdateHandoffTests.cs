@@ -30,7 +30,7 @@ internal static class ExeUpdateHandoffTests
             if (fault == "ready") Require(f.Log.IndexOf("disarm") < f.Log.IndexOf("recover"), "confirm helper disarm before restoring provider");
         }
         foreach (var mutation in new Func<ExeUpdateCandidate, ExeUpdateCandidate>[] {
-            c => c with { InstallationId = Guid.Empty }, c => c with { Channel = "unknown" },
+            c => c with { InstalledOwner = c.InstalledOwner with { Owner = "unowned" } }, c => c with { Channel = "unknown" },
             c => c with { CurrentVersion = "0.5.2" }, c => c with { InstallerPath = @"\\server\share\update.exe" },
             c => c with { Origin = new Uri("http://synthetic.invalid/") }, c => c with { ApiBase = "/other" },
             c => c with { Parent = new(0, 1) }, c => c with { Release = c.Release with { Version = "0.5.1.0" } },
@@ -105,7 +105,8 @@ internal static class ExeUpdateHandoffTests
         internal Func<Task>? DrainWork;
         internal WindowsAppReleaseStatus PreparedStatus = WindowsAppReleaseStatus.Available;
         internal ExeUpdateParentExitDecision ExitDecision = ExeUpdateParentExitDecision.Accepted;
-        internal ExeUpdateCandidate Candidate = new(Guid.Parse("11111111-1111-1111-1111-111111111111"), "pilot",
+        internal ExeUpdateCandidate Candidate = new(new("S-1-5-21-111-222-333-1001", 1, "0.5.2.0", @"C:\synthetic\installed",
+            "LedgeTop.Files.UnsignedPilotInstaller/1", new string('c', 64), new string('d', 40), new string('e', 64), new string('f', 64)), "pilot",
             new Uri("https://synthetic.invalid/"), "/api/app", "0.5.2.0", new(1234, 123456),
             new("pilot", "0.5.3.0", 100, new string('a', 64), "\"exact-artifact\"", new string('b', 40), "exe"), @"C:\synthetic\update.exe");
         internal readonly FakeLease Lease;

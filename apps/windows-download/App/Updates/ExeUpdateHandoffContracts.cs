@@ -12,7 +12,11 @@ internal enum ExeUpdateHandoffStatus
 // True includes an uncertain drain/recovery: active provider operation has NOT been confirmed restored.
 internal sealed record ExeUpdateHandoffResult(ExeUpdateHandoffStatus Status, bool ProviderRequiresReconnect);
 internal sealed record ExeUpdateParentIdentity(int ProcessId, long StartTimeUtcTicks);
-internal sealed record ExeUpdateCandidate(Guid InstallationId, string Channel, Uri Origin, string ApiBase,
+// Observed existing installer ownership, not a generated installation capability. The Windows adapter
+// must prove this exact tuple from the current SID/session, fixed registry/path, marker and actual files.
+internal sealed record ExeUpdateInstalledOwner(string WindowsSid, int SessionId, string Version, string InstallRoot,
+    string Owner, string PayloadManifestSha256, string SourceCommit, string AppHostSha256, string ManagedAssemblySha256);
+internal sealed record ExeUpdateCandidate(ExeUpdateInstalledOwner InstalledOwner, string Channel, Uri Origin, string ApiBase,
     string CurrentVersion, ExeUpdateParentIdentity Parent, WindowsAppReleasePins Release, string InstallerPath);
 internal sealed record ExeUpdatePreparation(WindowsAppReleaseStatus Status, ExeUpdateCandidate? Candidate = null);
 
@@ -25,6 +29,12 @@ internal sealed record ExeUpdateHandoff(Guid Id, ExeUpdateCandidate Candidate)
 }
 
 internal enum ExeUpdateParentExitDecision { Rejected, Accepted, Uncertain }
+
+// Dispatcher hook: reject BEFORE invoking commitFinalExit; invoke it exactly once only when graceful
+// shutdown can be accepted, await ExitCommitted acknowledgement, then close with code0. A failure after
+// acknowledgement is uncertain. Sending intent and exiting cannot be atomic; the helper also demands
+// retained-handle clean termination and fresh authority, and cannot distinguish every exit-code0 crash.
+internal delegate Task<ExeUpdateParentExitDecision> ExeUpdateExitHook(Func<Task> commitFinalExit);
 
 internal interface IExeUpdateBoundary : IAsyncDisposable
 {
@@ -49,7 +59,8 @@ internal interface IExeUpdateHandoffPlatform
     Task<IAsyncDisposable?> TryEnterMaintenanceAsync(CancellationToken cancellationToken);
     // Fresh cached-human authorization and WindowsAppReleaseClient verified staging; no interactive login.
     Task<ExeUpdatePreparation> PrepareFreshAsync(CancellationToken cancellationToken);
-    // Atomic, new, owned record only. The supplied bounded model is not authority to execute anything.
+    // New owned bounded in-memory proposal, not a restartable on-disk authority. No account/token is
+    // written here; any future diagnostic receipt needs separate privacy/ownership review.
     Task StageHandoffAsync(ExeUpdateHandoff handoff, CancellationToken cancellationToken);
     // Gracefully save/drain/disconnect existing provider; NEVER Remove/unregister/delete a sync root.
     Task DrainAndDisconnectAsync();

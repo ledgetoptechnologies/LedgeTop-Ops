@@ -122,9 +122,10 @@ internal sealed class ExeUpdateHandoffCoordinator
 
     private sealed class HandoffRefusedException : Exception;
 
-    private static bool Valid(ExeUpdateCandidate? item)
+    internal static bool Valid(ExeUpdateCandidate? item)
     {
-        if (item is null || item.InstallationId == Guid.Empty || item.Parent is null || item.Parent.ProcessId <= 0 ||
+        if (item is null || !ValidOwner(item.InstalledOwner) || item.InstalledOwner.Version != item.CurrentVersion ||
+            item.Parent is null || item.Parent.ProcessId <= 0 ||
             item.Parent.StartTimeUtcTicks <= 0 || item.Parent.StartTimeUtcTicks > DateTime.MaxValue.Ticks ||
             item.Channel is not ("pilot" or "stable") || item.ApiBase is not ("/api/app" or "/api/client/app") ||
             item.Origin is null || !item.Origin.IsAbsoluteUri || item.Origin.Scheme != "https" || !item.Origin.IsDefaultPort ||
@@ -141,6 +142,15 @@ internal sealed class ExeUpdateHandoffCoordinator
             release.StrongETag is { Length: > 0 and <= 512 } etag && Regex.IsMatch(etag, "\\A\"[\\x21\\x23-\\x7e]+\"\\z") &&
             EntityTagHeaderValue.TryParse(etag, out var parsed) && !parsed.IsWeak && parsed.Tag != "*" && parsed.ToString() == etag;
     }
+
+    private static bool ValidOwner(ExeUpdateInstalledOwner? owner) => owner is not null &&
+        owner.WindowsSid is { Length: > 0 and <= 184 } && Regex.IsMatch(owner.WindowsSid, @"\AS-1-[0-9]+(-[0-9]+){1,15}\z") &&
+        owner.SessionId >= 0 && owner.Owner == "LedgeTop.Files.UnsignedPilotInstaller/1" &&
+        owner.InstallRoot is { Length: > 3 and <= 1024 } && Regex.IsMatch(owner.InstallRoot, @"\A[A-Za-z]:[\\/][^\x00-\x1f]+\z") &&
+        !owner.InstallRoot.Contains("..", StringComparison.Ordinal) && !owner.InstallRoot.Contains('"') &&
+        !owner.InstallRoot.Contains('%') && !owner.InstallRoot.AsSpan(2).Contains(':') &&
+        Regex.IsMatch(owner.PayloadManifestSha256 ?? "", @"\A[0-9a-f]{64}\z") && Regex.IsMatch(owner.SourceCommit ?? "", @"\A[0-9a-f]{40}\z") &&
+        Regex.IsMatch(owner.AppHostSha256 ?? "", @"\A[0-9a-f]{64}\z") && Regex.IsMatch(owner.ManagedAssemblySha256 ?? "", @"\A[0-9a-f]{64}\z");
 
     private static bool VersionText(string? text, out Version version)
     {
