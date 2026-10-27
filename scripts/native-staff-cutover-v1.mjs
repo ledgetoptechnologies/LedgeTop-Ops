@@ -12,6 +12,10 @@ const PLAN_KIND = 'operations-native-staff-cutover-v1';
 const BINDING_KIND = 'operations-native-staff-binding-review-v1';
 const REVIEWED_MIGRATION_NAMES_SHA256 = 'c71f757e5f75e4ad9326db9175a02635cf5cecbfb06e6dfba7e6a856cb75b854';
 const REVIEWED_MIGRATION_CONTENTS_SHA256 = '0e43023eb3ddb1739e6a15d1050b6b512cb4afcda7cfb9545b5d6b47f2a1c3f5';
+const REVIEWED_LOCAL_SUCCESSOR = Object.freeze({
+  name: '0231_owner_google_ads_summary.sql',
+  sha256: 'd1c778d0e10a21b25663f89783ceb7ace664e4d70eb2b5e121375e6ef1f80481',
+});
 const LEGACY_TABLES = new Set(['staff_users','staff_divisions','permissions','roles','role_permissions',
   'staff_role_assignments','staff_permission_overrides','local_staff_role_assignments']);
 const AUTHORITY_WIDE_TABLES = new Set(['native_business_areas','native_business_divisions',
@@ -100,17 +104,29 @@ function tableStateExpression(table, columns, idsJson) {
   return { expression:`json((SELECT json_group_array(json_object(${pairs})) FROM (${query})))`, params:parameters };
 }
 
+/** Keep the D1 target at the frozen 0230 snapshot. A later source-tree file is
+ * admitted only as the single independently reviewed, byte-pinned 0231 Ads
+ * successor; it is never included in the cutover target ledger or plan. */
+export function assertNativeStaffCutoverMigrationSource({targetNames,localNames,readMigrationBytes}={}) {
+  if(!Array.isArray(targetNames)||!Array.isArray(localNames)||typeof readMigrationBytes!=='function')fail('migration_chain_mismatch');
+  const reviewedPrefix = localNames.slice(0, 230);
+  const hasOnlyReviewedSourceSuffix = localNames.length === 230
+    || localNames.length === 231 && localNames[230] === REVIEWED_LOCAL_SUCCESSOR.name;
+  if (!hasOnlyReviewedSourceSuffix || reviewedPrefix.length !== 230 || reviewedPrefix.at(-1) !== '0230_app_release_pilot.sql'
+    || sha(reviewedPrefix.join('\n')) !== REVIEWED_MIGRATION_NAMES_SHA256 || canonical(reviewedPrefix) !== canonical(targetNames)) fail('migration_chain_mismatch');
+  const contentHash = sha(reviewedPrefix.map(name => `${name}\0${sha(readMigrationBytes(name))}`).join('\n'));
+  if (contentHash !== REVIEWED_MIGRATION_CONTENTS_SHA256) fail('migration_contents_changed');
+  if (localNames.length === 231 && sha(readMigrationBytes(REVIEWED_LOCAL_SUCCESSOR.name)) !== REVIEWED_LOCAL_SUCCESSOR.sha256) {
+    fail('migration_contents_changed');
+  }
+  return true;
+}
+
 function verifyMigrationSource(names) {
   const directory = fileURLToPath(new URL('../apps/operations/migrations/', import.meta.url));
-  const local = [...readdirSync(directory)]
-    .filter(name => /^\d{4}_.+\.sql$/u.test(name)).sort();
-  if (local.length !== 230 || local.at(-1) !== '0230_app_release_pilot.sql'
-    || sha(local.join('\n')) !== REVIEWED_MIGRATION_NAMES_SHA256 || canonical(local) !== canonical(names)) fail('migration_chain_mismatch');
-  const contentHash = sha(local.map(name => {
-    const file = path.join(directory,name);
-    return `${name}\0${sha(readFileSync(file))}`;
-  }).join('\n'));
-  if (contentHash !== REVIEWED_MIGRATION_CONTENTS_SHA256) fail('migration_contents_changed');
+  const localNames = [...readdirSync(directory)].filter(name => /^\d{4}_.+\.sql$/u.test(name)).sort();
+  assertNativeStaffCutoverMigrationSource({targetNames:names,localNames,
+    readMigrationBytes:name=>readFileSync(path.join(directory,name))});
 }
 
 /** Read the exact 0230 source snapshot. This intentionally does not call the

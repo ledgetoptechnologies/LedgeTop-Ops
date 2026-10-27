@@ -126,6 +126,15 @@ production readiness observer. The synthetic tests demonstrate local
 transaction behavior only; no owner key, live binding, approval, production
 database, group, or deployment is exercised.
 
+The cutover target remains the exact reviewed 0230 D1 prefix and retains its
+original 0230 migration-name and content digests. The repository may contain
+the separate `0231_owner_google_ads_summary.sql` source successor only when its
+bytes match the independently reviewed successor SHA-256. This is source-tree
+compatibility for building and testing the frozen 0230 cutover; it does not
+admit migration 0231 into a cutover snapshot, plan, approval, or target ledger.
+Unknown or modified repository successors fail closed, and a target D1 ledger
+containing 0231 remains outside this cutover contract.
+
 The external approval verifier must validate a distinct cutover-purpose
 signature over the complete `cutoverApprovalContext`, including the exact
 dormant preparation receipt and current/desired group digests. A non-null

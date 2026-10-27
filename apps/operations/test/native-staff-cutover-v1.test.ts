@@ -5,7 +5,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { compileNativeStaffCutoverV1, executeNativeStaffCutoverD1, prepareNativeStaffCutoverD1 }
   from "../../../scripts/native-staff-cutover-v1.mjs";
-import { readNativeStaffCutoverSnapshot } from "../../../scripts/native-staff-cutover-v1.mjs";
+// @ts-expect-error reviewed test-only JavaScript source contract
+import { assertNativeStaffCutoverMigrationSource, readNativeStaffCutoverSnapshot } from "../../../scripts/native-staff-cutover-v1.mjs";
 
 let runtime:Miniflare, db:D1Database, serial=0;
 const hash=(value:string)=>createHash("sha256").update(value).digest("hex");
@@ -141,6 +142,20 @@ describe("first native staff cutover compiler and D1 executor",()=>{
   });
   afterAll(async()=>runtime?.dispose());
 
+  it("accepts only the byte-pinned local Ads successor without expanding the reviewed D1 prefix",()=>{
+    const dir=new URL("../migrations/",import.meta.url);
+    const localNames=readdirSync(dir).filter(name=>/^\d{4}_.+\.sql$/u.test(name)).sort();
+    const targetNames=localNames.slice(0,230);
+    const readMigrationBytes=(name:string)=>readFileSync(new URL(name,dir));
+    expect(localNames.slice(-2)).toEqual(["0230_app_release_pilot.sql","0231_owner_google_ads_summary.sql"]);
+    expect(assertNativeStaffCutoverMigrationSource({targetNames,localNames,readMigrationBytes})).toBe(true);
+    expect(()=>assertNativeStaffCutoverMigrationSource({targetNames,localNames:[...localNames,"0232_unreviewed.sql"],readMigrationBytes}))
+      .toThrow(/migration_chain_mismatch/u);
+    expect(()=>assertNativeStaffCutoverMigrationSource({targetNames,localNames,
+      readMigrationBytes:(name:string)=>name==="0231_owner_google_ads_summary.sql"?Buffer.from("-- altered unreviewed bytes\n"):readMigrationBytes(name)}))
+      .toThrow(/migration_contents_changed/u);
+  });
+
   it("writes only the exact cutover receipt and enabled flag atomically",async()=>{
     const operator=await seedOwner(),input=await cutoverInput(operator);
     const prepared=await prepareNativeStaffCutoverD1(input,{db,verifyApproval:trust});
@@ -167,6 +182,23 @@ describe("first native staff cutover compiler and D1 executor",()=>{
       accessGroupObservations:input.syncPreparationReceipt.accessGroupObservations});
     expect(await db.prepare("SELECT count(*) n FROM staff_users WHERE id=?").bind(operator.id).first("n")).toBe(1);
     expect(await db.prepare("SELECT count(*) n FROM native_staff_management_delegations WHERE actor_staff_id=?").bind(operator.id).first("n")).toBe(9);
+  },180_000);
+
+  it("keeps the cutover target at the frozen 0230 ledger when only the reviewed 0231 Ads source is appended",async()=>{
+    const dir=new URL("../migrations/",import.meta.url);
+    const local=readdirSync(dir).filter(name=>/^\d{4}_.+\.sql$/u.test(name)).sort();
+    expect(local.slice(-2)).toEqual(["0230_app_release_pilot.sql","0231_owner_google_ads_summary.sql"]);
+    const reviewed=await readNativeStaffCutoverSnapshot(db);
+    expect(reviewed.migrationNames).toHaveLength(230);
+    expect(reviewed.migrationNames.at(-1)).toBe("0230_app_release_pilot.sql");
+    expect(reviewed.migrationNames).not.toContain("0231_owner_google_ads_summary.sql");
+
+    await db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind("0231_owner_google_ads_summary.sql").run();
+    try {
+      await expect(readNativeStaffCutoverSnapshot(db)).rejects.toThrow(/migration_chain_mismatch/u);
+    } finally {
+      await db.prepare("DELETE FROM d1_migrations WHERE name=?").bind("0231_owner_google_ads_summary.sql").run();
+    }
   },180_000);
 
   it("packs the full 0230 snapshot and atomically rolls back every cutover write on late drift",async()=>{
