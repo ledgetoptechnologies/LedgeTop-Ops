@@ -38,6 +38,9 @@ jobs:
       - name: Verify guarded production deployment tooling without credentials
         run: node --test scripts/production-deploy.test.mjs scripts/native-staff-cutover-readiness.test.mjs
 
+      - name: Verify content-free Viewer startup diagnostics
+        run: node --test scripts/viewer-startup-diagnostics.test.mjs
+
       - name: Verify inactive additive UI binding preparation
         run: node --test scripts/ui-additive-release-plan.test.mjs
 
