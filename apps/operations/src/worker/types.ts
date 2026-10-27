@@ -91,6 +91,8 @@ export type Env = Omit<
 > & {
   /** Optional HTTP asset service, absent until a separately reviewed UI release packet is installed. */
   UI_RELEASE_ASSETS?: Pick<Fetcher, "fetch">;
+  /** Optional isolated binary store for reviewed pilot app releases. */
+  APP_RELEASE_BUCKET?: R2Bucket;
   /** Empty or absent keeps the installed legacy HTML; only exact registered releases may be selected. */
   UI_ACTIVE_RELEASE?: string;
   SHARED_PROFILE_PORTAL_AUTHORITY?: import('../../../../packages/shared/src/shared-business-profile').SharedProfilePortalAuthorityBinding;

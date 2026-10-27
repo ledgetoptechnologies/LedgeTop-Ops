@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { Miniflare } from "miniflare";
+import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createClientPortalRouter } from "../src/worker/client-portal/routes";
 import { decodeAuthenticatedDeliveryHandle } from "../src/worker/client-portal/authenticated-delivery-handles";
@@ -52,6 +54,11 @@ describe("authenticated delivery resources — migrated effective workspace", { 
   function app() {
     return createClientPortalRouter({ resolvePrincipal: async () => currentPrincipal });
   }
+  function joinedApp() {
+    const worker = new Hono<{ Bindings: Env }>();
+    worker.route("/api/client", app());
+    return worker;
+  }
   async function request(path: string, init: RequestInit = {}) {
     return app().request(`${origin}${path}`, init, env);
   }
@@ -88,6 +95,113 @@ describe("authenticated delivery resources — migrated effective workspace", { 
     expect(nested.status, await nested.clone().text()).toBe(200);
     expect((await nested.json() as { breadcrumbs: Array<{ name: string }>; files: Array<{ name: string }> }).breadcrumbs.map(crumb => crumb.name))
       .toEqual(["Shared delivery", "📷"]);
+  });
+
+  it("serves the exact default-off native Windows release DTO through the joined portal router", async () => {
+    const response = await joinedApp().request(
+      `${origin}/api/client/app/latest?platform=windows&channel=pilot&schemaVersion=1`,
+      { method: "GET" },
+      { ...env, ENVIRONMENT: "staging" },
+    );
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(await response.json()).toEqual({ schemaVersion: 1, available: false });
+    for (const platform of ["macos", "linux"]) {
+      const unsupported = await joinedApp().request(
+        `${origin}/api/client/app/latest?platform=${platform}`,
+        { method: "GET" },
+        { ...env, ENVIRONMENT: "staging" },
+      );
+      expect(unsupported.status).toBe(200);
+      expect(await unsupported.json()).toEqual({ available: false });
+    }
+  });
+
+  it("rejects unexpected native query shape before looking up release state", async () => {
+    const response = await joinedApp().request(
+      `${origin}/api/client/app/latest?platform=windows&channel=stable&schemaVersion=1`,
+      { method: "GET" },
+      { ...env, ENVIRONMENT: "staging" },
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "app_release_query_invalid" });
+    const workspaceBoundResource = await joinedApp().request(
+      `${origin}/api/client/notification-history`,
+      { method: "GET" },
+      { ...env, ENVIRONMENT: "staging" },
+    );
+    expect(workspaceBoundResource.status).toBe(403);
+  });
+
+  it("follows the authorized browser offer link to a full authenticated byte response", async () => {
+    const version = "1.2.3.4", sourceCommit = "a".repeat(40), artifactKey = "windows/pilot/1.2.3.4/setup.exe";
+    const bytes = new TextEncoder().encode("MZ client portal synthetic pilot app");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    await db.prepare("UPDATE app_release_control SET enabled=1,storage_accepted=1 WHERE singleton=1").run();
+    await bucket.put(artifactKey, bytes, { sha256: await crypto.subtle.digest("SHA-256", bytes),
+      customMetadata: { appReleaseVersion: version, sourceCommit, installerType: "exe", sha256 } });
+    const object = await bucket.head(artifactKey);
+    expect(object).not.toBeNull();
+    await db.prepare(`INSERT INTO app_release_catalog
+      (release_id,platform,channel,version,version_major,version_minor,version_patch,version_revision,
+       installer_type,artifact_key,size_bytes,sha256,strong_etag,source_commit,min_supported,notes,reviewed_by,reviewed_at)
+      VALUES('portal-release-1','windows','pilot',?,1,2,3,4,'exe',?,?,?,?,?,NULL,NULL,'test-reviewer','2026-10-26T12:00:00Z')`)
+      .bind(version, artifactKey, bytes.byteLength, sha256, object!.httpEtag, sourceCommit).run();
+    await db.prepare("INSERT INTO app_release_head VALUES('windows','pilot','portal-release-1',1,'2026-10-26T12:00:00Z')").run();
+    await db.prepare(`INSERT INTO app_release_pilot_eligibilities
+      (eligibility_id,identity_id,workspace_id,principal_public_id,principal_source_version,grant_id,grant_version,
+       channel,cohort_id,cohort_revision,granted_at)
+      VALUES('portal-release-eligibility','ad1-global','ad1-workspace','ad1-principal','ad1-v1','ad1-grant',1,
+       'pilot','synthetic-cohort',1,'2026-10-26T12:00:00Z')`).run();
+
+    const envWithReleaseBucket = { ...env, ENVIRONMENT: "staging", APP_RELEASE_BUCKET: bucket } as Env;
+    const worker = joinedApp();
+    const offerResponse = await worker.request(`${origin}/api/client/app/latest?platform=windows`, {}, envWithReleaseBucket);
+    expect(offerResponse.status, await offerResponse.clone().text()).toBe(200);
+    const offer = await offerResponse.json() as { available: boolean; downloadUrl: string };
+    expect(offer.available).toBe(true);
+    expect(offer.downloadUrl).toBe(`/api/client/app/download/${version}?platform=windows&channel=pilot`);
+    for (const platform of ["macos", "linux"]) {
+      const unsupported = await worker.request(`${origin}/api/client/app/latest?platform=${platform}`, {}, envWithReleaseBucket);
+      expect(unsupported.status).toBe(200);
+      expect(await unsupported.json()).toEqual({ available: false });
+    }
+    const nativeResponse = await worker.request(`${origin}/api/client/app/latest?platform=windows&channel=pilot&schemaVersion=1`, {}, envWithReleaseBucket);
+    expect(nativeResponse.status, await nativeResponse.clone().text()).toBe(200);
+    const nativeOffer = await nativeResponse.json() as { available: boolean; downloadUrl: string; strongETag: string };
+    expect(nativeOffer.available).toBe(true);
+    expect(nativeOffer.downloadUrl).toBe(offer.downloadUrl);
+    const downloadResponse = await worker.request(`${origin}${offer.downloadUrl}`, {}, envWithReleaseBucket);
+    expect(downloadResponse.status, await downloadResponse.clone().text()).toBe(200);
+    expect(Number(downloadResponse.headers.get("content-length"))).toBe(bytes.byteLength);
+    expect(await downloadResponse.bytes()).toEqual(bytes);
+    const nativeUrl = `${origin}${nativeOffer.downloadUrl}`;
+    const nativeHeaders = { "If-Match": nativeOffer.strongETag };
+    const nativeFull = await worker.request(nativeUrl, { headers: nativeHeaders }, envWithReleaseBucket);
+    expect(nativeFull.status, await nativeFull.clone().text()).toBe(200);
+    expect(nativeFull.headers.get("etag")).toBe(nativeOffer.strongETag);
+    expect(nativeFull.headers.get("content-length")).toBe(String(bytes.byteLength));
+    expect(await nativeFull.bytes()).toEqual(bytes);
+    const nativeHead = await worker.request(nativeUrl, { method: "HEAD", headers: nativeHeaders }, envWithReleaseBucket);
+    expect(nativeHead.status).toBe(200);
+    expect(nativeHead.headers.get("content-length")).toBe(String(bytes.byteLength));
+    expect(await nativeHead.text()).toBe("");
+    const offset = 5;
+    const nativeRange = await worker.request(nativeUrl, { headers: { ...nativeHeaders, "If-Range": nativeOffer.strongETag, Range: `bytes=${offset}-` } }, envWithReleaseBucket);
+    expect(nativeRange.status).toBe(206);
+    expect(nativeRange.headers.get("content-range")).toBe(`bytes ${offset}-${bytes.byteLength - 1}/${bytes.byteLength}`);
+    expect(await nativeRange.bytes()).toEqual(bytes.slice(offset));
+
+    await db.prepare(`INSERT INTO app_release_pilot_revocations
+      (eligibility_id,reason_code,revoked_at,revoked_by)
+      VALUES('portal-release-eligibility','test-revoke','2026-10-26T12:30:00Z','test-reviewer')`).run();
+    const revokedOffer = await worker.request(
+      `${origin}/api/client/app/latest?platform=windows&channel=pilot&schemaVersion=1`, {}, envWithReleaseBucket);
+    expect(revokedOffer.status).toBe(200);
+    expect(await revokedOffer.json()).toEqual({ schemaVersion: 1, available: false });
+    const revokedBytes = await worker.request(nativeUrl, { headers: nativeHeaders }, envWithReleaseBucket);
+    expect(revokedBytes.status).toBe(404);
+    expect(await revokedBytes.json()).toEqual({ error: "app_release_unavailable" });
   });
 
   it("derives headerless media workspace from the AD1 coordinate and rejects cross-actor or conflicting workspace requests", async () => {

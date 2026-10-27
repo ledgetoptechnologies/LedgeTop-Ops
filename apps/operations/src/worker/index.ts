@@ -1,5 +1,7 @@
 import { localDivisionJoin } from "./local-project-division";
 import { Hono, type Context } from "hono";
+import { dispatchCompetitorIntelIngest } from "./competitor-intel-ingest-routes";
+import { registerOperationsAppReleaseRoutes } from "./app-release-routes";
 import { dispatchIntelIngest } from "./intel-ingest-routes";
 import { reservePrimaryFolderMutation,attemptPrimaryFolderMutation,completePrimaryFolderMutation,reconcilePrimaryFolderMutation,readPrimaryFolderMutationReview,retryPrimaryDivisionMutation,type DivisionMutationWitness } from './primary-folder-authority-mutations';
 import { backfillIncomingRcloneOutbox, drainIncomingRcloneOutbox } from "./incoming-rclone-outbox";
@@ -694,6 +696,7 @@ app.use("/api/admin/*", async (c, next) => {
 });
 registerStaffLoginOwnerRoutes(app);
 registerOwnerIntelRoutes(app);
+registerOperationsAppReleaseRoutes(app);
 
 async function body<T>(c: any, schema: z.ZodType<T>): Promise<T> {
   const value = await c.req.json().catch(() => {

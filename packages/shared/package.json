@@ -14,6 +14,7 @@
     "./operations-portal-native-delivery-authority": "./src/operations-portal-native-delivery-authority.ts",
     "./configured-deployment-origin": "./src/configured-deployment-origin.ts",
     "./competitor-intel": "./src/competitor-intel.ts",
+    "./app-release-feed": "./src/app-release-feed.ts",
     "./windows-queue-reference": "./src/windows-queue-reference.ts"
   }
 }

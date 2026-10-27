@@ -4,6 +4,8 @@ export interface Env {
   SHARED_PROFILE_PORTAL?: import('../../../../packages/shared/src/shared-business-profile').SharedProfilePortalBinding;
   DELIVERY_DB: D1Database;
   DATA_BUCKET: R2Bucket;
+  /** Optional isolated binary store for reviewed pilot app releases. */
+  APP_RELEASE_BUCKET?: R2Bucket;
   ASSETS: Fetcher;
   /** Optional additive UI HTTP service. Absence never changes legacy presentation. */
   UI_RELEASE_ASSETS?: Pick<Fetcher, "fetch">;
