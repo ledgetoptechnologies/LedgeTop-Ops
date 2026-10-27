@@ -57,8 +57,13 @@ Existing same-version directories are refused, even if they look complete;
 failed extraction/preflight leaves the new directory for explicit review instead
 of recursive rollback. Older versions remain on an upgrade. Unknown registry
 metadata, same/lower versions, reparse ancestors and unsupported OS are refused.
-No directory picker, startup task, background download, signing, or app launch
-is configured. Start menu entries and uninstall registration use HKCU/current user.
+No directory picker, Windows service or signing is configured. Start menu entries
+and uninstall registration use HKCU/current user. The current source preserves an
+optional exact-owned per-user Run preference across forward upgrades. Interactive
+setup offers a checked Finish option to start the installed app; silent updates
+never use that launch path. Scheduled update checks belong to the app and its
+authenticated update protocol, not an installer background service. These source
+features are not yet included in the shared 0.5.2 installer.
 
 Before creating the fixed version directory, the installer stages the full
 payload in its fresh NSIS-owned plugin temp directory and runs its new app's
@@ -82,6 +87,14 @@ before deleting payload files. This CLI must drain native work and positively
 verify/remove only owned integration; it must preserve local files and return 20
 on ambiguity. Failed cleanup deletes no payload. No force-kill, broad directory
 delete, profile/root/cache/download deletion, or automatic old-version pruning.
+The current source also handles the exact recorded generated V2 Preview during
+this explicit uninstall. It validates both connected sources, then performs one
+singleton-held legacy cleanup before connected removals; partial multi-root
+cleanup is not atomic. A retry verifies recorded physical-root and native/Shell
+absence without repeating unregister. Missing legacy records are not proof that
+an untracked entry is absent. The separate packaged-pilot command
+`--installer-remove-legacy-preview` touches only that recorded old preview and
+refuses missing/unknown ownership. Neither command removes local file contents.
 New pilot app startup also observes the installer mutex before any provider work;
 maintenance children bypass that gate. Earlier portable builds lack it. Installed
 acceptance must still cover launch races and locked-file refusal before release.
