@@ -13,7 +13,7 @@ import {
   verifyNativeStaffBootstrapOwnerApprovalReceipt, initializeNativeStaffBootstrapApprovalRegistry,
   readNativeStaffBootstrapApprovalRegistry, issueNativeStaffBootstrapApproval,
   revokeNativeStaffBootstrapApproval, acquireNativeStaffBootstrapApprovalLease, preparedOwnerApprovalConsentText,
-  runPinnedCloudflaredToken,
+  runPinnedCloudflaredToken, validateLiveOwnerReview,
 } from './native-staff-bootstrap-owner-approval.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -90,6 +90,29 @@ function makeFixture(config) {
     expiresAt: Math.floor(Date.now() / 1000) + 1800, assertionSha256: sha('synthetic-access-jwt') };
   return { artifact, review, ownerClaims, owner, employee, migrationNames };
 }
+
+test('live review treats null-target delegation ceilings as authority-wide snapshot state', () => {
+  const { publicKey } = generateKeyPairSync('rsa', { modulusLength: 3072 });
+  const config = makeConfig(publicKey.export({ type: 'spki', format: 'pem' }));
+  const { artifact, review, owner } = makeFixture(config);
+  const ceiling = { id: 'broad-ceiling-synthetic', parent_delegation_id: 'owner-parent-synthetic', contract_version: 1,
+    authority_domain: 'staff_admin', capability: 'staff.onboarding.create', effect: 'allow', grant_allow: 1, grant_deny: 1,
+    operation_create: 1, operation_revoke: 1, scope_kind: 'global', business_area_id: null, division_id: null,
+    resource_id: null, target_staff_id: null, active: 0, version: 1,
+    created_at: '2026-10-26T00:00:00.000Z', updated_at: '2026-10-26T00:00:00.000Z' };
+  const snapshot = JSON.parse(artifact.reviewedSnapshot.snapshotJson);
+  snapshot.rows.native_staff_delegation_ceilings = [ceiling];
+  const snapshotJson = canonicalJson(snapshot);
+  const reviewedSnapshot = { ...artifact.reviewedSnapshot, snapshotJson, snapshotSha256: sha(snapshotJson) };
+  review.packet.tables.native_staff_delegation_ceilings = [ceiling];
+  review.packetSha256 = sha(canonicalJson(review.packet));
+  assert.doesNotThrow(() => validateLiveOwnerReview(review, reviewedSnapshot, config, { staffId: owner.id }));
+
+  review.packet.tables.native_staff_delegation_ceilings[0] = { ...ceiling, active: 1, version: 2 };
+  review.packetSha256 = sha(canonicalJson(review.packet));
+  assert.throws(() => validateLiveOwnerReview(review, reviewedSnapshot, config, { staffId: owner.id }),
+    /live_authority_state_mismatch_native_staff_delegation_ceilings/u);
+});
 
 test('trust config requires its independent source hash pin and exact owner/key binding', () => {
   const { publicKey } = generateKeyPairSync('rsa', { modulusLength: 3072 });

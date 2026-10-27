@@ -31,7 +31,8 @@ const BOOTSTRAP_AUTHORITY_TABLES = Object.freeze([
   'native_staff_admin_command_fences', 'native_staff_admin_commands', 'native_staff_management_commands',
 ]);
 const AUTHORITY_WIDE_TABLES = new Set(['native_business_areas', 'native_business_divisions',
-  'native_directory_resource_scopes', 'native_staff_authority_capabilities', 'native_staff_access_reconciliation']);
+  'native_directory_resource_scopes', 'native_staff_delegation_ceilings', 'native_staff_authority_capabilities',
+  'native_staff_access_reconciliation']);
 const ID_FIELD = /(?:staff|user)_id$/u;
 const CLIENT_REFERENCE_COLUMNS = Object.freeze({
   native_business_areas: { id: 'business_area_ref_sha256' },

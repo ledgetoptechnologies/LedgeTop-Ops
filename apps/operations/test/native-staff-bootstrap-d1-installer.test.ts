@@ -187,11 +187,13 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
     const seeded=(await db.prepare("SELECT id,email,access_subject FROM staff_users WHERE id IN ('staff-beau-koltz','staff-kollins-stirn') ORDER BY id").all()).results as any[];
     const preservedPrincipals=[people.pa,people.ops,people.operator,people.root,
       ...seeded.map(row=>({id:row.id,email:row.email,subject:row.access_subject??''}))];
-    const reviewed=await snapshot(db,[people.ops.id]);
-    const reviewedState=JSON.parse(reviewed.snapshotJson);
+    let reviewed=await snapshot(db,[people.ops.id]);
+    let reviewedState=JSON.parse(reviewed.snapshotJson);
+    expect(reviewedState.rows.native_staff_delegation_ceilings).toHaveLength(11);
+    expect(reviewedState.rows.native_staff_delegation_ceilings.every((row:any)=>row.target_staff_id===null)).toBe(true);
     const identityBefore=(await db.prepare("SELECT id,email,status,access_subject,project_alpha_user_id,sync_protected FROM staff_users ORDER BY id").all()).results;
     const before=await legacyEffectiveSnapshot(preservedPrincipals);
-    const input=planFor(reviewed,people),prepared=await prepare(input,{verifyTrust:trusted});
+    let input=planFor(reviewed,people),prepared=await prepare(input,{verifyTrust:trusted});
     expect(Object.isFrozen(prepared.plan.rows)).toBe(true);
     expect(Object.isFrozen(prepared.plan.staffCohort)).toBe(true);
     const mutatedPlan={...prepared.plan,staffCohort:[...prepared.plan.staffCohort,"unreviewed-cohort-member"],
@@ -204,6 +206,22 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
     const digestMismatch={...input,canonicalPlanJson:stable({...prepared.plan,rows:prepared.plan.rows.map((row:any,index:number)=>index===0
       ? {...row,row:{...row.row,name:"Tampered after owner review"}}:row)})};
     await expect(prepare(digestMismatch,{verifyTrust:trusted})).rejects.toThrow(/trust_envelope_invalid/u);
+    // A broad (NULL target_staff_id) policy ceiling added after review must be
+    // included in the same atomic full-state CAS, even though it names no staff.
+    await db.prepare(`INSERT INTO native_staff_delegation_ceilings
+      (id,parent_delegation_id,authority_domain,capability,effect,grant_allow,grant_deny,operation_create,operation_revoke,
+       scope_kind,business_area_id,active,version)
+      VALUES(?,?,'staff_admin','staff.onboarding.create','allow',1,1,1,1,'business_area',?,0,1)`)
+      .bind(`post-review-broad-ceiling:${people.operator.id}`,
+        `${people.operator.id}:staff.admin_delegation.manage`, `existing-scope-${people.operator.id}`).run();
+    await expect(execute(db,prepared,{verifyTrust:trusted})).rejects.toThrow();
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_bootstrap_approvals WHERE approval_id=?").bind(input.approval.approvalId).first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_bootstrap_receipts WHERE command_id=?").bind(input.commandId).first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_admissions WHERE staff_id=?").bind(people.ops.id).first("n")).toBe(0);
+    reviewed=await snapshot(db,[people.ops.id]);
+    reviewedState=JSON.parse(reviewed.snapshotJson);
+    input=planFor(reviewed,people);
+    prepared=await prepare(input,{verifyTrust:trusted});
     // Normal authenticated activity changes this telemetry field between
     // review and execution. It is intentionally excluded from the authority CAS.
     await db.prepare("UPDATE staff_users SET last_seen_at='2026-10-26T19:35:00.000Z' WHERE id=?").bind(people.ops.id).run();

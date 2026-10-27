@@ -26,7 +26,7 @@ const LEGACY_TABLES = Object.freeze([
 // Snapshot them with the other authority-wide state so an edit after review
 // fails the installer CAS instead of silently changing grant interpretation.
 const AUTHORITY_WIDE_TABLES = new Set(['native_business_areas','native_business_divisions','native_directory_resource_scopes',
-  'native_staff_authority_capabilities',
+  'native_staff_delegation_ceilings','native_staff_authority_capabilities',
   'native_staff_access_reconciliation']);
 const INSTALL_COLUMNS = Object.freeze({
   native_business_areas:['id','name','active'],
