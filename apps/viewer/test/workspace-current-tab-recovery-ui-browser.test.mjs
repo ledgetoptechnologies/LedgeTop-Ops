@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
 import { describeDiscardedWork } from '../workspace-current-tab-recovery-ui.mjs';
+import { waitForDevToolsPort } from './devtools-port.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -37,12 +38,9 @@ function browserPath() {
 }
 
 async function waitForDevTools(profile) {
-  const file = path.join(profile, 'DevToolsActivePort'), deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (existsSync(file)) { const port = readFileSync(file, 'utf8').split(/\r?\n/, 1)[0]; if (port) return `http://127.0.0.1:${port}`; }
-    await new Promise(resolve => setTimeout(resolve, 50));
-  }
-  throw new Error('Browser did not expose a DevTools endpoint');
+  const port = await waitForDevToolsPort(path.join(profile, 'DevToolsActivePort'),
+    { timeoutMs: 10_000, label: 'Browser did not expose a DevTools endpoint' });
+  return `http://127.0.0.1:${port}`;
 }
 
 class Cdp {
