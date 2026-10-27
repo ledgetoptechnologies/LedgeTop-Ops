@@ -1,21 +1,29 @@
 export type DeliveryNamespace = "staff" | "client-delegated";
 
 const legacyPublicHostRedirects: Readonly<Record<string, string>> = {
-  "client.ledgetopdroneservices.com": "https://portal.ledgetopdroneservices.com",
+  "client.ledgetopdroneservices.com": "https://delivery.ledgetop.app",
+  "portal.ledgetopdroneservices.com": "https://delivery.ledgetop.app",
 };
+const presentationQueryKeys = new Set([
+  "folder", "view", "q", "search", "sort", "order", "page", "limit", "cursor", "prefix",
+]);
 
 /** Moves a first-use fragment-bearing legacy link to the canonical host before
  * the private fragment is consumed. A fragment-less refresh stays on the
- * legacy host so its host-bound delivery session cookie remains valid.
+ * legacy host so its host-bound delivery session cookie remains valid. This
+ * also handles first-use links when unrelated cookies suppress the server's
+ * fresh-browser redirect. Signed query capabilities stay on their own host.
  */
 export function handoffLegacyPublicShare(
   location: Pick<Location, "hostname" | "pathname" | "search" | "hash">,
   navigate: (url: string) => void,
 ): boolean {
   const canonicalOrigin = legacyPublicHostRedirects[location.hostname.toLowerCase()];
-  if (!canonicalOrigin || !location.hash) return false;
-  const segments = location.pathname.split("/").filter(Boolean);
-  if (segments.length !== 2 || (segments[0] !== "s" && segments[0] !== "client-share")) return false;
+  if (!canonicalOrigin || !location.hash.startsWith("#") || location.hash.length < 2) return false;
+  if (!/^\/(?:s|client-share)\/[A-Za-z0-9_-]{1,128}$/.test(location.pathname)) return false;
+  for (const key of new URLSearchParams(location.search).keys()) {
+    if (!presentationQueryKeys.has(key.toLowerCase())) return false;
+  }
   navigate(new URL(`${location.pathname}${location.search}${location.hash}`, canonicalOrigin).toString());
   return true;
 }
