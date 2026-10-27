@@ -411,8 +411,29 @@ test("client-created links use opaque authorized targets and remain usable on de
   const form = page.locator(".portal-delegated-share-form");
   await expect(form).toBeVisible();
   expect((await form.boundingBox())!.width).toBeLessThanOrEqual(390);
-  page.once("dialog", dialog => dialog.accept());
-  await page.getByRole("button", { name: "Revoke" }).click();
+  forbidNativeDialogs(page);
+  const revokeLink = page.getByRole("button", { name: "Revoke", exact: true });
+  await revokeLink.click();
+  const confirmation = page.getByRole("dialog", { name: "Revoke public link?" });
+  await expect(confirmation.getByText("Revoke this public link? Anyone using it will immediately lose access.", { exact: true })).toBeVisible();
+  await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(confirmation).toHaveCount(0);
+  expect(revoked).toBe(false);
+  await revokeLink.click();
+  await page.keyboard.press("Escape");
+  await expect(confirmation).toHaveCount(0);
+  expect(revoked).toBe(false);
+  // An in-app route change unmounts the panel while the global dialog stays open: confirming must not revoke.
+  await revokeLink.click();
+  await expect(confirmation).toBeVisible();
+  await spaNavigate(page, "/portal/requests");
+  await expect(page.getByRole("heading", { name: "Client-created public links" })).toHaveCount(0);
+  await confirmInPage(page, "Revoke public link?", "Revoke link");
+  await settleRequests(page);
+  expect(revoked).toBe(false);
+  await spaNavigate(page, "/portal/deliveries");
+  await revokeLink.click();
+  await confirmInPage(page, "Revoke public link?", "Revoke link");
   await expect(page.getByText("No client-created links yet.")).toBeVisible();
   expect(revoked).toBe(true);
 });
@@ -535,8 +556,9 @@ test("a late submitted-service detail cannot repopulate cache after the request 
   });
   await page.getByRole("button", { name: "View submitted services" }).click();
   await detailStarted;
-  page.once("dialog", dialog => dialog.accept());
+  forbidNativeDialogs(page);
   await page.getByRole("button", { name: "Cancel request" }).click();
+  await confirmInPage(page, "Cancel this request?", "Cancel request");
   await expect(page.getByText("Cancelled", { exact: true })).toBeVisible();
   releaseDetail();
   await detailSettled;
@@ -2085,8 +2107,20 @@ test("client can edit before review, create a child change, and answer an estima
   await expect.poll(() => workflowEvents.changeRequested).toBe(true);
   await page.goto("/portal/requests");
 
-  page.once("dialog", dialog => dialog.accept());
+  forbidNativeDialogs(page);
+  // Leaving the requests page in-app abandons the open confirmation.
   await page.getByRole("button", { name: "Accept estimate" }).click();
+  await expect(page.getByRole("dialog", { name: "Accept operational estimate?" })).toBeVisible();
+  await spaNavigate(page, "/portal/deliveries");
+  await expect(page.locator("article").getByRole("button", { name: "Accept estimate" })).toHaveCount(0);
+  await confirmInPage(page, "Accept operational estimate?", "Accept estimate");
+  await settleRequests(page);
+  expect(workflowEvents.estimateAccepted).toBeUndefined();
+  await spaNavigate(page, "/portal/requests");
+  await page.getByRole("button", { name: "Accept estimate" }).click();
+  const acceptance = page.getByRole("dialog", { name: "Accept operational estimate?" });
+  await expect(acceptance.getByText("Accept this non-binding Ledge Top operational estimate? A separate Project Alpha quote will still be required before financial approval.", { exact: true })).toBeVisible();
+  await confirmInPage(page, "Accept operational estimate?", "Accept estimate");
   await expect.poll(() => workflowEvents.estimateAccepted).toBe(true);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
@@ -2127,7 +2161,7 @@ test("estimate change requests use an in-app text dialog, not the unsupported na
 });
 
 test("client can cancel pre-work requests and sees PA draft creation without an acceptance claim", async ({ page }) => {
-  const workflowEvents: { cancelled?: boolean } = {};
+  const workflowEvents: { cancelled?: boolean; cancellationKeys: string[] } = { cancellationKeys: [] };
   const fixtureRequests: PortalServiceRequest[] = [
     requests[0]!,
     { ...requests[0]!, id: "request-pa-pending", title: "Approved mapping", status: "accepted_pending_pa_linkage" },
@@ -2153,12 +2187,28 @@ test("client can cancel pre-work requests and sees PA draft creation without an 
   }
   await expect(page.getByText(/\$|document number|open draft/i)).toHaveCount(0);
   const submitted = page.locator("article").filter({ hasText: requests[0]!.title });
-  page.once("dialog", dialog => {
-    expect(dialog.message()).toContain("closes the request before work begins");
-    return dialog.accept();
-  });
+  forbidNativeDialogs(page);
   await submitted.getByRole("button", { name: "Cancel request" }).click();
+  const cancellation = page.getByRole("dialog", { name: "Cancel this request?" });
+  await expect(cancellation).toContainText("closes the request before work begins");
+  await cancellation.getByRole("button", { name: "Keep request", exact: true }).click();
+  await expect(cancellation).toHaveCount(0);
+  expect(workflowEvents.cancelled).toBeUndefined();
+  // Leaving the page in-app abandons the open confirmation.
+  await submitted.getByRole("button", { name: "Cancel request" }).click();
+  await expect(cancellation).toBeVisible();
+  await spaNavigate(page, "/portal/deliveries");
+  await confirmInPage(page, "Cancel this request?", "Cancel request");
+  await settleRequests(page);
+  expect(workflowEvents.cancellationKeys).toHaveLength(0);
+  await spaNavigate(page, "/portal/requests");
+  // Two synchronous clicks on the initiating action open one confirmation, and a repeated confirm sends once.
+  await submitted.getByRole("button", { name: "Cancel request" }).evaluate(button => { (button as HTMLButtonElement).click(); (button as HTMLButtonElement).click(); });
+  await expect(page.getByRole("dialog")).toHaveCount(1);
+  await cancellation.getByRole("button", { name: "Cancel request", exact: true }).dblclick();
   await expect.poll(() => workflowEvents.cancelled).toBe(true);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(workflowEvents.cancellationKeys).toHaveLength(1);
   await expect(submitted.getByText("Cancelled", { exact: true })).toBeVisible();
   await expect(submitted.getByRole("button", { name: "Cancel request" })).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -2169,12 +2219,35 @@ test("client cancellation reuses its idempotency key after an uncertain response
   await mockAuthorizedPortal(page, null, requests, workflowEvents);
   await page.goto("/portal/projects/project-a?tab=requests");
   const request = page.locator("article").filter({ hasText: requests[0]!.title });
-  page.on("dialog", async dialog => dialog.type() === "confirm" ? dialog.accept() : dialog.dismiss());
+  // The interrupted response still reports its error through an alert; only confirmation is in-app here.
+  forbidNativeDialogs(page, { allowAlerts: true });
   await request.getByRole("button", { name: "Cancel request" }).click();
+  await confirmInPage(page, "Cancel this request?", "Cancel request");
   await expect(request.getByRole("button", { name: "Retry cancellation" })).toBeVisible();
   await request.getByRole("button", { name: "Retry cancellation" }).click();
+  await confirmInPage(page, "Retry cancelling this request?", "Retry cancellation");
   await expect.poll(() => workflowEvents.cancelled).toBe(true);
   expect(workflowEvents.cancellationKeys).toHaveLength(2);
   expect(workflowEvents.cancellationKeys[1]).toBe(workflowEvents.cancellationKeys[0]);
   await expect(request.getByText("Cancelled", { exact: true })).toBeVisible();
 });
+
+function forbidNativeDialogs(page: Page, { allowAlerts = false } = {}) {
+  page.on("dialog", dialog => {
+    void dialog.dismiss();
+    if (!allowAlerts || dialog.type() !== "alert") throw new Error(`Native browser ${dialog.type()} is forbidden: ${dialog.message()}`);
+  });
+}
+/** In-app route change through the portal's own history handling, without a document reload. */
+async function spaNavigate(page: Page, path: string) {
+  await page.evaluate(target => { history.pushState(null, "", target); dispatchEvent(new PopStateEvent("popstate")); }, path);
+}
+/** Lets any request a confirmation might have dispatched reach the route mocks. */
+async function settleRequests(page: Page) {
+  await page.evaluate(() => new Promise<void>(resolve => setTimeout(resolve, 250)));
+}
+async function confirmInPage(page: Page, title: string, confirmLabel: string) {
+  const dialog = page.getByRole("dialog", { name: title });
+  await dialog.getByRole("button", { name: confirmLabel, exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+}
