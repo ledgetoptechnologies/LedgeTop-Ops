@@ -115,7 +115,9 @@ export async function uploadAssetManifest({ accountId, workerName, token, manife
   const { manifest, sizes } = validateManifest(input);
   const includedHashes = [...sizes.keys()].sort();
   const intent = async (phase, hashes) => {
-    try { await recordIntent(Object.freeze({ phase, hashes: Object.freeze([...hashes]) })); }
+    const requestPath = phase === 'asset-session'
+      ? `/workers/scripts/${workerName}/assets-upload-session` : '/workers/assets/upload?base64=true';
+    try { await recordIntent(Object.freeze({ phase, path: requestPath, hashes: Object.freeze([...hashes]) })); }
     catch { throw new Error('Asset mutation intent was not durably accepted; no request made'); }
   };
   await intent('asset-session', includedHashes);

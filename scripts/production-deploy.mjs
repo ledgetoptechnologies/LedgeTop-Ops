@@ -38,16 +38,35 @@ export function varsOf(state) {
     need(typeof x.text === 'string', 'Plain binding value missing'); return [x.name, x.text];
   }));
 }
-function activeId(state) {
+function activeId(state, expectedVersions) {
   const rows = state.deployment.versions;
+  if (expectedVersions !== undefined) {
+    need(Array.isArray(expectedVersions) && expectedVersions.length === 2
+      && expectedVersions.every(row => row && UUID.test(row.versionId) && Number.isInteger(row.percentage)
+        && row.percentage >= 0 && row.percentage <= 100)
+      && new Set(expectedVersions.map(row => row.versionId)).size === expectedVersions.length
+      && expectedVersions.reduce((sum, row) => sum + row.percentage, 0) === 100
+      && expectedVersions.filter(row => row.percentage === 100).length === 1,
+    'Expected exact staged deployment weights are invalid');
+    const projection = value => value.map(row => ({ versionId: row.version_id, percentage: row.percentage }))
+      .sort((a, b) => a.versionId.localeCompare(b.versionId));
+    const expected = expectedVersions.map(row => ({ versionId: row.versionId, percentage: row.percentage }))
+      .sort((a, b) => a.versionId.localeCompare(b.versionId));
+    need(Array.isArray(rows) && rows.length === expected.length && rows.every(row => UUID.test(row.version_id))
+      && new Set(rows.map(row => row.version_id)).size === rows.length && equal(projection(rows), expected),
+      'Provider deployment does not match exact expected staged weights');
+    const active = rows.filter(row => row.percentage === 100);
+    need(active.length === 1 && UUID.test(active[0].version_id), 'Production must have one100% active version');
+    return active[0].version_id;
+  }
   need(Array.isArray(rows) && rows.length === 1 && rows[0].percentage === 100 && UUID.test(rows[0].version_id), 'Production must have one100% active version');
   return rows[0].version_id;
 }
-export function validateInstallation(snapshot, { allowLatest = {}, profile = PROFILE, selectedApp } = {}) {
+export function validateInstallation(snapshot, { allowLatest = {}, profile = PROFILE, selectedApp, expectedDeploymentVersions = {} } = {}) {
   need(profile.onboardingAdminOrigin === undefined || profile.onboardingAdminOrigin === 'https://ops.ledgetop.app', 'Unreviewed canonical admin origin profile');
   need(snapshot && equal(Object.keys(snapshot).sort(), Object.keys(profile.workers).sort()), 'Existing complete production installation required');
   for (const [app, spec] of Object.entries(profile.workers)) {
-    const s = snapshot[app]; const id = activeId(s);
+    const s = snapshot[app]; const id = activeId(s, expectedDeploymentVersions[app]);
     need(s.version.id === id && s.modern.id === id && UUID.test(s.latest), 'Active/version identity invalid');
     if (!selectedApp || app === selectedApp) need(s.latest === (allowLatest[app] ?? id), 'Latest must equal the selected sole active version; reconcile an incomplete deployment first');
     else if (s.latest !== id) {
@@ -186,7 +205,7 @@ export class CloudflareReader {
     return body.result;
   }
 }
-export async function capture(reader, { selectedApp } = {}) {
+export async function capture(reader, { selectedApp, expectedDeploymentVersions = {} } = {}) {
   const out = {};
   for (const [app, spec] of Object.entries(PROFILE.workers)) {
     for (let attempt = 0; ; attempt++) {
@@ -194,7 +213,7 @@ export async function capture(reader, { selectedApp } = {}) {
     const deployments = await reader.get(`${pre}/deployments?per_page=1`);
     need(Array.isArray(deployments.deployments) && deployments.deployments.length >= 1 && deployments.deployments.length <= 100, 'Deployment head missing or unbounded');
     const deployment = deployments.deployments[0];
-    const id = activeId({ deployment });
+    const id = activeId({ deployment }, expectedDeploymentVersions[app]);
     const versions = await reader.get(`${pre}/versions?per_page=1`);
     need(Array.isArray(versions.items) && versions.items.length >= 1 && versions.items.length <= 100, 'Version head missing or unbounded');
     out[app] = {

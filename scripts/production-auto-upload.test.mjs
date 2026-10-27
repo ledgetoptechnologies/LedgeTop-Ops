@@ -46,6 +46,10 @@ test('only official bounded POSTs; account credential only registers, session JW
   }
   for (const call of f.calls) { assert.equal(call.init.method, 'POST'); assert.equal(call.init.redirect, 'error'); assert.ok(call.init.signal instanceof AbortSignal); }
   assert.deepEqual(f.intents.map(i => i.phase), ['asset-session', 'asset-bucket', 'asset-bucket']);
+  assert.deepEqual(f.intents.map(i => i.path), [
+    '/workers/scripts/ledgetop-ops/assets-upload-session',
+    '/workers/assets/upload?base64=true', '/workers/assets/upload?base64=true',
+  ]);
   assert.ok(!JSON.stringify(f.intents).includes(API_TOKEN) && !JSON.stringify(f.intents).includes(SESSION));
 });
 

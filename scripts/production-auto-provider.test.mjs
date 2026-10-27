@@ -73,30 +73,33 @@ test("stage and activate use only exact deployments JSON and durable intent, no 
     bodies.push(JSON.parse(init.body)); return ok({ id: candidate });
   });
   await provider.stageVersion({ workerName: "ledgetop-ops", parentVersionId: parent, candidateVersionId: candidate, message: "stage" });
-  await provider.activateCandidate({ workerName: "ledgetop-ops", candidateVersionId: candidate, message: "activate" });
+  await provider.activateCandidate({ workerName: "ledgetop-ops", parentVersionId: parent, candidateVersionId: candidate, message: "activate" });
   assert.deepEqual(bodies[0], { strategy: "percentage", versions: [{ version_id: parent, percentage: 100 }, { version_id: candidate, percentage: 0 }], annotations: { "workers/message": "stage" } });
   assert.deepEqual(bodies[1].versions, [{ version_id: candidate, percentage: 100 }]);
+  assert.deepEqual(intents.map(({ parentVersionId, candidateVersionId }) => ({ parentVersionId, candidateVersionId })),
+    [{ parentVersionId: parent, candidateVersionId: candidate }, { parentVersionId: parent, candidateVersionId: candidate }]);
 });
 
 test("intent refusal sends nothing; provider errors and malformed bodies persist privately, never retry or echo", async () => {
   let calls = 0;
   const blocked = setup(async () => { calls++; return ok({}); }, { recordIntent: async () => { throw Error(token); } }).provider;
-  await assert.rejects(blocked.activateCandidate({ workerName: "ledgetop-ops", candidateVersionId: candidate, message: "x" }), error => !error.message.includes(token)); assert.equal(calls, 0);
+  await assert.rejects(blocked.activateCandidate({ workerName: "ledgetop-ops", parentVersionId: parent, candidateVersionId: candidate, message: "x" }), error => !error.message.includes(token)); assert.equal(calls, 0);
   for (const response of [Response.json({ success: false, errors: [{ code: 10021, message: token }] }, { status: 400 }), new Response(token, { status: 200 }), new Response(null, { status: 302, headers: { Location: "https://evil.test" } })]) {
     const state = setup(async (_url, init) => { calls++; assert.equal(init.redirect, "error"); return response; }); const before = calls;
-    await assert.rejects(state.provider.activateCandidate({ workerName: "ledgetop-ops", candidateVersionId: candidate, message: "x" }), error => !error.message.includes(token));
+    await assert.rejects(state.provider.activateCandidate({ workerName: "ledgetop-ops", parentVersionId: parent, candidateVersionId: candidate, message: "x" }), error => !error.message.includes(token));
     assert.equal(calls, before + 1); assert.equal(state.persisted.length, 1);
   }
 });
 
 test("metadata GET supports capture suffixes but refuses arbitrary paths and bounded response violations", async () => {
-  const calls = []; const { provider } = setup(async (url, init) => { calls.push(url); assert.equal(init.method, "GET"); return ok({ deployments: [] }); });
+  const calls = []; const state = setup(async (url, init) => { calls.push(url); assert.equal(init.method, "GET"); return ok({ deployments: [] }); });
+  const { provider } = state;
   await provider.readDeployment("ledgetop-ops");
   await provider.get(`/workers/workers/ledgetop-clients/versions/${parent}?include=modules`);
   for (const path of ["/zones", "/workers/scripts/arbitrary/settings", "/workers/scripts/ledgetop-ops/../secrets", "/workers/scripts/ledgetop-ops/settings?token=secret"]) await assert.rejects(provider.get(path));
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 2); assert.equal(state.persisted.length, 0, "read-only configuration bodies stay out of the mutation journal");
   const oversized = setup(async () => new Response("x", { headers: { "Content-Length": String(33 * 1024 * 1024) } }));
-  await assert.rejects(oversized.provider.readDeployment("ledgetop-ops")); assert.equal(oversized.persisted.length, 1);
+  await assert.rejects(oversized.provider.readDeployment("ledgetop-ops")); assert.equal(oversized.persisted.length, 0);
 });
 
 test("temporary verifier creation, exact service readback, temporary-only enable, fetch and delete404", async () => {
@@ -134,7 +137,7 @@ test("existing or mismatched temporary Worker is never enabled, and ambiguous cr
 
 test("uncooperative transport expires with one intent and one private uncertainty receipt, no retry", async () => {
   let calls = 0; const state = setup(async () => { calls++; return new Promise(() => {}); }, { timeoutMs: 5 });
-  await assert.rejects(state.provider.activateCandidate({ workerName: "ledgetop-ops", candidateVersionId: candidate, message: "x" }), /no_retry/u);
+  await assert.rejects(state.provider.activateCandidate({ workerName: "ledgetop-ops", parentVersionId: parent, candidateVersionId: candidate, message: "x" }), /no_retry/u);
   assert.equal(calls, 1); assert.equal(state.intents.length, 1); assert.equal(state.persisted.length, 1); assert.equal(state.persisted[0].incomplete, true);
 });
 
@@ -148,6 +151,7 @@ test("direct asset upload delegates the real protocol and privately persists com
     manifest: { "/index.html": { hash: "b".repeat(32), size: 1 } }, recordIntent: async () => {}, resolvePayload: async () => { throw Error("must not resolve reused assets"); } });
   assert.equal(result.completionToken, "synthetic.complete.jwt"); assert.equal(state.persisted.length, 1);
   assert.equal(state.persisted[0].requestId, state.intents[0].requestId);
+  assert.equal(state.persisted[0].path, state.intents[0].path);
   assert(!JSON.stringify(state.intents).includes("synthetic.complete.jwt"));
 });
 

@@ -5,6 +5,11 @@ const SHA = /^[a-f0-9]{40}$/u;
 export const REQUIRED_MAIN_JOBS = Object.freeze(['source-invariants','incoming-pickup-alpine','client','operations','ops-sync','thumbnail-renderer',
   'operations-browser-desktop-edge','operations-browser-mobile-edge','client-browser-desktop-edge','client-browser-mobile-edge'].sort());
 const need = ok => { if (!ok) throw Error('Exact successful main CI is required; automatic release held'); };
+export function isExactMainCiWorkflowPath(value) {
+  // The REST workflow-run representation includes a ref suffix (for example
+  // `.github/workflows/ci.yml@main`); webhook fixtures/older shapes may omit it.
+  return ['.github/workflows/ci.yml', '.github/workflows/ci.yml@main', '.github/workflows/ci.yml@refs/heads/main'].includes(value);
+}
 /** Read only. Fixed official repository/URLs, bounded bodies, no redirect or
  * retry, and no raw provider errors/headers in release receipts. This is not an
  * inbox poller. A CI-completion event should start the deployment; Workers
@@ -45,7 +50,7 @@ export class ProductionMainCI {
     const runs=result.workflow_runs;
     need(runs.every(r=>r&&Number.isSafeInteger(r.id)&&r.id>0&&Number.isSafeInteger(r.run_number)&&r.run_number>0&&Number.isSafeInteger(r.run_attempt)&&r.run_attempt>0));
     const run=[...runs].sort((a,b)=>b.run_number-a.run_number || b.run_attempt-a.run_attempt)[0];
-    need(run.name==='CI'&&run.path==='.github/workflows/ci.yml'&&run.head_sha===sourceCommit&&run.head_branch==='main'&&run.event==='push'
+    need(run.name==='CI'&&isExactMainCiWorkflowPath(run.path)&&run.head_sha===sourceCommit&&run.head_branch==='main'&&run.event==='push'
       &&run.status==='completed'&&run.conclusion==='success'&&run.repository?.full_name===REPO&&run.head_repository?.full_name===REPO);
     const jobs=await this.get(`/actions/runs/${run.id}/jobs?filter=latest&per_page=100`);
     need(jobs.total_count===REQUIRED_MAIN_JOBS.length&&Array.isArray(jobs.jobs)&&jobs.jobs.length===jobs.total_count

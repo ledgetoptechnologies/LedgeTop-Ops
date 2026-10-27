@@ -7,6 +7,7 @@
 import { createHash } from 'node:crypto';
 import { mergeAssetLedger, providerManifest, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+import { isProviderUtcTimestamp, minimumRetainedUntil } from './production-auto-time.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const SHA = /^[a-f0-9]{64}$/, COMMIT = /^[a-f0-9]{40}$/;
@@ -15,7 +16,7 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const weights = values => JSON.stringify(values.map(({ versionId, percentage }) => ({ versionId, percentage }))
   .sort((a, b) => a.versionId.localeCompare(b.versionId)));
 const iso = value => typeof value === 'string' && Number.isFinite(Date.parse(value))
-  && new Date(value).toISOString() === value;
+  && (new Date(value).toISOString() === value || isProviderUtcTimestamp(value));
 const copy = value => structuredClone(value);
 const STAFF_KEYS = ['schemaVersion', 'sourceCommit', 'accountId', 'databaseId', 'reviewSha256',
   'cohortSha256', 'controlPlaneSha256', 'observedAt', 'staffCount', 'generation'];
@@ -216,7 +217,7 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
     await fence(active);
     const receipt = { candidateVersionId, parentVersionId: baseline.activeVersionId, ledgerSHA256,
       deploymentId: active.deploymentId, cutoverObservedAt: active.deployedAt,
-      earliestPermittedPruningAt: new Date(Date.parse(active.deployedAt) + 48 * 60 * 60 * 1000).toISOString(),
+      earliestPermittedPruningAt: minimumRetainedUntil(active.deployedAt, 48),
       minimumRetentionHours: 48, automaticPruning: false, allHistoricalAssetsCarried: true,
       files: ledger.assets.length, verifiedActive: true };
     phase = 'complete'; await record('verified', receipt); return receipt;
@@ -232,7 +233,12 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
           controlsUnchanged: observed.controlsSHA256 === baseline?.controlsSHA256 };
       } catch { /* retain original unknown outcome; no retry */ }
     }
-    try { await record('held', { writesAttempted, ...(candidateVersionId ? { candidateVersionId } : {}), reconciliation }); }
+    // Persist the original failure class before/alongside reconciliation. Do
+    // not serialize exception text: provider errors can contain URLs or data.
+    const failureCode = `release_${phase.replaceAll('-', '_')}_failed`;
+    const reconciliationCode = !writesAttempted ? 'not_attempted' : reconciliation.readSucceeded ? 'read_succeeded' : 'read_failed';
+    try { await record('held', { writesAttempted, failureCode, reconciliationCode,
+      ...(candidateVersionId ? { candidateVersionId } : {}), reconciliation }); }
     catch { /* original durable mutation intent must remain unresolved */ }
     throw new Error('Automatic release held; preserve journal and reconcile read-only; no retry or rollback performed');
   }

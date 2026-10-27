@@ -16,7 +16,7 @@ function readiness() { return { schemaVersion: 2, sourceCommit: COMMIT, accountI
 function fixture(workerName = 'ledgetop-ops') {
   const events = [], receipts = [], intents = [];
   const initial = { activeVersionId: PARENT, latestVersionId: PARENT, controlsSHA256: CONTROL,
-    deploymentId: DEPLOY, deployedAt: '2026-10-23T00:00:00.000Z', versions: [{ versionId: PARENT, percentage: 100 }] };
+    deploymentId: DEPLOY, deployedAt: '2026-10-27T06:20:51.000000Z', versions: [{ versionId: PARENT, percentage: 100 }] };
   let current = clone(initial), ledger;
   const oldPayloads = new Map([['/index.html', Buffer.from('old index')], ['/assets/old.js', Buffer.from('old js')]]);
   const newPayloads = new Map([['/index.html', Buffer.from('new index')], ['/assets/new.js', Buffer.from('new js')]]);
@@ -48,13 +48,13 @@ function fixture(workerName = 'ledgetop-ops') {
     candidateReadback: async input => { events.push('readback'); return { verified: true,
       candidateVersionId: CANDIDATE, moduleSHA256: MODULE, ledgerSHA256: input.ledgerSHA256, controlsSHA256: CONTROL }; },
     stageZero: async input => { events.push('zero-post'); current = { ...current,
-      deploymentId: ZERO, versions: clone(input.versions), deployedAt: '2026-10-23T01:00:00.000Z' }; },
+      deploymentId: ZERO, versions: clone(input.versions), deployedAt: '2026-10-27T07:20:50.123456Z' }; },
     verifyAssets: async input => { events.push(`verify-${input.stage}`); return { verified: true,
       versionRoutingVerified: true, routingDeploymentId: input.routingDeploymentId,
       versionId: input.versionId, ledgerSHA256: input.ledgerSHA256, files: input.ledger.assets.length,
       bytes: input.ledger.assets.reduce((sum, row) => sum + row.size, 0) }; },
     activate: async input => { events.push('activate-post'); current = { ...current,
-      deploymentId: ACTIVE, activeVersionId: CANDIDATE, versions: clone(input.versions), deployedAt: '2026-10-23T02:00:00.000Z' }; },
+      deploymentId: ACTIVE, activeVersionId: CANDIDATE, versions: clone(input.versions), deployedAt: '2026-10-27T07:20:51.938465Z' }; },
     readDeployment: async () => { events.push('read-deployment'); return clone(current); },
     recordIntent: async entry => { events.push(`intent-${entry.phase}`); intents.push(clone(entry)); },
     receipt: async entry => { events.push(`receipt-${entry.status}`); receipts.push(clone(entry)); },
@@ -67,8 +67,8 @@ function fixture(workerName = 'ledgetop-ops') {
 test('happy path fences every POST, verifies parent100/candidate0 then candidate100 and both byte sets', async () => {
   const f = fixture(), result = await f.run();
   assert.equal(result.verifiedActive, true); assert.equal(result.files, 3);
-  assert.equal(result.cutoverObservedAt, '2026-10-23T02:00:00.000Z');
-  assert.equal(result.earliestPermittedPruningAt, '2026-10-25T02:00:00.000Z');
+  assert.equal(result.cutoverObservedAt, '2026-10-27T07:20:51.938465Z');
+  assert.equal(result.earliestPermittedPruningAt, '2026-10-29T07:20:51.939Z');
   assert.equal(result.automaticPruning, false); assert.equal(result.allHistoricalAssetsCarried, true);
   assert.deepEqual(f.ledger().assets.map(row => row.path), ['/assets/new.js', '/assets/old.js', '/index.html']);
   for (const [post, phase] of [['asset-session-post', 'asset-session'], ['asset-bucket-post', 'asset-bucket'],
@@ -141,6 +141,21 @@ test('unknown version-upload outcome preserves intent and does only one GET reco
   assert.equal(f.intents.length, 1); assert.equal(f.events.filter(row => row === 'read-deployment').length, 1);
   assert.equal(f.events.includes('zero-post'), false); assert.equal(f.events.includes('activate-post'), false);
   assert.equal(f.receipts.at(-1).reconciliation.latestVersionId, CANDIDATE);
+  assert.equal(f.receipts.at(-1).failureCode, 'release_upload_failed');
+  assert.equal(f.receipts.at(-1).reconciliationCode, 'read_succeeded');
+  assert.equal(JSON.stringify(f.receipts.at(-1)).includes('raw-private-response'), false);
+});
+
+test('original safe failure class survives a failed read-only reconciliation', async () => {
+  const f = fixture();
+  f.adapter.upload = async input => { await input.recordIntent({ phase: 'worker-version-upload', hashes: [] }); throw Error('provider-secret-detail'); };
+  f.adapter.readDeployment = async () => { throw Error('secondary-secret-detail'); };
+  await assert.rejects(f.run(), /held/);
+  const held = f.receipts.at(-1);
+  assert.equal(held.failureCode, 'release_upload_failed');
+  assert.equal(held.reconciliationCode, 'read_failed');
+  assert.equal(held.reconciliation.readSucceeded, false);
+  assert.equal(JSON.stringify(held).includes('secret-detail'), false);
 });
 
 test('a fake upload acknowledgement without a durable version intent fails', async () => {

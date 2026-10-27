@@ -21,6 +21,15 @@ const need = value => { if (!value) fail(); };
 const jwt = value => typeof value === "string" && value.length <= 16384 && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u.test(value);
 const prod = name => { need(WORKERS.includes(name)); return name; };
 const version = id => { need(typeof id === "string" && UUID.test(id)); return id; };
+function providerIntentPath(url, accountId) {
+  let parsed; try { parsed = new URL(url); } catch { fail(); }
+  const prefix = `/client/v4/accounts/${accountId}`;
+  need(parsed.origin === 'https://api.cloudflare.com' && parsed.pathname.startsWith(`${prefix}/`)
+    && !parsed.hash && !parsed.username && !parsed.password);
+  const suffix = parsed.pathname.slice(prefix.length) + parsed.search;
+  need(/^\/workers\/[A-Za-z0-9_/?=&.-]+$/u.test(suffix) && !suffix.includes('..') && !suffix.includes('//'));
+  return suffix;
+}
 function pinnedModule(value) {
   need(value && Object.keys(value).sort().join() === "bytes,sha256" && Buffer.isBuffer(value.bytes)
     && value.bytes.length > 0 && value.bytes.length <= MAX_MODULE && SHA.test(value.sha256) && hash(value.bytes) === value.sha256);
@@ -60,7 +69,15 @@ export class ProductionCloudflareProvider {
       catch { fail(); } // No request until the intent is durable.
     }
     const controller = new AbortController(); let response, reader, raw = Buffer.alloc(0), persisted = false;
-    const persistOnce = async value => { if (persisted) return; persisted = true; await this.#persist(value); };
+    const persistOnce = async value => {
+      if (persisted) return;
+      persisted = true;
+      // Read-only snapshots can contain live configuration values and do not
+      // have mutation intents in the durable release journal. Keep them in
+      // memory only; seal only responses paired with a pre-dispatch intent.
+      if (method === "GET") return;
+      await this.#persist(value);
+    };
     const operation = (async () => {
       try {
         response = await this.#fetch(API + this.account + suffix, { method, redirect: "error", signal: controller.signal,
@@ -120,11 +137,11 @@ export class ProductionCloudflareProvider {
           size += next.value.byteLength; need(size <= 8 * 1024 * 1024); chunks.push(Buffer.from(next.value));
         } } finally { init.signal.removeEventListener("abort", cancel); }
         raw = Buffer.concat(chunks, size); let body; try { body = JSON.parse(raw.toString("utf8")); } catch {}
-        saved = true; await this.#persist({ requestId, method: "POST", path: new URL(url).pathname,
+        saved = true; await this.#persist({ requestId, method: "POST", path: providerIntentPath(url, this.account),
           status: response.status, rawResponse: raw, errorCodes: Array.isArray(body?.errors) ? body.errors.map(e => e.code).filter(Number.isSafeInteger) : [] });
         return new Response(raw, { status: response.status, headers: response.headers });
       } catch {
-        if (!saved) try { await this.#persist({ requestId, method: "POST", path: new URL(url).pathname,
+        if (!saved) try { await this.#persist({ requestId, method: "POST", path: providerIntentPath(url, this.account),
           status: response?.status ?? null, rawResponse: raw, incomplete: true }); } catch {}
         fail();
       } finally { try { void reader?.cancel().catch(() => {}); } catch {} }
@@ -165,18 +182,22 @@ export class ProductionCloudflareProvider {
       intent: { phase: "worker-version-upload", hashes: [], workerName, parentVersionId: parentId, modules: { "index.js": hash(js), "index.js.map": hash(sourceMap), "__ops_release_ledger.json": hash(json) } } });
     version(result.result?.id); need(result.result.id !== parentId); return result.result;
   }
-  async #deploy(workerName, versions, message, phase) {
+  async #deploy(workerName, versions, message, phase, { parentVersionId, candidateVersionId } = {}) {
     prod(workerName); need(typeof message === "string" && message.length > 0 && message.length <= 512 && !/[\x00-\x1f\x7f]/u.test(message));
     const body = { strategy: "percentage", versions, annotations: { "workers/message": message } };
     return (await this.#request(`/workers/scripts/${workerName}/deployments`, { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json" },
-      intent: { phase, workerName, versions } })).result;
+      intent: { phase, workerName, versions, ...(parentVersionId ? { parentVersionId } : {}),
+        ...(candidateVersionId ? { candidateVersionId } : {}) } })).result;
   }
   stageVersion({ workerName, parentVersionId, candidateVersionId, message }) {
     version(parentVersionId); version(candidateVersionId); need(parentVersionId !== candidateVersionId);
-    return this.#deploy(workerName, [{ version_id: parentVersionId, percentage: 100 }, { version_id: candidateVersionId, percentage: 0 }], message, "stage-zero-percent");
+    return this.#deploy(workerName, [{ version_id: parentVersionId, percentage: 100 }, { version_id: candidateVersionId, percentage: 0 }], message,
+      "stage-zero-percent", { parentVersionId, candidateVersionId });
   }
-  activateCandidate({ workerName, candidateVersionId, message }) {
-    return this.#deploy(workerName, [{ version_id: version(candidateVersionId), percentage: 100 }], message, "activate-candidate");
+  activateCandidate({ workerName, parentVersionId, candidateVersionId, message }) {
+    version(parentVersionId);
+    return this.#deploy(workerName, [{ version_id: version(candidateVersionId), percentage: 100 }], message,
+      "activate-candidate", { parentVersionId, candidateVersionId });
   }
   readDeployment(workerName) { return this.get(`/workers/scripts/${prod(workerName)}/deployments?per_page=1`); }
   async createVerifier({ name, workerName, origin, entries, nonceHash, versionId }) {
