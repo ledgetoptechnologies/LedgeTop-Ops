@@ -1,4 +1,4 @@
-import { IntelIngestError,strictIntelJson } from './competitor-intel-ingest-schema';
+import { IntelIngestError,strictIntelJson,validateIntelObservation } from './competitor-intel-ingest-schema';
 import { INTEL_INGEST_PATH,intelSignatureHeaders,readIntelBody,verifyIntelSignature,type ProducerKey } from './competitor-intel-ingest-security';
 import { readIngestProducerKey } from './competitor-intel-ingest-store';
 import { validateOwnerIntelV2Observation,type OwnerIntelV2Observation,type ReviewedOwnerIntelV2Context,OWNER_INTEL_V2_DRAFT_SHA } from './owner-intel-v2-observation';
@@ -40,7 +40,20 @@ export function dispatchOwnerIntelSourceIngest(request:Request,env:OwnerIntelSou
    await verifyIntelSignature(raw,headers,key);
    const decoded=strictIntelJson(raw) as Record<string,unknown>;
    const semantics=decoded&&typeof decoded==='object'?decoded.semantics as Record<string,unknown>|undefined:undefined;
-   if(semantics?.observation!=='ci.obs.v2')return null;
+   if(semantics?.observation!=='ci.obs.v2'){
+    // Existing v1 traffic stays independent of the new migration. When the
+    // source inbox exists, a retained v2 operation must report a permanent
+    // replay conflict rather than repeatedly failing v1's insertion trigger.
+    if(semantics?.observation==='ci.obs.v1'){
+     let v1;
+     try{v1=validateIntelObservation(decoded,headers.producer,now);}
+     catch{return null;} // The frozen receiver retains its own validation errors.
+     const installed=await db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name=?").bind('owner_intel_source_inbox').first();
+     if(installed&&await db.prepare('SELECT operation_id FROM owner_intel_source_inbox WHERE operation_id=?').bind(v1.operationId).first())
+      throw new IntelIngestError('operation_hash_conflict',409);
+    }
+    return null;
+   }
    if(decoded.observationKind!=='search_console_summary'&&decoded.observationKind!=='own_site')throw new IntelIngestError('schema_invalid',400);
    // Only a recognized v2 source envelope depends on migration 0229. v1
    // falls through to the frozen receiver without querying new tables.

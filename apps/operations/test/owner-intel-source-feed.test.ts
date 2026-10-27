@@ -114,6 +114,29 @@ describe('source-only Hermes feed, immutable history and authorized reads',()=>{
    expect(execution.waitUntil).not.toHaveBeenCalled();
   }finally{clock.mockRestore();}
  });
+ it('accepts a valid signed v1 event through Worker fetch on a database that has never installed 0229',async()=>{
+  const oldRuntime=new Miniflare({modules:true,compatibilityDate:'2026-08-06',script:'export default {}',d1Databases:{OPS_DB:crypto.randomUUID()}});
+  const clock=vi.spyOn(Date,'now').mockReturnValue(NOW);
+  try{
+   const oldDb=await oldRuntime.getD1Database('OPS_DB') as unknown as D1Database;
+   await oldDb.prepare('CREATE TABLE staff_users(id TEXT PRIMARY KEY)').run();
+   for(const name of ['0227_owner_intel_reads.sql','0228_competitor_intel_ingest.sql'])
+    await oldDb.batch(splitD1MigrationStatements(readFileSync(new URL(`../migrations/${name}`,import.meta.url),'utf8')).map(sql=>oldDb.prepare(sql)));
+   await oldDb.batch([
+    oldDb.prepare('INSERT INTO ci_ingest_control VALUES(1,1)'),
+    oldDb.prepare('INSERT INTO ci_ingest_producer_keys VALUES(?,?,?,?,?)').bind(PRODUCER,key.key_id,key.public_key,1,'active'),
+    oldDb.prepare("INSERT INTO owner_intel_businesses VALUES(?,'Synthetic Business',1,'reviewed')").bind(businessId),
+    oldDb.prepare("INSERT INTO owner_intel_business_aliases VALUES(?,?,'active')").bind(routeKey,businessId),
+    oldDb.prepare("INSERT INTO owner_intel_bindings VALUES(?,?,1,'reviewed')").bind(bindingId,businessId),
+    oldDb.prepare('INSERT INTO ci_ingest_producer_bindings VALUES(?,?,1,1)').bind(PRODUCER,bindingId)]);
+   const v1={...observation(),semantics:{observation:'ci.obs.v1',scoring:'concern_0_10.v1'},observationKind:'scan_run',subjectKey:'scan:synthetic',
+    payload:{scanType:'website',trigger:'manual',startedAt:TS,completedAt:null,nextScheduledAt:null,competitorsScanned:0,pages:{attempted:0,succeeded:0},changesDetected:0,errors:1,state:'failed'}};
+   const response=await worker.fetch(await signed(v1),{...env(),OPS_DB:oldDb} as Env,{waitUntil:vi.fn(),passThroughOnException:vi.fn()} as unknown as ExecutionContext);
+   expect(response.status).toBe(200);expect(await response.json()).toMatchObject({delivery:'first',receipt:{operationId:v1.operationId}});
+   expect(await oldDb.prepare('SELECT COUNT(*) count FROM ci_ingest_inbox').first<number>('count')).toBe(1);
+   expect(await oldDb.prepare("SELECT name FROM sqlite_schema WHERE name='owner_intel_source_inbox'").first()).toBeNull();
+  }finally{clock.mockRestore();await oldRuntime.dispose();}
+ });
  it('keeps the frozen v1 validator route available and rejects source kinds when the source gate is off',async()=>{
   const v2=observation(),disabled={...env(),COMPETITOR_INTEL_INGEST_ENABLED:undefined};
   const pending=dispatchOwnerIntelSourceIngest(await signed(v2),disabled,NOW);expect(pending).not.toBeNull();const response=await pending!;expect(response).not.toBeNull();expect(response!.status).toBe(404);
@@ -158,6 +181,14 @@ describe('source-only Hermes feed, immutable history and authorized reads',()=>{
   const history=observation('search_console_summary','2');history.operationId=id();expect((await post(history))?.status).toBe(200);
   const prior=await db.prepare('SELECT outcome FROM owner_intel_source_inbox WHERE operation_id=?').bind(history.operationId).first<string>('outcome');expect(prior).toBe('accepted_history');
   expect(await count('owner_intel_source_projections')).toBe(2);
+ });
+ it('returns a permanent conflict when a frozen v1 event reuses a source operation ID',async()=>{
+  const value=observation();expect((await post(value))?.status).toBe(200);
+  const v1={...value,semantics:{observation:'ci.obs.v1',scoring:'concern_0_10.v1'},observationKind:'scan_run',subjectKey:'scan:synthetic',
+   payload:{scanType:'website',trigger:'manual',startedAt:TS,completedAt:null,nextScheduledAt:null,competitorsScanned:0,pages:{attempted:0,succeeded:0},changesDetected:0,errors:1,state:'failed'}};
+  const response=await dispatchIntelIngest(await signed(v1),env() as Env,NOW);
+  expect(response?.status).toBe(409);expect(await response!.json()).toEqual({error:'operation_hash_conflict'});
+  expect(await count('ci_ingest_inbox')).toBe(0);expect(await count('owner_intel_source_inbox')).toBe(1);
  });
  it('denies wrong business membership and exact reviewed property mismatches',async()=>{
   const unreviewed=observation();unreviewed.monitoringBindingId='binding-other';unreviewed.operationId=id();
