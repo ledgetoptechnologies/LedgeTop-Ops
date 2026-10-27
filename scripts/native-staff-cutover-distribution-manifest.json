@@ -8,15 +8,15 @@
     },
     {
       "path": "scripts/access-group-read-capsule-pins.mjs",
-      "sha256": "f06923498ba0dd979359bd648c77dc7b4595c480650786f585066bcfd68014ee"
+      "sha256": "30ddf6b02cd0904b117ecb29f74a5c3b0049ccaf975ec9264954a2546df2b013"
     },
     {
       "path": "scripts/access-group-read-capsule-unseal.ps1",
-      "sha256": "4459fd5f9ddb1ce9f59d55a367edd9bbb96bd1cbbab7fef3d0593f42190cf41d"
+      "sha256": "9bbf44a8a66521c55b06c59c41d064d3dae6047e8b5b1f1d4d1d4ae859ed5a50"
     },
     {
       "path": "scripts/access-group-read-capsule.mjs",
-      "sha256": "57f4a305421f981cf29faf63b1710369695654f621363b4c0e4ded0195709df8"
+      "sha256": "bd7a3d405fd4a205eff5a006844f834877591ccf5fbd5f707aa4b63d54619bfa"
     },
     {
       "path": "scripts/native-staff-bootstrap-approved-executor-config.mjs",
@@ -48,7 +48,7 @@
     },
     {
       "path": "scripts/native-staff-cutover-access-group-observation.mjs",
-      "sha256": "210c71a92616495d7c07371c825181fad2630f658a9307fec6df5dddb0767cdb"
+      "sha256": "8e49ebd0ff8418496b19ada25211903632e37cc2a2f9980e750df245263f2856"
     },
     {
       "path": "scripts/native-staff-cutover-approved-executor-config.mjs",
@@ -56,15 +56,15 @@
     },
     {
       "path": "scripts/native-staff-cutover-approved-executor.mjs",
-      "sha256": "2386ec55d865081d127c44c59c4ab8db291b66694b35de16854170bf24d406ab"
+      "sha256": "8583cd49e38570aeaf510cead4c093d934636b6a702ed799af7f84f4092c7778"
     },
     {
       "path": "scripts/native-staff-cutover-distribution-pin.mjs",
-      "sha256": "0265a3f3f6aa82cbd57d6b804e7e354412c4f7aba010884f9db0d7706729aaad"
+      "sha256": "c66179b5951a66652d731c2a34e7cab9acdb3af61e13577ad94063ba88dd1bb0"
     },
     {
       "path": "scripts/native-staff-cutover-owner-approval-cli.mjs",
-      "sha256": "4bd03c9293b20d690b8f5577fe7e41534db5c61c45141c8ce7e217b78280a4ab"
+      "sha256": "df35872bd0d3ae8a3998803f7146f5f5d64b697ee512488f5b67ffea633a7a9f"
     },
     {
       "path": "scripts/native-staff-cutover-owner-approval.mjs",
