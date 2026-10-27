@@ -88,6 +88,8 @@ import {
   serializeLodMemoryMode,
 } from './lod-memory-profile.mjs';
 
+window.__ltdsViewerStartupDiagnostics?.mark('module-started');
+
 // BVH-accelerated raycasting (critical for pivot picking on huge meshes)
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
@@ -1309,6 +1311,7 @@ let lodAvailabilityTimer = null;
 let lodAvailabilityRefreshInFlight = false;
 
 async function redeemViewerGrant(grant, { signal } = {}) {
+  window.__ltdsViewerStartupDiagnostics?.mark('redeem-started');
   const accessToken = sessionStorageKey ? sessionCapabilities.read(sessionStorageKey) : null;
   const res = await fetch('/api/v1/sessions/redeem', {
     method: 'POST',
@@ -1319,6 +1322,7 @@ async function redeemViewerGrant(grant, { signal } = {}) {
     body: JSON.stringify({ grant }),
     signal,
   });
+  window.__ltdsViewerStartupDiagnostics?.mark('redeem-http', res.status);
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(body.error || `HTTP ${res.status}`), { status: res.status });
   return body;
@@ -1584,17 +1588,20 @@ function applyViewerSession(session, { initialize = false } = {}) {
   // Establish the redeemed session before init/ready can select its controller.
   activeViewerSession = session;
   if (initialize) {
+    window.__ltdsViewerStartupDiagnostics?.mark('session-applied');
     sessionRenewalBackoffIndex = 0;
     sessionRenewalMinimumDelayMs = 1_000;
     PROJECT = session.model;
     applyProjectConfig(PROJECT);
     init();
-    postToAllowedController({
+    window.__ltdsViewerStartupDiagnostics?.mark('init-returned');
+    const readySent = postToAllowedController({
       version: 1,
       type: 'ltds-viewer:ready',
       modelId: session.model.id,
       expiresAt: session.expiresAt,
     });
+    if (readySent) window.__ltdsViewerStartupDiagnostics?.mark('ready-sent');
   } else if (PROJECT && session.model.id === PROJECT.id) {
     // Refresh the credential-bearing asset roots without disturbing camera,
     // visibility, measurements, or already-loaded render resources.
@@ -1629,6 +1636,7 @@ async function bootstrapSession() {
     }
     applyViewerSession(session, { initialize: true });
   } catch (error) {
+    window.__ltdsViewerStartupDiagnostics?.mark('bootstrap-failed');
     if (sessionStorageKey) sessionCapabilities.clear(sessionStorageKey);
     updateLoading('Viewer session unavailable', String(error.message || error));
   }
