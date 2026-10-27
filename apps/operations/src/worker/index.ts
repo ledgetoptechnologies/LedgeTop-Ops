@@ -18,7 +18,7 @@ import {
   type ServiceRequestNotificationSnapshot,
 } from "@ltds/shared";
 import { authenticateStaff } from "./auth";
-import { registerStaffLoginClaimRoute, registerStaffLoginOwnerRoutes } from "./staff-login-link-routes";
+import { registerNativeStaffCohortReviewRoute, registerStaffLoginClaimRoute, registerStaffLoginOwnerRoutes } from "./staff-login-link-routes";
 import { ownerIntelCapability, registerOwnerIntelRoutes } from "./owner-intel";
 import { OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE, handleOperationsNativeStaffLifecycleHttp } from "./operations-native-staff-lifecycle-http";
 import { handleAgentRead } from "./agent-read-routes";
@@ -654,6 +654,7 @@ async function dispatchOperationsNativeStaffLifecycle(c: Context<{ Bindings: Env
 app.use(OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE, dispatchOperationsNativeStaffLifecycle);
 app.use(`${OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE}/*`, dispatchOperationsNativeStaffLifecycle);
 registerStaffLoginClaimRoute(app);
+registerNativeStaffCohortReviewRoute(app);
 app.use("/api/*", async (c, next) => {
   if (viewerMachineEventRequest(c.req.method, c.req.path) || projectAlphaDeliveryMachineRequest(c.req.method, c.req.path)) {
     await next();
