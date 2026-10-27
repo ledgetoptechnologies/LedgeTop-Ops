@@ -350,4 +350,3 @@ test('unprovisioned recipient stops release and artifact completion before provi
     error => !error.message.includes('private-github-token'));
   assert.equal(requests, 0);
 });
-
