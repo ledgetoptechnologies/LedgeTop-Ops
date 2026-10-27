@@ -132,9 +132,8 @@ let syncPrep:any,fetchImpl:typeof fetch;
 let miniflareBatchErrors:string[]=[];
 let syntheticFetchRoutes:string[]=[];
 let syntheticQueryBatches:any[]=[];
-describe("purpose-bound approved native staff cutover executor",()=>{
+describe.skipIf(process.platform !== "win32")("purpose-bound approved native staff cutover executor",()=>{
   beforeAll(async()=>{
-    if(process.platform!=="win32")throw new Error("integration requires Windows DPAPI test signer");
     scratch=mkdtempSync(path.join(os.tmpdir(),"native-staff-cutover-approved-integration-"));
     receiptDirectory=path.join(scratch,"receipts");mkdirSync(receiptDirectory);
     signer=protectTestSigner(receiptDirectory);
