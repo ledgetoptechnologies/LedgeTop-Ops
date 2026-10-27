@@ -1068,17 +1068,69 @@ test.describe("unified home without business switching", () => {
     await expect(page.locator(".client-portal-main")).not.toContainText("Ledge Top Technologies");
   });
 
-  test("a new request asks what the client needs and sends it to the matching account", async ({page}) => {
-    await mockBoth(page); await page.goto("/portal");
+  test("without the one-step form, several accounts get a retry and never a choice of business or account", async ({page}) => {
+    await mockBoth(page);
+    let discovery = 0;
+    page.on("request", item => { if (new URL(item.url()).pathname === "/api/client/request-services") discovery++; });
+    await page.goto("/portal");
     await page.getByRole("button", {name: "New request"}).first().click();
     const chooser = page.locator(".unified-portal-chooser");
-    await expect(chooser.getByRole("heading", {name: "What do you need help with?"})).toBeVisible();
-    await expect(chooser.getByRole("button", {name: /Drone flight or field work/})).toBeVisible();
-    await expect(chooser).not.toContainText("Ledge Top Technologies");
-    await chooser.getByRole("button", {name: /Website or marketing/}).click();
+    await expect(chooser.getByRole("heading", {name: "New requests are unavailable"})).toBeVisible();
+    await expect(chooser.getByRole("button")).toHaveText(["Try again", "Cancel"]);
+    await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Drone flight|Website or marketing|Primary customer|Rivera/);
+    await expect(page).toHaveURL(/\/portal$/);
+    const before = discovery;
+    await chooser.getByRole("button", {name: "Try again"}).click();
+    await expect.poll(() => discovery).toBeGreaterThan(before);
+    await expect(chooser.getByRole("heading", {name: "New requests are unavailable"})).toBeVisible();
+    await chooser.getByRole("button", {name: "Cancel"}).click();
+    await expect(chooser).toHaveCount(0);
+    await expect(page).toHaveURL(/\/portal$/);
+  });
+
+  for (const second of ["still loading", "failed"] as const)
+    test(`without the one-step form, an account that ${second === "failed" ? "failed to load" : "is still loading"} keeps the neutral retry instead of opening the other account`, async ({page}) => {
+      await mockBoth(page);
+      // The plain context: services aren't offered here, so this account can't take requests.
+      const ineligible = () => ({json: {...context("workspace-b"), workspace: listed.find(item => item.id === "workspace-b")}});
+      const held: import("@playwright/test").Route[] = [];
+      let answer: "hold" | "fail" | "ineligible" = second === "failed" ? "fail" : "hold";
+      await page.route("**/api/client/v2/workspaces/workspace-b/context", route => {
+        if (answer === "hold") { held.push(route); return; }
+        return route.fulfill(answer === "fail" ? {status: 503, json: {error: "Unavailable"}} : ineligible());
+      });
+      await page.goto("/portal");
+      const chooser = page.locator(".unified-portal-chooser");
+      const problems = page.locator(".unified-portal-problems");
+      if (second === "failed") await expect(problems).toBeVisible();
+      else await expect.poll(() => held.length).toBeGreaterThan(0);
+      await page.getByRole("button", {name: "New request"}).first().click();
+      await expect(chooser.getByRole("heading", {name: "New requests are unavailable"})).toBeVisible();
+      await chooser.getByRole("button", {name: "Try again"}).click();
+      await expect(chooser.getByRole("heading", {name: "New requests are unavailable"})).toBeVisible();
+      await expect(page).toHaveURL(/\/portal$/);
+      await expect(page.getByLabel("Service request title")).toHaveCount(0);
+
+      answer = "ineligible";
+      if (second === "failed") await problems.getByRole("button", {name: "Try again"}).click();
+      else for (const route of held.splice(0)) await route.fulfill(ineligible());
+      await expect(page.getByRole("button", {name: /Coastal seawall construction documentation/})).toBeVisible();
+      await expect(problems).toHaveCount(0);
+      await chooser.getByRole("button", {name: "Try again"}).click();
+      await expect(page).toHaveURL(/\/portal\/requests\/new\?workspace=workspace-c$/);
+    });
+
+  test("without the one-step form, the only account that can take requests opens its own form", async ({page}) => {
+    await mockBoth(page);
+    // The plain context: services aren't offered here, so this account can't take requests.
+    await page.route("**/api/client/v2/workspaces/workspace-b/context", route =>
+      route.fulfill({json: {...context("workspace-b"), workspace: listed.find(item => item.id === "workspace-b")}}));
+    await page.goto("/portal");
+    await expect(page.getByRole("button", {name: /Coastal seawall construction documentation/})).toBeVisible();
+    await expect(page.locator(".unified-portal-problems")).toHaveCount(0);
+    await page.getByRole("button", {name: "New request"}).first().click();
     await expect(page).toHaveURL(/\/portal\/requests\/new\?workspace=workspace-c$/);
-    await expect(page.locator(".unified-portal-context")).toHaveCount(0);
-    await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Drone and survey|Website and marketing|Ledge Top \d/);
+    await expect(page.locator(".unified-portal-chooser")).toHaveCount(0);
   });
 
   const quickServices = [

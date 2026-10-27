@@ -58,6 +58,7 @@ import { ViewerProcessingPanel } from "./ViewerProcessingPanel";
 import { SignInProblem, type StartupFailure } from "./SignInProblem";
 import { AccountPage } from "./AccountPage";
 import { IntelPage } from "./IntelPage";
+import { withStartupDeadline } from "./startup-deadline";
 import { ViewerQuickShare } from "./ViewerQuickShare";
 import { parseViewerReauthorization, viewerReauthorizationFragment } from "./viewer-reauthorization";
 import {
@@ -332,7 +333,7 @@ export function OperationsApp() {
   };
   useEffect(() => {
     const controller = new AbortController();
-    api<Session>("/api/session", {signal: controller.signal})
+    withStartupDeadline(signal => api<Session>("/api/session", {signal}), controller.signal)
       .then(async (value) => {
         setCsrf(value.csrfToken);
         if (value.capabilities?.clientWorkspaceManagerRecovery?.enabled === true) {

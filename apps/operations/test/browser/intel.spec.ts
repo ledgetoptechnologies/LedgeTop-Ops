@@ -66,24 +66,77 @@ async function mockOps(page: Page, options: { permissions?: string[]; intel?: bo
 const intelPaths = (requests: Request[]) => requests.map(request => new URL(request.url())).filter(url => url.pathname.startsWith("/api/intel/"))
   .map(url => `${url.pathname}${url.search}`);
 
-test("Intel opens from the Administration menu and shows competitor intel for Drone Services first", async ({ page }) => {
+const overviewCard = (page: Page, name: string) => page.getByRole("region", { name });
+
+test("Intel opens from the Administration menu on an overview of both businesses that links to each detail view", async ({ page }) => {
   const requests = await mockOps(page);
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/");
   await page.getByRole("button", { name: "Administration" }).click();
   await page.locator("#ops-manage-menu").getByRole("link", { name: "Intel" }).click();
-  await expect(page).toHaveURL(/\/intel/);
+  await expect(page).toHaveURL(/\/intel$/);
   await expect(page.getByRole("heading", { name: "Intel", level: 1 })).toBeVisible();
-  const switcher = page.getByRole("group", { name: "Business" });
-  await expect(switcher.getByRole("button", { name: "Ledge Top Drone Services" })).toHaveAttribute("aria-pressed", "true");
-  await expect(switcher.getByRole("button", { name: "Ledge Top Technologies" })).toHaveAttribute("aria-pressed", "false");
+  for (const [key, name] of [["drone-services", "Ledge Top Drone Services"], ["technologies", "Ledge Top Technologies"]] as const) {
+    const card = overviewCard(page, name);
+    await expect(card.getByRole("heading", { name, level: 2 })).toBeVisible();
+    await expect(card).toContainText(`${sampleStaffTenant.competitors.length} competitor`);
+    await expect(card).toContainText("2 pages monitored · 1 change");
+    await expect(card).toContainText("312 clicks · 18,400 impressions · Out of date");
+    for (const [label, view] of [["Competitor Intel", "competitors"], ["Site monitor", "website"], ["Search Console", "search"]] as const)
+      await expect(card.getByRole("link", { name: new RegExp(`^${label}`) })).toHaveAttribute("href", `/intel?business=${key}&view=${view}&range=28d`);
+  }
+  await expect(page.getByRole("group", { name: "Business" })).toHaveCount(0);
+  expect(requests.filter(request => request.method() !== "GET")).toEqual([]);
+  expect(intelPaths(requests).sort()).toEqual(["/api/intel/businesses",
+    ...["drone-services", "technologies"].flatMap(key => [`/api/intel/${key}/competitors`, `/api/intel/${key}/search-console?range=28d`, `/api/intel/${key}/website?range=28d`])].sort());
+
+  await overviewCard(page, "Ledge Top Technologies").getByRole("link", { name: /^Search Console/ }).click();
+  await expect(page).toHaveURL(/\/intel\?business=technologies&view=search&range=28d$/);
+  await expect(page.getByRole("group", { name: "Business" }).getByRole("button", { name: "Ledge Top Technologies" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("list", { name: "Search totals" })).toBeVisible();
+  await page.goBack();
+  await expect(overviewCard(page, "Ledge Top Drone Services")).toBeVisible();
+  await overviewCard(page, "Ledge Top Drone Services").getByRole("link", { name: /^Competitor Intel/ }).click();
   await expect(page.getByRole("heading", { name: sampleStaffTenant.tenantName })).toBeVisible();
-  expect(intelPaths(requests)).toEqual(["/api/intel/businesses", "/api/intel/drone-services/competitors"]);
+  await page.getByRole("link", { name: "← All businesses" }).click();
+  await expect(page).toHaveURL(/\/intel$/);
+  await expect(overviewCard(page, "Ledge Top Technologies")).toBeVisible();
+});
+
+test("the overview keeps each business and section separate: a failure or missing source never hides the rest or shows zeros", async ({ page }) => {
+  await mockOps(page, { sections: {
+    "technologies/competitors": { status: 500, json: { error: "Unavailable" } },
+    "technologies/website": { status: 404, json: { error: "intel_website_not_connected" } },
+    "technologies/search-console": { status: 404, json: { error: "intel_awaiting_first_data" } },
+    "drone-services/search-console": { json: { ...search, totals: { clicks: null, impressions: null, ctr: null, position: null } } },
+  } });
+  await page.goto("/intel");
+  const technologies = overviewCard(page, "Ledge Top Technologies"), drone = overviewCard(page, "Ledge Top Drone Services");
+  await expect(technologies).toContainText("This view couldn't be loaded.");
+  await expect(technologies).toContainText("Not set up yet");
+  await expect(technologies).toContainText("Waiting for the first data");
+  await expect(technologies).not.toContainText(/\b0\b/);
+  await expect(drone).toContainText(`${sampleStaffTenant.competitors.length} competitor`);
+  await expect(drone).toContainText("2 pages monitored");
+  await expect(drone).toContainText("Clicks not available · Impressions not available");
+  await expect(drone).not.toContainText("This view couldn't be loaded.");
+  await page.unrouteAll();
+  await mockOps(page);
+  await technologies.getByRole("button", { name: "Try again" }).click();
+  await expect(technologies).toContainText(`${sampleStaffTenant.competitors.length} competitor`);
+});
+
+test("the overview fits a phone screen", async ({ page }) => {
+  await mockOps(page);
+  await page.setViewportSize({ width: 320, height: 800 });
+  await page.goto("/intel");
+  await expect(overviewCard(page, "Ledge Top Technologies")).toContainText("312 clicks");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
 test("switching business loads that business only and explains what isn't set up", async ({ page }) => {
   const requests = await mockOps(page, { sections: { "technologies/competitors": { status: 404, json: { error: "Not configured", code: "not_configured" } } } });
-  await page.goto("/intel");
+  await page.goto("/intel?business=drone-services");
   await page.getByRole("button", { name: "Ledge Top Technologies" }).click();
   await expect(page.getByText("Competitors for Ledge Top Technologies haven't been added yet.")).toBeVisible();
   await expect(page.getByRole("heading", { name: sampleStaffTenant.tenantName })).toHaveCount(0);
@@ -241,6 +294,7 @@ for (const width of [320, 375, 390]) for (const font of ["default", "Arial"] as 
     ...["Competitor Intel", "Site monitor", "Search Console"].map(name => page.getByRole("navigation", { name: "Intel views" }).getByRole("button", { name })),
     ...[/Review changes/, /^Competitors$/, /Google Ads/, /Self-assessment/].map(name => page.getByRole("tab", { name }))];
   for (const control of controls) {
+    await control.scrollIntoViewIfNeeded();
     const box = (await control.boundingBox())!;
     expect(box.x).toBeGreaterThanOrEqual(0);
     expect(box.x + box.width).toBeLessThanOrEqual(width);

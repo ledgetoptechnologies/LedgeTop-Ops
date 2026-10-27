@@ -87,6 +87,17 @@ export function chicagoEndOfDay(day: string): string | null {
   return new Date(instant).toISOString();
 }
 
+/** Today's calendar day in America/Chicago (YYYY-MM-DD): the earliest last day a share can have. */
+export function chicagoToday(now = Date.now()): string {
+  return new Date(now).toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+}
+
+/** The end of that Chicago day, only while it is still in the future; a day that has already ended gives null. */
+export function futureChicagoEndOfDay(day: string, now = Date.now()): string | null {
+  const end = chicagoEndOfDay(day);
+  return end !== null && Date.parse(end) > now ? end : null;
+}
+
 export function chicagoDate(value: string | null): string {
   if (!value) return "Never expires";
   const parsed = new Date(value);
@@ -282,8 +293,8 @@ function DirectClientSharePanel({ target, onBusyChange }: { target: ViewerShareT
   const changeQuery = (value: string) => { run.current += 1; setWorkspace(null); setLoadError(""); setQuery(value); };
 
   const existing = workspace ? grantsForTarget(workspace.grants, target) : [];
-  const expiresAt = neverExpires ? null : chicagoEndOfDay(expiryDay);
-  const tomorrow = new Date(Date.now() + 86_400_000).toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+  const expiresAt = neverExpires ? null : futureChicagoEndOfDay(expiryDay);
+  const today = chicagoToday();
   const pick = (next: DirectShareClient | null) => {
     if (busy || unconfirmed) return;
     setClient(next); setReviewing(false); setIncludeFuture(false); setError(""); setMessage(""); pending.current = null;
@@ -358,7 +369,7 @@ function DirectClientSharePanel({ target, onBusyChange }: { target: ViewerShareT
       </fieldset>
       <fieldset disabled={busy || unconfirmed}><legend>Access ends</legend>
         <label className="viewer-share-check"><input type="checkbox" checked={neverExpires} onChange={event => setNeverExpires(event.target.checked)} /> Never (until you stop sharing)</label>
-        {!neverExpires && <label>Last day (Central time)<input type="date" required min={tomorrow} value={expiryDay} onChange={event => setExpiryDay(event.target.value)} /></label>}
+        {!neverExpires && <label>Last day (Central time)<input type="date" required min={today} value={expiryDay} onChange={event => setExpiryDay(event.target.value)} /></label>}
       </fieldset>
       {!target.task && <fieldset disabled={busy || unconfirmed} className="viewer-direct-share-future"><legend>Whole project</legend>
         <label className="viewer-share-check"><input type="checkbox" checked={includeFuture} onChange={event => { setIncludeFuture(event.target.checked); setReviewing(false); }} /> Also share every model published to this project later</label>

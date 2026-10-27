@@ -45,11 +45,6 @@ export function sharedViewerRows(items: NativeViewerWorkItem[]): NativeViewerWor
     || left.title.localeCompare(right.title) || rowKey(left).localeCompare(rowKey(right)));
 }
 
-/** Business names only help when the list spans more than one business. */
-export function showsBusinessName(rows: NativeViewerWorkItem[]): boolean {
-  return new Set(rows.map(row => row.businessName).filter(Boolean)).size > 1;
-}
-
 export function directViewerTaskPath(item: Pick<NativeViewerWorkItem, "workspaceId" | "grantId" | "taskId">): string {
   return `/portal/viewer/${encodeURIComponent(item.grantId)}/tasks/${encodeURIComponent(item.taskId)}?${new URLSearchParams({ workspace: item.workspaceId })}`;
 }

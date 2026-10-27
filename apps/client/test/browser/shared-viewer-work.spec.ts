@@ -65,7 +65,7 @@ test("a project and an exact task grant for the same task show one row that open
   await expect(rows(page).nth(1)).toContainText("North elevation scan");
   await expect(rows(page).nth(1)).toContainText("Harbor bridge");
   await expect(rows(page).nth(1)).toContainText("Available until");
-  // A single business is not repeated on every row; account names are never shown.
+  // Business and account names are never shown.
   await expect(card(page)).not.toContainText("Harbor Engineering");
   await expect(card(page)).not.toContainText("QA internal label");
   const open = rows(page).nth(1).getByRole("link", {name: /^Open 3D model\s*: North elevation scan$/});
@@ -75,7 +75,7 @@ test("a project and an exact task grant for the same task show one row that open
   expect(calls.filter(call => call.path.endsWith("/viewer")).map(call => call.path)).toEqual(["/api/client/v2/workspaces/workspace-b/viewer"]);
 });
 
-test("work from two accounts is one flat list with business names, and one failing account does not hide the other", async ({page}) => {
+test("work from two accounts is one flat list without business names, and one failing account does not hide the other", async ({page}) => {
   let failC = true;
   const calls = await mock(page, allWorkspaces, (route, call, id) => {
     if (!call.path.endsWith("/viewer")) return undefined;
@@ -103,8 +103,9 @@ test("work from two accounts is one flat list with business names, and one faili
   await card(page).getByRole("button", {name: "Try again"}).click();
   await expect(rows(page)).toHaveCount(2);
   await expect(rows(page).nth(0)).toContainText("Ridge roof model");
-  await expect(rows(page).nth(0)).toContainText("Summit Builders");
-  await expect(rows(page).nth(1)).toContainText("Harbor Engineering");
+  await expect(rows(page).nth(0)).toContainText("Summit lodge");
+  await expect(rows(page).nth(1)).toContainText("Harbor bridge");
+  await expect(card(page)).not.toContainText(/Summit Builders|Harbor Engineering/);
   await expect(card(page)).not.toContainText("QA internal label");
 
   await card(page).getByRole("button", {name: "Load more 3D work"}).click();

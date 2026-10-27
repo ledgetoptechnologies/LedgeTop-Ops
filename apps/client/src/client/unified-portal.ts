@@ -137,27 +137,3 @@ export async function loadUnifiedPortal(
   };
   await Promise.all(Array.from({ length: Math.min(ACCOUNT_CONCURRENCY, queue.length) }, worker));
 }
-
-export type AccountArea = "drone" | "web" | "general";
-
-/**
- * What kind of work an account covers, described for the client instead of naming a business.
- * The business still comes only from the server-assigned source; this just words it.
- */
-export function accountArea(account: UnifiedAccount): AccountArea {
-  const source = account.workspace.sourceId ?? PRIMARY_SOURCE;
-  return source === PRIMARY_SOURCE ? "drone" : source === "project-alpha:secondary" ? "web" : "general";
-}
-
-export const AREA_TEXT: Record<AccountArea, { name: string; need: string; needDetail: string; deliveries: string; feedback: string }> = {
-  drone: { name: "Drone and survey", need: "Drone flight or field work", needDetail: "Mapping, inspections, photos, video and site data.",
-    deliveries: "Drone and survey deliveries", feedback: "Drone and survey work" },
-  web: { name: "Website and marketing", need: "Website or marketing", needDetail: "Website changes, Google Ads, SEO, email and IT help.",
-    deliveries: "Website and marketing files", feedback: "Website and marketing" },
-  general: { name: "Ledge Top", need: "Other Ledge Top work", needDetail: "Anything else you need from Ledge Top.",
-    deliveries: "Deliveries", feedback: "Your work with Ledge Top" },
-};
-
-export function accountLabel(account: UnifiedAccount, withClient: boolean): string {
-  return withClient ? `${account.business} · ${account.clientName}` : account.business;
-}

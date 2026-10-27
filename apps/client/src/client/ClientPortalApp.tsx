@@ -112,6 +112,7 @@ import { canBeginRequest, RequestAvailabilityMessage, useRequestAvailability, ty
 import { RequestScopeBoundary } from "./RequestScopeBoundary";
 import { UNIFIED_PAGES, UnifiedPortal, type UnifiedPage } from "./UnifiedPortal";
 import { unifiedAccountSupported } from "./unified-portal";
+import { withStartupDeadline } from "./startup-deadline";
 import { ClientSessionExpiry } from "./ClientSessionExpiry";
 import { LeaveFeedback, PortalFeedback } from "./PortalFeedback";
 import { PortalNotifications } from "./PortalNotifications";
@@ -1675,9 +1676,9 @@ function LegacyServiceRequestForm({
   const [preferredStartAt, setPreferredStartAt] = useState(
     source?.preferredStartAt?.slice(0, 16) ?? "",
   );
-  const [serviceCategory, setServiceCategory] = useState(
-    source?.serviceCategory ?? "",
-  );
+  // Ledge Top categorizes requests. An edit or change carries the existing category through unchanged,
+  // because the server clears any category a request omits.
+  const serviceCategory = source?.serviceCategory ?? null;
   const [deliverables, setDeliverables] = useState(source?.deliverables ?? "");
   const [siteContactName, setSiteContactName] = useState(
     source?.siteContactName ?? "",
@@ -1722,7 +1723,7 @@ function LegacyServiceRequestForm({
       preferredStartAt: preferredStartAt
         ? new Date(preferredStartAt).toISOString()
         : null,
-      serviceCategory: serviceCategory.trim() || null,
+      serviceCategory,
       deliverables: deliverables.trim() || null,
       siteContactName: siteContactName.trim() || null,
       siteContactEmail: siteContactEmail.trim() || null,
@@ -1862,15 +1863,6 @@ function LegacyServiceRequestForm({
                 type="datetime-local"
                 value={preferredStartAt}
                 onChange={(event) => setPreferredStartAt(event.target.value)}
-              />
-            </label>
-            <label>
-              Service category <span>(optional)</span>
-              <input
-                value={serviceCategory}
-                onChange={(event) => setServiceCategory(event.target.value)}
-                maxLength={100}
-                placeholder="Aerial imaging"
               />
             </label>
             <label>
@@ -2886,7 +2878,7 @@ export function ClientPortalApp({
     bootstrapController.current?.abort(); const controller = new AbortController(); bootstrapController.current = controller;
     const requestedViewerRoute = parseClientViewerShellRoute(location.pathname, location.search);
     const requestedWorkspaceId = clientViewerRouteWorkspaceId(requestedViewerRoute) ?? new URLSearchParams(location.search).get("workspace");
-    loadPortalBootstrap(undefined, requestedWorkspaceId, controller.signal)
+    withStartupDeadline(signal => loadPortalBootstrap(undefined, requestedWorkspaceId, signal), controller.signal)
       .then((data) => {
         if (active && !controller.signal.aborted) {
           const unifiedList = data.capabilities.workspaceHierarchyV2 && (data.workspaces ?? []).filter(unifiedAccountSupported).length > 1
@@ -3579,9 +3571,7 @@ export function ClientPortalApp({
         <section className="portal-page-heading">
           <span className="eyebrow">Account</span>
           <h1>Your account</h1>
-          <p>
-            Ledge Top provisions and manages client access directly during the pilot.
-          </p>
+          <p>Your sign-in details and who can see your work.</p>
         </section>
         <div className="portal-account-grid">
           <Card title="Client account" className="portal-account-card">
@@ -3596,9 +3586,9 @@ export function ClientPortalApp({
           </Card>
           <Card title="Access & security">
             <p className="portal-copy">
-              Your account uses a verified identity and server-managed project
-              grants. Contact Ledge Top to add a colleague, update access, or change
-              your account details.
+              {capabilities.workspaceMembershipManagement
+                ? "Your account uses a verified identity. Contact Ledge Top to change your account details."
+                : "Your account uses a verified identity. Contact Ledge Top to add a colleague, update access, or change your account details."}
             </p>
             <a
               className="button-ghost button-small portal-contact-action"

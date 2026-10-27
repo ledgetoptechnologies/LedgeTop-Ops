@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Card, EmptyState, Skeleton, StatusPill } from "@ltds/ui";
 import type { PortalServiceRequest, PortalWorkspace } from "./portal-api";
 import {
-  AREA_TEXT, accountArea, loadUnifiedPortal, unifiedAccount, unifiedAccountSupported,
+  loadUnifiedPortal, unifiedAccount, unifiedAccountSupported,
   type UnifiedAccountResult, type UnifiedProject, type UnifiedRequest,
 } from "./unified-portal";
 import { UnifiedDeliveries } from "./UnifiedDeliveries";
@@ -38,7 +38,8 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   const [results, setResults] = useState<Map<string, UnifiedAccountResult>>(() => new Map());
   const [retry, setRetry] = useState(0);
   const [choosingRequest, setChoosingRequest] = useState(false);
-  // The one-step form is tried first; only a portal without it falls back to choosing per account.
+  // The one-step form is the only way to start a request across accounts. Without it, a single account
+  // opens its own form; several accounts get a retry, never a choice of business or account.
   const [quickRequest, setQuickRequest] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
   const generation = useRef(0);
@@ -92,13 +93,15 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   const projects = ready.flatMap(result => result.projects).sort(byName);
   const requests = ready.flatMap(result => result.requests).sort(byUpdated);
   const requestAccounts = ready.filter(result => result.canRequest).map(result => result.account);
-  // The chooser asks what kind of help is needed; one choice per kind of service, never one per business or account.
-  const requestChoices = requestAccounts.filter((account, index) => requestAccounts.findIndex(other => accountArea(other) === accountArea(account)) === index);
+  // Going straight to one account's form needs every account answered: one still loading or failed may also take requests.
+  const allAccountsReady = accounts.length > 0 && accounts.every(account => results.get(account.workspace.id)?.status === "ready");
+  const onlyRequestAccount = allAccountsReady && requestAccounts.length === 1 ? requestAccounts[0]! : null;
 
   const startRequest = () => {
     setNotice(null);
-    if (!quickRequest && requestChoices.length === 1) openInAccount(requestChoices[0]!.workspace.id, "/portal/requests/new");
-    else setChoosingRequest(true);
+    if (!quickRequest && onlyRequestAccount) { openInAccount(onlyRequestAccount.workspace.id, "/portal/requests/new"); return; }
+    setQuickRequest(true);
+    setChoosingRequest(true);
   };
   const requestSent = () => {
     setChoosingRequest(false);
@@ -130,19 +133,17 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
         <button type="button" className="button-ghost button-small" onClick={() => openInAccount(item.account.workspace.id, "/portal/requests")}>View</button></div>
     </li>)}
   </ul>;
-  // Ask what the client needs, not which business: the choice decides where the request goes.
+  // The server works out where a request goes from the service picked; the client never chooses.
   const requestChooser = choosingRequest && quickRequest ? <QuickRequest mapboxPublicToken={mapboxPublicToken}
     onSubmitted={requestSent} onCancel={() => setChoosingRequest(false)} onUnavailable={() => {
       setQuickRequest(false);
-      if (requestChoices.length === 1) { setChoosingRequest(false); openInAccount(requestChoices[0]!.workspace.id, "/portal/requests/new"); }
-    }} /> : choosingRequest && <Card title="What do you need help with?" className="unified-portal-chooser">
-    <div className="unified-portal-need-list">
-      {requestChoices.map(account => <button key={account.workspace.id} type="button" className="unified-portal-need"
-        onClick={() => openInAccount(account.workspace.id, "/portal/requests/new")}>
-        <span><strong>{AREA_TEXT[accountArea(account)].need}</strong><small>{AREA_TEXT[accountArea(account)].needDetail}</small></span>
-      </button>)}
+      if (onlyRequestAccount) { setChoosingRequest(false); openInAccount(onlyRequestAccount.workspace.id, "/portal/requests/new"); }
+    }} /> : choosingRequest && <Card title="New requests are unavailable" className="unified-portal-chooser">
+    <div role="alert"><p>A new request can’t be started right now. Try again in a moment.</p></div>
+    <div className="unified-portal-chooser-actions">
+      <button type="button" className="button-orange" onClick={() => setQuickRequest(true)}>Try again</button>
+      <button type="button" className="portal-text-action" onClick={() => setChoosingRequest(false)}>Cancel</button>
     </div>
-    <button type="button" className="portal-text-action" onClick={() => setChoosingRequest(false)}>Cancel</button>
   </Card>;
   const heading = (title: string, detail: string) => <section className="portal-page-heading"><span className="eyebrow">Client portal</span><h1>{title}</h1><p>{detail}</p></section>;
   /** One neutral card that opens the first account's page. */
