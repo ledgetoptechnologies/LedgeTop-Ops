@@ -367,6 +367,31 @@ test('unselected head transition gets bounded GET-only recapture; selected trans
   reads = 0;
   await assert.rejects(capture(reader, { selectedApp: 'client' }), /changed during/);
 });
+test('only explicitly expected parent100/candidate0 weights extend strict capture for a staged release', async () => {
+  const { profile, snapshot } = fixture(), parentId = snapshot.client.version.id;
+  snapshot.client.latest = NEW;
+  snapshot.client.deployment.versions = [{ version_id: parentId, percentage: 100 }, { version_id: NEW, percentage: 0 }];
+  const candidateVersion = clone(snapshot.client.version); candidateVersion.id = NEW;
+  const candidateModern = clone(snapshot.client.modern); candidateModern.id = NEW;
+  const reader = readerFor(snapshot, { version: candidateVersion, modern: candidateModern });
+  const expected = [{ versionId: parentId, percentage: 100 }, { versionId: NEW, percentage: 0 }];
+  const captured = await capture(reader, { selectedApp: 'client', expectedDeploymentVersions: { client: expected } });
+  assert.deepEqual(captured.client.deployment.versions, snapshot.client.deployment.versions);
+  assert.equal(validateInstallation(captured, { profile, allowLatest: { client: NEW }, selectedApp: 'client',
+    expectedDeploymentVersions: { client: expected } }), captured);
+  for (const invalid of [
+    [{ versionId: parentId, percentage: 100 }, { versionId: '55555555-5555-4555-8555-555555555555', percentage: 0 }],
+    [...expected, { versionId: '55555555-5555-4555-8555-555555555555', percentage: 0 }],
+    [{ versionId: parentId, percentage: 99 }, { versionId: NEW, percentage: 1 }],
+    [{ versionId: parentId, percentage: 100 }, { versionId: parentId, percentage: 0 }],
+  ]) await assert.rejects(capture(reader, { selectedApp: 'client', expectedDeploymentVersions: { client: invalid } }));
+  const duplicateActual = clone(snapshot); duplicateActual.client.deployment.versions = [
+    { version_id: parentId, percentage: 100 }, { version_id: parentId, percentage: 0 }];
+  await assert.rejects(capture(readerFor(duplicateActual, { version: candidateVersion, modern: candidateModern }),
+    { selectedApp: 'client', expectedDeploymentVersions: { client: [
+      { versionId: parentId, percentage: 100 }, { versionId: parentId, percentage: 0 }] } }));
+  await assert.rejects(capture(reader, { selectedApp: 'client' }), /one100% active version/u);
+});
 test('candidate verifies actual new bytes, opaque assets and unchanged resources', () => {
   const { snapshot } = fixture();const version = clone(snapshot.operations.version);version.id = NEW;
   const modern = { id: NEW, assets: snapshot.operations.modern.assets, modules: [{ name: 'index.js', content_base64: Buffer.from('new').toString('base64') }] };
