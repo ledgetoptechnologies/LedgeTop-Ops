@@ -177,14 +177,31 @@ describe("authenticated delivery resources — migrated effective workspace", { 
     expect(await downloadResponse.bytes()).toEqual(bytes);
     const nativeUrl = `${origin}${nativeOffer.downloadUrl}`;
     const nativeHeaders = { "If-Match": nativeOffer.strongETag };
+    const nativeFull = await worker.request(nativeUrl, { headers: nativeHeaders }, envWithReleaseBucket);
+    expect(nativeFull.status, await nativeFull.clone().text()).toBe(200);
+    expect(nativeFull.headers.get("etag")).toBe(nativeOffer.strongETag);
+    expect(nativeFull.headers.get("content-length")).toBe(String(bytes.byteLength));
+    expect(await nativeFull.bytes()).toEqual(bytes);
     const nativeHead = await worker.request(nativeUrl, { method: "HEAD", headers: nativeHeaders }, envWithReleaseBucket);
     expect(nativeHead.status).toBe(200);
     expect(nativeHead.headers.get("content-length")).toBe(String(bytes.byteLength));
     expect(await nativeHead.text()).toBe("");
-    const nativeRange = await worker.request(nativeUrl, { headers: { ...nativeHeaders, "If-Range": nativeOffer.strongETag, Range: "bytes=0-4" } }, envWithReleaseBucket);
+    const offset = 5;
+    const nativeRange = await worker.request(nativeUrl, { headers: { ...nativeHeaders, "If-Range": nativeOffer.strongETag, Range: `bytes=${offset}-` } }, envWithReleaseBucket);
     expect(nativeRange.status).toBe(206);
-    expect(nativeRange.headers.get("content-range")).toBe(`bytes 0-4/${bytes.byteLength}`);
-    expect(await nativeRange.bytes()).toEqual(bytes.slice(0, 5));
+    expect(nativeRange.headers.get("content-range")).toBe(`bytes ${offset}-${bytes.byteLength - 1}/${bytes.byteLength}`);
+    expect(await nativeRange.bytes()).toEqual(bytes.slice(offset));
+
+    await db.prepare(`INSERT INTO app_release_pilot_revocations
+      (eligibility_id,reason_code,revoked_at,revoked_by)
+      VALUES('portal-release-eligibility','test-revoke','2026-10-26T12:30:00Z','test-reviewer')`).run();
+    const revokedOffer = await worker.request(
+      `${origin}/api/client/app/latest?platform=windows&channel=pilot&schemaVersion=1`, {}, envWithReleaseBucket);
+    expect(revokedOffer.status).toBe(200);
+    expect(await revokedOffer.json()).toEqual({ schemaVersion: 1, available: false });
+    const revokedBytes = await worker.request(nativeUrl, { headers: nativeHeaders }, envWithReleaseBucket);
+    expect(revokedBytes.status).toBe(404);
+    expect(await revokedBytes.json()).toEqual({ error: "app_release_unavailable" });
   });
 
   it("derives headerless media workspace from the AD1 coordinate and rejects cross-actor or conflicting workspace requests", async () => {
