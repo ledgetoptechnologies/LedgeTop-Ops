@@ -84,3 +84,17 @@
 .direct-share-heading{margin:1rem 0 .25rem;font-size:1rem}
 .share-legacy{margin-top:1rem}
 .share-legacy>summary{cursor:pointer;min-height:44px;display:flex;align-items:center;font-weight:600}
+
+/* Recovery dialog: explicit "Renew in this tab" offer when the renewal window
+   could not complete. Loss warning only appears when work would be discarded. */
+.recovery-current-tab{display:grid;gap:10px;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
+.recovery-current-tab h3{margin:0;font-size:1rem}
+.recovery-current-tab p{margin:0;color:var(--muted);line-height:1.5}
+.recovery-current-tab-loss{display:grid;gap:8px;padding:12px 14px;border:1px solid #6b4a12;border-radius:10px;background:#251b0b}
+.recovery-current-tab-loss p{color:var(--yellow)}
+.recovery-current-tab-loss ul{margin:0;padding-left:1.1rem;color:var(--text);line-height:1.45}
+.recovery-current-tab-loss label{display:flex;align-items:center;gap:8px;font-weight:600;color:var(--text);cursor:pointer}
+.recovery-current-tab-loss input{width:18px;height:18px;accent-color:var(--orange)}
+.recovery-current-tab-actions{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+.recovery-current-tab-actions small{color:var(--muted)}
+.recovery-current-tab-status:empty{display:none}

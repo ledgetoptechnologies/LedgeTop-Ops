@@ -160,5 +160,5 @@ export function mountNewTask({container,dialog,project,providers=[],presets=[],d
   refreshOptionsOnOpen();
   if(!canUpload){source=canImport?'server':'existing';form.querySelectorAll('[data-source-panel]').forEach(panel=>panel.hidden=panel.dataset.sourcePanel!==source);if(source==='server')void browse();}
   form.querySelectorAll('[data-source]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.source===source)));
-  return {dispose,reopen,get active(){return !disposed;}};
+  return {dispose,reopen,get active(){return !disposed;},get navigationState(){return{pendingUpload:busy&&!presetSaving,selectedFileCount:files.length,unsavedTaskDraft:!disposed};}};
 }

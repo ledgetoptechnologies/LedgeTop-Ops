@@ -1,12 +1,15 @@
 import {validateWorkspaceSessionEnvelope} from './workspace-renewal.mjs';
+import {beginCurrentTabWorkspaceRecovery} from './workspace-current-tab-recovery.mjs';
 
 const STATE_KEY='ltds-viewer-reauthorization-state';
 const GRANT=/^[A-Za-z0-9_-]{32,128}$/;
 
 // Recovery exchanges a fresh, one-use Ops grant. It never extends authority
-// using an expired token alone, and never navigates the working tab.
+// using an expired token alone. Popup recovery keeps the working tab mounted;
+// same-tab navigation requires a separate explicit user action.
 export function createWorkspaceRecovery({windowRef=window,documentRef=document,fetchImpl=fetch,
-  getSession,install,onFatal,onPaused=()=>{},onResumed=()=>{},now=()=>Date.now()}){
+  getSession,install,onFatal,onPaused=()=>{},onResumed=()=>{},getView=()=>null,
+  getNavigationState=()=>({}),onPopupBlocked=()=>{},now=()=>Date.now()}){
   let pending=null;
   function resetLaunch(record){
     try{record.channel?.close();}catch{}
@@ -16,6 +19,9 @@ export function createWorkspaceRecovery({windowRef=window,documentRef=document,f
   function closeDialog(record){
     try{record.dialog.close();}catch{}
     try{record.dialog.remove();}catch{}
+  }
+  function offerCurrentTabRecovery(){
+    try{onPopupBlocked({continueInCurrentTab,navigationState:getNavigationState()});}catch{}
   }
   function pause(){
     if(pending)return pending.promise;
@@ -34,15 +40,17 @@ export function createWorkspaceRecovery({windowRef=window,documentRef=document,f
       let origin;try{origin=new URL(previous.controllerOrigin);if(origin.protocol!=='https:'||origin.origin!==previous.controllerOrigin)throw new Error();}catch{status.textContent='Open Viewer from Operations to restore access.';return;}
       if(record.popup&&!record.popup.closed&&now()>=record.createdAt&&now()-record.createdAt<=5*60_000){try{record.popup.focus();return;}catch{}}
       resetLaunch(record);
+      let stored=false;
       try{
         record.nonce=windowRef.crypto.randomUUID().replaceAll('-','');record.createdAt=now();
         // BroadcastChannel is optional: direct opener messaging remains available.
         try{if(windowRef.BroadcastChannel){record.channel=new windowRef.BroadcastChannel(`ltds-workspace-recovery:${record.nonce}`);record.channel.onmessage=event=>message(event,record);}}catch{record.channel=null;}
         windowRef.sessionStorage.setItem(STATE_KEY,JSON.stringify({nonce:record.nonce,createdAt:record.createdAt}));
+        stored=true;
         record.popup=windowRef.open(`${origin.origin}/viewer/reauthorize?state=${encodeURIComponent(record.nonce)}`,'_blank');
-        if(!record.popup){resetLaunch(record);status.textContent='Your browser blocked the sign-in tab. Allow pop-ups, then try again.';return;}
+        if(!record.popup){resetLaunch(record);status.textContent='The sign-in tab did not open. You can try again.';offerCurrentTabRecovery();return;}
         status.textContent='Complete sign-in in the new tab. This tab will resume automatically.';
-      }catch{resetLaunch(record);status.textContent='Unable to open sign-in. Allow pop-ups and browser storage, then try again. Your work is still here.';}
+      }catch{resetLaunch(record);status.textContent='Unable to open sign-in. Your work is still here; you can try again.';if(stored)offerCurrentTabRecovery();}
     };
     documentRef.body.append(dialog);dialog.showModal();onPaused();return promise;
   }
@@ -76,18 +84,27 @@ export function createWorkspaceRecovery({windowRef=window,documentRef=document,f
     }finally{clearTimeout(timer);}
   }
   windowRef.addEventListener('message',message);
+  function continueInCurrentTab(){
+    const record=pending;if(!record||record.busy)return false;
+    resetLaunch(record);
+    // This does not dispose uploads, remove beforeunload handlers or mutate
+    // pending writes. Browser cancellation leaves the paused workspace usable.
+    return beginCurrentTabWorkspaceRecovery({windowRef,previous:record.previous,view:getView(),now});
+  }
   function wait(signal){
     if(signal?.aborted)return Promise.reject(new DOMException('Cancelled','AbortError'));
     if(!pending)return Promise.resolve();
     if(!signal)return pending.promise;
     return new Promise((resolve,reject)=>{const abort=()=>{cleanup();reject(new DOMException('Cancelled','AbortError'));},cleanup=()=>signal.removeEventListener('abort',abort);signal.addEventListener('abort',abort,{once:true});pending.promise.then(()=>{cleanup();resolve();},error=>{cleanup();reject(error);});});
   }
-  return{pause,wait,isPaused:()=>Boolean(pending),dispose(){windowRef.removeEventListener('message',message);if(pending){const record=pending;pending=null;resetLaunch(record);closeDialog(record);record.reject(new Error('Workspace closed'));}}};
+  return{pause,wait,continueInCurrentTab,navigationState:()=>({paused:Boolean(pending),...getNavigationState()}),isPaused:()=>Boolean(pending),dispose(){windowRef.removeEventListener('message',message);if(pending){const record=pending;pending=null;resetLaunch(record);closeDialog(record);record.reject(new Error('Workspace closed'));}}};
 }
 
 export function relayWorkspaceRecoveryGrant({windowRef=window,documentRef=document,now=()=>Date.now()}={}){
   const url=new URL(windowRef.location.href),grant=url.pathname.match(/^\/workspace\/([A-Za-z0-9_-]{32,128})$/)?.[1],nonce=new URLSearchParams(url.hash.slice(1)).get('reauthorize');
+  if(new URLSearchParams(url.hash.slice(1)).has('recoveryMode'))return false;
   let state;try{state=JSON.parse(windowRef.sessionStorage.getItem(STATE_KEY)||'null');}catch{}
+  if(state?.mode==='same-tab')return false;
   if(!grant||!nonce||state?.nonce!==nonce||!Number.isFinite(state.createdAt)||now()-state.createdAt<0||now()-state.createdAt>5*60_000)return false;
   let channel=null;
   try{if(windowRef.BroadcastChannel)channel=new windowRef.BroadcastChannel(`ltds-workspace-recovery:${nonce}`);}catch{}
