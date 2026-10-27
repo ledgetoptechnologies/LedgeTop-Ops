@@ -3,7 +3,7 @@
  *
  * This is deliberately not host admission, authentication, a proxy, or a public
  * share migration. Callers must separately admit/protect the new domains before
- * enabling it. Existing API, capability, upload, Viewer and share namespaces
+ * enabling it. Existing API, capability, upload, detailed Viewer session and share namespaces
  * continue at their original hosts with their existing cookies and authority.
  * Nothing invokes this policy until a caller explicitly supplies enabled=true.
  */
@@ -32,6 +32,12 @@ const SOURCES: Readonly<Record<CanonicalDomainSurface, readonly string[]>> = Obj
 const OPERATIONS_PAGES = new Set([
   "/", "/dashboard", "/airspace", "/operations", "/clients", "/delivery",
   "/team", "/administration",
+  "/clients/requests", "/clients/feedback", "/clients/invitation-requests",
+  "/viewer", "/viewer/models", "/viewer/sharing", "/viewer/processing", "/operations/processing",
+  "/intel", "/account", "/configurations", "/notifications", "/jobs", "/projects", "/tasks", "/sops",
+  "/operations/projects", "/operations/tasks", "/operations/sops", "/operations/notifications",
+  "/operations/client-requests", "/operations/feedback", "/operations/inbox", "/operations/invitation-requests",
+  "/delivery/incoming", "/delivery/links",
 ]);
 const PORTAL_PAGES = new Set([
   "/", "/portal", "/portal/dashboard", "/portal/projects", "/portal/deliveries",
@@ -44,21 +50,28 @@ const NAVIGATION_QUERY_KEYS = new Set([
   "folder", "prefix", "page", "limit", "cursor", "sort", "order", "filter", "tab",
   "status", "source", "sourceid", "area", "division", "client", "clientid",
   "organization", "organizationid", "id", "kind", "type", "view", "from", "to", "date",
+  "business", "range",
 ]);
 
 function browserPage(pathname: string, surface: CanonicalDomainSurface): boolean {
   // Encoded separators/control bytes are not an alternate way into a page
   // namespace. Do not interpret or normalize capability routes for the caller.
   if (pathname.includes("//") || /%(?:2f|5c|00|0a|0d)/i.test(pathname)) return false;
+  const path = pathname === "/" ? pathname : pathname.replace(/\/$/, "");
+  const exactPage = (surface === "operations" ? OPERATIONS_PAGES : PORTAL_PAGES).has(path);
+  const legacyClientDetail = surface === "operations"
+    && /^(?:\/operations\/(?:client-requests|feedback|invitation-requests)|\/clients\/(?:requests|feedback|invitation-requests))\/[A-Za-z0-9_-]{1,128}$/.test(path);
   let decodedSegments: string[];
   try { decodedSegments = pathname.split("/").map(segment => decodeURIComponent(segment)); }
   catch { return false; }
   // Reject malformed/multiply encoded segments instead of guessing how a later
   // router decodes them. Source identifiers such as project-alpha%3Aprimary
   // remain valid, while encoded capability words are checked as actual words.
-  if (decodedSegments.some(segment => /[%\\/\p{C}]/u.test(segment)
-    || /(?:^|[-_.])(?:onboarding|enrollments?|invitations?|invite|callbacks?|oauth|sessions?|authorize|authorization|tokens?|grants?)(?:[-_.]|$)/i.test(segment))) return false;
-  const path = pathname === "/" ? pathname : pathname.replace(/\/$/, "");
+  if (decodedSegments.some(segment => /[%\\/\p{C}]/u.test(segment))) return false;
+  // A fixed ordinary page such as the legacy invitation-request list is not
+  // an invitation capability. Unknown/deep routes retain the lexical guard.
+  if (exactPage || legacyClientDetail) return true;
+  if (decodedSegments.some(segment => /(?:^|[-_.])(?:onboarding|enrollments?|invitations?|invite|callbacks?|oauth|sessions?|authorize|authorization|tokens?|grants?)(?:[-_.]|$)/i.test(segment))) return false;
   if (surface === "operations") {
     if (OPERATIONS_PAGES.has(path)) return true;
     // Preserve ordinary Client Hub record bookmarks. Administrative capability

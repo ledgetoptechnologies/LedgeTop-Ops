@@ -422,7 +422,14 @@ test("rejects an Operations staging config without the required SPA assets bindi
 test("routes the workspace owner page through the guarded staging Worker exactly once", () => {
   const approvedRoutes = STAGING_INVENTORY.operations.assets.run_worker_first;
   assert.deepEqual(approvedRoutes, [
-    "/api/*", "/health", "/r/*",
+    "/api/*", "/health", "/r/*", "/", "/dashboard", "/airspace", "/operations", "/clients", "/clients/*",
+    "/delivery", "/team", "/administration",
+    "/viewer", "/viewer/models", "/viewer/sharing", "/viewer/processing", "/operations/processing",
+    "/intel", "/account", "/configurations", "/notifications", "/jobs", "/projects", "/tasks", "/sops",
+    "/operations/projects", "/operations/tasks", "/operations/sops", "/operations/notifications",
+    "/operations/client-requests", "/operations/feedback", "/operations/inbox", "/operations/invitation-requests",
+    "/operations/client-requests/*", "/operations/feedback/*", "/operations/invitation-requests/*",
+    "/delivery/incoming", "/delivery/links",
     "/administration/client-portal/operations-recipients",
     "/administration/client-portal/operations-delivery-authority",
     operationsWorkspacePage,

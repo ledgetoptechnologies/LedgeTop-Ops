@@ -28,7 +28,7 @@ function htmlNavigation(request: Request): boolean {
  * namespaces are never inferred to be presentation routes from Accept alone. */
 export function operationsUiPresentationPath(pathname: string): boolean {
   if (pathname === "/") return true;
-  if (["/dashboard", "/notifications", "/airspace", "/team", "/administration", "/configurations",
+  if (["/dashboard", "/notifications", "/airspace", "/team", "/administration", "/configurations", "/intel", "/account",
     "/administration/client-onboarding", "/administration/client-portal/recipients"].includes(pathname)) return true;
   return ["/operations", "/clients", "/viewer", "/delivery", "/jobs", "/projects", "/tasks", "/sops"]
     .some(base => pathname === base || pathname.startsWith(`${base}/`));

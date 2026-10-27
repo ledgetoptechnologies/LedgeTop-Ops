@@ -171,7 +171,15 @@ test('finite domain recognition preserves all resources, public namespaces and p
         if (!Object.hasOwn(values[app] ?? {}, name)) assert.equal(next.plainValueSHA256[name], sha);
     }
     for (const [app, name] of [['operations','PUBLIC_SHARE_ORIGIN'],['client','PUBLIC_BASE_URL'],['client','PUBLIC_SHARE_ORIGIN'],['client','EXPECTED_HOST'],['client','LEGACY_CLIENT_ORIGINS']])
-      assert.equal(profile.workers[app].plainValueSHA256[name], base.workers[app].plainValueSHA256[name]);
+      assert.equal(profile.workers[app].plainValueSHA256[name], Object.hasOwn(values[app] ?? {}, name)
+        ? hash(values[app][name]) : base.workers[app].plainValueSHA256[name]);
+    if (phase === 'staff-canonical') {
+      assert.deepEqual(values.client, domainPhaseValues('delivery-public-canonical').client);
+      assert.equal(values.operations.PUBLIC_SHARE_ORIGIN, 'https://delivery.ledgetop.app');
+      assert.equal(values.operations.PUBLIC_BASE_URL, 'https://ops.ledgetop.app');
+      assert.equal(values.operations.EXPECTED_HOST, 'ops.ledgetop.app');
+      assert.equal(values.operations.CLIENT_ONBOARDING_ADMIN_ORIGIN, 'https://ops.ledgetop.app');
+    }
     const wrong = clone(snapshot);
     for (const bindings of [wrong.client.settings.bindings, wrong.client.version.resources.bindings])
       bindings.find(row => row.name === 'PUBLIC_SHARE_ORIGIN').text = 'https://portal.ledgetop.app';

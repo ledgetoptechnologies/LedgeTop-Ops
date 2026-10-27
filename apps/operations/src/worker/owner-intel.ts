@@ -3,6 +3,7 @@ import { HTTPException } from 'hono/http-exception';
 import type { Env, StaffPrincipal } from './types';
 import { ownerCompetitorProjection, refreshOwnerIntel } from './owner-intel-model';
 import { parseDuplicateFreeJson } from './bounded-json';
+import { ownerIntelSourceProjectionStillCurrent,readOwnerIntelSourceProjection } from './owner-intel-source-ingest';
 
 type Bindings={Bindings:Env;Variables:{principal:StaffPrincipal;administrator:boolean}};
 const CONTRACT='a60a11ddd68df90da80a1e2eaf298434369653d8e8f390b814ed906e7b675b32';
@@ -68,6 +69,33 @@ async function stillCurrent(db:D1Database,principal:StaffPrincipal,expected:Auth
  if(!await configured(db))throw unavailable('intel_not_configured');
 }
 
+const asNumber=(value:string|null)=>value===null?null:Number(value);
+const asFraction=(value:string|null)=>value===null?null:Number(value)/100;
+function ownerSearchConsoleDto(source:NonNullable<Awaited<ReturnType<typeof readOwnerIntelSourceProjection>>>,range:'7d'|'28d'|'90d'){
+ if(source.sourceKind!=='search_console_summary'||source.observation.observationKind!=='search_console_summary')throw unavailable('intel_projection_unavailable',503);
+ const p=source.observation.payload,provenance=p.provenance;
+ return {site:{url:p.siteUrl},range:{start:p.period.start,end:p.period.end},freshness:{fetchedAt:provenance.collectedAt,stale:provenance.partialReason==='source_stale'},
+  totals:{clicks:p.totals.clicks,impressions:p.totals.impressions,ctr:asFraction(p.totals.ctrPercent),position:asNumber(p.totals.avgPosition)},previous:null,
+  queries:p.topQueries.map(row=>({query:row.query,clicks:row.clicks,impressions:row.impressions,ctr:asFraction(row.ctrPercent),position:asNumber(row.avgPosition)})),
+  pages:p.topPages.map(row=>({url:row.url,clicks:row.clicks,impressions:row.impressions,ctr:asFraction(row.ctrPercent),position:asNumber(row.avgPosition)})),
+  daily:p.daily.map(row=>({date:row.date,clicks:row.clicks,impressions:row.impressions})),comparison:p.comparison,coverage:{state:p.totals.state,reason:p.totals.reason,lastDataDate:provenance.lastDataDate,
+   dataRange:provenance.dataRange,partial:provenance.partial,partialReason:provenance.partialReason,limits:provenance.limits,asOf:provenance.asOf,rangeSelection:range},
+  receipt:{operationId:source.operationId,payloadSha256:source.payloadSha256,completedAt:source.completedAt,acceptedAt:source.acceptedAt}};
+}
+function ownerWebsiteDto(source:NonNullable<Awaited<ReturnType<typeof readOwnerIntelSourceProjection>>>,range:'7d'|'28d'|'90d',now=Date.now()){
+ if(source.sourceKind!=='own_site'||source.observation.observationKind!=='own_site')throw unavailable('intel_projection_unavailable',503);
+ const p=source.observation.payload,provenance=p.provenance;
+ const days=Number(range.slice(0,-1)),today=new Date(now).toISOString().slice(0,10),start=new Date(Date.parse(`${today}T00:00:00Z`)-(days-1)*86400000).toISOString().slice(0,10);
+ const changes=p.changesSincePrevious.filter(change=>change.detectedAt.slice(0,10)>=start&&change.detectedAt.slice(0,10)<=today);
+ // This endpoint reports the approved Hermes site monitor. It does not map
+ // missing GA4 metrics to zeros or claim that a GA4 property is connected.
+ return {schema:'ops.intel.website-monitor.v1',site:{canonicalDomain:p.canonicalDomain},range:{start,end:today},freshness:{fetchedAt:provenance.collectedAt,stale:provenance.partialReason==='source_stale'},
+  monitoredPages:p.monitoredPages,changesSincePrevious:changes,technical:p.technical,
+  provenance:{source:provenance.source,sourceAccountRef:provenance.sourceAccountRef,collectedBy:provenance.collectedBy,collectedAt:provenance.collectedAt,asOf:provenance.asOf,
+   lastDataDate:provenance.lastDataDate,dataRange:provenance.dataRange,partial:provenance.partial,partialReason:provenance.partialReason,limits:provenance.limits},
+  receipt:{operationId:source.operationId,payloadSha256:source.payloadSha256,completedAt:source.completedAt,acceptedAt:source.acceptedAt}};
+}
+
 /** Registered only after ordinary human Access authentication. No producer,
  * portal, PA, public-link or service credential is accepted here. */
 export function registerOwnerIntelRoutes(app:Hono<Bindings>){
@@ -113,7 +141,26 @@ export function registerOwnerIntelRoutes(app:Hono<Bindings>){
   if(!selected)throw unavailable('intel_business_not_found');
   if(section!=='competitors'){
    await stillCurrent(c.env.OPS_DB,principal,authority,selected.businessId);
-   throw unavailable(section==='website'?'intel_website_not_connected':'intel_search_console_not_connected');
+   if(!selected.bindingId||selected.configurationRevision===null)throw unavailable('intel_monitoring_not_configured');
+   let sourceControl:{enabled:number;storage_accepted:number}|null;
+   try{sourceControl=await c.env.OPS_DB.withSession('first-primary').prepare('SELECT enabled,storage_accepted FROM owner_intel_source_control WHERE singleton=1').first<{enabled:number;storage_accepted:number}>();}
+   catch{throw unavailable(section==='website'?'intel_website_not_connected':'intel_search_console_not_connected');}
+   if(!sourceControl||sourceControl.enabled!==1||sourceControl.storage_accepted!==1)
+    throw unavailable(section==='website'?'intel_website_not_connected':'intel_search_console_not_connected');
+   const kind=section==='website'?'own_site':'search_console_summary';
+   const requestedRange=query.get('range') as '7d'|'28d'|'90d',days=Number(requestedRange.slice(0,-1)) as 7|28|90;
+   const source=await readOwnerIntelSourceProjection(c.env.OPS_DB,selected.bindingId,selected.configurationRevision,kind,section==='website'?undefined:days);
+   if(!source){
+    const any=await c.env.OPS_DB.withSession('first-primary').prepare('SELECT COUNT(*) count FROM owner_intel_source_projections WHERE binding_id=? AND configuration_revision=? AND observation_kind=?')
+     .bind(selected.bindingId,selected.configurationRevision,kind).first<number>('count');
+    throw unavailable(any&&any>0?'intel_range_unavailable':'intel_awaiting_first_data');
+   }
+   const view=section==='website'?ownerWebsiteDto(source,query.get('range') as '7d'|'28d'|'90d'):ownerSearchConsoleDto(source,query.get('range') as '7d'|'28d'|'90d');
+   await stillCurrent(c.env.OPS_DB,principal,authority,selected.businessId);
+   const current=await business(c.env.OPS_DB,key,principal.id);
+   if(!current||JSON.stringify(current)!==JSON.stringify(selected))throw unavailable('intel_binding_changed',503);
+   if(!await ownerIntelSourceProjectionStillCurrent(c.env.OPS_DB,source))throw unavailable('intel_binding_changed',503);
+   return c.json(view);
   }
   if(!selected.bindingId||selected.configurationRevision===null)throw unavailable('intel_monitoring_not_configured');
   const row=await c.env.OPS_DB.withSession('first-primary').prepare(`SELECT projection_id id,revision,dto_json dto,dto_sha256 digest,source_contract_sha256 contract,read_schema schema

@@ -7,21 +7,41 @@ const user = (permissions: string[], intel: boolean) => ({
   csrfToken: "csrf-test", timezone: "America/Chicago", capabilities: { intel: { enabled: intel } },
 });
 const businesses = [{ key: "drone-services", name: "Ledge Top Drone Services" }, { key: "technologies", name: "Ledge Top Technologies" }];
-const website = {
-  property: { name: "ledgetopdroneservices.com" }, range: { start: "2026-09-26", end: "2026-10-23" },
+const digest = "q1_yGq5bBkqgXxkVdN7ZrUoQyN0nJbUqJKcB0g4tXvA";
+const receipt = { operationId: "11111111-1111-4111-8111-111111111111", payloadSha256: digest, completedAt: "2026-10-24T06:00:00Z", acceptedAt: "2026-10-24T06:00:05Z" };
+const sourcePage = (url: string, title: string | null, fetchStatus = "ok") => ({ url, title, observedAt: "2026-10-24T05:58:00Z", fetchStatus });
+// Website ranges are the requested UTC change window ending today, so the fixture is built from the test's clock.
+const windowFor = (days: number) => {
+  const end = new Date(); end.setUTCHours(0, 0, 0, 0);
+  return { start: new Date(end.getTime() - (days - 1) * 86_400_000).toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+};
+const website = (days = 28) => ({
+  schema: "ops.intel.website-monitor.v1", site: { canonicalDomain: "ledgetopdroneservices.com" }, range: windowFor(days),
   freshness: { fetchedAt: "2026-10-24T06:00:00Z", stale: false },
-  totals: { users: 1240, sessions: 1610, pageViews: 4120, engagementRate: 0.612, conversions: 18 },
-  previous: { users: 1000, sessions: 1700, pageViews: 4120, engagementRate: 0.6, conversions: 12 },
-  topPages: [{ path: "/services/roof-inspections", title: "Roof inspections", pageViews: 820, users: 610 }],
-  sources: [{ channel: "Organic Search", sessions: 900 }, { channel: "Direct", sessions: 410 }],
-};
+  monitoredPages: [{ ...sourcePage("https://ledgetopdroneservices.com/services/roof-inspections", "Roof inspections"), contentSha256: digest, contentLength: 18234 },
+    { ...sourcePage("https://ledgetopdroneservices.com/pricing", null, "blocked"), contentSha256: digest, contentLength: 0 }],
+  changesSincePrevious: [{ pageUrl: sourcePage("https://ledgetopdroneservices.com/services/roof-inspections", "Roof inspections"), changeType: "content_changed",
+    summary: "Added a section on insurance claim photos.", addedSentences: ["We provide insurance-ready roof photos."], removedSentences: [], detectedAt: "2026-10-22T14:00:00Z" }],
+  technical: { httpsOk: { value: true, state: "observed", reason: null }, sitemapPageCount: { value: 42, state: "observed", reason: null },
+    robotsAllowsIndexing: { value: null, state: "unknown", reason: "robots_blocked" }, avgFetchMs: 640 },
+  provenance: { source: "hermes_site_monitor", sourceAccountRef: null, collectedBy: "hermes", collectedAt: "2026-10-24T06:00:00Z", asOf: null,
+    lastDataDate: null, dataRange: null, partial: false, partialReason: null, limits: [] },
+  receipt,
+});
 const search = {
-  site: { url: "sc-domain:ledgetopdroneservices.com" }, range: { start: "2026-09-26", end: "2026-10-23" },
+  site: { url: "sc-domain:ledgetopdroneservices.com" }, range: { start: "2026-09-23", end: "2026-10-20" },
   freshness: { fetchedAt: "2026-10-23T06:00:00Z", stale: true },
-  totals: { clicks: 312, impressions: 18400, ctr: 0.017, position: 14.2 }, previous: { clicks: 280, impressions: 17000, ctr: 0.0165, position: 16.8 },
-  queries: [{ query: "drone roof inspection", clicks: 44, impressions: 1900, ctr: 0.023, position: 6.1 }],
+  totals: { clicks: 312, impressions: 18400, ctr: 0.017, position: 14.2 }, previous: null,
+  queries: [{ query: "drone roof inspection", clicks: 44, impressions: 1900, ctr: 0.023, position: 6.1 },
+    { query: "aerial survey near me", clicks: 0, impressions: 40, ctr: null, position: null }],
   pages: [{ url: "https://ledgetopdroneservices.com/", clicks: 120, impressions: 8000, ctr: 0.015, position: 11.3 }],
+  daily: [{ date: "2026-10-20", clicks: 12, impressions: 700 }],
+  comparison: { previousPeriod: { start: "2026-08-26", end: "2026-09-22", days: 28 }, clicksDeltaPercent: "11.4", impressionsDeltaPercent: "-2.5" },
+  coverage: { state: "observed", reason: null, lastDataDate: "2026-10-20", dataRange: { start: "2026-09-23", end: "2026-10-20" }, partial: false,
+    partialReason: null, limits: [] as string[], asOf: null, rangeSelection: "28d" },
+  receipt,
 };
+const search7 = { ...search, range: { start: "2026-10-14", end: "2026-10-20" }, comparison: null, coverage: { ...search.coverage, rangeSelection: "7d" } };
 
 type Answer = { status?: number; json: unknown };
 async function mockOps(page: Page, options: { permissions?: string[]; intel?: boolean; list?: Answer; sections?: Record<string, Answer> } = {}) {
@@ -36,7 +56,8 @@ async function mockOps(page: Page, options: { permissions?: string[]; intel?: bo
       if (match[3]) return route.fulfill({ status: 202, json: { accepted: true } });
       const override = options.sections?.[`${match[1]}/${match[2]}`];
       if (override) return route.fulfill(override);
-      return route.fulfill({ json: match[2] === "competitors" ? sampleStaffTenant : match[2] === "website" ? website : search });
+      const days = Number((url.searchParams.get("range") ?? "28d").slice(0, -1));
+      return route.fulfill({ json: match[2] === "competitors" ? sampleStaffTenant : match[2] === "website" ? website(days) : days === 7 ? search7 : search });
     }
     return route.fulfill({ status: 404, json: { error: "Not found" } });
   });
@@ -70,38 +91,97 @@ test("switching business loads that business only and explains what isn't set up
   expect(intelPaths(requests)).toContain("/api/intel/technologies/competitors");
 });
 
-test("website stats show totals with changes, top pages and sources, and follow the chosen period", async ({ page }) => {
+test("the site monitor shows own-site health, monitored pages and changes, and follows the chosen period", async ({ page }) => {
   const requests = await mockOps(page);
   await page.goto("/intel?business=drone-services&view=website");
-  const totals = page.getByRole("list", { name: "Website totals" });
-  await expect(totals.getByRole("listitem").filter({ hasText: "Visitors" })).toContainText("1,240");
-  await expect(totals.getByRole("listitem").filter({ hasText: "Visitors" })).toContainText("▲ 24.0% vs previous period");
-  await expect(totals.getByRole("listitem").filter({ hasText: "Visits" }).first()).toContainText("▼ 5.3% vs previous period");
-  await expect(totals.getByRole("listitem").filter({ hasText: "Page views" })).toContainText("No change");
-  await expect(page.getByRole("table", { name: "Top pages" })).toContainText("Roof inspections");
-  await expect(page.getByRole("table", { name: "Where visits came from" })).toContainText("Organic Search");
-  await expect(page.getByText(/Google Analytics · ledgetopdroneservices\.com · Updated/)).toBeVisible();
-  await page.getByLabel("Period").selectOption("90d");
+  await expect(page.getByText(/site monitoring, not visitor analytics/)).toBeVisible();
+  const health = page.getByRole("list", { name: "Site health" });
+  await expect(health.getByRole("listitem").filter({ hasText: "Secure (HTTPS)" })).toContainText("Yes");
+  await expect(health.getByRole("listitem").filter({ hasText: "Pages in sitemap" })).toContainText("42");
+  // An unknown fact gives its reason, never a yes/no or a zero.
+  await expect(health.getByRole("listitem").filter({ hasText: "Search engines may index" })).toContainText("The site asks automated checks not to read this page");
+  await expect(health.getByRole("listitem").filter({ hasText: "Average page response" })).toContainText("640 ms");
+  const pages = page.getByRole("table", { name: "Monitored pages" });
+  await expect(pages).toContainText("Roof inspections");
+  await expect(pages.getByRole("row").filter({ hasText: "/pricing" })).toContainText("Blocked automated checks");
+  const changes = page.getByRole("region", { name: "Changes in this period" });
+  await expect(changes).toContainText("Content changed");
+  await expect(changes).toContainText("Added a section on insurance claim photos.");
+  await changes.getByText("What changed").click();
+  await expect(changes).toContainText("We provide insurance-ready roof photos.");
+  await expect(page.getByText(/Site monitor · ledgetopdroneservices\.com · Updated/)).toBeVisible();
+  // No visitor-analytics metrics or Google Analytics labels.
+  for (const label of ["Visitors", "Visits", "Page views", "Conversions"]) await expect(page.getByText(label, { exact: true })).toHaveCount(0);
+  await expect(page.getByText(/Google Analytics/)).toHaveCount(0);
+  await page.getByRole("combobox", { name: /^Period/ }).selectOption("90d");
   await expect.poll(() => intelPaths(requests)).toContain("/api/intel/drone-services/website?range=90d");
+  await expect(page.getByRole("list", { name: "Site health" })).toBeVisible();
   expect(new URL(page.url()).searchParams.get("range")).toBe("90d");
 });
 
-test("Search Console treats a lower average position as better and flags out-of-date data", async ({ page }) => {
+test("Search Console shows totals with the source's own changes, flags out-of-date data and lists top searches and pages", async ({ page }) => {
   await mockOps(page);
   await page.goto("/intel?business=drone-services&view=search");
-  const position = page.getByRole("list", { name: "Search totals" }).getByRole("listitem").filter({ hasText: "Average position" });
-  await expect(position).toContainText("14.2");
-  await expect(position.locator(".intel-change")).toHaveClass(/intel-up/);
+  const totals = page.getByRole("list", { name: "Search totals" });
+  const metric = (label: string) => totals.getByRole("listitem").filter({ has: page.getByText(label, { exact: true }) });
+  await expect(metric("Clicks")).toContainText("312");
+  await expect(metric("Clicks").locator(".intel-change")).toHaveText("▲ 11.4% vs previous 28 days");
+  await expect(metric("Impressions").locator(".intel-change")).toHaveText("▼ 2.5% vs previous 28 days");
+  // CTR is a fraction: 0.017 is 1.7%. There is no invented prior CTR or position.
+  await expect(metric("Click-through rate")).toContainText("1.7%");
+  await expect(metric("Click-through rate").locator(".intel-change")).toHaveCount(0);
+  await expect(metric("Average position")).toContainText("14.2");
+  await expect(metric("Average position")).toContainText("Lower is better");
   await expect(page.getByText(/Out of date, last updated/)).toBeVisible();
-  await expect(page.getByRole("table", { name: "Top searches" })).toContainText("drone roof inspection");
+  await expect(page.getByText(/Sep 23, 2026 – Oct 20, 2026/)).toBeVisible();
+  await expect(page.getByText("Google data through Oct 20, 2026.")).toBeVisible();
+  const searches = page.getByRole("table", { name: "Top searches" });
+  await expect(searches).toContainText("drone roof inspection");
+  await expect(searches.getByRole("row").filter({ hasText: "aerial survey near me" })).toContainText("Not available");
   await expect(page.getByRole("table", { name: "Top pages in search" })).toContainText("https://ledgetopdroneservices.com/");
 });
 
-test("an unconnected source says so instead of showing zeros", async ({ page }) => {
-  await mockOps(page, { sections: { "technologies/website": { status: 404, json: { error: "Not connected", code: "not_connected" } } } });
+test("Search Console never fills unreported totals with zeros and says why they're missing", async ({ page }) => {
+  await mockOps(page, { sections: { "drone-services/search-console": { json: { ...search, comparison: null,
+    totals: { clicks: null, impressions: null, ctr: null, position: null }, queries: [], pages: [], daily: [],
+    coverage: { ...search.coverage, state: "unknown", reason: "provider_data_delay", partial: true, partialReason: "data_limited", limits: ["Top 25 rows only"] } } } } });
+  await page.goto("/intel?business=drone-services&view=search");
+  const totals = page.getByRole("list", { name: "Search totals" });
+  for (const label of ["Clicks", "Impressions", "Click-through rate", "Average position"])
+    await expect(totals.getByRole("listitem").filter({ has: page.getByText(label, { exact: true }) })).toContainText("Not available");
+  await expect(totals).not.toContainText(/\d/);
+  await expect(totals.locator(".intel-change")).toHaveCount(0);
+  const about = page.getByRole("list", { name: "About this data" });
+  await expect(about).toContainText("Google didn't report totals for this period: Google hasn't finished reporting this period yet.");
+  await expect(about).toContainText("Partial data: Google limited the data it reported.");
+  await expect(about).toContainText("Top 25 rows only");
+});
+
+test("a period the source hasn't reported says so; a reply for a different period is never shown as the chosen one", async ({ page }) => {
+  await mockOps(page, { sections: { "drone-services/search-console": { status: 404, json: { error: "intel_range_unavailable" } } } });
+  await page.goto("/intel?business=drone-services&view=search&range=7d");
+  await expect(page.getByText("Search Console hasn't reported the last 7 days for Ledge Top Drone Services. Choose another period.")).toBeVisible();
+  await expect(page.getByRole("list", { name: "Search totals" })).toHaveCount(0);
+  await page.unrouteAll();
+  // A 28-day answer to a 7-day request is refused rather than relabelled, whatever it claims to be.
+  for (const json of [search, { ...search, coverage: { ...search.coverage, rangeSelection: "7d" } }]) {
+    await mockOps(page, { sections: { "drone-services/search-console": { json } } });
+    await page.goto("/intel?business=drone-services&view=search&range=7d");
+    await expect(page.getByText("This view couldn't be loaded.")).toBeVisible();
+    await expect(page.getByRole("list", { name: "Search totals" })).toHaveCount(0);
+    await page.unrouteAll();
+  }
+});
+
+test("a source that isn't connected, or hasn't sent data yet, says so instead of showing zeros", async ({ page }) => {
+  await mockOps(page, { sections: { "technologies/website": { status: 404, json: { error: "intel_website_not_connected" } },
+    "technologies/search-console": { status: 404, json: { error: "intel_awaiting_first_data" } } } });
   await page.goto("/intel?business=technologies&view=website");
-  await expect(page.getByText("Google Analytics isn't connected for Ledge Top Technologies yet.")).toBeVisible();
-  await expect(page.getByRole("list", { name: "Website totals" })).toHaveCount(0);
+  await expect(page.getByText("Ledge Top's site monitor isn't connected for Ledge Top Technologies yet.")).toBeVisible();
+  await expect(page.getByRole("list", { name: "Site health" })).toHaveCount(0);
+  await page.getByRole("navigation", { name: "Intel views" }).getByRole("button", { name: "Search Console" }).click();
+  await expect(page.getByText("Search Console is set up for Ledge Top Technologies, but no data has arrived yet.")).toBeVisible();
+  await expect(page.getByRole("list", { name: "Search totals" })).toHaveCount(0);
 });
 
 test("competitor intel is read-only: no scan, verdict or client report controls, and nothing is sent", async ({ page }) => {
@@ -114,16 +194,6 @@ test("competitor intel is read-only: no scan, verdict or client report controls,
   await page.getByRole("tab", { name: /Self-assessment/ }).click();
   await expect(page.getByRole("button", { name: "Run self-assessment" })).toHaveCount(0);
   expect(requests.filter(request => request.method() !== "GET")).toEqual([]);
-});
-
-test("a total the source doesn't report reads as not tracked, never as zero", async ({ page }) => {
-  await mockOps(page, { sections: { "drone-services/website": { json: { ...website,
-    totals: { ...website.totals, conversions: null, engagementRate: null }, previous: null } } } });
-  await page.goto("/intel?business=drone-services&view=website");
-  const totals = page.getByRole("list", { name: "Website totals" });
-  await expect(totals.getByRole("listitem").filter({ hasText: "Conversions" })).toContainText("Not tracked");
-  await expect(totals.getByRole("listitem").filter({ hasText: "Engaged visits" })).toContainText("Not tracked");
-  await expect(totals.getByRole("listitem").filter({ hasText: "Visitors" })).toContainText("1,240");
 });
 
 test("Intel is hidden unless the session grants it, even to administrators, and a server refusal shows nothing private", async ({ page }) => {
@@ -149,7 +219,7 @@ test("a wrong-shaped business list or section shows an error instead of breaking
 
   await page.unrouteAll();
   await mockOps(page, { sections: {
-    "drone-services/website": { json: { ...website, totals: "lots" } },
+    "drone-services/website": { json: { ...website(), technical: "fine" } },
     "drone-services/search-console": { json: { site: { url: "x" } } },
     "drone-services/competitors": { json: { ...sampleStaffTenant, competitors: [{ subjectKey: "comp:x", name: "x", baseline: {} }] } },
   } });
@@ -168,7 +238,7 @@ for (const width of [320, 375, 390]) for (const font of ["default", "Arial"] as 
   if (font === "Arial") await page.addStyleTag({ content: "* { font-family: Arial, sans-serif !important; }" });
   await expect(page.getByRole("tab", { name: /Self-assessment/ })).toBeVisible();
   const controls = [page.getByRole("button", { name: "Ledge Top Drone Services" }), page.getByRole("button", { name: "Ledge Top Technologies" }),
-    ...["Competitor Intel", "Website", "Search Console"].map(name => page.getByRole("navigation", { name: "Intel views" }).getByRole("button", { name })),
+    ...["Competitor Intel", "Site monitor", "Search Console"].map(name => page.getByRole("navigation", { name: "Intel views" }).getByRole("button", { name })),
     ...[/Review changes/, /^Competitors$/, /Google Ads/, /Self-assessment/].map(name => page.getByRole("tab", { name }))];
   for (const control of controls) {
     const box = (await control.boundingBox())!;
