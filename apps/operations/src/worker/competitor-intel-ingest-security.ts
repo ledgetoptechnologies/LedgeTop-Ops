@@ -27,7 +27,7 @@ export async function verifyIntelSignature(raw:Uint8Array,headers:IntelSignature
  let valid=false;try{const imported=await crypto.subtle.importKey('raw',publicKey as BufferSource,{name:'Ed25519'},false,['verify']);valid=await crypto.subtle.verify('Ed25519',imported,headers.signature as BufferSource,intelSigningBytes(headers) as BufferSource);}catch{throw new IntelIngestError('signature_invalid',401);}
  if(!valid)throw new IntelIngestError('signature_invalid',401);
 }
-export async function readIntelBody(request:Request):Promise<Uint8Array> {
+export async function readIntelBody(request:{headers:Headers;body:ReadableStream<Uint8Array>|null}):Promise<Uint8Array> {
  const declared=request.headers.get('Content-Length');
  if(declared!==null&&(!/^\d+$/.test(declared)||!Number.isSafeInteger(Number(declared))))throw new IntelIngestError('header_invalid',400);
  if(declared!==null&&Number(declared)>INTEL_BODY_LIMIT)throw new IntelIngestError('body_too_large',413);
