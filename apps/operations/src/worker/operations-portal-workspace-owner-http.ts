@@ -12,6 +12,7 @@ import { reserveOperationsPortalWorkspacePublication, dispatchOperationsPortalWo
 import { reserveOperationsPortalWorkspacePublicationInvocation }
   from "./operations-portal-workspace-publication-invocations";
 import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
+import { admittedOperationsRequestOrigin } from "./host-admission";
 import { lookupOperationsPortalSharedProjectFolder, confirmOperationsPortalSharedProjectFolder,
   type ConfirmOperationsPortalSharedProjectFolder, type OperationsPortalSharedProjectFolderAssociation }
   from "./operations-portal-shared-project-folders";
@@ -22,7 +23,7 @@ const encoder = new TextEncoder();
 type Actor = AuthenticatedNativeStaffWithAdmissionVersion;
 type Configuration = NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
 export type OperationsPortalWorkspaceOwnerHttpDependencies = Readonly<{
-  environment: string; expectedHost: string; configuration: Configuration; database: D1Database;
+  environment: string; expectedHost: string; operationsOrigins?: string; configuration: Configuration; database: D1Database;
   publication: OperationsPortalWorkspacePublicationBinding;
   folderAuthority?:Env;
 }>;
@@ -171,16 +172,18 @@ export async function handleOperationsPortalWorkspaceOwnerHttp(request: Request,
   dependencies: OperationsPortalWorkspaceOwnerHttpDependencies): Promise<Response> {
   try {
     const config = settings(dependencies), url = new URL(request.url);
+    const requestOrigin = admittedOperationsRequestOrigin(request.url, { ENVIRONMENT: dependencies.environment,
+      EXPECTED_HOST: dependencies.expectedHost, OPERATIONS_ORIGINS: dependencies.operationsOrigins }, config.origin);
     const mutation = url.pathname === `${BASE}/reserve-and-publish`
       || url.pathname === `${BASE}/refresh-and-publish`
       || url.pathname === `${BASE}/reserve-folder-and-publish` || url.pathname === `${BASE}/revoke-folder-and-publish`
       || url.pathname === `${BASE}/confirm-project-folder`;
-    if (url.origin !== config.origin || (url.pathname !== `${BASE}/csrf` && !mutation
+    if (!requestOrigin || url.origin !== requestOrigin || (url.pathname !== `${BASE}/csrf` && !mutation
       && url.pathname !== `${BASE}/recover-publication` && url.pathname !== `${BASE}/project-folder`))
       throw new Failure(404, "not_found");
     const actor = await authenticateNativeStaffWithAdmissionVersion(request, dependencies.database, config.access);
     if (url.pathname === `${BASE}/csrf` && request.method === "GET")
-      return response(200, { csrfToken: await csrf(config.secret, config.origin, actor) });
+      return response(200, { csrfToken: await csrf(config.secret, requestOrigin, actor) });
     if (url.pathname === `${BASE}/project-folder`) {
       if (request.method !== "GET") throw new Failure(405, "method_not_allowed");
       const keys = [...url.searchParams.keys()].sort();
@@ -190,7 +193,7 @@ export async function handleOperationsPortalWorkspaceOwnerHttp(request: Request,
       return response(200, await lookupOperationsPortalSharedProjectFolder(dependencies.database, actor, { targetId, externalProjectId }));
     }
     if (request.method !== "POST") throw new Failure(405, "method_not_allowed");
-    sameOrigin(request, config.origin); await csrf(config.secret, config.origin, actor, request);
+    sameOrigin(request, requestOrigin); await csrf(config.secret, requestOrigin, actor, request);
     if (url.pathname === `${BASE}/confirm-project-folder`) {
       const input = confirmProjectFolderInput(await readBoundedJson(request, 4096, "operations native project folder confirmation"));
       if (!input) throw new Failure(400, "invalid_request");

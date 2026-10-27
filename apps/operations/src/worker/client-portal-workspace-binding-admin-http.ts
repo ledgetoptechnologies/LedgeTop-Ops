@@ -7,11 +7,13 @@ import { authenticateNativeStaffWithAdmissionVersion,
 import { dispatchNextPortalWorkspaceBinding, enqueuePortalWorkspaceBinding,
   type WorkspaceBindingEnv } from "./client-portal-workspace-binding-outbox";
 import { selectPortalWorkspaceBinding } from "./client-portal-workspace-binding-selection";
+import { admittedOperationsRequestOrigin } from "./host-admission";
 
 type Route="session"|"select"|"apply";
 export type WorkspaceBindingAdminHttpDependencies=Readonly<{
   environment?:string;
   expectedHost?:string;
+  operationsOrigins?:string;
   configuration:NativeStaffAccessConfiguration&Readonly<{origin:string;csrfSecret:string}>;
   database:D1Database;
   dispatch:WorkspaceBindingEnv;
@@ -105,21 +107,22 @@ export async function handleWorkspaceBindingAdminHttp(request:Request,
   try{
     const url=new URL(request.url),route=workspaceBindingAdminHttpRequest(request.method,url.pathname);
     if(!route)throw new HttpFailure(404,"not_found");
-    const authority=snapshot(dependencies);
-    if(url.origin!==authority.origin||url.search||url.hash)throw new HttpFailure(403,"denied");
+    const authority=snapshot(dependencies),requestOrigin=admittedOperationsRequestOrigin(request.url,{ENVIRONMENT:dependencies.environment??"",
+      EXPECTED_HOST:dependencies.expectedHost??"",OPERATIONS_ORIGINS:dependencies.operationsOrigins},authority.origin);
+    if(!requestOrigin||url.origin!==requestOrigin||url.search||url.hash)throw new HttpFailure(403,"denied");
     const origin=request.headers.get("Origin"),fetchSite=request.headers.get("Sec-Fetch-Site");
     if(fetchSite!==null&&fetchSite!=="same-origin")throw new HttpFailure(403,"denied");
     if(route==="session"){
-      if(request.headers.get("X-Native-Staff-Request")!=="1"||(origin!==null&&origin!==authority.origin))
+      if(request.headers.get("X-Native-Staff-Request")!=="1"||(origin!==null&&origin!==requestOrigin))
         throw new HttpFailure(403,"denied");
-    }else if(origin!==authority.origin)throw new HttpFailure(403,"denied");
+    }else if(origin!==requestOrigin)throw new HttpFailure(403,"denied");
     let auth:AuthenticatedNativeStaffWithAdmissionVersion;
     try{auth=await authenticateNativeStaffWithAdmissionVersion(request,authority.database,authority.access);}
     catch{throw new HttpFailure(403,"denied");}
     unexpired(auth);
-    if(route==="session")return response(200,{csrfToken:await token(authority.csrfSecret,authority.origin,
+    if(route==="session")return response(200,{csrfToken:await token(authority.csrfSecret,requestOrigin,
       authority.access,auth,Math.floor(Date.now()/1000/BUCKET_SECONDS)),verifiedUntil:auth.verifiedUntil});
-    await requireCsrf(request,authority.csrfSecret,authority.origin,authority.access,auth);
+    await requireCsrf(request,authority.csrfSecret,requestOrigin,authority.access,auth);
     unexpired(auth);
     const input=await body(request,route);
     unexpired(auth);

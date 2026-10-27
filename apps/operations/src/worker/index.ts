@@ -504,6 +504,7 @@ app.use("/api/native-integrations/monitor/*", dispatchProjectAlphaApiV2MonitorCo
 // legacy /api staff middleware. It never accepts legacy PA/portal identity.
 async function dispatchClientOnboardingStaff(c: any) {
   return handleClientOnboardingStaffHttp(c.req.raw, {
+    environment: c.env.ENVIRONMENT, expectedHost: c.env.EXPECTED_HOST,
     configuration: {
       enabled: c.env.CLIENT_ONBOARDING_ADMIN_ENABLED === "true",
       issuer: c.env.TEAM_DOMAIN ?? "",
@@ -528,6 +529,7 @@ async function dispatchWorkspaceBindingAdmin(c: any) {
   return handleWorkspaceBindingAdminHttp(c.req.raw, {
     environment: c.env.ENVIRONMENT,
     expectedHost: c.env.EXPECTED_HOST,
+    operationsOrigins: c.env.OPERATIONS_ORIGINS,
     configuration: {
       enabled: c.env.CLIENT_PORTAL_WORKSPACE_BINDING_ADMIN_ENABLED === "true",
       issuer: c.env.TEAM_DOMAIN ?? "",
@@ -542,14 +544,14 @@ async function dispatchWorkspaceBindingAdmin(c: any) {
 app.use("/api/native-client-portal/workspace-binding", dispatchWorkspaceBindingAdmin);
 app.use("/api/native-client-portal/workspace-binding/*", dispatchWorkspaceBindingAdmin);
 async function dispatchAuthorityV3Owner(c:Context<{Bindings:Env;Variables:Variables}>){return handleAuthorityV3OwnerHttp(c.req.raw,{environment:c.env.ENVIRONMENT,
-  expectedHost:c.env.EXPECTED_HOST,configuration:{enabled:c.env.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED==="true",
+  expectedHost:c.env.EXPECTED_HOST,operationsOrigins:c.env.OPERATIONS_ORIGINS,configuration:{enabled:c.env.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ENABLED==="true",
     issuer:c.env.TEAM_DOMAIN??"",staffAudience:c.env.OPERATIONS_AUD,origin:c.env.CLIENT_PORTAL_AUTHORITY_V3_OWNER_ORIGIN??"",
     csrfSecret:c.env.OPERATIONS_SESSION_SECRET},database:c.env.OPS_DB,dispatch:c.env});}
 app.use("/api/native-client-portal/authority-v3",dispatchAuthorityV3Owner);
 app.use("/api/native-client-portal/authority-v3/*",dispatchAuthorityV3Owner);
 async function dispatchRecipientEnrollmentOwner(c:Context<{Bindings:Env;Variables:Variables}>){
   return handleRecipientEnrollmentOwnerHttp(c.req.raw,{
-    environment:c.env.ENVIRONMENT,expectedHost:c.env.EXPECTED_HOST,
+    environment:c.env.ENVIRONMENT,expectedHost:c.env.EXPECTED_HOST,operationsOrigins:c.env.OPERATIONS_ORIGINS,
     configuration:{enabled:c.env.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED==="true"
       &&c.env.CLIENT_PORTAL_RECIPIENT_ENROLLMENT_OWNER_ENABLED==="true",
       issuer:c.env.TEAM_DOMAIN??"",staffAudience:c.env.OPERATIONS_AUD,
@@ -566,6 +568,7 @@ async function dispatchOperationsNativeRecipientOwner(c: Context<{ Bindings: Env
   return handleOperationsNativeRecipientOwnerHttp(c.req.raw, {
     environment: c.env.ENVIRONMENT,
     expectedHost: c.env.EXPECTED_HOST,
+    operationsOrigins: c.env.OPERATIONS_ORIGINS,
     configuration: {
       enabled: c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED === "true"
         && c.env.CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED === "true",
@@ -586,7 +589,7 @@ async function dispatchOperationsNativeDirectoryLifecycle(c: Context<{ Bindings:
     return c.json({ error: "Not found" }, 404);
   return handleOperationsNativeDirectoryLifecycleOwnerHttp(c.req.raw, {
     environment: c.env.ENVIRONMENT, enabledFlag: c.env.NATIVE_DIRECTORY_LIFECYCLE_ENABLED,
-    expectedHost: c.env.EXPECTED_HOST,
+    expectedHost: c.env.EXPECTED_HOST, operationsOrigins: c.env.OPERATIONS_ORIGINS,
     configuration: { enabled: true, issuer: c.env.TEAM_DOMAIN ?? "", staffAudience: c.env.OPERATIONS_AUD,
       origin: c.env.PUBLIC_BASE_URL, csrfSecret: c.env.OPERATIONS_SESSION_SECRET },
     database: c.env.OPS_DB,
@@ -602,7 +605,7 @@ async function dispatchReviewedImportEnrollment(c: Context<{ Bindings: Env; Vari
     return c.json({ error: "Not found" }, 404);
   return handleReviewedImportEnrollmentHttp(c.req.raw, {
     environment: c.env.ENVIRONMENT ?? "", enabledFlag: c.env.REVIEWED_IMPORT_ENROLLMENT_ENABLED ?? "false",
-    expectedHost: c.env.EXPECTED_HOST,
+    expectedHost: c.env.EXPECTED_HOST, operationsOrigins: c.env.OPERATIONS_ORIGINS,
     configuration: { enabled: true, issuer: c.env.TEAM_DOMAIN ?? "", staffAudience: c.env.OPERATIONS_AUD,
       origin: c.env.PUBLIC_BASE_URL, csrfSecret: c.env.OPERATIONS_SESSION_SECRET },
     database: c.env.OPS_DB,
@@ -648,7 +651,8 @@ app.use("/api/viewer/workspace/session-renewal/*", async c =>
 // transfer before activation. No extra deployment scalar or PA-role bypass.
 async function dispatchOperationsNativeStaffLifecycle(c: Context<{ Bindings: Env; Variables: Variables }>) {
   return handleOperationsNativeStaffLifecycleHttp(c.req.raw, {
-    enabledFlag: "true", expectedHost: c.env.EXPECTED_HOST,
+    enabledFlag: "true", environment: c.env.ENVIRONMENT, expectedHost: c.env.EXPECTED_HOST,
+    operationsOrigins: c.env.OPERATIONS_ORIGINS,
     configuration: { enabled: true, issuer: c.env.TEAM_DOMAIN ?? "",
       staffAudience: c.env.OPERATIONS_AUD, origin: c.env.PUBLIC_BASE_URL, csrfSecret: c.env.OPERATIONS_SESSION_SECRET },
     database: c.env.OPS_DB,

@@ -5,6 +5,7 @@ import { authenticateNativeStaffWithAdmissionVersion,
 import { writeReviewedImportEnrollment, type ReviewedImportDestination,
   type ReviewedImportEnrollmentOutcome } from "./reviewed-import-enrollment-writer";
 import type { ReviewedImportEnrollmentReview, ReviewedImportEnrollmentReviewOutcome } from "./reviewed-import-enrollment-destinations";
+import { admittedOperationsRequestOrigin } from "./host-admission";
 
 export const REVIEWED_IMPORT_ENROLLMENT_BASE = "/api/native-directory/reviewed-import-enrollment";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -30,7 +31,7 @@ export type ReviewedImportEnrollmentResolveInput = Readonly<{ recordId: string; 
   expectedRecordVersion: number; expectedEnrollmentVersion: number; sourceIds: readonly string[] }>;
 
 export type ReviewedImportEnrollmentHttpDependencies = Readonly<{
-  environment: string; enabledFlag: string; expectedHost: string;
+  environment: string; enabledFlag: string; expectedHost: string; operationsOrigins?: string;
   configuration: NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
   database: D1Database;
   authenticate?: typeof authenticateNativeStaffWithAdmissionVersion;
@@ -233,19 +234,21 @@ export async function handleReviewedImportEnrollmentHttp(request: Request,
   d: ReviewedImportEnrollmentHttpDependencies): Promise<Response> {
   try {
     const configured = config(d), url = new URL(request.url), selected = route(url, request.method);
+    const requestOrigin = admittedOperationsRequestOrigin(request.url, { ENVIRONMENT: d.environment,
+      EXPECTED_HOST: d.expectedHost, OPERATIONS_ORIGINS: d.operationsOrigins }, configured.origin);
     if (!selected) throw new Failure(404, "not_found");
-    if (url.origin !== configured.origin || url.search || url.hash || request.headers.get("Sec-Fetch-Site") !== "same-origin")
+    if (!requestOrigin || url.origin !== requestOrigin || url.search || url.hash || request.headers.get("Sec-Fetch-Site") !== "same-origin")
       throw new Failure(403, "denied");
     if (selected === "session" || selected.review) {
       if (request.headers.get("X-Native-Staff-Request") !== "1"
-        || request.headers.has("Origin") && request.headers.get("Origin") !== configured.origin) throw new Failure(403, "denied");
-    } else if (request.headers.get("Origin") !== configured.origin) throw new Failure(403, "denied");
+        || request.headers.has("Origin") && request.headers.get("Origin") !== requestOrigin) throw new Failure(403, "denied");
+    } else if (request.headers.get("Origin") !== requestOrigin) throw new Failure(403, "denied");
     let actor: Actor;
     try { actor = await (d.authenticate ?? authenticateNativeStaffWithAdmissionVersion)(request, d.database,
       { enabled: true, issuer: d.configuration.issuer, staffAudience: d.configuration.staffAudience }); }
     catch { throw new Failure(403, "denied"); }
     alive(actor);
-    if (selected === "session") return response(200, { csrfToken: await csrf(configured.secret, configured.origin, actor),
+    if (selected === "session") return response(200, { csrfToken: await csrf(configured.secret, requestOrigin, actor),
       verifiedUntil: actor.verifiedUntil });
     if (selected.review) {
       const authority = await (d.selectAuthority ?? selectAuthority)(d.database, actor, selected.recordId);
@@ -263,7 +266,7 @@ export async function handleReviewedImportEnrollmentHttp(request: Request,
         recordVersion: result.review.recordVersion, enrollmentVersion: result.review.enrollmentVersion,
         sources: result.review.sources.map(item => ({ sourceId: item.sourceId, enrolled: item.enrolled })) } });
     }
-    await csrf(configured.secret, configured.origin, actor, request); alive(actor);
+    await csrf(configured.secret, requestOrigin, actor, request); alive(actor);
     const value = await body(request), sourceIds = value.sourceIds;
     if (typeof value.mutationId !== "string" || !UUID.test(value.mutationId)
       || request.headers.get("Idempotency-Key") !== value.mutationId

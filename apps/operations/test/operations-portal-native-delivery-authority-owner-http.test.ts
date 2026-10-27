@@ -86,6 +86,53 @@ describe("Ops native delivery owner HTTP boundary", () => {
     expect(response.status).toBe(200); expect(calls.auth).toHaveBeenCalledOnce();
   });
 
+  it("keeps old Ops API sessions origin-bound across the canonical scalar switch", async () => {
+    const api = "/api/native-client-portal/operations-delivery-authority";
+    const canonical = "https://ops.ledgetop.app", oldOrigin = "https://ops.ledgetopdroneservices.com";
+    const origins = `${canonical},${oldOrigin}`;
+    const before = { ...deps(), environment: "production", expectedHost: "ops.ledgetopdroneservices.com",
+      operationsOrigins: origins, configuration: { ...deps().configuration, origin: oldOrigin },
+      dispatch: { ...deps().dispatch, ENVIRONMENT: "production", EXPECTED_HOST: "ops.ledgetopdroneservices.com" } };
+    const oldSession = await handle(new Request(`${oldOrigin}${api}/session`, { headers: {
+      Origin: oldOrigin, "Sec-Fetch-Site": "same-origin", "X-Native-Staff-Request": "1",
+    } }), before);
+    expect(oldSession.status).toBe(200);
+    const oldCsrf = (await oldSession.json() as { csrfToken: string }).csrfToken;
+    const after = { ...before, expectedHost: "ops.ledgetop.app",
+      configuration: { ...before.configuration, origin: canonical },
+      dispatch: { ...before.dispatch, EXPECTED_HOST: "ops.ledgetop.app" } };
+    const grantBody = grant();
+    const oldAliasWrite = await handle(new Request(`${oldOrigin}${api}/authorities`, { method: "POST", headers: {
+      Origin: oldOrigin, "Sec-Fetch-Site": "same-origin", "Content-Type": "application/json",
+      "X-CSRF-Token": oldCsrf,
+    }, body: JSON.stringify(grantBody) }), after);
+    expect(oldAliasWrite.status).toBe(200);
+    expect(calls.issue).toHaveBeenCalledOnce();
+
+    const canonicalSession = await handle(new Request(`${canonical}${api}/session`, { headers: {
+      Origin: canonical, "Sec-Fetch-Site": "same-origin", "X-Native-Staff-Request": "1",
+    } }), after);
+    expect(canonicalSession.status).toBe(200);
+    const canonicalCsrf = (await canonicalSession.json() as { csrfToken: string }).csrfToken;
+    const oldTokenOnCanonical = await handle(new Request(`${canonical}${api}/authorities`, { method: "POST", headers: {
+      Origin: canonical, "Sec-Fetch-Site": "same-origin", "Content-Type": "application/json",
+      "X-CSRF-Token": oldCsrf,
+    }, body: JSON.stringify(grantBody) }), after);
+    expect(oldTokenOnCanonical.status).toBe(403);
+    const canonicalWrite = await handle(new Request(`${canonical}${api}/authorities`, { method: "POST", headers: {
+      Origin: canonical, "Sec-Fetch-Site": "same-origin", "Content-Type": "application/json",
+      "X-CSRF-Token": canonicalCsrf,
+    }, body: JSON.stringify(grantBody) }), after);
+    expect(canonicalWrite.status).toBe(200);
+    expect(calls.issue).toHaveBeenCalledTimes(2);
+
+    const portal = await handle(new Request(`https://portal.ledgetop.app${api}/session`, { headers: {
+      Origin: "https://portal.ledgetop.app", "Sec-Fetch-Site": "same-origin", "X-Native-Staff-Request": "1",
+    } }), after);
+    expect(portal.status).toBe(403);
+    expect(calls.auth).toHaveBeenCalledTimes(5);
+  });
+
   it("requires a complete staging-only private transport", async () => {
     const d = deps();
     expect((await handle(request("session"), { ...d, dispatch: { ...d.dispatch,
