@@ -7,13 +7,23 @@ The unsigned per-user pilot installer is available in
 `S:\LedgeTop Operations\Sync App`. Start with `LATEST-PREVIEW.txt` and
 `CURRENT-STAGING-STATUS.txt`; versioned receipts retain their original build-time
 observations. Code signing is intentionally off. Uploads and automatic catalog
-refresh are not implemented. Shared 0.5.2 does not include automatic updates;
-the unpublished resident-update work below is separate.
+refresh are not implemented. Shared 0.5.3 is a staging candidate for manual laptop
+acceptance. It includes client-side scheduled update checks, but the update feed
+is still off and automatic delivery/installation is not accepted end to end.
 
 ## Current verification — October 26, 2026
 
-- Installer 0.5.2.0 completed on the desktop; all 524 payload files, registry,
-  ownership marker and Start menu targets matched. Setup did not launch the app.
+- Installer 0.5.2.0 completed on the desktop; all 524 payload files, registry and
+  ownership marker matched. Later native-path checks found the Start-menu reads
+  resolve into the test host's package LocalCache/Roaming view. The earlier
+  shortcut-target readback does not qualify the physical Windows Start menu.
+  Setup did not launch the normal app.
+- Candidate 0.5.3.0 has independently verified source/archive, 524 payload files,
+  inventory sidecar, helper/notices and installer metadata. Its real staged
+  maintenance check exited 0 and preserved three ownership JSON files. Desktop
+  forward-install testing stopped BEFORE setup dispatch because the physical
+  shortcut-path fence refused the redirected view. Laptop installation, Finish
+  launch and optional old-Preview cleanup remain pending manual acceptance.
 - Actual authenticated Company-file native acceptance passed ordinary open,
   content verification, keep, free-space cache removal without source calls,
   redownload and exact owned registration cleanup for two approved staging
@@ -38,13 +48,15 @@ the unpublished resident-update work below is separate.
   current-user profiles. The current gateway now uses `unless-stopped` and the
   retired gateway `no` restart; actual reboot/crash acceptance remains untested.
 
-The current installed/shared Windows payload remains 0.5.2.0 from source
-`e654af09379b3862a84563bed791868eb9caf77e`. The later backend-only commit
+The desktop installed payload remains 0.5.2.0 from source
+`e654af09379b3862a84563bed791868eb9caf77e`. Shared candidate 0.5.3.0 is built from
+`a6e86474fdcb058262dea4613ff5d33b13835df0`; see `READ-ME-0.5.3.txt` on the share.
+The later backend-only commit
 `1d85aa18e89d326f1222618a9163acb694aefa1c` does not constitute a new Windows
 installer. Its maintainable change merged through PR #294 as
 `75ca5453e1c511d4c295df9862397b8dafd4732e`; the separately qualified staging
-runtime is `bba93046-3a9f-4df5-a987-3c35d9af9dab`. Shared current instructions now
-mark the unchanged installer ready for laptop acceptance.
+runtime is `bba93046-3a9f-4df5-a987-3c35d9af9dab`. No new backend or NAS activation
+was performed while publishing the Windows candidate.
 
 Working files appear in Explorer; the app contains connection controls and
 activity. Closing Settings keeps a working tray connection running; Quit drains
@@ -52,7 +64,7 @@ the provider. Reconnect restores the saved inventory. Explicit Remove and a new
 connection prepare a fresh inventory and logo generation, preserving old local
 files. Shared 0.5.2 creates no startup task or Windows service.
 
-### Unpublished resident-update source
+### Resident-update staging candidate
 
 The draft includes installed-payload verification, authenticated metadata and
 download checks, graceful drain, an authenticated helper and fixed installed
@@ -69,15 +81,16 @@ update reconnect opens a browser or substitutes another source/account.
 Local synthetic schedule, startup, resume, cancellation and settings tests pass.
 Twenty actual isolated NSIS registry cases passed against a new private test
 key; this is not real startup/logon, interactive Finish or installed upgrade
-acceptance. The backend feed remains default-off and no new installer is shared.
+acceptance. The backend feed remains default-off. Candidate 0.5.3 is shared for
+manual install/Finish and lifecycle testing; this does not qualify update delivery.
 Actual connected replacement/relaunch/reconnect and Shell-menu repair remain
 release gates. Automatic client/employee discovery is under backend contract
 review; it is not a deployed endpoint or a reason to guess roles from email.
 
-### Unpublished legacy Preview cleanup
+### Legacy Preview cleanup candidate
 
 The older portable `LedgeTop Files Preview` has a separate generated V2 ownership
-receipt, so uninstalling shared 0.5.2 does not remove it. The draft's explicit
+receipt, so uninstalling older 0.5.2 does not remove it. Candidate 0.5.3's explicit
 uninstall path now includes that exact recorded preview after checking ownership;
 ordinary installation/startup does not migrate or start the demo. Uninstall keeps
 local folders and all downloaded, modified and added files. It does not download
@@ -85,8 +98,10 @@ online-only files or promise that unhydrated placeholders become local copies.
 
 The draft also accepts `--installer-remove-legacy-preview` in a packaged pilot to
 remove only that recorded demo, without preparing/removing Company or Client
-connections. Both applications must be quit first. This command is not present in
-the shared installer yet. Missing/invalid receipts are refused for this dedicated
+connections. Both applications must be quit first. This command is present in
+the 0.5.3 candidate; the share has an optional reviewed cleanup ZIP that checks
+its exact installed bytes before invoking it. Laptop cleanup is not yet accepted.
+Missing/invalid receipts are refused for this dedicated
 repair; do not delete registry entries or restart an unknown old demo to recreate
 ownership. Normal uninstall handles known receipts only and cannot prove that an
 untracked old entry is absent.
