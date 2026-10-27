@@ -11,6 +11,7 @@ import { assertPinnedNativeStaffCutoverDistribution } from './native-staff-cutov
 import { assertPinnedNativeStaffCutoverSource } from './native-staff-cutover-owner-approval.mjs';
 import { loadPinnedNativeStaffCutoverConfig } from './native-staff-cutover-approved-executor-config.mjs';
 import { assertFreshNativeStaffAccessGroup } from './native-staff-cutover-access-group-observation.mjs';
+import { loadPinnedAccessGroupReadCredential } from './access-group-read-capsule.mjs';
 import { acquireNativeStaffCutoverApprovalLease, compileNativeStaffCutoverApprovalContext,
   readNativeStaffCutoverApprovalRegistry, verifyCurrentNativeStaffCutoverOwnerSession,
   verifyNativeStaffCutoverOwnerApprovalReceipt } from './native-staff-cutover-owner-approval.mjs';
@@ -122,9 +123,10 @@ async function durableCutoverMatches(provider,candidate,receipt,config){
 
 /** Read-only preview by default; execute requires the exact displayed digest and a one-shot signed lease. */
 export async function runNativeStaffCutoverApprovedExecutor({candidate,receipt,mode='preview',preparedSha256,
-  getAccessToken=()=>runPinnedCloudflaredToken(loadPinnedNativeStaffCutoverConfig()),getBearerToken,fetchImpl=globalThis.fetch,now=Date.now()}={}){
+  getAccessToken=()=>runPinnedCloudflaredToken(loadPinnedNativeStaffCutoverConfig()),getBearerToken,
+  getAccessGroupReadCredential=loadPinnedAccessGroupReadCredential,fetchImpl=globalThis.fetch,now=Date.now()}={}){
   if(!['preview','execute'].includes(mode)||!candidate||!receipt||typeof getAccessToken!=='function'
-    ||typeof getBearerToken!=='function'||typeof fetchImpl!=='function')stop('arguments_invalid');
+    ||typeof getBearerToken!=='function'||typeof getAccessGroupReadCredential!=='function'||typeof fetchImpl!=='function')stop('arguments_invalid');
   assertPinnedNativeStaffCutoverDistribution();assertPinnedIssuerDistribution();
   const config=loadPinnedNativeStaffCutoverConfig();
   assertPinnedNativeStaffCutoverSource(config);
@@ -141,7 +143,7 @@ export async function runNativeStaffCutoverApprovedExecutor({candidate,receipt,m
     stop('current_snapshot_or_owner_changed');
   const groupObservations=candidate.syncPreparationReceipt.accessGroupObservations;
   await assertFreshNativeStaffAccessGroup({config,reviewedBefore:groupObservations.before,reviewedAfter:groupObservations.after,
-    getBearerToken,fetchImpl});
+    getAccessGroupReadCredential,fetchImpl});
   let verifyApproval=approvalVerifier(config,candidate,receipt,session,'issued');
   const input=lowLevelInput(candidate,receipt,config);
   const prepared=await prepareNativeStaffCutoverD1(input,{db:provider,verifyApproval});
@@ -173,7 +175,7 @@ export async function runNativeStaffCutoverApprovedExecutor({candidate,receipt,m
       const recheckedTarget=await provider.assertTarget();
       if(recheckedTarget.databaseId!==config.target.databaseId||recheckedTarget.name!==config.target.databaseName)stop('target_metadata_mismatch');
       await assertFreshNativeStaffAccessGroup({config,reviewedBefore:groupObservations.before,reviewedAfter:groupObservations.after,
-        getBearerToken,fetchImpl});
+        getAccessGroupReadCredential,fetchImpl});
       registryEntry(config,receipt,'dispatching',lease.stateSha256);
       dispatchStarted=true;
     }});

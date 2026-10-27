@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { accessGroupCapsuleEnvironment, loadPinnedAccessGroupReadToken } from './access-group-read-capsule.mjs';
+import { accessGroupCapsuleEnvironment, loadPinnedAccessGroupReadCredential } from './access-group-read-capsule.mjs';
 import { PINNED_TRUST_CONFIG_SHA256, PINNED_UNSEALER_SHA256 } from './access-group-read-capsule-pins.mjs';
 
 const PS = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
@@ -130,7 +130,7 @@ async function fixture({ expired = false, tamperCipher = false, tamperPlainHash 
 test('zero production pins refuse before reading config/cipher/helper or starting PowerShell', async () => {
   assert.equal(PINNED_TRUST_CONFIG_SHA256, ZERO);
   assert.equal(PINNED_UNSEALER_SHA256, ZERO);
-  await assert.rejects(loadPinnedAccessGroupReadToken(), /access_group_capsule_not_provisioned/u);
+  await assert.rejects(loadPinnedAccessGroupReadCredential(), /access_group_capsule_not_provisioned/u);
 });
 
 test('the environment boundary strips Cloudflare credentials, Node overrides, and proxies', () => {
@@ -148,11 +148,13 @@ test('loads only the hash-pinned synthetic CurrentUser capsule into memory', { s
   let token;
   console.log = (...values) => logged.push(values.join(' '));
   console.error = (...values) => logged.push(values.join(' '));
-  try { token = await module.loadPinnedAccessGroupReadToken(); }
+  try { token = await module.loadPinnedAccessGroupReadCredential(); }
   finally { console.log = originalLog; console.error = originalError; }
-  assert.equal(token, created.token);
+  assert.deepEqual(token, {schemaVersion:1,accountId:'a'.repeat(32),groupId:'11111111-1111-4111-8111-111111111111',
+    groupName:'Synthetic Ops Staff',token:created.token});
+  assert.equal(Object.isFrozen(token), true);
   assert.equal(process.env.CLOUDFLARE_API_TOKEN, undefined);
-  assert.equal(process.argv.includes(token), false);
+  assert.equal(process.argv.includes(created.token), false);
   assert.deepEqual(logged, []);
   assert.doesNotMatch(fs.readFileSync(created.modulePath, 'utf8'), /console\.(?:log|error)\s*\(/u);
   // This module owns no fetch/D1 client; its only exported secret capability
@@ -170,7 +172,7 @@ for (const [name, options, expected] of [
 ]) test(`refuses ${name} without returning secret data`, { skip: !isWindows }, async t => {
   const created = await fixture(options); t.after(created.cleanup);
   const module = await import(`${pathToFileURL(created.modulePath).href}?${name.replaceAll(' ', '-')}`);
-  await assert.rejects(module.loadPinnedAccessGroupReadToken(), new RegExp(expected));
+  await assert.rejects(module.loadPinnedAccessGroupReadCredential(), new RegExp(expected));
   assert.equal(process.argv.includes(created.token), false);
 });
 

@@ -87,7 +87,10 @@ try {
   if ($plainBytes.Length -le 0 -or $plainBytes.Length -gt 4096 -or (Get-Sha256 $plainBytes) -cne $config.plaintextSha256) { Stop-Safe }
   $token = [Text.UTF8Encoding]::new($false, $true).GetString($plainBytes)
   if ($token -cnotmatch '^[\x21-\x7e]{20,1024}$') { Stop-Safe }
-  [Console]::Out.Write([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($token)))
+  $payload = [ordered]@{ schemaVersion = 1; accountId = $config.accountId; groupId = $config.groupId;
+    groupName = $config.groupName; token = $token }
+  $payloadJson = ConvertTo-Json -InputObject $payload -Compress -Depth 3
+  [Console]::Out.Write([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payloadJson)))
   exit 0
 } catch { Stop-Safe }
 finally {

@@ -8,6 +8,9 @@ import { PINNED_TRUST_CONFIG_SHA256, PINNED_UNSEALER_SHA256 } from './access-gro
 const ZERO = '0'.repeat(64);
 const HASH = /^[a-f0-9]{64}$/u;
 const TOKEN = /^[\x21-\x7e]{20,1024}$/u;
+const ACCOUNT_ID = /^[a-f0-9]{32}$/u;
+const GROUP_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/iu;
+const GROUP_NAME = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,127}$/u;
 const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 const UNSEALER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'access-group-read-capsule-unseal.ps1');
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -31,7 +34,7 @@ export function accessGroupCapsuleEnvironment(source = process.env) {
  * accepted from the caller. The returned string is secret; keep it in memory
  * and pass it only as the Authorization value to the pinned group GET.
  */
-export async function loadPinnedAccessGroupReadToken() {
+export async function loadPinnedAccessGroupReadCredential() {
   // This check intentionally precedes every filesystem or subprocess access.
   need(HASH.test(PINNED_TRUST_CONFIG_SHA256) && PINNED_TRUST_CONFIG_SHA256 !== ZERO
     && HASH.test(PINNED_UNSEALER_SHA256) && PINNED_UNSEALER_SHA256 !== ZERO, 'not_provisioned');
@@ -83,10 +86,17 @@ export async function loadPinnedAccessGroupReadToken() {
         const encoded = Buffer.concat(chunks, byteCount).toString('ascii').trim();
         need(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(encoded), 'unseal_output_invalid');
         const bytes = Buffer.from(encoded, 'base64');
-        const token = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        const payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
         bytes.fill(0);
-        need(TOKEN.test(token), 'unseal_output_invalid');
-        resolve(token);
+        need(payload && typeof payload === 'object' && !Array.isArray(payload)
+          && Object.getPrototypeOf(payload) === Object.prototype
+          && Reflect.ownKeys(payload).length === 5
+          && ['schemaVersion','accountId','groupId','groupName','token'].every(key => Object.hasOwn(payload, key))
+          && payload.schemaVersion === 1 && ACCOUNT_ID.test(payload.accountId ?? '')
+          && GROUP_ID.test(payload.groupId ?? '') && GROUP_NAME.test(payload.groupName ?? '')
+          && TOKEN.test(payload.token ?? ''), 'unseal_output_invalid');
+        resolve(Object.freeze({ schemaVersion: 1, accountId: payload.accountId, groupId: payload.groupId,
+          groupName: payload.groupName, token: payload.token }));
       } catch (error) {
         reject(error instanceof Error && error.message.startsWith('access_group_capsule_')
           ? error : new Error('access_group_capsule_unseal_output_invalid'));
