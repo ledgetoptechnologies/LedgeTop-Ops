@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chicagoEndOfDay, directShareBody, grantsForTarget, validViewerCatalogProjects, validViewerCatalogTasks,
+import { chicagoEndOfDay, chicagoToday, directShareBody, futureChicagoEndOfDay, grantsForTarget, validViewerCatalogProjects, validViewerCatalogTasks,
   type DirectShareGrant, type ViewerShareTarget } from "../src/client/ViewerQuickShare";
 
 const project = { viewerProjectId: "vp-1", name: "Seawall survey" };
@@ -51,5 +51,14 @@ describe("Viewer quick share", () => {
     expect(chicagoEndOfDay("2026-03-08")).toBe("2026-03-09T04:59:59.000Z");
     expect(chicagoEndOfDay("2026-11-01")).toBe("2026-11-02T05:59:59.000Z");
     expect(chicagoEndOfDay("12/31/2026")).toBeNull();
+  });
+  it("allows today's Chicago date while its end of day is still ahead, never a day that has ended", () => {
+    // 2026-10-27 22:00 in Chicago (CDT) is 2026-10-28 03:00Z: still Oct 27 there, though already Oct 28 in UTC.
+    const lateEvening = Date.parse("2026-10-28T03:00:00Z");
+    expect(chicagoToday(lateEvening)).toBe("2026-10-27");
+    expect(futureChicagoEndOfDay("2026-10-27", lateEvening)).toBe("2026-10-28T04:59:59.000Z");
+    expect(futureChicagoEndOfDay("2026-10-26", lateEvening)).toBeNull();
+    expect(futureChicagoEndOfDay("2026-10-27", Date.parse("2026-10-28T04:59:59.000Z"))).toBeNull();
+    expect(futureChicagoEndOfDay("not a day", lateEvening)).toBeNull();
   });
 });

@@ -2290,3 +2290,33 @@ async function confirmInPage(page: Page, title: string, confirmLabel: string) {
   await dialog.getByRole("button", { name: confirmLabel, exact: true }).click();
   await expect(dialog).toHaveCount(0);
 }
+
+/** Holds every matching request unanswered until released, like a connection that never settles. */
+async function holdRequests(page: Page, pattern: string) {
+  const held: Array<{ route: import("@playwright/test").Route }> = [];
+  let holding = true;
+  await page.route(pattern, route => { if (holding) held.push({ route }); else return route.fallback(); });
+  return { held, release: () => { holding = false; } };
+}
+
+for (const [entry, path, heading] of [["unified home", "/portal", "Client portal unavailable"], ["account page", "/portal/requests", "Portal temporarily unavailable"]] as const)
+  test(`a ${entry} startup check that never answers offers sign-in recovery, ignores a late answer and starts fresh on Try again`, async ({ page }) => {
+    await page.clock.install();
+    await mockAuthorizedPortal(page);
+    const startup = await holdRequests(page, path === "/portal" ? "**/api/client/v2/operations/home" : "**/api/client/session");
+    await page.goto(path);
+    await expect.poll(() => startup.held.length).toBe(1);
+    await page.clock.runFor(19_000);
+    await expect(page.getByRole("button", { name: "Try again" })).toHaveCount(0);
+    await page.clock.runFor(1_500);
+    await expect(page.getByText(heading, { exact: true })).toBeVisible();
+    await expect(page.getByRole("link", { name: /Sign in/ })).toBeVisible();
+    // An answer arriving after the deadline can't replace the recovery screen.
+    await startup.held[0]!.route.fulfill({ status: 404, json: { error: "Not found" } }).catch(() => undefined);
+    await page.clock.runFor(1_000);
+    await expect(page.getByText(heading, { exact: true })).toBeVisible();
+    startup.release();
+    await page.getByRole("button", { name: "Try again" }).click();
+    await expect(page.locator(".client-portal-header")).toBeVisible();
+    await expect(page.getByText(heading, { exact: true })).toHaveCount(0);
+  });

@@ -112,6 +112,7 @@ import { canBeginRequest, RequestAvailabilityMessage, useRequestAvailability, ty
 import { RequestScopeBoundary } from "./RequestScopeBoundary";
 import { UNIFIED_PAGES, UnifiedPortal, type UnifiedPage } from "./UnifiedPortal";
 import { unifiedAccountSupported } from "./unified-portal";
+import { withStartupDeadline } from "./startup-deadline";
 import { ClientSessionExpiry } from "./ClientSessionExpiry";
 import { LeaveFeedback, PortalFeedback } from "./PortalFeedback";
 import { PortalNotifications } from "./PortalNotifications";
@@ -2877,7 +2878,7 @@ export function ClientPortalApp({
     bootstrapController.current?.abort(); const controller = new AbortController(); bootstrapController.current = controller;
     const requestedViewerRoute = parseClientViewerShellRoute(location.pathname, location.search);
     const requestedWorkspaceId = clientViewerRouteWorkspaceId(requestedViewerRoute) ?? new URLSearchParams(location.search).get("workspace");
-    loadPortalBootstrap(undefined, requestedWorkspaceId, controller.signal)
+    withStartupDeadline(signal => loadPortalBootstrap(undefined, requestedWorkspaceId, signal), controller.signal)
       .then((data) => {
         if (active && !controller.signal.aborted) {
           const unifiedList = data.capabilities.workspaceHierarchyV2 && (data.workspaces ?? []).filter(unifiedAccountSupported).length > 1

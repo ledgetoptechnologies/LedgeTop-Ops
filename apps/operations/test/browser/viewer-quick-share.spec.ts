@@ -99,6 +99,27 @@ test("staff share one published model with a client, with no business project or
   expect(calls.some(call => call.path.startsWith("/api/viewer/direct-client-grants?viewerProjectId=vp-seawall"))).toBe(true);
 });
 
+test("a share can end today in Central time, but not on a day that has already ended", async ({ page }) => {
+  // 22:00 in Chicago is already the next day in UTC; the last day offered is still Chicago's today.
+  await page.clock.setFixedTime(new Date("2026-10-28T03:00:00Z"));
+  const calls = await mockOps(page, MANAGER, (url, method, route) =>
+    url.pathname === "/api/viewer/direct-client-grants" && method === "POST" ? route.fulfill({ status: 201, json: { grant: grant(), replayed: false } }) : undefined);
+  const dialog = await openShare(page, "Seawall orthomosaic");
+  await dialog.getByRole("option", { name: /Harbor Authority/ }).click();
+  await dialog.getByRole("checkbox", { name: /^Never/ }).uncheck();
+  const lastDay = dialog.getByLabel("Last day (Central time)");
+  await expect(lastDay).toHaveAttribute("min", "2026-10-27");
+  await lastDay.fill("2026-10-26");
+  await expect(dialog.getByRole("button", { name: "Review share" })).toBeDisabled();
+  await lastDay.fill("2026-10-27");
+  expect(await lastDay.evaluate(input => (input as HTMLInputElement).validity.valid)).toBe(true);
+  await dialog.getByRole("button", { name: "Review share" }).click();
+  await expect(dialog.getByRole("region", { name: "Review share" })).toContainText("Access ends Oct 27, 2026.");
+  await dialog.getByRole("button", { name: "Share", exact: true }).click();
+  await expect(dialog.getByRole("status").filter({ hasText: "Shared with Harbor Authority" })).toBeVisible();
+  expect(posts(calls).map(post => (post.body as { expiresAt: string }).expiresAt)).toEqual(["2026-10-28T04:59:59.000Z"]);
+});
+
 test("an unconfirmed share is retried with the identical body and key, and the selection is locked", async ({ page }) => {
   let attempts = 0;
   const calls = await mockOps(page, MANAGER, (url, method, route) => {

@@ -2,6 +2,7 @@ import { lazy, useEffect, useState } from "react";
 import { SignInRecovery } from "@ltds/ui";
 import { loadOperationsHome, type PortalOperationsHomeResponse } from "./portal-api";
 import { PortalBoundary } from "./PortalShell";
+import { withStartupDeadline } from "./startup-deadline";
 
 type BootstrapState =
   | { kind: "loading" }
@@ -49,7 +50,7 @@ export function PortalBootstrapApp() {
   const [state, setState] = useState<BootstrapState>({ kind: "loading" });
   useEffect(() => {
     const controller = new AbortController();
-    void loadOperationsHome(undefined, controller.signal).then(
+    void withStartupDeadline(signal => loadOperationsHome(undefined, signal), controller.signal).then(
       response => {
         if (!controller.signal.aborted) setState({ kind: "operations", response });
       },
