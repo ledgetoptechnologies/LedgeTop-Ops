@@ -38,7 +38,9 @@ async function existingControlPlane(p:Person){
 }
 async function fixture(){
   const pa=await person("pa-independent"), ops=await person("ops-target"), operator=await person("bootstrap-operator"), root=await person("offline-root");
-  const division=await db.prepare("SELECT id FROM divisions ORDER BY id LIMIT 1").first<string>("id");
+  const divisionRow=await db.prepare("SELECT id FROM divisions ORDER BY id LIMIT 1").first<{id:string}>();
+  if(typeof divisionRow?.id!=="string")throw new Error("native_staff_bootstrap_test_division_missing");
+  const division=divisionRow.id;
   await db.batch([
     db.prepare("INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,division_id,scope_key,created_by) VALUES(?,?,'role-operator','global',NULL,'global',?)").bind(`pa-role:${pa.id}`,pa.id,pa.id),
     db.prepare("INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,division_id,scope_key,created_by) VALUES(?,?,'role-operator','division',?,? ,?)").bind(`ops-role:${ops.id}`,ops.id,division,division,ops.id),
@@ -139,7 +141,7 @@ function planForExistingOwner(snap:any,p:{owner:Person;employee:Person;priorAppr
 const trusted=async({trustEnvelope}:any)=>typeof trustEnvelope?.ownerSessionId==="string"&&trustEnvelope.ownerSessionId.startsWith("synthetic-");
 async function legacyEffectiveSnapshot(people:Person[]){
   const output:any={};
-  const divisions=(await db.prepare("SELECT id FROM divisions ORDER BY id").all<string>()).results.map(row=>row.id);
+  const divisions=(await db.prepare("SELECT id FROM divisions ORDER BY id").all<{id:string}>()).results.map(row=>row.id);
   for(const p of people){
     const grants=(await db.prepare(`SELECT rp.permission_key permission,'allow' effect,a.scope,a.division_id divisionId,'role' source FROM staff_role_assignments a JOIN role_permissions rp ON rp.role_id=a.role_id WHERE a.staff_id=?
       UNION ALL SELECT rp.permission_key permission,'allow' effect,a.scope,a.division_id divisionId,'role' source FROM local_staff_role_assignments a JOIN role_permissions rp ON rp.role_id=a.role_id WHERE a.staff_id=?
@@ -171,9 +173,11 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
     const response=await submitManagementBatch(async request=>{calls++;expect(request).toEqual({batch:statements});return [{success:true,results:[]}];},statements);
     expect(calls).toBe(1);
     expect(response).toEqual([{success:true,results:[]}]);
-    expect(compileManagementBatch(statements).batch[0].params).toEqual(["active",1,null]);
+    const compiled=compileManagementBatch(statements),compiledStatement=compiled.batch.at(0);
+    if(!compiledStatement)throw new Error("native_staff_bootstrap_test_compiled_statement_missing");
+    expect(compiledStatement.params).toEqual(["active",1,null]);
     expect(()=>compileManagementBatch([{sql:"SELECT ?",params:[true]}])).toThrow(/management_parameter_type_unsupported/u);
-    expect(()=>compileManagementBatch(Array.from({length:257},()=>statements[0]))).toThrow(/management_batch_size_invalid/u);
+    expect(()=>compileManagementBatch(Array.from({length:257},()=>({sql:"SELECT ?",params:[1]})))).toThrow(/management_batch_size_invalid/u);
   });
 
   it("installs approved synthetic admission/profile/scope grant rows while preserving Ops/PA permissions and existing authority bytes",async()=>{
@@ -212,18 +216,21 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
     expect(await db.prepare("SELECT count(*) n FROM native_staff_bootstrap_receipts WHERE approval_id=?").bind(input.approval.approvalId).first("n")).toBe(1);
     expect((await db.prepare("SELECT id,email,status,access_subject,project_alpha_user_id,sync_protected FROM staff_users ORDER BY id").all()).results).toEqual(identityBefore);
     const installedState=JSON.parse((await snapshot(db,[people.ops.id])).snapshotJson),installedKeys:Record<string,Set<string>>={};
+    const rowKeyForTable:Record<string,string>={native_business_areas:"id",native_staff_admissions:"staff_id",native_staff_profiles:"staff_id",
+      native_staff_target_memberships:"id",native_staff_management_delegations:"id",native_staff_admin_delegations:"id",
+      native_staff_delegation_ceilings:"id",native_directory_grants:"id",native_directory_assignments:"record_id",
+      native_staff_bootstrap_approvals:"approval_id",native_staff_bootstrap_receipts:"command_id"};
     for(const operation of prepared.plan.rows){
-      const key={native_business_areas:"id",native_staff_admissions:"staff_id",native_staff_profiles:"staff_id",native_staff_target_memberships:"id",
-        native_staff_management_delegations:"id",native_staff_admin_delegations:"id",native_staff_delegation_ceilings:"id",
-        native_directory_grants:"id",native_directory_assignments:"record_id"}[operation.table];
-      installedKeys[operation.table]??=new Set();installedKeys[operation.table].add(operation.row[key]);
+      const key=rowKeyForTable[operation.table];
+      if(!key)throw new Error(`native_staff_bootstrap_test_row_key_missing:${operation.table}`);
+      const tableKeys=installedKeys[operation.table]??new Set<string>();
+      tableKeys.add(operation.row[key]);
+      installedKeys[operation.table]=tableKeys;
     }
     installedKeys.native_staff_bootstrap_approvals=new Set([input.approval.approvalId]);
     installedKeys.native_staff_bootstrap_receipts=new Set([input.commandId]);
     for(const table of Object.keys(reviewedState.rows).filter(name=>name.startsWith("native_"))){
-      const key={native_staff_admissions:"staff_id",native_staff_profiles:"staff_id",native_business_areas:"id",native_staff_bootstrap_approvals:"approval_id",
-        native_staff_bootstrap_receipts:"command_id",native_staff_target_memberships:"id",native_staff_management_delegations:"id",
-        native_staff_admin_delegations:"id",native_staff_delegation_ceilings:"id",native_directory_grants:"id",native_directory_assignments:"record_id"}[table];
+      const key=rowKeyForTable[table];
       if(table==="native_directory_grant_generations"){
         const originalByStaff=new Map(reviewedState.rows[table].map((row:any)=>[row.staff_id,row]));
         for(const row of installedState.rows[table]??[]){
@@ -237,6 +244,10 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
         expect((installedState.rows[table]??[]).filter((row:any)=>row.grant_id===`scoped-grant:${people.ops.id}`)).toHaveLength(1);
         const prior=(installedState.rows[table]??[]).filter((row:any)=>row.grant_id!==`scoped-grant:${people.ops.id}`);
         expect(prior,`preexisting ${table} rows changed`).toEqual(reviewedState.rows[table]);
+        continue;
+      }
+      if(!key){
+        expect(installedState.rows[table]??[],`preexisting ${table} rows changed`).toEqual(reviewedState.rows[table]);
         continue;
       }
       const kept=(installedState.rows[table]??[]).filter((row:any)=>!installedKeys[table]?.has(row[key]));
