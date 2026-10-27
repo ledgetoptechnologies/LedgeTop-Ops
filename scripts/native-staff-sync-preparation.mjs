@@ -138,7 +138,11 @@ export function compileNativeStaffSyncPreparation({ active, candidate, control, 
     ||qualificationEvidence.builtModuleSha256!==candidate.moduleSha256
     ||typeof qualificationEvidence.vitestVersion!=='string'||typeof qualificationEvidence.wranglerVersion!=='string'
     ||!HASH.test(qualificationEvidence.qualificationRunnerSha256??'')
-    ||qualificationEvidence.suiteCount!==3||!Number.isSafeInteger(qualificationEvidence.testCount)||qualificationEvidence.testCount<6
+    // Vitest's numPassedTestSuites counts nested describe suites as well as
+    // files. The exact three-file inventory below is the file-coverage fence;
+    // permit bounded nested-suite counts instead of equating suites to files.
+    ||!Number.isSafeInteger(qualificationEvidence.suiteCount)||qualificationEvidence.suiteCount<3||qualificationEvidence.suiteCount>100
+    ||!Number.isSafeInteger(qualificationEvidence.testCount)||qualificationEvidence.testCount<6||qualificationEvidence.testCount>10000
     ||!HASH.test(qualificationEvidence.testReportSha256??'')
     ||!same(qualificationEvidence.testFiles,['connector-ingress.test.ts','native-staff-access.test.ts','native-staff-preparation-entrypoint.test.ts'])
     ||!HASH.test(qualificationSha256??'')||sha(JSON.stringify(qualificationBody))!==qualificationSha256)

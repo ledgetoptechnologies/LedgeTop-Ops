@@ -39,7 +39,7 @@ function qualifiedFixture(){
   const proof={schemaVersion:1,kind:'ops-sync-candidate-behavior-qualification-v1',sourceCommit:value.candidate.sourceCommit,
     sourceTreeSha256:value.sourceEvidence.sourceTreeSha256,sourceEvidenceSha256:value.sourceEvidence.sourceEvidenceSha256,
     candidateModuleSha256:value.candidate.moduleSha256,builtModuleSha256:value.candidate.moduleSha256,
-    vitestVersion:'synthetic-test-fixture',wranglerVersion:'synthetic-build-fixture',suiteCount:3,testCount:50,
+    vitestVersion:'synthetic-test-fixture',wranglerVersion:'synthetic-build-fixture',suiteCount:6,testCount:53,
     testReportSha256:'9'.repeat(64),qualificationRunnerSha256:'a'.repeat(64),
     testFiles:['connector-ingress.test.ts','native-staff-access.test.ts','native-staff-preparation-entrypoint.test.ts']};
   value.qualificationEvidence={...proof,qualificationSha256:digest(JSON.stringify(proof))};
@@ -54,6 +54,28 @@ test('compiles only a read-only dormant Sync preparation with exact surface and 
   assert.equal(receipt.currentGroupSha256.length,64);
   assert.equal(receipt.desiredGroupSha256.length,64);
   assert.equal(receipt.receiptSha256.length,64);
+});
+
+test('accepts genuine Vitest nested-suite count with the exact three-file inventory',()=>{
+  const value=qualifiedFixture();
+  assert.equal(value.qualificationEvidence.suiteCount,6);
+  assert.equal(value.qualificationEvidence.testCount,53);
+  assert.deepEqual(value.qualificationEvidence.testFiles,
+    ['connector-ingress.test.ts','native-staff-access.test.ts','native-staff-preparation-entrypoint.test.ts']);
+  assert.equal(compileNativeStaffSyncPreparation(value).kind,'operations-native-staff-sync-dormant-preparation-v1');
+});
+
+for (const [field, invalid] of [
+  ['suiteCount',0], ['suiteCount',-1], ['suiteCount',2], ['suiteCount',101], ['suiteCount',1.5],
+  ['suiteCount',null], ['suiteCount','6'], ['suiteCount',Number.MAX_SAFE_INTEGER+1],
+  ['testCount',0], ['testCount',-1], ['testCount',5], ['testCount',10001], ['testCount',1.5],
+  ['testCount',null], ['testCount','53'], ['testCount',Number.MAX_SAFE_INTEGER+1],
+]) test(`rejects malformed qualification ${field} ${invalid}`,()=>{
+  const value=qualifiedFixture();
+  value.qualificationEvidence[field]=invalid;
+  const {qualificationSha256,...body}=value.qualificationEvidence;
+  value.qualificationEvidence.qualificationSha256=digest(JSON.stringify(body));
+  assert.throws(()=>compileNativeStaffSyncPreparation(value),/behavior_qualification_invalid/u);
 });
 
 for (const [label, mutate, code] of [
