@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -147,13 +147,13 @@ test('"Renew in this tab" gates on discarded work and honours the real beforeunl
   const executable = browserPath();
   if (!executable) { t.skip('Chrome or Edge is required for beforeunload browser coverage.'); return; }
   const release = await acquireBrowserHarnessLock({ root });
-  let server, origin, profile, browser, client;
+  let server, origin, profile, browser, client, devTools;
   try {
     ({ server, origin } = await startServer());
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-viewer-browser-'));
     browser = spawn(executable, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
-    const devTools = await waitForDevTools(profile);
+    devTools = await waitForDevTools(profile);
     const pages = await until(async () => (await (await fetch(`${devTools}/json/list`)).json()).filter(item => item.type === 'page'), 'no page target');
     client = await Cdp.connect(pages[0].webSocketDebuggerUrl);
     await client.command('Page.enable');
@@ -231,11 +231,33 @@ test('"Renew in this tab" gates on discarded work and honours the real beforeunl
       assert.deepEqual(state, { s: 'This tab could not start renewal. Open Viewer from Operations again.', path: '/harness.html', disabled: false });
     });
   } finally {
+    // The endpoint was discovered only from this run's fresh private profile.
+    // Close that browser through its own protocol, never enumerate/kill a
+    // shared profile or retry cleanup of historical retained profiles.
+    if (client) {
+      let timer;
+      try { await Promise.race([client.command('Browser.close'), new Promise(resolve => { timer=setTimeout(resolve,1_000); })]); }
+      catch {} finally { clearTimeout(timer); }
+    }
     try { client?.close(); } catch {}
     try {
-      if (browser) { const exited = new Promise(resolve => browser.once('exit', resolve)); browser.kill(); await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]); }
+      if (browser && browser.exitCode===null && browser.signalCode===null) {
+        let timer;
+        try { await Promise.race([new Promise(resolve=>browser.once('exit',resolve)),new Promise(resolve=>{timer=setTimeout(resolve,5_000);})]); }
+        finally { clearTimeout(timer); }
+      }
     } finally { release(); }
     if (server) await new Promise(resolve => server.close(resolve));
-    if (profile) { try { rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch {} }
+    let endpointClosed=false,profileRemoved=false;
+    if (devTools) {
+      try { await until(async()=>{try{await fetch(`${devTools}/json/version`,{signal:AbortSignal.timeout(500)});return false;}catch{return true;}},'Owned browser endpoint still active',5_000);endpointClosed=true; }
+      catch {}
+    }
+    if (profile && client && endpointClosed && browser && (browser.exitCode!==null || browser.signalCode!==null)) {
+      const resolved=realpathSync(profile),tempRoot=realpathSync(tmpdir());
+      if (path.dirname(resolved)!==tempRoot || !path.basename(resolved).startsWith('ltds-viewer-browser-') || lstatSync(profile).isSymbolicLink()) throw new Error('Refusing cleanup outside the fresh test profile');
+      try { rmSync(resolved, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });profileRemoved=!existsSync(profile); } catch {}
+    }
+    t.diagnostic(JSON.stringify({ownedBrowserPid:browser?.pid,profile,endpointClosed,profileRemoved}));
   }
 });
