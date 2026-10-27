@@ -42,13 +42,15 @@ export function canonicalDeliveryEntryRedirect(request: Request, env: RoutingEnv
 }
 
 /** Redirects presentation pages only after both origins pass existing host
- * admission. Cookies, signed capabilities, APIs and bytes stay on their host. */
+ * admission. Old private-page cookies are not transferred to the target: its
+ * existing Access policy authenticates that navigation independently. Public
+ * delivery resumptions, signed capabilities, APIs and bytes stay on their host. */
 export function canonicalClientNavigationRedirect(request: Request,
   env: RoutingEnv & { CANONICAL_BROWSER_NAVIGATION_ENABLED?: string }): Response | null {
   if (env.CANONICAL_BROWSER_NAVIGATION_ENABLED !== "true" || env.ENVIRONMENT !== "production") return null;
   const publicEntry = canonicalDeliveryEntryRedirect(request, env, true);
   if (publicEntry) return publicEntry;
-  if (["Cookie", "Authorization", "Range", "If-Range", "Origin"].some(name => request.headers.has(name))
+  if (["Authorization", "Range", "If-Range", "Origin"].some(name => request.headers.has(name))
     || request.headers.get("Sec-Fetch-Dest") !== "document" || request.headers.get("Sec-Fetch-Mode") !== "navigate"
     || configuredClientPortalOrigin(env) !== "https://portal.ledgetop.app"
     || !configuredClientPortalOrigins(env)?.includes("https://portal.ledgetop.app")

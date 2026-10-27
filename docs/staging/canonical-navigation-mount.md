@@ -15,11 +15,11 @@ The source Operations Wrangler and staging templates route only redirectable
 staff page paths through the Worker so asset-first handling cannot bypass the
 policy. `/api/*`, `/r/*`, and static assets retain their existing routing.
 
-For Client redirects, fresh means GET/HEAD with document/navigation Fetch
-Metadata and no Cookie, Authorization, Origin, Range or If-Range header. Ops
-ordinary staff pages redirect even when the old host carries an Access cookie:
+For public Client redirects, fresh means GET/HEAD with document/navigation Fetch
+Metadata and no Cookie, Authorization, Origin, Range or If-Range header. Ordinary
+private Client pages and Ops staff pages redirect even when the old host carries an Access cookie:
 no cookie or authorization header is copied, and Access on the canonical host
-performs its normal check. This makes the old-host UI redirect automatic; staff
+performs its normal check. This makes the old-host UI redirect automatic; users
 may need to authenticate at the canonical host because old-host cookies are
 host-scoped and are not transferable. The original cookies are not modified.
 API requests, bodies, assets, media and Viewer sessions remain local. Missing
@@ -55,9 +55,12 @@ The one intentional default-off correction is in legacy private routing: an old
 origin still present in active `CLIENT_PORTAL_ORIGINS` no longer receives the
 retirement-style private redirect merely because it also appears in
 `LEGACY_CLIENT_ORIGINS`. Otherwise the new mixed-host public overlap tuple would
-force existing old private cookies across origins. Explicitly retired private
-hosts keep their existing retirement handler. This correction preserves active
-old private sessions and does not create a new public namespace.
+force existing old private cookies across origins before the navigation control
+is enabled. Explicitly retired private hosts keep their existing retirement
+handler. When the navigation control is enabled, ordinary private page entries
+move to the canonical portal while API requests remain local for existing open
+sessions. Public delivery cookies keep their original resumption behavior.
+This does not create a new public namespace.
 
 ## Required deployment gates
 
