@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { afterAll,beforeAll,beforeEach,describe,expect,it,vi } from 'vitest';
+vi.mock('cloudflare:workers',()=>({WorkflowEntrypoint:class{},WorkerEntrypoint:class{},DurableObject:class{}}));
+import worker from '../src/worker/index';
 import { Hono } from 'hono';
 import { Miniflare } from 'miniflare';
 import { splitD1MigrationStatements } from '../../client/test/helpers/d1-migrations';
@@ -91,6 +93,26 @@ describe('source-only Hermes feed, immutable history and authorized reads',()=>{
   const v1={...observation(),semantics:{observation:'ci.obs.v1',scoring:'concern_0_10.v1'},observationKind:'competitor_profile'};
   const response=await dispatchIntelIngest(await signed(v1),{...env(),OPS_DB:noSourceSchema as unknown as D1Database} as Env,NOW);
   expect(response).not.toBeNull();expect(response!.status).toBe(400);expect(await response!.json()).toEqual({error:'schema_invalid'});
+ });
+ it('exercises the actual Worker fetch boundary before human auth and without new source schema',async()=>{
+  const clock=vi.spyOn(Date,'now').mockReturnValue(NOW);
+  const execution={waitUntil:vi.fn(),passThroughOnException:vi.fn()} as unknown as ExecutionContext;
+  try{
+   const disabledDb={withSession:vi.fn(()=>{throw Error('disabled ingress must not access any database');})};
+   const disabled=await worker.fetch(await signedBody('{'),{...env(),OPS_DB:disabledDb,COMPETITOR_INTEL_INGEST_ENABLED:'false'} as unknown as Env,execution);
+   expect(disabled.status).toBe(404);expect(await disabled.json()).toEqual({error:'not_found'});
+   expect(disabledDb.withSession).not.toHaveBeenCalled();
+   const seen:string[]=[];
+   const noSourceSchema={withSession:()=>noSourceSchema,prepare:(sql:string)=>{
+    seen.push(sql);if(sql.includes('owner_intel_source_'))throw Error('source schema absent');
+    return db.prepare(sql);
+   }};
+   const v1={...observation(),semantics:{observation:'ci.obs.v1',scoring:'concern_0_10.v1'},observationKind:'competitor_profile'};
+   const response=await worker.fetch(await signed(v1),{...env(),OPS_DB:noSourceSchema} as unknown as Env,execution);
+   expect(response.status).toBe(400);expect(await response.json()).toEqual({error:'schema_invalid'});
+   expect(seen.length).toBeGreaterThan(0);expect(seen.some(sql=>sql.includes('owner_intel_source_'))).toBe(false);
+   expect(execution.waitUntil).not.toHaveBeenCalled();
+  }finally{clock.mockRestore();}
  });
  it('keeps the frozen v1 validator route available and rejects source kinds when the source gate is off',async()=>{
   const v2=observation(),disabled={...env(),COMPETITOR_INTEL_INGEST_ENABLED:undefined};
