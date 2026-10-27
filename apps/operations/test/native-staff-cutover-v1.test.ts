@@ -48,6 +48,15 @@ async function cutoverInput(operator:Person){
   }).sort((a,b)=>String(a.staffId).localeCompare(String(b.staffId)));
   const cohortSha256=hash(stable(cohort));
   const desiredGroup=cohort.filter(row=>row.active).map(row=>row.email).sort();
+  const groupPolicy={exclude:[],require:[],is_default:false};
+  const groupObservation=(offset:number)=>{
+    const body={schemaVersion:1,kind:"cloudflare-access-group-observation-v1",accountId:"a".repeat(32),
+      groupId:"11111111-1111-4111-8111-111111111111",groupName:"Synthetic Ops Staff",
+      observedAt:new Date(Date.now()+offset).toISOString(),managedEmailCount:desiredGroup.length,
+      managedEmailsSha256:hash(stable(desiredGroup)),includeRuleCount:desiredGroup.length,
+      policySha256:hash(stable(groupPolicy)),providerResponseSha256:"5".repeat(64)};
+    return {...body,evidenceSha256:hash(stable(body))};
+  };
   const prepBody={schemaVersion:1,kind:"operations-native-staff-sync-dormant-preparation-v1",accountId:"a".repeat(32),
     workerName:"ltds-ops-sync",environment:"production",databaseId:"b".repeat(8)+"-"+"b".repeat(4)+"-"+"b".repeat(4)+"-"+"b".repeat(4)+"-"+"b".repeat(12),
     activeRuntimeVersion:"2026-07-22",candidateRuntimeVersion:"2026-07-22",activeSettingsSha256:"c".repeat(64),
@@ -56,7 +65,8 @@ async function cutoverInput(operator:Person){
     candidateSourceTreeSha256:"5".repeat(64),sourceEvidenceSha256:"6".repeat(64),behaviorQualificationSha256:"7".repeat(64),
     testReportSha256:"8".repeat(64),builtModuleSha256:"1".repeat(64),qualificationRunnerSha256:"9".repeat(64),
     controlState:"disabled",cohortSha256,activeStaffCount:cohort.filter(row=>row.active).length,activeAlternateBindingCount:0,
-    alternateBindingEvidenceSha256:"4".repeat(64),currentGroupCount:desiredGroup.length,currentGroupSha256:hash(stable(desiredGroup)),
+    alternateBindingEvidenceSha256:"4".repeat(64),accessGroupObservations:{before:groupObservation(-1000),after:groupObservation(0)},
+    currentGroupCount:desiredGroup.length,currentGroupSha256:hash(stable(desiredGroup)),
     desiredGroupCount:desiredGroup.length,desiredGroupSha256:hash(stable(desiredGroup))};
   const syncPreparationReceipt={...prepBody,receiptSha256:hash(stable(prepBody))};
   const controlPlaneStaffIds=[...reviewedSnapshot.controlPlaneStaffIds];
@@ -153,7 +163,8 @@ describe("first native staff cutover compiler and D1 executor",()=>{
       cohortSha256:JSON.parse(input.canonicalPlanJson).cohortSha256,operatorStaffId:operator.id,operatorSubject:operator.subject});
     const storedResult=await db.prepare("SELECT result_json FROM native_staff_bootstrap_receipts WHERE command_id=?").bind(input.commandId).first<{result_json:string}>();
     expect(JSON.parse(storedResult!.result_json)).toMatchObject({syncPreparationReceiptSha256:input.syncPreparationReceipt.receiptSha256,
-      currentGroupSha256:input.syncPreparationReceipt.currentGroupSha256,desiredGroupSha256:input.syncPreparationReceipt.desiredGroupSha256});
+      currentGroupSha256:input.syncPreparationReceipt.currentGroupSha256,desiredGroupSha256:input.syncPreparationReceipt.desiredGroupSha256,
+      accessGroupObservations:input.syncPreparationReceipt.accessGroupObservations});
     expect(await db.prepare("SELECT count(*) n FROM staff_users WHERE id=?").bind(operator.id).first("n")).toBe(1);
     expect(await db.prepare("SELECT count(*) n FROM native_staff_management_delegations WHERE actor_staff_id=?").bind(operator.id).first("n")).toBe(9);
   },180_000);

@@ -11,17 +11,30 @@ membership.
 The cutover receipt has its own `operations-native-staff-cutover-owner-approval-v1`
 kind and its own signed registry file (`cutover-approval-state.json`). Its
 consent hash covers a closed owner approval context containing the exact
-configured account, D1 UUID and database name, committed 0230 source and
-migration hashes, the low-level cutover context, snapshot, canonical plan and
-binding hashes, cohort, control-plane IDs, operator, command, and complete
-dormant Sync preparation receipt. That receipt includes the current and desired
-Access group counts and digests. The typed phrase contains the hash of this
-whole context, including target and source.
+configured account, D1 UUID and database name, pinned Cloudflare Access group
+ID/name, committed 0230 source and migration hashes, the low-level cutover
+context, snapshot, canonical plan and binding hashes, cohort, control-plane
+IDs, operator, command, and complete dormant Sync preparation receipt. That
+receipt includes before/after observation times, raw-response digests, full
+normalized member-set counts/digests, policy digests, and desired-group
+digest. It does not store the email list, response body, or token. The typed
+phrase contains the hash of this whole context, including target, source,
+group identity, and observations.
 
 Issuance and execution require a real signed Cloudflare Access app JWT and an
-Access-protected `/api/session` response naming the configured owner. Execution
-also checks the configured D1 metadata, current full 0230 snapshot, active owner
-admission/profile binding, and signed local registry before preparing. It
+Access-protected `/api/session` response naming the configured owner. The
+issuer performs a fresh GET of the pinned group before displaying consent and
+after typed consent. Execution performs a fresh GET during preview and
+immediately before dispatch; each must match the reviewed identity, complete
+normalized membership set, and the exact empty exclude/require/default-policy
+arrays. Cloudflare returns those policy values as rule arrays. The GET reader
+rejects nonempty policy arrays, malformed `errors`/`messages` notices, mixed
+success/error envelopes, and unknown fields; it has no PUT path. The exact
+empty-policy profile remains unverified against production because the
+available API read returns 403; the separate UI summary is not API evidence.
+Execution also checks the configured D1 metadata,
+current full 0230 snapshot, active owner admission/profile binding, and signed
+local registry before preparing. It
 repeats the owner session, target, snapshot, approval, and registry checks after
 acquiring the one-shot lease and again immediately before the atomic batch.
 
@@ -37,7 +50,10 @@ model, as with the bootstrap registry.
 ## Commands
 
 The owner-only issuer accepts a candidate artifact and asks the operator to
-type the context-bound consent phrase:
+type the context-bound consent phrase. It first performs two fresh GETs,
+requires their stable group state to match the candidate, then writes a new
+private candidate file containing those actual observation digests/times. Use
+the returned `candidatePath` for the executor commands below:
 
 ```powershell
 node scripts/native-staff-cutover-owner-approval-cli.mjs --candidate <candidate.json>
@@ -55,8 +71,8 @@ The executor defaults to read-only preview. Use the exact digest it prints for
 the one-shot execution command:
 
 ```powershell
-node scripts/native-staff-cutover-approved-executor.mjs --candidate <candidate.json>
-node scripts/native-staff-cutover-approved-executor.mjs --candidate <candidate.json> --execute --prepared-sha256 <digest>
+node scripts/native-staff-cutover-approved-executor.mjs --candidate <candidatePath>
+node scripts/native-staff-cutover-approved-executor.mjs --candidate <candidatePath> --execute --prepared-sha256 <digest>
 ```
 
 The candidate contains the reviewed source snapshot, control-plane staff IDs,
@@ -74,6 +90,12 @@ production Access call, D1 write, activation, or deployment is part of this
 source change. Synthetic tests use only a temporary DPAPI-protected test key,
 synthetic Access JWT/JWKS/session responses, and local fixtures; they do not
 establish owner authority or production readiness.
+
+The cutover trust config also requires an exact Access group UUID and name
+under `accessGroup`, plus an `accessGroupModuleSha256` source pin. The observed
+Cloudflare account comes from the pinned target account. The group reader uses
+the existing in-memory Wrangler management-token boundary and requires
+Cloudflare Access Groups read permission; it has no write path.
 
 During local integration debugging, an earlier synthetic D1 batch committed
 and its exact durable readback marked that fixture's one-shot registry entry

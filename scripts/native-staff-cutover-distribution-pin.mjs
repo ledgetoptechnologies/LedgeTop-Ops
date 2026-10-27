@@ -14,6 +14,7 @@ export const NATIVE_STAFF_CUTOVER_DISTRIBUTION_FILES = Object.freeze([
   'scripts/native-staff-cutover-approved-executor-config.mjs',
   'scripts/native-staff-cutover-owner-approval-cli.mjs',
   'scripts/native-staff-cutover-owner-approval.mjs',
+  'scripts/native-staff-cutover-access-group-observation.mjs',
   'scripts/native-staff-cutover-distribution-pin.mjs',
   'scripts/native-staff-cutover-v1.mjs',
   'scripts/native-staff-sync-preparation.mjs',

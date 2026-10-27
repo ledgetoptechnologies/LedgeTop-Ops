@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { assertNativeStaffAccessGroupStateMatches, validateNativeStaffAccessGroupObservation } from './native-staff-cutover-access-group-observation.mjs';
 
 const fail = code => { throw new Error(`native_staff_cutover_${code}`); };
 const SHA = /^[0-9a-f]{64}$/u;
@@ -201,7 +202,7 @@ const PREPARATION_KEYS = ['schemaVersion','kind','accountId','workerName','envir
   'activeRuntimeVersion','candidateRuntimeVersion','activeSettingsSha256','candidateSettingsSha256','bindingsSha256',
   'activeModuleSha256','candidateModuleSha256','activeSourceCommit','candidateSourceCommit','controlState',
   'candidateSourceTreeSha256','sourceEvidenceSha256','behaviorQualificationSha256','testReportSha256','builtModuleSha256','qualificationRunnerSha256',
-  'cohortSha256','activeStaffCount','activeAlternateBindingCount','alternateBindingEvidenceSha256',
+  'cohortSha256','activeStaffCount','activeAlternateBindingCount','alternateBindingEvidenceSha256','accessGroupObservations',
   'currentGroupCount','currentGroupSha256','desiredGroupCount','desiredGroupSha256','receiptSha256'];
 
 function validatePreparationReceipt(value, compiled) {
@@ -224,6 +225,22 @@ function validatePreparationReceipt(value, compiled) {
     || value.builtModuleSha256!==value.candidateModuleSha256
     || !['activeStaffCount','activeAlternateBindingCount','currentGroupCount','desiredGroupCount']
       .every(key=>Number.isSafeInteger(value[key]) && value[key]>=0)) fail('sync_preparation_invalid');
+  if (!exact(value.accessGroupObservations, ['before','after'])) fail('access_group_observation_invalid');
+  let before, after;
+  try {
+    before = validateNativeStaffAccessGroupObservation(value.accessGroupObservations.before);
+    after = validateNativeStaffAccessGroupObservation(value.accessGroupObservations.after);
+    assertNativeStaffAccessGroupStateMatches(before, after);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('native_staff_access_group_')) fail('access_group_observation_invalid');
+    throw error;
+  }
+  if (before.accountId !== value.accountId || after.accountId !== value.accountId
+    || value.currentGroupCount !== before.managedEmailCount || value.currentGroupCount !== after.managedEmailCount
+    || value.currentGroupSha256 !== before.managedEmailsSha256 || value.currentGroupSha256 !== after.managedEmailsSha256)
+    fail('access_group_observation_mismatch');
+  const beforeAt=Date.parse(before.observedAt),afterAt=Date.parse(after.observedAt);
+  if(beforeAt>afterAt||afterAt-beforeAt>60*60_000)fail('access_group_observation_window_invalid');
   const { receiptSha256, ...body } = value;
   if (!SHA.test(receiptSha256 ?? '') || sha(canonical(body)) !== receiptSha256) fail('sync_preparation_digest_invalid');
   return cloneCanonical(value);
@@ -389,6 +406,7 @@ function expectedResultJson(prepared) {
     desiredGroupSha256:prepared.syncPreparationReceipt.desiredGroupSha256,
     currentGroupCount:prepared.syncPreparationReceipt.currentGroupCount,
     desiredGroupCount:prepared.syncPreparationReceipt.desiredGroupCount,
+    accessGroupObservations:prepared.syncPreparationReceipt.accessGroupObservations,
     generation:0, enabled:1 });
 }
 

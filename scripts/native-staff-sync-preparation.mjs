@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { assertNativeStaffAccessGroupStateMatches, validateNativeStaffAccessGroupObservation } from './native-staff-cutover-access-group-observation.mjs';
 
 const fail = code => { throw new Error(`native_staff_sync_preparation_${code}`); };
 const HASH = /^[0-9a-f]{64}$/u;
@@ -79,7 +80,8 @@ export function deriveNativeStaffSyncSourceEvidence({ repositoryRoot, sourceComm
  * type, and pinned resource identifiers.
  */
 export function compileNativeStaffSyncPreparation({ active, candidate, control, cohortBefore, cohortAfter,
-  alternateBindingsBefore, alternateBindingsAfter, groupBefore, groupAfter, pins, sourceEvidence, qualificationEvidence, repositoryRoot }) {
+  alternateBindingsBefore, alternateBindingsAfter, groupBeforeObservation, groupAfterObservation,
+  pins, sourceEvidence, qualificationEvidence, repositoryRoot }) {
   if (!exact(active, ['accountId','workerName','environment','databaseId','runtimeVersion','settings','bindings','moduleSha256','sourceCommit'])
     || !exact(candidate, ['accountId','workerName','environment','databaseId','runtimeVersion','settings','bindings','moduleSha256','sourceCommit'])
     || !exact(sourceEvidence, ['schemaVersion','sourceCommit','sourceTreeSha256','moduleSha256','files','sourceEvidenceSha256'])
@@ -92,8 +94,7 @@ export function compileNativeStaffSyncPreparation({ active, candidate, control, 
     || !exact(alternateBindingsBefore, ['issuer','activeBindings','pendingIntentCount'])
     || !exact(alternateBindingsAfter, ['issuer','activeBindings','pendingIntentCount'])
     || !exact(pins, ['accountId','workerName','environment','databaseId','runtimeVersion','activeModuleSha256','activeSourceCommit',
-      'candidateModuleSha256','candidateSourceCommit','settingsSha256','bindingsSha256','staffAccessIssuer'])
-    || !Array.isArray(groupBefore) || !Array.isArray(groupAfter)) fail('input_invalid');
+      'candidateModuleSha256','candidateSourceCommit','settingsSha256','bindingsSha256','staffAccessIssuer','accessGroupId','accessGroupName'])) fail('input_invalid');
   for (const worker of [active,candidate]) {
     if (typeof worker.accountId !== 'string' || !/^[a-f0-9]{32}$/u.test(worker.accountId)
       || typeof worker.workerName !== 'string' || !/^[a-z0-9][a-z0-9-]{0,62}$/u.test(worker.workerName)
@@ -212,9 +213,20 @@ export function compileNativeStaffSyncPreparation({ active, candidate, control, 
   for (const row of beforeCohort.rows) cohortByStaff.set(row.staffId,row);
   const aliasesBefore=validateAliases(alternateBindingsBefore), aliasesAfter=validateAliases(alternateBindingsAfter);
   if (!same(aliasesBefore,aliasesAfter)) fail('alternate_bindings_changed_during_preparation');
-  const before = strings(groupBefore, 'group_before');
-  const after = strings(groupAfter, 'group_after');
-  if (!same(before, after)) fail('group_changed_during_preparation');
+  let before, after;
+  try {
+    before = validateNativeStaffAccessGroupObservation(groupBeforeObservation);
+    after = validateNativeStaffAccessGroupObservation(groupAfterObservation);
+    assertNativeStaffAccessGroupStateMatches(before, after);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('native_staff_access_group_')) fail('group_observation_invalid');
+    throw error;
+  }
+  if (before.accountId !== active.accountId || before.groupId !== pins.accessGroupId || before.groupName !== pins.accessGroupName
+    || after.accountId !== active.accountId || after.groupId !== pins.accessGroupId || after.groupName !== pins.accessGroupName)
+    fail('group_observation_target_mismatch');
+  const beforeAt = Date.parse(before.observedAt), afterAt = Date.parse(after.observedAt);
+  if (beforeAt > afterAt || afterAt - beforeAt > 60 * 60_000) fail('group_observation_window_invalid');
   const desiredGroup = strings([...staffEmails, ...aliasesBefore.activeBindings.map(row=>row.loginEmail)], 'desired_group');
   const receipt = { schemaVersion:1, kind:'operations-native-staff-sync-dormant-preparation-v1',
     accountId:active.accountId, workerName:active.workerName, environment:active.environment, databaseId:active.databaseId,
@@ -229,7 +241,8 @@ export function compileNativeStaffSyncPreparation({ active, candidate, control, 
     controlState:control.tablePresent ? 'disabled' : 'missing', cohortSha256:beforeCohort.cohortSha256,
     activeStaffCount:staffEmails.length, activeAlternateBindingCount:aliasesBefore.activeBindings.length,
     alternateBindingEvidenceSha256:sha(canonical(aliasesBefore)),
-    currentGroupCount:before.length, currentGroupSha256:sha(canonical(before)),
+    accessGroupObservations:{before,after},
+    currentGroupCount:before.managedEmailCount, currentGroupSha256:before.managedEmailsSha256,
     desiredGroupCount:desiredGroup.length, desiredGroupSha256:sha(canonical(desiredGroup)) };
   return Object.freeze({ ...receipt, receiptSha256:sha(canonical(receipt)) });
 }

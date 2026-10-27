@@ -79,11 +79,27 @@ export interface NativeStaffSyncPreparationReceipt {
   activeStaffCount: number;
   activeAlternateBindingCount: number;
   alternateBindingEvidenceSha256: string;
+  accessGroupObservations: { before: NativeStaffAccessGroupObservation; after: NativeStaffAccessGroupObservation };
   currentGroupCount: number;
   currentGroupSha256: string;
   desiredGroupCount: number;
   desiredGroupSha256: string;
   receiptSha256: string;
+}
+
+export interface NativeStaffAccessGroupObservation {
+  schemaVersion: 1;
+  kind: 'cloudflare-access-group-observation-v1';
+  accountId: string;
+  groupId: string;
+  groupName: string;
+  observedAt: string;
+  managedEmailCount: number;
+  managedEmailsSha256: string;
+  includeRuleCount: number;
+  policySha256: string;
+  providerResponseSha256: string;
+  evidenceSha256: string;
 }
 
 export interface NativeStaffSyncAlternateBindingEvidence {
@@ -118,11 +134,11 @@ export interface NativeStaffSyncPreparationInput {
   cohortAfter: { cohortSha256: string; rows: readonly NativeStaffSyncCohortRow[] };
   alternateBindingsBefore: { issuer: string; activeBindings: readonly NativeStaffSyncAlternateBindingEvidence[]; pendingIntentCount: number };
   alternateBindingsAfter: { issuer: string; activeBindings: readonly NativeStaffSyncAlternateBindingEvidence[]; pendingIntentCount: number };
-  groupBefore: readonly string[];
-  groupAfter: readonly string[];
+  groupBeforeObservation: NativeStaffAccessGroupObservation;
+  groupAfterObservation: NativeStaffAccessGroupObservation;
   pins: { accountId: string; workerName: string; environment: string; databaseId: string; runtimeVersion: string;
     activeModuleSha256: string; activeSourceCommit: string; candidateModuleSha256: string; candidateSourceCommit: string;
-    settingsSha256: string; bindingsSha256: string; staffAccessIssuer: string };
+    settingsSha256: string; bindingsSha256: string; staffAccessIssuer: string; accessGroupId: string; accessGroupName: string };
   sourceEvidence: NativeStaffSyncSourceEvidence;
   qualificationEvidence: NativeStaffSyncQualificationEvidence;
   repositoryRoot: string;
