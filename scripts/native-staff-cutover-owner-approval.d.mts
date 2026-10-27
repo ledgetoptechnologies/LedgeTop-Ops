@@ -4,6 +4,7 @@ export const NATIVE_STAFF_CUTOVER_CONSENT_PREFIX: string;
 export function assertPinnedNativeStaffCutoverSource(config: any, options?: { cwd?: string; run?: typeof import('node:child_process').execFileSync;
   read?: typeof import('node:fs').readFileSync }): true;
 export function compileNativeStaffCutoverApprovalContext(artifact: any, config: any): any;
+export function bindNativeStaffCutoverObservedGroupToCandidate(artifact: any, observations: { before: any; after: any }, config: any): any;
 export function verifyCurrentNativeStaffCutoverOwnerSession(config: any, token: string, options?: { fetchImpl?: typeof fetch; now?: number }): Promise<any>;
 export function nativeStaffCutoverConsentText(artifact: any, config: any): string;
 export function buildNativeStaffCutoverOwnerApprovalReceipt(options: { config: any; artifact: any; ownerSession: any;

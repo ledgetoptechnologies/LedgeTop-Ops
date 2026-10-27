@@ -31,7 +31,7 @@ const response=(body:any,status=200,headers:Record<string,string>={})=>new Respo
 const uuid=()=>crypto.randomUUID();
 type Person={id:string;email:string;subject:string};
 let runtime:Miniflare,db:D1Database,scratch:string,receiptDirectory:string,config:any,signer:any,
-  executorModule:any,ownerModule:any,restoreLocalAppData:string|undefined;
+  executorModule:any,ownerModule:any,accessGroupReader:any,restoreLocalAppData:string|undefined;
 
 function protectTestSigner(directory:string){
   const {privateKey,publicKey}=generateKeyPairSync("rsa",{modulusLength:3072});
@@ -50,7 +50,8 @@ function protectTestSigner(directory:string){
 
 function pinnedSource(){
   const commit=execFileSync("git",["-C",root,"rev-parse","HEAD"],{encoding:"utf8"}).trim();
-  const files=["scripts/native-staff-cutover-v1.mjs","scripts/native-staff-sync-preparation.mjs","scripts/native-staff-bootstrap-d1.mjs"];
+  const files=["scripts/native-staff-cutover-v1.mjs","scripts/native-staff-sync-preparation.mjs",
+    "scripts/native-staff-cutover-access-group-observation.mjs","scripts/native-staff-bootstrap-d1.mjs"];
   const moduleHashes=files.map(file=>sha(readFileSync(path.join(root,file))));
   const names=readdirSync(path.join(root,"apps/operations/migrations"))
     .filter(name=>/^\d{4}_.+\.sql$/u.test(name)&&Number(name.slice(0,4))<=230).sort();
@@ -58,7 +59,8 @@ function pinnedSource(){
     throw new Error("synthetic-migration-fixture-invalid");
   const migrationContentsSha256=sha(names.map(name=>`${name}\0${sha(readFileSync(path.join(root,"apps/operations/migrations",name)))}`).join("\n"));
   return {commit,migrationNamesSha256:sha(names.join("\n")),migrationContentsSha256,
-    cutoverModuleSha256:moduleHashes[0],syncPreparationModuleSha256:moduleHashes[1],installerModuleSha256:moduleHashes[2]};
+    cutoverModuleSha256:moduleHashes[0],syncPreparationModuleSha256:moduleHashes[1],accessGroupModuleSha256:moduleHashes[2],
+    installerModuleSha256:moduleHashes[3]};
 }
 
 async function seedOwner():Promise<Person>{
@@ -106,7 +108,7 @@ function cutoverCandidate(operator:Person,reviewedSnapshot:any){
   const pinsInput={accountId:active.accountId,workerName:active.workerName,environment:active.environment,databaseId:workerId,
     runtimeVersion:active.runtimeVersion,activeModuleSha256:active.moduleSha256,activeSourceCommit:active.sourceCommit,
     candidateModuleSha256:candidate.moduleSha256,candidateSourceCommit:candidate.sourceCommit,settingsSha256,bindingsSha256,
-    staffAccessIssuer:config.access.issuer};
+    staffAccessIssuer:config.access.issuer,accessGroupId:config.accessGroup.id,accessGroupName:config.accessGroup.name};
   const sourceEvidence=syncPrep.deriveNativeStaffSyncSourceEvidence({repositoryRoot,sourceCommit:candidateCommit,moduleSha256:candidate.moduleSha256});
   const qualificationBody={schemaVersion:1,kind:"ops-sync-candidate-behavior-qualification-v1",sourceCommit:candidateCommit,
     sourceTreeSha256:sourceEvidence.sourceTreeSha256,sourceEvidenceSha256:sourceEvidence.sourceEvidenceSha256,
@@ -116,12 +118,22 @@ function cutoverCandidate(operator:Person,reviewedSnapshot:any){
   const qualificationEvidence={...qualificationBody,qualificationSha256:sha(JSON.stringify(qualificationBody))};
   const activeEmails=cohort.filter((row:any)=>row.active).map((row:any)=>row.email).sort();
   const historical="historical-member@example.test",group=[...activeEmails,historical].sort();
+  syntheticGroupMembers=group;
+  const groupPolicy={exclude:[],require:[],is_default:[]};
+  const groupObservation=(offset:number)=>{
+    const body={schemaVersion:1,kind:"cloudflare-access-group-observation-v1",accountId:config.target.accountId,
+      groupId:config.accessGroup.id,groupName:config.accessGroup.name,observedAt:new Date(Date.now()+offset).toISOString(),
+      managedEmailCount:group.length,managedEmailsSha256:sha(canonical(group)),includeRuleCount:group.length,
+      policySha256:sha(canonical(groupPolicy)),providerResponseSha256:"8".repeat(64)};
+    return {...body,evidenceSha256:sha(canonical(body))};
+  };
   const groupEvidence={issuer:config.access.issuer,activeBindings:[],pendingIntentCount:0};
   const cohortEvidence={cohortSha256,rows:cohort};
   const syncPreparationReceipt=syncPrep.compileNativeStaffSyncPreparation({active,candidate,
     control:{tablePresent:true,enabled:0,generation:0,appliedGeneration:0,leaseId:null,leaseUntil:null,attemptGeneration:null},
     cohortBefore:cohortEvidence,cohortAfter:structuredClone(cohortEvidence),alternateBindingsBefore:groupEvidence,
-    alternateBindingsAfter:structuredClone(groupEvidence),groupBefore:group,groupAfter:structuredClone(group),pins:pinsInput,
+    alternateBindingsAfter:structuredClone(groupEvidence),groupBeforeObservation:groupObservation(-1000),
+    groupAfterObservation:groupObservation(0),pins:pinsInput,
     sourceEvidence,qualificationEvidence,repositoryRoot});
   return {schemaVersion:1,kind:"operations-native-staff-cutover-candidate-v1",approvalId:uuid(),commandId:uuid(),
     reviewedSnapshot,controlPlaneStaffIds:[...reviewedSnapshot.controlPlaneStaffIds],operator:{staffId:operator.id,accessSubject:operator.subject},
@@ -132,6 +144,7 @@ let syncPrep:any,fetchImpl:typeof fetch;
 let miniflareBatchErrors:string[]=[];
 let syntheticFetchRoutes:string[]=[];
 let syntheticQueryBatches:any[]=[];
+let syntheticGroupMembers:string[]=[];
 describe.skipIf(process.platform !== "win32")("purpose-bound approved native staff cutover executor",()=>{
   beforeAll(async()=>{
     scratch=mkdtempSync(path.join(os.tmpdir(),"native-staff-cutover-approved-integration-"));
@@ -140,6 +153,7 @@ describe.skipIf(process.platform !== "win32")("purpose-bound approved native sta
     const source=pinnedSource();
     config={schemaVersion:1,kind:"operations-native-staff-cutover-trust-config-v1",
       target:{accountId:"a".repeat(32),databaseId:uuid(),databaseName:"synthetic-native-cutover-db"},source,
+      accessGroup:{id:uuid(),name:"Synthetic Ops Staff"},
       access:{origin:"https://ops.example.test",issuer:"https://synthetic.cloudflareaccess.com",audience:"A".repeat(32),
         owner:{staffId:"cutover-owner-e2e",accessSubject:"access|cutover-owner-e2e"},
         cloudflaredExecutablePath:"C:\\synthetic\\cloudflared.exe",cloudflaredExecutableSha256:"2".repeat(64)},
@@ -154,6 +168,7 @@ describe.skipIf(process.platform !== "win32")("purpose-bound approved native sta
     pins.bootstrapManifest=sha(readFileSync(path.join(root,"scripts/native-staff-bootstrap-owner-approval-distribution-manifest.json")));
     ownerModule=await import("../../../scripts/native-staff-cutover-owner-approval.mjs");
     executorModule=await import("../../../scripts/native-staff-cutover-approved-executor.mjs");
+    accessGroupReader=await import("../../../scripts/native-staff-cutover-access-group-observation.mjs");
     syncPrep=await import("../../../scripts/native-staff-sync-preparation.mjs");
 
     runtime=new Miniflare({modules:true,compatibilityDate:"2026-07-22",script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});
@@ -186,6 +201,9 @@ describe.skipIf(process.platform !== "win32")("purpose-bound approved native sta
       syntheticFetchRoutes.push(`${init?.method??"GET"} ${url.pathname}`);
       if(url.pathname==="/cdn-cgi/access/certs")return response({keys:[jwk]});
       if(url.origin===config.access.origin&&url.pathname==="/api/session")return response({user:{id:config.access.owner.staffId},csrfToken:"s".repeat(48)});
+      if(url.hostname==="api.cloudflare.com"&&url.pathname===`/client/v4/accounts/${config.target.accountId}/access/groups/${config.accessGroup.id}`
+        &&init?.method==="GET")return response({success:true,result:{id:config.accessGroup.id,name:config.accessGroup.name,
+          include:syntheticGroupMembers.map(email=>({email:{email}})),exclude:[],require:[],is_default:[]}});
       if(url.hostname==="api.cloudflare.com"&&url.pathname.endsWith(`/d1/database/${config.target.databaseId}`)
         &&init?.method==="GET")return response({success:true,result:{uuid:config.target.databaseId,name:config.target.databaseName}});
       if(url.hostname==="api.cloudflare.com"&&url.pathname.endsWith(`/d1/database/${config.target.databaseId}/query`)
@@ -216,8 +234,24 @@ describe.skipIf(process.platform !== "win32")("purpose-bound approved native sta
 
   it("issues, previews, dispatches once, and verifies the exact 0230 cutover via the fixed-target REST adapter",async()=>{
     miniflareBatchErrors=[];syntheticFetchRoutes=[];syntheticQueryBatches=[];
-    const {candidate}=await makeCandidate(),{token,proof,writeBatches}=await installFetch();
+    const {candidate:driftCandidate}=await makeCandidate(),{token:driftToken,proof:driftProof,writeBatches:driftWriteBatches}=await installFetch();
+    const readGroup=()=>accessGroupReader.readNativeStaffAccessGroupObservation({config,
+      getBearerToken:async()=>"synthetic-cloudflare-read-token-not-a-real-credential",fetchImpl});
+    const driftBound=ownerModule.bindNativeStaffCutoverObservedGroupToCandidate(driftCandidate,
+      {before:await readGroup(),after:await readGroup()},config).artifact;
     ownerModule.initializeNativeStaffCutoverApprovalRegistry(config);
+    const driftReceipt=ownerModule.buildNativeStaffCutoverOwnerApprovalReceipt({config,artifact:driftBound,ownerSession:driftProof,
+      typedConsent:ownerModule.nativeStaffCutoverConsentText(driftBound,config)});
+    ownerModule.writeNativeStaffCutoverReceiptFile(config,driftReceipt);ownerModule.issueNativeStaffCutoverApproval(config,driftReceipt);
+    const driftBearer="synthetic-d1-api-token-not-used-outside-fetch-fixture",expectedMembers=[...syntheticGroupMembers];
+    syntheticGroupMembers=[...expectedMembers,"unexpected@example.test"];
+    await expect(executorModule.runNativeStaffCutoverApprovedExecutor({candidate:driftBound,receipt:driftReceipt,mode:"preview",
+      getAccessToken:()=>driftToken,getBearerToken:()=>driftBearer,fetchImpl})).rejects.toThrow(/fresh_group_observation_invalid/u);
+    expect(driftWriteBatches).toHaveLength(0);
+    syntheticGroupMembers=expectedMembers;
+    const {candidate:rawCandidate}=await makeCandidate(),{token,proof,writeBatches}=await installFetch();
+    const candidate=ownerModule.bindNativeStaffCutoverObservedGroupToCandidate(rawCandidate,
+      {before:await readGroup(),after:await readGroup()},config).artifact;
     const receipt=ownerModule.buildNativeStaffCutoverOwnerApprovalReceipt({config,artifact:candidate,ownerSession:proof,
       typedConsent:ownerModule.nativeStaffCutoverConsentText(candidate,config)});
     ownerModule.writeNativeStaffCutoverReceiptFile(config,receipt);ownerModule.issueNativeStaffCutoverApproval(config,receipt);
@@ -246,7 +280,10 @@ describe.skipIf(process.platform !== "win32")("purpose-bound approved native sta
     expect(JSON.parse(receiptRow!.result_json)).toMatchObject({action:"native-staff-cutover",
       syncPreparationReceiptSha256:candidate.syncPreparationReceipt.receiptSha256,
       currentGroupSha256:candidate.syncPreparationReceipt.currentGroupSha256,
-      desiredGroupSha256:candidate.syncPreparationReceipt.desiredGroupSha256});
+      desiredGroupSha256:candidate.syncPreparationReceipt.desiredGroupSha256,
+      accessGroupObservations:candidate.syncPreparationReceipt.accessGroupObservations});
+    expect(JSON.stringify(JSON.parse(receiptRow!.result_json).accessGroupObservations)).not.toContain("historical-member@example.test");
+    expect(syntheticFetchRoutes.filter(route=>route.includes("/access/groups/")).every(route=>route.startsWith("GET "))).toBe(true);
     const registry=ownerModule.readNativeStaffCutoverApprovalRegistry(config);
     expect(registry.envelope.payload.entries[0]).toMatchObject({approvalId:candidate.approvalId,state:"consumed"});
     expect(writeBatches).toHaveLength(1);

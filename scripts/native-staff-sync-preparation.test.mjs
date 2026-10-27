@@ -13,6 +13,15 @@ const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(
   : value === null || typeof value !== 'object' ? JSON.stringify(value)
     : `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
 const digest = value => createHash('sha256').update(value).digest('hex');
+const groupId='11111111-1111-4111-8111-111111111111',groupName='Synthetic Ops Staff';
+function groupObservation(members, offsetMs=0, overrides={}) {
+  const normalized=[...members].map(email=>email.trim().toLowerCase()).sort();
+  const policy={exclude:[],require:[],is_default:[]};
+  const body={schemaVersion:1,kind:'cloudflare-access-group-observation-v1',accountId:'a'.repeat(32),groupId,groupName,
+    observedAt:new Date(Date.now()+offsetMs).toISOString(),managedEmailCount:normalized.length,managedEmailsSha256:digest(canonical(normalized)),
+    includeRuleCount:normalized.length,policySha256:digest(canonical(policy)),providerResponseSha256:'f'.repeat(64),...overrides};
+  return {...body,evidenceSha256:digest(canonical(body))};
+}
 const cohortRows=[{staffId:'owner',email:'owner@example.test',accessSubject:'access|owner',displayName:'Owner',active:true,admissionVersion:1,profileVersion:1}];
 const aliasEvidence=()=>({issuer:'https://example.cloudflareaccess.com',activeBindings:[],pendingIntentCount:0});
 const fixture = () => ({
@@ -30,8 +39,9 @@ const fixture = () => ({
     runtimeVersion:'2026-07-22',activeModuleSha256:hash,activeSourceCommit:commitA,candidateModuleSha256:'c'.repeat(64),candidateSourceCommit:candidateCommit,
     settingsSha256:digest(canonical({compatibilityDate:'2026-07-22',triggers:['0 * * * *']})),
     bindingsSha256:digest(canonical([{name:'ACCESS_GROUP',type:'text',resourceId:'group-id'},{name:'OPS_DB',type:'d1',resourceId:'ops-db-id'}])),
-    staffAccessIssuer:'https://example.cloudflareaccess.com'},
-  groupBefore:['owner@example.test','staff@example.test'],groupAfter:['owner@example.test','staff@example.test'],repositoryRoot,
+    staffAccessIssuer:'https://example.cloudflareaccess.com',accessGroupId:groupId,accessGroupName:groupName},
+  groupBeforeObservation:groupObservation(['owner@example.test','staff@example.test'],-1000),
+  groupAfterObservation:groupObservation(['owner@example.test','staff@example.test'],0),repositoryRoot,
 });
 function qualifiedFixture(){
   const value=fixture();value.sourceEvidence=deriveNativeStaffSyncSourceEvidence({repositoryRoot,
@@ -88,7 +98,7 @@ for (const [label, mutate, code] of [
   ['lease active',x=>{x.control.tablePresent=true;x.control.enabled=0;x.control.generation=0;x.control.appliedGeneration=0;x.control.leaseId='lease';},'control_not_dormant'],
   ['cohort changed',x=>{x.cohortAfter.rows[0].displayName='Changed';x.cohortAfter.cohortSha256=digest(canonical(x.cohortAfter.rows));},'cohort_changed_during_preparation'],
   ['alternate binding changed',x=>x.alternateBindingsAfter.pendingIntentCount=1,'alternate_bindings_changed_during_preparation'],
-  ['group changed',x=>x.groupAfter=['owner@example.test'],'group_changed_during_preparation'],
+  ['group changed',x=>x.groupAfterObservation=groupObservation(['owner@example.test']),'group_observation_invalid'],
 ]) test(`refuses ${label}`,()=>{
   const value=qualifiedFixture(); mutate(value);
   assert.throws(()=>compileNativeStaffSyncPreparation(value),new RegExp(code));
@@ -96,10 +106,26 @@ for (const [label, mutate, code] of [
 
 test('retains unrelated existing group members exactly during prep without writing them',()=>{
   const value=qualifiedFixture();
-  value.groupBefore.push('historical-member@example.test');
-  value.groupAfter.push('historical-member@example.test');
+  value.groupBeforeObservation=groupObservation(['owner@example.test','staff@example.test','historical-member@example.test'],-1000);
+  value.groupAfterObservation=groupObservation(['owner@example.test','staff@example.test','historical-member@example.test']);
   const receipt=compileNativeStaffSyncPreparation(value);
   assert.equal(receipt.activeStaffCount,1);
+  assert.equal(receipt.currentGroupCount,3);
+  assert.equal(receipt.accessGroupObservations.after.managedEmailsSha256,value.groupAfterObservation.managedEmailsSha256);
+  assert.equal(JSON.stringify(receipt.accessGroupObservations).includes('historical-member@example.test'),false);
+});
+
+test('rejects stale, cross-account, cross-group and policy-drifted observations',()=>{
+  const stale=qualifiedFixture();
+  stale.groupBeforeObservation=groupObservation(['owner@example.test','staff@example.test'],-11*60_000);
+  assert.throws(()=>compileNativeStaffSyncPreparation(stale),/group_observation_invalid/u);
+  const cross=qualifiedFixture();
+  cross.groupAfterObservation=groupObservation(['owner@example.test','staff@example.test'],0,{groupId:'22222222-2222-4222-8222-222222222222'});
+  assert.throws(()=>compileNativeStaffSyncPreparation(cross),/group_observation_invalid/u);
+  const policy=qualifiedFixture();
+  policy.groupAfterObservation=groupObservation(['owner@example.test','staff@example.test'],0,{policySha256:'0'.repeat(64)});
+  policy.groupAfterObservation.evidenceSha256=digest(canonical(Object.fromEntries(Object.entries(policy.groupAfterObservation).filter(([key])=>key!=='evidenceSha256'))));
+  assert.throws(()=>compileNativeStaffSyncPreparation(policy),/group_observation_invalid/u);
 });
 
 test('rejects binding values instead of recording secrets in a preparation artifact',()=>{

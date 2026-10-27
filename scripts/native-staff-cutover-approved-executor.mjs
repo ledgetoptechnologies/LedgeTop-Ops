@@ -10,6 +10,7 @@ import { executeNativeStaffCutoverD1, prepareNativeStaffCutoverD1, readNativeSta
 import { assertPinnedNativeStaffCutoverDistribution } from './native-staff-cutover-distribution-pin.mjs';
 import { assertPinnedNativeStaffCutoverSource } from './native-staff-cutover-owner-approval.mjs';
 import { loadPinnedNativeStaffCutoverConfig } from './native-staff-cutover-approved-executor-config.mjs';
+import { assertFreshNativeStaffAccessGroup } from './native-staff-cutover-access-group-observation.mjs';
 import { acquireNativeStaffCutoverApprovalLease, compileNativeStaffCutoverApprovalContext,
   readNativeStaffCutoverApprovalRegistry, verifyCurrentNativeStaffCutoverOwnerSession,
   verifyNativeStaffCutoverOwnerApprovalReceipt } from './native-staff-cutover-owner-approval.mjs';
@@ -86,7 +87,8 @@ function expectedResultJson(candidate,compiled){return canonicalJson({schemaVers
   currentGroupSha256:candidate.syncPreparationReceipt.currentGroupSha256,
   desiredGroupSha256:candidate.syncPreparationReceipt.desiredGroupSha256,
   currentGroupCount:candidate.syncPreparationReceipt.currentGroupCount,
-  desiredGroupCount:candidate.syncPreparationReceipt.desiredGroupCount,generation:0,enabled:1});}
+  desiredGroupCount:candidate.syncPreparationReceipt.desiredGroupCount,
+  accessGroupObservations:candidate.syncPreparationReceipt.accessGroupObservations,generation:0,enabled:1});}
 
 async function durableCutoverMatches(provider,candidate,receipt,config){
   const compiled=compileNativeStaffCutoverApprovalContext(candidate,config),env=receipt.payload.trustEnvelope;
@@ -137,6 +139,9 @@ export async function runNativeStaffCutoverApprovedExecutor({candidate,receipt,m
   if(snapshot.snapshotSha256!==candidate.reviewedSnapshot.snapshotSha256||snapshot.snapshotJson!==candidate.reviewedSnapshot.snapshotJson
     ||canonicalJson([...snapshot.controlPlaneStaffIds].sort())!==canonicalJson([...candidate.controlPlaneStaffIds].sort())||!ownerIsBound(snapshot,config))
     stop('current_snapshot_or_owner_changed');
+  const groupObservations=candidate.syncPreparationReceipt.accessGroupObservations;
+  await assertFreshNativeStaffAccessGroup({config,reviewedBefore:groupObservations.before,reviewedAfter:groupObservations.after,
+    getBearerToken,fetchImpl});
   let verifyApproval=approvalVerifier(config,candidate,receipt,session,'issued');
   const input=lowLevelInput(candidate,receipt,config);
   const prepared=await prepareNativeStaffCutoverD1(input,{db:provider,verifyApproval});
@@ -167,6 +172,8 @@ export async function runNativeStaffCutoverApprovedExecutor({candidate,receipt,m
         ||!ownerIsBound(latest,config))stop('current_snapshot_or_owner_changed');
       const recheckedTarget=await provider.assertTarget();
       if(recheckedTarget.databaseId!==config.target.databaseId||recheckedTarget.name!==config.target.databaseName)stop('target_metadata_mismatch');
+      await assertFreshNativeStaffAccessGroup({config,reviewedBefore:groupObservations.before,reviewedAfter:groupObservations.after,
+        getBearerToken,fetchImpl});
       registryEntry(config,receipt,'dispatching',lease.stateSha256);
       dispatchStarted=true;
     }});

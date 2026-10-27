@@ -5,6 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalJson, protectedSign, verifyCloudflareAccessJwt } from './native-staff-bootstrap-owner-approval.mjs';
 import { compileNativeStaffCutoverV1 } from './native-staff-cutover-v1.mjs';
+import { assertNativeStaffAccessGroupObservationWasReadHere, assertNativeStaffAccessGroupStateMatches,
+  validateNativeStaffAccessGroupObservation } from './native-staff-cutover-access-group-observation.mjs';
 
 export const NATIVE_STAFF_CUTOVER_OWNER_APPROVAL_KIND = 'operations-native-staff-cutover-owner-approval-v1';
 export const NATIVE_STAFF_CUTOVER_APPROVAL_STATE_KIND = 'operations-native-staff-cutover-approval-state-v1';
@@ -15,6 +17,7 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/u;
 const MAX_TTL_MS = 10 * 60 * 1000;
 const MAX_RECEIPT_BYTES = 2 * 1024 * 1024;
 const OWNER_CLAIMS = new WeakSet();
+const ISSUABLE_GROUP_CANDIDATES = new WeakMap();
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const stop = code => { throw new Error(`native_staff_cutover_owner_${code}`); };
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -41,7 +44,7 @@ function sourceEvidence(config, { cwd = REPOSITORY_ROOT, run = undefined,
   if (names.length !== 230 || names.some((name,index) => !name.startsWith(`${String(index+1).padStart(4,'0')}_`))
     || sha(names.join('\n')) !== source.migrationNamesSha256) stop('migration_names_mismatch');
   const modulePaths = ['scripts/native-staff-cutover-v1.mjs','scripts/native-staff-sync-preparation.mjs',
-    'scripts/native-staff-bootstrap-d1.mjs'];
+    'scripts/native-staff-cutover-access-group-observation.mjs','scripts/native-staff-bootstrap-d1.mjs'];
   const pinnedPaths = [...modulePaths, ...names.map(name => `apps/operations/migrations/${name}`)];
   try {
     exec('git', ['-C', cwd, 'diff', '--quiet', source.commit, '--', ...pinnedPaths],
@@ -60,6 +63,7 @@ function sourceEvidence(config, { cwd = REPOSITORY_ROOT, run = undefined,
   }
   if (hashes['scripts/native-staff-cutover-v1.mjs'] !== source.cutoverModuleSha256
     || hashes['scripts/native-staff-sync-preparation.mjs'] !== source.syncPreparationModuleSha256
+    || hashes['scripts/native-staff-cutover-access-group-observation.mjs'] !== source.accessGroupModuleSha256
     || hashes['scripts/native-staff-bootstrap-d1.mjs'] !== source.installerModuleSha256) stop('module_pin_mismatch');
   const contentHash = sha(names.map(name => {
     let current;
@@ -88,17 +92,52 @@ export function compileNativeStaffCutoverApprovalContext(artifact, config) {
   const compiled = compileNativeStaffCutoverV1({ reviewedSnapshot: artifact.reviewedSnapshot,
     controlPlaneStaffIds: artifact.controlPlaneStaffIds, operator: artifact.operator,
     syncPreparationReceipt: artifact.syncPreparationReceipt });
+  const groupObservation=compiled.syncPreparationReceipt.accessGroupObservations?.after;
+  if (!groupObservation || groupObservation.accountId!==config.target.accountId
+    || groupObservation.groupId!==config.accessGroup?.id || groupObservation.groupName!==config.accessGroup?.name)
+    stop('access_group_binding_invalid');
   const context = { schemaVersion:1, kind:'operations-native-staff-cutover-approval-context-v1',
     commandId:artifact.commandId, approvalId:artifact.approvalId, sourceSnapshotSha256:compiled.reviewedSnapshot.snapshotSha256,
     planSha256:compiled.planSha256, bindingSha256:compiled.bindingSha256, cohortSha256:compiled.plan.cohortSha256,
     controlPlaneStaffIds:compiled.controlPlaneStaffIds, operatorStaffId:artifact.operator.staffId,
     operatorSubject:artifact.operator.accessSubject, syncPreparationReceipt:compiled.syncPreparationReceipt };
   const approvalContext={schemaVersion:1,kind:'operations-native-staff-cutover-owner-approval-context-v1',
-    target:config.target,source:config.source,cutoverApprovalContext:context};
+    target:config.target,accessGroup:config.accessGroup,source:config.source,cutoverApprovalContext:context};
   const contextSha256=sha(canonicalJson(approvalContext));
   return Object.freeze({ artifact:deepClone(artifact), compiled, context, approvalContext,
     contextSha256, cutoverContextSha256:sha(canonicalJson(context)),
     consentText:`${NATIVE_STAFF_CUTOVER_CONSENT_PREFIX} ${contextSha256}` });
+}
+
+/** Replace advisory preparation observations with the two actual GET results
+ * obtained by the closed owner CLI immediately before consent. The exact safe
+ * observations and times then enter the signed owner context. */
+export function bindNativeStaffCutoverObservedGroupToCandidate(artifact, { before, after }, config) {
+  let first, second, reported;
+  try {
+    assertNativeStaffAccessGroupObservationWasReadHere(before);
+    assertNativeStaffAccessGroupObservationWasReadHere(after);
+    first=validateNativeStaffAccessGroupObservation(before);
+    second=validateNativeStaffAccessGroupObservation(after);
+    reported=validateNativeStaffAccessGroupObservation(artifact?.syncPreparationReceipt?.accessGroupObservations?.after);
+    assertNativeStaffAccessGroupStateMatches(first,second);
+    assertNativeStaffAccessGroupStateMatches(reported,first);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('native_staff_access_group_')) stop('fresh_group_observation_invalid');
+    throw error;
+  }
+  if (first.accountId!==config.target.accountId || second.accountId!==config.target.accountId
+    || first.groupId!==config.accessGroup?.id || second.groupId!==config.accessGroup?.id
+    || first.groupName!==config.accessGroup?.name || second.groupName!==config.accessGroup?.name) stop('fresh_group_target_mismatch');
+  const updated=deepClone(artifact),prior=updated.syncPreparationReceipt;
+  const { receiptSha256: _priorReceiptSha256, ...body }=prior;
+  body.accessGroupObservations={before:first,after:second};
+  body.currentGroupCount=second.managedEmailCount;
+  body.currentGroupSha256=second.managedEmailsSha256;
+  updated.syncPreparationReceipt={...body,receiptSha256:sha(canonicalJson(body))};
+  const reviewed=compileNativeStaffCutoverApprovalContext(updated,config);
+  ISSUABLE_GROUP_CANDIDATES.set(updated,sha(canonicalJson(updated)));
+  return Object.freeze({ artifact:updated, compiled:reviewed });
 }
 
 function buildTrustEnvelope({ config, context, contextSha256, cutoverContextSha256, ownerClaims, now, authorizationChallenge }) {
@@ -154,6 +193,7 @@ export function nativeStaffCutoverConsentText(artifact, config) {
 export function buildNativeStaffCutoverOwnerApprovalReceipt({ config, artifact, ownerSession, typedConsent,
   now = Date.now(), authorizationChallenge = sha(randomBytes(32)) } = {}) {
   if (!ownerSession || !OWNER_CLAIMS.has(ownerSession)) stop('verified_owner_session_required');
+  if (ISSUABLE_GROUP_CANDIDATES.get(artifact)!==sha(canonicalJson(artifact))) stop('fresh_group_observation_required');
   const prepared = compileNativeStaffCutoverApprovalContext(artifact,config), claims = ownerSession.claims;
   if (typedConsent !== prepared.consentText || claims.issuer !== config.access.issuer
     || claims.audience !== config.access.audience || claims.subject !== config.access.owner.accessSubject
@@ -187,9 +227,11 @@ export function verifyNativeStaffCutoverOwnerApprovalReceipt(receipt, { config, 
   const ownerContext=payload?.approvalContext, context=ownerContext?.cutoverApprovalContext;
   if (!exact(payload,payloadKeys) || payload.schemaVersion !== 1 || payload.kind !== NATIVE_STAFF_CUTOVER_OWNER_APPROVAL_KIND
     || canonicalJson(payload.target)!==canonicalJson(config.target) || canonicalJson(payload.source)!==canonicalJson(config.source)
-    || !exact(ownerContext,['schemaVersion','kind','target','source','cutoverApprovalContext'])
+    || !exact(ownerContext,['schemaVersion','kind','target','accessGroup','source','cutoverApprovalContext'])
     || ownerContext.schemaVersion!==1||ownerContext.kind!=='operations-native-staff-cutover-owner-approval-context-v1'
-    || canonicalJson(ownerContext.target)!==canonicalJson(payload.target)||canonicalJson(ownerContext.source)!==canonicalJson(payload.source)
+    || canonicalJson(ownerContext.target)!==canonicalJson(payload.target)
+    || canonicalJson(ownerContext.accessGroup)!==canonicalJson(config.accessGroup)
+    || canonicalJson(ownerContext.source)!==canonicalJson(payload.source)
     || canonicalJson(payload.target)!==canonicalJson(config.target)||canonicalJson(payload.source)!==canonicalJson(config.source)
     || !exact(context,['schemaVersion','kind','commandId','approvalId','sourceSnapshotSha256','planSha256','bindingSha256',
       'cohortSha256','controlPlaneStaffIds','operatorStaffId','operatorSubject','syncPreparationReceipt'])

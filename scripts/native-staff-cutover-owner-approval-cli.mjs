@@ -1,5 +1,6 @@
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
+import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, openSync, writeFileSync, fsyncSync, closeSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,13 +9,16 @@ import { createApprovedExecutorD1Provider } from './native-staff-bootstrap-appro
 import { assertPinnedNativeStaffCutoverDistribution } from './native-staff-cutover-distribution-pin.mjs';
 import { loadPinnedNativeStaffCutoverConfig } from './native-staff-cutover-approved-executor-config.mjs';
 import { assertPinnedNativeStaffCutoverSource, buildNativeStaffCutoverOwnerApprovalReceipt,
-  compileNativeStaffCutoverApprovalContext, issueNativeStaffCutoverApproval, readNativeStaffCutoverApprovalRegistry,
+  bindNativeStaffCutoverObservedGroupToCandidate, compileNativeStaffCutoverApprovalContext,
+  issueNativeStaffCutoverApproval, readNativeStaffCutoverApprovalRegistry,
   revokeNativeStaffCutoverApproval, verifyCurrentNativeStaffCutoverOwnerSession, verifyNativeStaffCutoverOwnerApprovalReceipt,
   writeNativeStaffCutoverReceiptFile } from './native-staff-cutover-owner-approval.mjs';
 import { readNativeStaffCutoverSnapshot } from './native-staff-cutover-v1.mjs';
+import { assertFreshNativeStaffAccessGroup, readNativeStaffAccessGroupObservation } from './native-staff-cutover-access-group-observation.mjs';
 import { wranglerBearerToken } from './native-staff-cutover-approved-executor.mjs';
 
 const stop=code=>{throw new Error(`native_staff_cutover_issuer_${code}`);};
+const sha=value=>createHash('sha256').update(value).digest('hex');
 function readJson(file,max=16*1024*1024){try{const stat=lstatSync(file);if(!stat.isFile()||stat.isSymbolicLink()||stat.size<1||stat.size>max)stop('input_invalid');
   return JSON.parse(readFileSync(file,'utf8'));}catch(error){if(error instanceof Error&&error.message.startsWith('native_staff_cutover_issuer_'))throw error;stop('input_invalid');}}
 function sameSnapshot(left,right){return left?.snapshotSha256===right?.snapshotSha256&&left?.snapshotJson===right?.snapshotJson
@@ -23,6 +27,15 @@ function ownerBound(snapshot,config){let rows;try{rows=JSON.parse(snapshot.snaps
   const user=rows.staff_users?.find(row=>row.id===id),admission=rows.native_staff_admissions?.find(row=>row.staff_id===id),profile=rows.native_staff_profiles?.find(row=>row.staff_id===id);
   return user?.status==='active'&&user.access_subject===s&&admission?.active===1&&admission.bound_access_subject===s
     &&profile?.staff_id===id&&Number.isSafeInteger(profile.version)&&profile.version>0&&snapshot.controlPlaneStaffIds.includes(id);}
+function writeApprovedCandidateFile(config,artifact){
+  let directory;try{directory=lstatSync(config.receiptDirectory);}catch{stop('receipt_directory_unavailable');}
+  if(!directory.isDirectory()||directory.isSymbolicLink())stop('receipt_directory_unavailable');
+  const file=path.join(config.receiptDirectory,`native-staff-cutover-candidate-${artifact.approvalId}.json`);
+  const bytes=`${canonicalJson(artifact)}\n`;if(Buffer.byteLength(bytes)>16*1024*1024)stop('candidate_too_large');
+  let fd;try{fd=openSync(file,'wx',0o600);writeFileSync(fd,bytes,'utf8');fsyncSync(fd);closeSync(fd);fd=undefined;}
+  catch{if(fd!==undefined)closeSync(fd);stop('candidate_publish_failed');}
+  return file;
+}
 async function promptConsent(expected){const rl=createInterface({input:stdin,output:stdout});try{
   const supplied=await rl.question(`Type exactly to issue this one-time cutover approval:\n${expected}\n> `);return supplied;
 }finally{rl.close();}}
@@ -48,13 +61,18 @@ async function main(argv){
     stdout.write(`${canonicalJson({approvalId,state:'revoked'})}\n`);return;
   }
   if(argv.length!==2||argv[0]!=='--candidate')stop('usage');
-  const candidate=readJson(path.resolve(argv[1]));const compiled=compileNativeStaffCutoverApprovalContext(candidate,config);
+  const candidate=readJson(path.resolve(argv[1]));compileNativeStaffCutoverApprovalContext(candidate,config);
   const provider=createApprovedExecutorD1Provider({config,getBearerToken:wranglerBearerToken});
   const target=await provider.assertTarget();if(target.databaseId!==config.target.databaseId||target.name!==config.target.databaseName)stop('target_mismatch');
   const before=await readNativeStaffCutoverSnapshot(provider);
   if(!sameSnapshot(before,candidate.reviewedSnapshot)||!ownerBound(before,config))stop('snapshot_or_owner_changed');
   let session=await verifyCurrentNativeStaffCutoverOwnerSession(config,runPinnedCloudflaredToken(config));
   if(session.staffId!==config.access.owner.staffId)stop('owner_session_mismatch');
+  const observedBefore=await readNativeStaffAccessGroupObservation({config,getBearerToken:wranglerBearerToken});
+  const observedAfter=await readNativeStaffAccessGroupObservation({config,getBearerToken:wranglerBearerToken});
+  const approved=bindNativeStaffCutoverObservedGroupToCandidate(candidate,{before:observedBefore,after:observedAfter},config);
+  const approvalCandidate=approved.artifact,compiled=approved.compiled;
+  const observations=approvalCandidate.syncPreparationReceipt.accessGroupObservations;
   stdout.write(`Cutover review summary (hashes bind the complete context): ${canonicalJson({
     accountId:config.target.accountId,databaseId:config.target.databaseId,databaseName:config.target.databaseName,
     sourceCommit:config.source.commit,migrationNamesSha256:config.source.migrationNamesSha256,
@@ -63,19 +81,25 @@ async function main(argv){
     approvalContextSha256:compiled.contextSha256,planSha256:compiled.context.planSha256,bindingSha256:compiled.context.bindingSha256,
     cohortSha256:compiled.context.cohortSha256,staffCount:compiled.compiled.cohort.length,
     controlPlaneStaffIds:compiled.context.controlPlaneStaffIds,
-    currentGroupCount:candidate.syncPreparationReceipt.currentGroupCount,
-    currentGroupSha256:candidate.syncPreparationReceipt.currentGroupSha256,
-    desiredGroupCount:candidate.syncPreparationReceipt.desiredGroupCount,
-    desiredGroupSha256:candidate.syncPreparationReceipt.desiredGroupSha256})}\n`);
+    accessGroupId:config.accessGroup.id,accessGroupName:config.accessGroup.name,
+    groupReadBeforeAt:observations.before.observedAt,groupReadAfterAt:observations.after.observedAt,
+    groupPolicySha256:observations.after.policySha256,groupEvidenceSha256:observations.after.evidenceSha256,
+    currentGroupCount:approvalCandidate.syncPreparationReceipt.currentGroupCount,
+    currentGroupSha256:approvalCandidate.syncPreparationReceipt.currentGroupSha256,
+    desiredGroupCount:approvalCandidate.syncPreparationReceipt.desiredGroupCount,
+    desiredGroupSha256:approvalCandidate.syncPreparationReceipt.desiredGroupSha256})}\n`);
   const typed=await promptConsent(compiled.consentText);
   session=await verifyCurrentNativeStaffCutoverOwnerSession(config,runPinnedCloudflaredToken(config));
   const after=await readNativeStaffCutoverSnapshot(provider);
   if(session.staffId!==config.access.owner.staffId||!sameSnapshot(before,after)||!sameSnapshot(after,candidate.reviewedSnapshot)||!ownerBound(after,config))
     stop('owner_or_snapshot_changed_after_consent');
-  const receipt=buildNativeStaffCutoverOwnerApprovalReceipt({config,artifact:candidate,ownerSession:session,typedConsent:typed});
+  await assertFreshNativeStaffAccessGroup({config,reviewedBefore:observations.before,reviewedAfter:observations.after,
+    getBearerToken:wranglerBearerToken});
+  const candidatePath=writeApprovedCandidateFile(config,approvalCandidate);
+  const receipt=buildNativeStaffCutoverOwnerApprovalReceipt({config,artifact:approvalCandidate,ownerSession:session,typedConsent:typed});
   const receiptPath=writeNativeStaffCutoverReceiptFile(config,receipt);const registration=issueNativeStaffCutoverApproval(config,receipt);
   stdout.write(`${canonicalJson({approvalId:registration.approvalId,commandId:registration.commandId,
-    receiptSha256:registration.receiptSha256,registryStateSha256:registration.stateSha256,receiptPath})}\n`);
+    receiptSha256:registration.receiptSha256,registryStateSha256:registration.stateSha256,candidatePath,receiptPath})}\n`);
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url))main(process.argv.slice(2)).catch(error=>{
   const code=error instanceof Error&&/^native_staff_cutover_(?:issuer|owner|executor|config|distribution)_[a-z0-9_]+$/u.test(error.message)

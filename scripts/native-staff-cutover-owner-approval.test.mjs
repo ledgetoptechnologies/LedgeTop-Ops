@@ -10,13 +10,14 @@ import { canonicalJson, protectedSign } from './native-staff-bootstrap-owner-app
 import { loadPinnedNativeStaffCutoverConfig, parseNativeStaffCutoverConfig } from './native-staff-cutover-approved-executor-config.mjs';
 import { assertPinnedNativeStaffCutoverDistribution } from './native-staff-cutover-distribution-pin.mjs';
 import { NATIVE_STAFF_CUTOVER_CONSENT_PREFIX, acquireNativeStaffCutoverApprovalLease,
-  assertPinnedNativeStaffCutoverSource,
-  buildNativeStaffCutoverOwnerApprovalReceipt, initializeNativeStaffCutoverApprovalRegistry,
+  assertPinnedNativeStaffCutoverSource, bindNativeStaffCutoverObservedGroupToCandidate,
+  buildNativeStaffCutoverOwnerApprovalReceipt, compileNativeStaffCutoverApprovalContext, initializeNativeStaffCutoverApprovalRegistry,
   issueNativeStaffCutoverApproval, nativeStaffCutoverConsentText, readNativeStaffCutoverApprovalRegistry,
   revokeNativeStaffCutoverApproval, verifyCurrentNativeStaffCutoverOwnerSession,
   verifyNativeStaffCutoverOwnerApprovalReceipt, writeNativeStaffCutoverReceiptFile } from './native-staff-cutover-owner-approval.mjs';
 import { compileNativeStaffCutoverV1 } from './native-staff-cutover-v1.mjs';
 import { runNativeStaffCutoverApprovedExecutor } from './native-staff-cutover-approved-executor.mjs';
+import { readNativeStaffAccessGroupObservation } from './native-staff-cutover-access-group-observation.mjs';
 
 const sha=value=>createHash('sha256').update(value).digest('hex');
 const uuid=n=>`aaaaaaaa-aaaa-4aaa-8aaa-${String(n).padStart(12,'0')}`;
@@ -41,8 +42,9 @@ function makeConfig(directory,signer){
   const keyId=sha(createPublicKey(publicKeyPem).export({type:'spki',format:'der'}));
   return {schemaVersion:1,kind:'operations-native-staff-cutover-trust-config-v1',
     target:{accountId:'a'.repeat(32),databaseId:uuid(100),databaseName:'synthetic-cutover-db'},
+    accessGroup:{id:uuid(101),name:'Synthetic Ops Staff'},
     source:{commit:'b'.repeat(40),migrationNamesSha256:'c'.repeat(64),migrationContentsSha256:'d'.repeat(64),
-      cutoverModuleSha256:'e'.repeat(64),syncPreparationModuleSha256:'f'.repeat(64),installerModuleSha256:'1'.repeat(64)},
+      cutoverModuleSha256:'e'.repeat(64),syncPreparationModuleSha256:'f'.repeat(64),accessGroupModuleSha256:'0'.repeat(64),installerModuleSha256:'1'.repeat(64)},
     access:{origin:'https://ops.example.test',issuer:'https://synthetic.cloudflareaccess.com',audience:'A'.repeat(32),
       owner:{staffId:'owner-synthetic',accessSubject:'access|owner-synthetic'},cloudflaredExecutablePath:'C:\\synthetic\\cloudflared.exe',
       cloudflaredExecutableSha256:'2'.repeat(64)},
@@ -65,13 +67,22 @@ function candidateFor(config,serial=1){
   const cohort=[{staffId:owner.id,email:owner.email,accessSubject:owner.access_subject,displayName:owner.display_name,active:true,
     admissionVersion:1,profileVersion:1}];
   const cohortSha256=sha(stable(cohort)),group=[owner.email];
-  const prep={schemaVersion:1,kind:'operations-native-staff-sync-dormant-preparation-v1',accountId:'9'.repeat(32),workerName:'ltds-ops-sync',
+  const groupPolicy={exclude:[],require:[],is_default:[]};
+  const groupObservation=()=>{
+    const body={schemaVersion:1,kind:'cloudflare-access-group-observation-v1',accountId:config.target.accountId,
+      groupId:config.accessGroup.id,groupName:config.accessGroup.name,observedAt:new Date().toISOString(),
+      managedEmailCount:group.length,managedEmailsSha256:sha(stable(group)),includeRuleCount:group.length,
+      policySha256:sha(stable(groupPolicy)),providerResponseSha256:'9'.repeat(64)};
+    return {...body,evidenceSha256:sha(stable(body))};
+  };
+  const prep={schemaVersion:1,kind:'operations-native-staff-sync-dormant-preparation-v1',accountId:config.target.accountId,workerName:'ltds-ops-sync',
     environment:'production',databaseId:uuid(101),activeRuntimeVersion:'runtime-a',candidateRuntimeVersion:'runtime-a',
     activeSettingsSha256:'3'.repeat(64),candidateSettingsSha256:'4'.repeat(64),bindingsSha256:'5'.repeat(64),activeModuleSha256:'6'.repeat(64),
     candidateModuleSha256:'7'.repeat(64),activeSourceCommit:'8'.repeat(40),candidateSourceCommit:'9'.repeat(40),controlState:'disabled',
     cohortSha256,activeStaffCount:1,activeAlternateBindingCount:0,alternateBindingEvidenceSha256:'a'.repeat(64),
     candidateSourceTreeSha256:'b'.repeat(64),sourceEvidenceSha256:'c'.repeat(64),behaviorQualificationSha256:'d'.repeat(64),
     testReportSha256:'e'.repeat(64),builtModuleSha256:'7'.repeat(64),qualificationRunnerSha256:'f'.repeat(64),
+    accessGroupObservations:{before:groupObservation(),after:groupObservation()},
     currentGroupCount:1,currentGroupSha256:sha(stable(group)),
     desiredGroupCount:1,desiredGroupSha256:sha(stable(group))};
   const syncPreparationReceipt={...prep,receiptSha256:sha(stable(prep))};
@@ -79,6 +90,12 @@ function candidateFor(config,serial=1){
   compileNativeStaffCutoverV1({reviewedSnapshot,controlPlaneStaffIds:[owner.id],operator:{staffId:owner.id,accessSubject:owner.access_subject},syncPreparationReceipt});
   return {schemaVersion:1,kind:'operations-native-staff-cutover-candidate-v1',approvalId:uuid(serial),commandId:uuid(serial+1),
     reviewedSnapshot,controlPlaneStaffIds:[owner.id],operator:{staffId:owner.id,accessSubject:owner.access_subject},syncPreparationReceipt};
+}
+
+function replaceObservationFields(value,changes){
+  const {evidenceSha256:_old,...body}=value;
+  const updated={...body,...changes};
+  return {...updated,evidenceSha256:sha(stable(updated))};
 }
 
 function makeAccessToken(config){
@@ -107,15 +124,36 @@ test('approved executor cannot reach Access or D1 while its independent distribu
   assert.equal(accessCalls,0);assert.equal(bearerCalls,0);
 });
 
+test('owner consent artifact binds two actual fresh group observations and replaces candidate-supplied observation hashes',async()=>{
+  const config=makeConfig(os.tmpdir(),{publicKey:generateKeyPairSync('rsa',{modulusLength:3072}).publicKey,
+    protectedPrivateKeyPath:'C:\\synthetic\\unused.dpapi',entropy:'synthetic-dpapi-entropy-material'});
+  // The group evidence is tested independently of signer use; the trust key fields
+  // above are synthetic and this helper performs no provider or signing call.
+  const candidate=candidateFor(config),reported=candidate.syncPreparationReceipt.accessGroupObservations.after;
+  const read=async(members,now)=>readNativeStaffAccessGroupObservation({config,getBearerToken:async()=>'synthetic-test-token-value',now:()=>now,
+    fetchImpl:async()=>ok({success:true,result:{id:config.accessGroup.id,name:config.accessGroup.name,
+      include:members.map(email=>({email:{email}})),exclude:[],require:[],is_default:[]}})});
+  const before=await read(['owner@example.test'],Date.now()-1000),after=await read(['owner@example.test'],Date.now());
+  const bound=bindNativeStaffCutoverObservedGroupToCandidate(candidate,{before,after},config);
+  assert.deepEqual(bound.artifact.syncPreparationReceipt.accessGroupObservations,{before,after});
+  assert.notEqual(bound.artifact.syncPreparationReceipt.receiptSha256,candidate.syncPreparationReceipt.receiptSha256);
+  assert.notEqual(bound.compiled.contextSha256,compileNativeStaffCutoverApprovalContext(candidate,config).contextSha256);
+  const drift=await read(['owner@example.test','other@example.test'],Date.now());
+  assert.throws(()=>bindNativeStaffCutoverObservedGroupToCandidate(candidate,{before,after:drift},config),/fresh_group_observation_invalid/u);
+  const serialized=structuredClone(after);
+  assert.throws(()=>bindNativeStaffCutoverObservedGroupToCandidate(candidate,{before,after:serialized},config),/fresh_group_observation_invalid/u);
+});
+
 test('230-source pin requires the contiguous committed migration chain and a clean pinned Git diff',()=>{
   const root=fileURLToPath(new URL('../',import.meta.url)),names=readdirSync(path.join(root,'apps','operations','migrations'))
     .filter(name=>/^\d{4}_.+\.sql$/u.test(name)&&Number(name.slice(0,4))<=230).sort();
-  const modulePaths=['scripts/native-staff-cutover-v1.mjs','scripts/native-staff-sync-preparation.mjs','scripts/native-staff-bootstrap-d1.mjs'];
+  const modulePaths=['scripts/native-staff-cutover-v1.mjs','scripts/native-staff-sync-preparation.mjs',
+    'scripts/native-staff-cutover-access-group-observation.mjs','scripts/native-staff-bootstrap-d1.mjs'];
   const moduleBytes=Object.fromEntries(modulePaths.map(name=>[name,readFileSync(path.join(root,name))]));
   const contentHash=sha(names.map(name=>`${name}\0${sha(readFileSync(path.join(root,'apps','operations','migrations',name)))}`).join('\n'));
   const config={source:{commit:'b'.repeat(40),migrationNamesSha256:sha(names.join('\n')),migrationContentsSha256:contentHash,
     cutoverModuleSha256:sha(moduleBytes[modulePaths[0]]),syncPreparationModuleSha256:sha(moduleBytes[modulePaths[1]]),
-    installerModuleSha256:sha(moduleBytes[modulePaths[2]])}};
+    accessGroupModuleSha256:sha(moduleBytes[modulePaths[2]]),installerModuleSha256:sha(moduleBytes[modulePaths[3]])}};
   const fakeGit=(file,args)=>{
     if(file!=='git'||args[0]!=='-C')throw new Error('unexpected-git-call');
     const command=args[2];if(command==='cat-file')return '';
@@ -135,8 +173,11 @@ test('cutover receipt binds exact purpose, target/source, full preparation conte
   {skip:process.platform!=='win32'},async t=>{
     const directory=mkdtempSync(path.join(os.tmpdir(),'native-staff-cutover-owner-'));
     t.after(()=>rmSync(directory,{recursive:true,force:true}));
-    const signer=makeProtectedSigner(directory),config=makeConfig(directory,signer),candidate=candidateFor(config);
+    const signer=makeProtectedSigner(directory),config=makeConfig(directory,signer),rawCandidate=candidateFor(config);
     const {token,fetchImpl,jwk}=makeAccessToken(config);
+    const read=()=>readNativeStaffAccessGroupObservation({config,getBearerToken:async()=>'synthetic-test-token-value',fetchImpl:async()=>ok({success:true,
+      result:{id:config.accessGroup.id,name:config.accessGroup.name,include:[{email:{email:'owner@example.test'}}],exclude:[],require:[],is_default:[]}})});
+    const candidate=bindNativeStaffCutoverObservedGroupToCandidate(rawCandidate,{before:await read(),after:await read()},config).artifact;
     const session=await verifyCurrentNativeStaffCutoverOwnerSession(config,token,{fetchImpl});
     const consent=nativeStaffCutoverConsentText(candidate,config);
     assert.match(consent,new RegExp(`^${NATIVE_STAFF_CUTOVER_CONSENT_PREFIX} [a-f0-9]{64}$`,'u'));
@@ -163,8 +204,11 @@ test('cutover registry is independently signed, purpose-specific, one-shot, and 
   {skip:process.platform!=='win32'},async t=>{
     const directory=mkdtempSync(path.join(os.tmpdir(),'native-staff-cutover-registry-'));
     t.after(()=>rmSync(directory,{recursive:true,force:true}));
-    const signer=makeProtectedSigner(directory),config=makeConfig(directory,signer),candidate=candidateFor(config,10);
+    const signer=makeProtectedSigner(directory),config=makeConfig(directory,signer),rawCandidate=candidateFor(config,10);
     const {token,fetchImpl}=makeAccessToken(config),session=await verifyCurrentNativeStaffCutoverOwnerSession(config,token,{fetchImpl});
+    const read=()=>readNativeStaffAccessGroupObservation({config,getBearerToken:async()=>'synthetic-test-token-value',fetchImpl:async()=>ok({success:true,
+      result:{id:config.accessGroup.id,name:config.accessGroup.name,include:[{email:{email:'owner@example.test'}}],exclude:[],require:[],is_default:[]}})});
+    const candidate=bindNativeStaffCutoverObservedGroupToCandidate(rawCandidate,{before:await read(),after:await read()},config).artifact;
     const receipt=buildNativeStaffCutoverOwnerApprovalReceipt({config,artifact:candidate,ownerSession:session,
       typedConsent:nativeStaffCutoverConsentText(candidate,config),authorizationChallenge:sha('registry-challenge')});
     initializeNativeStaffCutoverApprovalRegistry(config);
@@ -178,7 +222,8 @@ test('cutover registry is independently signed, purpose-specific, one-shot, and 
     lease.finish('consumed');
     assert.equal(readNativeStaffCutoverApprovalRegistry(config).envelope.payload.entries[0].state,'consumed');
     assert.throws(()=>acquireNativeStaffCutoverApprovalLease(config,receipt),/approval_not_issuable/u);
-    const second=candidateFor(config,20),secondSession=await verifyCurrentNativeStaffCutoverOwnerSession(config,token,{fetchImpl});
+    const rawSecond=candidateFor(config,20),secondSession=await verifyCurrentNativeStaffCutoverOwnerSession(config,token,{fetchImpl});
+    const second=bindNativeStaffCutoverObservedGroupToCandidate(rawSecond,{before:await read(),after:await read()},config).artifact;
     const secondReceipt=buildNativeStaffCutoverOwnerApprovalReceipt({config,artifact:second,ownerSession:secondSession,
       typedConsent:nativeStaffCutoverConsentText(second,config),authorizationChallenge:sha('revoke-challenge')});
     writeNativeStaffCutoverReceiptFile(config,secondReceipt);

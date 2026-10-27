@@ -38,14 +38,43 @@ module hash and runtime/bindings against this preparation record.
 The preparation receipt requires read-only before and after observations:
 
 - The active staff cohort digest and exact active email set must remain equal.
-- The managed Access group membership readback must remain byte-for-byte
-  equivalent as a normalized sorted set. Historical or otherwise unrelated
-  existing group members are preserved during preparation.
-- The preparation receipt records digests and counts for both the current
-  group and the planned desired group (active admitted primary logins plus
-  currently verified alternate bindings). The cutover approval context binds
-  this receipt to the exact D1 snapshot, plan, operator, command, and target;
-  both group digests are persisted in the immutable execution result.
+- A bounded Node adapter performs one GET to the exact configured Cloudflare
+  account/group path. It requires the pinned group ID and name, a complete
+  `include`/`exclude`/`require`/`is_default` response using Cloudflare's
+  AccessRule-array shape. This reviewed profile permits email-only include
+  rules and requires the other three policy arrays to be empty; unsupported
+  policy rules, duplicate normalized members, redirects, non-200 responses,
+  oversized bodies, malformed envelope notices, and unknown response keys fail
+  closed. Required group fields must be explicitly present even where the API
+  schema marks them optional; omission is not normalized to an empty policy.
+  It never calls the reconciliation PUT helper.
+- The adapter normalizes the full include email set in memory, sorts it, and
+  emits only its count and SHA-256, a policy hash covering the exact
+  `exclude`/`require`/`is_default` values, pinned group identity, observation
+  time, raw-response SHA-256, and evidence SHA-256. Email lists, response
+  bodies, and bearer tokens are not placed in preparation receipts or logs.
+- Before/after observations must identify the same account and group and have
+  the same complete normalized member-set and policy hashes. The owner issuer
+  re-GETs the group before displaying consent and after typed consent; the
+  executor re-GETs it during preview and immediately before the D1 batch. Each
+  fresh read must match the reviewed stable state. Observation timestamps and
+  raw-response digests are included in the signed candidate context and the
+  durable cutover receipt, but naturally are not required to match a later
+  GET byte-for-byte.
+- The preparation receipt also records the planned desired group (active
+  admitted primary logins plus currently verified alternate bindings) as a
+  count and hash. Historical or otherwise unrelated current group members
+  remain preserved during preparation. The post-cutover worker reconciliation
+  is separately verified by another fresh GET; D1 readiness alone does not
+  prove Cloudflare membership.
+
+The empty exclude/require/default-policy profile is a source constraint, not
+verified current production state. The available read-only Cloudflare API call
+currently returns 403, and a separate UI summary is not API evidence. The
+installer remains unqualified for production until an authorized GET confirms
+all required fields and the exact group policy. This source does not establish
+the semantics of a future Access group update; any write path must be reviewed
+against the real API response separately.
 - The control must be missing or default-off, at generation zero, with no
   active reconciliation lease. This phase must never write Access membership.
 - Binding metadata contains names, types, and resource identifiers only; secret
@@ -57,8 +86,12 @@ This is local source qualification, not live deployment or remote readback.
 The compiler emits a bounded digest
 receipt only. It does not change the final Operations or Sync readiness gate,
 authorize a deployment, execute Worker code, or qualify remote observations
-unless an independently reviewed read-only provider adapter supplies them.
-Provider observations remain separate from source qualification.
+unless the bounded read-only provider adapter supplies them. Provider
+observations remain separate from source qualification. Its trusted config
+pins the Access group ID and name and the reader uses an in-memory Cloudflare
+management token from the existing credential boundary; the token must have
+Access Groups read permission. The source contains no provider credential or
+new credential provisioning flow.
 
 ## First cutover receipt
 

@@ -10,6 +10,13 @@ const COMMIT = /^[0-9a-f]{40}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const fail = code => { throw new Error(`native_staff_cutover_config_${code}`); };
 const sha = value => createHash('sha256').update(value).digest('hex');
+function deepFreeze(value) {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
 
 function exact(value, keys) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -24,15 +31,18 @@ export function parseNativeStaffCutoverConfig(text, expectedSha256) {
     || !HASH.test(expectedSha256 ?? '') || expectedSha256 === '0'.repeat(64) || sha(text) !== expectedSha256) fail('pin_mismatch');
   let value;
   try { value = JSON.parse(text); } catch { fail('json_invalid'); }
-  const keys = ['schemaVersion','kind','target','source','access','signer','receiptDirectory'];
+  const keys = ['schemaVersion','kind','target','accessGroup','source','access','signer','receiptDirectory'];
   if (!exact(value, keys) || value.schemaVersion !== 1 || value.kind !== 'operations-native-staff-cutover-trust-config-v1'
     || !exact(value.target, ['accountId','databaseId','databaseName']) || !/^[a-f0-9]{32}$/u.test(value.target.accountId ?? '')
     || !UUID.test(value.target.databaseId ?? '') || typeof value.target.databaseName !== 'string'
     || !/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,127}$/u.test(value.target.databaseName)
-    || !exact(value.source, ['commit','migrationNamesSha256','migrationContentsSha256','cutoverModuleSha256','syncPreparationModuleSha256','installerModuleSha256'])
+    || !exact(value.accessGroup, ['id','name']) || !UUID.test(value.accessGroup.id ?? '')
+    || typeof value.accessGroup.name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,127}$/u.test(value.accessGroup.name)
+    || !exact(value.source, ['commit','migrationNamesSha256','migrationContentsSha256','cutoverModuleSha256','syncPreparationModuleSha256',
+      'accessGroupModuleSha256','installerModuleSha256'])
     || !COMMIT.test(value.source.commit ?? '')
     || ![value.source.migrationNamesSha256,value.source.migrationContentsSha256,value.source.cutoverModuleSha256,
-      value.source.syncPreparationModuleSha256,value.source.installerModuleSha256].every(item => HASH.test(item ?? ''))
+      value.source.syncPreparationModuleSha256,value.source.accessGroupModuleSha256,value.source.installerModuleSha256].every(item => HASH.test(item ?? ''))
     || !exact(value.access, ['origin','issuer','audience','owner','cloudflaredExecutablePath','cloudflaredExecutableSha256'])
     || !exact(value.access.owner, ['staffId','accessSubject'])
     || !/^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/u.test(value.access.owner.staffId ?? '')
@@ -57,7 +67,7 @@ export function parseNativeStaffCutoverConfig(text, expectedSha256) {
     || !HASH.test(value.access.cloudflaredExecutableSha256 ?? '')
     || key.asymmetricKeyType !== 'rsa' || (key.asymmetricKeyDetails?.modulusLength ?? 0) < 3072
     || sha(key.export({ type: 'spki', format: 'der' })) !== value.signer.keyId) fail('schema_invalid');
-  return Object.freeze(value);
+  return deepFreeze(value);
 }
 
 export function loadPinnedNativeStaffCutoverConfig({ env = process.env, read = readFileSync, stat = lstatSync } = {}) {
