@@ -45,14 +45,14 @@ test('POST/PUT/PATCH/DELETE/OPTIONS and other non-navigation methods never redir
       assert.equal(canonicalDomainNavigationRedirect(request('/','https://ops.ledgetopdroneservices.com',method),configuration),null);
 });
 
-test('public links, APIs, downloads, capabilities, uploads, Viewer and assets keep their existing host', () => {
+test('public links, APIs, downloads, capabilities, uploads, detailed Viewer sessions and assets keep their existing host', () => {
   const excluded=[
     '/s/existing-public-id','/s/existing-public-id#fragment-secret','/client-share/existing-id',
     '/api/public/shares/existing-id/manifest','/api/public/shares/existing-id/bulk-download',
     '/api/client/profile','/api/internal/client-request-attachments/id/scanned','/api/agent/v1/clients',
     '/api/viewer/workspace/session-renewal','/api/project-alpha/events','/api/upload',
     '/assets/app.js','/health','/r/invitation','/onboarding/synthetic-token','/portal/operations-recipient-enrollment/id',
-    '/portal/recipient-enrollment/id','/portal/invitation/id','/viewer','/viewer/session/callback',
+    '/portal/recipient-enrollment/id','/portal/invitation/id','/viewer/workspace/synthetic','/viewer/session/callback',
     '/administration/client-portal/operations-workspaces','/clients/onboarding/capability',
     '/cdn-cgi/access/login','/cdn-cgi/access/logout','/cdn-cgi/access/get-identity',
   ];
@@ -60,6 +60,20 @@ test('public links, APIs, downloads, capabilities, uploads, Viewer and assets ke
     assert.equal(canonicalDomainNavigationRedirect(request(path),ops),null,path);
     assert.equal(canonicalDomainNavigationRedirect(request(path,'https://portal.ledgetopdroneservices.com'),portal),null,path);
   }
+});
+
+test('ordinary staff navigation aliases remain distinct from capability routes', () => {
+  for (const path of ['/viewer','/intel?business=synthetic&range=28d','/account','/configurations','/notifications',
+    '/operations/projects','/operations/tasks','/operations/sops','/operations/notifications',
+    '/operations/client-requests','/operations/feedback','/operations/inbox','/operations/invitation-requests',
+    '/operations/client-requests/synthetic-id','/operations/feedback/synthetic-id','/operations/invitation-requests/synthetic-id',
+    '/clients/requests','/clients/feedback','/clients/invitation-requests','/clients/invitation-requests/synthetic-id',
+    '/delivery/incoming','/delivery/links']) {
+    assert.equal(canonicalDomainNavigationRedirect(request(path),ops)?.headers.get('Location'),`https://ops.ledgetop.app${path}`,path);
+  }
+  for (const path of ['/operations/invitation-requests/synthetic/extra','/operations/%69nvitation-requests',
+    '/viewer/session/synthetic','/viewer?token=synthetic','/account?intentId=synthetic'])
+    assert.equal(canonicalDomainNavigationRedirect(request(path),ops),null,path);
 });
 
 test('capability and login query parameters are not redirected by the generic navigation policy', () => {

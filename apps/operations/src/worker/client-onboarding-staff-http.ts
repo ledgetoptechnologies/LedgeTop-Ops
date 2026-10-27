@@ -21,6 +21,8 @@ export type ClientOnboardingStaffRoute = "session" | "scope-choices" | "create" 
 export type ClientOnboardingStaffHttpDependencies = Readonly<{
   configuration: NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
   database: D1Database;
+  /** Exact Worker-admitted Ops origins let open tabs finish origin-bound requests during the host migration. */
+  operationsOrigins?: string;
   handoffKeyringJson?: string;
   /** Canonical portal origin, supplied by deployment configuration, never browser input. */
   recipientOrigin?: string;
@@ -107,6 +109,23 @@ function snapshot(dependencies: ClientOnboardingStaffHttpDependencies) {
     if (error instanceof HttpFailure) throw error;
     throw new HttpFailure(503, "client_onboarding_unavailable");
   }
+}
+function configuredStaffOrigins(value: string | undefined, primary: string): Set<string> {
+  if (value === undefined) return new Set([primary]);
+  const values = value.split(",").map(item => item.trim());
+  if (!values.length || values.length > 4 || values.some(item => !item))
+    throw new HttpFailure(503, "client_onboarding_unavailable");
+  const origins = values.map(item => {
+    try {
+      const parsed = new URL(item);
+      if (parsed.protocol !== "https:" || parsed.origin !== item || parsed.pathname !== "/"
+        || parsed.search || parsed.hash || parsed.username || parsed.password || parsed.port) throw Error();
+      return parsed.origin;
+    } catch { throw new HttpFailure(503, "client_onboarding_unavailable"); }
+  });
+  if (new Set(origins).size !== origins.length || !origins.includes(primary))
+    throw new HttpFailure(503, "client_onboarding_unavailable");
+  return new Set(origins);
 }
 function keyring(value: unknown): ClientOnboardingKeyring {
   try {
@@ -227,12 +246,14 @@ export async function handleClientOnboardingStaffHttp(request: Request,
     const route = clientOnboardingStaffHttpRequest(request.method, url.pathname);
     if (!route) throw new HttpFailure(404, "not_found");
     const authority = snapshot(dependencies);
+    const staffOrigins = configuredStaffOrigins(dependencies.operationsOrigins, authority.origin);
     // Capture deployment configuration before authentication/CSRF awaits so a
     // mutable test or host object cannot change the selected destinations.
     const projectAlphaApiV2Connections = dependencies.projectAlphaApiV2Connections;
     const recipientOrigin = dependencies.recipientOrigin;
     const handoff = route === "create" || route === "reveal" ? keyring(dependencies.handoffKeyringJson) : undefined;
-    if (url.origin !== authority.origin || url.search || url.hash)
+    const requestOrigin = url.origin;
+    if (!staffOrigins.has(requestOrigin) || url.search || url.hash)
       throw new HttpFailure(403, "client_onboarding_denied");
     const origin = request.headers.get("Origin");
     const fetchSite = request.headers.get("Sec-Fetch-Site");
@@ -240,19 +261,19 @@ export async function handleClientOnboardingStaffHttp(request: Request,
       throw new HttpFailure(403, "client_onboarding_denied");
     if (route === "session") {
       if (request.headers.get("X-Native-Staff-Request") !== "1"
-        || (origin !== null && origin !== authority.origin)) throw new HttpFailure(403, "client_onboarding_denied");
-    } else if (origin !== authority.origin) throw new HttpFailure(403, "client_onboarding_denied");
+        || (origin !== null && origin !== requestOrigin)) throw new HttpFailure(403, "client_onboarding_denied");
+    } else if (origin !== requestOrigin) throw new HttpFailure(403, "client_onboarding_denied");
     let auth: AuthenticatedNativeStaffWithAdmissionVersion;
     try { auth = await authenticateNativeStaffWithAdmissionVersion(request, authority.database, authority.access); }
     catch { throw new HttpFailure(403, "client_onboarding_denied"); }
     unexpired(auth);
     if (route === "session") {
-      const token = await csrfToken(authority.csrfSecret, authority.origin, authority.access, auth,
+      const token = await csrfToken(authority.csrfSecret, requestOrigin, authority.access, auth,
         Math.floor(Date.now() / 1000 / BUCKET_SECONDS));
       unexpired(auth);
       return response(200, { csrfToken: token, verifiedUntil: auth.verifiedUntil });
     }
-    await requireCsrf(request, authority.csrfSecret, authority.origin, authority.access, auth);
+    await requireCsrf(request, authority.csrfSecret, requestOrigin, authority.access, auth);
     unexpired(auth);
     const input = await body(request, route);
     unexpired(auth);

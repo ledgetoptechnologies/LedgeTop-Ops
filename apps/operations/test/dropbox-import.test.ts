@@ -5,7 +5,31 @@ vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntry
 
 import { dropboxImportPartSize, encryptImportSecret, decryptImportSecret, importOneFile, loadDropboxImportCredential, revokeDropboxImportAuthorization } from "../src/worker/dropbox-import";
 import { DropboxImportClient, DropboxImportError } from "../src/worker/dropbox-import-client";
-import { dropboxImportCapability, registerDropboxImportRoutes } from "../src/worker/dropbox-import-routes";
+import { dropboxImportCallbackUrl, dropboxImportCallbackUrlForState, dropboxImportCapability, registerDropboxImportRoutes } from "../src/worker/dropbox-import-routes";
+
+describe("Dropbox callback host migration", () => {
+  it("generates callbacks on PUBLIC_BASE_URL and leaves old callback paths intact", () => {
+    expect(dropboxImportCallbackUrl({ PUBLIC_BASE_URL: "https://ops.ledgetop.app" }))
+      .toBe("https://ops.ledgetop.app/api/dropbox-import/oauth/callback");
+    expect(dropboxImportCallbackUrl({ PUBLIC_BASE_URL: "https://ops.ledgetopdroneservices.com" }))
+      .toBe("https://ops.ledgetopdroneservices.com/api/dropbox-import/oauth/callback");
+  });
+  it("uses the original encrypted callback URI for an in-flight OAuth state across cutover", () => {
+    const old = "https://ops.ledgetopdroneservices.com/api/dropbox-import/oauth/callback";
+    expect(dropboxImportCallbackUrlForState(old, { PUBLIC_BASE_URL: "https://ops.ledgetop.app" }))
+      .toBe(old);
+    expect(dropboxImportCallbackUrlForState(undefined, { PUBLIC_BASE_URL: "https://ops.ledgetop.app" }))
+      .toBe("https://ops.ledgetop.app/api/dropbox-import/oauth/callback");
+  });
+  it("keeps the callback URI inside the existing purpose-bound encrypted OAuth state", async () => {
+    const secret = "test-secret-material-at-least-32-chars-long!!";
+    const payload = { verifier: "pkce-verifier", staffId: "staff-one",
+      redirectUri: "https://ops.ledgetopdroneservices.com/api/dropbox-import/oauth/callback" };
+    const encrypted = await encryptImportSecret(payload, secret, "oauth-state:state-hash");
+    await expect(decryptImportSecret<typeof payload>(encrypted.ciphertext, encrypted.iv, secret, "oauth-state:state-hash"))
+      .resolves.toEqual(payload);
+  });
+});
 
 describe("Dropbox import secret encryption", () => {
   const secret = "test-secret-material-at-least-32-chars-long!!";

@@ -187,12 +187,27 @@ function validateReviewUrl(env: Env, value: string | undefined, attemptId: strin
   if (!value) return null;
   try {
     const base = new URL(env.PUBLIC_BASE_URL), url = new URL(value);
+    const configured = env.OPERATIONS_ORIGINS
+      ? env.OPERATIONS_ORIGINS.split(",").map(item => item.trim())
+      : [base.origin];
+    if (!configured.length || configured.length > 4 || configured.some(item => !item)) throw new Error("origins");
+    const trustedOrigins = configured.map(item => {
+      const configuredOrigin = new URL(item);
+      if (configuredOrigin.protocol !== "https:" || configuredOrigin.origin !== item
+        || configuredOrigin.pathname !== "/" || configuredOrigin.search || configuredOrigin.hash
+        || configuredOrigin.username || configuredOrigin.password || configuredOrigin.port) throw new Error("origin");
+      return configuredOrigin.origin;
+    });
     if (base.protocol !== "https:" || base.username || base.password ||
       url.protocol !== "https:" || url.username || url.password || url.hash ||
-      url.origin !== base.origin || url.pathname !== "/operations/processing" ||
+      new Set(trustedOrigins).size !== trustedOrigins.length || !trustedOrigins.includes(base.origin)
+      || !trustedOrigins.includes(url.origin) || url.pathname !== "/operations/processing" ||
       url.search !== `?attemptId=${encodeURIComponent(attemptId)}`)
       throw new Error("canonical_url");
-    return `${base.origin}/operations/processing?attemptId=${encodeURIComponent(attemptId)}`;
+    // Preserve the origin signed into callbacks created by the old Worker.
+    // Only exact existing Ops aliases are accepted, and the callback signature
+    // and attempt identifier remain checked before the event is stored.
+    return `${url.origin}/operations/processing?attemptId=${encodeURIComponent(attemptId)}`;
   } catch {
     throw new HTTPException(400, { message: "Operations review URL is invalid" });
   }

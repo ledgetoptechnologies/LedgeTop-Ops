@@ -141,6 +141,33 @@ describe("Viewer processing event callback", () => {
     expect(await database.prepare("SELECT COUNT(*) FROM viewer_processing_events").first<number>("COUNT(*)")).toBe(0);
   });
 
+  it("accepts a signed old-origin Viewer callback under the canonical Ops tuple and preserves its signed review URL", async () => {
+    const oldOrigin = "https://ops.ledgetopdroneservices.com";
+    const newOrigin = "https://ops.ledgetop.app";
+    const eventBody = body("event-old-origin-0001", {
+      reviewUrl: `${oldOrigin}/operations/processing?attemptId=attempt-one`,
+    });
+    const timestamp = Math.floor(Date.now() / 1000), nonce = "event-old-origin-callback-001";
+    const signed = await signViewerProcessingEvent({ secret, method: "POST", path: "/api/viewer/events",
+      body: eventBody, timestamp, nonce });
+    // This represents an event signed while the old Ops origin was primary and
+    // delivered after the exact origin tuple changes, without changing its body.
+    Object.assign(env, { PUBLIC_BASE_URL: newOrigin, EXPECTED_HOST: "ops.ledgetop.app",
+      OPERATIONS_ORIGINS: `${newOrigin},${oldOrigin}` });
+    const response = await app.fetch(new Request("https://ops.ledgetop.app/api/viewer/events", { method: "POST", headers: {
+      "Content-Type": "application/json", "Idempotency-Key": JSON.parse(eventBody).eventId,
+      "X-LTDS-Viewer-Key-Id": "viewer-v1", "X-LTDS-Viewer-Timestamp": String(timestamp),
+      "X-LTDS-Viewer-Nonce": nonce, "X-LTDS-Viewer-Content-SHA256": signed.contentSha256,
+      "X-LTDS-Viewer-Signature": signed.signature,
+    }, body: eventBody }), env, { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext);
+    expect(response.status).toBe(202);
+    expect(await database.prepare("SELECT review_url FROM viewer_processing_events WHERE event_id=?")
+      .bind("event-old-origin-0001").first<string>("review_url"))
+      .toBe(`${oldOrigin}/operations/processing?attemptId=attempt-one`);
+    expect(await database.prepare("SELECT COUNT(*) FROM viewer_processing_events WHERE event_id=?")
+      .bind("event-old-origin-0001").first<number>("COUNT(*)")).toBe(1);
+  });
+
   it("requires one canonical attemptId query on the exact public Operations route", async () => {
     const invalid = [
       "https://ops.example.test/operations/processing?attemptId=other-attempt",

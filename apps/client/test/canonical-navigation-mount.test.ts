@@ -40,11 +40,23 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     expect(f.fetch).not.toHaveBeenCalled();expect(f.prepare).not.toHaveBeenCalled();
     expect((await f.request(`${OLD}/?folder=opaque%2Fref`)).headers.get("Location")).toBe(`${PORTAL}/portal?folder=opaque%2Fref`);
   });
-  it("keeps old private and public cookies, authorization, ranges and non-navigation requests local",async()=>{
+  it("moves ordinary private pages with old cookies without copying session credentials",async()=>{
+    const f=fixture("true");
+    for(const origin of [OLD,CLIENT,LTT]) for(const method of ["GET","HEAD"])
+      for(const cookie of ["__Host-ltds_delivery=synthetic","CF_Authorization=synthetic","unrelated=synthetic"]){
+        const response=await f.request(`${origin}/portal/account?tab=profile`,{method,headers:{...navigation,Cookie:cookie}});
+        expect(response.status).toBe(302);
+        expect(response.headers.get("Location")).toBe(`${PORTAL}/portal/account?tab=profile`);
+        expect(response.headers.get("Set-Cookie")).toBeNull();
+        expect(response.headers.get("Cache-Control")).toBe("no-store");
+      }
+    expect(f.fetch).not.toHaveBeenCalled();expect(f.prepare).not.toHaveBeenCalled();
+  });
+  it("keeps public cookies and all authorization, ranges and non-navigation requests local",async()=>{
     const f=fixture("true");
     for(const path of ["/portal/projects","/s/synthetic-id","/client-share/synthetic-id"]) {
-      const protectedHeaders:Record<string,string>[]=[{Cookie:"__Host-ltds_delivery=synthetic"},{Cookie:"CF_Authorization=synthetic"},
-        {Authorization:"Bearer synthetic"},{Range:"bytes=0-1"},{"If-Range":"synthetic"},{Origin:OLD}];
+      const protectedHeaders:Record<string,string>[]=[{Authorization:"Bearer synthetic"},{Range:"bytes=0-1"},{"If-Range":"synthetic"},{Origin:OLD},
+        ...(path.startsWith("/portal/")?[]:[{Cookie:"__Host-ltds_delivery=synthetic"},{Cookie:"CF_Authorization=synthetic"}])];
       for(const headers of protectedHeaders) {
         const response=await f.request(`${OLD}${path}`,{headers:{...navigation,...headers}});
         expect(response.status).toBe(200);expect(response.headers.get("Location")).toBeNull();

@@ -43,6 +43,7 @@ const phases = {
   'staff-canonical': { operations: { ...portal.operations,
     DELIVERY_BASE_URL: 'https://portal.ledgetop.app',
     PUBLIC_BASE_URL: 'https://ops.ledgetop.app', EXPECTED_HOST: 'ops.ledgetop.app',
+    PUBLIC_SHARE_ORIGIN: 'https://delivery.ledgetop.app',
     CLIENT_ONBOARDING_ADMIN_ORIGIN: 'https://ops.ledgetop.app',
   }, client: portal.client },
 };
@@ -54,6 +55,9 @@ phases['delivery-links-canonical'] = {
   },
   client: phases['delivery-public-canonical'].client,
 };
+// The final staff phase composes every accepted portal/public phase instead
+// of rolling Client back to the intermediate portal-only tuple.
+phases['staff-canonical'].client = phases['delivery-public-canonical'].client;
 export function domainPhaseValues(phase) {
   need(Object.hasOwn(phases, phase), 'Unknown reviewed domain phase');
   return structuredClone(phases[phase]);
