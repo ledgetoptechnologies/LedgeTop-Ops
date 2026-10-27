@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Card, EmptyState, StatusPill } from "@ltds/ui";
 import { api, ApiError } from "./api";
+import { confirmAction } from "./confirm-action";
 import "./ClientPortalAccessPanel.css";
 
 export interface PortalPageMetadata {
@@ -268,7 +269,9 @@ export function ClientPortalAccessPanel({ initialPage, rootAccess, basePath, con
     if (claimed.current || contextSignal.aborted || !rootAccess?.available) return;
     const label = action === "revoke" ? "Revoke portal access for this entire client workspace, including current and future people? Memberships and shared content will be preserved."
       : "Restore portal access for this client workspace? Individual sign-in blocks and content permissions will still apply.";
-    if (!confirm(label)) return;
+    if (!(await confirmAction(label))) return;
+    // The dialog is asynchronous: re-check the claim so a stale or repeated click cannot dispatch.
+    if (claimed.current || !active.current || contextSignal.aborted) return;
     claimed.current = true; setBusy(true);
     const operation = JSON.stringify([basePath, rootAccess.version, action]);
     const idempotencyKey = attempts.current.get(operation) || crypto.randomUUID(); attempts.current.set(operation, idempotencyKey);
@@ -298,11 +301,12 @@ export function ClientPortalAccessPanel({ initialPage, rootAccess, basePath, con
         : action === "workspace_reactivate" ? !capabilities.canManageWorkspaceAccess || !identity.actions.canReactivateWorkspaceAccess
           || !blockId || !identity.removableWorkspaceDenialUpdatedAt
           : !capabilities.canManageEligibilityBlocks || (action === "block" && !identity.actions.canCreateEmailBlock) || (action === "unblock" && !blockId)) return;
-    if (action !== "retry" && !confirm(action === "block"
+    if (action !== "retry" && !(await confirmAction(action === "block"
       ? `Block portal sign-in for ${identity.email_hint} across ALL client workspaces? Existing project and file permissions are not deleted.`
       : action === "unblock" ? `Remove this GLOBAL email sign-in block for ${identity.email_hint}? This affects all client workspaces. Other blocks, memberships, and content permissions still apply.`
         : action === "workspace_suspend" ? `Pause portal access for ${identity.display_name} in ${identity.workspace_name || "this client workspace"}? Their Project Alpha membership is preserved and other client workspaces are not affected.`
-          : `Restore portal access for ${identity.display_name} in ${identity.workspace_name || "this client workspace"}? Other restrictions and content permissions still apply.`)) return;
+          : `Restore portal access for ${identity.display_name} in ${identity.workspace_name || "this client workspace"}? Other restrictions and content permissions still apply.`))) return;
+    if (claimed.current || !active.current || contextSignal.aborted) return;
     claimed.current = true; setBusy(true);
     const key = identityKey(identity), operation = JSON.stringify([key, identity.principalContextVersion, action, blockId || ""]);
     const idempotencyKey = attempts.current.get(operation) || crypto.randomUUID(); attempts.current.set(operation, idempotencyKey);

@@ -358,7 +358,7 @@ test("navigating to another client aborts pending sections and never appends old
 });
 
 test("an identity mutation refreshes all loaded sections and aborts pending old-context pages", async ({ page }) => {
-  page.on("dialog", dialog => dialog.accept());
+  page.on("dialog", dialog => { void dialog.dismiss(); throw new Error("Native browser dialog is forbidden"); });
   let pending: Route | undefined;
   const state = await mock(page, async (route, collection) => {
     if (collection === "projects") { pending = route; return; }
@@ -370,6 +370,7 @@ test("an identity mutation refreshes all loaded sections and aborts pending old-
   await loadButton(page, "projects").click();
   await expect.poll(() => Boolean(pending)).toBe(true);
   await page.getByRole("button", { name: "Block portal sign-in", exact: true }).click();
+  await page.getByRole("dialog", { name: "Confirm action" }).getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Acme refreshed" })).toBeVisible();
   await lateFulfill(pending!, reply("projects"));
   await expect(region(page, "accounts").getByText("Account 2", { exact: true })).toHaveCount(0);
