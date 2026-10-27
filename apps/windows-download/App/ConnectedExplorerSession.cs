@@ -124,9 +124,11 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             token.ThrowIfCancellationRequested();
             backend = createBackend();
             var selected = SelectedSource(backend);
+            Add(explicitLogin ? "Waiting for browser sign-in to finish." : "Checking your saved sign-in.");
             if (explicitLogin) await backend.Session.SignInAsync(token); // Only this explicit user-button path may launch a browser.
             token.ThrowIfCancellationRequested();
             var person = await CurrentPersonAsync(backend, selected, token, explicitLogin ? null : index!.PrincipalId);
+            Add("Sign-in confirmed. Preparing your files for Explorer.");
             if (index is { } previous && previous.PrincipalId != person && !previousRemoved) {
                 Add("A different account is signed in. Remove the previous Explorer connection before connecting this account. Local files are kept.");
                 throw new AccessDeniedException();
@@ -149,24 +151,28 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                 if (candidate.Session.State is not (ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed))
                     throw new IOException("The saved Explorer inventory is unavailable.");
                 await DisposeEngineAsync(); token.ThrowIfCancellationRequested();
+                Add("Preparing the current file list. Large files can take longer.");
                 var snapshot = await capture(backend, channel, person, token);
                 token.ThrowIfCancellationRequested();
                 if (snapshot.Channel != channel || snapshot.Alias != alias || snapshot.Origin != origin || snapshot.PrincipalId != person)
                     throw new AccessDeniedException();
                 inventory = new ExplorerRootManifest(scope, snapshot.Files, snapshot.Directories);
+                Add($"Prepared {snapshot.Files.Count} files for File Explorer.");
                 SetEngine(Create(scope, lifetimeSource, inventory));
             }
+            else Add($"Using this PC's saved file list ({inventory.Files.Count} files). Reconnecting does not refresh it.");
             if (inventory.Scope != scope) throw new AccessDeniedException();
             _ = await CurrentPersonAsync(backend, selected, token, person);
             token.ThrowIfCancellationRequested();
             if (explicitLogin) SaveIndex(person); // Retain the cleanup identity even if subsequent native setup stops partway through.
             else token.ThrowIfCancellationRequested(); // Ready reconnect has durable ownership already; never republishes its index.
             // Engine writes Prepared ownership before its lifetime-bound cached preflight observes cancellation.
+            Add("Connecting your prepared files to Windows Explorer.");
             await engine!.Session.StartAsync();
             token.ThrowIfCancellationRequested();
             SetState(engine.Session.State);
             Add(InventoryEmpty
-                ? "Your account is connected, but no folders or files are currently shared with it in this source."
+                ? "Your account is connected. This PC's saved file list is empty; reconnecting does not refresh that list."
                 : "Your selected files are connected in Explorer. This connection does not enable uploads.");
         } finally { starting = false; }
     });

@@ -26,7 +26,20 @@ internal sealed class ExplorerPreviewWindow : Window
     internal readonly Button RemoveButton = new() { Content = "Remove Explorer preview" };
     internal readonly Button CheckUpdatesButton = new() { Content = "Check for updates" };
     internal readonly Button InstallUpdateButton = new() { Content = "Install and restart" };
+    internal readonly CheckBox AutomaticUpdatesCheckBox = new() { Content = "Install approved updates automatically", Margin = new Thickness(0, 4, 0, 8), IsEnabled = false };
+    internal readonly CheckBox WindowsStartupCheckBox = new() { Content = "Start with Windows", Margin = new Thickness(0, 4, 0, 8), IsEnabled = false };
+    private readonly TextBlock windowsStartupStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 10) };
+    private ExplorerStartupActions? startupActions;
+    private WindowsStartupState? startupState;
+    private CancellationTokenSource? startupCancellation;
+    private bool refreshingStartup;
     private readonly TextBlock updateVersion = new(), updateStatus = new();
+    private readonly TextBlock automaticUpdateStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 10) };
+    private ExplorerUpdateScheduleController? updateSchedule;
+    private DispatcherTimer? updateScheduleTimer;
+    private ExeUpdateHandoffResult? lastUpdateResult;
+    private bool lastUpdateCheckSucceeded;
+    private bool refreshingSchedule;
     private readonly Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? readUpdateBindingForTests;
     private ExplorerUpdateActions? updates;
     private CancellationTokenSource? updateCancellation;
@@ -79,6 +92,10 @@ internal sealed class ExplorerPreviewWindow : Window
         OpenFolderButton.Click += (_, _) => OpenFolder();
         CheckUpdatesButton.Click += async (_, _) => await CheckForUpdatesAsync();
         InstallUpdateButton.Click += async (_, _) => await InstallUpdateAsync();
+        AutomaticUpdatesCheckBox.Checked += async (_, _) => await ChangeAutomaticUpdatesAsync();
+        AutomaticUpdatesCheckBox.Unchecked += async (_, _) => await ChangeAutomaticUpdatesAsync();
+        WindowsStartupCheckBox.Checked += async (_, _) => await ChangeWindowsStartupAsync();
+        WindowsStartupCheckBox.Unchecked += async (_, _) => await ChangeWindowsStartupAsync();
         KeyDown += (_, e) => { if (e.Key == System.Windows.Input.Key.Q && System.Windows.Input.Keyboard.Modifiers == System.Windows.Input.ModifierKeys.Control) { e.Handled = true; Quit(); } };
         try {
             tray = (createTray ?? (actions => new ShellTrayIcon(actions)))(TrayActions);
@@ -140,6 +157,11 @@ internal sealed class ExplorerPreviewWindow : Window
         account.Children.Add(Body(presentation.AccountDetail));
         if (!presentation.Generated) account.Children.Add(Body("This connection downloads files you are allowed to read. Local changes and added files are not uploaded."));
         settings.Children.Add(Card(account));
+        if (!presentation.Generated) {
+            var startup = new StackPanel(); startup.Children.Add(Heading("Startup"));
+            startup.Children.Add(WindowsStartupCheckBox); startup.Children.Add(windowsStartupStatus);
+            settings.Children.Add(Card(startup));
+        }
 
         var files = new StackPanel(); files.Children.Add(Heading("Files on this PC"));
         files.Children.Add(Body("Browse your files in File Explorer. Opening an online-only file downloads it. Right-click a file or folder to keep it on this device or free up space."));
@@ -149,6 +171,7 @@ internal sealed class ExplorerPreviewWindow : Window
         updateVersion.Foreground = Brush("Muted"); updateVersion.Margin = new Thickness(0, 3, 0, 6);
         updateStatus.TextWrapping = TextWrapping.Wrap; updateStatus.Margin = new Thickness(0, 0, 0, 12);
         update.Children.Add(updateVersion); update.Children.Add(updateStatus);
+        update.Children.Add(AutomaticUpdatesCheckBox); update.Children.Add(automaticUpdateStatus);
         var updateButtons = new WrapPanel();
         foreach (var button in new[] { CheckUpdatesButton, InstallUpdateButton }) { button.Margin = new Thickness(0, 0, 10, 6); updateButtons.Children.Add(button); }
         update.Children.Add(updateButtons);
@@ -262,16 +285,85 @@ internal sealed class ExplorerPreviewWindow : Window
         updates = actions; updateMessage = "Check for an approved update using your saved sign-in."; Refresh();
     }
 
+    internal Task SetStartupActionsAsync(ExplorerStartupActions actions)
+    {
+        Dispatcher.VerifyAccess();
+        if (presentation.Generated || startupActions is not null || busy || quitting || readyToClose || updateMaintenance)
+            throw new InvalidOperationException("Windows startup settings are unavailable.");
+        startupActions = actions;
+        return ChangeStartupAsync(null);
+    }
+    private Task ChangeWindowsStartupAsync()
+    {
+        if (refreshingStartup || startupActions is null) return Task.CompletedTask;
+        return ChangeStartupAsync(WindowsStartupCheckBox.IsChecked == true);
+    }
+    private Task ChangeStartupAsync(bool? enabled) => OperateAsync(async () => {
+        using var cancellation = new CancellationTokenSource(); startupCancellation = cancellation;
+        try {
+            startupState = enabled is { } requested
+                ? await startupActions!.SetAsync(requested, cancellation.Token)
+                : await startupActions!.ReadAsync(cancellation.Token);
+        } finally { startupCancellation = null; }
+    });
+    internal void HideAfterWindowsStartup()
+    {
+        Dispatcher.VerifyAccess();
+        if (tray?.IsAvailable == true && !busy && !quitting && !readyToClose && problem.Length == 0 &&
+            session?.State is ExplorerPreviewState.Running or ExplorerPreviewState.Paused) Hide();
+    }
+
+    internal void ConfigureUpdateSchedule(ExplorerUpdateScheduleSettingsStore store, Func<DateTimeOffset> utcNow,
+        TimeSpan jitter, bool runTimer = true)
+    {
+        Dispatcher.VerifyAccess();
+        if (updates is null || presentation.Generated || updateSchedule is not null) throw new InvalidOperationException("Update schedule is unavailable.");
+        updateSchedule = new ExplorerUpdateScheduleController(store, utcNow, jitter,
+            () => new(session?.State is ExplorerPreviewState.Running or ExplorerPreviewState.Paused, busy, updateMaintenance, quitting || readyToClose),
+            async token => {
+                await RunUpdateAsync(install: false, token);
+                token.ThrowIfCancellationRequested();
+                if (!lastUpdateCheckSucceeded) throw new IOException("The scheduled update check did not complete.");
+                return updateAvailable;
+            },
+            async token => {
+                lastUpdateResult = null;
+                await RunUpdateAsync(install: true, token);
+                return lastUpdateResult ?? (updateHelperUncertain
+                    ? new(ExeUpdateHandoffStatus.RecoveryBlocked, true) : new(ExeUpdateHandoffStatus.Busy, false));
+            });
+        if (runTimer) {
+            updateScheduleTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher) { Interval = TimeSpan.FromMinutes(1) };
+            updateScheduleTimer.Tick += ScheduledUpdateTick;
+            updateScheduleTimer.Start();
+        }
+        Refresh();
+    }
+    internal async Task TickUpdateScheduleAsync()
+    {
+        Dispatcher.VerifyAccess();
+        if (updateSchedule is { } schedule) await schedule.TickAsync();
+        Refresh();
+    }
+    private async void ScheduledUpdateTick(object? sender, EventArgs e) => await TickUpdateScheduleAsync();
+    private async Task ChangeAutomaticUpdatesAsync()
+    {
+        if (refreshingSchedule || updateSchedule is null) return;
+        await updateSchedule.SetEnabledAsync(AutomaticUpdatesCheckBox.IsChecked == true);
+        Refresh();
+    }
+
     internal Task CheckForUpdatesAsync() => RunUpdateAsync(install: false);
     internal Task InstallUpdateAsync() => RunUpdateAsync(install: true);
-    private Task RunUpdateAsync(bool install)
+    private Task RunUpdateAsync(bool install, CancellationToken requestedCancellation = default)
     {
         Dispatcher.VerifyAccess();
         if (presentation.Generated || updates is null || busy || quitting || readyToClose || updateMaintenance || install && !updateAvailable)
             return Task.CompletedTask;
         busy = true; updateApplying = install; updateAvailable = false;
+        if (!install) lastUpdateCheckSucceeded = false;
         if (install) { updateMaintenance = true; finalExitAttempted = false; sessionCheck?.Stop(); }
-        var cancellation = new CancellationTokenSource(); updateCancellation = cancellation;
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(requestedCancellation); updateCancellation = cancellation;
         updateMessage = install ? "Stopping downloads and preparing the update…" : "Checking for updates…";
         Refresh(); operation = Run(); return operation;
         async Task Run()
@@ -283,6 +375,7 @@ internal sealed class ExplorerPreviewWindow : Window
                         (result.Release is null || !VersionText(result.Release.Version) || Version.Parse(result.Release.Version) <= Version.Parse(updates.CurrentVersion)))
                         throw new InvalidOperationException();
                     updateAvailable = result.Status == WindowsAppReleaseStatus.Available;
+                    lastUpdateCheckSucceeded = result.Status is WindowsAppReleaseStatus.Available or WindowsAppReleaseStatus.Current or WindowsAppReleaseStatus.NoRelease;
                     updateMessage = result.Status switch {
                         WindowsAppReleaseStatus.Available => "Version " + result.Release!.Version + " is available. Installing will stop downloads and restart this app.",
                         WindowsAppReleaseStatus.Current => "This version is current.",
@@ -291,6 +384,7 @@ internal sealed class ExplorerPreviewWindow : Window
                     };
                 } else {
                     var result = await updates.InstallAsync(cancellation.Token);
+                    lastUpdateResult = result;
                     updateHelperUncertain = result.Status is ExeUpdateHandoffStatus.RecoveryBlocked or ExeUpdateHandoffStatus.ExitUncertain or ExeUpdateHandoffStatus.ParentExitRequested;
                     updateMaintenance = updateHelperUncertain || updateDrainUncertain;
                     updateMessage = result.Status switch {
@@ -389,6 +483,28 @@ internal sealed class ExplorerPreviewWindow : Window
 
     private void Refresh()
     {
+        refreshingStartup = true;
+        try {
+            WindowsStartupCheckBox.IsChecked = startupState?.Enabled == true;
+            WindowsStartupCheckBox.IsEnabled = startupState?.Availability == WindowsStartupAvailability.Available && !busy && !quitting && !readyToClose && !updateMaintenance;
+            windowsStartupStatus.Text = startupState?.Availability switch {
+                WindowsStartupAvailability.Available => startupState.Enabled
+                    ? "Windows will reconnect " + (startupState.SourceAlias == "employee" ? "Company files" : "Client deliveries") + " using your saved sign-in."
+                    : "Enable to reconnect this kind of files using your saved sign-in when you sign in to Windows.",
+                WindowsStartupAvailability.Conflict => "Another startup value needs review. It has been kept unchanged.",
+                WindowsStartupAvailability.Error => "Windows startup settings could not be verified. Try reopening Settings.",
+                _ => "Startup is available in the installed Windows version."
+            };
+        } finally { refreshingStartup = false; }
+        refreshingSchedule = true;
+        try {
+            var schedule = updateSchedule?.Status;
+            AutomaticUpdatesCheckBox.IsChecked = schedule?.AutoUpdatesEnabled == true;
+            AutomaticUpdatesCheckBox.IsEnabled = schedule is { Issue: null } && !busy && !quitting && !readyToClose && !updateMaintenance;
+            automaticUpdateStatus.Text = schedule?.Issue ?? (schedule is null ? "Automatic updates are not configured in this build."
+                : schedule.AutoUpdatesEnabled ? "Checks every six hours using your saved sign-in. Verified updates stop downloads and restart the app."
+                : "Automatic updates are off. You can still check and install an approved update here.");
+        } finally { refreshingSchedule = false; }
         var state = session?.State ?? ExplorerPreviewState.NotStarted;
         status.Text = quitting ? "Stopping preview…" : problem.Length > 0 ? "Preview needs attention" : state switch {
             ExplorerPreviewState.Starting => "Starting Explorer preview…", ExplorerPreviewState.Running => "Your preview is ready",
@@ -421,8 +537,8 @@ internal sealed class ExplorerPreviewWindow : Window
             };
         if (!presentation.Generated && !quitting && problem.Length == 0 && state == ExplorerPreviewState.Running &&
             session is ConnectedExplorerSession { InventoryEmpty: true }) {
-            status.Text = "Connected — no files shared yet";
-            detail.Text = "You're signed in, but no folders or files are currently shared with this account in this source. Your LedgeTop contact can check source access.";
+            status.Text = "Connected — saved file list is empty";
+            detail.Text = "You're signed in, but this PC's saved file list is empty. It may be out of date. Reconnecting reuses that list; it does not refresh it or confirm current sharing.";
         }
         var enabled = !busy && !quitting && !updateMaintenance;
         updateVersion.Text = "Version " + (updates?.CurrentVersion ?? typeof(ExplorerPreviewWindow).Assembly.GetName().Version?.ToString(4) ?? "unavailable");
@@ -494,6 +610,7 @@ internal sealed class ExplorerPreviewWindow : Window
     internal void Quit()
     {
         if (quitting || readyToClose) return;
+        startupCancellation?.Cancel();
         updateCancellation?.Cancel();
         if (updateApplying || updateHelperUncertain) {
             updateQuitRequested = updateApplying;
@@ -519,11 +636,13 @@ internal sealed class ExplorerPreviewWindow : Window
         // Let OnClosing publish its shutdown task before a synchronous service failure can clear it for retry.
         await Dispatcher.Yield(DispatcherPriority.Background);
         try {
+            var stopSchedule = updateSchedule?.StopAsync();
             // Connected sessions cancel pending human login/catalog work before waiting for their
             // operation lock. Begin disposal now so Quit can cancel that work before draining it.
             var stoppingSession = session;
             var disconnect = stoppingSession is null ? null : DisposeOnWorkerAsync(stoppingSession);
             await operation;
+            if (stopSchedule is not null) await stopSchedule;
             if (disconnect is not null) await disconnect;
             else if (session is not null) await DisposeOnWorkerAsync(session);
         } catch (Exception) {
@@ -540,6 +659,7 @@ internal sealed class ExplorerPreviewWindow : Window
         closed = true;
         readyToClose = true;
         folderLauncher.Dispose();
+        if (updateScheduleTimer is { } scheduleTimer) { scheduleTimer.Stop(); scheduleTimer.Tick -= ScheduledUpdateTick; }
         if (sessionCheck is { } timer) { timer.Stop(); timer.Tick -= CheckSession; }
         if (session is not null) session.Changed -= SessionChanged;
         if (tray is not null) { tray.Activated -= RestoreFromTray; tray.Unavailable -= TrayUnavailable; tray.Dispose(); tray = null; }

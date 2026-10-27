@@ -6,8 +6,9 @@ human Cloudflare Access and separate portal and employee read adapters.
 The unsigned per-user pilot installer is available in
 `S:\LedgeTop Operations\Sync App`. Start with `LATEST-PREVIEW.txt` and
 `CURRENT-STAGING-STATUS.txt`; versioned receipts retain their original build-time
-observations. Code signing is intentionally off. Uploads, automatic catalog
-refresh and automatic updates are not implemented.
+observations. Code signing is intentionally off. Uploads and automatic catalog
+refresh are not implemented. Shared 0.5.2 does not include automatic updates;
+the unpublished resident-update work below is separate.
 
 ## Current verification — October 26, 2026
 
@@ -28,11 +29,14 @@ refresh and automatic updates are not implemented.
   one directory and 1,919,807,773 total bytes. This resolved real manifests without
   downloading every file body to Windows; it does not prove an atomic catalog
   revision or retention of every gateway snapshot.
-- The current laptop's Explorer connection, logo, context-menu actions and tray
-  close/quit/reconnect lifecycle remain acceptance gates. Actual uninstall has
+- Current laptop testing confirmed the Company connection and all 19 photos,
+  with real download-on-open. The laptop's standard keep/free context-menu
+  actions are missing, and its Status column is blank or unavailable. This is
+  an unresolved Shell-integration defect; native API tests do not qualify menus.
+  The remaining tray close/quit/reconnect lifecycle still needs acceptance. Actual uninstall has
   not been tested; relocating the real uninstaller does not isolate its use of
-  current-user profiles. Restart-policy improvements are separately proposed,
-  with no policy change or boot acceptance claimed.
+  current-user profiles. The current gateway now uses `unless-stopped` and the
+  retired gateway `no` restart; actual reboot/crash acceptance remains untested.
 
 The current installed/shared Windows payload remains 0.5.2.0 from source
 `e654af09379b3862a84563bed791868eb9caf77e`. The later backend-only commit
@@ -46,15 +50,37 @@ Working files appear in Explorer; the app contains connection controls and
 activity. Closing Settings keeps a working tray connection running; Quit drains
 the provider. Reconnect restores the saved inventory. Explicit Remove and a new
 connection prepare a fresh inventory and logo generation, preserving old local
-files. Installation creates no startup task or Windows service.
+files. Shared 0.5.2 creates no startup task or Windows service.
+
+### Unpublished resident-update source
+
+The draft includes installed-payload verification, authenticated metadata and
+download checks, graceful drain, an authenticated helper and fixed installed
+relaunch. Scheduled checks run every six hours with an initial delay, skip busy
+or disconnected sessions, and pause after uncertain helper outcomes. Settings
+can disable automatic attempts. These preferences contain no account or token.
+
+An optional Start with Windows control manages only the exact owned pilot HKCU
+Run value. Forward setup preserves its source choice; uninstall removes only an
+exact owned value. A checked interactive Finish option launches the installed
+app after setup; silent updates never use that launch path. Neither startup nor
+update reconnect opens a browser or substitutes another source/account.
+
+Local synthetic schedule, startup, resume, cancellation and settings tests pass.
+Twenty actual isolated NSIS registry cases passed against a new private test
+key; this is not real startup/logon, interactive Finish or installed upgrade
+acceptance. The backend feed remains default-off and no new installer is shared.
+Actual connected replacement/relaunch/reconnect and Shell-menu repair remain
+release gates. Automatic client/employee discovery is under backend contract
+review; it is not a deployed endpoint or a reason to guess roles from email.
 
 The harness commands below use synthetic identities and handlers; they do not
 install software or establish live-source acceptance. Core uses the SDK alone;
 the Windows desktop and Explorer projects also require the exact Windows SDK
 reference package described below.
 
-The desktop offers **Client deliveries** or **Company files** before sign-in.
-It remembers an offered choice per release channel. Switching stops and saves
+The Explorer UI offers **Client deliveries** or **Company files** before sign-in.
+The earlier transfer window remembers an offered choice per release channel. Switching stops and saves
 the previous transfers before opening the other source; a denied sign-in never
 falls back to the other mode. The preference grants no access. Each service
 still checks its own current identity and grants.
@@ -319,8 +345,10 @@ does not refresh its catalog automatically.
 
 ## Remaining product work
 
-- Full real-folder capture and laptop acceptance after the staging expiry fix;
-  current live expiry, identity-change and revocation scenarios still require
+- Repair and verify the missing laptop Shell verbs/status, then complete real
+  keep/free/reopen and tray lifecycle acceptance. Full approved-folder capture
+  and laptop listing/download-on-open have passed. Current live expiry,
+  identity-change and revocation scenarios still require
   their own evidence. Browser-profile copying, service tokens and bucket
   credentials are not client setup mechanisms.
 - Version-fenced checksum coverage for existing and multipart files. Native

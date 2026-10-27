@@ -6,6 +6,8 @@ internal static class ExplorerResumeRequestTests
 {
     internal static Task Run()
     {
+        Require(ExplorerResumeRequest.StartupSavedSourceArgument == WindowsStartupPolicy.StartupSavedSourceArgument,
+            "registry command and startup parser use the same reserved coordinate");
         foreach (var (alias, mode) in new[] { ("portal", AccessMode.Client), ("employee", AccessMode.Employee) }) {
             var request = ExplorerResumeRequest.Parse([ExeUpdateWindowsPolicy.ResumeSavedSourceArgument, alias]);
             Require(request.Requested && request.IsValid && request.SourceMode == mode &&
@@ -14,6 +16,9 @@ internal static class ExplorerResumeRequestTests
             Require(!request.AllowedIn((true, ReleaseChannel.Pilot), [other]) &&
                 !request.AllowedIn((false, null)) && !request.AllowedIn((true, null)) &&
                 !request.AllowedIn((true, ReleaseChannel.Stable)), "unoffered source and unconfigured build never fall back to another source");
+            var startup = ExplorerResumeRequest.Parse([ExplorerResumeRequest.StartupSavedSourceArgument, alias]);
+            Require(startup.Requested && startup.StartWithWindows && startup.SourceMode == mode && startup.AllowedIn((true, ReleaseChannel.Pilot), [mode]) &&
+                !startup.AllowedIn((false, null)) && !startup.AllowedIn((true, ReleaseChannel.Pilot), [other]), "Windows startup remains an exact offered pilot source coordinate");
         }
         foreach (var arguments in new string[][] {
             [ExeUpdateWindowsPolicy.ResumeSavedSourceArgument],
@@ -22,6 +27,11 @@ internal static class ExplorerResumeRequestTests
             [ExeUpdateWindowsPolicy.ResumeSavedSourceArgument, "https://other.invalid"],
             ["--RECONNECT-SAVED-SOURCE-V1", "employee"],
             ["--reconnect-saved-source-v2", "portal"],
+            ["--STARTUP-SAVED-SOURCE-V1", "portal"],
+            ["--startup-saved-source-v2", "employee"],
+            [ExplorerResumeRequest.StartupSavedSourceArgument],
+            [ExplorerResumeRequest.StartupSavedSourceArgument, "employee", "extra"],
+            [ExplorerResumeRequest.StartupSavedSourceArgument, ExeUpdateWindowsPolicy.ResumeSavedSourceArgument],
             ["extra", ExeUpdateWindowsPolicy.ResumeSavedSourceArgument, "employee"]
         }) {
             var request = ExplorerResumeRequest.Parse(arguments);

@@ -1,4 +1,5 @@
-; Initial manual, unsigned per-user pilot installation. No updater, trust claim or auto-launch.
+; Unsigned per-user pilot installation; optional normal launch only from interactive Finish.
+; Existing exact startup opt-in may migrate on upgrade; setup never creates opt-in.
 ; Builder must provide vetted canonical APP_VERSION (four u16s), OUTPUT_FILE,
 ; PAYLOAD_MANIFEST_SHA256, SOURCE_COMMIT and PAYLOAD_INCLUDE. Generated include defines ONLY:
 ; InstallPayload: explicit File commands into $INSTDIR, with SetOutPath for subdirs.
@@ -48,11 +49,25 @@ VIAddVersionKey /LANG=1033 "Comments" "LedgeTop.Files.Payload/1:${PAYLOAD_MANIFE
 !define TARGET "${PRODUCT_BASE}\versions\${APP_VERSION}"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\LedgeTopFilesPilot"
 !define OWNER "LedgeTop.Files.UnsignedPilotInstaller/1"
+!define STARTUP_KEY "Software\Microsoft\Windows\CurrentVersion\Run"
+!define STARTUP_VALUE "LedgeTopFilesPilot"
 Var ExistingVersion
 Var MutexHandle
 Var FixedTarget
+Var StartupKey
+Var StartupData
+Var StartupBytes
+Var StartupText
+Var StartupReadable
+Var StartupOld
+Var StartupNew
+Var StartupFailed
+Var FinishLaunchReady
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_INSTFILES
+!define MUI_FINISHPAGE_RUN "${TARGET}\LedgeTop.Files.exe"
+!define MUI_FINISHPAGE_RUN_TEXT "Start LedgeTop Files"
+!define MUI_FINISHPAGE_RUN_FUNCTION FinishStartLedgeTopFiles
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
@@ -158,6 +173,163 @@ Function un.CheckInventorySidecarPath
     SetErrorLevel 20
     Abort
   inventory_sidecar_done:
+FunctionEnd
+
+; Run ownership is literal REG_SZ in HKCU64 only. ReadRegStr cannot distinguish
+; REG_EXPAND_SZ; query raw bounded UTF16 without expansion or type coercion.
+; An absent, foreign, malformed, inaccessible or concurrently changed value is
+; retained. Registry compare/write is NOT atomic against external same-user edits.
+!macro StartupRegistrySupport Prefix
+Function ${Prefix}OpenStartupKey
+  StrCpy $StartupKey 0
+  System::Call 'advapi32::RegOpenKeyExW(p 0x80000001,w "${STARTUP_KEY}",i0,i0x103,*p .r0)i.r1'
+  StrCmp $1 0 0 startup_open_done_${Prefix}
+  StrCpy $StartupKey $0
+  startup_open_done_${Prefix}:
+FunctionEnd
+Function ${Prefix}CloseStartupKey
+  StrCmp $StartupKey 0 startup_close_done_${Prefix}
+  System::Call 'advapi32::RegCloseKey(p $StartupKey)i.r0'
+  StrCpy $StartupKey 0
+  startup_close_done_${Prefix}:
+FunctionEnd
+Function ${Prefix}ReadStartupValue
+  StrCpy $StartupReadable 0
+  StrCpy $StartupText ""
+  StrCpy $StartupData 0
+  System::Call 'advapi32::RegQueryValueExW(p $StartupKey,w "${STARTUP_VALUE}",p0,*i .r0,p0,*i .r1)i.r2'
+  StrCmp $2 0 0 startup_read_done_${Prefix}
+  StrCmp $0 1 0 startup_read_done_${Prefix}
+  IntCmp $1 2 0 startup_read_done_${Prefix} 0
+  ; At most 260 UTF16 command characters plus one NUL; longer old values are
+  ; foreign/unowned. Keep strictly below the NSIS string capacity too, so a
+  ; saturated nonterminated buffer can never be mistaken for a truncated owner.
+  IntCmp $1 522 0 0 startup_read_done_${Prefix}
+  IntOp $2 ${NSIS_MAX_STRLEN} * 2
+  IntCmp $1 $2 startup_read_done_${Prefix} 0 startup_read_done_${Prefix}
+  IntOp $2 $1 & 1
+  StrCmp $2 0 0 startup_read_done_${Prefix}
+  StrCpy $StartupBytes $1
+  ; Extra zeroed UTF16 sentinel makes even malformed nonterminated input safe
+  ; to inspect, but the exact byte/character relation below still rejects it.
+  IntOp $2 ${NSIS_MAX_STRLEN} * 2
+  IntOp $2 $2 + 2
+  System::Call 'kernel32::GlobalAlloc(i0x40,p r2)p.r3'
+  StrCpy $StartupData $3
+  StrCmp $StartupData 0 startup_read_done_${Prefix}
+  System::Call 'advapi32::RegQueryValueExW(p $StartupKey,w "${STARTUP_VALUE}",p0,*i .r0,p $StartupData,*i $StartupBytes r1)i.r2'
+  StrCmp $2 0 0 startup_read_free_${Prefix}
+  StrCmp $0 1 0 startup_read_free_${Prefix}
+  StrCmp $1 $StartupBytes 0 startup_read_free_${Prefix}
+  System::Call '*$StartupData(&w${NSIS_MAX_STRLEN} .r0)'
+  StrCpy $StartupText $0
+  StrLen $0 $StartupText
+  IntOp $0 $0 + 1
+  IntOp $0 $0 * 2
+  StrCmp $0 $StartupBytes 0 startup_read_free_${Prefix}
+  StrCpy $StartupReadable 1
+  startup_read_free_${Prefix}:
+  System::Call 'kernel32::GlobalFree(p $StartupData)p.r0'
+  StrCpy $StartupData 0
+  startup_read_done_${Prefix}:
+FunctionEnd
+!macroend
+!insertmacro StartupRegistrySupport ""
+!insertmacro StartupRegistrySupport "un."
+
+; Called only after new payload, marker, activation and shortcuts succeeded.
+; No previous activation means no opt-in: never manufacture a Run value.
+Function MigrateStartupCommand
+  StrCpy $StartupFailed 0
+  StrCmp $ExistingVersion "" startup_migrate_done
+  ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "DisplayVersion"
+  StrCmpS $0 "${APP_VERSION}" 0 startup_migrate_failed
+  ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
+  StrCmpS $0 "${TARGET}" 0 startup_migrate_failed
+  Call OpenStartupKey
+  StrCmp $StartupKey 0 startup_migrate_done
+  Call ReadStartupValue
+  StrCmp $StartupReadable 1 0 startup_migrate_close
+  StrCmpS $StartupText '"${PRODUCT_BASE}\versions\$ExistingVersion\LedgeTop.Files.exe" --startup-saved-source-v1 portal' startup_migrate_portal
+  StrCmpS $StartupText '"${PRODUCT_BASE}\versions\$ExistingVersion\LedgeTop.Files.exe" --startup-saved-source-v1 employee' 0 startup_migrate_close
+  StrCpy $StartupNew '"$INSTDIR\LedgeTop.Files.exe" --startup-saved-source-v1 employee'
+  StrCpy $1 ' --startup-saved-source-v1 employee'
+  Goto startup_migrate_selected
+  startup_migrate_portal:
+  StrCpy $StartupNew '"$INSTDIR\LedgeTop.Files.exe" --startup-saved-source-v1 portal'
+  StrCpy $1 ' --startup-saved-source-v1 portal'
+  startup_migrate_selected:
+  StrCpy $StartupOld $StartupText
+  StrLen $0 "$INSTDIR\LedgeTop.Files.exe"
+  StrLen $1 $1
+  IntOp $0 $0 + $1
+  IntOp $0 $0 + 2
+  IntCmp $0 ${NSIS_MAX_STRLEN} startup_migrate_failed_close 0 startup_migrate_failed_close
+  StrLen $1 $StartupNew
+  StrCmp $0 $1 0 startup_migrate_failed_close
+  ; Windows Run command data is limited to 260 characters. A recognized old
+  ; opt-in which cannot fit the new target needs explicit review, not truncation.
+  IntCmp $0 260 0 0 startup_migrate_failed_close
+  ; Requery immediately before the sole set; never overwrite a newly absent or
+  ; foreign observation. This cannot provide an external registry CAS.
+  Call ReadStartupValue
+  StrCmp $StartupReadable 1 0 startup_migrate_close
+  StrCmpS $StartupText $StartupOld 0 startup_migrate_close
+  StrLen $0 $StartupNew
+  IntOp $0 $0 + 1
+  IntOp $0 $0 * 2
+  ; Keep quoted command bytes opaque to the System plug-in call parser.
+  StrCpy $4 $StartupNew
+  System::Call 'advapi32::RegSetValueExW(p $StartupKey,w "${STARTUP_VALUE}",i0,i1,w r4,i r0)i.r1'
+  StrCmp $1 0 0 startup_migrate_failed_close
+  Call ReadStartupValue
+  StrCmp $StartupReadable 1 0 startup_migrate_failed_close
+  StrCmpS $StartupText $StartupNew 0 startup_migrate_failed_close
+  Goto startup_migrate_close
+  startup_migrate_failed_close:
+  StrCpy $StartupFailed 1
+  startup_migrate_close:
+  Call CloseStartupKey
+  Goto startup_migrate_done
+  startup_migrate_failed:
+  StrCpy $StartupFailed 1
+  startup_migrate_done:
+FunctionEnd
+
+; Existing active-version and marker gates precede this call. Remove only the
+; one exact active-version startup value, before deleting any payload files.
+Function un.RemoveStartupCommand
+  StrCpy $StartupFailed 0
+  ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "DisplayVersion"
+  StrCmpS $0 "${APP_VERSION}" 0 startup_remove_failed
+  ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
+  StrCmpS $0 "$INSTDIR" 0 startup_remove_failed
+  Call un.OpenStartupKey
+  StrCmp $StartupKey 0 startup_remove_done
+  Call un.ReadStartupValue
+  StrCmp $StartupReadable 1 0 startup_remove_close
+  StrCmpS $StartupText '"$INSTDIR\LedgeTop.Files.exe" --startup-saved-source-v1 portal' startup_remove_selected
+  StrCmpS $StartupText '"$INSTDIR\LedgeTop.Files.exe" --startup-saved-source-v1 employee' 0 startup_remove_close
+  startup_remove_selected:
+  StrCpy $StartupOld $StartupText
+  Call un.ReadStartupValue
+  StrCmp $StartupReadable 1 0 startup_remove_close
+  StrCmpS $StartupText $StartupOld 0 startup_remove_close
+  System::Call 'advapi32::RegDeleteValueW(p $StartupKey,w "${STARTUP_VALUE}")i.r0'
+  StrCmp $0 0 startup_remove_verify
+  StrCmp $0 2 0 startup_remove_failed_close
+  startup_remove_verify:
+  System::Call 'advapi32::RegQueryValueExW(p $StartupKey,w "${STARTUP_VALUE}",p0,p0,p0,*i .r0)i.r1'
+  StrCmp $1 2 0 startup_remove_failed_close
+  Goto startup_remove_close
+  startup_remove_failed_close:
+  StrCpy $StartupFailed 1
+  startup_remove_close:
+  Call un.CloseStartupKey
+  Goto startup_remove_done
+  startup_remove_failed:
+  StrCpy $StartupFailed 1
+  startup_remove_done:
 FunctionEnd
 
 ; Canonical four-component unsigned-16 version gate for untrusted registry values.
@@ -349,6 +521,8 @@ Section "Install"
   CreateShortCut "$SMPROGRAMS\LedgeTop Files Pilot\LedgeTop Files Pilot.lnk" "$INSTDIR\LedgeTop.Files.exe"
   CreateShortCut "$SMPROGRAMS\LedgeTop Files Pilot\Uninstall.lnk" "$INSTDIR\uninstall.exe"
   IfErrors activation_failed
+  Call MigrateStartupCommand
+  StrCmp $StartupFailed 1 activation_failed
   Goto install_done
   install_failed:
     MessageBox MB_ICONSTOP "Installation stopped before activation. The new version's files were retained for review; existing versions and user data were kept." /SD IDOK
@@ -359,7 +533,66 @@ Section "Install"
     SetErrorLevel 20
     Abort
   install_done:
+  StrCpy $FinishLaunchReady 1
 SectionEnd
+
+; MUI calls this only when the interactive Finish checkbox is checked. The silent
+; helper owns its own verified relaunch and must never reach a normal launch here.
+Function FinishStartLedgeTopFiles
+  IfSilent finish_start_return
+  Push $0
+  Push $1
+  StrCmp $FinishLaunchReady 1 0 finish_start_done
+  StrCpy $FinishLaunchReady 0
+  StrCmp $INSTDIR "${TARGET}" 0 finish_start_failed
+  Call CheckFixedPath
+  ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "DisplayVersion"
+  StrCmp $0 "${APP_VERSION}" 0 finish_start_failed
+  ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
+  StrCmp $0 "${TARGET}" 0 finish_start_failed
+  System::Call 'kernel32::GetFileAttributesW(w "${TARGET}\installer-owned.ini")i.r0'
+  IntCmp $0 -1 finish_start_failed
+  IntOp $1 $0 & 0x410
+  IntCmp $1 0 +2
+    Goto finish_start_failed
+  ReadINIStr $0 "${TARGET}\installer-owned.ini" "Installer" "Owner"
+  StrCmp $0 "${OWNER}" 0 finish_start_failed
+  ReadINIStr $0 "${TARGET}\installer-owned.ini" "Installer" "Version"
+  StrCmp $0 "${APP_VERSION}" 0 finish_start_failed
+  ReadINIStr $0 "${TARGET}\installer-owned.ini" "Installer" "PayloadManifestSha256"
+  StrCmp $0 "${PAYLOAD_MANIFEST_SHA256}" 0 finish_start_failed
+  ReadINIStr $0 "${TARGET}\installer-owned.ini" "Installer" "SourceCommit"
+  StrCmp $0 "${SOURCE_COMMIT}" 0 finish_start_failed
+  System::Call 'kernel32::GetFileAttributesW(w "${TARGET}\LedgeTop.Files.exe")i.r0'
+  IntCmp $0 -1 finish_start_failed
+  IntOp $1 $0 & 0x410
+  IntCmp $1 0 +2
+    Goto finish_start_failed
+  ; All writes are complete. Close only this process's activity handle so normal
+  ; app startup can proceed; a racing new installer can still make the app refuse.
+  StrCmp $MutexHandle 0 finish_start_failed
+  System::Call 'kernel32::CloseHandle(p $MutexHandle)i.r0'
+  StrCpy $MutexHandle 0
+  StrCmp $0 0 finish_start_failed
+  System::Call 'kernel32::OpenMutexW(i 0x00100000, i 0, w "Local\LedgeTopFilesPilotInstaller")p.r0 ?e'
+  Pop $1
+  StrCmp $0 0 finish_start_absent
+    System::Call 'kernel32::CloseHandle(p r0)'
+    Goto finish_start_failed
+  finish_start_absent:
+  IntCmp $1 2 +2
+    Goto finish_start_failed
+  ClearErrors
+  Exec '"${TARGET}\LedgeTop.Files.exe"'
+  IfErrors finish_start_failed
+  Goto finish_start_done
+  finish_start_failed:
+    MessageBox MB_ICONEXCLAMATION "LedgeTop Files could not be started. Open it from the Start menu after setup closes." /SD IDOK
+  finish_start_done:
+  Pop $1
+  Pop $0
+  finish_start_return:
+FunctionEnd
 
 Function un.onInit
   SetShellVarContext current
@@ -411,6 +644,8 @@ Section "Uninstall"
   ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
   StrCmp $0 "$INSTDIR" 0 un_failed
   !insertmacro ValidatePayloadPaths
+  Call un.RemoveStartupCommand
+  StrCmp $StartupFailed 1 un_failed
   ClearErrors
   !insertmacro DeletePayload
   IfErrors un_failed

@@ -31,6 +31,7 @@ public partial class App : Application
         }
         var resume = ExplorerResumeRequest.Parse(e.Args);
         if (!resume.AllowedIn(compiled)) { Shutdown(20); return; }
+        var startupAdapter = compiled.Packaged && compiled.Channel == ReleaseChannel.Pilot ? new WindowsStartupAdapter() : null;
         if (InstallerMaintenance.Requested(e.Args)) {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             var exitCode = await InstallerMaintenance.RunAsync(compiled, e.Args);
@@ -49,6 +50,9 @@ public partial class App : Application
                 "LedgeTop Files", MessageBoxButton.OK, MessageBoxImage.Information);
             Shutdown();
             return;
+        }
+        if (resume.StartWithWindows && (startupAdapter is null || !await startupAdapter.ValidateRunningInstallationAsync(CancellationToken.None))) {
+            Shutdown(20); return;
         }
         var scope = SingleInstance.ScopeFor(compiled, e.Args);
         try {
@@ -129,9 +133,16 @@ public partial class App : Application
                         binding.SourceAlias, binding.PrincipalId, settings.DrainForUpdateAsync,
                         () => settings.RecoverForUpdateAsync(binding), settings.RequestUpdateExitAsync)));
                 settings.SetUpdateActions(updateController.Actions(currentVersion));
+                settings.ConfigureUpdateSchedule(ExplorerUpdateScheduleSettingsStore.CreatePilot(stateBase),
+                    () => DateTimeOffset.UtcNow, TimeSpan.FromSeconds(Random.Shared.Next(0, 121)));
             }
             settings.Show(); RestoreWhenReady(settings);
+            if (startupAdapter is not null) {
+                await settings.SetStartupActionsAsync(new ExplorerStartupActions(startupAdapter.GetStateAsync,
+                    (enabled, token) => startupAdapter.SetEnabledAsync(enabled, AccessModes.Alias(mode.Value), token)));
+            }
             if (resume.Requested) await settings.ReconnectPreviewAsync();
+            if (resume.StartWithWindows) settings.HideAfterWindowsStartup();
             return;
         }
         if (resume.Requested) { Shutdown(20); return; }

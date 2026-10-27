@@ -147,6 +147,8 @@ internal static class ExplorerPreviewWindowTests
             True(cachedPending.Disposals == 1 && cachedPending.Starts == 0 && cachedPending.State != ExplorerPreviewState.Running,
                 "Quit cancels and drains cached reconnect before closing without explicit sign-in");
             await UpdateLifecycle(root, screenshots);
+            await ScheduledUpdates(root);
+            await WindowsStartupSettings(root);
             var choice = new ExplorerSourceChoiceWindow([LedgeTop.Files.Backends.AccessMode.Client, LedgeTop.Files.Backends.AccessMode.Employee], "Pilot") {
                 ShowInTaskbar = false, Left = -20000, Top = -20000, WindowStartupLocation = WindowStartupLocation.Manual
             };
@@ -291,6 +293,84 @@ internal static class ExplorerPreviewWindowTests
                 True(veto ? final.IsVisible && final.UpdateMaintenanceOwned : !final.IsVisible, "final hook closes without awaiting its own update operation");
             } finally { final.Closing -= handler; if (veto) CloseFakeUpdateWindow(final); }
         }
+    }
+
+    private static async Task WindowsStartupSettings(string root)
+    {
+        var content = ExplorerWindowContent.Connected("Pilot", AccessMode.Employee);
+        var session = new FakeSession(root); var writes = new List<bool>();
+        var window = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), content, session);
+        try {
+            await window.SetStartupActionsAsync(new(_ => Task.FromResult(new WindowsStartupState(WindowsStartupAvailability.Available)),
+                (enabled, _) => { writes.Add(enabled); return Task.FromResult(new WindowsStartupState(WindowsStartupAvailability.Available, enabled, enabled ? "employee" : null)); }));
+            True(window.WindowsStartupCheckBox.IsEnabled && window.WindowsStartupCheckBox.IsChecked == false, "owned startup read controls the checkbox without enabling startup");
+            window.HideAfterWindowsStartup(); True(window.IsVisible, "failed or absent cached reconnect stays visible for sign-in");
+            window.WindowsStartupCheckBox.IsChecked = true;
+            await Until(() => writes.Count == 1 && window.WindowsStartupCheckBox.IsEnabled);
+            True(writes.SequenceEqual(new[] { true }) && window.WindowsStartupCheckBox.IsChecked == true, "explicit startup toggle commits through the supplied installed adapter");
+            await window.StartPreviewAsync(); window.HideAfterWindowsStartup();
+            True(!window.IsVisible && session.Starts == 1 && session.Disposals == 0, "successful startup hides only with a usable tray and connected provider");
+            window.RestoreFromTray(); window.WindowsStartupCheckBox.IsChecked = false;
+            await Until(() => writes.Count == 2 && window.WindowsStartupCheckBox.IsEnabled);
+            True(writes.SequenceEqual(new[] { true, false }), "explicit disable is not immediately opted back in by refresh");
+        } finally { window.Quit(); await Until(() => !window.IsVisible); }
+        window = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), content, new FakeSession(root));
+        try {
+            await window.SetStartupActionsAsync(new(_ => Task.FromResult(new WindowsStartupState(WindowsStartupAvailability.Conflict)),
+                (_, _) => throw new InvalidOperationException("Foreign startup data cannot be changed.")));
+            True(!window.WindowsStartupCheckBox.IsEnabled && Labels(window).Contains("kept unchanged"), "foreign startup values remain visible and disabled");
+        } finally { window.Quit(); await Until(() => !window.IsVisible); }
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        window = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), content, new FakeSession(root));
+        var loading = window.SetStartupActionsAsync(new(async token => { entered.TrySetResult(); await Task.Delay(Timeout.Infinite, token); return new(WindowsStartupAvailability.Available); },
+            (_, _) => throw new InvalidOperationException()));
+        await entered.Task; window.Quit(); await loading; await Until(() => !window.IsVisible);
+        True(writes.Count == 2, "Quit cancels and joins startup inspection without new writes");
+    }
+
+    private static async Task ScheduledUpdates(string root)
+    {
+        var content = ExplorerWindowContent.Connected("Pilot", AccessMode.Employee);
+        var now = new DateTimeOffset(2026, 10, 26, 0, 0, 0, TimeSpan.Zero);
+        var checks = 0; var installs = 0;
+        var owned = new FakeSession(root);
+        var settings = ExplorerUpdateScheduleSettingsStore.CreateForTests(Path.Combine(root, "schedule-safe"));
+        var window = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), content, owned,
+            new("0.5.2.0", _ => { checks++; return Task.FromResult(AvailableUpdate()); }, _ => { installs++; return Task.FromResult(new ExeUpdateHandoffResult(ExeUpdateHandoffStatus.Postponed, false)); }), FakeBinding);
+        try {
+            window.ConfigureUpdateSchedule(settings, () => now, TimeSpan.Zero, runTimer: false);
+            now += TimeSpan.FromMinutes(5); await window.TickUpdateScheduleAsync();
+            True(checks == 0 && installs == 0, "due native schedule waits for a connected provider");
+            await window.StartPreviewAsync(); await window.TickUpdateScheduleAsync();
+            True(checks == 1 && installs == 1 && !window.UpdateMaintenanceOwned && owned.Removals == 0,
+                "scheduled update uses existing check/install lifecycle and safe postponed result");
+            await window.TickUpdateScheduleAsync(); True(checks == 1, "completed safe attempt is not repeated immediately");
+            window.AutomaticUpdatesCheckBox.IsChecked = false;
+            await Until(() => !settings.Load().Settings.AutoUpdatesEnabled);
+            True(!settings.Load().Settings.AutoUpdatesEnabled && settings.Load().Settings.NextDueUtc is not null, "checkbox saves ordinary disable distinctly from uncertain helper pause");
+        } finally { window.Quit(); await Until(() => !window.IsVisible); }
+
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        window = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), content, new FakeSession(root),
+            new("0.5.2.0", async token => { entered.TrySetResult(); await Task.Delay(Timeout.Infinite, token); return AvailableUpdate(); },
+                _ => throw new InvalidOperationException("A cancelled scheduled check cannot install.")), FakeBinding);
+        window.ConfigureUpdateSchedule(ExplorerUpdateScheduleSettingsStore.CreateForTests(Path.Combine(root, "schedule-quit")), () => now, TimeSpan.Zero, runTimer: false);
+        await window.StartPreviewAsync(); now += TimeSpan.FromMinutes(5);
+        var checking = window.TickUpdateScheduleAsync(); await entered.Task;
+        window.Quit(); await checking; await Until(() => !window.IsVisible);
+        True(!window.UpdateMaintenanceOwned, "Quit cancels and joins the actual scheduled check without a dispatcher cycle");
+
+        var successfulStore = ExplorerUpdateScheduleSettingsStore.CreateForTests(Path.Combine(root, "schedule-final"));
+        window = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), content, new FakeSession(root),
+            new("0.5.2.0", _ => Task.FromResult(AvailableUpdate()), async _ => {
+                await window.DrainForUpdateAsync();
+                True(await window.RequestUpdateExitAsync(() => Task.CompletedTask) == ExeUpdateParentExitDecision.Accepted,
+                    "scheduled final exit does not await its own controller");
+                return new(ExeUpdateHandoffStatus.ParentExitRequested, true);
+            }), FakeBinding);
+        window.ConfigureUpdateSchedule(successfulStore, () => now, TimeSpan.Zero, runTimer: false);
+        await window.StartPreviewAsync(); now += TimeSpan.FromMinutes(5); await window.TickUpdateScheduleAsync();
+        True(!window.IsVisible && successfulStore.Load().Settings.AutoUpdatesEnabled, "successful scheduled handoff keeps upgrades enabled for the next version");
     }
 
     private static void CloseFakeUpdateWindow(ExplorerPreviewWindow window)

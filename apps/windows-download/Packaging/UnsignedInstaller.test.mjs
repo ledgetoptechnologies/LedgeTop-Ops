@@ -8,6 +8,8 @@ const install = active.slice(active.indexOf('Section "Install"'), active.indexOf
 const init = active.slice(active.indexOf('Function .onInit'), active.indexOf('Section "Install"'));
 const uninit = active.slice(active.indexOf('Function un.onInit'), active.indexOf('Section "Uninstall"'));
 const uninstall = active.slice(active.indexOf('Section "Uninstall"'));
+const finishStart = active.slice(active.indexOf('Function FinishStartLedgeTopFiles'), active.indexOf('Function un.onInit'));
+const outsideFinishStart = active.replace(finishStart, '');
 const before = (text, a, b) => assert(text.indexOf(a) >= 0 && text.indexOf(a) < text.indexOf(b), `${a} must precede ${b}`);
 
 test('explicit immutable builder inputs have no installable defaults', () => {
@@ -71,11 +73,42 @@ test('registry versions canonicalized and numerically compared before activation
   assert.match(init, /\$\{VersionCompare\} \$ExistingVersion "\$\{APP_VERSION\}" \$0\n    StrCmp \$0 2 init_done/);
   assert.match(init, /registry_unknown/);
 });
-test('maintenance check success required before receipt and activation, no normal launch', () => {
+test('maintenance check success required before receipt and activation; normal launch only in guarded interactive Finish', () => {
   before(install, '--installer-check', 'WriteUninstaller');
   before(install, 'StrCmp $0 0', 'WriteRegStr HKCU');
   assert.match(install, /IfErrors install_failed/);
-  assert(!/ExecShell|\bExec\s|nsExec|taskkill|TerminateProcess|schtasks|\bRunOnce\b|\\Run"|https?:\/\//i.test(active));
+  assert(!/ExecShell|nsExec|taskkill|TerminateProcess|schtasks|\bRunOnce\b|https?:\/\//i.test(active));
+  assert.doesNotMatch(outsideFinishStart, /\bExec\s/);
+  assert.equal((active.match(/\bExec\s/g) ?? []).length, 1);
+  assert.match(active, /!define STARTUP_KEY "Software\\Microsoft\\Windows\\CurrentVersion\\Run"/);
+  assert.match(active, /!define STARTUP_VALUE "LedgeTopFilesPilot"/);
+  assert.doesNotMatch(active, /WriteReg(?:Str|ExpandStr)[^\n]*STARTUP_KEY|DeleteRegKey[^\n]*STARTUP_KEY/);
+});
+test('Finish offers checked-by-default Start LedgeTop Files and invokes only its checkbox callback', () => {
+  assert.match(active, /!define MUI_FINISHPAGE_RUN "\$\{TARGET\}\\LedgeTop\.Files\.exe"/);
+  assert.match(active, /!define MUI_FINISHPAGE_RUN_TEXT "Start LedgeTop Files"/);
+  assert.match(active, /!define MUI_FINISHPAGE_RUN_FUNCTION FinishStartLedgeTopFiles/);
+  before(active, '!define MUI_FINISHPAGE_RUN_FUNCTION', '!insertmacro MUI_PAGE_FINISH');
+  assert.doesNotMatch(active, /MUI_FINISHPAGE_RUN_NOTCHECKED/);
+  assert.doesNotMatch(active, /Call FinishStartLedgeTopFiles/);
+  assert.match(finishStart, /^Function FinishStartLedgeTopFiles\n  IfSilent finish_start_return\n/);
+  before(finishStart, 'IfSilent finish_start_return', 'Exec ');
+});
+test('Finish launch requires successful install, exact activation and marker before releasing only own activity handle', () => {
+  before(install, 'Call MigrateStartupCommand', 'StrCpy $FinishLaunchReady 1');
+  before(install, 'StrCmp $StartupFailed 1 activation_failed', 'StrCpy $FinishLaunchReady 1');
+  before(finishStart, 'StrCmp $FinishLaunchReady 1', 'Exec ');
+  before(finishStart, 'StrCpy $FinishLaunchReady 0', 'Exec ');
+  for (const field of ['DisplayVersion', 'InstallLocation', 'Owner', 'Version', 'PayloadManifestSha256', 'SourceCommit'])
+    before(finishStart, `"${field}"`, 'CloseHandle(p $MutexHandle)');
+  before(finishStart, 'Call CheckFixedPath', 'CloseHandle(p $MutexHandle)');
+  assert.equal((finishStart.match(/IntOp \$1 \$0 & 0x410/g) ?? []).length, 2);
+  before(finishStart, 'CloseHandle(p $MutexHandle)', 'StrCpy $MutexHandle 0');
+  before(finishStart, 'StrCpy $MutexHandle 0', 'OpenMutexW');
+  before(finishStart, 'OpenMutexW', 'Exec ');
+  assert.match(finishStart, /IntCmp \$1 2 \+2\n    Goto finish_start_failed/);
+  assert.match(finishStart, /Exec '"\$\{TARGET\}\\LedgeTop\.Files\.exe"'/);
+  assert.doesNotMatch(finishStart, /WriteReg|WriteINI|Delete|SetOutPath|CreateDirectory|ExecWait|--startup|--reconnect|--installer|ReleaseMutex/);
 });
 test('old-version uninstaller refuses before any connection cleanup', () => {
   assert.match(uninit, /StrCmp \$INSTDIR "\$\{TARGET\}"/);

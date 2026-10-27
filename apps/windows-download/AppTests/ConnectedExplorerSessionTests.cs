@@ -85,7 +85,7 @@ internal static class ConnectedExplorerSessionTests
         await using (var empty = new Fixture { EmptyInventory = true }) {
             var connectedEmpty = empty.Create(); await connectedEmpty.StartAsync();
             Check(connectedEmpty.State == ExplorerPreviewState.Running && connectedEmpty.InventoryEmpty &&
-                connectedEmpty.Activity.Any(line => line.Contains("no folders or files", StringComparison.Ordinal)),
+                connectedEmpty.Activity.Any(line => line.Contains("saved file list is empty", StringComparison.Ordinal)),
                 "authorized empty source connects with an explicit empty-sharing explanation instead of a failure");
         }
         foreach (var wrong in new[] { "alias", "origin", "multiple" }) {

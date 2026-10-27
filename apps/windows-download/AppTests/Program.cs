@@ -15,6 +15,9 @@ if (args.FirstOrDefault() == "--folder-launcher-exit-helper") return BackgroundF
 // no network, no sign-in, no installer. Optional first argument: a folder for rendered screenshots
 // (otherwise they go to a new temporary folder, which is printed and kept as evidence).
 var screenshots = args.Length > 0 ? args[0] : Path.Combine(Path.GetTempPath(), "ltfiles-screens-" + Guid.NewGuid().ToString("N"));
+// Keep owned filesystem fixtures alongside this harness's explicit screenshots/artifact root.
+if (Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") is null)
+    Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", Path.GetFullPath(screenshots));
 var passed = 0; var failed = 0;
 var groups = new (string Name, Func<Task> Run)[] {
     ("client and employee backends construct and route only their selected source", BackendModeTests.Run),
@@ -73,6 +76,8 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("EXE Windows update policies preserve peer exit and installer ownership", ExeUpdateWindowsPolicyTests.Run),
     ("Saved-source resume admits only the exact offered pilot coordinate", ExplorerResumeRequestTests.Run),
     ("Installed update parent classifies cancellation before helper capability", ExplorerInstalledUpdateControllerTests.Run),
+    ("Automatic update schedule preserves idle and recovery boundaries", LedgeTop.Files.Tests.ExplorerUpdateScheduleTests.Run),
+    ("Windows startup settings preserve fixed installed ownership and foreign values", WindowsStartupAdapterTests.Run),
     ("Installed payload verifier binds exact inventory and retained filesystem handles", InstalledPayloadVerifierTests.Run),
     ("Installer maintenance validates fixed pilot ownership and drains offline cleanup", InstallerMaintenanceTests.Run),
     ("Folder launcher keeps dispatcher and Quit responsive while Windows Shell is blocked", () => BackgroundFolderLauncherTests.Run(screenshots)),
@@ -95,6 +100,10 @@ var selectedGroups = args.Contains("--folder-launcher-only")
     ? groups.Where(group => group.Name.StartsWith("Saved-source resume", StringComparison.Ordinal)).ToArray()
     : args.Contains("--update-parent-only")
     ? groups.Where(group => group.Name.StartsWith("Installed update parent", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--update-schedule-only")
+    ? groups.Where(group => group.Name.StartsWith("Automatic update schedule", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--windows-startup-only")
+    ? groups.Where(group => group.Name.StartsWith("Windows startup settings", StringComparison.Ordinal)).ToArray()
     : args.Contains("--explorer-catalog-only")
     ? groups.Where(group => group.Name.StartsWith("Explorer catalog", StringComparison.Ordinal)).ToArray()
     : args.Contains("--connected-coordinator-only")
