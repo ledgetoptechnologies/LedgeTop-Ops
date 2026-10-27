@@ -22,7 +22,11 @@ const LEGACY_TABLES = Object.freeze([
   'staff_users','staff_divisions','permissions','roles','role_permissions','staff_role_assignments',
   'staff_permission_overrides','local_staff_role_assignments',
 ]);
-const AUTHORITY_WIDE_TABLES = new Set(['native_business_areas','native_business_divisions','native_staff_authority_capabilities',
+// These rows affect effective permission scope without a staff_id column.
+// Snapshot them with the other authority-wide state so an edit after review
+// fails the installer CAS instead of silently changing grant interpretation.
+const AUTHORITY_WIDE_TABLES = new Set(['native_business_areas','native_business_divisions','native_directory_resource_scopes',
+  'native_staff_delegation_ceilings','native_staff_authority_capabilities',
   'native_staff_access_reconciliation']);
 const INSTALL_COLUMNS = Object.freeze({
   native_business_areas:['id','name','active'],
@@ -385,7 +389,7 @@ export async function prepareNativeStaffBootstrapD1(input, { verifyTrust } = {})
   verifyEnvelopeClaims(input.trustEnvelope,input,planSha256,bindingSha256,input.reviewedSnapshot.snapshotSha256);
   if (!/^[0-9a-f]{64}$/u.test(input.reviewedSnapshot.snapshotSha256 ?? '')
     || input.reviewedSnapshot.snapshotSha256!==sha(input.reviewedSnapshot.snapshotJson)
-    || !await verifyTrust({trustEnvelope:input.trustEnvelope,approval:input.approval,canonicalPlanJson:input.canonicalPlanJson,
+    || !await verifyTrust({trustEnvelope:input.trustEnvelope,approval:input.approval,commandId:input.commandId,canonicalPlanJson:input.canonicalPlanJson,
       planSha256,bindingEvidenceJson:input.bindingEvidenceJson,bindingSha256,reviewedSnapshot:input.reviewedSnapshot})) fail('independent_approval_missing');
   verifyPlanRows(plan,input.reviewedSnapshot.snapshotJson);
   if (plan.reviewedSnapshotSha256!==input.reviewedSnapshot.snapshotSha256 || plan.approvalId!==input.approval.approvalId) fail('review_binding_invalid');
@@ -415,7 +419,7 @@ export async function executeNativeStaffBootstrapD1(db, prepared, { verifyTrust,
   if(plan.reviewedSnapshotSha256!==snapshotSha||plan.approvalId!==compiled.approval.approvalId
     ||!plan.controlPlaneStaffIds.includes(compiled.approval.approvedOperatorStaffId))fail('review_binding_invalid');
   const execution=deepFreeze({...compiled,plan});
-  if (!await verifyTrust({trustEnvelope:execution.trustEnvelope,approval:execution.approval,canonicalPlanJson:execution.canonicalPlanJson,
+  if (!await verifyTrust({trustEnvelope:execution.trustEnvelope,approval:execution.approval,commandId:execution.commandId,canonicalPlanJson:execution.canonicalPlanJson,
     planSha256:execution.planSha256,bindingEvidenceJson:execution.bindingEvidenceJson,bindingSha256:execution.bindingSha256,
     reviewedSnapshot:execution.reviewedSnapshot})) fail('independent_approval_revoked');
   const model=await schemaModel(db), ids=JSON.parse(execution.reviewedSnapshot.snapshotJson).rows.staff_users.map(row=>row.id);
@@ -433,7 +437,7 @@ export async function executeNativeStaffBootstrapD1(db, prepared, { verifyTrust,
   const batch=[...guards,
     approvalStatement(execution),...execution.plan.rows.map(item=>gatedInsert(item,execution.approval.approvalId)),
     receiptStatement({...execution,schemaModel:model})];
-  if (!await verifyTrust({trustEnvelope:execution.trustEnvelope,approval:execution.approval,canonicalPlanJson:execution.canonicalPlanJson,
+  if (!await verifyTrust({trustEnvelope:execution.trustEnvelope,approval:execution.approval,commandId:execution.commandId,canonicalPlanJson:execution.canonicalPlanJson,
     planSha256:execution.planSha256,bindingEvidenceJson:execution.bindingEvidenceJson,bindingSha256:execution.bindingSha256,
     reviewedSnapshot:execution.reviewedSnapshot})) fail('independent_approval_revoked');
   let result;

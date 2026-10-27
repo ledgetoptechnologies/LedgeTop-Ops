@@ -1,12 +1,28 @@
 import { reconcileAccessGroupForEmails, type ReconciliationEnvironment } from "./access-group";
+import { staffLoginLinksAvailable } from "../../operations/src/worker/staff-login-bindings";
 
-type Database = Pick<D1DatabaseSession, "prepare">;
+type Database = D1Database;
 type Control = { enabled: number; generation: number; applied_generation: number };
 export type NativeStaffAccessOutcome = Readonly<{ status: "disabled" | "busy" | "applied" | "pending"; members: number }>;
 
+function validAccessIssuer(value: unknown): value is string {
+  try {
+    if (typeof value !== "string") return false;
+    const url = new URL(value);
+    return url.origin === value && url.protocol === "https:" && url.hostname.endsWith(".cloudflareaccess.com")
+      && url.hostname !== ".cloudflareaccess.com" && !url.port && !url.username && !url.password
+      && url.pathname === "/" && !url.search && !url.hash;
+  } catch { return false; }
+}
+
+function validMemberEmail(email: unknown): email is string {
+  return typeof email === "string" && email.length >= 3 && email.length <= 254
+    && email === email.trim().toLowerCase() && !/[\p{Cc}\p{Cf}]/u.test(email) && /^[^\s@]+@[^\s@]+$/u.test(email);
+}
+
 /** Only an exact, already-bound native/compatibility identity enters this set.
  * Historical PA users, roles and email-only matches confer no membership. */
-export async function desiredNativeStaffAccessEmails(db: Database): Promise<string[]> {
+export async function desiredNativeStaffAccessEmails(db: Database, configuredIssuer?: string): Promise<string[]> {
   const result = await db.prepare(`SELECT p.login_email AS email FROM native_staff_profiles p
     JOIN native_staff_admissions a ON a.staff_id=p.staff_id AND a.active=1
     JOIN staff_users s ON s.id=a.staff_id AND s.status='active'
@@ -14,9 +30,31 @@ export async function desiredNativeStaffAccessEmails(db: Database): Promise<stri
     ORDER BY p.login_email LIMIT 10001`).all<{email:string}>();
   const emails = result.results.map(row => row.email);
   if (!result.success || emails.length > 10_000 || new Set(emails).size !== emails.length
-    || emails.some(email => typeof email !== "string" || email.length < 3 || email.length > 254
-      || email !== email.trim().toLowerCase() || /[\p{Cc}\p{Cf}]/u.test(email) || !/^[^\s@]+@[^\s@]+$/u.test(email)))
+    || emails.some(email => !validMemberEmail(email)))
     throw new Error("native-access-members-invalid");
+
+  // Keep migrations rolling-deploy safe: no 0226 tables means the historical
+  // primary-login cohort remains unchanged. A partial/broken migration throws
+  // through Operations' canonical schema preflight instead of guessing.
+  if (await staffLoginLinksAvailable(db)) {
+    if (!validAccessIssuer(configuredIssuer)) throw new Error("native-access-issuer-invalid");
+    const aliases = await db.prepare(`SELECT b.login_email AS email FROM staff_login_bindings b
+      JOIN staff_login_binding_intents i ON i.id=b.intent_id AND i.status='claimed' AND i.binding_id=b.id
+        AND i.issuer=b.issuer AND i.alternate_email=b.login_email COLLATE BINARY
+      JOIN staff_login_generations g ON g.staff_id=b.staff_id AND g.generation>i.generation
+      JOIN staff_users s ON s.id=b.staff_id AND s.status='active'
+        AND s.email=i.canonical_email COLLATE BINARY AND s.access_subject=i.canonical_subject
+      JOIN native_staff_admissions a ON a.staff_id=s.id AND a.active=1 AND a.bound_access_subject=s.access_subject
+      JOIN native_staff_profiles p ON p.staff_id=s.id AND p.login_email=s.email COLLATE BINARY
+      WHERE b.issuer=? AND b.status='active'
+      ORDER BY b.login_email LIMIT 10001`).bind(configuredIssuer).all<{email:string}>();
+    const aliasEmails = aliases.results.map(row => row.email);
+    if (!aliases.success || aliasEmails.length > 10_000 || aliasEmails.some(email => !validMemberEmail(email))
+      || new Set(aliasEmails).size !== aliasEmails.length
+      || aliasEmails.some(email => emails.includes(email))) throw new Error("native-access-members-invalid");
+    emails.push(...aliasEmails);
+    emails.sort();
+  }
   return emails;
 }
 
@@ -24,7 +62,7 @@ export async function desiredNativeStaffAccessEmails(db: Database): Promise<stri
  * D1 leases fence local outcomes, not remote Cloudflare processing. A timed-out
  * PUT may apply later; every cron re-reads and converges even applied generations.
  * Immediate offboarding denial therefore relies on local native + legacy status. */
-export async function reconcileNativeStaffAccess(env: ReconciliationEnvironment): Promise<NativeStaffAccessOutcome> {
+export async function reconcileNativeStaffAccess(env: ReconciliationEnvironment & { TEAM_DOMAIN?: string }): Promise<NativeStaffAccessOutcome> {
   const db = env.OPS_DB.withSession("first-primary");
   let state: Control | null;
   try {
@@ -54,7 +92,7 @@ export async function reconcileNativeStaffAccess(env: ReconciliationEnvironment)
     if (valid !== 1) throw new Error("native-access-generation-changed");
   };
   try {
-    const emails = await desiredNativeStaffAccessEmails(db);
+    const emails = await desiredNativeStaffAccessEmails(env.OPS_DB, env.TEAM_DOMAIN);
     // A ready cohort retains an admitted control-plane member. Do not assume
     // provider include:[] means deny-all, invent an address, or rewrite excludes.
     if (emails.length === 0) throw new Error("native-access-empty-cohort");

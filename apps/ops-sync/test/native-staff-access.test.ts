@@ -8,7 +8,7 @@ import type { Env } from "../src/types";
 
 let runtime: Miniflare, db: D1Database;
 const environment = () => ({ OPS_DB: db, CF_ACCOUNT_ID: "synthetic-account", CF_ACCESS_GROUP_ID: "synthetic-group",
-  CF_ACCESS_GROUP_API_TOKEN: "synthetic-token" });
+  CF_ACCESS_GROUP_API_TOKEN: "synthetic-token", TEAM_DOMAIN: "https://tenant.cloudflareaccess.com" });
 type Group = { id:string; name:string; include:unknown[]; exclude:unknown[]; require:unknown[]; is_default:boolean };
 let group: Group, writes: Group[];
 let intercept: ((method:string) => Promise<Response | undefined>) | undefined;
@@ -25,6 +25,27 @@ async function member(id:string, email:string, options:{native?:boolean;active?:
     await db.prepare("INSERT INTO native_staff_profiles(staff_id,login_email) VALUES(?,?)").bind(id,options.profileEmail ?? email).run();
   }
 }
+async function enableLoginBindings() {
+  const migration=await readFile(new URL("../../operations/migrations/0226_staff_login_bindings.sql",import.meta.url),"utf8");
+  for(const sql of unstable_splitSqlQuery(migration).filter(s=>!/^[\s\uFEFF]*PRAGMA\b/i.test(s))) await db.prepare(sql).run();
+}
+async function bindAlias(staffId:string, email:string, options:{issuer?:string;subject?:string}={}) {
+  const staff=await db.prepare("SELECT email,access_subject FROM staff_users WHERE id=?").bind(staffId).first<{email:string;access_subject:string}>();
+  if(!staff) throw new Error("synthetic-staff-missing");
+  const intentId=crypto.randomUUID(), bindingId=crypto.randomUUID(), now=Date.now();
+  const tokenHash=Array.from(crypto.getRandomValues(new Uint8Array(32)),value=>value.toString(16).padStart(2,"0")).join("");
+  await db.prepare("INSERT INTO staff_role_assignments(staff_id,role_id,scope) VALUES(?,'role-owner','global')").bind(staffId).run();
+  await db.prepare("INSERT INTO staff_login_generations(staff_id,generation) VALUES(?,0) ON CONFLICT(staff_id) DO NOTHING").bind(staffId).run();
+  const generation=await db.prepare("SELECT generation FROM staff_login_generations WHERE staff_id=?").bind(staffId).first<number>("generation");
+  if(typeof generation!=="number") throw new Error("synthetic-generation-missing");
+  await db.prepare(`INSERT INTO staff_login_binding_intents(id,staff_id,canonical_email,canonical_subject,issuer,alternate_email,
+    token_sha256,generation,created_at_ms,expires_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?)`)
+    .bind(intentId,staffId,staff.email,staff.access_subject,options.issuer??"https://tenant.cloudflareaccess.com",email,tokenHash,generation,now,now+900_000).run();
+  await db.prepare(`INSERT INTO staff_login_bindings(id,staff_id,issuer,login_email,access_subject,intent_id,created_at_ms)
+    VALUES(?,?,?,?,?,?,?)`).bind(bindingId,staffId,options.issuer??"https://tenant.cloudflareaccess.com",email,
+      options.subject??`alternate:${staffId}:${bindingId}`,intentId,now).run();
+  return {intentId,bindingId};
+}
 beforeEach(async () => {
   runtime = new Miniflare({ modules:true, script:"export default {fetch(){return new Response('unused')}}", cf:false,
     outboundService:() => { throw Error("No Worker outbound in reconciliation tests"); }, d1Databases:["DB"] });
@@ -35,10 +56,12 @@ beforeEach(async () => {
   const controlDdl = migration.slice(0,migration.indexOf("CREATE TABLE native_staff_lifecycle_fences"));
   for (const sql of unstable_splitSqlQuery(controlDdl).filter(s => !/^\s*PRAGMA\b/i.test(s))) await db.prepare(sql).run();
   await db.batch([
-    db.prepare("CREATE TABLE staff_users(id TEXT PRIMARY KEY,email TEXT,access_subject TEXT,status TEXT)"),
+    db.prepare("CREATE TABLE staff_users(id TEXT PRIMARY KEY,email TEXT,display_name TEXT DEFAULT 'Synthetic Staff',project_alpha_user_id TEXT,access_subject TEXT,status TEXT)"),
     db.prepare("CREATE TABLE native_staff_admissions(staff_id TEXT PRIMARY KEY,bound_access_subject TEXT,active INTEGER)"),
-    db.prepare("CREATE TABLE native_staff_profiles(staff_id TEXT PRIMARY KEY,login_email TEXT)"),
+    db.prepare("CREATE TABLE native_staff_profiles(staff_id TEXT PRIMARY KEY,login_email TEXT,version INTEGER NOT NULL DEFAULT 1,updated_at TEXT DEFAULT 'synthetic')"),
     db.prepare("CREATE TABLE pa_users(id TEXT PRIMARY KEY,email TEXT,active INTEGER)"),
+    db.prepare("CREATE TABLE staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT)"),
+    db.prepare("CREATE TABLE staff_permission_overrides(staff_id TEXT,permission_key TEXT,effect TEXT,scope TEXT)"),
   ]);
   group = { id:"synthetic-group",name:"Managed staff",include:[{email:{email:"retired@example.invalid"}}],
     exclude:[{email:{email:"excluded@example.invalid"}}],require:[{auth_method:{auth_method:"mfa"}}],is_default:false };
@@ -67,7 +90,7 @@ describe("native staff Access reconciliation uses D1 claims and provider doubles
     await member("wrong-subject","subject@example.invalid",{subject:"different-subject"});
     await member("wrong-email","Email@example.invalid",{profileEmail:"email@example.invalid"});
     await db.prepare("INSERT INTO pa_users VALUES('pa','pa@example.invalid',1)").run();
-    expect(await desiredNativeStaffAccessEmails(db.withSession("first-primary"))).toEqual(["valid@example.invalid"]);
+    expect(await desiredNativeStaffAccessEmails(db, environment().TEAM_DOMAIN)).toEqual(["valid@example.invalid"]);
     await enable(); expect(await reconcileScheduledAccess(environment() as Env)).toBe(1);
     expect(writes[0]!.include).toEqual([{email:{email:"valid@example.invalid"}}]);
     expect(writes[0]!.exclude).toEqual([{email:{email:"excluded@example.invalid"}}]);
@@ -77,6 +100,58 @@ describe("native staff Access reconciliation uses D1 claims and provider doubles
     await db.prepare("UPDATE pa_users SET active=0,email='changed@example.invalid'").run();
     const count = writes.length; expect(await reconcileNativeStaffAccess(environment())).toMatchObject({status:"applied",members:1});
     expect(writes).toHaveLength(count); // Periodic verification still GETs, but PA changes no desired membership.
+  });
+  it("unions only current accepted aliases for active native staff under the configured Access issuer",async()=>{
+    await member("valid","valid@example.invalid");
+    await member("revoked","revoked-primary@example.invalid");
+    await member("disabled","disabled-primary@example.invalid");
+    await member("stale","stale-primary@example.invalid");
+    await member("other-issuer","other-issuer-primary@example.invalid");
+    await member("collision","collision@example.invalid");
+    await member("profile-stale","profile-stale@example.invalid",{profileEmail:"stale-profile@example.invalid"});
+    await enableLoginBindings();
+    const accepted=await bindAlias("valid","valid-alias@example.invalid");
+    await bindAlias("valid","valid-second-alias@example.invalid");
+    const revoked=await bindAlias("revoked","revoked-alias@example.invalid");
+    await bindAlias("disabled","disabled-alias@example.invalid");
+    await bindAlias("stale","stale-alias@example.invalid");
+    await bindAlias("other-issuer","other-tenant-alias@example.invalid",{issuer:"https://other.cloudflareaccess.com"});
+    await bindAlias("profile-stale","profile-stale-alias@example.invalid");
+    await expect(bindAlias("collision","valid@example.invalid")).rejects.toThrow("staff_login_intent_denied");
+    await db.prepare("UPDATE staff_login_bindings SET status='revoked',version=version+1,revoked_at_ms=?,revoked_by_staff_id=staff_id WHERE id=?")
+      .bind(Date.now(),revoked.bindingId).run();
+    await db.prepare("UPDATE native_staff_admissions SET active=0 WHERE staff_id='disabled'").run();
+    await db.batch([
+      db.prepare("UPDATE staff_users SET access_subject='current:stale' WHERE id='stale'"),
+      db.prepare("UPDATE native_staff_admissions SET bound_access_subject='current:stale' WHERE staff_id='stale'"),
+    ]);
+    const desired=await desiredNativeStaffAccessEmails(db,environment().TEAM_DOMAIN);
+    expect(desired).toEqual([
+      "collision@example.invalid","other-issuer-primary@example.invalid","revoked-primary@example.invalid",
+      "stale-primary@example.invalid","valid-alias@example.invalid","valid-second-alias@example.invalid","valid@example.invalid",
+    ]);
+    expect(desired).toContain("valid-alias@example.invalid");
+    expect(desired).not.toContain("revoked-alias@example.invalid");
+    expect(desired).not.toContain("disabled-alias@example.invalid");
+    expect(desired).not.toContain("stale-alias@example.invalid");
+    expect(desired).not.toContain("other-tenant-alias@example.invalid");
+    expect(desired).not.toContain("profile-stale-alias@example.invalid");
+    expect(desired).not.toContain("profile-stale@example.invalid");
+    await enable();
+    expect(await reconcileNativeStaffAccess(environment())).toEqual({status:"applied",members:7});
+    expect(group.include).toEqual(desired.map(email=>({email:{email}})));
+    expect(accepted.bindingId).toMatch(/^[0-9a-f-]{36}$/u);
+  },15_000);
+  it("keeps pre-0226 primary-only behavior but holds a partially installed alias schema",async()=>{
+    await member("legacy","legacy@example.invalid");
+    expect(await desiredNativeStaffAccessEmails(db)).toEqual(["legacy@example.invalid"]);
+    await db.prepare("CREATE TABLE staff_login_bindings(id TEXT)").run();
+    await expect(desiredNativeStaffAccessEmails(db,environment().TEAM_DOMAIN)).rejects.toThrow("staff_login_unavailable");
+  });
+  it("uses only the configured issuer once alias acceptance is installed",async()=>{
+    await member("valid","valid@example.invalid"); await enableLoginBindings();
+    expect(await desiredNativeStaffAccessEmails(db,"https://other.cloudflareaccess.com")).toEqual(["valid@example.invalid"]);
+    await expect(desiredNativeStaffAccessEmails(db,"https://tenant.cloudflareaccess.com/path")).rejects.toThrow("native-access-issuer-invalid");
   });
   it("keeps provider failures pending without undoing local denial, then retries current state",async () => {
     await member("control","control@example.invalid"); await member("off","retired@example.invalid",{active:0,legacyActive:false}); await enable();
