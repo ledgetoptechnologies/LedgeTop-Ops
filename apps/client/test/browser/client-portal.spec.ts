@@ -423,6 +423,15 @@ test("client-created links use opaque authorized targets and remain usable on de
   await page.keyboard.press("Escape");
   await expect(confirmation).toHaveCount(0);
   expect(revoked).toBe(false);
+  // An in-app route change unmounts the panel while the global dialog stays open: confirming must not revoke.
+  await revokeLink.click();
+  await expect(confirmation).toBeVisible();
+  await spaNavigate(page, "/portal/requests");
+  await expect(page.getByRole("heading", { name: "Client-created public links" })).toHaveCount(0);
+  await confirmInPage(page, "Revoke public link?", "Revoke link");
+  await settleRequests(page);
+  expect(revoked).toBe(false);
+  await spaNavigate(page, "/portal/deliveries");
   await revokeLink.click();
   await confirmInPage(page, "Revoke public link?", "Revoke link");
   await expect(page.getByText("No client-created links yet.")).toBeVisible();
@@ -2099,6 +2108,15 @@ test("client can edit before review, create a child change, and answer an estima
   await page.goto("/portal/requests");
 
   forbidNativeDialogs(page);
+  // Leaving the requests page in-app abandons the open confirmation.
+  await page.getByRole("button", { name: "Accept estimate" }).click();
+  await expect(page.getByRole("dialog", { name: "Accept operational estimate?" })).toBeVisible();
+  await spaNavigate(page, "/portal/deliveries");
+  await expect(page.locator("article").getByRole("button", { name: "Accept estimate" })).toHaveCount(0);
+  await confirmInPage(page, "Accept operational estimate?", "Accept estimate");
+  await settleRequests(page);
+  expect(workflowEvents.estimateAccepted).toBeUndefined();
+  await spaNavigate(page, "/portal/requests");
   await page.getByRole("button", { name: "Accept estimate" }).click();
   const acceptance = page.getByRole("dialog", { name: "Accept operational estimate?" });
   await expect(acceptance.getByText("Accept this non-binding Ledge Top operational estimate? A separate Project Alpha quote will still be required before financial approval.", { exact: true })).toBeVisible();
@@ -2176,10 +2194,20 @@ test("client can cancel pre-work requests and sees PA draft creation without an 
   await cancellation.getByRole("button", { name: "Keep request", exact: true }).click();
   await expect(cancellation).toHaveCount(0);
   expect(workflowEvents.cancelled).toBeUndefined();
+  // Leaving the page in-app abandons the open confirmation.
   await submitted.getByRole("button", { name: "Cancel request" }).click();
-  // A repeated confirm click must not send a second cancellation.
+  await expect(cancellation).toBeVisible();
+  await spaNavigate(page, "/portal/deliveries");
+  await confirmInPage(page, "Cancel this request?", "Cancel request");
+  await settleRequests(page);
+  expect(workflowEvents.cancellationKeys).toHaveLength(0);
+  await spaNavigate(page, "/portal/requests");
+  // Two synchronous clicks on the initiating action open one confirmation, and a repeated confirm sends once.
+  await submitted.getByRole("button", { name: "Cancel request" }).evaluate(button => { (button as HTMLButtonElement).click(); (button as HTMLButtonElement).click(); });
+  await expect(page.getByRole("dialog")).toHaveCount(1);
   await cancellation.getByRole("button", { name: "Cancel request", exact: true }).dblclick();
   await expect.poll(() => workflowEvents.cancelled).toBe(true);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(workflowEvents.cancellationKeys).toHaveLength(1);
   await expect(submitted.getByText("Cancelled", { exact: true })).toBeVisible();
   await expect(submitted.getByRole("button", { name: "Cancel request" })).toHaveCount(0);
@@ -2209,6 +2237,14 @@ function forbidNativeDialogs(page: Page, { allowAlerts = false } = {}) {
     void dialog.dismiss();
     if (!allowAlerts || dialog.type() !== "alert") throw new Error(`Native browser ${dialog.type()} is forbidden: ${dialog.message()}`);
   });
+}
+/** In-app route change through the portal's own history handling, without a document reload. */
+async function spaNavigate(page: Page, path: string) {
+  await page.evaluate(target => { history.pushState(null, "", target); dispatchEvent(new PopStateEvent("popstate")); }, path);
+}
+/** Lets any request a confirmation might have dispatched reach the route mocks. */
+async function settleRequests(page: Page) {
+  await page.evaluate(() => new Promise<void>(resolve => setTimeout(resolve, 250)));
 }
 async function confirmInPage(page: Page, title: string, confirmLabel: string) {
   const dialog = page.getByRole("dialog", { name: title });

@@ -2333,7 +2333,9 @@ function DelegatedSharePanel({ workspaceId }: { workspaceId: string }) {
   const [created, setCreated] = useState<PortalDelegatedShareCreated | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
-  const revoking = useRef(false);
+  const revoking = useRef(false), shareGeneration = useRef(0);
+  // Advances when the workspace changes or the panel unmounts; an open confirmation for the old context must not dispatch.
+  useEffect(() => () => { shareGeneration.current += 1; }, [workspaceId]);
 
   const refresh = async () => {
     setBusy(true); setError("");
@@ -2398,8 +2400,10 @@ function DelegatedSharePanel({ workspaceId }: { workspaceId: string }) {
         {share.status === "active" && <button type="button" className="button-ghost button-small" disabled={busy} onClick={async () => {
           if (revoking.current) return;
           revoking.current = true;
+          const generation = shareGeneration.current;
           try {
             if (!await confirmInApp("Revoke public link?", "Revoke this public link? Anyone using it will immediately lose access.", "Revoke link", "danger")) return;
+            if (generation !== shareGeneration.current) return;
             setBusy(true); setError("");
             try { await revokePortalDelegatedShare(workspaceId, share.id); setShares(await loadPortalDelegatedShares(workspaceId)); }
             catch (caught) { setError((caught as Error).message); } finally { setBusy(false); }
@@ -2773,8 +2777,9 @@ export function ClientPortalApp({
   const [requestNotice, setRequestNotice] = useState<string | null>(null);
   const [cancellingRequestId, setCancellingRequestId] = useState<string | null>(null);
   const cancellationKeys = useRef(new Map<string, string>());
-  // Held across the asynchronous in-app confirmations so a repeated click cannot send twice.
-  const cancelConfirming = useRef(false), estimateResponding = useRef(false);
+  // Synchronous claims held from the first click through completion, so a repeated click cannot send twice.
+  const cancelClaim = useRef(false), estimateResponding = useRef(false);
+  const requestGeneration = useRef(0);
   const [retryingCancellationRequestIds, setRetryingCancellationRequestIds] = useState<ReadonlySet<string>>(() => new Set());
   const [switchingWorkspace, setSwitchingWorkspace] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -2786,6 +2791,9 @@ export function ClientPortalApp({
       ? gate.data.capabilities.requestV2 ? `${gate.data.workspace.sourceId}:${gate.data.workspace.id}:${gate.data.contextVersion}` : null
       : `${gate.data.account.id}:${gate.data.selectedWorkspaceId ?? "legacy"}`
     : null;
+  // Advances when the request context or page changes, or the portal unmounts; an open
+  // confirmation from the old context must not dispatch.
+  useEffect(() => () => { requestGeneration.current += 1; }, [requestContextKey, page, projectId, switchingWorkspace]);
   const requestAvailability = useRequestAvailability(switchingWorkspace ? null : requestContextKey, gate.status === "ready" ? gate.data.selectedWorkspaceId ?? null : null);
 
   // Operations service-home labels are authorized separately from Client data.
@@ -3100,6 +3108,7 @@ export function ClientPortalApp({
     request: PortalServiceRequest,
     response: "accept" | "request_change",
   ) => {
+    const generation = requestGeneration.current;
     const note =
       response === "request_change"
         ? await requestText({ title: "Request a change", label: "What should change in the operational estimate?",
@@ -3115,6 +3124,7 @@ export function ClientPortalApp({
       ))
     )
       return;
+    if (generation !== requestGeneration.current) return;
     try {
       onSaved(
         await respondToPortalEstimate(
@@ -3135,16 +3145,16 @@ export function ClientPortalApp({
     try { await respondToEstimate(request, response); } finally { estimateResponding.current = false; }
   };
   const onCancelRequest = async (request: PortalServiceRequest) => {
-    if (cancellingRequestId || cancelConfirming.current || !cancellableStatuses.has(request.status)) return;
-    const retrying = cancellationKeys.current.has(request.id);
-    cancelConfirming.current = true;
-    let confirmed = false;
-    try {
-      confirmed = await confirmInApp(`${retrying ? "Retry cancelling" : "Cancel"} this request?`,
-        `${retrying ? "Retry cancelling" : "Cancel"} “${request.title}”? This closes the request before work begins.`,
-        retrying ? "Retry cancellation" : "Cancel request", "danger", "Keep request");
-    } finally { cancelConfirming.current = false; }
-    if (!confirmed) return;
+    if (cancelClaim.current || cancellingRequestId || !cancellableStatuses.has(request.status)) return;
+    cancelClaim.current = true;
+    try { await cancelRequest(request); } finally { cancelClaim.current = false; }
+  };
+  const cancelRequest = async (request: PortalServiceRequest) => {
+    const retrying = cancellationKeys.current.has(request.id), generation = requestGeneration.current;
+    if (!await confirmInApp(`${retrying ? "Retry cancelling" : "Cancel"} this request?`,
+      `${retrying ? "Retry cancelling" : "Cancel"} “${request.title}”? This closes the request before work begins.`,
+      retrying ? "Retry cancellation" : "Cancel request", "danger", "Keep request")) return;
+    if (generation !== requestGeneration.current) return;
     const key = cancellationKeys.current.get(request.id) ?? crypto.randomUUID();
     cancellationKeys.current.set(request.id, key);
     setCancellingRequestId(request.id);
