@@ -60,10 +60,12 @@ const candidateVisibilityPause = ms => new Promise(resolve => setTimeout(resolve
  * is returned immediately. Upload and deployment writes are never retried.
  */
 export async function readCandidateVersionWithVisibilityRetry(provider, workerName, candidateVersionId,
-  { pause = candidateVisibilityPause, now = Date.now } = {}) {
+  { pause = candidateVisibilityPause, now = () => performance.now(), timeoutMs = CANDIDATE_VISIBILITY_MAX_MS } = {}) {
   need(provider && typeof provider.getCandidateVersion === "function" && typeof pause === "function"
-    && typeof now === "function" && WORKERS.includes(workerName) && UUID.test(candidateVersionId ?? ""));
-  const deadline = now() + CANDIDATE_VISIBILITY_MAX_MS;
+    && typeof now === "function" && Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= CANDIDATE_VISIBILITY_MAX_MS
+    && WORKERS.includes(workerName) && UUID.test(candidateVersionId ?? ""));
+  const startedAt = now(); need(Number.isFinite(startedAt));
+  const deadline = startedAt + timeoutMs;
   for (let attempt = 0; attempt <= CANDIDATE_VISIBILITY_BACKOFF_MS.length; attempt++) {
     const remaining = deadline - now();
     need(remaining > 0, "production_candidate_visibility_expired_get_only_reconciliation_required");

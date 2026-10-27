@@ -258,3 +258,30 @@ test("candidate visibility exhaustion is eight exact GETs with bounded backoff a
   assert.equal(reads, 8);
   assert.deepEqual(pauses, [250, 500, 1000, 2000, 3000, 3000, 3000]);
 });
+
+test("slow candidate GET is stopped by the absolute deadline and receives an abort signal", async () => {
+  let reads = 0, attemptSignal;
+  const provider = { async getCandidateVersion(_workerName, _versionId, { signal }) {
+    reads++; attemptSignal = signal;
+    return new Promise(() => {});
+  } };
+  await assert.rejects(readCandidateVersionWithVisibilityRetry(provider, "ledgetop-ops", candidate, { timeoutMs: 5 }), /read_failed/u);
+  assert.equal(reads, 1, "a slow GET is never retried as if it were the transient 404");
+  assert.equal(attemptSignal.aborted, true, "the per-attempt abort reaches the in-flight metadata reader");
+});
+
+test("candidate GET deadline abort propagates through the provider transport without a write", async () => {
+  let transportAborted = false, transportCalls = 0;
+  const state = setup((_url, init) => new Promise((_, reject) => {
+    transportCalls++;
+    init.signal.addEventListener("abort", () => {
+      transportAborted = init.signal.aborted;
+      reject(Object.assign(new Error("synthetic transport abort"), { name: "AbortError" }));
+    }, { once: true });
+  }), { timeoutMs: 1000 });
+  await assert.rejects(readCandidateVersionWithVisibilityRetry(state.provider, "ledgetop-ops", candidate, { timeoutMs: 5 }), /read_failed/u);
+  assert.equal(transportCalls, 1);
+  assert.equal(transportAborted, true, "outer visibility deadline abort reaches the actual fetch signal");
+  assert.equal(state.intents.length, 0, "candidate visibility reads cannot create mutation intents");
+  assert.equal(state.persisted.length, 0, "GET cancellation stores no response or credential material");
+});
