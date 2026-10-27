@@ -166,12 +166,13 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
   afterAll(async()=>runtime?.dispose());
 
   it("compiles one bounded management batch without coercing or splitting bind values",async()=>{
-    const statements=[{sql:"INSERT INTO x VALUES(?,?,?,?)",params:["active",1,false,null]}];
+    const statements=[{sql:"INSERT INTO x VALUES(?,?,?)",params:["active",1,null]}];
     let calls=0;
     const response=await submitManagementBatch(async request=>{calls++;expect(request).toEqual({batch:statements});return [{success:true,results:[]}];},statements);
     expect(calls).toBe(1);
     expect(response).toEqual([{success:true,results:[]}]);
-    expect(compileManagementBatch(statements).batch[0].params).toEqual(["active",1,false,null]);
+    expect(compileManagementBatch(statements).batch[0].params).toEqual(["active",1,null]);
+    expect(()=>compileManagementBatch([{sql:"SELECT ?",params:[true]}])).toThrow(/management_parameter_type_unsupported/u);
     expect(()=>compileManagementBatch(Array.from({length:257},()=>statements[0]))).toThrow(/management_batch_size_invalid/u);
   });
 
@@ -185,6 +186,18 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
     const identityBefore=(await db.prepare("SELECT id,email,status,access_subject,project_alpha_user_id,sync_protected FROM staff_users ORDER BY id").all()).results;
     const before=await legacyEffectiveSnapshot(preservedPrincipals);
     const input=planFor(reviewed,people),prepared=await prepare(input,{verifyTrust:trusted});
+    expect(Object.isFrozen(prepared.plan.rows)).toBe(true);
+    expect(Object.isFrozen(prepared.plan.staffCohort)).toBe(true);
+    const mutatedPlan={...prepared.plan,staffCohort:[...prepared.plan.staffCohort,"unreviewed-cohort-member"],
+      rows:[...prepared.plan.rows,{table:"native_directory_grants",row:{id:`unapproved-extra-grant:${people.ops.id}`,staff_id:people.ops.id,
+        permission:"directory.profile.edit",effect:"allow",scope_kind:"global",business_area_id:null,division_id:null,resource_id:null,active:1,granted_by:people.operator.id}}]};
+    const mutatedPrepared={...prepared,plan:mutatedPlan};
+    await expect(execute(db,mutatedPrepared,{verifyTrust:trusted})).rejects.toThrow(/prepared_artifact_invalid/u);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_bootstrap_approvals WHERE approval_id=?").bind(input.approval.approvalId).first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM native_directory_grants WHERE id=?").bind(`unapproved-extra-grant:${people.ops.id}`).first("n")).toBe(0);
+    const digestMismatch={...input,canonicalPlanJson:stable({...prepared.plan,rows:prepared.plan.rows.map((row:any,index:number)=>index===0
+      ? {...row,row:{...row.row,name:"Tampered after owner review"}}:row)})};
+    await expect(prepare(digestMismatch,{verifyTrust:trusted})).rejects.toThrow(/trust_envelope_invalid/u);
     // Normal authenticated activity changes this telemetry field between
     // review and execution. It is intentionally excluded from the authority CAS.
     await db.prepare("UPDATE staff_users SET last_seen_at='2026-10-26T19:35:00.000Z' WHERE id=?").bind(people.ops.id).run();

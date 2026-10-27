@@ -46,6 +46,25 @@ const ID_COLUMNS = new Set(['staff_id','actor_staff_id','target_staff_id','grant
   'beneficiary_staff_id','selected_by_staff_id','reviewed_by_staff_id','terminal_by_staff_id','created_by_staff_id']);
 const MANAGEMENT_BATCH_MAX_STATEMENTS=256;
 const MANAGEMENT_BATCH_MAX_BYTES=16*1024*1024;
+const COMPILED_PREPARED=new WeakMap();
+
+function deepFreeze(value){
+  if(!value||typeof value!=='object'||Object.isFrozen(value))return value;
+  for(const child of Object.values(value))deepFreeze(child);
+  return Object.freeze(value);
+}
+
+function cloneCanonical(value,code){
+  try{
+    const encoded=canonical(value);
+    const cloned=JSON.parse(encoded);
+    if(canonical(cloned)!==encoded)fail(code);
+    return cloned;
+  }catch(error){
+    if(String(error?.message||'').includes('native_staff_bootstrap_'))throw error;
+    fail(code);
+  }
+}
 
 /** Build one bounded Cloudflare D1 management API batch body without coercing
  * bind parameters, splitting statements, embedding values in SQL, or retrying. */
@@ -55,7 +74,7 @@ export function compileNativeStaffBootstrapManagementBatch(statements){
     if(!statement||typeof statement.sql!=='string'||!statement.sql.length||statement.sql.length>1_000_000
       ||!Array.isArray(statement.params)||statement.params.length>1_000)fail('management_statement_invalid');
     for(const value of statement.params){
-      if(value!==null&&typeof value!=='string'&&typeof value!=='boolean'&&!(typeof value==='number'&&Number.isFinite(value)))
+      if(value!==null&&typeof value!=='string'&&!(typeof value==='number'&&Number.isFinite(value)))
         fail('management_parameter_type_unsupported');
     }
     return {sql:statement.sql,params:[...statement.params]};
@@ -351,6 +370,7 @@ export async function prepareNativeStaffBootstrapD1(input, { verifyTrust } = {})
     || !own(input.approval,['approvalId','approvedOperatorStaffId','approvedOperatorAccessSubject','issuedByStaffId','issuedByAccessSubject','issuedAt','expiresAt'])
     || typeof input.canonicalPlanJson !== 'string' || typeof input.bindingEvidenceJson !== 'string'
     || typeof input.reviewedSnapshot?.snapshotJson !== 'string' || typeof input.commandId !== 'string') fail('input_invalid');
+  input=deepFreeze(cloneCanonical(input,'input_invalid'));
   let plan; try { plan=JSON.parse(input.canonicalPlanJson); } catch { fail('plan_json_invalid'); }
   let binding;try{binding=JSON.parse(input.bindingEvidenceJson);}catch{fail('artifact_json_invalid');}
   if (canonical(plan)!==input.canonicalPlanJson || canonical(binding)!==input.bindingEvidenceJson) fail('artifact_invalid');
@@ -364,21 +384,37 @@ export async function prepareNativeStaffBootstrapD1(input, { verifyTrust } = {})
   if (plan.reviewedSnapshotSha256!==input.reviewedSnapshot.snapshotSha256 || plan.approvalId!==input.approval.approvalId) fail('review_binding_invalid');
   if(!plan.controlPlaneStaffIds.includes(input.approval.approvedOperatorStaffId))fail('approved_operator_not_control_plane');
   if (!/^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/u.test(input.commandId)) fail('command_id_invalid');
-  const prepared={...input,plan,planSha256,bindingSha256};
-  return Object.freeze(prepared);
+  const prepared=deepFreeze({...input,plan,planSha256,bindingSha256});
+  COMPILED_PREPARED.set(prepared,prepared);
+  return prepared;
 }
 
 /** Execute a compiled install in one D1 atomic batch, with a failing first CAS. */
 export async function executeNativeStaffBootstrapD1(db, prepared, { verifyTrust, submitManagementBatch } = {}) {
   if (!db || typeof db.batch!=='function' || typeof verifyTrust!=='function' || !prepared
     || (submitManagementBatch!==undefined&&typeof submitManagementBatch!=='function')) fail('d1_management_required');
-  if (!await verifyTrust({trustEnvelope:prepared.trustEnvelope,approval:prepared.approval,canonicalPlanJson:prepared.canonicalPlanJson,
-    planSha256:prepared.planSha256,bindingEvidenceJson:prepared.bindingEvidenceJson,bindingSha256:prepared.bindingSha256,
-    reviewedSnapshot:prepared.reviewedSnapshot})) fail('independent_approval_revoked');
-  const model=await schemaModel(db), ids=JSON.parse(prepared.reviewedSnapshot.snapshotJson).rows.staff_users.map(row=>row.id);
-  const proposed=prepared.plan.staffCohort;
+  const compiled=COMPILED_PREPARED.get(prepared);
+  if(!compiled)fail('prepared_artifact_invalid');
+  let plan;try{plan=JSON.parse(compiled.canonicalPlanJson);}catch{fail('plan_json_invalid');}
+  if(canonical(plan)!==compiled.canonicalPlanJson||sha(compiled.canonicalPlanJson)!==compiled.planSha256
+    ||canonical(plan)!==canonical(compiled.plan))fail('prepared_plan_integrity_mismatch');
+  const binding=cloneCanonical(JSON.parse(compiled.bindingEvidenceJson),'artifact_invalid');
+  if(canonical(binding)!==compiled.bindingEvidenceJson||sha(compiled.bindingEvidenceJson)!==compiled.bindingSha256)fail('prepared_binding_integrity_mismatch');
+  const snapshotSha=sha(compiled.reviewedSnapshot.snapshotJson);
+  if(snapshotSha!==compiled.reviewedSnapshot.snapshotSha256||!Array.isArray(compiled.reviewedSnapshot.controlPlaneStaffIds))
+    fail('prepared_snapshot_integrity_mismatch');
+  verifyEnvelopeClaims(compiled.trustEnvelope,compiled,compiled.planSha256,compiled.bindingSha256,snapshotSha);
+  verifyPlanRows(plan,compiled.reviewedSnapshot.snapshotJson);
+  if(plan.reviewedSnapshotSha256!==snapshotSha||plan.approvalId!==compiled.approval.approvalId
+    ||!plan.controlPlaneStaffIds.includes(compiled.approval.approvedOperatorStaffId))fail('review_binding_invalid');
+  const execution=deepFreeze({...compiled,plan});
+  if (!await verifyTrust({trustEnvelope:execution.trustEnvelope,approval:execution.approval,canonicalPlanJson:execution.canonicalPlanJson,
+    planSha256:execution.planSha256,bindingEvidenceJson:execution.bindingEvidenceJson,bindingSha256:execution.bindingSha256,
+    reviewedSnapshot:execution.reviewedSnapshot})) fail('independent_approval_revoked');
+  const model=await schemaModel(db), ids=JSON.parse(execution.reviewedSnapshot.snapshotJson).rows.staff_users.map(row=>row.id);
+  const proposed=execution.plan.staffCohort;
   const stateIds=[...new Set([...ids,...proposed])].sort();
-  const probe=snapshotGuardStatements(model,prepared.reviewedSnapshot,JSON.stringify(stateIds),{failClosed:false});
+  const probe=snapshotGuardStatements(model,execution.reviewedSnapshot,JSON.stringify(stateIds),{failClosed:false});
   let probeResults;
   try{probeResults=await db.batch(probe.map(statement=>db.prepare(statement.sql).bind(...statement.params)));}
   catch{fail('snapshot_recheck_failed');}
@@ -386,13 +422,13 @@ export async function executeNativeStaffBootstrapD1(db, prepared, { verifyTrust,
     const mismatch=Array.isArray(probeResults)?probeResults.findIndex(row=>row?.results?.[0]?.verified!==1):-1;
     fail(`snapshot_changed${mismatch>=0?`_${probe[mismatch].key}`:''}`);
   }
-  const guards=snapshotGuardStatements(model,prepared.reviewedSnapshot,JSON.stringify(stateIds));
+  const guards=snapshotGuardStatements(model,execution.reviewedSnapshot,JSON.stringify(stateIds));
   const batch=[...guards,
-    approvalStatement(prepared),...prepared.plan.rows.map(item=>gatedInsert(item,prepared.approval.approvalId)),
-    receiptStatement({...prepared,schemaModel:model})];
-  if (!await verifyTrust({trustEnvelope:prepared.trustEnvelope,approval:prepared.approval,canonicalPlanJson:prepared.canonicalPlanJson,
-    planSha256:prepared.planSha256,bindingEvidenceJson:prepared.bindingEvidenceJson,bindingSha256:prepared.bindingSha256,
-    reviewedSnapshot:prepared.reviewedSnapshot})) fail('independent_approval_revoked');
+    approvalStatement(execution),...execution.plan.rows.map(item=>gatedInsert(item,execution.approval.approvalId)),
+    receiptStatement({...execution,schemaModel:model})];
+  if (!await verifyTrust({trustEnvelope:execution.trustEnvelope,approval:execution.approval,canonicalPlanJson:execution.canonicalPlanJson,
+    planSha256:execution.planSha256,bindingEvidenceJson:execution.bindingEvidenceJson,bindingSha256:execution.bindingSha256,
+    reviewedSnapshot:execution.reviewedSnapshot})) fail('independent_approval_revoked');
   let result;
   try {
     result=submitManagementBatch
@@ -402,10 +438,10 @@ export async function executeNativeStaffBootstrapD1(db, prepared, { verifyTrust,
   catch(error) { throw new Error('native_staff_bootstrap_atomic_batch_refused',{cause:error}); }
   if (!Array.isArray(result)||result.length!==batch.length||result.some(row=>row?.success!==true)
     ||result.slice(0,guards.length).some(row=>row.results?.[0]?.verified!==1)) fail('atomic_batch_not_committed');
-  if(!await confirmDurableInstall(db,prepared))fail('commit_outcome_uncertain');
-  return Object.freeze({schemaVersion:1,approvalId:prepared.approval.approvalId,commandId:prepared.commandId,
-    canonicalPlanSha256:prepared.planSha256,bindingEvidenceSha256:prepared.bindingSha256,
-    insertedRowCount:prepared.plan.rows.length+2,staffCount:prepared.plan.staffCohort.length});
+  if(!await confirmDurableInstall(db,execution))fail('commit_outcome_uncertain');
+  return Object.freeze({schemaVersion:1,approvalId:execution.approval.approvalId,commandId:execution.commandId,
+    canonicalPlanSha256:execution.planSha256,bindingEvidenceSha256:execution.bindingSha256,
+    insertedRowCount:execution.plan.rows.length+2,staffCount:execution.plan.staffCohort.length});
 }
 
 export const nativeStaffBootstrapD1InsertColumns = INSTALL_COLUMNS;

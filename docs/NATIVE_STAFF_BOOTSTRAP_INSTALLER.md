@@ -13,6 +13,10 @@ role, or ordinary Worker credential cannot satisfy that requirement. This
 repository does not yet define or provide the independent root-signature
 format/verifier or an actual owner-accepted bootstrap artifact; therefore this
 prototype cannot produce an executable production approval.
+The prepared artifact is deep-frozen and tied to a private in-process compiled
+record. Execution reparses the exact canonical plan, rechecks its digest and
+review bindings, and derives every write and durable-row check from that fresh
+parse; a copied or mutated prepared object is rejected before any write.
 
 `executeNativeStaffBootstrapD1` is the concrete D1 management adapter. It
 submits bounded schema, migration-ledger, full cohort, Ops ACL, and existing
@@ -31,9 +35,10 @@ scope/control-plane changes remain guarded.
 For a root-owned out-of-band transport, `executeNativeStaffBootstrapD1` accepts
 an optional `submitManagementBatch` callback for the single mutating batch.
 `compileNativeStaffBootstrapManagementBatch` creates one
-`{batch:[{sql,params}]}` request, preserves bound JS scalar values without SQL
-interpolation, limits the request to 256 statements and 16 MiB, and never splits
-it. `submitNativeStaffBootstrapManagementBatch` calls the injected transport
+`{batch:[{sql,params}]}` request, preserves string, finite-number, and null bind
+values without SQL interpolation, rejects booleans/other types, limits the
+request to 256 statements and 16 MiB, and never splits it.
+`submitNativeStaffBootstrapManagementBatch` calls the injected transport
 once; the caller must not automatically retry and must normalize a confirmed
 API response to per-statement D1 results. A reader exposing the read operations
 used for schema and snapshot verification is still required.
@@ -41,9 +46,9 @@ used for schema and snapshot verification is still required.
 Cloudflare documents the management endpoint as
 `POST /accounts/{account_id}/d1/database/{database_id}/query` and accepts a
 `batch` object, but its current API schema describes each bound parameter as a
-string. This installer plan includes numbers, booleans, and nulls, so a future
-management transport must validate exact parameter and NULL behavior against a
-staging D1 binding. Provider-level atomic rollback and uncertain-response
+string. This installer plan includes numbers and nulls, so a future management
+transport must validate exact number and NULL behavior against a staging D1
+binding. Provider-level atomic rollback and uncertain-response
 handling also require a staging probe before production. The callback seam has
 no credentials, endpoint, retry, or production wiring. If a response is
 uncertain, inspect the durable approval, receipt, and planned rows; do not
