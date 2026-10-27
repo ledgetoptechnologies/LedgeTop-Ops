@@ -60,8 +60,7 @@ internal sealed class ExplorerUpdateScheduleSettingsStore
             // OPEN_ALWAYS and no sharing serialize cooperating writers. Existing locks must be
             // current-user-owned, regular, one-link, empty files; their bytes are never changed.
             var lockPath = Path.Combine(directory, Leaf + ".lock");
-            using var lockHandle = CreateFileW(lockPath, 0xC0000000, 0, IntPtr.Zero, 4, 0x00200000, IntPtr.Zero);
-            if (lockHandle.IsInvalid) throw new IOException("Update settings writer unavailable.");
+            using var lockHandle = CreateOwnedFile(lockPath, 4, 0x00200000);
             using var writeLock = new FileStream(lockHandle, FileAccess.ReadWrite);
             Verify(writeLock.SafeFileHandle, lockPath);
             if (writeLock.Length != 0) throw new IOException("Update settings writer refused.");
@@ -72,7 +71,8 @@ internal sealed class ExplorerUpdateScheduleSettingsStore
             // The only temporary file we create is an owned, exact leaf; no directory cleanup is performed.
             // A failed publication retains this leaf for ownership review. The controller visibly pauses
             // after a save failure rather than automatically retrying and accumulating temporary files.
-            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 4096, FileOptions.WriteThrough)) {
+            using (var handle = CreateOwnedFile(temporary, 1, 0x80200000))
+            using (var stream = new FileStream(handle, FileAccess.ReadWrite, 4096)) {
                 Verify(stream.SafeFileHandle, temporary); VerifyOwner(temporary);
                 stream.Write(bytes); stream.Flush(flushToDisk: true);
             }
@@ -128,7 +128,30 @@ internal sealed class ExplorerUpdateScheduleSettingsStore
     private static void VerifyOwner(string path)
     {
         var owner = new FileInfo(path).GetAccessControl(AccessControlSections.Owner).GetOwner(typeof(SecurityIdentifier));
-        if (!Equals(owner, WindowsIdentity.GetCurrent().User)) throw new IOException("Update settings owner refused.");
+        using var identity = WindowsIdentity.GetCurrent();
+        if (!Equals(owner, identity.User)) throw new IOException("Update settings owner refused.");
+    }
+    private static SafeFileHandle CreateOwnedFile(string path, uint disposition, uint flags)
+    {
+        // An elevated token may otherwise default a new file's owner to Administrators. Specify
+        // our actual user SID at creation, never take ownership of an existing file. OPEN_ALWAYS
+        // ignores this descriptor for existing files, whose original owner is still verified above.
+        using var identity = WindowsIdentity.GetCurrent();
+        var sid = identity.User ?? throw new IOException("Update settings identity unavailable.");
+        var security = new FileSecurity();
+        security.SetOwner(sid);
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.AddAccessRule(new FileSystemAccessRule(sid, FileSystemRights.FullControl, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), FileSystemRights.FullControl, AccessControlType.Allow));
+        var descriptor = security.GetSecurityDescriptorBinaryForm();
+        var address = Marshal.AllocHGlobal(descriptor.Length);
+        try {
+            Marshal.Copy(descriptor, 0, address, descriptor.Length);
+            var attributes = new SecurityAttributes { Length = (uint)Marshal.SizeOf<SecurityAttributes>(), Descriptor = address, InheritHandle = 0 };
+            var handle = CreateFileWithSecurityW(path, 0xC0000000, 0, ref attributes, disposition, flags, IntPtr.Zero);
+            if (!handle.IsInvalid) return handle;
+            handle.Dispose(); throw new IOException("Update settings owned file unavailable.");
+        } finally { Marshal.FreeHGlobal(address); }
     }
     private static byte[] Encode(ExplorerUpdateScheduleSettings settings)
     {
@@ -164,6 +187,9 @@ internal sealed class ExplorerUpdateScheduleSettingsStore
     [StructLayout(LayoutKind.Sequential)] private struct HandleInfo
     { internal uint Attributes; internal System.Runtime.InteropServices.ComTypes.FILETIME Creation, Access, Write; internal uint Volume, High, Low, Links, IndexHigh, IndexLow; }
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+    [StructLayout(LayoutKind.Sequential)] private struct SecurityAttributes { internal uint Length; internal IntPtr Descriptor; internal int InheritHandle; }
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileWithSecurityW(string path, uint access, uint share, ref SecurityAttributes security, uint disposition, uint flags, IntPtr template);
     [DllImport("kernel32.dll")] private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out HandleInfo info);
     [DllImport("kernel32.dll")] private static extern uint GetFileType(SafeFileHandle handle);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern uint GetFinalPathNameByHandleW(SafeFileHandle handle, StringBuilder path, uint length, uint flags);

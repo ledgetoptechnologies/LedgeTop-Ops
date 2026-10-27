@@ -1,4 +1,6 @@
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using LedgeTop.Files.Updates;
 
@@ -25,8 +27,14 @@ internal static class ExplorerUpdateScheduleTests
         True(fresh.Load().Settings == new ExplorerUpdateScheduleSettings(false, clock), "atomic round trip and bounded parent creation");
         var ownedLock = Path.Combine(root, "fresh/not-yet-created", ExplorerUpdateScheduleSettingsStore.Leaf + ".lock");
         True(new FileInfo(ownedLock).Length == 0, "first save leaves an owned empty writer lock");
+        AssertCurrentOwnerAndAcl(ownedLock);
+        AssertCurrentOwnerAndAcl(Path.Combine(root, "fresh/not-yet-created", ExplorerUpdateScheduleSettingsStore.Leaf));
+        var ownedLockSecurity = new FileInfo(ownedLock).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access).GetSecurityDescriptorBinaryForm();
         fresh.Save(new(true, clock.AddHours(6))); True(fresh.Load().Settings.AutoUpdatesEnabled, "replacement round trip");
         True(new FileInfo(ownedLock).Length == 0, "existing owned empty lock reused without mutation");
+        True(new FileInfo(ownedLock).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access).GetSecurityDescriptorBinaryForm().AsSpan().SequenceEqual(ownedLockSecurity),
+            "OPEN_ALWAYS preserves the existing owned lock's exact security descriptor");
+        AssertCurrentOwnerAndAcl(Path.Combine(root, "fresh/not-yet-created", ExplorerUpdateScheduleSettingsStore.Leaf));
         var data = File.ReadAllText(Path.Combine(root, "fresh/not-yet-created", ExplorerUpdateScheduleSettingsStore.Leaf));
         True(!data.Contains("source") && !data.Contains("principal") && !data.Contains("token"), "only schedule preference is saved");
 
@@ -35,7 +43,7 @@ internal static class ExplorerUpdateScheduleTests
             data.Replace("\"autoUpdatesEnabled\":true", "\"AutoUpdatesEnabled\":true"), data.Replace("\"autoUpdatesEnabled\":true", "\"autoUpdatesEnabled\":\"true\""),
             data.Replace("\"owner\":", "\"extra\":0,\"owner\":"), new string(' ', 1025), data.Replace("2026-10-26", "not-a-date") }) {
             var directory = Path.Combine(root, Guid.NewGuid().ToString("N")); Directory.CreateDirectory(directory);
-            var path = Path.Combine(directory, ExplorerUpdateScheduleSettingsStore.Leaf); File.WriteAllText(path, malformed, new UTF8Encoding(false));
+            var path = Path.Combine(directory, ExplorerUpdateScheduleSettingsStore.Leaf); CreateFixtureFile(path, malformed);
             var invalid = ExplorerUpdateScheduleSettingsStore.CreateForTests(directory);
             True(invalid.Load() is { Settings.AutoUpdatesEnabled: false, Issue: not null }, "unknown/corrupt/foreign settings pause automatically");
             Throws(() => invalid.Save(new(true, clock)), "invalid settings cannot be silently overwritten");
@@ -43,7 +51,7 @@ internal static class ExplorerUpdateScheduleTests
         }
 
         var linkedDirectory = Path.Combine(root, "hardlink"); Directory.CreateDirectory(linkedDirectory);
-        var original = Path.Combine(root, "original.json"); File.WriteAllText(original, data);
+        var original = Path.Combine(root, "original.json"); CreateFixtureFile(original, data);
         True(CreateHardLinkW(Path.Combine(linkedDirectory, ExplorerUpdateScheduleSettingsStore.Leaf), original, IntPtr.Zero), "owned hardlink fixture created");
         True(ExplorerUpdateScheduleSettingsStore.CreateForTests(linkedDirectory).Load().Issue is not null, "hardlink rejected");
         var aliasDirectory = Path.Combine(root, "alias-leaf"); Directory.CreateDirectory(aliasDirectory);
@@ -52,8 +60,28 @@ internal static class ExplorerUpdateScheduleTests
         var aliasParent = Path.Combine(root, "alias-parent"); Junction(aliasParent, linkedDirectory);
         True(ExplorerUpdateScheduleSettingsStore.CreateForTests(aliasParent).Load().Issue is not null, "reparse ancestor rejected");
         var foreignLock = Store("foreign-lock"); Directory.CreateDirectory(Path.Combine(root, "foreign-lock"));
-        File.WriteAllText(Path.Combine(root, "foreign-lock", ExplorerUpdateScheduleSettingsStore.Leaf + ".lock"), "foreign");
+        CreateFixtureFile(Path.Combine(root, "foreign-lock", ExplorerUpdateScheduleSettingsStore.Leaf + ".lock"), "foreign");
         Throws(() => foreignLock.Save(new(true, clock)), "unrecognized lock bytes are never overwritten");
+        // On an elevated Windows runner the default owner can be Administrators. When that owner
+        // is assignable without changing privileges, prove OPEN_ALWAYS never adopts it. Normal
+        // tokens still run every strict owner assertion above; this extra adversarial fixture is
+        // unavailable when Windows refuses assigning the foreign SID in the first place.
+        var foreignOwnersExercised = 0;
+        foreach (var lockOnly in new[] { false, true }) {
+            var directory = Path.Combine(root, "foreign-owner-" + lockOnly); Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, ExplorerUpdateScheduleSettingsStore.Leaf + (lockOnly ? ".lock" : ""));
+            var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+            if (TryCreateForeignOwnerFixture(path, lockOnly ? "" : data, administrators)) {
+                foreignOwnersExercised++;
+                var bytesBefore = File.ReadAllBytes(path); var descriptorBefore = new FileInfo(path).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access).GetSecurityDescriptorBinaryForm();
+                var refused = ExplorerUpdateScheduleSettingsStore.CreateForTests(directory);
+                if (!lockOnly) True(refused.Load().Issue is not null, "foreign owner settings stay visibly disabled");
+                Throws(() => refused.Save(new(true, clock)), "foreign owner cannot be adopted by save/open-always");
+                True(File.ReadAllBytes(path).AsSpan().SequenceEqual(bytesBefore) && new FileInfo(path).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access)
+                    .GetSecurityDescriptorBinaryForm().AsSpan().SequenceEqual(descriptorBefore), "foreign owner data and security descriptor remain exact");
+            }
+        }
+        Console.WriteLine("Schedule ACL checks: current-user owner/protected ACL verified for new lock and two publications; assignable foreign-owner fixtures=" + foreignOwnersExercised + "/2 (no token or privilege changes).");
 
         var eligible = new ExplorerUpdateScheduleEligibility(true, false, false, false); var checks = 0; var installs = 0;
         var disableEarlyStore = Store("disable-before-first-tick");
@@ -109,7 +137,7 @@ internal static class ExplorerUpdateScheduleTests
         }
         await CancellationJoins(installing: false); await CancellationJoins(installing: true); await CancellationJoins(installing: true, confirmsStopped: true);
         var readOnlyBad = Store("bad-controller"); Directory.CreateDirectory(Path.Combine(root, "bad-controller"));
-        File.WriteAllText(Path.Combine(root, "bad-controller", ExplorerUpdateScheduleSettingsStore.Leaf), "{}");
+        CreateFixtureFile(Path.Combine(root, "bad-controller", ExplorerUpdateScheduleSettingsStore.Leaf), "{}");
         var badController = new ExplorerUpdateScheduleController(readOnlyBad, () => clock, TimeSpan.Zero, () => eligible, _ => throw new InvalidOperationException(), _ => throw new InvalidOperationException());
         await badController.TickAsync(); True(badController.Status is { AutoUpdatesEnabled: false, Issue: not null }, "corrupt config remains visibly off without callbacks");
 
@@ -135,6 +163,33 @@ internal static class ExplorerUpdateScheduleTests
     }
     private static void Throws(Action action, string description) { try { action(); } catch { return; } throw new InvalidOperationException(description); }
     private static void True(bool value, string description) { if (!value) throw new InvalidOperationException(description); }
+    private static void AssertCurrentOwnerAndAcl(string path)
+    {
+        using var current = WindowsIdentity.GetCurrent();
+        var security = new FileInfo(path).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
+        True(Equals(security.GetOwner(typeof(SecurityIdentifier)), current.User), "new lock/published file owner is actual user SID regardless of token default owner");
+        var expected = new HashSet<string> { current.User!.Value, new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null).Value };
+        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier)).Cast<FileSystemAccessRule>().ToArray();
+        True(security.AreAccessRulesProtected && rules.Length == expected.Count && rules.All(rule => !rule.IsInherited && rule.AccessControlType == AccessControlType.Allow &&
+            rule.FileSystemRights == FileSystemRights.FullControl && expected.Contains(rule.IdentityReference.Value)), "new files have only protected current-user+SYSTEM full control");
+    }
+    private static void CreateFixtureFile(string path, string text, SecurityIdentifier? owner = null)
+    {
+        using var current = WindowsIdentity.GetCurrent();
+        var security = new FileSecurity(); security.SetOwner(owner ?? current.User!);
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.AddAccessRule(new FileSystemAccessRule(current.User!, FileSystemRights.FullControl, AccessControlType.Allow));
+        using var file = FileSystemAclExtensions.Create(new FileInfo(path), FileMode.CreateNew, FileSystemRights.Read | FileSystemRights.Write, FileShare.None, 4096, FileOptions.None, security);
+        var bytes = new UTF8Encoding(false).GetBytes(text); file.Write(bytes); file.Flush(flushToDisk: true);
+    }
+    private static bool TryCreateForeignOwnerFixture(string path, string text, SecurityIdentifier foreign)
+    {
+        try { CreateFixtureFile(path, text, foreign); return true; }
+        catch (UnauthorizedAccessException) { True(!File.Exists(path), "unassignable owner fails at creation without leaving a file"); return false; }
+        catch (IOException error) when ((error.HResult & 0xffff) is 1307 or 1314) {
+            True(!File.Exists(path), "Windows invalid-owner/privilege refusal leaves no test file"); return false;
+        }
+    }
     private static void Junction(string alias, string target)
     {
         if (alias.Concat(target).Any(ch => "&|<>^\"%!\r\n".Contains(ch))) throw new IOException("Test junction argument refused.");
