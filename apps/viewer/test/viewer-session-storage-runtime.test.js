@@ -28,7 +28,9 @@ function fixture({ denied = 'getter', active = false, reject = false } = {}) {
     setItem: (key, value) => denied === 'set' ? blocked('QuotaExceededError') : values.set(key, value),
     removeItem: key => denied === 'remove' ? blocked() : values.delete(key),
   };
-  const window = { parent: { postMessage: (message, origin) => posts.push({ message, origin }) } };
+  const startupPhases = [];
+  const window = { parent: { postMessage: (message, origin) => posts.push({ message, origin }) },
+    __ltdsViewerStartupDiagnostics: { mark: (...args) => startupPhases.push(args) } };
   Object.defineProperty(window, 'sessionStorage', { get: () => denied === 'getter' ? blocked() : storage });
   const sessionCapabilities = createViewerSessionCapabilityStore({ storage: () => window.sessionStorage });
   const context = vm.createContext({
@@ -72,9 +74,29 @@ function fixture({ denied = 'getter', active = false, reject = false } = {}) {
   const tokenProviders = source.split('\n').filter(line => /^\s*token:\s*\(\)\s*=>/.test(line) && line.includes('sessionStorageKey'))
     .map(line => vm.runInContext(`(${line.trim().slice('token:'.length).replace(/,$/, '')})`, context));
   assert.equal(tokenProviders.length, 3, 'admin calculation, personal workspace and surface providers are exercised');
-  return { context, session, values, calls, loading, posts, initialized, tokenProviders, sessionCapabilities,
+  return { context, session, values, calls, loading, posts, initialized, tokenProviders, sessionCapabilities, startupPhases,
     setNext(value) { next = value; } };
 }
+
+test('actual bootstrap emits bounded startup milestones without capability or error text', async () => {
+  const f = fixture();
+  await f.context.bootstrapSession();
+  assert.deepEqual(f.startupPhases, [['redeem-started'], ['redeem-http', 200], ['session-applied'],
+    ['init-returned'], ['ready-sent']]);
+  const rejected = fixture({ reject: 403 });
+  await rejected.context.bootstrapSession();
+  assert.deepEqual(rejected.startupPhases, [['redeem-started'], ['redeem-http', 403], ['bootstrap-failed']]);
+  const failedInit = fixture();
+  failedInit.context.init = () => { throw new Error('private model URL or error'); };
+  await failedInit.context.bootstrapSession();
+  assert.deepEqual(failedInit.startupPhases, [['redeem-started'], ['redeem-http', 200], ['session-applied'],
+    ['bootstrap-failed']]);
+  const noController = fixture();
+  noController.context.postToAllowedController = () => false;
+  await noController.context.bootstrapSession();
+  assert.deepEqual(noController.startupPhases, [['redeem-started'], ['redeem-http', 200], ['session-applied'],
+    ['init-returned']], 'missing controller must not look like a ready message was sent');
+});
 
 test('fresh authorized bootstrap, headers and all model token providers work with denied storage', async t => {
   for (const denied of ['getter', 'get', 'set']) await t.test(denied, async () => {
