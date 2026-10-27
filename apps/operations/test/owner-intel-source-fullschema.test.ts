@@ -6,13 +6,13 @@ import {reviewedOperationsMigrationNames} from './helpers/reviewed-operations-mi
 // @ts-expect-error reviewed test-only JavaScript seed transformer
 import {transformSeed} from '../../../scripts/staging-bootstrap.mjs';
 
-it('applies the reviewed full Operations chain through source-only Intel 0229 and default-off app release 0230',async()=>{
+it('applies the reviewed full Operations chain through source-only Intel 0229, app release 0230 and default-off owner Ads 0231',async()=>{
  const directory=new URL('../migrations/',import.meta.url);
  // This validates every physical successor and its hash before enumeration;
  // unknown SQL files cannot silently join the integration rehearsal.
  reviewedOperationsMigrationNames(directory);
  const names=readdirSync(directory).filter(name=>name.endsWith('.sql')).sort();
- expect(names.slice(-2)).toEqual(['0229_owner_intel_source_feed.sql','0230_app_release_pilot.sql']);
+  expect(names.slice(-3)).toEqual(['0229_owner_intel_source_feed.sql','0230_app_release_pilot.sql','0231_owner_google_ads_summary.sql']);
  const runtime=new Miniflare({modules:true,compatibilityDate:'2026-08-06',script:'export default {}',d1Databases:{OPS_DB:crypto.randomUUID()}});
  try{
   const db=await runtime.getD1Database('OPS_DB') as unknown as D1Database;
@@ -26,7 +26,10 @@ it('applies the reviewed full Operations chain through source-only Intel 0229 an
   expect((await db.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
   expect(await db.prepare('SELECT enabled,storage_accepted FROM owner_intel_source_control WHERE singleton=1').first()).toEqual({enabled:0,storage_accepted:0});
   expect(await db.prepare('SELECT enabled,storage_accepted FROM app_release_control WHERE singleton=1').first()).toEqual({enabled:0,storage_accepted:0});
+  expect(await db.prepare('SELECT enabled,storage_accepted FROM owner_intel_google_ads_control WHERE singleton=1').first()).toEqual({enabled:0,storage_accepted:0});
   for(const table of ['owner_intel_source_bindings','owner_intel_source_inbox','owner_intel_source_projections','ci_ingest_producer_keys','owner_intel_read_grants'])
+   expect(await db.prepare(`SELECT COUNT(*) count FROM ${table}`).first<number>('count')).toBe(0);
+  for(const table of ['owner_intel_google_ads_bindings','owner_intel_google_ads_inbox','owner_intel_google_ads_projections'])
    expect(await db.prepare(`SELECT COUNT(*) count FROM ${table}`).first<number>('count')).toBe(0);
  }finally{await runtime.dispose();}
 },300000);

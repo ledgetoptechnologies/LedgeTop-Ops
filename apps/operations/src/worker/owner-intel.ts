@@ -4,6 +4,7 @@ import type { Env, StaffPrincipal } from './types';
 import { ownerCompetitorProjection, refreshOwnerIntel } from './owner-intel-model';
 import { parseDuplicateFreeJson } from './bounded-json';
 import { ownerIntelSourceProjectionStillCurrent,readOwnerIntelSourceProjection } from './owner-intel-source-ingest';
+import { ownerGoogleAdsProjectionStillCurrent,ownerGoogleAdsReadState,readOwnerGoogleAdsProjection } from './owner-google-ads-ingest';
 
 type Bindings={Bindings:Env;Variables:{principal:StaffPrincipal;administrator:boolean}};
 const CONTRACT='a60a11ddd68df90da80a1e2eaf298434369653d8e8f390b814ed906e7b675b32';
@@ -95,6 +96,15 @@ function ownerWebsiteDto(source:NonNullable<Awaited<ReturnType<typeof readOwnerI
    lastDataDate:provenance.lastDataDate,dataRange:provenance.dataRange,partial:provenance.partial,partialReason:provenance.partialReason,limits:provenance.limits},
   receipt:{operationId:source.operationId,payloadSha256:source.payloadSha256,completedAt:source.completedAt,acceptedAt:source.acceptedAt}};
 }
+function ownerGoogleAdsDto(source:NonNullable<Awaited<ReturnType<typeof readOwnerGoogleAdsProjection>>>,range:'7d'|'28d'|'90d'){
+ if(source.observation.observationKind!=='google_ads_summary'||source.observation.semantics.observation!=='ci.google_ads_owner.v1')throw unavailable('intel_projection_unavailable',503);
+ const p=source.observation.payload;
+ return {schema:'ops.intel.owner-google-ads.v1',rangeSelection:range,
+  period:p.period?{start:p.period.start,end:p.period.end,days:p.period.days,timeZone:p.period.timeZone}:null,
+  currencyCode:p.currencyCode,totals:{costMicros:p.totals.costMicros,impressions:p.totals.impressions,clicks:p.totals.clicks,conversions:p.totals.conversions,state:p.totals.state,reason:p.totals.reason},
+  freshness:{collectedAt:p.provenance.collectedAt,asOf:p.provenance.asOf,state:p.totals.state},
+  receipt:{operationId:source.operationId,payloadSha256:source.payloadSha256,completedAt:source.completedAt,acceptedAt:source.acceptedAt}};
+}
 
 /** Registered only after ordinary human Access authentication. No producer,
  * portal, PA, public-link or service credential is accepted here. */
@@ -133,7 +143,7 @@ export function registerOwnerIntelRoutes(app:Hono<Bindings>){
   const principal=c.get('principal'),authority=await ownerIntelAuthority(c.env.OPS_DB,principal);
   if(!authority)throw new HTTPException(403,{message:'intel_owner_required'});
   const key=c.req.param('key'),section=c.req.param('section');
-  if(!['competitors','website','search-console'].includes(section))throw unavailable('intel_section_not_found');
+  if(!['competitors','website','search-console','google-ads'].includes(section))throw unavailable('intel_section_not_found');
   const query=new URL(c.req.url).searchParams;
   if(section==='competitors'?query.size!==0:[...query.keys()].some(k=>k!=='range')||query.getAll('range').length!==1||!['7d','28d','90d'].includes(query.get('range')??''))
    throw new HTTPException(400,{message:'intel_query_invalid'});
@@ -141,6 +151,24 @@ export function registerOwnerIntelRoutes(app:Hono<Bindings>){
   if(!selected)throw unavailable('intel_business_not_found');
   if(section!=='competitors'){
    await stillCurrent(c.env.OPS_DB,principal,authority,selected.businessId);
+   if(section==='google-ads'){
+    const state=await ownerGoogleAdsReadState(c.env.OPS_DB,selected.bindingId??'',selected.configurationRevision??0);
+    if(state==='schema_missing')throw unavailable('intel_google_ads_not_configured');
+    if(state==='disabled'||state==='binding_missing')throw unavailable('intel_google_ads_not_connected');
+    const requestedRange=query.get('range') as '7d'|'28d'|'90d';
+    const source=await readOwnerGoogleAdsProjection(c.env.OPS_DB,selected.bindingId!,selected.configurationRevision!,requestedRange);
+    if(!source){
+     const prior=await c.env.OPS_DB.withSession('first-primary').prepare('SELECT COUNT(*) count FROM owner_intel_google_ads_projections WHERE binding_id=? AND configuration_revision=? AND subject_key=\'own:google-ads\'')
+      .bind(selected.bindingId,selected.configurationRevision).first<number>('count');
+     throw unavailable(prior&&prior>0?'intel_google_ads_range_unavailable':'intel_google_ads_awaiting_first_data');
+    }
+    const view=ownerGoogleAdsDto(source,requestedRange);
+    await stillCurrent(c.env.OPS_DB,principal,authority,selected.businessId);
+    const current=await business(c.env.OPS_DB,key,principal.id);
+    if(!current||JSON.stringify(current)!==JSON.stringify(selected))throw unavailable('intel_binding_changed',503);
+    if(!await ownerGoogleAdsProjectionStillCurrent(c.env.OPS_DB,source))throw unavailable('intel_binding_changed',503);
+    return c.json(view);
+   }
    if(!selected.bindingId||selected.configurationRevision===null)throw unavailable('intel_monitoring_not_configured');
    let sourceControl:{enabled:number;storage_accepted:number}|null;
    try{sourceControl=await c.env.OPS_DB.withSession('first-primary').prepare('SELECT enabled,storage_accepted FROM owner_intel_source_control WHERE singleton=1').first<{enabled:number;storage_accepted:number}>();}

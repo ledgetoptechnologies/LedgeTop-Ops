@@ -3,6 +3,7 @@ import { INTEL_INGEST_PATH,intelSignatureHeaders,readIntelBody,verifyIntelSignat
 import { readIngestProducerKey } from './competitor-intel-ingest-store';
 import { validateOwnerIntelV2Observation,type OwnerIntelV2Observation,type ReviewedOwnerIntelV2Context,OWNER_INTEL_V2_DRAFT_SHA } from './owner-intel-v2-observation';
 import { parseDuplicateFreeJson } from './bounded-json';
+import { acceptOwnerGoogleAdsEnvelope } from './owner-google-ads-ingest';
 import type { Env } from './types';
 
 export type OwnerIntelSourceEnvironment=Pick<Env,'OPS_DB'|'ENVIRONMENT'|'INCOMING_BASE_URL'|'INCOMING_EXPECTED_HOST'|'COMPETITOR_INTEL_INGEST_ENABLED'>;
@@ -40,6 +41,7 @@ export function dispatchOwnerIntelSourceIngest(request:Request,env:OwnerIntelSou
    await verifyIntelSignature(raw,headers,key);
    const decoded=strictIntelJson(raw) as Record<string,unknown>;
    const semantics=decoded&&typeof decoded==='object'?decoded.semantics as Record<string,unknown>|undefined:undefined;
+   if(semantics?.observation==='ci.google_ads_owner.v1')return await acceptOwnerGoogleAdsEnvelope(env.OPS_DB,key,headers,raw,decoded,now);
    if(semantics?.observation!=='ci.obs.v2'){
     // Existing v1 traffic stays independent of the new migration. When the
     // source inbox exists, a retained v2 operation must report a permanent
@@ -51,10 +53,16 @@ export function dispatchOwnerIntelSourceIngest(request:Request,env:OwnerIntelSou
      const installed=await db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name=?").bind('owner_intel_source_inbox').first();
      if(installed&&await db.prepare('SELECT operation_id FROM owner_intel_source_inbox WHERE operation_id=?').bind(v1.operationId).first())
       throw new IntelIngestError('operation_hash_conflict',409);
+     const adsInstalled=await db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name=?").bind('owner_intel_google_ads_inbox').first();
+     if(adsInstalled&&await db.prepare('SELECT operation_id FROM owner_intel_google_ads_inbox WHERE operation_id=?').bind(v1.operationId).first())
+      throw new IntelIngestError('operation_hash_conflict',409);
     }
     return null;
    }
    if(decoded.observationKind!=='search_console_summary'&&decoded.observationKind!=='own_site')throw new IntelIngestError('schema_invalid',400);
+   const adsInstalled=await db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name=?").bind('owner_intel_google_ads_inbox').first();
+   if(adsInstalled&&typeof decoded.operationId==='string'&&await db.prepare('SELECT operation_id FROM owner_intel_google_ads_inbox WHERE operation_id=?').bind(decoded.operationId).first())
+    throw new IntelIngestError('operation_hash_conflict',409);
    // Only a recognized v2 source envelope depends on migration 0229. v1
    // falls through to the frozen receiver without querying new tables.
    const sourceGate=await db.prepare('SELECT enabled,storage_accepted FROM owner_intel_source_control WHERE singleton=1').first<{enabled:number;storage_accepted:number}>();
