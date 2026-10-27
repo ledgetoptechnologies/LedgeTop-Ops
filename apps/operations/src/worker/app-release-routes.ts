@@ -109,12 +109,14 @@ export function registerOperationsAppReleaseRoutes(app: Hono<Bindings>): void {
   routes.on(["GET", "HEAD"], "/latest", async c => {
     const head = c.req.method === "HEAD";
     if (!exactCanonicalOrigin(c.req.raw, c.env)) return failure(404, "app_release_unavailable", head);
-    const mode = parseLatestQuery(new URL(c.req.url));
+    const url = new URL(c.req.url);
+    const mode = parseLatestQuery(url);
     if (!mode) return failure(400, "app_release_query_invalid", head);
     const principal = c.get("principal");
     try {
       await requireCurrentOwner(c.env, principal);
       if (!await eligible(c.env, principal.id)) return json(noOffer(mode), head);
+      if (mode === "legacy" && url.searchParams.get("platform") !== "windows") return json(noOffer(mode), head);
       const release = await readLatestAppRelease(c.env.OPS_DB, c.env.APP_RELEASE_BUCKET);
       await requireCurrentOwner(c.env, principal);
       if (!await eligible(c.env, principal.id)) return json(noOffer(mode), head);

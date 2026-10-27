@@ -17,19 +17,24 @@ It returns the flat schema consumed by the Windows helper contract, or exactly
 `{"schemaVersion":1,"available":false}` for an authorized user with no eligible
 offer. Unknown/duplicate query keys and noncanonical values are rejected. The
 older browser request with only `platform=windows` keeps its existing response
-shape. Both forms and all download/HEAD/range requests use private no-store
-responses. Non-staging environments and noncanonical origins do not serve the
-new path.
+shape. Legacy platform-only requests for macOS and Linux return
+`{"available":false}` rather than receiving a Windows binary. Both forms and all
+download/HEAD/range requests use private no-store responses. Non-staging
+environments and noncanonical origins do not serve the new path.
 
 The metadata includes a canonical four-component unsigned-16-bit version,
 length, lowercase SHA-256, strong ETag, source commit and EXE type. Its download
 URL is a relative path under the selected service base. Download requests accept
-no query or the exact ordered `platform=windows&channel=pilot` query. They require
-the exact strong `If-Match`; single byte ranges use ordinary 206 and
-`Content-Range` semantics, with R2 length, range, ETag and stored SHA-256 checked
-against the immutable catalog. Client eligibility is rechecked before bytes are
-read. Ops checks current owner status and explicit pilot eligibility on each
-request and before returning a byte stream.
+no query or the exact ordered `platform=windows&channel=pilot` query. A browser
+full `GET` or `HEAD` may omit `If-Match`; when supplied, it must be the exact
+strong catalog ETag. The native consumer sends `If-Match` on every byte request.
+Any Range request requires both exact `If-Match` and matching `If-Range`; missing
+validators fail with 428, and stale validators fail with 412 rather than falling
+back to a full body. Single byte ranges use ordinary 206 and `Content-Range`
+semantics, with R2 length, range, ETag and stored SHA-256 checked against the
+immutable catalog. Client eligibility is rechecked before bytes are read. Ops
+checks current owner status and explicit pilot eligibility on each request and
+before returning a byte stream.
 
 ## Storage and authority
 

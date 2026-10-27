@@ -95,11 +95,13 @@ export function createClientAppReleaseRouter(): Hono<Bindings> {
     const head = c.req.method === "HEAD";
     if (c.env.ENVIRONMENT !== "staging" || !exactCanonicalOrigin(c.req.raw, c.env))
       return failure(404, "app_release_unavailable", head);
-    const mode = parseLatestQuery(new URL(c.req.url));
+    const url = new URL(c.req.url);
+    const mode = parseLatestQuery(url);
     if (!mode) return failure(400, "app_release_query_invalid", head);
     try {
       const principal = c.get("clientPrincipal");
       if (!await pilotEligible(c.env, principal)) return json(noOffer(mode), head);
+      if (mode === "legacy" && url.searchParams.get("platform") !== "windows") return json(noOffer(mode), head);
       const release = await readLatestAppRelease(c.env.DELIVERY_DB, c.env.APP_RELEASE_BUCKET);
       if (!await pilotEligible(c.env, principal)) return json(noOffer(mode), head);
       if (!release) return json(noOffer(mode), head);

@@ -250,13 +250,21 @@ export async function serveAppReleaseBytes(
   beforeBody?: () => Promise<void>,
 ): Promise<Response> {
   const ifMatch = request.headers.get("If-Match");
-  if (ifMatch === null) throw new AppReleaseFeedError(428, "app_release_if_match_required");
-  if (ifMatch !== release.strong_etag) throw new AppReleaseFeedError(412, "app_release_version_changed");
   const rangeHeader = request.headers.get("Range");
   const ifRange = request.headers.get("If-Range");
-  const rangeRequested = rangeHeader !== null && (ifRange === null || ifRange === release.strong_etag);
-  const partial = rangeRequested ? parseAppByteRange(rangeHeader, release.size_bytes) : null;
-  if (rangeRequested && !partial) {
+  if (ifMatch !== null && ifMatch !== release.strong_etag)
+    throw new AppReleaseFeedError(412, "app_release_version_changed");
+  // Browser download links are ordinary authenticated GET/HEAD requests and
+  // cannot attach If-Match. Range/resume requests remain conditional so a
+  // stale partial is never mixed with a different immutable artifact.
+  if (rangeHeader !== null && ifMatch === null)
+    throw new AppReleaseFeedError(428, "app_release_if_match_required");
+  if (rangeHeader !== null && ifRange === null)
+    throw new AppReleaseFeedError(428, "app_release_if_range_required");
+  if (rangeHeader !== null && ifRange !== release.strong_etag)
+    throw new AppReleaseFeedError(412, "app_release_version_changed");
+  const partial = rangeHeader !== null ? parseAppByteRange(rangeHeader, release.size_bytes) : null;
+  if (rangeHeader !== null && !partial) {
     return new Response(null, { status: 416, headers: new Headers({
       "Accept-Ranges": "bytes", "Cache-Control": "private, no-store",
       "Cloudflare-CDN-Cache-Control": "no-store", "Content-Range": `bytes */${release.size_bytes}`,

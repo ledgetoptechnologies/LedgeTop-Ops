@@ -87,9 +87,19 @@ describe("staging Operations Windows app release feed", () => {
       downloadUrl: `/api/app/download/${VERSION}?platform=windows&channel=pilot`, minSupported: "Windows 10/11 x64", notes: "Pilot candidate" });
     expect(native.headers.get("cache-control")).toBe("private, no-store");
     const legacy = await app().fetch("/api/app/latest?platform=windows");
-    expect(await legacy.json()).toEqual({ available: true, platform: "windows", channel: "pilot", version: VERSION,
+    const legacyOffer = await legacy.json() as { downloadUrl: string };
+    expect(legacyOffer).toEqual({ available: true, platform: "windows", channel: "pilot", version: VERSION,
       size: BYTES.byteLength, sha256: SHA, downloadUrl: `/api/app/download/${VERSION}?platform=windows&channel=pilot`,
       minSupported: "Windows 10/11 x64", notes: "Pilot candidate" });
+    for (const platform of ["macos", "linux"]) {
+      const unsupported = await app().fetch(`/api/app/latest?platform=${platform}`);
+      expect(unsupported.status).toBe(200);
+      expect(await unsupported.json()).toEqual({ available: false });
+    }
+    const browserDownload = await app().fetch(legacyOffer.downloadUrl);
+    expect(browserDownload.status).toBe(200);
+    expect(Number(browserDownload.headers.get("content-length"))).toBe(BYTES.byteLength);
+    expect(await browserDownload.bytes()).toEqual(BYTES);
   });
 
   it("returns no-off only for eligible owners without a pilot cohort or approved head", async () => {
@@ -125,18 +135,23 @@ describe("staging Operations Windows app release feed", () => {
     expect(partial.status).toBe(206); expect(partial.headers.get("content-range")).toBe(`bytes 3-8/${BYTES.byteLength}`);
     expect(Number(partial.headers.get("content-length"))).toBe(6);
     expect(await partial.bytes()).toEqual(BYTES.slice(3, 9));
-    const suffix = await app().fetch(url, { headers: { "If-Match": etag, Range: "bytes=-4" } });
+    const suffix = await app().fetch(url, { headers: { "If-Match": etag, "If-Range": etag, Range: "bytes=-4" } });
     expect(suffix.status).toBe(206); expect(suffix.headers.get("content-range")).toBe(`bytes ${BYTES.byteLength - 4}-${BYTES.byteLength - 1}/${BYTES.byteLength}`);
     expect(await suffix.bytes()).toEqual(BYTES.slice(-4));
     expect((await app().fetch(url, { method: "HEAD", headers: { "If-Match": etag } })).status).toBe(200);
   });
 
-  it("requires exact preconditions, rejects malformed ranges, and refuses R2 mismatches", async () => {
+  it("serves browser full GETs while requiring native validators for ranges, and refuses R2 mismatches", async () => {
     await seedRelease();
     const url = `/api/app/download/${VERSION}?platform=windows&channel=pilot`;
-    expect((await app().fetch(url)).status).toBe(428);
+    const browserFull = await app().fetch(url);
+    expect(browserFull.status).toBe(200);
+    expect(await browserFull.bytes()).toEqual(BYTES);
     expect((await app().fetch(url, { headers: { "If-Match": '"other"' } })).status).toBe(412);
-    expect((await app().fetch(url, { headers: { "If-Match": etag, Range: "bytes=999-" } })).status).toBe(416);
+    expect((await app().fetch(url, { headers: { Range: "bytes=0-1" } })).status).toBe(428);
+    expect((await app().fetch(url, { headers: { "If-Match": etag, Range: "bytes=0-1" } })).status).toBe(428);
+    expect((await app().fetch(url, { headers: { "If-Match": etag, "If-Range": '"other"', Range: "bytes=0-1" } })).status).toBe(412);
+    expect((await app().fetch(url, { headers: { "If-Match": etag, "If-Range": etag, Range: "bytes=999-" } })).status).toBe(416);
     const full = await app().fetch(url, { headers: { "If-Match": etag }, redirect: "manual" });
     expect(full.status, await full.clone().text()).toBe(200);
     await bucket.put("windows/pilot/1.2.3.4/setup.exe", new TextEncoder().encode("corrupted"), {
