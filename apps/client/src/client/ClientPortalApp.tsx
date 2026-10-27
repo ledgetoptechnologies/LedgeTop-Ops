@@ -7,7 +7,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { AccountMenu, Card, EmptyState, Loading, SignInRecovery, StatusPill, openViewerShell, requestText, Skeleton } from "@ltds/ui";
+import { AccountMenu, Card, EmptyState, Loading, SignInRecovery, StatusPill, openViewerShell, requestChoice, requestText, Skeleton } from "@ltds/ui";
 import { PortalBoundary, PortalBrand } from "./PortalShell";
 import { VideoPlayer } from "./VideoPlayer";
 import { PORTAL_APP_API, type DeliveryLocationCollection } from "@ltds/shared";
@@ -2316,6 +2316,13 @@ function ProjectWorkspace({
   );
 }
 
+/** In-app confirmation; Cancel, Escape and a missing dialog host all resolve to false. */
+async function confirmInApp(title: string, description: string, confirmLabel: string,
+  tone: "primary" | "danger" = "primary", cancelLabel?: string) {
+  return await requestChoice({ title, description, cancelLabel,
+    choices: [{ value: "confirm", label: confirmLabel, tone }] }) === "confirm";
+}
+
 function DelegatedSharePanel({ workspaceId }: { workspaceId: string }) {
   const [targets, setTargets] = useState<PortalDelegatedShareTarget[]>([]);
   const [shares, setShares] = useState<PortalDelegatedShare[]>([]);
@@ -2326,6 +2333,7 @@ function DelegatedSharePanel({ workspaceId }: { workspaceId: string }) {
   const [created, setCreated] = useState<PortalDelegatedShareCreated | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
+  const revoking = useRef(false);
 
   const refresh = async () => {
     setBusy(true); setError("");
@@ -2388,10 +2396,14 @@ function DelegatedSharePanel({ workspaceId }: { workspaceId: string }) {
       {busy && !shares.length ? <Loading /> : shares.length ? shares.map(share => <div className="portal-team-row" key={share.id}>
         <span><strong>{share.label || "Client public link"}</strong><small>{share.status} · Expires {formatDate(share.expiresAt)}</small></span>
         {share.status === "active" && <button type="button" className="button-ghost button-small" disabled={busy} onClick={async () => {
-          if (!window.confirm("Revoke this public link? Anyone using it will immediately lose access.")) return;
-          setBusy(true); setError("");
-          try { await revokePortalDelegatedShare(workspaceId, share.id); setShares(await loadPortalDelegatedShares(workspaceId)); }
-          catch (caught) { setError((caught as Error).message); } finally { setBusy(false); }
+          if (revoking.current) return;
+          revoking.current = true;
+          try {
+            if (!await confirmInApp("Revoke public link?", "Revoke this public link? Anyone using it will immediately lose access.", "Revoke link", "danger")) return;
+            setBusy(true); setError("");
+            try { await revokePortalDelegatedShare(workspaceId, share.id); setShares(await loadPortalDelegatedShares(workspaceId)); }
+            catch (caught) { setError((caught as Error).message); } finally { setBusy(false); }
+          } finally { revoking.current = false; }
         }}>Revoke</button>}
       </div>) : <p className="portal-copy">No client-created links yet.</p>}
     </section>
@@ -2761,6 +2773,8 @@ export function ClientPortalApp({
   const [requestNotice, setRequestNotice] = useState<string | null>(null);
   const [cancellingRequestId, setCancellingRequestId] = useState<string | null>(null);
   const cancellationKeys = useRef(new Map<string, string>());
+  // Held across the asynchronous in-app confirmations so a repeated click cannot send twice.
+  const cancelConfirming = useRef(false), estimateResponding = useRef(false);
   const [retryingCancellationRequestIds, setRetryingCancellationRequestIds] = useState<ReadonlySet<string>>(() => new Set());
   const [switchingWorkspace, setSwitchingWorkspace] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -3082,7 +3096,7 @@ export function ClientPortalApp({
     ]);
     setEditing(null);
   };
-  const onEstimateRespond = async (
+  const respondToEstimate = async (
     request: PortalServiceRequest,
     response: "accept" | "request_change",
   ) => {
@@ -3094,9 +3108,11 @@ export function ClientPortalApp({
     if (response === "request_change" && !note?.trim()) return;
     if (
       response === "accept" &&
-      !window.confirm(
+      !(await confirmInApp(
+        "Accept operational estimate?",
         "Accept this non-binding Ledge Top operational estimate? A separate Project Alpha quote will still be required before financial approval.",
-      )
+        "Accept estimate",
+      ))
     )
       return;
     try {
@@ -3113,10 +3129,22 @@ export function ClientPortalApp({
       window.alert((caught as Error).message);
     }
   };
+  const onEstimateRespond = async (request: PortalServiceRequest, response: "accept" | "request_change") => {
+    if (estimateResponding.current) return;
+    estimateResponding.current = true;
+    try { await respondToEstimate(request, response); } finally { estimateResponding.current = false; }
+  };
   const onCancelRequest = async (request: PortalServiceRequest) => {
-    if (cancellingRequestId || !cancellableStatuses.has(request.status)) return;
+    if (cancellingRequestId || cancelConfirming.current || !cancellableStatuses.has(request.status)) return;
     const retrying = cancellationKeys.current.has(request.id);
-    if (!window.confirm(`${retrying ? "Retry cancelling" : "Cancel"} “${request.title}”? This closes the request before work begins.`)) return;
+    cancelConfirming.current = true;
+    let confirmed = false;
+    try {
+      confirmed = await confirmInApp(`${retrying ? "Retry cancelling" : "Cancel"} this request?`,
+        `${retrying ? "Retry cancelling" : "Cancel"} “${request.title}”? This closes the request before work begins.`,
+        retrying ? "Retry cancellation" : "Cancel request", "danger", "Keep request");
+    } finally { cancelConfirming.current = false; }
+    if (!confirmed) return;
     const key = cancellationKeys.current.get(request.id) ?? crypto.randomUUID();
     cancellationKeys.current.set(request.id, key);
     setCancellingRequestId(request.id);
