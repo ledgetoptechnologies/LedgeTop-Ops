@@ -93,8 +93,14 @@ untracked old entry is absent.
 
 Retries verify the saved physical-root identity and exact native/Shell absence
 without repeating unregister. A changed, missing or uncertain root is refused.
-Compilation and injected lifecycle tests are separate from actual owned removal
-and real uninstall acceptance, which remain release gates.
+Compilation and injected lifecycle tests pass. A separate explicit generated-only
+native acceptance registered and hydrated a fresh private preview, retained its
+downloaded/modified/added files through one owned removal, then passed fresh and
+repeated exact absence verification with an unchanged receipt. This does not
+qualify the fixed legacy wrapper against an actual old installation or a real
+uninstall; those remain release gates. Native acceptance is opt-in through
+`--generated-removed-absence-acceptance`; normal tests never run it. Do not replay
+an uncertain native run or use the default user profile as a test fixture.
 
 The proposed NAS/R2 replacement is described in
 [`nas-r2-bidirectional-sync-design.md`](../../docs/nas-r2-bidirectional-sync-design.md).

@@ -5,6 +5,8 @@ using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
 if (args.Length == 1 && args[0] == "--branding-policy-tests") return await ExplorerBrandIconTests.RunAsync();
+if (args.Length >= 1 && args[0] == "--generated-removed-absence-acceptance")
+    return args.Length == 1 ? await GeneratedRemovedAbsenceAcceptance.RunAsync() : 2;
 
 if (args.Length == 1 && args[0] == "--empty-inventory-acceptance") return await EmptyInventoryAcceptance.RunAsync();
 if (args.Length >= 1 && args[0] == "--connected-root-acceptance") return await ConnectedRootAcceptance.RunAsync(args[1..]);
