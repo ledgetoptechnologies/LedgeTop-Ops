@@ -20,6 +20,9 @@ const ID_COLUMNS = new Set(['staff_id','actor_staff_id','target_staff_id','grant
   'approved_by_staff_id','operator_staff_id','approved_operator_staff_id','issued_by_staff_id','owner_staff_id',
   'beneficiary_staff_id','selected_by_staff_id','reviewed_by_staff_id','terminal_by_staff_id','created_by_staff_id']);
 const PREPARED = new WeakMap();
+const MAX_SNAPSHOT_GUARD_TERMS = 8;
+const MAX_SNAPSHOT_GUARD_SQL_BYTES = 80_000;
+const MAX_SNAPSHOT_GUARD_PARAMS = 100;
 const sha = value => createHash('sha256').update(value).digest('hex');
 const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(',')}]`
   : value === null || typeof value !== 'object' ? JSON.stringify(value)
@@ -280,34 +283,74 @@ async function snapshotGuards(db, reviewedSnapshot) {
   for (const row of modelRows.filter(row => row.type === 'table' && row.name !== 'd1_migrations')) tables.set(row.name, []);
   for (const row of colRows.results) tables.get(row.table_name)?.push(row.column_name);
   tables.set('d1_migrations', ['name']);
-  const statements = [{ key:'schema_count', sql:`SELECT CASE WHEN (SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'
-      AND name NOT IN ('_cf_KV','_cf_METADATA') AND type IN ('table','view','index','trigger'))=? THEN 1
-      ELSE json('native-staff-cutover-schema-mismatch') END AS verified`, params:[expected.schema_count] }];
+  const statements = [{ key:'schema_count', condition:`(SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'
+      AND name NOT IN ('_cf_KV','_cf_METADATA') AND type IN ('table','view','index','trigger'))=?`,
+    error:'native-staff-cutover-schema-mismatch', params:[expected.schema_count] }];
   for (let offset = 0; offset < expected.schema.length; offset += 20) {
     const chunk = expected.schema.slice(offset, offset + 20);
-    statements.push({ key:`schema:${offset}`, sql:`SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM json_each(?) expected
+    statements.push({ key:`schema:${offset}`, condition:`NOT EXISTS(SELECT 1 FROM json_each(?) expected
       WHERE NOT EXISTS(SELECT 1 FROM sqlite_schema current WHERE current.type=json_extract(expected.value,'$.type')
         AND current.name=json_extract(expected.value,'$.name') AND current.tbl_name IS json_extract(expected.value,'$.tbl_name')
-        AND current.sql IS json_extract(expected.value,'$.sql'))) THEN 1 ELSE json('native-staff-cutover-schema-mismatch') END AS verified`,
+        AND current.sql IS json_extract(expected.value,'$.sql')))` , error:'native-staff-cutover-schema-mismatch',
       params:[JSON.stringify(chunk)] });
   }
   const ledger = JSON.stringify(expected.ledger);
-  statements.push({ key:'ledger', sql:`SELECT CASE WHEN ${`json((SELECT json_group_array(name) FROM (SELECT name FROM d1_migrations ORDER BY name)))`} IS ?
-    THEN 1 ELSE json('native-staff-cutover-ledger-mismatch') END AS verified`, params:[ledger] });
+  statements.push({ key:'ledger', condition:`json((SELECT json_group_array(name) FROM (SELECT name FROM d1_migrations ORDER BY name))) IS ?`,
+    error:'native-staff-cutover-ledger-mismatch', params:[ledger] });
   const idsJson = JSON.stringify((expected.rows.staff_users ?? []).map(row => row.id).sort());
   for (const [table, columns] of [...tables.entries()].sort(([a],[b]) => a.localeCompare(b))) {
     if (table === 'd1_migrations') continue;
     const state = tableStateSql(table, columns, idsJson);
     if (!state) continue;
     const expectedRows = JSON.stringify(expected.rows[table] ?? []);
-    statements.push({ key:`rows:${table}`, sql:`SELECT CASE WHEN ${state} IS ? THEN 1
-      ELSE json('native-staff-cutover-rows-mismatch') END AS verified`, params:[expectedRows] });
+    statements.push({ key:`rows:${table}`, condition:`${state} IS ?`, error:'native-staff-cutover-rows-mismatch', params:[expectedRows] });
   }
   const controlPlane = JSON.stringify([...reviewedSnapshot.controlPlaneStaffIds].sort());
-  statements.push({ key:'control_plane', sql:`SELECT CASE WHEN coalesce((SELECT json_group_array(staff_id) FROM
-      (SELECT staff_id FROM native_staff_lifecycle_control_plane_candidates ORDER BY staff_id)),'[]') IS ? THEN 1
-    ELSE json('native-staff-cutover-control-plane-mismatch') END AS verified`, params:[controlPlane] });
-  return statements;
+  statements.push({ key:'control_plane', condition:`coalesce((SELECT json_group_array(staff_id) FROM
+      (SELECT staff_id FROM native_staff_lifecycle_control_plane_candidates ORDER BY staff_id)),'[]') IS ?`,
+    error:'native-staff-cutover-control-plane-mismatch', params:[controlPlane] });
+  return packSnapshotGuards(statements);
+}
+
+function snapshotGuardSql(guards) {
+  let expression = '1';
+  for (let index = guards.length - 1; index >= 0; index -= 1) {
+    const guard = guards[index];
+    expression = `CASE WHEN (${guard.condition}) THEN (${expression}) ELSE json(${sqlText(guard.error)}) END`;
+  }
+  return `SELECT ${expression} AS verified`;
+}
+
+function packSnapshotGuards(logicalGuards) {
+  const packed = [];
+  let current = [];
+  const flush = () => {
+    if (!current.length) return;
+    const sql = snapshotGuardSql(current);
+    packed.push({ key:current.map(guard => guard.key).join('+'), sql,
+      params:current.flatMap(guard => guard.params) });
+    current = [];
+  };
+  for (const guard of logicalGuards) {
+    if (!guard || typeof guard.key !== 'string' || typeof guard.condition !== 'string'
+      || !Array.isArray(guard.params) || !/^native-staff-cutover-[a-z-]+-mismatch$/u.test(guard.error)) fail('snapshot_guard_invalid');
+    const singleSql = snapshotGuardSql([guard]);
+    if (new TextEncoder().encode(singleSql).byteLength > MAX_SNAPSHOT_GUARD_SQL_BYTES
+      || guard.params.length > MAX_SNAPSHOT_GUARD_PARAMS) fail('snapshot_guard_oversized');
+    const candidate = [...current, guard];
+    const candidateSql = snapshotGuardSql(candidate);
+    const candidateParams = candidate.reduce((count, item) => count + item.params.length, 0);
+    if (current.length && (candidate.length > MAX_SNAPSHOT_GUARD_TERMS
+      || new TextEncoder().encode(candidateSql).byteLength > MAX_SNAPSHOT_GUARD_SQL_BYTES
+      || candidateParams > MAX_SNAPSHOT_GUARD_PARAMS)) flush();
+    const nextSql = snapshotGuardSql([...current, guard]);
+    const nextParams = current.reduce((count, item) => count + item.params.length, guard.params.length);
+    if (current.length >= MAX_SNAPSHOT_GUARD_TERMS || new TextEncoder().encode(nextSql).byteLength > MAX_SNAPSHOT_GUARD_SQL_BYTES
+      || nextParams > MAX_SNAPSHOT_GUARD_PARAMS) fail('snapshot_guard_oversized');
+    current.push(guard);
+  }
+  flush();
+  return packed;
 }
 
 function compileWrites(prepared) {

@@ -72,6 +72,47 @@ async function cutoverInput(operator:Person){
 
 const trust=async()=>true;
 
+function observeMutationBatch(target:D1Database){
+  const metadata=new WeakMap<object,{sql:string;params:unknown[]}>();
+  const batches:{sql:string[];params:unknown[][]}[]=[];
+  let armed=false;
+  const observed=new Proxy(target,{get(inner,property){
+    if(property==="prepare")return (sql:string)=>{
+      const statement=inner.prepare(sql);
+      return new Proxy(statement,{get(prepared,key){
+        if(key==="bind")return (...params:unknown[])=>{
+          const bound=prepared.bind(...params);
+          metadata.set(bound as object,{sql,params});
+          return bound;
+        };
+        const value=Reflect.get(prepared,key,prepared);return typeof value==="function"?value.bind(prepared):value;
+      }});
+    };
+    if(property==="batch")return async(statements:Parameters<D1Database["batch"]>[0])=>{
+      if(armed)batches.push({sql:statements.map(statement=>metadata.get(statement as object)?.sql??"<untracked>"),
+        params:statements.map(statement=>metadata.get(statement as object)?.params??[])});
+      return inner.batch(statements);
+    };
+    const value=Reflect.get(inner,property,inner);return typeof value==="function"?value.bind(inner):value;
+  }}) as D1Database;
+  return {db:observed,batches,arm(){armed=true;}};
+}
+
+function expectPacked230Batch(batch:{sql:string[];params:unknown[][]}){
+  expect(batch.sql).not.toContain("<untracked>");
+  expect(batch.sql.length).toBeLessThanOrEqual(256);
+  const guards=batch.sql.slice(0,-3);
+  const marker=/ELSE json\('native-staff-cutover-[a-z-]+-mismatch'\)/gu;
+  const perStatement=guards.map(sql=>[...sql.matchAll(marker)].length);
+  expect(perStatement.every(count=>count>=1&&count<=8)).toBe(true);
+  expect(guards.reduce((total,sql)=>total+[...sql.matchAll(marker)].length,0)).toBe(340);
+  for(const [index,sql] of guards.entries()){
+    expect(new TextEncoder().encode(sql).byteLength).toBeLessThanOrEqual(80_000);
+    expect(Array.isArray(batch.params[index])).toBe(true);
+    expect(batch.params[index]!.length).toBeLessThanOrEqual(100);
+  }
+}
+
 describe("first native staff cutover compiler and D1 executor",()=>{
   beforeAll(async()=>{
     runtime=new Miniflare({modules:true,compatibilityDate:"2026-07-22",script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});
@@ -94,7 +135,12 @@ describe("first native staff cutover compiler and D1 executor",()=>{
     const operator=await seedOwner(),input=await cutoverInput(operator);
     const prepared=await prepareNativeStaffCutoverD1(input,{db,verifyApproval:trust});
     const dispatches:unknown[]=[];
-    const result=await executeNativeStaffCutoverD1(db,prepared,{verifyApproval:trust,beforeMutationDispatch:async value=>{dispatches.push(value);}});
+    const observed=observeMutationBatch(db);
+    const result=await executeNativeStaffCutoverD1(observed.db,prepared,{verifyApproval:trust,beforeMutationDispatch:async value=>{
+      dispatches.push(value);observed.arm();
+    }});
+    expect(observed.batches).toHaveLength(1);
+    expectPacked230Batch(observed.batches[0]!);
     expect(dispatches).toEqual([{schemaVersion:1,commandId:input.commandId,approvalId:input.approval.approvalId,
       snapshotSha256:prepared.reviewedSnapshot.snapshotSha256,planSha256:prepared.planSha256,bindingSha256:prepared.bindingSha256}]);
     expect(result).toMatchObject({action:"native-staff-cutover",enabled:1,generation:0});
@@ -110,6 +156,29 @@ describe("first native staff cutover compiler and D1 executor",()=>{
       currentGroupSha256:input.syncPreparationReceipt.currentGroupSha256,desiredGroupSha256:input.syncPreparationReceipt.desiredGroupSha256});
     expect(await db.prepare("SELECT count(*) n FROM staff_users WHERE id=?").bind(operator.id).first("n")).toBe(1);
     expect(await db.prepare("SELECT count(*) n FROM native_staff_management_delegations WHERE actor_staff_id=?").bind(operator.id).first("n")).toBe(9);
+  },180_000);
+
+  it("packs the full 0230 snapshot and atomically rolls back every cutover write on late drift",async()=>{
+    const operator=await seedOwner(),input=await cutoverInput(operator);
+    const prepared=await prepareNativeStaffCutoverD1(input,{db,verifyApproval:trust});
+    const snapshot=JSON.parse(prepared.reviewedSnapshot.snapshotJson) as {schema_count:number;schema:unknown[]};
+    expect(snapshot.schema_count).toBe(2535);
+    expect(snapshot.schema).toHaveLength(2535);
+    const observed=observeMutationBatch(db);
+    const dispatch=vi.fn(async()=>{
+      await db.prepare(`INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,division_id,scope_key,created_by)
+        VALUES(?,?,'role-operator','global',NULL,'global',?)`).bind(`late:${operator.id}`,operator.id,operator.id).run();
+      observed.arm();
+    });
+    await expect(executeNativeStaffCutoverD1(observed.db,prepared,{verifyApproval:trust,beforeMutationDispatch:dispatch}))
+      .rejects.toThrow(/native_staff_cutover_atomic_batch_(?:refused|not_committed)/u);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(observed.batches).toHaveLength(1);
+    expectPacked230Batch(observed.batches[0]!);
+    expect(await db.prepare("SELECT enabled FROM native_staff_access_reconciliation WHERE singleton=1").first("enabled")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_bootstrap_approvals WHERE approval_id=?").bind(input.approval.approvalId).first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_bootstrap_receipts WHERE command_id=?").bind(input.commandId).first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM staff_role_assignments WHERE id=?").bind(`late:${operator.id}`).first("n")).toBe(1);
   },180_000);
 
   it("refuses a changed full snapshot before any approval, receipt, or enable write",async()=>{
