@@ -8,6 +8,7 @@ import { intelDigest,intelSigningBytes,base64url,type ProducerKey } from '../src
 import { INTEL_INGEST_PATH } from '../src/worker/competitor-intel-ingest-security';
 import { strictIntelJson,validateIntelObservation } from '../src/worker/competitor-intel-ingest-schema';
 import { registerOwnerIntelRoutes } from '../src/worker/owner-intel';
+import { dispatchIntelIngest } from '../src/worker/intel-ingest-routes';
 import type { Env,StaffPrincipal } from '../src/worker/types';
 
 const ORIGIN='https://incoming.ledgetopdroneservices.com',TS='2026-10-25T12:00:00Z',NOW=Date.parse(TS),PRODUCER='hermes-competitor-intel';
@@ -33,7 +34,10 @@ function observation(kind:'search_console_summary'|'own_site'='search_console_su
   sourceSequence:{epoch:'1',counter},commandBinding:null,observedAt:'2026-10-24T11:00:00Z',completedAt:TS,semantics:{observation:'ci.obs.v2',scoring:'concern_0_10.v1'},payload};
 }
 async function signed(value:unknown){
- const body=JSON.stringify(value),digest=await intelDigest(encoder.encode(body)),headers={producer:PRODUCER,keyId:key.key_id,timestamp:TS,digest};
+ return signedBody(JSON.stringify(value));
+}
+async function signedBody(body:string){
+ const digest=await intelDigest(encoder.encode(body)),headers={producer:PRODUCER,keyId:key.key_id,timestamp:TS,digest};
  const signature=base64url(new Uint8Array(await crypto.subtle.sign('Ed25519',privateKey,intelSigningBytes(headers) as BufferSource)));
  return new Request(`${ORIGIN}${INTEL_INGEST_PATH}`,{method:'POST',headers:{'Content-Type':'application/json','X-CI-Producer':headers.producer,'X-CI-Key-Id':headers.keyId,'X-CI-Timestamp':headers.timestamp,'X-CI-Content-SHA256':digest,'X-CI-Signature':signature},body});
 }
@@ -72,6 +76,22 @@ beforeEach(async()=>{
 });
 
 describe('source-only Hermes feed, immutable history and authorized reads',()=>{
+ it('keeps the joined worker gates ahead of body parsing and v1 independent of migration 0229',async()=>{
+  const malformed=await signedBody('{');
+  const disabled=await dispatchIntelIngest(malformed,{...env(),COMPETITOR_INTEL_INGEST_ENABLED:undefined} as Env,NOW);
+  expect(disabled).not.toBeNull();expect(disabled!.status).toBe(404);expect(await disabled!.json()).toEqual({error:'not_found'});
+
+  const noSourceSchema={withSession:(consistency:'first-primary')=>{
+   const session=db.withSession(consistency);
+   return {prepare:(sql:string)=>{
+    expect(sql).not.toMatch(/owner_intel_source_(?:control|bindings|inbox|projections)/);
+    return session.prepare(sql);
+   }};
+  }};
+  const v1={...observation(),semantics:{observation:'ci.obs.v1',scoring:'concern_0_10.v1'},observationKind:'competitor_profile'};
+  const response=await dispatchIntelIngest(await signed(v1),{...env(),OPS_DB:noSourceSchema as unknown as D1Database} as Env,NOW);
+  expect(response).not.toBeNull();expect(response!.status).toBe(400);expect(await response!.json()).toEqual({error:'schema_invalid'});
+ });
  it('keeps the frozen v1 validator route available and rejects source kinds when the source gate is off',async()=>{
   const v2=observation(),disabled={...env(),COMPETITOR_INTEL_INGEST_ENABLED:undefined};
   const pending=dispatchOwnerIntelSourceIngest(await signed(v2),disabled,NOW);expect(pending).not.toBeNull();const response=await pending!;expect(response).not.toBeNull();expect(response!.status).toBe(404);

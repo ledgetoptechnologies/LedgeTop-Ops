@@ -1,6 +1,6 @@
 import { IntelIngestError,strictIntelJson } from './competitor-intel-ingest-schema';
 import { INTEL_INGEST_PATH,intelSignatureHeaders,readIntelBody,verifyIntelSignature,type ProducerKey } from './competitor-intel-ingest-security';
-import { intelDigest } from './competitor-intel-ingest-security';
+import { readIngestProducerKey } from './competitor-intel-ingest-store';
 import { validateOwnerIntelV2Observation,type OwnerIntelV2Observation,type ReviewedOwnerIntelV2Context,OWNER_INTEL_V2_DRAFT_SHA } from './owner-intel-v2-observation';
 import { parseDuplicateFreeJson } from './bounded-json';
 import type { Env } from './types';
@@ -26,19 +26,26 @@ export function dispatchOwnerIntelSourceIngest(request:Request,env:OwnerIntelSou
  if(!incoming(request,env))return null;
  return (async()=>{
   try{
+   if(env.COMPETITOR_INTEL_INGEST_ENABLED!=='true')return json({error:'not_found'},404);
+   const db=env.OPS_DB.withSession('first-primary');
+   // Preserve the frozen receiver's ordering and its independence from the
+   // source migration: the shared gates, signature headers and producer key
+   // are checked before the cloned body is read or inspected.
+   const ingestGate=await db.prepare('SELECT enabled FROM ci_ingest_control WHERE singleton=1').first<{enabled:number}>();
+   if(ingestGate?.enabled!==1)return json({error:'not_found'},404);
+   const headers=intelSignatureHeaders(request,now);
+   const key=await readIngestProducerKey(env.OPS_DB,headers.producer,headers.keyId);
+   if(!['active','previous'].includes(key.state))throw new IntelIngestError('key_not_active',403);
    const raw=await readIntelBody(request.clone());
+   await verifyIntelSignature(raw,headers,key);
    const decoded=strictIntelJson(raw) as Record<string,unknown>;
    const semantics=decoded&&typeof decoded==='object'?decoded.semantics as Record<string,unknown>|undefined:undefined;
    if(semantics?.observation!=='ci.obs.v2')return null;
    if(decoded.observationKind!=='search_console_summary'&&decoded.observationKind!=='own_site')throw new IntelIngestError('schema_invalid',400);
-   if(env.COMPETITOR_INTEL_INGEST_ENABLED!=='true')return json({error:'not_found'},404);
-   const db=env.OPS_DB.withSession('first-primary');
-   const gates=await db.prepare(`SELECT c.enabled ingest_enabled,s.enabled,s.storage_accepted FROM ci_ingest_control c JOIN owner_intel_source_control s ON s.singleton=c.singleton WHERE c.singleton=1`).first<{ingest_enabled:number;enabled:number;storage_accepted:number}>();
-   if(gates?.ingest_enabled!==1||gates.enabled!==1||gates.storage_accepted!==1)return json({error:'not_found'},404);
-   const headers=intelSignatureHeaders(request,now);
-   const key=await db.prepare('SELECT producer_id,key_id,public_key,key_revision,state FROM ci_ingest_producer_keys WHERE producer_id=? AND key_id=?').bind(headers.producer,headers.keyId).first<ProducerKey>();
-   if(!key)throw new IntelIngestError('producer_not_allowed',403);
-   await verifyIntelSignature(raw,headers,key);
+   // Only a recognized v2 source envelope depends on migration 0229. v1
+   // falls through to the frozen receiver without querying new tables.
+   const sourceGate=await db.prepare('SELECT enabled,storage_accepted FROM owner_intel_source_control WHERE singleton=1').first<{enabled:number;storage_accepted:number}>();
+   if(sourceGate?.enabled!==1||sourceGate.storage_accepted!==1)return json({error:'not_found'},404);
    const candidate=decoded as unknown as OwnerIntelV2Observation;
    const binding=await db.prepare(`SELECT s.producer_id,s.binding_id,s.configuration_revision,s.observation_kind,s.subject_key,s.source,s.source_account_ref,s.collected_by,s.reviewed_context_json,
     b.business_id,b.version business_version,b.display_name,x.route_key,k.key_id,k.public_key,k.key_revision,k.state key_state,

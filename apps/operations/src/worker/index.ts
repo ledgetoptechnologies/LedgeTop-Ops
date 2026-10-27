@@ -1,7 +1,6 @@
 import { localDivisionJoin } from "./local-project-division";
 import { Hono, type Context } from "hono";
-import { dispatchCompetitorIntelIngest } from "./competitor-intel-ingest-routes";
-import { dispatchOwnerIntelSourceIngest } from "./owner-intel-source-ingest";
+import { dispatchIntelIngest } from "./intel-ingest-routes";
 import { reservePrimaryFolderMutation,attemptPrimaryFolderMutation,completePrimaryFolderMutation,reconcilePrimaryFolderMutation,readPrimaryFolderMutationReview,retryPrimaryDivisionMutation,type DivisionMutationWitness } from './primary-folder-authority-mutations';
 import { backfillIncomingRcloneOutbox, drainIncomingRcloneOutbox } from "./incoming-rclone-outbox";
 import { reconcileIncomingRcloneDispatched } from "./incoming-rclone-reconcile";
@@ -3776,13 +3775,8 @@ async function fetch(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  const ownerSourceIngest = dispatchOwnerIntelSourceIngest(request, env);
-  if (ownerSourceIngest) {
-    const response = await ownerSourceIngest;
-    if (response) return response;
-  }
-  const intelIngest = dispatchCompetitorIntelIngest(request, env);
-  if (intelIngest) return await intelIngest;
+  const intelIngest = await dispatchIntelIngest(request, env);
+  if (intelIngest) return intelIngest;
   const nativeOwner = await dispatchOperationsPortalNativeOwnerRequest(request, env);
   if (nativeOwner) return nativeOwner;
   const thumbnailIngest = await dispatchThumbnailIngestRequest(request, env);
