@@ -46,7 +46,8 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
     }
     private sealed record Profile(int Schema, string Owner, string Sid, Guid Identity, string Root, string Context,
         string Icon, long RootFileId, Phase Phase, bool Paused, long Revision, Guid NamespaceClsid = default,
-        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ManifestBinding? Binding = null);
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ManifestBinding? Binding = null,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? DisplayName = null);
     private sealed record ManifestBinding(ExplorerRootScope Scope, string File, string Digest);
 
     private readonly string directory, profilePath, preferredRoot, sid;
@@ -151,7 +152,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
             if (p.Phase != Phase.Removed || p.RootFileId == 0 || p.NamespaceClsid == Guid.Empty ||
                 !NativeRootRegistration.HasExactRootFileId(p.Root, p.RootFileId)) return false;
             var absent = ShellRegistration.Inspect(p.Root, ShellRegistration.CreateId(p.Identity), Context(p),
-                p.NamespaceClsid, p.Icon).CompleteAbsenceVerified;
+                p.NamespaceClsid, p.Icon, ProfileDisplayName(p)).CompleteAbsenceVerified;
             // Recheck the physical pin after namespace/native observations as well. This is a
             // bounded read-only snapshot, not permission to clean up any newly appearing root.
             return absent && NativeRootRegistration.HasExactRootFileId(p.Root, p.RootFileId);
@@ -200,7 +201,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
             var selectedRoot = NewRoot();
             var binding = generated ? null : new ManifestBinding(scope, "manifest-" + id.ToString("N") + ".json",
                 (manifest ?? throw new IOException("The frozen Explorer inventory is unavailable.")).Digest);
-            profile = new(generated ? 2 : 3, Owner, sid, id, selectedRoot, Owner + ":" + id.ToString("N"), ExplorerBrandIcon.EnsureResource(), 0, Phase.Prepared, false, 0, Binding: binding);
+            profile = new(generated ? 2 : 4, Owner, sid, id, selectedRoot, Owner + ":" + id.ToString("N"), ExplorerBrandIcon.EnsureResource(), 0, Phase.Prepared, false, 0, Binding: binding, DisplayName: generated ? null : ExplorerRootDisplayName.ForConnectedAlias(scope.Alias));
             Save(profile, createOnly: !File.Exists(profilePath));
             if (!generated) PublishFrozenManifest(profile);
             // Even a cancelled/expired cached session leaves positive Prepared ownership evidence.
@@ -236,7 +237,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
         else source.Pause();
         if (reconnect)
         {
-            registration = ShellRegistration.OpenOwned(p.Root, ShellRegistration.CreateId(p.Identity), Context(p), p.Icon, p.NamespaceClsid, p.RootFileId);
+            registration = ShellRegistration.OpenOwned(p.Root, ShellRegistration.CreateId(p.Identity), Context(p), p.Icon, p.NamespaceClsid, p.RootFileId, ProfileDisplayName(p));
             VerifyPinnedRoot(p, registration);
             provider = CreateProvider(registration, source, cache);
             await provider.ConnectExistingAsync();
@@ -247,7 +248,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
             Save(profile! with { Phase = Phase.NativeRegisterIntent });
             try
             {
-                registration = await ShellRegistration.RegisterAsync(p.Root, ShellRegistration.CreateId(p.Identity), p.Icon, Context(p));
+                registration = await ShellRegistration.RegisterAsync(p.Root, ShellRegistration.CreateId(p.Identity), p.Icon, Context(p), ProfileDisplayName(p));
             }
             catch (ShellRegistrationException error)
             {
@@ -310,7 +311,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
             throw new IOException("The previously registered preview root is missing; exact reconciliation is required.");
         }
         var shellId = ShellRegistration.CreateId(p.Identity);
-        if (ShellRegistration.IsAbsent(shellId, p.Root, Context(p), p.NamespaceClsid == Guid.Empty ? null : p.NamespaceClsid, p.Icon))
+        if (ShellRegistration.IsAbsent(shellId, p.Root, Context(p), p.NamespaceClsid == Guid.Empty ? null : p.NamespaceClsid, p.Icon, ProfileDisplayName(p)))
         {
             // Early setup did not reach native registration, or a previously journaled removal completed.
             if (p.Phase <= Phase.NativeRegisterIntent || p.Phase == Phase.NativeRemoveIntent)
@@ -326,7 +327,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
             throw new IOException("The recorded Windows removal is incomplete. Inspect the exact saved registration before any further change.");
         }
         registration ??= ShellRegistration.OpenOwned(p.Root, shellId, Context(p), p.Icon,
-            p.NamespaceClsid == Guid.Empty ? null : p.NamespaceClsid, p.RootFileId == 0 ? null : p.RootFileId);
+            p.NamespaceClsid == Guid.Empty ? null : p.NamespaceClsid, p.RootFileId == 0 ? null : p.RootFileId, ProfileDisplayName(p));
         VerifyPinnedRoot(p, registration, allowUnrecordedId: p.Phase == Phase.NativeRegisterIntent);
         if (profile!.NamespaceClsid == Guid.Empty)
             Save(profile with { NamespaceClsid = registration.NamespaceClsid, RootFileId = registration.RootFileId });
@@ -385,9 +386,12 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
         var info = new FileInfo(profilePath);
         if (!info.Exists || info.Length is < 1 or > 65536 || (info.Attributes & FileAttributes.ReparsePoint) != 0)
             throw new IOException("The preview profile ownership marker is missing or invalid.");
-        var p = JsonSerializer.Deserialize<Profile>(File.ReadAllBytes(profilePath), json)
+        var profileBytes = File.ReadAllBytes(profilePath);
+        using var document = JsonDocument.Parse(profileBytes);
+        _ = ExplorerRootDisplayName.ResolveProfileJson(document.RootElement, generated, scope.Alias);
+        var p = JsonSerializer.Deserialize<Profile>(profileBytes, json)
             ?? throw new IOException("The preview profile is invalid.");
-        if (p.Schema != (generated ? 2 : 3) || p.Owner != Owner || p.Sid != sid || p.Identity == Guid.Empty || p.Revision < 1 ||
+        if (p.Owner != Owner || p.Sid != sid || p.Identity == Guid.Empty || p.Revision < 1 ||
             !Enum.IsDefined(p.Phase) || p.Context != Owner + ":" + p.Identity.ToString("N") || !ExplorerBrandIcon.IsKnownResource(p.Icon) ||
             !IsRootVariant(p.Root))
             throw new IOException("The profile does not belong to this Windows user and preview location.");
@@ -469,6 +473,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
         stream.Write(bytes); stream.Flush(flushToDisk: true);
     }
 
+    private string ProfileDisplayName(Profile p) => ExplorerRootDisplayName.ResolveProfile(generated, p.Schema, scope.Alias, p.DisplayName is not null, p.DisplayName);
     private static byte[] Context(Profile p) => Encoding.UTF8.GetBytes(p.Context);
     private string NewRoot()
     {

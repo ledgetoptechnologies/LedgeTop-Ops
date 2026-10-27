@@ -30,7 +30,7 @@ internal static class ConnectedPreflightAcceptance
             Require(refused && source.Sessions == 1 && source.Resolutions == 0 && source.Downloads == 0,
                 "Signed-out preflight did not refuse before file metadata or content calls.");
             var prepared = Profile();
-            Require(session.HasOwnershipReceipt && prepared["Schema"]!.GetValue<int>() == 3 &&
+            Require(session.HasOwnershipReceipt && prepared["Schema"]!.GetValue<int>() == 4 &&
                 prepared["Phase"]!.GetValue<string>() == "Prepared", "Signed-out preflight did not retain valid Prepared ownership.");
             Require(!Directory.Exists(root) && !File.Exists(root), "Signed-out preflight created a local root.");
             var bytes = File.ReadAllBytes(Path.Combine(profileDirectory, prepared["Binding"]!["File"]!.GetValue<string>()));
@@ -39,7 +39,7 @@ internal static class ConnectedPreflightAcceptance
             var unusedShellId = ShellRegistration.CreateId(Guid.Parse(prepared["Identity"]!.GetValue<string>()));
             Require(ShellMetadataAbsent(unusedShellId), "Signed-out preflight established shell metadata.");
             File.WriteAllText(Path.Combine(directory, "prepared-before-cleanup.json"), prepared.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-            phases.Add("signed-out Start saved schema3 Prepared + canonical inventory before auth refusal; no local root or exact HKLM metadata"); Save();
+            phases.Add("signed-out Start saved schema4 Prepared + canonical inventory before auth refusal; no local root or exact HKLM metadata"); Save();
             await session.DisposeAsync(); session = null;
 
             var calls = source.Counts;
@@ -73,7 +73,8 @@ internal static class ConnectedPreflightAcceptance
             var observation = ShellRegistration.Inspect(root,
                 ShellRegistration.CreateId(Guid.Parse(registered["Identity"]!.GetValue<string>())),
                 Encoding.UTF8.GetBytes(registered["Context"]!.GetValue<string>()),
-                Guid.Parse(registered["NamespaceClsid"]!.GetValue<string>()), registered["Icon"]!.GetValue<string>());
+                Guid.Parse(registered["NamespaceClsid"]!.GetValue<string>()), registered["Icon"]!.GetValue<string>(), ExplorerRootDisplayName.ResolveProfile(false,
+                    registered["Schema"]!.GetValue<int>(), scope.Alias, registered.AsObject().ContainsKey("DisplayName"), registered["DisplayName"]?.GetValue<string>()));
             Require(observation.CompleteAbsenceVerified, "Supported unregister left native/HKLM/linked HKCU integration.");
             File.WriteAllText(Path.Combine(directory, "cleanup-observation.json"), JsonSerializer.Serialize(observation, new JsonSerializerOptions { WriteIndented = true }));
             phases.Add("revoked-source offline removal made zero new source calls; one unregister proved native/HKLM/linked-HKCU absence and preserved local files"); Save();

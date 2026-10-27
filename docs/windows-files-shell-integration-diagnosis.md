@@ -6,6 +6,22 @@ The shared 0.5.3 candidate does not claim to fix missing Explorer actions.
 
 ## Evidence and remaining discriminator
 
+The shared 0.5.3 source uses the same `LedgeTop Files Preview` display name for
+generated and connected roots. A sidebar name alone therefore cannot identify
+an obsolete demo. Removal must use the recorded root/context/namespace identity.
+Comparing historical source `9ed7cc33` with `c8783723` found no change in the
+registration creation settings: generated and connected sessions converge on
+the same registration and placeholder provider. This comparison does not prove
+the exact bytes of the earlier laptop ZIP or its runtime registration.
+
+Later draft source separates new connected labels from the generated preview,
+using schema-4 persisted display metadata. Existing schema-3 connected records
+retain the legacy label and are not rewritten just to rename them. The new
+label must match the bound source alias; it never supplies access authority.
+Generated schema-2 cleanup is unchanged. This is a naming repair, not evidence
+that Explorer menu/status behavior is repaired. The shared 0.5.3 bytes and v1
+schema-3 diagnostic have not been replaced by this draft.
+
 The laptop lists the approved Company photos and opens/downloads them. Its file
 menus, including Show more options, lack keep/free actions and its Status column
 is blank or unavailable. Earlier generated V2 testing confirmed the actions and

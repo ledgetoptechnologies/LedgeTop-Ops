@@ -12,12 +12,12 @@ internal static class ShellMetadata
     private const string HiddenParent = @"Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel";
     internal sealed record Evidence(Guid NamespaceClsid);
 
-    internal static Evidence? Read(string id, string sid, string root, string icon, Guid pinnedNamespace, bool allowMissingLinks)
+    internal static Evidence? Read(string id, string sid, string root, string icon, Guid pinnedNamespace, bool allowMissingLinks, string displayName)
     {
         using var machine = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
         using var metadata = machine.OpenSubKey(MachineParent + id, false);
         if (metadata is null) return null;
-        RequireString(metadata, "DisplayNameResource", ShellRegistration.DisplayName);
+        RequireString(metadata, "DisplayNameResource", displayName);
         RequireString(metadata, "IconResource", icon, ignoreCase: true);
         if (HasValue(metadata, "Version")) RequireString(metadata, "Version", NativeRootRegistration.ProviderVersion);
         // Observed broker output for this exact pinning/grouping configuration; unknown shapes fail closed.

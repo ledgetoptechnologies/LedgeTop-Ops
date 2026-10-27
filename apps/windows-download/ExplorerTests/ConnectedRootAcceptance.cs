@@ -60,7 +60,7 @@ internal static class ConnectedRootAcceptance
                 await using var session = new OwnedExplorerRootSession(profile, root, source, scope, manifest);
                 await session.StartAsync(); Require(session.State == ExplorerPreviewState.Running, "Connected engine did not run.");
                 var saved = ReadProfile(profile);
-                Require(saved["Schema"]!.GetValue<int>() == 3 && saved["Owner"]!.GetValue<string>() == "LedgeTop.Files.ConnectedExplorer/1", "Generated facade was used instead of connected schema3.");
+                Require(saved["Schema"]!.GetValue<int>() == 4 && saved["Owner"]!.GetValue<string>() == "LedgeTop.Files.ConnectedExplorer/1", "Generated facade was used instead of connected schema4.");
                 var sidecar = Path.Combine(profile, saved["Binding"]!["File"]!.GetValue<string>());
                 var bytes = File.ReadAllBytes(sidecar);
                 Require(Hash(bytes) == manifest.Digest && saved["Binding"]!["Digest"]!.GetValue<string>() == manifest.Digest, "Frozen manifest digest was not persisted.");
@@ -126,7 +126,7 @@ internal static class ConnectedRootAcceptance
         var identity = Guid.Parse(saved["Identity"]!.GetValue<string>());
         var context = Encoding.UTF8.GetBytes(saved["Context"]!.GetValue<string>());
         var observation = ShellRegistration.Inspect(root, ShellRegistration.CreateId(identity), context,
-            Guid.Parse(saved["NamespaceClsid"]!.GetValue<string>()), saved["Icon"]!.GetValue<string>());
+            Guid.Parse(saved["NamespaceClsid"]!.GetValue<string>()), saved["Icon"]!.GetValue<string>(), DisplayName(saved));
         Require(observation.CompleteAbsenceVerified, "Offline removal left native/shell/linked namespace integration.");
         Require(File.ReadAllText(Path.Combine(root, "local-notes.txt")) == "Owned connected acceptance local notes.\r\n", "Removal changed local notes.");
         var expected = fixture.Entries.Single(e => e.RelativePath == "Samples/sample.csv").Identity.Sha256;
@@ -160,12 +160,14 @@ internal static class ConnectedRootAcceptance
     {
         var profile = ReadProfile(directory);
         var observation = ShellRegistration.Inspect(root, ShellRegistration.CreateId(Guid.Parse(profile["Identity"]!.GetValue<string>())),
-            Encoding.UTF8.GetBytes(profile["Context"]!.GetValue<string>()), Guid.Parse(profile["NamespaceClsid"]!.GetValue<string>()), profile["Icon"]!.GetValue<string>());
+            Encoding.UTF8.GetBytes(profile["Context"]!.GetValue<string>()), Guid.Parse(profile["NamespaceClsid"]!.GetValue<string>()), profile["Icon"]!.GetValue<string>(), DisplayName(profile));
         Require(observation.ExpectedNativeIdentityMatches && observation.ExactShellMetadataPresent &&
             observation.RootFileId == profile["RootFileId"]!.GetValue<long>(), "Failed startup changed actual root ownership.");
     }
     private static JsonObject ReadProfile(string directory) => JsonNode.Parse(File.ReadAllText(Path.Combine(directory, "profile.json")))!.AsObject();
     private static string Base(Guid id) => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LedgeTopFilesConnectedRootTests", id.ToString("N"));
+    private static string DisplayName(System.Text.Json.Nodes.JsonNode profile) => ExplorerRootDisplayName.ResolveProfile(false,
+        profile["Schema"]!.GetValue<int>(), "explorer-demo", profile.AsObject().ContainsKey("DisplayName"), profile["DisplayName"]?.GetValue<string>());
     private static ExplorerRootScope Scope(ExplorerDemoSource source) => new(source.Channel, source.Alias, source.Origin.GetLeftPart(UriPartial.Authority), source.PrincipalId);
     private static string Hash(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
     private static void Require(bool condition, string message) { if (!condition) throw new IOException(message); }

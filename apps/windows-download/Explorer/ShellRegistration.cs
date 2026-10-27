@@ -20,20 +20,21 @@ public sealed class ShellRegistration : IPreviewRootRegistration
     private static readonly Dictionary<string, ShellRegistration> owned = new(StringComparer.Ordinal);
     private static readonly HashSet<string> attempted = new(StringComparer.Ordinal);
     private readonly byte[] context;
-    private readonly string sid, icon;
+    private readonly string sid, icon, displayName;
     private long rootFileId;
     private Guid namespaceClsid;
     private bool removalAttempted, removed;
 
-    private ShellRegistration(string root, string id, string icon, byte[] context, Guid expectedNamespace = default, long expectedRootFileId = 0)
+    private ShellRegistration(string root, string id, string icon, byte[] context, Guid expectedNamespace = default, long expectedRootFileId = 0, string displayName = DisplayName)
     {
         Root = root; Id = id; this.icon = icon; this.context = context.ToArray();
-        sid = CurrentSid(); namespaceClsid = expectedNamespace; rootFileId = expectedRootFileId;
+        this.displayName = displayName; sid = CurrentSid(); namespaceClsid = expectedNamespace; rootFileId = expectedRootFileId;
     }
 
     public string Root { get; }
     public string Id { get; }
     public string IconResource => icon;
+    public string RegisteredDisplayName => displayName;
     public long RootFileId => rootFileId;
     public Guid NamespaceClsid => namespaceClsid;
 
@@ -45,9 +46,9 @@ public sealed class ShellRegistration : IPreviewRootRegistration
 
     /// <summary>One Register attempt on a new empty root. Persist Id/context before calling. Failure retains
     /// an OwnedPartial receipt; nothing retries, directly writes HKLM, or automatically unregisters.</summary>
-    public static async Task<ShellRegistration> RegisterAsync(string root, string id, string iconResource, byte[] context)
+    public static async Task<ShellRegistration> RegisterAsync(string root, string id, string iconResource, byte[] context, string displayName = DisplayName)
     {
-        ValidateId(id); ValidateContext(context); ValidateIcon(iconResource);
+        ValidateId(id); ValidateContext(context); ValidateIcon(iconResource); ExplorerRootDisplayName.ValidateRegistration(displayName);
         context = context.ToArray();
         var canonical = ValidateRoot(root, true);
         if (!StorageProviderSyncRootManager.IsSupported()) throw new NotSupportedException("Windows Cloud Files registration is unavailable.");
@@ -68,7 +69,7 @@ public sealed class ShellRegistration : IPreviewRootRegistration
                 if (existing is not null) throw new IOException("The exact shell ID appeared during preparation; it was not changed.");
             if (NativeRootRegistration.Inspect(canonical, context).Hresult != NotUnderSyncRoot)
                 throw new IOException("Native registration changed during preparation; no registration was attempted.");
-            var receipt = new ShellRegistration(canonical, id, iconResource, context);
+            var receipt = new ShellRegistration(canonical, id, iconResource, context, displayName: displayName);
             attempted.Add(id); owned.Add(id, receipt); // Retain before the side effect.
             try
             {
@@ -76,7 +77,7 @@ public sealed class ShellRegistration : IPreviewRootRegistration
                 // Microsoft CloudMirror uses this supported broker and omits optional telemetry ProviderId.
                 StorageProviderSyncRootManager.Register(new StorageProviderSyncRootInfo
                 {
-                    Id = id, Path = folder, DisplayNameResource = DisplayName, IconResource = iconResource,
+                    Id = id, Path = folder, DisplayNameResource = displayName, IconResource = iconResource,
                     Version = NativeRootRegistration.ProviderVersion, AllowPinning = true, ShowSiblingsAsGroup = false,
                     HydrationPolicy = StorageProviderHydrationPolicy.Full,
                     HydrationPolicyModifier = StorageProviderHydrationPolicyModifier.None,
@@ -98,29 +99,29 @@ public sealed class ShellRegistration : IPreviewRootRegistration
     }
 
     public static ShellRegistration OpenOwned(string root, string id, byte[] context, string? iconResource = null,
-        Guid? expectedNamespaceClsid = null, long? expectedRootFileId = null) =>
-        Open(root, id, context, iconResource, expectedNamespaceClsid, expectedRootFileId, forRemoval: false);
+        Guid? expectedNamespaceClsid = null, long? expectedRootFileId = null, string displayName = DisplayName) =>
+        Open(root, id, context, iconResource, expectedNamespaceClsid, expectedRootFileId, forRemoval: false, displayName);
 
     /// <summary>Explicit read-only recovery for removal. A durable namespace GUID is mandatory when native
     /// registration is absent or linked entries are partially removed.</summary>
     public static ShellRegistration OpenForRemoval(string root, string id, byte[] context, Guid expectedNamespaceClsid,
-        long expectedRootFileId, string? iconResource = null)
+        long expectedRootFileId, string? iconResource = null, string displayName = DisplayName)
     {
         if (expectedNamespaceClsid == Guid.Empty) throw new ArgumentException("The saved namespace identity is required.", nameof(expectedNamespaceClsid));
-        return Open(root, id, context, iconResource, expectedNamespaceClsid, expectedRootFileId, forRemoval: true);
+        return Open(root, id, context, iconResource, expectedNamespaceClsid, expectedRootFileId, forRemoval: true, displayName);
     }
 
     private static ShellRegistration Open(string root, string id, byte[] context, string? iconResource,
-        Guid? expectedNamespaceClsid, long? expectedRootFileId, bool forRemoval)
+        Guid? expectedNamespaceClsid, long? expectedRootFileId, bool forRemoval, string displayName)
     {
-        ValidateId(id); ValidateContext(context);
+        ValidateId(id); ValidateContext(context); ExplorerRootDisplayName.ValidateRegistration(displayName);
         var canonical = ValidateRoot(root, false);
         changes.Wait();
         try
         {
             if (owned.TryGetValue(id, out var current))
             {
-                if (current.removed || current.removalAttempted || !SameRoot(current.Root, canonical) ||
+                if (current.displayName != displayName || current.removed || current.removalAttempted || !SameRoot(current.Root, canonical) ||
                     !CryptographicOperations.FixedTimeEquals(current.context, context) ||
                     iconResource is not null && !SameIcon(current.icon, iconResource) ||
                     expectedNamespaceClsid is { } ns && current.namespaceClsid != Guid.Empty && ns != current.namespaceClsid ||
@@ -132,7 +133,7 @@ public sealed class ShellRegistration : IPreviewRootRegistration
                 return current;
             }
             var icon = iconResource ?? DefaultIcon(); ValidateIcon(icon, requireExistingResource: false);
-            var receipt = new ShellRegistration(canonical, id, icon, context, expectedNamespaceClsid ?? Guid.Empty, expectedRootFileId ?? 0);
+            var receipt = new ShellRegistration(canonical, id, icon, context, expectedNamespaceClsid ?? Guid.Empty, expectedRootFileId ?? 0, displayName);
             receipt.VerifyIdentity(!forRemoval, forRemoval);
             owned.Add(id, receipt);
             return receipt;
@@ -173,13 +174,13 @@ public sealed class ShellRegistration : IPreviewRootRegistration
 
     /// <summary>Complete absence needs a persisted or process-retained generated namespace GUID.
     /// Unknown GUID means false: negative WinRT lookup never substitutes for actual absence readback.</summary>
-    public static bool IsAbsent(string id, string root, byte[] context, Guid? expectedNamespaceClsid = null, string? iconResource = null) =>
-        Inspect(root, id, context, expectedNamespaceClsid, iconResource).CompleteAbsenceVerified;
+    public static bool IsAbsent(string id, string root, byte[] context, Guid? expectedNamespaceClsid = null, string? iconResource = null, string displayName = DisplayName) =>
+        Inspect(root, id, context, expectedNamespaceClsid, iconResource, displayName).CompleteAbsenceVerified;
 
     public static ShellRegistrationObservation Inspect(string root, string id, byte[] context,
-        Guid? expectedNamespaceClsid = null, string? iconResource = null)
+        Guid? expectedNamespaceClsid = null, string? iconResource = null, string displayName = DisplayName)
     {
-        ValidateId(id); ValidateContext(context);
+        ValidateId(id); ValidateContext(context); ExplorerRootDisplayName.ValidateRegistration(displayName);
         var canonical = ValidateRoot(root, false);
         changes.Wait();
         try
@@ -187,12 +188,12 @@ public sealed class ShellRegistration : IPreviewRootRegistration
             var icon = iconResource ?? DefaultIcon(); ValidateIcon(icon, requireExistingResource: false);
             if (owned.TryGetValue(id, out var current))
             {
-                if (!SameRoot(current.Root, canonical) || !CryptographicOperations.FixedTimeEquals(current.context, context) ||
+                if (current.displayName != displayName || !SameRoot(current.Root, canonical) || !CryptographicOperations.FixedTimeEquals(current.context, context) ||
                     !SameIcon(current.icon, icon) || expectedNamespaceClsid is { } ns && ns != current.namespaceClsid)
                     throw new IOException("The requested shell observation differs from the retained receipt.");
                 return current.ObserveCore();
             }
-            return new ShellRegistration(canonical, id, icon, context, expectedNamespaceClsid ?? Guid.Empty).ObserveCore();
+            return new ShellRegistration(canonical, id, icon, context, expectedNamespaceClsid ?? Guid.Empty, displayName: displayName).ObserveCore();
         }
         finally { changes.Release(); }
     }
@@ -214,7 +215,7 @@ public sealed class ShellRegistration : IPreviewRootRegistration
         }
         else if (requireNative || native.Hresult != NotUnderSyncRoot)
             throw new IOException("Native registration is absent or unavailable; it was not recreated.");
-        var metadata = ShellMetadata.Read(Id, sid, Root, icon, namespaceClsid, allowMissingLinks)
+        var metadata = ShellMetadata.Read(Id, sid, Root, icon, namespaceClsid, allowMissingLinks, displayName)
             ?? throw new IOException("Exact shell provider metadata is absent; no WinRT lookup was treated as absence proof.");
         if (namespaceClsid == Guid.Empty) namespaceClsid = metadata.NamespaceClsid;
         if (native.Hresult == 0 && rootFileId == 0) rootFileId = native.RootFileId;
@@ -226,7 +227,7 @@ public sealed class ShellRegistration : IPreviewRootRegistration
         if (native.Hresult != 0 && native.Hresult != NotUnderSyncRoot) throw new IOException("Native registration observation is unavailable.");
         if (native.Hresult == 0 && (!MatchesNative(native) || rootFileId != 0 && rootFileId != native.RootFileId))
             throw new IOException("Native registration ownership changed.");
-        var metadata = ShellMetadata.Read(Id, sid, Root, icon, namespaceClsid, true);
+        var metadata = ShellMetadata.Read(Id, sid, Root, icon, namespaceClsid, true, displayName);
         var ns = namespaceClsid != Guid.Empty ? namespaceClsid : metadata?.NamespaceClsid ?? Guid.Empty;
         var linksAbsent = ns != Guid.Empty && ShellMetadata.LinkedEntriesAbsent(ns);
         return new(native.Hresult, native.RootFileId, native.Hresult == 0 && MatchesNative(native),

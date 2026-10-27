@@ -56,8 +56,35 @@ internal static class ExplorerBrandIconTests
                     RootFileId = 0, Phase = "Prepared", Paused = false, Revision = 1, NamespaceClsid = Guid.Empty,
                     Binding = new { Scope = scope, File = "manifest-" + id.ToString("N") + ".json", Digest = new string('a', 64) }
                 }));
+                var before = await File.ReadAllBytesAsync(Path.Combine(profile3, "profile.json"));
                 await using var session = new OwnedExplorerRootSession(profile3, files, source, scope);
                 Require(session.HasOwnershipReceipt, "Connected schema-3 exact icon compatibility failed.");
+                var after = await File.ReadAllBytesAsync(Path.Combine(profile3, "profile.json"));
+                Require(before.AsSpan().SequenceEqual(after), "Legacy profile read rewrote migration data.");
+            }
+            // Real ownership JSON parser, without Start, source calls, root creation or native registration.
+            foreach (var alias in new[] { "employee", "portal", "explorer-demo" }) {
+                var profile4 = Path.Combine(testRoot, "Profile4-" + alias); Directory.CreateDirectory(profile4);
+                var aliasScope = scope with { Alias = alias };
+                var unused = new NeverCalledSource(alias, source.Origin);
+                var node = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(profile3, "profile.json")))!.AsObject();
+                node["Schema"] = 4;
+                node["DisplayName"] = ExplorerRootDisplayName.ForConnectedAlias(alias);
+                node["Binding"]!["Scope"]!["Alias"] = alias;
+                var path = Path.Combine(profile4, "profile.json");
+                await File.WriteAllTextAsync(path, node.ToJsonString());
+                var expectedBytes = await File.ReadAllBytesAsync(path);
+                await using (var accepted = new OwnedExplorerRootSession(profile4, files, unused, aliasScope))
+                    Require(accepted.HasOwnershipReceipt, "Source-specific schema4 profile was refused.");
+                var actualBytes = await File.ReadAllBytesAsync(path);
+                Require(expectedBytes.AsSpan().SequenceEqual(actualBytes), "Schema4 read changed the profile.");
+                foreach (var invalid in new string?[] { null, "unknown", alias == "portal" ? ExplorerRootDisplayName.Company : ExplorerRootDisplayName.Client }) {
+                    node["DisplayName"] = invalid;
+                    await File.WriteAllTextAsync(path, node.ToJsonString());
+                    await using var rejected = new OwnedExplorerRootSession(profile4, files, unused, aliasScope);
+                    Reject(() => { _ = rejected.HasOwnershipReceipt; });
+                }
+                Require(unused.Calls == 0, "Profile compatibility inspection contacted its source.");
             }
             // Ownership checks must still refuse another executable/icon path.
             var profileText = await File.ReadAllTextAsync(Path.Combine(profile, "profile.json"));
@@ -71,4 +98,15 @@ internal static class ExplorerBrandIconTests
     }
     private static void Require(bool condition, string message) { if (!condition) throw new IOException(message); }
     private static void Reject(Action action) { try { action(); } catch (IOException) { return; } throw new IOException("Unsafe icon/profile was accepted."); }
+    private sealed class NeverCalledSource(string alias, Uri origin) : IQueuedDownloadSource
+    {
+        public string Alias => alias;
+        public Uri Origin => origin;
+        public int Calls { get; private set; }
+        private Exception Refuse() { Calls++; return new IOException("Profile inspection must not contact a source."); }
+        public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken = default) => throw Refuse();
+        public Task<ResolvedQueuedDownload> ResolveAsync(string resourceReference, CancellationToken cancellationToken = default) => throw Refuse();
+        public Task<string> DownloadAsync(DownloadSpec spec, string destination, IProgress<DownloadProgress>? progress = null,
+            CancellationToken cancellationToken = default) => throw Refuse();
+    }
 }

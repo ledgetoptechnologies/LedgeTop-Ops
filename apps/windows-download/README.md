@@ -89,6 +89,21 @@ review; it is not a deployed endpoint or a reason to guess roles from email.
 
 ### Legacy Preview cleanup candidate
 
+The sidebar label alone does not identify the old demo: candidate 0.5.3 also uses
+`LedgeTop Files Preview` for connected roots. Later draft source gives newly
+created connected roots source-specific Company files / Client deliveries names
+and records the exact label in connected profile schema 4. Existing schema-3
+connections retain their legacy label; generated schema-2 previews are unchanged.
+Other valid source aliases use the generic `LedgeTop Files` label, with existing
+source authorization checks unchanged. Reconnect and removal verify the exact
+recorded label as well as root/context/namespace ownership.
+
+Older binaries and the shared v1 diagnostic do not understand schema 4. Do not
+publish a schema-4 candidate without a compatible diagnostic and forward-only
+upgrade instructions; do not downgrade it into an older binary. The shared 0.5.3
+installer and diagnostic remain unchanged. This naming change does not fix or
+verify native Explorer menu visibility.
+
 The older portable `LedgeTop Files Preview` has a separate generated V2 ownership
 receipt, so uninstalling older 0.5.2 does not remove it. Candidate 0.5.3's explicit
 uninstall path now includes that exact recorded preview after checking ownership;

@@ -68,6 +68,8 @@ jobs:
         run: dotnet run --project ExplorerTests/WindowsDownload.Explorer.Tests.csproj --configuration Release --no-build -- --branding-policy-tests
       - name: Verify package-context classification without querying native identity
         run: dotnet run --project ExplorerTests/WindowsDownload.Explorer.Tests.csproj --configuration Release --no-build -- --package-context-policy-tests
+      - name: Verify Explorer label compatibility without native registration
+        run: dotnet run --project ExplorerTests/WindowsDownload.Explorer.Tests.csproj --configuration Release --no-build -- --display-name-policy-tests
       - name: Verify offline update policy and installer template contracts
         run: node --test ../../scripts/windows-update-policy.test.mjs ../../scripts/windows-workflow.test.mjs Packaging/UnsignedInstaller.test.mjs Packaging/StartupRegistry.test.mjs
       - name: Qualify pinned public packaging test tools without executing the helper
