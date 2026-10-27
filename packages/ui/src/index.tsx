@@ -528,6 +528,13 @@ export function ViewerEmbed({
   const [state, setState] = useState<"loading" | "ready" | "renewing" | "at-risk" | "startup-failed">("loading");
   const [message, setMessage] = useState("");
   const viewerOrigin = new URL(session.embedUrl).origin;
+  // StrictMode replays effects. Reuse this source generation's nonce so the
+  // child's first-parent binding cannot be stranded on the discarded effect.
+  const startupBinding = useRef<{ embedUrl: string; nonce: string } | null>(null);
+  if (!startupBinding.current || startupBinding.current.embedUrl !== session.embedUrl) {
+    startupBinding.current = { embedUrl: session.embedUrl, nonce: crypto.randomUUID().replaceAll("-", "") };
+  }
+  const startupNonce = startupBinding.current.nonce;
   const startupDiagnostics = useRef<ReturnType<typeof createViewerStartupDiagnostics> | null>(null);
   const [startupSnapshot, setStartupSnapshot] = useState<ViewerStartupSnapshot>({ phase: "awaiting-shell", sequence: 0, frameLoads: 0, stages: [] });
 
@@ -535,7 +542,7 @@ export function ViewerEmbed({
   useEffect(() => {
     const diagnostics = createViewerStartupDiagnostics({
       origin: viewerOrigin,
-      nonce: crypto.randomUUID().replaceAll("-", ""),
+      nonce: startupNonce,
       source: () => frame.current?.contentWindow,
       onChange: setStartupSnapshot,
     });
@@ -551,7 +558,7 @@ export function ViewerEmbed({
       stop();
       if (startupDiagnostics.current === diagnostics) startupDiagnostics.current = null;
     };
-  }, [viewerOrigin, session.embedUrl]);
+  }, [viewerOrigin, session.embedUrl, startupNonce]);
 
   const requestRenewal = useCallback((expiresAt: string) => {
     const remaining = Date.parse(expiresAt) - Date.now();
