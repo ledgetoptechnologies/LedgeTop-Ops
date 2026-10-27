@@ -222,6 +222,22 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
     reviewedState=JSON.parse(reviewed.snapshotJson);
     input=planFor(reviewed,people);
     prepared=await prepare(input,{verifyTrust:trusted});
+    const lateCeilingId=`post-review-broad-ceiling:${people.operator.id}`;
+    await expect(execute(db,prepared,{verifyTrust:trusted,submitManagementBatch:async request=>{
+      // Simulate authority drift after the execution probe, immediately before
+      // the provider submits the single guarded D1 transaction.
+      await db.prepare("UPDATE native_staff_delegation_ceilings SET active=1,version=version+1 WHERE id=? AND active=0")
+        .bind(lateCeilingId).run();
+      return db.batch(request.batch.map((statement:any)=>db.prepare(statement.sql).bind(...statement.params)));
+    }})).rejects.toThrow(/native_staff_bootstrap_atomic_batch_refused/u);
+    expect(await db.prepare("SELECT active FROM native_staff_delegation_ceilings WHERE id=?").bind(lateCeilingId).first("active")).toBe(1);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_bootstrap_approvals WHERE approval_id=?").bind(input.approval.approvalId).first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_bootstrap_receipts WHERE command_id=?").bind(input.commandId).first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_admissions WHERE staff_id=?").bind(people.ops.id).first("n")).toBe(0);
+    reviewed=await snapshot(db,[people.ops.id]);
+    reviewedState=JSON.parse(reviewed.snapshotJson);
+    input=planFor(reviewed,people);
+    prepared=await prepare(input,{verifyTrust:trusted});
     // Normal authenticated activity changes this telemetry field between
     // review and execution. It is intentionally excluded from the authority CAS.
     await db.prepare("UPDATE staff_users SET last_seen_at='2026-10-26T19:35:00.000Z' WHERE id=?").bind(people.ops.id).run();
