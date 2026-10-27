@@ -41,6 +41,8 @@ var tests = new (string Name, Func<Task> Run)[] {
     .Concat(PlaceholderCacheEvictionTests.Groups).ToArray();
 if (args.Length == 1 && args[0] == "--cache-reclamation-only") tests = PlaceholderCacheEvictionTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--windows-release-client-only") tests = WindowsAppReleaseClientTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--metadata-diagnostics-only")
+    tests = EmployeeClientTests.Groups.Concat(QueuedDownloadSourceTests.Groups).Where(test => test.Name.Contains("metadata diagnostics", StringComparison.Ordinal)).ToArray();
 foreach (var test in tests) {
     try { await test.Run(); passed++; Console.WriteLine("PASS " + test.Name); }
     catch (Exception error) { Console.Error.WriteLine("FAIL " + test.Name + ": " + error.GetType().Name + " " + error.Message); Environment.ExitCode = 1; }

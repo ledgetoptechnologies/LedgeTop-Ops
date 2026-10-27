@@ -19,13 +19,56 @@ internal static class EmployeeClientTests
         ("employee HTTP statuses UTF8 duplicate fields redirects and body bounds fail closed", Responses),
         ("employee renewed snapshots resume only the identical logical content version", Resume),
         ("employee wrong-person session cannot reuse file metadata or access discovery", WrongPerson),
-        ("employee metadata cancellation is explicit and never launches login", Cancellation)
+        ("employee metadata cancellation is explicit and never launches login", Cancellation),
+        ("employee metadata diagnostics classify bounded reasons and actual HTTP status", FailureReasons)
     ];
     private static void Assert(bool value) { if (!value) throw new Exception("Employee adapter assertion failed."); }
     private static async Task Throws<T>(Func<Task> action) where T : Exception {
         try { await action(); } catch (T) { return; } throw new Exception("Expected safe employee adapter failure.");
     }
     private static string Sha(byte[]? bytes = null) => Convert.ToHexStringLower(SHA256.HashData(bytes ?? Bytes));
+    private static async Task FailureReasons()
+    {
+        using var fixture = new Fixture();
+        foreach (var status in new[] { HttpStatusCode.Unauthorized, HttpStatusCode.Forbidden, HttpStatusCode.NotFound, HttpStatusCode.Conflict }) {
+            using var client = new EmployeeClient(new Handler((_, _) => Task.FromResult(new HttpResponseMessage(status))), fixture.Session);
+            if (status == HttpStatusCode.Unauthorized) await Throws<LoginRequiredException>(() => client.GetRootsAsync());
+            else if (status == HttpStatusCode.Forbidden) await Throws<AccessDeniedException>(() => client.GetRootsAsync());
+            else await Throws<ResourceUnavailableException>(() => client.GetRootsAsync());
+        }
+        foreach (var status in new[] { 302, 400, 429, 503 }) {
+            var handler = new Handler((_, _) => Task.FromResult(new HttpResponseMessage((HttpStatusCode)status)));
+            using var client = new EmployeeClient(handler, fixture.Session);
+            try { await client.GetRootsAsync(); throw new Exception("Expected actual HTTP status."); }
+            catch (TransferException error) { Assert(error.Reason == TransferFailureReason.UnexpectedHttpStatus && error.HttpStatus == status && error.InnerException is null); }
+            Assert(handler.Calls == 1);
+        }
+        foreach (var (response, reason) in new (Func<HttpResponseMessage>, TransferFailureReason)[] {
+            (() => Json(new { schemaVersion = 1, roots = Array.Empty<object>(), extra = true }), TransferFailureReason.InvalidMetadata),
+            (() => new(HttpStatusCode.OK) { Content = new StringContent("private-detail", Encoding.UTF8, "text/html") }, TransferFailureReason.InvalidMetadata),
+            (() => new((HttpStatusCode)700), TransferFailureReason.InvalidMetadata) }) {
+            using var client = new EmployeeClient(new Handler((_, _) => Task.FromResult(response())), fixture.Session);
+            try { await client.GetRootsAsync(); throw new Exception("Expected invalid metadata."); }
+            catch (TransferException error) { Assert(error.Reason == reason && error.HttpStatus is null && !error.Message.Contains("private-detail", StringComparison.Ordinal)); }
+        }
+        foreach (var (failure, reason) in new (Exception, TransferFailureReason)[] {
+            (new HttpRequestException("private-detail"), TransferFailureReason.Network),
+            (new IOException("private-detail"), TransferFailureReason.ResponseRead),
+            (new OperationCanceledException("private-detail"), TransferFailureReason.Timeout) }) {
+            using var client = new EmployeeClient(new Handler((_, _) => throw failure), fixture.Session);
+            try { await client.GetRootsAsync(); throw new Exception("Expected safe transport failure."); }
+            catch (TransferException error) { Assert(error.Reason == reason && error.HttpStatus is null && error.InnerException is null && !error.Message.Contains("private-detail", StringComparison.Ordinal)); }
+        }
+        Assert(new TransferException("legacy").Reason == TransferFailureReason.Unknown && new TransferException("legacy").HttpStatus is null);
+        foreach (var pair in new[] { (TransferFailureReason.Network, (int?)503), (TransferFailureReason.UnexpectedHttpStatus, (int?)null),
+            (TransferFailureReason.UnexpectedHttpStatus, (int?)700), ((TransferFailureReason)999, (int?)null) }) {
+            var refused = false; try { _ = new TransferException("safe", pair.Item1, pair.Item2); } catch (ArgumentException) { refused = true; } Assert(refused);
+        }
+        using var cancel = new CancellationTokenSource(); cancel.Cancel();
+        var unused = new Handler((_, _) => throw new Exception("Cancelled request reached HTTP."));
+        using var cancelled = new EmployeeClient(unused, fixture.Session);
+        await Throws<OperationCanceledException>(() => cancelled.GetRootsAsync(cancel.Token)); Assert(unused.Calls == 0);
+    }
     private static string Token(string subject) => "eyJhbGciOiJSUzI1NiJ9." + Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(
         new { sub = subject, exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600 })).TrimEnd('=').Replace('+', '-').Replace('/', '_') + ".c2ln";
     private static object Roots(int count = 1) => new { schemaVersion = 1, roots = Enumerable.Range(0, count).Select(index => new {

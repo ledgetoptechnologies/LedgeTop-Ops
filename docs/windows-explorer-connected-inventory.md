@@ -23,6 +23,22 @@ listing/manifest mismatches all abort capture. Catalog APIs have no snapshot
 revision token, so this is a bounded inventory across requests, not an atomic
 remote snapshot or permission to rename/delete local content during refresh.
 
+Later diagnostic source distinguishes capture operations and their pre-session,
+request, post-session and validation boundaries. Transfer failures carry only a
+bounded reason and, for an actual unexpected HTTP response, its numeric status.
+Activity displays a static support code; it does not include the original error,
+response body, resource name, URL, principal or credential. Authorization,
+unavailable-resource and caller-cancellation exceptions retain their existing
+handling. Redirects remain disabled, and the generic message no longer implies
+that a redirect caused every metadata failure.
+
+A failure during initial capture precedes cleanup-index publication and native
+Explorer activation. Synthetic coordinator tests verify neither operation runs
+on that failure. Focused validation passed two metadata-transport groups, ten
+catalog groups and thirteen coordinator cases. These are offline fixtures, not a
+diagnosis of the laptop failure. This diagnostic change is not in the shared
+0.5.3 installer and grants no additional source access.
+
 For the production `LiveBackend`, capture additionally leases the exact cached
 credential through the same `CloudflareAccessSession` instance shared by its
 catalog and queue source. The normal helper reads the credential. Every later

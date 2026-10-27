@@ -17,7 +17,20 @@ public sealed record DownloadSpec(string OpaqueIdentity, Uri ContentUri, string 
 public enum DownloadPhase { Receiving, Verifying, Completed }
 /// <summary>Received bytes include an existing partial; integrity is established only at Completed.</summary>
 public sealed record DownloadProgress(long BytesTransferred, long TotalBytes, DownloadPhase Phase);
-public sealed class TransferException(string message) : Exception(message);
+public enum TransferFailureReason { Unknown, UnexpectedHttpStatus, InvalidMetadata, Network, Timeout, ResponseRead }
+public sealed class TransferException : Exception
+{
+    public TransferFailureReason Reason { get; }
+    public int? HttpStatus { get; }
+    public TransferException(string message) : this(message, TransferFailureReason.Unknown) { }
+    public TransferException(string message, TransferFailureReason reason, int? httpStatus = null) : base(message)
+    {
+        if (!Enum.IsDefined(reason) || (reason == TransferFailureReason.UnexpectedHttpStatus
+            ? httpStatus is null or < 100 or > 599 : httpStatus is not null))
+            throw new ArgumentException("A bounded transfer failure reason and matching HTTP status are required.");
+        Reason = reason; HttpStatus = httpStatus;
+    }
+}
 
 /// <summary>Read-only prototype. No upload, filesystem placeholders or automatic updates.</summary>
 public sealed class Downloader : IDisposable

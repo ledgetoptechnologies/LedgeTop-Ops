@@ -42,6 +42,8 @@ public static class ExplorerCatalogSnapshotBuilder
         var visited = new HashSet<string>(StringComparer.Ordinal);
         var pending = new Queue<(CatalogNode Node, string Path)>();
         var pages = 0;
+        var operation = CatalogCaptureOperation.SessionPin;
+        var boundary = CatalogCaptureBoundary.MetadataRequest;
 
         void Configuration()
         {
@@ -78,12 +80,16 @@ public static class ExplorerCatalogSnapshotBuilder
             Session(selected.PrincipalId, selected.ExpiresAt);
         }
 
-        async Task<T> Request<T>(Func<Task<T>> action)
+        async Task<T> Request<T>(CatalogCaptureOperation selectedOperation, Func<Task<T>> action)
         {
+            operation = selectedOperation; boundary = CatalogCaptureBoundary.BeforeSession;
             await Fence();
+            boundary = CatalogCaptureBoundary.MetadataRequest;
             var result = await action();
+            boundary = CatalogCaptureBoundary.AfterSession;
             Configuration();
             await Fence();
+            boundary = CatalogCaptureBoundary.ValidateInventory;
             return result;
         }
 
@@ -121,6 +127,7 @@ public static class ExplorerCatalogSnapshotBuilder
 
         async Task FileEntry(CatalogFile file, string parent)
         {
+            operation = CatalogCaptureOperation.FileReference; boundary = CatalogCaptureBoundary.ValidateInventory;
             if (file is null || file.SourceAlias != alias || !file.Verifiable || file.Size < -1 ||
                 file.Size > (1L << 40) || string.IsNullOrWhiteSpace(file.Key) || file.Key.Length > 16384)
                 throw Invalid("A catalog file lacks supported, verifiable download metadata.");
@@ -133,10 +140,10 @@ public static class ExplorerCatalogSnapshotBuilder
             // Stop before resolving the next file when its addition would exceed the inventory bound.
             if (files.Count + directories.Count >= MaximumEntries)
                 throw Invalid("The Explorer catalog exceeds the supported file and folder limit.");
-            var reference = await Request(() => catalog.GetReferenceAsync(file, cancellationToken));
+            var reference = await Request(CatalogCaptureOperation.FileReference, () => catalog.GetReferenceAsync(file, cancellationToken));
             if (reference is null || reference.Length > 16384 || !Regex.IsMatch(reference, "\\Aodqr1_[A-Za-z0-9_-]+\\z"))
                 throw Invalid("The catalog returned an invalid durable file reference.");
-            var resolved = await Request(() => source.ResolveAsync(reference, cancellationToken));
+            var resolved = await Request(CatalogCaptureOperation.FileResolution, () => source.ResolveAsync(reference, cancellationToken));
             if (resolved is null || resolved.Spec is null || string.IsNullOrEmpty(resolved.LogicalFileId) || string.IsNullOrEmpty(resolved.RemoteVersion))
                 throw Invalid("The catalog returned an invalid resolved file.");
             var spec = resolved.Spec;
@@ -159,53 +166,63 @@ public static class ExplorerCatalogSnapshotBuilder
         // The production backend pins its cached Access credential for the entire capture.
         // Metadata fetched under an intervening account's credential must never become a
         // snapshot for the expected person, even if that account changes back before a fence.
-        using var captureScope = backend is LiveBackend live ? await live.PinCatalogSessionAsync(cancellationToken) : null;
-        Configuration();
-        await GatewayFence();
-        var sections = await Request(() => catalog.GetSectionsAsync(cancellationToken));
-        if (sections is null) throw Invalid("The catalog returned no supported section list.");
-        foreach (var section in sections) {
-            Node(section, NodeKind.Section);
-            object? more = null;
-            var continuations = new HashSet<object>();
-            do {
-                Page();
-                var roots = await Request(() => catalog.GetChildrenAsync(section, more, cancellationToken));
-                if (roots is null || roots.Nodes is null) throw Invalid("The catalog returned an invalid root page.");
-                foreach (var root in roots.Nodes) {
-                    Node(root, NodeKind.Root); WindowsName(root.Name); DirectoryEntry(root.Name);
-                    pending.Enqueue((root, root.Name));
-                }
-                more = roots.More;
-                if (more is not null && !continuations.Add(more)) throw Invalid("The catalog repeated a root continuation.");
-            } while (more is not null);
-        }
+        try {
+            using var captureScope = backend is LiveBackend live ? await live.PinCatalogSessionAsync(cancellationToken) : null;
+            operation = CatalogCaptureOperation.InitialSession; boundary = CatalogCaptureBoundary.BeforeSession;
+            Configuration();
+            await GatewayFence();
+            var sections = await Request(CatalogCaptureOperation.Sections, () => catalog.GetSectionsAsync(cancellationToken));
+            if (sections is null) throw Invalid("The catalog returned no supported section list.");
+            foreach (var section in sections) {
+                Node(section, NodeKind.Section);
+                object? more = null;
+                var continuations = new HashSet<object>();
+                do {
+                    operation = CatalogCaptureOperation.Roots; boundary = CatalogCaptureBoundary.ValidateInventory;
+                    Page();
+                    var roots = await Request(CatalogCaptureOperation.Roots, () => catalog.GetChildrenAsync(section, more, cancellationToken));
+                    if (roots is null || roots.Nodes is null) throw Invalid("The catalog returned an invalid root page.");
+                    foreach (var root in roots.Nodes) {
+                        Node(root, NodeKind.Root); WindowsName(root.Name); DirectoryEntry(root.Name);
+                        pending.Enqueue((root, root.Name));
+                    }
+                    more = roots.More;
+                    if (more is not null && !continuations.Add(more)) throw Invalid("The catalog repeated a root continuation.");
+                } while (more is not null);
+            }
 
-        while (pending.TryDequeue(out var item)) {
-            object? more = null;
-            var continuations = new HashSet<object>();
-            do {
-                Page();
-                var listing = await Request(() => catalog.ListAsync(item.Node, more, cancellationToken));
-                if (listing is null || listing.Folders is null || listing.Files is null)
-                    throw Invalid("The catalog returned an invalid folder page.");
-                foreach (var folder in listing.Folders) {
-                    Node(folder, NodeKind.Folder); WindowsName(folder.Name);
-                    var path = item.Path + "\\" + folder.Name;
-                    DirectoryEntry(path); pending.Enqueue((folder, path));
-                }
-                foreach (var file in listing.Files) await FileEntry(file, item.Path);
-                more = listing.More;
-                if (more is not null && !continuations.Add(more)) throw Invalid("The catalog repeated a folder continuation.");
-            } while (more is not null);
+            while (pending.TryDequeue(out var item)) {
+                object? more = null;
+                var continuations = new HashSet<object>();
+                do {
+                    operation = CatalogCaptureOperation.FolderListing; boundary = CatalogCaptureBoundary.ValidateInventory;
+                    Page();
+                    var listing = await Request(CatalogCaptureOperation.FolderListing, () => catalog.ListAsync(item.Node, more, cancellationToken));
+                    if (listing is null || listing.Folders is null || listing.Files is null)
+                        throw Invalid("The catalog returned an invalid folder page.");
+                    foreach (var folder in listing.Folders) {
+                        Node(folder, NodeKind.Folder); WindowsName(folder.Name);
+                        var path = item.Path + "\\" + folder.Name;
+                        DirectoryEntry(path); pending.Enqueue((folder, path));
+                    }
+                    foreach (var file in listing.Files) await FileEntry(file, item.Path);
+                    operation = CatalogCaptureOperation.FolderListing; boundary = CatalogCaptureBoundary.ValidateInventory;
+                    more = listing.More;
+                    if (more is not null && !continuations.Add(more)) throw Invalid("The catalog repeated a folder continuation.");
+                } while (more is not null);
+            }
+            operation = CatalogCaptureOperation.FinalSession; boundary = CatalogCaptureBoundary.BeforeSession;
+            await GatewayFence();
+            boundary = CatalogCaptureBoundary.AfterSession;
+            // The gateway await can itself be delayed while its source changes; never return a
+            // completed inventory without a subsequent authoritative selected-source readback.
+            await Fence();
+            return new(expectedPrincipal, channel, alias, origin,
+                new ReadOnlyDictionary<string, PlaceholderIdentity>(files),
+                Array.AsReadOnly(directories.Order(StringComparer.OrdinalIgnoreCase).ToArray()));
+        } catch (TransferException error) {
+            throw new CatalogCaptureException(operation, boundary, error.Reason, error.HttpStatus);
         }
-        await GatewayFence();
-        // The gateway await can itself be delayed while its source changes; never return a
-        // completed inventory without a subsequent authoritative selected-source readback.
-        await Fence();
-        return new(expectedPrincipal, channel, alias, origin,
-            new ReadOnlyDictionary<string, PlaceholderIdentity>(files),
-            Array.AsReadOnly(directories.Order(StringComparer.OrdinalIgnoreCase).ToArray()));
     }
 
     private static string CanonicalOrigin(Uri uri)
@@ -240,5 +257,5 @@ public static class ExplorerCatalogSnapshotBuilder
             Regex.IsMatch(stem, "\\A(?:COM|LPT)[1-9¹²³]\\z")) throw Invalid("A catalog name uses a Windows reserved device name.");
     }
 
-    private static TransferException Invalid(string message) => new(message);
+    private static TransferException Invalid(string message) => new(message, TransferFailureReason.InvalidMetadata);
 }

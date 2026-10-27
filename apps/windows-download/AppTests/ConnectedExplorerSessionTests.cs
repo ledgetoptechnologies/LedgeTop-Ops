@@ -24,7 +24,23 @@ internal static class ConnectedExplorerSessionTests
         await DurableRemovalBeforeProfileCreation(); count++;
         await CachedReconnect(); count++;
         await UpdateIdentityBinding(); count++;
-        Console.WriteLine($"Connected Explorer coordinator: {count}/12 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+        await CaptureDiagnostics(); count++;
+        Console.WriteLine($"Connected Explorer coordinator: {count}/13 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+    }
+
+    private static async Task CaptureDiagnostics()
+    {
+        await using var fixture = new Fixture {
+            CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.FileResolution,
+                CatalogCaptureBoundary.MetadataRequest, TransferFailureReason.UnexpectedHttpStatus, 503)
+        };
+        var session = fixture.Create();
+        try { await session.StartAsync(); throw new InvalidOperationException("Expected the exact capture refusal."); }
+        catch (CatalogCaptureException error) when (ReferenceEquals(error, fixture.CaptureFailure)) { }
+        Check(session.Activity.Any(line => line.Contains("catalog/FileResolution/MetadataRequest/UnexpectedHttpStatus; HTTP 503", StringComparison.Ordinal)), "Activity omits bounded capture coordinate/status");
+        Check(session.Activity.All(line => !line.Contains("No redirects", StringComparison.Ordinal) && !line.Contains(fixture.IndexPath, StringComparison.Ordinal)), "Activity exposes a path or implies a redirect cause");
+        Check(!File.Exists(fixture.IndexPath) && fixture.EngineStarts == 0 && fixture.NativeActivations == 0 && fixture.Captures == 1,
+            "Failed capture published ownership or activated Windows integration");
     }
 
     private static async Task UpdateIdentityBinding()
@@ -346,6 +362,7 @@ internal static class ConnectedExplorerSessionTests
         internal string Person = PersonA, Version = "version-one", WrongConfiguration = "";
         internal bool HoldLogin, HoldCapture, HoldCurrent, HoldEngineSession, HoldSourceSession, IgnoreLoginCancellation, Expired, AccessDenied, FailEngineStart, ThrowIfBackendCreated, EmptyInventory,
             FailFirstRunningDispose, RunningDisposeRefused, VerifyEngineSession, FailEngineBeforeProfile, FailEnginePreparedAuth;
+        internal CatalogCaptureException? CaptureFailure;
         internal int Backends, SignIns, Captures, EngineStarts, EnginePauses, EngineResumes, BackendDisposals, Requests, NativeActivations;
         internal readonly TaskCompletionSource LoginEntered = new(TaskCreationOptions.RunContinuationsAsynchronously), LoginRelease = new(TaskCreationOptions.RunContinuationsAsynchronously),
             CaptureEntered = new(TaskCreationOptions.RunContinuationsAsynchronously), CaptureRelease = new(TaskCreationOptions.RunContinuationsAsynchronously),
@@ -377,6 +394,7 @@ internal static class ConnectedExplorerSessionTests
         private async Task<ExplorerCatalogSnapshot> Capture(IFilesBackend backend, string channel, string expected, CancellationToken token)
         {
             Captures++; CaptureEntered.TrySetResult();
+            if (CaptureFailure is { } failure) throw failure;
             if (HoldCapture) await CaptureRelease.Task.WaitAsync(token);
             var source = backend.Sources.Single();
             if (EmptyInventory) return new(expected, channel, source.Alias, source.Origin.GetLeftPart(UriPartial.Authority),

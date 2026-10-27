@@ -19,11 +19,47 @@ internal static class QueuedDownloadSourceTests
         ("queue source verified downloader emits truthful progress without credential persistence", Download),
         ("queue source cancellation does not launch login or start another request", Cancellation),
         ("queue actual adapter joins lightweight reference durable enqueue renewal and verified completion", JoinedQueue),
-        ("portal queue resumes an owned partial through only the dedicated successor byte path", SuccessorResume)
+        ("portal queue resumes an owned partial through only the dedicated successor byte path", SuccessorResume),
+        ("queue metadata diagnostics classify bounded reasons and actual HTTP status", FailureReasons)
     ];
     private static void Assert(bool value) { if (!value) throw new Exception("Queue source assertion failed."); }
     private static async Task Throws<T>(Func<Task> run) where T : Exception { try { await run(); } catch (T) { return; } throw new Exception("Expected safe queue source failure."); }
     private static string Base(bool employee) => employee ? "/api/staff/files" : "/api/client/operations/data";
+    private static async Task FailureReasons()
+    {
+        using var fixture = new Fixture();
+        foreach (var employee in new[] { true, false }) {
+            foreach (var status in new[] { HttpStatusCode.Unauthorized, HttpStatusCode.Forbidden, HttpStatusCode.NotFound, HttpStatusCode.Conflict }) {
+                using var source = fixture.Source(employee, new Handler((_, _) => Task.FromResult(new HttpResponseMessage(status))));
+                if (status == HttpStatusCode.Unauthorized) await Throws<LoginRequiredException>(() => source.ResolveAsync(Reference));
+                else if (status == HttpStatusCode.Forbidden) await Throws<AccessDeniedException>(() => source.ResolveAsync(Reference));
+                else await Throws<ResourceUnavailableException>(() => source.ResolveAsync(Reference));
+            }
+            foreach (var status in new[] { 302, 400, 429, 503 }) {
+                var handler = new Handler((_, _) => Task.FromResult(new HttpResponseMessage((HttpStatusCode)status)));
+                using var source = fixture.Source(employee, handler);
+                try { await source.ResolveAsync(Reference); throw new Exception("Expected actual HTTP status."); }
+                catch (TransferException error) { Assert(error.Reason == TransferFailureReason.UnexpectedHttpStatus && error.HttpStatus == status && error.InnerException is null); }
+                Assert(handler.Calls == 1);
+            }
+            using (var source = fixture.Source(employee, new Handler((_, _) => Task.FromResult(Json(new { unexpected = "private-detail" }))))) {
+                try { await source.ResolveAsync(Reference); throw new Exception("Expected invalid metadata."); }
+                catch (TransferException error) { Assert(error.Reason == TransferFailureReason.InvalidMetadata && error.HttpStatus is null && !error.Message.Contains("private-detail", StringComparison.Ordinal)); }
+            }
+            foreach (var (failure, reason) in new (Exception, TransferFailureReason)[] {
+                (new HttpRequestException("private-detail"), TransferFailureReason.Network),
+                (new IOException("private-detail"), TransferFailureReason.ResponseRead),
+                (new OperationCanceledException("private-detail"), TransferFailureReason.Timeout) }) {
+                using var source = fixture.Source(employee, new Handler((_, _) => throw failure));
+                try { await source.ResolveAsync(Reference); throw new Exception("Expected transport classification."); }
+                catch (TransferException error) { Assert(error.Reason == reason && error.HttpStatus is null && error.InnerException is null && !error.Message.Contains("private-detail", StringComparison.Ordinal)); }
+            }
+        }
+        using var cancel = new CancellationTokenSource(); cancel.Cancel();
+        var unused = new Handler((_, _) => throw new Exception("Cancelled request reached HTTP."));
+        using var cancelled = fixture.Source(true, unused);
+        await Throws<OperationCanceledException>(() => cancelled.ResolveAsync(Reference, cancel.Token)); Assert(unused.Calls == 0 && fixture.Runner.Logins == 0);
+    }
     private static Dictionary<string, object?> Manifest(bool employee, string handle = "renewed") => new() {
         ["schemaVersion"] = 1, ["logicalFileId"] = (employee ? "oef1_" : "ondf1_") + new string('b',64), ["remoteVersion"] = employee ? Sha : "provider-version-one",
         ["strongETag"] = "\"" + Sha + "\"", ["size"] = Bytes.Length, ["sha256"] = Sha, ["name"] = "queue.bin",
@@ -213,7 +249,8 @@ internal static class QueuedDownloadSourceTests
         }
     }
     private sealed class Handler(Func<HttpRequestMessage,CancellationToken,Task<HttpResponseMessage>> action):HttpMessageHandler {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken)=>action(request,cancellationToken);
+        internal int Calls;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken) { Calls++; return action(request,cancellationToken); }
     }
     private sealed class Runner:IAccessCommandRunner {
         internal int Calls,Logins;internal string Token="";

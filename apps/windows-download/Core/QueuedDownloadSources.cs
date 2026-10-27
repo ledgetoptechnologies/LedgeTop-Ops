@@ -105,8 +105,11 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
             if (response.StatusCode == HttpStatusCode.Unauthorized) throw new LoginRequiredException();
             if (response.StatusCode == HttpStatusCode.Forbidden) throw new AccessDeniedException();
             if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Conflict) throw new ResourceUnavailableException();
+            if ((int)response.StatusCode is < 100 or > 599) throw Invalid();
+            if (response.StatusCode != HttpStatusCode.OK)
+                throw new TransferException("The queue source returned an unexpected HTTP status.", TransferFailureReason.UnexpectedHttpStatus, (int)response.StatusCode);
             var type = response.Content.Headers.ContentType;
-            if (response.StatusCode != HttpStatusCode.OK || type?.MediaType != "application/json"
+            if (type?.MediaType != "application/json"
                 || type.CharSet is not null && !type.CharSet.Trim('"').Equals("utf-8", StringComparison.OrdinalIgnoreCase)
                 || response.Content.Headers.ContentEncoding.Count != 0 || response.Content.Headers.ContentLength > limit) throw Invalid();
             using var stream = await response.Content.ReadAsStreamAsync(deadline.Token); using var output = new MemoryStream(); var bytes = new byte[8192];
@@ -117,8 +120,10 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
             deadline.Token.ThrowIfCancellationRequested();
             var doc = JsonDocument.Parse(Utf8.GetString(output.ToArray()), new JsonDocumentOptions { MaxDepth = 12 });
             try { Unique(doc.RootElement); return doc; } catch { doc.Dispose(); throw; }
-        } catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { throw new TransferException("The queue source request timed out."); }
-        catch (Exception e) when (e is HttpRequestException or IOException or JsonException or DecoderFallbackException) { throw Invalid(); }
+        } catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { throw new TransferException("The queue source request timed out.", TransferFailureReason.Timeout); }
+        catch (HttpRequestException) { throw new TransferException("The queue source request could not be completed.", TransferFailureReason.Network); }
+        catch (IOException) { throw new TransferException("The queue source response could not be read.", TransferFailureReason.ResponseRead); }
+        catch (Exception e) when (e is JsonException or DecoderFallbackException) { throw Invalid(); }
     }
     private static void Unique(JsonElement e) {
         if (e.ValueKind == JsonValueKind.Object) { var seen = new HashSet<string>(StringComparer.Ordinal); foreach (var p in e.EnumerateObject()) { if (!seen.Add(p.Name)) throw Invalid(); Unique(p.Value); } }
@@ -136,7 +141,7 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
     private static string Principal(JsonElement e) { var v = Text(e, "principalId", 70); if (!Regex.IsMatch(v, "\\Aodqp1_[a-f0-9]{64}\\z")) throw Invalid(); return v; }
     private static string Reference(string v) { if (v is null || v.Length > 16384 || !Regex.IsMatch(v, "\\Aodqr1_[A-Za-z0-9_-]+\\z")) throw Invalid(); return v; }
     private static bool Malformed(Exception e) => e is InvalidOperationException or KeyNotFoundException or FormatException or OverflowException or ArgumentOutOfRangeException;
-    private static TransferException Invalid() => new("The queue source returned invalid metadata.");
+    private static TransferException Invalid() => new("The queue source returned invalid metadata.", TransferFailureReason.InvalidMetadata);
     public void Dispose() { client.Dispose(); downloader.Dispose(); }
 }
 

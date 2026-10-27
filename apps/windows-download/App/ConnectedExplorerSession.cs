@@ -427,7 +427,10 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         OperationCanceledException => "Sign-in or file preparation was cancelled. Use the Sign in button to try again when you're ready.",
         AccessDeniedException => "This account is not allowed to use the selected file connection. Check the source and permissions; remove the previous connection before choosing another account.",
         ResourceUnavailableException => "The approved files are unavailable or have changed. Ask your LedgeTop contact to check the delivery or folder before reconnecting.",
-        TransferException => "The file service or its metadata could not be verified. No redirects were followed. Check your connection, then ask your LedgeTop contact to check this source if it continues.",
+        CatalogCaptureException capture => "File preparation stopped. Support code: " + capture.SupportCode +
+            (capture.HttpStatus is { } status ? "; HTTP " + status.ToString(System.Globalization.CultureInfo.InvariantCulture) : "") +
+            ". Ask your LedgeTop contact to check this source. Local files were kept.",
+        TransferException => "The file service or its metadata could not be verified. Check your connection, then ask your LedgeTop contact to check this source if it continues.",
         IOException => "The owned local Explorer connection needs ownership review. Try Remove for normal cleanup; if that is also blocked, keep the saved files and ask your LedgeTop contact to review the connection.",
         _ => "The Explorer action could not finish safely. Check the connection and try again. Local files were kept and the saved connection remains available for cleanup."
     };

@@ -18,7 +18,8 @@ internal static class ExplorerCatalogSnapshotTests
         ("Explorer catalog refuses repeated cursors incomplete pages and excessive enumeration", PagingBounds),
         ("Explorer catalog compares fresh principal name size version origin and integrity pins", ManifestPins),
         ("Explorer catalog enforces entry depth path and native identity limits before integration", InventoryBounds),
-        ("Explorer catalog production composition pins cached credentials across capture and disposes on every outcome", ProductionPin)
+        ("Explorer catalog production composition pins cached credentials across capture and disposes on every outcome", ProductionPin),
+        ("Explorer catalog capture failures retain only bounded stage reason and HTTP status", FailureCoordinates)
     ];
 
     private static void Check(bool value) { if (!value) throw new Exception("Explorer catalog snapshot assertion failed."); }
@@ -30,6 +31,55 @@ internal static class ExplorerCatalogSnapshotTests
     }
     private static Task<ExplorerCatalogSnapshot> Capture(Backend backend, CancellationToken token = default) =>
         ExplorerCatalogSnapshotBuilder.CaptureAsync(backend, "pilot", Principal, token);
+
+    private static async Task FailureCoordinates()
+    {
+        const string privateDetail = "private-url-name-reference-token";
+        TransferException Failure() => new(privateDetail, TransferFailureReason.UnexpectedHttpStatus, 503);
+        foreach (var operation in new[] { CatalogCaptureOperation.InitialSession, CatalogCaptureOperation.Sections,
+            CatalogCaptureOperation.Roots, CatalogCaptureOperation.FolderListing, CatalogCaptureOperation.FileReference,
+            CatalogCaptureOperation.FileResolution, CatalogCaptureOperation.FinalSession }) {
+            var b = new Backend(); var file = b.Add("file", "photo.jpg");
+            b.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], [file]));
+            if (operation == CatalogCaptureOperation.InitialSession) b.Gateway.BeforeProbe = _ => throw Failure();
+            if (operation == CatalogCaptureOperation.Sections) b.CatalogImpl.SectionFailure = Failure();
+            if (operation == CatalogCaptureOperation.Roots) b.CatalogImpl.Roots = (_, _) => throw Failure();
+            if (operation == CatalogCaptureOperation.FolderListing) b.CatalogImpl.List = (_, _) => throw Failure();
+            if (operation == CatalogCaptureOperation.FileReference) b.CatalogImpl.ReferenceFailure = Failure();
+            if (operation == CatalogCaptureOperation.FileResolution) b.Source.ResolveFailure = Failure();
+            if (operation == CatalogCaptureOperation.FinalSession) b.Gateway.BeforeProbe = n => { if (n == 2) throw Failure(); };
+            try { await Capture(b); throw new Exception("Missing failure coordinate."); }
+            catch (CatalogCaptureException error) {
+                Check(error.Operation == operation && error.Boundary == (operation is CatalogCaptureOperation.InitialSession or CatalogCaptureOperation.FinalSession
+                    ? CatalogCaptureBoundary.BeforeSession : CatalogCaptureBoundary.MetadataRequest));
+                Check(error.Reason == TransferFailureReason.UnexpectedHttpStatus && error.HttpStatus == 503 && error.InnerException is null);
+                Check(!error.Message.Contains(privateDetail, StringComparison.Ordinal) && !error.SupportCode.Contains(privateDetail, StringComparison.Ordinal));
+            }
+            Check(b.Source.Downloads == 0 && b.Gateway.SignIns == 0);
+        }
+        foreach (var after in new[] { false, true }) {
+            var b = new Backend(); b.Source.BeforeSession = n => { if (n == (after ? 4 : 3)) throw Failure(); };
+            try { await Capture(b); throw new Exception("Missing session boundary."); }
+            catch (CatalogCaptureException error) {
+                Check(error.Operation == CatalogCaptureOperation.Roots && error.Boundary == (after ? CatalogCaptureBoundary.AfterSession : CatalogCaptureBoundary.BeforeSession));
+            }
+        }
+        var invalid = new Backend(); invalid.CatalogImpl.Roots = (_, _) => Task.FromResult(new NodePage([invalid.Node("root", "CON", NodeKind.Root)]));
+        try { await Capture(invalid); throw new Exception("Unsafe name admitted."); }
+        catch (CatalogCaptureException error) { Check(error.Operation == CatalogCaptureOperation.Roots && error.Boundary == CatalogCaptureBoundary.ValidateInventory && error.Reason == TransferFailureReason.InvalidMetadata && error.HttpStatus is null); }
+        foreach (var authority in new Exception[] { new AccessDeniedException(), new LoginRequiredException(), new ResourceUnavailableException(), new OperationCanceledException() }) {
+            var b = new Backend(); b.CatalogImpl.Roots = (_, _) => throw authority;
+            try { await Capture(b); throw new Exception("Authority/cancellation was swallowed."); }
+            catch (Exception error) when (ReferenceEquals(error, authority)) { }
+        }
+        var pinBackend = new Backend();
+        var settings = new LiveSettings(new Uri("https://source.example.invalid/deliveries"), null, Path.Combine(Path.GetTempPath(), "unused.exe"), new string('a', 64));
+        await using var live = new LiveBackend(settings, "not-used-no-filesystem", AccessMode.Client,
+            (_, _) => new(pinBackend.Gateway, pinBackend.CatalogImpl, pinBackend.Source, () => { }, _ => throw Failure()));
+        try { await ExplorerCatalogSnapshotBuilder.CaptureAsync(live, "pilot", Principal); throw new Exception("Missing pin failure coordinate."); }
+        catch (CatalogCaptureException error) { Check(error.Operation == CatalogCaptureOperation.SessionPin && error.Boundary == CatalogCaptureBoundary.MetadataRequest && error.HttpStatus == 503); }
+        Check(pinBackend.Gateway.Probes == 0 && pinBackend.CatalogImpl.RootCalls == 0 && pinBackend.Source.Resolutions == 0);
+    }
 
     private static async Task Complete()
     {
@@ -115,7 +165,7 @@ internal static class ExplorerCatalogSnapshotTests
         }) {
             var b = new Backend();
             b.CatalogImpl.Roots = (_, _) => { change(b); return Task.FromResult(new NodePage([b.DefaultRoot])); };
-            await Refuse<TransferException>(() => Capture(b)); Check(b.Source.Resolutions == 0);
+            await Refuse<CatalogCaptureException>(() => Capture(b)); Check(b.Source.Resolutions == 0);
         }
         var cancelled = new Backend(); using var cancellation = new CancellationTokenSource();
         cancelled.CatalogImpl.Roots = (_, _) => { cancellation.Cancel(); return Task.FromResult(new NodePage([cancelled.DefaultRoot])); };
@@ -127,36 +177,36 @@ internal static class ExplorerCatalogSnapshotTests
     {
         foreach (var name in new[] { "..", "CON.txt", "NUL", "folder ", "folder.", "bad:name", "a/b", "a\\b", "x\u202ey", "x\ud800", ".LTDS-Downloads-V1" }) {
             var b = new Backend(); b.CatalogImpl.Roots = (_, _) => Task.FromResult(new NodePage([b.Node("bad-root", name, NodeKind.Root)]));
-            await Refuse<TransferException>(() => Capture(b));
+            await Refuse<CatalogCaptureException>(() => Capture(b));
         }
         var roots = new Backend();
         roots.CatalogImpl.Roots = (_, _) => Task.FromResult(new NodePage([roots.Node("a", "Same", NodeKind.Root), roots.Node("b", "same", NodeKind.Root)]));
-        await Refuse<TransferException>(() => Capture(roots));
+        await Refuse<CatalogCaptureException>(() => Capture(roots));
         var files = new Backend(); var upper = files.Add("a", "A.txt"); var lower = files.Add("b", "a.txt");
         files.CatalogImpl.List = (_, more) => Task.FromResult(more is null ? new CatalogListing([], [upper], "next") : new CatalogListing([], [lower]));
-        await Refuse<TransferException>(() => Capture(files));
+        await Refuse<CatalogCaptureException>(() => Capture(files));
         var mixed = new Backend(); var same = mixed.Add("file", "Folder");
         mixed.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([mixed.Node("folder", "folder", NodeKind.Folder)], [same]));
-        await Refuse<TransferException>(() => Capture(mixed));
+        await Refuse<CatalogCaptureException>(() => Capture(mixed));
         var cycle = new Backend();
         cycle.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([cycle.Node(cycle.DefaultRoot.Key, "Again", NodeKind.Folder)], []));
-        await Refuse<TransferException>(() => Capture(cycle));
+        await Refuse<CatalogCaptureException>(() => Capture(cycle));
         var wrongSource = new Backend();
         wrongSource.CatalogImpl.Roots = (_, _) => Task.FromResult(new NodePage([wrongSource.DefaultRoot with { SourceAlias = "employee" }]));
-        await Refuse<TransferException>(() => Capture(wrongSource));
+        await Refuse<CatalogCaptureException>(() => Capture(wrongSource));
     }
 
     private static async Task PagingBounds()
     {
         var repeatedRoot = new Backend(); repeatedRoot.CatalogImpl.Roots = (_, _) => Task.FromResult(new NodePage([], "repeat"));
-        await Refuse<TransferException>(() => Capture(repeatedRoot)); Check(repeatedRoot.CatalogImpl.RootCalls == 2);
+        await Refuse<CatalogCaptureException>(() => Capture(repeatedRoot)); Check(repeatedRoot.CatalogImpl.RootCalls == 2);
         var repeatedFolder = new Backend(); repeatedFolder.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], [], "repeat"));
-        await Refuse<TransferException>(() => Capture(repeatedFolder)); Check(repeatedFolder.CatalogImpl.ListCalls == 2);
+        await Refuse<CatalogCaptureException>(() => Capture(repeatedFolder)); Check(repeatedFolder.CatalogImpl.ListCalls == 2);
         var endless = new Backend(); var page = 0;
         endless.CatalogImpl.Roots = (_, _) => Task.FromResult(new NodePage([], "page-" + ++page));
-        await Refuse<TransferException>(() => Capture(endless)); Check(endless.CatalogImpl.RootCalls == 2048);
+        await Refuse<CatalogCaptureException>(() => Capture(endless)); Check(endless.CatalogImpl.RootCalls == 2048);
         var malformed = new Backend(); malformed.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing(null!, []));
-        await Refuse<TransferException>(() => Capture(malformed));
+        await Refuse<CatalogCaptureException>(() => Capture(malformed));
     }
 
     private static async Task ManifestPins()
@@ -175,39 +225,39 @@ internal static class ExplorerCatalogSnapshotTests
         }) {
             var b = new Backend(); var file = b.Add("one", "one.txt");
             b.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], [file]));
-            b.Source.Mutate = mutate; await Refuse<TransferException>(() => Capture(b));
+            b.Source.Mutate = mutate; await Refuse<CatalogCaptureException>(() => Capture(b));
             Check(b.Source.Downloads == 0 && b.Gateway.SignIns == 0);
         }
         var unavailable = new Backend(); var missingHash = unavailable.Add("unavailable", "no-hash.txt") with { Verifiable = false };
         unavailable.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], [missingHash]));
-        await Refuse<TransferException>(() => Capture(unavailable)); Check(unavailable.Source.Resolutions == 0);
+        await Refuse<CatalogCaptureException>(() => Capture(unavailable)); Check(unavailable.Source.Resolutions == 0);
     }
 
     private static async Task InventoryBounds()
     {
         var count = new Backend(); var large = Enumerable.Range(0, 1000).Select(i => count.Add("file" + i, "file" + i + ".txt")).ToArray();
         count.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], large));
-        await Refuse<TransferException>(() => Capture(count)); Check(count.Source.Resolutions == 999); // The root directory consumes one slot.
+        await Refuse<CatalogCaptureException>(() => Capture(count)); Check(count.Source.Resolutions == 999); // The root directory consumes one slot.
         var depth = new Backend(); var index = 0;
         depth.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([depth.Node("depth-" + ++index, "x", NodeKind.Folder)], []));
-        await Refuse<TransferException>(() => Capture(depth)); Check(index == 32);
+        await Refuse<CatalogCaptureException>(() => Capture(depth)); Check(index == 32);
         var path = new Backend(); path.CatalogImpl.Roots = (_, _) => Task.FromResult(new NodePage([path.Node("long-root", new string('r', 100), NodeKind.Root)]));
         path.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([path.Node("long-child", new string('c', 81), NodeKind.Folder)], []));
-        await Refuse<TransferException>(() => Capture(path));
+        await Refuse<CatalogCaptureException>(() => Capture(path));
         var identity = new Backend(); var file = identity.Add("long-reference", "file.txt");
         var reference = "odqr1_" + new string('x', 4000);
         identity.CatalogImpl.References[file.Key] = reference;
         identity.Source.Metadata[reference] = identity.Source.Metadata.Values.Single();
         identity.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], [file]));
-        await Refuse<TransferException>(() => Capture(identity)); Check(identity.Source.Resolutions == 1 && identity.Source.Downloads == 0);
+        await Refuse<CatalogCaptureException>(() => Capture(identity)); Check(identity.Source.Resolutions == 1 && identity.Source.Downloads == 0);
 
         var listedLarge = new Backend(); var listed = listedLarge.Add("listed-large", "large.txt") with { Size = (64L << 30) + 1 };
         listedLarge.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], [listed]));
-        await Refuse<TransferException>(() => Capture(listedLarge)); Check(listedLarge.Source.Resolutions == 0);
+        await Refuse<CatalogCaptureException>(() => Capture(listedLarge)); Check(listedLarge.Source.Resolutions == 0);
         var resolvedLarge = new Backend(); var unknown = resolvedLarge.Add("resolved-large", "large.txt", sizeUnknown: true);
         resolvedLarge.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], [unknown]));
         resolvedLarge.Source.Mutate = r => r with { Spec = r.Spec with { Length = (64L << 30) + 1 } };
-        await Refuse<TransferException>(() => Capture(resolvedLarge)); Check(resolvedLarge.Source.Resolutions == 1);
+        await Refuse<CatalogCaptureException>(() => Capture(resolvedLarge)); Check(resolvedLarge.Source.Resolutions == 1);
         resolvedLarge.Source.Mutate = r => r with { Spec = r.Spec with { Length = 64L << 30 } };
         Check((await Capture(resolvedLarge)).Files.Single().Value.Length == (64L << 30));
     }
@@ -260,7 +310,7 @@ internal static class ExplorerCatalogSnapshotTests
         var changedCapture = ExplorerCatalogSnapshotBuilder.CaptureAsync(changing, "pilot", Principal);
         await pinEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         changed.Source.Alias = "changed-during-pin"; pinRelease.SetResult();
-        await Refuse<TransferException>(() => changedCapture);
+        await Refuse<CatalogCaptureException>(() => changedCapture);
         Check(pinDisposed == 1 && changed.Gateway.Probes == 0 && changed.CatalogImpl.RootCalls == 0);
     }
 
@@ -321,11 +371,16 @@ internal static class ExplorerCatalogSnapshotTests
         public DateTimeOffset Expiry = DateTimeOffset.UtcNow.AddHours(1);
         public readonly Dictionary<string, ResolvedQueuedDownload> Metadata = new(StringComparer.Ordinal);
         public Func<ResolvedQueuedDownload, ResolvedQueuedDownload>? Mutate;
-        public int Downloads, Resolutions;
-        public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken = default) => Task.FromResult(new QueuedDownloadSession(Person, Expiry));
+        public int Downloads, Resolutions, Sessions;
+        public Action<int>? BeforeSession;
+        public Exception? ResolveFailure;
+        public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken = default) {
+            BeforeSession?.Invoke(++Sessions); return Task.FromResult(new QueuedDownloadSession(Person, Expiry));
+        }
         public Task<ResolvedQueuedDownload> ResolveAsync(string reference, CancellationToken cancellationToken = default)
         {
             Resolutions++;
+            if (ResolveFailure is { } failure) throw failure;
             if (!Metadata.TryGetValue(reference, out var resolved)) throw new ResourceUnavailableException();
             return Task.FromResult(Mutate?.Invoke(resolved) ?? resolved);
         }
@@ -340,19 +395,25 @@ internal static class ExplorerCatalogSnapshotTests
         public Func<CatalogNode, object?, Task<CatalogListing>> List;
         public readonly Dictionary<string, string> References = new(StringComparer.Ordinal);
         public int RootCalls, ListCalls;
+        public Exception? SectionFailure, ReferenceFailure;
         public Catalog(Backend backend)
         {
             this.backend = backend;
             Roots = (_, _) => Task.FromResult(new NodePage([backend.DefaultRoot]));
             List = (_, _) => Task.FromResult(new CatalogListing([], []));
         }
-        public Task<IReadOnlyList<CatalogNode>> GetSectionsAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<CatalogNode>>([backend.Node("section", "Selected source", NodeKind.Section)]);
+        public Task<IReadOnlyList<CatalogNode>> GetSectionsAsync(CancellationToken cancellationToken = default) {
+            if (SectionFailure is { } failure) throw failure;
+            return Task.FromResult<IReadOnlyList<CatalogNode>>([backend.Node("section", "Selected source", NodeKind.Section)]);
+        }
         public Task<NodePage> GetChildrenAsync(CatalogNode node, object? more = null, CancellationToken cancellationToken = default)
         { RootCalls++; return Roots(node, more); }
         public Task<CatalogListing> ListAsync(CatalogNode node, object? more = null, CancellationToken cancellationToken = default)
         { ListCalls++; return List(node, more); }
-        public Task<string> GetReferenceAsync(CatalogFile file, CancellationToken cancellationToken = default) => Task.FromResult(References[file.Key]);
+        public Task<string> GetReferenceAsync(CatalogFile file, CancellationToken cancellationToken = default) {
+            if (ReferenceFailure is { } failure) throw failure;
+            return Task.FromResult(References[file.Key]);
+        }
     }
 
     private static string Hash(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
