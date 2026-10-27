@@ -12,6 +12,7 @@ import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-c
 import { ProductionCloudflareProvider, readCandidateVersionWithVisibilityRetry } from './production-auto-provider.mjs';
 import { readProductionAutoTriggerRun, runBuild } from './production-auto-runtime.mjs';
 import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+import { readProductionMigrationReadiness, validateProductionMigrationReadiness } from './production-auto-migration-readiness.mjs';
 import { ProductionAutoJournal, loadPinnedProductionAutoRecipient } from './production-auto-journal.mjs';
 import { isProviderUtcTimestamp } from './production-auto-time.mjs';
 
@@ -96,7 +97,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   fetchImpl = fetch, profile = PROFILE, sourceReader = deploymentSourceCommit, ciFactory = options => new ProductionMainCI(options),
   providerFactory = options => new ProductionCloudflareProvider(options), journalFactory = options => new ProductionAutoJournal(options),
   recipientLoader = loadPinnedProductionAutoRecipient, readinessReader = readNativeStaffCutoverReadiness,
-  buildRunner = runBuild, buildArtifactsReader } = {}) {
+  buildRunner = runBuild, buildArtifactsReader, migrationReader = readProductionMigrationReadiness } = {}) {
   need(COMMIT.test(sourceCommit ?? '') && triggerRun?.sourceCommit === sourceCommit && typeof fetchImpl === 'function'
     && profile === PROFILE && env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
     && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN ?? '')
@@ -104,6 +105,14 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? '') && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? ''),
   'sync_runtime_identity_or_credentials_invalid');
   const ci = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl }), token = env.CLOUDFLARE_API_TOKEN;
+  let migrationPins;
+  const checkMigrations = async () => {
+    const observed = validateProductionMigrationReadiness(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl }), { sourceCommit });
+    const { observedAt: _observedAt, ...pins } = observed;
+    need(migrationPins === undefined || canonical(pins) === canonical(migrationPins), 'sync_migration_readiness_drift');
+    migrationPins = pins;
+    return observed;
+  };
   let provider, journal, baseline, expected, build, candidateVersionId, readiness, writesAttempted = false;
   let phase = 'sync-prepare';
   const current = async () => {
@@ -122,6 +131,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
       deploymentId: state.deploymentId, controlsUnchanged: state.controlsSHA256 === expected?.controlsSHA256 };
   };
   const checkSourceAndCI = async () => {
+    await checkMigrations();
     need(sourceReader(ROOT, env) === sourceCommit, 'sync_source_checkout_changed');
     const result = await ci.verify(sourceCommit);
     need(result.sourceCommit === sourceCommit && result.passed === true && result.runId === triggerRun.runId
@@ -150,7 +160,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   const ensureProvider = () => {
     if (provider) return;
     provider = providerFactory({ accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId, token, fetchImpl,
-      recordIntent: async value => { await journal.recordIntent(value); writesAttempted = true; },
+      recordIntent: async value => { await checkMigrations(); await journal.recordIntent(value); writesAttempted = true; },
       persistResponse: value => journal.persistResponse(value), profile });
   };
   const adapter = {
@@ -173,6 +183,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
       need(build.moduleBytes.length > 0 && build.moduleBytes.length <= 32 * 1024 * 1024, 'sync_build_module_invalid');
       const map = sourceMapBytes(build.sourceMapBytes), moduleSHA256 = hash(build.moduleBytes);
       await checkStaff();
+      await checkMigrations();
       const responseDirectory = path.join(ROOT, '.backups', 'production-auto-release', WORKER, sourceCommit);
       journal = journalFactory({ token: env.GITHUB_TOKEN, workerName: WORKER, releaseKind: 'backend-sync', sourceCommit,
         ciRunId: triggerRun.runId, ciRunAttempt: triggerRun.runAttempt, workflowRunId: Number(env.GITHUB_RUN_ID),

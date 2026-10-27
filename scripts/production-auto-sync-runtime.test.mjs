@@ -27,6 +27,19 @@ test('Sync readiness is exact-source, bounded, and rejects stale or future obser
   ]) assert.throws(() => exactSyncReady(invalid, commit, now));
 });
 
+test('Sync migration refusal stops before CI, staff reads, provider construction and journal writes', async () => {
+  let otherCalls = 0;
+  const unexpected = () => { otherCalls++; throw Error('unexpected side effect'); };
+  const env = { CLOUDFLARE_ACCOUNT_ID: nativeTarget.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
+    GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', NATIVE_STAFF_CUTOVER_REVIEW_JSON: '{"synthetic":true}' };
+  const runtime = createProductionAutoSyncAdapter({ sourceCommit: commit, triggerRun: { sourceCommit: commit, runId: 678, runAttempt: 3 }, env,
+    migrationReader: async () => { throw Error('missing migration'); }, sourceReader: unexpected,
+    ciFactory: () => ({ verify: unexpected }), readinessReader: unexpected, providerFactory: unexpected,
+    journalFactory: unexpected, fetchImpl: unexpected });
+  await assert.rejects(runtime.adapter.release(), /Ops Sync backend release held; inspect the durable journal/);
+  assert.equal(otherCalls, 0);
+});
+
 test('Sync candidate proof binds exact API-created code, source map, resources and opaque assets', () => {
   const moduleBytes = Buffer.from('export default {fetch(){return new Response("ok")}};');
   const mapObject = { version: 3, file: 'index.js', sources: ['src/index.ts'], sourcesContent: ['export default {};'], mappings: '', names: [] };
@@ -86,7 +99,12 @@ function awaitlessRead(relative) {
   return JSON.parse(readFileSync(new URL(`../${relative}`, import.meta.url), 'utf8'));
 }
 
-test('Sync runtime drives readiness, capture, two durable intents, candidate proof and activation in order', async () => {
+for (const scenario of ['success', 'first-write-drift', 'activation-drift']) test(
+  scenario === 'activation-drift'
+    ? 'Sync migration drift at activation intent holds without activation dispatch or retry'
+    : scenario === 'first-write-drift'
+      ? 'Sync migration drift before first mutation prevents upload intent and provider write'
+      : 'Sync runtime drives readiness, capture, two durable intents, candidate proof and activation in order', async () => {
   const fixture = fullSnapshotFixture();
   const candidateId = '44444444-4444-4444-8444-444444444444';
   const deploymentId = '55555555-5555-4555-8555-555555555555';
@@ -96,7 +114,7 @@ test('Sync runtime drives readiness, capture, two durable intents, candidate pro
   const triggerRun = { sourceCommit: commit, runId: 678, runAttempt: 3 };
   const env = { CLOUDFLARE_ACCOUNT_ID: nativeTarget.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
     GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', NATIVE_STAFF_CUTOVER_REVIEW_JSON: '{"synthetic":true}' };
-  const events = [], candidateResources = { ...structuredClone(fixture.snapshots['ops-sync'].version.resources),
+  const events = [], journalReceipts = [], candidateResources = { ...structuredClone(fixture.snapshots['ops-sync'].version.resources),
     script: { ...structuredClone(fixture.snapshots['ops-sync'].version.resources.script), last_deployed_from: 'api' } };
   const latestCandidate = { id: candidateId, resources: candidateResources };
   const modernCandidate = { id: candidateId, assets: null, modules: [
@@ -104,11 +122,11 @@ test('Sync runtime drives readiness, capture, two durable intents, candidate pro
     { name: 'index.js.map', content_base64: sourceMapBytes.toString('base64') },
   ] };
   const journal = {
-    releaseId: '6'.repeat(64), receipt: async value => { events.push(`receipt:${value.status}`); },
+    releaseId: '6'.repeat(64), receipt: async value => { journalReceipts.push(structuredClone(value)); events.push(`receipt:${value.status}`); },
     recordIntent: async value => { events.push(`intent:${value.phase}`); },
     persistResponse: async () => { events.push('response'); },
   };
-  let readinessCalls = 0, candidateExists = false, activated = false, candidateVisibilityAttempts = 0;
+  let readinessCalls = 0, migrationCalls = 0, candidateExists = false, activated = false, migrationDrift = false, activationMethodCalls = 0, candidateVisibilityAttempts = 0;
   const providerFactory = options => ({
     async getCandidateVersion(workerName, versionId) {
       assert.equal(workerName, 'ledgetop-ops-sync'); assert.equal(versionId, candidateId);
@@ -157,6 +175,8 @@ test('Sync runtime drives readiness, capture, two durable intents, candidate pro
     async activateBackendCandidate(input) {
       assert.deepEqual(input, { workerName: 'ledgetop-ops-sync', parentVersionId: parent,
         candidateVersionId: candidateId, message: `Ops Sync backend release ${commit.slice(0, 12)}` });
+      activationMethodCalls++;
+      if (scenario === 'activation-drift') migrationDrift = true;
       await options.recordIntent({ requestId: '88888888-8888-4888-8888-888888888888', method: 'POST',
         path: '/workers/scripts/ledgetop-ops-sync/deployments', phase: 'sync-activate-candidate', workerName: 'ledgetop-ops-sync',
         parentVersionId: parent, candidateVersionId: candidateId, versions: [{ version_id: candidateId, percentage: 100 }],
@@ -177,19 +197,54 @@ test('Sync runtime drives readiness, capture, two durable intents, candidate pro
       sourceReader: () => commit, ciFactory: () => ({ verify: async sha => ({ sourceCommit: sha, passed: true,
         runId: triggerRun.runId, runAttempt: triggerRun.runAttempt }) }), providerFactory,
       journalFactory: () => journal, recipientLoader: () => ({ synthetic: 'recipient' }),
+      migrationReader: async input => { assert.equal(input.token, env.CLOUDFLARE_API_TOKEN); assert.equal(input.sourceCommit, commit);
+        migrationCalls++; return { schemaVersion: 1, sourceCommit: commit,
+        accountId: nativeTarget.accountId, observedAt: new Date().toISOString(), databases: [
+          { databaseId: nativeTarget.databaseId, sourceInventorySha256: '1'.repeat(64), ledgerNamesSha256: migrationDrift ? '5'.repeat(64) : '2'.repeat(64), migrationCount: 231 },
+          { databaseId: '7f40a7b7-c3ec-470e-a626-e798867f71f8', sourceInventorySha256: '3'.repeat(64), ledgerNamesSha256: '4'.repeat(64), migrationCount: 160 },
+        ] }; },
       readinessReader: async ({ review, sourceCommit }) => { readinessCalls++; assert.deepEqual(review, { synthetic: true });
         return { schemaVersion: 2, sourceCommit, accountId: nativeTarget.accountId, databaseId: nativeTarget.databaseId,
           reviewSha256: '1'.repeat(64), cohortSha256: '2'.repeat(64), controlPlaneSha256: '3'.repeat(64),
           observedAt: new Date().toISOString(), staffCount: 3, generation: 8 }; },
-      buildRunner: () => {}, buildArtifactsReader: () => ({ moduleBytes, sourceMapBytes }) });
-    const result = await runtime.adapter.release();
-    assert.equal(result.verifiedActive, true); assert.equal(result.candidateVersionId, candidateId);
-    assert.equal(result.deploymentId, deploymentId); assert.equal(candidateExists, true); assert.equal(activated, true);
-    assert.equal(candidateVisibilityAttempts, 2, 'Sync candidate readback uses bounded GET-only visibility retry');
-    assert.ok(readinessCalls >= 5, 'native readiness is rechecked at each source/candidate/activation boundary');
-    assert.deepEqual(events.filter(value => value.startsWith('intent:')),
-      ['intent:sync-version-upload','intent:sync-activate-candidate']);
-    assert.equal(events.at(-1), 'receipt:verified');
-    assert.deepEqual(events.filter(value => ['upload','activate'].includes(value)), ['upload','activate']);
+      buildRunner: () => {}, buildArtifactsReader: () => {
+        if (scenario === 'first-write-drift') migrationDrift = true;
+        return { moduleBytes, sourceMapBytes };
+      } });
+    if (scenario !== 'success') {
+      await assert.rejects(runtime.adapter.release(), /Ops Sync backend release held; inspect the durable journal/);
+      if (scenario === 'first-write-drift') {
+        assert.equal(candidateExists, false, 'no candidate version is uploaded');
+        assert.equal(activationMethodCalls, 0);
+        assert.equal(events.some(value => value.startsWith('intent:')), false);
+        assert.equal(events.some(value => ['upload','activate'].includes(value)), false);
+        assert.equal(journalReceipts.length, 0, 'the journal is not claimed before first-write readiness passes');
+        assert.ok(migrationCalls >= 2, 'ledger is rechecked after build and before first mutation');
+      } else {
+        assert.equal(candidateExists, true, 'the already-uploaded inactive candidate remains available for reconciliation');
+        assert.equal(activationMethodCalls, 1, 'execution reaches the final activation intent boundary');
+        assert.equal(activated, false, 'the provider callback does not proceed after ledger drift');
+        assert.equal(events.includes('intent:sync-version-upload'), true);
+        assert.equal(events.includes('intent:sync-activate-candidate'), false, 'the activation intent is not journaled after drift');
+        assert.equal(events.includes('upload'), true);
+        assert.equal(events.includes('activate'), false, 'no activation dispatch occurs');
+        assert.equal(events.at(-1), 'receipt:held');
+        assert.equal(journalReceipts.at(-1).writesAttempted, true);
+        assert.equal(journalReceipts.at(-1).phase, 'sync-activate');
+        assert.ok(migrationCalls >= 5, 'ledger is reread after candidate upload and before activation');
+      }
+    } else {
+      const result = await runtime.adapter.release();
+      assert.equal(result.verifiedActive, true); assert.equal(result.candidateVersionId, candidateId);
+      assert.equal(result.deploymentId, deploymentId); assert.equal(candidateExists, true); assert.equal(activated, true);
+      assert.equal(candidateVisibilityAttempts, 2, 'Sync candidate readback uses bounded GET-only visibility retry');
+      assert.ok(readinessCalls >= 5, 'native readiness is rechecked at each source/candidate/activation boundary');
+      assert.ok(migrationCalls >= 7, 'both migration ledgers are checked before preparation, provider intents and final verification');
+      assert.deepEqual(events.filter(value => value.startsWith('intent:')),
+        ['intent:sync-version-upload','intent:sync-activate-candidate']);
+      assert.equal(events.at(-1), 'receipt:verified');
+      assert.deepEqual(events.filter(value => ['upload','activate'].includes(value)), ['upload','activate']);
+      assert.equal(activationMethodCalls, 1);
+    }
   } finally { fixture.restore(); }
 });
