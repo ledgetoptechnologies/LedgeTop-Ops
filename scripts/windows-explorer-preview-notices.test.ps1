@@ -79,8 +79,15 @@ try {
   $passed++
   $runtimeHelper = Join-Path $PSScriptRoot 'windows-package-runtime-notices.ps1'
   Refuses { & $runtimeHelper -PayloadDirectory $good -NugetPackagesDirectory $NugetPackagesDirectory } 'Legacy runtime check silently accepted an extra SDK runtimepack.'
-  $runtimeReceipt = & $runtimeHelper -PayloadDirectory $good -NugetPackagesDirectory $NugetPackagesDirectory -IncludeExplorerSdk | ConvertFrom-Json
+  # Actual release construction runs with strict property access. Both package-backed
+  # and source-backed notices must serialize their nonapplicable provenance fields as null.
+  $runtimeReceipt = & {
+    Set-StrictMode -Version Latest
+    & $runtimeHelper -PayloadDirectory $good -NugetPackagesDirectory $NugetPackagesDirectory -IncludeExplorerSdk
+  } | ConvertFrom-Json
   Check ($runtimeReceipt.notices.Count -eq 5 -and -not $runtimeReceipt.completeThirdPartyAttribution) 'Expected separately scoped five-runtime-notice receipt.'
+  Check (@($runtimeReceipt.notices | Where-Object { $null -ne $_.packageId -and $null -eq $_.sourceUrl }).Count -eq 3 -and
+    @($runtimeReceipt.notices | Where-Object { $null -ne $_.sourceUrl -and $null -eq $_.packageId -and $null -eq $_.packageSha256 -and $null -eq $_.packageEntry }).Count -eq 2) 'Notice provenance variants lost their explicit null fields.'
   Check (@(Get-ChildItem -LiteralPath (Join-Path $good 'Notices') -File).Count -eq 8) 'Composed payload must retain all eight verified vendor notice files.'
   $passed++
 

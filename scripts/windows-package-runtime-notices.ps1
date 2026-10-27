@@ -56,7 +56,7 @@ foreach ($inputPackage in $inputs) {
       $stream = $entries[0].Open(); $memory = [IO.MemoryStream]::new()
       try { $stream.CopyTo($memory); $bytes = $memory.ToArray() } finally { $stream.Dispose(); $memory.Dispose() }
       if ((HashBytes $bytes) -cne $file.sha256) { throw 'Vendor notice hash differs.' }
-      $pending += @{name=$file.name;bytes=$bytes;sha256=$file.sha256;packageId=$inputPackage.id;packageSha256=$inputPackage.sha256;entry=$file.entry}
+      $pending += @{name=$file.name;bytes=$bytes;sha256=$file.sha256;packageId=$inputPackage.id;packageSha256=$inputPackage.sha256;entry=$file.entry;sourceUrl=$null}
     }
   } finally { $zip.Dispose() }
 }
@@ -71,7 +71,7 @@ foreach ($file in @(
   if (([IO.File]::GetAttributes($path) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Reparse source notice.' }
   $bytes = [IO.File]::ReadAllBytes($path)
   if ((HashBytes $bytes) -cne $file.sha256) { throw 'Desktop component source notice hash differs.' }
-  $pending += @{name=$file.name;bytes=$bytes;sha256=$file.sha256;sourceUrl="https://raw.githubusercontent.com/dotnet/dotnet/4099f83977f4d29604a9aeb971fb0a7bc1d5f699/src/$($file.component)/THIRD-PARTY-NOTICES.TXT"}
+  $pending += @{name=$file.name;bytes=$bytes;sha256=$file.sha256;packageId=$null;packageSha256=$null;entry=$null;sourceUrl="https://raw.githubusercontent.com/dotnet/dotnet/4099f83977f4d29604a9aeb971fb0a7bc1d5f699/src/$($file.component)/THIRD-PARTY-NOTICES.TXT"}
 }
 $noticeDirectory = Join-Path $payload 'Notices'
 if (-not [IO.Directory]::Exists($noticeDirectory)) { $null = [IO.Directory]::CreateDirectory($noticeDirectory) }
