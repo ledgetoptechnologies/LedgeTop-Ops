@@ -66,7 +66,11 @@ export async function dispatchOperationsPortalNativeOwnerRequest(request: Reques
 
   const origin = configuredDeploymentOrigin({ environment: env.ENVIRONMENT,
     origin: env.PUBLIC_BASE_URL, expectedHost: env.EXPECTED_HOST });
-  const requestOrigin = origin && admittedOperationsRequestOrigin(request.url, env, origin);
+  // Keep page presentation on its existing canonical-origin policy. Browser
+  // APIs separately admit reviewed legacy origins and bind their CSRF there.
+  const requestOrigin = origin && (pathname.startsWith("/api/")
+    ? admittedOperationsRequestOrigin(request.url, env, origin)
+    : new URL(request.url).origin === origin ? origin : null);
   if (!origin || !requestOrigin) return notFound();
   const configuration = { enabled: true, issuer: env.TEAM_DOMAIN ?? "", staffAudience: env.OPERATIONS_AUD,
     origin, csrfSecret: env.OPERATIONS_SESSION_SECRET };
