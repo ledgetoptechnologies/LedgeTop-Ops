@@ -6,13 +6,18 @@ import { applyConnectorSchema, registerVisibleTestSource } from "./helpers/proje
 import { applyBusinessPartySchema, applyBusinessPartyStaffSchema } from "./helpers/business-parties";
 import rootAccessMigration from "../../client/migrations/0197_portal_root_access_policy.sql?raw";
 
-const acl = vi.hoisted(() => ({
-  sqlScope: vi.fn(async () => ({ global: true, deniedGlobal: false })),
-  hasPermission: vi.fn(async (_env: unknown, _principal: unknown, permission: string) =>
-    ["delivery.share.audit", "viewer.view"].includes(permission)),
-  isAdministrator: vi.fn(async () => true),
-  hasLocalGlobalAllow: vi.fn(async () => false),
-}));
+const acl = vi.hoisted(() => {
+  const value = {
+    sqlScope: vi.fn(async (_env: unknown, _principal: unknown, _permission: string) => ({ global: true, deniedGlobal: false })),
+    sqlScopes: vi.fn(async (env: unknown, principal: unknown, permissions: readonly string[]) => Object.fromEntries(
+      await Promise.all(permissions.map(async permission => [permission, await value.sqlScope(env, principal, permission)] as const)))),
+    hasPermission: vi.fn(async (_env: unknown, _principal: unknown, permission: string) =>
+      ["delivery.share.audit", "viewer.view"].includes(permission)),
+    isAdministrator: vi.fn(async () => true),
+    hasLocalGlobalAllow: vi.fn(async () => false),
+  };
+  return value;
+});
 const identityReads = vi.hoisted(() => ({
   listPortalIdentityPage: vi.fn(async (_env: unknown, _actor: unknown, scope: { kind: "client"; context: import("../src/worker/client-hub-collections").ClientHubCollectionContext }, _options?: Record<string, unknown>) => {
     const workspaceId = scope.context.root.workspace_id;
