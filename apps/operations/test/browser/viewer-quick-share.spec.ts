@@ -87,6 +87,7 @@ test("staff share one published model with a client, with no business project or
   await dialog.getByLabel("Last day (Central time)").fill("2026-12-31");
   await dialog.getByRole("button", { name: "Review share" }).click();
   await expect(dialog.getByRole("region", { name: "Review share" })).toContainText("Share Seawall orthomosaic with Harbor Authority. Access ends Dec 31, 2026.");
+  await expect(dialog.getByRole("region", { name: "Review share" })).toContainText("They can view the model, take measurements, see camera photos, and download files.");
   await dialog.getByRole("button", { name: "Share", exact: true }).click();
   await expect(dialog.getByRole("status").filter({ hasText: "Shared with Harbor Authority" })).toBeVisible();
   const sent = posts(calls);
@@ -134,9 +135,40 @@ test("an unconfirmed share is retried with the identical body and key, and the s
   await expect(dialog.getByRole("alert")).toContainText("couldn't confirm");
   await expect(dialog.getByRole("button", { name: "Change" })).toBeDisabled();
   await expect(dialog.getByRole("checkbox", { name: "Download files" })).toBeDisabled();
+  // The error sits above the retry button.
+  const errorBox = await dialog.getByRole("alert").boundingBox(), retryBox = await dialog.getByRole("button", { name: "Try again" }).boundingBox();
+  expect(errorBox!.y + errorBox!.height).toBeLessThanOrEqual(retryBox!.y);
+  // An unconfirmed share can only be retried from here: its receipt belongs to this sign-in and expires.
   await expect(dialog.getByRole("button", { name: "Close" })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Change" })).toBeDisabled();
+  await expect(dialog.getByRole("checkbox", { name: "Download files" })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Share", exact: true })).toHaveCount(0);
+  expect(posts(calls)).toHaveLength(1);
   await dialog.getByRole("button", { name: "Try again" }).click();
   await expect(dialog.getByRole("status").filter({ hasText: "Shared with Harbor Authority" })).toBeVisible();
+  await expect(dialog.getByRole("status").filter({ hasText: "Shared with Harbor Authority" })).toHaveClass(/\bok\b/);
+  const sent = posts(calls);
+  expect(sent).toHaveLength(2);
+  expect(sent[1]!.key).toBe(sent[0]!.key);
+  expect(sent[1]!.body).toEqual(sent[0]!.body);
+});
+
+test("a duplicate reported after an unconfirmed share is not treated as a failure of that share", async ({ page }) => {
+  let attempts = 0;
+  const calls = await mockOps(page, MANAGER, (url, method, route) => {
+    if (url.pathname !== "/api/viewer/direct-client-grants" || method !== "POST") return undefined;
+    attempts += 1;
+    return route.fulfill(attempts === 1 ? { status: 503, json: { error: "Viewer unavailable" } }
+      : { status: 409, json: { error: "An active share already exists", code: "duplicate_active_grant" } });
+  });
+  const dialog = await openShare(page, "Seawall orthomosaic");
+  await dialog.getByRole("option", { name: /Harbor Authority/ }).click();
+  await dialog.getByRole("button", { name: "Review share" }).click();
+  await dialog.getByRole("button", { name: "Share", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("couldn't confirm");
+  await dialog.getByRole("button", { name: "Try again" }).click();
+  await expect(dialog.getByRole("alert")).toHaveText('Harbor Authority already has this share, possibly from your earlier attempt. Check "Already shared with" above.');
+  await expect(dialog.getByRole("alert")).not.toContainText("An active share already exists");
   const sent = posts(calls);
   expect(sent).toHaveLength(2);
   expect(sent[1]!.key).toBe(sent[0]!.key);
@@ -174,7 +206,7 @@ test("a client whose connection changed is reloaded, never substituted", async (
   await dialog.getByRole("option", { name: /Harbor Authority/ }).click();
   await dialog.getByRole("button", { name: "Review share" }).click();
   await dialog.getByRole("button", { name: "Share", exact: true }).click();
-  await expect(dialog.getByRole("alert")).toContainText("Reload the client list and choose them again");
+  await expect(dialog.getByRole("alert")).toHaveText("Something changed with this client. Choose them again from the list.");
   await expect(dialog.getByRole("option", { name: /Coastal Engineering/ })).toBeVisible();
   await expect(dialog.getByRole("option", { name: /Harbor Authority/ })).toHaveCount(0);
   expect(posts(calls)).toHaveLength(1);
@@ -295,6 +327,9 @@ test("an unconfirmed public link is retried with the identical body and key, nev
   await expect(dialog.getByRole("checkbox", { name: "Allow model download" })).toBeDisabled();
   await expect(dialog.getByRole("tab", { name: "Client Workspace" })).toBeDisabled();
   await expect(dialog.getByRole("button", { name: "Close" })).toBeDisabled();
+  await expect(dialog.getByRole("alert")).toContainText("couldn't confirm the link was created");
+  await expect(dialog.getByLabel("Label (optional)")).toHaveValue("Board review");
+  await expect(dialog.getByLabel("Label (optional)")).toBeDisabled();
   await dialog.getByRole("button", { name: "Try again" }).click();
   await expect(dialog.getByLabel("New link")).toHaveValue(`${VIEWER}/s/abc`);
   await expect(dialog.getByRole("button", { name: "Close" })).toBeEnabled();
@@ -305,4 +340,128 @@ test("an unconfirmed public link is retried with the identical body and key, nev
   expect(sent[1]!.body).toEqual(sent[0]!.body);
   expect(sent[0]!.body).toEqual({ label: "Board review", expiresAt: null, displayUnits: "metric", password: "correct horse",
     permissions: { view: true, measure: true, cameras: true, download: false } });
+});
+
+test("Client Workspace is the first and selected method", async ({ page }) => {
+  await mockOps(page, MANAGER);
+  const dialog = await openShare(page, "Seawall orthomosaic");
+  const tabs = dialog.getByRole("tab");
+  await expect(tabs).toHaveText(["Client Workspace", "Public link"]);
+  await expect(tabs.first()).toHaveAttribute("aria-selected", "true");
+});
+
+test("a client who already has access is marked, and the review says what sharing again does", async ({ page }) => {
+  const calls = await mockOps(page, MANAGER, (url, method, route) => {
+    if (url.pathname !== "/api/viewer/direct-client-grants" || method !== "GET") return undefined;
+    return route.fulfill({ json: { clients, clientsNextCursor: null, grants: [grant(),
+      grant({ grantId: "grant-project", workspaceId: "ws-coastal", taskId: null, scopeType: "project", includeFuturePublished: true, clientDisplayName: "Coastal Engineering" })] } });
+  });
+  const dialog = await openShare(page, "Seawall orthomosaic");
+  const harbor = dialog.getByRole("option", { name: /Harbor Authority/ });
+  await expect(harbor).toContainText("Already has access");
+  await expect(dialog.getByRole("option", { name: /Coastal Engineering/ })).toContainText("Already has access");
+  // One business: no business line under each client.
+  await expect(harbor).not.toContainText("Ledge Top");
+  await harbor.click();
+  await dialog.getByRole("button", { name: "Review share" }).click();
+  const review = dialog.getByRole("region", { name: "Review share" });
+  await expect(review).toContainText("Harbor Authority already has this share, so it can't be shared again.");
+  await expect(dialog.getByRole("button", { name: "Share", exact: true })).toBeDisabled();
+  await dialog.getByRole("button", { name: "Back" }).click();
+  await dialog.getByRole("button", { name: "Change" }).click();
+  await dialog.getByRole("option", { name: /Coastal Engineering/ }).click();
+  await dialog.getByRole("button", { name: "Review share" }).click();
+  await expect(review).toContainText("already has this model through a whole-project share. This adds a separate share for this model");
+  await expect(dialog.getByRole("button", { name: "Share", exact: true })).toBeEnabled();
+  expect(posts(calls)).toHaveLength(0);
+});
+
+test("clients from more than one business show which business they come through", async ({ page }) => {
+  await mockOps(page, MANAGER, (url, method, route) =>
+    url.pathname === "/api/viewer/direct-client-grants" && method === "GET" ? route.fulfill({ json: { clients: [clients[0],
+      { sourceId: "project-alpha:source-2", workspaceId: "ws-bay", displayName: "Bay Marine", businessName: "LTT" }], clientsNextCursor: null, grants: [] } }) : undefined);
+  const dialog = await openShare(page, "Seawall orthomosaic");
+  await expect(dialog.getByRole("option", { name: /Coastal Engineering/ })).toContainText("via Ledge Top");
+  await expect(dialog.getByRole("option", { name: /Bay Marine/ })).toContainText("via Ledge Top LTT");
+});
+
+test("a project with no published models doesn't offer a whole-project share", async ({ page }) => {
+  await mockOps(page, MANAGER, (url, _method, route) => url.pathname === "/api/viewer/direct-share-catalog/vp-ranch/tasks"
+    ? route.fulfill({ json: { project: { viewerProjectId: "vp-ranch", name: "Ranch mapping" }, tasks: [], nextCursor: null } }) : undefined);
+  await page.goto("/viewer");
+  await page.getByRole("list", { name: "Viewer projects" }).getByRole("button", { name: "Ranch mapping", exact: true }).click();
+  await expect(page.getByText("No published models yet.")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Whole project/ })).toHaveCount(0);
+});
+
+test("a public link ends at the close of its last day in Central time", async ({ page }) => {
+  await page.clock.setFixedTime(new Date("2026-10-28T03:00:00Z"));
+  const calls = await mockOps(page, MANAGER, (url, method, route) => {
+    if (url.pathname !== "/api/viewer/models/model-ortho/shares") return undefined;
+    if (method === "GET") return route.fulfill({ json: { shares: [] } });
+    return route.fulfill({ status: 201, json: { share: { id: "share-1", label: null, hasPassword: false, expiresAt: "2026-11-01T05:59:59.000Z", displayUnits: "imperial",
+      accessCount: 0, lastAccessedAt: null, revokedAt: null, createdAt: date }, viewUrl: `${VIEWER}/s/abc` } });
+  });
+  const dialog = await openShare(page, "Seawall orthomosaic");
+  await dialog.getByRole("tab", { name: "Public link" }).click();
+  const lastDay = dialog.getByLabel("Last day (Central time)");
+  await expect(lastDay).toHaveValue("2026-11-03");
+  await expect(lastDay).toHaveAttribute("min", "2026-10-27");
+  await expect(lastDay).toHaveAttribute("max", "2026-11-25");
+  await lastDay.fill("2026-10-31");
+  await dialog.getByRole("button", { name: "Create link" }).click();
+  await expect(dialog.getByLabel("New link")).toHaveValue(`${VIEWER}/s/abc`);
+  const created = calls.find(call => call.method === "POST" && call.path === "/api/viewer/models/model-ortho/shares")!;
+  expect((created.body as { expiresAt: string }).expiresAt).toBe("2026-11-01T04:59:59.000Z");
+});
+
+test("an unconfirmed client share older than the retry window is held: no new request, guidance to check existing access", async ({ page }) => {
+  await page.clock.install();
+  let attempts = 0;
+  const calls = await mockOps(page, MANAGER, (url, method, route) => {
+    if (url.pathname !== "/api/viewer/direct-client-grants" || method !== "POST") return undefined;
+    attempts += 1;
+    return route.fulfill({ status: 503, json: { error: "Viewer unavailable" } });
+  });
+  const dialog = await openShare(page, "Seawall orthomosaic");
+  await dialog.getByRole("option", { name: /Harbor Authority/ }).click();
+  await dialog.getByRole("button", { name: "Review share" }).click();
+  await dialog.getByRole("button", { name: "Share", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("couldn't confirm");
+  // A dialog left open past the Viewer's 24-hour receipt retention never re-sends.
+  await page.clock.fastForward("25:00:00");
+  await expect(dialog.getByRole("alert")).toContainText("too old to retry safely");
+  await expect(dialog.getByRole("button", { name: "Try again" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Close" })).toBeDisabled();
+  await dialog.getByRole("button", { name: "Check again" }).click();
+  expect(posts(calls)).toHaveLength(1);
+  expect(attempts).toBe(1);
+});
+
+test("an unconfirmed public link older than the retry window is held and its password is dropped", async ({ page }) => {
+  await page.clock.install();
+  let attempts = 0;
+  const calls = await mockOps(page, MANAGER, (url, method, route) => {
+    if (url.pathname !== "/api/viewer/models/model-ortho/shares") return undefined;
+    if (method === "GET") return route.fulfill({ json: { shares: [] } });
+    attempts += 1;
+    return route.fulfill({ status: 504, json: { error: "Gateway timeout" } });
+  });
+  const dialog = await openShare(page, "Seawall orthomosaic");
+  await dialog.getByRole("tab", { name: "Public link" }).click();
+  await dialog.getByRole("checkbox", { name: "Never expires" }).check();
+  await dialog.getByLabel("Password (optional)").fill("correct horse");
+  page.once("dialog", confirm => void confirm.accept());
+  await dialog.getByRole("button", { name: "Create link" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("couldn't confirm the link was created");
+  await page.clock.fastForward("25:00:00");
+  await expect(dialog.getByRole("alert")).toContainText("too old to retry safely");
+  await expect(dialog.getByRole("button", { name: "Try again" })).toHaveCount(0);
+  await expect(dialog.getByLabel("Password (optional)")).toHaveValue("");
+  await expect(dialog.getByRole("button", { name: "Close" })).toBeDisabled();
+  const gets = calls.filter(call => call.method === "GET" && call.path === "/api/viewer/models/model-ortho/shares").length;
+  await dialog.getByRole("button", { name: "Check again" }).click();
+  await expect.poll(() => calls.filter(call => call.method === "GET" && call.path === "/api/viewer/models/model-ortho/shares").length).toBeGreaterThan(gets);
+  expect(calls.filter(call => call.method === "POST")).toHaveLength(1);
+  expect(attempts).toBe(1);
 });

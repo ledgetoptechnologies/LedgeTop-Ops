@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { chicagoEndOfDay, chicagoToday, directShareBody, futureChicagoEndOfDay, grantsForTarget, validViewerCatalogProjects, validViewerCatalogTasks,
+import { businessLabel, chicagoEndOfDay, chicagoToday, directShareBody, futureChicagoEndOfDay, grantsForTarget, permissionSentence,
+  publicLinkDayRange, publicLinkExpiry, validViewerCatalogProjects, validViewerCatalogTasks,
   type DirectShareGrant, type ViewerShareTarget } from "../src/client/ViewerQuickShare";
 
 const project = { viewerProjectId: "vp-1", name: "Seawall survey" };
@@ -60,5 +61,26 @@ describe("Viewer quick share", () => {
     expect(futureChicagoEndOfDay("2026-10-26", lateEvening)).toBeNull();
     expect(futureChicagoEndOfDay("2026-10-27", Date.parse("2026-10-28T04:59:59.000Z"))).toBeNull();
     expect(futureChicagoEndOfDay("not a day", lateEvening)).toBeNull();
+  });
+
+  it("offers public-link last days only between five minutes and 30 days ahead, in Central time", () => {
+    const lateEvening = Date.parse("2026-10-28T03:00:00Z");
+    expect(publicLinkDayRange(lateEvening)).toEqual({ min: "2026-10-27", max: "2026-11-25" });
+    expect(publicLinkExpiry("2026-10-27", lateEvening)).toBe("2026-10-28T04:59:59.000Z");
+    expect(publicLinkExpiry("2026-11-25", lateEvening)).toBe("2026-11-26T05:59:59.000Z");
+    expect(publicLinkExpiry("2026-11-26", lateEvening)).toBeNull();
+    expect(publicLinkExpiry("2026-10-26", lateEvening)).toBeNull();
+    // Three minutes before Chicago midnight, today's end is too close; the first day offered is tomorrow.
+    expect(publicLinkDayRange(Date.parse("2026-10-28T04:57:00Z")).min).toBe("2026-10-28");
+  });
+
+  it("describes permissions and the business line in plain words", () => {
+    expect(permissionSentence({ measure: false, cameras: false, download: false })).toBe("They can view the model.");
+    expect(permissionSentence({ measure: true, cameras: false, download: false })).toBe("They can view the model and take measurements.");
+    expect(permissionSentence({ measure: true, cameras: true, download: true }))
+      .toBe("They can view the model, take measurements, see camera photos, and download files.");
+    expect(businessLabel("Ledge Top", 1)).toBeNull();
+    expect(businessLabel("LTDS", 2)).toBe("via Ledge Top LTDS");
+    expect(businessLabel("Ledge Top Technologies", 2)).toBe("via Ledge Top Technologies");
   });
 });
