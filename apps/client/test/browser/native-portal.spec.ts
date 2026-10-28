@@ -1316,6 +1316,11 @@ test("native model routes retain client navigation and pin bootstrap to their ex
   await expect(page.getByRole("heading", { name: "Secure 3D Viewer" })).toBeVisible();
   await expect(page.locator(".client-portal-header")).toBeVisible();
   expect(calls.some(call => call.path.endsWith("workspace-c/context"))).toBe(false);
+  expect(calls.some(call => call.method === "POST" && call.path.endsWith("/session"))).toBe(false);
+  const popupWait = page.waitForEvent("popup");
+  await page.getByRole("button", { name: "Open secure 3D Viewer" }).click();
+  const popup = await popupWait;
+  await expect.poll(() => popup.isClosed()).toBe(true); // The exact native account rejects the synthetic session.
   const nav = page.getByRole("navigation", { name: "Client portal", exact: true });
   if (!(await nav.isVisible())) {
     await page.getByRole("button", { name: "Open navigation" }).click();
@@ -1327,4 +1332,5 @@ test("native model routes retain client navigation and pin bootstrap to their ex
   const modelSessions = calls.filter(call => call.method === "POST" && call.path.endsWith("/session"));
   expect(modelSessions.length).toBeGreaterThan(0);
   expect(modelSessions.every(call => call.path.includes("/workspace-b/"))).toBe(true);
+  await expect(page.locator("iframe")).toHaveCount(0);
 });

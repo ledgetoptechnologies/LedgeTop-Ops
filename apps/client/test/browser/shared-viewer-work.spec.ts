@@ -143,13 +143,15 @@ for (const [label, answer] of [["missing (404)", {status: 404, json: {error: "No
   test(`a direct 3D link whose sharing list is ${label} never requests a session`, async ({page}) => {
     const calls = await mock(page, [allWorkspaces[0]!], (route, call) => call.path.endsWith("/viewer") ? route.fulfill(answer) : undefined);
     await page.goto("/portal/viewer/grant-task/tasks/task-1?workspace=workspace-b");
-    await expect(page.getByRole("alert")).toContainText("This shared 3D model isn’t available here yet.");
-    await page.getByRole("button", {name: "Retry secure session"}).click();
-    await expect(page.getByRole("alert")).toContainText("This shared 3D model isn’t available here yet.");
+    expect(calls.filter(call => call.path.endsWith("/viewer"))).toEqual([]); // Deep links never issue checks or sessions on load.
+    await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
+    await expect(page.getByRole("status")).not.toBeEmpty();
+    await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
+    await expect(page.getByRole("status")).not.toBeEmpty();
     expect(calls.filter(call => call.method === "POST")).toEqual([]);
   });
 
-test("opening shared work loads the direct route and posts its exact session endpoint for that account", async ({page}) => {
+test("opening shared work opens a full-page Viewer and renews through the preserved opener", async ({page}) => {
   let viewerLoads = 0;
   await page.context().route(`${viewerOrigin}/**`, async route => {
     if (!new URL(route.request().url()).pathname.startsWith("/session/")) return route.fulfill({status: 404, body: "not found"});
@@ -159,10 +161,10 @@ test("opening shared work loads the direct route and posts its exact session end
       addEventListener("message", event => {
         if (event.data?.type !== "ltds-viewer:renew-session") return;
         document.body.dataset.renewedGrant = event.data.grant;
-        parent.postMessage({version:1,type:"ltds-viewer:session-renewed",modelId:"model-direct",expiresAt:new Date(Date.now()+60000).toISOString()}, "*");
+        opener.postMessage({version:1,type:"ltds-viewer:session-renewed",modelId:"model-direct",expiresAt:new Date(Date.now()+60000).toISOString()}, "*");
       });
-      setTimeout(() => parent.postMessage({version:1,type:"ltds-viewer:ready",modelId:"model-direct",expiresAt}, "*"), 50);
-      setTimeout(() => parent.postMessage({version:1,type:"ltds-viewer:session-expiring",modelId:"model-direct",expiresAt}, "*"), 100);
+      setTimeout(() => opener.postMessage({version:1,type:"ltds-viewer:ready",modelId:"model-direct",expiresAt}, "*"), 50);
+      setTimeout(() => opener.postMessage({version:1,type:"ltds-viewer:session-expiring",modelId:"model-direct",expiresAt}, "*"), 100);
     </script></body>`});
   });
   let sessions = 0;
@@ -181,10 +183,14 @@ test("opening shared work loads the direct route and posts its exact session end
   await page.goto("/portal/dashboard");
   await expect(rows(page)).toHaveCount(1);
   const beforeOpen = calls.length;
+  const popupWait = page.waitForEvent("popup");
   await rows(page).first().getByRole("link", {name: /^Open 3D model/}).click();
-  await expect(page).toHaveURL(/\/portal\/viewer\/grant-task\/tasks\/task-1\?workspace=workspace-c$/);
-  await expect(page.frameLocator("iframe").locator("#loaded")).toHaveText("direct model");
-  await expect(page.frameLocator("iframe").locator("body")).toHaveAttribute("data-renewed-grant", "22222222-2222-4222-8222-222222222222", {timeout: 5_000});
+  const popup = await popupWait;
+  await expect(popup).toHaveURL(`${viewerOrigin}/session/11111111-1111-4111-8111-111111111111`);
+  await expect(popup.locator("#loaded")).toHaveText("direct model");
+  await expect(popup.locator("body")).toHaveAttribute("data-renewed-grant", "22222222-2222-4222-8222-222222222222", {timeout: 5_000});
+  expect(await popup.evaluate(() => Boolean(window.opener))).toBe(true);
+  await expect(page.locator("iframe")).toHaveCount(0);
   expect(viewerLoads).toBe(1);
   await expect(page.locator(".client-portal-header")).toBeVisible();
   const posts = calls.filter(call => call.method === "POST");
@@ -195,10 +201,53 @@ test("opening shared work loads the direct route and posts its exact session end
   expect(posts.every(call => /^[0-9a-f-]{36}$/.test(call.key ?? ""))).toBe(true);
   expect(posts[0]!.key).not.toBe(posts[1]!.key);
   expect(posts[0]!.body).toEqual({displayUnits: expect.stringMatching(/^(imperial|metric)$/)});
-  // The bootstrap is pinned to the account in the link; the other account's context is not loaded for the viewer.
+  // The direct task route posts only to the exact account/grant/task endpoint; it does not need a broad context read.
   const afterOpen = calls.slice(beforeOpen);
   expect(afterOpen.some(call => call.path === "/api/client/v2/workspaces/workspace-b/context")).toBe(false);
-  expect(afterOpen.some(call => call.path === "/api/client/v2/workspaces/workspace-c/context")).toBe(true);
+  expect(afterOpen.some(call => call.path === "/api/client/v2/workspaces/workspace-c/context")).toBe(false);
+});
+
+test("a refreshed task grant gets a new issuer while ambiguous retries for the old grant stay isolated", async ({page}) => {
+  await page.context().route(`${viewerOrigin}/**`, route => route.fulfill({contentType: "text/html", body: "<!doctype html><title>Viewer</title>"}));
+  let cursorRequests = 0, sessionRequests = 0;
+  const calls = await mock(page, [allWorkspaces[0]!], (route, call, id) => {
+    if (call.method === "GET" && call.path.endsWith("/viewer")) {
+      if (call.query.has("cursor")) {
+        cursorRequests += 1;
+        return route.fulfill({status: 409, json: {error: "Cursor expired"}});
+      }
+      const item = cursorRequests
+        ? {grantId: "grant-new", taskId: "task-1", scopeType: "task" as const, title: "Fresh share", projectName: "Harbor bridge", businessName: "Harbor Engineering", updatedAt: "2026-08-25T12:00:00Z"}
+        : {grantId: "grant-old", taskId: "task-1", scopeType: "task" as const, title: "Original share", projectName: "Harbor bridge", businessName: "Harbor Engineering", updatedAt: "2026-08-20T12:00:00Z"};
+      return route.fulfill({json: viewerPage(id, [item], cursorRequests ? null : "stale-cursor")});
+    }
+    if (call.method !== "POST" || !call.path.endsWith("/session")) return undefined;
+    sessionRequests += 1;
+    if (sessionRequests === 1) return route.fulfill({status: 503, json: {error: "Unclear session result"}});
+    const grant = "33333333-3333-4333-8333-333333333333";
+    return route.fulfill({status: 201, json: {modelId: "model-direct", grant, grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
+      redeemUrl: `${viewerOrigin}/api/v1/sessions/redeem`, embedUrl: `${viewerOrigin}/session/${grant}`}});
+  });
+
+  await page.goto("/portal/dashboard?workspace=workspace-b");
+  await expect(rows(page).first()).toContainText("Original share");
+  await rows(page).first().getByRole("link", {name: /^Open 3D model/}).click();
+  await expect.poll(() => calls.filter(call => call.method === "POST").length).toBe(1);
+  await expect.poll(() => page.context().pages().length).toBe(1);
+
+  await card(page).getByRole("button", {name: "Load more 3D work"}).click();
+  await expect(rows(page).first()).toContainText("Fresh share");
+  const popupWait = page.waitForEvent("popup");
+  await rows(page).first().getByRole("link", {name: /^Open 3D model/}).click();
+  const popup = await popupWait;
+  await expect(popup).toHaveURL(`${viewerOrigin}/session/33333333-3333-4333-8333-333333333333`);
+  const sessions = calls.filter(call => call.method === "POST" && call.path.endsWith("/session"));
+  expect(sessions).toHaveLength(2);
+  expect(sessions.map(call => call.path)).toEqual([
+    "/api/client/v2/workspaces/workspace-b/viewer/grant-old/tasks/task-1/session",
+    "/api/client/v2/workspaces/workspace-b/viewer/grant-new/tasks/task-1/session",
+  ]);
+  expect(sessions[0]!.key).not.toBe(sessions[1]!.key);
 });
 
 for (const [label, workspaces] of [["one account", [allWorkspaces[0]!]], ["two accounts", allWorkspaces]] as const) test(`Deliveries lists shared 3D work next to delivery folders (${label})`, async ({page}) => {
@@ -213,7 +262,6 @@ for (const [label, workspaces] of [["one account", [allWorkspaces[0]!]], ["two a
 });
 
 for (const [label, status, sameKey] of [["an unclear failure retries the same request", 503, true], ["a success that fails verification retries the same request", 200, true], ["a refused request retries as a new request", 409, false]] as const) test(`opening shared work: ${label}`, async ({page}) => {
-  await page.context().route(`${viewerOrigin}/**`, route => route.fulfill({contentType: "text/html", body: "<!doctype html><body>model</body>"}));
   let sessions = 0;
   const calls = await mock(page, [allWorkspaces[0]!], (route, call, id) => {
     if (call.method === "GET" && call.path.endsWith("/viewer")) return route.fulfill({json: viewerPage(id, [])});
@@ -225,8 +273,15 @@ for (const [label, status, sameKey] of [["an unclear failure retries the same re
       redeemUrl: `${viewerOrigin}/api/v1/sessions/redeem`, embedUrl: `${viewerOrigin}/session/${grant}`}});
   });
   await page.goto("/portal/viewer/grant-task/tasks/task-1?workspace=workspace-b");
-  await page.getByRole("button", {name: "Retry secure session"}).click();
-  await expect(page.locator("iframe")).toBeVisible();
+  await expect.poll(() => calls.length).toBe(0);
+  await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
+  await expect.poll(() => calls.filter(call => call.method === "POST").length).toBe(1);
+  await expect(page.getByRole("status")).not.toContainText("Opening");
+  const popupWait = page.waitForEvent("popup");
+  await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
+  const popup = await popupWait;
+  await expect(popup).toHaveURL(`${viewerOrigin}/session/33333333-3333-4333-8333-333333333333`);
+  await expect(page.locator("iframe")).toHaveCount(0);
   const keys = calls.filter(call => call.method === "POST").map(call => call.key);
   expect(keys).toHaveLength(2);
   expect(keys[0] === keys[1]).toBe(sameKey);
@@ -247,46 +302,25 @@ test("Deliveries shows shared 3D work even when delivery folders are not in acce
 });
 
 test("a Viewer that never reports ready stops waiting and retries with a freshly issued session", async ({page}) => {
-  await page.clock.install();
-  const loads: string[] = [];
-  await page.context().route(`${viewerOrigin}/**`, async route => {
-    const path = new URL(route.request().url()).pathname;
-    loads.push(path);
-    // The first session never reports ready; the retried one does.
-    const ready = path.endsWith("55555555-5555-4555-8555-555555555555");
-    await route.fulfill({contentType: "text/html", body: `<!doctype html><body><div id="loaded">${path}</div><script>
-      ${ready ? `parent.postMessage({version:1,type:"ltds-viewer:ready",modelId:"model-direct",expiresAt:new Date(Date.now()+600000).toISOString()}, "*");` : ""}
-    </script></body>`});
-  });
+  await page.context().route(`${viewerOrigin}/**`, route => route.fulfill({contentType: "text/html", body: "<!doctype html><title>Full-page Viewer</title>"}));
   let sessions = 0;
   const calls = await mock(page, [allWorkspaces[0]!], (route, call, id) => {
     if (call.method === "GET" && call.path.endsWith("/viewer")) return route.fulfill({json: viewerPage(id, [])});
     if (call.method !== "POST" || !call.path.endsWith("/session")) return undefined;
     sessions += 1;
-    const grant = sessions === 1 ? "44444444-4444-4444-8444-444444444444" : "55555555-5555-4555-8555-555555555555";
+    const grant = "55555555-5555-4555-8555-555555555555";
     return route.fulfill({status: 201, json: {modelId: "model-direct", grant, grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
       redeemUrl: `${viewerOrigin}/api/v1/sessions/redeem`, embedUrl: `${viewerOrigin}/session/${grant}`}});
   });
   await page.goto("/portal/viewer/grant-task/tasks/task-1?workspace=workspace-b");
-  await expect(page.getByRole("status").filter({hasText: "Opening 3D model"})).toBeVisible();
-  await page.clock.fastForward(30_000);
-  await expect(page.getByRole("alert").filter({hasText: "didn't open"})).toHaveCount(0);
-  await page.clock.fastForward(16_000);
-  const failure = page.getByRole("alert").filter({hasText: "The 3D model didn't open"});
-  await expect(failure).toBeVisible();
-  await expect(page.getByRole("status").filter({hasText: "Opening 3D model"})).toHaveCount(0);
-  await expect(failure.getByRole("button", {name: "Close viewer"})).toBeVisible();
-  // Nothing retries on its own, and no window is opened.
-  expect(calls.filter(call => call.method === "POST")).toHaveLength(1);
-  expect(page.context().pages()).toHaveLength(1);
-  await failure.getByRole("button", {name: "Try again"}).click();
-  await expect(page.locator("iframe")).toHaveAttribute("src", `${viewerOrigin}/session/55555555-5555-4555-8555-555555555555`);
-  await expect(page.getByRole("alert").filter({hasText: "didn't open"})).toHaveCount(0);
-  await expect(page.locator(".ltds-viewer-stage")).toHaveAttribute("aria-busy", "false");
-  const posts = calls.filter(call => call.method === "POST");
-  expect(posts).toHaveLength(2);
-  expect(posts[1]!.path).toBe(posts[0]!.path);
-  expect(posts[1]!.key).not.toBe(posts[0]!.key);
-  // The consumed grant is never loaded again.
-  expect(loads).toEqual(["/session/44444444-4444-4444-8444-444444444444", "/session/55555555-5555-4555-8555-555555555555"]);
+  await expect(page.getByRole("button", {name: "Open secure 3D Viewer"})).toBeVisible();
+  expect(calls.filter(call => call.method === "POST")).toHaveLength(0);
+  expect(page.context().pages()).toHaveLength(1); // No popup or authorization request on route load.
+  const popupWait = page.waitForEvent("popup");
+  await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
+  const popup = await popupWait;
+  await expect(popup).toHaveURL(`${viewerOrigin}/session/55555555-5555-4555-8555-555555555555`);
+  await expect(popup.locator("iframe")).toHaveCount(0);
+  await expect(page.locator("iframe")).toHaveCount(0);
+  expect(sessions).toBe(1);
 });
