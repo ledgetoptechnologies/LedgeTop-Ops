@@ -2124,7 +2124,7 @@ test("client can edit before review, create a child change, and answer an estima
   await spaNavigate(page, "/portal/requests");
   await page.getByRole("button", { name: "Accept estimate" }).click();
   const acceptance = page.getByRole("dialog", { name: "Accept operational estimate?" });
-  await expect(acceptance.getByText("Accept this non-binding Ledge Top estimate? Ledge Top will still send a separate quote before anything is billed.", { exact: true })).toBeVisible();
+  await expect(acceptance.getByText("Accept this non-binding Ledge Top operational estimate? A separate formal quote will still be required before financial approval.", { exact: true })).toBeVisible();
   await confirmInPage(page, "Accept operational estimate?", "Accept estimate");
   await expect.poll(() => workflowEvents.estimateAccepted).toBe(true);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);

@@ -744,8 +744,8 @@ function EstimateSummary({
       <strong>Scope proposal</strong>
       <p>{estimate.scope}</p>
       <small>
-        This is not a quote, contract, or invoice. Ledge Top will send a
-        separate quote before any billing.
+        This is not a quote, contract, or invoice. Ledge Top's billing system
+        remains the financial record.
       </small>
       <div>
         <StatusPill
@@ -3133,7 +3133,7 @@ export function ClientPortalApp({
       response === "accept" &&
       !(await confirmInApp(
         "Accept operational estimate?",
-        "Accept this non-binding Ledge Top estimate? Ledge Top will still send a separate quote before anything is billed.",
+        "Accept this non-binding Ledge Top operational estimate? A separate formal quote will still be required before financial approval.",
         "Accept estimate",
       ))
     )
