@@ -98,6 +98,7 @@ describe("bounded PA financial transport", () => {
       expect(init?.body).toBeUndefined(); expect(url.origin).toBe("https://pa.example.test");
       expect(url.searchParams.get("externalId")).toBe(mapping.externalId);
       expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer secret-key");
+      expect(new Headers(init?.headers).get("X-PA-Financial-Document-Dates")).toBe("v1");
     }
   });
 

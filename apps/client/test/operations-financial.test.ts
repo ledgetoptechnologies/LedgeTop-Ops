@@ -20,9 +20,24 @@ describe("Client private native financial consumer",()=>{
   it("derives recipient identity from the verified principal and rechecks the home after RPC",async()=>{
     const rpc=vi.fn(async()=>success);
     await expect(readPortalFinancialDocuments(env(rpc),principal,authorityId)).resolves.toMatchObject({ok:true,
-      collections:[{documents:[{kind:"invoice",status:"unpaid"}]}]});
+      collections:[{documents:[{kind:"invoice",status:"unpaid",issueDate:null,dueDate:null}]}]});
     expect(rpc).toHaveBeenCalledWith({protocolVersion:1,...home,issuer:principal.issuer,subject:principal.subject});
     expect(mocks.homes).toHaveBeenCalledTimes(2);
+  });
+  it("passes valid date-only metadata and PA's overdue status without deriving status",async()=>{
+    const parsed=JSON.parse(success);const document=parsed.collections[0].value.documents[0];
+    document.status="overdue";document.issueDate="2026-02-28";document.dueDate="2026-03-30";
+    await expect(readPortalFinancialDocuments(env(vi.fn(async()=>JSON.stringify(parsed))),principal,authorityId))
+      .resolves.toMatchObject({ok:true,collections:[{documents:[{status:"overdue",issueDate:"2026-02-28",dueDate:"2026-03-30"}]}]});
+  });
+  it.each([
+    {issueDate:"2026-02-30",dueDate:"2026-03-30"},
+    {issueDate:"2026-02-28"},
+    {issueDate:"2026-02-28T00:00:00Z",dueDate:"2026-03-30"},
+  ])("rejects invalid or partial dates: %o",async dates=>{
+    const parsed=JSON.parse(success);Object.assign(parsed.collections[0].value.documents[0],dates);
+    await expect(readPortalFinancialDocuments(env(vi.fn(async()=>JSON.stringify(parsed))),principal,authorityId))
+      .resolves.toEqual({ok:false,code:"unavailable"});
   });
   it("fails closed when disabled or when the requested authority is not the principal's current home",async()=>{
     await expect(readPortalFinancialDocuments({DELIVERY_DB:{} as D1Database},principal,authorityId))
