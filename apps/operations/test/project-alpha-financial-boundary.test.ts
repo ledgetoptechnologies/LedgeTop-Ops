@@ -21,9 +21,26 @@ describe("unrouted PA financial response boundary", () => {
   it("accepts exact lineage and freezes nested data without granting recipient access", () => {
     const result = decodeProjectAlphaFinancialPage(bytes(fixture()), expected);
     expect(result?.documents[0]?.balanceDue).toBe("400.00");
+    expect(result?.documents[0]).toMatchObject({ issueDate: null, dueDate: null });
     expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(result?.documents[0])).toBe(true);
     expect(Object.isFrozen(result?.selector)).toBe(true);
+  });
+  it("normalizes a complete valid date-only pair", () => {
+    const value = fixture();
+    Object.assign(value.documents[0]!, { issueDate: "2026-02-28", dueDate: "2026-03-30" });
+    expect(decodeProjectAlphaFinancialPage(bytes(value), expected)?.documents[0])
+      .toMatchObject({ issueDate: "2026-02-28", dueDate: "2026-03-30" });
+  });
+  it.each([
+    { issueDate: "2026-02-28" },
+    { dueDate: "2026-03-30" },
+    { issueDate: "2026-02-30", dueDate: "2026-03-30" },
+    { issueDate: "2026-02-28T00:00:00Z", dueDate: "2026-03-30" },
+    { issueDate: 20260228, dueDate: "2026-03-30" },
+  ])("rejects incomplete or invalid date pairs: %o", dates => {
+    const value = fixture(); Object.assign(value.documents[0]!, dates);
+    expect(decodeProjectAlphaFinancialPage(bytes(value), expected)).toBeNull();
   });
   it.each(["organization", "client", "project"] as const)("supports explicit %s selectors", kind => {
     const value = fixture(); value.selector.kind = kind;
