@@ -173,8 +173,8 @@ The existing params stay, and one is added: `?section=projects&org=&project=&tas
   - Runtime
   - Updated
   - Quick action: **Open 3D** when ready, otherwise **View run**.
-- **Source sets** become "Photo sets", in a collapsible section under the tasks with the same
-  actions as today.
+- **Source sets** become "Datasets" (or an input-kind label such as Photos / LiDAR when known, since
+  inputs are not always photos), in a collapsible section under the tasks with the same actions as today.
 
 ### 4.3 Task page (one detail pattern)
 
@@ -191,7 +191,7 @@ The existing params stay, and one is added: `?section=projects&org=&project=&tas
   3. **Files & versions.** Today's output panel. Each version shows **one** primary action (Open /
      Download), with the rest in ⋯.
   4. **Ground control points.** Unchanged workflow, restyled.
-  5. **Settings.** Processing options, streaming and product recovery, and photo-set lifecycle.
+  5. **Settings.** Processing options, streaming and product recovery, and dataset lifecycle.
 - The inline task expansion on the dashboard is **removed**. Clicking a task always opens this page.
 
 ### 4.4 Processing (new)
@@ -199,7 +199,8 @@ The existing params stay, and one is added: `?section=projects&org=&project=&tas
 - **Runs tab.** All active and recent runs across projects, grouped by stage:
   - Running
   - Waiting (for worker, transfer or delivery)
-  - Needs attention (disk-pressure blocked, delivery retrying, awaiting acceptance)
+  - Needs attention (only explicit operator-required states: disk-pressure blocked, a retry that has
+    failed or crossed its threshold)
   - Finished today
 
   Each row links to the task page Runs tab.
@@ -211,7 +212,8 @@ The existing params stay, and one is added: `?section=projects&org=&project=&tas
 The layout is unchanged, with these changes:
 - Node actions (Edit, Token, Refresh capabilities, Disable) go in a ⋯ menu.
 - Each preset row has one **Edit** button, with View, Duplicate and Delete in a ⋯ menu.
-- "Viewer admission" becomes "Max parallel jobs".
+- "Viewer admission" becomes "Queue handoff limit" (it counts queued handoffs to the provider, not
+  parallel execution; meaning unchanged).
 
 ---
 
@@ -226,12 +228,14 @@ Two separate signals, matching Codex's draft:
 | Stage | Label | Tone |
 |---|---|---|
 | `waiting_for_worker` | Waiting for a worker | neutral |
-| `waiting_for_transfer` | Transferring photos | neutral (progress if given) |
+| `waiting_for_transfer` | Waiting for input transfer | neutral (progress only when an explicit transfer stage reports it) |
 | `waiting_for_delivery` | Waiting for results | neutral |
 | `awaiting_acceptance` | Checking results | neutral |
-| `delivery_retrying` | Retrying delivery | amber |
+| `delivery_retrying` | Retrying delivery | neutral; amber + Needs attention only after an actionable failure or threshold |
 | `blocked_disk_pressure` | Paused: storage full | amber, counted in "Needs attention", with a link to Diagnostics → storage |
-| `accepted` | Delivered | green (only until Completed shows) |
+| `accepted` | Delivered | green. "Delivered" is separate from public Ready/Published: upstream completion is not ready while ingestion, derivatives or review are pending |
+
+The full legacy `attempt.status` mapping is kept unchanged.
 
 **Connection rule:** when the browser loses contact with the API, runs keep their last known state
 with a grey "Status unknown, reconnecting" note. They are never shown as failed or disappeared. Codex
@@ -324,6 +328,9 @@ same PR, as listed above.
 
 ## 10. Coordination needed with Codex
 
+Codex reviewed v1 on 2026-10-27 and accepted the direction, preservation list, seams and staging;
+its corrections are applied in §4, §5 and below.
+
 - **Hierarchy DTO:** organizations/customers, optional groups, `organizationId`/`groupId` on projects
   (null means Unassigned), and an endpoint or field to list them. Needed for PR 3; until then I use a
   stub fixture.
@@ -331,10 +338,16 @@ same PR, as listed above.
 - **Shared seams I will not edit without agreement:** `workspace-new-task.mjs` (restyle via CSS
   only), `workspace-dialogs.mjs`, `workspace-direct-client-share.mjs`, `workspace-task-options.mjs`,
   and the recovery/renewal modules.
-- **`workspace.js`** is dead code: not loaded and not tested. I propose deleting it in PR 1 if Codex
-  agrees.
+- **`workspace.js`** is dead code: not loaded and not tested. Codex: leave it untouched for now; check
+  consumers before any separate cleanup.
+- Refresh errors keep failed-source rows and last-known state (no disappearing jobs). Hierarchy uses
+  exact customer/source IDs, never display-name merging. New hierarchy controls stay disabled until the
+  server reports the capability; stubs are synthetic only.
 
 ## 11. Decisions for Beau
+
+**Decided 2026-10-27 — Beau approved all three, verbatim:** "Yes to all three: rename Dashboard to
+Projects with a Processing page, use the slim status strip, and group projects by customer."
 
 1. Rename **Dashboard → Projects** and add a **Processing** page that absorbs Background work?
    (Recommended.)
