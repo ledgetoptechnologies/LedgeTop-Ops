@@ -16,7 +16,7 @@ const context=vm.createContext({state,groupProjects,URL,URLSearchParams,location
   // this task-navigation harness. Capability refresh has its own focused tests.
   context.refreshProviderCapabilities=()=>{throw new Error('Task navigation must not refresh node capabilities');};
   vm.runInContext(`let lastProviderEntry=null;\n${source.slice(source.indexOf('function refreshOpenedProvider('),source.indexOf('function providerDetail('))}`,context);
-  vm.runInContext([...names,'taskOutputStage','logPanel','projectSearchText','projectStatusMatches','workspaceBreadcrumb','taskRunsPanel'].map(declaration).join('\n'),context);
+  vm.runInContext([...names,'taskOutputStage','logPanel','projectSearchText','projectStatusMatches','workspaceBreadcrumb','taskRunsPanel','attemptHistory','attemptLabel','disclosureAttributes','attemptDiagnosticPanel','projectRows'].map(declaration).join('\n'),context);
   vm.runInContext(source.slice(source.indexOf('function canShareOutput('),source.indexOf('async function openShareModal(')),context);
   vm.runInContext(lines.find(line=>line.startsWith("addEventListener('popstate'")),context);
   const route=lines.find(line=>line.trimStart().startsWith("if(['task-gcp','task-settings','task-files','task-return']"));
@@ -239,4 +239,25 @@ test('authoritative active latestAttempt, not newest history failure, selects ta
   const html=f.context.taskDetail(f.task,f.dataset);
   assert.match(html,/data-action="cancel-attempt" data-id="active"/);assert.doesNotMatch(html,/restart-task|retry-attempt|trash-task/);
   f.state.taskPage='files';assert.doesNotMatch(f.context.taskWorkspacePage(),/publish-attempt/);
+});
+
+test('Runs tab offers provider retry only on active tasks in active projects',()=>{
+  const f=fixture();
+  f.state.taskDetails.task={...f.state.taskDetails.task,attempts:[{id:'failed-run',status:'failed',providerId:'provider',attemptNumber:1,createdAt:'2026-09-01'}]};
+  f.state.taskDisclosures={};
+  assert.match(f.context.taskRunsPanel(f.task),/data-action="retry-attempt"/,'active task must keep its retry');
+  f.task.status='archived';
+  assert.doesNotMatch(f.context.taskRunsPanel(f.task),/retry-attempt"/,'archived task must not offer a provider retry');
+  f.task.status='ready_for_review';f.state.projects[0].status='archived';
+  assert.doesNotMatch(f.context.taskRunsPanel(f.task),/retry-attempt"/,'archived project must not offer a provider retry');
+  assert.match(f.context.taskRunsPanel(f.task),/data-action="open-attempt-diagnostics"/,'diagnostics stay readable on archived work');
+});
+
+test('an open project is never hidden by a search left over from the project list',()=>{
+  const f=fixture();
+  f.state.selectedProjectId='project';f.state.projectQuery='no match here';f.state.projectStatus='all';
+  f.context.selectedProject=()=>'<section class="project-detail"></section>';
+  const html=f.context.projectRows();
+  assert.match(html,/class="project-row selected"/);
+  assert.doesNotMatch(html,/class="project-row selected"[^>]*\shidden[\s>]/);
 });
