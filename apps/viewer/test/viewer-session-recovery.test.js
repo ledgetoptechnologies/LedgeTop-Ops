@@ -17,6 +17,7 @@ function fixture({ controller = true } = {}) {
   const timers = new Map(), posts = [], resets = [], measurements = {sliceResets:0,invalidations:0,installs:0,invalidated:false,displayAborts:0,records:new Map([['private','geometry']])};
   let timerId = 0;
   const window = {};
+  const reportNodes = Object.fromEntries(['panel-model-report', 'measurement-report-actions', 'btn-capture-float'].map(id => [id, { hidden: false }]));
   window.parent = window;
   const stored = new Map();
   const storage = { getItem: key => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value), removeItem: key => stored.delete(key) };
@@ -31,7 +32,7 @@ function fixture({ controller = true } = {}) {
     // covered together in viewer-header-browser.test.mjs.
     installStaffNavigationGuard() {},
     viewerSlice:{reset:()=>measurements.sliceResets++},
-    window, VIEW_MODE: 'session', reviewSessionChannel: controller ? { postMessage: value => posts.push(value) } : null,
+    window, document: { getElementById: id => reportNodes[id] || null }, VIEW_MODE: 'session', reviewSessionChannel: controller ? { postMessage: value => posts.push(value) } : null,
     REVIEW_CONTROLLER_ID: REQUEST,
     reviewControllerCandidate: REQUEST,
     activeViewerSession: session, sessionAccessGeneration: 0, PROJECT: session.model, TILES_URL: '/stable/tileset.json', EPT_URL: '/stable/ept.json',
@@ -77,7 +78,7 @@ function fixture({ controller = true } = {}) {
     ${invalidateSource}
     return invalidate;
   })()`,context);
-  return { context, timers, posts, resets, measurements };
+  return { context, timers, posts, resets, measurements, reportNodes };
 }
 
 function drawWorkspaceWithCurrentPermission(f) {
@@ -96,6 +97,53 @@ function drawWorkspaceWithCurrentPermission(f) {
   vm.runInContext(workspaceSource.slice(start, workspaceSource.indexOf('\n  const timer=setInterval(draw,', start)), scope);
   scope.draw();
 }
+
+test('report and capture controls start hidden before a session is authorized', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  for (const id of ['panel-model-report', 'measurement-report-actions', 'btn-capture-float']) {
+    assert.match(html, new RegExp(`<[^>]+id="${id}"[^>]* hidden(?:>|\\s)`), `${id} cannot flash during failed session startup`);
+  }
+  assert.match(html, /id="measurement-report-actions"[^>]*>[\s\S]*?id="btn-model-report"[\s\S]*?<\/div><div id="model-report-download"/,
+    'the original downloadable report remains outside the measurement-only actions');
+});
+
+test('a valid view-only session hides measurement report and capture without denying model access', () => {
+  const f = fixture();
+  f.context.applyViewerSession({ ...f.context.activeViewerSession, audience: 'client', permissions: { view: true, measure: false, download: false } });
+  for (const node of Object.values(f.reportNodes)) assert.equal(node.hidden, true);
+  assert.equal(f.context.sessionAccessState, 'active');
+  assert.equal(f.context.sessionRenewalBlocked, false);
+  assert.equal(f.posts.length, 0);
+});
+
+test('download-only permission keeps the original report host visible while measurement actions stay hidden', () => {
+  const f = fixture();
+  f.context.applyViewerSession({ ...f.context.activeViewerSession, permissions: { view: true, measure: false, download: true } });
+  assert.equal(f.reportNodes['panel-model-report'].hidden, false);
+  assert.equal(f.reportNodes['measurement-report-actions'].hidden, true);
+  assert.equal(f.reportNodes['btn-capture-float'].hidden, true);
+  f.context.setSessionAccessState('unavailable', 'authorization-required');
+  assert.equal(f.reportNodes['panel-model-report'].hidden, true);
+  f.context.applyViewerSession({ ...f.context.activeViewerSession, expiresAt: new Date(Date.now() + 600_000).toISOString() });
+  assert.equal(f.reportNodes['panel-model-report'].hidden, false);
+  assert.equal(f.reportNodes['measurement-report-actions'].hidden, true);
+});
+
+test('report and capture follow permission changes, access loss, expiry and successful renewal', () => {
+  const f = fixture();
+  f.context.applyViewerSession(f.context.activeViewerSession);
+  for (const node of Object.values(f.reportNodes)) assert.equal(node.hidden, false);
+  f.context.setSessionAccessState('renewing', 'timer');
+  assert.equal(f.reportNodes['btn-capture-float'].hidden, false, 'still-valid access survives a renewal transport attempt');
+  f.context.setSessionAccessState('unavailable', 'authorization-required');
+  for (const node of Object.values(f.reportNodes)) assert.equal(node.hidden, true);
+  f.context.applyViewerSession({ ...f.context.activeViewerSession, expiresAt: new Date(Date.now() + 600_000).toISOString() });
+  for (const node of Object.values(f.reportNodes)) assert.equal(node.hidden, false);
+  f.context.applyViewerSession({ ...f.context.activeViewerSession, permissions: { view: true, measure: false } });
+  for (const node of Object.values(f.reportNodes)) assert.equal(node.hidden, true);
+  f.context.applyViewerSession({ ...f.context.activeViewerSession, permissions: { view: true, measure: true }, expiresAt: new Date(Date.now() - 1).toISOString() });
+  for (const node of Object.values(f.reportNodes)) assert.equal(node.hidden, true, 'expired credentials cannot restore actions');
+});
 
 test('parallel tile/cloud authorization failures coalesce and successful renewal resumes both runtimes', async () => {
   const f = fixture();

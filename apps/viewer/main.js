@@ -796,6 +796,7 @@ function applyAvailability() {
   setVisible('tab-dtm', !!DTM_URL);
   setVisible('layer-cameras', !!SHOTS_URL && SHARE_PERMISSIONS.cameras);
   setVisible('panel-pc', state.cloudMode === 'potree');   // budget/size/EDL sliders only apply to Potree
+  syncMeasurementActionVisibility();
   // A share link can disable measuring entirely (permissions.measure=false).
   if (dom.btnMeasureFloat) {
     dom.btnMeasureFloat.style.display = (VIEW_MODE === 'embed' && SHARE_PERMISSIONS.measure && state.meshSource === 'tiles') ? 'flex' : 'none';
@@ -1415,6 +1416,18 @@ function postToAllowedController(message) {
   return origins.length > 0;
 }
 
+function syncMeasurementActionVisibility() {
+  const accessAvailable = sessionAccessState !== 'unavailable'
+    && (VIEW_MODE !== 'session' || (activeViewerSession && Date.parse(activeViewerSession.expiresAt) > Date.now()));
+  const measure = accessAvailable && SHARE_PERMISSIONS.measure !== false;
+  const download = accessAvailable && SHARE_PERMISSIONS.download === true;
+  const setHidden = (id, hidden) => { const element = document.getElementById(id); if (element) element.hidden = hidden; };
+  setHidden('measurement-report-actions', !measure);
+  setHidden('btn-capture-float', !measure);
+  // The original processing report follows download permission independently.
+  setHidden('panel-model-report', !measure && !download);
+}
+
 function sessionAccessLabel(prefix = 'LOD') {
   if (VIEW_MODE !== 'session' || sessionAccessState === 'active') return null;
   if (sessionAccessState === 'renewing') return `${prefix}: renewing access`;
@@ -1443,6 +1456,7 @@ function setSessionAccessState(next, reason = null) {
     const workspace=measurementWorkspace;
     void measurementDraftRecovery.restore(activeViewerSession,workspace).then(restored=>{if(!restored&&workspace===measurementWorkspace&&sessionAccessState==='active')workspace.showRecoveryNotice?.(measurementDraftRecovery.hasPending());});
   }
+  syncMeasurementActionVisibility();
   const label = sessionAccessLabel();
   if (label && tilesRenderer) dom.lodStatus.textContent = label;
   if (label && state.activeMode === 'cloud') dom.cloudStatus.textContent = sessionAccessLabel('Cloud');
@@ -4473,6 +4487,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   document.getElementById('panel-camera-positions').style.display = (is3D || isPC || isMapMode(mode)) && SHOTS_URL && SHARE_PERMISSIONS.cameras ? 'block' : 'none';
   document.getElementById('panel-nav').style.display = (is3D || isPC) ? 'block' : 'none';
   document.getElementById('panel-measure').style.display = SHARE_PERMISSIONS.measure ? 'block' : 'none';
+  syncMeasurementActionVisibility();
   document.getElementById('panel-camera').style.display = is3D ? 'block' : 'none';
   document.getElementById('panel-pc').style.display = isPotreeCloud ? 'block' : 'none';
   document.getElementById('panel-slice').style.display = (is3D||isPC)?'block':'none';
