@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Card, Loading, RenewableViewerShell } from "@ltds/ui";
+import { useCallback, useMemo, useState } from "react";
+import { Card } from "@ltds/ui";
 import { createPortalViewerSession, loadPortalBootstrap, type PortalViewerSession } from "./portal-api";
 import { createNativeViewerSession, loadNativeViewerWork, openNativeViewerTaskSession } from "./native-portal-api";
 import { clientProjectPath } from "./portal-route";
 import { readClientViewerUnits } from "./viewer-units-preference";
+import { createViewerSessionIssuer, openClientViewerWindowWithIssuer } from "./viewer-window-launch";
 
 const opaque = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const projectCoordinate = /^[^\u0000-\u001f\u007f]{1,256}$/;
@@ -75,78 +76,76 @@ export function parseClientViewerShellRoute(pathname: string, search = ""): Clie
 
 export function ClientViewerShell({ route }: { route: ClientViewerShellRoute }) {
   if (route.mode === "direct") return <DirectTaskViewerShell key={`${route.workspaceId}:${route.grantId}:${route.taskId}`} route={route} />;
-  const issueSession = async (key: string) => {
+  return <ProjectViewerLaunch key={`${route.mode}:${route.mode === "native" ? route.workspaceId : "legacy"}:${route.projectId}:${route.associationId}:${route.modelId}`} route={route} />;
+}
+
+function ProjectViewerLaunch({ route }: { route: Exclude<ClientViewerShellRoute, { mode: "direct" }> }) {
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const issueSession = useCallback(async (key: string) => {
     if (route.mode === "legacy")
       return createPortalViewerSession(route.projectId, route.associationId, key, readClientViewerUnits());
     const bootstrap = await loadPortalBootstrap(undefined, route.workspaceId);
     if (bootstrap.resourceMode !== "native" || bootstrap.workspace.id !== route.workspaceId || bootstrap.capabilities.viewer !== true)
       throw new Error("This 3D model is no longer available for the selected client.");
     return createNativeViewerSession(bootstrap, route.projectId, route.associationId, key, readClientViewerUnits());
-  };
+  }, [route]);
+  const issue = useMemo(() => createViewerSessionIssuer(issueSession, route.modelId), [issueSession, route.modelId]);
   const exit = new URL(clientProjectPath(route.projectId), window.location.origin);
   exit.searchParams.set("tab", "models");
   if (route.mode === "native") exit.searchParams.set("workspace", route.workspaceId);
-  return <RenewableViewerShell
-    routeKey={`${route.mode}:${route.mode === "native" ? `${route.workspaceId}:` : ""}${route.projectId}:${route.associationId}:${route.modelId}`}
-    modelId={route.modelId}
-    title="Client 3D model"
-    issueSession={issueSession}
-    onExit={() => window.location.assign(`${exit.pathname}${exit.search}`)}
-  />;
+  const launch = () => {
+    if (busy) return;
+    setBusy(true); setMessage("Opening secure 3D Viewer…");
+    // openClientViewerWindow reserves the top-level tab synchronously in this click handler.
+    void openClientViewerWindowWithIssuer({ title: "Client 3D model", issueSession: issue, onStatus: (_status, text) => setMessage(text) })
+      .then(result => setMessage(result.openedIn === "new-tab"
+        ? "Viewer opened in a new tab. Keep this portal tab open to renew the session."
+        : "The popup was blocked; Viewer opened here without automatic renewal. Reopen it when the session expires."))
+      .catch(caught => setMessage(caught instanceof Error ? caught.message : "The Viewer session could not be opened. Try again."))
+      .finally(() => setBusy(false));
+  };
+  return <section className="viewer-shell-page" aria-label="3D Viewer launch">
+    <Card title="Secure 3D Viewer">
+      <p>This link opens the model in a full-page Viewer window.</p>
+      {message && <p role="status" aria-live="polite">{message}</p>}
+      <div className="actions">
+        <button type="button" className="button-orange" disabled={busy} onClick={launch}>{busy ? "Opening…" : "Open secure 3D Viewer"}</button>
+        <button type="button" className="button-ghost" onClick={() => window.location.assign(`${exit.pathname}${exit.search}`)}>Back to models</button>
+      </div>
+    </Card>
+  </section>;
 }
 
 type DirectTaskSession = PortalViewerSession & { modelId: string };
-/**
- * The model behind a direct task grant is only known from its first session, so that
- * first session is issued here and handed to the shared renewable shell, which then
- * renews by posting to the same exact account, grant and task with a fresh key.
- */
+/** The direct task’s first authorized session identifies the model and pins later renewals. */
 function DirectTaskViewerShell({ route }: { route: Extract<ClientViewerShellRoute, { mode: "direct" }> }) {
-  const [first, setFirst] = useState<DirectTaskSession | null>(null);
-  const [error, setError] = useState("");
-  // An ambiguous failure (network, 5xx, or a success response that failed verification) keeps its key so a retry
-  // cannot mint a second session; a definitive HTTP rejection (4xx) can never succeed with that key, so Retry starts fresh.
-  const pendingKey = useRef<string | null>(null), inflight = useRef<Promise<void> | null>(null), handedOff = useRef<DirectTaskSession | null>(null);
-  const issue = useCallback((key: string) => openNativeViewerTaskSession(route.workspaceId, route.grantId, route.taskId, readClientViewerUnits(), key), [route.workspaceId, route.grantId, route.taskId]);
-  // A read-only check first: a portal that can't list direct sharing for this account never receives a session request.
-  // The server still authorizes the exact grant and task on the session request itself.
-  const supported = useRef<Promise<boolean> | null>(null);
-  const checkSupport = useCallback(() => supported.current ??= loadNativeViewerWork(route.workspaceId, null)
-    .then(() => true, () => { supported.current = null; return false; }), [route.workspaceId]);
-  const issueFirst = useCallback(() => {
-    const key = pendingKey.current ?? crypto.randomUUID(); pendingKey.current = key;
-    const request = issue(key).then(session => { pendingKey.current = null; handedOff.current = session; setFirst(session); },
-      caught => { const failure = caught as { status?: number; responseInvalid?: boolean }, status = failure.status ?? 0;
-        if (status >= 400 && status < 500 && !failure.responseInvalid) pendingKey.current = null;
-        setError(caught instanceof Error ? caught.message : "3D Viewer authorization is temporarily unavailable"); });
-    return request;
-  }, [issue]);
-  const start = useCallback(() => {
-    if (inflight.current) return inflight.current;
-    setError("");
-    const request = checkSupport().then(ok => {
-      if (!ok) { setError("This shared 3D model isn’t available here yet. Try again later, or open it from your portal home."); return; }
-      return issueFirst();
-    }).finally(() => { inflight.current = null; });
-    inflight.current = request;
-    return request;
-  }, [checkSupport, issueFirst]);
-  useEffect(() => { void start(); }, [start]);
-  // The portal root, so a client with only an Operations home returns to that home rather than a client-account page.
-  const exit = () => window.location.assign("/portal");
-  if (!first)
-    return error
-      ? <section className="viewer-shell-page" aria-label="3D Viewer"><Card title="Secure 3D Viewer"><p className="viewer-session-error" role="alert">{error}</p><div className="actions"><button type="button" className="button-orange" onClick={() => void start()}>Retry secure session</button><button type="button" className="button-ghost" onClick={exit}>Back</button></div></Card></section>
-      : <section className="viewer-shell-page" aria-label="3D Viewer"><Loading /></section>;
-  return <RenewableViewerShell
-    routeKey={`direct:${route.workspaceId}:${route.grantId}:${route.taskId}:${first.modelId}`}
-    modelId={first.modelId}
-    title="Client 3D model"
-    issueSession={key => {
-      // The shell's first issuance reuses the session issued above; every renewal posts again with its fresh key.
-      const ready = handedOff.current; handedOff.current = null;
-      return ready ? Promise.resolve(ready) : issue(key);
-    }}
-    onExit={exit}
-  />;
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  // Verify the client’s direct-sharing endpoint inside the already-reserved tab, then request
+  // the exact grant/task session. The first authorized session binds model identity for renewal.
+  const issueSession = useCallback(async (key: string) => {
+    try { await loadNativeViewerWork(route.workspaceId, null); }
+    catch { throw new Error("This shared 3D model isn’t available here yet. Try again later, or open it from your portal home."); }
+    return openNativeViewerTaskSession(route.workspaceId, route.grantId, route.taskId, readClientViewerUnits(), key);
+  }, [route.workspaceId, route.grantId, route.taskId]);
+  const issue = useMemo(() => createViewerSessionIssuer(issueSession), [issueSession]);
+  const launch = () => {
+    if (busy) return;
+    setBusy(true); setMessage("Opening secure 3D Viewer…");
+    void openClientViewerWindowWithIssuer({ title: "Client 3D model", issueSession: issue, onStatus: (_status, text) => setMessage(text) })
+      .then(result => setMessage(result.openedIn === "new-tab"
+        ? "Viewer opened in a new tab. Keep this portal tab open to renew the session."
+        : "The popup was blocked; Viewer opened here without automatic renewal. Reopen it when the session expires."))
+      .catch(caught => setMessage(caught instanceof Error ? caught.message : "The Viewer session could not be opened. Try again."))
+      .finally(() => setBusy(false));
+  };
+  return <section className="viewer-shell-page" aria-label="3D Viewer launch"><Card title="Secure 3D Viewer">
+    <p>This shared task opens in a full-page Viewer window.</p>
+    {message && <p role="status" aria-live="polite">{message}</p>}
+    <div className="actions">
+      <button type="button" className="button-orange" disabled={busy} onClick={launch}>{busy ? "Opening…" : "Open secure 3D Viewer"}</button>
+      <button type="button" className="button-ghost" onClick={() => window.location.assign("/portal")}>Back</button>
+    </div>
+  </Card></section>;
 }

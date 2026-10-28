@@ -1684,13 +1684,14 @@ test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 3
   await page.getByRole("button", { name: "Models" }).click();
   await page.getByLabel("Measurement units").selectOption("metric");
   await expect.poll(() => preferenceUnits).toBe("metric");
+  const popupWait = page.waitForEvent("popup");
   await page.getByRole("button", { name: "Open 3D model" }).click();
-  const viewerPage = page;
+  const viewerPage = await popupWait;
   await expect.poll(() => sessionUnits).toBe("metric");
-  await expect(viewerPage).toHaveURL(/\/portal\/viewer\/project-a\/association-one\/model-one$/);
-  expect(await viewerPage.evaluate(() => window.opener === null)).toBe(true);
-  await expect(viewerPage.locator("iframe")).toHaveAttribute("src", "https://viewer.example.test/session/11111111-1111-4111-8111-111111111111");
-  await page.goBack();
+  await expect(viewerPage).toHaveURL("https://viewer.example.test/session/11111111-1111-4111-8111-111111111111");
+  expect(await viewerPage.evaluate(() => Boolean(window.opener))).toBe(true);
+  await expect(viewerPage.locator("iframe")).toHaveCount(0);
+  await expect(page.locator("iframe")).toHaveCount(0);
   await page.getByRole("button", { name: "Share public link" }).click();
   await expect(page.getByText("Expired engineer review")).toHaveCount(0);
   await page.getByLabel("Link label").fill("Engineer review");
@@ -1721,7 +1722,7 @@ test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 3
   await expect(page.getByText("No active links.")).toBeVisible();
 });
 
-test("Viewer shell is openerless and keeps the iframe and idempotency key across a transient renewal failure", async ({ page }) => {
+test("full-page Viewer keeps the opener and idempotency key across a transient renewal failure", async ({ page }) => {
   let sessionRequests = 0, viewerLoads = 0;
   const sessionDisplayUnits: string[] = [];
   const sessionIdempotencyKeys: string[] = [];
@@ -1735,10 +1736,10 @@ test("Viewer shell is openerless and keeps the iframe and idempotency key across
       addEventListener("message", event => {
         if (event.data?.type !== "ltds-viewer:renew-session") return;
         document.body.dataset.renewedGrant = event.data.grant;
-        parent.postMessage({version:1,type:"ltds-viewer:session-renewed",modelId:"model-one",expiresAt:new Date(Date.now()+60000).toISOString()}, "*");
+        opener.postMessage({version:1,type:"ltds-viewer:session-renewed",modelId:"model-one",expiresAt:new Date(Date.now()+60000).toISOString()}, "*");
       });
-      setTimeout(() => parent.postMessage({version:1,type:"ltds-viewer:ready",modelId:"model-one",expiresAt}, "*"), 50);
-      setTimeout(() => parent.postMessage({version:1,type:"ltds-viewer:session-expiring",modelId:"model-one",expiresAt}, "*"), 100);
+      setTimeout(() => opener.postMessage({version:1,type:"ltds-viewer:ready",modelId:"model-one",expiresAt}, "*"), 50);
+      setTimeout(() => opener.postMessage({version:1,type:"ltds-viewer:session-expiring",modelId:"model-one",expiresAt}, "*"), 100);
     </script></body>` });
   });
   await page.context().route("**/api/client/**", async route => {
@@ -1771,15 +1772,16 @@ test("Viewer shell is openerless and keeps the iframe and idempotency key across
   await navigatePortal(page, "Projects");
   await page.getByRole("button", { name: /North Site/ }).click();
   await page.getByRole("button", { name: "Models" }).click();
+  const popupWait = page.waitForEvent("popup");
   await page.getByRole("button", { name: "Open 3D model" }).click();
-  const viewerPage = page;
-  await expect(viewerPage).toHaveURL(/\/portal\/viewer\/project-a\/association-one\/model-one$/);
-  expect(await viewerPage.evaluate(() => window.opener === null)).toBe(true);
+  const viewerPage = await popupWait;
+  await expect(viewerPage).toHaveURL(`${viewerOrigin}/session/11111111-1111-4111-8111-111111111111`);
+  expect(await viewerPage.evaluate(() => Boolean(window.opener))).toBe(true);
   await expect.poll(() => viewerLoads).toBe(1);
-  const viewerFrame = viewerPage.frameLocator("iframe");
-  await expect(viewerFrame.locator("#camera-state")).toHaveText("camera-position-42");
-  await expect(viewerFrame.locator("body")).toHaveAttribute("data-renewed-grant", "22222222-2222-4222-8222-222222222222", { timeout: 5_000 });
-  await expect(viewerFrame.locator("#camera-state")).toHaveText("camera-position-42");
+  await expect(viewerPage.locator("#camera-state")).toHaveText("camera-position-42");
+  await expect(viewerPage.locator("body")).toHaveAttribute("data-renewed-grant", "22222222-2222-4222-8222-222222222222", { timeout: 5_000 });
+  await expect(viewerPage.locator("#camera-state")).toHaveText("camera-position-42");
+  await expect(page.locator("iframe")).toHaveCount(0);
   expect(sessionRequests).toBe(3);
   expect(sessionDisplayUnits).toEqual(["metric", "metric", "metric"]);
   expect(sessionIdempotencyKeys[0]).toMatch(/^[0-9a-f-]{36}$/);
@@ -1787,7 +1789,6 @@ test("Viewer shell is openerless and keeps the iframe and idempotency key across
   expect(sessionIdempotencyKeys[0]).not.toBe(sessionIdempotencyKeys[1]);
   expect(sessionIdempotencyKeys[2]).toBe(sessionIdempotencyKeys[1]);
   expect(viewerLoads).toBe(1);
-  await page.goBack();
 });
 
 test("disabled Operations home and unavailable legacy session stop before account data requests", async ({ page }) => {

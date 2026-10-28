@@ -7,7 +7,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { AccountMenu, Card, EmptyState, Loading, SignInRecovery, StatusPill, openViewerShell, requestChoice, requestText, Skeleton } from "@ltds/ui";
+import { AccountMenu, Card, EmptyState, Loading, SignInRecovery, StatusPill, requestChoice, requestText, Skeleton } from "@ltds/ui";
 import { PortalBoundary, PortalBrand } from "./PortalShell";
 import { VideoPlayer } from "./VideoPlayer";
 import { PORTAL_APP_API, type DeliveryLocationCollection } from "@ltds/shared";
@@ -29,6 +29,7 @@ import {
   loadPortalProjectFileLocations,
   loadPortalProjectFolderFiles,
   loadPortalViewerModels,
+  createPortalViewerSession,
   setPortalWorkspaceSelection,
   loadPortalPricingHint,
   listPortalRequestAttachments,
@@ -93,6 +94,7 @@ import {
   type PortalOperationsHomeResponse,
 } from "./portal-api";
 import { readClientViewerUnits, writeClientViewerUnits } from "./viewer-units-preference";
+import { createViewerSessionIssuer, openClientViewerWindowWithIssuer } from "./viewer-window-launch";
 import { ClientViewerShell, parseClientViewerShellRoute, clientViewerShellPath, nativeClientViewerShellPath, clientViewerRouteProjectId, clientViewerRouteWorkspaceId } from "./ClientViewerShell";
 import { SharedViewerWork } from "./SharedViewerWork";
 import { operationsHomeViewerWorkspaceIds } from "./shared-viewer-work";
@@ -118,7 +120,7 @@ import { LeaveFeedback, PortalFeedback } from "./PortalFeedback";
 import { PortalNotifications } from "./PortalNotifications";
 import { loadFeedbackFile, withPortalWorkspace } from "./feedback-api";
 import { NativeWorkspaceContent } from "./NativeWorkspaceContent";
-import { loadNativeViewerModels, type NativePortalBootstrap } from "./native-portal-api";
+import { createNativeViewerSession, loadNativeViewerModels, type NativePortalBootstrap } from "./native-portal-api";
 import { invitationCapabilitiesLabel, invitationRequestSchema } from "./invitation-request-api";
 import { PortalInvitationRequests } from "./PortalInvitationRequests";
 import { isNoAuthorizedClientWorkspace, isOptionalClientWorkspaceBootstrapAbsence } from "./portal-bootstrap-classification";
@@ -1949,15 +1951,21 @@ function LegacyServiceRequestForm({
   );
 }
 
-function ProjectViewerModels({ projectId, initialDisplayUnits, loadModels = loadPortalViewerModels,
+function ProjectViewerModels({ projectId, initialDisplayUnits, loadModels = loadPortalViewerModels, sessionScope = "legacy",
+  issueSession = (model, key, units) => createPortalViewerSession(projectId, model.associationId, key, units),
   shellPath = model => clientViewerShellPath({ projectId, associationId: model.associationId, modelId: model.modelId }), persistUnits = updatePortalViewerUnits }: { projectId: string; initialDisplayUnits: "imperial" | "metric";
     loadModels?: (projectId:string)=>Promise<PortalViewerModel[]>;
+    sessionScope?: string;
+    issueSession?: (model: PortalViewerModel, idempotencyKey: string, units: "imperial" | "metric") => Promise<import("./portal-api").PortalViewerSession>;
     shellPath?: (model:PortalViewerModel)=>string;
     persistUnits?: ((units:"imperial"|"metric")=>Promise<unknown>)|null }) {
   const [models, setModels] = useState<PortalViewerModel[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [displayUnits, setDisplayUnits] = useState<"imperial" | "metric">(initialDisplayUnits || readClientViewerUnits());
+  const displayUnitsRef = useRef(displayUnits);
+  displayUnitsRef.current = displayUnits;
+  const sessionIssuers = useRef(new Map<string, () => Promise<import("./portal-api").PortalViewerSession>>());
 
   useEffect(() => {
     let active = true;
@@ -1968,20 +1976,34 @@ function ProjectViewerModels({ projectId, initialDisplayUnits, loadModels = load
     return () => { active = false; };
   }, [projectId]);
 
-  const open = async (model: PortalViewerModel) => {
+  const [launchMessage, setLaunchMessage] = useState("");
+  const open = (model: PortalViewerModel) => {
+    if (busy) return;
     setBusy(true); setError("");
-    try {
-      // The openerless shell cannot read React state from this tab. Persist only
-      // this non-secret preference; authorization remains in same-origin cookies.
-      writeClientViewerUnits(displayUnits);
-      openViewerShell(shellPath(model));
-    } catch (caught) { setError((caught as Error).message); }
-    finally { setBusy(false); }
+    setLaunchMessage("Opening secure 3D Viewer…");
+    writeClientViewerUnits(displayUnits);
+    const issuerKey = `${projectId}:${sessionScope}:${model.associationId}:${model.modelId}`;
+    let issuer = sessionIssuers.current.get(issuerKey);
+    if (!issuer) {
+      issuer = createViewerSessionIssuer(key => issueSession(model, key, displayUnitsRef.current), model.modelId);
+      sessionIssuers.current.set(issuerKey, issuer);
+    }
+    // This call reserves the top-level window synchronously before session issuance awaits.
+    void openClientViewerWindowWithIssuer({
+      title: model.title,
+      issueSession: issuer,
+      onStatus: (_status, text) => setLaunchMessage(text),
+    }).then(result => setLaunchMessage(result.openedIn === "new-tab"
+      ? "Viewer opened in a new tab. Keep this portal tab open to renew the session."
+      : "The popup was blocked; Viewer opened here without automatic renewal. Reopen it when the session expires."))
+      .catch(caught => setLaunchMessage((caught as Error).message))
+      .finally(() => setBusy(false));
   };
 
   if (!models) return <Card title="3D models"><Loading /></Card>;
   return <Card title="3D models">
     {error && <div className="notice error" role="alert">{error}</div>}
+    {launchMessage && <p role="status" aria-live="polite">{launchMessage}</p>}
     <label className="portal-viewer-units">Measurement units<select value={displayUnits} onChange={event => {
       const next = event.target.value as "imperial" | "metric";
       setDisplayUnits(next); writeClientViewerUnits(next);
@@ -1992,7 +2014,7 @@ function ProjectViewerModels({ projectId, initialDisplayUnits, loadModels = load
         <div><span>Interactive model</span><h3>{model.title}</h3><p>{model.provider} · secure Viewer session</p></div>
         <div className="portal-form-actions"><button type="button" className="button-orange" disabled={busy} onClick={() => void open(model)}>
           {busy ? "Opening…" : "Open 3D model"}
-        </button></div>
+        </button><a className="button-ghost" href={shellPath(model)}>Open Viewer launch page</a></div>
         {model.canShare && <PortalViewerShares projectId={projectId} model={model} displayUnits={displayUnits} />}
       </article>)}</div>}
   </Card>;
@@ -3245,6 +3267,8 @@ export function ClientPortalApp({
       renderRequests={renderRequestSurface}
       renderModels={id => <ProjectViewerModels projectId={id} initialDisplayUnits={readClientViewerUnits()}
         loadModels={project => loadNativeViewerModels(native,project)}
+        sessionScope={native.contextVersion}
+        issueSession={(model, key, units) => createNativeViewerSession(native, id, model.associationId, key, units)}
         shellPath={model=>nativeClientViewerShellPath({workspaceId:native.workspace.id,projectId:id,associationId:model.associationId,modelId:model.modelId})}
         persistUnits={null} />}
       renderDashboardSupplement={() => <><SharedViewerWork workspaces={workspaces.length ? workspaces : [native.workspace]} operationsHomeWorkspaceIds={operationsViewerWorkspaceIds} />{operationsHomeSummary}</>}

@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, EmptyState, Skeleton } from "@ltds/ui";
 import type { RequestError } from "./bulk-download";
-import { loadNativeViewerWork, type NativeViewerWorkItem } from "./native-portal-api";
+import { loadNativeViewerWork, openNativeViewerTaskSession, type NativeViewerWorkItem } from "./native-portal-api";
 import type { PortalWorkspace } from "./portal-api";
 import { directViewerTaskPath, sharedViewerRows, viewerWorkAccounts } from "./shared-viewer-work";
+import { createViewerSessionIssuer, openClientViewerWindowWithIssuer } from "./viewer-window-launch";
+import type { ModelViewerSession } from "./viewer-window-launch";
+import { readClientViewerUnits } from "./viewer-units-preference";
 
 const ACCOUNT_CONCURRENCY = 4;
 type AccountWork =
@@ -33,6 +36,9 @@ export function SharedViewerWork({ workspaces, operationsHomeWorkspaceIds = [] }
   const accountKey = viewerWorkAccounts(workspaces, operationsHomeWorkspaceIds).join("\n");
   const accounts = useMemo(() => accountKey ? accountKey.split("\n") : [], [accountKey]);
   const [work, setWork] = useState<Map<string, AccountWork>>(() => new Map());
+  const [openingTask, setOpeningTask] = useState<string | null>(null);
+  const [launchMessages, setLaunchMessages] = useState<Map<string, string>>(() => new Map());
+  const sessionIssuers = useRef(new Map<string, () => Promise<ModelViewerSession>>());
   const controllers = useRef(new Map<string, AbortController>());
   const generation = useRef(0);
 
@@ -85,17 +91,51 @@ export function SharedViewerWork({ workspaces, operationsHomeWorkspaceIds = [] }
   const more = states.filter(({ state }) => state.status === "ready" && (state.cursor || state.moreError));
   if (!accounts.length) return null;
 
+  const openTask = (item: NativeViewerWorkItem, event: React.MouseEvent<HTMLAnchorElement>) => {
+    // Preserve normal browser link gestures; a primary click gets a synchronous
+    // blank-window reservation before the first task-session request.
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    const key = `${item.workspaceId}:${item.taskId}`;
+    if (openingTask) return;
+    setOpeningTask(key);
+    setLaunchMessages(previous => new Map(previous).set(key, "Opening secure 3D Viewer…"));
+    const issuerKey = `${item.workspaceId}:${item.taskId}:${item.grantId}`;
+    let issuer = sessionIssuers.current.get(issuerKey);
+    if (!issuer) {
+      issuer = createViewerSessionIssuer(idempotencyKey => openNativeViewerTaskSession(item.workspaceId, item.grantId, item.taskId,
+        readClientViewerUnits(), idempotencyKey));
+      sessionIssuers.current.set(issuerKey, issuer);
+    }
+    const pending = openClientViewerWindowWithIssuer({
+      title: item.title,
+      issueSession: issuer,
+      onStatus: (_status, message) => setLaunchMessages(previous => new Map(previous).set(key, message)),
+    });
+    void pending.then(opened => {
+      setLaunchMessages(previous => new Map(previous).set(key, opened.openedIn === "new-tab"
+        ? "Viewer opened in a new tab." : "The popup was blocked; Viewer opened in this tab without automatic renewal."));
+    }).catch(caught => {
+      setLaunchMessages(previous => new Map(previous).set(key,
+        caught instanceof Error ? caught.message : "The Viewer session could not be opened. Try again."));
+    }).finally(() => setOpeningTask(current => current === key ? null : current));
+  };
+
   return <Card title="Shared 3D work" className="shared-viewer-work">
     {failed.length > 0 && <div className="shared-viewer-work-problem" role="alert">
       <p>Some shared 3D work couldn’t be loaded.</p>
       <button type="button" className="button-ghost button-small" onClick={() => failed.forEach(({ account }) => void loadFirst(account, generation.current))}>Try again</button>
     </div>}
-    {rows.length > 0 && <ul className="shared-viewer-work-list">{rows.map(row => <li key={`${row.workspaceId}:${row.taskId}`}>
+    {rows.length > 0 && <ul className="shared-viewer-work-list">{rows.map(row => {
+      const key = `${row.workspaceId}:${row.taskId}`;
+      return <li key={key}>
       <div><strong>{row.title}</strong>
         {row.projectName && <span>{row.projectName}</span>}
         <small>Shared {shortDate(row.sharedAt)}{row.expiresAt ? ` · Available until ${shortDate(row.expiresAt)}` : ""}</small></div>
-      <a className="button button-orange" href={directViewerTaskPath(row)}>Open 3D model<span className="visually-hidden">: {row.title}</span></a>
-    </li>)}</ul>}
+      <a className="button button-orange" href={directViewerTaskPath(row)} aria-disabled={openingTask !== null || undefined}
+        onClick={event => openTask(row, event)}>Open 3D model<span className="visually-hidden">: {row.title}</span></a>
+      {launchMessages.has(key) && <p className="shared-viewer-work-problem" role="status" aria-live="polite">{launchMessages.get(key)}</p>}
+    </li>})}</ul>}
     {loading && <Skeleton variant="list" rows={2} label="Loading shared 3D work…" />}
     {unchecked.length > 0 && <p className="shared-viewer-work-problem" role="status">{unchecked.length === states.length
       ? "Shared 3D work isn’t available here yet." : "Some shared 3D work isn’t available here yet."}</p>}
