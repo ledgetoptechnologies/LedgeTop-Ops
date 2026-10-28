@@ -3631,7 +3631,8 @@ export function ClientPortalApp({
               href={unifiedMode ? clientPortalPath(item.page) : withPortalWorkspace(clientPortalPath(item.page))}
               aria-current={
                 page === item.page ||
-                (item.page === "projects" && page === "project") ||
+                // A model shared on its own isn't inside a project the client can browse.
+                (item.page === "projects" && page === "project" && viewerRoute?.mode !== "direct") ||
                 (item.page === "requests" && page === "request-new")
                   ? "page"
                   : undefined
@@ -3659,7 +3660,7 @@ export function ClientPortalApp({
         <div ref={mobileNavPanel} id="portal-mobile-navigation" className="portal-mobile-nav" role="dialog" aria-modal="true" aria-label="Navigation">
           <header><strong>Navigation</strong><button type="button" aria-label="Close navigation" onClick={() => { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); }}>Close</button></header>
           <nav aria-label="Mobile client portal navigation">
-            {[...navigation.filter(item => unifiedMode || (item.page !== "feedback" || capabilities.feedback) && (item.page !== "requests" || capabilities.requestV2)), { page: "account" as const, label: "Account" }].map((item) => <a key={item.page} href={unifiedMode ? clientPortalPath(item.page) : withPortalWorkspace(clientPortalPath(item.page))} aria-current={page === item.page || (item.page === "projects" && page === "project") || (item.page === "requests" && page === "request-new") ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(item.page); }}>{item.label}</a>)}
+            {[...navigation.filter(item => unifiedMode || (item.page !== "feedback" || capabilities.feedback) && (item.page !== "requests" || capabilities.requestV2)), { page: "account" as const, label: "Account" }].map((item) => <a key={item.page} href={unifiedMode ? clientPortalPath(item.page) : withPortalWorkspace(clientPortalPath(item.page))} aria-current={page === item.page || (item.page === "projects" && page === "project" && viewerRoute?.mode !== "direct") || (item.page === "requests" && page === "request-new") ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(item.page); }}>{item.label}</a>)}
           </nav>
         </div>
       </div>}

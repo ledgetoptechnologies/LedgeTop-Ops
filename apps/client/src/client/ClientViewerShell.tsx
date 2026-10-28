@@ -4,7 +4,7 @@ import { createPortalViewerSession, loadPortalBootstrap, type PortalViewerSessio
 import { createNativeViewerSession, loadNativeViewerWork, openNativeViewerTaskSession } from "./native-portal-api";
 import { clientProjectPath } from "./portal-route";
 import { readClientViewerUnits } from "./viewer-units-preference";
-import { createViewerSessionIssuer, openClientViewerWindowWithIssuer } from "./viewer-window-launch";
+import { createViewerSessionIssuer, openClientViewerWindowWithIssuer, viewerLaunchFailureMessage } from "./viewer-window-launch";
 
 const opaque = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const projectCoordinate = /^[^\u0000-\u001f\u007f]{1,256}$/;
@@ -87,7 +87,7 @@ function ProjectViewerLaunch({ route }: { route: Exclude<ClientViewerShellRoute,
       return createPortalViewerSession(route.projectId, route.associationId, key, readClientViewerUnits());
     const bootstrap = await loadPortalBootstrap(undefined, route.workspaceId);
     if (bootstrap.resourceMode !== "native" || bootstrap.workspace.id !== route.workspaceId || bootstrap.capabilities.viewer !== true)
-      throw new Error("This 3D model is no longer available for the selected client.");
+      throw Object.assign(new Error("This 3D model is no longer available for the selected client."), { status: 404 });
     return createNativeViewerSession(bootstrap, route.projectId, route.associationId, key, readClientViewerUnits());
   }, [route]);
   const issue = useMemo(() => createViewerSessionIssuer(issueSession, route.modelId), [issueSession, route.modelId]);
@@ -102,7 +102,7 @@ function ProjectViewerLaunch({ route }: { route: Exclude<ClientViewerShellRoute,
       .then(result => setMessage(result.openedIn === "new-tab"
         ? "Viewer opened in a new tab. Keep this portal tab open to renew the session."
         : "The popup was blocked; Viewer opened here without automatic renewal. Reopen it when the session expires."))
-      .catch(caught => setMessage(caught instanceof Error ? caught.message : "The Viewer session could not be opened. Try again."))
+      .catch(caught => setMessage(viewerLaunchFailureMessage(caught)))
       .finally(() => setBusy(false));
   };
   return <section className="viewer-shell-page" aria-label="3D Viewer launch">
@@ -126,7 +126,11 @@ function DirectTaskViewerShell({ route }: { route: Extract<ClientViewerShellRout
   // the exact grant/task session. The first authorized session binds model identity for renewal.
   const issueSession = useCallback(async (key: string) => {
     try { await loadNativeViewerWork(route.workspaceId, null); }
-    catch { throw new Error("This shared 3D model isn’t available here yet. Try again later, or open it from your portal home."); }
+    catch (caught) {
+      const status = (caught as { status?: number }).status ?? 0;
+      // 403/404 means direct sharing can't be checked for this account, which isn't the same as "no longer shared".
+      throw Object.assign(new Error("Direct sharing could not be checked."), { status, sharingUnchecked: status === 403 || status === 404 });
+    }
     return openNativeViewerTaskSession(route.workspaceId, route.grantId, route.taskId, readClientViewerUnits(), key);
   }, [route.workspaceId, route.grantId, route.taskId]);
   const issue = useMemo(() => createViewerSessionIssuer(issueSession), [issueSession]);
@@ -137,11 +141,11 @@ function DirectTaskViewerShell({ route }: { route: Extract<ClientViewerShellRout
       .then(result => setMessage(result.openedIn === "new-tab"
         ? "Viewer opened in a new tab. Keep this portal tab open to renew the session."
         : "The popup was blocked; Viewer opened here without automatic renewal. Reopen it when the session expires."))
-      .catch(caught => setMessage(caught instanceof Error ? caught.message : "The Viewer session could not be opened. Try again."))
+      .catch(caught => setMessage(viewerLaunchFailureMessage(caught)))
       .finally(() => setBusy(false));
   };
   return <section className="viewer-shell-page" aria-label="3D Viewer launch"><Card title="Secure 3D Viewer">
-    <p>This shared task opens in a full-page Viewer window.</p>
+    <p>This 3D model opens in a full-page Viewer window.</p>
     {message && <p role="status" aria-live="polite">{message}</p>}
     <div className="actions">
       <button type="button" className="button-orange" disabled={busy} onClick={launch}>{busy ? "Opening…" : "Open secure 3D Viewer"}</button>

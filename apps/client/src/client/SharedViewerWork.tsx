@@ -4,7 +4,7 @@ import type { RequestError } from "./bulk-download";
 import { loadNativeViewerWork, openNativeViewerTaskSession, type NativeViewerWorkItem } from "./native-portal-api";
 import type { PortalWorkspace } from "./portal-api";
 import { directViewerTaskPath, sharedViewerRows, viewerWorkAccounts } from "./shared-viewer-work";
-import { createViewerSessionIssuer, openClientViewerWindowWithIssuer } from "./viewer-window-launch";
+import { createViewerSessionIssuer, openClientViewerWindowWithIssuer, viewerLaunchFailureMessage } from "./viewer-window-launch";
 import type { ModelViewerSession } from "./viewer-window-launch";
 import { readClientViewerUnits } from "./viewer-units-preference";
 
@@ -116,8 +116,7 @@ export function SharedViewerWork({ workspaces, operationsHomeWorkspaceIds = [] }
       setLaunchMessages(previous => new Map(previous).set(key, opened.openedIn === "new-tab"
         ? "Viewer opened in a new tab." : "The popup was blocked; Viewer opened in this tab without automatic renewal."));
     }).catch(caught => {
-      setLaunchMessages(previous => new Map(previous).set(key,
-        caught instanceof Error ? caught.message : "The Viewer session could not be opened. Try again."));
+      setLaunchMessages(previous => new Map(previous).set(key, viewerLaunchFailureMessage(caught)));
     }).finally(() => setOpeningTask(current => current === key ? null : current));
   };
 
@@ -134,7 +133,7 @@ export function SharedViewerWork({ workspaces, operationsHomeWorkspaceIds = [] }
         <small>Shared {shortDate(row.sharedAt)}{row.expiresAt ? ` · Available until ${shortDate(row.expiresAt)}` : ""}</small></div>
       <a className="button button-orange" href={directViewerTaskPath(row)} aria-disabled={openingTask !== null || undefined}
         onClick={event => openTask(row, event)}>Open 3D model<span className="visually-hidden">: {row.title}</span></a>
-      {launchMessages.has(key) && <p className="shared-viewer-work-problem" role="status" aria-live="polite">{launchMessages.get(key)}</p>}
+      {launchMessages.has(key) && <p className="shared-viewer-work-launch" role="status" aria-live="polite">{launchMessages.get(key)}</p>}
     </li>})}</ul>}
     {loading && <Skeleton variant="list" rows={2} label="Loading shared 3D work…" />}
     {unchecked.length > 0 && <p className="shared-viewer-work-problem" role="status">{unchecked.length === states.length

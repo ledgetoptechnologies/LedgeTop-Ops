@@ -148,6 +148,10 @@ for (const [label, answer] of [["missing (404)", {status: 404, json: {error: "No
     await expect(page.getByRole("status")).not.toBeEmpty();
     await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
     await expect(page.getByRole("status")).not.toBeEmpty();
+    // Only fixed client wording: never the server's own text.
+    await expect(page.getByRole("status")).not.toContainText(/Not found|Forbidden|Direct sharing could not be checked/);
+    if (label === "missing (404)" || label === "refused (403)")
+      await expect(page.getByRole("status")).toHaveText("This 3D model can't be opened from here yet. Open it from your portal home.");
     expect(calls.filter(call => call.method === "POST")).toEqual([]);
   });
 
@@ -277,6 +281,9 @@ for (const [label, status, sameKey] of [["an unclear failure retries the same re
   await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
   await expect.poll(() => calls.filter(call => call.method === "POST").length).toBe(1);
   await expect(page.getByRole("status")).not.toContainText("Opening");
+  await expect(page.getByRole("status")).not.toContainText(/Not available right now|did not match/);
+  await expect(page.getByRole("status")).toHaveText(status === 503 ? "The 3D Viewer is busy or can't be reached right now. Try again in a minute."
+    : status === 409 ? "Sharing for this model changed. Refresh the page, then try again." : "The 3D Viewer couldn't confirm this model. Try again.");
   const popupWait = page.waitForEvent("popup");
   await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
   const popup = await popupWait;
@@ -324,3 +331,27 @@ test("a Viewer that never reports ready stops waiting and retries with a freshly
   await expect(page.locator("iframe")).toHaveCount(0);
   expect(sessions).toBe(1);
 });
+
+for (const [status, expected] of [[401, "Your sign-in has ended. Sign in again, then open the model."], [403, "This 3D model is no longer shared with you."],
+  [409, "Sharing for this model changed. Refresh the page, then try again."], [503, "The 3D Viewer is busy or can't be reached right now. Try again in a minute."]] as const)
+  test(`a shared work row that can't open (${status}) shows plain wording on its own line, never the server's text`, async ({page}) => {
+    await mock(page, [allWorkspaces[0]!], (route, call, id) => {
+      if (call.method === "GET" && call.path.endsWith("/viewer")) return route.fulfill({json: viewerPage(id, [{grantId: "grant-task", taskId: "task-1", scopeType: "task", title: "Deck survey", projectName: "Harbor bridge", businessName: "Ledge Top", updatedAt: "2026-08-01T12:00:00Z"}])});
+      if (call.method === "POST" && call.path.endsWith("/session")) return route.fulfill({status, json: {error: "Workspace access changed. Refresh this workspace to continue."}});
+      return undefined;
+    });
+    await page.goto("/portal");
+    const row = rows(page).first();
+    const open = row.getByRole("link", {name: /Open 3D model/});
+    const before = await open.boundingBox();
+    const popupWait = page.waitForEvent("popup");
+    await open.click();
+    await (await popupWait).close().catch(() => undefined);
+    const status_ = row.getByRole("status");
+    await expect(status_).toHaveText(expected);
+    await expect(row).not.toContainText("Workspace access changed");
+    // The status sits under the row, so the button stays where it was.
+    const after = await open.boundingBox(), line = await status_.boundingBox();
+    expect(Math.round(after!.x)).toBe(Math.round(before!.x));
+    expect(line!.y).toBeGreaterThan(after!.y + after!.height - 1);
+  });

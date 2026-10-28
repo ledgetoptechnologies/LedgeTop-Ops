@@ -134,7 +134,7 @@ test("a direct link to an Operations home's task whose access was removed never 
   await page.goto("/portal/viewer/grant-workspace-ops/tasks/task-workspace-ops?workspace=workspace-ops");
   expect(calls.filter(call => call.method === "POST")).toEqual([]); // Deep links do not authorize on load.
   await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
-  await expect(page.getByRole("status")).toContainText("shared 3D model");
+  await expect(page.getByRole("status")).toHaveText("This 3D model can't be opened from here yet. Open it from your portal home.");
   expect(calls.filter(call => call.method === "POST")).toEqual([]);
 });
 
