@@ -81,7 +81,11 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             }
         } finally { serial.Release(); }
     }
-    public async Task HydrateAsync(PlaceholderIdentity identity, long offset, long length, IPlaceholderTransferSink sink, CancellationToken cancellationToken = default)
+    public Task HydrateAsync(PlaceholderIdentity identity, long offset, long length, IPlaceholderTransferSink sink, CancellationToken cancellationToken = default) =>
+        HydrateCoreAsync(identity, offset, length, sink, cancellationToken, null);
+    internal Task HydrateTimedAsync(PlaceholderIdentity identity, long offset, long length, IPlaceholderTransferSink sink, CancellationToken cancellationToken, HydrationTiming timing) =>
+        HydrateCoreAsync(identity, offset, length, sink, cancellationToken, timing);
+    private async Task HydrateCoreAsync(PlaceholderIdentity identity, long offset, long length, IPlaceholderTransferSink sink, CancellationToken cancellationToken, HydrationTiming? timing)
     {
         var completed = false;
         var stage = HydrationStage.Context;
@@ -90,11 +94,12 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             if (identity.Channel != channel || identity.SourceAlias != source.Alias || identity.Origin != source.Origin.GetLeftPart(UriPartial.Authority)
                 || identity.Length > maximumFileBytes || offset < 0 || length < 0 || offset > identity.Length || length > identity.Length - offset || offset % 4096 != 0 || (length % 4096 != 0 && length != identity.Length - offset))
                 throw new TransferException("Hydration identity or range is unavailable.");
+            timing?.Enter(HydrationTimingStage.QueueWait);
             await serial.WaitAsync(cancellationToken);
             try {
-                stage = HydrationStage.AuthorizationBefore;
+                stage = HydrationStage.AuthorizationBefore; timing?.Enter(HydrationTimingStage.AuthorizationBefore);
                 var resolved = await Authorize(identity, cancellationToken);
-                stage = HydrationStage.CachePreparation;
+                stage = HydrationStage.CachePreparation; timing?.Enter(HydrationTimingStage.CachePreparation);
                 RequireSafe(root); Owned(root);
                 var quotaLock = Path.Combine(root, ".hydration-cache.lock"); RequireSafe(quotaLock);
                 using var capacityLease = new FileStream(quotaLock, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
@@ -104,27 +109,31 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 using var held = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
                 var file = Path.Combine(entry, identity.FileName); RequireSafe(file);
                 if (!File.Exists(file)) {
+                    timing?.SetCacheHit(false);
                     var used = CacheBytes();
                     if (identity.Length > maximumCacheBytes - used) throw new TransferException("Hydration cache capacity exceeded.");
-                    stage = HydrationStage.Download;
+                    stage = HydrationStage.Download; timing?.Enter(HydrationTimingStage.Download);
                     var downloaded = await source.DownloadAsync(resolved.Spec, entry, cancellationToken: cancellationToken);
                     if (Path.GetFullPath(downloaded) != file) throw new TransferException("Hydration source returned an unexpected cache path.");
                 }
-                stage = HydrationStage.CacheVerification;
+                else timing?.SetCacheHit(true);
+                stage = HydrationStage.CacheVerification; timing?.Enter(HydrationTimingStage.CacheVerification);
                 RequireSafe(file);
                 // Windows denies concurrent writes and replacement through verification and publication.
                 await using var input = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.Asynchronous);
                 if (input.Length != identity.Length || !CryptographicOperations.FixedTimeEquals(await SHA256.HashDataAsync(input, cancellationToken), Convert.FromHexString(identity.Sha256)))
                     throw new TransferException("Hydration cache integrity check failed.");
-                stage = HydrationStage.AuthorizationAfter;
+                stage = HydrationStage.AuthorizationAfter; timing?.Enter(HydrationTimingStage.AuthorizationAfter);
                 await Authorize(identity, cancellationToken); // Download/hash may be lengthy; never treat cached bytes as authority.
-                stage = HydrationStage.Transfer;
+                stage = HydrationStage.Transfer; timing?.Enter(HydrationTimingStage.NativeTransfer);
                 await TransferVerifiedRange(input, offset, length, sink, cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
                 // Mark terminal before calling external code; its exception cannot cause a second terminal call.
                 completed = true; await sink.CompleteAsync(cancellationToken);
             } finally { serial.Release(); }
         } catch (Exception e) {
+            // Native failure settlement is observed separately from the failed/queued phase.
+            timing?.Enter(HydrationTimingStage.NativeTransfer);
             var diagnostic = HydrationFailureDiagnostic.FromException(stage, e);
             if (sink is IPlaceholderFailureDiagnostics observer) observer.ObservePrimaryFailure(diagnostic);
             if (!completed) { completed = true; try { await sink.FailAsync(e is OperationCanceledException ? "cancelled" : "unavailable"); } catch { } }

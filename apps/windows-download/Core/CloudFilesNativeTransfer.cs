@@ -40,7 +40,9 @@ internal static class CloudFilesNativeTransfer {
         HydrateForCallbackAsync(coordinator, identity, context, token, new WindowsNative(), TimeSpan.FromSeconds(20));
 
     internal static async Task HydrateForCallbackAsync(PlaceholderHydrationCoordinator coordinator, PlaceholderIdentity identity,
-        CloudFilesOperationContext context, CancellationToken token, ICloudFilesTransferNative native, TimeSpan heartbeatInterval) {
+        CloudFilesOperationContext context, CancellationToken token, ICloudFilesTransferNative native, TimeSpan heartbeatInterval, Action<HydrationTimingSummary>? observeTiming = null, TimeProvider? timingClock = null) {
+        using var timing = observeTiming is null ? null : new HydrationTiming(observeTiming, timingClock);
+        var timingOutcome = HydrationTimingOutcome.Failed;
         AssertAbi();
         // Empty FETCH_DATA requests are deliberately unsupported: no invented zero-byte native completion.
         if (context.FileSize != identity.Length || context.RequiredOffset < 0 || context.RequiredLength <= 0
@@ -53,14 +55,16 @@ internal static class CloudFilesNativeTransfer {
         using var sink = new Sink(context, native, token, heartbeatInterval);
         try {
             sink.StartProgress();
-            await coordinator.HydrateAsync(identity, context.RequiredOffset, context.RequiredLength, sink, sink.Token);
+            if (timing is null) await coordinator.HydrateAsync(identity, context.RequiredOffset, context.RequiredLength, sink, sink.Token);
+            else await coordinator.HydrateTimedAsync(identity, context.RequiredOffset, context.RequiredLength, sink, sink.Token, timing);
+            timingOutcome = HydrationTimingOutcome.Completed;
         } catch (Exception error) {
             sink.ObservePrimaryFailure(HydrationFailureDiagnostic.FromException(HydrationStage.Context, error));
             await sink.FailAsync(token.IsCancellationRequested ? "cancelled" : "unavailable");
-            if (sink.Committed) return;
-            if (token.IsCancellationRequested) throw new OperationCanceledException(token);
+            if (sink.Committed) { timingOutcome = HydrationTimingOutcome.Completed; return; }
+            if (token.IsCancellationRequested) { timingOutcome = HydrationTimingOutcome.Cancelled; throw new OperationCanceledException(token); }
             throw new TransferException("Native hydration unavailable.", sink.PrimaryFailure!);
-        } finally { await sink.StopProgressAsync(); }
+        } finally { await sink.StopProgressAsync(); timing?.Complete(timingOutcome); }
     }
 
     internal static void AssertAbi() {

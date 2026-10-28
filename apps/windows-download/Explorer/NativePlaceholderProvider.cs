@@ -65,7 +65,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                 Notice("Downloading " + identity.FileName);
                 try {
                     await CloudFilesNativeTransfer.HydrateForCallbackAsync(coordinator, identity, context, token,
-                        new TransferNative(value => LastNativeTransferDiagnostic = value), TimeSpan.FromSeconds(20));
+                        new TransferNative(value => LastNativeTransferDiagnostic = value), TimeSpan.FromSeconds(20), summary => Notice(summary.ActivityText));
                 } catch (TransferException error) when (error.HydrationFailure is { } diagnostic) {
                     Notice(diagnostic.ActivityText); // Bounded enums/statuses only, before the callback's generic WorkFailed notice.
                     throw;
