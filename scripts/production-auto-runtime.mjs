@@ -133,7 +133,10 @@ function assetVerifierEntries(ledger) {
   return ledger.assets.map(row => ({ path: row.path, size: row.size, sha256: row.sha256, contentType: row.mime }));
 }
 function parseLedger(snapshot, app, workerName, accountId) {
-  const module = snapshot[app].modern.modules?.find(row => row.name === '__ops_release_ledger.json');
+  const state = snapshot?.[app];
+  const activeId = activeVersion(state);
+  need(activeId === state.version?.id && state.modern?.id === activeId, 'runtime_active_ledger_version_mismatch');
+  const module = state.modern.modules?.find(row => row.name === '__ops_release_ledger.json');
   need(module && typeof module.content_base64 === 'string' && module.content_base64.length <= 12 * 1024 * 1024, 'runtime_active_ledger_missing');
   const bytes = Buffer.from(module.content_base64, 'base64'); need(bytes.length <= 8 * 1024 * 1024 && bytes.toString('base64') === module.content_base64);
   let ledger; try { ledger = JSON.parse(bytes.toString('utf8')); } catch { need(false, 'runtime_active_ledger_invalid'); }
@@ -296,7 +299,6 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       ensureProvider();
       const snapshot = (await currentCapture()).raw;
       previousLedger = parseLedger(snapshot, app, workerName, accountId);
-      need(previousLedger.parentVersionId === snapshot[app].version.id, 'runtime_active_ledger_parent_mismatch');
       return previousLedger;
     },
     readOldAssets: async ({ ledger }) => {
