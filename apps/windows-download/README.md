@@ -92,6 +92,16 @@ baseline-first pair does not establish a general speedup. Cold rehydration of
 the smaller photo still took 8.802 versus 8.161 seconds. These source successors
 have not been published as a new installer; the shared download remains 0.5.10.
 
+Commit `7afc01ea` adds bounded attribute-change hints to wake the frozen inventory
+scan, retaining the two-second fallback, fixed manifest and two-worker limit.
+Windows CI `40747907653` passed. A generated-data native comparison with two
+workers in both variants measured first Downloading callback at 1,724 ms with
+f82 versus 126 ms with 7afc, and batch completion at 1,873 versus 257 ms.
+Both passed full pin/cache hashes before reads, Free/cache removal, drain and
+exact unregister checks. These timings measure provider callbacks for generated
+data; they do not establish real-photo transfer speed or Explorer rendering time.
+This successor also remains unpublished.
+
 Actual installed tray close/quit/reconnect, full uninstall and legacy sidebar
 cleanup, logon startup, authenticated update replacement, and current laptop
 acceptance remain to be completed or rechecked against the intended release.
