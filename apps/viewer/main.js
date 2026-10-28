@@ -688,7 +688,12 @@ async function createShareLink() {
 
 function populateProjectSwitcher(models, { queryKey = 'project' } = {}) {
   if (!dom.projectSwitcher) return;
-  dom.projectSwitcher.innerHTML = models.map((m) => `<option value="${m.id}">${m.title}</option>`).join('');
+  dom.projectSwitcher.replaceChildren(...models.map((m) => {
+    const option = document.createElement('option');
+    option.value = m.id;
+    option.textContent = m.title;
+    return option;
+  }));
   dom.projectSwitcher.style.display = models.length > 1 ? '' : 'none';
   dom.projectSwitcher.addEventListener('change', () => {
     const url = new URL(location.href);

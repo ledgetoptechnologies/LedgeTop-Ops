@@ -70,6 +70,7 @@ function sharedViewerConfig(project, share) {
 
 // ── Admin: create / list / revoke share links for a project ──────────────
 router.post('/api/models/:id/share-links', requireAdmin, async (req, res) => {
+  if (!req.is('application/json') || !req.body || Array.isArray(req.body)) return res.status(415).json({ error: 'JSON body required' });
   const project = store.getById(req.params.id);
   if (!project || !project.available) return res.status(404).json({ error: 'model not found' });
 

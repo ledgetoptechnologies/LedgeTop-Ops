@@ -65,7 +65,7 @@ function catalog() {
     displayUnits: 'imperial',
     tasks: [
       { id: 'task-one', displayName: 'Published task one', modelId: 'model-one', modelTitle: 'Published task one' },
-      { id: 'task-two', displayName: 'Published task two', modelId: 'model-two', modelTitle: 'Published task two' },
+      { id: 'task-two', displayName: '<img src=x onerror="window.__taskNameExecuted=true">', modelId: 'model-two', modelTitle: 'Published task two' },
     ],
     nextCursor: null,
   };
@@ -351,6 +351,8 @@ async function verifyPublicShare(devTools, origin, viewport) {
     }
     await waitFor(client, `new URL(location.href).searchParams.get('task') === 'task-one'`, `${viewport.name}: recovered task URL was not canonicalized`);
     await waitFor(client, `document.querySelector('#brand-project')?.textContent.includes('Published task one')`, `${viewport.name}: recovered task config did not load`);
+    assert.deepEqual(await client.evaluate(`({title:document.querySelector('#project-switcher option[value="task-two"]')?.textContent,executed:window.__taskNameExecuted===true})`),
+      { title: '<img src=x onerror="window.__taskNameExecuted=true">', executed: false }, `${viewport.name}: task name was parsed as HTML`);
     assert.equal(await client.evaluate(`getComputedStyle(document.querySelector('#admin-controls')).display`), 'none', `${viewport.name}: public project exposed admin controls`);
     await client.evaluate(`(() => { const select=document.querySelector('#project-switcher'); select.value='task-two'; select.dispatchEvent(new Event('change',{bubbles:true})); return true })()`);
     await waitFor(client, `new URL(location.href).searchParams.get('task') === 'task-two' && document.querySelector('#project-switcher')?.value === 'task-two'`, `${viewport.name}: task switch did not survive navigation`);

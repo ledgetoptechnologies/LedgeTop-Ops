@@ -77,7 +77,22 @@ async function isAuthorizedForProject(req, projectId) {
   }
   if (payload.viewerProjectId !== projectId) return false;
   const legacyShare = shareStore.getById(payload.shareId);
-  return shareStore.isLive(legacyShare) && legacyShare.viewerProjectId === projectId;
+  if (!shareStore.isLive(legacyShare) || legacyShare.viewerProjectId !== projectId || !revisionMatches(legacyShare,payload)) return false;
+  req.legacyShare = legacyShare;
+  return true;
+}
+
+function legacyAssetAllowed(project, share, rootKey, relPath) {
+  const requested = String(relPath).replaceAll('\\', '/');
+  if (!requested || requested.split('/').some((part) => !part || part === '.' || part === '..')) return false;
+  return Object.entries(project.relAssets || {}).some(([kind, entry]) => {
+    if (!entry || entry.root !== rootKey || !assetAllowed(share, kind)) return false;
+    const listed = String(entry.rel || '').replaceAll('\\', '/');
+    if (requested === listed) return true;
+    if (!['tiles', 'ept'].includes(kind)) return false;
+    const directory = path.posix.dirname(listed);
+    return directory !== '.' && requested.startsWith(`${directory}/`);
+  });
 }
 
 function safeExistingFile(root, relPath) {
@@ -198,11 +213,12 @@ async function pathTokenAuthorization(req, projectId) {
       return allowed ? { model, share, review: false, cameras: share.permissions?.cameras !== false, download: share.permissions?.download === true } : false;
     }
     const share = shareStore.getById(payload.shareId);
-    return shareStore.isLive(share) && share.viewerProjectId === projectId ? { model: null, review: false, cameras: share.permissions?.cameras !== false } : false;
+    return shareStore.isLive(share) && share.viewerProjectId === projectId && revisionMatches(share,payload)
+      ? { model: null, legacyShare: share, review: false, cameras: share.permissions?.cameras !== false } : false;
   }
   if (payload.kind === 'project-share-asset' && processingRepository) {
     const share = canonicalRepository.getProjectShare(payload.shareId);
-    const selected = share && processingRepository.getActivePublishedProjectTask(share.projectId, payload.taskId);
+    const selected = share && processingRepository.getActivePublishedProjectTask(share.projectId, payload.taskId, { strictPublished: true });
     const model = selected ? canonicalRepository.getModel(selected.modelId) : null;
     const allowed = canonicalRepository.projectShareLive(share)
       && share.projectId === payload.projectId
@@ -235,7 +251,7 @@ function xAccelLocation(abs) {
   return null;
 }
 
-async function sendAsset(req, res, authorizedModel = null, { review = false, publicOnly = false, cameras = true, share = req.publicShare } = {}) {
+async function sendAsset(req, res, authorizedModel = null, { review = false, publicOnly = false, cameras = true, share = req.publicShare, legacyShare = req.legacyShare } = {}) {
   const resolved = authorizedModel
     ? { project: authorizedModel, rootPath: canonicalAssetRoot(authorizedModel, req.params.root) }
     : resolveProject(req.params.id, req.params.root);
@@ -244,6 +260,7 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
   if (!rootPath) return res.status(404).json({ error: 'unknown asset root' });
 
   const rel = req.params[0] || '';
+  if (legacyShare && !legacyAssetAllowed(project, legacyShare, req.params.root, rel)) return res.status(403).json({ error: 'not authorized' });
   const publishedAsset = project.activeVersion ? publishedAssetMatch(project, req.params.root, rel, { review, publicOnly }) : null;
   if (project.activeVersion && !publishedAsset) {
     return res.status(404).json({ error: 'asset not found' });
@@ -261,6 +278,10 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
   // intermediary or browser cache from serving a previously authorized URL
   // after its session/share has expired or been revoked.
   if(share){const current=canonicalRepository.getPublicShare(share.id);if(!canonicalRepository.publicShareLive(current)||!revisionMatches(current,{shareRevision:share.authorizationRevision})||!assetAllowed(current,publishedAsset?.kind))return res.status(403).json({error:'not authorized'});}
+  if (legacyShare) {
+    const current = shareStore.getById(legacyShare.id);
+    if (!shareStore.isLive(current) || !revisionMatches(current,{shareRevision:legacyShare.authorizationRevision}) || !legacyAssetAllowed(project,current,req.params.root,rel)) return res.status(403).json({error:'not authorized'});
+  }
   res.setHeader('Cache-Control', 'private, no-store');
 
   const accelerated = xAccelLocation(abs);
@@ -292,7 +313,7 @@ router.get('/session-assets/:token/:id/:root/*', async (req, res, next) => {
   if(canonicalRepository?.rateLimited(`capability-asset:${auth.hashToken(req.params.token)}:${req.ip}:${req.params.id}`,6000,5*60_000))return res.status(429).json({error:'too many asset requests'});
   const authorization = await pathTokenAuthorization(req, req.params.id);
   if (!authorization) return res.status(403).json({ error: 'not authorized' });
-  return sendAsset(req, res, authorization.model, { review: authorization.review, publicOnly: authorization.publicOnly, cameras: authorization.cameras,share:authorization.share }).catch(next);
+  return sendAsset(req, res, authorization.model, { review: authorization.review, publicOnly: authorization.publicOnly, cameras: authorization.cameras,share:authorization.share,legacyShare:authorization.legacyShare }).catch(next);
 });
 
 router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next) => {

@@ -71,6 +71,7 @@ function dropboxAdapter(env: CloudTransferEnv): CloudProviderAdapter {
         if (await input.signalCancelled()) throw new Error("cancelled");
         const length = Math.min(CHUNK_SIZE, input.item.source_size - offset);
         const chunk = await sourceChunk(env, input.item, offset, length);
+        if (await input.signalCancelled()) throw new Error("cancelled");
         try {
           const nextOffset = await client.uploadSessionAppend(sessionId, offset, chunk);
           if (nextOffset > input.item.source_size) throw new Error("source-changed");
@@ -87,6 +88,7 @@ function dropboxAdapter(env: CloudTransferEnv): CloudProviderAdapter {
         }
         await input.saveUploadState({ provider: "dropbox", sessionId }, offset);
       }
+      if (await input.signalCancelled()) throw new Error("cancelled");
       try {
         const result = await client.uploadSessionFinish(
           sessionId, offset, path, new Uint8Array(), input.conflictMode === "autorename",
@@ -110,6 +112,7 @@ function googleAdapter(env: CloudTransferEnv): CloudProviderAdapter {
       const client = new GoogleDriveClient({ accessToken: accessToken(input.credential) });
       const existing = await client.findByTransferId(googleParent(input.destination), input.item.id);
       if (existing) {
+        if (await input.signalCancelled()) throw new Error("cancelled");
         return { status: "completed", providerFileId: existing.id, uploadedBytes: input.item.source_size };
       }
       const saved = await input.loadUploadState();
@@ -128,7 +131,10 @@ function googleAdapter(env: CloudTransferEnv): CloudProviderAdapter {
       let offset = 0;
       if (canResume) {
         const status = await client.queryUploadStatus(sessionUrl, input.item.source_size);
-        if (status.complete) return { status: "completed", providerFileId: status.fileId, uploadedBytes: status.committedBytes };
+        if (status.complete) {
+          if (await input.signalCancelled()) throw new Error("cancelled");
+          return { status: "completed", providerFileId: status.fileId, uploadedBytes: status.committedBytes };
+        }
         offset = status.committedBytes;
       } else {
         await input.saveUploadState({ provider: "google", sessionUrl }, offset);
@@ -137,15 +143,19 @@ function googleAdapter(env: CloudTransferEnv): CloudProviderAdapter {
         if (await input.signalCancelled()) throw new Error("cancelled");
         const length = Math.min(CHUNK_SIZE, input.item.source_size - offset);
         const chunk = await sourceChunk(env, input.item, offset, length);
+        if (await input.signalCancelled()) throw new Error("cancelled");
         const status = await client.uploadChunk(sessionUrl, offset, input.item.source_size, chunk);
         offset = status.committedBytes;
         await input.saveUploadState({ provider: "google", sessionUrl }, offset);
         if (status.complete) {
+          if (await input.signalCancelled()) throw new Error("cancelled");
           return { status: "completed", providerFileId: status.fileId, uploadedBytes: offset };
         }
       }
+      if (await input.signalCancelled()) throw new Error("cancelled");
       const status = await client.queryUploadStatus(sessionUrl, input.item.source_size);
       if (!status.complete) throw new Error("provider-unavailable");
+      if (await input.signalCancelled()) throw new Error("cancelled");
       return { status: "completed", providerFileId: status.fileId, uploadedBytes: status.committedBytes };
     },
   };
