@@ -134,10 +134,20 @@ def output_directory_fd(root, directory):
 def run_process(args, timeout, capture=False, pass_fds=(), cwd=None):
     if STOP.is_set():
         raise JobError("stopped")
+    diagnostics = not capture and os.environ.get("PROXY_GENERATOR_DIAGNOSTICS") == "1"
     process = subprocess.Popen(args, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE if capture else subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+        stderr=subprocess.PIPE if diagnostics else subprocess.DEVNULL,
         start_new_session=True, cwd=cwd, **({"pass_fds": pass_fds} if os.name == "posix" else {}))
     deadline = time.monotonic() + timeout
+    error_tail = bytearray()
+    if diagnostics:
+        def read_stderr():
+            while chunk := process.stderr.read(4096):
+                error_tail.extend(chunk)
+                del error_tail[:-1024]
+        error_reader = threading.Thread(target=read_stderr, daemon=True)
+        error_reader.start()
     try:
         if capture:
             chunks = queue.Queue(maxsize=2)
@@ -172,8 +182,15 @@ def run_process(args, timeout, capture=False, pass_fds=(), cwd=None):
             if STOP.is_set() or time.monotonic() >= deadline:
                 raise JobError("stopped" if STOP.is_set() else "process_timeout")
             try:
-                output, _ = process.communicate(timeout=min(0.5, max(0.01, deadline - time.monotonic())))
+                if diagnostics:
+                    process.wait(timeout=min(0.5, max(0.01, deadline - time.monotonic())))
+                    error_reader.join(timeout=1)
+                    output = None
+                else:
+                    output, _ = process.communicate(timeout=min(0.5, max(0.01, deadline - time.monotonic())))
                 if process.returncode:
+                    if diagnostics:
+                        log("process_diagnostic", stderr=error_tail.decode("utf-8", "replace"))
                     raise JobError("process_failed")
                 return output
             except subprocess.TimeoutExpired:
