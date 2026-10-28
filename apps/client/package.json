@@ -37,7 +37,7 @@
     "typescript": "^5.9.3",
     "vite": "^7.1.7",
     "vitest": "^4.1.0",
-    "wrangler": "^4.118.0"
+    "wrangler": "4.118.0"
   },
   "allowScripts": {
     "esbuild@0.28.1": true,
