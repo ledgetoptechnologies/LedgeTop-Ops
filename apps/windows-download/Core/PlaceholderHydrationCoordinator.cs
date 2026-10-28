@@ -64,7 +64,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             if (!OperatingSystem.IsWindows()) throw new TransferException("Verified cache reclamation requires Windows.");
             // DELETE access binds deletion to this verified file handle. Writes/rename/replacement are
             // excluded through hashing and setting delete disposition; no hash-close-path-delete race.
-            using var handle = CacheNative.CreateFileW(file, 0x80010000, 1, 0, 3, 0x40200000, 0);
+            using var handle = CacheNative.CreateFileW(NativeCacheFilePath(file), 0x80010000, 1, 0, 3, 0x40200000, 0);
             if (handle.IsInvalid) throw new IOException("Verified cache file could not be exclusively inspected.");
             await using (var input = new FileStream(handle, FileAccess.Read, 65536, isAsync: true)) {
                 if (input.Length != identity.Length || !CryptographicOperations.FixedTimeEquals(
@@ -207,6 +207,17 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool SetFileInformationByHandle(SafeFileHandle file, int kind, ref byte disposition, uint size);
+    }
+    // Managed file APIs already support the long owned cache hierarchy. The installed apphost need
+    // not opt into process-wide Win32 long paths; give this exact native open the same DOS path.
+    // This is not an admission path: callers have already checked ownership, no-reparse ancestry,
+    // source/principal, cache keys and leases. Never accept UNC, device namespaces or normalization.
+    internal static string NativeCacheFilePath(string path)
+    {
+        if (path.Length < 3 || !char.IsAsciiLetter(path[0]) || path[1] != ':' || path[2] != '\\' ||
+            Path.GetFullPath(path) != path)
+            throw new TransferException("A canonical local cache path is required.");
+        return @"\\?\" + path;
     }
     private static void RequireSafe(string path)
     {

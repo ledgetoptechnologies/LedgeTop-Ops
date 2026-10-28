@@ -55,6 +55,11 @@ jobs:
         run: dotnet build Tests/WindowsDownload.Tests.csproj --configuration Release -p:RestoreConfigFile="$env:WINDOWS_SDK_CONFIG"
       - name: Verify transfers against synthetic HTTP handlers and temporary files
         run: dotnet run --project Tests/WindowsDownload.Tests.csproj --configuration Release --no-build
+      - name: Verify owned cache eviction through the emitted apphost
+        run: |
+          $env:DOTNET_ROOT = Split-Path -Parent (Get-Command dotnet).Source
+          & ./Tests/bin/Release/net10.0/LedgeTop.WindowsDownload.Tests.exe --cache-reclamation-only
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build the Windows desktop acceptance harness
         run: dotnet build AppTests/WindowsDownload.App.Tests.csproj --configuration Release -p:RestoreConfigFile="$env:WINDOWS_SDK_CONFIG"
       - name: Verify identity changes, queue controls and rendered desktop screens

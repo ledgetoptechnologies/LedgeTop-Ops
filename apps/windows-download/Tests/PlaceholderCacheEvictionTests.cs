@@ -14,7 +14,8 @@ internal static class PlaceholderCacheEvictionTests
         ("cache reclamation honors capacity entry and file sharing leases", Leases),
         ("cache reclamation waits active sink and cancels without deleting its cache", ActiveSink),
         ("cache reclamation dispatcher stop joins cancelled eviction and hydration", Stop),
-        ("cache reclamation connection owner forwards only active scoped requests", Owner)
+        ("cache reclamation connection owner forwards only active scoped requests", Owner),
+        ("cache reclamation handles installed-profile-length paths without weakening ownership", LongPaths)
     ];
     private static void Check(bool value) { if (!value) throw new InvalidOperationException("Cache reclamation assertion failed."); }
     private static async Task Refuse(Func<Task> action) {
@@ -34,6 +35,22 @@ internal static class PlaceholderCacheEvictionTests
         Check(!File.Exists(f.File) && f.Source.Calls == calls && f.Source.Downloads == 1);
         await f.Coordinator.EvictVerifiedCacheAsync(Identity);
         Check(f.Source.Calls == calls && Directory.GetFiles(f.Root, "*", SearchOption.AllDirectories).Length == files - 1);
+        await f.Hydrate(); Check(File.ReadAllBytes(f.File).SequenceEqual(Bytes) && f.Source.Downloads == 2);
+    }
+    private static async Task LongPaths()
+    {
+        Check(PlaceholderHydrationCoordinator.NativeCacheFilePath(@"C:\owned\cache\file.bin") == @"\\?\C:\owned\cache\file.bin");
+        foreach (var invalid in new[] { "relative.bin", @"\rooted.bin", @"C:relative.bin", @"\\server\share\file.bin",
+            @"\\?\C:\owned\file.bin", @"\\.\C:\owned\file.bin", @"C:\owned\..\file.bin", "C:/owned/file.bin" }) {
+            var refused = false;
+            try { _ = PlaceholderHydrationCoordinator.NativeCacheFilePath(invalid); } catch (TransferException) { refused = true; }
+            Check(refused);
+        }
+        using var f = new Fixture(longPath: true); await f.Hydrate();
+        Check(f.File.Length > 382 && File.ReadAllBytes(f.File).SequenceEqual(Bytes));
+        var calls = f.Source.Calls;
+        await f.Coordinator.EvictVerifiedCacheAsync(Identity);
+        Check(!File.Exists(f.File) && f.Source.Calls == calls);
         await f.Hydrate(); Check(File.ReadAllBytes(f.File).SequenceEqual(Bytes) && f.Source.Downloads == 2);
     }
     private static async Task Missing()
@@ -164,7 +181,10 @@ internal static class PlaceholderCacheEvictionTests
         internal string CacheRoot => Path.Combine(Root, "verified-hydration-v1");
         internal string Entry => Path.Combine(CacheRoot, Identity.ScopeKey, Identity.CacheKey);
         internal string File => Path.Combine(Entry, Identity.FileName);
-        internal Fixture() { Directory.CreateDirectory(Root); Coordinator = new(Source, "pilot", Root, expectedPrincipal: Principal); }
+        internal Fixture(bool longPath = false) {
+            if (longPath) Root = Path.Combine(Root, new string('p', 90), new string('q', 90));
+            Directory.CreateDirectory(Root); Coordinator = new(Source, "pilot", Root, expectedPrincipal: Principal);
+        }
         internal Task Hydrate() => Coordinator.HydrateAsync(Identity, 0, Bytes.Length, new Sink());
         public void Dispose() => Coordinator.Dispose(); // Retain only synthetic evidence within the one authorized task artifact directory.
         private static string CreateFixtureRoot()
