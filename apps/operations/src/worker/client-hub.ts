@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { listClientBusinessActivity } from "./client-business-activity";
 import { listClientAuditTimeline, parseClientAuditTimelineFilters } from "./client-audit-timeline";
-import { sqlScope } from "./acl";
+import { sqlScopes } from "./acl";
 import { clientHubDetailPath, clientHubRouteKind, findClientHubRoot, listClientHubRoots,
   isClientHubRootNamespace, isClientHubSource, type ClientHubKind, type ClientHubReviewAuthority, type ClientHubRoot } from "./client-hub-directory";
 import { isAlphaPublicId, isBusinessProjectionSource, resolveClientHubSourceRoot,
@@ -74,14 +74,11 @@ async function currentClientHubReviewAuthority(request: Request, env: Env, princ
 }
 
 async function permissions(env: Env, principal: StaffPrincipal): Promise<ClientHubPermissions> {
-  const [team, operations, deliveryAudit, deliveryCreate, viewerView, viewerManage] = await Promise.all([
-    sqlScope(env, principal, "team.view"),
-    sqlScope(env, principal, "operations.manage"),
-    sqlScope(env, principal, "delivery.share.audit"),
-    sqlScope(env, principal, "delivery.share.create"),
-    sqlScope(env, principal, "viewer.view"),
-    sqlScope(env, principal, "viewer.manage"),
-  ]);
+  const scopes = await sqlScopes(env, principal, ["team.view", "operations.manage", "delivery.share.audit",
+    "delivery.share.create", "viewer.view", "viewer.manage"] as const);
+  const team = scopes["team.view"], operations = scopes["operations.manage"],
+    deliveryAudit = scopes["delivery.share.audit"], deliveryCreate = scopes["delivery.share.create"],
+    viewerView = scopes["viewer.view"], viewerManage = scopes["viewer.manage"];
   const global = (scope: typeof team) => scope.global && !scope.deniedGlobal;
   return {
     directory: global(team),
