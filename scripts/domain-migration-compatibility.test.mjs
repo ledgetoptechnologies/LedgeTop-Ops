@@ -85,8 +85,10 @@ test('historical fragment links preserve opaque credentials before any cookie ex
   const navigate = [];
   const path = '/s/synthetic-public-id', query='?folder=opaque_ref&view=list', fragment='#Synthetic_secret-123';
   assert.equal(handoffLegacyPublicShare({hostname:'client.ledgetopdroneservices.com',pathname:path,search:query,hash:fragment},url=>navigate.push(url)),true);
-  assert.deepEqual(navigate,[`${OLD_PUBLIC}${path}${query}${fragment}`]);
-  assert.equal(requestHostAllowed(navigate[0],finalPortal),true);
+  assert.deepEqual(navigate,[`https://delivery.ledgetop.app${path}${query}${fragment}`]);
+  assert.equal(requestHostAllowed(navigate[0],{...finalPortal,
+    EXPECTED_HOST:'delivery.ledgetop.app',PUBLIC_BASE_URL:'https://delivery.ledgetop.app',
+    PUBLIC_SHARE_ORIGIN:'https://delivery.ledgetop.app'}),true);
   const replaced=[];
   assert.deepEqual(consumeDeliveryRoute({pathname:path,search:query,hash:fragment},{state:null,replaceState:(...args)=>replaced.push(args)}),{publicId:'synthetic-public-id',secret:'Synthetic_secret-123'});
   assert.deepEqual(replaced,[[null,'',`${path}${query}`]]);
