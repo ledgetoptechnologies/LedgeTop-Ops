@@ -47,6 +47,18 @@ public sealed class Downloader : IDisposable
     private readonly CloudflareAccessSession? accessSession;
     private readonly TimeSpan networkInactivityTimeout;
     private sealed record State(int Version, string Descriptor, long Length, string ETag, string Sha256);
+    // Exact serialized state/marker growth for the existing bounded downloader format. The
+    // descriptor is always 64 lowercase hex; its value cannot affect its serialized length.
+    internal static long HydrationStateGrowthBudget(DownloadSpec spec) => HydrationStateGrowthBudget(spec.Length, spec.ETag, spec.Sha256);
+    internal static long HydrationStateGrowthBudget(long length, string etag, string sha256)
+    {
+        if (length < 0 || etag is null || etag.Length > 512 ||
+            !EntityTagHeaderValue.TryParse(etag, out var tag) || tag.IsWeak || tag.Tag == "*" || tag.ToString() != etag ||
+            sha256 is null || !Regex.IsMatch(sha256, "\\A[0-9a-fA-F]{64}\\z"))
+            throw new TransferException("Hydration storage metadata is invalid.");
+        return checked(JsonSerializer.SerializeToUtf8Bytes(new State(1, new string('a', 64), length,
+            etag, sha256.ToLowerInvariant())).LongLength + Encoding.UTF8.GetByteCount(OwnerMarker));
+    }
 
     public Downloader(IEnumerable<Uri> allowedOrigins, long maximumBytes = 1L << 40, TimeSpan? networkInactivityTimeout = null)
         : this(new HttpClientHandler {

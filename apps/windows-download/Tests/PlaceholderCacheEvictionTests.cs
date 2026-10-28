@@ -96,8 +96,13 @@ internal static class PlaceholderCacheEvictionTests
     {
         using var f = new Fixture(); await f.Hydrate(); var calls = f.Source.Calls;
         foreach (var path in new[] { Path.Combine(f.CacheRoot, ".hydration-cache.lock"), Path.Combine(f.Entry, ".hydration.lock"), f.File }) {
-            using (var held = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
-                await Refuse(() => f.Coordinator.EvictVerifiedCacheAsync(Identity));
+            using (var held = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None)) {
+                if (Path.GetFileName(path) == ".hydration.lock") {
+                    using var cancel = new CancellationTokenSource();
+                    var waiting = f.Coordinator.EvictVerifiedCacheAsync(Identity, cancel.Token);
+                    Check(!waiting.IsCompleted); cancel.Cancel(); await Cancelled(waiting);
+                } else await Refuse(() => f.Coordinator.EvictVerifiedCacheAsync(Identity));
+            }
             Check(File.Exists(f.File) && f.Source.Calls == calls);
         }
         await f.Coordinator.EvictVerifiedCacheAsync(Identity); Check(!File.Exists(f.File));

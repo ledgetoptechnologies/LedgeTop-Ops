@@ -5,6 +5,7 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using LedgeTop.WindowsDownload;
 
+if (args.Length > 1 && args[0] == "--hydration-concurrency-only") { Environment.ExitCode = 2; return; }
 if (args.Length > 0 && args[0] == "--synthetic-access-child-v1") {
     Environment.ExitCode = await AccessSessionTests.RunChildAsync(args);
     return;
@@ -40,7 +41,8 @@ var tests = new (string Name, Func<Task> Run)[] {
     .Concat(PlaceholderHydrationTests.Groups).Concat(CloudFilesProbeTests.Groups)
     .Concat(CloudFilesNativeTransferTests.Groups).Concat(CloudFilesCallbackTests.Groups).Concat(DownloaderInactivityTests.Groups)
     .Concat(CloudFilesConnectionTests.Groups).Concat(ExplorerDemoSourceTests.Groups).Concat(WindowsAppReleaseClientTests.Groups)
-    .Concat(PlaceholderCacheEvictionTests.Groups).Concat(HydrationTimingTests.Groups).ToArray();
+    .Concat(PlaceholderCacheEvictionTests.Groups).Concat(HydrationTimingTests.Groups).Concat(HydrationConcurrencyTests.Groups).ToArray();
+if (args.Length == 1 && args[0] == "--hydration-concurrency-only") tests = HydrationConcurrencyTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--company-hydration-authority-only")
     tests = QueuedDownloadSourceTests.Groups.Where(test => test.Name.StartsWith("Company hydration", StringComparison.Ordinal)).ToArray();
 if (args.Length == 1 && args[0] == "--hydration-timing-only") tests = HydrationTimingTests.Groups.ToArray();

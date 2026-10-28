@@ -14,7 +14,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     private readonly HashSet<string> directories = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> preservedLocalFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> reclaimedCache = new(StringComparer.OrdinalIgnoreCase);
-    private readonly FailedAvailabilityIntents failedAvailability;
+    private readonly BoundedAvailabilityWorkers availabilityWorkers;
     private readonly CancellationTokenSource stopping = new();
     private Task? pinWorker;
     private Task? closing;
@@ -59,7 +59,6 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
             foreach (var parent in Parents(directory)) AddDirectory(parent);
         }
         if (directories.Any(files.ContainsKey)) throw new TransferException("A provider path cannot be both a file and a directory.");
-        failedAvailability = new(files.Keys);
         connection = new(new NativeConnection(root), key => new CloudFilesCallbackDispatcher(source, channel, principal, key,
             cacheDirectory, async (coordinator, identity, context, token) => {
                 Notice("Downloading " + identity.FileName);
@@ -72,6 +71,13 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                 }
                 Notice("Available locally: " + identity.FileName);
             }), notice => Notice("Provider: " + notice), normalizeNativeRanges: true);
+        availabilityWorkers = new(files.Keys, InspectAvailability, async (relative, intent, token) => {
+            if (intent == AvailabilityIntent.Keep) {
+                try { HydrateCore(relative); }
+                catch (Exception error) { throw LocalAvailabilityException.FromException(LocalAvailabilityStage.Hydrate, error); }
+                Notice("Kept on this device: " + Path.GetFileName(relative));
+            } else await FreeSpaceCoreAsync(relative, token).ConfigureAwait(false);
+        }, error => Notice(LocalAvailabilityException.FromException(LocalAvailabilityStage.Inspect, error).ActivityText));
     }
 
     public async Task ConnectAndPopulateAsync()
@@ -214,39 +220,18 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         } finally { Marshal.FreeHGlobal(name); if (opaque != 0) Marshal.FreeHGlobal(opaque); }
     }
 
-    // Reconcile intent after menu actions and at startup. This preview has a bounded fixed manifest,
-    // so a serial periodic scan avoids watcher overflow, unbounded tasks and hydration on the UI thread.
+    // One scanner observes the bounded manifest without waiting for native hydration.
+    // Exactly two tracked workers re-read intent after their per-path availability gate.
     private async Task PinLoopAsync()
     {
         while (!stopping.IsCancellationRequested) {
             foreach (var relative in files.Keys) {
                 if (stopping.IsCancellationRequested) break;
                 if (preservedLocalFiles.Contains(relative)) continue;
-                var intent = AvailabilityIntent.None;
-                var availabilityStage = LocalAvailabilityStage.Inspect;
-                try {
-                    var path = CheckedPath(relative);
-                    var attributes = (uint)PlaceholderVisibility.Run(() => File.GetAttributes(path));
-                    intent = FailedAvailabilityIntents.ObserveAttributes(attributes);
-                    bool reclaimed;
-                    lock (reclaimedCache) {
-                        if ((attributes & 0x100000) == 0) reclaimedCache.Remove(relative);
-                        reclaimed = reclaimedCache.Contains(relative);
-                    }
-                    if (!failedAvailability.ShouldAttempt(relative, intent)) continue;
-                    if (intent == AvailabilityIntent.Keep && (attributes & (0x1000u | 0x40000u | 0x400000u)) != 0) {
-                        availabilityStage = LocalAvailabilityStage.Hydrate;
-                        Hydrate(relative);
-                        Notice("Kept on this device: " + Path.GetFileName(relative));
-                    } else if (intent == AvailabilityIntent.Free && ((attributes & 0x1000) == 0 || !reclaimed)) {
-                        // Shell may already have dehydrated the placeholder before our scan.
-                        // Unpin intent still needs this provider's private cache reclaimed once.
-                        await FreeSpaceAsync(relative, stopping.Token);
-                    }
-                } catch (OperationCanceledException) when (stopping.IsCancellationRequested) { break; }
+                try { availabilityWorkers.Observe(relative, InspectAvailability(relative)); }
+                catch (OperationCanceledException) when (stopping.IsCancellationRequested) { break; }
                 catch (Exception error) when (error is IOException or UnauthorizedAccessException or TransferException) {
-                    if (intent is AvailabilityIntent.Keep or AvailabilityIntent.Free) failedAvailability.MarkFailed(relative, intent);
-                    Notice(LocalAvailabilityException.FromException(availabilityStage, error).ActivityText);
+                    Notice(LocalAvailabilityException.FromException(LocalAvailabilityStage.Inspect, error).ActivityText);
                 }
             }
             try { await Task.Delay(TimeSpan.FromSeconds(2), stopping.Token); }
@@ -254,15 +239,32 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         }
     }
 
-    /// <summary>Used by acceptance tests and explicit UI actions; pin intent alone is never an availability receipt.</summary>
-    public void KeepOnDevice(string relative)
+    private AvailabilityObservation InspectAvailability(string relative)
     {
-        var path = CheckedPath(relative);
-        WithHandle(path, handle => { Check(Native.CfSetPinState(handle, 1, 0, 0), "Pin sample"); });
-        Hydrate(relative);
+        var attributes = (uint)PlaceholderVisibility.Run(() => File.GetAttributes(CheckedPath(relative)));
+        var intent = FailedAvailabilityIntents.ObserveAttributes(attributes);
+        bool reclaimed;
+        lock (reclaimedCache) {
+            if ((attributes & 0x100000) == 0) reclaimedCache.Remove(relative);
+            reclaimed = reclaimedCache.Contains(relative);
+        }
+        return new(intent, intent == AvailabilityIntent.Keep ? (attributes & (0x1000u | 0x40000u | 0x400000u)) != 0
+            : intent == AvailabilityIntent.Free && ((attributes & 0x1000) == 0 || !reclaimed));
     }
 
-    public void Hydrate(string relative)
+    /// <summary>Used by acceptance tests and explicit UI actions; pin intent alone is never an availability receipt.</summary>
+    public void KeepOnDevice(string relative) => RunAvailabilityAsync(relative, _ => {
+        var path = CheckedPath(relative);
+        WithHandle(path, handle => { Check(Native.CfSetPinState(handle, 1, 0, 0), "Pin sample"); });
+        HydrateCore(relative);
+        return Task.CompletedTask;
+    }).GetAwaiter().GetResult();
+
+    public void Hydrate(string relative) => RunAvailabilityAsync(relative, _ => {
+        HydrateCore(relative); return Task.CompletedTask;
+    }).GetAwaiter().GetResult();
+
+    private void HydrateCore(string relative)
     {
         var path = CheckedPath(relative);
         WithHandle(path, handle => Check(Native.CfHydratePlaceholder(handle, 0, -1, 0, 0), "Hydrate sample"));
@@ -282,19 +284,22 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     public void FreeSpace(string relative) => FreeSpaceAsync(relative).GetAwaiter().GetResult();
 
     /// <summary>Does not block a UI caller. Online-only receipt includes successful verified-cache reclamation.</summary>
-    public Task FreeSpaceAsync(string relative, CancellationToken cancellationToken = default)
+    public Task FreeSpaceAsync(string relative, CancellationToken cancellationToken = default) =>
+        RunAvailabilityAsync(relative, token => FreeSpaceCoreAsync(relative, token), cancellationToken);
+
+    private Task RunAvailabilityAsync(string relative, Func<CancellationToken, Task> operation, CancellationToken cancellationToken = default)
     {
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (availabilityGate) {
             if (availabilityStopping || availabilityWork.Count >= 1000) throw new IOException("Availability changes are stopping or at capacity.");
             availabilityWork.Add(completion.Task);
         }
-        _ = RunFreeSpaceAsync(relative, cancellationToken, completion);
+        _ = CompleteAvailabilityAsync(relative, operation, cancellationToken, completion);
         return completion.Task;
     }
-    private async Task RunFreeSpaceAsync(string relative, CancellationToken cancellationToken, TaskCompletionSource completion)
+    private async Task CompleteAvailabilityAsync(string relative, Func<CancellationToken, Task> operation, CancellationToken cancellationToken, TaskCompletionSource completion)
     {
-        try { await FreeSpaceCoreAsync(relative, cancellationToken).ConfigureAwait(false); completion.TrySetResult(); }
+        try { await availabilityWorkers.RunExclusiveAsync(relative, operation, cancellationToken).ConfigureAwait(false); completion.TrySetResult(); }
         catch (OperationCanceledException error) { completion.TrySetCanceled(error.CancellationToken); }
         catch (Exception error) { completion.TrySetException(error); }
         finally { lock (availabilityGate) availabilityWork.Remove(completion.Task); }
@@ -364,7 +369,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         TaskCompletionSource completion;
         lock (availabilityGate) {
             if (closing is not null) return new(closing);
-            availabilityStopping = true;
+            availabilityStopping = true; availabilityWorkers.StopAdmission();
             completion = new(TaskCreationOptions.RunContinuationsAsynchronously); closing = completion.Task;
         }
         _ = CompleteStopAsync(completion);
@@ -377,13 +382,14 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     }
     private async Task StopAsync()
     {
-        stopping.Cancel();
-        // Disconnect first cancels managed hydrations and drains callbacks. A pin-worker blocked
-        // in explicit hydration then observes the platform failure rather than hanging shutdown.
-        await connection.StopAsync();
-        Task[] availability; lock (availabilityGate) availability = availabilityWork.ToArray();
-        await Task.WhenAll(availability.Select(async task => { try { await task.ConfigureAwait(false); } catch { } }));
-        if (pinWorker is not null) await pinWorker;
+        Exception? cancellationFailure = null;
+        try { stopping.Cancel(); } catch (Exception error) { cancellationFailure = error; }
+        await availabilityWorkers.StopAndDrainAsync(() => connection.StopAsync(), async () => {
+            Task[] availability; lock (availabilityGate) availability = availabilityWork.ToArray();
+            await Task.WhenAll(availability.Select(async task => { try { await task.ConfigureAwait(false); } catch { } }));
+            if (pinWorker is not null) await pinWorker.ConfigureAwait(false);
+        }).ConfigureAwait(false);
+        if (cancellationFailure is not null) throw new IOException("Provider cancellation notification failed after disconnect and drain.", cancellationFailure);
     }
 
     internal static void AssertAbi()

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
+using System.Text.Json;
 
 namespace LedgeTop.WindowsDownload;
 
@@ -20,14 +21,14 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     private readonly string channel, root;
     private readonly string? principal;
     private readonly long maximumFileBytes, maximumCacheBytes;
-    private readonly SemaphoreSlim serial = new(1, 1);
+    private int disposed;
     private const string Marker = ".verified-hydration-owner";
     private const string Owner = "LedgeTop.VerifiedHydration/1\n";
 
     public PlaceholderHydrationCoordinator(IQueuedDownloadSource source, string channel, string applicationStateRoot,
         long maximumFileBytes = 64L << 30, long maximumCacheBytes = 128L << 30, string? expectedPrincipal = null)
     {
-        if (channel is not ("pilot" or "stable") || maximumFileBytes < 0 || maximumCacheBytes < maximumFileBytes
+        if (channel is not ("pilot" or "stable") || maximumFileBytes < 0 || maximumCacheBytes < maximumFileBytes || maximumCacheBytes < System.Text.Encoding.UTF8.GetByteCount(Owner)
             || !Path.IsPathFullyQualified(applicationStateRoot) || applicationStateRoot.StartsWith("\\\\", StringComparison.Ordinal))
             throw new TransferException("Hydration configuration is invalid.");
         if (expectedPrincipal is not null && !System.Text.RegularExpressions.Regex.IsMatch(expectedPrincipal, "\\Aodqp1_[a-f0-9]{64}\\z"))
@@ -45,8 +46,9 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         if (principal is null || identity.PrincipalId != principal || identity.Channel != channel || identity.Length > maximumFileBytes)
             throw new TransferException("Cache eviction does not match this provider.");
         ValidateSource(identity);
-        await serial.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        using var admission = await HydrationCacheConcurrency.AcquireAsync(root, identity.ScopeKey + identity.CacheKey, cancellationToken).ConfigureAwait(false);
+        {
             cancellationToken.ThrowIfCancellationRequested(); ValidateSource(identity);
             if (!OwnedExisting(root)) return;
             var scope = Path.Combine(root, identity.ScopeKey);
@@ -57,9 +59,11 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             if (!File.Exists(file)) { if (Directory.Exists(file)) throw new TransferException("Cache entry changed type."); return; }
             // Missing leases are ambiguous, never create locks/directories during offline eviction.
             var quotaLock = Path.Combine(root, ".hydration-cache.lock"); RequireSafe(quotaLock);
-            using var capacityLease = new FileStream(quotaLock, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            var newQuota = Path.Combine(root, ".hydration-quota-v2.lock"); RequireSafe(newQuota);
+            var modernQuota = File.Exists(newQuota);
+            using var capacityLease = new FileStream(quotaLock, FileMode.Open, FileAccess.ReadWrite, modernQuota ? FileShare.ReadWrite : FileShare.None);
             var lockPath = Path.Combine(entry, ".hydration.lock"); RequireSafe(lockPath);
-            using var held = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            using var held = await OpenEntryLeaseAsync(lockPath, FileMode.Open, cancellationToken).ConfigureAwait(false);
             _ = OwnedExisting(root); _ = OwnedExisting(scope); _ = OwnedExisting(entry); RequireSafe(file);
             if (!OperatingSystem.IsWindows()) throw new TransferException("Verified cache reclamation requires Windows.");
             // DELETE access binds deletion to this verified file handle. Writes/rename/replacement are
@@ -75,11 +79,15 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                     throw new TransferException("Cache ownership changed during eviction.");
                 // FILE_DISPOSITION_INFO is one BOOLEAN byte, not a four-byte Win32 BOOL.
                 // https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_disposition_info
-                byte disposition = 1;
-                if (!CacheNative.SetFileInformationByHandle(handle, 4, ref disposition, 1))
-                    throw new IOException("Verified cache deletion was not confirmed.");
+                lock (admission.Quota) {
+                    using var quota = modernQuota ? new FileStream(newQuota, FileMode.Open, FileAccess.ReadWrite, FileShare.None) : null;
+                    RemoveExactStaleReservation(identity); // Offline immutable pins only; no source/auth call.
+                    byte disposition = 1;
+                    if (!CacheNative.SetFileInformationByHandle(handle, 4, ref disposition, 1))
+                        throw new IOException("Verified cache deletion was not confirmed.");
+                }
             }
-        } finally { serial.Release(); }
+        }
     }
     public Task HydrateAsync(PlaceholderIdentity identity, long offset, long length, IPlaceholderTransferSink sink, CancellationToken cancellationToken = default) =>
         HydrateCoreAsync(identity, offset, length, sink, cancellationToken, null);
@@ -95,28 +103,53 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 || identity.Length > maximumFileBytes || offset < 0 || length < 0 || offset > identity.Length || length > identity.Length - offset || offset % 4096 != 0 || (length % 4096 != 0 && length != identity.Length - offset))
                 throw new TransferException("Hydration identity or range is unavailable.");
             timing?.Enter(HydrationTimingStage.QueueWait);
-            await serial.WaitAsync(cancellationToken);
-            try {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+            using var admission = await HydrationCacheConcurrency.AcquireAsync(root, identity.ScopeKey + identity.CacheKey, cancellationToken);
+            {
+                ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
                 stage = HydrationStage.AuthorizationBefore; timing?.Enter(HydrationTimingStage.AuthorizationBefore);
                 var resolved = await Authorize(identity, cancellationToken);
                 stage = HydrationStage.CachePreparation; timing?.Enter(HydrationTimingStage.CachePreparation);
                 RequireSafe(root); Owned(root);
                 var quotaLock = Path.Combine(root, ".hydration-cache.lock"); RequireSafe(quotaLock);
-                using var capacityLease = new FileStream(quotaLock, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-                var scope = Path.Combine(root, identity.ScopeKey); Owned(scope);
-                var entry = Path.Combine(scope, identity.CacheKey); Owned(entry);
+                // Shared only among the new protocol. Any old FileShare.None coordinator is
+                // excluded for the full operation, even while the short quota lock is released.
+                using var capacityLease = new FileStream(quotaLock, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
+                var scope = Path.Combine(root, identity.ScopeKey);
+                var entry = Path.Combine(scope, identity.CacheKey);
+                WithQuota(admission.Quota, () => {
+                    var scopeExists = OwnedExisting(scope); var entryExists = OwnedExisting(entry);
+                    if (!scopeExists || !entryExists) {
+                        var directory = Path.Combine(root, ".hydration-reservations-v2");
+                        var metadata = checked((scopeExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
+                            (entryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
+                            (OwnedExisting(directory) ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)));
+                        RequireCapacity(ReservedBytes(directory), checked(identity.Length + Downloader.HydrationStateGrowthBudget(resolved.Spec) + 1024 + metadata));
+                        Owned(scope); Owned(entry);
+                    }
+                });
                 var lockPath = Path.Combine(entry, ".hydration.lock"); RequireSafe(lockPath);
-                using var held = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                using var held = await OpenEntryLeaseAsync(lockPath, FileMode.OpenOrCreate, cancellationToken);
                 var file = Path.Combine(entry, identity.FileName); RequireSafe(file);
                 if (!File.Exists(file)) {
                     timing?.SetCacheHit(false);
-                    var used = CacheBytes();
-                    if (identity.Length > maximumCacheBytes - used) throw new TransferException("Hydration cache capacity exceeded.");
                     stage = HydrationStage.Download; timing?.Enter(HydrationTimingStage.Download);
-                    var downloaded = await source.DownloadAsync(resolved.Spec, entry, cancellationToken: cancellationToken);
-                    if (Path.GetFullPath(downloaded) != file) throw new TransferException("Hydration source returned an unexpected cache path.");
+                    var reservation = Reserve(admission.Quota, identity, resolved.Spec); Exception? primary = null;
+                    try {
+                        var downloaded = await source.DownloadAsync(resolved.Spec, entry, cancellationToken: cancellationToken);
+                        if (Path.GetFullPath(downloaded) != file) throw new TransferException("Hydration source returned an unexpected cache path.");
+                    } catch (Exception error) { primary = error; throw; }
+                    finally {
+                        // A cleanup failure retains the durable record. Never replace caller
+                        // cancellation or the primary source/integrity diagnostic during unwind.
+                        if (primary is null) reservation.Dispose();
+                        else { try { reservation.Dispose(); } catch { } }
+                    } // Source writes have fully joined; remaining bytes are now measured on disk.
                 }
-                else timing?.SetCacheHit(true);
+                else {
+                    timing?.SetCacheHit(true);
+                    WithQuota(admission.Quota, () => RemoveExactStaleReservation(identity));
+                }
                 stage = HydrationStage.CacheVerification; timing?.Enter(HydrationTimingStage.CacheVerification);
                 RequireSafe(file);
                 // Windows denies concurrent writes and replacement through verification and publication.
@@ -130,7 +163,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 cancellationToken.ThrowIfCancellationRequested();
                 // Mark terminal before calling external code; its exception cannot cause a second terminal call.
                 completed = true; await sink.CompleteAsync(cancellationToken);
-            } finally { serial.Release(); }
+            }
         } catch (Exception e) {
             // Native failure settlement is observed separately from the failed/queued phase.
             timing?.Enter(HydrationTimingStage.NativeTransfer);
@@ -175,6 +208,133 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         if (new[] { Marker, ".hydration.lock", ".hydration-cache.lock" }.Contains(id.FileName, StringComparer.OrdinalIgnoreCase))
             throw new TransferException("A source basename collides with hydration metadata.");
         if (source.Alias != id.SourceAlias || source.Origin.GetLeftPart(UriPartial.Authority) != id.Origin) throw new AccessDeniedException();
+    }
+    private sealed record Reservation(int Version, string Scope, string Entry, long Growth);
+    private static long ReservationGrowth(PlaceholderIdentity identity) => checked(identity.Length +
+        Downloader.HydrationStateGrowthBudget(identity.Length, identity.ETag, identity.Sha256) + 1024);
+    // Caller owns this entry exclusively and holds the appropriate root quota/legacy lease.
+    private void RemoveExactStaleReservation(PlaceholderIdentity identity)
+    {
+        var directory = Path.Combine(root, ".hydration-reservations-v2");
+        if (!OwnedExisting(directory)) return;
+        var path = Path.Combine(directory, identity.ScopeKey + "-" + identity.CacheKey + ".json"); RequireSafe(path);
+        if (!File.Exists(path)) { if (Directory.Exists(path)) throw new TransferException("Hydration reservation changed type."); return; }
+        var old = ReadReservation(path);
+        if (old.Value.Scope != identity.ScopeKey || old.Value.Entry != identity.CacheKey || old.Value.Growth != ReservationGrowth(identity))
+            throw new TransferException("Hydration reservation ownership changed.");
+        DeleteReservation(path, old.Bytes);
+    }
+    private static async Task<FileStream> OpenEntryLeaseAsync(string path, FileMode mode, CancellationToken token)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(TimeSpan.FromMinutes(2));
+        try {
+            while (true) {
+                timeout.Token.ThrowIfCancellationRequested(); RequireSafe(path);
+                try { return new FileStream(path, mode, FileAccess.ReadWrite, FileShare.None); }
+                catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33) {
+                    await Task.Delay(TimeSpan.FromMilliseconds(25), timeout.Token).ConfigureAwait(false);
+                }
+            }
+        } catch (OperationCanceledException) when (!token.IsCancellationRequested) {
+            throw new TransferException("Hydration entry lease timed out.", TransferFailureReason.Timeout);
+        }
+    }
+    private sealed class Release(Action release) : IDisposable
+    {
+        private Action? action = release;
+        public void Dispose() => Interlocked.Exchange(ref action, null)?.Invoke();
+    }
+    private void WithQuota(object gate, Action action)
+    {
+        lock (gate) {
+            RequireSafe(root); _ = OwnedExisting(root);
+            var path = Path.Combine(root, ".hydration-quota-v2.lock"); RequireSafe(path);
+            // Cross-process contention is a conservative failure, never an ignored reservation.
+            using var held = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            action();
+        }
+    }
+    private IDisposable Reserve(object gate, PlaceholderIdentity identity, DownloadSpec spec)
+    {
+        var directory = Path.Combine(root, ".hydration-reservations-v2");
+        var name = identity.ScopeKey + "-" + identity.CacheKey + ".json";
+        var path = Path.Combine(directory, name);
+        // Includes the exact downloader JSON/marker growth plus the enforced maximum new
+        // reservation record length. Partial bytes already counted on disk are NOT discounted.
+        var growth = ReservationGrowth(identity);
+        if (growth != checked(identity.Length + Downloader.HydrationStateGrowthBudget(spec) + 1024))
+            throw new TransferException("Hydration storage metadata changed.");
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(new Reservation(2, identity.ScopeKey, identity.CacheKey, growth));
+        if (bytes.Length > 1024) throw new TransferException("Hydration reservation is outside its storage bound.");
+        WithQuota(gate, () => {
+            var directoryExists = OwnedExisting(directory); RequireSafe(path);
+            RemoveExactStaleReservation(identity);
+            RequireCapacity(ReservedBytes(directory), checked(growth + (directoryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner))));
+            Owned(directory);
+            using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            output.Write(bytes); output.Flush(true);
+        });
+        return new Release(() => WithQuota(gate, () => DeleteReservation(path, bytes)));
+    }
+    private void RequireCapacity(long reserved, long growth)
+    {
+        var used = CacheBytes();
+        if (reserved > maximumCacheBytes || used > maximumCacheBytes - reserved || growth > maximumCacheBytes - reserved - used)
+            throw new TransferException("Hydration cache capacity exceeded.");
+    }
+    private static long ReservedBytes(string directory)
+    {
+        if (!OwnedExisting(directory)) return 0;
+        long reserved = 0; var count = 0;
+        if (Directory.EnumerateDirectories(directory).Any()) throw new TransferException("Hydration reservation tree is unknown.");
+        foreach (var item in Directory.EnumerateFiles(directory)) {
+            if (Path.GetFileName(item) == Marker) continue;
+            if (++count > 4096) throw new TransferException("Hydration reservation capacity exceeded.");
+            reserved = checked(reserved + ReadReservation(item).Value.Growth);
+        }
+        return reserved;
+    }
+    private static (Reservation Value, byte[] Bytes) ReadReservation(string path)
+    {
+        RequireSafe(path);
+        using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (input.Length is <= 0 or > 1024) throw new TransferException("Hydration reservation is unavailable.");
+        var bytes = new byte[(int)input.Length]; input.ReadExactly(bytes);
+        using var json = JsonDocument.Parse(bytes);
+        var expected = new[] { "Version", "Scope", "Entry", "Growth" };
+        if (json.RootElement.ValueKind != JsonValueKind.Object ||
+            !json.RootElement.EnumerateObject().Select(p => p.Name).Order().SequenceEqual(expected.Order()))
+            throw new TransferException("Hydration reservation schema is unknown.");
+        var row = JsonSerializer.Deserialize<Reservation>(bytes) ?? throw new TransferException("Hydration reservation is unknown.");
+        if (row.Version != 2 || row.Growth < 0 ||
+            !System.Text.RegularExpressions.Regex.IsMatch(row.Scope ?? "", "\\A[a-f0-9]{64}\\z") ||
+            !System.Text.RegularExpressions.Regex.IsMatch(row.Entry ?? "", "\\A[a-f0-9]{64}\\z") ||
+            Path.GetFileName(path) != row.Scope + "-" + row.Entry + ".json")
+            throw new TransferException("Hydration reservation ownership is unknown.");
+        return (row, bytes);
+    }
+    private static void DeleteReservation(string path, byte[] expected)
+    {
+        RequireSafe(path);
+        if (OperatingSystem.IsWindows()) {
+            using var handle = CacheNative.CreateFileW(NativeCacheFilePath(path), 0x80010000, 1, 0, 3, 0x40200000, 0);
+            if (handle.IsInvalid) throw new IOException("Hydration reservation cannot be verified.");
+            using var input = new FileStream(handle, FileAccess.Read);
+            if (input.Length != expected.Length) throw new TransferException("Hydration reservation changed.");
+            var observed = new byte[expected.Length]; input.ReadExactly(observed);
+            if (!observed.AsSpan().SequenceEqual(expected)) throw new TransferException("Hydration reservation changed.");
+            byte disposition = 1;
+            if (!CacheNative.SetFileInformationByHandle(handle, 4, ref disposition, 1)) throw new IOException("Hydration reservation release was not confirmed.");
+        } else {
+            // Portable synthetic coordinator use only; native provider/eviction are Windows-only.
+            using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+            var observed = new byte[expected.Length];
+            if (input.Length != expected.Length) throw new TransferException("Hydration reservation changed.");
+            input.ReadExactly(observed);
+            if (!observed.AsSpan().SequenceEqual(expected)) throw new TransferException("Hydration reservation changed.");
+            File.Delete(path);
+        }
     }
     private long CacheBytes()
     {
@@ -240,5 +400,5 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             catch (FileNotFoundException) { } catch (DirectoryNotFoundException) { }
         }
     }
-    public void Dispose() => serial.Dispose();
+    public void Dispose() => Interlocked.Exchange(ref disposed, 1);
 }
