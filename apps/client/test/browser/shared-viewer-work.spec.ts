@@ -3,6 +3,17 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 /** 3D work shared directly with a client: one flat list across every client account, opened with each row's own grant. */
 const date = "2026-08-26T12:00:00Z";
 const viewerOrigin = "https://viewer.ledgetopdroneservices.com";
+async function navigateHome(page: Page) {
+  await expect(page.locator(".client-portal-header")).toBeVisible();
+  const desktopNavigation = page.getByRole("navigation", {name: "Client portal", exact: true});
+  if (await desktopNavigation.isVisible()) {
+    await desktopNavigation.getByRole("link", {name: "Home", exact: true}).click();
+  } else {
+    await page.getByRole("button", {name: "Open navigation", exact: true}).click();
+    await page.getByRole("dialog", {name: "Navigation", exact: true})
+      .getByRole("link", {name: "Home", exact: true}).click();
+  }
+}
 // Stored account names can be internal labels; the shared 3D work list must never show them.
 const allWorkspaces = [
   { id: "workspace-b", rootType: "organization", rootPublicId: "org-shared", displayName: "QA internal label B", resourceMode: "native", sourceId: "project-alpha:coastal" },
@@ -160,17 +171,25 @@ test("opening shared work opens a full-page Viewer and renews through the preser
   await page.context().route(`${viewerOrigin}/**`, async route => {
     if (!new URL(route.request().url()).pathname.startsWith("/session/")) return route.fulfill({status: 404, body: "not found"});
     viewerLoads += 1;
-    await route.fulfill({contentType: "text/html", body: `<!doctype html><body><div id="loaded">direct model</div><script>
+    await route.fulfill({contentType: "text/html", headers: {"Cross-Origin-Opener-Policy": "unsafe-none"}, body: `<!doctype html><body><div id="loaded">direct model</div><script>
       const expiresAt = new Date(Date.now() + 10000).toISOString();
       addEventListener("message", event => {
         if (event.data?.type !== "ltds-viewer:renew-session") return;
         document.body.dataset.renewedGrant = event.data.grant;
         opener.postMessage({version:1,type:"ltds-viewer:session-renewed",modelId:"model-direct",expiresAt:new Date(Date.now()+60000).toISOString()}, "*");
       });
+      window.sendExpiry = (modelId = "model-direct", type = "ltds-viewer:session-expiring") => opener.postMessage({version:1,type,modelId,expiresAt}, "*");
       setTimeout(() => opener.postMessage({version:1,type:"ltds-viewer:ready",modelId:"model-direct",expiresAt}, "*"), 50);
-      setTimeout(() => opener.postMessage({version:1,type:"ltds-viewer:session-expiring",modelId:"model-direct",expiresAt}, "*"), 100);
+      if (!new URL(location.href).searchParams.has("suppressInitialExpiry")) setTimeout(() => window.sendExpiry(), 100);
     </script></body>`});
   });
+  await page.context().route("https://evil.example.test/**", route => route.fulfill({contentType: "text/html",
+    headers: {"Cross-Origin-Opener-Policy": "unsafe-none"}, body: `<!doctype html><script>
+      setTimeout(() => { document.body.dataset.opener = String(Boolean(opener)); if (opener) {
+        opener.postMessage({version:1,type:"ltds-viewer:session-expiring",modelId:"model-direct",expiresAt:new Date(Date.now()+60000).toISOString()}, "*");
+        opener.postMessage({type:"test-message-barrier",nonce:"evil-sibling-delivered"}, "*");
+      } document.body.dataset.messageSent = "true"; }, 50);
+    </script>untrusted origin` }));
   let sessions = 0;
   const calls = await mock(page, allWorkspaces, (route, call, id) => {
     if (call.path.endsWith("/viewer")) return route.fulfill({json: id === "workspace-c" ? viewerPage(id, [
@@ -178,13 +197,24 @@ test("opening shared work opens a full-page Viewer and renews through the preser
     ]) : viewerPage(id, [])});
     if (call.method === "POST" && call.path.endsWith("/session")) {
       sessions += 1;
+      if (sessions === 4) return route.fulfill({status: 403, json: {error: "Membership revoked"}});
       const grant = sessions === 1 ? "11111111-1111-4111-8111-111111111111" : "22222222-2222-4222-8222-222222222222";
+      if (sessions === 2) return route.fulfill({status: 503, json: {error: "Transient session service failure"}});
       return route.fulfill({status: 201, json: {modelId: "model-direct", grant, grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
         redeemUrl: `${viewerOrigin}/api/v1/sessions/redeem`, embedUrl: `${viewerOrigin}/session/${grant}`}});
     }
     return undefined;
   });
-  await page.goto("/portal/dashboard");
+  await page.addInitScript(() => window.addEventListener("message", event => {
+    if (event.data?.type === "test-message-barrier") document.documentElement.dataset.testMessageBarrier = event.data.nonce;
+  }));
+  let portalDocuments = 0;
+  page.on("request", request => { if (request.isNavigationRequest() && request.resourceType() === "document") portalDocuments += 1; });
+  const portalResponse = await page.goto("/portal/not-a-private-route/");
+  expect(portalResponse?.headers()["cross-origin-opener-policy"]).toBe("same-origin-allow-popups");
+  await navigateHome(page);
+  await expect(page).toHaveURL(/\/portal\/dashboard(?:\?|$)/);
+  expect(portalDocuments).toBe(1);
   await expect(rows(page)).toHaveCount(1);
   const beforeOpen = calls.length;
   const popupWait = page.waitForEvent("popup");
@@ -194,6 +224,35 @@ test("opening shared work opens a full-page Viewer and renews through the preser
   await expect(popup.locator("#loaded")).toHaveText("direct model");
   await expect(popup.locator("body")).toHaveAttribute("data-renewed-grant", "22222222-2222-4222-8222-222222222222", {timeout: 5_000});
   expect(await popup.evaluate(() => Boolean(window.opener))).toBe(true);
+  const requestCountAfterRenewal = calls.filter(call => call.method === "POST" && call.path.endsWith("/session")).length;
+  const ignoredExpiry = {version: 1, type: "ltds-viewer:session-expiring", modelId: "model-direct", expiresAt: new Date(Date.now() + 60_000).toISOString()};
+  await popup.evaluate(message => {
+    window.opener!.postMessage({...message, modelId: "another-model"}, "*");
+    window.opener!.postMessage({type: "test-message-barrier", nonce: "wrong-model-delivered"}, "*");
+  }, ignoredExpiry);
+  await expect.poll(() => page.locator("html").getAttribute("data-test-message-barrier")).toBe("wrong-model-delivered");
+  await page.evaluate(({message, viewerOrigin}) => window.dispatchEvent(new MessageEvent("message", {data: message, origin: viewerOrigin, source: window})),
+    {message: ignoredExpiry, viewerOrigin});
+  await page.waitForTimeout(50);
+  await expect.poll(() => calls.filter(call => call.method === "POST" && call.path.endsWith("/session")).length).toBe(requestCountAfterRenewal);
+  await page.evaluate(() => {
+    const button = document.createElement("button"); button.id = "open-untrusted-popup";
+    button.onclick = () => { const child = window.open("about:blank", "_blank"); setTimeout(() => child?.location.replace("https://evil.example.test/session/spoof"), 50); };
+    document.body.appendChild(button);
+  });
+  const spoofWait = page.waitForEvent("popup"); await page.click("#open-untrusted-popup"); const spoof = await spoofWait;
+  await expect(spoof).toHaveURL("https://evil.example.test/session/spoof");
+  await expect(spoof.locator("body")).toHaveAttribute("data-message-sent", "true");
+  expect(await spoof.locator("body").getAttribute("data-opener")).toBe("true");
+  await expect.poll(() => page.locator("html").getAttribute("data-test-message-barrier")).toBe("evil-sibling-delivered");
+  await expect.poll(() => calls.filter(call => call.method === "POST" && call.path.endsWith("/session")).length).toBe(requestCountAfterRenewal);
+  await spoof.close();
+  await popup.evaluate(() => (window as Window & {sendExpiry?: (modelId?: string, type?: string) => void}).sendExpiry?.("model-direct", "ltds-viewer:session-renewal-failed"));
+  await expect.poll(() => calls.filter(call => call.method === "POST" && call.path.endsWith("/session")).length).toBe(requestCountAfterRenewal + 1);
+  await expect(page.locator(".shared-viewer-work-launch")).toContainText("Viewer renewal is retrying…");
+  expect(await popup.locator("body").getAttribute("data-renewed-grant")).toBe("22222222-2222-4222-8222-222222222222");
+  await popup.close();
+  await expect(page.locator(".shared-viewer-work-launch")).toContainText("Viewer tab closed.", {timeout: 3_000});
   await expect(page.locator("iframe")).toHaveCount(0);
   expect(viewerLoads).toBe(1);
   await expect(page.locator(".client-portal-header")).toBeVisible();
@@ -201,14 +260,117 @@ test("opening shared work opens a full-page Viewer and renews through the preser
   expect(posts.map(call => call.path)).toEqual([
     "/api/client/v2/workspaces/workspace-c/viewer/grant-task/tasks/task-1/session",
     "/api/client/v2/workspaces/workspace-c/viewer/grant-task/tasks/task-1/session",
+    "/api/client/v2/workspaces/workspace-c/viewer/grant-task/tasks/task-1/session",
+    "/api/client/v2/workspaces/workspace-c/viewer/grant-task/tasks/task-1/session",
   ]);
   expect(posts.every(call => /^[0-9a-f-]{36}$/.test(call.key ?? ""))).toBe(true);
   expect(posts[0]!.key).not.toBe(posts[1]!.key);
-  expect(posts[0]!.body).toEqual({displayUnits: expect.stringMatching(/^(imperial|metric)$/)});
+  expect(posts[1]!.key).toBe(posts[2]!.key);
+  expect(posts[2]!.key).not.toBe(posts[3]!.key);
+  expect(posts.every(call => call.body && typeof call.body === "object" && "displayUnits" in call.body)).toBe(true);
   // The direct task route posts only to the exact account/grant/task endpoint; it does not need a broad context read.
   const afterOpen = calls.slice(beforeOpen);
   expect(afterOpen.some(call => call.path === "/api/client/v2/workspaces/workspace-b/context")).toBe(false);
   expect(afterOpen.some(call => call.path === "/api/client/v2/workspaces/workspace-c/context")).toBe(false);
+});
+
+test("the exact live Viewer window rejects evil-origin protocol messages", async ({page}) => {
+  const grant = "33333333-3333-4333-8333-333333333333";
+  await page.context().route(`${viewerOrigin}/**`, route => {
+    if (!new URL(route.request().url()).pathname.startsWith("/session/")) return route.fulfill({status: 404});
+    return route.fulfill({contentType: "text/html", headers: {"Cross-Origin-Opener-Policy": "unsafe-none"}, body: `<!doctype html><body>Viewer</body><script>
+      setTimeout(() => opener.postMessage({version:1,type:"ltds-viewer:ready",modelId:"model-origin-check",expiresAt:new Date(Date.now()+60000).toISOString()}, "*"), 25);
+    </script>`});
+  });
+  let sessions = 0;
+  await mock(page, allWorkspaces, (route, call, id) => {
+    if (call.path.endsWith("/viewer")) return route.fulfill({json: id === "workspace-c" ? viewerPage(id, [
+      {grantId: "grant-task", taskId: "task-1", scopeType: "task", title: "Ridge roof model", projectName: "Summit lodge", businessName: "Summit Builders", updatedAt: "2026-08-24T12:00:00Z"},
+    ]) : viewerPage(id, [])});
+    if (call.method === "POST" && call.path.endsWith("/session")) {
+      sessions += 1;
+      return route.fulfill({status: 201, json: {modelId: "model-origin-check", grant, grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
+        redeemUrl: `${viewerOrigin}/api/v1/sessions/redeem`, embedUrl: `${viewerOrigin}/session/${grant}`}});
+    }
+    return undefined;
+  });
+  await page.addInitScript(() => {
+    window.addEventListener("message", event => {
+      if (event.data?.type === "test-message-barrier") document.documentElement.dataset.testMessageBarrier = event.data.nonce;
+    });
+    const win = window as Window & {__viewerPopupForTest?: Window | null};
+    const originalOpen = window.open.bind(window);
+    window.open = ((...args: Parameters<typeof window.open>) => {
+      const popup = originalOpen(...args);
+      if (!win.__viewerPopupForTest) win.__viewerPopupForTest = popup;
+      return popup;
+    }) as typeof window.open;
+  });
+  const portalResponse = await page.goto("/portal/not-a-private-route");
+  expect(portalResponse?.headers()["cross-origin-opener-policy"]).toBe("same-origin-allow-popups");
+  await navigateHome(page);
+  await expect(rows(page)).toHaveCount(1);
+  const popupWait = page.waitForEvent("popup");
+  await rows(page).first().getByRole("link", {name: /^Open 3D model/}).click();
+  const popup = await popupWait;
+  await expect(popup).toHaveURL(`${viewerOrigin}/session/${grant}`);
+  expect(await popup.evaluate(() => Boolean(window.opener))).toBe(true);
+
+  // Dispatch synthetic message events through the real window listeners. This
+  // isolates origin validation while the captured Viewer WindowProxy is live;
+  // browsers do not deliver actual cross-origin postMessages after a COOP split.
+  const message = {version: 1, type: "ltds-viewer:session-expiring", modelId: "model-origin-check", expiresAt: new Date(Date.now() + 60_000).toISOString()};
+  const eventResult = await page.evaluate(({message, expectedOrigin}) => {
+    const win = window as Window & {__viewerPopupForTest?: Window | null};
+    if (!win.__viewerPopupForTest) throw new Error("Viewer popup WindowProxy was not captured");
+    const evilMessage = new MessageEvent("message", {data: message, origin: "https://evil.example.test", source: win.__viewerPopupForTest});
+    window.dispatchEvent(evilMessage);
+    const barrier = new MessageEvent("message", {data: {type: "test-message-barrier", nonce: "same-window-evil-origin-delivered"},
+      origin: expectedOrigin, source: win.__viewerPopupForTest});
+    window.dispatchEvent(barrier);
+    return {popupStillOpen: !win.__viewerPopupForTest.closed};
+  }, {message, expectedOrigin: viewerOrigin});
+  expect(eventResult.popupStillOpen).toBe(true);
+  await expect.poll(() => page.locator("html").getAttribute("data-test-message-barrier")).toBe("same-window-evil-origin-delivered");
+  expect(sessions).toBe(1);
+
+  // Positive control: identical data from the Viewer origin and same WindowProxy
+  // must pass validation and request one renewal, proving the listener is live.
+  await page.evaluate(({message, expectedOrigin}) => {
+    const win = window as Window & {__viewerPopupForTest?: Window | null};
+    if (!win.__viewerPopupForTest || win.__viewerPopupForTest.closed) throw new Error("Viewer popup closed before positive control");
+    window.dispatchEvent(new MessageEvent("message", {data: message, origin: expectedOrigin, source: win.__viewerPopupForTest}));
+    window.dispatchEvent(new MessageEvent("message", {data: {type: "test-message-barrier", nonce: "same-window-valid-origin-delivered"},
+      origin: expectedOrigin, source: win.__viewerPopupForTest}));
+  }, {message, expectedOrigin: viewerOrigin});
+  await expect.poll(() => page.locator("html").getAttribute("data-test-message-barrier")).toBe("same-window-valid-origin-delivered");
+  await expect.poll(() => sessions).toBe(2);
+  await popup.close();
+});
+
+test("a real Viewer popup navigation to another origin is tracked separately from message validation", async ({page}) => {
+  await page.context().route(`${viewerOrigin}/**`, route => route.fulfill({contentType: "text/html",
+    headers: {"Cross-Origin-Opener-Policy": "unsafe-none"}, body: "<!doctype html><body>Viewer origin</body>"}));
+  await page.context().route("https://evil.example.test/**", route => route.fulfill({contentType: "text/html",
+    headers: {"Cross-Origin-Opener-Policy": "unsafe-none"}, body: "<!doctype html><body>untrusted origin</body>"}));
+  await page.goto("/portal/not-a-private-route/");
+  await page.evaluate(() => {
+    const button = document.createElement("button"); button.id = "open-navigation-probe"; button.textContent = "Open probe";
+    button.onclick = () => {
+      const popup = window.open("about:blank", "viewer-navigation-semantics");
+      if (popup) setTimeout(() => popup.location.replace("https://viewer.ledgetopdroneservices.com/session/navigation-check"), 0);
+    };
+    document.body.appendChild(button);
+  });
+  const popupWait = page.waitForEvent("popup");
+  await page.click("#open-navigation-probe");
+  const popup = await popupWait;
+  await expect(popup).toHaveURL(`${viewerOrigin}/session/navigation-check`);
+  expect(await popup.evaluate(() => Boolean(window.opener))).toBe(true);
+  await popup.goto("https://evil.example.test/session/away");
+  await expect(popup.locator("body")).toContainText("untrusted origin");
+  expect(await popup.evaluate(() => window.opener === null)).toBe(true);
+  await popup.close();
 });
 
 test("a refreshed task grant gets a new issuer while ambiguous retries for the old grant stay isolated", async ({page}) => {
