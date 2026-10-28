@@ -687,6 +687,18 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.equal(await client.evaluate(`(() => { const menu=document.querySelector('.task-more-actions[open] .project-more-menu'),r=menu.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&getComputedStyle(menu.closest('.task-panel')).overflow==='visible' })()`),true,`${viewport.name}: task menu must open without horizontal clipping`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>button.textContent)`),['Rename','Download model files','Details & processing','Files & versions','Processing history','Ground control points']);
     await client.evaluate(`document.querySelector('[data-action="task-history"]').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('panel')==='runs' && document.querySelector('.task-page-navigation [aria-current=\"page\"]')?.textContent==='Runs' && document.querySelector('.attempt-history[open] .attempt-run') !== null", `${viewport.name}: Processing history did not open this task's Runs tab`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.workspace-breadcrumb li')].map(item=>item.textContent)`), ['Projects', 'Adams County', 'Johnson Road Survey', 'Johnson reconstruction'], `${viewport.name}: task breadcrumb`);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: task Runs tab overflows horizontally`);
+    assert.equal(await client.evaluate(`Boolean(document.querySelector('.task-runs-note [data-section="diagnostics"]'))`), true, `${viewport.name}: Runs tab has no link to every run in Diagnostics`);
+    await client.evaluate(`history.back()`);
+    await waitFor(client, "document.querySelector('.compact-task-detail') !== null && !new URL(location.href).searchParams.get('panel')", `${viewport.name}: back from the Runs tab did not return to the task`);
+    await client.evaluate(`document.querySelector('.task-open-page [data-action="task-overview"]').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('panel')==='overview' && document.querySelector('.task-page-navigation [aria-current=\"page\"]')?.textContent==='Overview' && document.querySelector('.task-workspace-page .compact-task-detail') !== null && !document.querySelector('.task-open-page')", `${viewport.name}: Open task page did not show the Overview tab`);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: task Overview tab overflows horizontally`);
+    await client.evaluate(`history.back()`);
+    await waitFor(client, "document.querySelector('.compact-task-detail') !== null && !new URL(location.href).searchParams.get('panel')", `${viewport.name}: back from Overview did not return to the task`);
+    await client.evaluate(`document.querySelector('.task-runs-note, .nav-link[data-section="diagnostics"]') && document.querySelector('.nav-link[data-section="diagnostics"]').click()`);
     await waitFor(client, "new URL(location.href).searchParams.get('section')==='diagnostics' && document.querySelector('[data-action=\"load-more-diagnostic-runs\"]') !== null", `${viewport.name}: task history did not route to paginated Diagnostics`);
     assert.equal(await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson"]')?.textContent.includes('Run #2')`), true, `${viewport.name}: current run number was not rendered`);
     await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson-old"] [data-action="open-global-attempt-diagnostics"]').click()`);
@@ -791,6 +803,10 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: dataset trash did not settle`);
 
     await client.evaluate(`document.querySelector('[data-action="task-return"]').click()`);
+    await waitFor(client, "document.querySelector('.project-page') !== null && document.querySelectorAll('.project-row').length === 1 && !document.querySelector('#project-filter')", `${viewport.name}: project page did not show only the open project`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.workspace-breadcrumb li')].map(item=>item.textContent)`), ['Projects', 'Adams County', 'Johnson Road Survey'], `${viewport.name}: project breadcrumb`);
+    await client.evaluate(`document.querySelector('.workspace-breadcrumb [data-section="dashboard"]').click()`);
+    await waitFor(client, "!new URL(location.href).searchParams.get('project') && document.querySelector('#project-filter') !== null", `${viewport.name}: breadcrumb did not return to Projects`);
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value=''; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
     await waitFor(client, "document.querySelector('[data-action=\"open-project\"][data-id=\"project-quarry\"]') !== null", `${viewport.name}: project filter did not clear`);
     await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
