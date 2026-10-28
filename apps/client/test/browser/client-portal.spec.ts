@@ -650,7 +650,7 @@ test("native workspace branding stays generic Ledge Top for every source across 
   }
 });
 
-test("authenticated video preview uses native controls and supports seeking with range delivery", async ({ page }) => {
+test("authenticated video preview shows one control bar and supports seeking, fullscreen and range delivery", async ({ page }) => {
   const videoFile = {
     ...filePage.files[0]!,
     id: "video-file-a",
@@ -693,7 +693,13 @@ test("authenticated video preview uses native controls and supports seeking with
   await expect(dialog).toBeVisible();
   await expect(dialog.locator(".portal-file-preview-stage")).toHaveCSS("background-color", "rgb(13, 20, 26)");
   const video = dialog.locator("video");
-  await expect(video).toHaveAttribute("controls", "");
+  // The 3-second fixture can finish before the test reaches Pause on a busy machine; slow it so playback is still running.
+  await video.evaluate(element => { const media = element as HTMLVideoElement; media.defaultPlaybackRate = .1; media.playbackRate = .1; });
+  // Exactly one control set: the custom bar, never the browser's native controls as well.
+  await expect(video).not.toHaveAttribute("controls");
+  await expect(dialog.getByRole("button", { name: /^(Play|Pause) video$/ })).toHaveCount(1);
+  await expect(dialog.getByRole("button", { name: /fullscreen/i })).toHaveCount(1);
+  await expect(dialog.getByRole("slider")).toHaveCount(1);
   await expect(video).toHaveAttribute("playsinline", "");
   await expect(video).toHaveAttribute("preload", "metadata");
   await expect.poll(() => video.evaluate(element => (element as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(1);
@@ -716,6 +722,7 @@ test("authenticated video preview uses native controls and supports seeking with
   await page.keyboard.press("Escape");
   await expect(dialog).toBeVisible();
   await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true);
+  await expect(dialog.getByRole("button", { name: "Enter fullscreen" })).toBeVisible();
   expect(observedRanges.length).toBeGreaterThan(0);
   await page.getByRole("button", { name: "Close preview" }).click();
   await expect(dialog).toHaveCount(0);
