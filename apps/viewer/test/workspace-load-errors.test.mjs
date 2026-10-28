@@ -12,7 +12,7 @@ const line = name => {
   return found;
 };
 
-function harness({ failing = new Set(), previous = {}, onHierarchy = null } = {}) {
+function harness({ failing = new Set(), previous = {}, onHierarchy = null, routes = {} } = {}) {
   const fixtures = {
     '/api/v1/projects': { projects: [{ id: 'fresh-project' }] },
     '/api/v1/datasets': { datasets: [] },
@@ -22,10 +22,12 @@ function harness({ failing = new Set(), previous = {}, onHierarchy = null } = {}
     '/api/v1/processing/ready': { ok: true },
     '/api/v1/operations': { operations: [{ id: 'fresh-operation' }] },
     '/api/v1/processing/derivatives': { derivatives: [{ id: 'fresh-derivative' }] },
+    '/api/v1/processing/hierarchy': { schemaVersion: 1, organizations: [], groups: [], nextCursor: null, capabilities: {} },
   };
   let context;
   const reply = path => {
     if (path.startsWith('/api/v1/processing/hierarchy') && onHierarchy) return onHierarchy(context.state);
+    if (routes[path]) return routes[path](context.state);
     return failing.has(path)
       ? Promise.reject(new Error(`${path} returned 503`))
       : Promise.resolve(fixtures[path] || {});
@@ -37,6 +39,7 @@ function harness({ failing = new Set(), previous = {}, onHierarchy = null } = {}
     loadHierarchy,
     state: { token: 'token', projects: [], datasets: [], tasks: [], providers: [], presets: [], outputs: [], failedMutations: [], operations: [], derivativeJobs: [], storage: null, ...previous },
     pagedApi: path => reply(path),
+    shareCalls: [],
     api: path => reply(path),
     pagedStorage: () => Promise.resolve({ usage: {}, items: [] }),
     can: () => false,
@@ -133,4 +136,52 @@ test('render shows a retryable alert instead of an empty list when data failed t
 test('navigation marks the current section and modals return focus to their opener', () => {
   assert.match(line('function renderNav('), /aria-current="page"/);
   assert.match(line('function openModal('), /addEventListener\('close'[\s\S]*opener\.focus\(\)/);
+});
+
+const published = { outputs: [{ id: 'output-live', taskId: 'fresh-task', activePublished: true }] };
+
+test('a 401 on the final share lookup stops the load before health or render', async () => {
+  const { context, renders, elements } = harness({
+    routes: {
+      '/api/v1/processing/outputs': () => Promise.resolve(published),
+      '/api/v1/processing/outputs/output-live/shares': state => { state.token = null; return Promise.reject(Object.assign(new Error('unauthorized'), { status: 401 })); },
+    },
+  });
+  await context.load();
+  assert.equal(renders.length, 0);
+  assert.equal(elements['#nav-health-label'], undefined);
+});
+
+test('a session replaced during the core requests leaves state untouched', async () => {
+  const previous = { projects: [{ id: 'new-session-project' }] };
+  const { context, renders } = harness({
+    previous,
+    routes: { '/api/v1/projects': state => { state.token = 'replacement'; return Promise.resolve({ projects: [{ id: 'old-session-project' }] }); } },
+  });
+  await context.load();
+  assert.deepEqual(plain(context.state.projects.map(project => project.id)), ['new-session-project']);
+  assert.equal(context.state.loadErrors, undefined);
+  assert.equal(renders.length, 0);
+});
+
+test('a failing hierarchy is reported, but a server without the endpoint is not', async () => {
+  const failing = harness({ onHierarchy: () => Promise.reject(Object.assign(new Error('hierarchy 503'), { status: 503 })) });
+  await failing.context.load();
+  assert.deepEqual(plain(failing.context.state.loadErrors.map(error => error.label)), ['customer grouping']);
+  const absent = harness({ onHierarchy: () => Promise.reject(Object.assign(new Error('not found'), { status: 404 })) });
+  await absent.context.load();
+  assert.deepEqual(plain(absent.context.state.loadErrors), []);
+});
+
+test('failed share lookups are reported and keep the last loaded links', async () => {
+  const { context } = harness({
+    previous: { shares: { 'output-live': [{ id: 'kept-share' }] } },
+    routes: {
+      '/api/v1/processing/outputs': () => Promise.resolve(published),
+      '/api/v1/processing/outputs/output-live/shares': () => Promise.reject(new Error('503')),
+    },
+  });
+  await context.load();
+  assert.deepEqual(plain(context.state.loadErrors.map(error => error.label)), ['share links']);
+  assert.deepEqual(plain(context.state.shares['output-live'].map(share => share.id)), ['kept-share']);
 });
