@@ -11,6 +11,8 @@ if (args.Length >= 1 && args[0] == "--availability-intent-policy-tests")
     return args.Length == 1 ? FailedAvailabilityIntentTests.Run() : 2;
 if (args.Length >= 1 && args[0] == "--source-gate-policy-tests")
     return args.Length == 1 ? await ExplorerSourceGatePolicyTests.RunAsync() : 2;
+if (args.Length >= 1 && args[0] == "--local-availability-operation-tests")
+    return args.Length == 1 ? LocalAvailabilityOperationTests.Run() : 2;
 if (args.Length >= 1 && args[0] == "--package-context-policy-tests")
     return args.Length == 1 ? CurrentProcessPackageContextTests.Run() : 2;
 if (args.Length >= 1 && args[0] == "--package-context-observation") {

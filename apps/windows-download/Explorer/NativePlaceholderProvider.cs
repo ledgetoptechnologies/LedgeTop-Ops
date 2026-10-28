@@ -223,6 +223,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                 if (stopping.IsCancellationRequested) break;
                 if (preservedLocalFiles.Contains(relative)) continue;
                 var intent = AvailabilityIntent.None;
+                var availabilityStage = LocalAvailabilityStage.Inspect;
                 try {
                     var path = CheckedPath(relative);
                     var attributes = (uint)PlaceholderVisibility.Run(() => File.GetAttributes(path));
@@ -234,6 +235,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                     }
                     if (!failedAvailability.ShouldAttempt(relative, intent)) continue;
                     if (intent == AvailabilityIntent.Keep && (attributes & (0x1000u | 0x40000u | 0x400000u)) != 0) {
+                        availabilityStage = LocalAvailabilityStage.Hydrate;
                         Hydrate(relative);
                         Notice("Kept on this device: " + Path.GetFileName(relative));
                     } else if (intent == AvailabilityIntent.Free && ((attributes & 0x1000) == 0 || !reclaimed)) {
@@ -244,7 +246,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                 } catch (OperationCanceledException) when (stopping.IsCancellationRequested) { break; }
                 catch (Exception error) when (error is IOException or UnauthorizedAccessException or TransferException) {
                     if (intent is AvailabilityIntent.Keep or AvailabilityIntent.Free) failedAvailability.MarkFailed(relative, intent);
-                    Notice("Could not change local availability: " + Path.GetFileName(relative));
+                    Notice(LocalAvailabilityException.FromException(availabilityStage, error).ActivityText);
                 }
             }
             try { await Task.Delay(TimeSpan.FromSeconds(2), stopping.Token); }
@@ -302,14 +304,17 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, stopping.Token);
         await Task.Run(() => {
             linked.Token.ThrowIfCancellationRequested();
-            var path = CheckedPath(relative);
-            WithHandle(path, handle => {
-                Check(Native.CfSetPinState(handle, 2, 0, 0), "Unpin sample");
-                Check(Native.CfDehydratePlaceholder(handle, 0, -1, 0, 0), "Free local sample space");
-            });
+            string path;
+            try { path = CheckedPath(relative); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or TransferException) {
+                throw LocalAvailabilityException.FromException(LocalAvailabilityStage.Inspect, error);
+            }
+            LocalAvailabilityOperations.FreeNative(new FreeNative(path), linked.Token);
         }, linked.Token).ConfigureAwait(false);
         // Close native oplock before waiting for hydration drain/cache leases; no lock inversion.
-        await connection.EvictVerifiedCacheAsync(files[relative], linked.Token).ConfigureAwait(false);
+        try { await connection.EvictVerifiedCacheAsync(files[relative], linked.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (linked.IsCancellationRequested) { throw; }
+        catch (Exception error) { throw LocalAvailabilityException.FromException(LocalAvailabilityStage.CacheReclamation, error); }
         lock (reclaimedCache) reclaimedCache.Add(relative);
         Notice("Online only: " + Path.GetFileName(relative));
     }
@@ -412,6 +417,14 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                 CompletionStatus = status, Offset = context.RequiredOffset, Length = context.RequiredLength } };
             Check(Native.CfExecute(ref info, ref parameters), "Reject hydration");
         }
+    }
+
+    private sealed class FreeNative(string path) : ILocalAvailabilityNative
+    {
+        public int Open(out nint handle) => Native.CfOpenFileWithOplock(path, 1, out handle);
+        public int Unpin(nint handle) => Native.CfSetPinState(handle, 2, 0, 0);
+        public int Dehydrate(nint handle) => Native.CfDehydratePlaceholder(handle, 0, -1, 0, 0);
+        public void Close(nint handle) => Native.CfCloseHandle(handle);
     }
 
     private sealed class TransferNative(Action<string> diagnostic) : ICloudFilesTransferNative
