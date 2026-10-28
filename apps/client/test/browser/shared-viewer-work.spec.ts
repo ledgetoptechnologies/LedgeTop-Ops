@@ -3,6 +3,17 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 /** 3D work shared directly with a client: one flat list across every client account, opened with each row's own grant. */
 const date = "2026-08-26T12:00:00Z";
 const viewerOrigin = "https://viewer.ledgetopdroneservices.com";
+async function navigateHome(page: Page) {
+  await expect(page.locator(".client-portal-header")).toBeVisible();
+  const desktopNavigation = page.getByRole("navigation", {name: "Client portal", exact: true});
+  if (await desktopNavigation.isVisible()) {
+    await desktopNavigation.getByRole("link", {name: "Home", exact: true}).click();
+  } else {
+    await page.getByRole("button", {name: "Open navigation", exact: true}).click();
+    await page.getByRole("dialog", {name: "Navigation", exact: true})
+      .getByRole("link", {name: "Home", exact: true}).click();
+  }
+}
 // Stored account names can be internal labels; the shared 3D work list must never show them.
 const allWorkspaces = [
   { id: "workspace-b", rootType: "organization", rootPublicId: "org-shared", displayName: "QA internal label B", resourceMode: "native", sourceId: "project-alpha:coastal" },
@@ -197,10 +208,13 @@ test("opening shared work opens a full-page Viewer and renews through the preser
   await page.addInitScript(() => window.addEventListener("message", event => {
     if (event.data?.type === "test-message-barrier") document.documentElement.dataset.testMessageBarrier = event.data.nonce;
   }));
+  let portalDocuments = 0;
+  page.on("request", request => { if (request.isNavigationRequest() && request.resourceType() === "document") portalDocuments += 1; });
   const portalResponse = await page.goto("/portal/not-a-private-route/");
   expect(portalResponse?.headers()["cross-origin-opener-policy"]).toBe("same-origin-allow-popups");
-  await page.getByRole("link", {name: "Home"}).click();
+  await navigateHome(page);
   await expect(page).toHaveURL(/\/portal\/dashboard(?:\?|$)/);
+  expect(portalDocuments).toBe(1);
   await expect(rows(page)).toHaveCount(1);
   const beforeOpen = calls.length;
   const popupWait = page.waitForEvent("popup");
@@ -294,7 +308,7 @@ test("the exact live Viewer window rejects evil-origin protocol messages", async
   });
   const portalResponse = await page.goto("/portal/not-a-private-route");
   expect(portalResponse?.headers()["cross-origin-opener-policy"]).toBe("same-origin-allow-popups");
-  await page.getByRole("link", {name: "Home"}).click();
+  await navigateHome(page);
   await expect(rows(page)).toHaveCount(1);
   const popupWait = page.waitForEvent("popup");
   await rows(page).first().getByRole("link", {name: /^Open 3D model/}).click();
