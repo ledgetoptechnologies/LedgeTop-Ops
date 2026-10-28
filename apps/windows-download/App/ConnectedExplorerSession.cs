@@ -407,6 +407,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             Notify();
             Add(FailureActivity(error));
             Add(primary);
+            TryPersistFailure(primary);
             if (CanRecoverTransientSession)
                 Add("The file service is temporarily unavailable. Downloads will be checked again automatically; files already on this PC are kept.");
             throw;
@@ -624,12 +625,27 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             } catch (Exception error) {
                 SetState(ExplorerPreviewState.Failed);
                 Add("The Explorer connection could not confirm shutdown. Its saved ownership and local files were retained.");
-                Add(trace.Failure(error));
+                var primary = trace.Failure(error);
+                Add(primary);
+                TryPersistFailure(primary);
                 lock (lifetime) { closeRequested = false; closing = null; cancellation.Dispose(); cancellation = new(); }
                 done.TrySetException(error);
             } finally { operations.Release(); }
         });
         return new(done.Task);
+    }
+
+    private void TryPersistFailure(string supportCode)
+    {
+        // Both callers hold operations. Diagnostics are never authority or a lifecycle
+        // decision, and cannot create an unowned index/lease or replace unknown data.
+        try {
+            bool OwnIndex() => channel == "pilot" && alias == "employee" && !invalidIndex && index is { Removed: false } &&
+                indexLease is not null && !indexLease.SafeFileHandle.IsClosed && !indexLease.SafeFileHandle.IsInvalid && ReadIndex() == index;
+            if (!OwnIndex()) return;
+            ConnectionDiagnosticStore.TrySaveLatest(indexDirectory, OwnIndex, supportCode,
+                typeof(ConnectedExplorerSession).Assembly.GetName().Version ?? new Version(0, 0, 0, 0), DateTimeOffset.UtcNow);
+        } catch { /* Missing/uncertain local diagnostic ownership never changes connection handling. */ }
     }
 
     private static bool Principal(string? value) => Regex.IsMatch(value ?? "", "\\Aodqp1_[a-f0-9]{64}\\z");

@@ -32,7 +32,82 @@ internal static class ConnectedExplorerSessionTests
         await TransientRecoveryHolds(); count++;
         await TransientRecoveryTimerAndQuit(); count++;
         await RecoveryViewPublicationRaces(); count++;
-        Console.WriteLine($"Connected Explorer coordinator: {count}/20 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+        await LocalFailureDiagnosticIntegration(); count++;
+        Console.WriteLine($"Connected Explorer coordinator: {count}/21 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+    }
+
+    private static async Task LocalFailureDiagnosticIntegration()
+    {
+        string Diagnostic(Fixture fixture) => Path.Combine(Path.GetDirectoryName(fixture.IndexPath)!, ConnectionDiagnosticStore.Leaf);
+        foreach (var atSource in new[] { false, true }) {
+            await using var fixture = new Fixture { Alias = "employee", VerifyEngineSession = true };
+            var session = fixture.Create(); await session.StartAsync();
+            var index = File.ReadAllBytes(fixture.IndexPath); var indexTime = File.GetLastWriteTimeUtc(fixture.IndexPath);
+            var signs = fixture.SignIns; var captures = fixture.Captures; var starts = fixture.EngineStarts;
+            var failure = new TransferException("private URL token account reference", TransferFailureReason.UnexpectedHttpStatus, 503);
+            failure.Data["private"] = "secret";
+            if (atSource) fixture.SourceFailure = failure; else fixture.CurrentFailure = failure;
+            await SameFailure(session.RecheckSessionAsync, failure);
+            var leaf = Diagnostic(fixture); var text = File.ReadAllText(leaf); var record = JsonNode.Parse(text)!.AsObject();
+            var expected = ConnectionFailureTrace.Format(ConnectionAction.Recheck,
+                atSource ? ConnectionPhase.SourceSession : ConnectionPhase.CurrentSession, failure);
+            Check(new FileInfo(leaf).Length <= 1024 && record.Count == 5 && record["owner"]!.GetValue<string>() == ConnectionDiagnosticStore.Owner &&
+                record["supportCode"]!.GetValue<string>() == expected &&
+                record["appVersion"]!.GetValue<string>() == typeof(ConnectedExplorerSession).Assembly.GetName().Version!.ToString(4) &&
+                !text.Contains("private", StringComparison.Ordinal) && !text.Contains("secret", StringComparison.Ordinal) && !text.Contains(Fixture.PersonA, StringComparison.Ordinal),
+                "owned employee lease writes only the exact closed typed current/source failure and five bounded fields");
+            fixture.CurrentFailure = null; fixture.SourceFailure = null; fixture.Log.Clear(); var requests = fixture.Requests;
+            await session.RecheckSessionAsync();
+            Check(session.State == ExplorerPreviewState.Running && fixture.Requests == requests + 3 && fixture.SignIns == signs &&
+                fixture.Captures == captures && fixture.EngineStarts == starts && fixture.EngineResumes == 1 &&
+                index.AsSpan().SequenceEqual(File.ReadAllBytes(fixture.IndexPath)) && File.GetLastWriteTimeUtc(fixture.IndexPath) == indexTime &&
+                File.ReadAllText(leaf) == text,
+                "diagnostic persistence changes no authorization/recovery calls, index or successful-operation evidence");
+        }
+        await using (var fixture = new Fixture { Alias = "employee", VerifyEngineSession = true }) {
+            var session = fixture.Create(); await session.StartAsync();
+            var leaf = Diagnostic(fixture); File.WriteAllText(leaf, "unknown diagnostic record must remain");
+            var original = File.ReadAllBytes(leaf); var time = File.GetLastWriteTimeUtc(leaf);
+            var failure = new TransferException("private transient", TransferFailureReason.Network); fixture.CurrentFailure = failure;
+            await SameFailure(session.RecheckSessionAsync, failure);
+            Check(session.CanRecoverTransientSession && original.AsSpan().SequenceEqual(File.ReadAllBytes(leaf)),
+                "unknown existing record is not adopted and cannot suppress normal transient recovery");
+            fixture.CurrentFailure = null; fixture.Log.Clear(); var requests = fixture.Requests; var signs = fixture.SignIns;
+            await session.RecheckSessionAsync();
+            Check(session.State == ExplorerPreviewState.Running && fixture.Requests == requests + 3 && fixture.SignIns == signs && fixture.EngineResumes == 1 &&
+                fixture.Log.SequenceEqual(["current-check", "source-check", "resume-gate", "source-check", "engine-resumed"]) &&
+                original.AsSpan().SequenceEqual(File.ReadAllBytes(leaf)) && File.GetLastWriteTimeUtc(leaf) == time &&
+                !File.Exists(Path.Combine(Path.GetDirectoryName(leaf)!, ".latest-connection-failure.write.tmp")),
+                "unknown record stays byte/time identical while the same verified recovery and requests complete");
+        }
+        await using (var client = new Fixture()) {
+            var session = client.Create(); await session.StartAsync();
+            var failure = new TransferException("private client", TransferFailureReason.Network); client.CurrentFailure = failure;
+            await SameFailure(session.RecheckSessionAsync, failure);
+            Check(!File.Exists(Diagnostic(client)), "client source never writes an employee diagnostic");
+        }
+        foreach (var unknownIndex in new[] { false, true }) {
+            await using var fixture = new Fixture { Alias = "employee" };
+            var seed = fixture.Create(); await seed.StartAsync(); await seed.DisposeAsync();
+            if (unknownIndex) File.WriteAllText(fixture.IndexPath, "{}");
+            var original = File.ReadAllBytes(fixture.IndexPath); var requests = fixture.Requests; var signs = fixture.SignIns;
+            var passive = fixture.Create();
+            if (unknownIndex) await Refuses(passive.StartAsync);
+            else await Refuses(async () => { _ = await passive.GetUpdateBindingAsync(); });
+            Check(!File.Exists(Diagnostic(fixture)) && original.AsSpan().SequenceEqual(File.ReadAllBytes(fixture.IndexPath)) &&
+                fixture.Requests == requests && fixture.SignIns == signs,
+                "unknown index or passive current index without its real lease cannot write diagnostics or start authentication");
+        }
+        await using (var fixture = new Fixture { Alias = "employee", FailFirstRunningDispose = true }) {
+            var session = fixture.Create(); await session.StartAsync(); var requests = fixture.Requests;
+            await Refuses(() => session.DisposeAsync().AsTask());
+            var text = File.ReadAllText(Diagnostic(fixture));
+            Check(JsonNode.Parse(text)!["supportCode"]!.GetValue<string>() == ConnectionFailureTrace.Format(ConnectionAction.Dispose,
+                ConnectionPhase.ProviderDrain, new IOException("ignored private detail")) && fixture.Requests == requests,
+                "uncertain disposal writes its bounded phase while the real index lease remains owned, without authentication");
+            await session.DisposeAsync();
+            Check(File.ReadAllText(Diagnostic(fixture)) == text, "successful later drain does not overwrite failure evidence");
+        }
     }
 
     private static async Task RecoveryViewPublicationRaces()

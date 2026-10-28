@@ -160,10 +160,40 @@ and 14 payload/actor/gateway predicates were verified. This does not establish
 loaded gateway enrollment or successful data-plane access. No other folder or
 upload permission was added.
 Installation does not renew access. No grant expansion, backend activation or
-NAS change accompanied publication of 0.5.10. The last captured staging backend was
-version `bba93046-3a9f-4df5-a987-3c35d9af9dab`, based on the separately reviewed
-870-second manifest-headroom correction. Newer backend source is not evidence
-that its authentication changes are deployed.
+NAS change accompanied publication of 0.5.10. Operations subsequently verified
+the minimal public-JWKS resolver reuse on staging at October 28, 21:32 UTC:
+active version `b1023692-2ef2-4004-9187-4cb8b9bb9b65`, module SHA256
+`f5c51d80fdae674718144c45738469f1af5a936882f6fb3a4eca217f5a4db379`.
+Runtime configuration, assets and the current same-folder grant witness were
+preserved. The 870-second manifest headroom remains unchanged. Public signing
+keys have a bounded 600-second cache and 30-second unknown-key cooldown;
+JWT expiry and current identity/admission/grant checks still apply per request.
+This is staging activation evidence, not a new Windows file-download speed result.
+
+Before that activation, a one-attempt metadata diagnostic used the exact 0.5.12 Core and pinned
+installed helper with the existing cached sign-in. Both current-session checks
+matched the saved employee principal and valid expiry, with cumulative elapsed
+times of 2,562 and 3,169 ms. No browser login, catalog, Resolve, content, registry
+or native operation was performed. This executor-context result does not prove
+that the installed Explorer session recovered.
+
+Commit `bb6a8c4b` corrects a source-proven recovery dead end: the existing 60-second
+timer may recheck only confirmed transient session failures on the same owned,
+newly paused generation. Fresh account/expiry checks and the engine's own source
+gate precede resume. Permanent denial, expired sign-in, malformed metadata,
+manual pause and uncertain local/native ownership remain held. Read-only UI
+observations and fenced engine events preserve failure holds across races.
+Twenty coordinator cases, focused regressions and independent source review
+passed. Installed acceptance of this successor remains pending.
+
+The successor also keeps one bounded local connection-failure record at
+`%LOCALAPPDATA%\LedgeTop\Files\pilot\connected-explorer-pilot-employee\latest-connection-failure.json`.
+It contains only a validated support code, UTC time and app version, with a
+fixed schema/owner marker and a 1 KB limit. Writing requires the existing owned
+employee index lease and current index; unknown files and uncertain ownership
+are preserved. Diagnostic IO is best effort and never determines authorization,
+recovery or shutdown. The integrated source passed four focused groups and
+21 coordinator cases; actual installed log capture remains pending.
 
 ## Earlier evidence
 
