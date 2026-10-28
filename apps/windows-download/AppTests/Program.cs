@@ -77,6 +77,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("Saved-source resume admits only the exact offered pilot coordinate", ExplorerResumeRequestTests.Run),
     ("Installed update parent classifies cancellation before helper capability", ExplorerInstalledUpdateControllerTests.Run),
     ("Automatic update schedule preserves idle and recovery boundaries", LedgeTop.Files.Tests.ExplorerUpdateScheduleTests.Run),
+    ("Saved connection startup routing retains pinned owned identity and source isolation", SavedConnectionStartupRouterTests.Run),
     ("Unified sign-in binds authoritative source selection to one authenticated attempt", UnifiedSignInTests.Run),
     ("Windows startup settings preserve fixed installed ownership and foreign values", WindowsStartupAdapterTests.Run),
     ("Installed payload verifier binds exact inventory and retained filesystem handles", InstalledPayloadVerifierTests.Run),
@@ -84,7 +85,9 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("Legacy preview cleanup preserves content and verifies already-removed registrations", LegacyExplorerPreviewCleanupTests.Run),
     ("Folder launcher keeps dispatcher and Quit responsive while Windows Shell is blocked", () => BackgroundFolderLauncherTests.Run(screenshots)),
 }.Concat(ExplorerCatalogSnapshotTests.Groups).ToArray();
-var selectedGroups = args.Contains("--unified-sign-in-only")
+var selectedGroups = args.Contains("--saved-connection-startup-only")
+    ? groups.Where(group => group.Name.StartsWith("Saved connection startup routing", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--unified-sign-in-only")
     ? groups.Where(group => group.Name.StartsWith("Unified sign-in", StringComparison.Ordinal)).ToArray()
     : args.Contains("--folder-launcher-only")
     ? groups.Where(group => group.Name.StartsWith("Folder launcher", StringComparison.Ordinal)).ToArray()

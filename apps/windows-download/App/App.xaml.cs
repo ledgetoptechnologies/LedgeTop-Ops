@@ -78,7 +78,8 @@ public partial class App : Application
             preview.Show(); RestoreWhenReady(preview);
             return;
         }
-        // The compiled channel supplies trusted setup. Real sources remain deferred until an explicit connection action.
+        // The compiled channel supplies trusted setup. New connections wait for an explicit action;
+        // existing owned profiles may reconnect only after fresh source/principal verification.
         StartupPlan plan;
         try {
             plan = Backends.Startup.Choose(compiled, e.Args,
@@ -89,13 +90,35 @@ public partial class App : Application
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "Ledge Top"), null);
         }
         if (plan.Access is { } access) {
-            // Pick one source without constructing either backend or starting browser authentication.
+            // Inspect only existing local ownership. Backend construction/authentication
+            // stays deferred, and reserved update/logon coordinates never probe other sources.
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
-            AccessMode? mode;
-            if (resume.SourceMode is { } requestedMode) {
-                if (!resume.AllowedIn(compiled, access.Modes)) { Shutdown(20); return; }
-                mode = requestedMode;
+            var channel = compiled.Channel == ReleaseChannel.Stable ? "stable" : "pilot";
+            var stateFolder = compiled.Packaged ? channel : "developer";
+            var stateBase = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LedgeTop", "Files", stateFolder);
+            ConnectedExplorerSession Prepare(AccessMode selectedMode)
+            {
+                if (access.TrustedOrigins is null || !access.TrustedOrigins.TryGetValue(selectedMode, out var selectedOrigin))
+                    throw new IOException("The configured source origin is unavailable.");
+                var label = selectedMode == AccessMode.Client ? "Client deliveries" : "Company files";
+                var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "LedgeTop Files " + (plan.Tag ?? "") + " — " + label);
+                return new ConnectedExplorerSession(() => access.Create(selectedMode), channel,
+                    AccessModes.Alias(selectedMode), selectedOrigin, stateBase, root);
             }
+            SavedStartupRoute route;
+            try {
+                route = await SavedConnectionStartupRouter.PrepareAsync(resume, access.Modes, selectedMode => {
+                    var prepared = Prepare(selectedMode);
+                    return new(prepared, prepared.StartupProfileState);
+                });
+            } catch (Exception) {
+                MessageBox.Show("LedgeTop Files couldn't check its saved connections safely. Keep your local files and ask your LedgeTop contact to review setup.",
+                    "LedgeTop Files", MessageBoxButton.OK, MessageBoxImage.Information);
+                Shutdown(20); return;
+            }
+            if (route.Kind == SavedStartupRouteKind.Refused) { Shutdown(20); return; }
+            AccessMode? mode;
+            if (route.Mode is { } routedMode) mode = routedMode;
             else if (access.Modes.Count == 1) mode = access.Modes[0];
             else {
                 var chooser = new ExplorerSourceChoiceWindow(access.Modes, plan.Tag ?? "Files");
@@ -103,23 +126,14 @@ public partial class App : Application
                 mode = await chooser.Selection;
             }
             if (mode is null) { Shutdown(); return; }
-            if (access.TrustedOrigins is null || !access.TrustedOrigins.TryGetValue(mode.Value, out var origin)) {
-                MessageBox.Show(Backends.Startup.UnreviewedProblem, "LedgeTop Files", MessageBoxButton.OK, MessageBoxImage.Information);
-                Shutdown(); return;
-            }
-            var channel = compiled.Channel == ReleaseChannel.Stable ? "stable" : "pilot";
-            var stateFolder = compiled.Packaged ? channel : "developer";
-            var stateBase = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LedgeTop", "Files", stateFolder);
-            var label = mode == AccessMode.Client ? "Client deliveries" : "Company files";
-            var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "LedgeTop Files " + (plan.Tag ?? "") + " — " + label);
-            IExplorerPreviewSession Prepare() => new ConnectedExplorerSession(() => access.Create(mode.Value), channel,
-                AccessModes.Alias(mode.Value), origin, stateBase, root);
             ExplorerPreviewWindow settings;
+            IExplorerPreviewSession? preparedSession = route.Prepared;
             try {
-                var prepared = Prepare(); // Only owned local profile/index reads; no source/helper/authentication call.
-                settings = new ExplorerPreviewWindow(() => Task.FromResult(Prepare()), presentation:
-                    ExplorerWindowContent.Connected(plan.Tag ?? "Files", mode.Value), preparedSession: prepared, setupProblem: plan.Problem);
+                preparedSession ??= Prepare(mode.Value);
+                settings = new ExplorerPreviewWindow(() => Task.FromResult<IExplorerPreviewSession>(Prepare(mode.Value)), presentation:
+                    ExplorerWindowContent.Connected(plan.Tag ?? "Files", mode.Value), preparedSession: preparedSession, setupProblem: plan.Problem);
             } catch (Exception) {
+                if (preparedSession is not null) { try { await preparedSession.DisposeAsync(); } catch { } }
                 MessageBox.Show("LedgeTop Files couldn't prepare its local connection. Restart the app, and ask your LedgeTop contact to check setup if this continues.",
                     "LedgeTop Files", MessageBoxButton.OK, MessageBoxImage.Information);
                 Shutdown(); return;
@@ -141,7 +155,9 @@ public partial class App : Application
                 await settings.SetStartupActionsAsync(new ExplorerStartupActions(token => startupAdapter.ApplyDefaultAsync(AccessModes.Alias(mode.Value), token),
                     (enabled, token) => startupAdapter.SetEnabledAsync(enabled, AccessModes.Alias(mode.Value), token)));
             }
-            if (resume.Requested) await settings.ReconnectPreviewAsync();
+            // Cached reconnect revalidates the retained source/index principal before any work.
+            // Rejection remains on this Settings window; it never opens a different source/chooser.
+            if (route.Reconnect) await settings.ReconnectPreviewAsync();
             if (resume.StartWithWindows) settings.HideAfterWindowsStartup();
             return;
         }

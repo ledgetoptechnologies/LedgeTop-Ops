@@ -110,6 +110,14 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException) { return false; }
         }
     }
+    // Read only the ownership/readiness already established by this instance. A partial,
+    // invalid or changed generation is never interpreted as an absent connection.
+    internal SavedProfileState StartupProfileState => invalidIndex || closeRequested || disposed
+        ? SavedProfileState.NeedsReview
+        : index is null ? SavedProfileState.Absent
+        : CanReconnectCached ? SavedProfileState.OwnedReady
+        : State == ExplorerPreviewState.Removed ? SavedProfileState.Removed : SavedProfileState.NeedsReview;
+
     /// <summary>Reopens only an existing ready frozen generation using cached authorization. Never signs in or captures.</summary>
     internal Task ReconnectCachedAsync() => StartCoreAsync(explicitLogin: false);
     Task ICachedExplorerReconnect.ReconnectCachedAsync() => ReconnectCachedAsync();
