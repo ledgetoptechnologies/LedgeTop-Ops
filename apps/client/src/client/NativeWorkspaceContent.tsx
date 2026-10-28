@@ -42,14 +42,14 @@ function featureDetail(key: NativeWorkspaceFeatureKey, readiness: NativeWorkspac
     : "The delivery backend is not ready for this client account. Existing shares and files have not been removed.";
   if (key === "serviceRequests") return status.state === "available"
     ? "Service requests are available through this exact connected source. Project access and request authority are checked again for every change."
-    : "New service requests are not connected for this Project Alpha source. Existing authorized request history remains unchanged.";
+    : "New service requests aren't available for this account yet. Your existing requests are unchanged.";
   if (key === "feedback") return status.state === "available"
     ? "Feedback is ready for individually authorized projects and delivery items. Access is checked again when feedback is sent or opened."
     : status.state === "not_in_access" ? "Feedback is not in your current directory access." : "Feedback storage is not ready for this client account.";
   if (key === "models") return status.state === "available"
     ? "3D models explicitly shared with this client account are ready. Access is checked again whenever a model opens."
-    : "3D model viewing is not connected for this Project Alpha source.";
-  if (key === "team") return "Team member management is not connected for this Project Alpha source.";
+    : "3D model viewing isn't available for this account yet.";
+  if (key === "team") return "Team member management isn't available for this account yet.";
   return "Billing is managed by the source system and is not connected for this client account.";
 }
 function FeatureReadiness({features}: {features: NativeWorkspaceFeatureReadiness}) {

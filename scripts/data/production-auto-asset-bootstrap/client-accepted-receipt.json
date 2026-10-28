@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "status": "accepted-after-separate-active-verification",
+  "sourceCommit": "b0c99cdd7303ca9eea9830b5be6d3a8cf990f24a",
+  "worker": "ledgetop-clients",
+  "candidateVersionId": "1c606164-9a98-495a-87c9-3be251658d00",
+  "cutoverAt": "2026-10-28T12:52:44.586807Z",
+  "earliestPermittedPruningAt": "2026-10-30T12:52:45Z",
+  "minimumRetentionHours": 48,
+  "files": 167,
+  "bytes": 90534186,
+  "packetManifestSHA256": "fa42dede3e1befc359f59907603942b0b60e96f04e42c71daf63ed707ca9cb05",
+  "terminalReceiptSHA256": "53778ed358dd4c6a19c09ed08a0f135f0767587cd388ab487d1ecfa1855c042c",
+  "acceptedReceiptSHA256": "47240239cc53d9afbcbb464efd5d402dfb88501e286ecb5816899b47829d2b16",
+  "evidence": "Existing12:52Client live HEAD+GET terminal and rendered-portal acceptance; aggregate recorded proof, not newly repeated per-path network observations",
+  "automaticPruning": false,
+  "postActivationProof": {
+    "allBodySizeShaMimeChecksPassed": true,
+    "temporaryHelperRemoved": true,
+    "cleanup": {
+      "removed": true,
+      "absenceVerified": true
+    },
+    "evidenceScope": "Existing12:52Client live HEAD+GET terminal and rendered-portal acceptance; aggregate recorded proof, not newly repeated per-path network observations"
+  },
+  "bootstrapBoundary": "Qualification of recorded inventory only; next automatic release MUST reverify every path against exact still-active version before upload"
+}

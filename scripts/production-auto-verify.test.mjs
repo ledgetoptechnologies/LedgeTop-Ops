@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { createAssetVerificationNonce, createAssetVerifierSource, collectVerifiedAssets, executeAssetVerification } from "./production-auto-verify.mjs";
+import { ASSET_VERIFICATION_LIMITS, createAssetVerificationNonce, createAssetVerifierSource, collectVerifiedAssets, executeAssetVerification } from "./production-auto-verify.mjs";
 
 const bytes = Buffer.from([0, 255, 13, 10, 65, 0]);
 const sha = value => createHash("sha256").update(value).digest("hex");
@@ -77,6 +77,26 @@ test("target, version, manifest resource bounds and namespace restrictions are v
     assert.throws(() => createAssetVerifierSource({ ...input, ...patch }), error => error.message === "static_asset_verification_refused");
   }
   assert.match(createAssetVerifierSource({ ...input, workerName: "ledgetop-clients", origin: "https://portal.ledgetop.app" }), /portal\.ledgetop\.app/u);
+});
+
+test('bounded 471-file Operations inventory of 152255343 bytes fits while inventories above 256 MiB fail before any fetch', async () => {
+  const targetBytes = 152_255_343, count = 471, base = Math.floor(targetBytes / count), extra = targetBytes % count;
+  const opsRows = Array.from({ length: count }, (_, i) => ({
+    path: i === 0 ? '/index.html' : `/assets/ops-${String(i).padStart(3, '0')}.js`,
+    size: base + (i < extra ? 1 : 0), sha256: String(i + 1).padStart(64, '0'),
+    contentType: i === 0 ? 'text/html' : 'text/javascript',
+  }));
+  assert.equal(opsRows.reduce((sum, row) => sum + row.size, 0), targetBytes);
+  assert.ok(targetBytes > 128 * 1024 * 1024 && targetBytes < ASSET_VERIFICATION_LIMITS.totalBytes);
+  assert.doesNotThrow(() => createAssetVerifierSource({ ...options(createAssetVerificationNonce()), entries: opsRows }));
+
+  const tooLarge = Array.from({ length: 1000 }, (_, i) => ({ ...entry,
+    path: i === 0 ? '/index.html' : `/assets/large-${String(i).padStart(3, '0')}.js`,
+    size: 269_000, sha256: String(i + 1).padStart(64, '0') }));
+  assert.ok(tooLarge.reduce((sum, row) => sum + row.size, 0) > ASSET_VERIFICATION_LIMITS.totalBytes);
+  let calls = 0;
+  await assert.rejects(collectVerifiedAssets({ entries: tooLarge, fetchAsset: async () => { calls++; return response('GET'); } }));
+  assert.equal(calls, 0, 'over-limit inventory is refused before helper calls');
 });
 
 test("collector checks HEAD and GET and returns byte-exact copies without input mutation", async () => {
