@@ -138,11 +138,8 @@ test("an unconfirmed share is retried with the identical body and key, and the s
   // The error sits above the retry button.
   const errorBox = await dialog.getByRole("alert").boundingBox(), retryBox = await dialog.getByRole("button", { name: "Try again" }).boundingBox();
   expect(errorBox!.y + errorBox!.height).toBeLessThanOrEqual(retryBox!.y);
-  // Closing is allowed, but the unconfirmed share is kept: reopening offers the same retry, never a new share.
-  await dialog.getByRole("button", { name: "Close" }).click();
-  await expect(dialog).toHaveCount(0);
-  await page.getByRole("list", { name: "Published models in Seawall survey" }).getByRole("button", { name: /Seawall orthomosaic/ }).click();
-  await expect(dialog.getByRole("alert")).toContainText("couldn't confirm");
+  // An unconfirmed share can only be retried from here: its receipt belongs to this sign-in and expires.
+  await expect(dialog.getByRole("button", { name: "Close" })).toBeDisabled();
   await expect(dialog.getByRole("button", { name: "Change" })).toBeDisabled();
   await expect(dialog.getByRole("checkbox", { name: "Download files" })).toBeDisabled();
   await expect(dialog.getByRole("button", { name: "Share", exact: true })).toHaveCount(0);
@@ -150,6 +147,28 @@ test("an unconfirmed share is retried with the identical body and key, and the s
   await dialog.getByRole("button", { name: "Try again" }).click();
   await expect(dialog.getByRole("status").filter({ hasText: "Shared with Harbor Authority" })).toBeVisible();
   await expect(dialog.getByRole("status").filter({ hasText: "Shared with Harbor Authority" })).toHaveClass(/\bok\b/);
+  const sent = posts(calls);
+  expect(sent).toHaveLength(2);
+  expect(sent[1]!.key).toBe(sent[0]!.key);
+  expect(sent[1]!.body).toEqual(sent[0]!.body);
+});
+
+test("a duplicate reported after an unconfirmed share is not treated as a failure of that share", async ({ page }) => {
+  let attempts = 0;
+  const calls = await mockOps(page, MANAGER, (url, method, route) => {
+    if (url.pathname !== "/api/viewer/direct-client-grants" || method !== "POST") return undefined;
+    attempts += 1;
+    return route.fulfill(attempts === 1 ? { status: 503, json: { error: "Viewer unavailable" } }
+      : { status: 409, json: { error: "An active share already exists", code: "duplicate_active_grant" } });
+  });
+  const dialog = await openShare(page, "Seawall orthomosaic");
+  await dialog.getByRole("option", { name: /Harbor Authority/ }).click();
+  await dialog.getByRole("button", { name: "Review share" }).click();
+  await dialog.getByRole("button", { name: "Share", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("couldn't confirm");
+  await dialog.getByRole("button", { name: "Try again" }).click();
+  await expect(dialog.getByRole("alert")).toHaveText('Harbor Authority already has this share, possibly from your earlier attempt. Check "Already shared with" above.');
+  await expect(dialog.getByRole("alert")).not.toContainText("An active share already exists");
   const sent = posts(calls);
   expect(sent).toHaveLength(2);
   expect(sent[1]!.key).toBe(sent[0]!.key);
@@ -307,11 +326,7 @@ test("an unconfirmed public link is retried with the identical body and key, nev
   await expect(dialog.getByLabel("Label (optional)")).toBeDisabled();
   await expect(dialog.getByRole("checkbox", { name: "Allow model download" })).toBeDisabled();
   await expect(dialog.getByRole("tab", { name: "Client Workspace" })).toBeDisabled();
-  // Closing keeps the unconfirmed link; reopening returns to the same retry.
-  await dialog.getByRole("button", { name: "Close" }).click();
-  await expect(dialog).toHaveCount(0);
-  await page.getByRole("list", { name: "Published models in Seawall survey" }).getByRole("button", { name: /Seawall orthomosaic/ }).click();
-  await expect(dialog.getByRole("tab", { name: "Public link" })).toHaveAttribute("aria-selected", "true");
+  await expect(dialog.getByRole("button", { name: "Close" })).toBeDisabled();
   await expect(dialog.getByRole("alert")).toContainText("couldn't confirm the link was created");
   await expect(dialog.getByLabel("Label (optional)")).toHaveValue("Board review");
   await expect(dialog.getByLabel("Label (optional)")).toBeDisabled();

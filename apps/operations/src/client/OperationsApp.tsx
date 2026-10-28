@@ -3948,7 +3948,7 @@ function ViewerDataOverview({session}:{session:Session}) {
         : <><StatusPill tone="warning">Needs attention</StatusPill><small>{[
           !value.platform.ready && "The Viewer isn't ready yet.",
           !value.platform.workerLive && "Background processing isn't running.",
-          value.platform.lifecycleBlocked && "Routine file cleanup is on hold.",
+          value.platform.lifecycleBlocked && "File storage changes are on hold until a storage problem is fixed in the Viewer.",
         ].filter(Boolean).join(" ")}</small></>}</Card>
     </div>
     {value.jobs.failed > 0 && <p className="notice warning">{value.jobs.failed} processing job{value.jobs.failed === 1 ? " needs" : "s need"} attention. <button type="button" className="button-ghost button-small" disabled={opening} onClick={() => void openWorkspace()}>Review in Viewer</button></p>}
