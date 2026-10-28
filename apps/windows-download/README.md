@@ -75,6 +75,22 @@ connection without the chooser, retaining its prepared principal and performing
 fresh cached reconnect. New or ambiguous connections still need discovery.
 Its Windows CI `40735518515` passed.
 
+Beau subsequently narrowed the first installed release to employees. Commit
+`84c3d4a5` opens employee Settings directly, without the client/company chooser.
+The installed backend factory and reserved startup/resume admission refuse
+client routing, with an explicit client-unavailable notice. Existing client
+profiles and local files are not probed or removed. Employee sign-in still uses
+the existing authoritative staff admission, principal and file-grant checks;
+admitted employees with an empty inventory remain connected. Five focused test
+groups, an independent source review, a separate packaged Pilot build and Windows
+CI `40759058157` passed. Unsigned 0.5.11 contains this source and passed independent
+524-file installed verification. Its actual main-PC upgrade offered graceful
+closure and opened directly to employee Settings. However, cached reconnect
+subsequently paused during source-session checks, so connected acceptance is
+incomplete and no new installed speed result is available. The SMB status labels
+it a test candidate. The common signed discovery preparation remains inactive
+for any later multi-role release.
+
 Commit `f82aa0d4` adds two tracked availability workers and two concurrent distinct
 hydrations per process/cache root. Per-entry leases, conservative durable quota
 reservations, both authority checks and full SHA verification remain. Windows CI
@@ -109,7 +125,26 @@ The historical laptop LoginRequired failure is not independently resolved by a
 successful test on the main PC. Current Client-deliveries behavior needs its own
 approved account/source acceptance; Company tests do not qualify it.
 
-The approved read-only Test Data access expires October 28 at 20:33:11 UTC.
+The main PC's stale 0.5.7 activation metadata was corrected to its independently
+verified 0.5.10 payload by a separate, narrowly scoped support action. It required
+the exact approved installer, an uninstaller independently reconstructed from
+those installer bytes, a normal Quit of the verified pipe peer, actual process
+exit and singleton ownership. All three participating HKCU64 pointers read back
+as 0.5.10, with a flushed completion journal. No connection, local file, source
+permission or normal startup guard changed. This proves executor-visible HKCU64
+reconciliation only; it does not establish the application's prior registry view
+or qualify another version's installation/update behavior.
+
+After actual 0.5.11 installation, the same pinned read-only probe observed correct
+0.5.11 product/version/uninstall/Run values in the desktop context, but older
+product pointers in the executor context. SID, session, bitness and native key
+metadata matched; the mechanism remains unknown. These observations do not
+justify another registry repair or establish that the app reads the executor's
+view. In-app update acceptance must observe the actual desktop path.
+
+The prior read-only Test Data access expired October 28 at 20:33:11 UTC. Beau
+approved the same read-only folder through October 29 at 20:33:00 UTC; successor
+application/readback is pending, and protected tests remain stopped meanwhile.
 Installation does not renew access. No grant expansion, backend activation or
 NAS change accompanied publication of 0.5.10. The last captured staging backend was
 version `bba93046-3a9f-4df5-a987-3c35d9af9dab`, based on the separately reviewed

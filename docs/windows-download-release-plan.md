@@ -1,8 +1,9 @@
 # Windows files app: installer and release plan
 
-October 28 owner update: Beau reports creating an Azure account and again wants
-Artifact Signing. The actual signing resource, identity validation and profile
-remain unverified. The active installer is the conventional per-user EXE pilot;
+October 28 owner update: Azure portal observation confirms the Basic Artifact
+Signing account and Beau's resource-scoped Identity Verifier role assignment.
+Organization validation is In Progress; the certificate profile, validated
+publisher and actual signing remain unqualified. The active installer is the conventional per-user EXE pilot;
 historical MSIX research below is not the selected installed delivery mechanism.
 The first release is now employee-only, and the next update acceptance must run
 from inside the installed application rather than by manually launching setup.

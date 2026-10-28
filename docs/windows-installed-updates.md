@@ -2,19 +2,33 @@
 
 ## Current owner direction — October 28, 2026
 
-Beau now reports creating an Azure account and requests Artifact Signing again.
-The earlier unsigned-only decision below is historical. The Artifact Signing
-resource, business identity validation, Public Trust certificate profile and CI
-federation have not been verified by this chat; confirmation of the completed
-setup step is pending. No signing resource, purchase, secret or certificate trust
-change has been made by this work.
+Beau created an Azure Artifact Signing account and requests signing again. The
+earlier unsigned-only decision below is historical. Portal observation confirmed
+the Basic signing account in East US. At Beau's explicit request, his Azure user
+was assigned Artifact Signing Identity Verifier on that signing resource only;
+Azure returned a success notification. Beau completed the organization form, and
+the portal subsequently showed Public validation for Ledge Top Technologies LLC
+as **In Progress**. No business identifier was copied into these records. The
+relationship between the requested publisher name and the business identifier's
+existing name remains an owner question; approval must not be presumed. Public
+Trust certificate profile, signer permission, CI federation and actual signing
+remain unqualified. No purchase, signing secret or certificate trust change was
+made by this work.
 
 The next release must be tested through the installed app's update action,
 including authenticated offer/download, byte and publisher verification, safe
 provider drain, actual old-process exit, installation and reconnect. Source-level
 tests and a manually run installer do not qualify that sequence. The current
-shared build is unsigned 0.5.10; its Operations update feed remains off. GitHub
-holds source and CI evidence, rather than serving as an enabled update channel.
+shared 0.5.11 is an unsigned test candidate with incomplete connected acceptance;
+0.5.10 is retained. The Operations update feed remains off. GitHub holds source
+and CI evidence, rather than serving as an enabled update channel.
+The existing EXE consumer verifies authenticated release bytes but does not
+perform Authenticode publisher verification. The current offline offer builder
+refuses signed installers. Both require actual signed-release support before the
+future publisher-enforced path can be qualified; signing a setup file alone does
+not complete this integration. The current unsigned installed version can only
+bootstrap using its existing authenticated hash/ETag policy. A subsequent signed
+version-to-version update must prove publisher enforcement as well as lifecycle.
 
 Beau also narrowed the first Windows release to employees. It should have one
 employee sign-in entry and clearly explain that client access is not available
