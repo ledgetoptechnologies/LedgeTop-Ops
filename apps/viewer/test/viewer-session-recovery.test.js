@@ -6,6 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createMeasurementDraftRecovery } = require('../measurement-draft-recovery.mjs');
 const { renderStaffNavigation } = require('../viewer-staff-navigation.mjs');
+const { renderClientNavigation } = require('../viewer-client-navigation.mjs');
 const { createViewerSessionCapabilityStore, VIEWER_SESSION_STORAGE_PREFIX: PREFIX } = require('../viewer-session-capability-store.mjs');
 const { measurementCollection } = require('../measurement-document.mjs');
 const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
@@ -24,6 +25,7 @@ function fixture({ controller = true } = {}) {
   const context = vm.createContext({
     createMeasurementDraftRecovery,
     renderStaffNavigation,
+    renderClientNavigation,
     // This partial VM fixture exercises session renewal without a header DOM.
     // The actual navigation installer and measurement-keyboard interaction are
     // covered together in viewer-header-browser.test.mjs.

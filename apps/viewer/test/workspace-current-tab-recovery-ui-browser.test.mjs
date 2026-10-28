@@ -10,6 +10,7 @@ import { acquireBrowserHarnessLock } from './browser-lock.mjs';
 import { describeDiscardedWork } from '../workspace-current-tab-recovery-ui.mjs';
 import { waitForDevToolsPort } from './devtools-port.mjs';
 import { legacyUploadModuleSource } from './legacy-upload-fixture.mjs';
+import { BoundedTestCdp as Cdp } from './bounded-test-cdp.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -42,32 +43,6 @@ async function waitForDevTools(profile) {
   const port = await waitForDevToolsPort(path.join(profile, 'DevToolsActivePort'),
     { timeoutMs: 10_000, label: 'Browser did not expose a DevTools endpoint' });
   return `http://127.0.0.1:${port}`;
-}
-
-class Cdp {
-  constructor(socket) {
-    this.socket = socket; this.nextId = 1; this.pending = new Map(); this.events = [];
-    socket.addEventListener('message', event => {
-      const message = JSON.parse(event.data);
-      if (message.id) { const p = this.pending.get(message.id); if (!p) return; this.pending.delete(message.id); message.error ? p.reject(new Error(`${p.method}: ${message.error.message}`)) : p.resolve(message.result || {}); }
-      else this.events.push(message);
-    });
-  }
-  static async connect(url) {
-    const socket = new WebSocket(url);
-    await new Promise((resolve, reject) => { socket.addEventListener('open', resolve, { once: true }); socket.addEventListener('error', reject, { once: true }); });
-    return new Cdp(socket);
-  }
-  command(method, params = {}) {
-    const id = this.nextId++;
-    return new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject, method }); this.socket.send(JSON.stringify({ id, method, params })); });
-  }
-  async evaluate(expression) {
-    const result = await this.command('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-    if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
-    return result.result?.value;
-  }
-  close() { this.socket.close(); }
 }
 
 async function until(check, message, timeout = 10_000) {
@@ -128,11 +103,22 @@ async function startServer() {
 
 // A trusted click. The release does not complete while a beforeunload prompt it
 // triggered is open, so callers that expect a prompt answer it before awaiting.
-async function clickReal(client, selector) {
-  const box = await client.evaluate(`(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+async function clickReal(client, selector, { deferRelease = false } = {}) {
+  const box = await client.evaluate(`(() => {
+    const element = document.querySelector(${JSON.stringify(selector)});
+    if (!element) return { error: 'target missing', selector: ${JSON.stringify(selector)} };
+    element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    const r = element.getBoundingClientRect(), x = r.x + r.width / 2, y = r.y + r.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    return { x, y, width: r.width, height: r.height, viewport: { width: innerWidth, height: innerHeight },
+      hitTarget: hit ? { tag: hit.tagName, id: hit.id, className: hit.className } : null,
+      lands: Boolean(r.width && r.height && hit && (hit === element || element.contains(hit))) };
+  })()`);
+  assert.equal(box.lands, true, `Trusted click cannot reach ${selector}: ${JSON.stringify(box)}`);
   await client.command('Input.dispatchMouseEvent', { type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1 });
   const released = client.command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: box.x, y: box.y, button: 'left', clickCount: 1 });
   released.catch(() => {});
+  if (!deferRelease) await released;
   return { released };
 }
 
@@ -147,19 +133,40 @@ test('"Renew in this tab" gates on discarded work and honours the real beforeunl
   const executable = browserPath();
   if (!executable) { t.skip('Chrome or Edge is required for beforeunload browser coverage.'); return; }
   const release = await acquireBrowserHarnessLock({ root });
-  let server, origin, profile, browser, client, devTools;
+  let server, origin, profile, browser, control, devTools;
   try {
     ({ server, origin } = await startServer());
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-viewer-browser-'));
     browser = spawn(executable, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
     devTools = await waitForDevTools(profile);
-    const pages = await until(async () => (await (await fetch(`${devTools}/json/list`)).json()).filter(item => item.type === 'page'), 'no page target');
-    client = await Cdp.connect(pages[0].webSocketDebuggerUrl);
-    await client.command('Page.enable');
-    await client.command('Runtime.enable');
+    const pages = await until(async () => {
+      const pages = (await (await fetch(`${devTools}/json/list`, { signal: AbortSignal.timeout(1_000) })).json())
+        .filter(item => item.type === 'page');
+      return pages.length ? pages : null;
+    }, 'no page target');
+    // Keep about:blank as a dedicated control connection. Every subtest owns a
+    // fresh target, so a failed assertion cannot leak its upload/unload guard.
+    control = await Cdp.connect(pages[0].webSocketDebuggerUrl);
+    const fixtureTest = (name, run) => t.test(name, async () => {
+      const { targetId } = await control.command('Target.createTarget', { url: 'about:blank' });
+      let client;
+      try {
+        const page = await until(async () => (await (await fetch(`${devTools}/json/list`, { signal: AbortSignal.timeout(1_000) })).json())
+          .find(item => item.id === targetId), 'owned fixture target did not appear');
+        client = await Cdp.connect(page.webSocketDebuggerUrl);
+        await client.command('Page.enable');
+        await client.command('Runtime.enable');
+        await run(client);
+      } finally {
+        try {
+          const result = await control.command('Target.closeTarget', { targetId });
+          assert.equal(result.success, true, 'owned fixture target must close');
+        } finally { client?.close(); }
+      }
+    });
 
-    await t.test('pending work: warning lists losses, button needs explicit acknowledgement, Cancel keeps everything, Confirm navigates', async () => {
+    await fixtureTest('pending work: warning lists losses, button needs explicit acknowledgement, Cancel keeps everything, Confirm navigates', async client => {
       await open(client, origin, `busy=1&state=${encodeURIComponent(JSON.stringify({ pendingUpload: true, selectedFileCount: 3, unsavedTaskDraft: true }))}`);
       const view = await client.evaluate(`(() => { const s = document.querySelector('.recovery-current-tab'); return {
         title: s.querySelector('h3').textContent, items: [...s.querySelectorAll('.recovery-current-tab-loss li')].map(li => li.textContent),
@@ -176,7 +183,7 @@ test('"Renew in this tab" gates on discarded work and honours the real beforeunl
       assert.equal(await client.evaluate(`document.querySelector('.recovery-current-tab button').disabled`), false);
 
       let since = client.events.length;
-      let click = await clickReal(client, '.recovery-current-tab button');
+      let click = await clickReal(client, '.recovery-current-tab button', { deferRelease: true });
       const cancelPrompt = await until(() => dialogEvents(client, since).find(event => event.params.type === 'beforeunload'), 'beforeunload prompt did not open');
       assert.ok(cancelPrompt);
       await client.command('Page.handleJavaScriptDialog', { accept: false });
@@ -192,17 +199,17 @@ test('"Renew in this tab" gates on discarded work and honours the real beforeunl
       assert.equal(await client.evaluate('window.__calls'), 1, 'no automatic retry after Cancel');
 
       since = client.events.length;
-      click = await clickReal(client, '.recovery-current-tab button');
+      click = await clickReal(client, '.recovery-current-tab button', { deferRelease: true });
       await until(() => dialogEvents(client, since).find(event => event.params.type === 'beforeunload'), 'beforeunload prompt did not reopen');
       await client.command('Page.handleJavaScriptDialog', { accept: true });
       await click.released;
       await until(() => client.evaluate('location.pathname === "/next.html"'), 'Confirm did not navigate');
     });
 
-    await t.test('real legacy uploader protects unrelated navigation, Cancel preserves upload, completion removes the guard', async () => {
+    await fixtureTest('real legacy uploader protects unrelated navigation, Cancel preserves upload, completion removes the guard', async client => {
       await open(client, origin, 'busy=1');
       await until(()=>client.evaluate('window.__uploadState().requests === 1'),'actual uploader did not reach creation');
-      const since=client.events.length,click=await clickReal(client,'#other-navigation');
+      const since=client.events.length,click=await clickReal(client,'#other-navigation',{deferRelease:true});
       await until(()=>dialogEvents(client,since).find(event=>event.params.type==='beforeunload'),'legacy upload did not guard ordinary navigation');
       await client.command('Page.handleJavaScriptDialog',{accept:false});await click.released;
       assert.deepEqual(await client.evaluate('window.__uploadState()'),{pending:true,busy:true,selectedFiles:3,requests:1});
@@ -214,7 +221,7 @@ test('"Renew in this tab" gates on discarded work and honours the real beforeunl
       assert.equal(dialogEvents(client,after).length,0);
     });
 
-    await t.test('no pending work: no warning or acknowledgement, and the button navigates without a prompt', async () => {
+    await fixtureTest('no pending work: no warning or acknowledgement, and the button navigates without a prompt', async client => {
       await open(client, origin, `state=${encodeURIComponent(JSON.stringify({ pendingUpload: false, selectedFileCount: 0, unsavedTaskDraft: false }))}`);
       const view = await client.evaluate(`({ loss: Boolean(document.querySelector('.recovery-current-tab-loss')), disabled: document.querySelector('.recovery-current-tab button').disabled })`);
       assert.deepEqual(view, { loss: false, disabled: false });
@@ -224,7 +231,7 @@ test('"Renew in this tab" gates on discarded work and honours the real beforeunl
       assert.equal(dialogEvents(client, since).length, 0, 'no leave-page prompt without a registered guard');
     });
 
-    await t.test('a recovery start failure is reported and the page stays usable', async () => {
+    await fixtureTest('a recovery start failure is reported and the page stays usable', async client => {
       await open(client, origin, 'throw=1');
       await clickReal(client, '.recovery-current-tab button');
       const state = await until(() => client.evaluate(`(() => { const s = document.querySelector('.recovery-current-tab-status').textContent; return s ? { s, path: location.pathname, disabled: document.querySelector('.recovery-current-tab button').disabled } : null; })()`), 'no failure status');
@@ -234,12 +241,12 @@ test('"Renew in this tab" gates on discarded work and honours the real beforeunl
     // The endpoint was discovered only from this run's fresh private profile.
     // Close that browser through its own protocol, never enumerate/kill a
     // shared profile or retry cleanup of historical retained profiles.
-    if (client) {
+    if (control) {
       let timer;
-      try { await Promise.race([client.command('Browser.close'), new Promise(resolve => { timer=setTimeout(resolve,1_000); })]); }
+      try { await Promise.race([control.command('Browser.close'), new Promise(resolve => { timer=setTimeout(resolve,1_000); })]); }
       catch {} finally { clearTimeout(timer); }
     }
-    try { client?.close(); } catch {}
+    try { control?.close(); } catch {}
     try {
       if (browser && browser.exitCode===null && browser.signalCode===null) {
         let timer;
@@ -253,7 +260,7 @@ test('"Renew in this tab" gates on discarded work and honours the real beforeunl
       try { await until(async()=>{try{await fetch(`${devTools}/json/version`,{signal:AbortSignal.timeout(500)});return false;}catch{return true;}},'Owned browser endpoint still active',5_000);endpointClosed=true; }
       catch {}
     }
-    if (profile && client && endpointClosed && browser && (browser.exitCode!==null || browser.signalCode!==null)) {
+    if (profile && control && endpointClosed && browser && (browser.exitCode!==null || browser.signalCode!==null)) {
       const resolved=realpathSync(profile),tempRoot=realpathSync(tmpdir());
       if (path.dirname(resolved)!==tempRoot || !path.basename(resolved).startsWith('ltds-viewer-browser-') || lstatSync(profile).isSymbolicLink()) throw new Error('Refusing cleanup outside the fresh test profile');
       try { rmSync(resolved, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });profileRemoved=!existsSync(profile); } catch {}
