@@ -224,7 +224,7 @@ test("opening shared work opens a full-page Viewer and renews through the preser
   await page.evaluate(() => {
     const button = document.createElement("button"); button.id = "open-untrusted-popup";
     button.onclick = () => { const child = window.open("about:blank", "_blank"); setTimeout(() => child?.location.replace("https://evil.example.test/session/spoof"), 50); };
-    document.body.append(button);
+    document.body.appendChild(button);
   });
   const spoofWait = page.waitForEvent("popup"); await page.click("#open-untrusted-popup"); const spoof = await spoofWait;
   await expect(spoof).toHaveURL("https://evil.example.test/session/spoof");
@@ -346,7 +346,7 @@ test("a real Viewer popup navigation to another origin is tracked separately fro
       const popup = window.open("about:blank", "viewer-navigation-semantics");
       if (popup) setTimeout(() => popup.location.replace("https://viewer.ledgetopdroneservices.com/session/navigation-check"), 0);
     };
-    document.body.append(button);
+    document.body.appendChild(button);
   });
   const popupWait = page.waitForEvent("popup");
   await page.click("#open-navigation-probe");
