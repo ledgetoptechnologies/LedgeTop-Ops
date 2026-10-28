@@ -192,7 +192,13 @@ The existing params stay, and one is added: `?section=projects&org=&project=&tas
      Download), with the rest in ⋯.
   4. **Ground control points.** Unchanged workflow, restyled.
   5. **Settings.** Processing options, streaming and product recovery, and dataset lifecycle.
-- The inline task expansion on the dashboard is **removed**. Clicking a task always opens this page.
+- ~~The inline task expansion on the dashboard is removed.~~ **As built (PR 4):** the project page keeps
+  the short inline task peek (facts, orthophoto, live log), because the orthophoto preview, live log
+  and recovery flows depend on it. The peek has an **Open task page** button, and the task page's
+  Overview tab shows the same content. "Processing history" in the ⋯ menu now opens the task's Runs
+  tab, which links to Diagnostics for runs across every project.
+- **Project page (PR 4):** an open project shows on its own, under a Projects › Customer › Project
+  breadcrumb, without the status strip or search.
 
 ### 4.4 Processing (new)
 

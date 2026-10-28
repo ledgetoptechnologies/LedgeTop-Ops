@@ -63,3 +63,21 @@
 
 /* Native hidden must win over the grid display used by project groups and rows. */
 .project-group[hidden],.project-subgroup[hidden],.project-row[hidden],.project-no-matches[hidden]{display:none}
+
+/* PR 4: breadcrumbs, project page and task tabs. */
+.workspace-breadcrumb{margin:0 0 14px}
+.workspace-breadcrumb ol{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0;padding:0;list-style:none;font-size:13px;color:var(--muted)}
+.workspace-breadcrumb li{display:flex;align-items:center;gap:6px;min-width:0}
+.workspace-breadcrumb li+li::before{content:"›";color:var(--border-strong)}
+.workspace-breadcrumb li[aria-current] span{color:var(--text);font-weight:600;overflow-wrap:anywhere}
+.breadcrumb-link{padding:4px 2px;border:0;background:none;color:var(--blue);cursor:pointer;font-size:13px}
+.breadcrumb-link:hover{text-decoration:underline}
+.project-page .project-row{border-color:var(--border-strong)}
+.task-page-heading{margin-bottom:12px}
+nav.task-page-navigation{display:flex;flex-wrap:nowrap;gap:4px;overflow-x:auto;margin:0 0 18px;padding:0;border-bottom:1px solid var(--border);scrollbar-width:none}
+.task-page-navigation::-webkit-scrollbar{display:none}
+.task-page-navigation>button{flex:0 0 auto;min-height:44px;margin-bottom:-1px;padding:10px 14px;border:0;border-bottom:2px solid transparent;border-radius:0;background:none;color:var(--text-2);box-shadow:none;font-weight:600}
+.task-page-navigation>button:hover{background:none;color:var(--text);border-bottom-color:var(--border-strong)}
+.task-page-navigation>button[aria-current=page]{color:var(--text);border-bottom-color:var(--orange)}
+.task-open-page{margin-top:12px}
+.task-runs-note{margin-top:12px}
