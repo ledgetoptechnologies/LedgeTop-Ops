@@ -14,11 +14,11 @@ replacement through that feed is not accepted end to end.
 
 ## Current verification — October 28, 2026
 
-- Shared candidate **0.5.9.0**, source `095cc00510f1518927c49dd8164ea05122dace3e`,
-  passed Windows CI `40688340230`. Its 524 payload files and 288 source entries
+- Shared candidate **0.5.10.0**, source `d4d2cabeeed418724a4077816d4f744a2c2d66d2`,
+  passed Windows CI `40725723008`. Its 524 payload files and 288 source entries
   were independently verified. The installer SHA256 is
-  `4c1b30d934f3beb9ef918ebfc7e2ba4cbace2a1947a22322b796f0a773dfadd8`.
-  Version 0.5.8 is retained in `Archive\0.5.8` for rollback.
+  `b4f9401c3ff3978ef10757013ed05ebd721f73037fd03b6f4f950ab4c04e016e`.
+  Version 0.5.9 is retained in `Archive\0.5.9` for rollback.
 - Company-file hydration removes four redundant session probes: synthetic HTTP
   tests verify three requests rather than seven for a cold download. Both file
   resolutions remain, including principal, expiry, current authority, version,
@@ -37,7 +37,7 @@ replacement through that feed is not accepted end to end.
   retained authorization/resolution and download phases dominated. Download
   timing includes disk writes and downloader checks, not just network time.
   This is not a statistical benchmark, laptop test or Photos-rendering result.
-- The main PC is running installed **0.5.8.0**. The desktop-control binding still
+- The last main-PC process observation found installed **0.5.9.0**. The desktop-control binding still
   misidentifies its window as the older 0.5.6 executable and refuses control.
   The new installer has therefore not been installed through this session.
   User screenshots show downloads and Keep succeeding in 0.5.8. Warning-free
@@ -51,7 +51,7 @@ replacement through that feed is not accepted end to end.
 
 ## Remaining acceptance and scope
 
-The next Windows candidate removes manual Pause/Resume from connected settings
+The shared 0.5.10 Windows candidate removes manual Pause/Resume from connected settings
 and the tray, and resumes saved pauses after fresh same-account validation.
 Startup defaults on after source selection and verified installation ownership;
 explicit opt-outs and conflicting Run entries remain preserved. Interactive
@@ -59,7 +59,14 @@ setup offers graceful shutdown of a verified supporting app and waits for its
 actual exit. Builds through 0.5.9 lack that protocol, so their first upgrade uses
 tray Quit followed by Retry within the still-open installer. Silent setup keeps
 its busy refusal. These changes have focused and integrated synthetic tests;
-the next installer still needs publication and installed acceptance.
+installed acceptance remains separate from those tests and SMB publication.
+
+Commit `400c557f` adds reviewed, synthetic-tested unified sign-in source preparation:
+an account-bound discovery coordinator, one sign-in window, and saved-profile
+routing policy. Hosted Windows CI `40732633194` passed for that exact commit.
+It is not wired into production startup or the published installer.
+The server discovery contract, native bootstrap and cross-audience account binding
+remain pending; the current installer still offers the client/company chooser.
 
 Actual installed tray close/quit/reconnect, full uninstall and legacy sidebar
 cleanup, logon startup, authenticated update replacement, and current laptop
@@ -70,7 +77,7 @@ approved account/source acceptance; Company tests do not qualify it.
 
 The approved read-only Test Data access expires October 28 at 20:33:11 UTC.
 Installation does not renew access. No grant expansion, backend activation or
-NAS change accompanied publication of 0.5.9. The current staging backend remains
+NAS change accompanied publication of 0.5.10. The last captured staging backend was
 version `bba93046-3a9f-4df5-a987-3c35d9af9dab`, based on the separately reviewed
 870-second manifest-headroom correction. Newer backend source is not evidence
 that its authentication changes are deployed.
