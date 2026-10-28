@@ -59,4 +59,32 @@ describe("native staff Access assertion authentication", () => {
       .rejects.toThrow("native_staff_access_denied");
     expect(calls.resolve).not.toHaveBeenCalled();
   });
+
+  it("reuses only the JWKS resolver while checking expiry and current admission on every request", async () => {
+    const isolatedConfiguration = { ...configuration, issuer: "https://resolver-reuse-team.cloudflareaccess.com" };
+    calls.verify.mockImplementation(async () => ({ payload: payload(staffAudience) }));
+    calls.resolve.mockResolvedValue({ identity, admissionVersion: 7 });
+
+    await expect(authenticateNativeStaffWithAdmissionVersion(request, {} as D1Database, isolatedConfiguration))
+      .resolves.toMatchObject({ identity, admissionVersion: 7 });
+    await expect(authenticateNativeStaffWithAdmissionVersion(request, {} as D1Database, isolatedConfiguration))
+      .resolves.toMatchObject({ identity, admissionVersion: 7 });
+    expect(calls.jwks).toHaveBeenCalledTimes(1);
+    expect(calls.verify).toHaveBeenCalledTimes(2);
+    expect(calls.resolve).toHaveBeenCalledTimes(2);
+
+    calls.verify.mockResolvedValueOnce({ payload: { ...payload(staffAudience), exp: Math.floor(Date.now() / 1000) - 1 } });
+    await expect(authenticateNativeStaffWithAdmissionVersion(request, {} as D1Database, isolatedConfiguration))
+      .rejects.toThrow("native_staff_access_denied");
+    expect(calls.verify).toHaveBeenCalledTimes(3);
+    expect(calls.jwks).toHaveBeenCalledTimes(1);
+    expect(calls.resolve).toHaveBeenCalledTimes(2);
+
+    calls.resolve.mockResolvedValueOnce(null);
+    await expect(authenticateNativeStaffWithAdmissionVersion(request, {} as D1Database, isolatedConfiguration))
+      .rejects.toThrow("native_staff_access_denied");
+    expect(calls.verify).toHaveBeenCalledTimes(4);
+    expect(calls.jwks).toHaveBeenCalledTimes(1);
+    expect(calls.resolve).toHaveBeenCalledTimes(3);
+  });
 });
