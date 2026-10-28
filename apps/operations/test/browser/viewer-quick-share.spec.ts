@@ -414,3 +414,54 @@ test("a public link ends at the close of its last day in Central time", async ({
   const created = calls.find(call => call.method === "POST" && call.path === "/api/viewer/models/model-ortho/shares")!;
   expect((created.body as { expiresAt: string }).expiresAt).toBe("2026-11-01T04:59:59.000Z");
 });
+
+test("an unconfirmed client share older than the retry window is held: no new request, guidance to check existing access", async ({ page }) => {
+  await page.clock.install();
+  let attempts = 0;
+  const calls = await mockOps(page, MANAGER, (url, method, route) => {
+    if (url.pathname !== "/api/viewer/direct-client-grants" || method !== "POST") return undefined;
+    attempts += 1;
+    return route.fulfill({ status: 503, json: { error: "Viewer unavailable" } });
+  });
+  const dialog = await openShare(page, "Seawall orthomosaic");
+  await dialog.getByRole("option", { name: /Harbor Authority/ }).click();
+  await dialog.getByRole("button", { name: "Review share" }).click();
+  await dialog.getByRole("button", { name: "Share", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("couldn't confirm");
+  // A dialog left open past the Viewer's 24-hour receipt retention never re-sends.
+  await page.clock.fastForward("25:00:00");
+  await expect(dialog.getByRole("alert")).toContainText("too old to retry safely");
+  await expect(dialog.getByRole("button", { name: "Try again" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Close" })).toBeDisabled();
+  await dialog.getByRole("button", { name: "Check again" }).click();
+  expect(posts(calls)).toHaveLength(1);
+  expect(attempts).toBe(1);
+});
+
+test("an unconfirmed public link older than the retry window is held and its password is dropped", async ({ page }) => {
+  await page.clock.install();
+  let attempts = 0;
+  const calls = await mockOps(page, MANAGER, (url, method, route) => {
+    if (url.pathname !== "/api/viewer/models/model-ortho/shares") return undefined;
+    if (method === "GET") return route.fulfill({ json: { shares: [] } });
+    attempts += 1;
+    return route.fulfill({ status: 504, json: { error: "Gateway timeout" } });
+  });
+  const dialog = await openShare(page, "Seawall orthomosaic");
+  await dialog.getByRole("tab", { name: "Public link" }).click();
+  await dialog.getByRole("checkbox", { name: "Never expires" }).check();
+  await dialog.getByLabel("Password (optional)").fill("correct horse");
+  page.once("dialog", confirm => void confirm.accept());
+  await dialog.getByRole("button", { name: "Create link" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("couldn't confirm the link was created");
+  await page.clock.fastForward("25:00:00");
+  await expect(dialog.getByRole("alert")).toContainText("too old to retry safely");
+  await expect(dialog.getByRole("button", { name: "Try again" })).toHaveCount(0);
+  await expect(dialog.getByLabel("Password (optional)")).toHaveValue("");
+  await expect(dialog.getByRole("button", { name: "Close" })).toBeDisabled();
+  const gets = calls.filter(call => call.method === "GET" && call.path === "/api/viewer/models/model-ortho/shares").length;
+  await dialog.getByRole("button", { name: "Check again" }).click();
+  await expect.poll(() => calls.filter(call => call.method === "GET" && call.path === "/api/viewer/models/model-ortho/shares").length).toBeGreaterThan(gets);
+  expect(calls.filter(call => call.method === "POST")).toHaveLength(1);
+  expect(attempts).toBe(1);
+});

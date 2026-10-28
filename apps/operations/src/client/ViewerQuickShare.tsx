@@ -146,12 +146,19 @@ const uncertain = (caught: unknown) => { const status = statusOf(caught); return
 const SHARING_OFF = "Quick share isn't available yet. You can still share from the Viewer workspace.";
 const SHARE_UNCONFIRMED = "We couldn't confirm the share. Try again to finish it — the same share is sent, so it won't be duplicated.";
 const LINK_UNCONFIRMED = "We couldn't confirm the link was created. Try again to finish it — the same link is requested, so it won't be duplicated.";
+/**
+ * The Viewer keeps a request's idempotency receipt for 24 hours, then forgets it. Past this shorter window an
+ * unconfirmed attempt is never re-sent: a resend after the receipt is gone could create a second share or link.
+ */
+export const RETRY_WINDOW_MS = 12 * 60 * 60 * 1000;
+const SHARE_HELD = "We still can't confirm this share, and it's too old to retry safely. Check \"Already shared with\" above to see whether it went through. To share again, reload the page.";
+const LINK_HELD = "We still can't confirm this link, and it's too old to retry safely. Check the existing links above to see whether it was created. To create another, reload the page.";
 
 type PendingDirectShare = {
-  body: string; key: string; clientName: string; client: DirectShareClient; permissions: DirectShareGrant["permissions"];
+  body: string; key: string; sentAt: number; clientName: string; client: DirectShareClient; permissions: DirectShareGrant["permissions"];
   neverExpires: boolean; expiryDay: string; expiresAt: string | null; includeFuture: boolean;
 };
-type PendingPublicLink = { body: string; key: string; label: string; expiryDay: string; neverExpires: boolean; download: boolean; units: "imperial" | "metric" };
+type PendingPublicLink = { body: string; key: string; sentAt: number; label: string; expiryDay: string; neverExpires: boolean; download: boolean; units: "imperial" | "metric" };
 
 /** Search Viewer projects, pick a published model (or the whole project), then share it. */
 export function ViewerQuickShare({ canCreatePublic, canRevokePublic }: { canCreatePublic: boolean; canRevokePublic: boolean }) {
@@ -313,6 +320,8 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
   // An unconfirmed share is retried with the identical body and key, and the selection stays locked until it resolves.
   const pending = useRef<PendingDirectShare | null>(null);
   const [unconfirmed, setUnconfirmed] = useState(false);
+  // Held: unconfirmed for too long to retry. The request body is dropped; only the unresolved marker stays.
+  const [held, setHeld] = useState(false);
   const run = useRef(0);
   useEffect(() => { onStateChange(busy, unconfirmed); }, [busy, unconfirmed, onStateChange]);
 
@@ -385,12 +394,25 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
       }
     } finally { setBusy(false); }
   };
+  const hold = () => {
+    if (pending.current) pending.current = { ...pending.current, body: "" };
+    setHeld(true); setError(SHARE_HELD); void load(query);
+  };
+  useEffect(() => {
+    if (!unconfirmed || held || !pending.current) return;
+    const timer = window.setTimeout(hold, Math.max(0, pending.current.sentAt + RETRY_WINDOW_MS - Date.now()));
+    return () => window.clearTimeout(timer);
+  });
   const confirm = (event: FormEvent) => {
     event.preventDefault();
-    // Try again re-sends the unconfirmed share exactly as it was first sent.
-    if (unconfirmed) { void send(); return; }
+    // Try again re-sends the unconfirmed share exactly as it was first sent, but only within the retry window.
+    if (unconfirmed) {
+      if (held) return;
+      if (pending.current && Date.now() - pending.current.sentAt > RETRY_WINDOW_MS) { hold(); return; }
+      void send(); return;
+    }
     if (!client || busy || needsFutureOptIn || sameScope || (!neverExpires && !expiresAt)) return;
-    pending.current = { body: JSON.stringify(directShareBody(target, client, permissions, expiresAt, includeFuture)), key: crypto.randomUUID(),
+    pending.current = { body: JSON.stringify(directShareBody(target, client, permissions, expiresAt, includeFuture)), key: crypto.randomUUID(), sentAt: Date.now(),
       clientName: client.displayName, client, permissions, neverExpires, expiryDay, expiresAt, includeFuture };
     void send();
   };
@@ -457,7 +479,8 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
             This adds a separate share for this model with the options above; their whole-project access stays as it is.</p>}
           {errorNotice}
           <div className="actions">
-            <button type="submit" className="button-orange" disabled={busy || (!unconfirmed && !!sameScope)}>{busy ? "Sharing…" : unconfirmed ? "Try again" : "Share"}</button>
+            {held ? <button type="button" className="button-ghost" onClick={() => void load(query)}>Check again</button>
+              : <button type="submit" className="button-orange" disabled={busy || (!unconfirmed && !!sameScope)}>{busy ? "Sharing…" : unconfirmed ? "Try again" : "Share"}</button>}
             {!unconfirmed && <button type="button" className="button-ghost" disabled={busy} onClick={() => setReviewing(false)}>Back</button>}
           </div>
         </section>}
@@ -471,7 +494,6 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
 export function ViewerPublicLinkPanel({ modelId, canCreate, canRevoke, onStateChange }: {
   modelId: string; canCreate: boolean; canRevoke: boolean; onStateChange: (busy: boolean, unconfirmed: boolean) => void;
 }) {
-  // A link left unconfirmed when the dialog was closed comes back exactly as it was requested.
   const [shares, setShares] = useState<ViewerPublicShareSummary[] | null>(null);
   const [off, setOff] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -489,6 +511,8 @@ export function ViewerPublicLinkPanel({ modelId, canCreate, canRevoke, onStateCh
   // An unconfirmed link is retried with the identical body and key, so it can't be created twice.
   const pending = useRef<PendingPublicLink | null>(null);
   const [unconfirmed, setUnconfirmed] = useState(false);
+  // Held: unconfirmed for too long to retry. The body, which may hold a password, is dropped; only the marker stays.
+  const [held, setHeld] = useState(false);
   useEffect(() => { onStateChange(busy, unconfirmed); }, [busy, unconfirmed, onStateChange]);
   const path = `/api/viewer/models/${encodeURIComponent(modelId)}/shares`;
   const load = useCallback(async () => {
@@ -508,13 +532,14 @@ export function ViewerPublicLinkPanel({ modelId, canCreate, canRevoke, onStateCh
     if (!unconfirmed) {
       if (!neverExpires && !expiresAt) return;
       if (neverExpires && !window.confirm("Create a link that never expires? It stays active until you revoke it.")) return;
-      pending.current = { key: crypto.randomUUID(), label, expiryDay, neverExpires, download, units, body: JSON.stringify({
+      pending.current = { key: crypto.randomUUID(), sentAt: Date.now(), label, expiryDay, neverExpires, download, units, body: JSON.stringify({
         label: label.trim() || null, expiresAt, displayUnits: units,
         ...(password ? { password } : {}), permissions: { view: true, measure: true, cameras: true, download },
       }) };
     }
     const attempt = pending.current;
-    if (!attempt) return;
+    if (!attempt || held) return;
+    if (Date.now() - attempt.sentAt > RETRY_WINDOW_MS) { hold(); return; }
     setBusy(true); setError(""); setMessage(""); setCreatedUrl("");
     try {
       const created = await api<{ share: ViewerPublicShareSummary; viewUrl: string }>(path, {
@@ -531,6 +556,15 @@ export function ViewerPublicLinkPanel({ modelId, canCreate, canRevoke, onStateCh
       } else { pending.current = null; setUnconfirmed(false); setError((caught as Error).message); }
     } finally { setBusy(false); }
   };
+  const hold = () => {
+    if (pending.current) pending.current = { ...pending.current, body: "" };
+    setPassword(""); setHeld(true); setError(LINK_HELD); void load();
+  };
+  useEffect(() => {
+    if (!unconfirmed || held || !pending.current) return;
+    const timer = window.setTimeout(hold, Math.max(0, pending.current.sentAt + RETRY_WINDOW_MS - Date.now()));
+    return () => window.clearTimeout(timer);
+  });
   const revoke = async (share: ViewerPublicShareSummary) => {
     if (busy || unconfirmed || !window.confirm(`Revoke ${share.label || "this link"}? Anyone using it loses access right away.`)) return;
     setBusy(true); setError(""); setMessage("");
@@ -563,7 +597,8 @@ export function ViewerPublicLinkPanel({ modelId, canCreate, canRevoke, onStateCh
       <label className="viewer-share-check"><input type="checkbox" checked={download} onChange={event => setDownload(event.target.checked)} /> Allow model download</label>
       </fieldset>
       {errorNotice && <div className="viewer-share-form-error">{errorNotice}</div>}
-      <button type="submit" className="button-orange" disabled={busy || (!unconfirmed && !neverExpires && !expiresAt)}>{busy ? "Creating…" : unconfirmed ? "Try again" : "Create link"}</button>
+      {held ? <button type="button" className="button-ghost" onClick={() => void load()}>Check again</button>
+        : <button type="submit" className="button-orange" disabled={busy || (!unconfirmed && !neverExpires && !expiresAt)}>{busy ? "Creating…" : unconfirmed ? "Try again" : "Create link"}</button>}
     </form> : <p className="notice" role="status">You don't have permission to create public links.</p>}
     {createdUrl && <div className="viewer-created-share" role="status">
       <label>New link<input readOnly value={createdUrl} onFocus={event => event.currentTarget.select()} /></label>
