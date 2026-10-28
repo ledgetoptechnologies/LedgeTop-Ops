@@ -121,7 +121,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     /// <summary>Reopens only an existing ready frozen generation using cached authorization. Never signs in or captures.</summary>
     internal Task ReconnectCachedAsync() => StartCoreAsync(explicitLogin: false);
     Task ICachedExplorerReconnect.ReconnectCachedAsync() => ReconnectCachedAsync();
-    private Task StartCoreAsync(bool explicitLogin) => OperateAsync(async token => {
+    private Task StartCoreAsync(bool explicitLogin) => OperateAsync(explicitLogin ? ConnectionAction.ExplicitConnect : ConnectionAction.CachedReconnect, async (token, trace) => {
         starting = true; SetState(ExplorerPreviewState.Starting);
         try {
             var previousRemoved = ValidatePreviousRemoval();
@@ -136,15 +136,19 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                 Add("The saved Explorer setup needs local cleanup or ownership review before another sign-in. Use Remove this connection for normal cleanup.");
                 throw new IOException("The saved Explorer setup is incomplete.");
             }
-            await DrainCurrentAsync(); token.ThrowIfCancellationRequested();
+            await DrainCurrentAsync(trace); token.ThrowIfCancellationRequested();
+            trace.Phase = ConnectionPhase.LocalOwnership;
             AcquireExistingIndexLease();
             token.ThrowIfCancellationRequested();
+            trace.Phase = ConnectionPhase.BackendConstruction;
             backend = createBackend();
+            trace.Phase = ConnectionPhase.SourceSelection;
             var selected = SelectedSource(backend);
             Add(explicitLogin ? "Waiting for browser sign-in to finish." : "Checking your saved sign-in.");
+            trace.Phase = ConnectionPhase.ExplicitLogin;
             if (explicitLogin) await backend.Session.SignInAsync(token); // Only this explicit user-button path may launch a browser.
             token.ThrowIfCancellationRequested();
-            var person = await CurrentPersonAsync(backend, selected, token, explicitLogin ? null : index!.PrincipalId);
+            var person = await CurrentPersonAsync(backend, selected, token, trace, explicitLogin ? null : index!.PrincipalId);
             Add("Sign-in confirmed. Preparing your files for Explorer.");
             if (index is { } previous && previous.PrincipalId != person && !previousRemoved) {
                 Add("A different account is signed in. Remove the previous Explorer connection before connecting this account. Local files are kept.");
@@ -154,6 +158,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             // The root engine also makes cached source requests with optional/default caller tokens.
             // Bind all of those requests and later hydrations to this coordinator generation's lifetime.
             var lifetimeSource = new LifetimeQueuedDownloadSource(selected, token);
+            trace.Phase = ConnectionPhase.ProviderPreparation;
             var candidate = Create(scope, lifetimeSource, null);
             SetEngine(candidate);
             if (index is not null && !previousRemoved && !candidate.HasOwnedProfileReceipt())
@@ -168,22 +173,26 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             if (explicitLogin && !previousRemoved && index is not null &&
                 inventory is { Files.Count: 0, Directories.Count: 0 } empty && candidate.Session.State == ExplorerPreviewState.NotStarted) {
                 Add("Checking the current file list after your explicit sign-in. Local files will be kept.");
-                var refreshed = await CaptureInventoryAsync(backend, scope, person, token);
-                _ = await CurrentPersonAsync(backend, selected, token, person);
+                var refreshed = await CaptureInventoryAsync(backend, scope, person, token, trace);
+                _ = await CurrentPersonAsync(backend, selected, token, trace, person);
                 token.ThrowIfCancellationRequested();
+                trace.Phase = ConnectionPhase.LocalOwnership;
                 if (refreshed.Files.Count != 0 || refreshed.Directories.Count != 0) {
                     if (!candidate.HasOwnedProfileReceipt() || candidate.ReadFrozenManifest() is not { } unchanged ||
                         unchanged.Digest != empty.Digest || unchanged.Scope != scope)
                         throw new IOException("The empty saved inventory changed before refresh.");
                     // Remove validates the exact existing native/profile ownership and keeps every local file.
                     // Never replay an uncertain removal. Persist its confirmed outcome even if quit arrives meanwhile.
+                    trace.Phase = ConnectionPhase.ProviderRemoval;
                     await candidate.Session.RemoveAsync();
                     if (candidate.Session.State != ExplorerPreviewState.Removed)
                         throw new IOException("The empty Explorer connection did not confirm removal.");
+                    trace.Phase = ConnectionPhase.OwnershipPublication;
                     SaveIndex(person, removed: true);
                     token.ThrowIfCancellationRequested();
-                    await DisposeEngineAsync(); token.ThrowIfCancellationRequested();
+                    await DisposeEngineAsync(trace); token.ThrowIfCancellationRequested();
                     inventory = refreshed;
+                    trace.Phase = ConnectionPhase.ProviderPreparation;
                     SetEngine(Create(scope, lifetimeSource, inventory));
                     refreshedEmpty = true;
                     Add("The empty connection was refreshed. Its old folder and all local files were kept; Explorer will use a new owned folder.");
@@ -192,24 +201,28 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             if (inventory is null) {
                 if (candidate.Session.State is not (ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed))
                     throw new IOException("The saved Explorer inventory is unavailable.");
-                await DisposeEngineAsync(); token.ThrowIfCancellationRequested();
-                inventory = await CaptureInventoryAsync(backend, scope, person, token);
+                await DisposeEngineAsync(trace); token.ThrowIfCancellationRequested();
+                inventory = await CaptureInventoryAsync(backend, scope, person, token, trace);
+                trace.Phase = ConnectionPhase.ProviderPreparation;
                 SetEngine(Create(scope, lifetimeSource, inventory));
             }
             else if (!refreshedEmpty) Add($"Using this PC's saved file list ({inventory.Files.Count} files).");
             if (inventory.Scope != scope) throw new AccessDeniedException();
-            _ = await CurrentPersonAsync(backend, selected, token, person);
+            _ = await CurrentPersonAsync(backend, selected, token, trace, person);
             token.ThrowIfCancellationRequested();
+            trace.Phase = ConnectionPhase.OwnershipPublication;
             if (explicitLogin) SaveIndex(person); // Retain the cleanup identity even if subsequent native setup stops partway through.
             else token.ThrowIfCancellationRequested(); // Ready reconnect has durable ownership already; never republishes its index.
             // Engine writes Prepared ownership before its lifetime-bound cached preflight observes cancellation.
             Add("Connecting your prepared files to Windows Explorer.");
+            trace.Phase = ConnectionPhase.ProviderStart;
             await engine!.Session.StartAsync();
             token.ThrowIfCancellationRequested();
             // A saved manual pause is legacy UI state, not an access preference. Only resume
             // after this generation has freshly verified the same selected principal; the
             // source gate still performs its own current-session check without browser login.
             if (engine.Session.State == ExplorerPreviewState.Paused) {
+                trace.Phase = ConnectionPhase.ProviderResume;
                 await engine.Session.ResumeAsync();
                 token.ThrowIfCancellationRequested();
             }
@@ -220,8 +233,9 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         } finally { starting = false; }
     });
 
-    private async Task<ExplorerRootManifest> CaptureInventoryAsync(IFilesBackend selectedBackend, ExplorerRootScope scope, string person, CancellationToken token)
+    private async Task<ExplorerRootManifest> CaptureInventoryAsync(IFilesBackend selectedBackend, ExplorerRootScope scope, string person, CancellationToken token, ConnectionFailureTrace trace)
     {
+        trace.Phase = ConnectionPhase.InventoryPreparation;
         Add("Preparing the current file list. Large files can take longer.");
         var snapshot = await capture(selectedBackend, channel, person, token);
         token.ThrowIfCancellationRequested();
@@ -232,27 +246,29 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         return inventory;
     }
 
-    public Task PauseAsync() => OperateAsync(async token => {
+    public Task PauseAsync() => OperateAsync(ConnectionAction.Pause, async (token, trace) => {
         token.ThrowIfCancellationRequested();
         if (engine is null || backend is null) throw new LoginRequiredException();
+        trace.Phase = ConnectionPhase.ProviderPause;
         await engine.Session.PauseAsync(); token.ThrowIfCancellationRequested(); SetState(engine.Session.State);
     });
-    public Task ResumeAsync() => OperateAsync(async token => {
+    public Task ResumeAsync() => OperateAsync(ConnectionAction.Resume, async (token, trace) => {
         if (engine is null || backend is null || index is null) throw new LoginRequiredException();
-        await CurrentPersonAsync(backend, SelectedSource(backend), token, index.PrincipalId);
+        await CurrentPersonAsync(backend, SelectedSource(backend), token, trace, index.PrincipalId);
+        trace.Phase = ConnectionPhase.ProviderResume;
         await engine.Session.ResumeAsync(); token.ThrowIfCancellationRequested(); SetState(engine.Session.State);
     });
-    internal Task RecheckSessionAsync() => OperateAsync(async token => {
+    internal Task RecheckSessionAsync() => OperateAsync(ConnectionAction.Recheck, async (token, trace) => {
         if (backend is null || index is null || engine is null) return;
-        try { await CurrentPersonAsync(backend, SelectedSource(backend), token, index.PrincipalId); }
-        catch { Add("Your sign-in or file access changed. New downloads have stopped; reconnect the same account or remove this connection before choosing another."); throw; }
+        try { await CurrentPersonAsync(backend, SelectedSource(backend), token, trace, index.PrincipalId); }
+        catch { Add("Your sign-in or file access could not be verified. New downloads have stopped; reconnect the same account or remove this connection before choosing another."); throw; }
     });
     // This identity comes from the current selected server session, never saved UI text or a caller argument.
     // The updater must independently recheck the same principal under its own cached-session pin.
     internal async Task<ConnectedExplorerUpdateBinding> GetUpdateBindingAsync(CancellationToken cancellationToken = default)
     {
         ConnectedExplorerUpdateBinding? result = null;
-        await OperateAsync(async token => {
+        await OperateAsync(ConnectionAction.UpdateBinding, async (token, trace) => {
             if (channel != "pilot" || alias is not ("portal" or "employee") || backend is null || index is null || engine is null ||
                 State is not (ExplorerPreviewState.Running or ExplorerPreviewState.Paused) || ValidatePreviousRemoval() ||
                 engine.ReadFrozenManifest()?.Scope != Scope(index))
@@ -260,52 +276,61 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             var selected = backend;
             var source = SelectedSource(selected);
             using var pin = selected is LiveBackend live ? await live.PinCatalogSessionAsync(token).ConfigureAwait(false) : null;
-            var principal = await CurrentPersonAsync(selected, source, token, index.PrincipalId).ConfigureAwait(false);
+            var principal = await CurrentPersonAsync(selected, source, token, trace, index.PrincipalId).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             result = new(channel, alias, principal);
         }, cancellationToken).ConfigureAwait(false);
         return result ?? throw new AccessDeniedException();
     }
-    public Task RemoveAsync() => OperateAsync(async token => {
+    public Task RemoveAsync() => OperateAsync(ConnectionAction.Remove, async (token, trace) => {
         token.ThrowIfCancellationRequested();
         _ = ValidatePreviousRemoval();
         // Never retain a signed-in backend for removal: the cleanup engine's source always denies network operations.
-        await DrainCurrentAsync(); token.ThrowIfCancellationRequested();
+        await DrainCurrentAsync(trace); token.ThrowIfCancellationRequested();
+        trace.Phase = ConnectionPhase.LocalOwnership;
         if (index is null) { SetState(ExplorerPreviewState.Removed); return; }
         AcquireExistingIndexLease(); RestoreCleanupEngine();
         _ = ValidatePreviousRemoval();
+        trace.Phase = ConnectionPhase.ProviderRemoval;
         await engine!.Session.RemoveAsync(); token.ThrowIfCancellationRequested();
         if (engine.Session.State != ExplorerPreviewState.Removed)
             throw new IOException("The saved Explorer connection did not confirm removal.");
         // A preflight failure may leave no engine profile to persist its Removed phase.
         // Publish this confirmation only after exact owned cleanup, so it survives restart.
+        trace.Phase = ConnectionPhase.OwnershipPublication;
         SaveIndex(index.PrincipalId, removed: true);
         SetState(ExplorerPreviewState.Removed);
         Add("The Explorer connection was removed. Downloaded and modified local files have been kept.");
     });
 
-    private async Task OperateAsync(Func<CancellationToken, Task> action, CancellationToken requestedCancellation = default)
+    private async Task OperateAsync(ConnectionAction operation, Func<CancellationToken, ConnectionFailureTrace, Task> action, CancellationToken requestedCancellation = default)
     {
         CancellationToken connectionToken;
         lock (lifetime) { ObjectDisposedException.ThrowIf(disposed || closeRequested, this); connectionToken = cancellation.Token; }
         using var linked = requestedCancellation.CanBeCanceled ? CancellationTokenSource.CreateLinkedTokenSource(connectionToken, requestedCancellation) : null;
         var token = linked?.Token ?? connectionToken;
         await operations.WaitAsync(token).ConfigureAwait(false);
+        var trace = new ConnectionFailureTrace(operation);
         try {
             token.ThrowIfCancellationRequested();
             if (invalidIndex) throw new IOException("The saved Explorer index needs ownership review.");
-            await action(token).ConfigureAwait(false);
+            await action(token, trace).ConfigureAwait(false);
         } catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception error) {
+            var primary = trace.Failure(error);
             if (engine?.Session.State == ExplorerPreviewState.Running) {
                 try { await engine.Session.PauseAsync().ConfigureAwait(false); }
-                catch { Add("The file provider could not confirm its pause; keep this app open for ownership review."); }
+                catch (Exception pauseError) {
+                    Add("The file provider could not confirm its pause; keep this app open for ownership review.");
+                    Add(ConnectionFailureTrace.Format(operation, ConnectionPhase.ProviderPause, pauseError));
+                }
             }
             if (engine is null && index is not null) {
                 try { RestoreCleanupEngine(); } catch { /* retain the index for exact ownership review */ }
             }
             SetState(ExplorerPreviewState.Failed);
             Add(FailureActivity(error));
+            Add(primary);
             throw;
         } finally { operations.Release(); }
     }
@@ -318,16 +343,23 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         if (source is null || source.Alias != alias || CanonicalOrigin(source.Origin) != origin) throw new AccessDeniedException();
         return source;
     }
-    private async Task<string> CurrentPersonAsync(IFilesBackend selected, IQueuedDownloadSource source, CancellationToken token, string? expected = null)
+    private async Task<string> CurrentPersonAsync(IFilesBackend selected, IQueuedDownloadSource source, CancellationToken token, ConnectionFailureTrace trace, string? expected = null)
     {
+        trace.Phase = ConnectionPhase.SourceSelection;
         if (!ReferenceEquals(source, SelectedSource(selected))) throw new AccessDeniedException();
-        var current = await selected.Session.TryCurrentAsync(token).ConfigureAwait(false);
+        trace.Phase = ConnectionPhase.CurrentSession;
+        var current = selected.Session is IConnectionSessionGateway diagnostic
+            ? await diagnostic.CheckCurrentForConnectionAsync(token).ConfigureAwait(false)
+            : await selected.Session.TryCurrentAsync(token).ConfigureAwait(false);
         token.ThrowIfCancellationRequested();
         if (current is null) throw new LoginRequiredException();
+        trace.Phase = ConnectionPhase.SourceSession;
         var actual = await source.GetSessionAsync(token).ConfigureAwait(false);
         token.ThrowIfCancellationRequested();
+        trace.Phase = ConnectionPhase.PrincipalBinding;
         if (!ReferenceEquals(source, SelectedSource(selected)) || current.PrincipalId != actual.PrincipalId ||
             expected is not null && actual.PrincipalId != expected || !Principal(actual.PrincipalId)) throw new AccessDeniedException();
+        trace.Phase = ConnectionPhase.SessionExpiry;
         if (current.ExpiresAt <= DateTimeOffset.UtcNow.AddSeconds(5) || actual.ExpiresAt <= DateTimeOffset.UtcNow.AddSeconds(5))
             throw new LoginRequiredException();
         return actual.PrincipalId;
@@ -369,17 +401,19 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         if (!starting && !closeRequested) SetState(current.Session.State);
         else Notify();
     }
-    private async Task DisposeEngineAsync()
+    private async Task DisposeEngineAsync(ConnectionFailureTrace? trace = null)
     {
         var owned = engine;
         if (owned is null) return;
+        if (trace is not null) trace.Phase = ConnectionPhase.ProviderDrain;
         await Task.Run(async () => await owned.Session.DisposeAsync().ConfigureAwait(false)).ConfigureAwait(false);
         SetEngine(null);
     }
-    private async Task DrainCurrentAsync()
+    private async Task DrainCurrentAsync(ConnectionFailureTrace? trace = null)
     {
-        await DisposeEngineAsync().ConfigureAwait(false);
+        await DisposeEngineAsync(trace).ConfigureAwait(false);
         if (backend is { } previous) {
+            if (trace is not null) trace.Phase = ConnectionPhase.BackendDispose;
             await Task.Run(async () => await previous.DisposeAsync().ConfigureAwait(false)).ConfigureAwait(false);
             backend = null;
         }
@@ -460,8 +494,10 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         try { cancellation.Cancel(); } catch { Add("Cancellation reported a problem; the connection is still waiting for shutdown confirmation."); }
         _ = Task.Run(async () => {
             await operations.WaitAsync().ConfigureAwait(false);
+            var trace = new ConnectionFailureTrace(ConnectionAction.Dispose);
             try {
-                await DrainCurrentAsync().ConfigureAwait(false);
+                await DrainCurrentAsync(trace).ConfigureAwait(false);
+                trace.Phase = ConnectionPhase.LocalOwnership;
                 indexLease?.Dispose(); indexLease = null;
                 lock (lifetime) disposed = true;
                 if (State != ExplorerPreviewState.Removed) SetState(ExplorerPreviewState.NotStarted);
@@ -469,6 +505,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             } catch (Exception error) {
                 SetState(ExplorerPreviewState.Failed);
                 Add("The Explorer connection could not confirm shutdown. Its saved ownership and local files were retained.");
+                Add(trace.Failure(error));
                 lock (lifetime) { closeRequested = false; closing = null; cancellation.Dispose(); cancellation = new(); }
                 done.TrySetException(error);
             } finally { operations.Release(); }

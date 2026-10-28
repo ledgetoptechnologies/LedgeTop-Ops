@@ -148,6 +148,7 @@ internal static class ExplorerPreviewWindowTests
             cachedWindow.Quit(); await Until(() => cachedClosed); await pendingReconnect;
             True(cachedPending.Disposals == 1 && cachedPending.Starts == 0 && cachedPending.State != ExplorerPreviewState.Running,
                 "Quit cancels and drains cached reconnect before closing without explicit sign-in");
+            await FailedReplacementDiagnostics(root, retained);
             await UpdateLifecycle(root, screenshots);
             await ScheduledUpdates(root);
             await WindowsStartupSettings(root);
@@ -168,6 +169,36 @@ internal static class ExplorerPreviewWindowTests
                 throw new InvalidOperationException("Refusing unexpected test cleanup path.");
             Directory.Delete(full, true);
         }
+    }
+
+    private static async Task FailedReplacementDiagnostics(string root, string retained)
+    {
+        var previous = new FakeSession(root) { RefuseFirstDispose = true };
+        previous.MarkFailed(); var replacements = 0;
+        var replacement = new FakeSession(root);
+        var window = Window(() => { replacements++; return Task.FromResult<IExplorerPreviewSession>(replacement); }, new FakeTrayIcon(),
+            ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), previous);
+        var closed = false; window.Closed += (_, _) => closed = true;
+        try {
+            await window.StartPreviewAsync();
+            True(previous.Disposals == 1 && previous.Starts == 0 && replacements == 0 &&
+                window.ActivityLines.Any(line => line.EndsWith("settings/ExplicitConnect/DisposePrevious/LocalIO/Unknown", StringComparison.Ordinal)),
+                "failed old-session drain is identified before factory or explicit login can run");
+            True(window.ActivityLines.All(line => !line.Contains("Synthetic disconnect refusal", StringComparison.Ordinal)) && File.Exists(retained),
+                "drain diagnostic never reports exception message or changes local data");
+            await window.StartPreviewAsync();
+            True(previous.Disposals == 2 && replacements == 1 && replacement.Starts == 1 && replacement.State == ExplorerPreviewState.Running && File.Exists(retained),
+                "a later explicit action can recover only after the same previous session confirms drain");
+        } finally { window.Quit(); await Until(() => closed); }
+        var failed = Window(() => throw new TransferException("private source URL and credentials", TransferFailureReason.Timeout), new FakeTrayIcon(),
+            ExplorerWindowContent.Connected("Pilot", AccessMode.Employee));
+        closed = false; failed.Closed += (_, _) => closed = true;
+        try {
+            await failed.StartPreviewAsync();
+            True(failed.ActivityLines.Any(line => line.EndsWith("settings/ExplicitConnect/CreateSession/Transfer/Timeout", StringComparison.Ordinal)) &&
+                failed.ActivityLines.All(line => !line.Contains("private source URL", StringComparison.Ordinal)),
+                "factory failure is distinguishable from failed old-session disposal without leaking its message");
+        } finally { failed.Quit(); await Until(() => closed); }
     }
 
     private static WindowsAppReleaseCheck AvailableUpdate() => new(WindowsAppReleaseStatus.Available, "0.5.2.0",
@@ -443,6 +474,7 @@ internal static class ExplorerPreviewWindowTests
         public Task PauseAsync() { Pauses++; Set(ExplorerPreviewState.Paused, "Preview downloads paused."); return Task.CompletedTask; }
         public Task ResumeAsync() { Resumes++; Set(ExplorerPreviewState.Running, "Preview downloads resumed."); return Task.CompletedTask; }
         public Task RemoveAsync() { Removals++; Set(ExplorerPreviewState.Removed, "Explorer registration removed. Local files kept."); return Task.CompletedTask; }
+        internal void MarkFailed() => Set(ExplorerPreviewState.Failed, "Synthetic failed session.");
         public ValueTask DisposeAsync()
         {
             Disposals++;

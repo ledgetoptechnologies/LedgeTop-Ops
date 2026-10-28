@@ -27,7 +27,39 @@ internal static class ConnectedExplorerSessionTests
         await CaptureDiagnostics(); count++;
         await ExplicitEmptyRefresh(); count++;
         await EmployeeAdmission(); count++;
-        Console.WriteLine($"Connected Explorer coordinator: {count}/15 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+        await RecheckDiagnosticsAndRecovery(); count++;
+        Console.WriteLine($"Connected Explorer coordinator: {count}/16 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+    }
+
+    private static async Task RecheckDiagnosticsAndRecovery()
+    {
+        foreach (var boundary in new[] { "current", "source", "login" }) {
+            await using var fixture = new Fixture { Alias = "employee" };
+            var session = fixture.Create(); await session.StartAsync();
+            var signs = fixture.SignIns; var starts = fixture.EngineStarts;
+            Directory.CreateDirectory(Path.GetDirectoryName(fixture.LocalSentinel)!);
+            await File.WriteAllTextAsync(fixture.LocalSentinel, "local data retained through failed checks");
+            var sentinel = await File.ReadAllBytesAsync(fixture.LocalSentinel);
+            if (boundary == "current") fixture.CurrentFailure = new TransferException("private session details", TransferFailureReason.UnexpectedHttpStatus, 503);
+            if (boundary == "source") fixture.SourceFailure = new TransferException("private source details", TransferFailureReason.Network);
+            if (boundary == "login") fixture.CurrentFailure = new LoginRequiredException(LoginFailureReason.TokenExpired, LoginFailureOperation.CachedToken);
+            try { await session.RecheckSessionAsync(); throw new InvalidOperationException("Check failure required."); }
+            catch (Exception error) when (ReferenceEquals(error, fixture.CurrentFailure) || ReferenceEquals(error, fixture.SourceFailure)) { }
+            var expected = boundary switch {
+                "current" => "connection/Recheck/CurrentSession/Transfer/UnexpectedHttpStatus; HTTP 503",
+                "source" => "connection/Recheck/SourceSession/Transfer/Network",
+                _ => "connection/Recheck/CurrentSession/LoginRequired/Unknown; auth=CachedToken/TokenExpired"
+            };
+            Check(session.State == ExplorerPreviewState.Failed && fixture.EnginePauses == 1 && fixture.SignIns == signs && fixture.EngineStarts == starts &&
+                session.Activity.Any(line => line.EndsWith(expected, StringComparison.Ordinal)) && session.Activity.All(line => !line.Contains("private ", StringComparison.Ordinal)),
+                "periodic failure pauses without browser/retry and retains its bounded source boundary/root cause");
+            fixture.CurrentFailure = null; fixture.SourceFailure = null;
+            await session.StartAsync();
+            var retained = await File.ReadAllBytesAsync(fixture.LocalSentinel);
+            Check(session.State == ExplorerPreviewState.Running && fixture.SignIns == signs + 1 && fixture.EngineStarts == starts + 1 &&
+                sentinel.AsSpan().SequenceEqual(retained),
+                "only explicit sign-in recovers through full drain and current account checks, preserving local data");
+        }
     }
 
     private static async Task EmployeeAdmission()
@@ -439,6 +471,7 @@ internal static class ConnectedExplorerSessionTests
         internal bool HoldLogin, HoldCapture, HoldCurrent, HoldEngineSession, HoldSourceSession, IgnoreLoginCancellation, Expired, AccessDenied, FailEngineStart, ThrowIfBackendCreated, EmptyInventory,
             FailFirstRunningDispose, RunningDisposeRefused, VerifyEngineSession, FailEngineBeforeProfile, FailEnginePreparedAuth;
         internal CatalogCaptureException? CaptureFailure;
+        internal Exception? CurrentFailure, SourceFailure;
         internal Action? AfterCapture, AfterRemove;
         internal bool UnconfirmedRemove, DirectoriesOnly;
         internal string LocalSentinel => Path.Combine(root, "Files", "added-local.txt");
@@ -506,7 +539,7 @@ internal static class ConnectedExplorerSessionTests
             public string StateDirectory => Path.Combine(fixture.root, "unused-queue");
             public ValueTask DisposeAsync() { if (!disposed) { disposed = true; fixture.BackendDisposals++; fixture.Log.Add("backend-dispose"); } return ValueTask.CompletedTask; }
         }
-        private sealed class Gateway(Fixture fixture) : ISessionGateway
+        private sealed class Gateway(Fixture fixture) : ISessionGateway, IConnectionSessionGateway
         {
             public async Task SignInAsync(CancellationToken cancellationToken = default)
             {
@@ -518,9 +551,15 @@ internal static class ConnectedExplorerSessionTests
             }
             public async Task<SessionInfo?> TryCurrentAsync(CancellationToken cancellationToken = default)
             {
+                try { return await CheckCurrentForConnectionAsync(cancellationToken); }
+                catch (LoginRequiredException) { return null; }
+            }
+            public async Task<SessionInfo?> CheckCurrentForConnectionAsync(CancellationToken cancellationToken = default)
+            {
                 fixture.Requests++;
                 if (fixture.HoldCurrent) { fixture.CurrentEntered.TrySetResult(); await fixture.CurrentRelease.Task.WaitAsync(cancellationToken); }
                 if (fixture.AccessDenied) throw new AccessDeniedException();
+                if (fixture.CurrentFailure is { } failure) throw failure;
                 return new(fixture.Person, fixture.Expiry);
             }
         }
@@ -533,6 +572,7 @@ internal static class ConnectedExplorerSessionTests
                 fixture.Requests++; cancellationToken.ThrowIfCancellationRequested();
                 if (fixture.HoldSourceSession) { fixture.EngineSessionEntered.TrySetResult(); await fixture.EngineSessionRelease.Task.WaitAsync(cancellationToken); }
                 if (fixture.AccessDenied) throw new AccessDeniedException();
+                if (fixture.SourceFailure is { } failure) throw failure;
                 return new QueuedDownloadSession(fixture.Person, fixture.Expiry);
             }
             public Task<ResolvedQueuedDownload> ResolveAsync(string resourceReference, CancellationToken cancellationToken = default) => throw new InvalidOperationException("No source resolution in coordinator fake tests.");

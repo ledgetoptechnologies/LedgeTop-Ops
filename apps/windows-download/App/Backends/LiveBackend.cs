@@ -7,6 +7,13 @@ namespace LedgeTop.Files.Backends;
 /// <summary>The settings file exists but can't be trusted; <see cref="Exception.Message"/> is safe to show.</summary>
 public sealed class SettingsException(string message) : Exception(message);
 
+// Connected Explorer needs the same cached check with its bounded failure reason retained.
+// TryCurrentAsync keeps its historical null-for-login-required contract for other consumers.
+internal interface IConnectionSessionGateway
+{
+    Task<SessionInfo?> CheckCurrentForConnectionAsync(CancellationToken cancellationToken = default);
+}
+
 /// <summary>Local setup for a real copy of the app: fixed origins and the reviewed cloudflared binary.
 /// It never contains a token, bucket key or service credential. This file is user-writable, so it is not
 /// proof of where the binary came from: the installer must supply trusted origins and the cloudflared identity.</summary>
@@ -164,15 +171,20 @@ public sealed class LiveBackend : IFilesBackend
         return ValueTask.CompletedTask;
     }
 
-    private sealed class LiveSession(CloudflareAccessSession access, IQueuedDownloadSource probe) : ISessionGateway
+    internal sealed class LiveSession(CloudflareAccessSession access, IQueuedDownloadSource probe) : ISessionGateway, IConnectionSessionGateway
     {
         public async Task<SessionInfo?> TryCurrentAsync(CancellationToken cancellationToken = default)
         {
             try {
-                var session = await probe.GetSessionAsync(cancellationToken);
-                return new SessionInfo(session.PrincipalId, session.ExpiresAt);
+                return await CheckCurrentForConnectionAsync(cancellationToken);
             }
             catch (LoginRequiredException) { return null; }
+        }
+
+        public async Task<SessionInfo?> CheckCurrentForConnectionAsync(CancellationToken cancellationToken = default)
+        {
+            var session = await probe.GetSessionAsync(cancellationToken);
+            return new SessionInfo(session.PrincipalId, session.ExpiresAt);
         }
 
         public async Task SignInAsync(CancellationToken cancellationToken = default)

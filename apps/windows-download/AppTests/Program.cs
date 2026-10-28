@@ -78,6 +78,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("Installed update parent classifies cancellation before helper capability", ExplorerInstalledUpdateControllerTests.Run),
     ("Automatic update schedule preserves idle and recovery boundaries", LedgeTop.Files.Tests.ExplorerUpdateScheduleTests.Run),
     ("Employee-only installed entry preserves source isolation and client-unavailable messaging", EmployeeFirstReleaseTests.Run),
+    ("Connection diagnostics retain bounded check and recovery failures", ConnectionFailureDiagnosticsTests.Run),
     ("Saved connection startup routing retains pinned owned identity and source isolation", SavedConnectionStartupRouterTests.Run),
     ("Unified sign-in binds authoritative source selection to one authenticated attempt", UnifiedSignInTests.Run),
     ("Windows startup settings preserve fixed installed ownership and foreign values", WindowsStartupAdapterTests.Run),
@@ -86,7 +87,9 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("Legacy preview cleanup preserves content and verifies already-removed registrations", LegacyExplorerPreviewCleanupTests.Run),
     ("Folder launcher keeps dispatcher and Quit responsive while Windows Shell is blocked", () => BackgroundFolderLauncherTests.Run(screenshots)),
 }.Concat(ExplorerCatalogSnapshotTests.Groups).ToArray();
-var selectedGroups = args.Contains("--employee-first-release-only")
+var selectedGroups = args.Contains("--connection-diagnostics-only")
+    ? groups.Where(group => group.Name.StartsWith("Connection diagnostics", StringComparison.Ordinal) || group.Name.StartsWith("Connected Explorer coordinates", StringComparison.Ordinal) || group.Name.StartsWith("Explorer settings require", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--employee-first-release-only")
     ? groups.Where(group => group.Name.StartsWith("client and employee backends", StringComparison.Ordinal) || group.Name.StartsWith("Employee-only installed entry", StringComparison.Ordinal) || group.Name.StartsWith("packaged releases", StringComparison.Ordinal) || group.Name.StartsWith("Saved connection startup routing", StringComparison.Ordinal) || group.Name.StartsWith("Connected Explorer coordinates", StringComparison.Ordinal)).ToArray()
     : args.Contains("--saved-connection-startup-only")
     ? groups.Where(group => group.Name.StartsWith("Saved connection startup routing", StringComparison.Ordinal)).ToArray()

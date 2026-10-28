@@ -57,6 +57,7 @@ internal sealed class ExplorerPreviewWindow : Window
     private bool busy, quitting, readyToClose;
     private string problem = "";
     internal string StatusText => status.Text;
+    internal IReadOnlyList<string> ActivityLines => (session?.Activity ?? []).Concat(localActivity).TakeLast(100).ToArray();
     internal string UpdateStatusText => updateStatus.Text;
     internal bool UpdateMaintenanceOwned => updateMaintenance;
 
@@ -232,48 +233,65 @@ internal sealed class ExplorerPreviewWindow : Window
         return style;
     }
 
-    internal Task StartPreviewAsync() => OperateAsync(async () => {
+    internal Task StartPreviewAsync() => OperateAsync(ConnectionAction.ExplicitConnect, async trace => {
         if (drainedBinding is not null) return; // A saved update recovery never falls back to interactive sign-in.
         if (session is null || session.State is ExplorerPreviewState.Removed or ExplorerPreviewState.Failed) {
-            if (session is { } old) { await DisposeOnWorkerAsync(old); old.Changed -= SessionChanged; session = null; }
+            if (session is { } old) {
+                trace.Phase = ConnectionPhase.DisposePrevious;
+                await DisposeOnWorkerAsync(old); old.Changed -= SessionChanged; session = null;
+            }
+            trace.Phase = ConnectionPhase.CreateSession;
             var prepared = await createSession();
             if (quitting) { await DisposeOnWorkerAsync(prepared); return; }
             session = prepared; session.Changed += SessionChanged;
         }
+        trace.Phase = ConnectionPhase.ExecuteSession;
         if (!quitting) await session.StartAsync();
     });
-    internal Task PausePreviewAsync() => OperateAsync(async () => { if (session?.State == ExplorerPreviewState.Running) await session.PauseAsync(); });
-    internal Task ReconnectPreviewAsync() => OperateAsync(async () => {
+    internal Task PausePreviewAsync() => OperateAsync(ConnectionAction.Pause, async trace => {
+        trace.Phase = ConnectionPhase.ProviderPause;
+        if (session?.State == ExplorerPreviewState.Running) await session.PauseAsync();
+    });
+    internal Task ReconnectPreviewAsync() => OperateAsync(ConnectionAction.CachedReconnect, async trace => {
+        trace.Phase = ConnectionPhase.ExecuteSession;
         if (!presentation.Generated && session is ICachedExplorerReconnect { CanReconnectCached: true } saved)
             await saved.ReconnectCachedAsync();
         else if (!presentation.Generated && session is null && drainedBinding is { } expected) {
+            trace.Phase = ConnectionPhase.UpdateRecovery;
             if (!await RecoverForUpdateAsync(expected)) throw new LoginRequiredException();
             updateMessage = "Your files are reconnected. Check for updates when ready.";
         }
     });
-    internal Task ResumePreviewAsync() => OperateAsync(async () => { if (session?.State == ExplorerPreviewState.Paused) await session.ResumeAsync(); });
-    internal Task RemovePreviewAsync() => OperateAsync(async () => {
+    internal Task ResumePreviewAsync() => OperateAsync(ConnectionAction.Resume, async trace => {
+        trace.Phase = ConnectionPhase.ProviderResume;
+        if (session?.State == ExplorerPreviewState.Paused) await session.ResumeAsync();
+    });
+    internal Task RemovePreviewAsync() => OperateAsync(ConnectionAction.Remove, async trace => {
         if (session is null && drainedBinding is not null) {
+            trace.Phase = ConnectionPhase.CreateSession;
             var prepared = await createSession();
             if (quitting) { await DisposeOnWorkerAsync(prepared); return; }
             session = prepared; session.Changed += SessionChanged;
         }
+        trace.Phase = ConnectionPhase.ProviderRemoval;
         if (!quitting && session is not null) { await session.RemoveAsync(); if (session.State == ExplorerPreviewState.Removed) drainedBinding = null; }
     });
 
-    private Task OperateAsync(Func<Task> action)
+    private Task OperateAsync(ConnectionAction actionName, Func<ConnectionFailureTrace, Task> action)
     {
         if (busy || quitting || readyToClose || updateMaintenance) return Task.CompletedTask;
         busy = true; problem = ""; Refresh();
         operation = Run(); return operation;
         async Task Run()
         {
-            try { await action(); }
-            catch (Exception) {
+            var trace = new ConnectionFailureTrace(actionName);
+            try { await action(trace); }
+            catch (Exception error) {
                 problem = presentation.Generated ? "The preview couldn't finish that action. Check Activity, then try again."
                     : "The connection couldn't finish that action. Check Activity, then try again.";
                 localActivity.Add(presentation.Generated ? "A preview action could not finish. No local files were deleted."
                     : "A connection action could not finish. No local files were deleted.");
+                localActivity.Add(trace.Failure(error, settings: true));
             } finally { busy = false; Refresh(); }
         }
     }
@@ -299,7 +317,8 @@ internal sealed class ExplorerPreviewWindow : Window
         if (refreshingStartup || startupActions is null) return Task.CompletedTask;
         return ChangeStartupAsync(WindowsStartupCheckBox.IsChecked == true);
     }
-    private Task ChangeStartupAsync(bool? enabled) => OperateAsync(async () => {
+    private Task ChangeStartupAsync(bool? enabled) => OperateAsync(ConnectionAction.StartupSetting, async trace => {
+        trace.Phase = ConnectionPhase.StartupSetting;
         using var cancellation = new CancellationTokenSource(); startupCancellation = cancellation;
         try {
             startupState = enabled is { } requested
@@ -560,7 +579,7 @@ internal sealed class ExplorerPreviewWindow : Window
         ResumeButton.Visibility = presentation.Generated && state == ExplorerPreviewState.Paused ? Visibility.Visible : Visibility.Collapsed;
         RemoveButton.IsEnabled = enabled && (session is not null || drainedBinding is not null) && state != ExplorerPreviewState.Removed;
         location.Text = session?.RootPath ?? drainedRoot ?? "A dedicated local preview folder will be shown here after you start.";
-        activity.ItemsSource = (session?.Activity ?? []).Concat(localActivity).TakeLast(100).DefaultIfEmpty(presentation.Generated
+        activity.ItemsSource = ActivityLines.DefaultIfEmpty(presentation.Generated
             ? "No preview activity yet. Start the Explorer preview when you're ready." : "No connection activity yet. Sign in when you're ready.").ToArray();
         footer.Text = tray?.IsAvailable == true
             ? "Closing this window keeps LedgeTop Files running in the system tray. Use the tray menu to reopen Settings or quit."
@@ -609,7 +628,10 @@ internal sealed class ExplorerPreviewWindow : Window
     {
         if (busy || quitting || readyToClose || updateMaintenance || session is not ConnectedExplorerSession connected ||
             connected.State is not (ExplorerPreviewState.Running or ExplorerPreviewState.Paused)) return;
-        await OperateAsync(connected.RecheckSessionAsync);
+        await OperateAsync(ConnectionAction.Recheck, async trace => {
+            trace.Phase = ConnectionPhase.ExecuteSession;
+            await connected.RecheckSessionAsync();
+        });
     }
 
     internal void Quit()
