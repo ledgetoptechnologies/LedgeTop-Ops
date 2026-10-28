@@ -233,7 +233,7 @@ test("a refreshed task grant gets a new issuer while ambiguous retries for the o
   await expect(rows(page).first()).toContainText("Original share");
   await rows(page).first().getByRole("link", {name: /^Open 3D model/}).click();
   await expect.poll(() => calls.filter(call => call.method === "POST").length).toBe(1);
-  await expect(page.context().pages()).toHaveLength(1);
+  await expect.poll(() => page.context().pages().length).toBe(1);
 
   await card(page).getByRole("button", {name: "Load more 3D work"}).click();
   await expect(rows(page).first()).toContainText("Fresh share");
