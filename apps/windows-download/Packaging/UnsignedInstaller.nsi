@@ -1,5 +1,5 @@
 ; Unsigned per-user pilot installation; optional normal launch only from interactive Finish.
-; Existing exact startup opt-in may migrate on upgrade; setup never creates opt-in.
+; Existing owned startup commands migrate; first configured app launch applies the default-on preference.
 ; Builder must provide vetted canonical APP_VERSION (four u16s), OUTPUT_FILE,
 ; PAYLOAD_MANIFEST_SHA256, SOURCE_COMMIT and PAYLOAD_INCLUDE. Generated include defines ONLY:
 ; InstallPayload: explicit File commands into $INSTDIR, with SetOutPath for subdirs.
@@ -462,13 +462,21 @@ Section "Install"
   !insertmacro InstallPayload
   IfErrors preflight_failed
   SetOutPath "$INSTDIR"
+  preflight_retry:
   ClearErrors
   ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-check' $0
   IfErrors preflight_failed
   StrCmp $0 0 preflight_pass
     StrCmp $0 10 0 preflight_review
-    MessageBox MB_ICONSTOP "LedgeTop Files is still running.$\r$\n$\r$\nNear the Windows clock, open the LT tray icon and choose Quit LedgeTop Files. Check the hidden tray icons if needed. Closing Settings does not quit the app.$\r$\n$\r$\nThen run setup again." /SD IDOK
-    Goto preflight_refused
+    IfSilent preflight_refused
+    MessageBox MB_YESNO|MB_ICONQUESTION "LedgeTop Files is running. Stop it safely and continue installing?$\r$\n$\r$\nSetup will wait for downloads to stop. Local files stay on this PC." /SD IDNO IDYES preflight_stop IDNO preflight_refused
+  preflight_stop:
+    ClearErrors
+    ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-request-quit' $0
+    IfErrors preflight_failed
+    StrCmp $0 0 preflight_retry
+    StrCmp $0 10 0 preflight_review
+    MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "LedgeTop Files has not stopped yet. Older versions need you to quit once from the LT tray icon near the Windows clock: choose Quit LedgeTop Files. Check hidden tray icons if needed. Closing Settings does not quit the app.$\r$\n$\r$\nIf the app reports it cannot stop safely, keep it open and ask LedgeTop support for help.$\r$\n$\r$\nChoose Retry after quitting to continue this setup." /SD IDCANCEL IDRETRY preflight_retry IDCANCEL preflight_refused
   preflight_review:
     MessageBox MB_ICONSTOP "Setup could not verify this PC's file connections. Ask LedgeTop support for help before trying again. Setup code: $0" /SD IDOK
   preflight_refused:

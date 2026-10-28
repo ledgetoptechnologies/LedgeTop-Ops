@@ -51,6 +51,16 @@ replacement through that feed is not accepted end to end.
 
 ## Remaining acceptance and scope
 
+The next Windows candidate removes manual Pause/Resume from connected settings
+and the tray, and resumes saved pauses after fresh same-account validation.
+Startup defaults on after source selection and verified installation ownership;
+explicit opt-outs and conflicting Run entries remain preserved. Interactive
+setup offers graceful shutdown of a verified supporting app and waits for its
+actual exit. Builds through 0.5.9 lack that protocol, so their first upgrade uses
+tray Quit followed by Retry within the still-open installer. Silent setup keeps
+its busy refusal. These changes have focused and integrated synthetic tests;
+the next installer still needs publication and installed acceptance.
+
 Actual installed tray close/quit/reconnect, full uninstall and legacy sidebar
 cleanup, logon startup, authenticated update replacement, and current laptop
 acceptance remain to be completed or rechecked against the intended release.
@@ -91,7 +101,7 @@ relaunch. Scheduled checks run every six hours with an initial delay, skip busy
 or disconnected sessions, and pause after uncertain helper outcomes. Settings
 can disable automatic attempts. These preferences contain no account or token.
 
-An optional Start with Windows control manages only the exact owned pilot HKCU
+The Start with Windows control manages only the exact owned pilot HKCU
 Run value. Forward setup preserves its source choice; uninstall removes only an
 exact owned value. A checked interactive Finish option launches the installed
 app after setup; silent updates never use that launch path. Neither startup nor

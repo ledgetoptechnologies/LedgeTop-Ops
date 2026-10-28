@@ -136,7 +136,6 @@ test('temporary full-payload check precedes fixed-directory creation and permits
 
 test('only busy code10 gives tray Quit guidance at both setup checks and uninstall', () => {
   for (const [section, pass, review, refused] of [
-    [install, 'preflight_pass', 'preflight_review', 'preflight_refused'],
     [install, 'installed_payload_pass', 'installed_payload_review', 'installed_payload_refused'],
     [uninstall, 'un_cleanup_pass', 'un_cleanup_review', 'un_cleanup_refused'],
   ]) {
@@ -159,11 +158,11 @@ test('only busy code10 gives tray Quit guidance at both setup checks and uninsta
   assert(secondBusy.includes('If setup says this version already exists'));
   const uninstallBusy = uninstall.slice(0, uninstall.indexOf('un_cleanup_review:'));
   assert(uninstallBusy.includes('Also quit any old LedgeTop Files Preview tray icon.'));
-  assert.equal((active.match(/ExecWait/g) ?? []).length, 3, 'message clarification adds no process launch or retry');
+  assert.equal((active.match(/ExecWait/g) ?? []).length, 4, 'one extra bounded graceful quit maintenance command');
 });
 test('silent refusal has safe default dialog and nonzero explicit exit status', () => {
   for (const line of active.split('\n').filter(s => s.trimStart().startsWith('MessageBox ')))
-    assert(line.endsWith('/SD IDOK'));
+    assert(line.endsWith('/SD IDOK') || line.includes('/SD IDNO IDYES preflight_stop IDNO preflight_refused') || line.includes('/SD IDCANCEL IDRETRY preflight_retry IDCANCEL preflight_refused'));
   for (const [index, line] of active.split('\n').entries()) if (line.trim() === 'Abort')
     assert(active.split('\n')[index - 1].trim().startsWith('SetErrorLevel '));
 });
@@ -184,4 +183,18 @@ test('installer/uninstaller serialized and explicitly unsigned', () => {
   assert.equal((active.match(/CreateMutexW/g) ?? []).length, 2);
   assert.match(active, /unsigned preview/); assert(!/signtool|ForceUpdate|AppInstaller/i.test(active));
   assert.match(active, /"Publisher" "Ledge Top Technologies LLC"/);
+});
+
+
+test('interactive busy preflight offers graceful stop and retry without recreating setup or target', () => {
+  const loop = install.slice(install.indexOf('preflight_retry:'), install.indexOf('preflight_pass:'));
+  before(loop, 'StrCmp $0 10 0 preflight_review', 'IfSilent preflight_refused');
+  before(loop, 'IfSilent preflight_refused', 'MB_YESNO|MB_ICONQUESTION');
+  assert.match(loop, /IDYES preflight_stop IDNO preflight_refused/);
+  assert.match(loop, /ExecWait '"\$INSTDIR\\LedgeTop.Files.exe" --installer-request-quit' \$0/);
+  assert.match(loop, /StrCmp \$0 0 preflight_retry/);
+  assert.match(loop, /MB_RETRYCANCEL/);
+  assert.match(loop, /IDRETRY preflight_retry IDCANCEL preflight_refused/);
+  assert.match(loop, /Older versions need you to quit once/);
+  assert.doesNotMatch(loop, /CreateDirectory|WriteReg|Delete|TerminateProcess|taskkill/i);
 });

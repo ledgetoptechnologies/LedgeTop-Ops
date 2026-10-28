@@ -131,6 +131,8 @@ internal static class ExplorerPreviewWindowTests
                 Snap(savedWindow, Path.Combine(screenshots, "connected-settings-saved-files.png"));
                 savedWindow.ReconnectButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
                 await Until(() => saved.Reconnects == 1 && savedWindow.ResumeButton.IsEnabled);
+                True(savedWindow.PauseButton.Visibility == Visibility.Collapsed && savedWindow.ResumeButton.Visibility == Visibility.Collapsed,
+                    "connected settings never expose manual pause/resume, including legacy paused state");
                 True(saved.Starts == 0 && saved.State == ExplorerPreviewState.Paused && savedWindow.ReconnectButton.Visibility == Visibility.Collapsed,
                     "button routes cached-only action, preserves pause and disappears once connected");
                 await savedWindow.RemovePreviewAsync();
@@ -313,6 +315,13 @@ internal static class ExplorerPreviewWindowTests
             window.RestoreFromTray(); window.WindowsStartupCheckBox.IsChecked = false;
             await Until(() => writes.Count == 2 && window.WindowsStartupCheckBox.IsEnabled);
             True(writes.SequenceEqual(new[] { true, false }), "explicit disable is not immediately opted back in by refresh");
+        } finally { window.Quit(); await Until(() => !window.IsVisible); }
+        window = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), content, new FakeSession(root));
+        try {
+            await window.SetStartupActionsAsync(new(_ => Task.FromResult(new WindowsStartupState(WindowsStartupAvailability.Available, true, "employee")),
+                (_, _) => throw new InvalidOperationException("Reading an applied default must not trigger another toggle.")));
+            True(window.WindowsStartupCheckBox.IsEnabled && window.WindowsStartupCheckBox.IsChecked == true,
+                "verified installed default appears checked without a recursive checkbox write");
         } finally { window.Quit(); await Until(() => !window.IsVisible); }
         window = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), content, new FakeSession(root));
         try {

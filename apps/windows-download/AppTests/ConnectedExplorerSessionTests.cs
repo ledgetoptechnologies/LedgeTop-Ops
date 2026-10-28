@@ -351,9 +351,9 @@ internal static class ConnectedExplorerSessionTests
             var restored = fixture.Create();
             Check(restored.CanReconnectCached, "validated disconnected frozen connection exposes cached reconnect capability");
             await restored.ReconnectCachedAsync();
-            Check(restored.State == ExplorerPreviewState.Paused && fixture.SignIns == signs && fixture.Captures == captures &&
+            Check(restored.State == ExplorerPreviewState.Running && fixture.EngineResumes == 1 && fixture.SignIns == signs && fixture.Captures == captures &&
                 bytes.AsSpan().SequenceEqual(File.ReadAllBytes(fixture.IndexPath)),
-                "fresh coordinator cached reconnect preserves frozen inventory/paused state with no login, capture or index publication");
+                "fresh same-principal cached reconnect resumes legacy pause without login, capture or index publication");
             await restored.DisposeAsync();
             foreach (var failure in new[] { "expired", "person", "role" }) {
                 fixture.Expired = failure == "expired"; fixture.Person = failure == "person" ? Fixture.PersonB : Fixture.PersonA;

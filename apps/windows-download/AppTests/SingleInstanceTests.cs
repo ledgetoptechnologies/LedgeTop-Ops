@@ -11,7 +11,8 @@ internal static class SingleInstanceTests
         if (args.Length != 3) return 90;
         var mode = args[1]; var scope = args[2];
         if (mode == "signal") return SingleInstance.NotifyExistingAsync(scope).GetAwaiter().GetResult() ? 0 : 3;
-        using var owner = SingleInstance.TryOwn(scope, () => { Console.WriteLine("RESTORE"); Console.Out.Flush(); });
+        using var owner = SingleInstance.TryOwn(scope, () => { Console.WriteLine("RESTORE"); Console.Out.Flush(); },
+            mode == "own-quittable" ? () => { Console.WriteLine("QUIT"); Console.Out.Flush(); } : null);
         if (mode == "try") return owner is null ? 20 : 21;
         if (owner is null) return 2;
         Console.WriteLine(owner.RecoveredAbandonedOwner ? "OWNED-RECOVERED" : "OWNED"); Console.Out.Flush();
@@ -65,6 +66,23 @@ internal static class SingleInstanceTests
             }
         }
 
+        await using (var supported = Child.Start("own-quittable", scope)) {
+            Equal("OWNED", await supported.Line());
+            True(!await SingleInstance.RequestQuitAsync(scope, (_, _) => throw new IOException("Synthetic wrong peer.")),
+                "failed peer validation never sends quit");
+            True(await SingleInstance.NotifyExistingAsync(scope), "failed verification leaves owner untouched");
+            Equal("RESTORE", await supported.Line());
+            True(await SingleInstance.RequestQuitAsync(scope, (_, _) => Task.FromResult<IAsyncDisposable>(new Peer())),
+                "supported byte2 acknowledges the quit callback after verification");
+            Equal("QUIT", await supported.Line());
+            // Acceptance is not drain: this fake deliberately retains its singleton.
+            await using var contender = Child.Start("try", scope);
+            Equal(20, await contender.Exit());
+        }
+        await using (var legacy = await Child.Own(scope))
+            True(!await SingleInstance.RequestQuitAsync(scope, (_, _) => Task.FromResult<IAsyncDisposable>(new Peer())),
+                "restore-only owner does not acknowledge quit");
+
         // Keep a non-owning handle open so the killed process leaves a genuinely abandoned mutex to recover.
         using (var keeper = new Mutex(false, SingleInstance.Names(scope).Mutex)) {
             await using (var crashed = await Child.Own(scope)) {
@@ -83,6 +101,8 @@ internal static class SingleInstanceTests
     { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Expected {expected}; got {actual}."); }
     private static void True(bool condition, string message)
     { if (!condition) throw new InvalidOperationException(message); }
+
+    private sealed class Peer : IAsyncDisposable { public ValueTask DisposeAsync() => ValueTask.CompletedTask; }
 
     private sealed class Child(Process process) : IAsyncDisposable
     {

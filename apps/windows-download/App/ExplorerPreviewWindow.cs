@@ -555,9 +555,9 @@ internal sealed class ExplorerPreviewWindow : Window
         StartButton.Visibility = drainedBinding is null && (canRefreshEmpty || state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed) ? Visibility.Visible : Visibility.Collapsed;
         OpenFolderButton.IsEnabled = !quitting && Directory.Exists(session?.RootPath ?? drainedRoot);
         PauseButton.IsEnabled = enabled && state == ExplorerPreviewState.Running;
-        PauseButton.Visibility = state == ExplorerPreviewState.Running ? Visibility.Visible : Visibility.Collapsed;
+        PauseButton.Visibility = presentation.Generated && state == ExplorerPreviewState.Running ? Visibility.Visible : Visibility.Collapsed;
         ResumeButton.IsEnabled = enabled && state == ExplorerPreviewState.Paused;
-        ResumeButton.Visibility = state == ExplorerPreviewState.Paused ? Visibility.Visible : Visibility.Collapsed;
+        ResumeButton.Visibility = presentation.Generated && state == ExplorerPreviewState.Paused ? Visibility.Visible : Visibility.Collapsed;
         RemoveButton.IsEnabled = enabled && (session is not null || drainedBinding is not null) && state != ExplorerPreviewState.Removed;
         location.Text = session?.RootPath ?? drainedRoot ?? "A dedicated local preview folder will be shown here after you start.";
         activity.ItemsSource = (session?.Activity ?? []).Concat(localActivity).TakeLast(100).DefaultIfEmpty(presentation.Generated
@@ -572,8 +572,10 @@ internal sealed class ExplorerPreviewWindow : Window
         new("LedgeTop Files · " + presentation.Badge, false), new(""),
         new("Open settings and activity", true, RestoreFromTray),
         new("Open files folder", !quitting && Directory.Exists(session?.RootPath ?? drainedRoot), OpenFolder),
-        new("Pause downloads", !busy && !quitting && !updateMaintenance && session?.State == ExplorerPreviewState.Running, () => _ = PausePreviewAsync()),
-        new("Resume downloads", !busy && !quitting && !updateMaintenance && session?.State == ExplorerPreviewState.Paused, () => _ = ResumePreviewAsync()),
+        .. (presentation.Generated ? new TrayAction[] {
+            new("Pause downloads", !busy && !quitting && !updateMaintenance && session?.State == ExplorerPreviewState.Running, () => _ = PausePreviewAsync()),
+            new("Resume downloads", !busy && !quitting && !updateMaintenance && session?.State == ExplorerPreviewState.Paused, () => _ = ResumePreviewAsync())
+        } : []),
         new(""), new("Quit LedgeTop Files", true, Quit)
     ];
 

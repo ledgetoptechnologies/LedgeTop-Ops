@@ -7,6 +7,7 @@ internal enum WindowsStartupAvailability { Available, Unavailable, Conflict, Err
 // Enabled/SourceAlias describe our recognized setting only when Availability is Available.
 internal sealed record WindowsStartupState(WindowsStartupAvailability Availability, bool Enabled = false, string? SourceAlias = null);
 internal enum WindowsStartupValueKind { String, Other }
+internal enum WindowsStartupPreference { Unset, Disabled, Enabled, Invalid }
 internal sealed record WindowsStartupRunValue(WindowsStartupValueKind Kind, string? Text);
 
 internal interface IWindowsStartupOwnership : IAsyncDisposable
@@ -23,7 +24,9 @@ internal interface IWindowsStartupRunStore
     WindowsStartupRunValue? Read();
     // Serializes cooperating clients and rechecks the exact expected value immediately before writing.
     // Registry has no external-writer CAS: arbitrary same-user external writes are not made atomic.
-    bool TryReplace(WindowsStartupRunValue? expected, WindowsStartupRunValue? replacement);
+    bool TryReplace(WindowsStartupRunValue? expected, WindowsStartupRunValue? replacement, bool requireUnsetPreference = false);
+    WindowsStartupPreference ReadPreference();
+    void SavePreference(bool enabled);
 }
 internal sealed class WindowsStartupOwnershipUnavailableException() : Exception("Installed startup ownership is unavailable.");
 
@@ -31,7 +34,16 @@ internal static class WindowsStartupPolicy
 {
     internal const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     internal const string RunValueName = "LedgeTopFilesPilot";
+    internal const string PreferenceKey = @"Software\LedgeTop\Files\Pilot";
+    internal const string PreferenceValueName = "StartupEnabled";
     internal const string StartupSavedSourceArgument = "--startup-saved-source-v1";
+    internal static WindowsStartupPreference DecodePreference(uint type, ReadOnlySpan<byte> bytes)
+    {
+        if (type != 4 || bytes.Length != 4) return WindowsStartupPreference.Invalid;
+        return System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes) switch {
+            0 => WindowsStartupPreference.Disabled, 1 => WindowsStartupPreference.Enabled, _ => WindowsStartupPreference.Invalid
+        };
+    }
     internal static WindowsStartupRunValue DecodeRunValue(uint type, ReadOnlySpan<byte> bytes)
     {
         // REG_SZ only, max260 UTF16 code units plus exactly one terminal NUL. Do not normalize

@@ -8,15 +8,17 @@ namespace LedgeTop.Files;
 
 /// <summary>
 /// One owner per Windows user, interactive session and compiled product mode. A second launch can only
-/// ask that owner to restore its window; no arguments, identities, URLs or file paths cross the pipe.
+/// ask that owner to restore its window. Packaged pilot owners also accept a graceful Quit request;
+/// no arguments, identities, URLs or file paths cross the pipe.
 /// </summary>
 internal sealed class SingleInstance : IDisposable
 {
-    private const byte Restore = 1;
+    private const byte Restore = 1, Quit = 2;
     private readonly Mutex mutex;
     private readonly int ownerThread = Environment.CurrentManagedThreadId;
     private readonly string pipeName;
     private readonly Action restore;
+    private readonly Action? quit;
     private readonly CancellationTokenSource stop = new();
     private readonly object gate = new();
     private readonly Task listener;
@@ -24,9 +26,9 @@ internal sealed class SingleInstance : IDisposable
     private bool disposed;
     internal bool RecoveredAbandonedOwner { get; }
 
-    private SingleInstance(Mutex mutex, string pipeName, Action restore, bool abandoned)
+    private SingleInstance(Mutex mutex, string pipeName, Action restore, Action? quit, bool abandoned)
     {
-        this.mutex = mutex; this.pipeName = pipeName; this.restore = restore;
+        this.mutex = mutex; this.pipeName = pipeName; this.restore = restore; this.quit = quit;
         RecoveredAbandonedOwner = abandoned;
         // Create the endpoint before returning ownership, so a racing second launch can connect immediately.
         listener = ListenAsync(NewPipe());
@@ -50,7 +52,7 @@ internal sealed class SingleInstance : IDisposable
     }
 
     /// <summary>Must be acquired and disposed on the same thread, as required by a Windows mutex.</summary>
-    internal static SingleInstance? TryOwn(string scope, Action restore)
+    internal static SingleInstance? TryOwn(string scope, Action restore, Action? quit = null)
     {
         var names = Names(scope);
         var mutex = new Mutex(false, names.Mutex);
@@ -59,7 +61,7 @@ internal sealed class SingleInstance : IDisposable
             try { owned = mutex.WaitOne(0); }
             catch (AbandonedMutexException) { owned = abandoned = true; }
             if (!owned) { mutex.Dispose(); return null; }
-            return new SingleInstance(mutex, names.Pipe, restore, abandoned);
+            return new SingleInstance(mutex, names.Pipe, restore, quit, abandoned);
         } catch {
             if (owned) mutex.ReleaseMutex();
             mutex.Dispose();
@@ -68,6 +70,15 @@ internal sealed class SingleInstance : IDisposable
     }
 
     internal static async Task<bool> NotifyExistingAsync(string scope, TimeSpan? timeout = null)
+        => await SendAsync(scope, Restore, null, timeout).ConfigureAwait(false);
+
+    // The installer must bind the actual OS pipe peer to the exact active installed payload
+    // before byte2 crosses the pipe. An acknowledgement means accepted, never fully drained.
+    internal static Task<bool> RequestQuitAsync(string scope, Func<PipeStream, CancellationToken, Task<IAsyncDisposable>> verifyPeer,
+        TimeSpan? timeout = null) => SendAsync(scope, Quit, verifyPeer, timeout);
+
+    private static async Task<bool> SendAsync(string scope, byte command,
+        Func<PipeStream, CancellationToken, Task<IAsyncDisposable>>? verifyPeer, TimeSpan? timeout)
     {
         var names = Names(scope);
         using var deadline = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(3));
@@ -75,9 +86,10 @@ internal sealed class SingleInstance : IDisposable
             using var pipe = new NamedPipeClientStream(".", names.Pipe, PipeDirection.InOut,
                 PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
             await pipe.ConnectAsync(deadline.Token).ConfigureAwait(false);
-            await pipe.WriteAsync(new byte[] { Restore }, deadline.Token).ConfigureAwait(false);
+            await using var peer = verifyPeer is null ? null : await verifyPeer(pipe, deadline.Token).ConfigureAwait(false);
+            await pipe.WriteAsync(new byte[] { command }, deadline.Token).ConfigureAwait(false);
             var reply = new byte[1];
-            return await pipe.ReadAsync(reply, deadline.Token).ConfigureAwait(false) == 1 && reply[0] == Restore;
+            return await pipe.ReadAsync(reply, deadline.Token).ConfigureAwait(false) == 1 && reply[0] == command;
         } catch (Exception error) when (error is IOException or UnauthorizedAccessException or OperationCanceledException) {
             return false;
         }
@@ -103,11 +115,12 @@ internal sealed class SingleInstance : IDisposable
                         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stop.Token);
                         deadline.CancelAfter(TimeSpan.FromMilliseconds(750));
                         var request = new byte[1];
-                        if (await pipe.ReadAsync(request, deadline.Token).ConfigureAwait(false) == 1 && request[0] == Restore) {
+                        if (await pipe.ReadAsync(request, deadline.Token).ConfigureAwait(false) == 1 &&
+                            (request[0] == Restore || request[0] == Quit && quit is not null)) {
                             var accepted = false;
-                            try { restore(); accepted = true; }
+                            try { (request[0] == Restore ? restore : quit!)(); accepted = true; }
                             catch (Exception) { /* a dispatcher already shutting down cannot accept a restore */ }
-                            if (accepted) await pipe.WriteAsync(new byte[] { Restore }, deadline.Token).ConfigureAwait(false);
+                            if (accepted) await pipe.WriteAsync(new byte[] { request[0] }, deadline.Token).ConfigureAwait(false);
                         }
                     } catch (Exception error) when (error is IOException or UnauthorizedAccessException or OperationCanceledException or ObjectDisposedException) {
                         // A disconnected or silent launcher cannot hold the restore endpoint indefinitely.

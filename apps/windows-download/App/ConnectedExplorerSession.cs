@@ -198,6 +198,13 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             Add("Connecting your prepared files to Windows Explorer.");
             await engine!.Session.StartAsync();
             token.ThrowIfCancellationRequested();
+            // A saved manual pause is legacy UI state, not an access preference. Only resume
+            // after this generation has freshly verified the same selected principal; the
+            // source gate still performs its own current-session check without browser login.
+            if (engine.Session.State == ExplorerPreviewState.Paused) {
+                await engine.Session.ResumeAsync();
+                token.ThrowIfCancellationRequested();
+            }
             SetState(engine.Session.State);
             Add(InventoryEmpty
                 ? "Your account is connected. This PC's saved file list is empty. Sign in and refresh the file list to check current sharing."

@@ -6,6 +6,7 @@ internal static class InstallerMaintenanceTests
 {
     internal static async Task Run()
     {
+        await GracefulQuitContract();
         InstallerStartupGate();
         UntrackedRootObservations();
         await LegacyCleanupIntegration();
@@ -69,6 +70,34 @@ internal static class InstallerMaintenanceTests
                 "unavailable native ownership during either source preflight refuses cleanup and drains earlier sessions");
         }
         Console.WriteLine("Installer maintenance: injected absence/unknown observations, fake session lifecycle and original-thread drain passed. No native registration queries or real connection cleanup.");
+    }
+
+    private static async Task GracefulQuitContract()
+    {
+        var log = new List<string>(); var thread = Environment.CurrentManagedThreadId;
+        foreach (var compiled in new (bool, ReleaseChannel?)[] { (false, null), (true, ReleaseChannel.Stable) })
+            Require(await InstallerMaintenance.RunWithQuitAsync(compiled, [InstallerMaintenance.QuitArgument],
+                () => throw new Exception(), () => throw new Exception(), () => throw new Exception(), 2, () => throw new Exception()) == 20,
+                "unsupported builds cannot request quit");
+        var checks = 0; var requests = 0; var delays = 0;
+        async Task<int> Run(bool accepted, int freeAt) => await InstallerMaintenance.RunWithQuitAsync((true, ReleaseChannel.Pilot),
+            [InstallerMaintenance.QuitArgument], () => { requests++; return Task.FromResult(accepted); },
+            () => ++checks >= freeAt ? new Owner(log, thread) : null,
+            () => { delays++; return Task.CompletedTask; }, 3, () => throw new Exception("No other maintenance/session work."));
+        Require(await Run(true, 3) == 0 && checks == 3 && requests == 1 && delays == 2 && log.SequenceEqual(["owner-dispose"]),
+            "accepted quit waits for actual singleton release, retains caller thread and never prepares/removes sources");
+        checks = requests = delays = 0; log.Clear();
+        Require(await Run(true, 99) == 10 && checks == 4 && requests == 1 && delays == 3 && log.Count == 0,
+            "acknowledgement without completed drain stays busy and never force-closes");
+        checks = requests = delays = 0;
+        Require(await Run(false, 99) == 10 && checks == 1 && requests == 1 && delays == 0,
+            "legacy or rejected IPC returns busy for installer Retry");
+        checks = requests = delays = 0;
+        Require(await Run(true, 1) == 0 && requests == 0 && delays == 0,
+            "definite absence succeeds without sending quit");
+        Require(await InstallerMaintenance.RunWithQuitAsync((true, ReleaseChannel.Pilot), [InstallerMaintenance.QuitArgument],
+            () => throw new IOException(), () => null, () => Task.CompletedTask, 1, () => throw new Exception()) == 20,
+            "unavailable peer ownership refuses without starting other maintenance");
     }
 
     private static async Task LegacyCleanupIntegration()

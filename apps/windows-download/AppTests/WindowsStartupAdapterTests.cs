@@ -7,6 +7,33 @@ internal static class WindowsStartupAdapterTests
     internal static async Task Run()
     {
         Require(WindowsStartupPolicy.RunValueName == "LedgeTopFilesPilot" && WindowsStartupPolicy.StartupSavedSourceArgument == "--startup-saved-source-v1", "fixed installer contract");
+        Require(WindowsStartupPolicy.PreferenceKey == @"Software\LedgeTop\Files\Pilot" && WindowsStartupPolicy.PreferenceValueName == "StartupEnabled", "fixed explicit preference contract shared with installer");
+        Require(WindowsStartupPolicy.DecodePreference(4, [0, 0, 0, 0]) == WindowsStartupPreference.Disabled &&
+            WindowsStartupPolicy.DecodePreference(4, [1, 0, 0, 0]) == WindowsStartupPreference.Enabled &&
+            WindowsStartupPolicy.DecodePreference(4, [2, 0, 0, 0]) == WindowsStartupPreference.Invalid &&
+            WindowsStartupPolicy.DecodePreference(1, [1, 0, 0, 0]) == WindowsStartupPreference.Invalid &&
+            WindowsStartupPolicy.DecodePreference(4, [1]) == WindowsStartupPreference.Invalid, "preference accepts exact DWORD0/1 only");
+        foreach (var alias in new[] { "employee", "portal" }) {
+            var fresh = new Fixture(); var enabled = await fresh.Adapter.ApplyDefaultAsync(alias, default);
+            Require(enabled.Enabled && enabled.SourceAlias == alias && fresh.Store.Writes == 1 && fresh.Store.Preference == true,
+                "unset installed launch defaults on only for its selected source coordinate");
+            await fresh.Adapter.ApplyDefaultAsync(alias, default); Require(fresh.Store.Writes == 1, "default is idempotent");
+        }
+        foreach (var preference in new[] { false, true }) {
+            var stored = new Fixture(); stored.Store.Preference = preference;
+            Require(!(await stored.Adapter.ApplyDefaultAsync("employee", default)).Enabled && stored.Store.Writes == 0 && stored.Store.Preference == preference,
+                "recorded preference preserves absent Run without silently overriding user or external choice");
+        }
+        var ownedExisting = new Fixture(); ownedExisting.Store.Value = new(WindowsStartupValueKind.String, WindowsStartupPolicy.Command(Executable, "portal"));
+        Require((await ownedExisting.Adapter.ApplyDefaultAsync("employee", default)).SourceAlias == "portal" && ownedExisting.Store.Writes == 0 && ownedExisting.Store.Preference is null,
+            "existing owned Run alias is preserved without relabeling or preference write");
+        var malformed = new Fixture(); malformed.Store.PreferenceOverride = WindowsStartupPreference.Invalid;
+        Require((await malformed.Adapter.ApplyDefaultAsync("employee", default)).Availability == WindowsStartupAvailability.Conflict &&
+            (await malformed.Adapter.SetEnabledAsync(true, "employee", default)).Availability == WindowsStartupAvailability.Conflict && malformed.Store.Writes == 0 && malformed.Store.Preference is null,
+            "malformed stored preference is retained for review even on explicit toggle");
+        var defaultRace = new Fixture(); defaultRace.Store.BeforeReplace = () => defaultRace.Store.Preference = false;
+        Require((await defaultRace.Adapter.ApplyDefaultAsync("employee", default)).Availability == WindowsStartupAvailability.Conflict && defaultRace.Store.Writes == 0 && defaultRace.Store.Preference == false,
+            "default CAS rechecks preference so cooperating opt-out cannot be overwritten");
         foreach (var alias in new[] { "portal", "employee" }) {
             var text = WindowsStartupPolicy.Command(Executable, alias);
             Require(text == '"' + Executable + "\" --startup-saved-source-v1 " + alias && text.Length <= 260, "exact quoted command contains only source coordinates");
@@ -32,11 +59,11 @@ internal static class WindowsStartupAdapterTests
         Require(await f.Adapter.SetEnabledAsync(true, "portal", default) == new WindowsStartupState(WindowsStartupAvailability.Available, true, "portal") && f.Store.Writes == 1,
             "enable only after fresh ownership proof");
         Require(f.Log.LastIndexOf("verify") < f.Log.LastIndexOf("readback") && f.Owner.Disposals == 3, "readback and ownership are confirmed and every proof disposed");
-        await f.Adapter.SetEnabledAsync(true, "portal", default); Require(f.Store.Writes == 1, "idempotent enable performs no write");
+        await f.Adapter.SetEnabledAsync(true, "portal", default); Require(f.Store.Writes == 1 && f.Store.Preference == true, "idempotent enable records explicit preference without Run write");
         Require((await f.Adapter.SetEnabledAsync(true, "employee", default)).SourceAlias == "employee" && f.Store.Writes == 2, "explicit source change replaces other recognized owned alias");
         Require(await f.Adapter.SetEnabledAsync(false, "portal", default) == new WindowsStartupState(WindowsStartupAvailability.Available) && f.Store.Writes == 3,
             "explicit disable removes exact owned shape even when it names the other alias");
-        await f.Adapter.SetEnabledAsync(false, "employee", default); Require(f.Store.Writes == 3, "absent opt-out stays absent");
+        await f.Adapter.SetEnabledAsync(false, "employee", default); Require(f.Store.Writes == 3 && f.Store.Preference == false, "absent explicit opt-out is persisted without Run mutation");
 
         foreach (var foreign in new[] {
             new WindowsStartupRunValue(WindowsStartupValueKind.Other, null), new(WindowsStartupValueKind.String, "\"C:\\other.exe\""),
@@ -46,9 +73,12 @@ internal static class WindowsStartupAdapterTests
         }) {
             var conflict = new Fixture(); conflict.Store.Value = foreign;
             Require((await conflict.Adapter.GetStateAsync(default)).Availability == WindowsStartupAvailability.Conflict, "foreign type/text/stale-version is not owned by current proof");
+            Require((await conflict.Adapter.ApplyDefaultAsync("employee", default)).Availability == WindowsStartupAvailability.Conflict && conflict.Store.Writes == 0,
+                "default never adopts or replaces foreign Run data");
             foreach (var enable in new[] { true, false })
                 Require((await conflict.Adapter.SetEnabledAsync(enable, "portal", default)).Availability == WindowsStartupAvailability.Conflict && conflict.Store.Value == foreign && conflict.Store.Writes == 0,
                     "foreign Run value preserved for both enable and disable");
+            Require(conflict.Store.Preference is null, "foreign Run value never publishes an explicit startup preference");
         }
         var raced = new Fixture { }; var replacement = new WindowsStartupRunValue(WindowsStartupValueKind.String, "foreign command never echo");
         raced.Store.BeforeReplace = () => raced.Store.Value = replacement;
@@ -127,8 +157,12 @@ internal static class WindowsStartupAdapterTests
         internal int Reads, Writes;
         internal Action? BeforeReplace, AfterReplace;
         internal bool WriteFault;
+        internal bool? Preference;
+        internal WindowsStartupPreference? PreferenceOverride;
+        public WindowsStartupPreference ReadPreference() => PreferenceOverride ?? (Preference switch { false => WindowsStartupPreference.Disabled, true => WindowsStartupPreference.Enabled, _ => WindowsStartupPreference.Unset });
+        public void SavePreference(bool enabled) { Preference = enabled; }
         public WindowsStartupRunValue? Read() { Reads++; log.Add(Writes == 0 ? "read" : "readback"); return Value; }
-        public bool TryReplace(WindowsStartupRunValue? expected, WindowsStartupRunValue? replacement)
-        { BeforeReplace?.Invoke(); if (WriteFault) throw new IOException("private registry error"); if (Value != expected) return false; Writes++; Value = replacement; log.Add("write"); AfterReplace?.Invoke(); return true; }
+        public bool TryReplace(WindowsStartupRunValue? expected, WindowsStartupRunValue? replacement, bool requireUnsetPreference = false)
+        { BeforeReplace?.Invoke(); if (WriteFault) throw new IOException("private registry error"); if (Value != expected || requireUnsetPreference && ReadPreference() != WindowsStartupPreference.Unset) return false; Writes++; Value = replacement; log.Add("write"); AfterReplace?.Invoke(); return true; }
     }
 }

@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using LedgeTop.Files.Updates;
 using LedgeTop.Files.Backends;
 using LedgeTop.Files.Explorer;
 
@@ -8,12 +10,81 @@ namespace LedgeTop.Files;
 internal static class InstallerMaintenance
 {
     internal const string CheckArgument = "--installer-check", RemoveArgument = "--installer-remove-connections";
+    internal const string QuitArgument = "--installer-request-quit";
     internal const string LegacyRemoveArgument = "--installer-remove-legacy-preview";
     internal static bool Requested(IReadOnlyList<string> arguments) => arguments.Any(value => value.StartsWith("--installer", StringComparison.OrdinalIgnoreCase));
 
     internal static Task<int> RunAsync((bool Packaged, ReleaseChannel? Channel) compiled, IReadOnlyList<string> arguments) =>
-        RunAsync(compiled, arguments, () => SingleInstance.TryOwn("pilot", () => { }), Prepare,
-            remove => LegacyExplorerPreviewCleanup.RunAsync(remove, CancellationToken.None));
+        RunWithQuitAsync(compiled, arguments, RequestQuitOfInstalledOwnerAsync,
+            () => SingleInstance.TryOwn("pilot", () => { }), () => Task.Delay(250), 120,
+            () => RunAsync(compiled, arguments, () => SingleInstance.TryOwn("pilot", () => { }), Prepare,
+                remove => LegacyExplorerPreviewCleanup.RunAsync(remove, CancellationToken.None)));
+
+    internal static async Task<int> RunWithQuitAsync((bool Packaged, ReleaseChannel? Channel) compiled,
+        IReadOnlyList<string> arguments, Func<Task<bool>> requestQuit, Func<IDisposable?> tryOwn,
+        Func<Task> delay, int attempts, Func<Task<int>> otherMaintenance)
+    {
+        if (arguments.Count != 1 || arguments[0] != QuitArgument) return await otherMaintenance();
+        if (!compiled.Packaged || compiled.Channel != ReleaseChannel.Pilot) return 20;
+        try {
+            // Definite absence needs no IPC; retain thread-affine ownership through each check.
+            using (var absent = tryOwn()) { if (absent is not null) return 0; }
+            if (!await requestQuit()) return 10; // Includes pre-byte2/legacy owners.
+            for (var attempt = 0; attempt < attempts; attempt++) {
+                await delay();
+                using var drained = tryOwn();
+                if (drained is not null) return 0;
+            }
+            return 10; // Never equate acknowledgement or elapsed time with successful drain.
+        } catch { return 20; }
+    }
+
+    private static async Task<bool> RequestQuitOfInstalledOwnerAsync()
+    {
+        // Legacy releases can lack the inventory needed to verify an exact installed peer.
+        // In that case send nothing: setup remains open with manual tray Quit + Retry.
+        try { return await VerifyAndRequestQuitAsync(); }
+        catch { return false; }
+    }
+
+    private static async Task<bool> VerifyAndRequestQuitAsync()
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var token = deadline.Token;
+        var profile = ExeUpdateWindowsTrust.Profile();
+        var version = ExeUpdateWindowsTrust.ActiveVersion();
+        var root = ExeUpdateWindowsTrust.Target(version);
+        var markerPath = Path.Combine(root, "installer-owned.ini");
+        ExeUpdateWindowsNative.NoAliases(markerPath);
+        InstalledPayloadVerifier.InstalledPayloadMarker marker;
+        using (var stream = new FileStream(markerPath, FileMode.Open, FileAccess.Read, FileShare.Read)) {
+            if (stream.Length is <= 0 or > 16384) throw new IOException("Installed owner unavailable.");
+            var bytes = new byte[(int)stream.Length]; await stream.ReadExactlyAsync(bytes, token);
+            marker = InstalledPayloadVerifier.ParseMarker(bytes);
+        }
+        var payload = await InstalledPayloadVerifier.VerifyAsync(root, version, marker.SourceCommit,
+            marker.PayloadManifestSha256, profile.CloudflaredSha256!, token);
+        try {
+            ExeUpdateWindowsTrust.VerifyManagedRelease(root, version);
+            using var current = Process.GetCurrentProcess();
+            var owner = new ExeUpdateInstalledOwner(ExeUpdateWindowsNative.CurrentSid(), current.SessionId, version, root,
+                marker.Owner, payload.PayloadManifestSha256, payload.SourceCommit, payload.AppHostSha256, payload.ManagedAssemblySha256);
+            return await SingleInstance.RequestQuitAsync("pilot", (pipe, _) => {
+                using var observed = Process.GetProcessById(ExeUpdateWindowsNative.PipePeer(pipe, server: false));
+                var bound = ExeUpdateWindowsNative.OpenBoundProcess(ExeUpdateWindowsNative.ProcessIdentity(observed), owner);
+                try { ExeUpdateWindowsTrust.CheckOwner(owner); }
+                catch { bound.Dispose(); throw; }
+                // Hash validation happens before connecting so the 750ms restore endpoint
+                // remains responsive. Keep exact payload and actual OS peer handles until ACK.
+                return Task.FromResult<IAsyncDisposable>(new QuitPeer(bound));
+            });
+        } finally { await payload.DisposeAsync(); }
+    }
+
+    private sealed class QuitPeer(Process process) : IAsyncDisposable
+    {
+        public ValueTask DisposeAsync() { process.Dispose(); return ValueTask.CompletedTask; }
+    }
 
     // This method intentionally preserves its caller's synchronization context: Windows mutex ownership
     // must be released on the original UI thread after all async session work has drained.

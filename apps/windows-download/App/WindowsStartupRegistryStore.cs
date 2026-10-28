@@ -15,10 +15,18 @@ namespace LedgeTop.Files;
 internal sealed class WindowsStartupRegistryStore : IWindowsStartupRunStore
 {
     public WindowsStartupRunValue? Read() => Locked(ReadValue);
-    public bool TryReplace(WindowsStartupRunValue? expected, WindowsStartupRunValue? replacement) => Locked(() => {
+    public WindowsStartupPreference ReadPreference() => Locked(ReadPreferenceValue);
+    public void SavePreference(bool enabled) => Locked(() => {
+        using var user = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Registry64);
+        using var key = user.CreateSubKey(WindowsStartupPolicy.PreferenceKey, true) ?? throw new IOException("Startup preference unavailable.");
+        key.SetValue(WindowsStartupPolicy.PreferenceValueName, enabled ? 1 : 0, RegistryValueKind.DWord);
+        return true;
+    });
+    public bool TryReplace(WindowsStartupRunValue? expected, WindowsStartupRunValue? replacement, bool requireUnsetPreference = false) => Locked(() => {
         if (replacement is not null && !WindowsStartupPolicy.RecognizedCommandShape(replacement))
             throw new IOException("Startup replacement refused.");
         if (expected is not null && !WindowsStartupPolicy.RecognizedCommandShape(expected)) return false;
+        if (requireUnsetPreference && ReadPreferenceValue() != WindowsStartupPreference.Unset) return false;
         if (ReadValue() != expected) return false;
         using var user = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Registry64);
         if (replacement is null) {
@@ -30,6 +38,18 @@ internal sealed class WindowsStartupRegistryStore : IWindowsStartupRunStore
         }
         return true;
     });
+    private static WindowsStartupPreference ReadPreferenceValue()
+    {
+        using var user = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Registry64);
+        using var key = user.OpenSubKey(WindowsStartupPolicy.PreferenceKey, false);
+        if (key is null) return WindowsStartupPreference.Unset;
+        uint size = 4; var bytes = new byte[4];
+        var result = RegQueryValueEx(key.Handle, WindowsStartupPolicy.PreferenceValueName, IntPtr.Zero, out var type, bytes, ref size);
+        if (result == 2) return WindowsStartupPreference.Unset;
+        if (result == 234) return WindowsStartupPreference.Invalid;
+        if (result != 0) throw new IOException("Startup preference could not be read.");
+        return size != 4 ? WindowsStartupPreference.Invalid : WindowsStartupPolicy.DecodePreference(type, bytes);
+    }
     private static WindowsStartupRunValue? ReadValue()
     {
         using var user = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Registry64);

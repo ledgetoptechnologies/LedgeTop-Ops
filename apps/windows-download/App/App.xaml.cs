@@ -56,7 +56,7 @@ public partial class App : Application
         }
         var scope = SingleInstance.ScopeFor(compiled, e.Args);
         try {
-            instance = SingleInstance.TryOwn(scope, RequestRestore);
+            instance = SingleInstance.TryOwn(scope, RequestRestore, compiled.Packaged && compiled.Channel == ReleaseChannel.Pilot ? RequestInstallerQuit : null);
             if (instance is null) {
                 if (!await SingleInstance.NotifyExistingAsync(scope))
                     MessageBox.Show("LedgeTop Files is already running, but couldn't bring its window forward. Open it from the system tray, or quit that copy before trying again.",
@@ -138,7 +138,7 @@ public partial class App : Application
             }
             settings.Show(); RestoreWhenReady(settings);
             if (startupAdapter is not null) {
-                await settings.SetStartupActionsAsync(new ExplorerStartupActions(startupAdapter.GetStateAsync,
+                await settings.SetStartupActionsAsync(new ExplorerStartupActions(token => startupAdapter.ApplyDefaultAsync(AccessModes.Alias(mode.Value), token),
                     (enabled, token) => startupAdapter.SetEnabledAsync(enabled, AccessModes.Alias(mode.Value), token)));
             }
             if (resume.Requested) await settings.ReconnectPreviewAsync();
@@ -160,6 +160,17 @@ public partial class App : Application
         } catch (Exception) {
             model.ShowNotSetUp("Ledge Top Files couldn't start on this PC. Restart it, and if this keeps happening, ask your Ledge Top contact to check the installation.");
         }
+    }
+
+    private void RequestInstallerQuit()
+    {
+        if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
+        Dispatcher.BeginInvoke(() => {
+            // Use exactly the human Quit path: it cancels work and retains the process if
+            // provider drain or update-helper ownership is uncertain.
+            if (MainWindow is ExplorerPreviewWindow preview) preview.Quit();
+            else if (MainWindow is ExplorerSourceChoiceWindow chooser) chooser.Close();
+        });
     }
 
     private void RequestRestore()
