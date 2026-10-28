@@ -3,108 +3,85 @@
 This contains the .NET 10 transfer library, Windows settings/activity app,
 system tray, branded Explorer connection and files-on-demand provider, with
 human Cloudflare Access and separate portal and employee read adapters.
+
 The unsigned per-user pilot installer is available in
-`S:\LedgeTop Operations\Sync App`. Start with
-`CURRENT-STAGING-STATUS.txt`; versioned receipts retain their original build-time
-observations. Code signing is intentionally off. Uploads and automatic catalog
-refresh are not implemented. Shared 0.5.8 is the current diagnostic candidate.
-It includes client-side scheduled update checks, but the update feed
-is still off and automatic delivery/installation is not accepted end to end.
+`S:\LedgeTop Operations\Sync App`. Start with `CURRENT-STAGING-STATUS.txt`;
+versioned receipts preserve their original build-time observations. Code signing
+is intentionally off. Local edits/additions do not upload. Automatic catalog
+refresh, automatic account/source selection and NAS/R2 two-way sync are not
+implemented. Scheduled update checks exist, but the update feed is off and
+replacement through that feed is not accepted end to end.
 
 ## Current verification — October 28, 2026
 
-- Version 0.5.8 adds bounded hydration timing and fixes native temporary-cache
-  opening for long local paths. The emitted test executable passes the cache
-  regression; installed warning-free cache reclamation still needs acceptance.
-- Current user screenshots show successful downloads and Keep on device, with
-  cold hydration totals of 8,967 and 12,019 ms. Authorization-before accounts for
-  2,090 and 2,334 ms respectively; both report zero queue time. These observations
-  do not establish the duration of the clipped stages or pure network throughput.
-- Company-file source now removes four redundant session probes while retaining
-  both authoritative file resolutions and file-integrity validation. Synthetic
-  HTTP tests verify three requests instead of seven for a cold download, with
-  denial, expiry, account-change, cancellation and pause/epoch regressions passing.
-  Portal and unknown adapters retain their separate session checks. This change
-  is not in the shared 0.5.8 installer; installed speed remains unmeasured.
+- Shared candidate **0.5.9.0**, source `095cc00510f1518927c49dd8164ea05122dace3e`,
+  passed Windows CI `40688340230`. Its 524 payload files and 288 source entries
+  were independently verified. The installer SHA256 is
+  `4c1b30d934f3beb9ef918ebfc7e2ba4cbace2a1947a22322b796f0a773dfadd8`.
+  Version 0.5.8 is retained in `Archive\0.5.8` for rollback.
+- Company-file hydration removes four redundant session probes: synthetic HTTP
+  tests verify three requests rather than seven for a cold download. Both file
+  resolutions remain, including principal, expiry, current authority, version,
+  length and SHA checks. Portal and unknown sources retain their session checks.
+  Actual-adapter/lifetime/source-gate tests cover denial, account changes,
+  cancellation and pause/epoch changes. Activity wraps complete timing lines.
+- Isolated native tests of both 0.5.8 and the candidate source passed ordinary
+  download, exact-byte verification, Keep, Free/cache cleanup, redownload, final
+  payload release and exact owned native unregister for the approved
+  57,788,851-byte photo. Both tests used fresh hidden native roots, the same
+  existing human staging access and pinned helper; neither created a Shell
+  sidebar entry nor changed the installed connection.
+- That sequential one-photo comparison did **not** demonstrate a speedup.
+  Baseline cold read/hash took 11.187 and 9.541 seconds; candidate took 11.715 and
+  10.628 seconds. Warm local read/hash took 27 ms in both. Queue time was zero;
+  retained authorization/resolution and download phases dominated. Download
+  timing includes disk writes and downloader checks, not just network time.
+  This is not a statistical benchmark, laptop test or Photos-rendering result.
+- The main PC is running installed **0.5.8.0**. The desktop-control binding still
+  misidentifies its window as the older 0.5.6 executable and refuses control.
+  The new installer has therefore not been installed through this session.
+  User screenshots show downloads and Keep succeeding in 0.5.8. Warning-free
+  cache cleanup passed in the isolated executable test; installed UI acceptance
+  remains distinct.
+- The cache correction handles long application-owned paths at the native
+  file-open boundary without changing Windows policy. Its emitted-executable
+  regression reproduced five failures before the fix and passes all eight
+  cases afterward. CI explicitly tests that host because the dotnet host had
+  masked the defect.
 
-## Earlier verification — October 27, 2026
-- Candidate 0.5.5.0 is published from source 9481f7e2 with independently
-  verified installer/payload bytes and passing hosted Windows checks. Its
-  hydration diagnostics identify AuthorizationBefore/LoginRequired on the
-  laptop even after successful sign-in and Resume. The specific helper/server
-  failure remains unresolved. Current source distinguishes paused availability
-  from authentication and records bounded sign-in operation/reason details;
-  those new details still require a new candidate and laptop acceptance.
-- A separate approved one-photo read through immutable production 0.5.4
-  adapters succeeded with a fresh reference and authenticated manifest hash.
-  This proves that delivery at that time, not the laptop's saved-reference or
-  native callback path. Do not reset the connection based on that result alone.
+## Remaining acceptance and scope
 
-- Candidate 0.5.4.0 is published with the schema-3/schema-4-compatible Shell
-  diagnostic v2. Its source archive, all 524 payload files, inventory sidecar,
-  helper/notices and installer bytes were independently verified. Beau confirmed
-  that the checked Finish option opens the installed app on the laptop.
-- Company-file preparation previously failed after browser sign-in. Version
-  0.5.4 reports a bounded operation/boundary/reason support code and the actual
-  unexpected HTTP status. This is diagnostic evidence, not a confirmed repair.
-  The separately approved read-only Test Data access renewal was applied through
-  the supported staging API and independently read back; the new laptop
-  connection now shows all 19 photos. See the current shared status for access expiry
-  and test instructions. Installation itself does not grant file access.
+Actual installed tray close/quit/reconnect, full uninstall and legacy sidebar
+cleanup, logon startup, authenticated update replacement, and current laptop
+acceptance remain to be completed or rechecked against the intended release.
+The historical laptop LoginRequired failure is not independently resolved by a
+successful test on the main PC. Current Client-deliveries behavior needs its own
+approved account/source acceptance; Company tests do not qualify it.
 
-- Installer 0.5.2.0 completed on the desktop; all 524 payload files, registry and
-  ownership marker matched. Later native-path checks found the Start-menu reads
-  resolve into the test host's package LocalCache/Roaming view. The earlier
-  shortcut-target readback does not qualify the physical Windows Start menu.
-  Setup did not launch the normal app.
-- Candidate 0.5.3.0 has independently verified source/archive, 524 payload files,
-  inventory sidecar, helper/notices and installer metadata. Its real staged
-  maintenance check exited 0 and preserved three ownership JSON files. Desktop
-  forward-install testing stopped BEFORE setup dispatch because the physical
-  shortcut-path fence refused the redirected view. The later 0.5.4 laptop Finish
-  acceptance above does not qualify desktop installation or old-Preview cleanup.
-- Actual authenticated Company-file native acceptance passed ordinary open,
-  content verification, keep, free-space cache removal without source calls,
-  redownload and exact owned registration cleanup for two approved staging
-  files, including the largest at 126,453,788 bytes. The largest-file run also
-  released its final downloaded payload and verified its source hash and the
-  inventory unchanged.
-- Generated native acceptance also covers recursive keep/free, edited-file
-  preservation and provider shutdown. These results are separate from laptop UI
-  confirmation and do not establish acceptance of every real file.
-- The server headroom fix is active and independently verified. The recovered
-  gateway's source mount is read-only, with original roots/grants retained.
-  Actual production catalog capture passed the exact 19-file approved inventory,
-  one directory and 1,919,807,773 total bytes. This resolved real manifests without
-  downloading every file body to Windows; it does not prove an atomic catalog
-  revision or retention of every gateway snapshot.
-- Latest laptop testing confirms the Company connection, all 19 photos, status
-  icons and both standard keep/free context-menu actions. Opening an online-only
-  109 MB photo fails with 0x80070185 and repeated generic WorkFailed messages;
-  keep/free behavior is not accepted on this laptop. Earlier native test results
-  do not establish that this current connection can hydrate files successfully.
-  The remaining tray close/quit/reconnect lifecycle still needs acceptance. Actual uninstall has
-  not been tested; relocating the real uninstaller does not isolate its use of
-  current-user profiles. The current gateway now uses `unless-stopped` and the
-  retired gateway `no` restart; actual reboot/crash acceptance remains untested.
+The approved read-only Test Data access expires October 28 at 20:33:11 UTC.
+Installation does not renew access. No grant expansion, backend activation or
+NAS change accompanied publication of 0.5.9. The current staging backend remains
+version `bba93046-3a9f-4df5-a987-3c35d9af9dab`, based on the separately reviewed
+870-second manifest-headroom correction. Newer backend source is not evidence
+that its authentication changes are deployed.
 
-The desktop installed payload remains 0.5.2.0 from source
-`e654af09379b3862a84563bed791868eb9caf77e`. Shared candidate 0.5.4.0 is built from
-`97186ac096b9d4627555fe99417c9d04d2855284`; see `READ-ME-0.5.4.txt` plus the
-current shared status. The retained 0.5.3.0 was built from
-`a6e86474fdcb058262dea4613ff5d33b13835df0`.
-The later backend-only commit
-`1d85aa18e89d326f1222618a9163acb694aefa1c` does not constitute a new Windows
-installer. Its maintainable change merged through PR #294 as
-`75ca5453e1c511d4c295df9862397b8dafd4732e`; the separately qualified staging
-runtime is `bba93046-3a9f-4df5-a987-3c35d9af9dab`. No new backend or NAS activation
-was performed while publishing the Windows candidate.
+## Earlier evidence
 
-Working files appear in Explorer; the app contains connection controls and
-activity. Closing Settings keeps a working tray connection running; Quit drains
-the provider. Reconnect restores the saved inventory. Explicit Remove and a new
-connection prepare a fresh inventory and logo generation, preserving old local
-files. Shared 0.5.2 creates no startup task or Windows service.
+Earlier real Company native tests covered the largest approved photo
+(126,453,788 bytes), while generated provider tests covered recursive Keep/Free,
+edited-file preservation and shutdown. The user confirmed the installer Finish
+option starts the app in 0.5.4. Main-PC 0.5.6 testing established a branded Company
+root, 19 authorized photos, open/Keep/Free/reopen and oracle hashes for two photos.
+These are version- and scope-specific observations, not substitutes for the
+remaining release acceptance above. Consult historical receipts for older
+0.5.2–0.5.5 installation, package-context and laptop diagnostics.
+
+Files appear in Explorer; the app supplies connection controls and activity.
+Closing Settings keeps the tray connection running; Quit drains the provider.
+Reconnect restores the saved inventory. Explicit Remove and a new connection
+prepare a fresh inventory/logo generation while preserving old local files.
+An owned empty catalog offers an explicit sign-in/refresh action; nonempty
+catalogs are not automatically replaced.
 
 ### Resident-update staging candidate
 
@@ -451,9 +428,9 @@ does not refresh its catalog automatically.
 
 ## Remaining product work
 
-- Repair and verify the missing laptop Shell verbs/status, then complete real
-  keep/free/reopen and tray lifecycle acceptance. Full approved-folder capture
-  and laptop listing/download-on-open have passed. Current live expiry,
+- Recheck current laptop Shell verbs/status, keep/free/reopen and tray lifecycle
+  against the intended release. Earlier user confirmations and failures refer
+  to different builds and PCs. Full approved-folder capture has passed. Live expiry,
   identity-change and revocation scenarios still require
   their own evidence. Browser-profile copying, service tokens and bucket
   credentials are not client setup mechanisms.
