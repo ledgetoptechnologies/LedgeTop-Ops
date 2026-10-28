@@ -37,9 +37,11 @@ replacement through that feed is not accepted end to end.
   retained authorization/resolution and download phases dominated. Download
   timing includes disk writes and downloader checks, not just network time.
   This is not a statistical benchmark, laptop test or Photos-rendering result.
-- The last main-PC process observation found installed **0.5.9.0**. The desktop-control binding still
-  misidentifies its window as the older 0.5.6 executable and refuses control.
-  The new installer has therefore not been installed through this session.
+- The last main-PC process observation found **0.5.10.0**, with all 524 payload
+  files matching the published inventory. Executor registry reads still reported
+  0.5.7 activation, while its Run command pointed to 0.5.10. The running app's own
+  registry read remains unobserved; no activation repair was attempted.
+  Desktop control timed out opening Settings and exposed no LedgeTop window.
   User screenshots show downloads and Keep succeeding in 0.5.8. Warning-free
   cache cleanup passed in the isolated executable test; installed UI acceptance
   remains distinct.
@@ -67,6 +69,28 @@ routing policy. Hosted Windows CI `40732633194` passed for that exact commit.
 It is not wired into production startup or the published installer.
 The server discovery contract, native bootstrap and cross-audience account binding
 remain pending; the current installer still offers the client/company chooser.
+
+Commit `cee9bec0` wires startup to reopen exactly one verified owned saved
+connection without the chooser, retaining its prepared principal and performing
+fresh cached reconnect. New or ambiguous connections still need discovery.
+Its Windows CI `40735518515` passed.
+
+Commit `f82aa0d4` adds two tracked availability workers and two concurrent distinct
+hydrations per process/cache root. Per-entry leases, conservative durable quota
+reservations, both authority checks and full SHA verification remain. Windows CI
+`40739881077` passed. The Release build passed 172 Core groups, five Explorer
+groups, and actual Windows-native generated-data Keep/Free/reopen, local-edit
+preservation, reconnect, drain and exact unregister checks.
+
+One real staging comparison of the same approved 57.8 MB and 114.8 MB photos
+completed recursive Keep in **23.077 seconds with 0.5.10 versus 20.496 seconds
+with f82aa0d4** (11.18% shorter). Both variants passed full hashes before ordinary
+reads, Free/cache removal, reopen and exact cleanup. Callback overlap was one
+versus two; source-download/network overlap was not measured. Both used Release
+DLLs in the same framework host, not the installed app or Photos. This single
+baseline-first pair does not establish a general speedup. Cold rehydration of
+the smaller photo still took 8.802 versus 8.161 seconds. These source successors
+have not been published as a new installer; the shared download remains 0.5.10.
 
 Actual installed tray close/quit/reconnect, full uninstall and legacy sidebar
 cleanup, logon startup, authenticated update replacement, and current laptop
