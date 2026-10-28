@@ -19,8 +19,10 @@ The next release must be tested through the installed app's update action,
 including authenticated offer/download, byte and publisher verification, safe
 provider drain, actual old-process exit, installation and reconnect. Source-level
 tests and a manually run installer do not qualify that sequence. The current
-shared 0.5.11 is an unsigned test candidate with incomplete connected acceptance;
-0.5.10 is retained. The Operations update feed remains off. GitHub holds source
+shared 0.5.12 is an unsigned diagnostic candidate with incomplete connected
+acceptance; prior versions are archived. Its main-PC install and launch passed,
+which does not qualify the in-app update sequence. The Operations update feed
+remains off. GitHub holds source
 and CI evidence, rather than serving as an enabled update channel.
 The existing EXE consumer verifies authenticated release bytes but does not
 perform Authenticode publisher verification. The current offline offer builder

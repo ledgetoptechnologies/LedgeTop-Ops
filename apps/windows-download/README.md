@@ -91,6 +91,17 @@ incomplete and no new installed speed result is available. The SMB status labels
 it a test candidate. The common signed discovery preparation remains inactive
 for any later multi-role release.
 
+Commit `9e8b7bb3` adds bounded connection action/phase/reason diagnostics, retaining
+the original typed cached-session failure instead of converting it to Unknown.
+It changes no requests, authorization checks, pause/drain policy or file delivery.
+Focused tests, independent review and Windows CI `40765679148` passed. Unsigned
+0.5.12 was installed on the main PC: the real graceful-stop prompt, checked Start
+option at Finish, new process and all 524 installed payload files were verified.
+The saved employee index is unchanged. Connected acceptance remains pending:
+the computer-control tool refuses the new app window binding after upgrade, so
+the newest bounded Activity support code has been requested from Beau. No new
+photo-speed or successful reconnect claim follows from installation alone.
+
 Commit `f82aa0d4` adds two tracked availability workers and two concurrent distinct
 hydrations per process/cache root. Per-entry leases, conservative durable quota
 reservations, both authority checks and full SHA verification remain. Windows CI
@@ -143,8 +154,11 @@ justify another registry repair or establish that the app reads the executor's
 view. In-app update acceptance must observe the actual desktop path.
 
 The prior read-only Test Data access expired October 28 at 20:33:11 UTC. Beau
-approved the same read-only folder through October 29 at 20:33:00 UTC; successor
-application/readback is pending, and protected tests remain stopped meanwhile.
+approved the same read-only folder through October 29 at 20:33:00 UTC. A supported
+human-authenticated successor command was accepted and its exact scope, expiry
+and 14 payload/actor/gateway predicates were verified. This does not establish
+loaded gateway enrollment or successful data-plane access. No other folder or
+upload permission was added.
 Installation does not renew access. No grant expansion, backend activation or
 NAS change accompanied publication of 0.5.10. The last captured staging backend was
 version `bba93046-3a9f-4df5-a987-3c35d9af9dab`, based on the separately reviewed
