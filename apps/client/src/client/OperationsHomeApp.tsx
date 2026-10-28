@@ -97,6 +97,19 @@ function invoiceState(document: PortalFinancialDocument): InvoiceState {
 }
 const STATE_TEXT: Record<InvoiceState, string> = { overdue: "Overdue", due: "Payment due", partial: "Partly paid", paid: "Paid", other: "" };
 const STATE_TONE: Record<InvoiceState, string> = { overdue: "danger", due: "warning", partial: "warning", paid: "success", other: "neutral" };
+/**
+ * A financial calendar date (YYYY-MM-DD) as the same day everywhere: it is a day, not a moment, so it is
+ * formatted in UTC and never shifts with the viewer's time zone.
+ */
+export function financialDay(value: string): string {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(Date.UTC(year!, month! - 1, day!)).toLocaleDateString(undefined, { timeZone: "UTC", year: "numeric", month: "short", day: "numeric" });
+}
+/** Only the dates the invoice actually carries; older records without dates show none rather than a guess. */
+function invoiceDates(document: PortalFinancialDocument): string {
+  return [document.issueDate && `Issued ${financialDay(document.issueDate)}`, document.dueDate && `Due ${financialDay(document.dueDate)}`]
+    .filter(Boolean).join(" · ");
+}
 const CONTRACT_TEXT: Record<string, string> = { pending: "Awaiting your signature", active: "Active", paused: "Paused", completed: "Completed" };
 
 /**
@@ -145,11 +158,13 @@ export function OperationsFinancialSummary({state,documents}:{state:"loading"|"r
           const due = cents(document.balanceDue);
           const paid = state === "paid" ? total : cents(document.amountPaid) ?? (due !== null ? total - due : 0n);
           const percent = percentPaid(paid, total);
+          const dates = invoiceDates(document);
           return <li key={`${document.scopeKey}:${document.kind}:${document.publicId}`}>
             <div className="portal-finance-row">
               <strong>{money(total, document.currency)}</strong>
               <span className={`status-pill ${STATE_TONE[state]}`}>{STATE_TEXT[state] || document.status}</span>
             </div>
+            {dates && <small className="portal-finance-dates">{dates}</small>}
             {state !== "other" && <div className="portal-finance-meter" role="img" aria-label={`${percent}% paid`}><span style={{ width: `${percent}%` }} /></div>}
             <div className="portal-finance-actions">
               {document.actionUrl && document.actionUrl !== document.documentUrl && state !== "paid" &&
