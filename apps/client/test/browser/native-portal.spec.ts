@@ -1273,6 +1273,22 @@ test.describe("client header matches Operations", () => {
     await expect(menu.getByRole("menuitem", {name: "Logout"})).toHaveAttribute("href", "/cdn-cgi/access/logout");
   });
 
+  test("an ended sign-in offers Sign in again through the normal Access sign-out", async ({page}) => {
+    await mock(page, (route, call) => call.path === "/api/client/session/status" ? route.fulfill({status: 401, json: {error: "Session expired"}}) : undefined);
+    await page.goto("/portal");
+    await page.getByRole("button", {name: /^Account menu for /}).click();
+    const menu = page.getByRole("menu", {name: "Account"});
+    await expect(menu.locator(".account-session-status strong")).toHaveText("Session expired");
+    const again = menu.getByRole("menuitem", {name: "Sign in again"});
+    await expect(again).toHaveAttribute("href", "/cdn-cgi/access/logout");
+    await expect(menu.getByRole("menuitem", {name: "Logout"})).toBeVisible();
+    let logouts = 0;
+    await page.route("**/cdn-cgi/access/logout", route => { logouts += 1; return route.fulfill({status: 200, body: ""}); });
+    await again.click();
+    await expect.poll(() => logouts).toBe(1);
+    await expect(page).toHaveURL(/\/portal$/);
+  });
+
   test("a native account also shows the verified sign-in email, not a workspace contact", async ({page}) => {
     test.skip((page.viewportSize()?.width ?? 0) < 961, "the account details are collapsed on phones");
     await mock(page, (route, call) => call.path === "/api/client/session"

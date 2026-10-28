@@ -1800,6 +1800,48 @@ test("full-page Viewer keeps the opener and idempotency key across a transient r
   expect(viewerLoads).toBe(1);
 });
 
+test("the tab opened for the 3D Viewer shows a styled Ledge Top placeholder while the session is issued", async ({ page }) => {
+  let releaseSession: (() => void) | undefined;
+  await page.context().route("**/api/client/**", async route => {
+    const request = route.request(), path = new URL(request.url()).pathname;
+    if (path === "/api/client/session") return route.fulfill({ json: { account, capabilities: { viewer: true } } });
+    if (path === "/api/client/projects") return route.fulfill({ json: { projects } });
+    if (path === "/api/client/service-requests") return route.fulfill({ json: { requests } });
+    if (path === "/api/client/map-config") return route.fulfill({ json: { mapboxPublicToken: null } });
+    if (path === "/api/client/notification-history") return route.fulfill({ json: notificationHistory() });
+    if (path === "/api/client/projects/project-a/models") return route.fulfill({ json: { models: [{
+      associationId: "association-one", title: "North Site point cloud", provider: "WebODM",
+      modelId: "model-one", modelVersionId: "version-one", updatedAt: "2026-08-16T12:00:00.000Z", canShare: false,
+    }] } });
+    if (path === "/api/client/projects/project-a/models/association-one/session" && request.method() === "POST") {
+      await new Promise<void>(resolve => { releaseSession = resolve; });
+      return route.fulfill({ status: 503, json: { error: "temporary authorization failure" } });
+    }
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+  await page.goto("/portal");
+  await navigatePortal(page, "Projects");
+  await page.getByRole("button", { name: /North Site/ }).click();
+  await page.getByRole("button", { name: "Models" }).click();
+  const popupWait = page.waitForEvent("popup");
+  await page.getByRole("button", { name: "Open 3D model" }).click();
+  const placeholder = await popupWait;
+  await expect.poll(() => releaseSession !== undefined).toBe(true);
+  await expect(placeholder.locator("body")).toContainText("Ledge Top");
+  await expect(placeholder.locator("body")).toContainText("Opening secure 3D Viewer…");
+  const look = await placeholder.evaluate(() => {
+    const body = getComputedStyle(document.body), brand = getComputedStyle(document.querySelector("strong")!);
+    return { font: body.fontFamily, align: body.textAlign, background: body.backgroundColor, brand: brand.color };
+  });
+  expect(look.font).toContain("sans-serif");
+  expect(look.font).not.toMatch(/(^|,\s*)serif/);
+  expect(look).toMatchObject({ align: "center", background: "rgb(17, 24, 29)", brand: "rgb(238, 80, 7)" });
+  // Nothing outside the document is loaded: no scripts, stylesheets, images or fonts.
+  expect(await placeholder.evaluate(() => document.querySelectorAll("script,link,img,iframe").length)).toBe(0);
+  releaseSession!();
+  await expect.poll(() => placeholder.isClosed()).toBe(true);
+});
+
 test("disabled Operations home and unavailable legacy session stop before account data requests", async ({ page }) => {
   const requestedPaths: string[] = [];
   await page.route("**/api/client/**", async route => {
@@ -2321,6 +2363,11 @@ for (const [entry, path, heading] of [["unified home", "/portal", "Client portal
     await page.clock.runFor(1_500);
     await expect(page.getByText(heading, { exact: true })).toBeVisible();
     await expect(page.getByRole("link", { name: /Sign in/ })).toBeVisible();
+    // The message and its actions share one left edge, like the other startup and sign-in recovery screens.
+    const headingBox = await page.getByText(heading, { exact: true }).boundingBox();
+    const signInBox = await page.getByRole("link", { name: /Sign in/ }).boundingBox();
+    expect(Math.abs(headingBox!.x - signInBox!.x)).toBeLessThanOrEqual(1);
+    await expect(page.getByRole("alert").filter({ hasText: /\S/ }).first()).toHaveCSS("text-align", /^(start|left)$/);
     // An answer arriving after the deadline can't replace the recovery screen.
     await startup.held[0]!.route.fulfill({ status: 404, json: { error: "Not found" } }).catch(() => undefined);
     await page.clock.runFor(1_000);

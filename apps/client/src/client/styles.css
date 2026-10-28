@@ -2131,6 +2131,8 @@
 .portal-account-menu .account-session-status { display: grid; gap: .2rem; padding: .65rem .75rem; margin-bottom: .2rem; border-bottom: 1px solid #ffffff20; color: #f4f7f9; }
 .portal-account-menu .account-session-status strong { font-size: .9rem; font-variant-numeric: tabular-nums; }
 .portal-account-menu .account-session-status small { color: #c0cbd4; font-size: .75rem; line-height: 1.4; }
+.portal-account-menu .account-session-status .account-session-sign-in { margin: .2rem -.75rem -.45rem; color: var(--orange); }
+.portal-account-menu .account-session-status .account-session-sign-in[aria-disabled="true"] { opacity: .65; pointer-events: none; }
 @media (max-width: 960px) {
   .portal-account-menu .account-menu-trigger { width: 44px; height: 44px; padding: 3px; border-color: #ffffff30; background: #1c252c; }
 }

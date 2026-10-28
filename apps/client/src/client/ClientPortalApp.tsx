@@ -3061,13 +3061,13 @@ export function ClientPortalApp({
     }} />;
     return (
       <PortalBoundary>
-        <Card>
-          <EmptyState title={gate.title} detail={gate.detail} />
+        {/* The same left-aligned card as the startup and sign-in recovery screens, so the text sits over its actions. */}
+        <section className="portal-card portal-gate-card"><h1>{gate.title}</h1><p role="alert">{gate.detail}</p>
           <SignInRecovery returnTo="/portal" lead={gate.lead ?? "retry"} onRetry={() => {
             setGate({ status: "loading" });
             setBootstrapRevision(value => value + 1);
           }} />
-        </Card>
+        </section>
       </PortalBoundary>
     );
   }
