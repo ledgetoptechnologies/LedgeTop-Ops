@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { extname, resolve, sep } from "node:path";
 
 const root = resolve("dist/client");
-const port = 4173;
+const port = Number(process.env.PLAYWRIGHT_PORT || 4173);
 const contentTypes = new Map([
   [".css", "text/css; charset=utf-8"],
   [".html", "text/html; charset=utf-8"],
@@ -29,9 +29,15 @@ const server = createServer(async (request, response) => {
   } catch {
     file = resolve(root, "index.html");
   }
+  const portalPath = url.pathname;
+  const standalonePortalPath = portalPath === "/portal/invitations/accept"
+    || /^\/portal\/(?:recipient-enrollment|operations-recipient-enrollment)\/[^/]+$/.test(portalPath);
+  const privatePortalSpaPath = (portalPath === "/portal" || portalPath.startsWith("/portal/")) && !standalonePortalPath;
   response.writeHead(200, {
     "Cache-Control": "no-store",
     "Content-Type": contentTypes.get(extname(file)) ?? "application/octet-stream",
+    "Cross-Origin-Opener-Policy": privatePortalSpaPath
+      ? "same-origin-allow-popups" : "same-origin",
     "Content-Security-Policy": "default-src 'self'; img-src 'self' https://ledgetopdroneservices.com https://*.cloudflarestream.com data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://*.cloudflarestream.com https://*.r2.cloudflarestorage.com https://api.mapbox.com https://events.mapbox.com; frame-src 'self' https://*.cloudflarestream.com https://viewer.ledgetopdroneservices.com https://viewer-staging.ledgetopdroneservices.com; worker-src blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
   });
   createReadStream(file).pipe(response);
