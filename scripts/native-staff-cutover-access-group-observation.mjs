@@ -10,7 +10,7 @@ const MAX_CLOCK_SKEW_MS = 30_000;
 const FRESH_READER_OBSERVATIONS = new WeakSet();
 const OBSERVATION_KEYS = ['schemaVersion','kind','accountId','groupId','groupName','observedAt','managedEmailCount',
   'managedEmailsSha256','includeRuleCount','policySha256','providerResponseSha256','evidenceSha256'];
-const GROUP_RESULT_KEYS = ['id','name','include','exclude','require','is_default','created_at','updated_at'];
+const GROUP_RESULT_KEYS = ['id','name','uid','include','exclude','require','is_default','created_at','updated_at'];
 const sha = value => createHash('sha256').update(value).digest('hex');
 const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(',')}]`
   : value === null || typeof value !== 'object' ? JSON.stringify(value)
@@ -40,16 +40,19 @@ function validateTarget(config) {
 function normalizeGroup(result, expected) {
   if (!exact(result, Reflect.ownKeys(result ?? {}).filter(key => typeof key === 'string'))
     || Reflect.ownKeys(result).some(key => !GROUP_RESULT_KEYS.includes(key))
-    || !['id','name','include','exclude','require','is_default'].every(key => Object.hasOwn(result, key))
-    || ['created_at','updated_at'].some(key => Object.hasOwn(result, key) && typeof result[key] !== 'string')) fail('group_shape_invalid');
+    || !['id','name','include','exclude','require'].every(key => Object.hasOwn(result, key))
+    || ['created_at','updated_at'].some(key => Object.hasOwn(result, key) && typeof result[key] !== 'string')
+    || Object.hasOwn(result,'uid') && (typeof result.uid !== 'string' || result.uid.length < 1 || result.uid.length > 256
+      || /[\p{Cc}\p{Cf}]/u.test(result.uid))) fail('group_shape_invalid');
   if (result.id !== expected.groupId || result.name !== expected.groupName
     || !Array.isArray(result.include) || !Array.isArray(result.exclude) || !Array.isArray(result.require)
-    || !Array.isArray(result.is_default) || result.include.length > MAX_RULES
+    || Object.hasOwn(result,'is_default') && !Array.isArray(result.is_default) || result.include.length > MAX_RULES
     || result.exclude.length > MAX_RULES || result.require.length > MAX_RULES) fail('group_identity_or_policy_invalid');
   // This cutover profile observes an include-only employee group. Cloudflare
   // models all three policy fields as AccessRule arrays; do not silently accept
   // an unfamiliar or additional policy rule merely because it hashes cleanly.
-  if (result.exclude.length !== 0 || result.require.length !== 0 || result.is_default.length !== 0)
+  if (result.exclude.length !== 0 || result.require.length !== 0
+    || Object.hasOwn(result,'is_default') && result.is_default.length !== 0)
     fail('unsupported_group_policy');
 
   const members = result.include.map(rule => {
@@ -61,7 +64,10 @@ function normalizeGroup(result, expected) {
   }).sort();
   if (new Set(members).size !== members.length) fail('group_member_duplicate');
 
-  const policy = { exclude: result.exclude, require: result.require, is_default: result.is_default };
+  // Preserve omission distinctly from an explicit empty default list. The raw
+  // provider-response digest also binds optional metadata such as uid.
+  const policy = { exclude: result.exclude, require: result.require,
+    is_default: Object.hasOwn(result,'is_default') ? result.is_default : null };
   let policyJson;
   try { policyJson = canonical(policy); }
   catch { fail('group_policy_invalid'); }
