@@ -111,7 +111,7 @@ test("a checkpoint change clears published pages but keeps selected questions un
   await expect(page.getByText(/The service library changed. Refresh it/)).toBeVisible();
   await expect(page.getByLabel("Mapping requirements")).toHaveValue("Saved answer");
   await page.getByRole("button", { name: "Retry service library", exact: true }).click();
-  await expect(page.getByText("This service changed in Project Alpha.")).toBeVisible();
+  await expect(page.getByText("This service has been updated.")).toBeVisible();
   await expect(page.getByLabel("Current requirements")).toHaveCount(0);
   await page.getByRole("button", { name: "Use current service version", exact: true }).click();
   await expect(page.getByLabel("Current requirements")).toHaveValue("");

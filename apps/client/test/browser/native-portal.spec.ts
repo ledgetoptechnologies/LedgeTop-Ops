@@ -697,7 +697,7 @@ test("native feature readiness is operational status, not purchased services or 
   const surface = page.locator(".ltds-card").filter({has: page.getByRole("heading", {name: "Available features"})});
   await expect(surface).toContainText("Ready");
   await expect(surface).toContainText("Not connected");
-  await expect(surface).toContainText("Existing authorized request history remains unchanged.");
+  await expect(surface).toContainText("Your existing requests are unchanged.");
   await expect(surface).toContainText("not services purchased or assigned");
   nativeCallsOnly(calls);
 });
@@ -735,7 +735,7 @@ for (const width of [1280, 390]) test(`secondary workspace member management is 
   await page.setViewportSize({width, height: 900}); await page.goto("/portal/account?workspace=workspace-b");
   await expect(page.getByRole("heading", {name: "Invite a collaborator"})).toBeVisible();
   const source = page.locator(".portal-team-row", {hasText: "manager@example.test"});
-  await expect(source).toContainText("Source-managed member"); await expect(source).toContainText("managed in this Project Alpha source");
+  await expect(source).toContainText("Source-managed member"); await expect(source).toContainText("Ledge Top manages this person's access");
   await expect(source.getByRole("button", {name: /Suspend|administrator/i})).toHaveCount(0);
   const active = page.locator(".portal-team-row", {hasText: "active@example.test"});
   await expect(active).toContainText("Locally invited collaborator"); await expect(active.getByRole("button", {name: "Suspend"})).toBeVisible();
