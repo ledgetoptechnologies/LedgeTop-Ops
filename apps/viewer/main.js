@@ -9,6 +9,7 @@ import { createMeasurementDraftRecovery } from './measurement-draft-recovery.mjs
 import { captureMeasurementReportOrtho } from './measurement-report-ortho.mjs';
 import { installSidebarResize } from './viewer-sidebar-resize.mjs';
 import { renderStaffNavigation, installStaffNavigationGuard, hasUnfinishedMeasurements } from './viewer-staff-navigation.mjs';
+import { renderClientNavigation } from './viewer-client-navigation.mjs';
 import { createViewerSessionCapabilityStore, VIEWER_SESSION_STORAGE_PREFIX as SESSION_STORAGE_PREFIX } from './viewer-session-capability-store.mjs';
 import { projectMeasurementBoundary } from './measurement-projection.mjs';
 import { createMeasurementAdminClient } from './measurement-admin-client.mjs';
@@ -151,7 +152,7 @@ const dom = {};
  'error-actions','error-retry','error-lod','loading-cancel',
  'dem-settings','dem-colormap','dem-shading','dem-min','dem-max','dem-min-label','dem-max-label','dem-legend-unit',
  'brand-project','project-switcher','admin-controls','btn-share','btn-logout','btn-measure-float','lod-memory-mode',
- 'staff-navigation','staff-dashboard','staff-models','staff-logo','brand-company',
+ 'staff-navigation','staff-dashboard','staff-models','staff-logo','brand-company','client-navigation','client-portal',
  'share-password-overlay','share-password-input','share-password-error','share-password-submit',
  'share-modal','share-modal-close','share-new-password','share-new-expires',
  'share-new-perm-measure','share-new-perm-cameras','share-create-btn','share-create-result',
@@ -1418,10 +1419,13 @@ function sessionAccessLabel(prefix = 'LOD') {
   if (VIEW_MODE !== 'session' || sessionAccessState === 'active') return null;
   if (sessionAccessState === 'renewing') return `${prefix}: renewing access`;
   if (sessionAccessState === 'retrying') return `${prefix}: retrying access renewal`;
-  return `${prefix}: access unavailable — reopen this model from the Viewer workspace`;
+  return `${prefix}: access unavailable — reopen this model from ${activeViewerSession?.audience === 'client' ? 'the Client Portal' : 'the Viewer workspace'}`;
 }
 
 const measurementDraftRecovery=createMeasurementDraftRecovery();
+installStaffNavigationGuard({ container: dom.clientNavigation,
+  links: [dom.clientPortal],
+  hasUnfinishedWork: () => hasUnfinishedMeasurements(measurementWorkspace, measurementDraftRecovery) });
 installStaffNavigationGuard({ container: dom.staffNavigation,
   links: [dom.staffDashboard, dom.staffModels, dom.staffLogo],
   hasUnfinishedWork: () => hasUnfinishedMeasurements(measurementWorkspace, measurementDraftRecovery) });
@@ -1592,6 +1596,8 @@ function applyViewerSession(session, { initialize = false } = {}) {
     logo: dom.staffLogo, company: dom.brandCompany },
     session, { viewMode: VIEW_MODE, topLevel: window.parent === window });
   SHARE_PERMISSIONS = session.permissions || { measure: true, cameras: true };
+  renderClientNavigation({ container: dom.clientNavigation, portal: dom.clientPortal },
+    session, { viewMode: VIEW_MODE, topLevel: window.parent === window });
   // Establish the redeemed session before init/ready can select its controller.
   activeViewerSession = session;
   if (initialize) {

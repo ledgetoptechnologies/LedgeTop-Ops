@@ -25,15 +25,17 @@ async function unusedPort() {
 }
 
 async function waitFor(baseUrl, child) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  let lastReadiness = 'listener unavailable';
+  for (let attempt = 0; attempt < 400; attempt += 1) {
     if (child.exitCode !== null) throw new Error(`viewer exited with ${child.exitCode}`);
     try {
       const response = await fetch(`${baseUrl}/api/v1/ready`);
       if (response.ok) return;
+      lastReadiness = `${response.status} ${await response.text()}`;
     } catch { /* listener is not ready yet */ }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error('viewer did not become ready');
+  throw new Error(`viewer did not become ready: ${lastReadiness}`);
 }
 
 function signedHeaders(method, requestPath, body = '') {
@@ -109,6 +111,7 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
       SERVICE_AUTH_KEY_ID: 'ops-v1',
       SERVICE_AUTH_SECRET: SERVICE_SECRET,
       OPS_BASE_URL: 'https://ops.example.test',
+      CLIENT_PORTAL_BASE_URL: 'https://client.example.test',
       ALLOWED_EMBED_ORIGINS: 'https://ops.example.test,https://client.example.test',
     },
     stdio: 'ignore',
@@ -231,6 +234,7 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
   assert.equal(browserSession.model.id, model.id);
   assert.equal(browserSession.permissions.measure, false);
   assert.equal(Object.hasOwn(browserSession, 'operationsOrigin'), false);
+  assert.equal(browserSession.clientPortalOrigin, 'https://client.example.test');
   assert.deepEqual(browserSession.allowedEmbedOrigins, ['https://ops.example.test', 'https://client.example.test']);
   assert.ok(!JSON.stringify(browserSession).includes(SERVICE_SECRET));
   assert.match(browserSession.accessToken, /^[A-Za-z0-9_-]{43}$/);
@@ -251,6 +255,7 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
   const currentClientSession = await current.json();
   assert.equal(currentClientSession.model.assets.tiles, null);
   assert.equal(Object.hasOwn(currentClientSession, 'operationsOrigin'), false);
+  assert.equal(currentClientSession.clientPortalOrigin, 'https://client.example.test');
 
   await t.test('staff browser sessions expose only the configured Operations origin; client sessions omit it', async () => {
     const response = await signedFetch(baseUrl, sessionPath, {
@@ -269,6 +274,7 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
     assert.equal(redeem.status, 200);
     const staffSession = await redeem.json();
     assert.equal(staffSession.audience, 'ops');
+    assert.equal(Object.hasOwn(staffSession, 'clientPortalOrigin'), false);
     assert.equal(staffSession.operationsOrigin, 'https://ops.example.test');
     const refreshed = await fetch(`${baseUrl}/api/v1/sessions/current`, {
       headers: { Authorization: `Bearer ${staffSession.accessToken}` },
