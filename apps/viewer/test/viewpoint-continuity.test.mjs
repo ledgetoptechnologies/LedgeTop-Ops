@@ -9,6 +9,8 @@ import * as THREE from 'three';
 const source = fs.readFileSync(new URL('../main.js', import.meta.url), 'utf8');
 const syncSource = source.slice(source.indexOf('function captureMeshView()'), source.indexOf('function bindUI()'));
 const switchSource = source.slice(source.indexOf('function switchMode('), source.indexOf('function applyPcPanelState()'));
+const measurementActionsSource = source.slice(source.indexOf('function syncMeasurementActionVisibility()'), source.indexOf('function sessionAccessLabel('));
+assert.ok(measurementActionsSource.startsWith('function syncMeasurementActionVisibility()'), 'mode switching includes the production permission visibility helper');
 const cloudShell = fs.readFileSync(new URL('../public/pointcloud.html', import.meta.url), 'utf8');
 const nativeReadyStart = cloudShell.indexOf('      if (!window.__pcViewReady)');
 const nativeReadySource = cloudShell.slice(nativeReadyStart, cloudShell.indexOf('\n      const cam =', nativeReadyStart));
@@ -31,6 +33,7 @@ function harness() {
     availableViewerModes: () => ['model', 'cloud', 'ortho', 'dsm', 'dtm'],
     ORTHO_URL: 'ortho', DSM_URL: 'dsm', DTM_URL: 'dtm', SHOTS_URL: '',
     SHARE_PERMISSIONS: { cameras: true, measure: true },
+    VIEW_MODE: 'session', sessionAccessState: 'active', activeViewerSession: { expiresAt: new Date(Date.now() + 600_000).toISOString() },
     rememberMapView() {}, viewerDiagnostic() {}, hideLoading() {}, updateStatus() {}, onResize() {},
     syncCameraLayer() {}, syncMapVolumeAvailability() {},
     measurementWorkspace: { modeChanged() { ctx.calls.push('measurement-mode-change'); } },
@@ -59,11 +62,31 @@ function harness() {
     },
   };
   vm.createContext(ctx);
-  vm.runInContext(syncSource + '\n' + switchSource, ctx);
+  vm.runInContext(measurementActionsSource + '\n' + syncSource + '\n' + switchSource, ctx);
   const go = (mode, opts = {}) => ctx.switchMode(mode, { updateHistory: false, ...opts });
   const aim = (p, t) => ctx.controls.setView(new THREE.Vector3(...p), new THREE.Vector3(...t));
   return { ctx, go, aim, target, camera };
 }
+
+test('mode transitions apply real report/capture permission visibility without hiding download-only reports', () => {
+  const { ctx, go } = harness();
+  ctx.SHARE_PERMISSIONS = { measure: false, download: true };
+  for (const mode of ['ortho', 'cloud', 'model']) {
+    go(mode);
+    assert.equal(ctx.dom['measurement-report-actions'].hidden, true);
+    assert.equal(ctx.dom['btn-capture-float'].hidden, true);
+    assert.equal(ctx.dom['panel-model-report'].hidden, false, 'download-only original report remains available');
+  }
+  ctx.SHARE_PERMISSIONS = { measure: true, download: false };
+  go('dsm');
+  assert.equal(ctx.dom['measurement-report-actions'].hidden, false);
+  assert.equal(ctx.dom['btn-capture-float'].hidden, false);
+  ctx.sessionAccessState = 'unavailable';
+  go('model');
+  assert.equal(ctx.dom['panel-model-report'].hidden, true);
+  assert.equal(ctx.dom['measurement-report-actions'].hidden, true);
+  assert.equal(ctx.dom['btn-capture-float'].hidden, true);
+});
 
 for (const mapMode of ['ortho', 'dsm', 'dtm']) {
   test(`cloud → ${mapMode} → model preserves the latest cloud viewpoint before teardown`, () => {
