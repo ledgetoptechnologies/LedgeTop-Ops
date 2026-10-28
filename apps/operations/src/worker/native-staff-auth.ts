@@ -1,4 +1,5 @@
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { jwtVerify } from "jose";
+import { accessJwksResolver } from "./access-jwks";
 import { isNativeAccessSubject } from "./native-access-subject";
 import { resolveCanonicalNativeStaffIdentityWithAdmissionVersion, resolveNativeStaffIdentityWithAdmissionVersion, type NativeStaffIdentity } from "./native-staff-identity";
 import { assertCurrentStaffLogin, resolveVerifiedStaffLogin, type StaffLoginProof } from "./staff-login-bindings";
@@ -74,7 +75,7 @@ export async function authenticateNativeStaffWithAdmissionVersion(
     const assertion = request.headers.get("Cf-Access-Jwt-Assertion");
     if (!assertion || assertion.length > ASSERTION_LIMIT || /\s/.test(assertion)) throw Error();
 
-    const { payload } = await jwtVerify(assertion, createRemoteJWKSet(authority.jwksUrl), {
+    const { payload } = await jwtVerify(assertion, accessJwksResolver(authority.issuer), {
       issuer: authority.issuer,
       audience: authority.staffAudience,
       algorithms: ["RS256"],

@@ -1,4 +1,5 @@
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { jwtVerify } from "jose";
+import { accessJwksResolver } from "./access-jwks";
 import { HTTPException } from "hono/http-exception";
 import type { Env, StaffPrincipal } from "./types";
 import { assertCurrentStaffLogin, resolveVerifiedStaffLogin, type VerifiedStaffLoginClaims } from "./staff-login-bindings";
@@ -27,7 +28,7 @@ async function verifyAccessClaims(request: Request, env: Env): Promise<AccessCla
   if (!assertion) throw new HTTPException(401, { message: "Cloudflare Access authentication required" });
   try {
     const issuer = env.TEAM_DOMAIN.replace(/\/$/, "");
-    const verified = await jwtVerify(assertion, createRemoteJWKSet(new URL(`${issuer}/cdn-cgi/access/certs`)), { issuer, audience: env.OPERATIONS_AUD, algorithms: ["RS256"] });
+    const verified = await jwtVerify(assertion, accessJwksResolver(issuer), { issuer, audience: env.OPERATIONS_AUD, algorithms: ["RS256"] });
     return verified.payload;
   } catch {
     throw new HTTPException(401, { message: "Invalid Cloudflare Access authentication" });
