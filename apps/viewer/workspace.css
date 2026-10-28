@@ -21,3 +21,21 @@
 .workspace-modal[open]{animation:none}
 .nav-link,.primary-button,.secondary-button,.icon-button,.quick-action,.project-row,.task-panel,.metric-card{transition:none}
 }
+
+/* PR 2: skip link, startup skeleton, load errors, busy refresh. */
+.skip-link{position:fixed;left:12px;top:-60px;z-index:100;padding:10px 14px;border-radius:var(--radius-sm);background:var(--orange);color:var(--on-accent);font-weight:700;text-decoration:none}
+.skip-link:focus{top:12px}
+#workspace-content:focus{outline:none}
+.workspace-loading{display:grid;gap:12px}
+.workspace-loading>div{border:1px solid var(--border);border-radius:var(--radius-md);background:linear-gradient(90deg,var(--surface-1) 0%,var(--surface-2) 40%,var(--surface-1) 80%);background-size:200% 100%;animation:workspace-shimmer 1.4s linear infinite}
+.skeleton-strip{height:64px}
+.skeleton-row{height:58px}
+@keyframes workspace-shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
+.load-error-banner{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:16px;padding:12px 14px;border:1px solid color-mix(in srgb,var(--red) 45%,transparent);border-radius:var(--radius-md);background:color-mix(in srgb,var(--red) 9%,transparent)}
+.load-error-banner div{display:grid;gap:3px;min-width:0}
+.load-error-banner strong{color:var(--red-text)}
+.load-error-banner span{color:var(--text-2);font-size:13px;overflow-wrap:anywhere}
+.load-error-banner button{flex:none;min-height:44px}
+#refresh-button[aria-busy=true]{opacity:.75;cursor:progress}
+@media(max-width:520px){.load-error-banner{flex-direction:column;align-items:stretch}}
+@media(prefers-reduced-motion:reduce){.workspace-loading>div{animation:none}}
