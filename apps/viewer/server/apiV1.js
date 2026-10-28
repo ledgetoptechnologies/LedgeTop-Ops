@@ -240,6 +240,8 @@ function createApiV1(repository) {
       allowedEmbedOrigins: config.allowedEmbedOrigins,
       // Staff return navigation is configuration-owned, never request metadata.
       ...(session.audience === 'ops' && config.opsBaseUrl ? { operationsOrigin: config.opsBaseUrl } : {}),
+      ...(session.audience === 'client' && config.clientPortalBaseUrl
+        ? { clientPortalOrigin: config.clientPortalBaseUrl } : {}),
     });
   }
 

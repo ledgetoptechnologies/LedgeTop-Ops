@@ -98,6 +98,9 @@ if (!serviceAuthKeys && (previousServiceKeyId || previousServiceSecret)) {
 
 const opsBaseUrl = normalizedOrigin(process.env.OPS_BASE_URL || 'https://ops.ledgetopdroneservices.com');
 const opsControllerOrigins = controllerOrigins(opsBaseUrl, process.env.OPS_CONTROLLER_ORIGINS, !production);
+const clientPortalBaseUrl = normalizedOrigin(process.env.CLIENT_PORTAL_BASE_URL === undefined
+  ? (publicBaseUrl === 'https://viewer.ledgetopdroneservices.com' ? 'https://portal.ledgetop.app' : '')
+  : process.env.CLIENT_PORTAL_BASE_URL);
 
 const config = {
   measurementCalculationsEnabled: bool(process.env.MEASUREMENT_CALCULATIONS_ENABLED, true),
@@ -113,6 +116,7 @@ const config = {
   expectedHost: String(process.env.EXPECTED_HOST || '').trim().toLowerCase(),
   publicBaseUrl,
   opsBaseUrl,
+  clientPortalBaseUrl,
   opsControllerOrigins,
   opsAutomationBaseUrl: normalizedOrigin(process.env.OPS_AUTOMATION_BASE_URL || ''),
   allowedEmbedOrigins: csv(process.env.ALLOWED_EMBED_ORIGINS).map(normalizedOrigin).filter(Boolean),

@@ -6,6 +6,7 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 const { renderStaffNavigation } = require('../viewer-staff-navigation.mjs');
+const { renderClientNavigation } = require('../viewer-client-navigation.mjs');
 const { createViewerSessionCapabilityStore, VIEWER_SESSION_STORAGE_PREFIX: PREFIX } = require('../viewer-session-capability-store.mjs');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
@@ -88,7 +89,7 @@ test('the first redeemed session establishes popup routing before initialization
     allowedEmbedOrigins: [ORIGIN], permissions: { view: true, measure: true }, displayUnits: 'metric',
   };
   Object.assign(f.context, {
-    renderStaffNavigation, dom: {},
+    renderStaffNavigation, renderClientNavigation, dom: {},
     TILES_URL: null, EPT_URL: null, sessionStorageKey: null, SESSION_STORAGE_PREFIX: PREFIX,
     sessionCapabilities: createViewerSessionCapabilityStore({ storage: () => ({ setItem: (...args) => writes.push(args) }) }), SHARE_PERMISSIONS: {},
     setDisplayUnits() {}, applyProjectConfig() {},

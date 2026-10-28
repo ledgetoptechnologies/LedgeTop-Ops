@@ -43,7 +43,11 @@
 
     #staff-logo { display: flex; flex-shrink: 0; border-radius: 4px; }
     #staff-logo[href]:focus-visible { outline: 2px solid var(--brand-orange); outline-offset: 4px; }
-    #staff-navigation { display: flex; align-items: center; gap: 7px; min-height: 18px; }
+    #staff-navigation, #client-navigation { display: flex; align-items: center; gap: 7px; min-height: 18px; }
+    #client-navigation[hidden] { display: none; }
+    #client-navigation a { color: #b7b7be; font-size: 12px; font-weight: 600; text-decoration: none; padding: 2px 0; }
+    #client-navigation a:hover, #client-navigation a:focus-visible { color: var(--brand-orange); }
+    #client-navigation a:focus-visible { outline: 2px solid var(--brand-orange); outline-offset: 3px; }
     #staff-navigation[hidden] { display: none; }
     #staff-navigation a { color: #b7b7be; font-size: 12px; font-weight: 600; text-decoration: none; padding: 2px 0; }
     #staff-navigation a:hover, #staff-navigation a:focus-visible { color: var(--brand-orange); }
@@ -433,6 +437,9 @@
           <a id="staff-models" aria-label="Back to Models"><span class="back-arrow" aria-hidden="true">‹ </span>Models</a>
         </nav>
         <span class="project" id="brand-project">Loading project…</span>
+        <nav id="client-navigation" aria-label="Client navigation" hidden>
+          <a id="client-portal">‹ Client Portal</a>
+        </nav>
       </div>
       <select id="project-switcher" aria-label="Switch project"></select>
     </div>
