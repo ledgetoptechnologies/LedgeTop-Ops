@@ -33,9 +33,52 @@ internal static class ConnectedExplorerSessionTests
         await TransientRecoveryTimerAndQuit(); count++;
         await RecoveryViewPublicationRaces(); count++;
         await LocalFailureDiagnosticIntegration(); count++;
-        Console.WriteLine($"Connected Explorer coordinator: {count}/21 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+        await SavedCapabilityObservationRaces(); count++;
+        Console.WriteLine($"Connected Explorer coordinator: {count}/22 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
     }
 
+    private static async Task SavedCapabilityObservationRaces()
+    {
+        foreach (var empty in new[] { false, true }) foreach (var transition in new[] { "reconnect", "dispose", "disposed-observation" }) {
+            await using var fixture = new Fixture { EmptyInventory = empty };
+            var seed = fixture.Create(); await seed.StartAsync(); await seed.DisposeAsync();
+            var session = fixture.Create();
+            bool Observe() => empty ? session.CanRefreshEmptyInventory : session.CanReconnectCached;
+            var requests = fixture.Requests; var signs = fixture.SignIns; var captures = fixture.Captures;
+            Check(Observe() && fixture.Requests == requests && fixture.SignIns == signs && fixture.Captures == captures,
+                "stable saved capability remains an offline hint with unchanged owned eligibility");
+            using var barrier = new StateReadBarrier();
+            fixture.BeforeOwnedReceipt = () => {
+                if (barrier.Thread != Environment.CurrentManagedThreadId) return;
+                barrier.Entered.TrySetResult();
+                if (!barrier.Release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Saved capability release required.");
+            };
+            var reading = Task.Run(() => { barrier.Thread = Environment.CurrentManagedThreadId; return Observe(); });
+            await barrier.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Task? reconnect = null;
+            try {
+                if (transition == "reconnect") {
+                    fixture.HoldCurrent = true; reconnect = session.ReconnectCachedAsync();
+                    await fixture.CurrentEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    Check(session.State == ExplorerPreviewState.Starting && fixture.SignIns == signs && fixture.Captures == captures,
+                        "background reconnect drains the captured provider while the UI getter is blocked without holding view");
+                } else {
+                    fixture.ThrowDisposedObservation = transition == "disposed-observation";
+                    await session.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+                    Check(fixture.Requests == requests && fixture.SignIns == signs && fixture.Captures == captures,
+                        "disposal completes while a getter is blocked without authentication or view lock inversion");
+                }
+                barrier.Release.Set();
+                Check(!await reading.WaitAsync(TimeSpan.FromSeconds(5)),
+                    "both saved capability getters reject drained/replaced generations and known disposed observations without dereferencing mutable fields");
+            } finally {
+                barrier.Release.Set(); fixture.BeforeOwnedReceipt = null;
+                await reading.WaitAsync(TimeSpan.FromSeconds(5));
+                if (reconnect is not null) { var closing = session.DisposeAsync().AsTask(); await Cancelled(reconnect); await closing.WaitAsync(TimeSpan.FromSeconds(5)); }
+            }
+            Check(!Observe(), "closed or cancelled saved capability stays unavailable");
+        }
+    }
     private static async Task LocalFailureDiagnosticIntegration()
     {
         string Diagnostic(Fixture fixture) => Path.Combine(Path.GetDirectoryName(fixture.IndexPath)!, ConnectionDiagnosticStore.Leaf);
@@ -735,7 +778,8 @@ internal static class ConnectedExplorerSessionTests
             FailFirstRunningDispose, RunningDisposeRefused, VerifyEngineSession, FailEngineBeforeProfile, FailEnginePreparedAuth, RefusePause;
         internal CatalogCaptureException? CaptureFailure;
         internal Exception? CurrentFailure, SourceFailure;
-        internal Action? AfterCapture, AfterRemove;
+        internal Action? AfterCapture, AfterRemove, BeforeOwnedReceipt;
+        internal bool ThrowDisposedObservation;
         internal bool UnconfirmedRemove, DirectoriesOnly;
         internal string LocalSentinel => Path.Combine(root, "Files", "added-local.txt");
         internal int Backends, SignIns, Captures, EngineStarts, EnginePauses, EngineResumes, BackendDisposals, Requests, NativeActivations;
@@ -783,7 +827,7 @@ internal static class ConnectedExplorerSessionTests
             var fake = new FakeEngine(this, request, saved);
             lastEngine = fake;
             return new(fake, () => visibleManifestOverride ?? request.InitialManifest ?? (saved?.Removed == false ? saved.Manifest : null),
-                () => profiles.ContainsKey(request.ProfileDirectory));
+                () => { BeforeOwnedReceipt?.Invoke(); return profiles.ContainsKey(request.ProfileDirectory); });
         }
         private async Task<ExplorerCatalogSnapshot> Capture(IFilesBackend backend, string channel, string expected, CancellationToken token)
         {
@@ -875,6 +919,7 @@ internal static class ConnectedExplorerSessionTests
             public string RootPath => request.PreferredRoot;
             public ExplorerPreviewState State {
                 get {
+                    if (disposed && fixture.ThrowDisposedObservation) throw new ObjectDisposedException(nameof(FakeEngine));
                     var thread = Environment.CurrentManagedThreadId;
                     fixture.stateReads.AddOrUpdate(thread, 1, (_, count) => count + 1);
                     var snapshot = currentState;

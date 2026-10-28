@@ -109,26 +109,31 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         return inventory is not null && inventory.Files.Count == 0 && inventory.Directories.Count == 0;
     } } }
     // Only an explicit sign-in action can replace an empty ready generation. Cached reconnect never captures.
-    internal bool CanRefreshEmptyInventory {
-        get {
-            if (disposed || closeRequested || invalidIndex || index is null || engine is null) return false;
-            try { return !ValidatePreviousRemoval() && (engine.Session.State is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Running or ExplorerPreviewState.Paused) &&
-                engine.ReadFrozenManifest() is { Files.Count: 0, Directories.Count: 0 } frozen && frozen.Scope == Scope(index); }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException) { return false; }
-        }
-    }
+    internal bool CanRefreshEmptyInventory => ObserveSavedCapability(emptyInventory: true, disconnectedBackend: false);
     public IReadOnlyList<string> Activity { get { lock (view) return activity.Concat(engine?.Session.Activity ?? []).TakeLast(100).ToArray(); } }
     public event EventHandler? Changed;
 
     public Task StartAsync() => StartCoreAsync(explicitLogin: true);
-    public bool CanReconnectCached
+    public bool CanReconnectCached => ObserveSavedCapability(emptyInventory: false, disconnectedBackend: true);
+    private bool ObserveSavedCapability(bool emptyInventory, bool disconnectedBackend)
     {
-        get {
-            if (disposed || closeRequested || invalidIndex || backend is not null || index is null || engine is null) return false;
-            try { return !ValidatePreviousRemoval() && engine.Session.State == ExplorerPreviewState.NotStarted &&
-                engine.ReadFrozenManifest() is { } frozen && frozen.Scope == Scope(index); }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException) { return false; }
+        ConnectedExplorerEngine owned; Index saved; long epoch;
+        lock (view) {
+            if (disposed || closeRequested || invalidIndex || (disconnectedBackend && backend is not null) || index is not { } currentIndex || engine is not { } currentEngine) return false;
+            owned = currentEngine; saved = currentIndex; epoch = viewEpoch;
         }
+        // A UI hint is not authority. Inspect one captured generation outside view; a
+        // concurrent drain/replacement invalidates the observation, never another engine.
+        try {
+            if (ValidatePreviousRemoval(saved, owned)) return false;
+            var engineState = owned.Session.State;
+            if (emptyInventory ? engineState is not (ExplorerPreviewState.NotStarted or ExplorerPreviewState.Running or ExplorerPreviewState.Paused)
+                : engineState != ExplorerPreviewState.NotStarted) return false;
+            var frozen = owned.ReadFrozenManifest();
+            if (frozen is null || frozen.Scope != Scope(saved) || (emptyInventory && (frozen.Files.Count != 0 || frozen.Directories.Count != 0))) return false;
+            lock (view) return !disposed && !closeRequested && !invalidIndex && viewEpoch == epoch &&
+                ReferenceEquals(engine, owned) && ReferenceEquals(index, saved) && (!disconnectedBackend || backend is null);
+        } catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or ObjectDisposedException) { return false; }
     }
     // Read only the ownership/readiness already established by this instance. A partial,
     // invalid or changed generation is never interpreted as an absent connection.
@@ -477,16 +482,17 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         var scope = Scope(index);
         SetEngine(Create(scope, new CleanupSource(alias, new Uri(origin)), null));
     }
-    private bool ValidatePreviousRemoval()
+    private bool ValidatePreviousRemoval() => ValidatePreviousRemoval(index, engine);
+    private static bool ValidatePreviousRemoval(Index? saved, ConnectedExplorerEngine? owned)
     {
-        if (index is not null && !index.Removed && (engine is null || !engine.HasOwnedProfileReceipt()))
+        if (saved is not null && !saved.Removed && (owned is null || !owned.HasOwnedProfileReceipt()))
             throw new IOException("The saved Explorer index has no validated ownership receipt. Its Windows outcome needs ownership review.");
-        if (index?.Removed == true && engine is not null &&
-            engine.Session.State != ExplorerPreviewState.Removed &&
-            (engine.Session.State != ExplorerPreviewState.NotStarted || engine.ReadFrozenManifest() is not null))
+        if (saved?.Removed == true && owned is not null &&
+            owned.Session.State != ExplorerPreviewState.Removed &&
+            (owned.Session.State != ExplorerPreviewState.NotStarted || owned.ReadFrozenManifest() is not null))
             throw new IOException("The saved removal confirmation contradicts the owned Explorer profile.");
         // An engine's durable Removed phase also covers a crash before the index update.
-        return index?.Removed == true || engine?.Session.State == ExplorerPreviewState.Removed;
+        return saved?.Removed == true || owned?.Session.State == ExplorerPreviewState.Removed;
     }
     private void SetEngine(ConnectedExplorerEngine? next)
     {

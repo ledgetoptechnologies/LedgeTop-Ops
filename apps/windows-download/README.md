@@ -97,10 +97,11 @@ It changes no requests, authorization checks, pause/drain policy or file deliver
 Focused tests, independent review and Windows CI `40765679148` passed. Unsigned
 0.5.12 was installed on the main PC: the real graceful-stop prompt, checked Start
 option at Finish, new process and all 524 installed payload files were verified.
-The saved employee index is unchanged. Connected acceptance remains pending:
-the computer-control tool refuses the new app window binding after upgrade, so
-the newest bounded Activity support code has been requested from Beau. No new
-photo-speed or successful reconnect claim follows from installation alone.
+The saved employee index is unchanged. Connected acceptance remained pending
+because computer control could not bind the new app window or activate Explorer.
+Beau subsequently authorized terminating the exact running process and installing
+the successor. No new photo-speed or successful reconnect claim follows from
+installation alone.
 
 Commit `f82aa0d4` adds two tracked availability workers and two concurrent distinct
 hydrations per process/cache root. Per-entry leases, conservative durable quota
@@ -194,6 +195,27 @@ employee index lease and current index; unknown files and uncertain ownership
 are preserved. Diagnostic IO is best effort and never determines authorization,
 recovery or shutdown. The integrated source passed four focused groups and
 21 coordinator cases; actual installed log capture remains pending.
+
+Unsigned 0.5.13 installed successfully on the main PC with all 524 payload files
+matching the reviewed build and the saved employee index unchanged. Actual startup
+then crashed with a Windows .NET Runtime 1026 `NullReferenceException` in
+`CanReconnectCached`, called by a concurrent Settings refresh. Installation is
+therefore not connected acceptance. The repair captures the engine, saved index
+and observation epoch together, evaluates only that generation outside the view
+lock, and rejects a changed or disposed generation before publishing a UI hint.
+Both cached-reconnect and empty-inventory hints retain their existing ownership
+and manifest requirements; connection operations still perform their authoritative
+checks. The same deterministic regression reproduces the null-reference failure
+against the preceding source and passes with the repair. Four focused groups and
+22 coordinator cases pass, including six observation/reconnect/disposal races.
+Replacement installer and live Explorer acceptance remain separate gates.
+
+After the staging public-key-cache activation, one direct API test of the approved
+57,788,851-byte photo passed both Resolve checks, downloader and independent SHA
+verification, and private-duplicate cleanup. The verified download took 6,651 ms;
+Resolve-before and Resolve-after took 1,420 and 1,194 ms. Preparation took another
+2,318 ms. This is one API observation, not a native Explorer test or a controlled
+before/after performance comparison.
 
 ## Earlier evidence
 
