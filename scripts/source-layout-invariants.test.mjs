@@ -329,13 +329,13 @@ test("production Worker releases use repository-owned deploy wrappers", () => {
   }
 });
 
-test("the deployed Client Worker keeps reviewed resources, hosts, and portal asset routing", () => {
+test("the checked-in Client deployment keeps reviewed resources, hosts, and portal asset routing", () => {
   // The reviewed production contract retains existing native transports and
   // enables explicit folder enforcement only. Receiver-only/future authority
   // gates, route namespaces, no-email guards and resource checks stay exact.
   // Portal origin retirement changes only the reviewed host/profile bundle;
   // public compatibility hosts and existing resources remain pinned.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "179a414b6cd63e4f0ad886f45b9199ad32417babce23b76f6752ebceb2d86964");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "7dd86b42d6723842efcd65780bb1112a7dfdde1281af4585877c19159cfedcfc");
   assert.equal("CLIENT_PORTAL_INVITATION_FROM_NAME" in readJson("apps/client/wrangler.jsonc").vars, false);
   const config = readJson("apps/client/wrangler.jsonc");
   assert.deepEqual(config.services.filter(service => service.binding === "SHARED_PROFILE_PORTAL"), [{
@@ -358,6 +358,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.name, "ledgetop-clients");
   assert.equal(config.main, "src/worker/index.ts");
   assert.deepEqual(config.routes, [
+    { pattern: "delivery.ledgetop.app", custom_domain: true },
     { pattern: "portal.ledgetop.app", custom_domain: true },
     { pattern: "client.ledgetopdroneservices.com", custom_domain: true },
     { pattern: "portal.ledgetopdroneservices.com", custom_domain: true },
@@ -374,13 +375,13 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
     not_found_handling: "single-page-application",
     run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal*", "/onboarding/*", "/assets/*", "/health"],
   });
-  assert.equal(config.vars.PUBLIC_BASE_URL, "https://portal.ledgetopdroneservices.com");
-  assert.equal(config.vars.PUBLIC_SHARE_ORIGIN, "https://portal.ledgetopdroneservices.com");
-  assert.equal(config.vars.EXPECTED_HOST, "portal.ledgetopdroneservices.com");
+  assert.equal(config.vars.PUBLIC_BASE_URL, "https://delivery.ledgetop.app");
+  assert.equal(config.vars.PUBLIC_SHARE_ORIGIN, "https://delivery.ledgetop.app");
+  assert.equal(config.vars.EXPECTED_HOST, "delivery.ledgetop.app");
   assert.equal(config.vars.CLIENT_PORTAL_ORIGIN, "https://portal.ledgetop.app");
   assert.equal(config.vars.CLIENT_PORTAL_ORIGINS, "https://portal.ledgetop.app,https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com");
   assert.equal(config.vars.CLIENT_PORTAL_RETIRED_ORIGINS, "https://client.ledgetopdroneservices.com");
-  assert.equal(config.vars.LEGACY_CLIENT_ORIGINS, "https://client.ledgetopdroneservices.com");
+  assert.equal(config.vars.LEGACY_CLIENT_ORIGINS, "https://portal.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com");
   assert.equal(config.vars.CLIENT_ACCESS_AUDS, config.vars.CLIENT_ACCESS_AUD);
   assert.equal(config.vars.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST, "portal.ledgetop.app");
   assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST, "portal.ledgetop.app");
