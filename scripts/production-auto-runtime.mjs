@@ -12,7 +12,9 @@ import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVe
 import { collectFrontendAssets, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
 import { ASSET_VERIFICATION_LIMITS, createAssetVerificationNonce, executeAssetVerification } from './production-auto-verify.mjs';
 import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
-import { readProductionMigrationReadiness, validateProductionMigrationReadiness } from './production-auto-migration-readiness.mjs';
+import { validateProductionMigrationAdmission } from './production-auto-migration-readiness.mjs';
+import { loadPinnedAppendOnlyMigrationProfile,
+  readProductionMigrationReadiness as readProductionMigrationDiagnostics } from './production-auto-migration-classification.mjs';
 import { ProductionAutoJournal, loadPinnedProductionAutoRecipient } from './production-auto-journal.mjs';
 import { coordinateProductionAutoRelease } from './production-auto-coordinate.mjs';
 import { isProviderUtcTimestamp } from './production-auto-time.mjs';
@@ -150,7 +152,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   profile = PROFILE, providerFactory = options => new ProductionCloudflareProvider(options), ciFactory = options => new ProductionMainCI(options),
   journalFactory = options => new ProductionAutoJournal(options), recipientLoader = loadPinnedProductionAutoRecipient,
   readinessReader = readNativeStaffCutoverReadiness, sourceReader = deploymentSourceCommit, buildRunner = runBuild,
-  buildArtifactsReader, migrationReader = readProductionMigrationReadiness,
+  buildArtifactsReader, migrationReader = readProductionMigrationDiagnostics,
   assetBootstrapReader = readPinnedAssetInventoryBootstrap } = {}) {
   need(Object.values(WORKERS).some(row => row.name === workerName) && /^[a-f0-9]{40}$/u.test(sourceCommit ?? '')
     && typeof fetchImpl === 'function' && profile === PROFILE, 'runtime_target_or_profile_refused');
@@ -164,7 +166,8 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   const token = env.CLOUDFLARE_API_TOKEN;
   let migrationPins;
   const checkMigrations = async () => {
-    const observed = validateProductionMigrationReadiness(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl }), { sourceCommit });
+    const observed = validateProductionMigrationAdmission(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl,
+      appendOnlyProfile: loadPinnedAppendOnlyMigrationProfile() }), { sourceCommit });
     const { observedAt: _observedAt, ...pins } = observed;
     need(migrationPins === undefined || canonical(pins) === canonical(migrationPins), 'runtime_migration_readiness_drift');
     migrationPins = pins;
@@ -461,5 +464,10 @@ export async function runProductionAutoRelease({ workerName = process.env.PRODUC
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try { const result = await runProductionAutoRelease(); console.log(JSON.stringify({ status: 'verified', ...result })); }
-  catch { console.error('Production retained-asset release held; inspect the durable journal and reconcile read-only.'); process.exitCode = 1; }
+  catch (error) {
+    const reason = ['migration_required_pending', 'migration_application_schema_confirmation_required'].includes(error?.code)
+      ? ` (${error.code})` : '';
+    console.error(`Production retained-asset release held${reason}; inspect the durable journal and reconcile read-only.`);
+    process.exitCode = 1;
+  }
 }

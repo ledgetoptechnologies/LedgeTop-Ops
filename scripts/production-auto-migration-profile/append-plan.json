@@ -1,0 +1,3227 @@
+{
+  "schemaVersion": 1,
+  "status": "review-candidate-not-executable",
+  "sourceCommit": "1e09732cf4c8f863800cde3cc0ebbedd5a72a2ca",
+  "actualReceipt": {
+    "path": "C:/Users/fstor/.codex/artifacts/ui-preserved-ledger-actual-history-20261027.json",
+    "sha256": "d26d0517dff914668d6cf4b824797dd167803b32c26898dbab7e749792103ab6",
+    "purpose": "Actual ordered production migration-name metadata for preserved-runtime UI review; no SQL body claim",
+    "query": "SELECT name,id FROM d1_migrations ORDER BY id LIMIT 1025",
+    "sourceCommit": "c88011f7600e5f04dc96d5ab7ed1eacfa157c7c8",
+    "bodyHashClaim": false
+  },
+  "appliesNoProductionDDL": true,
+  "applicationOrder": "Per app, preserve exact observed id/name rows and append each exact pending source migration in lexical/current-source order; never sort or renumber historical observed rows.",
+  "apps": {
+    "operations": {
+      "observedBase": {
+        "rowCount": 221,
+        "firstId": 1,
+        "lastId": 221,
+        "orderedRowsSha256": "ddee5f48f005691ea6c7cb0f7ce4b810fec2d4496b03f693606fe5cf7d318df0",
+        "orderedNamesSha256": "605b3ccec883bd460ec64284dc36d09c75ae98b4e3cfdc659e4f0409073f5a56"
+      },
+      "preserveExactly": [
+        {
+          "id": 1,
+          "name": "0001_operations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 2,
+          "name": "0002_seed_acl.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 3,
+          "name": "0003_airspace_retention.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 4,
+          "name": "0004_project_alpha_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 5,
+          "name": "0005_project_alpha_ops_acl.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 6,
+          "name": "0006_airspace_sync_fingerprints.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 7,
+          "name": "0007_pa_projection_fingerprints.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 8,
+          "name": "0008_project_units_task_assignments.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 9,
+          "name": "0009_project_managers.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 10,
+          "name": "0010_delivery_reliability.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 11,
+          "name": "0011_r2_crud_jobs.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 12,
+          "name": "0012_incoming_request_acl.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 13,
+          "name": "0013_dropbox_import.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 14,
+          "name": "0014_staff_acl_controls.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 15,
+          "name": "0015_staff_acl_explicit_controls.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 16,
+          "name": "0016_projection_entity_leases.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 17,
+          "name": "0017_operational_job_briefs.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 18,
+          "name": "0018_browser_upload_intents.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 19,
+          "name": "0019_browser_upload_conflict_resolution.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 20,
+          "name": "0020_internal_sop_library.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 21,
+          "name": "0021_project_alpha_sync_hardening.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 22,
+          "name": "0022_r2_operation_retries.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 23,
+          "name": "0023_project_task_sop_links.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 24,
+          "name": "0024_administration_view_admin_grant.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 25,
+          "name": "0025_sop_assignment_permission.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 26,
+          "name": "0026_viewer_permissions.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 27,
+          "name": "0027_viewer_processing_control_plane.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 28,
+          "name": "0028_viewer_processing_labels.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 29,
+          "name": "0029_viewer_machine_rate_limits.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 30,
+          "name": "0030_viewer_client_grant_bridge_rate_limit.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 31,
+          "name": "0031_project_alpha_delivery_intent_rate_limits.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 32,
+          "name": "0032_client_hub_directory.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 33,
+          "name": "0033_projection_sources.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 34,
+          "name": "0034_client_hub_projection_sources.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 35,
+          "name": "0035_project_alpha_connectors.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 36,
+          "name": "0036_business_parties.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 37,
+          "name": "0037_client_business_activity.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 38,
+          "name": "0038_project_alpha_snapshot_recovery.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 39,
+          "name": "0039_portal_connector_coordination.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 40,
+          "name": "0040_native_delivery_authorizations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 41,
+          "name": "0041_invitation_review_authorizations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 42,
+          "name": "0042_client_hub_secondary_portal_visibility.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 43,
+          "name": "0043_project_operational_memory.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 44,
+          "name": "0044_project_operational_copy_forward.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 45,
+          "name": "0045_organization_operational_contacts.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 46,
+          "name": "0046_project_alpha_project_management_routes.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 47,
+          "name": "0047_project_memory_staff_attachments.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 48,
+          "name": "0048_business_party_lifecycle.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 49,
+          "name": "0049_project_alpha_delivery_source_rate_limits.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 50,
+          "name": "0050_project_alpha_draft_quote_credentials.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 51,
+          "name": "0051_client_hub_internal_notes.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 52,
+          "name": "0052_project_operational_reassignment_recovery.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 53,
+          "name": "0053_project_internal_notes.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 54,
+          "name": "0054_project_alpha_directory_outbox.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 55,
+          "name": "0055_operations_directory_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 56,
+          "name": "0056_operations_directory_materialization.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 57,
+          "name": "0057_native_directory_permissions.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 58,
+          "name": "0058_operations_directory_write_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 59,
+          "name": "0059_native_staff_profiles.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 60,
+          "name": "0060_native_staff_bootstrap.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 61,
+          "name": "0061_native_staff_administration.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 62,
+          "name": "0062_project_alpha_project_outbox.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 63,
+          "name": "0063_project_alpha_project_adoption.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 64,
+          "name": "0064_project_alpha_project_history_epoch.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 65,
+          "name": "0065_project_alpha_directory_history_epoch.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 66,
+          "name": "0066_operations_directory_original_actor_subject.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 67,
+          "name": "0067_native_staff_management_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 68,
+          "name": "0068_native_staff_control_plane.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 69,
+          "name": "0069_native_staff_management_commands.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 70,
+          "name": "0070_native_staff_pending_onboarding.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 71,
+          "name": "0071_native_staff_management_targets.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 72,
+          "name": "0072_native_staff_onboarding_cancel.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 73,
+          "name": "0073_native_staff_onboarding_create.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 74,
+          "name": "0074_native_staff_onboarding_approve.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 75,
+          "name": "0075_native_staff_onboarding_rate_limits.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 76,
+          "name": "0076_native_staff_onboarding_handoff.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 77,
+          "name": "0077_client_onboarding_submissions.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 78,
+          "name": "0078_client_onboarding_issuance.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 79,
+          "name": "0079_client_onboarding_rate_limits.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 80,
+          "name": "0080_client_onboarding_handoffs.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 81,
+          "name": "0081_operations_directory_relationships.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 82,
+          "name": "0082_operations_directory_intent_relationship_dependencies.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 83,
+          "name": "0083_client_onboarding_decisions.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 84,
+          "name": "0084_operations_directory_delivery_checkpoint.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 85,
+          "name": "0085_operations_directory_admission_version.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 86,
+          "name": "0086_native_shared_projects.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 87,
+          "name": "0087_project_alpha_api_v2_incidents.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 88,
+          "name": "0088_project_alpha_api_v2_incident_alerts.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 89,
+          "name": "0089_project_alpha_api_v2_monitor_lifecycle.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 90,
+          "name": "0090_project_alpha_api_v2_monitor_retirement.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 91,
+          "name": "0091_native_integration_control.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 92,
+          "name": "0092_native_integration_grant_management.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 93,
+          "name": "0093_native_integration_alert_reconciliation.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 94,
+          "name": "0094_client_onboarding_submission_notifications.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 95,
+          "name": "0095_client_onboarding_notification_scan.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 96,
+          "name": "0096_native_workforce_foundation.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 97,
+          "name": "0097_native_workforce_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 98,
+          "name": "0098_native_workforce_time_record_receipts.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 99,
+          "name": "0099_native_workforce_time_submit_review_receipts.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 100,
+          "name": "0100_native_workforce_authority_grant_change_receipts.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 101,
+          "name": "0101_native_workforce_grant_issuer.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 102,
+          "name": "0102_native_workforce_grant_issuance.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 103,
+          "name": "0103_client_onboarding_recipient_identity_bindings.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 104,
+          "name": "0104_client_onboarding_prefill_disclosures.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 105,
+          "name": "0105_client_onboarding_disclosure_recipient.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 106,
+          "name": "0106_client_onboarding_prefill_binding_commands.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 107,
+          "name": "0107_client_onboarding_prefill_authorization_intents.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 108,
+          "name": "0108_native_workforce_time_beneficiary_selection.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 109,
+          "name": "0109_native_workforce_time_beneficiary_selection_issuance.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 110,
+          "name": "0110_native_workforce_time_beneficiary_selection_lifecycle.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 111,
+          "name": "0111_project_alpha_existing_directory_binding_review_evidence.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 112,
+          "name": "0112_project_alpha_existing_directory_binding_acquisition_ledger.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 113,
+          "name": "0113_project_alpha_existing_directory_binding_acquired_mapping_receipts.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 114,
+          "name": "0114_project_alpha_existing_directory_binding_acquisition_response_receipts.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 115,
+          "name": "0115_project_alpha_existing_directory_binding_review_local_revision_fence.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 116,
+          "name": "0116_project_alpha_acquired_canonical_mapping_activation.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 117,
+          "name": "0117_project_alpha_native_owner_epoch_claims.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 118,
+          "name": "0118_project_alpha_existing_directory_binding_revision_refresh_ledger.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 119,
+          "name": "0119_project_alpha_project_v2_persistence_ledger.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 120,
+          "name": "0120_project_alpha_project_v2_canonical_settlement.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 121,
+          "name": "0121_project_alpha_project_v2_settlement_proof_expiry.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 122,
+          "name": "0122_project_alpha_project_v2_canonical_activation.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 123,
+          "name": "0123_native_directory_authority_history.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 124,
+          "name": "0124_project_alpha_project_adoption_review_evidence.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 125,
+          "name": "0125_project_alpha_existing_directory_binding_activation.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 126,
+          "name": "0126_project_alpha_project_active_directory_mapping_bridge.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 127,
+          "name": "0127_project_alpha_existing_directory_binding_activation_evidence_transition.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 128,
+          "name": "0128_project_alpha_project_adoption_bind_bridge.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 129,
+          "name": "0129_project_alpha_existing_directory_binding_activation_relationship.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 130,
+          "name": "0130_project_alpha_project_adoption_review_producer.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 131,
+          "name": "0131_project_alpha_project_active_directory_mapping_guards.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 132,
+          "name": "0132_operations_directory_acquired_relationship_dependencies.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 133,
+          "name": "0133_project_alpha_directory_relationship_outbox.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 134,
+          "name": "0134_native_directory_create_admission_relationships.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 135,
+          "name": "0135_operations_directory_relationship_canonical_ids.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 136,
+          "name": "0136_project_alpha_directory_reconciliation.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 137,
+          "name": "0137_project_alpha_directory_reconciliation_scheduler.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 138,
+          "name": "0138_project_alpha_directory_reconciliation_review.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 139,
+          "name": "0139_native_directory_staging_empty_enrollment_fixture_guard.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 140,
+          "name": "0140_client_onboarding_one_time_reveal.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 141,
+          "name": "0141_deferred_directory_client_materialization.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 142,
+          "name": "0142_client_portal_access_authority_outbox.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 143,
+          "name": "0143_client_portal_workspace_binding_selection.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 144,
+          "name": "0144_client_portal_workspace_binding_outbox.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 145,
+          "name": "0145_client_portal_authority_v2_outbox.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 146,
+          "name": "0146_ops_customer_service_enrollments.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 147,
+          "name": "0147_client_portal_authority_v3_permissions.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 148,
+          "name": "0148_client_portal_recipient_enrollment.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 149,
+          "name": "0149_client_portal_recipient_enrollment_sql_fences.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 150,
+          "name": "0150_client_portal_recipient_enrollment_cancellation.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 151,
+          "name": "0151_verified_recipient_delivery_authority_outbox.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 152,
+          "name": "0152_operations_portal_workspace_reservations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 153,
+          "name": "0153_operations_portal_workspace_publication_outbox.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 154,
+          "name": "0154_operations_portal_native_recipient_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 155,
+          "name": "0155_operations_portal_workspace_publication_cancellations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 156,
+          "name": "0156_operations_portal_workspace_publication_invocations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 157,
+          "name": "0157_operations_portal_native_workspace_cleanup.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 158,
+          "name": "0158_operations_portal_native_delivery_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 159,
+          "name": "0159_operations_portal_native_delivery_recovery_invocations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 160,
+          "name": "0160_operations_portal_native_recipient_labels.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 161,
+          "name": "0161_project_alpha_api_v2_inventory_observations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 162,
+          "name": "0162_project_alpha_directory_read_adoption_claims.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 163,
+          "name": "0163_project_alpha_directory_read_adoption_field_review_receipts.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 164,
+          "name": "0164_project_alpha_directory_read_adoption_authority_recheck.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 165,
+          "name": "0165_project_alpha_inventory_generation_surface_scope.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 166,
+          "name": "0166_project_alpha_reviewed_standalone_display.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 167,
+          "name": "0167_project_alpha_directory_read_adoption_finalizations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 168,
+          "name": "0168_project_alpha_directory_read_adoption_local_profiles.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 169,
+          "name": "0169_project_alpha_existing_directory_binding_generation_evidence.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 170,
+          "name": "0170_project_alpha_active_directory_project_guard.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 171,
+          "name": "0171_project_alpha_active_directory_update_guard.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 172,
+          "name": "0172_project_alpha_active_directory_consumer_guards.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 173,
+          "name": "0173_operations_directory_intent_acquired_destination_transition.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 174,
+          "name": "0174_project_alpha_directory_preserved_external_identity.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 175,
+          "name": "0175_operations_directory_acquired_parent_enrollment_identity.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 176,
+          "name": "0176_operations_directory_acquired_intent_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 177,
+          "name": "0177_operations_directory_acquired_intent_update_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 178,
+          "name": "0178_project_alpha_project_inbound_reconciliation.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 179,
+          "name": "0179_project_alpha_acquired_native_identity_collision.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 180,
+          "name": "0180_project_alpha_project_v2_recovery_authorization.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 181,
+          "name": "0181_project_alpha_directory_create_generation_recovery.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 182,
+          "name": "0182_project_alpha_directory_relationship_recovery_guard.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 183,
+          "name": "0183_project_alpha_binding_standalone_relationship_rows.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 184,
+          "name": "0184_project_alpha_directory_relationship_generation_recovery.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 185,
+          "name": "0185_project_alpha_directory_binding_generation_epochs.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 186,
+          "name": "0186_project_alpha_directory_conflict_evidence_binding.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 187,
+          "name": "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 188,
+          "name": "0188_client_hub_native_project_preparations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 189,
+          "name": "0189_client_hub_native_project_uncertain_recovery.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 190,
+          "name": "0190_client_hub_native_project_preparation_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 191,
+          "name": "0191_operations_portal_native_billing_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 192,
+          "name": "0192_ops_service_definition_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 193,
+          "name": "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 194,
+          "name": "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 195,
+          "name": "0195_client_hub_native_project_current_owner_observation.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 196,
+          "name": "0196_native_directory_maintenance_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 197,
+          "name": "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 198,
+          "name": "0198_native_directory_active_binding_revision_refresh.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 199,
+          "name": "0199_native_directory_profile_binding_continuations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 200,
+          "name": "0200_native_directory_active_binding_refresh_supersessions.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 201,
+          "name": "0201_native_directory_lifecycle.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 202,
+          "name": "0202_reviewed_import_enrollment.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 203,
+          "name": "0203_effective_native_directory_enrollment_consumers.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 204,
+          "name": "0204_native_project_archive_restore.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 205,
+          "name": "0205_native_billing_source_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 206,
+          "name": "0206_native_directory_existing_import.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 207,
+          "name": "0207_shared_directory_profiles.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 208,
+          "name": "0208_shared_profile_portal_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 209,
+          "name": "0209_shared_profile_portal_native_writes.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 210,
+          "name": "0210_admin_finance_summary_permission.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 211,
+          "name": "0211_native_directory_create_observations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 212,
+          "name": "0212_primary_portal_directory_correspondence.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 213,
+          "name": "0213_client_onboarding_notification_attempts.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 214,
+          "name": "0214_client_onboarding_portal_activation.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 215,
+          "name": "0215_local_project_division_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 216,
+          "name": "0216_client_onboarding_existing_company.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 217,
+          "name": "0217_client_onboarding_shared_company_plans.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 218,
+          "name": "0218_client_onboarding_shared_company_approval.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 219,
+          "name": "0219_staging_agent_read_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 220,
+          "name": "0220_directory_profile_generation_recovery.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 221,
+          "name": "0221_portal_correspondence_lifecycle_write_guards.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        }
+      ],
+      "appendInExactSourceOrder": [
+        {
+          "ledgerId": 222,
+          "name": "0222_employee_read_roots.sql",
+          "gitBlobOid": "ab5b32a74fc7718cf54cfe282a3f0b558dfa8652",
+          "sha256": "1b91e7eebe6580df7a780a8b473e3325fde2d9a8a8dc37282bc40c6f32e8edda"
+        },
+        {
+          "ledgerId": 223,
+          "name": "0223_employee_read_provisioning.sql",
+          "gitBlobOid": "f33b1bf4f3ed357cfea14f0e82a3a385ecd52d2c",
+          "sha256": "d55a0d5e16f37f231e0938516a1ee7248b0e3b4190e8de5e6c68e1e9a3e1810a"
+        },
+        {
+          "ledgerId": 224,
+          "name": "0224_windows_portal_publication_chain_index.sql",
+          "gitBlobOid": "a95e8eefe0eff504cff2e42a376a293cd1081505",
+          "sha256": "4252667cceb62ca9bbbb3efd8804a7dc69f58dae1396240f0109fbac6abbcd15"
+        },
+        {
+          "ledgerId": 225,
+          "name": "0225_native_staff_lifecycle_bridge.sql",
+          "gitBlobOid": "f8b68381f455e5e863eadc211e500a90283080ea",
+          "sha256": "1363221a710d774fc9e4c7547f7199d2bdc6b41ca62c8078c98ac5334603c175"
+        },
+        {
+          "ledgerId": 226,
+          "name": "0226_staff_login_bindings.sql",
+          "gitBlobOid": "46df71ee49ea588b70a00949033a53f60ecce8c4",
+          "sha256": "c25b03f4499c6de80d586a583c0e59b8c39b264248645c59733304ebe751d0c5"
+        },
+        {
+          "ledgerId": 227,
+          "name": "0227_owner_intel_reads.sql",
+          "gitBlobOid": "57c41601fad7fb7003d55e2802bcb7a485c441c9",
+          "sha256": "7e0d5efb1fdd99020b9f49292aa3fc06231c2ebabc99828c58a8959f8b06ece9"
+        },
+        {
+          "ledgerId": 228,
+          "name": "0228_competitor_intel_ingest.sql",
+          "gitBlobOid": "dcbcef66cce49e1f8c8478c7868a3713cd914f06",
+          "sha256": "8aec846b8a170ff36fcd6bd6036a3c725ced3e1c0e9b0677bdc9a9661e360b8d"
+        },
+        {
+          "ledgerId": 229,
+          "name": "0229_owner_intel_source_feed.sql",
+          "gitBlobOid": "006dd16ca7f9eda63e8d664962ca949724b4fcd3",
+          "sha256": "50e6dbd1899a2e601e8218feb4d7af4ca60717551c768b8d904f56cad4ac4c5d"
+        },
+        {
+          "ledgerId": 230,
+          "name": "0230_app_release_pilot.sql",
+          "gitBlobOid": "352a0178f4b3e3626775498a6bd143132a549280",
+          "sha256": "824bdd58e12a2db1821131aadec48982ff324219cd15c257d7ccc897eaabe45b"
+        },
+        {
+          "ledgerId": 231,
+          "name": "0231_owner_google_ads_summary.sql",
+          "gitBlobOid": "a8a2ef010e637b5a77e6d3d09048d142afdcff70",
+          "sha256": "d1c778d0e10a21b25663f89783ceb7ace664e4d70eb2b5e121375e6ef1f80481"
+        }
+      ],
+      "historicalRowsWithoutCurrentSource": []
+    },
+    "client": {
+      "observedBase": {
+        "rowCount": 158,
+        "firstId": 1,
+        "lastId": 158,
+        "orderedRowsSha256": "5b68178ca8f66e79407abe28d10aa393a7d37f15fdbd4309e01e2b4aac198a4e",
+        "orderedNamesSha256": "8964f7012574c7aea19e94529729a8fa3255687707c17df8bb0a08bea8136ee6"
+      },
+      "preserveExactly": [
+        {
+          "id": 1,
+          "name": "0001_initial.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 2,
+          "name": "0002_seed_initial_staff.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 3,
+          "name": "0003_delivery_platform.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 4,
+          "name": "0004_stream_resumable.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 5,
+          "name": "0005_share_lifecycle.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 6,
+          "name": "0006_download_quota.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 7,
+          "name": "0007_aliases_workflow_jobs.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 8,
+          "name": "0008_trash_tombstones.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 9,
+          "name": "0090_aliases_incoming_requests.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 10,
+          "name": "0091_client_notifications.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 11,
+          "name": "0092_preview_derivative_identity.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 12,
+          "name": "0093_reusable_incoming_uploads.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 13,
+          "name": "0094_cloud_transfers.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 14,
+          "name": "0095_trash_object_manifests.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 15,
+          "name": "0096_client_portal_foundation.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 16,
+          "name": "0097_client_portal_team_acl.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 17,
+          "name": "0098_client_access_sync_processing.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 18,
+          "name": "0099_client_portal_request_notifications.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 19,
+          "name": "0100_client_portal_release_hardening.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 20,
+          "name": "0101_client_service_request_scoping.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 21,
+          "name": "0102_client_service_request_area.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 22,
+          "name": "0103_client_portal_workspace.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 23,
+          "name": "0104_service_request_thread.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 24,
+          "name": "0105_internal_folder_grants.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 25,
+          "name": "0106_image_thumbnail_jobs.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 26,
+          "name": "0107_thumbnail_cleanup_jobs.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 27,
+          "name": "0108_thumbnail_backfill_runs.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 28,
+          "name": "0109_image_asset_locations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 29,
+          "name": "0110_thumbnail_backfill_jobs_scope.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 30,
+          "name": "0111_thumbnail_render_provenance.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 31,
+          "name": "0112_thumbnail_renderer_coordination.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 32,
+          "name": "0113_thumbnail_backfill_controls.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 33,
+          "name": "0112_public_share_location_privacy.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 34,
+          "name": "0114_delivery_share_prefix_lookup.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 35,
+          "name": "0115_client_workspace_notifications.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 36,
+          "name": "0116_incoming_upload_hardening.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 37,
+          "name": "0117_service_request_v2.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 38,
+          "name": "0118_staff_work_area_revisions.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 39,
+          "name": "0119_client_request_attachments.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 40,
+          "name": "0120_project_alpha_draft_quote_receipts.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 41,
+          "name": "0121_client_workspace_hierarchy_v2.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 42,
+          "name": "0122_project_alpha_service_catalog_projection.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 43,
+          "name": "0123_portal_v2_membership_management.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 44,
+          "name": "0124_client_delegated_public_shares.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 45,
+          "name": "0125_project_alpha_portal_projection.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 46,
+          "name": "0126_delivery_share_recipient_snapshots.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 47,
+          "name": "0127_portal_invitation_secret_scrub.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 48,
+          "name": "0128_project_alpha_catalog_compatibility.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 49,
+          "name": "0129_portal_hierarchy_relations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 50,
+          "name": "0130_client_delegated_share_provisioning.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 51,
+          "name": "0131_video_thumbnail_recovery_backfill.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 52,
+          "name": "0132_portal_v2_legacy_member_bridges.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 53,
+          "name": "0133_portal_invitation_access_enrollment_receipts.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 54,
+          "name": "0134_rejected_request_attachment_submit_guard.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 55,
+          "name": "0135_security_scan_followups.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 56,
+          "name": "0136_portal_v2_identity_denials.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 57,
+          "name": "0137_authenticated_delivery_grants.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 58,
+          "name": "0138_viewer_model_associations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 59,
+          "name": "0139_thumbnail_claim_queue_index.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 60,
+          "name": "0140_truenas_thumbnail_provenance.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 61,
+          "name": "0141_viewer_client_preferences.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 62,
+          "name": "0142_client_viewer_shares.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 63,
+          "name": "0143_viewer_session_revocation_outbox.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 64,
+          "name": "0144_viewer_client_grants.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 65,
+          "name": "0145_portal_identity_eligibility.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 66,
+          "name": "0146_viewer_client_grant_audit.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 67,
+          "name": "0147_project_alpha_delivery_intents.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 68,
+          "name": "0148_single_file_delivery_shares.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 69,
+          "name": "0149_portal_operations_management.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 70,
+          "name": "0150_delivery_share_history_index.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 71,
+          "name": "0151_thumbnail_render_not_before.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 72,
+          "name": "0152_portal_identity_read_indexes.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 73,
+          "name": "0153_client_folder_notification_batches.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 74,
+          "name": "0154_notification_batch_controls.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 75,
+          "name": "0155_client_feedback.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 76,
+          "name": "0156_catalog_source_isolation.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 77,
+          "name": "0157_delivery_source_provenance.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 78,
+          "name": "0158_portal_source_ownership.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 79,
+          "name": "0159_delivery_intent_source_provenance.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 80,
+          "name": "0160_project_alpha_quote_destinations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 81,
+          "name": "0161_portal_delivery_notification_batches.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 82,
+          "name": "0162_portal_source_authorities.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 83,
+          "name": "0163_native_staff_delivery_bindings.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 84,
+          "name": "0164_project_access_terms.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 85,
+          "name": "0165_workspace_invitation_approvals.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 86,
+          "name": "0166_workspace_address_book.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 87,
+          "name": "0167_workspace_peer_administrators.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 88,
+          "name": "0168_project_alpha_service_assignments.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 89,
+          "name": "0169_project_access_expiry_notifications.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 90,
+          "name": "0170_authenticated_delivery_change_notifications.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 91,
+          "name": "0171_secondary_workspace_membership_management.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 92,
+          "name": "0172_project_access_authority_history.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 93,
+          "name": "0173_invitation_request_foreign_key_repair.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 94,
+          "name": "0174_service_assignment_request_policy.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 95,
+          "name": "0175_authenticated_delivery_notification_policy_consistency.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 96,
+          "name": "0176_secondary_invitation_delegation_recheck.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 97,
+          "name": "0177_domain_neutral_delivery_notifications.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 98,
+          "name": "0178_domain_neutral_delivery_notification_contract.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 99,
+          "name": "0179_service_assignment_policy_proof_v2.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 100,
+          "name": "0180_service_assignment_policy_v1_contract.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 101,
+          "name": "0181_service_assignment_request_policy_reviews.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 102,
+          "name": "0182_portal_delivery_notification_source_ready.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 103,
+          "name": "0183_portal_delivery_notification_direct_source_ready.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 104,
+          "name": "0184_native_client_feedback.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 105,
+          "name": "0185_native_service_request_ownership.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 106,
+          "name": "0186_delivery_notification_authority_provenance.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 107,
+          "name": "0187_authenticated_content_audit.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 108,
+          "name": "0188_native_feedback_completion_notices.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 109,
+          "name": "0189_primary_staff_folder_bindings.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 110,
+          "name": "0190_portal_contact_assignments_v4.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 111,
+          "name": "0191_portal_projection_wire_contract_claim.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 112,
+          "name": "0192_contact_assignment_billing_independence.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 113,
+          "name": "0193_bulk_download_parts.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 114,
+          "name": "0194_client_delegated_share_expiry.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 115,
+          "name": "0195_legacy_workspace_authority_lifecycle.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 116,
+          "name": "0196_bulk_download_archive_cache.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 117,
+          "name": "0197_portal_root_access_policy.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 118,
+          "name": "0198_incoming_upload_owner_notifications.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 119,
+          "name": "0199_native_viewer_grants.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 120,
+          "name": "0199_incoming_upload_pickup_lifecycle.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 121,
+          "name": "0200_native_feedback_workspace_history.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 122,
+          "name": "0201_native_draft_quote_notifications.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 123,
+          "name": "0202_native_delivery_recipient_events.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 124,
+          "name": "0203_primary_delivery_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 125,
+          "name": "0204_delivery_change_receipts.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 126,
+          "name": "0205_authenticated_delivery_change_sequence.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 127,
+          "name": "0206_delivery_index_provider_identity.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 128,
+          "name": "0207_delivery_change_projection.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 129,
+          "name": "0208_authenticated_delivery_change_batch_provider_identity.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 130,
+          "name": "0209_authenticated_delivery_change_recipient_events.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 131,
+          "name": "0210_client_delegated_share_expiry_health.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 132,
+          "name": "0211_incoming_upload_verification_lifecycle.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 133,
+          "name": "0212_incoming_upload_archive_inventory.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 134,
+          "name": "0213_incoming_rclone_promotion.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 135,
+          "name": "0214_ops_inventory_catalog_staging.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 136,
+          "name": "0215_operations_portal_access_authority_shadow.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 137,
+          "name": "0216_client_authority_workspace_ownership_claim.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 138,
+          "name": "0217_client_authority_workspace_claim_evidence.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 139,
+          "name": "0218_client_authority_workspace_binding.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 140,
+          "name": "0219_operations_portal_authority_v2.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 141,
+          "name": "0220_operations_portal_authority_v3_permissions.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 142,
+          "name": "0221_verified_recipient_delivery_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 143,
+          "name": "0222_verified_recipient_delivery_cross_manager_revoke.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 144,
+          "name": "0223_operations_portal_workspace_publications.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 145,
+          "name": "0224_operations_portal_native_recipient_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 146,
+          "name": "0225_operations_portal_workspace_publication_cancellations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 147,
+          "name": "0226_operations_portal_native_workspace_cleanup.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 148,
+          "name": "0227_operations_portal_native_delivery_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 149,
+          "name": "0228_operations_portal_native_content_start_audit.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 150,
+          "name": "0229_operations_portal_native_delivery_regrant.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 151,
+          "name": "0230_operations_portal_native_delivery_terminal_cancellations.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 152,
+          "name": "0231_portal_primary_private_ingress_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 153,
+          "name": "0232_shared_profile_edit_authority.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 154,
+          "name": "0233_explicit_primary_workspace_folder_ownership.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 155,
+          "name": "0234_pa_principal_reenrollment.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 156,
+          "name": "0237_viewer_direct_client_grants.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 157,
+          "name": "0238_viewer_direct_session_intents.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        },
+        {
+          "id": 158,
+          "name": "0240_viewer_direct_grant_receipt_immutability.sql",
+          "action": "retain-as-installed-history",
+          "replay": false,
+          "rename": false,
+          "drop": false
+        }
+      ],
+      "appendInExactSourceOrder": [
+        {
+          "ledgerId": 159,
+          "name": "0235_windows_portal_successor_candidates.sql",
+          "gitBlobOid": "4f3698714c7061ba9c455b12a5211b7acddbe650",
+          "sha256": "50046477dda2efe378d4b01c7de9f4ff2383d1511cf56c4c7a9633b4e41c0841"
+        },
+        {
+          "ledgerId": 160,
+          "name": "0236_windows_portal_successor_content_start_audit.sql",
+          "gitBlobOid": "29f5c96adfa974540f824e41d423fde896f839cd",
+          "sha256": "fcbc6f9f802dee3e2bfe592f1476f485b24d7f5414ca86143ddd9a299e82ffcf"
+        },
+        {
+          "ledgerId": 161,
+          "name": "0239_native_project_assignment_proof_v3.sql",
+          "gitBlobOid": "7d487ae0eab2fa3dd829a1e16b68502007f10b66",
+          "sha256": "40d2e31d4d8d4fbf60752aee8fd4ec8d65ece6d7a728d7215303372b48a4e40a"
+        },
+        {
+          "ledgerId": 162,
+          "name": "0241_app_release_pilot.sql",
+          "gitBlobOid": "54e33aef18145276d13e37d2de13721bbf597b9f",
+          "sha256": "c93f3549f143bcb7cdfe64131b4ae7616df72c8fb9881562a082534b5f5f5048"
+        }
+      ],
+      "historicalRowsWithoutCurrentSource": [
+        {
+          "id": 31,
+          "name": "0112_thumbnail_renderer_coordination.sql",
+          "action": "preserve-only",
+          "replay": false,
+          "rename": false,
+          "drop": false,
+          "sourceBodyProven": false,
+          "reason": "Observed D1 metadata has name/id only; no authoritative installed SQL body hash."
+        },
+        {
+          "id": 32,
+          "name": "0113_thumbnail_backfill_controls.sql",
+          "action": "preserve-only",
+          "replay": false,
+          "rename": false,
+          "drop": false,
+          "sourceBodyProven": false,
+          "reason": "Observed D1 metadata has name/id only; no authoritative installed SQL body hash."
+        }
+      ]
+    }
+  },
+  "toolingGate": {
+    "currentBehavior": "production-auto-migration-readiness.validateMigrationLedgerRows requires the actual rows to equal the complete source migration-name list exactly (count and order). It therefore fails on current known runtime/source drift.",
+    "requiredNarrowAdaptation": [
+      "Pin the approved source commit and full per-file migration SHA-256/git blob inventory.",
+      "Compare the observed id/name rows byte-for-byte/order-for-order to the complete reviewed base snapshot; require IDs strictly increasing and exact expected count.",
+      "Represent runtime-only retired names as explicit historical preserve-only rows keyed by exact name/id. Do not require or invent their SQL bodies; never include them in pending/apply lists.",
+      "Compute source-only pending names as the exact set difference and require the ordered list and per-file hashes to match this manifest exactly. Reject every unknown missing/extra/reordered row.",
+      "Permit only the exact per-app append lists here; insert nothing for historical rows. After apply, require exact base prefix plus exact append names and IDs, and verify schema objects/foreign keys.",
+      "Keep code/flag/preflight barriers separate. Inventory approval does not enable a Worker feature."
+    ],
+    "forbiddenShortcut": "Do not relax strict count/name checks into a generic allow-missing or skip list; do not edit/remove/rename historical migrations; do not raw-execute SQL without the exact migration ledger entry."
+  },
+  "requestDecision": {
+    "currentClientFlags": "requestV2=false; nativeRequests=false; catalogSync=false; serviceAssignmentPolicy=false; attachments=false; hierarchyV2=true.",
+    "independentOfOpsNativeStaff": true,
+    "requiredMigration": "Client 0239 for full native project/service-assignment requests under the service-assignment policy. Existing actual history already includes 0185 request ownership.",
+    "requestOnlyEssentialPending": [
+      "0239_native_project_assignment_proof_v3.sql"
+    ],
+    "fullCurrentClientAppendWouldAlsoApply": [
+      "0235_windows_portal_successor_candidates.sql",
+      "0236_windows_portal_successor_content_start_audit.sql",
+      "0239_native_project_assignment_proof_v3.sql",
+      "0241_app_release_pilot.sql"
+    ],
+    "otherPendingNotSemanticRequestPrerequisites": [
+      "0235_windows_portal_successor_candidates.sql",
+      "0236_windows_portal_successor_content_start_audit.sql",
+      "0241_app_release_pilot.sql"
+    ],
+    "opsAppendRequiredForClientRequest": false,
+    "activationSequence": [
+      "Deploy paired current Client/Operations code with all request and staff activation flags off.",
+      "Complete exact source, migration-history, schema, foreign-key and runtime hash readbacks.",
+      "Qualify exact-source workspace projection, catalog, and current request.create authorization for one approved test identity/source.",
+      "Enable request v2 first; enable native requests only for the reviewed exact source. Keep service-assignment policy off until source assignments are current, then enable only after 0239 columns and proof paths qualify.",
+      "Keep attachments separately off until scanner/storage gates qualify."
+    ],
+    "staffBoundary": "Ops native staff reconciliation remains OFF; no Access Group read or native-staff cutover is a Client request prerequisite. Ops 0225 is staff schema; Ops 0230 is app-release pilot schema, not staff activation."
+  },
+  "limitations": [
+    "The actual receipt is ordered migration name/id metadata only; it does not attest SQL bodies, database schema objects, or foreign-key state.",
+    "Retired Client 0112/0113 fixture blobs exist in Git only under test/fixtures/production-history; their fixture hashes are not a verified hash of installed D1 SQL bodies.",
+    "This candidate cannot authorize production DDL, Worker deployment, or feature flag changes."
+  ]
+}
