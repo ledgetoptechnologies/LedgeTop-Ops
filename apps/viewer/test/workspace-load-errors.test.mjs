@@ -18,12 +18,16 @@ function harness({ failing = new Set(), previous = {} } = {}) {
     '/api/v1/tasks': { tasks: [{ id: 'fresh-task' }] },
     '/api/v1/processing/providers?limit=100': { providers: [{ id: 'fresh-node' }] },
     '/api/v1/processing/outputs': { outputs: [] },
+    '/api/v1/processing/ready': { ok: true },
+    '/api/v1/operations': { operations: [{ id: 'fresh-operation' }] },
+    '/api/v1/processing/derivatives': { derivatives: [{ id: 'fresh-derivative' }] },
   };
   const reply = path => failing.has(path)
     ? Promise.reject(new Error(`${path} returned 503`))
     : Promise.resolve(fixtures[path] || {});
   const renders = [];
-  const element = () => ({ className: '', textContent: '' });
+  const elements = {};
+  const element = selector => (elements[selector] ||= { className: '', textContent: '' });
   const context = vm.createContext({
     state: { token: 'token', projects: [], datasets: [], tasks: [], providers: [], presets: [], outputs: [], failedMutations: [], operations: [], derivativeJobs: [], storage: null, ...previous },
     pagedApi: path => reply(path),
@@ -42,8 +46,27 @@ function harness({ failing = new Set(), previous = {} } = {}) {
     Object,
   });
   vm.runInContext(`${line('async function load(')};globalThis.load=load;`, context);
-  return { context, renders };
+  return { context, renders, elements };
 }
+
+test('a rejected readiness check shows status unavailable instead of a stale Platform ready', async () => {
+  const { context, elements } = harness({ failing: new Set(['/api/v1/processing/ready']), previous: { ready: { ok: true } } });
+  await context.load();
+  assert.equal(context.state.ready, null);
+  assert.equal(elements['#nav-health-label'].textContent, 'Status unavailable');
+  assert.doesNotMatch(elements['#nav-health-dot'].className, /good/);
+  assert.deepEqual(plain(context.state.loadErrors.map(error => error.label)), ['platform status']);
+});
+
+test('only imports and derivatives failing keeps their last rows and still reports both', async () => {
+  const previous = { operations: [{ id: 'kept-operation' }], derivativeJobs: [{ id: 'kept-derivative' }] };
+  const { context, elements } = harness({ failing: new Set(['/api/v1/operations', '/api/v1/processing/derivatives']), previous });
+  await context.load();
+  assert.deepEqual(plain(context.state.operations.map(item => item.id)), ['kept-operation']);
+  assert.deepEqual(plain(context.state.derivativeJobs.map(item => item.id)), ['kept-derivative']);
+  assert.deepEqual(plain(context.state.loadErrors.map(error => error.label)), ['imports', 'model derivatives']);
+  assert.equal(elements['#nav-health-label'].textContent, 'Platform ready');
+});
 
 test('a failed core request keeps the last loaded data and reports which source failed', async () => {
   const previous = { projects: [{ id: 'kept-project' }], providers: [{ id: 'kept-node' }], loaded: true };
