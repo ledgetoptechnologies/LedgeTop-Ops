@@ -42,7 +42,7 @@ describe("native Operations recipient route", () => {
       const replaceState = vi.fn();
       return { history: { state: null, replaceState }, replaceState };
     };
-    for (const origin of ["https://portal.ledgetopdroneservices.com", "https://portal-staging.ledgetopdroneservices.com",
+    for (const origin of ["https://portal.ledgetop.app", "https://portal.ledgetopdroneservices.com", "https://portal-staging.ledgetopdroneservices.com",
       "https://client-staging.ledgetopdroneservices.com", "http://127.0.0.1:4173"]) {
       const { history, replaceState } = historyFor();
       expect(consumeOperationsNativeRecipientEnrollmentRoute({ origin, pathname, search: "", hash: `#${token}` }, history))
@@ -50,7 +50,7 @@ describe("native Operations recipient route", () => {
       expect(replaceState).toHaveBeenCalledOnce();
       expect(isOperationsNativeRecipientEnrollmentRoute(origin, pathname)).toBe(true);
     }
-    for (const origin of ["https://portal.ledgetoptechnologies.com", "https://portal-staging.ledgetoptechnologies.com", "https://project-alpha.ledgetopdroneservices.com", "https://client.ledgetopdroneservices.com", "https://portal.ledgetop.app", "http://localhost:4173", "http://127.0.0.1:19495",
+    for (const origin of ["https://portal.ledgetoptechnologies.com", "https://portal-staging.ledgetoptechnologies.com", "https://project-alpha.ledgetopdroneservices.com", "https://client.ledgetopdroneservices.com", "https://portal.ledgetop.app.evil.example", "https://portal.ledgetop.app:444", "http://portal.ledgetop.app", "http://localhost:4173", "http://127.0.0.1:19495",
       "http://portal.ledgetopdroneservices.com", "https://portal.ledgetopdroneservices.com.evil.example",
       "http://client-staging.ledgetopdroneservices.com", "https://client-staging.evil.example"]) {
       const { history, replaceState } = historyFor();
