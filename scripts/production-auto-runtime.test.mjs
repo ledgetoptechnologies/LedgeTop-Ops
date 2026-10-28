@@ -199,7 +199,8 @@ test('deployment transition intent binds verified candidate, original parent, co
   assert.throws(() => validateDeploymentTransitionIntent(activate));
 });
 
-for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'ledger-version-mismatch', 'old-index-mismatch', 'first-write-drift', 'activation-drift']) test(
+for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'ledger-version-mismatch', 'old-index-mismatch',
+  'known-manual-version-no-bootstrap', 'first-write-drift', 'activation-drift']) test(
   scenario === 'activation-drift'
     ? 'frontend migration drift at activation intent blocks dispatch after earlier writes without retry'
     : scenario === 'subsequent-release'
@@ -210,6 +211,8 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
           ? 'ledger module metadata from a different version fails closed before journal claim or provider writes'
           : scenario === 'old-index-mismatch'
             ? 'an old index body mismatch cleans the verifier and prevents application mutation intents'
+            : scenario === 'known-manual-version-no-bootstrap'
+              ? 'a known manual-static version with a missing bootstrap pin holds before helper, journal or upload'
     : scenario === 'first-write-drift'
       ? 'frontend migration drift before first mutation prevents journal claim and provider writes'
       : 'real runtime adapter drives provider protocol over fake HTTP with microsecond deployment timestamps', async () => {
@@ -233,6 +236,14 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
     priorModule.content_base64 = Buffer.from('tampered').toString('base64');
   } else if (scenario === 'ledger-version-mismatch') {
     clientState.modern.id = '33333333-3333-4333-8333-333333333333';
+  } else if (scenario === 'known-manual-version-no-bootstrap') {
+    const currentActive = '1c606164-9a98-495a-87c9-3be251658d00';
+    clientState.parentId = currentActive;
+    clientState.latest = currentActive;
+    clientState.deployment = { id: '99999999-9999-4999-8999-999999999999',
+      created_on: '2026-10-27T05:00:00.000000Z', versions: [{ version_id: currentActive, percentage: 100 }], strategy: 'percentage' };
+    clientState.version.id = currentActive;
+    clientState.modern.id = currentActive;
   }
   const calls = [], intents = [], publicReceipts = [], privateResponses = [], verifierVersions = new Map();
   const sourceCommit = 'a'.repeat(40), candidateId = '44444444-4444-4444-8444-444444444444';
@@ -370,6 +381,8 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
         },
         recipientLoader: () => ({ synthetic: true }), sourceReader: () => sourceCommit,
         buildRunner: () => {},
+        ...(scenario === 'known-manual-version-no-bootstrap'
+          ? { assetBootstrapReader: () => { throw Error('asset_bootstrap_successful_receipt_required'); } } : {}),
         buildArtifactsReader: () => { if (scenario === 'first-write-drift') migrationDrift = true; return artifact; } });
       const release = runProductionAutoRelease({ workerName: 'ledgetop-clients', env, fetchImpl,
         recipientLoader: () => ({ synthetic: true }), triggerReader: () => ({ sourceCommit, runId: ciRun.id, runAttempt: ciRun.run_attempt }),
@@ -402,6 +415,17 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
         assert.equal(activationMethodCalls, 0);
         assert.equal(activationDispatches, 0);
         assert.ok(migrationCalls >= 2, 'the ledger is rechecked after build and before first mutation preparation');
+      } else if (scenario === 'known-manual-version-no-bootstrap') {
+        await assert.rejects(release, /Automatic release held/);
+        assert.equal(intents.length, 0, 'bootstrap refusal occurs before helper or upload mutation intents');
+        assert.equal(publicReceipts.length, 0, 'bootstrap refusal occurs before journal claim');
+        assert.equal(privateResponses.length, 0);
+        assert.equal(calls.some(call => call.url.startsWith(apiBase) && call.method !== 'GET'), false,
+          'known manual-static version cannot silently release against its passive incomplete ledger');
+        assert.equal(calls.some(call => call.url.includes('/ops-ui-verify-')), false,
+          'the verifier helper is not created until an exact successful active receipt is pinned');
+        assert.equal(calls.some(call => call.url.includes('assets-upload-session') || call.url.endsWith('/deployments')
+          || call.url.endsWith('/versions?bindings_inherit=strict')), false);
       } else if (scenario === 'activation-drift') {
         await assert.rejects(release, /Automatic release held/);
         assert.equal(activationMethodCalls, 1, 'the provider path reaches the activation intent boundary');

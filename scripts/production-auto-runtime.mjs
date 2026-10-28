@@ -10,12 +10,14 @@ import { canonical, capture, deploymentSourceCommit, PROFILE, resourcesShape, va
 import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-ci.mjs';
 import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVersionWithVisibilityRetry } from './production-auto-provider.mjs';
 import { collectFrontendAssets, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
-import { createAssetVerificationNonce, executeAssetVerification } from './production-auto-verify.mjs';
+import { ASSET_VERIFICATION_LIMITS, createAssetVerificationNonce, executeAssetVerification } from './production-auto-verify.mjs';
 import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { readProductionMigrationReadiness, validateProductionMigrationReadiness } from './production-auto-migration-readiness.mjs';
 import { ProductionAutoJournal, loadPinnedProductionAutoRecipient } from './production-auto-journal.mjs';
 import { coordinateProductionAutoRelease } from './production-auto-coordinate.mjs';
 import { isProviderUtcTimestamp } from './production-auto-time.mjs';
+import { assetBootstrapVerificationEntries, completeAssetInventoryBootstrap, prepareAssetInventoryBootstrap,
+  readPinnedAssetInventoryBootstrap } from './production-auto-asset-bootstrap.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SHA = /^[a-f0-9]{64}$/u, UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
@@ -148,7 +150,8 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   profile = PROFILE, providerFactory = options => new ProductionCloudflareProvider(options), ciFactory = options => new ProductionMainCI(options),
   journalFactory = options => new ProductionAutoJournal(options), recipientLoader = loadPinnedProductionAutoRecipient,
   readinessReader = readNativeStaffCutoverReadiness, sourceReader = deploymentSourceCommit, buildRunner = runBuild,
-  buildArtifactsReader, migrationReader = readProductionMigrationReadiness } = {}) {
+  buildArtifactsReader, migrationReader = readProductionMigrationReadiness,
+  assetBootstrapReader = readPinnedAssetInventoryBootstrap } = {}) {
   need(Object.values(WORKERS).some(row => row.name === workerName) && /^[a-f0-9]{40}$/u.test(sourceCommit ?? '')
     && typeof fetchImpl === 'function' && profile === PROFILE, 'runtime_target_or_profile_refused');
   const app = workerName === 'ledgetop-ops' ? 'operations' : 'client', target = WORKERS[app];
@@ -167,7 +170,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     migrationPins = pins;
     return observed;
   };
-  let provider, journal, build, baselineCapture, expectedCapture, previousLedger, candidateVersionId, verifiedCI;
+  let provider, journal, build, baselineCapture, expectedCapture, previousLedger, assetBootstrap, candidateVersionId, verifiedCI;
   let durableRuntime = null, candidateReadbackVerified = false;
   let pendingCoordinatorFence = null, pendingTransition = null, verifiedDeploymentVersions = null;
   const currentCapture = async () => {
@@ -299,6 +302,16 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       ensureProvider();
       const snapshot = (await currentCapture()).raw;
       previousLedger = parseLedger(snapshot, app, workerName, accountId);
+      assetBootstrap = assetBootstrapReader({ app, workerName, accountId,
+        activeVersionId: activeVersion(snapshot[app]) });
+      if (assetBootstrap) {
+        const prepared = prepareAssetInventoryBootstrap({ bootstrap: assetBootstrap, previous: previousLedger,
+          activeVersionId: activeVersion(snapshot[app]), workerName, accountId });
+        const total = prepared.rows.reduce((sum, row) => sum + row.size, 0);
+        need(prepared.rows.length <= ASSET_VERIFICATION_LIMITS.files
+          && prepared.rows.every(row => row.size <= ASSET_VERIFICATION_LIMITS.fileBytes)
+          && total <= ASSET_VERIFICATION_LIMITS.totalBytes, 'runtime_bootstrap_inventory_exceeds_verifier_bounds');
+      }
       return previousLedger;
     },
     readOldAssets: async ({ ledger }) => {
@@ -306,12 +319,26 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       await createJournalBeforeOldAssetRead(expectedCapture);
       await assertFence();
       const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName();
-      const result = await executeAssetVerification({ entries: assetVerifierEntries(ledger), timeoutMs: 300_000,
-        create: () => provider.createVerifier({ name, workerName, origin: target.origin, entries: assetVerifierEntries(ledger),
+      const verificationLedger = assetBootstrap
+        ? prepareAssetInventoryBootstrap({ bootstrap: assetBootstrap, previous: ledger,
+          activeVersionId: baselineCapture[app].version.id, workerName, accountId }) : null;
+      const verificationEntries = verificationLedger
+        ? assetBootstrapVerificationEntries(ledger, verificationLedger)
+        : assetVerifierEntries(ledger);
+      const result = await executeAssetVerification({ entries: verificationEntries, timeoutMs: 300_000,
+        create: () => provider.createVerifier({ name, workerName, origin: target.origin, entries: verificationEntries,
           nonceHash: nonce.nonceHash, versionId: baselineCapture[app].version.id }),
         fetchAsset: ({ path: assetPath }, { method, signal }) => provider.fetchVerifierAsset({ name, path: assetPath, method, bearer: nonce.bearer, signal }),
         remove: () => provider.removeVerifier(name), readAbsent: () => provider.verifierAbsent(name) });
-      await assertFence(); return result.assets;
+      await assertFence();
+      if (assetBootstrap) previousLedger = completeAssetInventoryBootstrap({ bootstrap: assetBootstrap,
+        previous: ledger, verifiedAssets: result.assets, activeVersionId: baselineCapture[app].version.id, workerName, accountId });
+      return result.assets;
+    },
+    completeInventory: async ({ previous, verifiedAssets, baseline }) => {
+      if (!assetBootstrap) return previous;
+      return completeAssetInventoryBootstrap({ bootstrap: assetBootstrap, previous, verifiedAssets,
+        activeVersionId: baseline.activeVersionId, workerName, accountId });
     },
     upload: async ({ baseline, ledger, manifest, payloads, recordIntent }) => {
       ensureProvider(); const tokenResponse = await provider.uploadAssets({ workerName, manifest,
