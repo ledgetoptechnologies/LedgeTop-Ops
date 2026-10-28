@@ -20,8 +20,8 @@ import { selectedClientUiReleaseShell } from "../src/worker/ui-release-routes";
 import type { Env } from "../src/worker/types";
 
 const context = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
-function fixture() {
-  const portal = "https://portal.example.test", alias = "https://portal-alias.example.test";
+function fixture(portal = "https://portal.example.test") {
+  const alias = "https://portal-alias.example.test";
   const publicOrigin = "https://delivery.example.test", legacy = "https://legacy.example.test", retired = "https://retired.example.test";
   const assets = vi.fn(async () => new Response("retained legacy shell", { headers: { "Content-Type": "text/html" } }));
   const fetchRelease = vi.fn(async (input: RequestInfo | URL) => {
@@ -60,14 +60,13 @@ describe("Client additive UI routing through real Hono admission", () => {
       expect(response.status).toBe(200); expect(response.headers.get("Content-Type")).toContain("text/html");
       expect(response.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin-allow-popups");
     }
-    for (const path of ["/portal/invitations/accept", "/portal/recipient-enrollment/intent-a",
-      "/portal/operations-recipient-enrollment/intent-a"]) {
+    for (const path of ["/portal/invitations/accept", "/portal/recipient-enrollment/intent-a"]) {
       const response = await f.request(path);
       expect(response.status).toBe(200); expect(response.headers.get("Content-Type")).toContain("text/html");
       expect(response.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin");
     }
     for (const path of ["/portal/invitations/accept/", "/portal/recipient-enrollment/intent-a/",
-      "/portal/operations-recipient-enrollment/intent-a/"]) {
+      "/portal/operations-recipient-enrollment/intent-a/", "/portal/operations-recipient-enrollment/intent-a"]) {
       const response = await f.request(path);
       expect(response.status).toBe(200); expect(response.headers.get("Content-Type")).toContain("text/html");
       expect(response.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin-allow-popups");
@@ -89,6 +88,19 @@ describe("Client additive UI routing through real Hono admission", () => {
     expect(portalHead.status).toBe(200); expect(await portalHead.text()).toBe("");
     expect(portalHead.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin-allow-popups");
     expect(f.assets).toHaveBeenCalledTimes(21);
+  });
+
+  it("matches the native enrollment renderer origin boundary before excluding its document from opener-preserving COOP", async () => {
+    const path = "/portal/operations-recipient-enrollment/intent-a";
+    const allowedLegacy = fixture("https://client-staging.ledgetopdroneservices.com");
+    const nativeEntry = await allowedLegacy.request(path);
+    expect(nativeEntry.status).toBe(200);
+    expect(nativeEntry.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin");
+
+    const disallowed = fixture("https://portal.ledgetop.app");
+    const portalEntry = await disallowed.request(path);
+    expect(portalEntry.status).toBe(200);
+    expect(portalEntry.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin-allow-popups");
   });
 
   it("selects a registered shell for portal deep links and strips credentials/query upstream", async () => {

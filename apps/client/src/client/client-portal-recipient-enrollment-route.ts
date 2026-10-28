@@ -8,6 +8,12 @@ const OPERATIONS_NATIVE_ENROLLMENT_ORIGINS = new Set([
   // Playwright exercises the built portal through Vite preview on this exact origin.
   "http://127.0.0.1:4173",
 ]);
+const OPERATIONS_NATIVE_ENROLLMENT_PATH = /^\/portal\/operations-recipient-enrollment\/[^/]+$/;
+
+/** Shares the exact renderer boundary with Worker document-header selection. */
+export function isOperationsNativeRecipientEnrollmentRoute(origin: string, pathname: string): boolean {
+  return OPERATIONS_NATIVE_ENROLLMENT_ORIGINS.has(origin) && OPERATIONS_NATIVE_ENROLLMENT_PATH.test(pathname);
+}
 
 /**
  * Consumes the one-time portal enrollment token before React or any request
@@ -27,7 +33,7 @@ export function consumeOperationsNativeRecipientEnrollmentRoute(
   history: Pick<History, "state" | "replaceState">,
 ): { intentId: string; opaqueToken: string } | null {
   return consumeEnrollmentRoute(location, history, /^\/portal\/operations-recipient-enrollment\/([^/]+)$/,
-    OPERATIONS_NATIVE_ENROLLMENT_ORIGINS.has(location.origin));
+    isOperationsNativeRecipientEnrollmentRoute(location.origin, location.pathname));
 }
 
 function consumeEnrollmentRoute(

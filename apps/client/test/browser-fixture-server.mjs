@@ -30,8 +30,16 @@ const server = createServer(async (request, response) => {
     file = resolve(root, "index.html");
   }
   const portalPath = url.pathname;
+  const operationsNativeEnrollmentOrigins = new Set([
+    "https://portal.ledgetopdroneservices.com",
+    "https://portal-staging.ledgetopdroneservices.com",
+    "https://client-staging.ledgetopdroneservices.com",
+    "http://127.0.0.1:4173",
+  ]);
   const standalonePortalPath = portalPath === "/portal/invitations/accept"
-    || /^\/portal\/(?:recipient-enrollment|operations-recipient-enrollment)\/[^/]+$/.test(portalPath);
+    || /^\/portal\/recipient-enrollment\/[^/]+$/.test(portalPath)
+    || (operationsNativeEnrollmentOrigins.has(url.origin)
+      && /^\/portal\/operations-recipient-enrollment\/[^/]+$/.test(portalPath));
   const privatePortalSpaPath = (portalPath === "/portal" || portalPath.startsWith("/portal/")) && !standalonePortalPath;
   response.writeHead(200, {
     "Cache-Control": "no-store",
