@@ -2156,6 +2156,7 @@
 @media (max-width: 640px) {
   .shared-viewer-work-list li { flex-direction: column; align-items: stretch; }
   .shared-viewer-work-list .button { justify-content: center; white-space: normal; }
+  .shared-viewer-work-list .shared-viewer-work-launch { flex: none; }
 }
 
 /* One-step request: pick a service, say what's needed, send. */
