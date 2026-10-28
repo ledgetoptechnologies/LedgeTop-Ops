@@ -10,6 +10,7 @@ import { executeNativeStaffBootstrapD1 as execute, prepareNativeStaffBootstrapD1
   submitNativeStaffBootstrapManagementBatch as submitManagementBatch } from "../../../scripts/native-staff-bootstrap-d1.mjs";
 import { buildOwnerApprovalReceipt, canonicalJson as approvalCanonical,
   verifyNativeStaffBootstrapOwnerApprovalReceipt } from "../../../scripts/native-staff-bootstrap-owner-approval.mjs";
+import { composeNativeStaffBootstrapArtifact } from "../../../scripts/native-staff-bootstrap-artifact-composer.mjs";
 
 let runtime:Miniflare, db:D1Database, serial=0;
 const hash=(value:string)=>createHash("sha256").update(value).digest("hex");
@@ -508,5 +509,45 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
       .bind(commandId).first("n")).toBe(1);
     expect(await db.prepare("SELECT count(*) n FROM native_staff_profiles WHERE staff_id=?")
       .bind(fixtureData.owner.id).first("n")).toBe(1);
+  },240_000);
+
+  it("composes and prepares from the real full-schema D1 snapshot shape",async()=>{
+    const owner=await person("composer-owner"),kstirn=await person("composer-kstirn"),target=await person("composer-target");
+    await existingControlPlane(owner);
+    await nativeIdentity(kstirn);
+
+    // Exercise the installer reader against the actual Miniflare D1 database migrated above.
+    const reviewed=await snapshot(db,[target.id]);
+    expect(reviewed.migrationNames).toHaveLength(225);
+    expect(reviewed.controlPlaneStaffIds).toContain(owner.id);
+    const composed=composeNativeStaffBootstrapArtifact({
+      reviewedSnapshot:reviewed,
+      proposedStaffIds:[target.id],
+      controlPlaneStaffIds:reviewed.controlPlaneStaffIds,
+      preservationRoles:{ownerStaffId:owner.id,kstirnStaffId:kstirn.id},
+      decisionReference:"synthetic-fullschema-d1-interoperability",
+    });
+    const artifact=composed.artifact,plan=JSON.parse(artifact.canonicalPlanJson),approvalId=plan.approvalId;
+    const authorizedAt="2026-10-27T00:00:00.000Z",expiresAt="2030-10-27T00:00:00.000Z";
+    const approval={approvalId,approvedOperatorStaffId:owner.id,approvedOperatorAccessSubject:owner.subject,
+      issuedByStaffId:owner.id,issuedByAccessSubject:owner.subject,issuedAt:authorizedAt,expiresAt};
+    const trustEnvelope={schemaVersion:1,action:"install-operations-native-staff-bootstrap",
+      ownerSessionId:"synthetic-fullschema-owner-session",authorizationChallenge:"synthetic-fullschema-challenge",
+      approvalId,commandId:artifact.commandId,approvedOperatorStaffId:owner.id,
+      approvedOperatorAccessSubject:owner.subject,issuedByStaffId:owner.id,issuedByAccessSubject:owner.subject,
+      authorizedAt,expiresAt,reviewedSnapshotSha256:reviewed.snapshotSha256,
+      canonicalPlanSha256:composed.planSha256,bindingEvidenceSha256:composed.bindingSha256,
+      consentPhrase:"I approve this exact Operations staff cohort and native authority plan"};
+    const prepared=await prepare({approval,canonicalPlanJson:artifact.canonicalPlanJson,
+      bindingEvidenceJson:artifact.bindingEvidenceJson,reviewedSnapshot:artifact.reviewedSnapshot,
+      commandId:artifact.commandId,trustEnvelope},{verifyTrust:trusted});
+
+    expect(prepared.reviewedSnapshot.snapshotSha256).toBe(reviewed.snapshotSha256);
+    expect(prepared.plan.staffCohort).toEqual([target.id]);
+    expect(prepared.plan.rows).toEqual([
+      {table:"native_staff_admissions",row:{staff_id:target.id,bound_access_subject:target.subject,active:1,admitted_by:owner.id}},
+      {table:"native_staff_profiles",row:{staff_id:target.id,login_email:target.email,display_name:target.id,version:1}},
+    ]);
+    expect(composed.preservedStaff).toEqual([{role:"owner",staffId:owner.id},{role:"kstirn",staffId:kstirn.id}]);
   },240_000);
 });
