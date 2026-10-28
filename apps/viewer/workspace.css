@@ -39,3 +39,24 @@
 #refresh-button[aria-busy=true]{opacity:.75;cursor:progress}
 @media(max-width:520px){.load-error-banner{flex-direction:column;align-items:stretch}}
 @media(prefers-reduced-motion:reduce){.workspace-loading>div{animation:none}}
+
+/* PR 3: Projects status strip and customer groups. */
+.status-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.status-chip{min-width:0;display:flex;align-items:baseline;gap:9px;padding:12px 14px;border:1px solid var(--border);border-radius:var(--radius-md);background:var(--surface-1);color:var(--text-2);text-align:left;cursor:pointer;transition:background-color .16s ease,border-color .16s ease,color .16s ease}
+.status-chip strong{font-size:20px;color:var(--text);font-variant-numeric:tabular-nums}
+.status-chip span{font-size:13px}
+.status-chip:hover{border-color:var(--border-strong);background:var(--surface-2)}
+.status-chip.active{border-color:color-mix(in srgb,var(--orange) 55%,transparent);background:color-mix(in srgb,var(--orange) 12%,transparent);color:var(--text)}
+.status-chip.attention.has-items strong{color:var(--amber)}
+.status-chip.nodes.warn strong{color:var(--amber)}
+.mobile-new-project{display:none}
+.project-group{display:grid;gap:10px}
+.project-group+.project-group{margin-top:22px}
+.project-group-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:0 4px 8px;border-bottom:1px solid var(--border)}
+.project-group-heading h2{margin:0;font-size:15px;letter-spacing:.01em}
+.project-group-heading span{color:var(--muted);font-size:12px}
+.project-group.unassigned .project-group-heading h2{color:var(--text-2)}
+.project-subgroup{display:grid;gap:10px;padding-left:12px;border-left:2px solid var(--border)}
+.project-subgroup h3{margin:4px 0 0;color:var(--text-2);font-size:13px;font-weight:600}
+@media(max-width:720px){.status-strip{display:flex;overflow-x:auto;scrollbar-width:none;margin:0 -16px;padding:0 16px}.status-strip::-webkit-scrollbar{display:none}.mobile-new-project{display:block;min-height:44px}.status-chip{flex:0 0 auto;min-width:118px;padding:10px 12px}.status-chip strong{font-size:18px}}
+@media(prefers-reduced-motion:reduce){.status-chip{transition:none}}

@@ -11,7 +11,7 @@ const css=fs.readFileSync(path.join(root,'workspace-management.css'),'utf8');
 
 test('workspace is project-first with an instant responsive project filter',()=>{
   assert.match(html,/workspace-projects\.js/);
-  assert.match(source,/\['dashboard','⌂','Dashboard'\]/);
+  assert.match(source,/\['dashboard','⌂','Projects'\]/);
   assert.doesNotMatch(source,/\['review'.*Review/);
   assert.match(source,/id="project-filter"/);
   assert.match(source,/filter\.oninput/);
@@ -19,7 +19,7 @@ test('workspace is project-first with an instant responsive project filter',()=>
   assert.match(source,/function pagedApi/);
   assert.match(css,/\.project-row/);
   assert.match(css,/@media\(max-width:720px\)/);
-  assert.ok(source.indexOf("['dashboard','⌂','Dashboard']")<source.indexOf("['providers','⌁','Providers & nodes']"));
+  assert.ok(source.indexOf("['dashboard','⌂','Projects']")<source.indexOf("['providers','⌁','Providers & nodes']"));
   assert.ok(source.indexOf("['providers','⌁','Providers & nodes']")<source.indexOf("['background','↻','Background work']"));
   assert.ok(source.indexOf("['background','↻','Background work']")<source.indexOf("['trash','♲','Recycle Bin']"));
   assert.ok(source.indexOf("['trash','♲','Recycle Bin']")<source.indexOf("['diagnostics','▤','Diagnostics']"));
