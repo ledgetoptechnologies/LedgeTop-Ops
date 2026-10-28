@@ -145,7 +145,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             var scope = new ExplorerRootScope(channel, alias, origin, person);
             // The root engine also makes cached source requests with optional/default caller tokens.
             // Bind all of those requests and later hydrations to this coordinator generation's lifetime.
-            var lifetimeSource = new LifetimeSource(selected, token);
+            var lifetimeSource = new LifetimeQueuedDownloadSource(selected, token);
             var candidate = Create(scope, lifetimeSource, null);
             SetEngine(candidate);
             if (index is not null && !previousRemoved && !candidate.HasOwnedProfileReceipt())
@@ -512,32 +512,4 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         public Task<string> DownloadAsync(DownloadSpec spec, string destination, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default) => throw new AccessDeniedException();
     }
 
-    /// <summary>Non-owning cancellation bridge. Never authenticates or disposes the selected backend/source.</summary>
-    private sealed class LifetimeSource(IQueuedDownloadSource source, CancellationToken generation) : IQueuedDownloadSource
-    {
-        public string Alias => source.Alias;
-        public Uri Origin => source.Origin;
-        public async Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken = default)
-        {
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, generation);
-            linked.Token.ThrowIfCancellationRequested();
-            var result = await source.GetSessionAsync(linked.Token).ConfigureAwait(false);
-            linked.Token.ThrowIfCancellationRequested(); return result;
-        }
-        public async Task<ResolvedQueuedDownload> ResolveAsync(string resourceReference, CancellationToken cancellationToken = default)
-        {
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, generation);
-            linked.Token.ThrowIfCancellationRequested();
-            var result = await source.ResolveAsync(resourceReference, linked.Token).ConfigureAwait(false);
-            linked.Token.ThrowIfCancellationRequested(); return result;
-        }
-        public async Task<string> DownloadAsync(DownloadSpec spec, string destination, IProgress<DownloadProgress>? progress = null,
-            CancellationToken cancellationToken = default)
-        {
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, generation);
-            linked.Token.ThrowIfCancellationRequested();
-            var result = await source.DownloadAsync(spec, destination, progress, linked.Token).ConfigureAwait(false);
-            linked.Token.ThrowIfCancellationRequested(); return result;
-        }
-    }
 }

@@ -3,7 +3,7 @@ using LedgeTop.WindowsDownload;
 namespace LedgeTop.Files.Explorer;
 
 /// <summary>Pause is cancellation/availability, never authentication. Live resume reads only the current cached source session.</summary>
-internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IDisposable
+internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IHydrationAuthoritySource, IDisposable
 {
     private readonly IQueuedDownloadSource source;
     private readonly ExplorerRootScope scope;
@@ -13,6 +13,7 @@ internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IDisposable
     private bool enabled, disposed;
     public string Alias => scope.Alias;
     public Uri Origin => new(scope.Origin);
+    bool IHydrationAuthoritySource.ResolveCarriesCurrentAuthority => source is IHydrationAuthoritySource { ResolveCarriesCurrentAuthority: true };
 
     internal ExplorerSourceGate(IQueuedDownloadSource source, ExplorerRootScope scope,
         Action? prepareGenerated = null, Action? pauseGenerated = null, Action? disposeGenerated = null)

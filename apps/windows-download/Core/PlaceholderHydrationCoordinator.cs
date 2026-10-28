@@ -154,16 +154,21 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     private async Task<ResolvedQueuedDownload> Authorize(PlaceholderIdentity id, CancellationToken token)
     {
         ValidateSource(id);
-        var session = await source.GetSessionAsync(token); ValidateSource(id);
-        if (session.PrincipalId != id.PrincipalId || session.ExpiresAt <= DateTimeOffset.UtcNow.AddSeconds(5)) throw new AccessDeniedException();
+        var authoritativeResolve = source is IHydrationAuthoritySource { ResolveCarriesCurrentAuthority: true };
+        if (!authoritativeResolve) {
+            var session = await source.GetSessionAsync(token); ValidateSource(id);
+            if (session.PrincipalId != id.PrincipalId || session.ExpiresAt <= DateTimeOffset.UtcNow.AddSeconds(5)) throw new AccessDeniedException();
+        }
         var r = await source.ResolveAsync(id.ResourceReference, token); ValidateSource(id);
         if (r.PrincipalId != id.PrincipalId || r.LogicalFileId != id.LogicalFileId || r.RemoteVersion != id.RemoteVersion
             || r.Spec.OpaqueIdentity != id.LogicalFileId + ":" + id.RemoteVersion || r.Spec.FileName != id.FileName || r.Spec.Length != id.Length
             || r.Spec.ETag != id.ETag || r.Spec.Sha256 != id.Sha256
             || !r.Spec.ContentUri.IsAbsoluteUri || r.Spec.ContentUri.Scheme != "https" || r.Spec.ContentUri.UserInfo.Length != 0
             || r.Spec.ContentUri.Fragment.Length != 0 || r.Spec.ContentUri.GetLeftPart(UriPartial.Authority) != id.Origin) throw new ResourceUnavailableException();
-        session = await source.GetSessionAsync(token); ValidateSource(id);
-        if (session.PrincipalId != id.PrincipalId || session.ExpiresAt <= DateTimeOffset.UtcNow.AddSeconds(5)) throw new AccessDeniedException();
+        if (!authoritativeResolve) {
+            var session = await source.GetSessionAsync(token); ValidateSource(id);
+            if (session.PrincipalId != id.PrincipalId || session.ExpiresAt <= DateTimeOffset.UtcNow.AddSeconds(5)) throw new AccessDeniedException();
+        }
         return r;
     }
     private void ValidateSource(PlaceholderIdentity id) {

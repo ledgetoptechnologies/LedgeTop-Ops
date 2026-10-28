@@ -12,6 +12,7 @@ internal static class QueuedDownloadSourceTests
     private static byte[] Bytes => "synthetic durable source verified content"u8.ToArray();
     private static string Sha => Convert.ToHexStringLower(SHA256.HashData(Bytes));
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
+        ("Company hydration authoritative HTTP resolve removes only redundant Session probes", CompanyHydrationAuthority),
         ("queue bounded auth diagnostics distinguish actual HTTP401 operations", AuthDiagnostics),
         ("queue source employee and portal metadata renews exact identity with human fixed-origin GETs", Metadata),
         ("queue source selection queries encode once and unsafe selectors reject before authentication", Selection),
@@ -72,6 +73,64 @@ internal static class QueuedDownloadSourceTests
         if(selected) { result.Remove("manifest"); result["resourceRef"]=Reference; } return result;
     }
     private static HttpResponseMessage Json(object value) => new(HttpStatusCode.OK) {Content=new StringContent(JsonSerializer.Serialize(value),Encoding.UTF8,"application/json")};
+    private static async Task CompanyHydrationAuthority()
+    {
+        foreach (var mode in new[] { "employee", "employee-lifetime", "portal", "portal-lifetime", "opaque-wrapper", "before403", "after403", "after401", "afterPrincipal", "afterVersion", "afterLength", "afterExpiry" }) {
+            using var f = new Fixture(); var sessions = 0; var resolves = 0; var downloads = 0;
+            var employee = !mode.StartsWith("portal", StringComparison.Ordinal);
+            using var original = f.Source(employee, new Handler((request, _) => {
+                Assert(request.Headers.GetValues("Cf-Access-Token").Single() == f.Runner.Token);
+                if (request.RequestUri!.AbsolutePath.EndsWith("/session", StringComparison.Ordinal)) {
+                    sessions++; return Task.FromResult(Json(new { schemaVersion = 1, principalId = Principal, expiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600 }));
+                }
+                Assert(request.RequestUri.AbsolutePath == Base(employee) + "/queue/resolve"); resolves++;
+                if (mode == "before403" || downloads != 0 && mode == "after403") return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden));
+                if (downloads != 0 && mode == "after401") return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Unauthorized));
+                var envelope = Envelope(employee);
+                if (downloads != 0 && mode == "afterPrincipal") envelope["principalId"] = "odqp1_" + new string('f', 64);
+                var manifest = (Dictionary<string, object?>)envelope["manifest"]!;
+                if (downloads != 0 && mode == "afterVersion") { var sha = new string('e', 64); manifest["sha256"] = sha; manifest["remoteVersion"] = sha; manifest["strongETag"] = "\"" + sha + "\""; }
+                if (downloads != 0 && mode == "afterLength") manifest["size"] = Bytes.Length + 1;
+                if (downloads != 0 && mode == "afterExpiry") manifest["expiresAt"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 5;
+                return Task.FromResult(Json(envelope));
+            }), new Handler((request, _) => {
+                downloads++; Assert(request.Headers.GetValues("Cf-Access-Token").Single() == f.Runner.Token);
+                var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Bytes) };
+                response.Headers.ETag = EntityTagHeaderValue.Parse("\"" + Sha + "\""); return Task.FromResult(response);
+            }));
+            IQueuedDownloadSource selected = mode == "opaque-wrapper" ? new OpaqueSource(original) : original;
+            if (mode.EndsWith("-lifetime", StringComparison.Ordinal)) selected = new LifetimeQueuedDownloadSource(new LifetimeQueuedDownloadSource(selected, CancellationToken.None), CancellationToken.None);
+            var id = new PlaceholderIdentity("pilot", selected.Alias, f.Session.Origin.GetLeftPart(UriPartial.Authority), Principal, Reference,
+                (employee ? "oef1_" : "ondf1_") + new string('b', 64), employee ? Sha : "provider-version-one", "queue.bin", Bytes.Length, "\"" + Sha + "\"", Sha);
+            using var coordinator = new PlaceholderHydrationCoordinator(selected, "pilot", f.Root, expectedPrincipal: Principal);
+            var sink = new AuthoritySink();
+            if (mode is "employee" or "employee-lifetime" or "portal" or "portal-lifetime" or "opaque-wrapper") {
+                try { await coordinator.HydrateAsync(id, 0, id.Length, sink); }
+                catch (TransferException error) { throw new Exception("Company synthetic " + mode + "/" + error.HydrationFailure?.Stage + "/" + error.HydrationFailure?.Category + "/" + error.HydrationFailure?.Reason); }
+                Assert(sink.Written == Bytes.Length && sink.Completed == 1 && sink.Failed == 0 && downloads == 1 && resolves == 2);
+                Assert(sessions == (mode.StartsWith("employee", StringComparison.Ordinal) ? 0 : 4));
+                Assert(f.Runner.Calls == (mode.StartsWith("employee", StringComparison.Ordinal) ? 3 : 7) && f.Runner.Logins == 0);
+            } else {
+                await Throws<TransferException>(() => coordinator.HydrateAsync(id, 0, id.Length, sink));
+                Assert(sink.Written == 0 && sink.Completed == 0 && sink.Failed == 1 && sessions == 0 && f.Runner.Logins == 0);
+                Assert(downloads == (mode == "before403" ? 0 : 1));
+            }
+        }
+    }
+    private sealed class AuthoritySink : IPlaceholderTransferSink {
+        internal long Written; internal int Completed, Failed;
+        public Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) { Written += bytes.Length; return Task.CompletedTask; }
+        public Task CompleteAsync(CancellationToken token) { Completed++; return Task.CompletedTask; }
+        public Task FailAsync(string code) { Failed++; return Task.CompletedTask; }
+    }
+    private sealed class OpaqueSource(IQueuedDownloadSource inner) : IQueuedDownloadSource {
+        public string Alias => inner.Alias;
+        public Uri Origin => inner.Origin;
+        public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken token = default) => inner.GetSessionAsync(token);
+        public Task<ResolvedQueuedDownload> ResolveAsync(string reference, CancellationToken token = default) => inner.ResolveAsync(reference, token);
+        public Task<string> DownloadAsync(DownloadSpec spec, string destination, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default) => inner.DownloadAsync(spec, destination, progress, cancellationToken);
+    }
+
     private static async Task AuthDiagnostics() {
         foreach (var employee in new[] { true, false }) {
             using var f = new Fixture(); var calls = 0;

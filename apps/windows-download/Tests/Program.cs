@@ -15,6 +15,8 @@ if (args.Length == 3 && args[0] == "--windows-release-offer-fixture") {
     return;
 }
 
+if (args.FirstOrDefault() == "--company-hydration-authority-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
+
 var passed = 0;
 var tests = new (string Name, Func<Task> Run)[] {
     ("exact verified bytes promote once without overwrite", Full),
@@ -39,6 +41,8 @@ var tests = new (string Name, Func<Task> Run)[] {
     .Concat(CloudFilesNativeTransferTests.Groups).Concat(CloudFilesCallbackTests.Groups).Concat(DownloaderInactivityTests.Groups)
     .Concat(CloudFilesConnectionTests.Groups).Concat(ExplorerDemoSourceTests.Groups).Concat(WindowsAppReleaseClientTests.Groups)
     .Concat(PlaceholderCacheEvictionTests.Groups).Concat(HydrationTimingTests.Groups).ToArray();
+if (args.Length == 1 && args[0] == "--company-hydration-authority-only")
+    tests = QueuedDownloadSourceTests.Groups.Where(test => test.Name.StartsWith("Company hydration", StringComparison.Ordinal)).ToArray();
 if (args.Length == 1 && args[0] == "--hydration-timing-only") tests = HydrationTimingTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--cache-reclamation-only") tests = PlaceholderCacheEvictionTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--windows-release-client-only") tests = WindowsAppReleaseClientTests.Groups.ToArray();

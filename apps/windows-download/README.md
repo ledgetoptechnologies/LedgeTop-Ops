@@ -4,14 +4,30 @@ This contains the .NET 10 transfer library, Windows settings/activity app,
 system tray, branded Explorer connection and files-on-demand provider, with
 human Cloudflare Access and separate portal and employee read adapters.
 The unsigned per-user pilot installer is available in
-`S:\LedgeTop Operations\Sync App`. Start with `LATEST-PREVIEW.txt` and
+`S:\LedgeTop Operations\Sync App`. Start with
 `CURRENT-STAGING-STATUS.txt`; versioned receipts retain their original build-time
 observations. Code signing is intentionally off. Uploads and automatic catalog
-refresh are not implemented. Shared 0.5.5 is a diagnostic candidate for manual laptop
-acceptance. It includes client-side scheduled update checks, but the update feed
+refresh are not implemented. Shared 0.5.8 is the current diagnostic candidate.
+It includes client-side scheduled update checks, but the update feed
 is still off and automatic delivery/installation is not accepted end to end.
 
-## Current verification — October 27, 2026
+## Current verification — October 28, 2026
+
+- Version 0.5.8 adds bounded hydration timing and fixes native temporary-cache
+  opening for long local paths. The emitted test executable passes the cache
+  regression; installed warning-free cache reclamation still needs acceptance.
+- Current user screenshots show successful downloads and Keep on device, with
+  cold hydration totals of 8,967 and 12,019 ms. Authorization-before accounts for
+  2,090 and 2,334 ms respectively; both report zero queue time. These observations
+  do not establish the duration of the clipped stages or pure network throughput.
+- Company-file source now removes four redundant session probes while retaining
+  both authoritative file resolutions and file-integrity validation. Synthetic
+  HTTP tests verify three requests instead of seven for a cold download, with
+  denial, expiry, account-change, cancellation and pause/epoch regressions passing.
+  Portal and unknown adapters retain their separate session checks. This change
+  is not in the shared 0.5.8 installer; installed speed remains unmeasured.
+
+## Earlier verification — October 27, 2026
 - Candidate 0.5.5.0 is published from source 9481f7e2 with independently
   verified installer/payload bytes and passing hosted Windows checks. Its
   hydration diagnostics identify AuthorizationBefore/LoginRequired on the

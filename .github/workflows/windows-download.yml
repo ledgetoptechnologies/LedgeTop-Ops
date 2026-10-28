@@ -79,6 +79,8 @@ jobs:
         run: dotnet run --project ExplorerTests/WindowsDownload.Explorer.Tests.csproj --configuration Release --no-build -- --availability-intent-policy-tests
       - name: Pure paused-source gate policy
         run: dotnet run --project ExplorerTests/WindowsDownload.Explorer.Tests.csproj --configuration Release --no-build -- --source-gate-policy-tests
+      - name: Company hydration authority through Explorer source gate
+        run: dotnet run --project ExplorerTests/WindowsDownload.Explorer.Tests.csproj --configuration Release --no-build -- --company-hydration-source-gate-tests
       - name: Pure local availability native-operation diagnostics
         run: dotnet run --project ExplorerTests/WindowsDownload.Explorer.Tests.csproj --configuration Release --no-build -- --local-availability-operation-tests
       - name: Verify Company Shell diagnostic parser without real profile or Shell reads

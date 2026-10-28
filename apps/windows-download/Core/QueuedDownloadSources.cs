@@ -145,8 +145,12 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
     public void Dispose() { client.Dispose(); downloader.Dispose(); }
 }
 
-public sealed class EmployeeQueuedDownloadSource : QueuedDownloadSource
+public sealed class EmployeeQueuedDownloadSource : QueuedDownloadSource, IHydrationAuthoritySource
 {
+    // /api/staff/files/queue/resolve authenticates current native identity/admission/profile,
+    // validates the exact root/grant generation and rechecks authority after gateway work.
+    // This capability is Company-only; Portal and arbitrary adapters do not inherit it.
+    bool IHydrationAuthoritySource.ResolveCarriesCurrentAuthority => true;
     public EmployeeQueuedDownloadSource(string alias, CloudflareAccessSession session) : base(alias, session, true) { }
     internal EmployeeQueuedDownloadSource(string alias, CloudflareAccessSession session, HttpMessageHandler handler, Downloader downloader) : base(alias, session, true, handler, downloader) { }
     public Task<QueuedDownloadReference> GetReferenceAsync(string rootId, string path, CancellationToken cancellationToken = default)
