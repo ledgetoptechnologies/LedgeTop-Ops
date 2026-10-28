@@ -1,5 +1,14 @@
 # Windows files app: installer and release plan
 
+October 28 owner update: Beau reports creating an Azure account and again wants
+Artifact Signing. The actual signing resource, identity validation and profile
+remain unverified. The active installer is the conventional per-user EXE pilot;
+historical MSIX research below is not the selected installed delivery mechanism.
+The first release is now employee-only, and the next update acceptance must run
+from inside the installed application rather than by manually launching setup.
+See [the current direction](windows-installed-updates.md#current-owner-direction--october-28-2026)
+for unresolved signing, authenticated release-feed and server-provisioning work.
+
 October 25 update: Beau explicitly requested installed distribution and scheduled
 Operations-managed upgrades, supplied legal publisher **Ledge Top Technologies
 LLC**, and confirmed Azure setup is needed. Current construction evidence,

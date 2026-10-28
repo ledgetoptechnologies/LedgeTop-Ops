@@ -1,5 +1,34 @@
 # Installed Windows application and Operations-managed updates
 
+## Current owner direction — October 28, 2026
+
+Beau now reports creating an Azure account and requests Artifact Signing again.
+The earlier unsigned-only decision below is historical. The Artifact Signing
+resource, business identity validation, Public Trust certificate profile and CI
+federation have not been verified by this chat; confirmation of the completed
+setup step is pending. No signing resource, purchase, secret or certificate trust
+change has been made by this work.
+
+The next release must be tested through the installed app's update action,
+including authenticated offer/download, byte and publisher verification, safe
+provider drain, actual old-process exit, installation and reconnect. Source-level
+tests and a manually run installer do not qualify that sequence. The current
+shared build is unsigned 0.5.10; its Operations update feed remains off. GitHub
+holds source and CI evidence, rather than serving as an enabled update channel.
+
+Beau also narrowed the first Windows release to employees. It should have one
+employee sign-in entry and clearly explain that client access is not available
+yet. Existing Client Portal services and saved client data are not removed by
+this Windows capability choice. Authoritative employee admission and folder
+grants remain mandatory; zero currently shared folders do not disqualify an
+otherwise admitted employee. The proposed Docker/Nginx server connection and
+`ledgetop.app` hostname still require exact deployment/provisioning agreement.
+This direction does not activate a hostname, expand access or implement NAS/R2
+two-way synchronization. Current implementation and acceptance evidence is in
+[the Windows README](../apps/windows-download/README.md).
+
+## Earlier checkpoints
+
 Beau requested a fully installed Windows app and scheduled automatic upgrades on
 October 25, 2026. The confirmed legal business name is **Ledge Top Technologies
 LLC**. No Azure account/subscription currently exists, and no purchase, account,
