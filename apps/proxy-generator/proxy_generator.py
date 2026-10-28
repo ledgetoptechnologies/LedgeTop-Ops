@@ -134,20 +134,10 @@ def output_directory_fd(root, directory):
 def run_process(args, timeout, capture=False, pass_fds=(), cwd=None):
     if STOP.is_set():
         raise JobError("stopped")
-    diagnostics = not capture and os.environ.get("PROXY_GENERATOR_DIAGNOSTICS") == "1"
     process = subprocess.Popen(args, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
-        stderr=subprocess.PIPE if diagnostics else subprocess.DEVNULL,
+        stdout=subprocess.PIPE if capture else subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True, cwd=cwd, **({"pass_fds": pass_fds} if os.name == "posix" else {}))
     deadline = time.monotonic() + timeout
-    error_tail = bytearray()
-    if diagnostics:
-        def read_stderr():
-            while chunk := process.stderr.read(4096):
-                error_tail.extend(chunk)
-                del error_tail[:-1024]
-        error_reader = threading.Thread(target=read_stderr, daemon=True)
-        error_reader.start()
     try:
         if capture:
             chunks = queue.Queue(maxsize=2)
@@ -182,15 +172,8 @@ def run_process(args, timeout, capture=False, pass_fds=(), cwd=None):
             if STOP.is_set() or time.monotonic() >= deadline:
                 raise JobError("stopped" if STOP.is_set() else "process_timeout")
             try:
-                if diagnostics:
-                    process.wait(timeout=min(0.5, max(0.01, deadline - time.monotonic())))
-                    error_reader.join(timeout=1)
-                    output = None
-                else:
-                    output, _ = process.communicate(timeout=min(0.5, max(0.01, deadline - time.monotonic())))
+                output, _ = process.communicate(timeout=min(0.5, max(0.01, deadline - time.monotonic())))
                 if process.returncode:
-                    if diagnostics:
-                        log("process_diagnostic", stderr=error_tail.decode("utf-8", "replace"))
                     raise JobError("process_failed")
                 return output
             except subprocess.TimeoutExpired:
@@ -213,11 +196,11 @@ def run_process(args, timeout, capture=False, pass_fds=(), cwd=None):
                 process.wait(timeout=5)
 
 
-def probe(path, config):
+def probe(path, config, pass_fds=()):
     try:
         data = json.loads(run_process(["ffprobe", "-v", "error", "-show_entries",
             "stream=codec_type,codec_name,profile,pix_fmt,width,height,r_frame_rate,avg_frame_rate,time_base,start_time,duration,nb_frames:stream_tags=timecode:format=duration:format_tags=timecode",
-            "-of", "json", str(path)], config.probe_timeout, capture=True))
+            "-of", "json", str(path)], config.probe_timeout, capture=True, pass_fds=pass_fds))
         streams = data["streams"]
         video = next(x for x in streams if x.get("codec_type") == "video")
         fps = fractions.Fraction(video.get("avg_frame_rate", "0/1"))
@@ -398,7 +381,8 @@ class Generator:
                 # ffmpeg -n requires an absent output; the private random name is owned by this attempt.
                 temp.unlink()
                 run_process(encode_args(path, temp, media, config), config.encode_timeout)
-            if (temp.is_symlink() or not temp.is_file() or not validate_proxy(media, probe(temp, config), config)):
+            if (temp.is_symlink() or not temp.is_file() or not validate_proxy(media,
+                probe(temp, config, pass_fds=(output_fd,) if output_fd is not None else ()), config)):
                 raise JobError("invalid_output")
             if STOP.is_set() or not safe_path(config.root, path) or not safe_path(config.root, output) or identity(path) != source_id:
                 raise JobError("source_changed_or_unsafe")

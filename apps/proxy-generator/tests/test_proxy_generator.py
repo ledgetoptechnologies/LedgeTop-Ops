@@ -294,11 +294,7 @@ class RuntimeTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name != "nt" and shutil.which("ffmpeg") and shutil.which("ffprobe"), "Linux ffmpeg and ffprobe required for media smoke")
 class RealMediaSmokeTests(unittest.TestCase):
-    def setUp(self):
-        RuntimeTests.setUp(self)
-        diagnostics = mock.patch.dict(os.environ, {"PROXY_GENERATOR_DIAGNOSTICS": "1"})
-        diagnostics.start()
-        self.addCleanup(diagnostics.stop)
+    setUp = RuntimeTests.setUp
     def test_real_4k_smaller_profile_size_and_metadata(self):
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=3840x2160:rate=25", "-t", "0.24", "-c:v", "mpeg4", "-threads", "2", "-q:v", "4", "-timecode", "01:00:00:00", str(self.path)], check=True, timeout=30)
         source = app.probe(self.path, self.config)
