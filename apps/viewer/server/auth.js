@@ -131,12 +131,12 @@ function isSecureRequest(req) {
   return req.secure || req.headers['x-forwarded-proto'] === 'https';
 }
 
-function cookieAttrs(req, { httpOnly = true, maxAge } = {}) {
+function cookieAttrs(req, { httpOnly = true, maxAge, sameSite } = {}) {
   const secure = isSecureRequest(req);
   return {
     httpOnly,
     secure,
-    sameSite: secure ? 'none' : 'lax',
+    sameSite: sameSite || (secure ? 'none' : 'lax'),
     path: '/',
     maxAge,
   };

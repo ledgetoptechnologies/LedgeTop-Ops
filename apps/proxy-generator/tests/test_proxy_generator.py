@@ -38,6 +38,12 @@ class RuntimeTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.addCleanup(self.generator.store.close)
 
+    def test_probe_capture_is_bounded_and_small_output_survives(self):
+        small = app.run_process([sys.executable, "-c", "import sys; sys.stdout.write('ok')"], 5, capture=True)
+        self.assertEqual(small, b"ok")
+        with self.assertRaisesRegex(app.JobError, "probe_too_large"):
+            app.run_process([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x' * 1100000)"], 5, capture=True)
+
     def test_stability_requires_two_unchanged_observations(self):
         with mock.patch.object(self.generator, "render", return_value=("failed", None)) as render:
             self.generator.scan(now=2000)
@@ -71,6 +77,25 @@ class RuntimeTests(unittest.TestCase):
         link.symlink_to(self.folder, target_is_directory=True)
         self.assertEqual(len(list(self.generator.candidates())), 1)
 
+    @unittest.skipIf(os.name != "posix", "directory descriptor protection is for the Linux renderer")
+    def test_pinned_output_directory_ignores_replaced_symlink(self):
+        proxy = self.folder / "Proxy"
+        proxy.mkdir()
+        outside = pathlib.Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        descriptor = app.output_directory_fd(self.root, proxy)
+        try:
+            moved = self.folder / "FormerProxy"
+            proxy.rename(moved)
+            proxy.symlink_to(outside, target_is_directory=True)
+            file_descriptor = os.open("safe.mov", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600, dir_fd=descriptor)
+            os.close(file_descriptor)
+            self.assertTrue((moved / "safe.mov").is_file())
+            self.assertEqual(list(outside.iterdir()), [])
+        finally:
+            os.close(descriptor)
+
     def test_failure_isolation_and_bounded_retry_then_version_reset(self):
         self.generator.scan(now=2000)
         with mock.patch.object(self.generator, "render", return_value=("failed", None)) as render:
@@ -99,8 +124,11 @@ class RuntimeTests(unittest.TestCase):
         source_id = app.identity(self.path)
         key = app.key_for(self.root, self.path)
         self.generator.store_snapshot = {key: (source_id, 1000, "4", "old", 0, 0, 0)}
-        def encode(args, timeout):
-            pathlib.Path(args[-1]).write_bytes(b"new proxy")
+        def encode(args, timeout, **kwargs):
+            destination = pathlib.Path(args[-1])
+            if kwargs.get("cwd"):
+                destination = pathlib.Path(kwargs["cwd"]) / destination
+            destination.write_bytes(b"new proxy")
             self.path.write_bytes(b"replaced source")
         with mock.patch.object(app, "probe", return_value=media(height=1080)), mock.patch.object(app, "validate_proxy", return_value=True), mock.patch.object(app, "run_process", side_effect=encode):
             self.assertEqual(self.generator.render(self.path, source_id), ("failed", None))

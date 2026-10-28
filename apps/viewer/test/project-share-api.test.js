@@ -145,6 +145,11 @@ test('one project link dynamically exposes only active published derivatives and
   const currentConfig = await response.json();
   assert.equal(currentConfig.activeVersion.id, second.versionId);
   assert.equal(await (await fetch(`${base}${currentConfig.assets.glb}`)).text(), 'second-public-mesh');
+  assert.ok(processing.archiveTask(task.id));
+  response = await fetch(`${base}/api/project-share/${publicToken}`, { headers: { cookie } });
+  assert.deepEqual((await response.json()).tasks, [], 'archived task is removed from the public catalog');
+  assert.equal((await fetch(`${base}/api/project-share/${publicToken}/tasks/${task.id}`, { headers: { cookie } })).status, 404);
+  assert.equal((await fetch(`${base}${currentConfig.assets.glb}`)).status, 403, 'existing asset token cannot read an archived task');
 
   response = await fetch(`${base}/api/v1/projects/${project.id}/public-shares`, { headers: adminHeaders });
   assert.equal(response.status, 200);

@@ -10,6 +10,8 @@ import json
 import math
 import os
 import pathlib
+import queue
+import secrets
 import signal
 import sqlite3
 import subprocess
@@ -113,14 +115,59 @@ def safe_path(root, path):
     return True
 
 
-def run_process(args, timeout, capture=False):
+def output_directory_fd(root, directory):
+    """Pin each Jobs directory without following a swapped symlink."""
+    relative = directory.relative_to(root)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open(root, flags)
+    try:
+        for part in relative.parts:
+            child = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def run_process(args, timeout, capture=False, pass_fds=(), cwd=None):
     if STOP.is_set():
         raise JobError("stopped")
     process = subprocess.Popen(args, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE if capture else subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True)
+        start_new_session=True, cwd=cwd, **({"pass_fds": pass_fds} if os.name == "posix" else {}))
     deadline = time.monotonic() + timeout
     try:
+        if capture:
+            chunks = queue.Queue(maxsize=2)
+            def read_stdout():
+                while True:
+                    chunk = process.stdout.read(65536)
+                    chunks.put(chunk)
+                    if not chunk:
+                        return
+            threading.Thread(target=read_stdout, daemon=True).start()
+            output = bytearray()
+            while True:
+                if STOP.is_set() or time.monotonic() >= deadline:
+                    raise JobError("stopped" if STOP.is_set() else "process_timeout")
+                try:
+                    chunk = chunks.get(timeout=min(0.5, max(0.01, deadline - time.monotonic())))
+                except queue.Empty:
+                    continue
+                if not chunk:
+                    break
+                if len(output) + len(chunk) > 1024 * 1024:
+                    raise JobError("probe_too_large")
+                output.extend(chunk)
+            try:
+                process.wait(timeout=max(0.01, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                raise JobError("process_timeout") from None
+            if process.returncode:
+                raise JobError("process_failed")
+            return bytes(output)
         while True:
             if STOP.is_set() or time.monotonic() >= deadline:
                 raise JobError("stopped" if STOP.is_set() else "process_timeout")
@@ -128,28 +175,32 @@ def run_process(args, timeout, capture=False):
                 output, _ = process.communicate(timeout=min(0.5, max(0.01, deadline - time.monotonic())))
                 if process.returncode:
                     raise JobError("process_failed")
-                if capture and len(output) > 1024 * 1024:
-                    raise JobError("probe_too_large")
                 return output
             except subprocess.TimeoutExpired:
                 continue
     finally:
         if process.poll() is None:
             with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGTERM)
+                if hasattr(os, "killpg"):
+                    os.killpg(process.pid, signal.SIGTERM)
+                else:
+                    process.terminate()
             try:
                 process.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
+                    if hasattr(os, "killpg"):
+                        os.killpg(process.pid, signal.SIGKILL)
+                    else:
+                        process.kill()
                 process.wait(timeout=5)
 
 
-def probe(path, config):
+def probe(path, config, pass_fds=()):
     try:
         data = json.loads(run_process(["ffprobe", "-v", "error", "-show_entries",
             "stream=codec_type,codec_name,profile,pix_fmt,width,height,r_frame_rate,avg_frame_rate,time_base,start_time,duration,nb_frames:stream_tags=timecode:format=duration:format_tags=timecode",
-            "-of", "json", str(path)], config.probe_timeout, capture=True))
+            "-of", "json", str(path)], config.probe_timeout, capture=True, pass_fds=pass_fds))
         streams = data["streams"]
         video = next(x for x in streams if x.get("codec_type") == "video")
         fps = fractions.Fraction(video.get("avg_frame_rate", "0/1"))
@@ -292,12 +343,16 @@ class Generator:
         config = self.config
         output = path.parent / "Proxy" / (path.stem + ".mov")
         temp = None
+        output_fd = None
+        stage = None
         try:
             if not safe_path(config.root, path) or identity(path) != source_id or not safe_path(config.root, output):
                 raise JobError("source_changed_or_unsafe")
             output.parent.mkdir(exist_ok=True)
             if not safe_path(config.root, output):
                 raise JobError("unsafe_output")
+            if os.name == "posix":
+                output_fd = output_directory_fd(config.root, output.parent)
             if any(item.name != output.name and item.name.casefold() == output.name.casefold() for item in output.parent.iterdir()):
                 raise JobError("output_name_collision")
             media = probe(path, config)
@@ -313,25 +368,43 @@ class Generator:
                         return "adopted", identity(output)
                 except JobError:
                     pass
-            descriptor, name = tempfile.mkstemp(prefix=".proxy-gen-", suffix=".mov", dir=output.parent)
-            os.close(descriptor)
-            temp = pathlib.Path(name)
-            # ffmpeg -n requires an absent output; the private random name is owned by this attempt.
-            temp.unlink()
-            run_process(encode_args(path, temp, media, config), config.encode_timeout)
-            if not safe_path(config.root, temp) or not validate_proxy(media, probe(temp, config), config):
+            if output_fd is not None:
+                stage = ".proxy-gen-" + secrets.token_hex(16)
+                os.mkdir(stage, 0o700, dir_fd=output_fd)
+                temp = pathlib.Path(f"/proc/self/fd/{output_fd}/{stage}/proxy.mov")
+                run_process(encode_args(path, pathlib.Path(stage) / "proxy.mov", media, config),
+                    config.encode_timeout, pass_fds=(output_fd,), cwd=f"/proc/self/fd/{output_fd}")
+            else:
+                descriptor, name = tempfile.mkstemp(prefix=".proxy-gen-", suffix=".mov", dir=output.parent)
+                os.close(descriptor)
+                temp = pathlib.Path(name)
+                # ffmpeg -n requires an absent output; the private random name is owned by this attempt.
+                temp.unlink()
+                run_process(encode_args(path, temp, media, config), config.encode_timeout)
+            if (temp.is_symlink() or not temp.is_file() or not validate_proxy(media,
+                probe(temp, config, pass_fds=(output_fd,) if output_fd is not None else ()), config)):
                 raise JobError("invalid_output")
             if STOP.is_set() or not safe_path(config.root, path) or not safe_path(config.root, output) or identity(path) != source_id:
                 raise JobError("source_changed_or_unsafe")
             with temp.open("rb") as file:
                 os.fsync(file.fileno())
-            os.replace(temp, output)
+            if output_fd is not None:
+                os.replace(f"{stage}/proxy.mov", output.name, src_dir_fd=output_fd, dst_dir_fd=output_fd)
+            else:
+                os.replace(temp, output)
             return "generated", identity(output)
         except (JobError, OSError, ValueError, ArithmeticError, subprocess.SubprocessError) as error:
             log("job_failed", code=str(error) if isinstance(error, JobError) else "io_or_media_failure")
             return "failed", None
         finally:
-            if temp is not None and safe_path(config.root, temp):
+            if output_fd is not None:
+                if stage is not None:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(f"{stage}/proxy.mov", dir_fd=output_fd)
+                    with contextlib.suppress(FileNotFoundError):
+                        os.rmdir(stage, dir_fd=output_fd)
+                os.close(output_fd)
+            if output_fd is None and temp is not None and safe_path(config.root, temp):
                 with contextlib.suppress(FileNotFoundError):
                     temp.unlink()
 

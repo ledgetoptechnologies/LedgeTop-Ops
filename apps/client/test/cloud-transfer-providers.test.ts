@@ -150,6 +150,31 @@ describe("Google Drive primitives", () => {
   });
 });
 describe("Dropbox staged-beta transfer behavior", () => {
+  it("does not commit a file when authorization disappears after its last chunk", async () => {
+    const requests: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      requests.push(String(input));
+      return String(input).endsWith("/start") ? Response.json({ session_id: "session" }) : new Response(null, { status: 200 });
+    }));
+    const get = vi.fn(async () => ({ body: new ReadableStream(), arrayBuffer: async () => new Uint8Array(3).buffer }));
+    const adapter = createCloudProviderAdapter("dropbox", { DATA_BUCKET: { get } } as never);
+    let checks = 0;
+    await expect(adapter.transfer({
+      env: {} as never,
+      job: {} as never,
+      item: { id: "item", source_key: "source", source_etag: "etag", source_size: 3, destination_path: "file.bin" } as never,
+      credential: { accessToken: "token" },
+      destination: { path: "/LTDS Delivery/" },
+      conflictMode: "autorename",
+      signalCancelled: async () => ++checks > 2,
+      loadUploadState: async () => null,
+      saveUploadState: async () => undefined,
+    })).rejects.toThrow("cancelled");
+    expect(get).toHaveBeenCalledOnce();
+    expect(requests.some((url) => url.endsWith("/finish"))).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
   it("skips an existing destination without reading the R2 object", async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL) => {
       expect(String(input)).toContain("files/get_metadata");

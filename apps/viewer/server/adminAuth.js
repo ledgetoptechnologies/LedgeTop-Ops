@@ -21,7 +21,15 @@ function isAdminRequest(req) {
 
 function requireAdmin(req, res, next) {
   if (!config.emergencyAdminEnabled) return res.status(404).json({ error: 'legacy administration is disabled; use LTDS Ops' });
-  if (isAdminRequest(req)) return next();
+  if (isAdminRequest(req)) {
+    const bearer = req.headers.authorization?.startsWith('Bearer ')
+      && config.adminPassword && auth.constantTimeEqual(req.headers.authorization.slice('Bearer '.length), config.adminPassword);
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !bearer) {
+      const expectedOrigin = new URL(config.publicBaseUrl || `${req.protocol}://${req.get('host')}`).origin;
+      if (req.get('origin') !== expectedOrigin) return res.status(403).json({ error: 'invalid origin' });
+    }
+    return next();
+  }
   res.status(401).json({ error: 'admin authentication required' });
 }
 
@@ -41,7 +49,7 @@ router.post('/api/admin/login', (req, res) => {
     return res.status(401).json({ error: 'invalid password' });
   }
   const cookieVal = auth.sign({ role: 'admin' }, SESSION_TTL_MS);
-  res.cookie(COOKIE_NAME, cookieVal, auth.cookieAttrs(req, { maxAge: SESSION_TTL_MS }));
+  res.cookie(COOKIE_NAME, cookieVal, auth.cookieAttrs(req, { maxAge: SESSION_TTL_MS, sameSite: 'lax' }));
   res.json({ ok: true });
 });
 

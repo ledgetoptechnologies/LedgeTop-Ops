@@ -67,7 +67,7 @@ function createProjectShareApi({ repository, processing }) {
     const page = pageQuery(req);
     if (!page) return res.status(400).json({ error: 'invalid page', code: 'invalid_page' });
     let result;
-    try { result = processing.listActivePublishedProjectTasksPage(context.project.id, page); }
+    try { result = processing.listActivePublishedProjectTasksPage(context.project.id, { ...page, strictPublished: true }); }
     catch { return res.status(400).json({ error: 'invalid page', code: 'invalid_page' }); }
     if (recordAccess) repository.recordProjectShareAccess(context.share.id);
     issueSession(req, res, context.share);
@@ -117,7 +117,7 @@ function createProjectShareApi({ repository, processing }) {
     if (context.status === 404) return res.status(404).json({ error: 'link not found', code: 'link_not_found' });
     if (context.status !== 200) return res.status(410).json({ error: 'link expired, revoked, or unavailable', code: 'link_unavailable' });
     if (!unlocked(req, context.share)) return res.status(401).set('Cache-Control', 'no-store').json({ requiresPassword: true });
-    const selected = processing.getActivePublishedProjectTask(context.project.id, req.params.taskId);
+    const selected = processing.getActivePublishedProjectTask(context.project.id, req.params.taskId, { strictPublished: true });
     const model = selected ? repository.getModel(selected.modelId) : null;
     if (!selected || !model || model.activeVersion?.id !== selected.modelVersionId) {
       return res.status(404).json({ error: 'published task not found', code: 'published_task_not_found' });
