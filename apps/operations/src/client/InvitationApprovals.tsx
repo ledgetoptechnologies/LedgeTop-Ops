@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Card, Skeleton } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import { decideInvitationRequest, invitationAdministrationPath, invitationCapabilitiesLabel, invitationRequestHref, invitationRequestPage, invitationRequestStatus, invitationTermsLabel, loadInvitationRequestDetail, type InvitationAdministrationAccess, type InvitationRequest, type InvitationRequestDetail } from "./invitation-administration-api";
+import { OnboardClientButton } from "./OnboardClientButton";
 import "./InvitationAdministration.css";
 
 interface Route {id: string | null; sourceId: string; workspaceId: string; status: string; q: string; invalid: boolean}
@@ -63,7 +64,7 @@ function ApprovalView({route, navigate}: {route: Route; navigate: (route: Route)
       else {setUncertain(true); setError("The decision is not confirmed. Retry the same decision before making another change.");}
     }} finally {if (!controller.signal.aborted && run === epoch.current) {mutation.current = null; setBusy(false);}}
   }
-  return <section className="invitation-administration" aria-label="Invitation approvals"><header><div><h2>{route.id ? "Review invitation request" : "Invitation approvals"}</h2><p>Review the exact proposed access. Approval requests are not invitations or memberships.</p></div><a className="button button-ghost" href={route.id ? listPath(route) : "/clients"}>{route.id ? "Back to invitation approvals" : "Back to Client Hub"}</a></header>
+  return <section className="invitation-administration" aria-label="Invitation approvals"><header><div><h2>{route.id ? "Review invitation request" : "Invitation approvals"}</h2><p>Review the exact proposed access. Approval requests are not invitations or memberships.</p></div><div className="invitation-administration-header-actions">{!route.id && <OnboardClientButton />}<a className="button button-ghost" href={route.id ? listPath(route) : "/clients"}>{route.id ? "Back to invitation approvals" : "Back to Client Hub"}</a></div></header>
     {!route.id && <form className="invitation-administration-search" onSubmit={search}><label>Search invitation requests<input value={draft} maxLength={100} onChange={event => setDraft(event.target.value)} /></label><label>Request status<select value={route.status} onChange={event => navigate({...route, status: event.target.value})}>{["open", "pending", "approving", "approved", "rejected", "cancelled", "stale", "all"].map(status => <option key={status} value={status}>{status === "open" ? "Needs review" : status === "all" ? "All" : invitationRequestStatus(status as InvitationRequest["status"])}</option>)}</select></label><button className="button-orange">Search</button></form>}
     <button className="button-ghost" disabled={loading || busy || uncertain} onClick={() => void load()}>Refresh invitation requests</button>
     {loading && <Skeleton variant="list" rows={3} label="Loading invitation requests…" />}{notice && <p role="status">{notice}</p>}

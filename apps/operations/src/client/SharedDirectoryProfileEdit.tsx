@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { Card, StatusPill, requestChoice } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import { SharedProfileAuthorityRecovery } from "./SharedProfileAuthorityRecovery";
-import { NativeDirectoryProfileEdit, serializeNativeDirectoryProfile, type ProfileForm } from "./NativeDirectoryProfileEditor";
+import { DEFAULT_COUNTRY, NativeDirectoryProfileEdit, serializeNativeDirectoryProfile, type ProfileForm } from "./NativeDirectoryProfileEditor";
 
 type Kind = "organization" | "client";
 type Member = { recordId: string; version: number; sourceIds: string[]; sourceNames?: string[] };
@@ -97,7 +97,7 @@ function SharedDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
     if (!value || !Object.hasOwn(value, "sharedProfile") || (value.sharedProfile !== null && !validProfile(value.sharedProfile, kind, recordId)))
       throw new Error("The current shared profile could not be verified. Refresh before editing.");
     setResponse(value);
-    if (value.sharedProfile) setFields({ ...EMPTY, ...value.sharedProfile.profile } as ProfileForm);
+    if (value.sharedProfile) setFields({ ...EMPTY, ...value.sharedProfile.profile, country: value.sharedProfile.profile.country || DEFAULT_COUNTRY } as ProfileForm);
     return value;
   };
   useEffect(() => { let active = true;
