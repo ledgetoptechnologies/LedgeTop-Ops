@@ -29,6 +29,11 @@ async function openCreate(page: Page) {
   await expect(page.getByRole("dialog", { name: "Add client profile" })).toBeVisible();
 }
 
+async function openEdit(page: Page) {
+  await page.getByRole("button", { name: /^(Edit profile|Review pending update)$/ }).click();
+  await expect(page.getByRole("dialog", { name: "Edit client profile" })).toBeVisible();
+}
+
 async function fillCreate(page: Page, name: string) {
   await openCreate(page);
   await page.getByRole("checkbox", { name: "Ledge Top Drone Services" }).check();
@@ -96,11 +101,17 @@ test("a write-phase 400 keeps the exact frozen write and does not rerun admissio
 
 test("switching records never retries an old frozen request against the new display", async ({ page }) => {
   await render(page, "record-switch");
+  await openEdit(page);
   await expect(page.getByLabel("Organization name")).toHaveValue("Record One");
   await page.getByLabel("Organization name").fill("Record One Updated");
   await page.getByRole("button", { name: "Save client profile" }).click();
   await expect(page.getByRole("button", { name: "Retry same profile update" })).toBeVisible();
+  // The unconfirmed update stays reviewable after closing the editor.
+  await page.getByRole("dialog", { name: "Edit client profile" }).getByRole("button", { name: "Close", exact: true }).first().click();
+  await expect(page.getByRole("button", { name: "Review pending update" })).toBeVisible();
   await page.getByRole("button", { name: "Switch to record two" }).click();
+  await expect(page.getByRole("button", { name: "Edit profile" })).toBeVisible();
+  await openEdit(page);
   await expect(page.getByLabel("Organization name")).toHaveValue("Record Two");
   await expect(page.getByRole("button", { name: "Retry same profile update" })).toHaveCount(0);
   const patches = (await calls(page)).filter(call => call.method === "PATCH");
@@ -110,6 +121,7 @@ test("switching records never retries an old frozen request against the new disp
 
 test("a verified save followed by reload failure cannot submit a fresh UUID from the stale snapshot", async ({ page }) => {
   await render(page, "reload-failure");
+  await openEdit(page);
   await expect(page.getByLabel("Organization name")).toHaveValue("Record One");
   await page.getByLabel("Organization name").fill("Committed Name");
   await page.getByRole("button", { name: "Save client profile" }).click();
@@ -127,6 +139,7 @@ test("a verified save followed by reload failure cannot submit a fresh UUID from
 
 test("staging preparation freezes and displays one exact update before the normal PATCH", async ({ page }) => {
   await render(page, "prepared-update");
+  await openEdit(page);
   await page.getByLabel("Organization name").fill("Prepared Record One");
   await page.getByRole("button", { name: "Prepare update reference" }).click();
 
@@ -147,11 +160,12 @@ test("staging preparation freezes and displays one exact update before the norma
   expect(patches[0]!.mutationId).toBe("11111111-1111-4111-8111-000000000002");
   expect(JSON.parse(patches[0]!.body!)).toEqual({ mutationId: patches[0]!.mutationId, expectedLocalVersion: 1,
     profile: { name: "Final Prepared Record One", generalEmail: "", generalPhone: "", addressLine1: "", addressLine2: "",
-      city: "", state: "", postalCode: "", country: "" } });
+      city: "", state: "", postalCode: "", country: "US" } });
 });
 
 test("a prepared client update keeps its exact request after a possibly committed lost response", async ({ page }) => {
   await render(page, "prepared-lost-response");
+  await openEdit(page);
   await page.getByLabel("Email").fill("prepared-client@example.test");
   await page.getByRole("button", { name: "Prepare update reference" }).click();
   await page.getByRole("button", { name: "Submit prepared profile update" }).click();
@@ -176,6 +190,7 @@ test("a prepared client update keeps its exact request after a possibly committe
 
 test("a profile permission denial is final: no retry, nothing saved, editing locked", async ({ page }) => {
   await render(page, "profile-denied");
+  await openEdit(page);
   await expect(page.getByLabel("Organization name")).toHaveValue("Record One");
   await page.getByLabel("Organization name").fill("Record One Renamed");
   await page.getByRole("button", { name: "Save client profile" }).click();
@@ -191,6 +206,7 @@ test("a profile permission denial is final: no retry, nothing saved, editing loc
 
 test("a first-send sign-out is final and asks for sign-in, not edit access", async ({ page }) => {
   await render(page, "profile-signed-out");
+  await openEdit(page);
   await expect(page.getByLabel("Organization name")).toHaveValue("Record One");
   await page.getByLabel("Organization name").fill("Record One Renamed");
   await page.getByRole("button", { name: "Save client profile" }).click();
@@ -204,6 +220,7 @@ test("a first-send sign-out is final and asks for sign-in, not edit access", asy
 for (const [scenario, expected] of [["profile-lost-then-denied", "Once your access is restored"], ["profile-lost-then-signed-out", "Sign in again"]] as const)
   test(`${scenario}: a denial after an unknown outcome keeps the exact update and never claims no change`, async ({ page }) => {
     await render(page, scenario);
+    await openEdit(page);
     await expect(page.getByLabel("Organization name")).toHaveValue("Record One");
     await page.getByLabel("Organization name").fill("Record One Renamed");
     await page.getByRole("button", { name: "Save client profile" }).click();
@@ -231,6 +248,7 @@ test("a server-reported missing profile permission renders read-only with the re
 
 test("missing relationship authority leaves profile editing mounted but hides relationship mutation controls", async ({ page }) => {
   await render(page, "relationship-readonly");
+  await openEdit(page);
   await expect(page.getByLabel("Client name")).toHaveValue("Client One");
   await expect(page.getByRole("button", { name: "Save client profile" })).toBeVisible();
   await expect(page.getByText("The organization relationship is read-only")).toBeVisible();
@@ -320,4 +338,27 @@ for (const scenario of ["recovery-org-switch", "recovery-record-switch"] as cons
   await expect(page.getByText("Local intended organization:")).toHaveCount(0);
   await expect(page.getByLabel("Reason")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Authorize recovery" })).toHaveCount(0);
+});
+
+test("a profile shows as a short summary and edits in a dialog, with a blank country starting as the US", async ({ page }) => {
+  await render(page, "relationship-readonly");
+  const card = page.locator(".client-directory-profile-card");
+  await expect(card.locator("dt", { hasText: "Email" }).locator("+ dd")).toHaveText("Not on file");
+  await expect(card.locator("dt", { hasText: "Organization" }).locator("+ dd")).toHaveText("Standalone client");
+  await expect(page.getByLabel("Client name")).toBeHidden();
+
+  await openEdit(page);
+  await expect(page.getByLabel("Country")).toHaveValue("US");
+  await page.getByLabel("Client name").fill("Unsaved Name");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Edit client profile" })).toBeHidden();
+  await openEdit(page);
+  await expect(page.getByLabel("Client name")).toHaveValue("Client One");
+  expect((await calls(page)).filter(call => call.method !== "GET")).toHaveLength(0);
+});
+
+test("a new client profile starts with the US as its country", async ({ page }) => {
+  await render(page, "admission-400");
+  await openCreate(page);
+  await expect(page.getByLabel("Country")).toHaveValue("US");
 });

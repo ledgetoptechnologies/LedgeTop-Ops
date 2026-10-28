@@ -14,3 +14,4 @@
 .invitation-administration-facts dt { color: var(--muted, #5d6772); font-size: .8rem; }
 .invitation-administration-facts dd { margin: 0; overflow-wrap: anywhere; }
 @media (max-width: 600px) { .invitation-administration > header { display: grid; } .invitation-administration-actions button { flex: 1 1 auto; } }
+.invitation-administration > header > .invitation-administration-header-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
