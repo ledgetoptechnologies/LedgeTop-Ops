@@ -843,9 +843,9 @@ test("catalog refresh preserves the saved service version until the client expli
 
   catalogChanged = true;
   await page.getByLabel("Service request title").fill("Pinned catalog version updated");
-  await expect(page.getByText(/service library changed/i)).toBeVisible();
+  await expect(page.getByText(/our services? (?:was|were) updated/i)).toBeVisible();
   await page.getByRole("navigation", { name: "Service request progress" }).getByRole("button", { name: /Services$/ }).click();
-  await expect(page.getByText("This service changed in Project Alpha.")).toBeVisible();
+  await expect(page.getByText("This service has been updated.")).toBeVisible();
   await expect(page.getByLabel("Preferred resolution")).toHaveValue("standard");
   await expect(page.getByLabel("Delivery format")).toHaveCount(0);
 
@@ -2175,7 +2175,7 @@ test("client can edit before review, create a child change, and answer an estima
   await spaNavigate(page, "/portal/requests");
   await page.getByRole("button", { name: "Accept estimate" }).click();
   const acceptance = page.getByRole("dialog", { name: "Accept operational estimate?" });
-  await expect(acceptance.getByText("Accept this non-binding Ledge Top operational estimate? A separate Project Alpha quote will still be required before financial approval.", { exact: true })).toBeVisible();
+  await expect(acceptance.getByText("Accept this non-binding Ledge Top operational estimate? A separate formal quote will still be required before financial approval.", { exact: true })).toBeVisible();
   await confirmInPage(page, "Accept operational estimate?", "Accept estimate");
   await expect.poll(() => workflowEvents.estimateAccepted).toBe(true);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
