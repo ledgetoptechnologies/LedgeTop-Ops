@@ -35,11 +35,16 @@ have a stored Access subject, email, and display name. Profile display fields
 are copied from the row selected by staff ID; email matching never selects an
 identity.
 
-The explicit owner and kstirn rows must be active and already bound to their
-stored subjects and profiles. The binding evidence records hashes for each
-person's snapshot-linked Ops state and for inactive staff history. Neither
-protected staff ID can be added to the install cohort or be an authority actor
-or target in supplied policy rows. Authority rows are not inferred. If supplied,
+The explicit owner and kstirn rows must be active and carry their existing
+stored Access subjects. The owner must already have the matching native
+admission and profile. If kstirn has neither native row, the composer can add
+only an admission and profile copied from that exact existing staff ID's
+subject, email, and display name; partial or mismatched native state is refused.
+That identity-only copy does not infer a role or grant. The binding evidence
+records hashes for each person's snapshot-linked Ops state and for inactive
+staff history. The owner cannot be an install target, and neither protected
+staff ID can be an authority actor or target in supplied policy rows. Authority
+rows are not inferred. If supplied,
 they must be explicit, install-table-shaped rows for the proposed cohort and
 are included in the binding hash. Directory grant and directory assignment
 rows are excluded so the plan cannot alter client access or client assignments.

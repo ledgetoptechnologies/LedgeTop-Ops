@@ -146,12 +146,50 @@ test('refuses duplicate identities and does not select by email', () => {
   assert.equal(JSON.parse(result.artifact.canonicalPlanJson).rows[1].row.login_email, 'kstirn@example.test');
 });
 
-test('keeps owner and kstirn native rows untouched and rejects either in the install cohort', () => {
+test('keeps the owner unchanged and refuses duplicate owner or already-present kstirn native identity', () => {
   const f = fixture();
   const before = sha(canonicalJson(f.state.rows));
-  assert.throws(() => compose(f, { proposedStaffIds: [f.ownerId] }), /protected_staff_in_cohort|cohort_already_native/);
-  assert.throws(() => compose(f, { proposedStaffIds: [f.kstirnId] }), /protected_staff_in_cohort|cohort_already_native/);
+  assert.throws(() => compose(f, { proposedStaffIds: [f.ownerId] }), /owner_protected_from_cohort/);
+  assert.throws(() => compose(f, { proposedStaffIds: [f.kstirnId] }), /kstirn_native_state_already_present/);
   assert.equal(sha(canonicalJson(f.state.rows)), before);
+});
+
+test('permits an identity-only kstirn copy from exact legacy staff ID and stored subject when native rows are absent', () => {
+  const f = fixture();
+  const state = JSON.parse(f.reviewedSnapshot.snapshotJson);
+  state.rows.native_staff_admissions = state.rows.native_staff_admissions.filter(row => row.staff_id !== f.kstirnId);
+  state.rows.native_staff_profiles = state.rows.native_staff_profiles.filter(row => row.staff_id !== f.kstirnId);
+  const snapshotJson = JSON.stringify(state);
+  const reviewedSnapshot = { ...f.reviewedSnapshot, snapshotJson, snapshotSha256: sha(snapshotJson) };
+  const beforeClientState = sha(canonicalJson({ grants: state.rows.native_directory_grants, assignments: state.rows.native_directory_assignments }));
+  const result = compose(f, { reviewedSnapshot, proposedStaffIds: [f.kstirnId] });
+  const plan = JSON.parse(result.artifact.canonicalPlanJson);
+  const binding = JSON.parse(result.artifact.bindingEvidenceJson);
+  assert.deepEqual(plan.rows.map(item => item.table), ['native_staff_admissions', 'native_staff_profiles']);
+  assert.equal(plan.rows[0].row.staff_id, f.kstirnId);
+  assert.equal(plan.rows[0].row.bound_access_subject, 'access|synthetic-kstirn');
+  assert.equal(plan.rows[0].row.admitted_by, f.ownerId);
+  assert.equal(plan.rows[1].row.login_email, 'kstirn@example.test');
+  assert.equal(plan.rows[1].row.display_name, 'Synthetic Kstirn');
+  assert.equal(binding.preservation.protectedStaff.find(row => row.role === 'kstirn').nativeIdentityState,
+    'legacy-identity-present-native-copy-missing');
+  assert.equal(plan.rows.some(item => item.table.includes('delegation') || item.table.includes('grant') || item.table.includes('assignment')), false);
+  assert.equal(sha(canonicalJson({ grants: state.rows.native_directory_grants, assignments: state.rows.native_directory_assignments })), beforeClientState);
+});
+
+test('refuses partial kstirn native identity and any explicit authority row targeting kstirn', () => {
+  const f = fixture();
+  const partial = JSON.parse(f.reviewedSnapshot.snapshotJson);
+  partial.rows.native_staff_profiles = partial.rows.native_staff_profiles.filter(row => row.staff_id !== f.kstirnId);
+  const partialJson = JSON.stringify(partial);
+  assert.throws(() => compose(f, { reviewedSnapshot: { ...f.reviewedSnapshot, snapshotJson: partialJson, snapshotSha256: sha(partialJson) } }),
+    /protected_staff_binding_invalid/);
+  const explicit = { table: 'native_staff_management_delegations', row: {
+    id: 'synthetic-kstirn-added-authority', actor_staff_id: f.kstirnId, contract_version: 1,
+    authority_domain: 'staff_admin', capability: 'staff.profile.read', effect: 'allow', scope_kind: 'global',
+    business_area_id: null, division_id: null, target_staff_id: null, active: 1, version: 1, granted_by: f.ownerId,
+  } };
+  assert.throws(() => compose(f, { explicitPolicyRows: [explicit] }), /policy_mutates_protected_authority|policy_actor_not_new_cohort/);
 });
 
 test('accepts only explicit cohort-scoped policy rows and excludes client grants/assignments', () => {

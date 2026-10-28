@@ -109,16 +109,17 @@ function inactiveHistoryDigest(state) {
   return sha256(canonicalJson({ inactiveStaff: state.rows.staff_users.filter(row => row?.status !== 'active'), relatedRows: tables }));
 }
 
-function identityRows(state, staffIds, preservedIds, admittedByStaffId) {
+function identityRows(state, staffIds, ownerStaffId, kstirnStaffId, admittedByStaffId) {
   const byId = staffMap(state);
   const rows = [];
   for (const staffId of staffIds) {
     const staff = byId.get(staffId);
     if (!staff || staff.status !== 'active' || typeof staff.access_subject !== 'string' || !staff.access_subject.trim()
       || typeof staff.email !== 'string' || !staff.email.trim() || typeof staff.display_name !== 'string' || !staff.display_name.trim()) fail('cohort_identity_missing');
-    if (preservedIds.has(staffId)) fail('protected_staff_in_cohort');
-    if (state.rows.native_staff_admissions.some(row => row?.staff_id === staffId)
-      || state.rows.native_staff_profiles.some(row => row?.staff_id === staffId)) fail('cohort_already_native');
+    if (staffId === ownerStaffId) fail('owner_protected_from_cohort');
+    const hasAdmission = state.rows.native_staff_admissions.some(row => row?.staff_id === staffId);
+    const hasProfile = state.rows.native_staff_profiles.some(row => row?.staff_id === staffId);
+    if (hasAdmission || hasProfile) fail(staffId === kstirnStaffId ? 'kstirn_native_state_already_present' : 'cohort_already_native');
     rows.push({ table: 'native_staff_admissions', row: {
       staff_id: staff.id, bound_access_subject: staff.access_subject, active: 1,
       admitted_by: admittedByStaffId,
@@ -135,17 +136,20 @@ function validatePreservedStaff(state, roles, controlPlaneStaffIds) {
   const ids = [requireId(roles.ownerStaffId), requireId(roles.kstirnStaffId)];
   if (ids[0] === ids[1]) fail('preservation_roles_invalid');
   const byId = staffMap(state);
-  for (const staffId of ids) {
+  for (const [index, staffId] of ids.entries()) {
     const staff = byId.get(staffId);
     if (!staff || staff.status !== 'active' || typeof staff.access_subject !== 'string' || !staff.access_subject.trim()) fail('protected_staff_missing');
     const admission = state.rows.native_staff_admissions.find(row => row?.staff_id === staffId);
     const profile = state.rows.native_staff_profiles.find(row => row?.staff_id === staffId);
+    if (index === 1 && !admission && !profile) continue;
     if (!admission || admission.active !== 1 || admission.bound_access_subject !== staff.access_subject
       || !profile || profile.login_email !== staff.email || profile.display_name !== staff.display_name) fail('protected_staff_binding_invalid');
     if (!controlPlaneStaffIds.includes(staffId) && staffId === roles.ownerStaffId) fail('owner_not_control_plane_candidate');
   }
   return ids.map((staffId, index) => ({
     role: index === 0 ? 'owner' : 'kstirn', staffId,
+    nativeIdentityState: index === 1 && !state.rows.native_staff_admissions.some(row => row?.staff_id === staffId)
+      ? 'legacy-identity-present-native-copy-missing' : 'native-identity-present',
     staffRowSha256: sha256(canonicalJson(byId.get(staffId))),
     effectiveOpsStateSha256: sha256(canonicalJson(rowsReferencing(state, staffId))),
   }));
@@ -221,7 +225,8 @@ export function composeNativeStaffBootstrapArtifact({ reviewedSnapshot, proposed
   const preservedIds = new Set(protectedRows.map(row => row.staffId));
   const cohortIdSet = new Set(cohort);
   for (const id of cohort) if (!staffMap(state).has(id)) fail('cohort_identity_missing');
-  const derived = identityRows(state, cohort, preservedIds, preservationRoles.ownerStaffId);
+  const derived = identityRows(state, cohort, preservationRoles.ownerStaffId, preservationRoles.kstirnStaffId,
+    preservationRoles.ownerStaffId);
   const supplied = validateExplicitRows(explicitPolicyRows, state, cohortIdSet, preservedIds);
   const cmp = (left, right) => left < right ? -1 : left > right ? 1 : 0;
   const rows = [...derived, ...supplied].sort((left, right) => ORDER[left.table] - ORDER[right.table]
