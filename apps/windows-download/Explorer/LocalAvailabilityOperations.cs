@@ -26,7 +26,9 @@ internal sealed class LocalAvailabilityException : IOException
         });
     internal static void Check(int result, LocalAvailabilityStage stage)
     { if (result < 0) throw new LocalAvailabilityException(stage, LocalAvailabilityFailureKind.Native, result); }
-    internal string ActivityText => "Could not change local availability. Support code: availability/" + Stage + "/" + Kind +
+    internal string ActivityText => (Stage == LocalAvailabilityStage.CacheReclamation
+        ? "The file is online-only, but its temporary download cache could not be cleared. Support code: availability/"
+        : "Could not change local availability. Support code: availability/") + Stage + "/" + Kind +
         (NativeHResult is { } result ? "; native=0x" + unchecked((uint)result).ToString("X8", System.Globalization.CultureInfo.InvariantCulture) : "");
 }
 

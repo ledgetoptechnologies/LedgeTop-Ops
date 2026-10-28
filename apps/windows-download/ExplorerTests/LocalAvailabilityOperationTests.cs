@@ -33,6 +33,8 @@ internal static class LocalAvailabilityOperationTests
         Require(thrown.Calls.Last() == "Close");
         var cache = LocalAvailabilityException.FromException(LocalAvailabilityStage.CacheReclamation, new TransferException("SECRET https://private.invalid/token"));
         Require(cache.Stage == LocalAvailabilityStage.CacheReclamation && cache.Kind == LocalAvailabilityFailureKind.Transfer && cache.NativeHResult is null && !cache.ActivityText.Contains("SECRET"));
+        Require(cache.ActivityText.StartsWith("The file is online-only, but its temporary download cache could not be cleared.", StringComparison.Ordinal));
+        Require(!cache.ActivityText.Contains("Could not change local availability", StringComparison.Ordinal));
         using var stop = new CancellationTokenSource(); stop.Cancel(); var cancelled = new Native();
         var sawCancellation = false;
         try { LocalAvailabilityOperations.FreeNative(cancelled, stop.Token); } catch (OperationCanceledException) { sawCancellation = true; }
