@@ -17,6 +17,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     private readonly BoundedAvailabilityWorkers availabilityWorkers;
     private readonly CancellationTokenSource stopping = new();
     private Task? pinWorker;
+    private AvailabilityScanWake? scanWake;
     private Task? closing;
     private readonly object availabilityGate = new();
     private readonly HashSet<Task> availabilityWork = [];
@@ -91,6 +92,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
             .OrderBy(path => path.Count(c => c == Path.DirectorySeparatorChar)).ThenBy(path => path, StringComparer.OrdinalIgnoreCase);
         foreach (var folder in folders) Create(folder, null);
         foreach (var (path, identity) in files) Create(path, identity);
+        scanWake = AvailabilityScanWake.ForRoot(root);
         pinWorker = Task.Run(PinLoopAsync);
         } catch {
             await DisposeAsync();
@@ -119,6 +121,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                 System.Text.Encoding.UTF8.GetBytes("LedgeTop.Files.Preview.Directory.v1:" + folder), rootFileId);
         try {
             connection.Connect();
+            scanWake = AvailabilityScanWake.ForRoot(root);
             pinWorker = Task.Run(PinLoopAsync);
         } catch { await DisposeAsync(); throw; }
     }
@@ -222,22 +225,14 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
 
     // One scanner observes the bounded manifest without waiting for native hydration.
     // Exactly two tracked workers re-read intent after their per-path availability gate.
-    private async Task PinLoopAsync()
-    {
-        while (!stopping.IsCancellationRequested) {
-            foreach (var relative in files.Keys) {
-                if (stopping.IsCancellationRequested) break;
-                if (preservedLocalFiles.Contains(relative)) continue;
-                try { availabilityWorkers.Observe(relative, InspectAvailability(relative)); }
-                catch (OperationCanceledException) when (stopping.IsCancellationRequested) { break; }
-                catch (Exception error) when (error is IOException or UnauthorizedAccessException or TransferException) {
-                    Notice(LocalAvailabilityException.FromException(LocalAvailabilityStage.Inspect, error).ActivityText);
-                }
-            }
-            try { await Task.Delay(TimeSpan.FromSeconds(2), stopping.Token); }
-            catch (OperationCanceledException) when (stopping.IsCancellationRequested) { break; }
+    private Task PinLoopAsync() => scanWake!.RunScannerAsync(files.Keys, relative => {
+        if (preservedLocalFiles.Contains(relative)) return;
+        try { availabilityWorkers.Observe(relative, InspectAvailability(relative)); }
+        catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or TransferException) {
+            Notice(LocalAvailabilityException.FromException(LocalAvailabilityStage.Inspect, error).ActivityText);
         }
-    }
+    }, stopping.Token);
 
     private AvailabilityObservation InspectAvailability(string relative)
     {
@@ -382,6 +377,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     }
     private async Task StopAsync()
     {
+        scanWake?.Stop();
         Exception? cancellationFailure = null;
         try { stopping.Cancel(); } catch (Exception error) { cancellationFailure = error; }
         await availabilityWorkers.StopAndDrainAsync(() => connection.StopAsync(), async () => {
@@ -389,6 +385,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
             await Task.WhenAll(availability.Select(async task => { try { await task.ConfigureAwait(false); } catch { } }));
             if (pinWorker is not null) await pinWorker.ConfigureAwait(false);
         }).ConfigureAwait(false);
+        if (scanWake is not null) await scanWake.DisposeAsync().ConfigureAwait(false);
         if (cancellationFailure is not null) throw new IOException("Provider cancellation notification failed after disconnect and drain.", cancellationFailure);
     }
 

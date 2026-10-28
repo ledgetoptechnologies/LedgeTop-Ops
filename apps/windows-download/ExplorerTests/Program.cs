@@ -9,6 +9,8 @@ if (args.Length >= 1 && args[0] == "--company-hydration-source-gate-tests")
 if (args.Length == 1 && args[0] == "--branding-policy-tests") return await ExplorerBrandIconTests.RunAsync();
 if (args.Length >= 1 && args[0] == "--display-name-policy-tests")
     return args.Length == 1 ? ExplorerRootDisplayNameTests.Run() : 2;
+if (args.Length >= 1 && args[0] == "--availability-scan-wake-tests")
+    return args.Length == 1 ? await AvailabilityScanWakeTests.RunAsync() : 2;
 if (args.Length >= 1 && args[0] == "--bounded-availability-worker-tests")
     return args.Length == 1 ? await BoundedAvailabilityWorkerTests.RunAsync() : 2;
 if (args.Length >= 1 && args[0] == "--availability-intent-policy-tests")
