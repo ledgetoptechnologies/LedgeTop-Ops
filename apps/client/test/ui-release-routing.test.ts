@@ -97,7 +97,12 @@ describe("Client additive UI routing through real Hono admission", () => {
     expect(nativeEntry.status).toBe(200);
     expect(nativeEntry.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin");
 
-    const disallowed = fixture("https://portal.ledgetop.app");
+    const canonical = fixture("https://portal.ledgetop.app");
+    const canonicalEntry = await canonical.request(path);
+    expect(canonicalEntry.status).toBe(200);
+    expect(canonicalEntry.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin");
+
+    const disallowed = fixture("https://portal.ledgetoptechnologies.com");
     const portalEntry = await disallowed.request(path);
     expect(portalEntry.status).toBe(200);
     expect(portalEntry.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin-allow-popups");
