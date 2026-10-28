@@ -560,6 +560,10 @@ internal sealed class ExplorerPreviewWindow : Window
             status.Text = "Connected — saved file list is empty";
             detail.Text = "You're signed in, but this PC's saved file list is empty. Sign in and refresh the file list to check current sharing. If files are found, Explorer uses a new owned folder; the old folder and all local files are kept.";
         }
+        if (!presentation.Generated && !quitting && !busy && !updateMaintenance && session is ConnectedExplorerSession { CanRecoverTransientSession: true }) {
+            status.Text = "Waiting to reconnect";
+            detail.Text = "The file service is temporarily unavailable. LedgeTop Files will recheck your current access automatically before resuming downloads. Files already on this PC are kept.";
+        }
         var enabled = !busy && !quitting && !updateMaintenance;
         updateVersion.Text = "Version " + (updates?.CurrentVersion ?? typeof(ExplorerPreviewWindow).Assembly.GetName().Version?.ToString(4) ?? "unavailable");
         updateStatus.Text = updateMessage;
@@ -624,11 +628,13 @@ internal sealed class ExplorerPreviewWindow : Window
     }
     private void TrayUnavailable() { RestoreFromTray(); Refresh(); }
 
-    private async void CheckSession(object? sender, EventArgs e)
+    private async void CheckSession(object? sender, EventArgs e) => await TickSessionCheckAsync();
+    internal Task TickSessionCheckAsync()
     {
+        Dispatcher.VerifyAccess();
         if (busy || quitting || readyToClose || updateMaintenance || session is not ConnectedExplorerSession connected ||
-            connected.State is not (ExplorerPreviewState.Running or ExplorerPreviewState.Paused)) return;
-        await OperateAsync(ConnectionAction.Recheck, async trace => {
+            !connected.CanRecheckSession) return Task.CompletedTask;
+        return OperateAsync(ConnectionAction.Recheck, async trace => {
             trace.Phase = ConnectionPhase.ExecuteSession;
             await connected.RecheckSessionAsync();
         });

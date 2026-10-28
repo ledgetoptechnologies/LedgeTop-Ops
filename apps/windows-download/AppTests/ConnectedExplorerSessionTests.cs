@@ -28,7 +28,192 @@ internal static class ConnectedExplorerSessionTests
         await ExplicitEmptyRefresh(); count++;
         await EmployeeAdmission(); count++;
         await RecheckDiagnosticsAndRecovery(); count++;
-        Console.WriteLine($"Connected Explorer coordinator: {count}/16 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+        await TransientRecheckRecovery(); count++;
+        await TransientRecoveryHolds(); count++;
+        await TransientRecoveryTimerAndQuit(); count++;
+        await RecoveryViewPublicationRaces(); count++;
+        Console.WriteLine($"Connected Explorer coordinator: {count}/20 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+    }
+
+    private static async Task RecoveryViewPublicationRaces()
+    {
+        foreach (var transient in new[] { true, false }) {
+            await using var fixture = new Fixture { Alias = "employee", VerifyEngineSession = true };
+            var session = fixture.Create(); await session.StartAsync();
+            using var stateRead = new StateReadBarrier();
+            var staleEvent = fixture.EmitWithBlockedStateRead(stateRead);
+            await stateRead.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            using var readerContinue = new ManualResetEventSlim(false);
+            var readerReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var reader = Task.Run(() => {
+                var thread = Environment.CurrentManagedThreadId;
+                var readsBefore = fixture.StateReadsOnThread(thread);
+                var before = session.CanRecheckSession && !session.CanRecoverTransientSession;
+                readerReady.TrySetResult();
+                if (!readerContinue.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Synthetic view reader release required.");
+                var recheck = session.CanRecheckSession; var recovery = session.CanRecoverTransientSession;
+                return (before, Recheck: recheck, Recovery: recovery, Reads: fixture.StateReadsOnThread(thread) - readsBefore);
+            });
+            try {
+                await readerReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                Exception failure = transient ? new TransferException("private transient", TransferFailureReason.Network) : new AccessDeniedException();
+                fixture.CurrentFailure = failure;
+                await SameFailure(session.RecheckSessionAsync, failure);
+                Check(session.State == ExplorerPreviewState.Failed && session.CanRecoverTransientSession == transient,
+                    "failure+pending is published while a stale Running event read and view reader are held");
+                stateRead.Release.Set(); await staleEvent.WaitAsync(TimeSpan.FromSeconds(5));
+                readerContinue.Set(); var observed = await reader.WaitAsync(TimeSpan.FromSeconds(5));
+                Check(observed.before && observed.Recheck == transient && observed.Recovery == transient &&
+                    observed.Reads == 0 && session.State == ExplorerPreviewState.Failed &&
+                    session.CanRecoverTransientSession == transient,
+                    "getters are read-only atomic observations with no engine calls; delayed Running cannot erase or promote transient/permanent Failed publication");
+                fixture.CurrentFailure = null; var requests = fixture.Requests;
+                await session.RecheckSessionAsync();
+                Check(transient ? session.State == ExplorerPreviewState.Running && fixture.EngineResumes == 1
+                        : session.State == ExplorerPreviewState.Failed && fixture.EngineResumes == 0 && fixture.Requests == requests,
+                    "only a fresh checked operation promotes transient recovery; permanent hold remains untouched");
+            } finally {
+                stateRead.Release.Set(); readerContinue.Set();
+                await staleEvent.WaitAsync(TimeSpan.FromSeconds(5)); await reader.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+        }
+    }
+
+    private static async Task TransientRecheckRecovery()
+    {
+        foreach (var (failure, atSource) in new[] {
+            new TransferException("private transient", TransferFailureReason.Network),
+            new TransferException("private transient", TransferFailureReason.Timeout),
+            new TransferException("private transient", TransferFailureReason.UnexpectedHttpStatus, 502),
+            new TransferException("private transient", TransferFailureReason.UnexpectedHttpStatus, 503),
+            new TransferException("private transient", TransferFailureReason.UnexpectedHttpStatus, 504)
+        }.SelectMany(failure => new[] { (failure, false), (failure, true) })) {
+            await using var fixture = new Fixture { Alias = "employee", VerifyEngineSession = true };
+            var session = fixture.Create(); await session.StartAsync();
+            var signs = fixture.SignIns; var starts = fixture.EngineStarts; var captures = fixture.Captures;
+            var index = File.ReadAllBytes(fixture.IndexPath);
+            Directory.CreateDirectory(Path.GetDirectoryName(fixture.LocalSentinel)!);
+            await File.WriteAllTextAsync(fixture.LocalSentinel, "local bytes stay during automatic recovery");
+            if (atSource) fixture.SourceFailure = failure; else fixture.CurrentFailure = failure;
+            await SameFailure(session.RecheckSessionAsync, failure);
+            Check(session.State == ExplorerPreviewState.Failed && session.CanRecoverTransientSession && session.CanRecheckSession &&
+                fixture.EnginePauses == 1 && fixture.EngineResumes == 0 && fixture.SignIns == signs,
+                "only confirmed pause of a running generation arms a later timer check for a bounded transient");
+            fixture.EmitEngineActivity();
+            Check(session.State == ExplorerPreviewState.Failed && session.CanRecoverTransientSession,
+                "late Changed/Activity from the same paused provider retains Failed+pending until a checked resume");
+            var requests = fixture.Requests;
+            await SameFailure(session.RecheckSessionAsync, failure);
+            Check(fixture.Requests == requests + (atSource ? 2 : 1) && fixture.EnginePauses == 1 && fixture.EngineResumes == 0 && session.CanRecoverTransientSession,
+                "a still-unavailable next tick performs one check and retains the same paused generation without an inner retry loop");
+            fixture.CurrentFailure = null; fixture.SourceFailure = null; fixture.Log.Clear(); requests = fixture.Requests;
+            await session.RecheckSessionAsync();
+            Check(session.State == ExplorerPreviewState.Running && !session.CanRecoverTransientSession && fixture.EngineResumes == 1 &&
+                fixture.Requests == requests + 3 && fixture.Log.SequenceEqual(["current-check", "source-check", "resume-gate", "source-check", "engine-resumed"]),
+                "next healthy tick verifies current and source identity before the root engine's separate cached gate resumes");
+            Check(fixture.SignIns == signs && fixture.EngineStarts == starts && fixture.Captures == captures &&
+                index.AsSpan().SequenceEqual(File.ReadAllBytes(fixture.IndexPath)) && await File.ReadAllTextAsync(fixture.LocalSentinel) == "local bytes stay during automatic recovery",
+                "automatic recovery uses no browser/new backend/provider/capture/index write and preserves local bytes");
+        }
+    }
+
+    private static async Task TransientRecoveryHolds()
+    {
+        foreach (var failure in new Exception[] {
+            new TransferException("private invalid", TransferFailureReason.InvalidMetadata),
+            new TransferException("private unknown"),
+            new TransferException("private HTTP", TransferFailureReason.UnexpectedHttpStatus, 500),
+            new TransferException("private HTTP", TransferFailureReason.UnexpectedHttpStatus, 429),
+            new LoginRequiredException(LoginFailureReason.HttpUnauthorized, LoginFailureOperation.QueueSession),
+            new AccessDeniedException(), new ResourceUnavailableException(), new IOException("private ownership"),
+            new UnauthorizedAccessException("private local access"), new System.ComponentModel.Win32Exception(5), new OperationCanceledException()
+        }) {
+            await using var fixture = new Fixture { Alias = "employee" };
+            var session = fixture.Create(); await session.StartAsync();
+            // Also prove that a permanent result retires a previously eligible transient wait.
+            var transient = new TransferException("private network", TransferFailureReason.Network); fixture.CurrentFailure = transient;
+            await SameFailure(session.RecheckSessionAsync, transient); Check(session.CanRecoverTransientSession, "seed transient recovery");
+            fixture.CurrentFailure = failure; await SameFailure(session.RecheckSessionAsync, failure);
+            fixture.EmitEngineActivity();
+            Check(session.State == ExplorerPreviewState.Failed && !session.CanRecheckSession,
+                "late paused Activity cannot turn a permanent/manual Failed hold back into timer checks");
+            var requests = fixture.Requests; fixture.CurrentFailure = null;
+            await session.RecheckSessionAsync();
+            Check(!session.CanRecoverTransientSession && !session.CanRecheckSession && fixture.Requests == requests && fixture.EngineResumes == 0,
+                "nontransient results require explicit action and cannot restart checks or resume after becoming healthy");
+        }
+        foreach (var condition in new[] { "manual-pause", "pause-unconfirmed", "changed-person", "expired", "changed-inventory", "changed-index", "engine-failed", "engine-stopped", "engine-running", "engine-removed", "engine-unknown", "removed", "disposed" }) {
+            await using var fixture = new Fixture { Alias = "employee" };
+            var session = fixture.Create(); await session.StartAsync();
+            var failure = new TransferException("private network", TransferFailureReason.Network);
+            if (condition == "manual-pause") await session.PauseAsync();
+            if (condition == "pause-unconfirmed") fixture.RefusePause = true;
+            fixture.CurrentFailure = failure; await SameFailure(session.RecheckSessionAsync, failure); fixture.CurrentFailure = null;
+            if (condition == "changed-person") fixture.Person = Fixture.PersonB;
+            if (condition == "expired") fixture.Expired = true;
+            if (condition == "changed-inventory") fixture.ChangeVisibleManifest();
+            if (condition == "changed-index") {
+                var changed = JsonNode.Parse(File.ReadAllText(fixture.IndexPath))!.AsObject(); changed["Revision"] = changed["Revision"]!.GetValue<long>() + 1;
+                File.WriteAllText(fixture.IndexPath, changed.ToJsonString());
+            }
+            if (condition == "engine-failed") fixture.ForceEngineState(ExplorerPreviewState.Failed);
+            if (condition == "engine-stopped") fixture.ForceEngineState(ExplorerPreviewState.NotStarted);
+            if (condition == "engine-running") fixture.ForceEngineState(ExplorerPreviewState.Running);
+            if (condition == "engine-removed") fixture.ForceEngineState(ExplorerPreviewState.Removed);
+            if (condition == "engine-unknown") fixture.ForceEngineState((ExplorerPreviewState)123);
+            if (condition == "removed") await session.RemoveAsync();
+            if (condition == "disposed") await session.DisposeAsync();
+            var requests = fixture.Requests;
+            if (condition is "changed-person" or "expired") await Refuses(session.RecheckSessionAsync);
+            else if (condition == "disposed") {
+                try { await session.RecheckSessionAsync(); throw new InvalidOperationException("Disposed check must refuse."); }
+                catch (ObjectDisposedException) { }
+            } else await session.RecheckSessionAsync();
+            Check(fixture.EngineResumes == 0 && !session.CanRecoverTransientSession,
+                "manual pause, changed identity/expiry/ownership, unsupported engine state, removal and disposal never auto-resume: " + condition);
+            if (condition is "manual-pause" or "pause-unconfirmed" or "changed-inventory" or "changed-index" or "engine-failed" or "engine-stopped" or "engine-running" or "engine-removed" or "engine-unknown" or "removed" or "disposed")
+                Check(fixture.Requests == requests, "held/removed/disposed paths make no further account/source calls");
+        }
+    }
+
+    private static async Task TransientRecoveryTimerAndQuit()
+    {
+        await using var fixture = new Fixture { Alias = "employee", VerifyEngineSession = true };
+        var session = fixture.Create(); var factories = 0;
+        var window = new ExplorerPreviewWindow(() => { factories++; throw new InvalidOperationException("Timer must not replace a generation."); },
+            _ => new FakeTrayIcon(), ExplorerWindowContent.Connected("Test", AccessMode.Employee), session)
+            { ShowInTaskbar = false, Left = -20000, Top = -20000, WindowStartupLocation = System.Windows.WindowStartupLocation.Manual };
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); window.Closed += (_, _) => closed.TrySetResult(); window.Show();
+        try {
+            await window.StartPreviewAsync();
+            fixture.CurrentFailure = new TransferException("private network", TransferFailureReason.Network);
+            await window.TickSessionCheckAsync();
+            Check(window.StatusText == "Waiting to reconnect" && session.CanRecoverTransientSession && factories == 0,
+                "existing timer path accepts an eligible failed generation and clearly describes automatic recovery");
+            fixture.CurrentFailure = null; fixture.HoldCurrent = true;
+            var tick = window.TickSessionCheckAsync(); await fixture.CurrentEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            var requests = fixture.Requests; await window.TickSessionCheckAsync();
+            Check(!tick.IsCompleted && fixture.Requests == requests, "busy timer guard makes no overlapping check");
+            window.Quit(); await closed.Task.WaitAsync(TimeSpan.FromSeconds(5)); await tick;
+            await window.TickSessionCheckAsync();
+            Check(fixture.EngineResumes == 0 && !session.CanRecoverTransientSession && fixture.Requests == requests && factories == 0,
+                "Quit cancels the pending fresh check and later ticks cannot resume, authenticate or create a replacement");
+        } finally { window.Quit(); await closed.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
+    }
+
+    private static async Task SameFailure(Func<Task> work, Exception expected)
+    {
+        try { await work(); }
+        catch (Exception error) when (ReferenceEquals(error, expected)) { return; }
+        throw new InvalidOperationException("Expected the same bounded source failure.");
+    }
+
+    private sealed class StateReadBarrier : IDisposable
+    {
+        internal int Thread;
+        internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly ManualResetEventSlim Release = new(false);
+        public void Dispose() { Release.Set(); Release.Dispose(); }
     }
 
     private static async Task RecheckDiagnosticsAndRecovery()
@@ -465,11 +650,14 @@ internal static class ConnectedExplorerSessionTests
         private readonly string root = Path.Combine(Path.GetTempPath(), "ltfiles-connected-coordinator-" + Guid.NewGuid().ToString("N"));
         private readonly Dictionary<string, Saved> profiles = new(StringComparer.OrdinalIgnoreCase);
         private readonly List<ConnectedExplorerSession> sessions = [];
+        private FakeEngine? lastEngine;
+        private ExplorerRootManifest? visibleManifestOverride;
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<int, int> stateReads = new();
         internal readonly List<string> Log = [];
         internal readonly List<IQueuedDownloadSource> StartedSources = [];
         internal string Person = PersonA, Version = "version-one", WrongConfiguration = "", Alias = "portal";
         internal bool HoldLogin, HoldCapture, HoldCurrent, HoldEngineSession, HoldSourceSession, IgnoreLoginCancellation, Expired, AccessDenied, FailEngineStart, ThrowIfBackendCreated, EmptyInventory,
-            FailFirstRunningDispose, RunningDisposeRefused, VerifyEngineSession, FailEngineBeforeProfile, FailEnginePreparedAuth;
+            FailFirstRunningDispose, RunningDisposeRefused, VerifyEngineSession, FailEngineBeforeProfile, FailEnginePreparedAuth, RefusePause;
         internal CatalogCaptureException? CaptureFailure;
         internal Exception? CurrentFailure, SourceFailure;
         internal Action? AfterCapture, AfterRemove;
@@ -488,6 +676,19 @@ internal static class ConnectedExplorerSessionTests
             var saved = profiles.Values.Single(item => !item.Removed);
             saved.Manifest = new ExplorerRootManifest(saved.Manifest.Scope, new Dictionary<string, PlaceholderIdentity>(), ["changed"]);
         }
+        internal void ForceEngineState(ExplorerPreviewState state) => (lastEngine ?? throw new InvalidOperationException()).ForceState(state);
+        internal void EmitEngineActivity() => (lastEngine ?? throw new InvalidOperationException()).EmitChanged();
+        internal Task EmitWithBlockedStateRead(StateReadBarrier barrier)
+        {
+            var owned = lastEngine ?? throw new InvalidOperationException();
+            return Task.Run(() => owned.EmitWithBlockedStateRead(barrier));
+        }
+        internal int StateReadsOnThread(int thread) => stateReads.GetValueOrDefault(thread);
+        internal void ChangeVisibleManifest()
+        {
+            var saved = profiles.Values.Single(item => !item.Removed);
+            visibleManifestOverride = new ExplorerRootManifest(saved.Manifest.Scope, new Dictionary<string, PlaceholderIdentity>(), ["changed"]);
+        }
         internal void ForgetRemovedProfiles()
         {
             if (profiles.Values.Any(profile => !profile.Removed)) throw new InvalidOperationException("Only confirmed removed test profiles may be forgotten.");
@@ -505,7 +706,8 @@ internal static class ConnectedExplorerSessionTests
         {
             profiles.TryGetValue(request.ProfileDirectory, out var saved);
             var fake = new FakeEngine(this, request, saved);
-            return new(fake, () => request.InitialManifest ?? (saved?.Removed == false ? saved.Manifest : null),
+            lastEngine = fake;
+            return new(fake, () => visibleManifestOverride ?? request.InitialManifest ?? (saved?.Removed == false ? saved.Manifest : null),
                 () => profiles.ContainsKey(request.ProfileDirectory));
         }
         private async Task<ExplorerCatalogSnapshot> Capture(IFilesBackend backend, string channel, string expected, CancellationToken token)
@@ -556,6 +758,7 @@ internal static class ConnectedExplorerSessionTests
             }
             public async Task<SessionInfo?> CheckCurrentForConnectionAsync(CancellationToken cancellationToken = default)
             {
+                fixture.Log.Add("current-check");
                 fixture.Requests++;
                 if (fixture.HoldCurrent) { fixture.CurrentEntered.TrySetResult(); await fixture.CurrentRelease.Task.WaitAsync(cancellationToken); }
                 if (fixture.AccessDenied) throw new AccessDeniedException();
@@ -569,6 +772,7 @@ internal static class ConnectedExplorerSessionTests
             public Uri Origin => fixture.WrongConfiguration == "origin" ? new("https://wrong.invalid") : Fixture.Origin;
             public async Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken = default)
             {
+                fixture.Log.Add("source-check");
                 fixture.Requests++; cancellationToken.ThrowIfCancellationRequested();
                 if (fixture.HoldSourceSession) { fixture.EngineSessionEntered.TrySetResult(); await fixture.EngineSessionRelease.Task.WaitAsync(cancellationToken); }
                 if (fixture.AccessDenied) throw new AccessDeniedException();
@@ -589,10 +793,25 @@ internal static class ConnectedExplorerSessionTests
         private sealed class FakeEngine : IExplorerPreviewSession
         {
             private readonly Fixture fixture; private readonly ConnectedExplorerEngineRequest request; private Saved? saved; private bool disposed;
+            private ExplorerPreviewState currentState;
+            private StateReadBarrier? stateReadBarrier;
             internal FakeEngine(Fixture fixture, ConnectedExplorerEngineRequest request, Saved? saved)
             { this.fixture = fixture; this.request = request; this.saved = saved; State = saved?.Removed == true ? ExplorerPreviewState.Removed : saved?.Failed == true ? ExplorerPreviewState.Failed : ExplorerPreviewState.NotStarted; }
             public string RootPath => request.PreferredRoot;
-            public ExplorerPreviewState State { get; private set; }
+            public ExplorerPreviewState State {
+                get {
+                    var thread = Environment.CurrentManagedThreadId;
+                    fixture.stateReads.AddOrUpdate(thread, 1, (_, count) => count + 1);
+                    var snapshot = currentState;
+                    var barrier = Volatile.Read(ref stateReadBarrier);
+                    if (barrier is not null && barrier.Thread == thread) {
+                        barrier.Entered.TrySetResult();
+                        if (!barrier.Release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Synthetic engine State read release required.");
+                    }
+                    return snapshot;
+                }
+                private set => currentState = value;
+            }
             public IReadOnlyList<string> Activity => [];
             public event EventHandler? Changed;
             public async Task StartAsync()
@@ -613,8 +832,22 @@ internal static class ConnectedExplorerSessionTests
                 fixture.NativeActivations++;
                 State = saved.Paused ? ExplorerPreviewState.Paused : ExplorerPreviewState.Running; Changed?.Invoke(this, EventArgs.Empty);
             }
-            public Task PauseAsync() { fixture.EnginePauses++; if (saved is not null) saved.Paused = true; State = ExplorerPreviewState.Paused; Changed?.Invoke(this, EventArgs.Empty); return Task.CompletedTask; }
-            public Task ResumeAsync() { fixture.EngineResumes++; if (saved is not null) saved.Paused = false; State = ExplorerPreviewState.Running; Changed?.Invoke(this, EventArgs.Empty); return Task.CompletedTask; }
+            public Task PauseAsync() {
+                fixture.EnginePauses++; if (fixture.RefusePause) throw new IOException("Synthetic pause not confirmed.");
+                if (saved is not null) saved.Paused = true; State = ExplorerPreviewState.Paused; Changed?.Invoke(this, EventArgs.Empty); return Task.CompletedTask;
+            }
+            public async Task ResumeAsync() {
+                fixture.EngineResumes++; fixture.Log.Add("resume-gate");
+                if (fixture.VerifyEngineSession) await request.Source.GetSessionAsync();
+                if (saved is not null) saved.Paused = false; State = ExplorerPreviewState.Running; fixture.Log.Add("engine-resumed"); Changed?.Invoke(this, EventArgs.Empty);
+            }
+            internal void ForceState(ExplorerPreviewState value) { State = value; Changed?.Invoke(this, EventArgs.Empty); }
+            internal void EmitChanged() => Changed?.Invoke(this, EventArgs.Empty);
+            internal void EmitWithBlockedStateRead(StateReadBarrier barrier)
+            {
+                barrier.Thread = Environment.CurrentManagedThreadId; Volatile.Write(ref stateReadBarrier, barrier);
+                try { EmitChanged(); } finally { Volatile.Write(ref stateReadBarrier, null); }
+            }
             public Task RemoveAsync() { if (saved is not null) saved.Removed = !fixture.UnconfirmedRemove; State = fixture.UnconfirmedRemove ? ExplorerPreviewState.Failed : ExplorerPreviewState.Removed; fixture.Log.Add("engine-remove"); fixture.AfterRemove?.Invoke(); Changed?.Invoke(this, EventArgs.Empty); return Task.CompletedTask; }
             public ValueTask DisposeAsync()
             {

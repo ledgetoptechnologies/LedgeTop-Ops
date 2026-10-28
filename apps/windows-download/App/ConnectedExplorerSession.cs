@@ -28,6 +28,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private const string Owner = "LedgeTop.Files.ConnectedExplorer.Index/1";
     private sealed record Index(int Schema, string Owner, string Sid, string Channel, string Alias,
         string OriginSha256, string PrincipalId, long Revision, bool Removed = false);
+    private sealed record TransientRecheckRecovery(ConnectedExplorerEngine Engine, IFilesBackend Backend, Index Index, string InventoryDigest);
     private static readonly JsonSerializerOptions json = new() { WriteIndented = true, UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
     private readonly Func<IFilesBackend> createBackend;
     private readonly Func<ConnectedExplorerEngineRequest, ConnectedExplorerEngine> createEngine;
@@ -43,6 +44,9 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private FileStream? indexLease;
     private Task? closing;
     private bool closeRequested, disposed, invalidIndex, starting;
+    private TransientRecheckRecovery? transientRecovery;
+    private long viewEpoch;
+    private ExplorerPreviewState? lastEngineState;
     private ExplorerPreviewState state;
 
     internal ConnectedExplorerSession(Func<IFilesBackend> backendFactory, string channel, string alias, Uri trustedOrigin,
@@ -84,6 +88,22 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     }
     public string RootPath { get { lock (view) return engine?.Session.RootPath ?? preferredRoot; } }
     public ExplorerPreviewState State { get { lock (view) return state; } }
+    // UI observation only. Full local ownership and fresh server identity are checked under
+    // the operation lock before a recovery can resume this exact provider generation.
+    internal bool CanRecoverTransientSession {
+        get { lock (view) return RecoveryVisibleUnderView(); }
+    }
+    internal bool CanRecheckSession {
+        get { lock (view) return !disposed && !closeRequested &&
+            (state is ExplorerPreviewState.Running or ExplorerPreviewState.Paused || RecoveryVisibleUnderView()); }
+    }
+    private bool RecoveryVisibleUnderView() => !disposed && !closeRequested && !invalidIndex && state == ExplorerPreviewState.Failed &&
+        transientRecovery is { } pending && ReferenceEquals(engine, pending.Engine) &&
+        ReferenceEquals(backend, pending.Backend) && ReferenceEquals(index, pending.Index);
+    private void ClearTransientRecovery()
+    {
+        lock (view) { if (transientRecovery is not null) { transientRecovery = null; viewEpoch++; } }
+    }
     internal bool InventoryEmpty { get { lock (view) {
         var inventory = engine?.ReadFrozenManifest();
         return inventory is not null && inventory.Files.Count == 0 && inventory.Directories.Count == 0;
@@ -260,8 +280,30 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     });
     internal Task RecheckSessionAsync() => OperateAsync(ConnectionAction.Recheck, async (token, trace) => {
         if (backend is null || index is null || engine is null) return;
+        TransientRecheckRecovery? recovery;
+        lock (view) recovery = transientRecovery;
+        if (State == ExplorerPreviewState.Failed && (recovery is null || !RecoveryStillOwned(recovery, ExplorerPreviewState.Paused, requirePending: true))) {
+            ClearTransientRecovery(); return;
+        }
+        if (State is not (ExplorerPreviewState.Running or ExplorerPreviewState.Paused or ExplorerPreviewState.Failed)) {
+            ClearTransientRecovery(); return;
+        }
         try { await CurrentPersonAsync(backend, SelectedSource(backend), token, trace, index.PrincipalId); }
         catch { Add("Your sign-in or file access could not be verified. New downloads have stopped; reconnect the same account or remove this connection before choosing another."); throw; }
+        if (recovery is not null) {
+            token.ThrowIfCancellationRequested();
+            trace.Phase = ConnectionPhase.LocalOwnership;
+            if (!RecoveryStillOwned(recovery, ExplorerPreviewState.Paused, requirePending: true)) throw new IOException("The paused recovery generation changed.");
+            // Resume performs the root engine's own current cached-source gate checks.
+            // No new backend, browser login, inventory capture or index publication occurs.
+            ClearTransientRecovery();
+            trace.Phase = ConnectionPhase.ProviderResume;
+            await recovery.Engine.Session.ResumeAsync(); token.ThrowIfCancellationRequested();
+            trace.Phase = ConnectionPhase.LocalOwnership;
+            if (!RecoveryStillOwned(recovery, ExplorerPreviewState.Running)) throw new IOException("The recovery did not confirm its running generation.");
+            SetState(ExplorerPreviewState.Running);
+            Add("Downloads resumed automatically after your current account and file access were verified.");
+        }
     });
     // This identity comes from the current selected server session, never saved UI text or a caller argument.
     // The updater must independently recheck the same principal under its own cached-session pin.
@@ -311,15 +353,30 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         var token = linked?.Token ?? connectionToken;
         await operations.WaitAsync(token).ConfigureAwait(false);
         var trace = new ConnectionFailureTrace(operation);
+        ExplorerPreviewState previousState; TransientRecheckRecovery? previousRecovery;
+        ConnectedExplorerEngine? previousEngine; IFilesBackend? previousBackend; Index? previousIndex; long observedEpoch;
+        lock (view) {
+            previousState = state; previousRecovery = state == ExplorerPreviewState.Failed ? transientRecovery : null;
+            previousEngine = engine; previousBackend = backend; previousIndex = index;
+            if ((operation != ConnectionAction.Recheck || previousState != ExplorerPreviewState.Failed) && transientRecovery is not null) {
+                transientRecovery = null; viewEpoch++;
+            }
+            observedEpoch = viewEpoch;
+        }
+        var wasRunning = false;
         try {
+            var observedRunning = operation == ConnectionAction.Recheck && previousState == ExplorerPreviewState.Running &&
+                previousEngine?.Session.State == ExplorerPreviewState.Running;
+            lock (view) wasRunning = observedRunning && viewEpoch == observedEpoch && ReferenceEquals(engine, previousEngine);
             token.ThrowIfCancellationRequested();
             if (invalidIndex) throw new IOException("The saved Explorer index needs ownership review.");
             await action(token, trace).ConfigureAwait(false);
         } catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception error) {
             var primary = trace.Failure(error);
+            var paused = false;
             if (engine?.Session.State == ExplorerPreviewState.Running) {
-                try { await engine.Session.PauseAsync().ConfigureAwait(false); }
+                try { await engine.Session.PauseAsync().ConfigureAwait(false); paused = engine.Session.State == ExplorerPreviewState.Paused; }
                 catch (Exception pauseError) {
                     Add("The file provider could not confirm its pause; keep this app open for ownership review.");
                     Add(ConnectionFailureTrace.Format(operation, ConnectionPhase.ProviderPause, pauseError));
@@ -328,11 +385,55 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             if (engine is null && index is not null) {
                 try { RestoreCleanupEngine(); } catch { /* retain the index for exact ownership review */ }
             }
-            SetState(ExplorerPreviewState.Failed);
+            TransientRecheckRecovery? nextRecovery = null;
+            long recoveryProofEpoch = -1;
+            if (operation == ConnectionAction.Recheck && (trace.Phase is ConnectionPhase.CurrentSession or ConnectionPhase.SourceSession) &&
+                TransientRecheckFailure(error) && previousEngine is not null && previousBackend is not null && previousIndex is not null &&
+                (wasRunning && paused || previousRecovery is not null && IsCurrentRecovery(previousRecovery))) {
+                try {
+                    var candidate = previousRecovery ?? new TransientRecheckRecovery(previousEngine, previousBackend, previousIndex,
+                        previousEngine.ReadFrozenManifest()?.Digest ?? "");
+                    lock (view) recoveryProofEpoch = viewEpoch;
+                    if (RecoveryStillOwned(candidate, ExplorerPreviewState.Paused)) nextRecovery = candidate;
+                } catch { /* Unknown local ownership is a manual hold, never automatic recovery. */ }
+            }
+            // Ownership/I/O above stays outside the view lock. Publish these two fields
+            // together so a late paused-provider Activity event cannot lose the retry.
+            lock (view) {
+                state = ExplorerPreviewState.Failed;
+                transientRecovery = viewEpoch == recoveryProofEpoch ? nextRecovery : null;
+                viewEpoch++;
+            }
+            Notify();
             Add(FailureActivity(error));
             Add(primary);
+            if (CanRecoverTransientSession)
+                Add("The file service is temporarily unavailable. Downloads will be checked again automatically; files already on this PC are kept.");
             throw;
         } finally { operations.Release(); }
+    }
+
+    private static bool TransientRecheckFailure(Exception error) => error is TransferException transfer &&
+        (transfer.Reason is TransferFailureReason.Network or TransferFailureReason.Timeout ||
+         transfer.Reason == TransferFailureReason.UnexpectedHttpStatus && transfer.HttpStatus is 502 or 503 or 504);
+
+    private bool IsCurrentRecovery(TransientRecheckRecovery pending) { lock (view) return ReferenceEquals(transientRecovery, pending); }
+    private bool RecoveryStillOwned(TransientRecheckRecovery pending, ExplorerPreviewState expectedState, bool requirePending = false)
+    {
+        long observedEpoch;
+        lock (view) {
+            if (requirePending && !ReferenceEquals(transientRecovery, pending)) return false;
+            observedEpoch = viewEpoch;
+        }
+        if (disposed || closeRequested || invalidIndex || indexLease is null || pending.InventoryDigest.Length == 0 ||
+            !ReferenceEquals(engine, pending.Engine) || !ReferenceEquals(backend, pending.Backend) || !ReferenceEquals(index, pending.Index) ||
+            pending.Index.Removed || pending.Engine.Session.State != expectedState || ReadIndex() != pending.Index ||
+            ValidatePreviousRemoval() || !pending.Engine.HasOwnedProfileReceipt()) return false;
+        var frozen = pending.Engine.ReadFrozenManifest();
+        if (frozen is null || frozen.Scope != Scope(pending.Index) || frozen.Digest != pending.InventoryDigest) return false;
+        lock (view) return viewEpoch == observedEpoch && ReferenceEquals(engine, pending.Engine) &&
+            ReferenceEquals(backend, pending.Backend) && ReferenceEquals(index, pending.Index) &&
+            (!requirePending || ReferenceEquals(transientRecovery, pending));
     }
 
     private IQueuedDownloadSource SelectedSource(IFilesBackend selected)
@@ -389,17 +490,34 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private void SetEngine(ConnectedExplorerEngine? next)
     {
         ConnectedExplorerEngine? previous;
-        lock (view) { previous = engine; engine = next; }
+        lock (view) {
+            previous = engine; engine = next;
+            if (!ReferenceEquals(previous, next)) { transientRecovery = null; lastEngineState = null; }
+            viewEpoch++;
+        }
         if (previous is not null) previous.Session.Changed -= EngineChanged;
         if (next is not null) next.Session.Changed += EngineChanged;
         Notify();
     }
     private void EngineChanged(object? sender, EventArgs e)
     {
-        var current = engine;
-        if (current is null || !ReferenceEquals(sender, current.Session)) return;
-        if (!starting && !closeRequested) SetState(current.Session.State);
-        else Notify();
+        ConnectedExplorerEngine? current; long observedEpoch;
+        lock (view) {
+            current = engine;
+            if (current is null || !ReferenceEquals(sender, current.Session)) return;
+            observedEpoch = viewEpoch;
+        }
+        var engineState = current.Session.State; // Never take an engine/native lock while holding view.
+        lock (view) {
+            if (viewEpoch != observedEpoch || !ReferenceEquals(engine, current)) return;
+            var changed = lastEngineState != engineState; lastEngineState = engineState;
+            if (engineState != ExplorerPreviewState.Paused && transientRecovery is not null) { transientRecovery = null; changed = true; }
+            // Events never promote a Failed hold. Explicit checked operations publish their
+            // successful state only after awaiting authorization and engine completion.
+            if (!starting && !closeRequested && state != ExplorerPreviewState.Failed && state != engineState) { state = engineState; changed = true; }
+            if (changed) viewEpoch++;
+        }
+        Notify();
     }
     private async Task DisposeEngineAsync(ConnectionFailureTrace? trace = null)
     {
@@ -490,6 +608,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             closeRequested = true;
             done = new(TaskCreationOptions.RunContinuationsAsynchronously); closing = done.Task;
         }
+        ClearTransientRecovery();
         // Cancellation is visible before awaiting the operation lock, including an in-flight browser helper/catalog request.
         try { cancellation.Cancel(); } catch { Add("Cancellation reported a problem; the connection is still waiting for shutdown confirmation."); }
         _ = Task.Run(async () => {
@@ -551,7 +670,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             if ((File.GetAttributes(part) & FileAttributes.ReparsePoint) != 0) throw new IOException("Explorer state aliases are unsupported.");
         }
     }
-    private void SetState(ExplorerPreviewState value) { lock (view) state = value; Notify(); }
+    private void SetState(ExplorerPreviewState value) { lock (view) { state = value; viewEpoch++; } Notify(); }
     private void Add(string text) { lock (view) { activity.Add(text); if (activity.Count > 100) activity.RemoveAt(0); } Notify(); }
     private void Notify() { try { Changed?.Invoke(this, EventArgs.Empty); } catch { } }
 
