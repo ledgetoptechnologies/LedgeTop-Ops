@@ -7,7 +7,7 @@ export { formatSessionExpiry, formatSessionRemaining } from "./session-time";
 import { GetAppDialog } from "./GetAppDialog";
 export { GetAppDialog } from "./GetAppDialog";
 export { ACCESS_LOGOUT, useAccessEmail, useAccessSignOut } from "./access-session";
-export { LEDGE_TOP_SUPPORT_EMAIL, SignInRecovery } from "./SignInRecovery";
+export { SignInRecovery } from "./SignInRecovery";
 import { useAccessSignOut } from "./access-session";
 import { createViewerStartupDiagnostics, VIEWER_DIAGNOSTICS_TTL_MS, type ViewerStartupSnapshot } from "./viewer-startup-diagnostics";
 

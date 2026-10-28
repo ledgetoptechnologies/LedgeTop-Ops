@@ -1535,7 +1535,6 @@
 .portal-share-created > div { display: flex; gap: .5rem; align-items: center; }
 .portal-share-created input { min-width: 0; flex: 1; }
 .portal-delegated-share-history { margin-top: 1.5rem; }
-.portal-contact-action { display: inline-flex; margin-top: 1rem; text-decoration: none; }
 
 /* ---------------------------------------------------------------------------
    Portal map selector (request form map)
