@@ -124,8 +124,11 @@ class RuntimeTests(unittest.TestCase):
         source_id = app.identity(self.path)
         key = app.key_for(self.root, self.path)
         self.generator.store_snapshot = {key: (source_id, 1000, "4", "old", 0, 0, 0)}
-        def encode(args, timeout, **_kwargs):
-            pathlib.Path(args[-1]).write_bytes(b"new proxy")
+        def encode(args, timeout, **kwargs):
+            destination = pathlib.Path(args[-1])
+            if kwargs.get("cwd"):
+                destination = pathlib.Path(kwargs["cwd"]) / destination
+            destination.write_bytes(b"new proxy")
             self.path.write_bytes(b"replaced source")
         with mock.patch.object(app, "probe", return_value=media(height=1080)), mock.patch.object(app, "validate_proxy", return_value=True), mock.patch.object(app, "run_process", side_effect=encode):
             self.assertEqual(self.generator.render(self.path, source_id), ("failed", None))

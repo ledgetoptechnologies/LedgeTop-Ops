@@ -131,12 +131,12 @@ def output_directory_fd(root, directory):
         raise
 
 
-def run_process(args, timeout, capture=False, pass_fds=()):
+def run_process(args, timeout, capture=False, pass_fds=(), cwd=None):
     if STOP.is_set():
         raise JobError("stopped")
     process = subprocess.Popen(args, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE if capture else subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True, **({"pass_fds": pass_fds} if os.name == "posix" else {}))
+        start_new_session=True, cwd=cwd, **({"pass_fds": pass_fds} if os.name == "posix" else {}))
     deadline = time.monotonic() + timeout
     try:
         if capture:
@@ -372,7 +372,8 @@ class Generator:
                 stage = ".proxy-gen-" + secrets.token_hex(16)
                 os.mkdir(stage, 0o700, dir_fd=output_fd)
                 temp = pathlib.Path(f"/proc/self/fd/{output_fd}/{stage}/proxy.mov")
-                run_process(encode_args(path, temp, media, config), config.encode_timeout, pass_fds=(output_fd,))
+                run_process(encode_args(path, pathlib.Path(stage) / "proxy.mov", media, config),
+                    config.encode_timeout, pass_fds=(output_fd,), cwd=f"/proc/self/fd/{output_fd}")
             else:
                 descriptor, name = tempfile.mkstemp(prefix=".proxy-gen-", suffix=".mov", dir=output.parent)
                 os.close(descriptor)
