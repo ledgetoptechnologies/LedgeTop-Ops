@@ -1425,6 +1425,8 @@ test("client shell contains very long account text and reflows at a 200% zoom eq
   await expect(accountCard.getByText(longName, { exact: true })).toBeVisible();
   await expect(accountCard.getByText(longEmail, { exact: true })).toBeVisible();
   await expect(page.locator(".client-portal-main")).toContainText("Contact Ledge Top to add a colleague");
+  // No support mailbox is published from the account page.
+  await expect(page.locator('.client-portal-main a[href^="mailto:"]')).toHaveCount(0);
   await expect(page.locator(".client-portal-main")).not.toContainText(/pilot/i);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
 

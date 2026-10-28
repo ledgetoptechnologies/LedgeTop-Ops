@@ -3614,12 +3614,6 @@ export function ClientPortalApp({
                 ? "Your account uses a verified identity. Contact Ledge Top to change your account details."
                 : "Your account uses a verified identity. Contact Ledge Top to add a colleague, update access, or change your account details."}
             </p>
-            <a
-              className="button-ghost button-small portal-contact-action"
-              href="mailto:info@ledgetopdroneservices.com"
-            >
-              Contact Ledge Top
-            </a>
           </Card>
           {capabilities.workspaceMembershipManagement && <Card title="Team access" className="portal-team-card"><WorkspaceTeamPanel key={selectedWorkspaceId ?? "legacy"} initialWorkspaceId={selectedWorkspaceId} invitationEmailDelivery={capabilities.invitationEmailDelivery} hierarchyScopedInvitations={capabilities.hierarchyScopedInvitations} /></Card>}
         </div>
