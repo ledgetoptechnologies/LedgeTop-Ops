@@ -538,7 +538,7 @@ internal sealed class ExplorerPreviewWindow : Window
         if (!presentation.Generated && !quitting && problem.Length == 0 && state == ExplorerPreviewState.Running &&
             session is ConnectedExplorerSession { InventoryEmpty: true }) {
             status.Text = "Connected — saved file list is empty";
-            detail.Text = "You're signed in, but this PC's saved file list is empty. It may be out of date. Reconnecting reuses that list; it does not refresh it or confirm current sharing.";
+            detail.Text = "You're signed in, but this PC's saved file list is empty. Sign in and refresh the file list to check current sharing. If files are found, Explorer uses a new owned folder; the old folder and all local files are kept.";
         }
         var enabled = !busy && !quitting && !updateMaintenance;
         updateVersion.Text = "Version " + (updates?.CurrentVersion ?? typeof(ExplorerPreviewWindow).Assembly.GetName().Version?.ToString(4) ?? "unavailable");
@@ -548,8 +548,10 @@ internal sealed class ExplorerPreviewWindow : Window
         var canReconnect = !presentation.Generated && (session is ICachedExplorerReconnect { CanReconnectCached: true } || session is null && drainedBinding is not null && !updateDrainUncertain);
         ReconnectButton.Visibility = canReconnect ? Visibility.Visible : Visibility.Collapsed;
         ReconnectButton.IsEnabled = enabled && canReconnect;
-        StartButton.IsEnabled = enabled && state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed;
-        StartButton.Visibility = drainedBinding is null && state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed ? Visibility.Visible : Visibility.Collapsed;
+        var canRefreshEmpty = !presentation.Generated && session is ConnectedExplorerSession { CanRefreshEmptyInventory: true };
+        if (!presentation.Generated) StartButton.Content = canRefreshEmpty ? "Sign in and refresh file list" : "Sign in and connect files";
+        StartButton.IsEnabled = enabled && (canRefreshEmpty || state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed);
+        StartButton.Visibility = drainedBinding is null && (canRefreshEmpty || state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed) ? Visibility.Visible : Visibility.Collapsed;
         OpenFolderButton.IsEnabled = !quitting && Directory.Exists(session?.RootPath ?? drainedRoot);
         PauseButton.IsEnabled = enabled && state == ExplorerPreviewState.Running;
         PauseButton.Visibility = state == ExplorerPreviewState.Running ? Visibility.Visible : Visibility.Collapsed;

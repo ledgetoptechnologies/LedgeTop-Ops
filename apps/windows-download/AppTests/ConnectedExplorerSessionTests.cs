@@ -25,7 +25,66 @@ internal static class ConnectedExplorerSessionTests
         await CachedReconnect(); count++;
         await UpdateIdentityBinding(); count++;
         await CaptureDiagnostics(); count++;
-        Console.WriteLine($"Connected Explorer coordinator: {count}/13 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+        await ExplicitEmptyRefresh(); count++;
+        Console.WriteLine($"Connected Explorer coordinator: {count}/14 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+    }
+
+    private static async Task ExplicitEmptyRefresh()
+    {
+        foreach (var mode in new[] { "refresh", "still-empty", "capture-fails", "person-changes", "manifest-changes", "cancel-capture", "remove-uncertain", "cancel-after-remove" }) {
+            await using var f = new Fixture { EmptyInventory = true };
+            var session = f.Create(); await session.StartAsync();
+            var before = File.ReadAllBytes(f.IndexPath);
+            Directory.CreateDirectory(Path.GetDirectoryName(f.LocalSentinel)!);
+            File.WriteAllText(f.LocalSentinel, "locally added bytes stay here");
+            Check(session.CanRefreshEmptyInventory, "owned empty generation offers explicit refresh");
+            f.EmptyInventory = mode == "still-empty";
+            if (mode == "capture-fails") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.FileResolution, CatalogCaptureBoundary.MetadataRequest, TransferFailureReason.Network, null);
+            if (mode == "person-changes") f.AfterCapture = () => f.Person = Fixture.PersonB;
+            if (mode == "manifest-changes") f.AfterCapture = f.ChangeSavedManifest;
+            if (mode == "remove-uncertain") f.UnconfirmedRemove = true;
+            if (mode == "cancel-after-remove") f.AfterRemove = () => { _ = session.DisposeAsync(); };
+            if (mode == "cancel-capture") f.HoldCapture = true;
+            var refresh = session.StartAsync();
+            if (mode == "cancel-capture") {
+                // The first seed capture already completed its signal: this fresh operation still waits on the unreleased capture gate.
+                Check(!refresh.IsCompleted, "refresh waits for current authorized capture");
+                var closing = session.DisposeAsync().AsTask(); await Cancelled(refresh); await closing;
+            } else if (mode == "cancel-after-remove") await Cancelled(refresh);
+            else if (mode == "capture-fails") {
+                try { await refresh; throw new InvalidOperationException("Expected capture failure."); }
+                catch (CatalogCaptureException error) when (ReferenceEquals(error, f.CaptureFailure)) { }
+            }
+            else if (mode is "person-changes" or "manifest-changes" or "remove-uncertain") await Refuses(() => refresh);
+            else await refresh;
+            Check(File.ReadAllText(f.LocalSentinel) == "locally added bytes stay here", "refresh never deletes or modifies an added local file");
+            var removed = f.Log.Count(item => item == "engine-remove");
+            if (mode == "refresh") {
+                Check(removed == 1 && f.Captures == 2 && f.EngineStarts == 2 && !session.InventoryEmpty && !session.CanRefreshEmptyInventory,
+                    "explicit sign-in refresh rotates only an empty generation after capture and exact removal");
+                Check(session.Activity.Any(line => line.Contains("old folder and all local files were kept", StringComparison.Ordinal)), "refresh explains retained old folder/new owned folder");
+                var captures = f.Captures; await session.StartAsync();
+                Check(f.Captures == captures && f.Log.Count(item => item == "engine-remove") == 1, "nonempty explicit reconnect never recaptures or removes");
+            } else if (mode == "still-empty") Check(removed == 0 && session.InventoryEmpty && f.Captures == 2 &&
+                session.Activity.All(line => !line.Contains("Reconnecting does not refresh it", StringComparison.Ordinal)), "still-empty capture reuses existing registration without contradictory activity");
+            else if (mode == "cancel-after-remove") Check(removed == 1 && JsonNode.Parse(File.ReadAllText(f.IndexPath))!["Removed"]!.GetValue<bool>() && f.EngineStarts == 1,
+                "confirmed removal is durable before cancellation and never creates a replacement");
+            else Check(removed == (mode == "remove-uncertain" ? 1 : 0) && f.EngineStarts == 1 && before.AsSpan().SequenceEqual(File.ReadAllBytes(f.IndexPath)),
+                "failed capture/account/cancellation or uncertain removal never publishes a replacement index");
+        }
+        await using (var f = new Fixture { DirectoriesOnly = true }) {
+            var session = f.Create(); await session.StartAsync();
+            Check(!session.InventoryEmpty && !session.CanRefreshEmptyInventory, "a saved directory also makes an inventory nonempty");
+            f.DirectoriesOnly = false; await session.StartAsync();
+            Check(f.Captures == 1 && !f.Log.Contains("engine-remove"), "directory-only inventory is never rotated or recaptured");
+        }
+        await using (var f = new Fixture { EmptyInventory = true }) {
+            var first = f.Create(); await first.StartAsync(); await first.DisposeAsync();
+            f.EmptyInventory = false;
+            var before = File.ReadAllBytes(f.IndexPath); var restored = f.Create(); await restored.ReconnectCachedAsync();
+            Check(f.Captures == 1 && restored.InventoryEmpty && !f.Log.Contains("engine-remove") && before.AsSpan().SequenceEqual(File.ReadAllBytes(f.IndexPath)),
+                "cached startup/reconnect never refreshes even an empty saved generation");
+        }
     }
 
     private static async Task CaptureDiagnostics()
@@ -363,6 +422,9 @@ internal static class ConnectedExplorerSessionTests
         internal bool HoldLogin, HoldCapture, HoldCurrent, HoldEngineSession, HoldSourceSession, IgnoreLoginCancellation, Expired, AccessDenied, FailEngineStart, ThrowIfBackendCreated, EmptyInventory,
             FailFirstRunningDispose, RunningDisposeRefused, VerifyEngineSession, FailEngineBeforeProfile, FailEnginePreparedAuth;
         internal CatalogCaptureException? CaptureFailure;
+        internal Action? AfterCapture, AfterRemove;
+        internal bool UnconfirmedRemove, DirectoriesOnly;
+        internal string LocalSentinel => Path.Combine(root, "Files", "added-local.txt");
         internal int Backends, SignIns, Captures, EngineStarts, EnginePauses, EngineResumes, BackendDisposals, Requests, NativeActivations;
         internal readonly TaskCompletionSource LoginEntered = new(TaskCreationOptions.RunContinuationsAsynchronously), LoginRelease = new(TaskCreationOptions.RunContinuationsAsynchronously),
             CaptureEntered = new(TaskCreationOptions.RunContinuationsAsynchronously), CaptureRelease = new(TaskCreationOptions.RunContinuationsAsynchronously),
@@ -371,6 +433,11 @@ internal static class ConnectedExplorerSessionTests
         internal string IndexPath => Path.Combine(root, "State", "connected-explorer-pilot-portal", "current.json");
         private static readonly Uri Origin = new("https://coordinator.invalid");
         internal Fixture() => Directory.CreateDirectory(root);
+        internal void ChangeSavedManifest()
+        {
+            var saved = profiles.Values.Single(item => !item.Removed);
+            saved.Manifest = new ExplorerRootManifest(saved.Manifest.Scope, new Dictionary<string, PlaceholderIdentity>(), ["changed"]);
+        }
         internal void ForgetRemovedProfiles()
         {
             if (profiles.Values.Any(profile => !profile.Removed)) throw new InvalidOperationException("Only confirmed removed test profiles may be forgotten.");
@@ -397,8 +464,9 @@ internal static class ConnectedExplorerSessionTests
             if (CaptureFailure is { } failure) throw failure;
             if (HoldCapture) await CaptureRelease.Task.WaitAsync(token);
             var source = backend.Sources.Single();
-            if (EmptyInventory) return new(expected, channel, source.Alias, source.Origin.GetLeftPart(UriPartial.Authority),
-                new Dictionary<string, PlaceholderIdentity>(), []);
+            AfterCapture?.Invoke();
+            if (EmptyInventory || DirectoriesOnly) return new(expected, channel, source.Alias, source.Origin.GetLeftPart(UriPartial.Authority),
+                new Dictionary<string, PlaceholderIdentity>(), DirectoriesOnly ? ["shared"] : []);
             var id = new PlaceholderIdentity(channel, source.Alias, source.Origin.GetLeftPart(UriPartial.Authority), expected,
                 "odqr1_reference", "ondf1_" + new string('c', 64), Version, "sample.txt", 0, "\"etag\"", new string('d', 64));
             return new(expected, channel, source.Alias, source.Origin.GetLeftPart(UriPartial.Authority),
@@ -490,7 +558,7 @@ internal static class ConnectedExplorerSessionTests
             }
             public Task PauseAsync() { fixture.EnginePauses++; if (saved is not null) saved.Paused = true; State = ExplorerPreviewState.Paused; Changed?.Invoke(this, EventArgs.Empty); return Task.CompletedTask; }
             public Task ResumeAsync() { fixture.EngineResumes++; if (saved is not null) saved.Paused = false; State = ExplorerPreviewState.Running; Changed?.Invoke(this, EventArgs.Empty); return Task.CompletedTask; }
-            public Task RemoveAsync() { if (saved is not null) saved.Removed = true; State = ExplorerPreviewState.Removed; fixture.Log.Add("engine-remove"); Changed?.Invoke(this, EventArgs.Empty); return Task.CompletedTask; }
+            public Task RemoveAsync() { if (saved is not null) saved.Removed = !fixture.UnconfirmedRemove; State = fixture.UnconfirmedRemove ? ExplorerPreviewState.Failed : ExplorerPreviewState.Removed; fixture.Log.Add("engine-remove"); fixture.AfterRemove?.Invoke(); Changed?.Invoke(this, EventArgs.Empty); return Task.CompletedTask; }
             public ValueTask DisposeAsync()
             {
                 if (!disposed) {
