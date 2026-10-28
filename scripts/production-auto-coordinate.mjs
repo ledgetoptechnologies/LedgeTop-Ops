@@ -6,6 +6,7 @@
  */
 import { createHash } from 'node:crypto';
 import { mergeAssetLedger, providerManifest, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
+import { ASSET_VERIFICATION_LIMITS } from './production-auto-verify.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { isProviderUtcTimestamp, minimumRetainedUntil } from './production-auto-time.mjs';
 
@@ -42,12 +43,12 @@ function verifierBounds(...inventories) {
     need(Array.isArray(rows), 'Verifier asset inventory is unavailable');
     for (const row of rows) {
       need(row && typeof row.path === 'string' && Number.isSafeInteger(row.size) && row.size >= 0
-        && row.size <= 16 * 1024 * 1024, 'Asset exceeds the qualified verifier file bound');
+        && row.size <= ASSET_VERIFICATION_LIMITS.fileBytes, 'Asset exceeds the qualified verifier file bound');
       union.set(row.path, row.size);
     }
   }
   need(union.size > 0 && union.size <= 1024
-    && [...union.values()].reduce((sum, size) => sum + size, 0) <= 128 * 1024 * 1024,
+    && [...union.values()].reduce((sum, size) => sum + size, 0) <= ASSET_VERIFICATION_LIMITS.totalBytes,
   'Asset union exceeds the qualified verifier bound');
 }
 
@@ -162,10 +163,18 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
     phase = 'prepare';
     const built = await adapter.build({ sourceCommit, workerName });
     need(built?.sourceCommit === sourceCommit && SHA.test(built.moduleSHA256), 'Build source/module pin is invalid');
-    const previous = validateAssetLedger(await adapter.readLedger({ baseline: copy(baseline) }), { workerName, accountId });
+    let previous = validateAssetLedger(await adapter.readLedger({ baseline: copy(baseline) }), { workerName, accountId });
     verifierBounds(previous.assets, built.assets?.entries);
     const old = await adapter.readOldAssets({ ledger: copy(previous), baseline: copy(baseline) });
     need(old instanceof Map && built.assets?.payloads instanceof Map, 'Old/new asset payloads are unavailable');
+    if (typeof adapter.completeInventory === 'function') {
+      previous = validateAssetLedger(await adapter.completeInventory({ previous: copy(previous),
+        verifiedAssets: old, baseline: copy(baseline) }), { workerName, accountId });
+    }
+    need(old.size === previous.assets.length && previous.assets.every(row => {
+      const bytes = old.get(row.path);
+      return Buffer.isBuffer(bytes) && bytes.length === row.size && hash(bytes) === row.sha256;
+    }), 'Complete active asset inventory was not byte verified');
     const payloads = new Map(old);
     for (const [name, bytes] of built.assets.payloads) payloads.set(name, bytes);
     const ledger = mergeAssetLedger({ previous, current: { entries: built.assets.entries, payloads },
