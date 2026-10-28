@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="/workspace-transfers.css">
 </head>
 <body>
+  <a class="skip-link" href="#workspace-content">Skip to content</a>
   <div id="workspace" class="workspace-shell">
     <aside class="workspace-nav" aria-label="Viewer workspace">
       <a class="workspace-brand" href="/workspace" aria-label="Ledge Top Viewer home">
@@ -35,7 +36,8 @@
           <button class="primary-button" id="new-project-button">New project</button>
         </div>
       </header>
-      <section id="workspace-content" aria-live="polite"></section>
+      <section id="workspace-content" tabindex="-1" aria-label="Workspace content"><div class="workspace-loading" aria-hidden="true"><div class="skeleton-strip"></div><div class="skeleton-row"></div><div class="skeleton-row"></div><div class="skeleton-row"></div></div><p class="sr-only">Loading workspace…</p></section>
+      <p id="workspace-status" class="sr-only" role="status" aria-live="polite"></p>
     </main>
   </div>
   <dialog id="workspace-modal" class="workspace-modal" aria-labelledby="workspace-modal-title">
