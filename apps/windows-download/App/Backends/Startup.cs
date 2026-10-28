@@ -8,10 +8,11 @@ public sealed record StartupPlan(IFilesBackend? Backend, string? Problem, string
 
 /// <summary>
 /// Real sources open one kind of files at a time. <see cref="Create"/> builds only the chosen source from the fixed,
-/// trusted setup; nothing signs in until the person has chosen. The remembered choice is a convenience, not authority.
+/// trusted setup; nothing signs in until an explicit sign-in action. Installed releases expose employees only;
+/// a developer setup may retain the source chooser. The remembered choice is a convenience, not authority.
 /// </summary>
 public sealed record AccessChoice(Func<AccessMode, IFilesBackend> Create, IReadOnlyList<AccessMode> Modes, AccessPreference Preference,
-    IReadOnlyDictionary<AccessMode, Uri>? TrustedOrigins = null);
+    IReadOnlyDictionary<AccessMode, Uri>? TrustedOrigins = null, bool EmployeeOnly = false);
 
 /// <summary>
 /// Chooses how this copy runs. A packaged release (channel compiled in) uses only its compiled profile and its own
@@ -24,6 +25,8 @@ public static class Startup
     public const string HelperProblem = "The sign-in helper installed with Ledge Top Files is missing or has been changed, so it can't be trusted. Reinstall Ledge Top Files or ask your Ledge Top contact to check it.";
     public const string UnreviewedProblem = "This release of Ledge Top Files isn't ready to connect yet. Use a newer release or ask your Ledge Top contact.";
     public const string UnknownReleaseProblem = "This copy of Ledge Top Files has an unknown release setting, so it won't connect. Reinstall Ledge Top Files or ask your Ledge Top contact.";
+    public const string ClientUnavailableProblem = "Client access is not set up for this app yet. This release connects employee accounts to their approved company files.";
+    internal static IReadOnlyList<AccessMode> InstalledModes { get; } = Array.AsReadOnly(new[] { AccessMode.Employee });
 
     /// <summary>The pinned helper exists as a plain local file (no links on its path) with exactly the expected SHA-256.</summary>
     internal static bool HelperTrusted(string path, string sha256)
@@ -55,7 +58,7 @@ public static class Startup
             if (helper is null) return new(null, UnreviewedProblem, downloads, tag);
             var settings = new LiveSettings(profile.PortalApplicationUrl, profile.StaffApplicationUrl, helper, profile.CloudflaredSha256);
             var folder = channel == ReleaseChannel.Pilot ? "pilot" : "stable";
-            return Choice(settings, localAppData, folder, downloads, tag) ?? new(null, HelperProblem, downloads, tag);
+            return Choice(settings, localAppData, folder, downloads, tag, employeeOnly: true) ?? new(null, HelperProblem, downloads, tag);
         }
         if (arguments.Contains("--demo") || arguments.Contains("--demo-signed-in")) {
             var root = Path.Combine(Path.GetTempPath(), "LedgeTopFilesDemo");
@@ -72,20 +75,32 @@ public static class Startup
     }
 
     /// <summary>
-    /// Offers client deliveries, plus company files when this setup includes the staff application. The pinned helper
+    /// Offers employee files for installed releases; developer setups can also offer client deliveries. The pinned helper
     /// is checked now; missing/changed helpers are reported while keeping local connection cleanup available.
     /// Backend construction rechecks the helper before sign-in can run.
     /// </summary>
-    private static StartupPlan? Choice(LiveSettings settings, string localAppData, string folder, string downloads, string? tag)
+    private static StartupPlan? Choice(LiveSettings settings, string localAppData, string folder, string downloads, string? tag, bool employeeOnly = false)
     {
+        // The installed first release has one supported source. This is a product capability,
+        // not an inference about the signed-in person's role; the employee backend still
+        // requires authoritative staff admission and current file grants after sign-in.
+        if (employeeOnly && settings.StaffApplicationUrl is null)
+            return new(null, "Employee files are not configured in this release. " + ClientUnavailableProblem, downloads, tag);
         var root = StateRoot(localAppData, folder);
         // Report helper problems without hiding local connection cleanup. Neither source is built
         // here; its real constructor still rechecks the pinned helper before any authentication.
         var helperProblem = HelperTrusted(settings.CloudflaredPath, settings.CloudflaredSha256) ? null : HelperProblem;
-        AccessMode[] modes = settings.StaffApplicationUrl is null ? [AccessMode.Client] : [AccessMode.Client, AccessMode.Employee];
+        IReadOnlyList<AccessMode> modes = employeeOnly ? InstalledModes
+            : settings.StaffApplicationUrl is null ? [AccessMode.Client] : [AccessMode.Client, AccessMode.Employee];
         var origins = new System.Collections.ObjectModel.ReadOnlyDictionary<AccessMode, Uri>(modes.ToDictionary(mode => mode,
             mode => new Uri((mode == AccessMode.Client ? settings.PortalApplicationUrl : settings.StaffApplicationUrl!).GetLeftPart(UriPartial.Authority))));
-        return new(null, helperProblem, downloads, tag, new AccessChoice(mode => new LiveBackend(settings, root, mode), modes,
-            AccessPreference.For(localAppData, folder), origins));
+        IFilesBackend Create(AccessMode mode)
+        {
+            // Enforce the offered capability at construction as well as hiding its UI.
+            if (!modes.Contains(mode)) throw new SettingsException(ClientUnavailableProblem);
+            return new LiveBackend(settings, root, mode);
+        }
+        return new(null, helperProblem, downloads, tag, new AccessChoice(Create, modes,
+            AccessPreference.For(localAppData, folder), origins, employeeOnly));
     }
 }

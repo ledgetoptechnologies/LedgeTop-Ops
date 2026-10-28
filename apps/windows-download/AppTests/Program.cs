@@ -77,6 +77,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("Saved-source resume admits only the exact offered pilot coordinate", ExplorerResumeRequestTests.Run),
     ("Installed update parent classifies cancellation before helper capability", ExplorerInstalledUpdateControllerTests.Run),
     ("Automatic update schedule preserves idle and recovery boundaries", LedgeTop.Files.Tests.ExplorerUpdateScheduleTests.Run),
+    ("Employee-only installed entry preserves source isolation and client-unavailable messaging", EmployeeFirstReleaseTests.Run),
     ("Saved connection startup routing retains pinned owned identity and source isolation", SavedConnectionStartupRouterTests.Run),
     ("Unified sign-in binds authoritative source selection to one authenticated attempt", UnifiedSignInTests.Run),
     ("Windows startup settings preserve fixed installed ownership and foreign values", WindowsStartupAdapterTests.Run),
@@ -85,7 +86,9 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("Legacy preview cleanup preserves content and verifies already-removed registrations", LegacyExplorerPreviewCleanupTests.Run),
     ("Folder launcher keeps dispatcher and Quit responsive while Windows Shell is blocked", () => BackgroundFolderLauncherTests.Run(screenshots)),
 }.Concat(ExplorerCatalogSnapshotTests.Groups).ToArray();
-var selectedGroups = args.Contains("--saved-connection-startup-only")
+var selectedGroups = args.Contains("--employee-first-release-only")
+    ? groups.Where(group => group.Name.StartsWith("client and employee backends", StringComparison.Ordinal) || group.Name.StartsWith("Employee-only installed entry", StringComparison.Ordinal) || group.Name.StartsWith("packaged releases", StringComparison.Ordinal) || group.Name.StartsWith("Saved connection startup routing", StringComparison.Ordinal) || group.Name.StartsWith("Connected Explorer coordinates", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--saved-connection-startup-only")
     ? groups.Where(group => group.Name.StartsWith("Saved connection startup routing", StringComparison.Ordinal)).ToArray()
     : args.Contains("--unified-sign-in-only")
     ? groups.Where(group => group.Name.StartsWith("Unified sign-in", StringComparison.Ordinal)).ToArray()
@@ -548,14 +551,16 @@ async Task PackagedReleases()
 
         // Packaged pilot: the compiled profile only, despite the settings file, arguments and environment.
         var plan = Run(pilot, channel => Profile(channel), "--demo", "--demo-signed-in", "--settings", LiveSettings.PathUnder(local));
-        // Packaged releases offer a choice and sign in to nothing until one is made; each choice builds one source only.
-        True(plan.Backend is null && plan.Problem is null && plan.Access is not null, "packaged release offers a choice: " + plan.Problem);
-        True(plan.Access!.Modes.SequenceEqual([AccessMode.Client, AccessMode.Employee]), "client and company files offered");
-        Equal("https://portal.example.test/", plan.Access.TrustedOrigins![AccessMode.Client].AbsoluteUri);
+        // The installed first release supports employees only and creates no backend before an explicit action.
+        True(plan.Backend is null && plan.Problem is null && plan.Access is not null, "packaged employee release is prepared: " + plan.Problem);
+        True(plan.Access!.EmployeeOnly && plan.Access.Modes.SequenceEqual([AccessMode.Employee]), "installed release offers only company files");
+        True(!plan.Access.TrustedOrigins!.ContainsKey(AccessMode.Client), "client origin is not exposed by installed capability");
         Equal("https://ops.example.test/", plan.Access.TrustedOrigins[AccessMode.Employee].AbsoluteUri);
         Equal(Path.Combine(local, "LedgeTop", "Files", "pilot", "access-mode.json"), plan.Access.Preference.Path);
-        var live = plan.Access.Create(AccessMode.Client) as LiveBackend ?? throw new Exception("Expected the live backend");
-        Equal("portal", live.Sources.Single().Alias);
+        var clientRefused = false; try { await using var unexpected = plan.Access.Create(AccessMode.Client); } catch (SettingsException error) { clientRefused = error.Message == Startup.ClientUnavailableProblem; }
+        True(clientRefused, "client factory refuses with unavailable notice before any client backend");
+        var live = plan.Access.Create(AccessMode.Employee) as LiveBackend ?? throw new Exception("Expected the live backend");
+        Equal("employee", live.Sources.Single().Alias);
         await using (var company = (LiveBackend)plan.Access.Create(AccessMode.Employee)) Equal("employee", company.Sources.Single().Alias);
         Equal("https://portal.example.test/portal", live.Settings.PortalApplicationUrl.ToString());
         Equal(Path.Combine(install, "helper", "cloudflared.exe"), live.Settings.CloudflaredPath);
@@ -565,7 +570,7 @@ async Task PackagedReleases()
         await live.DisposeAsync();
 
         // Stable has its own folder; neither reuses the developer or the old shared records.
-        var stable = (LiveBackend)Run((true, ReleaseChannel.Stable), channel => Profile(channel)).Access!.Create(AccessMode.Client);
+        var stable = (LiveBackend)Run((true, ReleaseChannel.Stable), channel => Profile(channel)).Access!.Create(AccessMode.Employee);
         Equal(Path.Combine(local, "LedgeTop", "Files", "stable", "queue"), stable.StateDirectory);
         await stable.DisposeAsync();
         var roots = new[] { live.StateDirectory, stable.StateDirectory, Startup.StateRoot(local, "developer"), Path.Combine(local, "LedgeTop", "Files", "queue") };
@@ -611,10 +616,10 @@ async Task PackagedReleases()
         True(wrong.Backend is null && wrong.Problem == Startup.HelperProblem, "changed helper refused");
         var missing = Run(pilot, channel => Profile(channel, relative: @"helper\missing.exe"));
         True(missing.Backend is null && missing.Problem == Startup.HelperProblem, "missing helper refused");
-        True(missing.Access is not null && missing.Access.TrustedOrigins![AccessMode.Client].Host == "portal.example.test",
+        True(missing.Access is not null && missing.Access.TrustedOrigins![AccessMode.Employee].Host == "ops.example.test",
             "missing helper keeps local source selection and offline cleanup available");
         var missingRefused = false;
-        try { await using var unexpected = missing.Access!.Create(AccessMode.Client); }
+        try { await using var unexpected = missing.Access!.Create(AccessMode.Employee); }
         catch (TransferException) { missingRefused = true; }
         True(missingRefused, "helper integrity still refuses backend creation before sign-in");
 
@@ -638,8 +643,9 @@ async Task PackagedReleases()
 
         // Developer builds keep explicit demo and the developer settings file, with their own folder.
         Equal("Demo data", Run((false, null), ReleaseProfiles.For, "--demo").Tag);
-        // A profile without the staff application offers client deliveries only.
-        True(Run(pilot, channel => Profile(channel) with { StaffApplicationUrl = null }).Access!.Modes.SequenceEqual([AccessMode.Client]), "client-only setup");
+        // Missing employee setup cannot expose the client service as a fallback.
+        var noEmployee = Run(pilot, channel => Profile(channel) with { StaffApplicationUrl = null });
+        True(noEmployee.Access is null && noEmployee.Backend is null && noEmployee.Problem!.Contains(Startup.ClientUnavailableProblem, StringComparison.Ordinal), "missing employee setup refuses without client fallback");
         var developer = Run((false, null), ReleaseProfiles.For);
         True(developer.Backend is null && developer.Problem == Startup.HelperProblem, "developer build uses its own settings file (whose helper is missing here)");
         File.Delete(LiveSettings.PathUnder(local));

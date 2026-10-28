@@ -30,7 +30,11 @@ public partial class App : Application
             return;
         }
         var resume = ExplorerResumeRequest.Parse(e.Args);
-        if (!resume.AllowedIn(compiled)) { Shutdown(20); return; }
+        if (!resume.AllowedIn(compiled, compiled.Packaged ? Backends.Startup.InstalledModes : null)) {
+            if (compiled.Packaged && resume.SourceMode == AccessMode.Client)
+                MessageBox.Show(Backends.Startup.ClientUnavailableProblem, "LedgeTop Files", MessageBoxButton.OK, MessageBoxImage.Information);
+            Shutdown(20); return;
+        }
         var startupAdapter = compiled.Packaged && compiled.Channel == ReleaseChannel.Pilot ? new WindowsStartupAdapter() : null;
         if (InstallerMaintenance.Requested(e.Args)) {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
@@ -131,7 +135,7 @@ public partial class App : Application
             try {
                 preparedSession ??= Prepare(mode.Value);
                 settings = new ExplorerPreviewWindow(() => Task.FromResult<IExplorerPreviewSession>(Prepare(mode.Value)), presentation:
-                    ExplorerWindowContent.Connected(plan.Tag ?? "Files", mode.Value), preparedSession: preparedSession, setupProblem: plan.Problem);
+                    ExplorerWindowContent.Connected(plan.Tag ?? "Files", mode.Value, access.EmployeeOnly), preparedSession: preparedSession, setupProblem: plan.Problem);
             } catch (Exception) {
                 if (preparedSession is not null) { try { await preparedSession.DisposeAsync(); } catch { } }
                 MessageBox.Show("LedgeTop Files couldn't prepare its local connection. Restart the app, and ask your LedgeTop contact to check setup if this continues.",

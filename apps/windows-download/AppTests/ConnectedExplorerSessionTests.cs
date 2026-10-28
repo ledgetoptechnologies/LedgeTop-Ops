@@ -26,7 +26,24 @@ internal static class ConnectedExplorerSessionTests
         await UpdateIdentityBinding(); count++;
         await CaptureDiagnostics(); count++;
         await ExplicitEmptyRefresh(); count++;
-        Console.WriteLine($"Connected Explorer coordinator: {count}/14 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+        await EmployeeAdmission(); count++;
+        Console.WriteLine($"Connected Explorer coordinator: {count}/15 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+    }
+
+    private static async Task EmployeeAdmission()
+    {
+        await using (var denied = new Fixture { Alias = "employee", AccessDenied = true }) {
+            var session = denied.Create(); await Refuses(session.StartAsync);
+            Check(denied.Backends == 1 && denied.SignIns == 1 && denied.Captures == 0 && denied.EngineStarts == 0 &&
+                !File.Exists(denied.IndexPath) && session.State == ExplorerPreviewState.Failed,
+                "an authenticated but unadmitted employee account opens no inventory/provider and never probes a client source");
+        }
+        await using (var admitted = new Fixture { Alias = "employee", EmptyInventory = true }) {
+            var session = admitted.Create(); await session.StartAsync();
+            Check(admitted.Backends == 1 && admitted.Captures == 1 && admitted.EngineStarts == 1 && session.InventoryEmpty &&
+                session.State == ExplorerPreviewState.Running && admitted.StartedSources.All(source => source.Alias == "employee"),
+                "authoritatively admitted employee with zero current shared roots remains connected to the employee source");
+        }
     }
 
     private static async Task ExplicitEmptyRefresh()
@@ -418,7 +435,7 @@ internal static class ConnectedExplorerSessionTests
         private readonly List<ConnectedExplorerSession> sessions = [];
         internal readonly List<string> Log = [];
         internal readonly List<IQueuedDownloadSource> StartedSources = [];
-        internal string Person = PersonA, Version = "version-one", WrongConfiguration = "";
+        internal string Person = PersonA, Version = "version-one", WrongConfiguration = "", Alias = "portal";
         internal bool HoldLogin, HoldCapture, HoldCurrent, HoldEngineSession, HoldSourceSession, IgnoreLoginCancellation, Expired, AccessDenied, FailEngineStart, ThrowIfBackendCreated, EmptyInventory,
             FailFirstRunningDispose, RunningDisposeRefused, VerifyEngineSession, FailEngineBeforeProfile, FailEnginePreparedAuth;
         internal CatalogCaptureException? CaptureFailure;
@@ -430,7 +447,7 @@ internal static class ConnectedExplorerSessionTests
             CaptureEntered = new(TaskCreationOptions.RunContinuationsAsynchronously), CaptureRelease = new(TaskCreationOptions.RunContinuationsAsynchronously),
             CurrentEntered = new(TaskCreationOptions.RunContinuationsAsynchronously), CurrentRelease = new(TaskCreationOptions.RunContinuationsAsynchronously),
             EngineSessionEntered = new(TaskCreationOptions.RunContinuationsAsynchronously), EngineSessionRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal string IndexPath => Path.Combine(root, "State", "connected-explorer-pilot-portal", "current.json");
+        internal string IndexPath => Path.Combine(root, "State", "connected-explorer-pilot-" + Alias, "current.json");
         private static readonly Uri Origin = new("https://coordinator.invalid");
         internal Fixture() => Directory.CreateDirectory(root);
         internal void ChangeSavedManifest()
@@ -448,7 +465,7 @@ internal static class ConnectedExplorerSessionTests
             var session = new ConnectedExplorerSession(() => {
                 if (ThrowIfBackendCreated) throw new InvalidOperationException("No backend may be created for offline cleanup.");
                 Backends++; return new Backend(this);
-            }, "pilot", "portal", origin ?? Origin, Path.Combine(root, "State"), Path.Combine(root, "Files"), CreateEngine, Capture);
+            }, "pilot", Alias, origin ?? Origin, Path.Combine(root, "State"), Path.Combine(root, "Files"), CreateEngine, Capture);
             sessions.Add(session); return session;
         }
         private ConnectedExplorerEngine CreateEngine(ConnectedExplorerEngineRequest request)
@@ -509,7 +526,7 @@ internal static class ConnectedExplorerSessionTests
         }
         private sealed class Source(Fixture fixture) : IQueuedDownloadSource
         {
-            public string Alias => fixture.WrongConfiguration == "alias" ? "employee" : "portal";
+            public string Alias => fixture.WrongConfiguration == "alias" ? fixture.Alias == "portal" ? "employee" : "portal" : fixture.Alias;
             public Uri Origin => fixture.WrongConfiguration == "origin" ? new("https://wrong.invalid") : Fixture.Origin;
             public async Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken = default)
             {
