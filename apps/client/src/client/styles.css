@@ -2140,7 +2140,9 @@
 /* Shared 3D work: one flat list of Viewer tasks shared directly with the client. */
 .shared-viewer-work { min-width: 0; }
 .shared-viewer-work-list { list-style: none; margin: 0; padding: 0; display: grid; }
-.shared-viewer-work-list li { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: .8rem 0; border-top: 1px solid var(--line, #e3e8ec); min-width: 0; }
+.shared-viewer-work-list li { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .5rem 1rem; padding: .8rem 0; border-top: 1px solid var(--line, #e3e8ec); min-width: 0; }
+/* The launch status sits on its own line, so the Open button never shifts as the message changes. */
+.shared-viewer-work-list .shared-viewer-work-launch { flex: 1 0 100%; margin: 0; color: var(--muted, #5d6873); font-size: .9rem; }
 .shared-viewer-work-list li:first-child { border-top: 0; }
 .shared-viewer-work-list li > div { display: grid; gap: .2rem; min-width: 0; }
 .shared-viewer-work-list strong, .shared-viewer-work-list span { overflow-wrap: anywhere; }

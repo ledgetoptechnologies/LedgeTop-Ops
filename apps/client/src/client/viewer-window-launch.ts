@@ -43,6 +43,22 @@ export function createViewerSessionIssuer<T extends ModelViewerSession>(
   };
 }
 
+/**
+ * What a client reads when a 3D model can't open: a fixed sentence chosen by what went wrong, never the
+ * server's own wording. The underlying error stays on the rejected promise for diagnostics.
+ */
+export function viewerLaunchFailureMessage(caught: unknown): string {
+  const failure = (caught ?? {}) as { status?: number; responseInvalid?: boolean; sharingUnchecked?: boolean };
+  const status = typeof failure.status === "number" ? failure.status : 0;
+  if (failure.sharingUnchecked) return "This 3D model can't be opened from here yet. Open it from your portal home.";
+  if (status === 401) return "Your sign-in has ended. Sign in again, then open the model.";
+  if (status === 403 || status === 404 || status === 410) return "This 3D model is no longer shared with you.";
+  if (status === 409 && failure.responseInvalid) return "The 3D Viewer couldn't confirm this model. Try again.";
+  if (status === 409) return "Sharing for this model changed. Refresh the page, then try again.";
+  if (status === 429 || status >= 500 || status === 0) return "The 3D Viewer is busy or can't be reached right now. Try again in a minute.";
+  return "The 3D Viewer couldn't be opened. Try again.";
+}
+
 export function openClientViewerWindow<T extends ModelViewerSession>({
   title,
   issueSession,
