@@ -39,19 +39,27 @@ The preparation receipt requires read-only before and after observations:
 
 - The active staff cohort digest and exact active email set must remain equal.
 - A bounded Node adapter performs one GET to the exact configured Cloudflare
-  account/group path. It requires the pinned group ID and name, a complete
-  `include`/`exclude`/`require`/`is_default` response using Cloudflare's
-  AccessRule-array shape. This reviewed profile permits email-only include
-  rules and requires the other three policy arrays to be empty; unsupported
-  policy rules, duplicate normalized members, redirects, non-200 responses,
-  oversized bodies, malformed envelope notices, and unknown response keys fail
-  closed. Required group fields must be explicitly present even where the API
-  schema marks them optional; omission is not normalized to an empty policy.
+  account/group path. It requires the pinned group ID and name and the required
+  `include`/`exclude`/`require` AccessRule arrays. Cloudflare may omit the
+  optional `is_default` field; omission is preserved distinctly from an
+  explicitly empty array in the policy digest, and any nonempty default array
+  is refused. Optional `uid` is accepted only as bounded provider metadata and
+  is never used as group identity or authorization. This reviewed profile
+  permits email-only include rules and requires `exclude` and `require` to be
+  empty; unsupported policy rules, duplicate normalized members, redirects,
+  non-200 responses, oversized bodies, malformed envelope notices, and unknown
+  response keys fail closed.
+  A bounded shape-only read returned HTTP 200 with `id`, `name`, `uid`,
+  `include`, `exclude`, `require`, `created_at`, and `updated_at`; the optional
+  `is_default` field was absent. No member values were retained in that
+  shape-only record.
   It never calls the reconciliation PUT helper.
 - The adapter normalizes the full include email set in memory, sorts it, and
   emits only its count and SHA-256, a policy hash covering the exact
-  `exclude`/`require`/`is_default` values, pinned group identity, observation
-  time, raw-response SHA-256, and evidence SHA-256. Email lists, response
+  `exclude`/`require` values and the presence/value of `is_default`, pinned
+  group identity, observation time, raw-response SHA-256, and evidence
+  SHA-256. The raw-response digest binds optional metadata such as `uid`.
+  Email lists, response
   bodies, and bearer tokens are not placed in preparation receipts or logs.
 - Before/after observations must identify the same account and group and have
   the same complete normalized member-set and policy hashes. The owner issuer
@@ -68,12 +76,13 @@ The preparation receipt requires read-only before and after observations:
   is separately verified by another fresh GET; D1 readiness alone does not
   prove Cloudflare membership.
 
-The empty exclude/require/default-policy profile is a source constraint, not
-verified current production state. The available read-only Cloudflare API call
-currently returns 403, and a separate UI summary is not API evidence. The
-installer remains unqualified for production until an authorized GET confirms
-all required fields and the exact group policy. This source does not establish
-the semantics of a future Access group update; any write path must be reviewed
+The authorized fixed-group read now confirms the supported policy shape at its
+observation time: email-only includes, empty exclude/require arrays, and an
+omitted default field. That historical observation does not replace the fresh
+GETs required during preparation, consent and execution. The installer remains
+unqualified until its other identity, source, approval and runtime gates pass.
+A separate UI summary is not API evidence. This source does not establish the
+semantics of a future Access group update; any write path must be reviewed
 against the real API response separately.
 - The control must be missing or default-off, at generation zero, with no
   active reconciliation lease. This phase must never write Access membership.

@@ -48,7 +48,7 @@
     },
     {
       "path": "scripts/native-staff-cutover-access-group-observation.mjs",
-      "sha256": "8e49ebd0ff8418496b19ada25211903632e37cc2a2f9980e750df245263f2856"
+      "sha256": "c3254daf0cea2a24c127fa59b17da97e48f04954d63b6a7478275ac4e9f7e51e"
     },
     {
       "path": "scripts/native-staff-cutover-approved-executor-config.mjs",
