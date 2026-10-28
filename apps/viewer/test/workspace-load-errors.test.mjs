@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
+import { loadHierarchy } from '../workspace-hierarchy.mjs';
 
 const source = await readFile(new URL('../workspace-projects.js', import.meta.url), 'utf8');
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -11,7 +12,7 @@ const line = name => {
   return found;
 };
 
-function harness({ failing = new Set(), previous = {} } = {}) {
+function harness({ failing = new Set(), previous = {}, onHierarchy = null } = {}) {
   const fixtures = {
     '/api/v1/projects': { projects: [{ id: 'fresh-project' }] },
     '/api/v1/datasets': { datasets: [] },
@@ -22,13 +23,18 @@ function harness({ failing = new Set(), previous = {} } = {}) {
     '/api/v1/operations': { operations: [{ id: 'fresh-operation' }] },
     '/api/v1/processing/derivatives': { derivatives: [{ id: 'fresh-derivative' }] },
   };
-  const reply = path => failing.has(path)
-    ? Promise.reject(new Error(`${path} returned 503`))
-    : Promise.resolve(fixtures[path] || {});
+  let context;
+  const reply = path => {
+    if (path.startsWith('/api/v1/processing/hierarchy') && onHierarchy) return onHierarchy(context.state);
+    return failing.has(path)
+      ? Promise.reject(new Error(`${path} returned 503`))
+      : Promise.resolve(fixtures[path] || {});
+  };
   const renders = [];
   const elements = {};
   const element = selector => (elements[selector] ||= { className: '', textContent: '' });
-  const context = vm.createContext({
+  context = vm.createContext({
+    loadHierarchy,
     state: { token: 'token', projects: [], datasets: [], tasks: [], providers: [], presets: [], outputs: [], failedMutations: [], operations: [], derivativeJobs: [], storage: null, ...previous },
     pagedApi: path => reply(path),
     api: path => reply(path),
@@ -48,6 +54,35 @@ function harness({ failing = new Set(), previous = {} } = {}) {
   vm.runInContext(`${line('async function load(')};globalThis.load=load;`, context);
   return { context, renders, elements };
 }
+
+test('a 401 while loading the hierarchy stops the load: no render and no late hierarchy write', async () => {
+  const kept = { organizations: [{ id: 'org-old' }], groups: [] };
+  const { context, renders } = harness({
+    previous: { hierarchy: kept },
+    onHierarchy: state => { state.token = null; return Promise.reject(Object.assign(new Error('unauthorized'), { status: 401 })); },
+  });
+  await context.load();
+  assert.equal(context.state.token, null);
+  assert.equal(renders.length, 0);
+  assert.equal(context.state.hierarchy, kept);
+});
+
+test('a hierarchy answer that arrives after the session changed is dropped', async () => {
+  const { context, renders } = harness({
+    onHierarchy: state => { state.token = 'newer-session'; return Promise.resolve({ schemaVersion: 1, organizations: [{ id: 'org-late' }], groups: [], nextCursor: null }); },
+  });
+  await context.load();
+  assert.equal(renders.length, 0);
+  assert.equal(context.state.hierarchy, undefined);
+});
+
+test('a hierarchy failure keeps the last loaded grouping', async () => {
+  const kept = { organizations: [{ id: 'org-old' }], groups: [] };
+  const { context, renders } = harness({ previous: { hierarchy: kept }, onHierarchy: () => Promise.reject(new Error('503')) });
+  await context.load();
+  assert.equal(context.state.hierarchy, kept);
+  assert.equal(renders.length, 1);
+});
 
 test('a rejected readiness check shows status unavailable instead of a stale Platform ready', async () => {
   const { context, elements } = harness({ failing: new Set(['/api/v1/processing/ready']), previous: { ready: { ok: true } } });

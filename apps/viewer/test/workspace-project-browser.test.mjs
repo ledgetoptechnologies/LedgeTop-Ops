@@ -30,8 +30,8 @@ const orthophotoFixture = Buffer.from(writeArrayBuffer(new Uint8Array([
 
 const fixtures = {
   projects: [
-    { id: 'project-johnson', displayName: 'Johnson Road Survey', description: 'Road corridor reconstruction', status: 'active' },
-    { id: 'project-quarry', displayName: 'Alpha Quarry', description: 'Quarry progress capture', status: 'active' },
+    { id: 'project-johnson', displayName: 'Johnson Road Survey', description: 'Road corridor reconstruction', status: 'active', organizationId: 'org-adams', groupId: null, hierarchyRevision: 1 },
+    { id: 'project-quarry', displayName: 'Alpha Quarry', description: 'Quarry progress capture', status: 'active', organizationId: 'org-zenith', groupId: null, hierarchyRevision: 1 },
   ],
   datasets: [
     { id: 'dataset-johnson', projectId: 'project-johnson', displayName: 'Johnson imagery', status: 'finalized', fileCount: 48, byteSize: 7340032 },
@@ -165,6 +165,10 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
       },
     });
   }
+  if (pathname === '/api/v1/processing/hierarchy') return json({ schemaVersion: 1, organizations: [
+    { id: 'org-adams', displayName: 'Adams County', status: 'active', revision: 1 },
+    { id: 'org-zenith', displayName: 'Zenith Materials', status: 'active', revision: 1 },
+  ], groups: [], nextCursor: null, capabilities: { manageHierarchy: false } });
   if (pathname === '/api/v1/projects') return json({ projects: fixtures.projects.filter(item=>!runtime.archivedProjects.has(item.id)), nextCursor: null });
   if (pathname === '/api/v1/datasets') return json({ datasets: fixtures.datasets, nextCursor: null });
   if (pathname === '/api/v1/tasks') return json({ tasks: fixtures.tasks.filter(item=>!runtime.archivedTasks.has(item.id)), nextCursor: null });
@@ -635,6 +639,26 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
       { name: 'johnson road survey', hidden: false },
       { name: 'alpha quarry', hidden: true },
     ], `${viewport.name}: project search result visibility`);
+    const groupVisibility = `[...document.querySelectorAll('.project-group')].map(group=>({label:group.querySelector('h2').textContent,shown:getComputedStyle(group).display!=='none'}))`;
+    assert.deepEqual(await client.evaluate(groupVisibility), [
+      { label: 'Adams County', shown: true },
+      { label: 'Zenith Materials', shown: false },
+    ], `${viewport.name}: empty customer group heading stayed visible during search`);
+    await client.evaluate(`document.querySelector('[data-project-status="ready"]').click()`);
+    await client.evaluate(`document.querySelector('[data-project-status="all"]').click()`);
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value=''; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.project-row')].map(row=>getComputedStyle(row).display!=='none')`), [true, true],
+      `${viewport.name}: clearing search after a status filter did not restore every project`);
+    assert.deepEqual(await client.evaluate(groupVisibility), [
+      { label: 'Adams County', shown: true },
+      { label: 'Zenith Materials', shown: true },
+    ], `${viewport.name}: customer headings did not return after clearing search`);
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='zenith'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('[data-project-name]')].map(row=>row.hidden)`), [true, false],
+      `${viewport.name}: customer-name search did not find its project`);
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='no such project'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
+    assert.equal(await client.evaluate(`getComputedStyle(document.querySelector('.project-no-matches')).display!=='none'`), true, `${viewport.name}: no-match message missing`);
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='Johnson'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
 
     await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-johnson"]').click()`);
     await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Johnson Road Survey tasks and actions'", `${viewport.name}: project selection failed`);
