@@ -81,3 +81,8 @@ nav.task-page-navigation{display:flex;flex-wrap:nowrap;gap:4px;overflow-x:auto;m
 .task-page-navigation>button[aria-current=page]{color:var(--text);border-bottom-color:var(--orange)}
 .task-open-page{margin-top:12px}
 .task-runs-note{margin-top:12px}
+
+/* PR 6: section intro text and row ⋯ menus. */
+.section-intro{margin:0;color:var(--text-2)}
+.row-more-actions{position:relative}
+.row-more-actions>summary{list-style:none}
