@@ -55,6 +55,8 @@ jobs:
         run: dotnet build Tests/WindowsDownload.Tests.csproj --configuration Release -p:RestoreConfigFile="$env:WINDOWS_SDK_CONFIG"
       - name: Verify transfers against synthetic HTTP handlers and temporary files
         run: dotnet run --project Tests/WindowsDownload.Tests.csproj --configuration Release --no-build
+      - name: Verify synthetic reference response fixture decoding
+        run: dotnet run --project Tests/WindowsDownload.Tests.csproj --configuration Release --no-build -- --reference-preview-response-fixture-tests
       - name: Verify owned cache eviction through the emitted apphost
         run: |
           $env:DOTNET_ROOT = Split-Path -Parent (Get-Command dotnet).Source

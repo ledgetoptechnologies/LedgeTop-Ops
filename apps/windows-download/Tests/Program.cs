@@ -6,6 +6,21 @@ using System.Security.Cryptography;
 using LedgeTop.WindowsDownload;
 
 if (args.Length > 1 && args[0] == "--hydration-concurrency-only") { Environment.ExitCode = 2; return; }
+if (args.FirstOrDefault() == "--reference-preview-consume-fixture") {
+    if (args.Length != 2) { Environment.ExitCode = 2; return; }
+    try {
+        await EmployeeReferenceTransitionResponseFixtureTests.ConsumeFixtureAsync(args[1]);
+        Console.WriteLine("PASS synthetic Hono response accepted as nonauthorizing selector evidence only.");
+    }
+    catch { Console.Error.WriteLine("Synthetic reference response fixture refused."); Environment.ExitCode = 1; }
+    return;
+}
+if (args.FirstOrDefault() == "--reference-preview-response-fixture-tests") {
+    if (args.Length != 1) { Environment.ExitCode = 2; return; }
+    try { await EmployeeReferenceTransitionResponseFixtureTests.SelfTestsAsync(); Console.WriteLine("PASS synthetic response fixture framing, strict decoder, and cancellation tests."); }
+    catch { Console.Error.WriteLine("Synthetic response fixture self-tests failed."); Environment.ExitCode = 1; }
+    return;
+}
 if (args.FirstOrDefault() == "--reference-preview-capture-fixture") {
     if (args.Length != 4) { Environment.ExitCode = 2; return; }
     try { await EmployeeReferenceTransitionPreviewTests.CaptureFixtureAsync(args[1], args[2], args[3]); }
