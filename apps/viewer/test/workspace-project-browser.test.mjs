@@ -734,6 +734,14 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "document.querySelector('.gcp-mark-row')?.textContent.includes('x 13, y 15')", `${viewport.name}: GCP correspondence was not updated`);
     await confirmAppAction(client, runtime, '[data-action="gcp-delete-mark"]', { title: 'Delete image mark', cancelFirst: true });
     await waitFor(client, "document.querySelector('.gcp-mark-row') === null", `${viewport.name}: GCP correspondence was not deleted`);
+    runtime.manualGcp=true; runtime.gcpCrsConfirmed=false; runtime.gcpConfirmedCrs=null;
+    await client.evaluate('location.reload()');
+    await waitFor(client, "document.querySelector('.gcp-crs-form') !== null", `${viewport.name}: manual CRS mapping form missing`);
+    await client.evaluate(`(() => { const form=document.querySelector('.gcp-crs-form'); form.elements.epsgCode.value='7600'; form.elements.horizontalUnit.value='ftUS'; form.elements.verticalDatum.value='NAVD88'; form.querySelector('button').click(); })()`);
+    await waitFor(client, "document.querySelector('.workspace-decision[open]') !== null", `${viewport.name}: CRS confirmation dialog missing`);
+    await client.evaluate(`document.querySelector('.workspace-decision[open] button[type="submit"]').click()`);
+    await waitFor(client, "document.querySelector('.gcp-crs-confirmation').textContent.includes('EPSG:7600') && document.querySelector('.gcp-crs-confirmation').textContent.includes('Confirmed')", `${viewport.name}: manual coordinates not retained`);
+
 
     await client.evaluate(`document.querySelector('[data-action="task-return"]').click()`);
     await waitFor(client, "!new URL(location.href).searchParams.has('panel') && document.querySelector('.task-quick-actions') !== null", `${viewport.name}: GCP Back to task did not restore shortcuts`);
