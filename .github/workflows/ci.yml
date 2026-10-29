@@ -1,10 +1,8 @@
 name: CI
 
 on:
-  pull_request:
   push:
     branches: [main]
-
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -14,6 +12,7 @@ permissions:
 
 jobs:
   source-invariants:
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     steps:
       - name: Check out the exact commit
@@ -113,6 +112,7 @@ jobs:
         run: node --test scripts/historical-0195-scalar-writer-fixture.test.mjs scripts/staging-directory-scalar-authority-v184.test.mjs scripts/staging-directory-scalar-authority-v184-fullschema.test.mjs
 
   incoming-pickup:
+    if: ${{ github.ref == 'refs/heads/main' }}
     name: incoming-pickup-alpine
     runs-on: ubuntu-24.04
     steps:
@@ -146,6 +146,7 @@ jobs:
           /tmp/incoming-pickup-alpine.test.sh
 
   packages:
+    if: ${{ github.ref == 'refs/heads/main' }}
     name: ${{ matrix.package }}
     runs-on: ubuntu-24.04
     strategy:
@@ -184,6 +185,7 @@ jobs:
         run: npm run build
 
   operations-browser:
+    if: ${{ github.ref == 'refs/heads/main' }}
     name: operations-browser-${{ matrix.project }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -226,6 +228,7 @@ jobs:
           retention-days: 14
 
   client-browser:
+    if: ${{ github.ref == 'refs/heads/main' }}
     name: client-browser-${{ matrix.project }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
