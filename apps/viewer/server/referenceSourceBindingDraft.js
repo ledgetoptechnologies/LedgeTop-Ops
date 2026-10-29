@@ -5,6 +5,7 @@
 // route invokes this function.
 const crypto=require('node:crypto');
 const {indexedScopeMayOverlap}=require('./referenceIndexedScope');
+const {hasPendingSourceEffects}=require('./referenceSourcePendingEffects');
 const validId=x=>typeof x==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(x);
 const validHash=x=>typeof x==='string'&&/^[a-f0-9]{64}$/.test(x);
 const safeRelative=x=>typeof x==='string'&&x.length>0&&x.length<=1024&&!x.includes('\\')&&!x.startsWith('/')&&!/[\x00-\x1f\x7f:]/.test(x)&&x.split('/').every(c=>c&&c!=='.'&&c!=='..');
@@ -23,6 +24,7 @@ function prepareSourceBindingDraft(processing,{id,attemptId}={}) {
     // unjournaled/old writers and therefore cannot authorize admission.
     const scopes=processing.database.prepare('SELECT id,root_key,relative_path FROM datasets WHERE root_key=?').all(dataset.rootKey);
     if(scopes.some(row=>row.id!==dataset.id&&indexedScopeMayOverlap(dataset,{rootKey:row.root_key,relativePath:row.relative_path})&&potentialEffect(row.id)))throw unavailable();
+    if(hasPendingSourceEffects(processing,dataset))throw unavailable();
     const files=[...dataset.files].sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0);
     if(files.some(f=>!validId(f.id)||!safeRelative(f.relativePath)||!Number.isSafeInteger(f.byteSize)||f.byteSize<0||!validHash(f.sha256))||new Set(files.map(f=>f.id)).size!==files.length)throw unavailable();
     const createdAt=new Date().toISOString();

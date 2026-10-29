@@ -22,8 +22,16 @@ The code is incomplete and must remain disabled until all of these are solved:
 * Every import, source cleanup, payload-linked dataset operation, storage
   mutation and recovery effect must participate in one durable overlap fence.
   Failed/cancelled/awaiting-derivatives indexed operations are conservatively
-  held, but succeeded operations may still have cleanup, and payload-only or
-  cross-root effects are not fully enumerated.
+  held. Admission also holds unresolved retained-import cleanup globally,
+  catalog source-cleanup markers even after success, malformed catalog payloads,
+  and unresolved or overlapping payload-linked catalog attempts. The catalog
+  scan fails closed above 10,000 rows. These checks are conservative metadata
+  checks, not a complete enumeration of payload-only or cross-root effects.
+  While any binding exists, current repository methods suppress all import-cleanup
+  claims and filesystem callbacks and catalog cleanup listing and clearing,
+  including unrelated jobs; this global stall is not a production design.
+  A catalog cleanup fetched before binding can still run asynchronously; old
+  workers and other paths including upload cleanup do not honor these guards.
 * `applyStorageMutation` checks a binding before effects, but this draft does
   not hold an interprocess filesystem fence across check and move/remove.
   Preexisting, unjournaled, old-version and external writers must be drained

@@ -70,6 +70,58 @@ test('unsettled failed, cancelled and derivative-stage dataset operations block 
  assert.equal(f.db.prepare('SELECT count(*) n FROM viewer_source_bindings').get().n,0);
 });
 
+test('payload-linked catalog work is resolved even when dataset_id is null',t=>{
+ const f=fixture(t);enableOnlyForSyntheticFixture(f.db);
+ f.db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES('payload-op','catalog_map','synthetic',?,'queued','t','t','t')").run(JSON.stringify({ids:{attemptId:'a',datasetId:'d'}}));
+ assert.throws(()=>admit(f),{code:'source_binding_unavailable'});
+ assert.equal(f.db.prepare('SELECT count(*) n FROM viewer_source_bindings').get().n,0);
+});
+
+test('succeeded catalog source cleanup and pending import cleanup both block admission',t=>{
+ const f=fixture(t);enableOnlyForSyntheticFixture(f.db);
+ f.db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES('cleanup-op','catalog_map','synthetic',?,'succeeded','t','t','t')").run(JSON.stringify({ids:{attemptId:'a',datasetId:'d'},sourceCleanup:{rootKey:'dataset_import',relativePath:'source'}}));
+ assert.throws(()=>admit(f),{code:'source_binding_unavailable'});
+ f.db.exec("DELETE FROM dataset_operations WHERE id='cleanup-op'; INSERT INTO retained_imports(id,source_kind,staging_root_key,staging_relative_path,state,cleanup_jobs_inserted,created_at,updated_at) VALUES('ri','nodeodm_result','cache','stage','ready',1,'t','t'); INSERT INTO import_cleanup_jobs(id,retained_import_id,cleanup_type,root_key,relative_path,status,available_at,created_at,updated_at) VALUES('cleanup','ri','staging_tree','cache','stage','pending','t','t','t')");
+ assert.throws(()=>admit(f),{code:'source_binding_unavailable'});
+});
+
+test('bound source conservatively blocks new import-cleanup claim and filesystem callback',t=>{
+ const f=fixture(t);enableOnlyForSyntheticFixture(f.db);admit(f);
+ f.db.exec("INSERT INTO retained_imports(id,source_kind,staging_root_key,staging_relative_path,state,cleanup_jobs_inserted,created_at,updated_at) VALUES('ri','nodeodm_result','cache','stage','ready',1,'t','t'); INSERT INTO import_cleanup_jobs(id,retained_import_id,cleanup_type,root_key,relative_path,status,available_at,created_at,updated_at) VALUES('cleanup','ri','staging_tree','cache','stage','pending','2000-01-01T00:00:00.000Z','t','t')");
+ assert.equal(f.p.claimImportCleanup('synthetic'),null);
+ const until=new Date(Date.now()+60000).toISOString();
+ f.db.prepare("UPDATE import_cleanup_jobs SET status='leased',lease_owner='synthetic',lease_token='token',lease_generation=1,lease_expires_at=? WHERE id='cleanup'").run(until);
+ let invoked=false;
+ assert.equal(f.p.mutateImportCleanupFilesystem('cleanup','synthetic','token',1,()=>{invoked=true;}),false);
+ assert.equal(invoked,false);
+});
+
+test('bound source conservatively suppresses newly queued catalog-source cleanup',t=>{
+ const f=fixture(t);enableOnlyForSyntheticFixture(f.db);admit(f);
+ const payload=JSON.stringify({ids:{attemptId:'a',datasetId:'d'},sourceCleanup:{rootKey:'dataset_import',relativePath:'source'}});
+ f.db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES('cleanup-op','catalog_map','synthetic',?,'succeeded','t','t','t')").run(payload);
+ assert.deepEqual(f.p.pendingCatalogSourceCleanups(),[]);
+ assert.equal(f.p.clearCatalogSourceCleanup('cleanup-op'),false);
+ assert.deepEqual(JSON.parse(f.db.prepare("SELECT payload_json FROM dataset_operations WHERE id='cleanup-op'").get().payload_json),JSON.parse(payload));
+});
+
+test('malformed or mismatched catalog identity blocks admission without guessing',t=>{
+ const f=fixture(t);enableOnlyForSyntheticFixture(f.db);
+ const add=f.db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES('bad','catalog_map','synthetic',?,'queued','t','t','t')");
+ for(const payload of ['not-json',JSON.stringify({ids:{attemptId:'missing',datasetId:'d'}}),JSON.stringify({ids:{attemptId:'a',datasetId:'other'}})]){
+  add.run(payload);assert.throws(()=>admit(f),{code:'source_binding_unavailable'});f.db.exec("DELETE FROM dataset_operations WHERE id='bad'");
+ }
+});
+
+test('resolved unrelated catalog operation does not match a disjoint indexed path',t=>{
+ const f=fixture(t);enableOnlyForSyntheticFixture(f.db);
+ const other=f.p.createDataset({id:'other',projectId:'p',displayName:'Other',storageMode:'managed',rootKey:'datasets',relativePath:'disjoint'});
+ f.p.finalizeDataset(other.id,[{id:'otherfile',relativePath:'x.jpg',byteSize:1,sha256:'f'.repeat(64)}],'e'.repeat(64));
+ f.db.exec("INSERT INTO processing_tasks(id,project_id,dataset_id,display_name,status,created_at,updated_at) VALUES('other-task','p','other','Other','draft','t','t'); INSERT INTO processing_attempts(id,task_id,dataset_id,attempt_number,options_json,status,created_at,updated_at) VALUES('other-attempt','other-task','other',1,'{}','pending','t','t')");
+ f.db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES('unrelated','catalog_map','synthetic',?,'queued','t','t','t')").run(JSON.stringify({ids:{attemptId:'other-attempt',datasetId:'other'}}));
+ assert.equal(admit(f).objectCount,2);
+});
+
 test('archive methods still work inside audited repository transaction without a binding',t=>{
  const f=fixture(t);f.db.exec("UPDATE processing_attempts SET status='failed' WHERE id='a'");
  assert.ok(f.p.auditedMutation({action:'test',entityType:'task'},()=>f.p.archiveTask('t')));
