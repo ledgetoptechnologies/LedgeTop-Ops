@@ -30,8 +30,8 @@ const orthophotoFixture = Buffer.from(writeArrayBuffer(new Uint8Array([
 
 const fixtures = {
   projects: [
-    { id: 'project-johnson', displayName: 'Johnson Road Survey', description: 'Road corridor reconstruction', status: 'active' },
-    { id: 'project-quarry', displayName: 'Alpha Quarry', description: 'Quarry progress capture', status: 'active' },
+    { id: 'project-johnson', displayName: 'Johnson Road Survey', description: 'Road corridor reconstruction', status: 'active', organizationId: 'org-adams', groupId: null, hierarchyRevision: 1 },
+    { id: 'project-quarry', displayName: 'Alpha Quarry', description: 'Quarry progress capture', status: 'active', organizationId: 'org-zenith', groupId: null, hierarchyRevision: 1 },
   ],
   datasets: [
     { id: 'dataset-johnson', projectId: 'project-johnson', displayName: 'Johnson imagery', status: 'finalized', fileCount: 48, byteSize: 7340032 },
@@ -165,7 +165,41 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
       },
     });
   }
-  if (pathname === '/api/v1/projects') return json({ projects: fixtures.projects.filter(item=>!runtime.archivedProjects.has(item.id)), nextCursor: null });
+  // Hierarchy follows Codex's contract (apps/viewer/docs/workspace-hierarchy-api.md): revisions, 409 on stale writes,
+  // archived customers refuse new assignments, and a group must belong to the chosen customer.
+  const hierarchy = runtime.hierarchy;
+  const hierarchyError = (code, status = 400) => json({ error: code, code }, status);
+  if (pathname === '/api/v1/processing/hierarchy') return json({ schemaVersion: 1, organizations: hierarchy.organizations, groups: hierarchy.groups, nextCursor: null, capabilities: { manageHierarchy: runtime.manageHierarchy && (runtime.permissions || ['viewer.projects.write']).includes('viewer.projects.write') } });
+  const hierarchyEntity = pathname.match(/^\/api\/v1\/processing\/(organizations|project-groups)(?:\/([^/]+))?$/);
+  if (hierarchyEntity && ['POST', 'PATCH'].includes(method)) {
+    const kind = hierarchyEntity[1] === 'organizations' ? 'organizations' : 'groups';
+    if (method === 'POST') {
+      if (kind === 'groups' && hierarchy.organizations.find(item => item.id === body.organizationId)?.status !== 'active') return hierarchyError('organization_archived', 409);
+      const entity = { id: `${kind === 'groups' ? 'group' : 'org'}-created-${++hierarchy.sequence}`, ...(kind === 'groups' ? { organizationId: body.organizationId } : {}), displayName: String(body.displayName).trim(), status: 'active', revision: 1 };
+      hierarchy[kind].push(entity);
+      return json(kind === 'groups' ? { group: entity } : { organization: entity }, 201);
+    }
+    const entity = hierarchy[kind].find(item => item.id === decodeURIComponent(hierarchyEntity[2]));
+    if (!entity) return hierarchyError(kind === 'groups' ? 'group_not_found' : 'organization_not_found', 404);
+    if (runtime.forceHierarchyConflict || entity.revision !== body.expectedRevision) { runtime.forceHierarchyConflict = false; return hierarchyError('hierarchy_revision_conflict', 409); }
+    if (body.displayName !== undefined) entity.displayName = String(body.displayName).trim();
+    if (body.status !== undefined) entity.status = body.status;
+    entity.revision += 1;
+    return json(kind === 'groups' ? { group: entity } : { organization: entity });
+  }
+  const projectHierarchy = pathname.match(/^\/api\/v1\/projects\/([^/]+)\/hierarchy$/);
+  if (projectHierarchy && method === 'PATCH') {
+    const project = fixtures.projects.find(item => item.id === decodeURIComponent(projectHierarchy[1]));
+    const current = hierarchy.assignments.get(project?.id) || { organizationId: null, groupId: null, hierarchyRevision: 0 };
+    if (!project) return hierarchyError('project_not_found', 404);
+    if (Object.keys(body).sort().join() !== 'expectedRevision,groupId,organizationId') return hierarchyError('invalid_hierarchy_fields');
+    if (runtime.forceHierarchyConflict || current.hierarchyRevision !== body.expectedRevision) { runtime.forceHierarchyConflict = false; return hierarchyError('hierarchy_revision_conflict', 409); }
+    if (body.organizationId !== null && hierarchy.organizations.find(item => item.id === body.organizationId)?.status !== 'active') return hierarchyError('organization_archived', 409);
+    if (body.groupId !== null && hierarchy.groups.find(item => item.id === body.groupId)?.organizationId !== body.organizationId) return hierarchyError('group_organization_mismatch');
+    hierarchy.assignments.set(project.id, { organizationId: body.organizationId, groupId: body.groupId, hierarchyRevision: current.hierarchyRevision + 1 });
+    return json({ project: { ...project, ...hierarchy.assignments.get(project.id) } });
+  }
+  if (pathname === '/api/v1/projects') return json({ projects: fixtures.projects.filter(item=>!runtime.archivedProjects.has(item.id)).map(item => ({ ...item, ...(hierarchy.assignments.get(item.id) || {}) })), nextCursor: null });
   if (pathname === '/api/v1/datasets') return json({ datasets: fixtures.datasets, nextCursor: null });
   if (pathname === '/api/v1/tasks') return json({ tasks: fixtures.tasks.filter(item=>!runtime.archivedTasks.has(item.id)), nextCursor: null });
   if (pathname === '/api/v1/processing/providers' && method === 'GET') return json({ providers: fixtures.providers });
@@ -385,7 +419,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
 }
 
 function startFixtureServer() {
-  const runtime = { logSequence: 0, flakyDiagnosticRequests: 0, correspondences: [], shares: [], requests: [], permissions: null, outputs: structuredClone(fixtures.outputs), archivedProjects: new Set(), archivedTasks: new Set(), failNextStorage: false, operations: structuredClone(fixtures.operations), derivatives: structuredClone(fixtures.derivatives) };
+  const runtime = { manageHierarchy: true, forceHierarchyConflict: false, hierarchy: { sequence: 0, organizations: [{ id: 'org-adams', displayName: 'Adams County', status: 'active', revision: 1 }, { id: 'org-zenith', displayName: 'Zenith Materials', status: 'active', revision: 1 }], groups: [], assignments: new Map(fixtures.projects.filter(item => item.organizationId).map(item => [item.id, { organizationId: item.organizationId, groupId: item.groupId ?? null, hierarchyRevision: item.hierarchyRevision ?? 1 }])) }, logSequence: 0, flakyDiagnosticRequests: 0, correspondences: [], shares: [], requests: [], permissions: null, outputs: structuredClone(fixtures.outputs), archivedProjects: new Set(), archivedTasks: new Set(), failNextStorage: false, operations: structuredClone(fixtures.operations), derivatives: structuredClone(fixtures.derivatives) };
   const builtRoot = path.join(root, 'dist');
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
@@ -631,12 +665,93 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     const noOverflow = `Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <= window.innerWidth`;
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: dashboard overflows horizontally`);
+    await client.evaluate(`document.querySelector('.nav-link[data-section="processing"]').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('section')==='processing' && document.querySelector('.processing-row [data-action=\"task-runs\"]') !== null", `${viewport.name}: Processing page did not list in-progress tasks`);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: Processing page overflows horizontally`);
+    assert.equal(await client.evaluate(`/deliver/i.test(document.querySelector('#workspace-content').textContent)`), false, `${viewport.name}: Processing page must not claim delivery`);
+    await client.evaluate(`document.querySelector('.nav-link[data-section="dashboard"]').click()`);
+    await waitFor(client, "document.querySelector('#project-filter') !== null", `${viewport.name}: Projects did not return after Processing`);
+
+    // Customers: add a customer and a group, assign a project, see it regroup, hit a stale-revision conflict, then restore.
+    const decide = async (title, values) => {
+      await waitFor(client, `document.querySelector('.workspace-decision[open] h2')?.textContent === ${JSON.stringify(title)}`, `${viewport.name}: dialog "${title}" did not open`);
+      await client.evaluate(`(() => { const form=document.querySelector('.workspace-decision[open] form'); for (const [name,value] of Object.entries(${JSON.stringify(values)})) { const input=form.elements.namedItem(name); input.value=value; input.dispatchEvent(new Event('input',{bubbles:true})); } form.querySelector('button[type="submit"]').click(); })()`);
+    };
+    const hierarchyStart = runtime.requests.length;
+    const sequenceBefore = runtime.hierarchy.sequence;
+    await client.evaluate(`document.querySelector('[data-action="manage-customers"]').click()`);
+    await waitFor(client, "document.querySelector('#workspace-modal[open] .customer-list') !== null && document.querySelector('#workspace-modal-title')?.textContent === 'Customers'", `${viewport.name}: Customers dialog did not open`);
+    const listedCustomers = await client.evaluate(`[...document.querySelectorAll('.customer-row strong')].map(item=>item.textContent)`);
+    assert.ok(['Adams County', 'Zenith Materials'].every(name => listedCustomers.includes(name)), `${viewport.name}: customer list ${listedCustomers}`);
+    await client.evaluate(`document.querySelector('[data-hierarchy="add-organization"]').click()`);
+    await decide('Add customer', { displayName: 'Greenleaf Fire Department' });
+    await waitForRequest(runtime, hierarchyStart, 'POST', '/api/v1/processing/organizations');
+    const greenleaf = `org-created-${sequenceBefore + 1}`;
+    await waitFor(client, `document.querySelector('[data-customer-id="${greenleaf}"]') !== null`, `${viewport.name}: new customer missing from the dialog`);
+    await client.evaluate(`document.querySelector('[data-customer-id="${greenleaf}"] [data-hierarchy="add-group"]').click()`);
+    await decide('Add a group to Greenleaf Fire Department', { displayName: 'New Build' });
+    await waitForRequest(runtime, hierarchyStart, 'POST', '/api/v1/processing/project-groups');
+    const newBuild = `group-created-${sequenceBefore + 2}`;
+    await waitFor(client, `document.querySelector('[data-customer-id="${greenleaf}"] [data-group-id="${newBuild}"]') !== null`, `${viewport.name}: new group missing from the dialog`);
+    assert.equal(await client.evaluate(`(() => { const r=document.querySelector('#workspace-modal').getBoundingClientRect(); return r.left>=0 && r.right<=innerWidth })()`), true, `${viewport.name}: Customers dialog overflows`);
+    await client.evaluate(`document.querySelector('#workspace-modal .modal-close').click()`);
+
+    await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
+    await waitFor(client, "document.querySelector('.project-page') !== null", `${viewport.name}: quarry project page did not open`);
+    const quarryRevision = runtime.hierarchy.assignments.get('project-quarry').hierarchyRevision;
+    await client.evaluate(`document.querySelector('[data-action="set-project-customer"][data-id="project-quarry"]').click()`);
+    await decide('Set customer for Alpha Quarry', { organizationId: greenleaf });
+    await decide('Choose a group', { groupId: newBuild });
+    await waitForRequest(runtime, hierarchyStart, 'PATCH', '/api/v1/projects/project-quarry/hierarchy');
+    assert.deepEqual(runtime.requests.filter(item => item.method === 'PATCH' && item.path === '/api/v1/projects/project-quarry/hierarchy').at(-1).body, { organizationId: greenleaf, groupId: newBuild, expectedRevision: quarryRevision }, `${viewport.name}: assignment body`);
+    await waitFor(client, `[...document.querySelectorAll('.workspace-breadcrumb li')].map(item=>item.textContent).join('|') === 'Projects|Greenleaf Fire Department|Alpha Quarry'`, `${viewport.name}: breadcrumb did not move to the new customer`);
+    await client.evaluate(`document.querySelector('.workspace-breadcrumb [data-section="dashboard"]').click()`);
+    await waitFor(client, "document.querySelector('#project-filter') !== null", `${viewport.name}: Projects did not return`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.project-group')].map(group=>[group.querySelector('h2').textContent,[...group.querySelectorAll('.project-subgroup h3')].map(item=>item.textContent).join(','),[...group.querySelectorAll('.project-row')].map(row=>row.dataset.projectName).join(',')])`), [
+      ['Adams County', '', 'johnson road survey'],
+      ['Greenleaf Fire Department', 'New Build', 'alpha quarry'],
+    ], `${viewport.name}: project did not regroup under its customer and group`);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: grouped Projects overflows`);
+
+    runtime.forceHierarchyConflict = true;
+    await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
+    await waitFor(client, "document.querySelector('.project-page') !== null", `${viewport.name}: quarry project page did not reopen`);
+    await client.evaluate(`document.querySelector('[data-action="set-project-customer"][data-id="project-quarry"]').click()`);
+    await decide('Set customer for Alpha Quarry', { organizationId: 'org-zenith' });
+    await waitFor(client, "document.querySelector('#workspace-toast')?.textContent.includes('changed somewhere else')", `${viewport.name}: stale revision was not explained`);
+    assert.equal(await client.evaluate(`[...document.querySelectorAll('.workspace-breadcrumb li')].map(item=>item.textContent).join('|')`), 'Projects|Greenleaf Fire Department|Alpha Quarry', `${viewport.name}: a refused change must not move the project`);
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: conflict refresh did not settle`);
+    await client.evaluate(`document.querySelector('[data-action="set-project-customer"][data-id="project-quarry"]').click()`);
+    await decide('Set customer for Alpha Quarry', { organizationId: 'org-zenith' });
+    await waitFor(client, `[...document.querySelectorAll('.workspace-breadcrumb li')].map(item=>item.textContent).join('|') === 'Projects|Zenith Materials|Alpha Quarry'`, `${viewport.name}: project did not move back to its customer`);
+    await client.evaluate(`document.querySelector('.workspace-breadcrumb [data-section="dashboard"]').click()`);
+    await waitFor(client, "document.querySelector('#project-filter') !== null", `${viewport.name}: Projects did not return after restoring the customer`);
 
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='Johnson'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('[data-project-name]')].map(row=>({name:row.dataset.projectName,hidden:row.hidden}))`), [
       { name: 'johnson road survey', hidden: false },
       { name: 'alpha quarry', hidden: true },
     ], `${viewport.name}: project search result visibility`);
+    const groupVisibility = `[...document.querySelectorAll('.project-group')].map(group=>({label:group.querySelector('h2').textContent,shown:getComputedStyle(group).display!=='none'}))`;
+    assert.deepEqual(await client.evaluate(groupVisibility), [
+      { label: 'Adams County', shown: true },
+      { label: 'Zenith Materials', shown: false },
+    ], `${viewport.name}: empty customer group heading stayed visible during search`);
+    await client.evaluate(`document.querySelector('[data-project-status="ready"]').click()`);
+    await client.evaluate(`document.querySelector('[data-project-status="all"]').click()`);
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value=''; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.project-row')].map(row=>getComputedStyle(row).display!=='none')`), [true, true],
+      `${viewport.name}: clearing search after a status filter did not restore every project`);
+    assert.deepEqual(await client.evaluate(groupVisibility), [
+      { label: 'Adams County', shown: true },
+      { label: 'Zenith Materials', shown: true },
+    ], `${viewport.name}: customer headings did not return after clearing search`);
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='zenith'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('[data-project-name]')].map(row=>row.hidden)`), [true, false],
+      `${viewport.name}: customer-name search did not find its project`);
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='no such project'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
+    assert.equal(await client.evaluate(`getComputedStyle(document.querySelector('.project-no-matches')).display!=='none'`), true, `${viewport.name}: no-match message missing`);
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='Johnson'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
 
     await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-johnson"]').click()`);
     await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Johnson Road Survey tasks and actions'", `${viewport.name}: project selection failed`);
@@ -656,7 +771,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-johnson"]').click()`);
     await waitFor(client, "document.querySelector('.compact-task-detail .task-facts') !== null", `${viewport.name}: task details did not expand`);
-    assert.match(await client.evaluate(`document.querySelector('.task-authority-note').textContent`), /separate from node connection health/, `${viewport.name}: missing survey statistics must not be presented as a node connection failure`);
+    assert.match(await client.evaluate(`document.querySelector('.task-authority-note').textContent`), /were not recorded for this run/, `${viewport.name}: missing survey statistics must not be presented as a node connection failure`);
     assert.deepEqual(await client.evaluate(`({section:new URL(location.href).searchParams.get('section'),project:new URL(location.href).searchParams.get('project'),task:new URL(location.href).searchParams.get('task')})`),
       { section: 'dashboard', project: 'project-johnson', task: 'task-johnson' }, `${viewport.name}: expanded task route state`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions > button')].map(button=>button.textContent)`),
@@ -665,6 +780,18 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.equal(await client.evaluate(`(() => { const menu=document.querySelector('.task-more-actions[open] .project-more-menu'),r=menu.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&getComputedStyle(menu.closest('.task-panel')).overflow==='visible' })()`),true,`${viewport.name}: task menu must open without horizontal clipping`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>button.textContent)`),['Rename','Download model files','Details & processing','Files & versions','Processing history','Ground control points']);
     await client.evaluate(`document.querySelector('[data-action="task-history"]').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('panel')==='runs' && document.querySelector('.task-page-navigation [aria-current=\"page\"]')?.textContent==='Runs' && document.querySelector('.attempt-history[open] .attempt-run') !== null", `${viewport.name}: Processing history did not open this task's Runs tab`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.workspace-breadcrumb li')].map(item=>item.textContent)`), ['Projects', 'Adams County', 'Johnson Road Survey', 'Johnson reconstruction'], `${viewport.name}: task breadcrumb`);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: task Runs tab overflows horizontally`);
+    assert.equal(await client.evaluate(`Boolean(document.querySelector('.task-runs-note [data-section="diagnostics"]'))`), true, `${viewport.name}: Runs tab has no link to every run in Diagnostics`);
+    await client.evaluate(`history.back()`);
+    await waitFor(client, "document.querySelector('.compact-task-detail') !== null && !new URL(location.href).searchParams.get('panel')", `${viewport.name}: back from the Runs tab did not return to the task`);
+    await client.evaluate(`document.querySelector('.task-open-page [data-action="task-overview"]').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('panel')==='overview' && document.querySelector('.task-page-navigation [aria-current=\"page\"]')?.textContent==='Overview' && document.querySelector('.task-workspace-page .compact-task-detail') !== null && !document.querySelector('.task-open-page')", `${viewport.name}: Open task page did not show the Overview tab`);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: task Overview tab overflows horizontally`);
+    await client.evaluate(`history.back()`);
+    await waitFor(client, "document.querySelector('.compact-task-detail') !== null && !new URL(location.href).searchParams.get('panel')", `${viewport.name}: back from Overview did not return to the task`);
+    await client.evaluate(`document.querySelector('.task-runs-note, .nav-link[data-section="diagnostics"]') && document.querySelector('.nav-link[data-section="diagnostics"]').click()`);
     await waitFor(client, "new URL(location.href).searchParams.get('section')==='diagnostics' && document.querySelector('[data-action=\"load-more-diagnostic-runs\"]') !== null", `${viewport.name}: task history did not route to paginated Diagnostics`);
     assert.equal(await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson"]')?.textContent.includes('Run #2')`), true, `${viewport.name}: current run number was not rendered`);
     await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson-old"] [data-action="open-global-attempt-diagnostics"]').click()`);
@@ -784,6 +911,10 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: dataset trash did not settle`);
 
     await client.evaluate(`document.querySelector('[data-action="task-return"]').click()`);
+    await waitFor(client, "document.querySelector('.project-page') !== null && document.querySelectorAll('.project-row').length === 1 && !document.querySelector('#project-filter')", `${viewport.name}: project page did not show only the open project`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.workspace-breadcrumb li')].map(item=>item.textContent)`), ['Projects', 'Adams County', 'Johnson Road Survey'], `${viewport.name}: project breadcrumb`);
+    await client.evaluate(`document.querySelector('.workspace-breadcrumb [data-section="dashboard"]').click()`);
+    await waitFor(client, "!new URL(location.href).searchParams.get('project') && document.querySelector('#project-filter') !== null", `${viewport.name}: breadcrumb did not return to Projects`);
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value=''; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
     await waitFor(client, "document.querySelector('[data-action=\"open-project\"][data-id=\"project-quarry\"]') !== null", `${viewport.name}: project filter did not clear`);
     await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
@@ -843,7 +974,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.equal(await client.evaluate(`document.querySelector('.provider-detail h3')?.textContent`), 'TrueNAS NodeODM', `${viewport.name}: provider inline selection`);
     assert.match(await client.evaluate(`document.querySelector('.provider-detail').textContent`), /Cluster-managed capacity/);
     assert.equal(await client.evaluate(`document.querySelector('.provider-detail').textContent.includes('99999999999')`), false, `${viewport.name}: cluster sentinel must not imply real upstream slots`);
-    assert.match(await client.evaluate(`document.querySelector('.provider-detail').textContent`), /Viewer admission2 concurrent jobs/, `${viewport.name}: Viewer admission stays separate from cluster-managed capacity`);
+    assert.match(await client.evaluate(`document.querySelector('.provider-detail').textContent`), /Queue handoff limit2 jobs at a time/, `${viewport.name}: Viewer admission stays separate from cluster-managed capacity`);
     assert.equal(await client.evaluate(`document.querySelector('[data-action="select-provider"][data-id="provider-nodeodm"]').getAttribute('aria-pressed')`), 'true');
     assert.equal(await client.evaluate(`getComputedStyle(document.querySelector('.provider-workspace .provider-list')).overflowY`), 'auto', `${viewport.name}: node list must scroll independently`);
     assert.equal(await client.evaluate(`(()=>{const left=document.querySelector('.provider-workspace>aside').getBoundingClientRect(),right=document.querySelector('#provider-inline-detail').getBoundingClientRect();return innerWidth>720?left.right<right.left:right.top>=left.bottom;})()`),true,`${viewport.name}: node list/detail must be side-by-side on desktop and stacked on mobile`);
@@ -1111,7 +1242,7 @@ test('companion product restore is explicit, immutable-version scoped, and permi
         await waitFor(client, `new URL(location.href).searchParams.get('panel')==='settings' && Boolean(document.querySelector('.task-workspace-page'))`, 'Task settings route did not load');
         if (scenario.reject) {
           await waitForRequest(runtime, 0, 'GET', '/api/v1/tasks/task-johnson');
-          assert.equal(await client.evaluate(`document.querySelector('.task-workspace-page')?.textContent.includes('Loading authoritative task details')`), true, 'Settings must expose the pending detail state');
+          assert.equal(await client.evaluate(`document.querySelector('.task-workspace-page')?.textContent.includes('Loading task details')`), true, 'Settings must expose the pending detail state');
           assert.equal(await client.evaluate(`document.querySelectorAll('.task-workspace-page button').length`), 0, 'The loading placeholder is not the settled action list');
           releaseTaskDetail();
         }
