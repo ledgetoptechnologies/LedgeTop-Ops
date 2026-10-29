@@ -30,7 +30,7 @@ function wire(expiresAt: string) {
       selectedR2Prefix: "projects/selected/", baseR2Prefix: "projects/", baseMatchMethod: "manual",
       baseConfirmedBy: "staff:confirm", baseConfirmedAt: "2026-09-30 12:00:00" },
     features: ["folder.list", "file.download"] as const, expiresAt, reasonCode: "explicit share",
-    observedAt: "2026-09-30T12:00:00.000Z" };
+    observedAt: new Date(Date.parse(expiresAt) - 86_400_000).toISOString() };
 }
 
 async function replayDatabase(expiresAt: string, original = owner()) {
@@ -54,6 +54,18 @@ async function replayDatabase(expiresAt: string, original = owner()) {
 }
 
 describe("operations native delivery issuer replay", () => {
+  it("keeps replay fixtures calendar-independent while enforcing the real 30-day grant limit", () => {
+    const expiresAt = "2031-01-02T12:00:00.000Z", command = wire(expiresAt);
+    expect(JSON.parse(canonicalOperationsPortalNativeDeliveryAuthorityCommand(command)))
+      .toMatchObject({ expiresAt, observedAt: "2031-01-01T12:00:00.000Z" });
+    const boundary = { ...command,
+      observedAt: new Date(Date.parse(expiresAt) - 30 * 86_400_000).toISOString() };
+    expect(() => canonicalOperationsPortalNativeDeliveryAuthorityCommand(boundary)).not.toThrow();
+    expect(() => canonicalOperationsPortalNativeDeliveryAuthorityCommand({ ...boundary,
+      observedAt: new Date(Date.parse(boundary.observedAt) - 1).toISOString() }))
+      .toThrow("operations_portal_native_delivery_authority_invalid");
+  });
+
   it("replays stable business fields with a fresh verifiedUntil that is not fingerprinted", async () => {
     const expiresAt = expiry(), currentOwner = owner(), fake = await replayDatabase(expiresAt, currentOwner);
     currentOwner.verifiedUntil = new Date(Date.now() + 7_200_000).toISOString();
@@ -76,3 +88,4 @@ describe("operations native delivery issuer replay", () => {
       .rejects.toThrow("authority_denied");
   });
 });
+
