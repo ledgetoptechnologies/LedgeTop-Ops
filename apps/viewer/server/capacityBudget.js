@@ -20,11 +20,14 @@ function evaluateCapacityBudget({domainId,domainRevision,samples,commitments,req
   identity(domainId); identity(domainRevision);
   if (!Array.isArray(samples) || !samples.length || !Array.isArray(commitments)) throw invalid();
   const requestedBytes=scalar(requestBytes),requestedInodes=scalar(requestInodes);
-  let usableBytes=null,usableInodes=null;
+  let usableBytes=null,usableInodes=null,reserveBreached=false;
   for (const sample of samples) {
     if (!sample || sample.domainId!==domainId || sample.domainRevision!==domainRevision) throw invalid();
-    const bytes=positiveDifference(scalar(sample.availableBytes),scalar(sample.reserveBytes));
-    const inodes=positiveDifference(scalar(sample.availableInodes),scalar(sample.reserveInodes));
+    const availableBytes=scalar(sample.availableBytes),reserveBytes=scalar(sample.reserveBytes);
+    const availableInodes=scalar(sample.availableInodes),reserveInodes=scalar(sample.reserveInodes);
+    if (availableBytes<reserveBytes || availableInodes<reserveInodes) reserveBreached=true;
+    const bytes=positiveDifference(availableBytes,reserveBytes);
+    const inodes=positiveDifference(availableInodes,reserveInodes);
     usableBytes=usableBytes===null||bytes<usableBytes?bytes:usableBytes;
     usableInodes=usableInodes===null||inodes<usableInodes?inodes:usableInodes;
   }
@@ -36,7 +39,7 @@ function evaluateCapacityBudget({domainId,domainRevision,samples,commitments,req
   }
   const requiredBytes=committedBytes+requestedBytes,requiredInodes=committedInodes+requestedInodes;
   return {
-    allowed:requiredBytes<=usableBytes && requiredInodes<=usableInodes,
+    allowed:!reserveBreached && requiredBytes<=usableBytes && requiredInodes<=usableInodes,
     usableBytes:bounded(usableBytes),usableInodes:bounded(usableInodes),
     committedBytes:bounded(committedBytes),committedInodes:bounded(committedInodes),
     requiredBytes:bounded(requiredBytes),requiredInodes:bounded(requiredInodes),

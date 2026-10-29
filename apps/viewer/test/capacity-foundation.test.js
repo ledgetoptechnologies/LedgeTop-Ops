@@ -17,6 +17,14 @@ test('budget arithmetic groups explicitly identified cross-mount samples by thei
   assert.equal(evaluateCapacityBudget({...input,commitments:[item('a',1,90)],requestBytes:1,requestInodes:6}).allowed,false);
 });
 
+test('a breached reserve denies even zero-sized requests; equality is allowed only without extra work',()=>{
+  assert.equal(evaluateCapacityBudget({...input,samples:[sample(99,100)]}).allowed,false);
+  assert.equal(evaluateCapacityBudget({...input,samples:[sample(1000,4)]}).allowed,false);
+  assert.equal(evaluateCapacityBudget({...input,samples:[sample(99,4)]}).allowed,false);
+  assert.equal(evaluateCapacityBudget({...input,samples:[sample(100,5)]}).allowed,true);
+  assert.equal(evaluateCapacityBudget({...input,samples:[sample(100,5)],requestInodes:1}).allowed,false);
+});
+
 test('unknown domains, stale identity, duplicate rows and unsafe arithmetic fail closed',()=>{
   for(const change of [
     {samples:[]},{samples:[{...sample(500,20),domainRevision:'changed'}]},
