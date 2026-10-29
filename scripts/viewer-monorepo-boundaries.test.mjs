@@ -36,7 +36,8 @@ function reviewedUpstreamStep(name) {
 test('Viewer publication only watches its imported application and workflow', () => {
   assert.doesNotMatch(workflow, /^  workflow_dispatch:/m);
   assert.match(workflow, /^  push:\n    branches: \[main\]\n    paths:/m);
-  for (const event of ['pull_request', 'push']) {
+  assert.doesNotMatch(workflow, /^  (?:pull_request|pull_request_target):/m);
+  for (const event of ['push']) {
     const eventBlock = workflow.split(`  ${event}:\n`)[1].split(/^(?:  [a-z_]+:|\S)/m)[0];
     const paths = [...eventBlock.matchAll(/^      - '([^']+)'$/gm)].map(match => match[1]);
     assert.deepEqual(paths, ['apps/viewer/**', '.github/workflows/publish-viewer.yml', 'scripts/viewer-monorepo-boundaries.test.mjs']);
