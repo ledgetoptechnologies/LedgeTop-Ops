@@ -7,14 +7,6 @@ on:
       - apps/employee-read-gateway/**
       - docs/employee-read-gateway-protocol.md
       - .github/workflows/employee-read-gateway.yml
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - apps/employee-read-gateway/**
-      - docs/employee-read-gateway-protocol.md
-      - .github/workflows/employee-read-gateway.yml
-
 permissions:
   contents: read
 

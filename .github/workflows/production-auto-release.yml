@@ -2,6 +2,7 @@ name: Production automatic frontend and backend release
 
 on:
   workflow_run:
+    branches: [main]
     workflows: [CI]
     types: [completed]
 

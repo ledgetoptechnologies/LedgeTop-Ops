@@ -1,13 +1,6 @@
 name: Verify and publish Resolve proxy generator
 
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - apps/proxy-generator/**
-      - apps/media-generation/**
-      - .github/workflows/publish-proxy-generator.yml
   push:
     branches: [main]
     paths:

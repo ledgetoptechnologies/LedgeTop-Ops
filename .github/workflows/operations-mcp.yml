@@ -1,12 +1,6 @@
 name: Private Operations MCP
 
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - 'apps/operations-mcp/**'
-      - '.github/workflows/operations-mcp.yml'
   push:
     branches: [main]
     paths:

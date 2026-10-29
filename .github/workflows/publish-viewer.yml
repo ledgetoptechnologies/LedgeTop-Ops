@@ -1,13 +1,6 @@
 name: Publish Operations Viewer image
 
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - 'apps/viewer/**'
-      - '.github/workflows/publish-viewer.yml'
-      - 'scripts/viewer-monorepo-boundaries.test.mjs'
   push:
     branches: [main]
     paths:
