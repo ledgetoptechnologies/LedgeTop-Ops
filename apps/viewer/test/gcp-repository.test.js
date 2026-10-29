@@ -117,11 +117,11 @@ test('Emlid survey requires explicit mapping confirmation and snapshots metric p
  const {processing,gcp,project,dataset}=datasetFixture(t), {parseGcpInterchange}=require('../server/gcpImport');
  const source='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,1000,2000,100,43,-88.8,110,NAD83(2011) / WISCRS Dodge and Jefferson (ftUS) + NAVD88(GEOID18) height (ftUS)\n',parsed=parseGcpInterchange({format:'emlid-all-columns-v1',content:source});
  const set=gcp.importSet({datasetId:dataset.id,displayName:'Emlid',sourceFormat:'emlid-all-columns-v1',sourceSha256:parsed.sourceSha256,sourceContent:source,crs:parsed.crs,elevationUnits:'m',provenance:parsed.provenance,points:parsed.points,createdBy:'ops:1'});
- assert.equal(set.odmCrsCandidate.epsgCode,7541);assert.equal(set.odmCrsConfirmed,false);
+ assert.equal(set.odmCrsCandidate.epsgCode,7600);assert.equal(set.odmCrsConfirmed,false);
  const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Model'});gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'near',pixelX:120,pixelY:240,createdBy:'ops:1'});
  const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
  assert.throws(()=>processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),{code:'gcp_crs_confirmation_required'});
  assert.equal(gcp.confirmOdmCrs(set.id,'ops:1').odmCrsConfirmed,true);
  const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),content=processing.getAttemptGcpSnapshot(attempt.id).content;
- assert.match(content,/^EPSG:7541\n304\.8006096 609\.6012192 30\.48006096 120 240 near\.jpg\n$/);
+ assert.match(content,/^EPSG:7600\n1000 2000 30\.48006096 120 240 near\.jpg\n$/);
 });

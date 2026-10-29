@@ -81,9 +81,9 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
   });
 
   router.post('/api/v1/gcp-sets/:id/odm-crs-confirm', authorize('viewer.gcp.write'), mutate, (req,res) => {
-    if(!onlyKeys(req.body, [])) return error(res,400,'invalid_request');
+    if(!onlyKeys(req.body, ['epsgCode','horizontalUnit','verticalDatum'])) return error(res,400,'invalid_request');
     if(!gcp.getSet(req.params.id)) return error(res,404,'gcp_set_not_found');
-    try { const set=gcp.confirmOdmCrs(req.params.id,req.actorId); repository.audit({actorType:'admin',actorId:req.actorId,action:'gcp.odm_crs_confirmed',entityType:'gcp_set',entityId:set.id,details:{epsgCode:set.odmCrsCandidate.epsgCode}}); return res.json({set}); }
+    try { const set=gcp.confirmOdmCrs(req.params.id,req.actorId,req.body); repository.audit({actorType:'admin',actorId:req.actorId,action:'gcp.odm_crs_confirmed',entityType:'gcp_set',entityId:set.id,details:{epsgCode:set.odmCrs.epsgCode}}); return res.json({set}); }
     catch(caught) { if(caught.code==='gcp_crs_unmapped') return error(res,409,'gcp_crs_unmapped',caught.message); throw caught; }
   });
 

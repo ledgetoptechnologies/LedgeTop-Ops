@@ -10,8 +10,9 @@ function scalar(value, field) {
 
 function odmGcpList(rows, options = {}) {
   if (!Array.isArray(rows) || !rows.length) return null;
-  const projected = options.projected === true && options.epsgCode === 7541;
-  const lines = [projected ? 'EPSG:7541' : 'EPSG:4326'];
+  const projected = options.projected === true && Number.isInteger(options.epsgCode) && ['m','ftUS'].includes(options.horizontalUnit);
+  const unitScale = options.horizontalUnit === 'ftUS' ? 3937 / 1200 : 1;
+  const lines = [projected ? `EPSG:${options.epsgCode}` : 'EPSG:4326'];
   for (const row of rows) {
     const imageName = path.basename(String(row.relativePath || ''));
     if (!imageName || /\s/.test(imageName))
@@ -19,7 +20,7 @@ function odmGcpList(rows, options = {}) {
     // ODM's documented ordering is geo_x geo_y geo_z im_x im_y image_name.
     // In EPSG:4326, x is longitude and y is latitude.
     lines.push([
-      scalar(projected ? row.easting : row.longitude, projected ? 'easting' : 'longitude'), scalar(projected ? row.northing : row.latitude, projected ? 'northing' : 'latitude'), scalar(row.elevationM, 'elevation'),
+      scalar(projected ? row.easting * unitScale : row.longitude, projected ? 'easting' : 'longitude'), scalar(projected ? row.northing * unitScale : row.latitude, projected ? 'northing' : 'latitude'), scalar(row.elevationM, 'elevation'),
       scalar(row.pixelX, 'pixel X'), scalar(row.pixelY, 'pixel Y'), imageName,
     ].join(' '));
   }

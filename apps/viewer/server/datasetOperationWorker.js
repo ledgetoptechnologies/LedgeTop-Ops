@@ -73,6 +73,8 @@ async function adoptImport(operation, { processing, storage }, owner, updateProg
     expectedFingerprint: payload.treeFingerprint,
     onProgress: updateProgress,
   });
+  if (externalReference && adopted.scan.files.some(file => /\.csv$/i.test(file.relativePath)))
+    throw Object.assign(new Error('CSV sources require managed adoption so they can be retained'),{code:'retained_csv_external_reference'});
   const files = adopted.scan.files.map((file) => ({
     id: crypto.randomUUID(),
     relativePath: file.relativePath,

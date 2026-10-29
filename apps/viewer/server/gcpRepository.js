@@ -23,7 +23,7 @@ function haversineMeters(latitude1, longitude1, latitude2, longitude2) {
 
 function odmCrsCandidate(row) {
   if (row.adapter === 'emlid-all-columns-v1' && row.coordinate_system === 'NAD83(2011) / WISCRS Dodge and Jefferson (ftUS) + NAVD88(GEOID18) height (ftUS)' && row.linear_unit === 'ftUS')
-    return {epsgCode:7541,horizontalUnit:'m',verticalDatum:'NAVD88(GEOID18)',verticalUnit:'m'};
+    return {epsgCode:7600,horizontalUnit:'ftUS',verticalDatum:row.vertical_datum,verticalUnit:'m'};
   return null;
 }
 
@@ -47,7 +47,7 @@ class GcpRepository {
       provenance: row.adapter ? { adapter: row.adapter, coordinateSystem: row.coordinate_system,
         verticalDatum: row.vertical_datum, linearUnit: row.linear_unit,
         elevationSource: row.elevation_source, geographicCrossCheck: row.geographic_cross_check } : null,
-      odmCrsCandidate: candidate, odmCrsConfirmed: Boolean(candidate && confirmation && confirmation.source_sha256===row.source_sha256 && confirmation.epsg_code===candidate.epsgCode && confirmation.vertical_datum===candidate.verticalDatum),
+      odmCrsCandidate: candidate, odmCrsConfirmed: Boolean(confirmation && confirmation.source_sha256===row.source_sha256), odmCrs: confirmation && confirmation.source_sha256===row.source_sha256 ? {epsgCode:confirmation.epsg_code,horizontalUnit:confirmation.horizontal_unit,verticalDatum:confirmation.vertical_datum,verticalUnit:'m'} : null,
       pointCount: Number(row.point_count || 0), createdBy: row.created_by,
       createdAt: row.created_at, updatedAt: row.updated_at,
     };
@@ -153,9 +153,10 @@ class GcpRepository {
     return this.getPoint(id);
   }
 
-  confirmOdmCrs(id, actorId) {
-    const set=this.getSet(id); if(!set?.odmCrsCandidate) throw Object.assign(new Error('No verified CRS mapping is available for this source'),{code:'gcp_crs_unmapped'});
-    const c=set.odmCrsCandidate;
+  confirmOdmCrs(id, actorId, input={}) {
+    const set=this.getSet(id); if(!set || set.sourceFormat!=='emlid-all-columns-v1') throw Object.assign(new Error('A survey source is required'),{code:'gcp_crs_unmapped'});
+    const c=Object.keys(input).length ? input : set.odmCrsCandidate;
+    if(!c || !Number.isInteger(c.epsgCode) || c.epsgCode<1000 || c.epsgCode>999999 || !['m','ftUS'].includes(c.horizontalUnit) || c.horizontalUnit!==set.provenance.linearUnit || c.verticalDatum!==set.provenance.verticalDatum) throw Object.assign(new Error('Enter the EPSG code and units for the source survey coordinate system and confirm its vertical datum'),{code:'gcp_crs_unmapped'});
     this.database.prepare(`INSERT INTO gcp_odm_crs_confirmations(set_id,source_sha256,epsg_code,horizontal_unit,vertical_datum,confirmed_by,confirmed_at) VALUES (?,?,?,?,?,?,?)
       ON CONFLICT(set_id) DO UPDATE SET source_sha256=excluded.source_sha256,epsg_code=excluded.epsg_code,horizontal_unit=excluded.horizontal_unit,vertical_datum=excluded.vertical_datum,confirmed_by=excluded.confirmed_by,confirmed_at=excluded.confirmed_at`).run(id,set.sourceSha256,c.epsgCode,c.horizontalUnit,c.verticalDatum,actorId,now());
     return this.getSet(id);

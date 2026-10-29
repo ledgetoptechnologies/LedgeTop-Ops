@@ -30,3 +30,12 @@ test('CSV datasets are protected from direct and resumed purge',t=>{
  const mutation={id:'old',type:'purge',entityType:'dataset',entityId:dataset.id,status:'intent',sourceRootKey:'trash',sourceRelativePath:'source'};
  assert.throws(()=>applyStorageMutation(p,{pathExistsStrict:()=>true,removeExact:()=>{removed=true;}},mutation),{code:'retained_csv'});assert.equal(removed,false);
 });
+
+test('expired incomplete CSV uploads remain retained and resumable',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-upload-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
+ const p=new ProcessingRepository(db),project=p.createProject({displayName:'Survey'}),dataset=p.createDataset({projectId:project.id,displayName:'draft',storageMode:'managed',rootKey:'datasets',relativePath:'source'});
+ const files=[{id:'file-0',relativePath:'control.csv',byteSize:2,sha256:digest('ab')}];
+ const u=p.createUpload({datasetId:dataset.id,subject:'ops:test',files,chunkSize:2,expiresAt:'2020-01-01T00:00:00.000Z'}).upload;
+ assert.equal(p.hasUnfinishedCsvUploads(dataset.id),true);assert.equal(p.expiredUploads(Date.now()).includes(u.id),false);
+ assert.equal(p.resumeUpload(dataset.id,'ops:test',files,'2099-01-01T00:00:00.000Z').upload.id,u.id);
+});
