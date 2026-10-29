@@ -9,8 +9,8 @@ export async function sendAdminAlert(env: Env, subject: string, detail: string):
   try {
     await env.ALERT_EMAIL.send({
       to: env.ALERT_TO,
-      from: { email: env.ALERT_FROM, name: "LTDS Operations" },
-      subject: `[LTDS] ${subject}`,
+      from: { email: env.ALERT_FROM, name: "Ledge Top Operations" },
+      subject: `[Ledge Top] ${subject}`,
       text: detail,
       html: `<h1>${escapeHtml(subject)}</h1><p>${escapeHtml(detail)}</p>`,
     });

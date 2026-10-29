@@ -10,6 +10,7 @@ import { executeNativeStaffBootstrapD1 as execute, prepareNativeStaffBootstrapD1
   submitNativeStaffBootstrapManagementBatch as submitManagementBatch } from "../../../scripts/native-staff-bootstrap-d1.mjs";
 import { buildOwnerApprovalReceipt, canonicalJson as approvalCanonical,
   verifyNativeStaffBootstrapOwnerApprovalReceipt } from "../../../scripts/native-staff-bootstrap-owner-approval.mjs";
+import { composeNativeStaffBootstrapArtifact } from "../../../scripts/native-staff-bootstrap-artifact-composer.mjs";
 
 let runtime:Miniflare, db:D1Database, serial=0;
 const hash=(value:string)=>createHash("sha256").update(value).digest("hex");
@@ -85,12 +86,15 @@ function planFor(snap:any,p:{pa:Person;ops:Person;operator:Person;root:Person;di
   return {approval,canonicalPlanJson,bindingEvidenceJson,reviewedSnapshot:snap,commandId,trustEnvelope};
 }
 async function existingOwnerBootstrapFixture(){
-  const owner=await person("existing-owner"),employee=await person("owner-cohort-employee");
-  await nativeIdentity(owner);
+  const owner=await person("existing-owner"),kstirn=await person("preserved-kstirn"),employee=await person("owner-cohort-employee");
+  await Promise.all([nativeIdentity(owner),nativeIdentity(kstirn)]);
   const ownerGrants=["directory.profile.view","directory.profile.edit","directory.identity.link","directory.enrollment.manage","directory.portal_access.manage"];
   await db.batch(ownerGrants.map((permission,index)=>db.prepare(`INSERT INTO native_directory_grants
     (id,staff_id,permission,effect,scope_kind,active,granted_by) VALUES(?,?,?,'allow','global',1,?)`)
     .bind(`existing-owner-grant:${owner.id}:${index}`,owner.id,permission,owner.id)));
+  await db.prepare(`INSERT INTO native_directory_grants
+    (id,staff_id,permission,effect,scope_kind,active,granted_by) VALUES(?,?,'directory.profile.view','allow','global',1,?)`)
+    .bind(`existing-kstirn-grant:${kstirn.id}`,kstirn.id,kstirn.id).run();
   const priorPlanJson=stable({kind:"already-consumed-out-of-band-owner-approval",ownerStaffId:owner.id});
   const priorBindingJson=stable({kind:"existing-owner-binding-evidence",ownerStaffId:owner.id});
   const priorApprovalId=`prior-consumed-owner-approval:${owner.id}`,priorCommandId=`prior-consumed-owner-command:${owner.id}`;
@@ -104,16 +108,14 @@ async function existingOwnerBootstrapFixture(){
     canonical_plan_json,canonical_plan_sha256,independent_binding_verification_json,independent_binding_verification_sha256,result_json,result_sha256)
     VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(priorCommandId,priorApprovalId,owner.id,owner.subject,priorPlanJson,hash(priorPlanJson),priorBindingJson,
       hash(priorBindingJson),priorResultJson,hash(priorResultJson)).run();
-  return {owner,employee,priorApprovalId,priorCommandId};
+  return {owner,kstirn,employee,priorApprovalId,priorCommandId};
 }
-function planForExistingOwner(snap:any,p:{owner:Person;employee:Person;priorApprovalId:string;priorCommandId:string}){
+function planForExistingOwner(snap:any,p:{owner:Person;kstirn:Person;employee:Person;priorApprovalId:string;priorCommandId:string}){
   const area=`owner-initial-scope-${p.employee.id}`,ownerId=p.owner.id,employeeId=p.employee.id;
   const managementCaps=["staff.onboarding.create","staff.onboarding.approve","staff.admission.disable","staff.membership.manage",
     "staff.directory_grant.manage","staff.admin_delegation.manage","staff.admission.enable","staff.profile.edit","staff.profile.read"];
-  const rows:any[]=[
+  const explicitPolicyRows:any[]=[
     {table:"native_business_areas",row:{id:area,name:"Owner approved employee scope",active:1}},
-    {table:"native_staff_admissions",row:{staff_id:employeeId,bound_access_subject:p.employee.subject,active:1,admitted_by:ownerId}},
-    {table:"native_staff_profiles",row:{staff_id:employeeId,login_email:p.employee.email,display_name:employeeId,version:1}},
     {table:"native_staff_target_memberships",row:{id:`owner-approved-membership:${employeeId}`,staff_id:employeeId,scope_kind:"business_area",business_area_id:area,division_id:null,active:1,version:1,created_by:ownerId}},
     ...managementCaps.map(capability=>({table:"native_staff_management_delegations",row:{id:`owner-initial-delegation:${ownerId}:${capability}`,
       actor_staff_id:ownerId,contract_version:1,authority_domain:"staff_admin",capability,effect:"allow",scope_kind:"global",business_area_id:null,
@@ -124,21 +126,21 @@ function planForExistingOwner(snap:any,p:{owner:Person;employee:Person;priorAppr
         parent_delegation_id:`owner-initial-delegation:${ownerId}:${domain==="directory"?"staff.directory_grant.manage":"staff.admin_delegation.manage"}`,
         contract_version:1,authority_domain:domain,capability,effect:"allow",grant_allow:1,grant_deny:1,operation_create:1,operation_revoke:1,
         scope_kind:"global",business_area_id:null,division_id:null,resource_id:null,target_staff_id:null}})),
-    {table:"native_directory_grants",row:{id:`owner-approved-grant:${employeeId}`,staff_id:employeeId,permission:"directory.profile.view",effect:"allow",
-      scope_kind:"business_area",business_area_id:area,division_id:null,resource_id:null,active:1,granted_by:ownerId}},
   ];
-  const approvalId=`synthetic-existing-owner-approval:${ownerId}`,commandId=`synthetic-existing-owner-command:${ownerId}`;
-  const plan={kind:"operations-native-staff-bootstrap-install-v1",reviewedSnapshotSha256:snap.snapshotSha256,approvalId,
-    staffCohort:[employeeId],controlPlaneStaffIds:[...new Set([...snap.controlPlaneStaffIds,ownerId])].sort(),rows};
-  const canonicalPlanJson=stable(plan),bindingEvidenceJson=stable({kind:"synthetic-binding-test-only",staffId:employeeId,accessSubject:p.employee.subject});
-  const approval={approvalId,approvedOperatorStaffId:ownerId,approvedOperatorAccessSubject:p.owner.subject,issuedByStaffId:ownerId,
-    issuedByAccessSubject:p.owner.subject,issuedAt:"2026-10-26T00:00:00.000Z",expiresAt:"2030-01-01T00:00:00.000Z"};
+  const composition=composeNativeStaffBootstrapArtifact({reviewedSnapshot:snap,proposedStaffIds:[employeeId],
+    controlPlaneStaffIds:snap.controlPlaneStaffIds,preservationRoles:{ownerStaffId:ownerId,kstirnStaffId:p.kstirn.id},
+    explicitPolicyRows,decisionReference:"synthetic native staff bootstrap integration fixture"});
+  const artifact=composition.artifact,plan=JSON.parse(artifact.canonicalPlanJson);
+  const issuedAt=new Date().toISOString(),expiresAt=new Date(Date.now()+5*60_000).toISOString();
+  const approval={approvalId:plan.approvalId,approvedOperatorStaffId:ownerId,approvedOperatorAccessSubject:p.owner.subject,
+    issuedByStaffId:ownerId,issuedByAccessSubject:p.owner.subject,issuedAt,expiresAt};
   const trustEnvelope={schemaVersion:1,action:"install-operations-native-staff-bootstrap",ownerSessionId:"synthetic-existing-owner-session",
-    authorizationChallenge:`synthetic-owner-challenge:${ownerId}`,approvalId,commandId,approvedOperatorStaffId:ownerId,
-    approvedOperatorAccessSubject:p.owner.subject,issuedByStaffId:ownerId,issuedByAccessSubject:p.owner.subject,authorizedAt:approval.issuedAt,
-    expiresAt:approval.expiresAt,reviewedSnapshotSha256:snap.snapshotSha256,canonicalPlanSha256:hash(canonicalPlanJson),
-    bindingEvidenceSha256:hash(bindingEvidenceJson),consentPhrase:"I approve this exact Operations staff cohort and native authority plan"};
-  return {approval,canonicalPlanJson,bindingEvidenceJson,reviewedSnapshot:snap,commandId,trustEnvelope};
+    authorizationChallenge:`synthetic-owner-challenge:${ownerId}`,approvalId:approval.approvalId,commandId:artifact.commandId,
+    approvedOperatorStaffId:ownerId,approvedOperatorAccessSubject:p.owner.subject,issuedByStaffId:ownerId,
+    issuedByAccessSubject:p.owner.subject,authorizedAt:issuedAt,expiresAt,reviewedSnapshotSha256:snap.snapshotSha256,
+    canonicalPlanSha256:hash(artifact.canonicalPlanJson),bindingEvidenceSha256:hash(artifact.bindingEvidenceJson),
+    consentPhrase:"I approve this exact Operations staff cohort and native authority plan"};
+  return {...artifact,approval,trustEnvelope};
 }
 const trusted=async({trustEnvelope}:any)=>typeof trustEnvelope?.ownerSessionId==="string"&&trustEnvelope.ownerSessionId.startsWith("synthetic-");
 async function legacyEffectiveSnapshot(people:Person[]){
@@ -166,8 +168,51 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,dir),"utf8")).map(sql=>db.prepare(sql)));
       await db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name).run();
     }
-  },180_000);
+  // Applying the complete 225-migration chain to local Miniflare D1 is slow
+  // on this Windows host; this timeout covers test setup only, not production.
+  },240_000);
   afterAll(async()=>runtime?.dispose());
+
+  it("composes and installs initial owner authority from an observed empty control plane while preserving existing identities",async()=>{
+    const ownerShape=await existingOwnerBootstrapFixture();
+    const ownerReviewed=await snapshot(db,[ownerShape.employee.id]),ownerBefore=JSON.parse(ownerReviewed.snapshotJson).rows;
+    expect(ownerReviewed.controlPlaneStaffIds).toEqual([]);
+    const ownerInput=planForExistingOwner(ownerReviewed,ownerShape),ownerPrepared=await prepare(ownerInput,{verifyTrust:trusted});
+    const ownerPlan=JSON.parse(ownerInput.canonicalPlanJson),ownerBinding=JSON.parse(ownerInput.bindingEvidenceJson);
+    expect(ownerBinding.observedControlPlaneStaffIds).toEqual([]);
+    expect(ownerBinding.plannedControlPlaneStaffIds).toEqual([ownerShape.owner.id]);
+    expect(ownerPlan.controlPlaneStaffIds).toEqual([ownerShape.owner.id]);
+    expect(ownerPrepared.plan.staffCohort).toEqual([ownerShape.employee.id]);
+    expect(ownerPrepared.plan.rows.filter((row:any)=>row.table==="native_staff_admissions"||row.table==="native_staff_profiles")
+      .map((row:any)=>row.row.staff_id)).toEqual([ownerShape.employee.id,ownerShape.employee.id]);
+    expect(ownerPrepared.plan.rows.filter((row:any)=>row.table==="native_staff_management_delegations"
+      &&row.row.actor_staff_id===ownerShape.owner.id)).toHaveLength(9);
+    expect(ownerPrepared.plan.rows.filter((row:any)=>row.table==="native_staff_delegation_ceilings")).toHaveLength(11);
+    const ownerReceipt=await execute(db,ownerPrepared,{verifyTrust:trusted});
+    expect(ownerReceipt).toMatchObject({staffCount:1,insertedRowCount:ownerPrepared.plan.rows.length+2});
+    const ownerAfter=JSON.parse((await snapshot(db,[ownerShape.employee.id])).snapshotJson).rows;
+    for(const [table,filter] of [
+      ["staff_users",(row:any)=>row.id===ownerShape.owner.id||row.id===ownerShape.kstirn.id],
+      ["native_staff_admissions",(row:any)=>row.staff_id===ownerShape.owner.id],
+      ["native_staff_profiles",(row:any)=>row.staff_id===ownerShape.owner.id],
+      ["native_staff_admissions",(row:any)=>row.staff_id===ownerShape.kstirn.id],
+      ["native_staff_profiles",(row:any)=>row.staff_id===ownerShape.kstirn.id],
+      ["native_directory_grants",(row:any)=>row.staff_id===ownerShape.owner.id||row.staff_id===ownerShape.kstirn.id],
+      ["native_directory_assignments",(row:any)=>row.staff_id===ownerShape.owner.id||row.staff_id===ownerShape.kstirn.id],
+      ["native_directory_grant_generations",(row:any)=>row.staff_id===ownerShape.owner.id||row.staff_id===ownerShape.kstirn.id],
+      ["native_directory_grant_history",(row:any)=>row.staff_id===ownerShape.owner.id||row.staff_id===ownerShape.kstirn.id],
+      ["native_staff_bootstrap_approvals",(row:any)=>row.approval_id===ownerShape.priorApprovalId],
+      ["native_staff_bootstrap_receipts",(row:any)=>row.command_id===ownerShape.priorCommandId],
+    ] as const){
+      expect((ownerAfter[table]??[]).filter(filter),`preserved ${table} rows changed`).toEqual((ownerBefore[table]??[]).filter(filter));
+    }
+    expect(await db.prepare("SELECT COUNT(*) n FROM native_staff_management_delegations WHERE actor_staff_id=?")
+      .bind(ownerShape.owner.id).first("n")).toBe(9);
+    expect(await db.prepare("SELECT COUNT(*) n FROM native_staff_delegation_ceilings c JOIN native_staff_management_delegations d ON d.id=c.parent_delegation_id WHERE d.actor_staff_id=?")
+      .bind(ownerShape.owner.id).first("n")).toBe(11);
+    expect((await db.prepare("SELECT staff_id FROM native_staff_lifecycle_control_plane_candidates ORDER BY staff_id").all())
+      .results.map((row:any)=>row.staff_id)).toEqual([ownerShape.owner.id]);
+  },240_000);
 
   it("compiles one bounded management batch without coercing or splitting bind values",async()=>{
     const statements=[{sql:"INSERT INTO x VALUES(?,?,?)",params:["active",1,null]}];
@@ -183,14 +228,18 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
   });
 
   it("installs approved synthetic admission/profile/scope grant rows while preserving Ops/PA permissions and existing authority bytes",async()=>{
-    const people=await fixture(),ids=[people.pa.id,people.ops.id,people.operator.id,people.root.id];
+    const people=await fixture();
     const seeded=(await db.prepare("SELECT id,email,access_subject FROM staff_users WHERE id IN ('staff-beau-koltz','staff-kollins-stirn') ORDER BY id").all()).results as any[];
     const preservedPrincipals=[people.pa,people.ops,people.operator,people.root,
       ...seeded.map(row=>({id:row.id,email:row.email,subject:row.access_subject??''}))];
     let reviewed=await snapshot(db,[people.ops.id]);
     let reviewedState=JSON.parse(reviewed.snapshotJson);
-    expect(reviewedState.rows.native_staff_delegation_ceilings).toHaveLength(11);
-    expect(reviewedState.rows.native_staff_delegation_ceilings.every((row:any)=>row.target_staff_id===null)).toBe(true);
+    const operatorDelegationIds=new Set(reviewedState.rows.native_staff_management_delegations
+      .filter((row:any)=>row.actor_staff_id===people.operator.id).map((row:any)=>row.id));
+    const operatorCeilings=reviewedState.rows.native_staff_delegation_ceilings
+      .filter((row:any)=>operatorDelegationIds.has(row.parent_delegation_id));
+    expect(operatorCeilings).toHaveLength(11);
+    expect(operatorCeilings.every((row:any)=>row.target_staff_id===null)).toBe(true);
     const identityBefore=(await db.prepare("SELECT id,email,status,access_subject,project_alpha_user_id,sync_protected FROM staff_users ORDER BY id").all()).results;
     const before=await legacyEffectiveSnapshot(preservedPrincipals);
     let input=planFor(reviewed,people),prepared=await prepare(input,{verifyTrust:trusted});
@@ -244,7 +293,8 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
     const receipt=await execute(db,prepared,{verifyTrust:trusted});
     expect(receipt).toMatchObject({staffCount:1,insertedRowCount:8});
     expect(await legacyEffectiveSnapshot(preservedPrincipals)).toEqual(before);
-    expect((await db.prepare("SELECT id,email,access_subject,status FROM staff_users ORDER BY id").all()).results).toHaveLength(ids.length+2);
+    // The shared D1 fixture includes synthetic principals created by earlier tests.
+    expect((await db.prepare("SELECT id,email,access_subject,status FROM staff_users ORDER BY id").all()).results).toHaveLength(identityBefore.length);
     expect(await db.prepare("SELECT bound_access_subject FROM native_staff_admissions WHERE staff_id=?").bind(people.ops.id).first("bound_access_subject")).toBe(people.ops.subject);
     expect(await db.prepare("SELECT login_email FROM native_staff_profiles WHERE staff_id=?").bind(people.ops.id).first("login_email")).toBe(people.ops.email);
     expect(await db.prepare("SELECT count(*) n FROM native_staff_target_memberships WHERE staff_id=? AND business_area_id=?").bind(people.ops.id,`installer-scope-${people.ops.id}`).first("n")).toBe(1);
@@ -295,31 +345,6 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
     expect(await db.prepare("SELECT count(*) n FROM native_staff_bootstrap_approvals WHERE approval_id=?").bind(input.approval.approvalId).first("n")).toBe(1);
     expect(await db.prepare("SELECT count(*) n FROM native_staff_bootstrap_receipts WHERE command_id=?").bind(input.commandId).first("n")).toBe(1);
 
-    const ownerShape=await existingOwnerBootstrapFixture();
-    const ownerReviewed=await snapshot(db,[ownerShape.employee.id]),ownerBefore=JSON.parse(ownerReviewed.snapshotJson).rows;
-    expect(ownerReviewed.controlPlaneStaffIds).not.toContain(ownerShape.owner.id);
-    const ownerInput=planForExistingOwner(ownerReviewed,ownerShape),ownerPrepared=await prepare(ownerInput,{verifyTrust:trusted});
-    expect(ownerPrepared.plan.staffCohort).toEqual([ownerShape.employee.id]);
-    expect(ownerPrepared.plan.rows.filter((row:any)=>row.table==="native_staff_admissions"||row.table==="native_staff_profiles")
-      .every((row:any)=>row.row.staff_id===ownerShape.employee.id)).toBe(true);
-    expect(ownerPrepared.plan.rows.some((row:any)=>row.table==="native_directory_grants"&&row.row.staff_id===ownerShape.owner.id)).toBe(false);
-    const ownerReceipt=await execute(db,ownerPrepared,{verifyTrust:trusted});
-    expect(ownerReceipt).toMatchObject({staffCount:1,insertedRowCount:ownerPrepared.plan.rows.length+2});
-    const ownerAfter=JSON.parse((await snapshot(db,[ownerShape.employee.id])).snapshotJson).rows;
-    for(const [table,filter] of [
-      ["native_staff_admissions",(row:any)=>row.staff_id===ownerShape.owner.id],
-      ["native_staff_profiles",(row:any)=>row.staff_id===ownerShape.owner.id],
-      ["native_directory_grants",(row:any)=>row.staff_id===ownerShape.owner.id],
-      ["native_directory_grant_generations",(row:any)=>row.staff_id===ownerShape.owner.id],
-      ["native_directory_grant_history",(row:any)=>row.staff_id===ownerShape.owner.id],
-      ["native_staff_bootstrap_approvals",(row:any)=>row.approval_id===ownerShape.priorApprovalId],
-      ["native_staff_bootstrap_receipts",(row:any)=>row.command_id===ownerShape.priorCommandId],
-    ] as const){
-      expect((ownerAfter[table]??[]).filter(filter),`existing owner ${table} rows changed`).toEqual((ownerBefore[table]??[]).filter(filter));
-    }
-    expect((await db.prepare("SELECT COUNT(*) n FROM native_staff_management_delegations WHERE actor_staff_id=?").bind(ownerShape.owner.id).first("n"))).toBe(9);
-    expect((await db.prepare("SELECT COUNT(*) n FROM native_staff_delegation_ceilings c JOIN native_staff_management_delegations d ON d.id=c.parent_delegation_id WHERE d.actor_staff_id=?").bind(ownerShape.owner.id).first("n"))).toBe(11);
-    expect((await db.prepare("SELECT staff_id FROM native_staff_lifecycle_control_plane_candidates ORDER BY staff_id").all()).results.map((row:any)=>row.staff_id)).toContain(ownerShape.owner.id);
   },240_000);
 
   it("rolls back on stale cohort/role/schema, unexpected native authority, missing trust, and late row failure",async()=>{
@@ -508,5 +533,45 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
       .bind(commandId).first("n")).toBe(1);
     expect(await db.prepare("SELECT count(*) n FROM native_staff_profiles WHERE staff_id=?")
       .bind(fixtureData.owner.id).first("n")).toBe(1);
+  },240_000);
+
+  it("composes and prepares from the real full-schema D1 snapshot shape",async()=>{
+    const owner=await person("composer-owner"),kstirn=await person("composer-kstirn"),target=await person("composer-target");
+    await existingControlPlane(owner);
+    await nativeIdentity(kstirn);
+
+    // Exercise the installer reader against the actual Miniflare D1 database migrated above.
+    const reviewed=await snapshot(db,[target.id]);
+    expect(reviewed.migrationNames).toHaveLength(225);
+    expect(reviewed.controlPlaneStaffIds).toContain(owner.id);
+    const composed=composeNativeStaffBootstrapArtifact({
+      reviewedSnapshot:reviewed,
+      proposedStaffIds:[target.id],
+      controlPlaneStaffIds:reviewed.controlPlaneStaffIds,
+      preservationRoles:{ownerStaffId:owner.id,kstirnStaffId:kstirn.id},
+      decisionReference:"synthetic-fullschema-d1-interoperability",
+    });
+    const artifact=composed.artifact,plan=JSON.parse(artifact.canonicalPlanJson),approvalId=plan.approvalId;
+    const authorizedAt="2026-10-27T00:00:00.000Z",expiresAt="2030-10-27T00:00:00.000Z";
+    const approval={approvalId,approvedOperatorStaffId:owner.id,approvedOperatorAccessSubject:owner.subject,
+      issuedByStaffId:owner.id,issuedByAccessSubject:owner.subject,issuedAt:authorizedAt,expiresAt};
+    const trustEnvelope={schemaVersion:1,action:"install-operations-native-staff-bootstrap",
+      ownerSessionId:"synthetic-fullschema-owner-session",authorizationChallenge:"synthetic-fullschema-challenge",
+      approvalId,commandId:artifact.commandId,approvedOperatorStaffId:owner.id,
+      approvedOperatorAccessSubject:owner.subject,issuedByStaffId:owner.id,issuedByAccessSubject:owner.subject,
+      authorizedAt,expiresAt,reviewedSnapshotSha256:reviewed.snapshotSha256,
+      canonicalPlanSha256:composed.planSha256,bindingEvidenceSha256:composed.bindingSha256,
+      consentPhrase:"I approve this exact Operations staff cohort and native authority plan"};
+    const prepared=await prepare({approval,canonicalPlanJson:artifact.canonicalPlanJson,
+      bindingEvidenceJson:artifact.bindingEvidenceJson,reviewedSnapshot:artifact.reviewedSnapshot,
+      commandId:artifact.commandId,trustEnvelope},{verifyTrust:trusted});
+
+    expect(prepared.reviewedSnapshot.snapshotSha256).toBe(reviewed.snapshotSha256);
+    expect(prepared.plan.staffCohort).toEqual([target.id]);
+    expect(prepared.plan.rows).toEqual([
+      {table:"native_staff_admissions",row:{staff_id:target.id,bound_access_subject:target.subject,active:1,admitted_by:owner.id}},
+      {table:"native_staff_profiles",row:{staff_id:target.id,login_email:target.email,display_name:target.id,version:1}},
+    ]);
+    expect(composed.preservedStaff).toEqual([{role:"owner",staffId:owner.id},{role:"kstirn",staffId:kstirn.id}]);
   },240_000);
 });

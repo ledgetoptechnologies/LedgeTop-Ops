@@ -249,7 +249,9 @@ describe("Viewer service client", () => {
       { baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret },
       fetcher as typeof fetch,
     );
-    await expect(client.overview()).resolves.toEqual(overview);
+    const legacyOverview = await client.overview();
+    expect(legacyOverview).toEqual(overview);
+    expect(legacyOverview.jobs).not.toHaveProperty("observationWarnings");
 
     for (const invalid of [
       { ...overview, schemaVersion: 2 },
@@ -271,6 +273,57 @@ describe("Viewer service client", () => {
       }
     }
   });
+
+  it("preserves optional safe observation-warning counts without changing failed counts", async () => {
+    for (const observationWarnings of [0, 5]) {
+      const payload = {
+        schemaVersion: 1,
+        generatedAt: "2026-08-18T14:00:00.000Z",
+        projects: { active: 3, total: 4 },
+        models: { published: 7, total: 9, bytes: 123456 },
+        jobs: {
+          queued: 1, running: 2, reviewReady: 1, failed: 7, observationWarnings,
+          internalPath: "/private/job-output",
+        },
+        providers: { enabled: 2, healthy: 1, total: 3 },
+        storage: { usedBytes: 456789, availableBytes: null },
+        platform: { ready: true, workerLive: true, lifecycleBlocked: false },
+        internalPath: "/private/platform-output",
+      };
+      const client = new ViewerServiceClient(
+        { baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret },
+        vi.fn(async () => Response.json(payload)) as typeof fetch,
+      );
+
+      const value = await client.overview();
+
+      expect(value.jobs).toEqual({ queued: 1, running: 2, reviewReady: 1, failed: 7, observationWarnings });
+      expect(value.jobs).not.toHaveProperty("internalPath");
+      expect(value).not.toHaveProperty("internalPath");
+    }
+  });
+
+  it.each([null, "5", 1.5, -1, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects invalid optional observation-warning count %s",
+    async observationWarnings => {
+      const payload = {
+        schemaVersion: 1,
+        generatedAt: "2026-08-18T14:00:00.000Z",
+        projects: { active: 3, total: 4 },
+        models: { published: 7, total: 9, bytes: 123456 },
+        jobs: { queued: 1, running: 2, reviewReady: 1, failed: 0, observationWarnings },
+        providers: { enabled: 2, healthy: 1, total: 3 },
+        storage: { usedBytes: 456789, availableBytes: null },
+        platform: { ready: true, workerLive: true, lifecycleBlocked: false },
+      };
+      const client = new ViewerServiceClient(
+        { baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret },
+        vi.fn(async () => Response.json(payload)) as typeof fetch,
+      );
+
+      await expect(client.overview()).rejects.toMatchObject({ code: "invalid_response" });
+    },
+  );
 
   it("creates, lists, and revokes public shares without returning the raw token", async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash, createPublicKey, generateKeyPairSync, sign as signBytes, verify as verifyBytes, constants } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { assertPinnedIssuerDistribution } from './native-staff-bootstrap-owner-approval-distribution-pin.mjs';
+import { assertPinnedIssuerDistribution, PINNED_OWNER_APPROVAL_DISTRIBUTION_SHA256 } from './native-staff-bootstrap-owner-approval-distribution-pin.mjs';
+import { NATIVE_STAFF_CUTOVER_DISTRIBUTION_FILES } from './native-staff-cutover-distribution-pin.mjs';
+import { PINNED_NATIVE_STAFF_CUTOVER_DISTRIBUTION_SHA256 } from './native-staff-cutover-distribution-pin-value.mjs';
 import {
   BOOTSTRAP_OWNER_APPROVAL_KIND, canonicalJson, buildOwnerApprovalReceipt,
   assertPinnedInstallerSource, ownerApprovalConsentText, parseTrustConfig, verifyCloudflareAccessJwt,
@@ -180,27 +182,95 @@ test('fails closed on an unprovisioned distribution pin and verifies exact execu
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('verifies the exact human Access JWT against pinned issuer, audience, subject and RS256 JWKS', async () => {
+test('public bootstrap and cutover manifests pin every exact runtime file while both distribution pins remain unprovisioned', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const bootstrapManifestPath = path.join(root, 'scripts/native-staff-bootstrap-owner-approval-distribution-manifest.json');
+  const cutoverManifestPath = path.join(root, 'scripts/native-staff-cutover-distribution-manifest.json');
+  const bootstrapBytes = readFileSync(bootstrapManifestPath);
+  const bootstrapManifest = JSON.parse(bootstrapBytes.toString('utf8'));
+  const cutoverManifestBytes = readFileSync(cutoverManifestPath);
+  const cutoverManifest = JSON.parse(cutoverManifestBytes.toString('utf8'));
+  assert.deepEqual(Object.keys(bootstrapManifest).sort(), ['files', 'kind', 'schemaVersion']);
+  assert.equal(bootstrapManifest.schemaVersion, 1);
+  assert.equal(bootstrapManifest.kind, 'operations-native-staff-bootstrap-issuer-distribution-v1');
+  assert.equal(assertPinnedIssuerDistribution({ root, expectedSha256: sha(bootstrapBytes) }), true);
+  assert.deepEqual(Object.keys(cutoverManifest).sort(), ['files', 'kind', 'schemaVersion']);
+  assert.equal(cutoverManifest.schemaVersion, 1);
+  assert.equal(cutoverManifest.kind, 'operations-native-staff-cutover-runtime-manifest-v1');
+  const expectedCutoverFiles = [...NATIVE_STAFF_CUTOVER_DISTRIBUTION_FILES].sort();
+  assert.deepEqual(cutoverManifest.files.map(entry => entry.path), expectedCutoverFiles);
+  const seen = new Set();
+  for (const entry of cutoverManifest.files) {
+    assert.deepEqual(Object.keys(entry).sort(), ['path', 'sha256']);
+    assert.match(entry.sha256, /^[0-9a-f]{64}$/u);
+    assert.equal(seen.has(entry.path), false, entry.path);
+    seen.add(entry.path);
+    const target = path.resolve(root, entry.path);
+    const relative = path.relative(root, target);
+    assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative), entry.path);
+    const info = lstatSync(target);
+    assert.ok(info.isFile() && !info.isSymbolicLink(), entry.path);
+    assert.equal(sha(readFileSync(target)), entry.sha256, entry.path);
+  }
+  const uniqueEntry = (manifest, relative) => {
+    const entries = manifest.files.filter(entry => entry.path === relative);
+    assert.equal(entries.length, 1, relative);
+    return entries[0];
+  };
+  const ownerModuleSha256 = sha(readFileSync(path.join(root, 'scripts/native-staff-bootstrap-owner-approval.mjs')));
+  assert.equal(uniqueEntry(bootstrapManifest, 'scripts/native-staff-bootstrap-owner-approval.mjs').sha256, ownerModuleSha256);
+  assert.equal(uniqueEntry(cutoverManifest, 'scripts/native-staff-bootstrap-owner-approval.mjs').sha256, ownerModuleSha256);
+  assert.equal(uniqueEntry(cutoverManifest, 'scripts/native-staff-bootstrap-owner-approval-distribution-manifest.json').sha256,
+    sha(bootstrapBytes));
+  assert.equal(PINNED_OWNER_APPROVAL_DISTRIBUTION_SHA256, '0'.repeat(64));
+  assert.equal(PINNED_NATIVE_STAFF_CUTOVER_DISTRIBUTION_SHA256, '0'.repeat(64));
+});
+
+test('verifies the exact human Access JWT while allowing the optional RFC typ header only when absent or JWT', async () => {
   const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const access = { issuer: 'https://example.cloudflareaccess.com', audience: 'A'.repeat(32),
     owner: { staffId: 'owner-synthetic', accessSubject: 'access|owner-synthetic' } };
-  const header = encode({ alg: 'RS256', kid: 'synthetic-kid', typ: 'JWT' });
   const now = Math.floor(Date.now() / 1000);
-  const claims = encode({ iss: access.issuer, aud: access.audience, sub: access.owner.accessSubject,
-    email: 'owner@example.test', type: 'app', iat: now - 30, exp: now + 300 });
-  const signingInput = `${header}.${claims}`;
-  const jwt = `${signingInput}.${signBytes('RSA-SHA256', Buffer.from(signingInput), privateKey).toString('base64url')}`;
+  const makeJwt = (headerFields = { typ: 'JWT' }, claimOverrides = {}) => {
+    const header = encode({ alg: 'RS256', kid: 'synthetic-kid', ...headerFields });
+    const claims = encode({ iss: access.issuer, aud: access.audience, sub: access.owner.accessSubject,
+      email: 'owner@example.test', type: 'app', iat: now - 30, exp: now + 300, ...claimOverrides });
+    const signingInput = `${header}.${claims}`;
+    return `${signingInput}.${signBytes('RSA-SHA256', Buffer.from(signingInput), privateKey).toString('base64url')}`;
+  };
   const jwk = publicKey.export({ format: 'jwk' });
-  const verified = await verifyCloudflareAccessJwt(jwt, access, { now: Date.now(), fetchImpl: async url => {
+  const fetchJwks = async url => {
     assert.equal(url.href, `${access.issuer}/cdn-cgi/access/certs`);
     return new Response(JSON.stringify({ keys: [{ ...jwk, kid: 'synthetic-kid', alg: 'RS256', use: 'sig' }] }),
       { status: 200, headers: { 'content-type': 'application/json' } });
-  } });
-  assert.equal(verified.subject, access.owner.accessSubject);
-  assert.equal(verified.assertionSha256, sha(jwt));
-  const wrong = `${header}.${encode({ iss: access.issuer, aud: access.audience, sub: 'access|other', type: 'app', iat: now - 30, exp: now + 300 })}.`+
-    signBytes('RSA-SHA256', Buffer.from(`${header}.${encode({ iss: access.issuer, aud: access.audience, sub: 'access|other', type: 'app', iat: now - 30, exp: now + 300 })}`), privateKey).toString('base64url');
-  await assert.rejects(verifyCloudflareAccessJwt(wrong, access, { now: Date.now(), fetchImpl: async () => { throw new Error('must not fetch JWKS'); } }), /access_token_claims_invalid/u);
+  };
+  for (const [label, header] of [['absent typ', { }], ['typ JWT', { typ: 'JWT' }]]) {
+    const jwt = makeJwt(header);
+    const verified = await verifyCloudflareAccessJwt(jwt, access, { now: Date.now(), fetchImpl: fetchJwks });
+    assert.equal(verified.subject, access.owner.accessSubject, label);
+    assert.equal(verified.assertionSha256, sha(jwt), label);
+  }
+  for (const [label, header, claims] of [
+    ['null typ', { typ: null }, {}],
+    ['non-JWT typ', { typ: 'application/jwt' }, {}],
+    ['extra crit header', { typ: 'JWT', crit: ['exp'] }, {}],
+    ['extra jku header', { typ: 'JWT', jku: 'https://attacker.example.test/jwks' }, {}],
+    ['algorithm change', { typ: 'JWT', alg: 'HS256' }, {}],
+    ['none algorithm', { typ: 'JWT', alg: 'none' }, {}],
+    ['service token identifier', { typ: 'JWT' }, { common_name: 'service-client' }],
+    ['service token claim', { typ: 'JWT' }, { service_token_id: 'service-client' }],
+  ]) {
+    let fetched = false;
+    await assert.rejects(verifyCloudflareAccessJwt(makeJwt(header, claims), access, { now: Date.now(), fetchImpl: async () => {
+      fetched = true;
+      return fetchJwks(`${access.issuer}/cdn-cgi/access/certs`);
+    } }), /access_token_(?:invalid|claims_invalid)/u, label);
+    assert.equal(fetched, false, `${label} must be rejected before JWKS retrieval`);
+  }
+  const wrongSubject = makeJwt({ typ: 'JWT' }, { sub: 'access|other' });
+  await assert.rejects(verifyCloudflareAccessJwt(wrongSubject, access, { now: Date.now(), fetchImpl: async () => {
+    throw new Error('must not fetch JWKS for wrong subject');
+  } }), /access_token_claims_invalid/u);
 });
 
 test('uses only a hash-pinned absolute cloudflared executable and minimal inherited environment', () => {
