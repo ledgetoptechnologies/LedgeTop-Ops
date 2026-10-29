@@ -384,7 +384,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
     const sequence = ++runtime.logSequence;
     return json({
       attempt: fixtures.tasks[0].latestAttempt,
-      logs: [{ createdAt: new Date().toISOString(), level: 'info', message: `Running stage odm_dem · browser refresh ${sequence}` }],
+      logs: [{ createdAt: new Date().toISOString(), level: 'info', message: `Running stage odm_dem Â· browser refresh ${sequence}` }],
     });
   }
   if (pathname === '/api/v1/attempts/attempt-johnson-old/diagnostics') return json({ diagnostics: {
@@ -1339,7 +1339,7 @@ test('companion product restore is explicit, immutable-version scoped, and permi
         if (scenario.readOnly) {
           assert.equal(actions.some(button => ['restore-products', 'retry-operation'].includes(button.action)), false, JSON.stringify(actions));
         } else if (scenario.status === 'queued') {
-          assert.ok(actions.some(button => button.text === 'Restoring products…' && button.disabled), JSON.stringify(actions));
+          assert.ok(actions.some(button => button.text === 'Restoring productsâ€¦' && button.disabled), JSON.stringify(actions));
           assert.equal(actions.some(button => button.action === 'restore-products'), false);
         } else if (scenario.retryable === false) {
           assert.ok(actions.some(button => button.text === 'Product restore failed' && button.disabled), JSON.stringify(actions));
@@ -1425,4 +1425,34 @@ test('mobile project creation follows project write permission', { timeout: 6000
       } finally { await client.command('Page.close').catch(()=>{}); client.close(); }
     }
   } finally { if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);} release(); if(server)await new Promise(resolve=>server.close(resolve)); await removeBrowserProfile(profile,t); }
+});
+
+test('archived customer and group assignments survive default choices and change only deliberately', { timeout: 90_000, skip: manualFixture }, async t => {
+  const executable = browserPath(); if (!executable) { t.skip('Chrome or Edge required'); return; }
+  const release = await acquireBrowserHarnessLock({root}); let server, runtime, origin, profile, browser;
+  try {
+    ({server,runtime,origin}=await startFixtureServer());
+    profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
+    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    const devTools=await waitForDevTools(profile);
+    for (const scenario of ['archived-customer-keep','archived-customer-clear','archived-customer-move','archived-group-keep','archived-group-clear','archived-group-move','archived-group-conflict']) await t.test(scenario,async()=>{
+      const archivedCustomer=scenario.startsWith('archived-customer');
+      runtime.hierarchy.organizations.find(x=>x.id==='org-zenith').status=archivedCustomer?'archived':'active';
+      runtime.hierarchy.groups=[{id:'group-old',organizationId:'org-zenith',displayName:'Old group',status:'archived',revision:1},{id:'group-new',organizationId:'org-zenith',displayName:'New group',status:'active',revision:1}];
+      runtime.hierarchy.assignments.set('project-quarry',{organizationId:'org-zenith',groupId:'group-old',hierarchyRevision:7});runtime.forceHierarchyConflict=scenario.endsWith('conflict');runtime.requests=[];
+      const target=await (await fetch(`${devTools}/json/new?about:blank`,{method:'PUT'})).json(),client=await CdpClient.connect(target.webSocketDebuggerUrl);
+      try {
+        await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
+        await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-quarry`});
+        await waitFor(client,`Boolean(document.querySelector('[data-action="set-project-customer"]'))`,'Assignment action missing');
+        await client.evaluate(`document.querySelector('[data-action="set-project-customer"]').click()`);
+        await waitFor(client,`Boolean(document.querySelector('.workspace-decision[open] select[name=organizationId]'))`,'Customer dialog missing');
+        assert.equal(await client.evaluate(`document.querySelector('.workspace-decision select[name=organizationId]').value`),'org-zenith');
+        if(scenario==='archived-customer-clear')await client.evaluate(`document.querySelector('.workspace-decision select[name=organizationId]').value=''`);if(scenario==='archived-customer-move')await client.evaluate(`document.querySelector('.workspace-decision select[name=organizationId]').value='org-adams'`);
+        await client.evaluate(`document.querySelector('.workspace-decision button[type=submit]').click()`);
+        if(!archivedCustomer){await waitFor(client,`Boolean(document.querySelector('.workspace-decision[open] select[name=groupId]'))`,'Group dialog missing');assert.equal(await client.evaluate(`document.querySelector('.workspace-decision select[name=groupId]').value`),'group-old');if(scenario.endsWith('clear'))await client.evaluate(`document.querySelector('.workspace-decision select[name=groupId]').value=''`);if(scenario.endsWith('move')||scenario.endsWith('conflict'))await client.evaluate(`document.querySelector('.workspace-decision select[name=groupId]').value='group-new'`);await client.evaluate(`document.querySelector('.workspace-decision button[type=submit]').click()`)}
+        if(scenario.endsWith('keep')){await new Promise(resolve=>setTimeout(resolve,100));assert.equal(runtime.requests.filter(x=>x.method==='PATCH').length,0)}else{await waitForRequest(runtime,0,'PATCH','/api/v1/projects/project-quarry/hierarchy');const req=runtime.requests.filter(x=>x.method==='PATCH').at(-1);assert.equal(req.body.expectedRevision,7);const assignment=runtime.hierarchy.assignments.get('project-quarry');if(scenario.endsWith('conflict'))assert.deepEqual(assignment,{organizationId:'org-zenith',groupId:'group-old',hierarchyRevision:7});else if(archivedCustomer)assert.equal(assignment.organizationId,scenario.endsWith('move')?'org-adams':null);else assert.equal(assignment.groupId,scenario.endsWith('move')?'group-new':null)}
+      } finally {await client.command('Page.close').catch(()=>{});client.close()}
+    });
+  } finally {if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);}release();if(server)await new Promise(resolve=>server.close(resolve));await removeBrowserProfile(profile,t)}
 });
