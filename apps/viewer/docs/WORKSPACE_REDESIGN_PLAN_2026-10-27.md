@@ -2,7 +2,21 @@
 
 Owner: Claude (UX/design + workspace frontend). Backend hierarchy, DTOs and processing protocol: Codex / Processing.
 Branch: `claude/viewer-workspace-redesign` from `origin/main` 2f458ff (includes PR 321).
-Status: **plan for review — no code written yet.**
+Status (2026-10-28): **PRs 1, 2, 3, 4 and 6 built and committed locally; PR 5 waits on Codex's delivery-stage
+enum fixture.** Not pushed or deployed; the branch needs updating from main (now 3f4eb771) before a PR.
+
+| PR | Commits | Review |
+|---|---|---|
+| 1 Tokens, brand, transitions | 544676c2, 1288a95b (favicon) | Codex: favicon finding closed |
+| 2 Loading/error states, a11y | 85bfccf0, fdfc27bf (readiness), 7e5e1acc (session guards) | Codex: all findings closed at 7e5e1acc |
+| 3 Projects page, customer grouping | c6d50455, a67e3a72 (filter/hidden/401) | Codex: closed |
+| 4 Project page, task tabs | 4982d6f9, b8c66469 (selected-row search, archived retry) | Codex: closed at b8c66469 |
+| 5 Processing page, stage chips | — | Waiting on the delivery-stage enum fixture |
+| 6 Action menus, plain wording | 6fbfe6c5 | Sent to Codex |
+
+Test checkpoint at 6fbfe6c5 (Windows, after rebuild): every `test/workspace-*` file and
+`project-share-browser` passes, except `workspace-lifecycle-api` (Linux-only `/proc`; Codex ran it on
+Linux, 5/5) and `workspace-direct-client-browser` (skipped unless `LTDS_DIRECT_SHARE_BROWSER=true`).
 
 Direction from Beau (relayed by Codex, confirmed in session): a substantial daily-use revamp of the
 staff workspace (`/workspace`). Keep the dark theme. Align accents with the Operations design tokens.
