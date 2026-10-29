@@ -17,7 +17,8 @@ with:
 - the exact control-plane candidate IDs returned by the snapshot API;
 - explicit owner and kstirn preservation IDs;
 - a short decision/reference label for traceability; and
-- any proposed policy rows, written explicitly for the proposed cohort.
+- any proposed policy rows, written explicitly for the proposed cohort or the
+  narrowly defined initial owner package below.
 
 The result contains `artifact`, `planSha256`, `bindingSha256`, and preservation
 digests. The artifact has the four existing consumer fields:
@@ -42,12 +43,23 @@ only an admission and profile copied from that exact existing staff ID's
 subject, email, and display name; partial or mismatched native state is refused.
 That identity-only copy does not infer a role or grant. The binding evidence
 records hashes for each person's snapshot-linked Ops state and for inactive
-staff history. The owner cannot be an install target, and neither protected
-staff ID can be an authority actor or target in supplied policy rows. Authority
-rows are not inferred. If supplied,
-they must be explicit, install-table-shaped rows for the proposed cohort and
-are included in the binding hash. Directory grant and directory assignment
-rows are excluded so the plan cannot alter client access or client assignments.
+staff history. The owner cannot be an install target, and kstirn cannot be an
+authority actor or target in supplied policy rows. Authority rows are not
+inferred. Ordinary supplied policy rows must be explicit, install-table-shaped
+rows for the proposed cohort and are included in the binding hash.
+
+There is one owner-actor exception: when the observed snapshot has no
+control-plane candidate for the preserved owner, the plan may include that
+owner in `plannedControlPlaneStaffIds` only alongside the complete explicit
+initial owner package: nine global management delegations and eleven global
+delegation ceilings. The observed IDs remain exactly those from the snapshot;
+the package does not add the owner to the employee cohort or re-admit or
+re-profile the owner. The package is validated for its exact capabilities,
+scope, provenance, and ceiling links, and is bound as explicit policy. It does
+not grant authority to kstirn or infer any employee authority. See the
+[canonical owner-package and observed/planned control-plane rules](operations/native-staff-bootstrap-artifact-composer.md#observed-and-planned-control-plane)
+for the complete requirements. Directory grant and directory assignment rows
+are excluded so the plan cannot alter client access or client assignments.
 
 The existing installer is insert-only and its atomic snapshot guard remains the
 write boundary. This composer does not prove or assert that client records were
