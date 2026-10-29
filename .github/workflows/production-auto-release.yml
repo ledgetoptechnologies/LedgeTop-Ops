@@ -8,7 +8,7 @@ on:
 
 jobs:
   release:
-    if: ${{ github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.repository.full_name == 'ledgetoptechnologies/LedgeTop-Ops' && github.event.workflow_run.head_repository.full_name == 'ledgetoptechnologies/LedgeTop-Ops' && vars.PRODUCTION_AUTO_RELEASE_ENABLED == 'true' }}
+    if: ${{ github.ref == 'refs/heads/main' && (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.repository.full_name == 'ledgetoptechnologies/LedgeTop-Ops' && github.event.workflow_run.head_repository.full_name == 'ledgetoptechnologies/LedgeTop-Ops' && vars.PRODUCTION_AUTO_RELEASE_ENABLED == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:

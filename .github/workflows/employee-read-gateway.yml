@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   synthetic-linux-files:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
