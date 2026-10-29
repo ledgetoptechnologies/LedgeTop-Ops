@@ -11,6 +11,8 @@ const { safeRelativePath } = require('./processingSecurity');
 const { jpegMetadata, readHead } = require('./storageManager');
 const { parsePhotoExif } = require('./photoExif.mjs');
 const { fsyncDirectory, fsyncDirectoryTree } = require('./durableFs');
+const { TextDecoder } = require('node:util');
+const { parseGcpInterchange, MAX_SOURCE_BYTES } = require('./gcpImport');
 
 const IMAGE = /\.(?:jpe?g|png|tiff?)$/i;
 const CSV = /\.csv$/i;
@@ -89,6 +91,61 @@ function selectPhotos(storage, paths, maxFiles = 20000, { checkSpace = true } = 
   return { files: selected, byteSize };
 }
 
+// Search at most two parent directories of each explicitly selected folder or
+// image. Never recurse into siblings or leave the configured import root.
+function discoverSiblingSurveys(storage, paths, maxFiles = 20000) {
+  const selected = selectPhotos(storage, paths, maxFiles, { checkSpace: false });
+  if (selected.files.some(file => CSV.test(file.sourcePath))) return [];
+  const parents = new Set();
+  for (const relative of [...new Set(paths)]) {
+    const source = locate(storage, relative), stat = fs.lstatSync(source);
+    let parent = stat.isDirectory() ? path.posix.dirname(relative) : path.posix.dirname(path.posix.dirname(relative));
+    for (let i = 0; i < 2; i++) { parents.add(parent === '.' ? '' : parent); if (parent === '.') break; parent = path.posix.dirname(parent); }
+  }
+  const candidates = [], deadline = Date.now() + 10000;
+  let visited = 0, csvCount = 0;
+  for (const parent of [...parents].sort()) {
+    const directory = fs.opendirSync(locate(storage, parent, true));
+    try { for (let entry; (entry = directory.readSync());) {
+      if (++visited > 10000 || Date.now() >= deadline) fail('survey_discovery_limit');
+      if (!CSV.test(entry.name) || entry.name.startsWith('.') || !entry.isFile()) continue;
+      if (++csvCount > 64) fail('survey_discovery_limit');
+      const relative = parent ? `${parent}/${entry.name}` : entry.name, source = locate(storage, relative), initial = fs.lstatSync(source);
+      if (!initial.isFile() || initial.isSymbolicLink() || initial.size <= 0 || initial.size > MAX_SOURCE_BYTES) continue;
+      let fd, bytes;
+      try {
+        fd = fs.openSync(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+        if (!sameIdentity(identity(initial), identity(fs.fstatSync(fd))) || locate(storage, relative) !== source) fail('import_source_changed');
+        bytes = Buffer.alloc(initial.size + 1);
+        let read = 0, count;
+        while (read < bytes.length && (count = fs.readSync(fd, bytes, read, bytes.length - read, read)) > 0) read += count;
+        bytes = bytes.subarray(0, read);
+        if (bytes.length !== initial.size || !sameIdentity(identity(initial), identity(fs.fstatSync(fd))) || locate(storage, relative) !== source) fail('import_source_changed');
+      } finally { if (fd !== undefined) fs.closeSync(fd); }
+      try {
+        const content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+        parseGcpInterchange({ format: 'emlid-all-columns-v1', content });
+      } catch (error) {
+        if (error instanceof TypeError || ['invalid_gcp_input', 'gcp_input_too_large'].includes(error?.code)) continue;
+        throw error;
+      }
+      candidates.push({ relative, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), identity: identity(initial) });
+    } } finally { directory.closeSync(); }
+  }
+  return candidates;
+}
+function selectWithSiblingSurvey(storage, paths, survey, maxFiles = 20000) {
+  if (survey == null) return selectPhotos(storage, paths, maxFiles);
+  if (!survey || typeof survey !== 'object' || Array.isArray(survey) || Object.keys(survey).sort().join(',') !== 'path,sha256' || typeof survey.path !== 'string' || !/^[a-f0-9]{64}$/.test(survey.sha256)) fail('invalid_survey_choice');
+  const candidate = discoverSiblingSurveys(storage, paths, maxFiles).find(item => item.relative === survey.path && item.sha256 === survey.sha256);
+  if (!candidate) fail('survey_candidate_changed');
+  const selected = selectPhotos(storage, [...paths, candidate.relative], maxFiles);
+  const file = selected.files.find(item => item.sourcePath === candidate.relative);
+  if (!file || !sameIdentity(file, candidate.identity)) fail('import_source_changed');
+  file.expectedSha256 = candidate.sha256;
+  return selected;
+}
+
 async function previewPhotos(storage, paths, maxFiles = 20000) {
   const selected = selectPhotos(storage, paths, maxFiles, { checkSpace: false });
   const deadline = Date.now() + 10000, points = [];
@@ -123,6 +180,13 @@ function mountTaskPhotoImports(router, { processing, storage, authorize, mutate,
       res.json(await previewPhotos(storage, req.body?.paths, config.uploadMaxFiles || 20000));
     } catch (error) { res.status(400).json({ code: error.code || 'photo_preview_failed', error: 'Photo locations could not be inspected.' }); }
   });
+  router.post('/api/v1/dataset-imports/survey-preview', authorize('viewer.datasets.import'), (req, res) => {
+    try {
+      if (Object.keys(req.body || {}).some(key => key !== 'paths')) fail('invalid_raw_selection');
+      const candidates = discoverSiblingSurveys(storage, req.body?.paths, config.uploadMaxFiles || 20000);
+      res.json({ candidates: candidates.map(({ relative, sha256 }) => ({ path: relative, sha256 })) });
+    } catch (error) { res.status(400).json({ code: error.code || 'survey_preview_failed', error: 'Survey CSV discovery could not be completed. You can skip discovery or select a CSV directly.' }); }
+  });
   router.get('/api/v1/dataset-imports/browse', authorize('viewer.datasets.import'), (req, res) => {
     try { res.json(browsePhotos(storage, { relativePath: req.query.path || '', offset: Number(req.query.offset || 0), limit: Number(req.query.limit || 100) })); }
     catch (error) { res.status(error.code === 'import_mount_unavailable' ? 503 : 400).json({ code: error.code || 'import_path_unavailable', error: 'The import folder is unavailable.' }); }
@@ -131,8 +195,8 @@ function mountTaskPhotoImports(router, { processing, storage, authorize, mutate,
     try {
       const body = req.body || {}, project = processing.getProject(body.projectId);
       if (!project || project.status !== 'active') fail('invalid_project');
-      if (Object.keys(body).some(key => !['projectId', 'displayName', 'paths'].includes(key)) || typeof body.displayName !== 'string' || !body.displayName.trim() || body.displayName.length > 240) fail('invalid_raw_import');
-      const selected = selectPhotos(storage, body.paths, config.uploadMaxFiles || 20000);
+      if (Object.keys(body).some(key => !['projectId', 'displayName', 'paths', 'survey'].includes(key)) || typeof body.displayName !== 'string' || !body.displayName.trim() || body.displayName.length > 240) fail('invalid_raw_import');
+      const selected = selectWithSiblingSurvey(storage, body.paths, body.survey, config.uploadMaxFiles || 20000);
       const result = processing.transaction(() => {
         const id = crypto.randomUUID(), datasetId = crypto.randomUUID(), timestamp = new Date().toISOString();
         const dataset = processing.createDataset({ id: datasetId, projectId: project.id, displayName: body.displayName.trim(), sourceType: 'server_import', storageMode: 'managed', rootKey: 'datasets', relativePath: datasetId, status: 'finalizing', createdBy: req.actorId, metadata: { rawPhotoCopy: true, originalsPreserved: true } });
@@ -143,7 +207,7 @@ function mountTaskPhotoImports(router, { processing, storage, authorize, mutate,
         return { dataset, operation: processing.getDatasetOperation(id) };
       });
       res.status(202).set('Location', `/api/v1/operations/${result.operation.id}`).set('Retry-After', '2').json(result);
-    } catch (error) { res.status(error.code === 'dataset_name_conflict' ? 409 : 400).json({ code: error.code || 'raw_import_failed', error: error.code || 'Raw images could not be selected.' }); }
+    } catch (error) { const message = error.code === 'multiple_survey_csv_candidates' ? 'Multiple survey CSV files were found. Select the intended CSV in the server browser along with your photos.' : error.code === 'survey_discovery_limit' ? 'Survey CSV search exceeded its limit. Select your survey CSV explicitly along with your photos.' : error.code || 'Raw images could not be selected.'; res.status(error.code === 'dataset_name_conflict' ? 409 : 400).json({ code: error.code || 'raw_import_failed', error: message }); }
   });
 }
 
@@ -165,11 +229,11 @@ async function copyTaskPhotos(operation, { processing, storage }, updateProgress
       const digest = new Transform({ transform(chunk, encoding, done) { hash.update(chunk); done(null, chunk); } });
       await pipeline(handle.createReadStream({ autoClose: false }), digest, fs.createWriteStream(temp, { flags: 'w' }), { signal });
       if (!sameIdentity(file, identity(await handle.stat())) || locate(storage, file.sourcePath) !== source || !sameIdentity(file, identity(fs.statSync(source)))) fail('import_source_changed');
-      const copied = fs.statSync(temp);
-      if (copied.size !== file.byteSize) fail('import_source_changed');
+      const copied = fs.statSync(temp), sha256 = hash.digest('hex');
+      if (copied.size !== file.byteSize || (file.expectedSha256 && sha256 !== file.expectedSha256)) fail('import_source_changed');
       await updateProgress(0.05 + 0.9 * index / payload.files.length);
       fs.renameSync(temp, destination);
-      files.push({ id: crypto.randomUUID(), relativePath: file.relativePath, byteSize: file.byteSize, sha256: hash.digest('hex'), processingRole: CSV.test(file.relativePath) ? 'gcp_source' : 'image', metadata: { ...(IMAGE.test(file.relativePath) ? jpegMetadata(readHead(destination)) : {}), sourcePath: file.sourcePath } });
+      files.push({ id: crypto.randomUUID(), relativePath: file.relativePath, byteSize: file.byteSize, sha256, processingRole: CSV.test(file.relativePath) ? 'gcp_source' : 'image', metadata: { ...(IMAGE.test(file.relativePath) ? jpegMetadata(readHead(destination)) : {}), sourcePath: file.sourcePath } });
     } finally { await handle.close(); if (fs.existsSync(temp)) fs.unlinkSync(temp); }
     await updateProgress(0.05 + 0.9 * (index + 1) / payload.files.length);
   }
@@ -181,4 +245,4 @@ async function copyTaskPhotos(operation, { processing, storage }, updateProgress
   require('./gcpDiscovery').discoverDatasetGcp({ processing, storage, datasetId: finalized.id, actorId: operation.subject });
   return { dataset: finalized };
 }
-module.exports = { browsePhotos, selectPhotos, previewPhotos, mountTaskPhotoImports, copyTaskPhotos };
+module.exports = { browsePhotos, selectPhotos, discoverSiblingSurveys, selectWithSiblingSurvey, previewPhotos, mountTaskPhotoImports, copyTaskPhotos };

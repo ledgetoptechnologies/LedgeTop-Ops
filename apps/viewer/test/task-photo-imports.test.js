@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { StorageManager } = require('../server/storageManager');
-const { browsePhotos, selectPhotos, previewPhotos, copyTaskPhotos } = require('../server/taskPhotoImports');
+const { browsePhotos, selectPhotos, discoverSiblingSurveys, selectWithSiblingSurvey, previewPhotos, copyTaskPhotos } = require('../server/taskPhotoImports');
 const { openDatabase } = require('../server/database');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
@@ -121,8 +121,11 @@ test('authenticated copy endpoint is durable/idempotent and worker finalizes a f
   const server = await new Promise(resolve => { const instance = app.listen(0, '127.0.0.1', () => resolve(instance)); });
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); database.close(); });
   context.photo('raw/day/a.jpg');
+  const survey = 'Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,1,2,100,44,-88,101,Test (ftUS) + height (ftUS)\n';
+  const originalSurvey = context.photo('raw/control.csv', survey);
   const url = `http://127.0.0.1:${server.address().port}/api/v1/dataset-imports/copy`;
-  const request = { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'Idempotency-Key': 'raw-copy-test-key-00000001' }, body: JSON.stringify({ projectId: project.id, displayName: 'Flight photos', paths: ['raw'] }) };
+  const candidate = discoverSiblingSurveys(context.storage, ['raw/day'])[0];
+  const request = { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'Idempotency-Key': 'raw-copy-test-key-00000001' }, body: JSON.stringify({ projectId: project.id, displayName: 'Flight photos', paths: ['raw/day'], survey: { path: candidate.relative, sha256: candidate.sha256 } }) };
   const first = await fetch(url, request), body = await first.json(); assert.equal(first.status, 202, JSON.stringify(body));
   assert.equal(body.dataset.storageMode, 'managed');
   assert.equal(body.operation.type, 'raw_photo_copy');
@@ -131,7 +134,41 @@ test('authenticated copy endpoint is durable/idempotent and worker finalizes a f
   const replay = await fetch(url, request), replayBody = await replay.json(); assert.equal(replay.status, 202); assert.equal(replayBody.operation.id, body.operation.id);
   await processOneDatasetOperation({ processing, repository, storage: context.storage, config: context.config }, 'test-worker');
   const complete = processing.getDatasetOperation(body.operation.id); assert.equal(complete.status, 'succeeded', JSON.stringify(complete));
-  assert.equal(processing.getDataset(body.dataset.id, true).files.length, 1);
+  assert.equal(processing.getDataset(body.dataset.id, true).files.length, 2);
+  assert.equal(fs.readFileSync(originalSurvey, 'utf8'), survey);
+  assert.ok(processing.getDataset(body.dataset.id, true).files.some(file => file.relativePath === 'raw/control.csv' && file.processingRole === 'gcp_source'));
   assert.equal(fs.existsSync(path.join(context.config.datasetImportMount, 'raw/day/a.jpg')), true);
   assert.equal((await fetch(url, { ...request, headers: { 'content-type': 'application/json' } })).status, 401);
+});
+
+
+test('bounded sibling survey discovery selects a unique valid CSV and requires explicit choice for ambiguity', t => {
+  const {storage, photo} = fixture(t);
+  const csv = 'Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,1,2,100,44,-88,101,Test (ftUS) + height (ftUS)\n';
+  photo('client/dump/map/flight/a.jpg'); const raw = photo('client/dump/control.csv',csv);
+  photo('client/dump/invalid.csv','ordinary,table\n1,2\n');
+  const candidate = discoverSiblingSurveys(storage,['client/dump/map/flight'])[0];
+  const result = selectWithSiblingSurvey(storage,['client/dump/map/flight'],{path:candidate.relative,sha256:candidate.sha256});
+  assert.deepEqual(result.files.map(f=>f.sourcePath),['client/dump/control.csv','client/dump/map/flight/a.jpg']);
+  assert.equal(result.files[0].expectedSha256,require('node:crypto').createHash('sha256').update(csv).digest('hex'));
+  assert.equal(fs.readFileSync(raw,'utf8'),csv);
+  photo('client/dump/control.csv',csv.replace('Test (ftUS)', 'Changed (ftUS)'));
+  assert.throws(()=>selectWithSiblingSurvey(storage,['client/dump/map/flight'],{path:candidate.relative,sha256:candidate.sha256}),{code:'survey_candidate_changed'});
+  photo('client/dump/control.csv',csv);
+  photo('client/dump/second.csv',csv.replace('Test (ftUS)', 'Another (ftUS)'));
+  assert.equal(discoverSiblingSurveys(storage,['client/dump/map/flight']).length,2);
+  assert.equal(selectWithSiblingSurvey(storage,['client/dump/map/flight'],null).files.length,1);
+  const explicit=selectWithSiblingSurvey(storage,['client/dump/map/flight','client/dump/control.csv'],null);
+  assert.equal(explicit.files.filter(f=>f.sourcePath.endsWith('.csv')).length,1);
+  photo('client/elsewhere.csv',csv); // Above two ancestors: never discovered.
+  assert.equal(discoverSiblingSurveys(storage,['client/dump/map/flight']).length,2);
+  assert.equal(selectWithSiblingSurvey(storage,['client/dump/map/flight'],null).files.length,1);
+});
+
+test('invalid siblings are ignored and discovery does not follow symlinks', t => {
+  const {storage, photo, config} = fixture(t);
+  photo('a/b/flight/a.jpg'); photo('a/b/invalid.csv','not,gcp');
+  const outside=path.join(path.dirname(config.datasetImportMount),'outside.csv'); fs.writeFileSync(outside,'irrelevant');
+  try { fs.symlinkSync(outside,path.join(config.datasetImportMount,'a/b/link.csv')); } catch(error) { if(error.code!=='EPERM') throw error; }
+  assert.deepEqual(selectWithSiblingSurvey(storage,['a/b/flight'],null).files.map(f=>f.sourcePath),['a/b/flight/a.jpg']);
 });
