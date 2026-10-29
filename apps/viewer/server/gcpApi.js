@@ -142,7 +142,7 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
         return res.json({ images: ranked.images, selectedPoint: ranked.selectedPoint,
           pagination: { offset, limit: requested, total: ranked.total, nextOffset: offset + ranked.images.length < ranked.total ? offset + ranked.images.length : null },
           ranking: { basis: 'adaptive_camera_proximity', mode: 'radius', radiusM, reason: 'explicit_mode', confidence: 'user_selected',
-            targetCount: 5, warnings: ranked.images.length < 3 ? ['Fewer than 3 candidate images were found.'] : [],
+            targetCount: 5, warnings: ranked.total < 3 ? ['Fewer than 3 candidate images were found.'] : [],
             visibilityConfirmed: false, notice: 'Nearby camera positions are suggestions only; proximity does not prove that the GCP is visible.' } });
       }
       const ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, mode === 'radius' ? null : 200);

@@ -86,6 +86,7 @@ test('radius paging includes images beyond the former 200 result cutoff',async(t
  const url=`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius&radiusM=15.24&limit=200`,auth={authorization:'Bearer admin'};
  const first=await(await fetch(url,{headers:auth})).json();assert.equal(first.pagination.total,205);assert.equal(first.images.length,200);assert.equal(first.pagination.nextOffset,200);
  const second=await(await fetch(url+'&offset=200',{headers:auth})).json();assert.equal(second.images.length,5);assert.equal(second.pagination.nextOffset,null);assert.equal(new Set([...first.images,...second.images].map(x=>x.id)).size,205);
+ const last=await(await fetch(url+'&offset=204',{headers:auth})).json();assert.equal(last.images.length,1);assert.deepEqual(last.ranking.warnings,[]);
 });
 
 test('radius search filters a large dataset and wraps across the antimeridian',async(t)=>{
@@ -98,4 +99,9 @@ test('radius search filters a large dataset and wraps across the antimeridian',a
  const first=await(await fetch(url,{headers:auth})).json(),second=await(await fetch(url+'&offset=1',{headers:auth})).json();
  assert.equal(first.pagination.total,2);assert.equal(first.images[0].id,'near-a');assert.equal(second.images[0].id,'near-b');assert.equal(second.pagination.nextOffset,null);
  assert.ok(first.images[0].distanceM<15.24);
+ const distance=first.images[0].distanceM;
+ const inside=await(await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius&radiusM=${distance+0.000001}`,{headers:auth})).json();
+ const boundary=await(await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius&radiusM=${distance}`,{headers:auth})).json();
+ const outside=await(await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius&radiusM=${distance-0.000001}`,{headers:auth})).json();
+ assert.equal(inside.pagination.total,2);assert.equal(boundary.pagination.total,2);assert.equal(outside.pagination.total,0);
 });
