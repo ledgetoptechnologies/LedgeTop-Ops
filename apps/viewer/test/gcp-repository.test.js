@@ -122,8 +122,11 @@ test('Emlid survey requires explicit mapping confirmation and snapshots metric p
  const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
  assert.throws(()=>processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),{code:'gcp_crs_confirmation_required'});
  assert.equal(gcp.confirmOdmCrs(set.id,'ops:1').odmCrsConfirmed,true);
- const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),content=processing.getAttemptGcpSnapshot(attempt.id).content;
- assert.match(content,/^EPSG:7600\n1000 2000 30\.48006096 120 240 near\.jpg\n$/);
+ gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'far',pixelX:121,pixelY:241,createdBy:'ops:1'});
+ const original=GcpRepository.prototype.getSet; let reads=0; GcpRepository.prototype.getSet=function(...args){reads++;return original.apply(this,args);};
+ let attempt; try { attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}}); } finally { GcpRepository.prototype.getSet=original; }
+ assert.equal(reads,1);const content=processing.getAttemptGcpSnapshot(attempt.id).content;
+ assert.match(content,/^EPSG:7600\n1000 2000 30\.48006096 121 241 far\.jpg\n1000 2000 30\.48006096 120 240 near\.jpg\n$/);
 });
 
 test('legacy GCP set without provenance is never omitted from attempt snapshot', t=>{

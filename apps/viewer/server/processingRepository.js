@@ -464,7 +464,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       const emlid=marks.filter(mark=>mark.sourceAdapter==='emlid-all-columns-v1');
       const mapping=emlid[0];
       const gcpRepo = new (require('./gcpRepository').GcpRepository)(this.database);
-      if(emlid.some(mark=>!gcpRepo.getSet(mark.setId)?.odmCrsConfirmed)) throw Object.assign(new Error('Survey CRS confirmation is stale'),{code:'gcp_crs_confirmation_required'});
+      if([...new Set(emlid.map(mark=>mark.setId))].some(setId=>!gcpRepo.getSet(setId)?.odmCrsConfirmed)) throw Object.assign(new Error('Survey CRS confirmation is stale'),{code:'gcp_crs_confirmation_required'});
       if(emlid.length && (emlid.length!==marks.length || emlid.some(mark=>mark.confirmedSourceSha256!==mark.sourceSha256 || !Number.isInteger(mark.confirmedEpsg) || !['m','ftUS'].includes(mark.confirmedUnit) || mark.confirmedEpsg!==mapping.confirmedEpsg || mark.confirmedUnit!==mapping.confirmedUnit || mark.confirmedVerticalDatum!==mark.sourceVerticalDatum || mark.confirmedVerticalDatum!==mapping.confirmedVerticalDatum || mark.easting==null || mark.northing==null)))
         throw Object.assign(new Error('Emlid survey CRS and vertical datum must be mapped and confirmed before processing'),{code:'gcp_crs_confirmation_required'});
       const gcpList=odmGcpList(marks, emlid.length ? {epsgCode:mapping.confirmedEpsg,projected:true,horizontalUnit:mapping.confirmedUnit} : undefined);

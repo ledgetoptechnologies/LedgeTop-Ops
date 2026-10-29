@@ -168,7 +168,7 @@ class GcpRepository {
   }
 
   deletePoint(id) { return this.database.prepare('DELETE FROM gcp_points WHERE id=?').run(id).changes === 1; }
-  deleteSet(id) { const row=this.database.prepare('SELECT source_file_id FROM gcp_sets WHERE id=?').get(id); if(row && !row.source_file_id) throw Object.assign(new Error('GCP source must be retained'), {code:'retained_csv'}); return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1; }
+  deleteSet(id) { const row=this.database.prepare('SELECT sets.source_file_id,datasets.storage_mode FROM gcp_sets sets JOIN datasets ON datasets.id=sets.dataset_id WHERE sets.id=?').get(id); if(row && (!row.source_file_id || row.storage_mode==='external_reference')) throw Object.assign(new Error('GCP source must be retained'), {code:'retained_csv'}); return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1; }
 
   listRankedImages(datasetId, selectedPointId, limit = 100) {
     const point = selectedPointId ? this.database.prepare(`SELECT points.* FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id

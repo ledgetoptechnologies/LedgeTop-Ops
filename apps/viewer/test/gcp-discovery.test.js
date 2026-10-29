@@ -63,3 +63,12 @@ test('PROJ validates the declared projected CRS, units, every survey coordinate,
  db.prepare('UPDATE gcp_points SET easting=easting+100 WHERE set_id=?').run(set.id);assert.equal(g.getSet(set.id).odmCrsConfirmed,false);
  assert.throws(()=>g.confirmOdmCrs(set.id,'ops:test',input),{code:'gcp_crs_unmapped'});
 });
+
+
+test('external referenced source cannot delete the retained database copy',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-external-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
+ const p=new ProcessingRepository(db),project=p.createProject({displayName:'Survey'}),dataset=p.createDataset({projectId:project.id,displayName:'Reference',storageMode:'external_reference',rootKey:'datasets',relativePath:'source'}),source='point_id,label,latitude,longitude,elevation_m\nA,A,1,2,3\n';
+ p.finalizeDataset(dataset.id,[{id:'external-csv',relativePath:'control.csv',byteSize:Buffer.byteLength(source),sha256:digest(source)}],digest(source));
+ const parsed=require('../server/gcpImport').parseGcpInterchange({format:'generic-csv-v1',content:source}),g=new GcpRepository(db),set=g.importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'generic-csv-v1',sourceFileId:'external-csv',sourceFilename:'control.csv',sourceSha256:parsed.sourceSha256,sourceContent:source,crs:parsed.crs,elevationUnits:'m',provenance:parsed.provenance,points:parsed.points});
+ assert.throws(()=>g.deleteSet(set.id),{code:'retained_csv'});assert.equal(db.prepare('SELECT source_content FROM gcp_sets WHERE id=?').get(set.id).source_content,source);
+});
