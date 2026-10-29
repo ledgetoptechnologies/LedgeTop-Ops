@@ -8,7 +8,8 @@ export type OperationsFinancialEnv={DELIVERY_DB:D1Database;CLIENT_PORTAL_NATIVE_
   CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED?:string;
   CLIENT_PORTAL_NATIVE_FINANCIAL_READER?:OperationsFinancialBinding};
 export type PortalFinancialDocument=Readonly<{publicId:string;kind:"invoice"|"contract"|"project_invoice";status:string;
-  currency:string;total:string;amountPaid:string|null;balanceDue:string|null;documentUrl:string|null;actionUrl:string|null}>;
+  currency:string;total:string;amountPaid:string|null;balanceDue:string|null;issueDate:string|null;dueDate:string|null;
+  documentUrl:string|null;actionUrl:string|null}>;
 export type PortalFinancialCollection=Readonly<{grantId:string;revision:number;documents:readonly PortalFinancialDocument[]}>;
 export type PortalFinancialResult=Readonly<{ok:true;collections:readonly PortalFinancialCollection[]}>
   |Readonly<{ok:false;code:"disabled"|"denied"|"unavailable"}>;
@@ -18,6 +19,9 @@ const plain=(value:unknown):value is Record<string,unknown>=>Boolean(value)&&typ
 const exact=(value:Record<string,unknown>,keys:readonly string[])=>Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key));
 const bounded=(value:unknown,max:number):value is string=>typeof value==="string"&&value.length>0&&value.length<=max&&value.trim()===value;
 const money=(value:unknown):value is string=>typeof value==="string"&&/^(?:0|[1-9][0-9]{0,17})\.[0-9]{2}$/.test(value);
+const dateOnly=(value:unknown):value is string|null=>value===null||typeof value==="string"&&/^\d{4}-\d{2}-\d{2}$/.test(value)
+  &&!value.startsWith("0000-")&&!Number.isNaN(Date.parse(`${value}T00:00:00.000Z`))
+  &&new Date(`${value}T00:00:00.000Z`).toISOString().slice(0,10)===value;
 function safeLink(value:unknown):value is string|null{if(value===null)return true;if(typeof value!=="string"||value.length>2048)return false;
   try{const url=new URL(value),keys=[...url.searchParams.keys()];return url.protocol==="https:"&&!url.username&&!url.password&&!url.hash
     &&url.pathname==="/"&&keys.length===2&&keys.filter(key=>key==="page").length===1&&keys.filter(key=>key==="token").length===1
@@ -44,14 +48,22 @@ function decode(wire:unknown,request:ClientPortalServiceMetadataRequestV1):Decod
       ||candidate.value.documents.length>10_000)return null;
       grantIds.add(candidate.grantId);
       const documents:PortalFinancialDocument[]=[];
-      for(const item of candidate.value.documents){if(!plain(item)||!exact(item,["publicId","kind","status","currency","total","amountPaid","balanceDue","documentUrl","actionUrl"])
+      const legacyKeys=["publicId","kind","status","currency","total","amountPaid","balanceDue","documentUrl","actionUrl"] as const;
+      const datedKeys=["publicId","kind","status","currency","total","amountPaid","balanceDue","issueDate","dueDate","documentUrl","actionUrl"] as const;
+      for(const item of candidate.value.documents){if(!plain(item)||(!exact(item,legacyKeys)&&!exact(item,datedKeys))
         ||!bounded(item.publicId,191)||!bounded(item.status,64)
         ||!(item.kind==="invoice"||item.kind==="contract"||item.kind==="project_invoice")
         ||typeof item.currency!=="string"||!/^[A-Z]{3}$/.test(item.currency)||!money(item.total)
         ||!(item.amountPaid===null||money(item.amountPaid))||!(item.balanceDue===null||money(item.balanceDue))
+        ||Object.hasOwn(item,"issueDate")!==Object.hasOwn(item,"dueDate")
+        ||!dateOnly(Object.hasOwn(item,"issueDate")?item.issueDate:null)||!dateOnly(Object.hasOwn(item,"dueDate")?item.dueDate:null)
+        ||item.kind==="contract"&&((item.issueDate??null)!==null||(item.dueDate??null)!==null)
         ||!safeLink(item.documentUrl)||!safeLink(item.actionUrl))return null;
         documents.push({publicId:item.publicId,kind:item.kind,status:item.status,currency:item.currency,total:item.total,
-          amountPaid:item.amountPaid,balanceDue:item.balanceDue,documentUrl:item.documentUrl,actionUrl:item.actionUrl});}
+          amountPaid:item.amountPaid,balanceDue:item.balanceDue,
+          issueDate:Object.hasOwn(item,"issueDate")?item.issueDate as string|null:null,
+          dueDate:Object.hasOwn(item,"dueDate")?item.dueDate as string|null:null,
+          documentUrl:item.documentUrl,actionUrl:item.actionUrl});}
       collections.push({grantId:candidate.grantId,revision:candidate.revision,documents});}
     return{ok:true,collections};
   }catch{return null;}

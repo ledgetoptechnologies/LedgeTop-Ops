@@ -10,6 +10,7 @@ import { resolveNativePortalWorkspaceReadContext } from "../src/worker/client-po
 import { resolveNativeFeedbackTarget } from "../src/worker/client-portal/native-feedback-target";
 import { createNativeFeedbackRecord } from "../src/worker/client-portal/native-feedback-store";
 import { reservePrimaryPortalSigningKeys } from "../src/worker/project-alpha-portal-authority";
+import { nativeRequestSchemaReady } from "../src/worker/client-portal/native-request-authority";
 import type { Env } from "../src/worker/types";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 
@@ -37,6 +38,7 @@ describe("native PA draft notification history — migrated D1", { timeout: 240_
       DELIVERY_DB: db,
       CLIENT_PORTAL_ENABLED: "true",
       CLIENT_PORTAL_ORIGIN: origin,
+      CLIENT_PORTAL_ORIGINS: origin,
       CLIENT_PORTAL_REQUEST_V2_ENABLED: "true",
       CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED: "true",
       CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
@@ -44,10 +46,11 @@ describe("native PA draft notification history — migrated D1", { timeout: 240_
       CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED: "true",
       DELIVERY_SESSION_SECRET: "native-pa-draft-history-session-secret-0001",
       PROJECT_ALPHA_PORTAL_HMAC_SECRET: "native-pa-draft-primary-signing-secret-0001",
+      PUBLIC_BULK_RATE_LIMITER: { limit: async () => ({ success: true }) },
       ENVIRONMENT: "development",
     } satisfies Partial<Env>;
-    // This read-only router test provides only bindings reached by its D1 paths.
-    env = bindings as Env;
+    // This local D1 fixture provides only bindings reached by its synthetic paths.
+    env = bindings as unknown as Env;
     await reservePrimaryPortalSigningKeys(env);
     // All fixtures represent one PA producer with many workspaces. Reusing its
     // authority also keeps this suite below the production 31-source limit.
@@ -116,9 +119,242 @@ describe("native PA draft notification history — migrated D1", { timeout: 240_
         VALUES(?,?,?,'pa_draft_quote_created','service_request',?,?,'A draft quote is ready','Review the non-financial draft status.','/portal/requests')`)
         .bind(notification, account, storage, request, `service-request:${notification}`),
     ]);
-    return { identity, workspace, request, notification, source, root, principalId:`principal-${suffix}`,
+    return { account, storage, identity, workspace, request, notification, source, root, principalId:`principal-${suffix}`,
       generation:`generation-${suffix}`, requestEntitlement: `request.create-${suffix}` };
   }
+
+  async function seedRequestCatalog(source: string, suffix: string) {
+    const generation = `request-catalog-${suffix}`;
+    const sourceGeneration = `request-catalog-source-${suffix}`;
+    const latest = await db.prepare("SELECT MAX(source_sequence) max_sequence FROM pa_service_catalog_generations WHERE source_id=?")
+      .bind(source).first<number>("max_sequence");
+    const sequence = (latest ?? 0) + 1;
+    const service = { publicId: `service-${suffix}`, sourceVersion: "version-1", name: `Synthetic request ${suffix}` };
+    await db.batch([
+      db.prepare("UPDATE pa_service_catalog_generations SET status='superseded' WHERE source_id=? AND status='active'").bind(source),
+      db.prepare(`INSERT INTO pa_service_catalog_generations
+        (id,source_id,source_generation,source_sequence,snapshot_hash,page_count,item_count,status,complete,activated_at)
+        VALUES(?,?,?,?,?,1,1,'active',1,datetime('now'))`)
+        .bind(generation, source, sourceGeneration, sequence, "c".repeat(64)),
+      db.prepare(`INSERT INTO pa_service_catalog_generation_pages
+        (generation_id,source_id,page_number,item_count,payload_hash) VALUES(?,?,1,1,?)`)
+        .bind(generation, source, "d".repeat(64)),
+      db.prepare(`INSERT INTO pa_service_catalog_generation_items
+        (generation_id,source_id,page_number,public_id,source_version,name,summary,question_schema_json,category,display_order,geometry_requirement)
+        VALUES(?,?,1,?,? ,?,NULL,'[]','Synthetic',1,'none')`)
+        .bind(generation, source, service.publicId, service.sourceVersion, service.name),
+      db.prepare(`INSERT INTO pa_service_catalog_checkpoint
+        (source_id,active_generation_id,source_generation,source_sequence) VALUES(?,?,?,?)
+        ON CONFLICT(source_id) DO UPDATE SET active_generation_id=excluded.active_generation_id,
+          source_generation=excluded.source_generation,source_sequence=excluded.source_sequence`)
+        .bind(source, generation, sourceGeneration, sequence),
+      db.prepare(`INSERT INTO pa_service_catalog_items
+        (source_id,public_id,source_version,name,summary,question_schema_json,active,source_updated_at,
+         source_generation,source_sequence,category,display_order,geometry_requirement)
+        VALUES(?,?,?,?,NULL,'[]',1,datetime('now'),?,?, 'Synthetic',1,'none')`)
+        .bind(source, service.publicId, service.sourceVersion, service.name, sourceGeneration, sequence),
+    ]);
+    return service;
+  }
+
+  async function acceptSyntheticPrincipal(mine: Awaited<ReturnType<typeof seed>>, principal: VerifiedClientPrincipal) {
+    await db.prepare(`INSERT INTO portal_v2_identity_eligibility_bindings
+      (workspace_id,principal_public_id,identity_id,principal_source_version,verified_email)
+      VALUES(?,?,?,'member-v1',?)`).bind(mine.workspace, mine.principalId, mine.identity, principal.email).run();
+  }
+
+  async function requestMutationFootprint(mine: Awaited<ReturnType<typeof seed>>) {
+    const requests = await db.prepare("SELECT count(*) n FROM client_service_requests WHERE portal_workspace_id=?")
+      .bind(mine.workspace).first<number>("n");
+    const drafts = await db.prepare("SELECT count(*) n FROM client_service_request_drafts WHERE portal_workspace_id=? AND portal_identity_id=?")
+      .bind(mine.workspace, mine.identity).first<number>("n");
+    // This sequential suite owns the isolated database. Count the entire
+    // outbox so a newly queued notification under another request ID is caught.
+    const notifications = await db.prepare("SELECT count(*) n FROM client_portal_notification_outbox")
+      .first<number>("n");
+    return { requests, drafts, notifications };
+  }
+
+  function syntheticRequestPrincipal(label: string): VerifiedClientPrincipal {
+    const suffix = serial + 1;
+    return { ...owner, subject: `native-${label}-${suffix}`, email: `${label}-${suffix}@example.test` };
+  }
+
+  function clientPortal(principal: VerifiedClientPrincipal = owner) {
+    return new Hono().route("/api/client", createClientPortalRouter({
+      resolvePrincipal: async () => principal,
+      repository: d1ClientPortalRepository,
+    }));
+  }
+
+  function portalRequest(app: ReturnType<typeof clientPortal>, path: string, init: RequestInit = {}, bindings: Env = env) {
+    return app.request(`${origin}/api/client${path}`, init, bindings);
+  }
+
+  it("joins native context, membership, catalog and request.create into one real request path", async () => {
+    const principal = syntheticRequestPrincipal("joined-request");
+    const mine = await seed("joined-request", principal);
+    await acceptSyntheticPrincipal(mine, principal);
+    const service = await seedRequestCatalog(mine.source, `joined-${serial}`);
+    const requestEnv = { ...env, CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true",
+      CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true", CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true" } as Env;
+    const app = clientPortal(principal);
+    const contextResponse = await portalRequest(app, `/v2/workspaces/${mine.workspace}/context`, {}, requestEnv);
+    expect(contextResponse.status).toBe(200);
+    const context = await contextResponse.json() as { capabilities: { requestV2: boolean }; features: { serviceRequests: { state: string } } };
+    expect(context.capabilities.requestV2).toBe(true);
+    expect(context.features.serviceRequests.state).toBe("available");
+
+    const catalogResponse = await portalRequest(app, "/request-services", {}, requestEnv);
+    expect(catalogResponse.status).toBe(200);
+    const catalog = await catalogResponse.json() as { services: Array<{ serviceChoiceId: string; name: string }> };
+    const choice = catalog.services.find(row => row.name === service.name)?.serviceChoiceId;
+    expect(choice).toEqual(expect.any(String));
+
+    const response = await portalRequest(app, "/requests", {
+      method: "POST",
+      headers: { Origin: origin, "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ serviceChoiceId: choice, title: "Synthetic request", details: "Synthetic details", answers: {} }),
+    }, requestEnv);
+    expect(response.status, await response.clone().text()).toBe(201);
+    const payload = await response.json() as { request: { id: string } };
+    const stored = await db.prepare(`SELECT account_id,created_by_identity_id,catalog_source_id,portal_workspace_id,
+      portal_identity_id,portal_project_public_id,status FROM client_service_requests WHERE id=?`)
+      .bind(payload.request.id).first<Record<string, unknown>>();
+    expect(stored).toMatchObject({ account_id: mine.account, created_by_identity_id: mine.storage,
+      catalog_source_id: mine.source, portal_workspace_id: mine.workspace, portal_identity_id: mine.identity,
+      portal_project_public_id: null, status: "submitted" });
+    expect(await db.prepare("SELECT count(*) FROM client_service_request_drafts WHERE portal_workspace_id=? AND portal_identity_id=?")
+      .bind(mine.workspace, mine.identity).first<number>("count(*)")).toBe(1);
+  });
+
+  it("fails closed when request.create is denied or the source principal is withdrawn", async () => {
+    const principal = syntheticRequestPrincipal("joined-deny");
+    const mine = await seed("joined-deny", principal);
+    await acceptSyntheticPrincipal(mine, principal);
+    const service = await seedRequestCatalog(mine.source, `deny-${serial}`);
+    const requestEnv = { ...env, CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true",
+      CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true", CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true" } as Env;
+    const app = clientPortal(principal);
+    const before = await portalRequest(app, "/request-services", {}, requestEnv);
+    expect(before.status).toBe(200);
+    const catalog = await before.json() as { services: Array<{ serviceChoiceId: string }> };
+    const choice = catalog.services[0]?.serviceChoiceId;
+    expect(choice).toEqual(expect.any(String));
+    const beforeMutation = await requestMutationFootprint(mine);
+    expect(beforeMutation).toMatchObject({ requests: 1, drafts: 0 }); // The seed's historical request only.
+
+    await db.prepare("UPDATE portal_v2_entitlements SET effect='deny' WHERE id=?").bind(mine.requestEntitlement).run();
+    const denied = await portalRequest(app, "/requests", { method: "POST", headers: {
+      Origin: origin, "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID(),
+    }, body: JSON.stringify({ serviceChoiceId: choice, title: "Denied", details: "No authority" }) }, requestEnv);
+    expect(denied.status).toBe(503);
+    expect(await denied.text()).toBe("Service catalog is unavailable");
+    const directDenied = await portalRequest(app, "/service-requests", { method: "POST", headers: {
+      Origin: origin, "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID(),
+      "X-LTDS-Workspace-Id": mine.workspace,
+    }, body: JSON.stringify({ requestType: "service", title: "Denied", details: "No authority",
+      services: [{ publicId: service.publicId, sourceVersion: service.sourceVersion, answers: {} }] }) }, requestEnv);
+    expect(directDenied.status).toBe(404);
+    expect(await directDenied.text()).toBe("Project not found or service requests are not permitted");
+    expect(await requestMutationFootprint(mine)).toEqual(beforeMutation);
+
+    await db.prepare("UPDATE portal_v2_entitlements SET effect='allow' WHERE id=?").bind(mine.requestEntitlement).run();
+    // Model an authoritative source withdrawal while the automatic
+    // eligibility-repair bundle remains enabled. A stale local membership
+    // cannot revive a principal the source has revoked.
+    await db.prepare("UPDATE pa_portal_principals SET status='revoked' WHERE workspace_id=? AND public_id=?")
+      .bind(mine.workspace, mine.principalId).run();
+    const revokedChoice = await portalRequest(app, "/requests", { method: "POST", headers: {
+      Origin: origin, "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID(),
+    }, body: JSON.stringify({ serviceChoiceId: choice, title: "Denied", details: "Source principal withdrawn" }) }, requestEnv);
+    expect(revokedChoice.status).toBe(404);
+    expect(await revokedChoice.text()).toBe("The selected service is unavailable");
+    expect(await requestMutationFootprint(mine)).toEqual(beforeMutation);
+    const revokedContext = await portalRequest(app, `/v2/workspaces/${mine.workspace}/context`, {}, requestEnv);
+    expect(revokedContext.status).toBe(404);
+    expect(await revokedContext.text()).toBe("Delivery is unavailable");
+  });
+
+  it.each([
+    ["CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED", { CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED: "false" }],
+    ["CLIENT_PORTAL_REQUEST_V2_ENABLED", { CLIENT_PORTAL_REQUEST_V2_ENABLED: "false" }],
+  ] as const)("does not advertise or accept native requests when %s is disabled", async (_flag, override) => {
+    const principal = syntheticRequestPrincipal(`disabled-${_flag}`);
+    const mine = await seed(`disabled-${_flag}`, principal);
+    await acceptSyntheticPrincipal(mine, principal);
+    const service = await seedRequestCatalog(mine.source, `disabled-${_flag}-${serial}`);
+    const enabledEnv = { ...env, CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true",
+      CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true", CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true", ...override } as Env;
+    const app = clientPortal(principal);
+    const catalog = await portalRequest(app, "/request-services", {}, { ...env,
+      CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true", CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true",
+      CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true" } as Env);
+    expect(catalog.status).toBe(200);
+    const choice = ((await catalog.json()) as { services: Array<{ serviceChoiceId: string; name: string }> })
+      .services.find(row => row.name === service.name)?.serviceChoiceId;
+    expect(choice).toEqual(expect.any(String));
+    const disabledEnv = { ...enabledEnv, ...override } as Env;
+    const contextResponse = await portalRequest(app, `/v2/workspaces/${mine.workspace}/context`, {}, disabledEnv);
+    expect(contextResponse.status).toBe(200);
+    expect((await contextResponse.json() as { capabilities: { requestV2: boolean } }).capabilities.requestV2).toBe(false);
+    const available = await portalRequest(app, "/request-services", {}, disabledEnv);
+    expect(available.status).toBe(200);
+    expect(await available.json()).toMatchObject({ services: [], unavailable: [expect.objectContaining({ code: "service_catalog_unavailable" })] });
+    const beforeMutation = await requestMutationFootprint(mine);
+    const response = await portalRequest(app, "/requests", { method: "POST", headers: {
+      Origin: origin, "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID(),
+    }, body: JSON.stringify({ serviceChoiceId: choice, title: "Disabled", details: "Must not write", answers: {} }) }, disabledEnv);
+    expect(response.status).toBe(403);
+    expect(await response.text()).toBe("Service catalog is unavailable");
+    expect(await requestMutationFootprint(mine)).toEqual(beforeMutation);
+  });
+
+  it("does not advertise or create native requests when a required 0185 ownership trigger is absent", async () => {
+    const principal = syntheticRequestPrincipal("missing-trigger");
+    const mine = await seed("missing-trigger", principal);
+    await acceptSyntheticPrincipal(mine, principal);
+    const service = await seedRequestCatalog(mine.source, `missing-trigger-${serial}`);
+    const requestEnv = { ...env, CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true",
+      CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true", CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true" } as Env;
+    const app = clientPortal(principal);
+    const catalog = await portalRequest(app, "/request-services", {}, requestEnv);
+    expect(catalog.status).toBe(200);
+    const choice = ((await catalog.json()) as { services: Array<{ serviceChoiceId: string; name: string }> })
+      .services.find(row => row.name === service.name)?.serviceChoiceId;
+    expect(choice).toEqual(expect.any(String));
+    const beforeMutation = await requestMutationFootprint(mine);
+    const migration = readFileSync(new URL("../migrations/0185_native_service_request_ownership.sql", import.meta.url), "utf8");
+    const statements = splitD1MigrationStatements(migration);
+    const triggerSql = statements.find(statement => /CREATE TRIGGER client_requests_native_owner_insert\b/i.test(statement));
+    expect(triggerSql).toBeTruthy();
+    await db.prepare("DROP TRIGGER client_requests_native_owner_insert").run();
+    try {
+      expect(await nativeRequestSchemaReady(requestEnv, { refresh: true })).toBe(false);
+      const contextResponse = await portalRequest(app, `/v2/workspaces/${mine.workspace}/context`, {}, requestEnv);
+      expect(contextResponse.status).toBe(200);
+      expect((await contextResponse.json() as { capabilities: { requestV2: boolean } }).capabilities.requestV2).toBe(false);
+      const services = await portalRequest(app, "/request-services", {}, requestEnv);
+      expect(services.status).toBe(200);
+      expect(await services.json()).toMatchObject({ services: [], unavailable: [expect.objectContaining({ code: "service_catalog_unavailable" })] });
+      const response = await portalRequest(app, "/requests", { method: "POST", headers: {
+        Origin: origin, "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID(),
+      }, body: JSON.stringify({ serviceChoiceId: choice, title: "Missing trigger", details: "Must not write", answers: {} }) }, requestEnv);
+      expect(response.status).toBe(503);
+      expect(await response.text()).toBe("Service catalog is unavailable");
+      const direct = await portalRequest(app, "/service-requests", { method: "POST", headers: {
+        Origin: origin, "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID(),
+        "X-LTDS-Workspace-Id": mine.workspace,
+      }, body: JSON.stringify({ requestType: "service", title: "Missing trigger", details: "Must not write",
+        services: [{ publicId: service.publicId, sourceVersion: service.sourceVersion, answers: {} }] }) }, requestEnv);
+      expect(direct.status).toBe(503);
+      expect(await direct.json()).toMatchObject({ code: "request_unavailable" });
+      expect(await requestMutationFootprint(mine)).toEqual(beforeMutation);
+    } finally {
+      await db.prepare(triggerSql!).run();
+      expect(await nativeRequestSchemaReady(requestEnv, { refresh: true })).toBe(true);
+    }
+  });
 
   const history = (principal: VerifiedClientPrincipal, workspace: string) => new Hono().route("/api/client", createClientPortalRouter({
     resolvePrincipal: async () => principal,

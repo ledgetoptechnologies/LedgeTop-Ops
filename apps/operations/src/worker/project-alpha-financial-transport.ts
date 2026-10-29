@@ -95,6 +95,7 @@ export async function readConfiguredProjectAlphaFinancialDocuments(
       url.searchParams.set("selectorType", selector.kind); url.searchParams.set("externalId", selector.externalId);
       url.searchParams.set("limit", String(PAGE_LIMIT)); if (cursor !== null) url.searchParams.set("cursor", cursor);
       const headers = new Headers({ Accept: "application/json", Authorization: `Bearer ${connection.apiKey}`,
+        "X-PA-Financial-Document-Dates": "v1",
         "X-PA-Source-Instance-ID": connection.expectedSourceInstanceId,
         "X-PA-Application-ID": connection.expectedApplicationId,
         "X-PA-History-Epoch": connection.expectedHistoryEpoch ?? "" });

@@ -8,20 +8,22 @@ const authorityId="10000000-0000-4000-8000-000000000001",principal={issuer:"http
 const home={authorityId,workspaceId:"workspace-1",ownershipEpoch:2,grantRevision:3};
 const document={publicId:"doc-1",kind:"contract",status:"pending",currency:"USD",total:"0.00",amountPaid:null,balanceDue:null,
   documentUrl:"https://pa.example.test/?page=public-doc&token=abcdefghijklmnop",actionUrl:"https://pa.example.test/?page=public-doc&token=abcdefghijklmnop"};
-const rpc=vi.fn(async()=>JSON.stringify({ok:true,protocolVersion:1,...home,collections:[{status:"ok",
-  grantId:"20000000-0000-4000-8000-000000000002",revision:1,value:{selector:{},snapshotSha256:"a".repeat(64),documents:[document]}}]}));
+const normalizedDocument={...document,issueDate:null,dueDate:null};
+const successfulReply=()=>JSON.stringify({ok:true,protocolVersion:1,...home,collections:[{status:"ok",
+  grantId:"20000000-0000-4000-8000-000000000002",revision:1,value:{selector:{},snapshotSha256:"a".repeat(64),documents:[document]}}]});
+const rpc=vi.fn(async()=>successfulReply());
 const env={CLIENT_PORTAL_ENABLED:"true",CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED:"true",
   CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED:"true",CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED:"true",
   CLIENT_PORTAL_ORIGIN:"https://client.example.test",DELIVERY_DB:{},
   CLIENT_PORTAL_NATIVE_FINANCIAL_READER:{readFinancialDocuments:rpc}} as unknown as Env;
 
 describe("authenticated native financial route",()=>{
-  beforeEach(()=>{vi.clearAllMocks();mocks.homes.mockResolvedValue([home]);});
+  beforeEach(()=>{vi.clearAllMocks();rpc.mockReset().mockResolvedValue(successfulReply());mocks.homes.mockResolvedValue([home]);});
   it("derives recipient identity and returns only the verified private response",async()=>{
     const response=await createOperationsHomeRouter({resolvePrincipal:async()=>principal}).fetch(
       new Request(`https://client.example.test/home/${authorityId}/financial`),env);
     expect(response.status).toBe(200);expect(await response.json()).toEqual({resourceMode:"operations_financial",
-      collections:[{grantId:"20000000-0000-4000-8000-000000000002",revision:1,documents:[document]}]});
+      collections:[{grantId:"20000000-0000-4000-8000-000000000002",revision:1,documents:[normalizedDocument]}]});
     expect(rpc).toHaveBeenCalledWith({protocolVersion:1,...home,issuer:principal.issuer,subject:principal.subject});
   });
   it("is default-off and denies a principal without the selected native home",async()=>{
@@ -45,13 +47,13 @@ describe("authenticated native financial route",()=>{
     const response=await read();
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({resourceMode:"operations_financial",collections:[
-      {grantId:first.grantId,revision:1,documents:[document]},
-      {grantId:secondGrant,revision:1,documents:[secondDocument]},
+      {grantId:first.grantId,revision:1,documents:[normalizedDocument]},
+      {grantId:secondGrant,revision:1,documents:[{...secondDocument,issueDate:null,dueDate:null}]},
     ]});
     const after=await read();
     expect(after.status).toBe(200);
     expect(await after.json()).toEqual({resourceMode:"operations_financial",collections:[
-      {grantId:first.grantId,revision:1,documents:[document]},
+      {grantId:first.grantId,revision:1,documents:[normalizedDocument]},
     ]});
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     expect(after.headers.get("Cloudflare-CDN-Cache-Control")).toBe("no-store");

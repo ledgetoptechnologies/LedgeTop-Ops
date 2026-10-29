@@ -8,13 +8,26 @@ describe("financial portal response boundary",()=>{
   it("accepts the exact bounded document response",async()=>{
     const calls:Array<[string,unknown]>=[];
     const request=async<T>(url:string,init?:unknown)=>{calls.push([url,init]);return {resourceMode:"operations_financial",collections:[{grantId,revision:1,documents:[doc]}]} as T;};
-    await expect(loadOperationsFinancial(authority,request)).resolves.toEqual([{...doc,scopeKey:`${authority}:${grantId}:1`}]);
+    await expect(loadOperationsFinancial(authority,request)).resolves.toEqual([{...doc,issueDate:null,dueDate:null,scopeKey:`${authority}:${grantId}:1`}]);
     expect(calls).toEqual([[`/api/client/v2/operations/home/${authority}/financial`,expect.objectContaining({omitWorkspace:true})]]);
+  });
+  it("preserves valid dates and the authoritative PA overdue status",async()=>{
+    const dated={...doc,status:"overdue",issueDate:"2026-02-28",dueDate:"2026-03-30"};
+    await expect(loadOperationsFinancial(authority,async<T>()=>({resourceMode:"operations_financial",collections:[{grantId,revision:1,documents:[dated]}]}) as T))
+      .resolves.toEqual([{...dated,scopeKey:`${authority}:${grantId}:1`}]);
   });
   it("rejects unsafe links, malformed currency, and invalid authorities",async()=>{
     for(const changed of [{...doc,actionUrl:"javascript:alert(1)"},{...doc,currency:"usd"}])
       await expect(loadOperationsFinancial(authority,async<T>()=>({resourceMode:"operations_financial",collections:[{grantId,revision:1,documents:[changed]}]}) as T))
         .rejects.toMatchObject({status:503});
     await expect(loadOperationsFinancial("not-an-id",vi.fn())).rejects.toMatchObject({status:403});
+  });
+  it.each([
+    {...doc,issueDate:"2026-02-30",dueDate:"2026-03-30"},
+    {...doc,issueDate:"2026-02-28"},
+    {...doc,issueDate:"2026-02-28T00:00:00Z",dueDate:"2026-03-30"},
+  ])("rejects invalid or partial dates: %o",async changed=>{
+    await expect(loadOperationsFinancial(authority,async<T>()=>({resourceMode:"operations_financial",collections:[{grantId,revision:1,documents:[changed]}]}) as T))
+      .rejects.toMatchObject({status:503});
   });
 });

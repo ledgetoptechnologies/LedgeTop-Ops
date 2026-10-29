@@ -67,7 +67,9 @@ test("Operations shows a bounded Viewer overview and opens management on the Vie
   await expect(page.getByRole("heading", { name: "Viewer workspace", exact: true })).toBeVisible();
   await expect(page.getByText("11 total · 4.0 GB")).toBeVisible();
   await expect(page.getByText("3", { exact: true })).toBeVisible();
-  await expect(page.getByText("2 healthy")).toBeVisible();
+  // 2 of 2 enabled processing services are healthy, and 1 more is turned off.
+  await expect(page.getByText("All working", { exact: true })).toBeVisible();
+  await expect(page.getByText("2 turned on · 1 turned off")).toBeVisible();
   await expect(page.getByText(/1 processing job needs attention/)).toBeVisible();
   await expect(page.getByRole("heading", { name: "Processing platform" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Tasks" })).toHaveCount(0);

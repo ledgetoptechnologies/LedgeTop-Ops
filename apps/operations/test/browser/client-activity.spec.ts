@@ -78,7 +78,8 @@ test("recent is the default server order and name ordering preserves its own con
   await expect(cards(page).locator("h3")).toHaveText(["Alpha older", "Zebra recent"]);
   await expect(page).toHaveURL("/clients?sort=name");
   await page.getByRole("button", { name: "Load more clients" }).click();
-  expect(calls.some(url => url.searchParams.get("cursor") === "name-next" && url.searchParams.get("sort") === "name")).toBe(true);
+  // The click returns before the request is sent, so wait for it rather than checking at once.
+  await expect.poll(() => calls.some(url => url.searchParams.get("cursor") === "name-next" && url.searchParams.get("sort") === "name")).toBe(true);
   await page.getByRole("combobox", { name: "Sort clients" }).selectOption("recent");
   await expect(page).toHaveURL("/clients");
 });

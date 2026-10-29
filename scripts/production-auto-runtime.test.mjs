@@ -199,15 +199,55 @@ test('deployment transition intent binds verified candidate, original parent, co
   assert.throws(() => validateDeploymentTransitionIntent(activate));
 });
 
-for (const scenario of ['success', 'first-write-drift', 'activation-drift']) test(
+for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'ledger-version-mismatch', 'old-index-mismatch',
+  'known-manual-version-no-bootstrap', 'first-write-drift', 'activation-drift']) test(
   scenario === 'activation-drift'
     ? 'frontend migration drift at activation intent blocks dispatch after earlier writes without retry'
+    : scenario === 'subsequent-release'
+      ? 'a subsequent P-to-C release reads predecessor ledger lineage from exact active-version modules and verifies old bytes'
+      : scenario === 'ledger-tampered'
+        ? 'tampered active-version ledger bytes fail before journal claim or provider writes'
+        : scenario === 'ledger-version-mismatch'
+          ? 'ledger module metadata from a different version fails closed before journal claim or provider writes'
+          : scenario === 'old-index-mismatch'
+            ? 'an old index body mismatch cleans the verifier and prevents application mutation intents'
+            : scenario === 'known-manual-version-no-bootstrap'
+              ? 'a known manual-static version with a missing bootstrap pin holds before helper, journal or upload'
     : scenario === 'first-write-drift'
       ? 'frontend migration drift before first mutation prevents journal claim and provider writes'
       : 'real runtime adapter drives provider protocol over fake HTTP with microsecond deployment timestamps', async () => {
   const fixture = configuredSnapshotFixture();
+  const clientState = fixture.snapshots.client;
+  if (scenario === 'subsequent-release') {
+    const predecessor = clientState.parentId;
+    const currentActive = '33333333-3333-4333-8333-333333333333';
+    clientState.parentId = currentActive;
+    clientState.latest = currentActive;
+    clientState.deployment = { id: '99999999-9999-4999-8999-999999999999',
+      created_on: '2026-10-27T05:00:00.000000Z', versions: [{ version_id: currentActive, percentage: 100 }], strategy: 'percentage' };
+    clientState.version.id = currentActive;
+    clientState.modern.id = currentActive;
+    const priorModule = clientState.modern.modules.find(row => row.name === '__ops_release_ledger.json');
+    assert.notEqual(JSON.parse(Buffer.from(priorModule.content_base64, 'base64').toString()).parentVersionId, currentActive,
+      'the live ledger records the predecessor version, not its own active version');
+    assert.equal(JSON.parse(Buffer.from(priorModule.content_base64, 'base64').toString()).parentVersionId, predecessor);
+  } else if (scenario === 'ledger-tampered') {
+    const priorModule = clientState.modern.modules.find(row => row.name === '__ops_release_ledger.json');
+    priorModule.content_base64 = Buffer.from('tampered').toString('base64');
+  } else if (scenario === 'ledger-version-mismatch') {
+    clientState.modern.id = '33333333-3333-4333-8333-333333333333';
+  } else if (scenario === 'known-manual-version-no-bootstrap') {
+    const currentActive = '1c606164-9a98-495a-87c9-3be251658d00';
+    clientState.parentId = currentActive;
+    clientState.latest = currentActive;
+    clientState.deployment = { id: '99999999-9999-4999-8999-999999999999',
+      created_on: '2026-10-27T05:00:00.000000Z', versions: [{ version_id: currentActive, percentage: 100 }], strategy: 'percentage' };
+    clientState.version.id = currentActive;
+    clientState.modern.id = currentActive;
+  }
   const calls = [], intents = [], publicReceipts = [], privateResponses = [], verifierVersions = new Map();
   const sourceCommit = 'a'.repeat(40), candidateId = '44444444-4444-4444-8444-444444444444';
+  let uploadedLedger;
   const moduleBytes = Buffer.from('export default {fetch(){return new Response("synthetic")}};');
   const sourceMap = { version: 3, file: 'index.js', sources: ['synthetic.ts'], sourcesContent: ['export default {};'], names: [], mappings: 'AAAA' };
   const sourceMapBytes = Buffer.from(JSON.stringify(sourceMap)), newAsset = Buffer.from('new');
@@ -258,6 +298,7 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift']) tes
         const metadata = JSON.parse(init.body.get('metadata'));
         assert.equal(metadata.assets.jwt, 'synthetic.uploadsession.jwt');
         const newLedger = JSON.parse(await init.body.get('__ops_release_ledger.json').text());
+        uploadedLedger = newLedger;
         assert.equal(newLedger.minimumRetentionHours, 48);
         const state = now(); state.latest = candidateId;
         state.candidateVersion = { id: candidateId, resources: structuredClone(state.version.resources) };
@@ -304,7 +345,8 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift']) tes
     if (workerMatch) {
       assert.match(init.headers.Authorization, /^Bearer [A-Za-z0-9_-]{43}$/u);
       assert.equal(parsed.pathname, '/index.html');
-      const bytes = verifierVersions.get(workerMatch[1]) === candidateId ? newAsset : Buffer.from('old');
+      const bytes = verifierVersions.get(workerMatch[1]) === candidateId ? newAsset
+        : scenario === 'old-index-mismatch' ? Buffer.from('bad') : Buffer.from('old');
       return new Response(init.method === 'HEAD' ? null : bytes, { status: 200,
         headers: { 'Content-Type': 'text/html', 'Content-Length': String(bytes.length) } });
     }
@@ -339,11 +381,31 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift']) tes
         },
         recipientLoader: () => ({ synthetic: true }), sourceReader: () => sourceCommit,
         buildRunner: () => {},
+        ...(scenario === 'known-manual-version-no-bootstrap'
+          ? { assetBootstrapReader: () => { throw Error('asset_bootstrap_successful_receipt_required'); } } : {}),
         buildArtifactsReader: () => { if (scenario === 'first-write-drift') migrationDrift = true; return artifact; } });
       const release = runProductionAutoRelease({ workerName: 'ledgetop-clients', env, fetchImpl,
         recipientLoader: () => ({ synthetic: true }), triggerReader: () => ({ sourceCommit, runId: ciRun.id, runAttempt: ciRun.run_attempt }),
         sourceReader: () => sourceCommit, runtimeFactory: adapterFactory });
-      if (scenario === 'first-write-drift') {
+      if (scenario === 'ledger-tampered' || scenario === 'ledger-version-mismatch') {
+        await assert.rejects(release, /Automatic release held/);
+        assert.equal(publicReceipts.length, 0, 'invalid active ledger is refused before preparation receipt/claim');
+        assert.equal(intents.length, 0, 'no provider mutation intent is emitted');
+        assert.equal(calls.some(call => call.url.startsWith(apiBase) && call.method !== 'GET'), false,
+          'the malformed or mismatched versioned ledger stops before provider writes');
+        assert.equal(activationDispatches, 0);
+      } else if (scenario === 'old-index-mismatch') {
+        await assert.rejects(release, /Automatic release held/);
+        assert.equal(intents.some(row => ['asset-session', 'asset-bucket', 'worker-version-upload', 'stage-zero-percent', 'activate-candidate'].includes(row.phase)), false,
+          'old-index proof fails before asset upload, version creation, staging, or activation');
+        assert.ok(intents.some(row => row.phase === 'temporary-verifier-create'));
+        assert.ok(intents.some(row => row.phase === 'temporary-verifier-delete'));
+        assert.ok(calls.some(call => call.method === 'DELETE' && call.url.includes('/ops-ui-verify-')));
+        assert.equal(calls.some(call => call.url.includes('assets-upload-session') || call.url.endsWith('/deployments')
+          || call.url.endsWith('/versions?bindings_inherit=strict')), false);
+        assert.equal(activationDispatches, 0);
+        assert.equal(publicReceipts.at(-1).status, 'held');
+      } else if (scenario === 'first-write-drift') {
         await assert.rejects(release, /Automatic release held/);
         assert.equal(intents.length, 0, 'no mutation intent is persisted');
         assert.equal(publicReceipts.length, 0, 'journal is not claimed before the migration fence passes');
@@ -353,6 +415,17 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift']) tes
         assert.equal(activationMethodCalls, 0);
         assert.equal(activationDispatches, 0);
         assert.ok(migrationCalls >= 2, 'the ledger is rechecked after build and before first mutation preparation');
+      } else if (scenario === 'known-manual-version-no-bootstrap') {
+        await assert.rejects(release, /Automatic release held/);
+        assert.equal(intents.length, 0, 'bootstrap refusal occurs before helper or upload mutation intents');
+        assert.equal(publicReceipts.length, 0, 'bootstrap refusal occurs before journal claim');
+        assert.equal(privateResponses.length, 0);
+        assert.equal(calls.some(call => call.url.startsWith(apiBase) && call.method !== 'GET'), false,
+          'known manual-static version cannot silently release against its passive incomplete ledger');
+        assert.equal(calls.some(call => call.url.includes('/ops-ui-verify-')), false,
+          'the verifier helper is not created until an exact successful active receipt is pinned');
+        assert.equal(calls.some(call => call.url.includes('assets-upload-session') || call.url.endsWith('/deployments')
+          || call.url.endsWith('/versions?bindings_inherit=strict')), false);
       } else if (scenario === 'activation-drift') {
         await assert.rejects(release, /Automatic release held/);
         assert.equal(activationMethodCalls, 1, 'the provider path reaches the activation intent boundary');
@@ -372,6 +445,10 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift']) tes
         assert.equal(result.earliestPermittedPruningAt, '2026-10-29T07:20:51.939Z');
         assert.equal(result.minimumRetentionHours, 48);
         assert.equal(result.automaticPruning, false);
+        if (scenario === 'subsequent-release') {
+          assert.equal(uploadedLedger.parentVersionId, '33333333-3333-4333-8333-333333333333',
+            'the newly written ledger records the active P version as its predecessor');
+        }
         assert(candidateLegacyReadAttempts >= 3, 'one transient candidate GET is retried and later captures remain complete');
         assert.equal(candidateVisibility404s, 0);
         assert.ok(intents.some(row => row.phase === 'temporary-verifier-create'));
@@ -382,7 +459,7 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift']) tes
         assert.equal(activationDispatches, 1);
         assert.equal(publicReceipts.at(-1).status, 'verified');
       }
-      if (scenario !== 'first-write-drift') {
+      if (['success', 'subsequent-release', 'activation-drift'].includes(scenario)) {
         assert.ok(privateResponses.length > 0);
         assert.ok(privateResponses.some(row => row.path.endsWith('/assets-upload-session') && row.rawResponseBytes > 0));
         assert.equal(JSON.stringify([...intents, ...publicReceipts]).includes('synthetic.uploadsession.jwt'), false);
