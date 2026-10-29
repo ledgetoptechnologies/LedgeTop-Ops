@@ -6,19 +6,12 @@ on:
     paths:
       - apps/windows-download/**
       - .github/workflows/windows-download.yml
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - apps/windows-download/**
-      - .github/workflows/windows-download.yml
-
 permissions:
   contents: read
 
 jobs:
   synthetic-transfer:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: windows-latest
     timeout-minutes: 10
     defaults:
