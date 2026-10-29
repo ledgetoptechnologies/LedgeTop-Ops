@@ -38,6 +38,7 @@ const api=async(url,opts={})=>{if(opts.signal?.aborted)throw new DOMException('C
  if(url.endsWith('/finalize')){datasetStatus='finalizing';return{operation:{id:'assemble',status:'queued'}};}
  if(url.startsWith('/api/v1/operations/')){if(window.fixture.holdOperation){window.fixture.operationSignal=opts.signal;await new Promise(resolve=>window.fixture.releaseOperation=resolve);}if(opts.signal?.aborted)throw new DOMException('Cancelled','AbortError');datasetStatus=mode==='failed'?'draft':'finalized';return{operation:{id:'operation',status:mode==='failed'?'failed':'succeeded',errorMessage:'Copy validation failed'}};}
  if(url==='/api/v1/datasets/dataset')return{dataset:{id:'dataset',projectId:'project',status:datasetStatus}};
+ if(url==='/api/v1/datasets/dataset/gcp-sets/discover')return{sets:[]};
  if(url==='/api/v1/task-submissions'){submitCount++;if(mode==='pc'&&submitCount===1)throw new Error('Temporary submission failure');return{task:{id:'task'}};}
  throw new Error('Unexpected '+url);
 };
@@ -77,10 +78,21 @@ test('New task uses real form controls with isolated upload/copy APIs, retry and
       assert.ok(imageNode.attributes.includes('data-files'));assert.equal(client.choosers[0].mode,'selectMultiple');
       await client.eval("fixture.select(true)");await until(()=>client.eval("/1 photos? located/.test(document.querySelector('[data-photo-map]').textContent)"));
       await click('[data-source=pc]');await until(()=>client.choosers.length===2);await client.eval("document.querySelector('[data-files]').dispatchEvent(new Event('cancel'))");
-      assert.match(await client.eval("document.querySelector('[data-selection]').textContent"),/1 photo selected/);assert.equal(await client.eval("document.querySelector('[data-photo-map]').hidden"),false);
+      assert.match(await client.eval("document.querySelector('[data-selection]').textContent"),/1 photos and 0 CSV/);assert.equal(await client.eval("document.querySelector('[data-photo-map]').hidden"),false);
       await click('[data-choose-folder]');await until(()=>client.choosers.length===3);const folderNode=(await client.command('DOM.describeNode',{backendNodeId:client.choosers[2].backendNodeId})).node;assert.ok(folderNode.attributes.includes('data-folder'));assert.ok(folderNode.attributes.includes('webkitdirectory'));
-      await client.eval("document.querySelector('[data-folder]').dispatchEvent(new Event('cancel'));fixture.mount()");
+      await client.eval("document.querySelector('[data-folder]').dispatchEvent(new Event('cancel'))");
+      await click('[data-add-survey-csv]');await until(()=>client.choosers.length===4);const csvNode=(await client.command('DOM.describeNode',{backendNodeId:client.choosers[3].backendNodeId})).node;assert.ok(csvNode.attributes.includes('data-survey-csv'));
+      await client.eval("document.querySelector('[data-survey-csv]').dispatchEvent(new Event('cancel'))");assert.match(await client.eval("document.querySelector('[data-selection]').textContent"),/1 photos and 0 CSV/);
+      await client.eval('fixture.mount()');
       assert.equal(await client.eval("document.querySelector('[data-preview-photos]')===null"),true);
+    });
+    await t.test('a separately selected CSV preserves folder photos and replaces the prior explicit CSV',async()=>{
+      await delay(80);await client.eval(`{const dt=new DataTransfer();for(const [name,path] of [['a.jpg','flight/a.jpg'],['b.jpg','flight/sub/b.jpg']]){const f=new File(['photo'],name,{type:'image/jpeg'});Object.defineProperty(f,'webkitRelativePath',{value:path});dt.items.add(f)}const i=document.querySelector('[data-folder]');i.files=dt.files;i.dispatchEvent(new Event('change'));}`);
+      const pick=async(name,content='csv')=>client.eval(`{const dt=new DataTransfer();dt.items.add(new File([${JSON.stringify(content)}],${JSON.stringify(name)}));const i=document.querySelector('[data-survey-csv]');i.files=dt.files;i.dispatchEvent(new Event('change'));}`);
+      await pick('first.csv');await pick('first.csv');await pick('notes.txt');assert.match(await client.eval("document.querySelector('[data-status]').textContent"),/Choose one survey CSV/);await pick('survey.CSV');
+      assert.match(await client.eval("document.querySelector('[data-selection]').textContent"),/2 photos and 1 CSV/);await client.eval('fixture.submit()');await until(()=>client.eval("document.querySelector('[data-status]').textContent.includes('Temporary submission failure')"));await client.eval('fixture.submit()');await until(()=>client.eval('!!fixture.done()'));
+      const calls=await client.eval('fixture.calls'),uploads=calls.filter(x=>x.url.endsWith('/uploads'));assert.equal(uploads.length,1);assert.deepEqual(uploads[0].body.files.map(x=>[x.relativePath,x.processingRole]),[['flight/a.jpg','image'],['flight/sub/b.jpg','image'],['survey.CSV','gcp_source']]);
+      await client.eval('fixture.mount()');
     });
     await t.test('fresh node refresh, compatible preset, PC upload and succeeded finalization; failed submit retry never reuploads',async()=>{
       await until(()=>client.eval("!!document.querySelector('[aria-label=\"crop\"]')"));
