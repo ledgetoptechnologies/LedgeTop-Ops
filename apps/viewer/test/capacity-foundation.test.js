@@ -55,5 +55,32 @@ test('ledger records reject inconsistent or decreasing materialized amounts',t=>
   assert.throws(()=>db.prepare("UPDATE viewer_capacity_reservations SET materialized_bytes=9,remaining_bytes=91 WHERE id='r'").run(),/cannot decrease/);
   assert.throws(()=>db.prepare("UPDATE viewer_capacity_reservations SET materialized_inodes=1,remaining_inodes=19 WHERE id='r'").run(),/cannot decrease/);
   assert.throws(()=>db.prepare("UPDATE viewer_capacity_reservations SET remaining_bytes=0 WHERE id='r'").run(),/CHECK constraint/);
+  for(const conflict of ["'r','d','test','w2'", "'other','d','test','w'"]){
+    assert.throws(()=>db.exec(`INSERT OR REPLACE INTO viewer_capacity_reservations(id,domain_id,writer_kind,writer_id,domain_revision,writer_namespace,owner_id,fence_token,owner_generation,peak_bytes,materialized_bytes,remaining_bytes,peak_inodes,materialized_inodes,remaining_inodes,state,created_at,updated_at) VALUES(${conflict},'v1','scope','owner','fence',1,100,0,100,20,0,20,'held','t','t')`),/replacement is forbidden/);
+    assert.equal(db.prepare("SELECT materialized_bytes FROM viewer_capacity_reservations WHERE id='r'").get().materialized_bytes,10);
+  }
+  db.exec("INSERT INTO viewer_capacity_reservations SELECT 'r2',domain_id,domain_revision,writer_kind,'w2',writer_namespace,owner_id,fence_token,owner_generation,peak_bytes,materialized_bytes,remaining_bytes,peak_inodes,materialized_inodes,remaining_inodes,state,created_at,updated_at FROM viewer_capacity_reservations WHERE id='r'");
+  for(const change of ["id='r2'", "writer_id='w2'"]){
+    assert.throws(()=>db.exec(`UPDATE OR REPLACE viewer_capacity_reservations SET ${change} WHERE id='r'`),/identity is immutable/);
+    assert.equal(db.prepare('SELECT COUNT(*) n FROM viewer_capacity_reservations').get().n,2);
+  }
   for(const field of ['owner_generation','peak_bytes','materialized_bytes','remaining_bytes','peak_inodes','materialized_inodes','remaining_inodes']) assert.throws(()=>db.prepare(`UPDATE viewer_capacity_reservations SET ${field}=10.5 WHERE id='r'`).run(),/CHECK constraint/,field);
+});
+
+
+test('populated v15 and v41 upgrade to a disabled ledger without changing existing data',()=>{
+  for(const version of [15,41]){
+    const db=new DatabaseSync(':memory:');try{
+      db.exec('PRAGMA foreign_keys=ON');
+      for(const m of MIGRATIONS.filter(m=>m.version<=version)){db.exec(m.sql);m.after?.(db);db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(m.version,m.name,'t');}
+      db.exec("INSERT INTO projects(id,display_name,description,created_at,updated_at) VALUES('legacy-project','Legacy','preserve','t','t'); INSERT INTO datasets(id,project_id,display_name,storage_mode,root_key,relative_path,status,created_at,updated_at) VALUES('legacy-dataset','legacy-project','Data','managed','datasets','legacy','finalized','t','t')");
+      const project=JSON.stringify(db.prepare("SELECT id,display_name,description FROM projects WHERE id='legacy-project'").get());
+      const dataset=JSON.stringify(db.prepare("SELECT id,project_id,display_name,relative_path,status FROM datasets WHERE id='legacy-dataset'").get());
+      applyMigrations(db);
+      assert.equal(JSON.stringify(db.prepare("SELECT id,display_name,description FROM projects WHERE id='legacy-project'").get()),project);
+      assert.equal(JSON.stringify(db.prepare("SELECT id,project_id,display_name,relative_path,status FROM datasets WHERE id='legacy-dataset'").get()),dataset);
+      assert.deepEqual({...db.prepare('SELECT mode,legacy_state FROM viewer_capacity_control').get()},{mode:'disabled',legacy_state:'unassessed'});
+      assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
+    }finally{db.close();}
+  }
 });

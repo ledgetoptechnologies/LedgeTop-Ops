@@ -2075,7 +2075,7 @@ const MIGRATIONS = [
     INSERT INTO viewer_capacity_control(singleton,mode,legacy_state)
       VALUES(1,'disabled','unassessed');
     CREATE TABLE viewer_capacity_reservations (
-      id TEXT PRIMARY KEY,
+      id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
       domain_id TEXT NOT NULL CHECK(length(domain_id) BETWEEN 1 AND 128),
       domain_revision TEXT NOT NULL CHECK(length(domain_revision) BETWEEN 1 AND 128),
       writer_kind TEXT NOT NULL CHECK(length(writer_kind) BETWEEN 1 AND 64),
@@ -2096,6 +2096,15 @@ const MIGRATIONS = [
       UNIQUE(domain_id,writer_kind,writer_id)
     );
     CREATE INDEX viewer_capacity_reservations_domain_idx ON viewer_capacity_reservations(domain_id,state);
+    CREATE TRIGGER viewer_capacity_identity_immutable
+      BEFORE UPDATE OF id,domain_id,writer_kind,writer_id ON viewer_capacity_reservations
+      WHEN NEW.id IS NOT OLD.id OR NEW.domain_id IS NOT OLD.domain_id OR NEW.writer_kind IS NOT OLD.writer_kind OR NEW.writer_id IS NOT OLD.writer_id
+      BEGIN SELECT RAISE(ABORT,'capacity reservation identity is immutable'); END;
+    CREATE TRIGGER viewer_capacity_no_replacement
+      BEFORE INSERT ON viewer_capacity_reservations
+      WHEN EXISTS (SELECT 1 FROM viewer_capacity_reservations
+        WHERE id=NEW.id OR (domain_id=NEW.domain_id AND writer_kind=NEW.writer_kind AND writer_id=NEW.writer_id))
+      BEGIN SELECT RAISE(ABORT,'capacity reservation replacement is forbidden'); END;
     CREATE TRIGGER viewer_capacity_materialized_monotonic
       BEFORE UPDATE OF materialized_bytes,materialized_inodes ON viewer_capacity_reservations
       WHEN NEW.materialized_bytes < OLD.materialized_bytes OR NEW.materialized_inodes < OLD.materialized_inodes

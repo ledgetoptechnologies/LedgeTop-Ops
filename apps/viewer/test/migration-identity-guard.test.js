@@ -85,3 +85,20 @@ test('capacity ledger collisions fail before changing existing schema or ledger'
   }finally{db.close();}
  }
 });
+
+
+test('file-backed v43 collision refuses before WAL or any database mutation',t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'capacity-file-guard-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ for(const kind of ['foreign-name','unrecorded-table','case-table','foreign-trigger']){
+  const file=path.join(dir,kind+'.sqlite'),db=new DatabaseSync(file);db.exec('PRAGMA journal_mode=DELETE');
+  for(const m of MIGRATIONS.filter(x=>x.version<=42)){db.exec(m.sql);m.after?.(db);db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(m.version,m.name,'t');}
+  const m=MIGRATIONS.find(x=>x.version===43);
+  if(kind==='foreign-name')db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(43,'foreign','t');
+  if(kind==='unrecorded-table')db.exec('CREATE TABLE viewer_capacity_control(singleton INTEGER)');
+  if(kind==='case-table'){db.exec(m.sql.replaceAll('viewer_capacity_control','VIEWER_CAPACITY_CONTROL'));db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(43,m.name,'t');}
+  if(kind==='foreign-trigger'){db.exec(m.sql);db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(43,m.name,'t');db.exec("CREATE TRIGGER foreign_capacity_trigger BEFORE DELETE ON viewer_capacity_reservations BEGIN SELECT RAISE(ABORT,'blocked'); END");}
+  db.close();const hash=()=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),before=hash();
+  assert.throws(()=>openDatabase(file),{code:'migration_identity_conflict'},kind);assert.equal(hash(),before,kind);
+  const check=new DatabaseSync(file,{readOnly:true});try{assert.equal(check.prepare('PRAGMA journal_mode').get().journal_mode,'delete');}finally{check.close();}assert.equal(fs.existsSync(file+'-wal'),false);
+ }
+});
