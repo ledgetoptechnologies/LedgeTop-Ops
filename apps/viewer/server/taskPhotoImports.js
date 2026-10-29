@@ -95,7 +95,7 @@ function selectPhotos(storage, paths, maxFiles = 20000, { checkSpace = true } = 
 // image. Never recurse into siblings or leave the configured import root.
 function discoverSiblingSurveys(storage, paths, maxFiles = 20000) {
   const selected = selectPhotos(storage, paths, maxFiles, { checkSpace: false });
-  if (selected.files.some(file => CSV.test(file.sourcePath))) return [];
+  const alreadySelected = new Set(selected.files.map(file => file.sourcePath));
   const parents = new Set();
   for (const relative of [...new Set(paths)]) {
     const source = locate(storage, relative), stat = fs.lstatSync(source);
@@ -110,7 +110,9 @@ function discoverSiblingSurveys(storage, paths, maxFiles = 20000) {
       if (++visited > 10000 || Date.now() >= deadline) fail('survey_discovery_limit');
       if (!CSV.test(entry.name) || entry.name.startsWith('.') || !entry.isFile()) continue;
       if (++csvCount > 64) fail('survey_discovery_limit');
-      const relative = parent ? `${parent}/${entry.name}` : entry.name, source = locate(storage, relative), initial = fs.lstatSync(source);
+      const relative = parent ? `${parent}/${entry.name}` : entry.name;
+      if (alreadySelected.has(relative)) continue;
+      const source = locate(storage, relative), initial = fs.lstatSync(source);
       if (!initial.isFile() || initial.isSymbolicLink() || initial.size <= 0 || initial.size > MAX_SOURCE_BYTES) continue;
       let fd, bytes;
       try {

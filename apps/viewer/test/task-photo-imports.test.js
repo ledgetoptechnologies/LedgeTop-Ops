@@ -172,3 +172,17 @@ test('invalid siblings are ignored and discovery does not follow symlinks', t =>
   try { fs.symlinkSync(outside,path.join(config.datasetImportMount,'a/b/link.csv')); } catch(error) { if(error.code!=='EPERM') throw error; }
   assert.deepEqual(selectWithSiblingSurvey(storage,['a/b/flight'],null).files.map(f=>f.sourcePath),['a/b/flight/a.jpg']);
 });
+
+
+test('an explicitly selected unrelated CSV does not suppress nearby valid survey discovery', t => {
+  const {storage, photo} = fixture(t);
+  const csv = 'Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,1,2,100,44,-88,101,Test (ftUS) + height (ftUS)\n';
+  photo('client/dump/map/flight/a.jpg'); const unrelated = photo('client/dump/map/flight/notes.csv','ordinary,table\n1,2\n');
+  photo('client/dump/control.csv',csv);
+  const paths=['client/dump/map/flight'];
+  const candidates=discoverSiblingSurveys(storage,paths);
+  assert.deepEqual(candidates.map(x=>x.relative),['client/dump/control.csv']);
+  const selected=selectWithSiblingSurvey(storage,paths,{path:candidates[0].relative,sha256:candidates[0].sha256});
+  assert.ok(selected.files.some(x=>x.sourcePath==='client/dump/map/flight/notes.csv'));
+  assert.equal(fs.readFileSync(unrelated,'utf8'),'ordinary,table\n1,2\n');
+});
