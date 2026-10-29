@@ -217,12 +217,19 @@ class ReferenceProvider {
   }
   async downloadObject(jobId, objectId, {expectedBinding, maxBytes = this.maxObjectBytes, signal} = {}) {
     this.#check(); this.#expected(jobId,expectedBinding); slug(objectId);
-    const object = this.#manifests.get(jobId)?.objects.find(o => o.id === objectId);
+    // Hold a single sealed snapshot across the network await: another results()
+    // call may update the cached manifest while this download is in flight.
+    const manifest = this.#manifests.get(jobId);
+    const object = manifest?.objects.find(o => o.id === objectId);
     if (!object) fail('BINDING_REQUIRED');
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > this.maxObjectBytes || object.byteSize > maxBytes) fail('BODY_LIMIT');
     const transport = await this.#request('/jobs/' + jobId + '/results/' + objectId,{binary:true,signal,mediaType:object.role === 'odm_archive' ? 'application/zip' : 'application/octet-stream'});
+    if (transport.response.headers.get('x-result-sha256') !== object.sha256 || transport.response.headers.get('x-result-manifest-sha256') !== manifest.resultManifestSha256) {
+      try { await transport.response.body?.cancel(); } catch {}
+      fail('BINDING_MISMATCH');
+    }
     const declared = transport.response.headers.get('content-length');
-    if (declared !== null && Number(declared) !== object.byteSize) { try { await transport.response.body?.cancel(); } catch {} fail('BINDING_MISMATCH'); }
+    if (declared !== String(object.byteSize)) { try { await transport.response.body?.cancel(); } catch {} fail('BINDING_MISMATCH'); }
     const source = this.#chunks(transport,Math.min(maxBytes,object.byteSize));
     return (async function* () {
       const digest = createHash('sha256'); let bytes = 0;
