@@ -97,6 +97,7 @@ async function processReconcile(job,{processing,config,providerCredentials,signa
 
 async function processIngest(job,{processing,repository,storage,config,providerCredentials,signal}){
   const attempt=processing.getAttempt(job.attempt_id),task=processing.getTask(attempt.taskId),project=processing.getProject(task.projectId),provider=processing.getProvider(attempt.providerId);
+  if(processing.hasReferenceAttemptJournal(attempt.id))throw Object.assign(new Error('reference ingest is unavailable'),{code:'unsupported_provider_type'});
   // Historical attempts may have a deleted provider and still recover an
   // existing local destination. Unknown concrete types remain unsupported.
   if(provider)requireNodeOdmProvider(provider);
