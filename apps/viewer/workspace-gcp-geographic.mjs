@@ -12,7 +12,7 @@ function position(item) {
   const lat=Number(item.latitude),lon=Number(item.longitude);
   return Number.isFinite(lat)&&Number.isFinite(lon)&&Math.abs(lat)<=90&&Math.abs(lon)<=180?[lat,lon]:null;
 }
-export function mountGcpGeographicMap({L,element,point,points=[],images=[],radiusM,onPoint,onImage,aerial=false}) {
+export function mountGcpGeographicMap({L,element,point,points=[],images=[],radiusM,onPoint,onImage,aerial=false,view=null}) {
   const center=position(point),radius=Number(radiusM);
   if(!L||!element||!center||!Number.isFinite(radius)||radius<=0)throw Error('A valid control point and radius are required');
   const map=L.map(element,{zoomControl:true,attributionControl:true,maxZoom:22});
@@ -35,13 +35,14 @@ export function mountGcpGeographicMap({L,element,point,points=[],images=[],radiu
     const icon=L.divIcon({className:`gcp-geo-icon gcp-geo-${kind}${selected?' selected':''}`,html:'<span aria-hidden="true"></span>',iconSize:[20,20],iconAnchor:[10,10]});
     const m=L.marker(pos,{icon,keyboard:true,title:String(label),alt:String(label)}).addTo(map);
     m.on('click',()=>callback?.(item.id));
-    const node=m.getElement?.();if(node){node.setAttribute('aria-label',`${kind==='point'?'Select control point':'Open photo'} ${label}`);node.setAttribute('role','button');node.addEventListener('keydown',event=>{if(event.key===' '){event.preventDefault();callback?.(item.id)}});}
+    const node=m.getElement?.();if(node){node.setAttribute('aria-label',`${kind==='point'?'Select control point':'Open photo'} ${label}`);node.setAttribute('role','button');node.addEventListener('keydown',event=>{if(event.key===' '||event.key==='Enter'){event.preventDefault();event.stopPropagation();callback?.(item.id)}});}
     if(kind==='camera')bounds.extend(pos);
   }
   for(const p of points)marker(p,'point',p.id===point.id,onPoint);
   for(const image of images)marker(image,'camera',false,onImage);
-  map.fitBounds(bounds.pad(.15),{maxZoom:20});
+  if(view&&Array.isArray(view.center)&&view.center.length===2&&view.center.every(Number.isFinite)&&Number.isFinite(view.zoom))map.setView(view.center,view.zoom);
+  else map.fitBounds(bounds.pad(.15),{maxZoom:20});
   setAerial(aerial);
-  return Object.freeze({setAerial,resize(){if(!closed)map.invalidateSize()},close(){if(!closed){closed=true;map.remove()}}});
+  return Object.freeze({setAerial,getView(){const center=map.getCenter();return {center:[center.lat,center.lng],zoom:map.getZoom()}},resize(){if(!closed)map.invalidateSize()},close(){if(!closed){closed=true;map.remove()}}});
   } catch(error) {map.remove();throw error;}
 }

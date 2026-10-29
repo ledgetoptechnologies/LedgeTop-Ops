@@ -4,7 +4,7 @@ import {mountGcpGeographicMap,AERIAL_TILES,mapPage,MAP_PAGE_SIZE} from '../works
 
 function leaflet() {
   const state={markers:[],tiles:[],removed:0,resized:0};
-  const map={setView(center,zoom){state.view={center,zoom}},remove(){state.removed++},removeLayer(layer){layer.removed=true},fitBounds(bounds,options){state.fit={bounds,options}},invalidateSize(){state.resized++}};
+  const map={setView(center,zoom){state.view={center,zoom}},getCenter(){return {lat:state.view.center[0],lng:state.view.center[1]}},getZoom(){return state.view.zoom},remove(){state.removed++},removeLayer(layer){layer.removed=true},fitBounds(bounds,options){state.fit={bounds,options}},invalidateSize(){state.resized++}};
   const L={map:()=>map,divIcon:options=>options,circle:(pos,options)=>({addTo(){state.circle={pos,options};return this},getBounds(){return 'circle-bounds'}}),latLngBounds:()=>({points:[],extend(pos){this.points.push(pos)},pad(){return this}}),marker:(pos,options)=>{const listeners={},element={attrs:{},setAttribute(k,v){this.attrs[k]=v},addEventListener(k,fn){listeners[k]=fn}};const value={pos,options,listeners,element,addTo(){state.markers.push(this);return this},on(k,fn){listeners[k]=fn;return this},getElement(){return element}};return value},tileLayer:(url,options)=>({url,options,addTo(){state.tiles.push(this);return this}})};
   return {L,state};
 }
@@ -14,7 +14,7 @@ test('large map plots GCPs, camera GPS and 50-foot radius without remote tiles b
  assert.deepEqual(state.circle.pos,[44,-88]);assert.equal(state.circle.options.radius,15.24);assert.equal(state.markers.length,3);assert.equal(state.tiles.length,0);
  state.markers[1].listeners.click();state.markers[2].listeners.click();assert.deepEqual(calls,[['point','p2'],['image','i1']]);
  assert.equal(state.markers[2].element.attrs.role,'button');assert.match(state.markers[2].element.attrs['aria-label'],/Open photo/);
- let prevented=false;state.markers[2].listeners.keydown({key:' ',preventDefault(){prevented=true}});assert.equal(prevented,true);assert.deepEqual(calls.at(-1),['image','i1']);
+ let prevented=false;state.markers[2].listeners.keydown({key:' ',preventDefault(){prevented=true},stopPropagation(){}});assert.equal(prevented,true);assert.deepEqual(calls.at(-1),['image','i1']);
  mounted.setAerial(true);assert.equal(state.tiles[0].url,AERIAL_TILES);mounted.setAerial(false);assert.equal(state.tiles[0].removed,true);mounted.resize();mounted.close();mounted.close();assert.equal(state.resized,1);assert.equal(state.removed,1);
 });
 test('invalid point coordinates and radius fail before opening a map',()=>{
@@ -35,4 +35,8 @@ test('large loaded datasets stay reachable through bounded pages',()=>{
  const items=Array.from({length:20000},(_,id)=>({id}));
  const seen=[];for(let i=0;i<mapPage(items).pages;i++){const page=mapPage(items,i);assert.ok(page.items.length<=MAP_PAGE_SIZE);seen.push(...page.items.map(item=>item.id))}
  assert.deepEqual(seen,items.map(item=>item.id));assert.equal(mapPage(items,-1).current,0);assert.equal(mapPage(items,999).current,199);assert.deepEqual(mapPage([],0),{items:[],current:0,pages:1,total:0});
+});
+
+test('preserves the supplied map view across marker page renders',()=>{
+ const {L,state}=leaflet();const view={center:[12,34],zoom:13};const m=mountGcpGeographicMap({L,element:{},point:{id:'p',latitude:0,longitude:0},radiusM:15.24,view});assert.deepEqual(state.view,view);assert.deepEqual(m.getView(),view);assert.equal(state.fit,undefined);m.close();
 });
