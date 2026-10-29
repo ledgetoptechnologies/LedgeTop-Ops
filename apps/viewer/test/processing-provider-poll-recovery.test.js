@@ -218,3 +218,41 @@ test('stale-job settlement is fenced by live lease and advanced attempt state',t
  f.db.prepare("UPDATE processing_attempts SET status='failed' WHERE id=?").run(f.attempt.id);f.db.prepare("UPDATE processing_jobs SET lease_expires_at='2000' WHERE id='poll'").run();assert.equal(f.processing.settleStaleReconcileJob('poll','owner'),false);
  assert.equal(f.db.prepare("SELECT status FROM processing_jobs WHERE id='poll'").get().status,'leased');
 });
+
+test('reconcile heartbeat database failures leave the lease and prevent late poll writes after reclaim',async t=>{
+ for(const method of ['getAttempt','heartbeatJob']){
+  const f=fixture(t),originalMethod=f.processing[method].bind(f.processing),originalInterval=global.setInterval,originalClear=global.clearInterval;
+  let tick,resolveStatus,enteredResolve,cleared=false,reads=0;
+  const entered=new Promise(resolve=>{enteredResolve=resolve});
+  global.setInterval=callback=>{tick=callback;return{unref(){}}};global.clearInterval=()=>{cleared=true};
+  try{
+   const work=processOne({processing:f.processing,config:{},adapterFactory:()=>({status:async()=>{enteredResolve();return await new Promise(resolve=>{resolveStatus=resolve})},output:async()=>{reads++;return{lines:[],nextLine:0}}})},'old-worker');
+   await entered;f.processing[method]=()=>{throw new Error('synthetic database failure')};
+   assert.doesNotThrow(()=>tick());f.processing[method]=originalMethod;
+   assert.doesNotThrow(()=>tick());
+   assert.equal(f.db.prepare("SELECT status FROM processing_jobs WHERE id='poll'").get().status,'leased');
+   f.db.prepare("UPDATE processing_jobs SET lease_expires_at='2000' WHERE id='poll'").run();
+   const replacement=f.processing.claimJob('replacement-worker');assert.equal(replacement.id,'poll');
+   resolveStatus({status:'completed',statusCode:40,progress:1});await work;
+   assert.equal(cleared,true);assert.equal(reads,0);
+   assert.equal(f.processing.getAttempt(f.attempt.id).status,'running');
+   assert.equal(f.db.prepare("SELECT lease_owner FROM processing_jobs WHERE id='poll'").get().lease_owner,'replacement-worker');
+   assert.equal(f.db.prepare("SELECT count(*) n FROM processing_jobs WHERE job_type='ingest'").get().n,0);
+  }finally{f.processing[method]=originalMethod;global.setInterval=originalInterval;global.clearInterval=originalClear;}
+ }
+});
+
+test('late reconcile output after heartbeat failure cannot advance cursor or persist logs',async t=>{
+ const f=fixture(t),originalInterval=global.setInterval,originalClear=global.clearInterval,originalHeartbeat=f.processing.heartbeatJob.bind(f.processing);
+ let tick,resolveOutput,enteredResolve;const entered=new Promise(resolve=>{enteredResolve=resolve});
+ global.setInterval=callback=>{tick=callback;return{unref(){}}};global.clearInterval=()=>{};
+ try{
+  const work=processOne({processing:f.processing,config:{},adapterFactory:()=>({status:async()=>({status:'running',progress:.5}),output:async()=>{enteredResolve();return await new Promise(resolve=>{resolveOutput=resolve})}})},'old-worker');
+  await entered;f.processing.heartbeatJob=()=>{throw new Error('synthetic database failure')};tick();f.processing.heartbeatJob=originalHeartbeat;
+  f.db.prepare("UPDATE processing_jobs SET lease_expires_at='2000' WHERE id='poll'").run();assert.equal(f.processing.claimJob('replacement-worker').id,'poll');
+  resolveOutput({lines:['late record'],nextLine:1});await work;
+  assert.equal(f.processing.getAttempt(f.attempt.id).providerOutputCursor,0);
+  assert.equal(f.db.prepare("SELECT count(*) n FROM processing_logs WHERE attempt_id=? AND message='late record'").get(f.attempt.id).n,0);
+  assert.equal(f.db.prepare("SELECT lease_owner FROM processing_jobs WHERE id='poll'").get().lease_owner,'replacement-worker');
+ }finally{f.processing.heartbeatJob=originalHeartbeat;global.setInterval=originalInterval;global.clearInterval=originalClear;}
+});
