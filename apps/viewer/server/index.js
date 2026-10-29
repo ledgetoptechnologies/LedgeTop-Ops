@@ -141,16 +141,7 @@ app.get('/api/v1/ready', (_req, res) => {
   res.status(missing.length ? 503 : 200).json({ ok: missing.length === 0, missing });
 });
 
-app.use(express.json({
-  // Processing upload manifests are separately validated and capped. Keep the
-  // legacy surface small when the processing feature is disabled.
-  limit: config.processingPlatformEnabled ? config.uploadMaxManifestBytes : '100kb',
-  verify(req, _res, buffer) {
-    // HMAC verification must hash the exact octets Ops sent, not a
-    // re-serialized JavaScript object.
-    req.rawBody = Buffer.from(buffer);
-  },
-}));
+require('./jsonBodyParser').installJsonBodyParsers(app, config, processingRepository);
 app.use((req, res, next) => {
   req.cookies = cookie.parse(req.headers.cookie || '');
   next();

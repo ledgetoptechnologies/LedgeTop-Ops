@@ -1,6 +1,6 @@
 // Staff-only upload orchestration. Authorization and dataset admission remain server-owned.
 export const TASK_PHOTO_ACCEPT = '.jpg,.jpeg,.png,.tif,.tiff,.csv';
-export const TASK_PHOTO_LIMITS = Object.freeze({maxFiles:20000,maxFileBytes:64*1024**2,maxTotalBytes:128*1024**3,maxManifestBytes:2*1024**2});
+export const TASK_PHOTO_LIMITS = Object.freeze({maxFiles:20000,maxFileBytes:64*1024**2,maxTotalBytes:128*1024**3,maxManifestBytes:5*1024**2});
 const photo = /\.(?:jpe?g|png|tiff?)$/i;
 const sourceCsv = /\.csv$/i;
 const check = signal => { if(signal?.aborted)throw signal.reason||new DOMException('Upload cancelled','AbortError'); };
@@ -41,13 +41,13 @@ export async function prepareTaskPhotos(files,{signal,onProgress=()=>{},limits=T
   // SHA-256 has a fixed encoded length. The server requires these digests up front
   // to identify resumable uploads and verify assembled originals, not for EXIF or
   // reconstruction analysis. Keep one file buffer at a time for large selections.
-  if(new TextEncoder().encode(JSON.stringify(selection.items.map(item=>specFor(item,'0'.repeat(64))))).byteLength>limits.maxManifestBytes)throw new Error('Photo manifest is too large. Select fewer photos or shorter folder names.');
+  if(new TextEncoder().encode(JSON.stringify({files:selection.items.map(item=>specFor(item,'0'.repeat(64)))})).byteLength>limits.maxManifestBytes)throw new Error('Photo manifest is too large. Select fewer photos or shorter folder names.');
   let completedBytes=0;
   const report=()=>onProgress({phase:'preparing',completed:items.length,total:selection.items.length,completedBytes,totalBytes:selection.totalBytes});
   report();
   for(const item of selection.items){check(signal);const bytes=await item.file.arrayBuffer();check(signal);if(bytes.byteLength!==item.file.size)throw new Error('A selected photo changed while being read.');const sha256=await digest(bytes);check(signal);items.push({...item,spec:specFor(item,sha256)});completedBytes+=item.file.size;report();}
   const manifest=items.map(item=>item.spec);
-  if(new TextEncoder().encode(JSON.stringify(manifest)).byteLength>limits.maxManifestBytes)throw new Error('Photo manifest is too large. Select fewer photos or shorter folder names.');
+  if(new TextEncoder().encode(JSON.stringify({files:manifest})).byteLength>limits.maxManifestBytes)throw new Error('Photo manifest is too large. Select fewer photos or shorter folder names.');
   return {...selection,items,manifest};
 }
 

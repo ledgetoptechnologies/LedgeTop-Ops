@@ -38,6 +38,17 @@ test('preparation reports local byte/photo progress and rejects oversized manife
   assert.equal(reads,0);
 });
 
+test('20,000 short paths fit the bounded envelope, and byte limits include the wrapper',async()=>{
+  const files=Array.from({length:20000},(_,i)=>file(`flight/photo-${i}.jpg`,'x'));
+  const prepared=await prepareTaskPhotos(files);
+  assert.equal(prepared.manifest.length,20000);
+  const exact=new TextEncoder().encode(JSON.stringify({files:prepared.manifest})).byteLength;
+  assert.ok(exact>2*1024*1024&&exact<TASK_PHOTO_LIMITS.maxManifestBytes);
+  const sample=[file('a.jpg','x')],one=await prepareTaskPhotos(sample),bytes=new TextEncoder().encode(JSON.stringify({files:one.manifest})).byteLength;
+  await prepareTaskPhotos(sample,{limits:{...TASK_PHOTO_LIMITS,maxManifestBytes:bytes}});
+  await assert.rejects(prepareTaskPhotos(sample,{limits:{...TASK_PHOTO_LIMITS,maxManifestBytes:bytes-1}}),/manifest is too large/);
+});
+
 test('upload reports acknowledged progress and average speed excluding resumed bytes',async()=>{
   let clock=1000;const progress=[],f=await transport({now:()=>clock,onChunk:()=>{clock+=1000;},onProgress:value=>progress.push(value)});
   await f.run();
