@@ -17,6 +17,7 @@ permissions:
 
 jobs:
   verify:
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -37,7 +38,7 @@ jobs:
           npm --prefix apps/thumbnail-renderer test
 
   publish:
-    if: github.ref == 'refs/heads/main'
+    if: ${{ github.ref == 'refs/heads/main' }}
     needs: verify
     runs-on: ubuntu-24.04
     strategy:
