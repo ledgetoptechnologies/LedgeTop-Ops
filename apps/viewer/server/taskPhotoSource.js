@@ -22,7 +22,7 @@ function openPinnedImportRoot(root) {
     return fd;
   } catch (error) { if (fd !== undefined) fs.closeSync(fd); throw error; }
 }
-function openPinnedImportEntry(rootFd, relative, { directory = false, afterParentOpen = null } = {}) {
+function openPinnedImportEntry(rootFd, relative, { directory = false, allowDirectory = false, afterParentOpen = null } = {}) {
   if (typeof relative !== 'string' || !relative || safeRelativePath(relative) !== relative || relative.includes('\\')) fail('invalid_import_path');
   const parts = relative.split('/'); let parent = null, result = null;
   try {
@@ -34,8 +34,9 @@ function openPinnedImportEntry(rootFd, relative, { directory = false, afterParen
     if (afterParentOpen) afterParentOpen();
     result = fs.openSync(`/proc/self/fd/${parent}/${parts.at(-1)}`, directory ? dirFlags : fileFlags);
     const opened = fs.fstatSync(result);
-    if (directory ? !opened.isDirectory() : !opened.isFile()) fail('invalid_import_path');
+    if (directory ? !opened.isDirectory() : !(opened.isFile() || (allowDirectory && opened.isDirectory()))) fail('invalid_import_path');
     const fd = result; result = null; return fd;
+  } catch (error) { if (['ELOOP', 'ENOTDIR'].includes(error.code)) fail('invalid_import_path'); throw error;
   } finally { if (result !== null) fs.closeSync(result); if (parent !== null) fs.closeSync(parent); }
 }
 module.exports = { openPinnedImportRoot, openPinnedImportEntry };

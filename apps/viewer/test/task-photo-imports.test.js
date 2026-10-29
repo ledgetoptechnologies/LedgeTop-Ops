@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { StorageManager } = require('../server/storageManager');
-const { browsePhotos, selectPhotos, discoverSiblingSurveys, selectWithSiblingSurvey, previewPhotos, copyTaskPhotos } = require('../server/taskPhotoImports');
+const { browsePhotos, selectPhotos, discoverSiblingSurveys, selectWithSiblingSurvey, previewPhotos, copyTaskPhotos, mountTaskPhotoImports } = require('../server/taskPhotoImports');
 const { openDatabase } = require('../server/database');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
@@ -185,4 +185,44 @@ test('an explicitly selected unrelated CSV does not suppress nearby valid survey
   const selected=selectWithSiblingSurvey(storage,paths,{path:candidates[0].relative,sha256:candidates[0].sha256});
   assert.ok(selected.files.some(x=>x.sourcePath==='client/dump/map/flight/notes.csv'));
   assert.equal(fs.readFileSync(unrelated,'utf8'),'ordinary,table\n1,2\n');
+});
+
+
+test('selection rejects an ancestor replaced by an outside symlink at open time', {skip: process.platform !== 'linux' && 'Linux descriptor traversal required'}, t => {
+  const {root,storage,photo,config}=fixture(t); photo('raw/flight/a.jpg','inside');
+  const outside=path.join(root,'outside');fs.mkdirSync(outside);fs.writeFileSync(path.join(outside,'a.jpg'),'outside');
+  const original=fs.openSync;let fired=false;
+  fs.openSync=function(name,...args){
+    if(!fired&&typeof name==='string'&&name.startsWith('/proc/self/fd/')&&name.endsWith('/flight')){
+      fired=true;fs.renameSync(path.join(config.datasetImportMount,'raw/flight'),path.join(config.datasetImportMount,'raw/old'));
+      fs.symlinkSync(outside,path.join(config.datasetImportMount,'raw/flight'));
+    }
+    return original.call(fs,name,...args);
+  };
+  try { assert.throws(()=>selectPhotos(storage,['raw/flight/a.jpg']),{code:'invalid_import_path'}); assert.equal(fired,true); }
+  finally { fs.openSync=original; }
+});
+
+
+test('survey-preview route rejects a swapped ancestor rather than exposing an outside CSV', {skip: process.platform !== 'linux' && 'Linux descriptor traversal required'}, async t => {
+  const {root,storage,photo,config}=fixture(t); photo('raw/flight/a.jpg','inside');
+  const outside=path.join(root,'outside');fs.mkdirSync(outside);fs.writeFileSync(path.join(outside,'a.jpg'),'outside');
+  const router=express.Router(), app=express();app.use(express.json());
+  let fired=false;
+  const inspect=async request=>{
+    const original=fs.openSync;
+    fs.openSync=function(name,...args){
+      if(!fired&&typeof name==='string'&&name.startsWith('/proc/self/fd/')&&name.endsWith('/flight')){
+        fired=true;fs.renameSync(path.join(config.datasetImportMount,'raw/flight'),path.join(config.datasetImportMount,'raw/old'));
+        fs.symlinkSync(outside,path.join(config.datasetImportMount,'raw/flight'));
+      }
+      return original.call(fs,name,...args);
+    };
+    try{return discoverSiblingSurveys(storage,request.paths);}finally{fs.openSync=original;}
+  };
+  mountTaskPhotoImports(router,{storage,config,processing:{},authorize:()=>((_req,_res,next)=>next()),mutate:(_req,_res,next)=>next(),subjectReceipt:()=>null,inspect});app.use(router);
+  const server=await new Promise(resolve=>{const instance=app.listen(0,'127.0.0.1',()=>resolve(instance));});
+  t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));});
+  const response=await fetch(`http://127.0.0.1:${server.address().port}/api/v1/dataset-imports/survey-preview`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({paths:['raw/flight/a.jpg']})});
+  assert.equal(fired,true);assert.equal(response.status,400);const payload=await response.json();assert.equal(payload.code,'invalid_import_path');assert.doesNotMatch(JSON.stringify(payload),/outside/);
 });
