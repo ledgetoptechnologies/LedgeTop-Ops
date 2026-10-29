@@ -76,3 +76,14 @@ test('auto candidates adapt to camera spacing, accuracy and footprint metadata w
   assert.equal(footprint.ranking.reason,'median_camera_footprint_metadata');assert.equal(footprint.ranking.mode,'nearest_fallback');
   assert.equal(footprint.images.length,12);assert.equal(footprint.ranking.visibilityConfirmed,false);
 });
+
+test('radius paging includes images beyond the former 200 result cutoff',async(t)=>{
+ const {base,dataset,database}=await fixture(t),headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'paged'};
+ const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers,body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',content:'point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n'})});
+ const pointId=(await imported.json()).points[0].id,sha='a'.repeat(64),timestamp=new Date().toISOString();
+ const insert=database.prepare(`INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,metadata_json,created_at,mime_type,latitude,longitude) VALUES (?,?,?,?,?,?,'{}',?,?,?,?)`);
+ for(let i=0;i<205;i++)insert.run(`page-${i}`,dataset.id,`page-${i}.jpg`,1,sha,'image/jpeg',timestamp,'image/jpeg',44.5+i*0.0000001,-88.1);
+ const url=`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius&radiusM=15.24&limit=200`,auth={authorization:'Bearer admin'};
+ const first=await(await fetch(url,{headers:auth})).json();assert.equal(first.pagination.total,205);assert.equal(first.images.length,200);assert.equal(first.pagination.nextOffset,200);
+ const second=await(await fetch(url+'&offset=200',{headers:auth})).json();assert.equal(second.images.length,5);assert.equal(second.pagination.nextOffset,null);assert.equal(new Set([...first.images,...second.images].map(x=>x.id)).size,205);
+});

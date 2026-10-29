@@ -29,6 +29,7 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
         if(faultAt==='after_filesystem')throw Object.assign(new Error('injected failure after lifecycle filesystem effect'),{code:'fault_injected'});
         markApplied(processing,mutation,{destinationRelativePath:!sourceExists&&!destinationExists?'':mutation.destinationRelativePath});
       }else if(mutation.type==='purge'){
+        if(mutation.entityType==='dataset' && processing.datasetHasRetainedCsv(mutation.entityId)) throw Object.assign(new Error('dataset contains retained CSV source'), {code:'retained_csv'});
         if(exists(storage,mutation.sourceRootKey,mutation.sourceRelativePath)){require('./outputSupersession').requireSupersessionMutationProof(processing,mutation,supersessionProof);storage.removeExact(mutation.sourceRootKey,mutation.sourceRelativePath);}
         if(faultAt==='after_filesystem')throw Object.assign(new Error('injected failure after lifecycle filesystem effect'),{code:'fault_injected'});
         markApplied(processing,mutation);

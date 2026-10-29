@@ -21,6 +21,12 @@ function haversineMeters(latitude1, longitude1, latitude2, longitude2) {
   return 6371008.8 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+function odmCrsCandidate(row) {
+  if (row.adapter === 'emlid-all-columns-v1' && row.coordinate_system === 'NAD83(2011) / WISCRS Dodge and Jefferson (ftUS) + NAVD88(GEOID18) height (ftUS)' && row.linear_unit === 'ftUS')
+    return {epsgCode:7541,horizontalUnit:'m',verticalDatum:'NAVD88(GEOID18)',verticalUnit:'m'};
+  return null;
+}
+
 class GcpRepository {
   constructor(database) { this.database = database; }
 
@@ -31,6 +37,8 @@ class GcpRepository {
   }
 
   set(row) {
+    const candidate = row && odmCrsCandidate(row);
+    const confirmation = row && this.database.prepare('SELECT * FROM gcp_odm_crs_confirmations WHERE set_id=?').get(row.id);
     return row && {
       id: row.id, datasetId: row.dataset_id, displayName: row.display_name,
       sourceFormat: row.adapter || row.source_format, sourceFileId: row.source_file_id,
@@ -39,6 +47,7 @@ class GcpRepository {
       provenance: row.adapter ? { adapter: row.adapter, coordinateSystem: row.coordinate_system,
         verticalDatum: row.vertical_datum, linearUnit: row.linear_unit,
         elevationSource: row.elevation_source, geographicCrossCheck: row.geographic_cross_check } : null,
+      odmCrsCandidate: candidate, odmCrsConfirmed: Boolean(candidate && confirmation && confirmation.source_sha256===row.source_sha256 && confirmation.epsg_code===candidate.epsgCode && confirmation.vertical_datum===candidate.verticalDatum),
       pointCount: Number(row.point_count || 0), createdBy: row.created_by,
       createdAt: row.created_at, updatedAt: row.updated_at,
     };
@@ -126,6 +135,8 @@ class GcpRepository {
   updatePoint(id, patch) {
     const current = this.getPoint(id);
     if (!current) return null;
+    if (current.easting !== null && ['latitude','longitude','elevationM'].some(key => patch[key] !== undefined))
+      throw Object.assign(new Error('Projected survey coordinates must be reimported from their source'), {code:'invalid_gcp_point'});
     const next = {
       label: patch.label === undefined ? current.label : bounded(patch.label, 160),
       latitude: patch.latitude === undefined ? current.latitude : patch.latitude,
@@ -142,14 +153,22 @@ class GcpRepository {
     return this.getPoint(id);
   }
 
+  confirmOdmCrs(id, actorId) {
+    const set=this.getSet(id); if(!set?.odmCrsCandidate) throw Object.assign(new Error('No verified CRS mapping is available for this source'),{code:'gcp_crs_unmapped'});
+    const c=set.odmCrsCandidate;
+    this.database.prepare(`INSERT INTO gcp_odm_crs_confirmations(set_id,source_sha256,epsg_code,horizontal_unit,vertical_datum,confirmed_by,confirmed_at) VALUES (?,?,?,?,?,?,?)
+      ON CONFLICT(set_id) DO UPDATE SET source_sha256=excluded.source_sha256,epsg_code=excluded.epsg_code,horizontal_unit=excluded.horizontal_unit,vertical_datum=excluded.vertical_datum,confirmed_by=excluded.confirmed_by,confirmed_at=excluded.confirmed_at`).run(id,set.sourceSha256,c.epsgCode,c.horizontalUnit,c.verticalDatum,actorId,now());
+    return this.getSet(id);
+  }
+
   deletePoint(id) { return this.database.prepare('DELETE FROM gcp_points WHERE id=?').run(id).changes === 1; }
-  deleteSet(id) { return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1; }
+  deleteSet(id) { const row=this.database.prepare('SELECT source_file_id FROM gcp_sets WHERE id=?').get(id); if(row && !row.source_file_id) throw Object.assign(new Error('GCP source must be retained'), {code:'retained_csv'}); return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1; }
 
   listRankedImages(datasetId, selectedPointId, limit = 100) {
     const point = selectedPointId ? this.database.prepare(`SELECT points.* FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id
       WHERE points.id=? AND sets.dataset_id=?`).get(selectedPointId, datasetId) : null;
     if (selectedPointId && !point) throw Object.assign(new Error('GCP point is not in this dataset'), { code: 'invalid_gcp_point' });
-    const count = Math.max(1, Math.min(200, Number(limit) || 100));
+    const count = limit === null ? -1 : Math.max(1, Math.min(200, Number(limit) || 100));
     let rows;
     if (point) {
       const longitudeScale = Math.max(0.01, Math.cos(Number(point.latitude) * Math.PI / 180));

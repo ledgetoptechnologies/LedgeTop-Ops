@@ -80,10 +80,17 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
     return set ? res.json({ set, points: set.points }) : error(res, 404, 'gcp_set_not_found');
   });
 
+  router.post('/api/v1/gcp-sets/:id/odm-crs-confirm', authorize('viewer.gcp.write'), mutate, (req,res) => {
+    if(!onlyKeys(req.body, [])) return error(res,400,'invalid_request');
+    if(!gcp.getSet(req.params.id)) return error(res,404,'gcp_set_not_found');
+    try { const set=gcp.confirmOdmCrs(req.params.id,req.actorId); repository.audit({actorType:'admin',actorId:req.actorId,action:'gcp.odm_crs_confirmed',entityType:'gcp_set',entityId:set.id,details:{epsgCode:set.odmCrsCandidate.epsgCode}}); return res.json({set}); }
+    catch(caught) { if(caught.code==='gcp_crs_unmapped') return error(res,409,'gcp_crs_unmapped',caught.message); throw caught; }
+  });
+
   router.delete('/api/v1/gcp-sets/:id', authorize('viewer.gcp.write'), mutate, (req, res) => {
     const current = gcp.getSet(req.params.id);
     if (!current) return error(res, 404, 'gcp_set_not_found');
-    gcp.deleteSet(current.id);
+    try { gcp.deleteSet(current.id); } catch (caught) { if (caught.code === 'retained_csv') return error(res, 409, 'retained_csv', 'The source CSV must be retained.'); throw caught; }
     repository.audit({ actorType: 'admin', actorId: req.actorId, action: 'gcp.set_deleted', entityType: 'gcp_set', entityId: current.id,
       details: { datasetId: current.datasetId, pointCount: current.pointCount } });
     return res.status(204).end();
@@ -119,7 +126,9 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
       if (!['auto', 'radius', 'nearest'].includes(mode)) return error(res, 400, 'invalid_candidate_mode');
       const radiusM = req.query.radiusM == null ? (mode === 'radius' ? 100 : null) : Number(req.query.radiusM);
       if (radiusM != null && (!Number.isFinite(radiusM) || radiusM <= 0 || radiusM > 100000)) return error(res, 400, 'invalid_radius');
-      const requested = Number(rawLimit), ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, 200);
+      const rawOffset = String(req.query.offset || '0');
+      if (!/^\d{1,7}$/.test(rawOffset)) return error(res, 400, 'invalid_offset');
+      const offset = Number(rawOffset), requested = Number(rawLimit), ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, mode === 'radius' ? null : 200);
       let images = ranked.images;
       let appliedMode = ranked.selectedPoint ? mode : 'capture_time';
       let appliedRadius = radiusM, reason = 'explicit_mode', confidence = 'user_selected';
@@ -141,10 +150,12 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
         if (mode === 'radius' || inRadius.length >= 5) images = inRadius;
         else appliedMode = 'nearest_fallback';
       }
-      images = images.slice(0, appliedMode === 'nearest_fallback' ? Math.min(requested, 12) : requested);
+      const total = images.length;
+      images = images.slice(offset, offset + (appliedMode === 'nearest_fallback' ? Math.min(requested, 12) : requested));
       const result = { ...ranked, images };
       return res.json({
         ...result,
+        pagination: { offset, limit: requested, total, nextOffset: offset + images.length < total ? offset + images.length : null },
         ranking: {
           basis: result.selectedPoint ? 'adaptive_camera_proximity' : 'capture_time', mode: appliedMode,
           radiusM: appliedRadius, reason, confidence,
