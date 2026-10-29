@@ -39,3 +39,13 @@ test('expired incomplete CSV uploads remain retained and resumable',t=>{
  assert.equal(p.hasUnfinishedCsvUploads(dataset.id),true);assert.equal(p.expiredUploads(Date.now()).includes(u.id),false);
  assert.equal(p.resumeUpload(dataset.id,'ops:test',files,'2099-01-01T00:00:00.000Z').upload.id,u.id);
 });
+
+test('manual CRS mapping requires source units and original vertical datum',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-mapping-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
+ const p=new ProcessingRepository(db),project=p.createProject({displayName:'Survey'}),dataset=p.createDataset({projectId:project.id,displayName:'Flight',storageMode:'managed',rootKey:'datasets',relativePath:'source'});p.finalizeDataset(dataset.id,[],digest('empty'));
+ const source='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,1000,2000,100,43,-88.8,110,Local grid (m) + height (m)\n',parsed=require('../server/gcpImport').parseGcpInterchange({format:'emlid-all-columns-v1',content:source}),g=new GcpRepository(db);
+ const set=g.importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'emlid-all-columns-v1',sourceSha256:parsed.sourceSha256,sourceContent:source,crs:parsed.crs,elevationUnits:'m',provenance:parsed.provenance,points:parsed.points});
+ assert.equal(set.odmCrsCandidate,null);assert.throws(()=>g.confirmOdmCrs(set.id,'ops:test'),{code:'gcp_crs_unmapped'});
+ assert.throws(()=>g.confirmOdmCrs(set.id,'ops:test',{epsgCode:32616,horizontalUnit:'ftUS',verticalDatum:parsed.provenance.verticalDatum}),{code:'gcp_crs_unmapped'});
+ const confirmed=g.confirmOdmCrs(set.id,'ops:test',{epsgCode:32616,horizontalUnit:'m',verticalDatum:parsed.provenance.verticalDatum});assert.equal(confirmed.odmCrsConfirmed,true);assert.equal(confirmed.odmCrs.epsgCode,32616);
+});

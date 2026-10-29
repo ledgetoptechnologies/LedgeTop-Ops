@@ -5,6 +5,7 @@ const path = require('node:path');
 const { GcpRepository } = require('./gcpRepository');
 const { parseGcpInterchange, confirmationToken } = require('./gcpImport');
 const { hashFile } = require('./storageManager');
+const { discoverDatasetGcp } = require('./gcpDiscovery');
 
 function onlyKeys(value, allowed) {
   return value && typeof value === 'object' && !Array.isArray(value) &&
@@ -26,6 +27,13 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
   router.get('/api/v1/datasets/:datasetId/gcp-sets', authorize('viewer.gcp.read'), (req, res) => {
     if (!gcp.dataset(req.params.datasetId)) return error(res, 404, 'dataset_not_found');
     res.json({ sets: gcp.listSets(req.params.datasetId) });
+  });
+
+  router.post('/api/v1/datasets/:datasetId/gcp-sets/discover', authorize('viewer.gcp.write'), mutate, (req,res) => {
+    if (!onlyKeys(req.body, [])) return error(res,400,'invalid_request');
+    if (!gcp.dataset(req.params.datasetId)) return error(res,404,'dataset_not_found');
+    try { const sets=discoverDatasetGcp({processing,storage,datasetId:req.params.datasetId,actorId:req.actorId}); return res.json({sets}); }
+    catch (caught) { if(caught.code==='dataset_source_changed') return error(res,409,caught.code); throw caught; }
   });
 
   router.post('/api/v1/datasets/:datasetId/gcp-sets/import', authorize('viewer.gcp.write'), mutate, (req, res) => {
