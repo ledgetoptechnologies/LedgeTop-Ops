@@ -9,8 +9,12 @@ const digest = filename => crypto.createHash('sha256').update(fs.readFileSync(fi
 
 function carryVerifiedAsset(source, dist) {
   if (!fs.lstatSync(source).isFile() || digest(source) !== SHA256) throw new Error('retained Viewer asset hash mismatch');
+  if (!fs.lstatSync(dist).isDirectory()) throw new Error('Viewer dist directory is not a directory');
+  const realDist = fs.realpathSync(dist);
   const dir = path.join(dist, 'assets');
-  fs.mkdirSync(dir, { recursive: true });
+  try { fs.mkdirSync(dir); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+  if (!fs.lstatSync(dir).isDirectory() || path.dirname(fs.realpathSync(dir)) !== realDist)
+    throw new Error('Viewer assets directory escapes dist');
   const destination = path.join(dir, ASSET);
   try {
     fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);

@@ -30,3 +30,15 @@ test('retained bundle rejects changed input and symlink collision', t => {
   catch (error) { if (error.code === 'EPERM') { t.skip('symlink creation unavailable'); return; } throw error; }
   assert.throws(() => carryVerifiedAsset(source, dir), /collision/);
 });
+
+
+test('assets directory symlink cannot redirect retained bundle outside dist', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-carry-parent-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const dist = path.join(root, 'dist'), outside = path.join(root, 'outside');
+  fs.mkdirSync(dist); fs.mkdirSync(outside);
+  try { fs.symlinkSync(outside, path.join(dist, 'assets'), 'dir'); }
+  catch (error) { if (error.code === 'EPERM') { t.skip('symlink creation unavailable'); return; } throw error; }
+  assert.throws(() => carryVerifiedAsset(source, dist), /escapes dist/);
+  assert.equal(fs.existsSync(path.join(outside, ASSET)), false);
+});
