@@ -170,6 +170,42 @@ class GcpRepository {
   deletePoint(id) { return this.database.prepare('DELETE FROM gcp_points WHERE id=?').run(id).changes === 1; }
   deleteSet(id) { const row=this.database.prepare('SELECT sets.source_file_id,datasets.storage_mode FROM gcp_sets sets JOIN datasets ON datasets.id=sets.dataset_id WHERE sets.id=?').get(id); if(row && (!row.source_file_id || row.storage_mode==='external_reference')) throw Object.assign(new Error('GCP source must be retained'), {code:'retained_csv'}); return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1; }
 
+  listRadiusImages(datasetId, selectedPointId, radiusM, limit, offset) {
+    const point = this.database.prepare(`SELECT points.* FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id
+      WHERE points.id=? AND sets.dataset_id=?`).get(selectedPointId, datasetId);
+    if (!point) throw Object.assign(new Error('GCP point is not in this dataset'), { code: 'invalid_gcp_point' });
+    // A latitude band is conservative even at the poles and across the antimeridian.
+    // The haversine score is monotonic with distance; calculate and filter it in
+    // SQLite so only the requested page is materialized in the application.
+    const latitude = Number(point.latitude), longitude = Number(point.longitude);
+    const angular = radiusM / 6371008.8, latDelta = angular * 180 / Math.PI;
+    const scoreLimit = Math.sin(angular / 2) ** 2;
+    const eligible = `FROM dataset_files files WHERE files.dataset_id=?
+      AND files.latitude BETWEEN ? AND ? AND files.longitude IS NOT NULL
+      AND COALESCE(files.mime_type,files.content_type) LIKE 'image/%'
+      AND (sin(radians(files.latitude-?)/2)*sin(radians(files.latitude-?)/2)
+        + cos(radians(?))*cos(radians(files.latitude))*sin(radians(files.longitude-?)/2)*sin(radians(files.longitude-?)/2)) <= ?`;
+    const args = [datasetId, Math.max(-90, latitude-latDelta), Math.min(90, latitude+latDelta),
+      latitude, latitude, latitude, longitude, longitude, scoreLimit];
+    const total = this.database.prepare(`SELECT count(*) total ${eligible}`).get(...args).total;
+    const rows = this.database.prepare(`SELECT files.*,ranking.horizontal_accuracy_m,ranking.footprint_radius_m,
+      (sin(radians(files.latitude-?)/2)*sin(radians(files.latitude-?)/2)
+        + cos(radians(?))*cos(radians(files.latitude))*sin(radians(files.longitude-?)/2)*sin(radians(files.longitude-?)/2)) distance_score
+      ${eligible.replace('FROM dataset_files files', 'FROM dataset_files files LEFT JOIN gcp_image_ranking_metadata ranking ON ranking.dataset_file_id=files.id')}
+      ORDER BY distance_score,files.id LIMIT ? OFFSET ?`).all(latitude, latitude, latitude, longitude, longitude, ...args, limit, offset);
+    const images = rows.map(row => ({
+      id: row.id, datasetId: row.dataset_id, relativePath: row.relative_path,
+      mimeType: row.mime_type || row.content_type, capturedAt: row.captured_at,
+      latitude: Number(row.latitude), longitude: Number(row.longitude),
+      altitudeM: row.altitude_m == null ? null : Number(row.altitude_m),
+      horizontalAccuracyM: row.horizontal_accuracy_m == null ? null : Number(row.horizontal_accuracy_m),
+      footprintRadiusM: row.footprint_radius_m == null ? null : Number(row.footprint_radius_m),
+      width: row.width == null ? null : Number(row.width), height: row.height == null ? null : Number(row.height),
+      distanceM: haversineMeters(latitude, longitude, Number(row.latitude), Number(row.longitude)),
+    }));
+    return { images, selectedPoint: this.point(point), total };
+  }
+
   listRankedImages(datasetId, selectedPointId, limit = 100) {
     const point = selectedPointId ? this.database.prepare(`SELECT points.* FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id
       WHERE points.id=? AND sets.dataset_id=?`).get(selectedPointId, datasetId) : null;

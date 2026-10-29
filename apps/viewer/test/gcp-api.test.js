@@ -87,3 +87,15 @@ test('radius paging includes images beyond the former 200 result cutoff',async(t
  const first=await(await fetch(url,{headers:auth})).json();assert.equal(first.pagination.total,205);assert.equal(first.images.length,200);assert.equal(first.pagination.nextOffset,200);
  const second=await(await fetch(url+'&offset=200',{headers:auth})).json();assert.equal(second.images.length,5);assert.equal(second.pagination.nextOffset,null);assert.equal(new Set([...first.images,...second.images].map(x=>x.id)).size,205);
 });
+
+test('radius search filters a large dataset and wraps across the antimeridian',async(t)=>{
+ const {base,dataset,database}=await fixture(t),headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'dateline'};
+ const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers,body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',content:'point_id,label,latitude,longitude,elevation_m\nA,A,0,179.99999,0\n'})});
+ const pointId=(await imported.json()).points[0].id,sha='a'.repeat(64),timestamp=new Date().toISOString();
+ const insert=database.prepare(`INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,metadata_json,created_at,mime_type,latitude,longitude) VALUES (?,?,?,?,?,?,'{}',?,?,?,?)`);
+ database.exec('BEGIN');try{for(let i=0;i<17000;i++)insert.run(`far-${i}`,dataset.id,`far-${i}.jpg`,1,sha,'image/jpeg',timestamp,'image/jpeg',1,179);for(const id of ['near-b','near-a'])insert.run(id,dataset.id,`${id}.jpg`,1,sha,'image/jpeg',timestamp,'image/jpeg',0,-179.99999);database.exec('COMMIT')}catch(error){database.exec('ROLLBACK');throw error;}
+ const url=`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius&radiusM=15.24&limit=1`,auth={authorization:'Bearer admin'};
+ const first=await(await fetch(url,{headers:auth})).json(),second=await(await fetch(url+'&offset=1',{headers:auth})).json();
+ assert.equal(first.pagination.total,2);assert.equal(first.images[0].id,'near-a');assert.equal(second.images[0].id,'near-b');assert.equal(second.pagination.nextOffset,null);
+ assert.ok(first.images[0].distanceM<15.24);
+});

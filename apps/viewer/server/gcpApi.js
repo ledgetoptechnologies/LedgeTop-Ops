@@ -136,7 +136,16 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
       if (radiusM != null && (!Number.isFinite(radiusM) || radiusM <= 0 || radiusM > 100000)) return error(res, 400, 'invalid_radius');
       const rawOffset = String(req.query.offset || '0');
       if (!/^\d{1,7}$/.test(rawOffset)) return error(res, 400, 'invalid_offset');
-      const offset = Number(rawOffset), requested = Number(rawLimit), ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, mode === 'radius' ? null : 200);
+      const offset = Number(rawOffset), requested = Number(rawLimit);
+      if (mode === 'radius' && req.query.pointId) {
+        const ranked = gcp.listRadiusImages(req.params.datasetId, String(req.query.pointId), radiusM, requested, offset);
+        return res.json({ images: ranked.images, selectedPoint: ranked.selectedPoint,
+          pagination: { offset, limit: requested, total: ranked.total, nextOffset: offset + ranked.images.length < ranked.total ? offset + ranked.images.length : null },
+          ranking: { basis: 'adaptive_camera_proximity', mode: 'radius', radiusM, reason: 'explicit_mode', confidence: 'user_selected',
+            targetCount: 5, warnings: ranked.images.length < 3 ? ['Fewer than 3 candidate images were found.'] : [],
+            visibilityConfirmed: false, notice: 'Nearby camera positions are suggestions only; proximity does not prove that the GCP is visible.' } });
+      }
+      const ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, mode === 'radius' ? null : 200);
       let images = ranked.images;
       let appliedMode = ranked.selectedPoint ? mode : 'capture_time';
       let appliedRadius = radiusM, reason = 'explicit_mode', confidence = 'user_selected';
