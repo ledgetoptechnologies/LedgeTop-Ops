@@ -2209,6 +2209,39 @@ const MIGRATIONS = [
     CREATE TRIGGER viewer_reference_protocol_no_delete BEFORE DELETE ON viewer_reference_attempt_protocols BEGIN SELECT RAISE(ABORT,'reference protocol retained'); END;
     CREATE TRIGGER viewer_reference_protocol_no_replace BEFORE INSERT ON viewer_reference_attempt_protocols WHEN EXISTS(SELECT 1 FROM viewer_reference_attempt_protocols WHERE attempt_id=NEW.attempt_id OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'reference protocol replacement'); END;
   `},
+  // Provisional allocation in the combined 43-46 candidate only. Never apply
+  // to an existing deployment until its actual migration ledger is verified.
+  {version:47,name:'viewer_gcp_raw_source_journal',sql:`
+    CREATE TABLE viewer_gcp_raw_sources (
+      id TEXT PRIMARY KEY NOT NULL,
+      dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+      source_sha256 TEXT NOT NULL CHECK(length(source_sha256)=64 AND source_sha256 NOT GLOB '*[^0-9a-f]*'),
+      source_bytes BLOB NOT NULL CHECK(typeof(source_bytes)='blob' AND length(source_bytes)>0 AND length(source_bytes)<=2097152),
+      source_filename TEXT NOT NULL CHECK(length(source_filename) BETWEEN 1 AND 240),
+      source_format TEXT NOT NULL CHECK(source_format IN ('generic-csv-v1','emlid-all-columns-v1')),
+      display_name TEXT NOT NULL CHECK(length(display_name) BETWEEN 1 AND 160),
+      declarations_json TEXT NOT NULL CHECK(json_valid(declarations_json)),
+      confirmation_token TEXT NOT NULL CHECK(length(confirmation_token)=64),
+      created_by TEXT NOT NULL,
+      request_key TEXT NOT NULL,
+      archive_relative_path TEXT NOT NULL,
+      set_id TEXT UNIQUE REFERENCES gcp_sets(id) ON DELETE RESTRICT,
+      status TEXT NOT NULL CHECK(status IN ('pending','ready')),
+      created_at TEXT NOT NULL,
+      ready_at TEXT,
+      UNIQUE(created_by,request_key),
+      CHECK((status='pending' AND ready_at IS NULL AND set_id IS NULL) OR (status='ready' AND ready_at IS NOT NULL AND set_id IS NOT NULL))
+    );
+    CREATE INDEX viewer_gcp_raw_sources_dataset_idx ON viewer_gcp_raw_sources(dataset_id,status,source_sha256);
+    CREATE TRIGGER viewer_gcp_raw_sources_no_replace BEFORE INSERT ON viewer_gcp_raw_sources
+      WHEN NEW.status!='pending' OR EXISTS(SELECT 1 FROM viewer_gcp_raw_sources WHERE id=NEW.id OR rowid=NEW.rowid OR (created_by=NEW.created_by AND request_key=NEW.request_key) OR (NEW.set_id IS NOT NULL AND set_id=NEW.set_id))
+      BEGIN SELECT RAISE(ABORT,'raw GCP source replacement prohibited'); END;
+    CREATE TRIGGER viewer_gcp_raw_sources_immutable BEFORE UPDATE ON viewer_gcp_raw_sources
+      WHEN NEW.id IS NOT OLD.id OR NEW.dataset_id IS NOT OLD.dataset_id OR NEW.source_sha256 IS NOT OLD.source_sha256 OR NEW.source_bytes IS NOT OLD.source_bytes OR NEW.source_filename IS NOT OLD.source_filename OR NEW.source_format IS NOT OLD.source_format OR NEW.display_name IS NOT OLD.display_name OR NEW.declarations_json IS NOT OLD.declarations_json OR NEW.confirmation_token IS NOT OLD.confirmation_token OR NEW.created_by IS NOT OLD.created_by OR NEW.request_key IS NOT OLD.request_key OR NEW.archive_relative_path IS NOT OLD.archive_relative_path OR NEW.created_at IS NOT OLD.created_at OR OLD.status!='pending' OR NEW.status!='ready' OR NEW.set_id!=OLD.id OR NOT EXISTS(SELECT 1 FROM gcp_sets WHERE id=NEW.set_id AND dataset_id=NEW.dataset_id AND source_sha256=NEW.source_sha256)
+      BEGIN SELECT RAISE(ABORT,'raw GCP source immutable'); END;
+    CREATE TRIGGER viewer_gcp_raw_sources_no_delete BEFORE DELETE ON viewer_gcp_raw_sources
+      BEGIN SELECT RAISE(ABORT,'raw GCP source retained'); END;
+  `},
 
 ];
 
