@@ -11,6 +11,7 @@ const { clientPortalTarget, renderClientNavigation } = require('../viewer-client
 const { measurementAssetBearer } = require('../measurement-surface-client.mjs');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
 const GRANT = '11111111-2222-4333-8444-555555555555';
 const KEY = `${PREFIX}synthetic-session`;
 
@@ -179,6 +180,41 @@ test('invalid recovery destination cannot become a link', async () => {
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(link.hidden, true);
   assert.equal(link.href, undefined);
+});
+
+test('recovery link remains hidden while configuration is delayed or absent', async () => {
+  // Author CSS must override the link display rule as well as the UA [hidden] rule.
+  assert.match(html, /#session-recovery\s+a\[hidden\]\s*\{[^}]*display:\s*none/);
+  assert.match(html, /<a id="recovery-client-portal" hidden>/);
+  const f = fixture({ active: true, reject: true });
+  const link = { hidden: true }, recovery = { hidden: true };
+  f.context.document = { body: { classList: { add() {} } },
+    getElementById: id => id === 'session-recovery' ? recovery : link };
+  f.context.window.parent = f.context.window;
+  let complete;
+  const originalFetch = f.context.fetch;
+  f.context.fetch = (url, options) => url === '/api/v1/session-recovery'
+    ? new Promise(resolve => { complete = resolve; }) : originalFetch(url, options);
+  await f.context.bootstrapSession();
+  assert.equal(recovery.hidden, false);
+  assert.equal(link.hidden, true);
+  assert.equal(link.href, undefined);
+  complete({ ok: true, json: async () => ({ clientPortalOrigin: null }) });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(link.hidden, true);
+  assert.equal(link.href, undefined);
+});
+
+test('embedded recovery does not request or expose a portal destination', async () => {
+  const f = fixture({ active: true, reject: true });
+  const link = { hidden: true }, recovery = { hidden: true };
+  f.context.document = { body: { classList: { add() {} } },
+    getElementById: id => id === 'session-recovery' ? recovery : link };
+  await f.context.bootstrapSession();
+  assert.equal(recovery.hidden, false);
+  assert.equal(link.hidden, true);
+  assert.equal(link.href, undefined);
+  assert.deepEqual(f.calls.map(call => call.url), ['/api/v1/sessions/current']);
 });
 
 test('bootstrap denial cannot throw during cleanup or revive stale storage after failed removal', async () => {
