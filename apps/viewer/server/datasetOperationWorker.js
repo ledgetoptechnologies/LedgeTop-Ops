@@ -9,8 +9,8 @@ const { processingReadyEvent } = require('./processingReadyEvent');
 const { copyTaskPhotos } = require('./taskPhotoImports');
 const { discoverDatasetGcp } = require('./gcpDiscovery');
 
-async function reconcileCatalogSourceCleanups(processing,storage,limit=20){if(!processing.referenceCatalogRecoveryAllowed())return 0;let cleaned=0;for(const item of processing.pendingCatalogSourceCleanups(limit)){try{if(!processing.referenceCatalogRecoveryAllowed())break;const removed=await storage.removeAdoptedSourceIfMatches(item.rootKey,item.relativePath,{fingerprint:item.sourceFingerprint,byteSize:item.sourceByteSize,cleanupId:item.id,sourceDev:item.sourceDev,sourceIno:item.sourceIno,sourceCtimeNs:item.sourceCtimeNs,sourceMtimeNs:item.sourceMtimeNs});if(!removed)continue;processing.clearCatalogSourceCleanup(item.id);cleaned+=1;}catch(error){if(error?.restoredSourceIdentity)processing.refreshCatalogSourceCleanupIdentity(item.id,item,error.restoredSourceIdentity);/* durable journal retries during maintenance */}}return cleaned;}
-function reconcileCatalogAdoptionRecoveries(processing,storage,limit=20){if(!processing.referenceCatalogRecoveryAllowed())return 0;let recovered=0;for(const item of processing.pendingCatalogAdoptionRecoveries(limit)){try{if(!processing.referenceCatalogRecoveryAllowed())break;if(!item.datasetId||!processing.getDataset(item.datasetId,true))storage.reconcileAdoptionIntent(item.rootKey,item.relativePath,item.datasetRelative);processing.clearCatalogAdoptionIntent(item.id);recovered+=1;}catch{/* durable intent retries during maintenance */}}return recovered;}
+async function reconcileCatalogSourceCleanups(processing,storage,limit=20){if(!processing.referenceCatalogRecoveryAllowed())return 0;let cleaned=0;for(const item of processing.pendingCatalogSourceCleanups(limit)){try{if(!processing.referenceCatalogRecoveryAllowed(item.id))break;const removed=await storage.removeAdoptedSourceIfMatches(item.rootKey,item.relativePath,{fingerprint:item.sourceFingerprint,byteSize:item.sourceByteSize,cleanupId:item.id,sourceDev:item.sourceDev,sourceIno:item.sourceIno,sourceCtimeNs:item.sourceCtimeNs,sourceMtimeNs:item.sourceMtimeNs});if(!removed)continue;processing.clearCatalogSourceCleanup(item.id);cleaned+=1;}catch(error){if(error?.restoredSourceIdentity)processing.refreshCatalogSourceCleanupIdentity(item.id,item,error.restoredSourceIdentity);/* durable journal retries during maintenance */}}return cleaned;}
+function reconcileCatalogAdoptionRecoveries(processing,storage,limit=20){if(!processing.referenceCatalogRecoveryAllowed())return 0;let recovered=0;for(const item of processing.pendingCatalogAdoptionRecoveries(limit)){try{if(!processing.referenceCatalogRecoveryAllowed(item.id))break;if(!item.datasetId||!processing.getDataset(item.datasetId,true))storage.reconcileAdoptionIntent(item.rootKey,item.relativePath,item.datasetRelative);processing.clearCatalogAdoptionIntent(item.id);recovered+=1;}catch{/* durable intent retries during maintenance */}}return recovered;}
 
 function manifestHash(files) {
   const canonical = files.map(({ relativePath, byteSize, sha256 }) => ({ relativePath, byteSize, sha256 }));
@@ -107,7 +107,7 @@ async function processOneDatasetOperation(deps, owner) {
   if (!operation) return false;
   // Hard-disabled reference admission makes an existing journal unsupported;
   // this is an interim refusal, not a fence against old/external writers.
-  if(operation.operation_type==='catalog_map'&&!deps.processing.referenceCatalogRecoveryAllowed())return false;
+  if(operation.operation_type==='catalog_map'&&!deps.processing.referenceCatalogRecoveryAllowed(operation.id))return false;
   let progress = Number(operation.progress) || 0;
   let lostLease = false;
   const controller = new AbortController();
