@@ -2043,6 +2043,29 @@ const MIGRATIONS = [
   }},
   {version:40,name:'direct_client_session_source_authorizations',sql:'SELECT 1;',
     after(database){require('./directClientSourceMigration').migrateDirectClientSources(database);}},
+  // Version 41 is reserved by the independently reviewed GCP work.
+  {version:42,name:'viewer_workspace_hierarchy',sql:`
+    CREATE TABLE viewer_organizations (
+      id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')),
+      revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>=1)
+    );
+    CREATE TABLE viewer_project_groups (
+      id TEXT PRIMARY KEY, organization_id TEXT NOT NULL REFERENCES viewer_organizations(id) ON DELETE RESTRICT,
+      display_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')),
+      revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>=1), UNIQUE(id,organization_id)
+    );
+    CREATE TABLE viewer_project_hierarchy (
+      project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+      organization_id TEXT REFERENCES viewer_organizations(id) ON DELETE RESTRICT,
+      group_id TEXT REFERENCES viewer_project_groups(id) ON DELETE RESTRICT,
+      revision INTEGER NOT NULL CHECK(revision>=1),
+      CHECK(group_id IS NULL OR organization_id IS NOT NULL),
+      FOREIGN KEY(group_id,organization_id) REFERENCES viewer_project_groups(id,organization_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX viewer_project_groups_org_idx ON viewer_project_groups(organization_id);
+    CREATE INDEX viewer_project_hierarchy_org_idx ON viewer_project_hierarchy(organization_id,group_id);
+  `},
 ];
 
 function applyMigrations(database) {
