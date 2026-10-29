@@ -331,3 +331,33 @@ test('terminal settlement checks attempt eligibility after observation has commi
   assert.equal(f.db.prepare("SELECT count(*) n FROM event_outbox WHERE event_type='processing.failed'").get().n,0);
  }
 });
+
+test('superseded reconcile is settled without touching attempts or another job',async t=>{
+ for(const active of ['null','other']){
+  const f=fixture(t),old=f.processing.getAttempt(f.attempt.id),taskId=old.taskId;
+  let other=null;if(active==='other'){
+   f.db.prepare("UPDATE processing_attempts SET status='failed' WHERE id=?").run(old.id);
+   other=f.processing.createAttempt({taskId,providerId:old.providerId,options:{}});
+   f.db.prepare("UPDATE processing_attempts SET status='running' WHERE id=?").run(old.id);
+  }else f.db.prepare('UPDATE processing_tasks SET active_attempt_id=NULL WHERE id=?').run(taskId);
+  const before=f.db.prepare('SELECT * FROM processing_tasks WHERE id=?').get(taskId),oldBefore=f.db.prepare('SELECT * FROM processing_attempts WHERE id=?').get(old.id);
+  const otherJob=other?f.db.prepare("SELECT * FROM processing_jobs WHERE attempt_id=? AND job_type='submit'").get(other.id):null;
+  let calls=0;await processOne({processing:f.processing,config:{},adapterFactory:()=>{calls++;throw Error('unexpected provider access')}},'worker');
+  assert.equal(calls,0);assert.equal(f.db.prepare("SELECT status FROM processing_jobs WHERE id='poll'").get().status,'cancelled');
+  assert.deepEqual(f.db.prepare('SELECT * FROM processing_tasks WHERE id=?').get(taskId),before);
+  assert.deepEqual(f.db.prepare('SELECT * FROM processing_attempts WHERE id=?').get(old.id),oldBefore);
+  if(otherJob)assert.deepEqual(f.db.prepare('SELECT * FROM processing_jobs WHERE id=?').get(otherJob.id),otherJob);
+  assert.notEqual(f.processing.claimJob('replacement')?.id,'poll');
+ }
+});
+
+test('superseded stale settlement requires a live owner and still-superseded task',t=>{
+ const f=fixture(t),attempt=f.processing.getAttempt(f.attempt.id);assert.equal(f.processing.claimJob('worker').id,'poll');
+ f.db.prepare('UPDATE processing_tasks SET active_attempt_id=NULL WHERE id=?').run(attempt.taskId);
+ assert.equal(f.processing.settleStaleReconcileJob('poll','other'),false);
+ f.db.prepare("UPDATE processing_jobs SET lease_expires_at='2000' WHERE id='poll'").run();assert.equal(f.processing.settleStaleReconcileJob('poll','worker'),false);
+ assert.equal(f.processing.claimJob('replacement').id,'poll');
+ f.db.prepare('UPDATE processing_tasks SET active_attempt_id=? WHERE id=?').run(attempt.id,attempt.taskId);
+ assert.equal(f.processing.settleStaleReconcileJob('poll','replacement'),false);
+ assert.equal(f.db.prepare("SELECT status FROM processing_jobs WHERE id='poll'").get().status,'leased');
+});

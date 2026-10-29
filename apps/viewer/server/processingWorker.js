@@ -77,9 +77,10 @@ async function processSubmit(job,{processing,storage,config,providerCredentials,
 async function processReconcile(job,{processing,config,providerCredentials,signal,adapterFactory=adapterFor}){
   let attempt,provider;
   try{
+    if(processing.settleStaleReconcileJob(job.id,job.lease_owner))return;
     attempt=processing.getAttempt(job.attempt_id);
     if(!attempt)throw Object.assign(new Error('Processing attempt is unavailable; reconciliation will continue'),{code:'provider_attempt_unavailable'});
-    if(['cancelled','published','failed','derivatives','ready_for_review'].includes(attempt.status)){if(!processing.settleStaleReconcileJob(job.id,job.lease_owner))throw Object.assign(new Error('processing lease was lost or attempt changed'),{code:'lease_lost'});return;}
+    if(['cancelled','published','failed','derivatives','ready_for_review'].includes(attempt.status))throw Object.assign(new Error('processing lease was lost or attempt changed'),{code:'lease_lost'});
     provider=processing.getProvider(attempt.providerId);
     if(!provider)throw Object.assign(new Error('Provider is unavailable; reconciliation will continue'),{code:'provider_adapter_unavailable'});
   }catch(error){
