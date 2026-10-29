@@ -2044,6 +2044,28 @@ const MIGRATIONS = [
   {version:40,name:'direct_client_session_source_authorizations',sql:'SELECT 1;',
     after(database){require('./directClientSourceMigration').migrateDirectClientSources(database);}},
   {version:41,name:'gcp_odm_crs_confirmations',sql:`CREATE TABLE gcp_odm_crs_confirmations (set_id TEXT PRIMARY KEY REFERENCES gcp_sets(id) ON DELETE CASCADE, source_sha256 TEXT NOT NULL, epsg_code INTEGER NOT NULL, horizontal_unit TEXT NOT NULL, vertical_datum TEXT NOT NULL, validation_sha256 TEXT NOT NULL, confirmed_by TEXT NOT NULL, confirmed_at TEXT NOT NULL);`},
+  {version:42,name:'viewer_workspace_hierarchy',sql:`
+    CREATE TABLE viewer_organizations (
+      id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')),
+      revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>=1)
+    );
+    CREATE TABLE viewer_project_groups (
+      id TEXT PRIMARY KEY, organization_id TEXT NOT NULL REFERENCES viewer_organizations(id) ON DELETE RESTRICT,
+      display_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')),
+      revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>=1), UNIQUE(id,organization_id)
+    );
+    CREATE TABLE viewer_project_hierarchy (
+      project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+      organization_id TEXT REFERENCES viewer_organizations(id) ON DELETE RESTRICT,
+      group_id TEXT REFERENCES viewer_project_groups(id) ON DELETE RESTRICT,
+      revision INTEGER NOT NULL CHECK(revision>=1),
+      CHECK(group_id IS NULL OR organization_id IS NOT NULL),
+      FOREIGN KEY(group_id,organization_id) REFERENCES viewer_project_groups(id,organization_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX viewer_project_groups_org_idx ON viewer_project_groups(organization_id);
+    CREATE INDEX viewer_project_hierarchy_org_idx ON viewer_project_hierarchy(organization_id,group_id);
+  `},
 ];
 
 function applyMigrations(database) {

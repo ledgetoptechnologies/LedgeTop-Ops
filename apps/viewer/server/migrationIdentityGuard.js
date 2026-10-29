@@ -29,6 +29,9 @@ function assertProtectedMigrationIdentity(database,migrations) {
         const object=spec.objects[i],actual=found[i],reference=expected.prepare('SELECT type,sql FROM sqlite_master WHERE name=?').get(object);
         if(!reference||!actual||reference.type!==actual.type||normalize(reference.sql)!==normalize(actual.sql))throw incompatible(`schema mismatch for ${object}`);
       }
+      const tables=spec.objects.filter((_,i)=>found[i]?.type==='table');
+      const extras=database.prepare(`SELECT name FROM sqlite_master WHERE type IN ('index','trigger') AND sql IS NOT NULL AND tbl_name IN (${tables.map(()=>'?').join(',')})`).all(...tables);
+      if(extras.some(row=>!spec.objects.includes(row.name)))throw incompatible(`unexpected index or trigger for version ${spec.version}`);
     } finally {expected.close();}
   }
 }

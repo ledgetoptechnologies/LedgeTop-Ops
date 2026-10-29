@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const workspaceHierarchy = require('./workspaceHierarchy');
 const path = require('node:path');
 const { storageTrashRetentionMs } = require('./storageRetention');
 const { compareUtf8, safeRelativePath, sanitizeLogMessage } = require('./processingSecurity');
@@ -194,6 +195,7 @@ class ProcessingRepository {
   constructor(database, { logMaxBytes = 10 * 1024 * 1024 } = {}) {
     this.database = database;
     this.logMaxBytes = logMaxBytes;
+    workspaceHierarchy.assertDatabase(database);
     this.seedPresets();
   }
 
@@ -229,8 +231,13 @@ class ProcessingRepository {
     if (!row) return null;
     return { id: row.id, displayName: row.display_name, description: row.description, tags: json(row.tags_json,[]), metadata: json(row.metadata_json),
       defaultUnits: row.default_units, status: row.status, createdBy: row.created_by, createdAt: row.created_at,
-      updatedAt: row.updated_at, archivedAt: row.archived_at, purgedAt: row.purged_at };
+      updatedAt: row.updated_at, archivedAt: row.archived_at, purgedAt: row.purged_at,
+      ...workspaceHierarchy.assignment(this.database,row.id) };
   }
+  listHierarchyPage(page) { return workspaceHierarchy.list(this.database,page); }
+  createHierarchyEntity(kind,input) { return workspaceHierarchy.create(this.database,kind,input); }
+  updateHierarchyEntity(kind,id,input) { return workspaceHierarchy.update(this.database,kind,id,input); }
+  assignProjectHierarchy(id,input) { const project=this.getProject(id);if(!project)throw Object.assign(new Error('project_not_found'),{code:'project_not_found',status:404});workspaceHierarchy.assign(this.database,id,input);return this.getProject(id); }
   createProject(input) {
     const id = input.id || crypto.randomUUID(); const timestamp = now(),displayName=bounded(input.displayName),tags=normalizedTags(input.tags);
     if(!displayName)throw Object.assign(new Error('display name is required'),{code:'display_name_required'});
