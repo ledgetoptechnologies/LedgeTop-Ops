@@ -228,7 +228,7 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
   });
 
   it("installs approved synthetic admission/profile/scope grant rows while preserving Ops/PA permissions and existing authority bytes",async()=>{
-    const people=await fixture(),ids=[people.pa.id,people.ops.id,people.operator.id,people.root.id];
+    const people=await fixture();
     const seeded=(await db.prepare("SELECT id,email,access_subject FROM staff_users WHERE id IN ('staff-beau-koltz','staff-kollins-stirn') ORDER BY id").all()).results as any[];
     const preservedPrincipals=[people.pa,people.ops,people.operator,people.root,
       ...seeded.map(row=>({id:row.id,email:row.email,subject:row.access_subject??''}))];
@@ -293,7 +293,8 @@ describe("source-only trusted native staff bootstrap installer against full Ops 
     const receipt=await execute(db,prepared,{verifyTrust:trusted});
     expect(receipt).toMatchObject({staffCount:1,insertedRowCount:8});
     expect(await legacyEffectiveSnapshot(preservedPrincipals)).toEqual(before);
-    expect((await db.prepare("SELECT id,email,access_subject,status FROM staff_users ORDER BY id").all()).results).toHaveLength(ids.length+2);
+    // The shared D1 fixture includes synthetic principals created by earlier tests.
+    expect((await db.prepare("SELECT id,email,access_subject,status FROM staff_users ORDER BY id").all()).results).toHaveLength(identityBefore.length);
     expect(await db.prepare("SELECT bound_access_subject FROM native_staff_admissions WHERE staff_id=?").bind(people.ops.id).first("bound_access_subject")).toBe(people.ops.subject);
     expect(await db.prepare("SELECT login_email FROM native_staff_profiles WHERE staff_id=?").bind(people.ops.id).first("login_email")).toBe(people.ops.email);
     expect(await db.prepare("SELECT count(*) n FROM native_staff_target_memberships WHERE staff_id=? AND business_area_id=?").bind(people.ops.id,`installer-scope-${people.ops.id}`).first("n")).toBe(1);
