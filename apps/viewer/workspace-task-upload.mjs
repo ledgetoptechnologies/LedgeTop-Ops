@@ -1,7 +1,8 @@
 // Staff-only upload orchestration. Authorization and dataset admission remain server-owned.
-export const TASK_PHOTO_ACCEPT = '.jpg,.jpeg,.png,.tif,.tiff';
-export const TASK_PHOTO_LIMITS = Object.freeze({maxFiles:20000,maxFileBytes:64*1024**2,maxTotalBytes:128*1024**3,maxManifestBytes:2*1024**2});
+export const TASK_PHOTO_ACCEPT = '.jpg,.jpeg,.png,.tif,.tiff,.csv';
+export const TASK_PHOTO_LIMITS = Object.freeze({maxFiles:20000,maxFileBytes:64*1024**2,maxTotalBytes:128*1024**3,maxManifestBytes:5*1024**2});
 const photo = /\.(?:jpe?g|png|tiff?)$/i;
+const sourceCsv = /\.csv$/i;
 const check = signal => { if(signal?.aborted)throw signal.reason||new DOMException('Upload cancelled','AbortError'); };
 const compare = (a,b) => a<b?-1:a>b?1:0;
 const digest = async bytes => [...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(value=>value.toString(16).padStart(2,'0')).join('');
@@ -10,15 +11,15 @@ export function inspectTaskPhotos(files,{limits=TASK_PHOTO_LIMITS}={}) {
   const selected=[],ignored=[];let totalBytes=0;
   for(const file of files||[]) {
     const sourcePath=String(file.webkitRelativePath||file.name||'');
-    if(!photo.test(sourcePath)){ignored.push(sourcePath);continue;}
+    if(!photo.test(sourcePath)&&!sourceCsv.test(sourcePath)){ignored.push(sourcePath);continue;}
     if(!sourcePath||sourcePath.startsWith('/')||/[\\\x00-\x1f:]/.test(sourcePath)||sourcePath.split('/').some(part=>!part||part==='.'||part==='..'))throw new Error('A selected photo has an unsafe relative path.');
     if(!Number.isSafeInteger(file.size)||file.size<=0||file.size>limits.maxFileBytes)throw new Error(`Each photo must be nonempty and at most ${Math.floor(limits.maxFileBytes/1024**2)} MB.`);
     totalBytes+=file.size;
     if(!Number.isSafeInteger(totalBytes)||totalBytes>limits.maxTotalBytes)throw new Error('Selected photos exceed the browser transfer size limit.');
-    selected.push({file,sourcePath});
+    selected.push({file,sourcePath,processingRole:sourceCsv.test(sourcePath)?'gcp_source':'image'});
     if(selected.length>limits.maxFiles)throw new Error(`Select at most ${limits.maxFiles} photos.`);
   }
-  if(!selected.length)throw new Error('Select supported photos or a folder containing photos.');
+  if(!selected.some(item=>item.processingRole==='image'))throw new Error('Select supported photos or a folder containing photos.');
   selected.sort((a,b)=>compare(a.sourcePath,b.sourcePath));
   const paths=new Set(),counts=new Map();
   for(const item of selected){if(paths.has(item.sourcePath))throw new Error('The same photo path was selected more than once.');paths.add(item.sourcePath);const base=item.sourcePath.split('/').at(-1).toLowerCase();counts.set(base,(counts.get(base)||0)+1);}
@@ -35,18 +36,18 @@ export function inspectTaskPhotos(files,{limits=TASK_PHOTO_LIMITS}={}) {
 
 export async function prepareTaskPhotos(files,{signal,onProgress=()=>{},limits=TASK_PHOTO_LIMITS}={}) {
   check(signal);const selection=inspectTaskPhotos(files,{limits}),items=[];
-  const specFor=(item,sha256)=>({id:item.id,relativePath:item.relativePath,byteSize:item.file.size,sha256,contentType:item.file.type||'application/octet-stream',processingRole:'image'});
+  const specFor=(item,sha256)=>({id:item.id,relativePath:item.relativePath,byteSize:item.file.size,sha256,contentType:item.file.type||'application/octet-stream',processingRole:item.processingRole});
   // Reject an oversized manifest using metadata before reading any photo pixels.
   // SHA-256 has a fixed encoded length. The server requires these digests up front
   // to identify resumable uploads and verify assembled originals, not for EXIF or
   // reconstruction analysis. Keep one file buffer at a time for large selections.
-  if(new TextEncoder().encode(JSON.stringify(selection.items.map(item=>specFor(item,'0'.repeat(64))))).byteLength>limits.maxManifestBytes)throw new Error('Photo manifest is too large. Select fewer photos or shorter folder names.');
+  if(new TextEncoder().encode(JSON.stringify({files:selection.items.map(item=>specFor(item,'0'.repeat(64)))})).byteLength>limits.maxManifestBytes)throw new Error('Photo manifest is too large. Select fewer photos or shorter folder names.');
   let completedBytes=0;
   const report=()=>onProgress({phase:'preparing',completed:items.length,total:selection.items.length,completedBytes,totalBytes:selection.totalBytes});
   report();
   for(const item of selection.items){check(signal);const bytes=await item.file.arrayBuffer();check(signal);if(bytes.byteLength!==item.file.size)throw new Error('A selected photo changed while being read.');const sha256=await digest(bytes);check(signal);items.push({...item,spec:specFor(item,sha256)});completedBytes+=item.file.size;report();}
   const manifest=items.map(item=>item.spec);
-  if(new TextEncoder().encode(JSON.stringify(manifest)).byteLength>limits.maxManifestBytes)throw new Error('Photo manifest is too large. Select fewer photos or shorter folder names.');
+  if(new TextEncoder().encode(JSON.stringify({files:manifest})).byteLength>limits.maxManifestBytes)throw new Error('Photo manifest is too large. Select fewer photos or shorter folder names.');
   return {...selection,items,manifest};
 }
 

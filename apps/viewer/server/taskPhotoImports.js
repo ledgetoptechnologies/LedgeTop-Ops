@@ -13,6 +13,7 @@ const { parsePhotoExif } = require('./photoExif.mjs');
 const { fsyncDirectory, fsyncDirectoryTree } = require('./durableFs');
 
 const IMAGE = /\.(?:jpe?g|png|tiff?)$/i;
+const CSV = /\.csv$/i;
 const fail = (code) => { throw Object.assign(new Error(code), { code }); };
 function locate(storage, relative, allowRoot = false) {
   if (typeof relative !== 'string' || (!relative && !allowRoot) || (relative && (safeRelativePath(relative) !== relative || relative.includes('\\')))) fail('invalid_import_path');
@@ -38,8 +39,8 @@ function browsePhotos(storage, { relativePath = '', offset = 0, limit = 100 } = 
     if (name.startsWith('.') || /[\u0000-\u001f]/.test(name)) continue;
     const stat = fs.lstatSync(path.join(absolute, name));
     if (stat.isSymbolicLink()) continue;
-    const kind = stat.isDirectory() ? 'folder' : stat.isFile() && IMAGE.test(name) ? 'image' : null;
-    if (kind) entries.push({ name, relativePath: relativePath ? `${relativePath}/${name}` : name, kind, ...(kind === 'image' ? { byteSize: stat.size } : {}) });
+    const kind = stat.isDirectory() ? 'folder' : stat.isFile() && IMAGE.test(name) ? 'image' : stat.isFile() && CSV.test(name) ? 'csv' : null;
+    if (kind) entries.push({ name, relativePath: relativePath ? `${relativePath}/${name}` : name, kind, ...(kind !== 'folder' ? { byteSize: stat.size } : {}) });
   }
   entries.sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name));
   return { path: relativePath, parentPath: relativePath ? relativePath.split('/').slice(0, -1).join('/') : null, entries: entries.slice(offset, offset + limit), nextOffset: offset + limit < entries.length ? offset + limit : null };
@@ -61,7 +62,7 @@ function selectPhotos(storage, paths, maxFiles = 20000, { checkSpace = true } = 
         if (entry.name.startsWith('.')) continue;
         walk(`${relative}/${entry.name}`, false, depth + 1);
       } } finally { directory.closeSync(); }
-    } else if (stat.isFile() && IMAGE.test(relative)) {
+    } else if (stat.isFile() && (IMAGE.test(relative) || CSV.test(relative))) {
       if (files.has(relative)) return;
       if (files.size >= maxFiles) fail('import_selection_too_large');
       if (!Number.isSafeInteger(stat.size) || stat.size <= 0) fail('invalid_image_size');
@@ -71,7 +72,7 @@ function selectPhotos(storage, paths, maxFiles = 20000, { checkSpace = true } = 
     } else if (explicit || !stat.isFile()) fail('invalid_raw_image');
   }
   for (const relative of [...new Set(paths)].sort()) walk(relative, true);
-  if (!files.size) fail('no_raw_images');
+  if (![...files.keys()].some(file => IMAGE.test(file))) fail('no_raw_images');
   if (checkSpace) storage.requireSpace('datasets', byteSize);
   const selected = [...files.values()].sort((a, b) => a.sourcePath < b.sourcePath ? -1 : a.sourcePath > b.sourcePath ? 1 : 0), counts = new Map();
   for (const file of selected) { const base = path.posix.basename(file.sourcePath).toLowerCase(); counts.set(base, (counts.get(base) || 0) + 1); }
@@ -93,7 +94,7 @@ async function previewPhotos(storage, paths, maxFiles = 20000) {
   const deadline = Date.now() + 10000, points = [];
   let scannedCount = 0, missingGpsCount = 0;
   // Read at most 2,048 bounded EXIF headers (512 MiB), never full image pixels.
-  for (const file of selected.files) {
+  for (const file of selected.files.filter(file => IMAGE.test(file.sourcePath))) {
     if (scannedCount >= 2048 || Date.now() >= deadline) break;
     const source = locate(storage, file.sourcePath);
     if (!sameIdentity(file, identity(fs.statSync(source)))) fail('import_source_changed');
@@ -111,7 +112,8 @@ async function previewPhotos(storage, paths, maxFiles = 20000) {
     else missingGpsCount++;
     if (scannedCount % 32 === 0) await new Promise(resolve => setImmediate(resolve));
   }
-  return { photoCount: selected.files.length, scannedCount, locatedCount: points.length, missingGpsCount, unscannedCount: selected.files.length - scannedCount, points, truncated: scannedCount < selected.files.length };
+  const photoCount = selected.files.filter(file => IMAGE.test(file.sourcePath)).length;
+  return { photoCount, scannedCount, locatedCount: points.length, missingGpsCount, unscannedCount: photoCount - scannedCount, points, truncated: scannedCount < photoCount };
 }
 
 function mountTaskPhotoImports(router, { processing, storage, authorize, mutate, subjectReceipt, config }) {
@@ -147,7 +149,7 @@ function mountTaskPhotoImports(router, { processing, storage, authorize, mutate,
 
 async function copyTaskPhotos(operation, { processing, storage }, updateProgress, signal) {
   const payload = JSON.parse(operation.payload_json), dataset = processing.getDataset(operation.dataset_id, true);
-  if (dataset?.status === 'finalized') return { dataset };
+  if (dataset?.status === 'finalized') { require('./gcpDiscovery').discoverDatasetGcp({ processing, storage, datasetId: dataset.id, actorId: operation.subject }); return { dataset }; }
   if (!dataset || dataset.status !== 'finalizing' || dataset.storageMode !== 'managed') fail('dataset_unavailable');
   storage.requireSpace('datasets', payload.byteSize);
   const files = [];
@@ -167,7 +169,7 @@ async function copyTaskPhotos(operation, { processing, storage }, updateProgress
       if (copied.size !== file.byteSize) fail('import_source_changed');
       await updateProgress(0.05 + 0.9 * index / payload.files.length);
       fs.renameSync(temp, destination);
-      files.push({ id: crypto.randomUUID(), relativePath: file.relativePath, byteSize: file.byteSize, sha256: hash.digest('hex'), processingRole: 'image', metadata: { ...jpegMetadata(readHead(destination)), sourcePath: file.sourcePath } });
+      files.push({ id: crypto.randomUUID(), relativePath: file.relativePath, byteSize: file.byteSize, sha256: hash.digest('hex'), processingRole: CSV.test(file.relativePath) ? 'gcp_source' : 'image', metadata: { ...(IMAGE.test(file.relativePath) ? jpegMetadata(readHead(destination)) : {}), sourcePath: file.sourcePath } });
     } finally { await handle.close(); if (fs.existsSync(temp)) fs.unlinkSync(temp); }
     await updateProgress(0.05 + 0.9 * (index + 1) / payload.files.length);
   }
@@ -175,6 +177,8 @@ async function copyTaskPhotos(operation, { processing, storage }, updateProgress
   fsyncDirectory(storage.roots.datasets, { code: 'import_durability_failed' });
   await updateProgress(0.99);
   const manifestHash = crypto.createHash('sha256').update(JSON.stringify(files.map(({ relativePath, byteSize, sha256 }) => ({ relativePath, byteSize, sha256 })))).digest('hex');
-  return { dataset: processing.finalizeDataset(dataset.id, files, manifestHash) };
+  const finalized = processing.finalizeDataset(dataset.id, files, manifestHash);
+  require('./gcpDiscovery').discoverDatasetGcp({ processing, storage, datasetId: finalized.id, actorId: operation.subject });
+  return { dataset: finalized };
 }
 module.exports = { browsePhotos, selectPhotos, previewPhotos, mountTaskPhotoImports, copyTaskPhotos };
