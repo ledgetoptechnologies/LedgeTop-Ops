@@ -99,3 +99,17 @@ nav.task-page-navigation{display:flex;flex-wrap:nowrap;gap:4px;overflow-x:auto;m
 .processing-meta{display:grid;justify-items:end;gap:3px;text-align:right}
 .processing-group.attention .processing-row{border-color:color-mix(in srgb,var(--red) 40%,transparent)}
 @media(max-width:720px){.processing-row{grid-template-columns:1fr;gap:8px}.processing-meta{justify-items:start;text-align:left}.processing-row>button{justify-self:start;min-height:44px}}
+
+/* Customers dialog. */
+.customers-modal .customer-list{display:grid;gap:10px;margin-top:12px;max-height:min(60vh,560px);overflow:auto}
+.customers-toolbar{margin-top:10px}
+.customer-row{display:grid;gap:8px;padding:12px;border:1px solid var(--border);border-radius:var(--radius-md);background:var(--surface-1)}
+.customer-row.archived{opacity:.75}
+.customer-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.customer-heading>div:first-child{display:grid;gap:2px;min-width:0}
+.customer-heading strong{overflow-wrap:anywhere}
+.customer-heading small,.customer-groups small{color:var(--muted)}
+.customer-groups{display:grid;gap:6px;margin:0;padding:0 0 0 12px;border-left:2px solid var(--border);list-style:none}
+.customer-groups li{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;min-height:44px}
+.customer-groups li.archived>span:first-child{color:var(--muted)}
+.customer-row .row-actions button{min-height:40px}
