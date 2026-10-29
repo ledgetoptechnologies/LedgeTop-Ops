@@ -208,12 +208,19 @@ test('recovery link remains hidden while configuration is delayed or absent', as
 test('embedded recovery does not request or expose a portal destination', async () => {
   const f = fixture({ active: true, reject: true });
   const link = { hidden: true }, recovery = { hidden: true };
+  const workspace = { hidden: false }, topLevelGuidance = { hidden: false }, embeddedGuidance = { hidden: true };
   f.context.document = { body: { classList: { add() {} } },
-    getElementById: id => id === 'session-recovery' ? recovery : link };
+    getElementById: id => ({ 'session-recovery': recovery, 'recovery-client-portal': link,
+      'recovery-workspace': workspace, 'recovery-top-level-guidance': topLevelGuidance,
+      'recovery-embedded-guidance': embeddedGuidance })[id] || null };
   await f.context.bootstrapSession();
   assert.equal(recovery.hidden, false);
   assert.equal(link.hidden, true);
   assert.equal(link.href, undefined);
+  assert.equal(workspace.hidden, true);
+  assert.equal(topLevelGuidance.hidden, true);
+  assert.equal(embeddedGuidance.hidden, false);
+  assert.match(html, /id="recovery-embedded-guidance" hidden>Close this viewer and reopen the model from the Client Portal/);
   assert.deepEqual(f.calls.map(call => call.url), ['/api/v1/sessions/current']);
 });
 

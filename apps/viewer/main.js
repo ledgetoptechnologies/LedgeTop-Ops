@@ -1675,8 +1675,17 @@ function showSessionRecovery() {
   if (!recovery) return;
   document.body.classList.add('session-bootstrap-failed');
   recovery.hidden = false;
+  if (window.parent !== window) {
+    const workspace = document.getElementById('recovery-workspace');
+    const topLevelGuidance = document.getElementById('recovery-top-level-guidance');
+    const embeddedGuidance = document.getElementById('recovery-embedded-guidance');
+    if (workspace) workspace.hidden = true;
+    if (topLevelGuidance) topLevelGuidance.hidden = true;
+    if (embeddedGuidance) embeddedGuidance.hidden = false;
+    return;
+  }
   const link = document.getElementById('recovery-client-portal');
-  if (!link || window.parent !== window) return;
+  if (!link) return;
   // Fetch only a deployment-owned destination, never a URL parameter or
   // caller-controlled opener. A failure leaves the local workspace link.
   fetch('/api/v1/session-recovery', { cache: 'no-store' }).then(response => {
