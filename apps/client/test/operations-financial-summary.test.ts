@@ -3,6 +3,7 @@ import {describe,expect,it} from "vitest";
 import {renderToStaticMarkup} from "react-dom/server";
 import {OperationsFinancialSummary} from "../src/client/OperationsHomeApp";
 const document={scopeKey:"authority:grant:1",publicId:"doc-1",kind:"invoice" as const,status:"unpaid",currency:"USD",total:"10.00",
+  issueDate:null as string|null,dueDate:null as string|null,
   amountPaid:"0.00",balanceDue:"10.00",documentUrl:"https://pa.example.test/?page=public-doc&token=abcdefghijklmnop",
   actionUrl:"https://pa.example.test/?page=stripe-checkout&token=abcdefghijklmnop"};
 type Document=Omit<typeof document,"kind"|"amountPaid"|"balanceDue">&{kind:"invoice"|"contract"|"project_invoice";amountPaid:string|null;balanceDue:string|null};

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "status": "accepted-after-separate-active-verification",
+  "sourceCommit": "b0c99cdd7303ca9eea9830b5be6d3a8cf990f24a",
+  "worker": "ledgetop-ops",
+  "candidateVersionId": "0b1ab5a8-9db0-42ab-b718-8569fae2382e",
+  "cutoverAt": "2026-10-28T18:05:20.006467Z",
+  "earliestPermittedPruningAt": "2026-10-30T21:10:14.047Z",
+  "minimumRetentionHours": 52,
+  "files": 471,
+  "bytes": 152255343,
+  "packetManifestSHA256": "fec34761336801fe672132c07b9d219f0325185de245a28e2713b1b7ebd9e0ae",
+  "terminalReceiptSHA256": "eb668d58c8ffab56910b776397aa25d1f4fcd40d3fdf909c498f8cf835fa69e1",
+  "evidence": "Root live HEAD+GET proof after acknowledged activation; all471per-path size/SHA/MIME checks and two owned-helper cleanup proofs",
+  "automaticPruning": false,
+  "postActivationProof": {
+    "allBodySizeShaMimeChecksPassed": true,
+    "temporaryHelperRemoved": true,
+    "cleanup": {
+      "removed": true,
+      "absenceVerified": true
+    },
+    "evidenceScope": "Root live HEAD+GET proof after acknowledged activation; all471per-path size/SHA/MIME checks and two owned-helper cleanup proofs"
+  },
+  "bootstrapBoundary": "Qualification of recorded inventory only; next automatic release MUST reverify every path against exact still-active version before upload"
+}

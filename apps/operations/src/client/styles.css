@@ -1593,14 +1593,19 @@ tbody tr:last-child td { border: 0; }
 .viewer-overview-grid .card { min-width: 0; }
 .viewer-overview-grid strong { display: block; font-size: clamp(1.25rem,3vw,1.8rem); margin-bottom: .35rem; }
 .viewer-overview-grid small { display: block; color: var(--muted); overflow-wrap: anywhere; }
+@media (max-width: 480px) {
+  .viewer-overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
+  .viewer-overview-grid .card { padding: .85rem; }
+}
 .viewer-page-back { justify-self: start; }
 .viewer-quick-share { display: grid; gap: .85rem; padding: 1rem 1.15rem; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); min-width: 0; }
 .viewer-quick-share > header h3, .viewer-quick-share > h3 { margin: 0; }
 .viewer-quick-share > header p { margin: .3rem 0 0; color: var(--muted); }
-.viewer-quick-share-search, .viewer-direct-share > label, .viewer-direct-share-form fieldset > label:not(.viewer-share-check) { display: grid; gap: .35rem; color: var(--muted); font-size: .78rem; font-weight: 800; }
+/* 700, not 800: without Inter installed, Windows renders 800 as Segoe UI Black, which reads as a different typeface. */
+.viewer-quick-share-search, .viewer-direct-share > label, .viewer-direct-share-form fieldset > label:not(.viewer-share-check) { display: grid; gap: .35rem; color: var(--muted); font-size: .78rem; font-weight: 700; }
 .viewer-quick-share-search input, .viewer-direct-share input[type="search"], .viewer-direct-share input[type="date"] { width: 100%; min-width: 0; padding: .7rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); }
 .viewer-quick-share-list, .viewer-direct-share-clients { display: grid; gap: .5rem; margin: 0; padding: 0; list-style: none; }
-.viewer-quick-share-list button, .viewer-direct-share-clients button { display: grid; gap: .2rem; width: 100%; min-height: 48px; padding: .75rem 1rem; border: 1px solid var(--line); border-radius: 10px; background: #f8fafb; color: var(--ink); justify-items: start; text-align: left; font-weight: 400; cursor: pointer; }
+.viewer-quick-share-list button, .viewer-direct-share-clients button { display: grid; gap: .2rem; width: 100%; min-height: 48px; padding: .75rem 1rem; border: 1px solid var(--line); border-radius: 10px; background: #f8fafb; color: var(--ink); grid-template-columns: minmax(0, 1fr); justify-content: stretch; justify-items: start; text-align: left; font-weight: 400; cursor: pointer; }
 .viewer-quick-share-list button:hover, .viewer-direct-share-clients button:hover { border-color: var(--orange, #ee5007); }
 .viewer-quick-share-list strong, .viewer-direct-share-clients strong { overflow-wrap: anywhere; }
 .viewer-quick-share-list small, .viewer-direct-share-clients small, .viewer-quick-share-loading, .viewer-quick-share-empty { color: var(--muted); margin: 0; }
@@ -1618,11 +1623,20 @@ tbody tr:last-child td { border: 0; }
 .viewer-direct-share-review { display: grid; gap: .6rem; padding: .85rem 1rem; border: 1px solid var(--orange, #ee5007); border-radius: 10px; }
 .viewer-direct-share-review p { margin: 0; overflow-wrap: anywhere; }
 .viewer-direct-share-review .actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.viewer-direct-share-review .notice, .viewer-share-form-error .notice { margin: 0; }
+.viewer-direct-share-note { color: var(--amber); }
+.viewer-direct-share-clients .viewer-direct-share-has-access { color: var(--green); font-weight: 700; }
+.viewer-share-form-error { grid-column: 1 / -1; }
+/* A quiet danger action: stopping access shouldn't outweigh the share itself. */
+.viewer-stop-share.button-ghost { background: transparent; color: var(--red); box-shadow: inset 0 0 0 1px #e7b9bf; }
+.viewer-stop-share.button-ghost:hover:not(:disabled) { background: var(--red-soft); }
+.viewer-stop-share.button-ghost:disabled { background: transparent; box-shadow: inset 0 0 0 1px var(--line); }
 .viewer-share-fields { display: contents; }
 .viewer-connection-details { display: grid; gap: .6rem; color: var(--muted); }
 .viewer-connection-details summary { cursor: pointer; font-weight: 700; min-height: 44px; display: flex; align-items: center; }
 @media (max-width: 640px) {
   .viewer-direct-share-recipient, .viewer-direct-share-existing li { align-items: stretch; flex-direction: column; }
+  .viewer-direct-share-existing .viewer-stop-share { align-self: flex-start; min-height: 40px; }
   .viewer-direct-share :is(button.button-orange, button.button-danger), .viewer-direct-share-review .actions button { width: 100%; min-height: 44px; }
 }
 .viewer-processing { display: grid; gap: 1rem; min-width: 0; }
@@ -1895,7 +1909,7 @@ tbody tr:last-child td { border: 0; }
 .viewer-ingest-recovery small { color: var(--muted); }
 .viewer-ingest-recovery .button-orange { justify-self: start; }
 .button-link { padding: 0; min-height: 0; border: 0; background: none; color: #b33d00; font: inherit; text-decoration: underline; cursor: pointer; }
-.viewer-share-form label, .viewer-created-share label { display: grid; gap: .35rem; color: var(--muted); font-size: .78rem; font-weight: 800; }
+.viewer-share-form label, .viewer-created-share label { display: grid; gap: .35rem; color: var(--muted); font-size: .78rem; font-weight: 700; }
 .viewer-share-form input:not([type="checkbox"]), .viewer-created-share input { width: 100%; min-width: 0; padding: .7rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); }
 .viewer-share-form { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(180px, .8fr) minmax(180px, 1fr); align-items: end; gap: .75rem; padding: 1rem; border: 1px solid var(--line); border-radius: 10px; background: #f8fafb; }
 .viewer-share-check { display: flex !important; align-items: center; gap: .55rem !important; min-height: 44px; }
@@ -2443,6 +2457,9 @@ tbody tr:last-child td { border: 0; }
 
 .share-mode-selector { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; margin-bottom: 1rem; }
 .share-mode-selector > button { min-height: 44px; }
+/* The chosen method reads at a glance: a white tab with an orange edge. */
+.share-mode-selector > button[aria-selected="true"] { color: var(--ink); box-shadow: inset 0 0 0 2px var(--orange), 0 1px 2px rgba(20, 32, 43, .08); }
+.share-mode-selector > button[aria-selected="false"]:not(:disabled) { color: var(--muted); }
 .share-mode-description { margin: 0 0 1rem; color: var(--muted); line-height: 1.5; }
 .share-mode-panel { display: grid; gap: .8rem; }
 .share-mode-panel > header { display: grid; gap: .25rem; }
@@ -3082,3 +3099,11 @@ a.dashboard-alert:hover > span[aria-hidden] { transform: translateX(3px); }
   .alpha-correspondence .alpha-connection-actions > button { flex: 1 1 auto; min-height: 44px; }
   .alpha-correspondence-details dl { grid-template-columns: minmax(0, 1fr); }
 }
+.client-hub-section-heading { flex-wrap: wrap; }
+.client-directory-profile-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: .75rem 1.5rem; margin: 0; }
+.client-directory-profile-summary > div { min-width: 0; }
+.client-directory-profile-summary dt { font-size: .75rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.client-directory-profile-summary dd { margin: .2rem 0 0; overflow-wrap: anywhere; }
+.client-directory-profile-summary-wide { grid-column: 1 / -1; }
+.client-directory-profile-card .notice { margin: .75rem 0 0; }
+.client-directory-profile-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1rem; }

@@ -650,7 +650,7 @@ test("native workspace branding stays generic Ledge Top for every source across 
   }
 });
 
-test("authenticated video preview uses native controls and supports seeking with range delivery", async ({ page }) => {
+test("authenticated video preview shows one control bar and supports seeking, fullscreen and range delivery", async ({ page }) => {
   const videoFile = {
     ...filePage.files[0]!,
     id: "video-file-a",
@@ -693,7 +693,13 @@ test("authenticated video preview uses native controls and supports seeking with
   await expect(dialog).toBeVisible();
   await expect(dialog.locator(".portal-file-preview-stage")).toHaveCSS("background-color", "rgb(13, 20, 26)");
   const video = dialog.locator("video");
-  await expect(video).toHaveAttribute("controls", "");
+  // The 3-second fixture can finish before the test reaches Pause on a busy machine; slow it so playback is still running.
+  await video.evaluate(element => { const media = element as HTMLVideoElement; media.defaultPlaybackRate = .1; media.playbackRate = .1; });
+  // Exactly one control set: the custom bar, never the browser's native controls as well.
+  await expect(video).not.toHaveAttribute("controls");
+  await expect(dialog.getByRole("button", { name: /^(Play|Pause) video$/ })).toHaveCount(1);
+  await expect(dialog.getByRole("button", { name: /fullscreen/i })).toHaveCount(1);
+  await expect(dialog.getByRole("slider")).toHaveCount(1);
   await expect(video).toHaveAttribute("playsinline", "");
   await expect(video).toHaveAttribute("preload", "metadata");
   await expect.poll(() => video.evaluate(element => (element as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(1);
@@ -716,6 +722,7 @@ test("authenticated video preview uses native controls and supports seeking with
   await page.keyboard.press("Escape");
   await expect(dialog).toBeVisible();
   await expect.poll(() => page.evaluate(() => document.fullscreenElement === null)).toBe(true);
+  await expect(dialog.getByRole("button", { name: "Enter fullscreen" })).toBeVisible();
   expect(observedRanges.length).toBeGreaterThan(0);
   await page.getByRole("button", { name: "Close preview" }).click();
   await expect(dialog).toHaveCount(0);
@@ -836,9 +843,9 @@ test("catalog refresh preserves the saved service version until the client expli
 
   catalogChanged = true;
   await page.getByLabel("Service request title").fill("Pinned catalog version updated");
-  await expect(page.getByText(/service library changed/i)).toBeVisible();
+  await expect(page.getByText(/our services? (?:was|were) updated/i)).toBeVisible();
   await page.getByRole("navigation", { name: "Service request progress" }).getByRole("button", { name: /Services$/ }).click();
-  await expect(page.getByText("This service changed in Project Alpha.")).toBeVisible();
+  await expect(page.getByText("This service has been updated.")).toBeVisible();
   await expect(page.getByLabel("Preferred resolution")).toHaveValue("standard");
   await expect(page.getByLabel("Delivery format")).toHaveCount(0);
 
@@ -1425,6 +1432,8 @@ test("client shell contains very long account text and reflows at a 200% zoom eq
   await expect(accountCard.getByText(longName, { exact: true })).toBeVisible();
   await expect(accountCard.getByText(longEmail, { exact: true })).toBeVisible();
   await expect(page.locator(".client-portal-main")).toContainText("Contact Ledge Top to add a colleague");
+  // No support mailbox is published from the account page.
+  await expect(page.locator('.client-portal-main a[href^="mailto:"]')).toHaveCount(0);
   await expect(page.locator(".client-portal-main")).not.toContainText(/pilot/i);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
 
@@ -1684,13 +1693,14 @@ test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 3
   await page.getByRole("button", { name: "Models" }).click();
   await page.getByLabel("Measurement units").selectOption("metric");
   await expect.poll(() => preferenceUnits).toBe("metric");
+  const popupWait = page.waitForEvent("popup");
   await page.getByRole("button", { name: "Open 3D model" }).click();
-  const viewerPage = page;
+  const viewerPage = await popupWait;
   await expect.poll(() => sessionUnits).toBe("metric");
-  await expect(viewerPage).toHaveURL(/\/portal\/viewer\/project-a\/association-one\/model-one$/);
-  expect(await viewerPage.evaluate(() => window.opener === null)).toBe(true);
-  await expect(viewerPage.locator("iframe")).toHaveAttribute("src", "https://viewer.example.test/session/11111111-1111-4111-8111-111111111111");
-  await page.goBack();
+  await expect(viewerPage).toHaveURL("https://viewer.example.test/session/11111111-1111-4111-8111-111111111111");
+  expect(await viewerPage.evaluate(() => Boolean(window.opener))).toBe(true);
+  await expect(viewerPage.locator("iframe")).toHaveCount(0);
+  await expect(page.locator("iframe")).toHaveCount(0);
   await page.getByRole("button", { name: "Share public link" }).click();
   await expect(page.getByText("Expired engineer review")).toHaveCount(0);
   await page.getByLabel("Link label").fill("Engineer review");
@@ -1721,7 +1731,7 @@ test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 3
   await expect(page.getByText("No active links.")).toBeVisible();
 });
 
-test("Viewer shell is openerless and keeps the iframe and idempotency key across a transient renewal failure", async ({ page }) => {
+test("full-page Viewer keeps the opener and idempotency key across a transient renewal failure", async ({ page }) => {
   let sessionRequests = 0, viewerLoads = 0;
   const sessionDisplayUnits: string[] = [];
   const sessionIdempotencyKeys: string[] = [];
@@ -1735,10 +1745,10 @@ test("Viewer shell is openerless and keeps the iframe and idempotency key across
       addEventListener("message", event => {
         if (event.data?.type !== "ltds-viewer:renew-session") return;
         document.body.dataset.renewedGrant = event.data.grant;
-        parent.postMessage({version:1,type:"ltds-viewer:session-renewed",modelId:"model-one",expiresAt:new Date(Date.now()+60000).toISOString()}, "*");
+        opener.postMessage({version:1,type:"ltds-viewer:session-renewed",modelId:"model-one",expiresAt:new Date(Date.now()+60000).toISOString()}, "*");
       });
-      setTimeout(() => parent.postMessage({version:1,type:"ltds-viewer:ready",modelId:"model-one",expiresAt}, "*"), 50);
-      setTimeout(() => parent.postMessage({version:1,type:"ltds-viewer:session-expiring",modelId:"model-one",expiresAt}, "*"), 100);
+      setTimeout(() => opener.postMessage({version:1,type:"ltds-viewer:ready",modelId:"model-one",expiresAt}, "*"), 50);
+      setTimeout(() => opener.postMessage({version:1,type:"ltds-viewer:session-expiring",modelId:"model-one",expiresAt}, "*"), 100);
     </script></body>` });
   });
   await page.context().route("**/api/client/**", async route => {
@@ -1771,15 +1781,16 @@ test("Viewer shell is openerless and keeps the iframe and idempotency key across
   await navigatePortal(page, "Projects");
   await page.getByRole("button", { name: /North Site/ }).click();
   await page.getByRole("button", { name: "Models" }).click();
+  const popupWait = page.waitForEvent("popup");
   await page.getByRole("button", { name: "Open 3D model" }).click();
-  const viewerPage = page;
-  await expect(viewerPage).toHaveURL(/\/portal\/viewer\/project-a\/association-one\/model-one$/);
-  expect(await viewerPage.evaluate(() => window.opener === null)).toBe(true);
+  const viewerPage = await popupWait;
+  await expect(viewerPage).toHaveURL(`${viewerOrigin}/session/11111111-1111-4111-8111-111111111111`);
+  expect(await viewerPage.evaluate(() => Boolean(window.opener))).toBe(true);
   await expect.poll(() => viewerLoads).toBe(1);
-  const viewerFrame = viewerPage.frameLocator("iframe");
-  await expect(viewerFrame.locator("#camera-state")).toHaveText("camera-position-42");
-  await expect(viewerFrame.locator("body")).toHaveAttribute("data-renewed-grant", "22222222-2222-4222-8222-222222222222", { timeout: 5_000 });
-  await expect(viewerFrame.locator("#camera-state")).toHaveText("camera-position-42");
+  await expect(viewerPage.locator("#camera-state")).toHaveText("camera-position-42");
+  await expect(viewerPage.locator("body")).toHaveAttribute("data-renewed-grant", "22222222-2222-4222-8222-222222222222", { timeout: 5_000 });
+  await expect(viewerPage.locator("#camera-state")).toHaveText("camera-position-42");
+  await expect(page.locator("iframe")).toHaveCount(0);
   expect(sessionRequests).toBe(3);
   expect(sessionDisplayUnits).toEqual(["metric", "metric", "metric"]);
   expect(sessionIdempotencyKeys[0]).toMatch(/^[0-9a-f-]{36}$/);
@@ -1787,7 +1798,48 @@ test("Viewer shell is openerless and keeps the iframe and idempotency key across
   expect(sessionIdempotencyKeys[0]).not.toBe(sessionIdempotencyKeys[1]);
   expect(sessionIdempotencyKeys[2]).toBe(sessionIdempotencyKeys[1]);
   expect(viewerLoads).toBe(1);
-  await page.goBack();
+});
+
+test("the tab opened for the 3D Viewer shows a styled Ledge Top placeholder while the session is issued", async ({ page }) => {
+  let releaseSession: (() => void) | undefined;
+  await page.context().route("**/api/client/**", async route => {
+    const request = route.request(), path = new URL(request.url()).pathname;
+    if (path === "/api/client/session") return route.fulfill({ json: { account, capabilities: { viewer: true } } });
+    if (path === "/api/client/projects") return route.fulfill({ json: { projects } });
+    if (path === "/api/client/service-requests") return route.fulfill({ json: { requests } });
+    if (path === "/api/client/map-config") return route.fulfill({ json: { mapboxPublicToken: null } });
+    if (path === "/api/client/notification-history") return route.fulfill({ json: notificationHistory() });
+    if (path === "/api/client/projects/project-a/models") return route.fulfill({ json: { models: [{
+      associationId: "association-one", title: "North Site point cloud", provider: "WebODM",
+      modelId: "model-one", modelVersionId: "version-one", updatedAt: "2026-08-16T12:00:00.000Z", canShare: false,
+    }] } });
+    if (path === "/api/client/projects/project-a/models/association-one/session" && request.method() === "POST") {
+      await new Promise<void>(resolve => { releaseSession = resolve; });
+      return route.fulfill({ status: 503, json: { error: "temporary authorization failure" } });
+    }
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+  await page.goto("/portal");
+  await navigatePortal(page, "Projects");
+  await page.getByRole("button", { name: /North Site/ }).click();
+  await page.getByRole("button", { name: "Models" }).click();
+  const popupWait = page.waitForEvent("popup");
+  await page.getByRole("button", { name: "Open 3D model" }).click();
+  const placeholder = await popupWait;
+  await expect.poll(() => releaseSession !== undefined).toBe(true);
+  await expect(placeholder.locator("body")).toContainText("Ledge Top");
+  await expect(placeholder.locator("body")).toContainText("Opening secure 3D Viewer…");
+  const look = await placeholder.evaluate(() => {
+    const body = getComputedStyle(document.body), brand = getComputedStyle(document.querySelector("strong")!);
+    return { font: body.fontFamily, align: body.textAlign, background: body.backgroundColor, brand: brand.color };
+  });
+  expect(look.font).toContain("sans-serif");
+  expect(look.font).not.toMatch(/(^|,\s*)serif/);
+  expect(look).toMatchObject({ align: "center", background: "rgb(17, 24, 29)", brand: "rgb(238, 80, 7)" });
+  // Nothing outside the document is loaded: no scripts, stylesheets, images or fonts.
+  expect(await placeholder.evaluate(() => document.querySelectorAll("script,link,img,iframe").length)).toBe(0);
+  releaseSession!();
+  await expect.poll(() => placeholder.isClosed()).toBe(true);
 });
 
 test("disabled Operations home and unavailable legacy session stop before account data requests", async ({ page }) => {
@@ -2123,7 +2175,7 @@ test("client can edit before review, create a child change, and answer an estima
   await spaNavigate(page, "/portal/requests");
   await page.getByRole("button", { name: "Accept estimate" }).click();
   const acceptance = page.getByRole("dialog", { name: "Accept operational estimate?" });
-  await expect(acceptance.getByText("Accept this non-binding Ledge Top operational estimate? A separate Project Alpha quote will still be required before financial approval.", { exact: true })).toBeVisible();
+  await expect(acceptance.getByText("Accept this non-binding Ledge Top operational estimate? A separate formal quote will still be required before financial approval.", { exact: true })).toBeVisible();
   await confirmInPage(page, "Accept operational estimate?", "Accept estimate");
   await expect.poll(() => workflowEvents.estimateAccepted).toBe(true);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -2311,6 +2363,11 @@ for (const [entry, path, heading] of [["unified home", "/portal", "Client portal
     await page.clock.runFor(1_500);
     await expect(page.getByText(heading, { exact: true })).toBeVisible();
     await expect(page.getByRole("link", { name: /Sign in/ })).toBeVisible();
+    // The message and its actions share one left edge, like the other startup and sign-in recovery screens.
+    const headingBox = await page.getByText(heading, { exact: true }).boundingBox();
+    const signInBox = await page.getByRole("link", { name: /Sign in/ }).boundingBox();
+    expect(Math.abs(headingBox!.x - signInBox!.x)).toBeLessThanOrEqual(1);
+    await expect(page.getByRole("alert").filter({ hasText: /\S/ }).first()).toHaveCSS("text-align", /^(start|left)$/);
     // An answer arriving after the deadline can't replace the recovery screen.
     await startup.held[0]!.route.fulfill({ status: 404, json: { error: "Not found" } }).catch(() => undefined);
     await page.clock.runFor(1_000);

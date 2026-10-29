@@ -649,3 +649,24 @@ for (const width of [375, 1280]) test(`initial directory load shows decorative c
   await expect(skeletons).toHaveCount(0);
   await expect(page.locator(".client-directory-grid")).toHaveAttribute("aria-busy", "false");
 });
+
+for (const onboarding of ["available", "not enabled"] as const)
+  test(`Onboard client is offered only when client onboarding is ${onboarding === "available" ? "available to this person" : "turned on"}`, async ({ page }) => {
+    await mock(page, route => route.fulfill({ json: { clients: [client("org-a", "Acme")], nextCursor: null, capabilities } }),
+      ["team.view", "operations.manage"], []);
+    let sessionChecks = 0;
+    await page.route("**/api/client-onboarding/staff/session", route => {
+      sessionChecks += 1;
+      expect(route.request().method()).toBe("GET");
+      expect(route.request().headers()["x-native-staff-request"]).toBe("1");
+      return onboarding === "available"
+        ? route.fulfill({ json: { csrfToken: "a".repeat(64), verifiedUntil: "2099-01-01T00:00:00.000Z" } })
+        : route.fulfill({ status: 404, json: { error: "not_found" } });
+    });
+    await page.goto("/clients");
+    await expect(page.getByRole("link", { name: "Open Acme client workspace" })).toBeVisible();
+    await expect.poll(() => sessionChecks).toBe(1);
+    const onboard = page.getByRole("link", { name: "Onboard client" });
+    if (onboarding === "available") await expect(onboard).toHaveAttribute("href", "/administration/client-onboarding");
+    else await expect(onboard).toHaveCount(0);
+  });

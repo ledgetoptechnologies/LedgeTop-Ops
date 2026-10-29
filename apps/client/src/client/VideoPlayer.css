@@ -5,6 +5,7 @@
 .client-video-controls button { min-height: 44px; flex: 0 0 auto; padding: .5rem .75rem; background: #fff; color: #10202c; border: 1px solid #b3c0ca; border-radius: 6px; font-size: .85rem; }
 .client-video-controls button:focus-visible, .client-video-controls input:focus-visible, .client-video-start:focus-visible { outline: 3px solid #ff914d; outline-offset: 2px; }
 .client-video-controls input[type=range] { flex: 1 1 120px; min-width: 70px; width: auto; min-height: 44px; padding: 0; accent-color: #ff8a45; }
+.client-video-controls button:disabled, .client-video-controls input:disabled { opacity: .45; cursor: not-allowed; }
 .client-video-time { color: #fff; font-size: .8rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .client-video-start { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: .8rem 1rem; border: 1px solid #ffffff90; border-radius: 10px; background: #101b28ed; color: #fff; display: flex; gap: .5rem; align-items: center; }
 .client-video-status { position: absolute; top: .75rem; left: 50%; transform: translateX(-50%); width: max-content; max-width: calc(100% - 2rem); padding: .5rem .75rem; background: #101b28ed; color: #fff; border-radius: 6px; text-align: center; pointer-events: none; }

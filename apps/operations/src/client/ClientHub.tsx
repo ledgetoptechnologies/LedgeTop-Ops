@@ -25,6 +25,7 @@ import { NativeDirectoryBindingRefresh } from "./NativeDirectoryBindingRefresh";
 import { OpsServiceManagement } from "./OpsServiceManagement";
 import { ProjectAlphaOperationalProjectAdoption } from "./ProjectAlphaOperationalProjectAdoption";
 import { sourceDisplayName } from "./source-label";
+import { OnboardClientButton } from "./OnboardClientButton";
 
 interface CollectionItem { row_key?: string }
 interface ClientContact extends CollectionItem {
@@ -753,7 +754,8 @@ export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invita
   return <>
     {canReview && <section className="client-hub-queue"><ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" pendingOnly hideWhenEmpty={canViewDirectory} /></section>}
     {canViewDirectory && <section>
-      <div className="client-hub-section-heading"><div><h2>Clients</h2><p>Organizations and standalone clients with their contacts, access, and shared work.</p></div></div>
+      <div className="client-hub-section-heading"><div><h2>Clients</h2><p>Organizations and standalone clients with their contacts, access, and shared work.</p></div>
+        <OnboardClientButton /></div>
       <ClientDirectory nativeDirectoryProfileWrites={nativeDirectoryProfileWrites} />
       {canReview && canManagePortalSetup && <ClientPortalBootstrap />}
     </section>}

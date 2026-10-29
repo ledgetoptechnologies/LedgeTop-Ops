@@ -96,7 +96,7 @@ function buildSourceInventory(root, sourceCommit, target, deadline) {
     }
     const start = headerEnd + 1, end = start + size;
     if (end >= blobs.length || blobs[end] !== 0x0a) fail('source_migration_blob_invalid');
-    blobRows.push({ relative: entry.relative, name: path.posix.basename(entry.relative), bytes: blobs.subarray(start, end) });
+    blobRows.push({ relative: entry.relative, oid: entry.oid, name: path.posix.basename(entry.relative), bytes: blobs.subarray(start, end) });
     blobOffset = end + 1;
   }
   if (blobOffset !== blobs.length) fail('source_migration_blob_invalid');
@@ -108,19 +108,23 @@ function buildSourceInventory(root, sourceCommit, target, deadline) {
     fail('source_migration_bytes_changed');
   }
   const rows = [];
+  const sourceFiles = [];
   const seen = new Set();
   for (const blob of blobRows) {
     const { name, bytes } = blob;
     if (!/^\d{4}_.+\.sql$/.test(name) || seen.has(name)) fail('source_migration_name_invalid');
     seen.add(name);
     const blobHash = hash(bytes);
-    rows.push(Object.freeze({ name, sha256: blobHash }));
+    rows.push(Object.freeze({ name, gitBlobOid: blob.oid, sha256: blobHash }));
+    sourceFiles.push(Object.freeze({ name, bytes: Buffer.from(bytes) }));
   }
   const inventoryBytes = Buffer.from(JSON.stringify(rows.map((row) => [row.name, row.sha256])), 'utf8');
   return Object.freeze({
     names: Object.freeze(rows.map((row) => row.name)),
     paths: Object.freeze(tree.map((entry) => entry.relative)),
     blobOids: Object.freeze(tree.map((entry) => entry.oid)),
+    sourceRows: Object.freeze(rows),
+    sourceFiles: Object.freeze(sourceFiles),
     sha256: hash(inventoryBytes),
   });
 }
@@ -173,23 +177,34 @@ function assertZeroWrites(meta) {
 }
 export function validateMigrationLedgerRows(expectedNames, rows, statementMeta) {
   if (!Array.isArray(rows) || rows.length > MAX_LEDGER_ROWS || rows.length !== expectedNames.length) fail('migration_ledger_count_mismatch');
+  const actualNames = validateMigrationEvidenceRows(rows, statementMeta);
   let previousId = -1;
-  const actualNames = [];
-  const seen = new Set();
   for (const row of rows) {
-    if (!keysExact(row, ['name', 'id']) || typeof row.name !== 'string' ||
-        !Number.isSafeInteger(row.id) || row.id < 1 || row.id <= previousId || seen.has(row.name)) {
-      fail('migration_ledger_row_invalid');
-    }
+    if (row.id <= previousId) fail('migration_ledger_row_invalid');
     previousId = row.id;
-    seen.add(row.name);
-    actualNames.push(row.name);
   }
   for (let index = 0; index < expectedNames.length; index++) {
     if (actualNames[index] !== expectedNames[index]) fail('migration_ledger_names_mismatch');
   }
-  assertZeroWrites(statementMeta);
   return hash(Buffer.from(actualNames.join('\n'), 'utf8'));
+}
+
+export function validateMigrationEvidenceRows(rows, statementMeta) {
+  if (!Array.isArray(rows) || rows.length > MAX_LEDGER_ROWS) fail('migration_ledger_count_mismatch');
+  const actualNames = [];
+  const seen = new Set();
+  const seenIds = new Set();
+  for (const row of rows) {
+    if (!keysExact(row, ['name', 'id']) || typeof row.name !== 'string' ||
+        !Number.isSafeInteger(row.id) || row.id < 1 || seen.has(row.name) || seenIds.has(row.id)) {
+      fail('migration_ledger_row_invalid');
+    }
+    seen.add(row.name);
+    seenIds.add(row.id);
+    actualNames.push(row.name);
+  }
+  assertZeroWrites(statementMeta);
+  return Object.freeze(actualNames);
 }
 function nonblockingCancel(target) {
   try {
@@ -254,7 +269,7 @@ function extractQuery(value) {
       !Array.isArray(statement.results) || (statement.meta !== undefined && !isRecord(statement.meta))) fail('provider_statement_invalid');
   return statement;
 }
-async function readOneLedger({ accountId, databaseId, inventory, token, fetchImpl, deadlineAt, monotonicNow }) {
+async function readOneLedgerEvidence({ accountId, databaseId, token, fetchImpl, deadlineAt, monotonicNow }) {
   if (accountId !== PRODUCTION_MIGRATION_TARGET.accountId || !PRODUCTION_MIGRATION_TARGET.databases.some((db) => db.databaseId === databaseId)) {
     fail('provider_target_invalid');
   }
@@ -284,12 +299,11 @@ async function readOneLedger({ accountId, databaseId, inventory, token, fetchImp
     const payload = await readBoundedJson(response, controller.signal);
     assertOptionalIdentity(payload, databaseId);
     const statement = extractQuery(payload);
-    const ledgerNamesSha256 = validateMigrationLedgerRows(inventory.names, statement.results, statement.meta);
+    validateMigrationEvidenceRows(statement.results, statement.meta);
     return Object.freeze({
       databaseId,
-      sourceInventorySha256: inventory.sha256,
-      ledgerNamesSha256,
-      migrationCount: inventory.names.length,
+      ledgerRows: Object.freeze(statement.results.map(({ name, id }) => Object.freeze({ name, id }))),
+      statementMeta: statement.meta,
     });
   } catch (error) {
     if (error?.code) throw error;
@@ -316,10 +330,24 @@ export function validateProductionMigrationReadiness(value, { sourceCommit, now 
   return structuredClone(value);
 }
 
-export async function readProductionMigrationReadiness({
+export function validateProductionMigrationAdmission(value, { sourceCommit, now = Date.now() } = {}) {
+  if (isRecord(value) && value.purpose === 'append-only-migration-inventory-classification') {
+    if (value.status === 'migration-required') fail('migration_required_pending');
+    if (value.status === 'inventory-current-schema-check-required') {
+      fail('migration_application_schema_confirmation_required');
+    }
+    fail('migration_readiness_diagnostic_invalid');
+  }
+  return validateProductionMigrationReadiness(value, { sourceCommit, now });
+}
+
+export async function collectProductionMigrationEvidence({
   sourceCommit, root, token, env = process.env, fetchImpl = globalThis.fetch,
   now = () => new Date(), monotonicNow = () => performance.now(),
-} = {}) {
+} = {}, { processLedgerEvidence } = {}) {
+  if (processLedgerEvidence !== undefined && typeof processLedgerEvidence !== 'function') {
+    fail('migration_evidence_processor_invalid');
+  }
   if (!COMMIT.test(sourceCommit ?? '') || typeof root !== 'string' || !path.isAbsolute(root) ||
       typeof token !== 'string' || token.length < 16 || token.length > 16_384 || !/^[\x21-\x7e]+$/.test(token) ||
       typeof fetchImpl !== 'function') fail('migration_readiness_input_invalid');
@@ -342,22 +370,40 @@ export async function readProductionMigrationReadiness({
   const databases = [];
   for (let index = 0; index < PRODUCTION_MIGRATION_TARGET.databases.length; index++) {
     if (checkedMonotonicNow() > deadlineAt) fail('readiness_deadline_exceeded');
-    databases.push(await readOneLedger({
+    const ledger = await readOneLedgerEvidence({
       accountId: PRODUCTION_MIGRATION_TARGET.accountId,
       databaseId: PRODUCTION_MIGRATION_TARGET.databases[index].databaseId,
-      inventory: inventories[index], token, fetchImpl, deadlineAt, monotonicNow: checkedMonotonicNow,
-    }));
+      token, fetchImpl, deadlineAt, monotonicNow: checkedMonotonicNow,
+    });
+    assertSourceUnchanged(root, sourceCommit, inventories, deadline);
+    checkedMonotonicNow();
+    const inventory = inventories[index];
+    const classification = processLedgerEvidence?.(Object.freeze({ ...ledger, inventory }), index);
+    databases.push(Object.freeze({ ...ledger, inventory, ...(classification === undefined ? {} : { classification }) }));
   }
   const endWall = now().getTime();
   if (!Number.isFinite(startWall) || !Number.isFinite(endWall) || endWall < startWall) fail('readiness_clock_moved_backwards');
   assertSourceUnchanged(root, sourceCommit, inventories, deadline);
   checkedMonotonicNow();
-  const result = {
+  return Object.freeze({
     schemaVersion: 1,
     sourceCommit,
     accountId: PRODUCTION_MIGRATION_TARGET.accountId,
     observedAt: new Date(endWall).toISOString(),
-    databases,
-  };
-  return validateProductionMigrationReadiness(result, { sourceCommit, now: endWall });
+    databases: Object.freeze(databases),
+  });
+}
+
+export async function readProductionMigrationReadiness(options = {}) {
+  const evidence = await collectProductionMigrationEvidence(options, {
+    processLedgerEvidence: ({ inventory, ledgerRows, statementMeta }) =>
+      validateMigrationLedgerRows(inventory.names, ledgerRows, statementMeta),
+  });
+  const databases = evidence.databases.map(({ databaseId, inventory, classification: ledgerNamesSha256 }) => {
+    return Object.freeze({ databaseId, sourceInventorySha256: inventory.sha256, ledgerNamesSha256,
+      migrationCount: inventory.names.length });
+  });
+  const result = { schemaVersion: 1, sourceCommit: evidence.sourceCommit, accountId: evidence.accountId,
+    observedAt: evidence.observedAt, databases };
+  return validateProductionMigrationReadiness(result, { sourceCommit: evidence.sourceCommit, now: Date.parse(evidence.observedAt) });
 }

@@ -307,7 +307,10 @@ export async function loadOperationsHome(
 }
 
 export interface PortalFinancialDocument { scopeKey:string;publicId:string;kind:"invoice"|"contract"|"project_invoice";status:string;
-  currency:string;total:string;amountPaid:string|null;balanceDue:string|null;documentUrl:string|null;actionUrl:string|null }
+  currency:string;total:string;amountPaid:string|null;balanceDue:string|null;issueDate:string|null;dueDate:string|null;
+  documentUrl:string|null;actionUrl:string|null }
+function portalFinancialDate(value:unknown){if(value===null)return true;if(typeof value!=="string"||!/^\d{4}-\d{2}-\d{2}$/.test(value)||value.startsWith("0000-"))return false;
+  const parsed=new Date(`${value}T00:00:00.000Z`);return !Number.isNaN(parsed.valueOf())&&parsed.toISOString().slice(0,10)===value;}
 function portalFinancialLink(value:unknown){if(value===null)return true;if(typeof value!=="string"||value.length>2048)return false;
   try{const url=new URL(value),keys=[...url.searchParams.keys()];return url.protocol==="https:"&&!url.username&&!url.password&&!url.hash
     &&url.pathname==="/"&&keys.length===2&&keys.includes("page")&&keys.includes("token")
@@ -323,12 +326,18 @@ export async function loadOperationsFinancial(authorityId:string,request:PortalR
       ||collection.documents.some(document=>!document||typeof document.publicId!=="string"
         ||!(document.kind==="invoice"||document.kind==="contract"||document.kind==="project_invoice")
         ||typeof document.status!=="string"||!/^([A-Z]{3})$/.test(document.currency)||typeof document.total!=="string"||!/^(?:0|[1-9][0-9]{0,17})\.[0-9]{2}$/.test(document.total)
+        ||Object.hasOwn(document,"issueDate")!==Object.hasOwn(document,"dueDate")
+        ||!portalFinancialDate(Object.hasOwn(document,"issueDate")?document.issueDate:null)
+        ||!portalFinancialDate(Object.hasOwn(document,"dueDate")?document.dueDate:null)
+        ||document.kind==="contract"&&((document.issueDate??null)!==null||(document.dueDate??null)!==null)
         // Paid and due amounts are required, as a decimal amount or null when unknown; anything else is refused.
         ||!(document.amountPaid===null||typeof document.amountPaid==="string"&&/^(?:0|[1-9][0-9]{0,17})\.[0-9]{2}$/.test(document.amountPaid))
         ||!(document.balanceDue===null||typeof document.balanceDue==="string"&&/^(?:0|[1-9][0-9]{0,17})\.[0-9]{2}$/.test(document.balanceDue))
         ||!portalFinancialLink(document.documentUrl)||!portalFinancialLink(document.actionUrl))))
     throw Object.assign(new Error("The financial response could not be verified."),{status:503});
   return value.collections.flatMap(collection=>collection.documents.map(document=>({...document,
+    issueDate:Object.hasOwn(document,"issueDate")?document.issueDate:null,
+    dueDate:Object.hasOwn(document,"dueDate")?document.dueDate:null,
     scopeKey:`${authorityId}:${collection.grantId}:${collection.revision}`})));
 }
 

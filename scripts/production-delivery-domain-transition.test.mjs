@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { PROFILE, canonical, hash, validateInstallation, varsOf, parseDeploymentArguments } from './production-deploy.mjs';
 import { domainPhaseValues, domainRecognitionProfile, domainRecognitionDiff } from './production-domain-recognition.mjs';
 import { compileDeliveryDomainTransition, compileDeliveryPublicLinkTransition, compileOperationsCanonicalTransition } from './production-delivery-domain-transition.mjs';
-import { NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE, nativeDeliveryDeploymentEnabled } from '../apps/client/src/worker/operations-native-delivery-deployment.ts';
+import { NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE, nativeDeliveryDeploymentEnabled } from '../apps/client/src/worker/operations-native-delivery-deployment.ts';
 
 const FROM='portal-entry-canonical', TO='delivery-public-canonical';
 const changed=['EXPECTED_HOST','PUBLIC_BASE_URL','PUBLIC_SHARE_ORIGIN','LEGACY_CLIENT_ORIGINS','CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE'].sort();
@@ -20,7 +20,16 @@ function fixture() {
       CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED:'true',CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED:'true',
       CLIENT_ONBOARDING_NOTIFICATION_STAFF_IDS:'["synthetic-owner"]',CLIENT_ONBOARDING_NOTIFICATIONS_NOT_BEFORE:'2026-10-20T00:00:00.000Z',
       PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED:'true'});
-    if(app==='client') vars.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED='true';
+    // This fixture models the historical pre-cutover installation, independently
+    // of the checked-in defaults for new deployments.
+    if(app==='client') Object.assign(vars, {
+      CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED:'true',
+      PUBLIC_BASE_URL:'https://portal.ledgetopdroneservices.com',
+      PUBLIC_SHARE_ORIGIN:'https://portal.ledgetopdroneservices.com',
+      EXPECTED_HOST:'portal.ledgetopdroneservices.com',
+      LEGACY_CLIENT_ORIGINS:'https://client.ledgetopdroneservices.com',
+      CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE:NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE,
+    });
     for(const name of Object.keys(spec.plainValueSHA256)) spec.plainValueSHA256[name]=hash(vars[name]);
     const bindings=[...structuredClone(spec.bindings),...Object.entries(vars).map(([name,text])=>({name,type:'plain_text',text}))];
     const id=`${String(++n).repeat(8)}-1111-4111-8111-111111111111`;

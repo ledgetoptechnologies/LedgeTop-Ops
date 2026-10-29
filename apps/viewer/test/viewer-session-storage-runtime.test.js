@@ -7,6 +7,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 const { createViewerSessionCapabilityStore, VIEWER_SESSION_STORAGE_PREFIX: PREFIX } = require('../viewer-session-capability-store.mjs');
 const { renderStaffNavigation } = require('../viewer-staff-navigation.mjs');
+const { renderClientNavigation } = require('../viewer-client-navigation.mjs');
 const { measurementAssetBearer } = require('../measurement-surface-client.mjs');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
@@ -34,7 +35,7 @@ function fixture({ denied = 'getter', active = false, reject = false } = {}) {
   Object.defineProperty(window, 'sessionStorage', { get: () => denied === 'getter' ? blocked() : storage });
   const sessionCapabilities = createViewerSessionCapabilityStore({ storage: () => window.sessionStorage });
   const context = vm.createContext({
-    window, URL, AbortController, renderStaffNavigation, dom: {},
+    window, URL, AbortController, renderStaffNavigation, renderClientNavigation, dom: {},
     VIEW_MODE: 'session', SESSION_GRANT: active ? null : GRANT, SESSION_STORAGE_PREFIX: PREFIX,
     sessionStorageKey: active ? KEY : null, sessionCapabilities,
     location: { href: `https://viewer.example/session/${active ? 'active/synthetic-session' : GRANT}` },

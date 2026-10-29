@@ -43,7 +43,11 @@
 
     #staff-logo { display: flex; flex-shrink: 0; border-radius: 4px; }
     #staff-logo[href]:focus-visible { outline: 2px solid var(--brand-orange); outline-offset: 4px; }
-    #staff-navigation { display: flex; align-items: center; gap: 7px; min-height: 18px; }
+    #staff-navigation, #client-navigation { display: flex; align-items: center; gap: 7px; min-height: 18px; }
+    #client-navigation[hidden] { display: none; }
+    #client-navigation a { color: #b7b7be; font-size: 12px; font-weight: 600; text-decoration: none; padding: 2px 0; }
+    #client-navigation a:hover, #client-navigation a:focus-visible { color: var(--brand-orange); }
+    #client-navigation a:focus-visible { outline: 2px solid var(--brand-orange); outline-offset: 3px; }
     #staff-navigation[hidden] { display: none; }
     #staff-navigation a { color: #b7b7be; font-size: 12px; font-weight: 600; text-decoration: none; padding: 2px 0; }
     #staff-navigation a:hover, #staff-navigation a:focus-visible { color: var(--brand-orange); }
@@ -433,6 +437,9 @@
           <a id="staff-models" aria-label="Back to Models"><span class="back-arrow" aria-hidden="true">‹ </span>Models</a>
         </nav>
         <span class="project" id="brand-project">Loading project…</span>
+        <nav id="client-navigation" aria-label="Client navigation" hidden>
+          <a id="client-portal">‹ Client Portal</a>
+        </nav>
       </div>
       <select id="project-switcher" aria-label="Switch project"></select>
     </div>
@@ -541,7 +548,7 @@
           <p class="hint">View only. The orange outline marks the cut plane. Saved measurements and volume calculations still use the full source surface and their own reference base.</p>
         </div>
 
-        <div class="panel" id="panel-model-report"><h3>Reports</h3><button class="tool-btn full" id="btn-model-report">Measurements report</button><p class="hint">Your saved measurements, quantities, and overview images.</p><div id="model-report-download"></div></div>
+        <div class="panel" id="panel-model-report" hidden><h3>Reports</h3><div id="measurement-report-actions" hidden><button class="tool-btn full" id="btn-model-report">Measurements report</button><p class="hint">Your saved measurements, quantities, and overview images.</p></div><div id="model-report-download"></div></div>
         <div class="panel" id="panel-camera">
           <h3><svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" stroke="currentColor" stroke-width="2" fill="none"/></svg> Camera</h3>
           <div class="tool-grid">
@@ -667,7 +674,7 @@
 
       <div id="floating-controls">
         <button class="icon-btn" id="btn-measure-float" title="Toggle distance measurement" style="display:none;"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
-        <button class="icon-btn" id="btn-capture-float" title="Save view image" aria-label="Save view image"><svg viewBox="0 0 24 24"><path d="M4 6h4l2-2h4l2 2h4v14H4z" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
+        <button class="icon-btn" id="btn-capture-float" title="Save view image" aria-label="Save view image" hidden><svg viewBox="0 0 24 24"><path d="M4 6h4l2-2h4l2 2h4v14H4z" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
         <button class="icon-btn" id="btn-reset-float" title="Reset camera"><svg viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
         <button class="icon-btn" id="btn-fullscreen-float" title="Fullscreen"><svg viewBox="0 0 24 24"><path d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
       </div>

@@ -1,17 +1,19 @@
 import { useEffect, useState } from "react";
-import { formatSessionExpiry } from "@ltds/ui";
+import { ACCESS_LOGOUT, formatSessionExpiry, useAccessSignOut } from "@ltds/ui";
 
 type Clock = { deadline: number; expiresAt: number };
 
 /**
  * The day this browser's sign-in ends, like the Operations account menu. Mounted only while the menu is
  * open; reads the server's view of the verified sign-in and never inspects cookies or tokens itself.
- * Until the portal reports session timing, nothing is shown rather than a guess.
+ * Until the portal reports session timing, nothing is shown rather than a guess. Once it has ended, "Sign in again"
+ * uses the same Cloudflare Access sign-out as the sign-in recovery screens, returning to the portal's sign-in.
  */
 export function ClientSessionExpiry() {
   const [clock, setClock] = useState<Clock | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "unavailable" | "unsupported" | "expired">("loading");
   const [now, setNow] = useState(() => performance.now());
+  const [signingOut, signOut] = useAccessSignOut("/portal");
   useEffect(() => {
     const controller = new AbortController();
     const refresh = async () => {
@@ -46,7 +48,9 @@ export function ClientSessionExpiry() {
   if (state === "unsupported") return null;
   const expired = state === "expired" || state === "ready" && clock !== null && now >= clock.deadline;
   return <div className="account-session-status">
-    {expired ? <><strong>Session expired</strong><small>Sign in again to continue.</small></>
+    {expired ? <><strong>Session expired</strong><small>Sign in again to continue.</small>
+      <a role="menuitem" className="account-session-sign-in" href={ACCESS_LOGOUT} onClick={signOut} aria-disabled={signingOut || undefined}>
+        {signingOut ? "Signing out…" : "Sign in again"}</a></>
       : state === "ready" && clock ? <>
         <small>Signed in</small>
         <strong>Expires <time dateTime={new Date(clock.expiresAt).toISOString()}>{formatSessionExpiry(clock.expiresAt)}</time></strong>

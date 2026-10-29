@@ -91,9 +91,7 @@ export interface SqlScope {
   deniedGlobal: boolean;
 }
 
-export async function sqlScope(env: Env, principal: StaffPrincipal, permission: Permission): Promise<SqlScope> {
-  const rows = (await loadGrants(env, principal.id)).filter(row => row.permission === permission);
-  await requireAclLogin(env, principal);
+function scopeFromGrants(rows: GrantRow[]): SqlScope {
   const deniedGlobal = rows.some(row => row.source === "override" && row.effect === "deny" && row.scope === "global");
   return {
     global: !deniedGlobal && rows.some(row => row.effect === "allow" && row.scope === "global"),
@@ -103,6 +101,24 @@ export async function sqlScope(env: Env, principal: StaffPrincipal, permission: 
     deniedDivisions: [...new Set(rows.filter(row => row.source === "override" && row.effect === "deny" && row.scope === "division" && row.divisionId).map(row => row.divisionId!))],
     deniedGlobal,
   };
+}
+
+/** Derive multiple permission scopes from one fresh grant read and one current
+ * login check. Intended for a single request checkpoint; never retain the
+ * returned scopes across requests or authority checkpoints. */
+export async function sqlScopes<const P extends readonly Permission[]>(env: Env, principal: StaffPrincipal,
+  permissions: P): Promise<{ [K in P[number]]: SqlScope }> {
+  if (permissions.length === 0) return {} as { [K in P[number]]: SqlScope };
+  const grants = await loadGrants(env, principal.id);
+  await requireAclLogin(env, principal);
+  const result = Object.fromEntries([...new Set(permissions)].map(permission => [permission,
+    scopeFromGrants(grants.filter(row => row.permission === permission))])) as { [K in P[number]]: SqlScope };
+  return result;
+}
+
+export async function sqlScope(env: Env, principal: StaffPrincipal, permission: Permission): Promise<SqlScope> {
+  const result = await sqlScopes(env, principal, [permission]);
+  return result[permission];
 }
 
 export function buildScopedWhere(scope: SqlScope, principal: StaffPrincipal, alias: string, assignmentSql?: string): { sql: string; values: unknown[] } {

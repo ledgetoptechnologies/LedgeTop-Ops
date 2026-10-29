@@ -107,9 +107,12 @@ test("a client with only an Operations home sees its shared 3D work and opens it
   await expect(page.getByRole("heading", {level: 1, name: "Your services"})).toBeVisible();
   await expect(rows(page)).toHaveCount(1);
   await expect(rows(page).first()).toContainText("Quarry survey");
+  const popupWait = page.waitForEvent("popup");
   await rows(page).first().getByRole("link", {name: /^Open 3D model/}).click();
-  await expect(page).toHaveURL(/\/portal\/viewer\/grant-workspace-ops\/tasks\/task-workspace-ops\?workspace=workspace-ops$/);
-  await expect(page.frameLocator("iframe").locator("#loaded")).toHaveText("direct model");
+  const popup = await popupWait;
+  await expect(popup).toHaveURL(`${viewerOrigin}/session/11111111-1111-4111-8111-111111111111`);
+  await expect(popup.locator("#loaded")).toHaveText("direct model");
+  await expect(page.locator("iframe")).toHaveCount(0);
   const posts = calls.filter(call => call.method === "POST");
   expect(posts.map(call => call.path)).toEqual(["/api/client/v2/workspaces/workspace-ops/viewer/grant-workspace-ops/tasks/task-workspace-ops/session"]);
   expect(posts[0]!.key).toMatch(/^[0-9a-f-]{36}$/);
@@ -129,7 +132,9 @@ test("an Operations-only client's shared work disappears when the home is no lon
 test("a direct link to an Operations home's task whose access was removed never requests a session", async ({page}) => {
   const calls = await mock(page, {clientAccounts: null, homes: () => []});
   await page.goto("/portal/viewer/grant-workspace-ops/tasks/task-workspace-ops?workspace=workspace-ops");
-  await expect(page.getByRole("alert")).toContainText("This shared 3D model isn’t available here yet.");
+  expect(calls.filter(call => call.method === "POST")).toEqual([]); // Deep links do not authorize on load.
+  await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
+  await expect(page.getByRole("status")).toHaveText("This 3D model can't be opened from here yet. Open it from your portal home.");
   expect(calls.filter(call => call.method === "POST")).toEqual([]);
 });
 
@@ -138,7 +143,12 @@ for (const [label, width] of [["desktop", 1280], ["phone", 390]] as const) test(
   await page.context().route(`${viewerOrigin}/**`, route => route.fulfill({contentType: "text/html", body: "<!doctype html><body><div id=\"loaded\">direct model</div></body>"}));
   const calls = await mock(page, {clientAccounts: null, homes: () => [opsHome]});
   await page.goto("/portal/viewer/grant-workspace-ops/tasks/task-workspace-ops?workspace=workspace-ops");
-  await expect(page.frameLocator("iframe").locator("#loaded")).toHaveText("direct model");
+  expect(calls.filter(call => call.method === "POST")).toEqual([]);
+  const popupWait = page.waitForEvent("popup");
+  await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
+  const popup = await popupWait;
+  await expect(popup.locator("#loaded")).toHaveText("direct model");
+  await expect(page.locator("iframe")).toHaveCount(0);
   const nav = page.getByRole("navigation", {name: "Client portal"});
   const home = nav.getByRole("link", {name: "Home"});
   await expect(home).toBeVisible();

@@ -26,8 +26,10 @@ interface CreateOptions { kind: Kind; sources: Array<{ id: string; name: string 
   scopes: Array<{ id: string; name: string; divisions: Array<{ id: string; name: string }> }>;
   organizations: Array<OrganizationChoice & { sourceIds: string[] }> }
 
+/** Ledge Top's clients are all in the United States, so a blank country starts as the US. */
+export const DEFAULT_COUNTRY = "US";
 const EMPTY: ProfileForm = { name: "", generalEmail: "", generalPhone: "", email: "", phone: "", clientType: "unknown",
-  addressLine1: "", addressLine2: "", city: "", state: "", postalCode: "", country: "" };
+  addressLine1: "", addressLine2: "", city: "", state: "", postalCode: "", country: DEFAULT_COUNTRY };
 const routeKind = (kind: Kind): RouteKind => kind === "organization" ? "organizations" : "standalone-clients";
 const message = (caught: unknown, fallback: string) => caught instanceof Error ? caught.message : fallback;
 export const isStagingNativeDirectoryProfilePreparationLocation = (location: Pick<Location, "protocol" | "hostname" | "port">) =>
@@ -92,6 +94,20 @@ function ProfileFields({ kind, value, onChange, prefix, creating, disabled = fal
     {field("city", "City", 100)}{field("state", "State", kind === "client" ? 2 : 100)}
     {field("postalCode", "Postal code", kind === "client" ? 20 : 32)}{field("country", "Country", 100)}
   </div>;
+}
+
+/** The saved profile at a glance: only what is on file, with the address on one line. */
+function ProfileSummary({ kind, profile, organization }: { kind: Kind; profile: ProfileForm; organization?: string | null }) {
+  const email = kind === "organization" ? profile.generalEmail : profile.email, phone = kind === "organization" ? profile.generalPhone : profile.phone;
+  const place = [profile.city, [profile.state, profile.postalCode].filter(Boolean).join(" ")].filter(Boolean).join(", ");
+  const address = [profile.addressLine1, profile.addressLine2, place, profile.country && profile.country !== DEFAULT_COUNTRY ? profile.country : ""]
+    .map(part => part.trim()).filter(Boolean).join(", ");
+  return <dl className="client-directory-profile-summary">
+    <div><dt>Email</dt><dd>{email || <span className="muted">Not on file</span>}</dd></div>
+    <div><dt>Phone</dt><dd>{phone || <span className="muted">Not on file</span>}</dd></div>
+    <div className="client-directory-profile-summary-wide"><dt>Address</dt><dd>{address || <span className="muted">Not on file</span>}</dd></div>
+    {organization !== undefined && <div><dt>Organization</dt><dd>{organization ?? <span className="muted">Standalone client</span>}</dd></div>}
+  </dl>;
 }
 
 function status(result: { status?: unknown }): string {
@@ -245,12 +261,13 @@ function NativeDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
   // A server permission denial is definite: there is nothing to retry until access changes.
   const [profileDenied, setProfileDenied] = useState("");
   const [relationshipAttempt, setRelationshipAttempt] = useState<{ request: FrozenDirectoryRequest; expectedVersion: number } | null>(null);
+  const [editing, setEditing] = useState(false);
   const load = async (): Promise<boolean> => {
     setLoading(true); setError("");
     try {
       const value = await api<unknown>(`/api/client-hub/directory/${routeKind(kind)}/${encodeURIComponent(recordId)}`);
       if (!usableSnapshot(value, kind, recordId)) throw new Error("The client profile could not be verified.");
-      setSnapshot(value); setFields({ ...EMPTY, ...value.profile }); setRelationshipOrganizationId(value.relationship?.organization?.recordId ?? ""); setMissing(false);
+      setSnapshot(value); setFields({ ...EMPTY, ...value.profile, country: value.profile.country || DEFAULT_COUNTRY }); setRelationshipOrganizationId(value.relationship?.organization?.recordId ?? ""); setMissing(false);
       return true;
     } catch (caught) {
       if (caught instanceof ApiError && caught.status === 404) { setMissing(true); setSnapshot(null); }
@@ -290,7 +307,7 @@ function NativeDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
       const result = await executeProfileAttempt(frozen.request, request => api(request.path, { method: request.method,
         headers: { "Idempotency-Key": request.mutationId }, body: request.body }),
       { recordId, kind, version: frozen.expectedVersion });
-      if (await load()) { setProfileAttempt(null); setProfileAttemptTransmitted(false); setSuccess(status(result as { status?: unknown })); }
+      if (await load()) { setProfileAttempt(null); setProfileAttemptTransmitted(false); setSuccess(status(result as { status?: unknown })); setEditing(false); }
     } catch (caught) {
       const denied = caught instanceof ApiError && (caught.status === 401 || caught.status === 403);
       const signedOut = caught instanceof ApiError && caught.status === 401;
@@ -327,7 +344,8 @@ function NativeDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
         headers: { "Idempotency-Key": request.mutationId }, body: request.body }),
       { mutationId: frozen.request.mutationId, relationshipVersion: frozen.expectedVersion }) as { status?: unknown };
       if (await load()) {
-        setRelationshipAttempt(null); setSuccess(result.status === "written" ? "Organization relationship saved." : "Organization relationship saved and queued for Project Alpha delivery.");
+        setRelationshipAttempt(null); setEditing(false);
+        setSuccess(result.status === "written" ? "Organization relationship saved." : "Organization relationship saved and queued for Project Alpha delivery.");
       }
     } catch (caught) { setError(`${message(caught, "The organization relationship could not be updated.")} Retry sends the same frozen operation. Reload this page to abandon it and review current state before starting another mutation.`); }
     finally { setRelationshipBusy(false); }
@@ -339,13 +357,29 @@ function NativeDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
   const recovery = kind === "client" && usableRelationshipRecoveryCapability(snapshot.relationship?.recovery)
     && snapshot.relationship?.organization ? snapshot.relationship.recovery : null;
   const recoveryTarget = kind === "client" ? snapshot.relationship?.organization ?? null : null;
-  if (!snapshot.editing.available) return <Card title="Client profile"><p>{snapshot.editing.reason === "profile_permission_required"
+  if (!snapshot.editing.available) return <Card title="Client profile"><ProfileSummary kind={kind} profile={snapshot.profile}
+    organization={kind === "client" && snapshot.relationship ? snapshot.relationship.organization?.name ?? null : undefined} />
+    <p className="muted">{snapshot.editing.reason === "profile_permission_required"
     ? "This client profile is read-only because your account does not have client profile edit access."
     : "This client profile is read-only because its current relationship or destination evidence is unavailable."}</p>
     {recoveryTarget && <DirectoryRelationshipRecoveryReview recordId={recordId}
       intendedOrganizationName={recoveryTarget.name}
       intendedOrganizationRecordId={recoveryTarget.recordId} capability={recovery} />}</Card>;
-  return <Card title="Edit client profile"><p>Editing version {snapshot.version}. The current server-owned profile is loaded before any change is submitted.</p>
+  const pending = Boolean(profileAttempt || relationshipAttempt), saving = busy || relationshipBusy;
+  // Opening fresh starts from the saved profile; an update still waiting to be confirmed keeps its exact values.
+  const openEditor = () => {
+    if (!pending && !profileDenied) { setFields({ ...EMPTY, ...snapshot.profile, country: snapshot.profile.country || DEFAULT_COUNTRY });
+      setRelationshipOrganizationId(snapshot.relationship?.organization?.recordId ?? ""); setError(""); }
+    setSuccess(""); setEditing(true);
+  };
+  return <Card title="Client profile" className="client-directory-profile-card" action={<button type="button"
+    className={pending ? "button-orange button-small" : "button-ghost button-small"} onClick={openEditor}>{pending ? "Review pending update" : "Edit profile"}</button>}>
+    <ProfileSummary kind={kind} profile={snapshot.profile}
+      organization={kind === "client" && snapshot.relationship ? snapshot.relationship.organization?.name ?? null : undefined} />
+    {success && <p role="status" className="notice ok">{success}</p>}
+    {pending && !editing && <p role="status" className="notice warning">An update is waiting to be confirmed. Open it to retry the same change.</p>}
+    <Dialog open={editing} onClose={() => { if (!saving) setEditing(false); }} dismissible={!saving} size="lg" title="Edit client profile"
+      description="Changes are saved in Client Hub and sent to Project Alpha.">
     <form onSubmit={event => void submit(event)} className="client-directory-profile-form"><ProfileFields kind={kind} value={fields} onChange={change} prefix={id} creating={false} disabled={Boolean(profileAttempt || relationshipAttempt || profileDenied)} />
       {allowPreparedAttempt && !profileAttempt && <button type="button" className="button-ghost" disabled={busy || Boolean(relationshipAttempt)}
         onClick={prepareProfileAttempt}>Prepare update reference</button>}
@@ -355,9 +389,12 @@ function NativeDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
         <button type="button" className="button-ghost" disabled={busy} onClick={cancelPreparedProfileAttempt}>Cancel prepared update</button>
       </section>}
       {profileDenied && <p role="alert">{profileDenied}</p>}
-      {error && <p role="alert">{error}</p>}{success && <p role="status">{success}</p>}
-      <button className="button-orange" disabled={busy || Boolean(relationshipAttempt) || Boolean(profileDenied)}>{busy ? "Saving profile…" : profileAttempt
-        ? profileAttemptTransmitted ? "Retry same profile update" : "Submit prepared profile update" : "Save client profile"}</button>
+      {error && <p role="alert">{error}</p>}
+      <div className="client-directory-profile-actions">
+        <button className="button-orange" disabled={busy || Boolean(relationshipAttempt) || Boolean(profileDenied)}>{busy ? "Saving profile…" : profileAttempt
+          ? profileAttemptTransmitted ? "Retry same profile update" : "Submit prepared profile update" : "Save client profile"}</button>
+        <button type="button" className="button-ghost" disabled={saving} onClick={() => setEditing(false)}>{pending ? "Close" : "Cancel"}</button>
+      </div>
     </form>
     {kind === "client" && snapshot.relationship && (snapshot.relationship.editing.available
       ? <form onSubmit={event => void submitRelationship(event)} className="client-directory-profile-form">
@@ -375,6 +412,7 @@ function NativeDirectoryProfileEditBound({ kind, recordId, allowPreparedAttempt 
       </button>
     </form>
       : <section><h3>Organization relationship</h3><p>The organization relationship is read-only because current relationship authority or destination evidence is unavailable.</p></section>)}
+    </Dialog>
     {recoveryTarget && <DirectoryRelationshipRecoveryReview recordId={recordId}
       intendedOrganizationName={recoveryTarget.name}
       intendedOrganizationRecordId={recoveryTarget.recordId} capability={recovery} />}

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import { canonicalDeliveryEntryRedirect } from '../apps/client/src/worker/canonical-delivery-routing.ts';
 import { configuredPublicRequestOrigins, requestHostAllowed, clientPortalRequestOriginAllowed } from '../apps/client/src/worker/origin-policy.ts';
 import { NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE,
@@ -13,6 +14,19 @@ const env={ENVIRONMENT:'production',EXPECTED_HOST:'delivery.ledgetop.app',PUBLIC
   CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE:NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE};
 const navigation={'Sec-Fetch-Dest':'document','Sec-Fetch-Mode':'navigate'};
 const redirect=(url,init={},configuration=env,enabled=true)=>canonicalDeliveryEntryRedirect(new Request(url,{headers:navigation,...init}),configuration,enabled);
+
+test('checked-in production config preserves the canonical delivery tuple and historical public links',()=>{
+  const config=JSON.parse(readFileSync(new URL('../apps/client/wrangler.jsonc',import.meta.url),'utf8'));
+  assert.equal(nativeDeliveryDeploymentEnabled(config.vars),true);
+  assert.deepEqual(configuredPublicRequestOrigins(config.vars),[NEW,OLD,CLIENT]);
+  for(const origin of [NEW,OLD,CLIENT])
+    assert.equal(requestHostAllowed(`${origin}/s/synthetic-id`,config.vars),true);
+  assert.equal(requestHostAllowed('https://ops.ledgetop.app/s/synthetic-id',config.vars),false);
+  assert.deepEqual(config.routes.map(row=>row.pattern).sort(),[
+    'delivery.ledgetop.app','portal.ledgetop.app','client.ledgetopdroneservices.com',
+    'portal.ledgetopdroneservices.com','portal.ledgetoptechnologies.com',
+  ].sort());
+});
 
 test('split delivery origin admits only explicit historical public hosts and retains private byte overlap',()=>{
   assert.deepEqual(configuredPublicRequestOrigins(env),[NEW,OLD,CLIENT]);

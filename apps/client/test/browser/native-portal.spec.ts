@@ -697,7 +697,7 @@ test("native feature readiness is operational status, not purchased services or 
   const surface = page.locator(".ltds-card").filter({has: page.getByRole("heading", {name: "Available features"})});
   await expect(surface).toContainText("Ready");
   await expect(surface).toContainText("Not connected");
-  await expect(surface).toContainText("Existing authorized request history remains unchanged.");
+  await expect(surface).toContainText("Your existing requests are unchanged.");
   await expect(surface).toContainText("not services purchased or assigned");
   nativeCallsOnly(calls);
 });
@@ -735,7 +735,7 @@ for (const width of [1280, 390]) test(`secondary workspace member management is 
   await page.setViewportSize({width, height: 900}); await page.goto("/portal/account?workspace=workspace-b");
   await expect(page.getByRole("heading", {name: "Invite a collaborator"})).toBeVisible();
   const source = page.locator(".portal-team-row", {hasText: "manager@example.test"});
-  await expect(source).toContainText("Source-managed member"); await expect(source).toContainText("managed in this Project Alpha source");
+  await expect(source).toContainText("Source-managed member"); await expect(source).toContainText("Ledge Top manages this person's access");
   await expect(source.getByRole("button", {name: /Suspend|administrator/i})).toHaveCount(0);
   const active = page.locator(".portal-team-row", {hasText: "active@example.test"});
   await expect(active).toContainText("Locally invited collaborator"); await expect(active.getByRole("button", {name: "Suspend"})).toBeVisible();
@@ -1273,6 +1273,22 @@ test.describe("client header matches Operations", () => {
     await expect(menu.getByRole("menuitem", {name: "Logout"})).toHaveAttribute("href", "/cdn-cgi/access/logout");
   });
 
+  test("an ended sign-in offers Sign in again through the normal Access sign-out", async ({page}) => {
+    await mock(page, (route, call) => call.path === "/api/client/session/status" ? route.fulfill({status: 401, json: {error: "Session expired"}}) : undefined);
+    await page.goto("/portal");
+    await page.getByRole("button", {name: /^Account menu for /}).click();
+    const menu = page.getByRole("menu", {name: "Account"});
+    await expect(menu.locator(".account-session-status strong")).toHaveText("Session expired");
+    const again = menu.getByRole("menuitem", {name: "Sign in again"});
+    await expect(again).toHaveAttribute("href", "/cdn-cgi/access/logout");
+    await expect(menu.getByRole("menuitem", {name: "Logout"})).toBeVisible();
+    let logouts = 0;
+    await page.route("**/cdn-cgi/access/logout", route => { logouts += 1; return route.fulfill({status: 200, body: ""}); });
+    await again.click();
+    await expect.poll(() => logouts).toBe(1);
+    await expect(page).toHaveURL(/\/portal$/);
+  });
+
   test("a native account also shows the verified sign-in email, not a workspace contact", async ({page}) => {
     test.skip((page.viewportSize()?.width ?? 0) < 961, "the account details are collapsed on phones");
     await mock(page, (route, call) => call.path === "/api/client/session"
@@ -1316,6 +1332,11 @@ test("native model routes retain client navigation and pin bootstrap to their ex
   await expect(page.getByRole("heading", { name: "Secure 3D Viewer" })).toBeVisible();
   await expect(page.locator(".client-portal-header")).toBeVisible();
   expect(calls.some(call => call.path.endsWith("workspace-c/context"))).toBe(false);
+  expect(calls.some(call => call.method === "POST" && call.path.endsWith("/session"))).toBe(false);
+  const popupWait = page.waitForEvent("popup");
+  await page.getByRole("button", { name: "Open secure 3D Viewer" }).click();
+  const popup = await popupWait;
+  await expect.poll(() => popup.isClosed()).toBe(true); // The exact native account rejects the synthetic session.
   const nav = page.getByRole("navigation", { name: "Client portal", exact: true });
   if (!(await nav.isVisible())) {
     await page.getByRole("button", { name: "Open navigation" }).click();
@@ -1327,4 +1348,5 @@ test("native model routes retain client navigation and pin bootstrap to their ex
   const modelSessions = calls.filter(call => call.method === "POST" && call.path.endsWith("/session"));
   expect(modelSessions.length).toBeGreaterThan(0);
   expect(modelSessions.every(call => call.path.includes("/workspace-b/"))).toBe(true);
+  await expect(page.locator("iframe")).toHaveCount(0);
 });

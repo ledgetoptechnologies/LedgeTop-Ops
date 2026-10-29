@@ -72,6 +72,9 @@ for (const [label, mutate, code] of [
   ['duplicate normalized member',value=>value.include.push({email:{email:'STAFF@example.test'}}),'group_member_duplicate'],
   ['missing exclude field',value=>delete value.exclude,'group_shape_invalid'],
   ['default flag with a nonempty AccessRule list',value=>value.is_default=[{certificate:{}}],'unsupported_group_policy'],
+  ['default flag with wrong type',value=>value.is_default='false','group_identity_or_policy_invalid'],
+  ['uid with wrong type',value=>value.uid=17,'group_shape_invalid'],
+  ['uid over limit',value=>value.uid='u'.repeat(257),'group_shape_invalid'],
   ['nonempty exclude policy',value=>value.exclude=[{certificate:{}}],'unsupported_group_policy'],
   ['nonempty require policy',value=>value.require=[{auth_method:{auth_method:'mfa'}}],'unsupported_group_policy'],
   ['unknown policy field',value=>value.session_duration='12h','group_shape_invalid'],
@@ -79,6 +82,28 @@ for (const [label, mutate, code] of [
   const value=group();mutate(value);const fake=fetchFor(value);
   await assert.rejects(read(fake.fetchImpl),new RegExp(code));
   assert.equal(fake.calls.length,1);
+});
+
+test('accepts the observed response shape with optional uid and omitted is_default while distinguishing omission',async()=>{
+  const actualShape=group();
+  actualShape.uid='provider-generated-metadata';
+  delete actualShape.is_default;
+  const fake=fetchFor(actualShape);
+  const omitted=await read(fake.fetchImpl);
+  assert.equal(fake.calls.length,1);
+  assert.equal(omitted.managedEmailCount,2);
+  assert.equal(JSON.stringify(omitted).includes('provider-generated-metadata'),false);
+
+  const explicit=await read(fetchFor({...actualShape,is_default:[]}).fetchImpl);
+  assert.notEqual(omitted.policySha256,explicit.policySha256);
+  assert.notEqual(omitted.providerResponseSha256,explicit.providerResponseSha256);
+});
+
+test('optional uid is bounded, response-bound metadata rather than policy authority',async()=>{
+  const first=await read(fetchFor({...group(),uid:'uid-a'}).fetchImpl);
+  const second=await read(fetchFor({...group(),uid:'uid-b'}).fetchImpl);
+  assert.equal(first.policySha256,second.policySha256);
+  assert.notEqual(first.providerResponseSha256,second.providerResponseSha256);
 });
 
 test('refuses redirects, non-200 responses, missing token and oversized responses without retries',async()=>{

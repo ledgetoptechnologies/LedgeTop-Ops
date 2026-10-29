@@ -5,6 +5,13 @@ const notSetUp = "This email is not set up for Ledge Top. Sign in with your Oper
 const legacyDenial = "Your Access identity is not provisioned for LTDS Operations";
 const deniedCopy = "This email isn't set up for Ledge Top Operations. Sign in with your Ledge Top staff email, or ask your administrator to add this one.";
 
+/** Points to the person who set up access; no support mailbox is published. */
+async function expectContactHelp(screen: import("@playwright/test").Locator) {
+  await expect(screen).toContainText("Still stuck? Ask your Ledge Top contact or administrator for help.");
+  await expect(screen.locator('a[href^="mailto:"]')).toHaveCount(0);
+  await expect(screen).not.toContainText("@ledgetopdroneservices.com");
+}
+
 async function failSession(page: Page, status: number, error: string, identity: unknown = { email: "someone@example.test" }) {
   const calls: string[] = [];
   await page.route("**/cdn-cgi/access/get-identity", route => { calls.push("identity"); return route.fulfill({ json: identity }); });
@@ -41,7 +48,7 @@ test("the live server's legacy denial is replaced by Ledge Top wording, with eve
   await expect(page.locator("body")).not.toContainText("provisioned");
   await expect(screen.getByRole("link", { name: "Sign in with a different email" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
   await expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
-  await expect(screen.getByRole("link", { name: "info@ledgetopdroneservices.com" })).toBeVisible();
+  await expectContactHelp(screen);
 });
 
 test("try again reloads and opens Operations once the right email is used", async ({ page }) => {
@@ -75,7 +82,7 @@ test("an ended sign-in offers to sign in again", async ({ page }) => {
   await page.goto("/");
   const screen = page.getByRole("main", { name: "Your sign-in has ended" });
   await expect(screen.getByRole("link", { name: "Sign in again" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
-  await expect(screen.getByRole("link", { name: "info@ledgetopdroneservices.com" })).toHaveAttribute("href", "mailto:info@ledgetopdroneservices.com");
+  await expectContactHelp(screen);
 });
 
 for (const [name, fail] of [
@@ -84,13 +91,13 @@ for (const [name, fail] of [
     await page.route("**/cdn-cgi/access/get-identity", route => route.fulfill({ json: { email: "someone@example.test" } }));
     await page.route("**/api/**", route => route.abort("failed"));
   }],
-] as const) test(`${name} still offers the way out: retry first, another email, and support`, async ({ page }) => {
+] as const) test(`${name} still offers the way out: retry first, another email, and who to ask`, async ({ page }) => {
   await fail(page);
   await page.goto("/");
   const screen = page.getByRole("main", { name: "Operations is unavailable right now" });
   await expect(screen.getByRole("button", { name: "Try again" })).toHaveClass(/button-orange/);
   await expect(screen.getByRole("link", { name: "Sign in with a different email" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
-  await expect(screen.getByRole("link", { name: "info@ledgetopdroneservices.com" })).toHaveAttribute("href", "mailto:info@ledgetopdroneservices.com");
+  await expectContactHelp(screen);
 });
 
 test("the card fits the screen without sideways scrolling", async ({ page }) => {

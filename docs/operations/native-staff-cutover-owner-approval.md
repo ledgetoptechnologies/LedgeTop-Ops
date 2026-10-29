@@ -26,12 +26,17 @@ Access-protected `/api/session` response naming the configured owner. The
 issuer performs a fresh GET of the pinned group before displaying consent and
 after typed consent. Execution performs a fresh GET during preview and
 immediately before dispatch; each must match the reviewed identity, complete
-normalized membership set, and the exact empty exclude/require/default-policy
-arrays. Cloudflare returns those policy values as rule arrays. The GET reader
-rejects nonempty policy arrays, malformed `errors`/`messages` notices, mixed
-success/error envelopes, and unknown fields; it has no PUT path. The exact
-empty-policy profile remains unverified against production because the
-available API read returns 403; the separate UI summary is not API evidence.
+normalized membership set, and the exact empty `exclude` and `require` arrays.
+Cloudflare's `is_default` array is optional: if present it must be empty, and
+the policy digest distinguishes an omitted field from an explicit empty list.
+The optional `uid` is bounded provider metadata, never group identity or
+authorization; the raw-response digest binds its observed value. A fixed-target
+shape-only GET returned HTTP 200 with `uid` and without `is_default`; no member
+values were retained in that shape record. The GET reader rejects nonempty
+policy arrays, malformed `errors`/`messages` notices, mixed success/error
+envelopes, and unknown fields; it has no PUT path. This read does not qualify
+the production cutover or authorize execution. The separate UI summary is not
+API evidence.
 Execution also checks the configured D1 metadata,
 current full 0230 snapshot, active owner admission/profile binding, and signed
 local registry before preparing. It

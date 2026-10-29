@@ -7,7 +7,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { AccountMenu, Card, EmptyState, Loading, SignInRecovery, StatusPill, openViewerShell, requestChoice, requestText, Skeleton } from "@ltds/ui";
+import { AccountMenu, Card, EmptyState, Loading, SignInRecovery, StatusPill, requestChoice, requestText, Skeleton } from "@ltds/ui";
 import { PortalBoundary, PortalBrand } from "./PortalShell";
 import { VideoPlayer } from "./VideoPlayer";
 import { PORTAL_APP_API, type DeliveryLocationCollection } from "@ltds/shared";
@@ -29,6 +29,7 @@ import {
   loadPortalProjectFileLocations,
   loadPortalProjectFolderFiles,
   loadPortalViewerModels,
+  createPortalViewerSession,
   setPortalWorkspaceSelection,
   loadPortalPricingHint,
   listPortalRequestAttachments,
@@ -93,6 +94,7 @@ import {
   type PortalOperationsHomeResponse,
 } from "./portal-api";
 import { readClientViewerUnits, writeClientViewerUnits } from "./viewer-units-preference";
+import { createViewerSessionIssuer, openClientViewerWindowWithIssuer } from "./viewer-window-launch";
 import { ClientViewerShell, parseClientViewerShellRoute, clientViewerShellPath, nativeClientViewerShellPath, clientViewerRouteProjectId, clientViewerRouteWorkspaceId } from "./ClientViewerShell";
 import { SharedViewerWork } from "./SharedViewerWork";
 import { operationsHomeViewerWorkspaceIds } from "./shared-viewer-work";
@@ -118,7 +120,7 @@ import { LeaveFeedback, PortalFeedback } from "./PortalFeedback";
 import { PortalNotifications } from "./PortalNotifications";
 import { loadFeedbackFile, withPortalWorkspace } from "./feedback-api";
 import { NativeWorkspaceContent } from "./NativeWorkspaceContent";
-import { loadNativeViewerModels, type NativePortalBootstrap } from "./native-portal-api";
+import { createNativeViewerSession, loadNativeViewerModels, type NativePortalBootstrap } from "./native-portal-api";
 import { invitationCapabilitiesLabel, invitationRequestSchema } from "./invitation-request-api";
 import { PortalInvitationRequests } from "./PortalInvitationRequests";
 import { isNoAuthorizedClientWorkspace, isOptionalClientWorkspaceBootstrapAbsence } from "./portal-bootstrap-classification";
@@ -742,8 +744,8 @@ function EstimateSummary({
       <strong>Scope proposal</strong>
       <p>{estimate.scope}</p>
       <small>
-        This is not a quote, contract, or invoice. Project Alpha remains the
-        financial system of record.
+        This is not a quote, contract, or invoice. Ledge Top's billing system
+        remains the financial record.
       </small>
       <div>
         <StatusPill
@@ -1360,7 +1362,7 @@ function NewServiceRequestWizard({
           setMessage(assignmentsChanged
             ? "Service assignments changed for this exact request context. Your selections and answers are preserved; review the currently assigned services before continuing."
             : catalogChanged
-              ? "The Project Alpha service library changed. Your saved selection was preserved; review the highlighted service and explicitly use its current version."
+              ? "One of our services was updated. Your saved selection is kept; review the highlighted service and choose its current version."
             : error.status === 409
               ? "This draft changed in another tab. Reload this page before making more changes."
               : "Your latest changes could not be saved. Check your connection and try again.");
@@ -1591,7 +1593,7 @@ function NewServiceRequestWizard({
         goTo("services");
         setMessage(code === "service_assignments_changed"
           ? "Service assignments changed for this exact request context. Your selections and answers are preserved; review the currently assigned services before submitting."
-          : "The Project Alpha service library changed. Your selections and answers are preserved; review the current service versions before submitting.");
+          : "Some of our services were updated. Your selections and answers are kept; review the current versions before submitting.");
       }
       else if (error.status === 422 && ["answers_incomplete", "request_fields_incomplete"].includes(code ?? "")) goTo(code === "request_fields_incomplete" ? "details" : "services");
       else if (error.status === 422 && code === "geometry_required") goTo("location");
@@ -1606,7 +1608,7 @@ function NewServiceRequestWizard({
   return <form className="portal-request-form portal-request-wizard" onSubmit={submit}>
     <nav className="portal-request-stepper" aria-label="Service request progress"><ol>{REQUEST_STEPS.map((item, index) => <li key={item} className={item === step ? "is-current" : REQUEST_STEPS.indexOf(step) > index ? "is-complete" : ""}><button type="button" onClick={() => index <= REQUEST_STEPS.indexOf(step) && goTo(item)} aria-current={item === step ? "step" : undefined}><span>{index + 1}</span>{item === "services" ? "Services" : item === "location" ? "Work area" : item === "details" ? "Details" : item === "contact" ? "Contact" : "Review"}</button></li>)}</ol></nav>
     <div className="portal-autosave-status" role="status" aria-live="polite"><span className={`save-dot ${saveState}`} aria-hidden="true" />{saveState === "saving" ? "Saving draft..." : saveState === "saved" ? "Draft saved" : saveState === "error" ? "Draft not saved" : saveState === "conflict" ? "Draft conflict" : dirty ? "Changes waiting to save" : "Your progress will save automatically"}</div>
-    {step === "services" && <section className="portal-wizard-panel" aria-labelledby="request-services-title"><header><span>Step 1 of 5</span><h3 id="request-services-title">What services do you need?</h3><p>Select between 1 and 10 services from the current Project Alpha service library.</p></header>
+    {step === "services" && <section className="portal-wizard-panel" aria-labelledby="request-services-title"><header><span>Step 1 of 5</span><h3 id="request-services-title">What services do you need?</h3><p>Choose between 1 and 10 services.</p></header>
       {!fixedProjectId && !fixedScope && <label>Project context<select value={projectId} onChange={event => changeRequestProject(event.target.value)}><option value="">New or one-off service</option>{eligibleProjects.map(project => <option key={project.id} value={project.id}>{project.projectName}</option>)}</select><small>Available services are specific to this exact request context.</small></label>}
       <ServiceLibrary catalog={catalogMatchesTarget ? catalog : []} selected={selectedCatalog} state={catalogMatchesTarget ? catalogState : "loading"} onRetry={reloadCatalog}
         complete={catalogComplete} legacy={catalogLegacy} hasMore={catalogCursor !== null} loadingMore={catalogLoadingMore} pageError={catalogPageError} onLoadMore={() => { if (catalogCursor) loadCatalogPage(catalogCursor); }}
@@ -1618,7 +1620,7 @@ function NewServiceRequestWizard({
     {step === "location" && <section className="portal-wizard-panel" aria-labelledby="request-location-title"><header><span>Step 2 of 5</span><h3 id="request-location-title">Show us the work area</h3><p>{geometryRequired ? "One or more selected services require a drawn work area. Search, add points, or draw the area directly on the secure map." : "The selected services do not require a work area, but you may add one when it helps explain the scope."} Clients cannot upload or import KML files.</p></header><div className="portal-request-map portal-request-map-step"><MapAreaSelector value={areaGeoJson} onChange={value => changePricingBasis(() => setAreaGeoJson(value))} token={mapboxPublicToken} points={points} onPoints={value => changePricingBasis(() => setPoints(value))} locationLabel={location} onLocationLabel={value => change(() => setLocation(value))} /></div>{draft?.areaAcres != null && <div className="portal-coverage-card"><span>Estimated coverage</span><strong>{draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres</strong><small>Calculated by Ledge Top from the area drawn above.</small></div>}</section>}
     {step === "details" && <section className="portal-wizard-panel" aria-labelledby="request-details-title"><header><span>Step 3 of 5</span><h3 id="request-details-title">Scope and timing</h3><p>Describe the outcome you need. Ledge Top will confirm feasibility and the final scope.</p></header><label>Service request title<input value={title} onChange={event => change(() => setTitle(event.target.value))} maxLength={160} required /></label><label>What do you need?<textarea value={details} onChange={event => change(() => setDetails(event.target.value))} maxLength={5000} rows={6} required /></label><div className="portal-form-grid"><label>Location <span>(optional)</span><input value={location} onChange={event => change(() => setLocation(event.target.value))} maxLength={240} /></label><label>Preferred start <span>(optional)</span><input type="datetime-local" value={preferredStartAt} onChange={event => change(() => setPreferredStartAt(event.target.value))} /></label><label>Desired completion <span>(optional)</span><input type="datetime-local" value={desiredCompletionAt} onChange={event => change(() => setDesiredCompletionAt(event.target.value))} /></label></div><label>Requested deliverables <span>(optional)</span><textarea value={deliverables} onChange={event => change(() => setDeliverables(event.target.value))} maxLength={2000} rows={4} /></label></section>}
     {step === "contact" && <section className="portal-wizard-panel" aria-labelledby="request-contact-title"><header><span>Step 4 of 5</span><h3 id="request-contact-title">Contact and supporting files</h3><p>Add an optional on-site contact and any authorized reference photos or PDFs.</p></header><fieldset className="portal-contact-fields"><legend>Contact details <span>(optional)</span></legend><label>Name<input value={siteContactName} onChange={event => change(() => setSiteContactName(event.target.value))} maxLength={160} /></label><label>Email<input type="email" value={siteContactEmail} onChange={event => change(() => setSiteContactEmail(event.target.value))} maxLength={320} /></label><label>Phone<input type="tel" value={siteContactPhone} onChange={event => change(() => setSiteContactPhone(event.target.value))} maxLength={64} /></label></fieldset>{attachmentsEnabled ? <div className="portal-attachment-uploader"><header><div><strong>Supporting files</strong><p>Up to 10 JPEG, PNG, WebP, HEIC, HEIF, or PDF files; 25 MiB each and 100 MiB total. Archives are not allowed.</p></div><label className="button-ghost portal-file-picker">Add files<input type="file" multiple accept=".jpg,.jpeg,.png,.webp,.heic,.heif,.pdf,image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf" onChange={event => { addAttachments(event.target.files); event.currentTarget.value = ""; }} /></label></header>{attachmentMessage && <p role="alert" className="portal-message error">{attachmentMessage}</p>}<div className="portal-attachment-list" aria-live="polite">{attachments.map(item => <article key={item.key}><div><strong>{item.name}</strong><span>{formatBytes(item.size)} / {attachmentStatusLabel(item.status)}</span></div><progress max={item.size} value={Math.min(item.uploadedBytes, item.size)} aria-label={`${item.name} upload progress`} /><small>{item.totalParts ? `${item.completedParts} of ${item.totalParts} parts` : "Preparing upload"}</small>{item.error && <p role="alert">{item.error}</p>}<div>{item.status === "error" && <button type="button" className="button-ghost button-small" onClick={() => void uploadAttachment(item)}>Retry</button>}{item.status !== "aborted" && <button type="button" className="button-ghost button-small" onClick={() => void removeAttachment(item)}>Remove</button>}</div></article>)}</div></div> : <div className="portal-attachments-coming"><strong>Supporting files are coming soon</strong><p>Secure request attachments are not enabled for this portal. Do not place sensitive file links in the description.</p></div>}</section>}
-    {step === "review" && <section className="portal-wizard-panel portal-review" aria-labelledby="request-review-title"><header><span>Step 5 of 5</span><h3 id="request-review-title">Review your request</h3><p>Double-check every section below. Nothing is submitted until you select Submit request.</p></header><div className="portal-review-grid"><article><header><h4>Services</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("services")}>Edit services</button></header><ul>{selectedCatalog.map(service => <li key={service.publicId}><strong>{service.name}</strong>{service.questions.map(question => { const value = answers[service.publicId]?.[question.id]; if (value === undefined || value === "" || (Array.isArray(value) && !value.length)) return null; const labels = question.type === "select" || question.type === "multi_select" ? question.options.filter(option => (Array.isArray(value) ? value : [value]).includes(option.value)).map(option => option.label).join(", ") : typeof value === "boolean" ? value ? "Yes" : "No" : String(value); return <span key={question.id}>{question.label}: {labels}</span>; })}</li>)}</ul></article><article className="portal-review-work-area"><header><h4>Work area</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("location")}>Edit work area</button></header><p>{location || "No location label provided"}</p><p>{draft?.areaAcres != null ? `${draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres` : areaGeoJson ? "Coverage is being calculated" : "No polygon drawn"} / {points.length} point{points.length === 1 ? "" : "s"}</p><RequestReviewMap area={areaGeoJson} points={points} />{points.length > 0 && <ol className="portal-review-pois" aria-label="Points of interest">{points.map((point, index) => <li key={`${point.longitude}:${point.latitude}:${index}`}><span>{index + 1}</span><div><strong>{point.label || `Point ${index + 1}`}</strong><small>{point.latitude.toFixed(6)}, {point.longitude.toFixed(6)}</small></div></li>)}</ol>}</article><article><header><h4>Scope and timing</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("details")}>Edit details</button></header><strong>{title || "Title required"}</strong><p>{details || "Description required"}</p><p>{requestProjectId ? eligibleProjects.find(project => project.id === requestProjectId)?.projectName ?? "Authorized project" : "New or one-off service"}</p><p>{deliverables || "No separate deliverables noted"}</p><dl className="portal-review-timing"><div><dt>Preferred start</dt><dd>{input.preferredStartAt ? formatDate(input.preferredStartAt) : "Not specified"}</dd></div><div><dt>Desired completion</dt><dd>{input.desiredCompletionAt ? formatDate(input.desiredCompletionAt) : "Not specified"}</dd></div></dl></article><article><header><h4>Contact</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("contact")}>Edit contact</button></header><p>{siteContactName || "No on-site contact"}</p>{siteContactEmail && <p>{siteContactEmail}</p>}{siteContactPhone && <p>{siteContactPhone}</p>}</article></div><aside className="portal-pricing-hint"><span>Planning guidance</span>{pricingHint ? <>{draft?.areaAcres != null && <p className="portal-pricing-coverage">Estimated coverage: {draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres</p>}<strong>{pricingHint.kind === "starting_at" ? `Starting at ${formatRequestMoney(pricingHint.startingAtMinor, pricingHint.currency)}` : `Typical range ${formatRequestMoney(pricingHint.minimumMinor, pricingHint.currency)} to ${formatRequestMoney(pricingHint.maximumMinor, pricingHint.currency)}`}</strong><p>{pricingHint.disclaimer}</p></> : <><strong>Final quote after review</strong><p>A reliable price hint is not available for this request. Submitting does not authorize work or create a charge. Ledge Top will review the scope and create the actual estimate in Project Alpha.</p></>}</aside></section>}
+    {step === "review" && <section className="portal-wizard-panel portal-review" aria-labelledby="request-review-title"><header><span>Step 5 of 5</span><h3 id="request-review-title">Review your request</h3><p>Double-check every section below. Nothing is submitted until you select Submit request.</p></header><div className="portal-review-grid"><article><header><h4>Services</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("services")}>Edit services</button></header><ul>{selectedCatalog.map(service => <li key={service.publicId}><strong>{service.name}</strong>{service.questions.map(question => { const value = answers[service.publicId]?.[question.id]; if (value === undefined || value === "" || (Array.isArray(value) && !value.length)) return null; const labels = question.type === "select" || question.type === "multi_select" ? question.options.filter(option => (Array.isArray(value) ? value : [value]).includes(option.value)).map(option => option.label).join(", ") : typeof value === "boolean" ? value ? "Yes" : "No" : String(value); return <span key={question.id}>{question.label}: {labels}</span>; })}</li>)}</ul></article><article className="portal-review-work-area"><header><h4>Work area</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("location")}>Edit work area</button></header><p>{location || "No location label provided"}</p><p>{draft?.areaAcres != null ? `${draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres` : areaGeoJson ? "Coverage is being calculated" : "No polygon drawn"} / {points.length} point{points.length === 1 ? "" : "s"}</p><RequestReviewMap area={areaGeoJson} points={points} />{points.length > 0 && <ol className="portal-review-pois" aria-label="Points of interest">{points.map((point, index) => <li key={`${point.longitude}:${point.latitude}:${index}`}><span>{index + 1}</span><div><strong>{point.label || `Point ${index + 1}`}</strong><small>{point.latitude.toFixed(6)}, {point.longitude.toFixed(6)}</small></div></li>)}</ol>}</article><article><header><h4>Scope and timing</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("details")}>Edit details</button></header><strong>{title || "Title required"}</strong><p>{details || "Description required"}</p><p>{requestProjectId ? eligibleProjects.find(project => project.id === requestProjectId)?.projectName ?? "Authorized project" : "New or one-off service"}</p><p>{deliverables || "No separate deliverables noted"}</p><dl className="portal-review-timing"><div><dt>Preferred start</dt><dd>{input.preferredStartAt ? formatDate(input.preferredStartAt) : "Not specified"}</dd></div><div><dt>Desired completion</dt><dd>{input.desiredCompletionAt ? formatDate(input.desiredCompletionAt) : "Not specified"}</dd></div></dl></article><article><header><h4>Contact</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("contact")}>Edit contact</button></header><p>{siteContactName || "No on-site contact"}</p>{siteContactEmail && <p>{siteContactEmail}</p>}{siteContactPhone && <p>{siteContactPhone}</p>}</article></div><aside className="portal-pricing-hint"><span>Planning guidance</span>{pricingHint ? <>{draft?.areaAcres != null && <p className="portal-pricing-coverage">Estimated coverage: {draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres</p>}<strong>{pricingHint.kind === "starting_at" ? `Starting at ${formatRequestMoney(pricingHint.startingAtMinor, pricingHint.currency)}` : `Typical range ${formatRequestMoney(pricingHint.minimumMinor, pricingHint.currency)} to ${formatRequestMoney(pricingHint.maximumMinor, pricingHint.currency)}`}</strong><p>{pricingHint.disclaimer}</p></> : <><strong>Final quote after review</strong><p>A reliable price hint is not available for this request. Submitting does not authorize work or create a charge. Ledge Top will review the scope and send you an estimate.</p></>}</aside></section>}
     {step === "review" && <section className="portal-review-attachments" aria-labelledby="review-attachments-title"><header><h3 id="review-attachments-title">Supporting files</h3><button type="button" className="button-ghost button-small" onClick={() => goTo("contact")}>Edit files</button></header>{attachments.some(item => item.status === "rejected") && <p className="portal-attachment-recovery" role="alert">A security scan rejected one or more files. Return to Edit files, remove each rejected file, and upload a safe replacement before submitting.</p>}{attachments.some(item => item.status === "expired") && <p className="portal-attachment-recovery" role="alert">One or more uploads expired before acceptance. Return to Edit files, remove each expired file, and upload it again before submitting.</p>}{attachments.length ? <ul>{attachments.filter(item => item.status !== "aborted").map(item => <li key={item.key}><div><strong>{item.name}</strong><span>{formatBytes(item.size)}</span></div><span className={`portal-attachment-status ${item.status}`}>{attachmentStatusLabel(item.status)}</span></li>)}</ul> : <p>No supporting files were added.</p>}</section>}
     {message && <p className="portal-message error" role="alert">{message}</p>}
     <div className="portal-form-actions portal-wizard-actions">{onCancel && <button type="button" className="button-ghost" onClick={onCancel}>Cancel</button>}{step !== "services" && <button type="button" className="button-ghost" onClick={() => goTo(REQUEST_STEPS[REQUEST_STEPS.indexOf(step) - 1]!)}>Back</button>}{step === "review" ? <button key="submit-request" type="submit" className="button-orange" disabled={submitting || saveState === "conflict" || !geometryComplete || attachments.some(item => ["queued", "uploading", "quarantined", "scanning", "rejected", "expired", "error"].includes(item.status))}>{submitting ? "Submitting..." : "Submit request"}</button> : <button key="continue-request" type="button" className="button-orange" onClick={() => void next()}>Continue</button>}</div>
@@ -1817,7 +1819,7 @@ function LegacyServiceRequestForm({
             {projectId
               ? `Existing project: ${eligibleProjects.find((project) => project.id === projectId)?.projectName || "authorized project"}. Ledge Top will triage this request in that project context.`
               : "New or one-off service. Ledge Top will review and triage this request before any project setup."}{" "}
-            This screen does not create or change a Project Alpha project.
+            Submitting doesn't start any work or create a project.
           </p>
           <label>
             Service request title
@@ -1949,15 +1951,21 @@ function LegacyServiceRequestForm({
   );
 }
 
-function ProjectViewerModels({ projectId, initialDisplayUnits, loadModels = loadPortalViewerModels,
+function ProjectViewerModels({ projectId, initialDisplayUnits, loadModels = loadPortalViewerModels, sessionScope = "legacy",
+  issueSession = (model, key, units) => createPortalViewerSession(projectId, model.associationId, key, units),
   shellPath = model => clientViewerShellPath({ projectId, associationId: model.associationId, modelId: model.modelId }), persistUnits = updatePortalViewerUnits }: { projectId: string; initialDisplayUnits: "imperial" | "metric";
     loadModels?: (projectId:string)=>Promise<PortalViewerModel[]>;
+    sessionScope?: string;
+    issueSession?: (model: PortalViewerModel, idempotencyKey: string, units: "imperial" | "metric") => Promise<import("./portal-api").PortalViewerSession>;
     shellPath?: (model:PortalViewerModel)=>string;
     persistUnits?: ((units:"imperial"|"metric")=>Promise<unknown>)|null }) {
   const [models, setModels] = useState<PortalViewerModel[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [displayUnits, setDisplayUnits] = useState<"imperial" | "metric">(initialDisplayUnits || readClientViewerUnits());
+  const displayUnitsRef = useRef(displayUnits);
+  displayUnitsRef.current = displayUnits;
+  const sessionIssuers = useRef(new Map<string, () => Promise<import("./portal-api").PortalViewerSession>>());
 
   useEffect(() => {
     let active = true;
@@ -1968,20 +1976,34 @@ function ProjectViewerModels({ projectId, initialDisplayUnits, loadModels = load
     return () => { active = false; };
   }, [projectId]);
 
-  const open = async (model: PortalViewerModel) => {
+  const [launchMessage, setLaunchMessage] = useState("");
+  const open = (model: PortalViewerModel) => {
+    if (busy) return;
     setBusy(true); setError("");
-    try {
-      // The openerless shell cannot read React state from this tab. Persist only
-      // this non-secret preference; authorization remains in same-origin cookies.
-      writeClientViewerUnits(displayUnits);
-      openViewerShell(shellPath(model));
-    } catch (caught) { setError((caught as Error).message); }
-    finally { setBusy(false); }
+    setLaunchMessage("Opening secure 3D Viewer…");
+    writeClientViewerUnits(displayUnits);
+    const issuerKey = `${projectId}:${sessionScope}:${model.associationId}:${model.modelId}`;
+    let issuer = sessionIssuers.current.get(issuerKey);
+    if (!issuer) {
+      issuer = createViewerSessionIssuer(key => issueSession(model, key, displayUnitsRef.current), model.modelId);
+      sessionIssuers.current.set(issuerKey, issuer);
+    }
+    // This call reserves the top-level window synchronously before session issuance awaits.
+    void openClientViewerWindowWithIssuer({
+      title: model.title,
+      issueSession: issuer,
+      onStatus: (_status, text) => setLaunchMessage(text),
+    }).then(result => setLaunchMessage(result.openedIn === "new-tab"
+      ? "Viewer opened in a new tab. Keep this portal tab open to renew the session."
+      : "The popup was blocked; Viewer opened here without automatic renewal. Reopen it when the session expires."))
+      .catch(caught => setLaunchMessage((caught as Error).message))
+      .finally(() => setBusy(false));
   };
 
   if (!models) return <Card title="3D models"><Loading /></Card>;
   return <Card title="3D models">
     {error && <div className="notice error" role="alert">{error}</div>}
+    {launchMessage && <p role="status" aria-live="polite">{launchMessage}</p>}
     <label className="portal-viewer-units">Measurement units<select value={displayUnits} onChange={event => {
       const next = event.target.value as "imperial" | "metric";
       setDisplayUnits(next); writeClientViewerUnits(next);
@@ -1992,7 +2014,7 @@ function ProjectViewerModels({ projectId, initialDisplayUnits, loadModels = load
         <div><span>Interactive model</span><h3>{model.title}</h3><p>{model.provider} · secure Viewer session</p></div>
         <div className="portal-form-actions"><button type="button" className="button-orange" disabled={busy} onClick={() => void open(model)}>
           {busy ? "Opening…" : "Open 3D model"}
-        </button></div>
+        </button><a className="button-ghost" href={shellPath(model)}>Open Viewer launch page</a></div>
         {model.canShare && <PortalViewerShares projectId={projectId} model={model} displayUnits={displayUnits} />}
       </article>)}</div>}
   </Card>;
@@ -2724,7 +2746,7 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
     {ready && canManageMembers && !uncertain && <div className="portal-team-lists">
       <section><h3>People</h3>{members.length === 0 && <p className="portal-copy">No team members are available.</p>}{members.map(member => {
         const sourceManaged = member.source === "project_alpha";
-        return <div className="portal-team-row" key={member.identityId}><span><strong>{member.email ?? "Verified portal user"}</strong><small>{member.manager ? "Administrator" : "Member"} · {member.status}</small><small>{sourceManaged ? "Source-managed member" : "Locally invited collaborator"}</small>{sourceManaged&&<small>Access is managed in this Project Alpha source and cannot be changed here.</small>}</span><div className="actions">{peerAdminManagement&&!sourceManaged&&member.status==="active"&&member.canChangeManager===true&&<button className="button-ghost button-small" disabled={managerActionDisabled||reviewed!==null} onClick={()=>{setReviewed(null);setReviewedManager({member,manager:!member.manager});setMessage("");setError("");}}>{member.manager?"Remove administrator":"Make administrator"}</button>}{!sourceManaged && member.status === "active" && <button className="button-ghost button-small" disabled={busy || uncertain || historyLocked || addressBookLocked || !ready || reviewedManager !== null} onClick={() => void removeAccess("member", member.identityId)}>Suspend</button>}</div></div>;
+        return <div className="portal-team-row" key={member.identityId}><span><strong>{member.email ?? "Verified portal user"}</strong><small>{member.manager ? "Administrator" : "Member"} · {member.status}</small><small>{sourceManaged ? "Source-managed member" : "Locally invited collaborator"}</small>{sourceManaged&&<small>Ledge Top manages this person's access; it can't be changed here.</small>}</span><div className="actions">{peerAdminManagement&&!sourceManaged&&member.status==="active"&&member.canChangeManager===true&&<button className="button-ghost button-small" disabled={managerActionDisabled||reviewed!==null} onClick={()=>{setReviewed(null);setReviewedManager({member,manager:!member.manager});setMessage("");setError("");}}>{member.manager?"Remove administrator":"Make administrator"}</button>}{!sourceManaged && member.status === "active" && <button className="button-ghost button-small" disabled={busy || uncertain || historyLocked || addressBookLocked || !ready || reviewedManager !== null} onClick={() => void removeAccess("member", member.identityId)}>Suspend</button>}</div></div>;
       })}</section>
       <section><h3>Invitations</h3>{ready && invitations.length === 0 ? <p className="portal-copy">No invitations yet.</p> : invitations.map(invitation => {
         const scopedEntry = invitation.scope.publicId ? hierarchy.find(entry => entry.type === invitation.scope.type && entry.publicId === invitation.scope.publicId) : null;
@@ -3039,13 +3061,13 @@ export function ClientPortalApp({
     }} />;
     return (
       <PortalBoundary>
-        <Card>
-          <EmptyState title={gate.title} detail={gate.detail} />
+        {/* The same left-aligned card as the startup and sign-in recovery screens, so the text sits over its actions. */}
+        <section className="portal-card portal-gate-card"><h1>{gate.title}</h1><p role="alert">{gate.detail}</p>
           <SignInRecovery returnTo="/portal" lead={gate.lead ?? "retry"} onRetry={() => {
             setGate({ status: "loading" });
             setBootstrapRevision(value => value + 1);
           }} />
-        </Card>
+        </section>
       </PortalBoundary>
     );
   }
@@ -3111,7 +3133,7 @@ export function ClientPortalApp({
       response === "accept" &&
       !(await confirmInApp(
         "Accept operational estimate?",
-        "Accept this non-binding Ledge Top operational estimate? A separate Project Alpha quote will still be required before financial approval.",
+        "Accept this non-binding Ledge Top operational estimate? A separate formal quote will still be required before financial approval.",
         "Accept estimate",
       ))
     )
@@ -3245,6 +3267,8 @@ export function ClientPortalApp({
       renderRequests={renderRequestSurface}
       renderModels={id => <ProjectViewerModels projectId={id} initialDisplayUnits={readClientViewerUnits()}
         loadModels={project => loadNativeViewerModels(native,project)}
+        sessionScope={native.contextVersion}
+        issueSession={(model, key, units) => createNativeViewerSession(native, id, model.associationId, key, units)}
         shellPath={model=>nativeClientViewerShellPath({workspaceId:native.workspace.id,projectId:id,associationId:model.associationId,modelId:model.modelId})}
         persistUnits={null} />}
       renderDashboardSupplement={() => <><SharedViewerWork workspaces={workspaces.length ? workspaces : [native.workspace]} operationsHomeWorkspaceIds={operationsViewerWorkspaceIds} />{operationsHomeSummary}</>}
@@ -3590,12 +3614,6 @@ export function ClientPortalApp({
                 ? "Your account uses a verified identity. Contact Ledge Top to change your account details."
                 : "Your account uses a verified identity. Contact Ledge Top to add a colleague, update access, or change your account details."}
             </p>
-            <a
-              className="button-ghost button-small portal-contact-action"
-              href="mailto:info@ledgetopdroneservices.com"
-            >
-              Contact Ledge Top
-            </a>
           </Card>
           {capabilities.workspaceMembershipManagement && <Card title="Team access" className="portal-team-card"><WorkspaceTeamPanel key={selectedWorkspaceId ?? "legacy"} initialWorkspaceId={selectedWorkspaceId} invitationEmailDelivery={capabilities.invitationEmailDelivery} hierarchyScopedInvitations={capabilities.hierarchyScopedInvitations} /></Card>}
         </div>
@@ -3613,7 +3631,8 @@ export function ClientPortalApp({
               href={unifiedMode ? clientPortalPath(item.page) : withPortalWorkspace(clientPortalPath(item.page))}
               aria-current={
                 page === item.page ||
-                (item.page === "projects" && page === "project") ||
+                // A model shared on its own isn't inside a project the client can browse.
+                (item.page === "projects" && page === "project" && viewerRoute?.mode !== "direct") ||
                 (item.page === "requests" && page === "request-new")
                   ? "page"
                   : undefined
@@ -3641,7 +3660,7 @@ export function ClientPortalApp({
         <div ref={mobileNavPanel} id="portal-mobile-navigation" className="portal-mobile-nav" role="dialog" aria-modal="true" aria-label="Navigation">
           <header><strong>Navigation</strong><button type="button" aria-label="Close navigation" onClick={() => { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); }}>Close</button></header>
           <nav aria-label="Mobile client portal navigation">
-            {[...navigation.filter(item => unifiedMode || (item.page !== "feedback" || capabilities.feedback) && (item.page !== "requests" || capabilities.requestV2)), { page: "account" as const, label: "Account" }].map((item) => <a key={item.page} href={unifiedMode ? clientPortalPath(item.page) : withPortalWorkspace(clientPortalPath(item.page))} aria-current={page === item.page || (item.page === "projects" && page === "project") || (item.page === "requests" && page === "request-new") ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(item.page); }}>{item.label}</a>)}
+            {[...navigation.filter(item => unifiedMode || (item.page !== "feedback" || capabilities.feedback) && (item.page !== "requests" || capabilities.requestV2)), { page: "account" as const, label: "Account" }].map((item) => <a key={item.page} href={unifiedMode ? clientPortalPath(item.page) : withPortalWorkspace(clientPortalPath(item.page))} aria-current={page === item.page || (item.page === "projects" && page === "project" && viewerRoute?.mode !== "direct") || (item.page === "requests" && page === "request-new") ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(item.page); }}>{item.label}</a>)}
           </nav>
         </div>
       </div>}
