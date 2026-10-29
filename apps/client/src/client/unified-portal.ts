@@ -97,6 +97,11 @@ export async function loadUnifiedAccount(
   const workspaceId = account.workspace.id;
   try {
     if (!unifiedAccountSupported(account.workspace)) throw Object.assign(new Error("This client account is not available here"), { status: 403 });
+    /** A history answer without a request list can't prove the history is empty, so it fails like any other read. */
+    const history = (value: { requests?: unknown }) => {
+      if (!Array.isArray(value.requests)) throw new Error("Your requests couldn’t be loaded.");
+      return value.requests as PortalServiceRequest[];
+    };
     if (account.workspace.resourceMode === "native") {
       const context = await loadNativePortalContext(account.workspace, request, signal);
       const canRequest = context.capabilities.requestV2 === true;
@@ -106,7 +111,7 @@ export async function loadUnifiedAccount(
       ]);
       const unifiedProjects = projectsFrom(account, projects);
       return { status: "ready", account, projects: unifiedProjects, canRequest, historyLoaded: canRequest,
-        requests: requestsFrom(account, Array.isArray(requests.requests) ? requests.requests : [], new Map(projects.map(item => [item.id, item.projectName]))) };
+        requests: requestsFrom(account, canRequest ? history(requests) : [], new Map(projects.map(item => [item.id, item.projectName]))) };
     }
     const [session, projects, requests] = await Promise.all([
       request<{ capabilities?: { requestV2?: boolean } }>("/api/client/session", { signal, workspaceId }),
@@ -116,7 +121,7 @@ export async function loadUnifiedAccount(
     const projectList = Array.isArray(projects.projects) ? projects.projects : [];
     return { status: "ready", account, projects: projectsFrom(account, projectList), historyLoaded: true,
       canRequest: session.capabilities?.requestV2 === true && projectList.some(project => project.canRequestService),
-      requests: requestsFrom(account, Array.isArray(requests.requests) ? requests.requests : [], new Map(projectList.map(item => [item.id, item.projectName]))) };
+      requests: requestsFrom(account, history(requests), new Map(projectList.map(item => [item.id, item.projectName]))) };
   } catch (caught) {
     if (signal.aborted) throw caught;
     return { status: "error", account, message: (caught as Error).message || "This client account could not be loaded." };

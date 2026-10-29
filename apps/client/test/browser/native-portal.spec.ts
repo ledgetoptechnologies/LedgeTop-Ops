@@ -1416,3 +1416,19 @@ test("while accounts are still loading the requests page shows a disabled Checki
   await expect(page.getByRole("heading", {name: "New requests aren’t available online yet"})).toBeVisible();
   await expect(page.getByRole("button", {name: "Checking…"})).toHaveCount(0);
 });
+
+for (const [label, body] of [["no request list", {}], ["a request list that isn't a list", {requests: "none"}]] as const)
+  test(`a successful history answer with ${label} is a load failure, not "No requests yet"`, async ({page}) => {
+    await mock(page, (route, call) => {
+      if (/\/api\/client\/v2\/workspaces\/workspace-[bc]\/context$/.test(call.path))
+        return route.fulfill({json: requestContext(call.path.includes("workspace-c") ? "workspace-c" : "workspace-b")});
+      if (call.path === "/api/client/service-requests" && call.workspace === "workspace-c") return route.fulfill({json: body});
+      return undefined;
+    });
+    await page.goto("/portal/requests");
+    const problems = page.locator(".unified-portal-problems");
+    await expect(problems).toContainText("Your requests couldn’t be loaded.");
+    await expect(page.getByText("No requests yet")).toHaveCount(0);
+    await expect(page.getByText("Request history couldn’t be loaded")).toBeVisible();
+    await expect(problems.getByRole("button", {name: "Try again"})).toBeVisible();
+  });

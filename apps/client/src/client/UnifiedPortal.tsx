@@ -184,7 +184,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     </section>
     {notice && <p className="portal-success-notice" role="status">{notice}</p>}
     {requestAvailability === "unavailable" && <Card className="unified-portal-request-unavailable" title="New requests aren’t available online yet">
-      <p>Online service requests aren’t turned on for your account yet. To ask for new work, contact your Ledge Top contact.</p>
+      <p>New requests can’t be started online for your account right now. To ask for new work, contact your Ledge Top contact.</p>
       <button type="button" className="portal-text-action" onClick={() => navigate("account")}>Go to your account</button>
     </Card>}
     {requestAvailability === "unchecked" && <Card className="unified-portal-request-unavailable" title="We couldn’t check new requests">
@@ -195,7 +195,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     <Card title="Request history">{!loading && requests.length === 0
       ? historyComplete ? <EmptyState title="No requests yet" detail="Requests you submit will appear here." />
         : failed.length > 0 ? <EmptyState title="Request history couldn’t be loaded" detail="Some of your work didn’t load, so requests may be missing. Try again above." />
-        : <EmptyState title="Request history isn’t shown here yet" detail="Online requests aren’t turned on for your account yet, so past requests aren’t listed here." />
+        : <EmptyState title="Request history isn’t shown here yet" detail="Past requests for your account aren’t listed here yet." />
       : <>{requestRows(requests)}{!loading && !historyComplete && <p className="unified-portal-request-note">{failed.length > 0
         ? "Some request history couldn’t be loaded, so this list may be incomplete." : "Requests for some of your work aren’t listed here yet."}</p>}</>}</Card>
   </>;
