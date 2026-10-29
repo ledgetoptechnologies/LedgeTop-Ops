@@ -4,7 +4,7 @@
 // in an error. All routes are constructed locally from validated identifiers.
 const { createHash } = require('node:crypto');
 const p = require('./referenceProtocol');
-const {validateReferenceOptions}=require('./referenceOptions');
+const {validateReferenceOptions,decodeOptionsWire}=require('./referenceOptions');
 const { createEndpointCaFetch } = require('./referenceCaTransport');
 class ReferenceProviderError extends Error {
   constructor(code) { super(code); this.name = 'ReferenceProviderError'; this.code = code; }
@@ -104,7 +104,7 @@ class ReferenceProvider {
   async #json(route, options) {
     const transport = await this.#request(route,options), chunks = [];
     for await (const chunk of this.#chunks(transport,p.LIMITS.metadataBytes)) chunks.push(chunk);
-    let value; try { value = JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks))); } catch { fail(transport.method === 'POST' ? 'UNCERTAIN' : 'INVALID_RESPONSE'); }
+    let value; try { const bytes=Buffer.concat(chunks); value = ['/options','/capabilities'].includes(route) ? decodeOptionsWire(bytes) : JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes)); } catch { fail(transport.method === 'POST' ? 'UNCERTAIN' : 'INVALID_RESPONSE'); }
     bounded(value);const reflectsToken=v=>typeof v==='string'?v.includes(this.#token):Array.isArray(v)?v.some(reflectsToken):Boolean(v&&typeof v==='object'&&Object.entries(v).some(([k,x])=>k.includes(this.#token)||reflectsToken(x)));if(reflectsToken(value))fail('INVALID_RESPONSE');return value;
   }
   #job(job, expected = {}) {

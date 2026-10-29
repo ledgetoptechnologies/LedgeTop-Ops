@@ -9,7 +9,9 @@ test('unsafe paths cannot become broker mappings',()=>{const x=input();x.dataset
 
 test('ODM options use upstream scalar and path-free grammar',()=>{for(const value of [{nested:1},['x'],'https://outside.test','../file',Infinity]){const x=input();x.odmOptions={dsm:value};assert.throws(()=>prepare(x))}});
 
-test('catalog definition tampering and unsupported float fail closed',()=>{for(const options of [[{name:'dsm',type:'bool',value:true}],[{name:'dsm',type:'float',value:1.5}]]){const x=input();x.optionsCatalog={...catalog,options};assert.throws(()=>prepare(x))}});
+test('catalog accepts finite float definitions and rejects duplicate option names',()=>{const x=input();x.optionsCatalog={...catalog,options:[{name:'dsm',type:'float',value:1.5}]};assert.doesNotThrow(()=>prepare(x));x.optionsCatalog.options.push({name:'dsm',type:'bool'});assert.throws(()=>prepare(x))});
 
 test('cross-platform unsafe paths fail closed',()=>{for(const value of ['C:/file.jpg','folder/\u0000a.jpg','folder/a\\b.jpg']){const x=input();x.dataset.files[0].relativePath=value;assert.throws(()=>prepare(x))}});
-test('negative catalog numeric values fail closed until shared canonicalization exists',()=>{const x=input();x.optionsCatalog={...catalog,options:[{name:'dsm',type:'int',value:-1}]};assert.throws(()=>prepare(x))});
+test('negative catalog numeric values are accepted as server-owned metadata',()=>{const x=input();x.optionsCatalog={...catalog,options:[{name:'dsm',type:'int',value:-1}]};assert.doesNotThrow(()=>prepare(x))});
+
+test('nonfinite catalog metadata cannot enter the planner',()=>{const x=input();x.optionsCatalog={...catalog,options:[{name:'dsm',type:'float',value:Infinity}]};assert.throws(()=>prepare(x))});
