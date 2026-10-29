@@ -4,6 +4,7 @@
 // it until the archive root authority and exclusive-writer fence are supplied.
 const crypto=require('node:crypto');
 const {parseRawGcpSource}=require('./gcpRawSource');
+const {assertRawJournalCapacity,requireRawJournalPolicy}=require('./gcpRawCapacity');
 
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const error=(message,code='invalid_gcp_input')=>Object.assign(new Error(message),{code});
@@ -19,7 +20,11 @@ function fullTransaction(db,fn) {
   } finally {db.exec(`PRAGMA synchronous=${previous}`);}
 }
 
-function prepareGcpRawJournal(db,{datasetId,encoded,format,declarations=null,confirmation,displayName,fileName,actorId,requestKey}) {
+// The third argument is server-owned configuration, not part of an import
+// request. Callers must independently authorize every invocation, including
+// idempotent replay. Journal accounting does not attest physical free space.
+function prepareGcpRawJournal(db,{datasetId,encoded,format,declarations=null,confirmation,displayName,fileName,actorId,requestKey},{capacityPolicy}={}) {
+  requireRawJournalPolicy(capacityPolicy);
   if(typeof datasetId!=='string' || !uuid.test(datasetId) || datasetId!==datasetId.toLowerCase() || !['generic-csv-v1','emlid-all-columns-v1'].includes(format) ||
     typeof displayName!=='string' || !displayName.trim() || displayName.trim().length>160 ||
     typeof fileName!=='string' || !fileName.trim() || fileName.length>240 || /[\\/\x00-\x1f\x7f]/.test(fileName) ||
@@ -28,14 +33,17 @@ function prepareGcpRawJournal(db,{datasetId,encoded,format,declarations=null,con
   if(confirmation!==raw.confirmationToken)throw error('GCP source preview no longer matches','gcp_preview_confirmation_required');
   const declarationsJson=JSON.stringify(declarations), id=crypto.randomUUID(), name=fileName.trim(), label=displayName.trim();
   return fullTransaction(db,()=>{
+    // Replays must not report success while lifecycle state is stale or a
+    // trash/restore/purge intent is active or requires recovery.
+    const dataset=db.prepare('SELECT status FROM datasets WHERE id=?').get(datasetId);
+    const pending=db.prepare("SELECT 1 FROM storage_mutations WHERE entity_type='dataset' AND entity_id=? AND status IN ('intent','fs_applied','failed') LIMIT 1").get(datasetId);
+    if(!dataset || dataset.status!=='finalized' || pending)throw error('dataset is not available for GCP import','dataset_not_available');
     const existing=db.prepare('SELECT * FROM viewer_gcp_raw_sources WHERE created_by=? AND request_key=?').get(actorId,requestKey);
     if(existing){
       if(existing.dataset_id!==datasetId || existing.source_sha256!==raw.sha256 || !Buffer.from(existing.source_bytes).equals(raw.bytes) || existing.source_filename!==name || existing.display_name!==label || existing.source_format!==format || existing.declarations_json!==declarationsJson || existing.confirmation_token!==confirmation)throw error('retained GCP source conflicts with existing import','gcp_source_conflict');
       return {id:existing.id,status:existing.status,replayed:true};
     }
-    const dataset=db.prepare('SELECT status FROM datasets WHERE id=?').get(datasetId);
-    const pending=db.prepare("SELECT 1 FROM storage_mutations WHERE entity_type='dataset' AND entity_id=? AND status IN ('intent','fs_applied','failed') LIMIT 1").get(datasetId);
-    if(!dataset || dataset.status!=='finalized' || pending)throw error('dataset is not available for GCP import','dataset_not_available');
+    assertRawJournalCapacity(db,capacityPolicy,raw.bytes.length);
     const archiveRelativePath=`.gcp-retained/${datasetId.toLowerCase()}/${raw.sha256}.csv`;
     db.prepare(`INSERT INTO viewer_gcp_raw_sources(id,dataset_id,source_sha256,source_bytes,source_filename,source_format,display_name,declarations_json,confirmation_token,created_by,request_key,archive_relative_path,status,created_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)`).run(id,datasetId,raw.sha256,raw.bytes,name,format,label,declarationsJson,confirmation,actorId,requestKey,archiveRelativePath,new Date().toISOString());

@@ -31,8 +31,11 @@ Before integration or activation all of the following remain open:
   import from bypassing byte retention. Support the existing indexed-file
   discovery and explicitly label historical text-only records as unverified.
 - Specify capacity and backpressure for permanent pending BLOB rows without
-  silently dropping user files. Reconcile database and archive quotas with
-  operational recovery and every purge/cleanup path.
+  silently dropping user files. The disabled journal now checks an explicit
+  server-owned byte and entry policy inside its write transaction; this is
+  logical accounting only. Reconcile physical database/WAL and archive quotas,
+  trusted policy configuration, current authorization on every replay, and
+  operational recovery and every purge/cleanup path before activation.
 - Validate on actual Linux with the target filesystem: normal, replay, symlink,
   concurrent writer, interrupted creation, process death, partial file, full
   disk, I/O errors, and directory/file fsync behavior. Unit tests on Windows
