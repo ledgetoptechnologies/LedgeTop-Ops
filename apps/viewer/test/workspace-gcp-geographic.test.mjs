@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {runInNewContext} from 'node:vm';
 import {mountGcpGeographicMap,AERIAL_TILES,mapPage,MAP_PAGE_SIZE} from '../workspace-gcp-geographic.mjs';
 
 function leaflet() {
@@ -39,4 +41,13 @@ test('large loaded datasets stay reachable through bounded pages',()=>{
 
 test('preserves the supplied map view across marker page renders',()=>{
  const {L,state}=leaflet();const view={center:[12,34],zoom:13};const m=mountGcpGeographicMap({L,element:{},point:{id:'p',latitude:0,longitude:0},radiusM:15.24,view});assert.deepEqual(state.view,view);assert.deepEqual(m.getView(),view);assert.equal(state.fit,undefined);m.close();
+});
+
+test('changing a point clears saved view and photo page only after the unsaved guard accepts',async()=>{
+ const source=await readFile(new URL('../workspace-projects.js',import.meta.url),'utf8');
+ const start=source.indexOf('async function changeGcpPoint('),end=source.indexOf('\n',start);assert.ok(start>=0&&end>start);
+ const view={center:[1,2],zoom:19},workspace={pointId:'old',mapView:view,mapImagePage:5};let allowed=false,refreshes=0;
+ const change=runInNewContext('('+source.slice(start,end)+')',{gcpWorkspace:()=>workspace,allowGcpSelectionChange:async()=>allowed,releaseGcpImage:()=>{},refreshGcpWorkspace:async()=>{refreshes++},toast:()=>{}});
+ await change('task','new');assert.equal(workspace.pointId,'old');assert.equal(workspace.mapView,view);assert.equal(workspace.mapImagePage,5);assert.equal(refreshes,0);
+ allowed=true;await change('task','new');assert.equal(workspace.pointId,'new');assert.equal(workspace.mapView,null);assert.equal(workspace.mapImagePage,0);assert.equal(refreshes,1);
 });
