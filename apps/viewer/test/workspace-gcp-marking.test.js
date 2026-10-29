@@ -12,11 +12,11 @@ const css = fs.readFileSync(path.join(root, 'workspace-management.css'), 'utf8')
 test('task GCP workspace selects authoritative sets and points before bounded image ranking', () => {
   for (const value of [
     'gcp-set-select', 'gcp-point-select', 'Control-point set', 'Control point',
-    'Auto radius', 'Fixed radius', 'Nearest images', 'visibility not confirmed',
+    'Search radius (feet)', 'visibility not confirmed', 'gcp-map-camera',
   ]) assert.ok(source.includes(value), value);
   assert.match(source, /\/api\/v1\/gcp-sets\/\$\{encodeURIComponent\(workspace\.setId\)\}/);
   assert.match(source, /\/gcp-images\?\$\{query\}/);
-  assert.match(source, /limit:'24'/);
+  assert.match(source, /limit:'200'/);
   assert.match(source, /query\.set\('radiusM',String\(workspace\.radiusM\)\)/);
   assert.match(source, /\.slice\(0,100\)/);
 });
