@@ -34,11 +34,18 @@ test('a worker that replies and retains a handle is timed out and reaped before 
 });
 
 test('IPC send callback failure escalates and reaps its SIGTERM-resistant child', {skip:process.platform !== 'linux' && 'signal behavior requires Linux'}, async t=>{
- const root=fs.mkdtempSync(path.join(os.tmpdir(),'photo-ipc-failure-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'photo-ipc-failure-'));let spawned;
+ t.after(async()=>{
+  if(spawned&&spawned.exitCode===null&&spawned.signalCode===null){
+   const closed=new Promise(resolve=>spawned.once('close',resolve));spawned.kill('SIGKILL');let timer;
+   try{await Promise.race([closed,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Owned test worker did not close')),3000);})]);}finally{clearTimeout(timer);}
+  }
+  fs.rmSync(root,{recursive:true,force:true});
+ });
  const worker=path.join(root,'worker.js'),pidFile=path.join(root,'pid');
  fs.writeFileSync(worker,`process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000);`);
  const childProcess=require('node:child_process'),originalFork=childProcess.fork,modulePath=require.resolve('../server/taskPhotoInspectionSupervisor');
- const oldCache=require.cache[modulePath];delete require.cache[modulePath];let spawned;
+ const oldCache=require.cache[modulePath];delete require.cache[modulePath];
  childProcess.fork=(...args)=>{spawned=originalFork(...args);spawned.send=(_input,callback)=>{const until=Date.now()+3000;const poll=setInterval(()=>{if(fs.existsSync(pidFile)){clearInterval(poll);callback(Object.assign(new Error('simulated IPC error'),{code:'EPIPE'}));}else if(Date.now()>until){clearInterval(poll);callback(new Error('worker did not start'));}},10);};return spawned;};
  let isolated;try{isolated=require(modulePath);}finally{childProcess.fork=originalFork;if(oldCache)require.cache[modulePath]=oldCache;else delete require.cache[modulePath];}
  await assert.rejects(isolated.runImportInspection({}, {workerFile:worker,timeoutMs:4000}),{code:'import_inspection_failed'});
