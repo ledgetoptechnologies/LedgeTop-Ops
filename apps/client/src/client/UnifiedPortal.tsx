@@ -96,6 +96,13 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   // Going straight to one account's form needs every account answered: one still loading or failed may also take requests.
   const allAccountsReady = accounts.length > 0 && accounts.every(account => results.get(account.workspace.id)?.status === "ready");
   const onlyRequestAccount = allAccountsReady && requestAccounts.length === 1 ? requestAccounts[0]! : null;
+  // An account that can't take requests online doesn't load its request history either, so an empty list
+  // there means "not shown", never "no requests". The page says which, instead of dropping the button.
+  const historyHidden = ready.some(result => !result.historyLoaded);
+  // "No requests yet" only when every account answered and every account's history was actually read.
+  const historyComplete = !loading && failed.length === 0 && !historyHidden;
+  const requestAvailability: "available" | "checking" | "unchecked" | "unavailable" = requestAccounts.length > 0 ? "available"
+    : loading ? "checking" : failed.length > 0 ? "unchecked" : "unavailable";
 
   const startRequest = () => {
     setNotice(null);
@@ -172,12 +179,25 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   if (page === "requests") return <>
     <section className="portal-page-heading portal-page-heading-action">
       <div><span className="eyebrow">Requests</span><h1>Service requests</h1><p>Everything you’ve asked us for, and where it stands.</p></div>
-      {requestAccounts.length > 0 && <button type="button" className="button-orange" onClick={startRequest}>New request</button>}
+      {requestAvailability === "available" ? <button type="button" className="button-orange" onClick={startRequest}>New request</button>
+        : requestAvailability === "checking" && <button type="button" className="button-orange" disabled>Checking…</button>}
     </section>
     {notice && <p className="portal-success-notice" role="status">{notice}</p>}
+    {requestAvailability === "unavailable" && <Card className="unified-portal-request-unavailable" title="New requests aren’t available online yet">
+      <p>New requests can’t be started online for your account right now. To ask for new work, contact your Ledge Top contact.</p>
+      <button type="button" className="portal-text-action" onClick={() => navigate("account")}>Go to your account</button>
+    </Card>}
+    {requestAvailability === "unchecked" && <Card className="unified-portal-request-unavailable" title="We couldn’t check new requests">
+      <p>We couldn’t confirm whether new requests are available right now. Try again in a moment.</p>
+    </Card>}
     {requestChooser}{problems}{loadingNote}
     {requests.length > 0 && <RequestProgress requests={requests} />}
-    <Card title="Request history">{!loading && requests.length === 0 ? <EmptyState title="No requests yet" detail="Requests you submit will appear here." /> : requestRows(requests)}</Card>
+    <Card title="Request history">{!loading && requests.length === 0
+      ? historyComplete ? <EmptyState title="No requests yet" detail="Requests you submit will appear here." />
+        : failed.length > 0 ? <EmptyState title="Request history couldn’t be loaded" detail="Some of your work didn’t load, so requests may be missing. Try again above." />
+        : <EmptyState title="Request history isn’t shown here yet" detail="Past requests for your account aren’t listed here yet." />
+      : <>{requestRows(requests)}{!loading && !historyComplete && <p className="unified-portal-request-note">{failed.length > 0
+        ? "Some request history couldn’t be loaded, so this list may be incomplete." : "Requests for some of your work aren’t listed here yet."}</p>}</>}</Card>
   </>;
 
   const openRequests = requests.filter(item => !CLOSED_REQUEST.has(item.request.status));

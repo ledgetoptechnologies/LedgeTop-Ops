@@ -41,6 +41,14 @@ const search = {
     partialReason: null, limits: [] as string[], asOf: null, rangeSelection: "28d" },
   receipt,
 };
+const adsPeriod = (days: number) => days === 7 ? { start: "2026-10-14", end: "2026-10-20", days: 7, timeZone: "America/Chicago" }
+  : days === 90 ? { start: "2026-07-23", end: "2026-10-20", days: 90, timeZone: "America/Chicago" } : { start: "2026-09-23", end: "2026-10-20", days: 28, timeZone: "America/Chicago" };
+const ads = (days = 28) => ({
+  schema: "ops.intel.owner-google-ads.v1", rangeSelection: `${days}d`, period: adsPeriod(days), currencyCode: "USD",
+  totals: { costMicros: "1234565000", impressions: "9100", clicks: "57", conversions: "4.5", state: "observed", reason: null },
+  freshness: { collectedAt: "2026-10-23T06:00:00Z", asOf: "2026-10-22T12:00:00Z", state: "observed" },
+  receipt,
+});
 const search7 = { ...search, range: { start: "2026-10-14", end: "2026-10-20" }, comparison: null, coverage: { ...search.coverage, rangeSelection: "7d" } };
 
 type Answer = { status?: number; json: unknown };
@@ -51,13 +59,14 @@ async function mockOps(page: Page, options: { permissions?: string[]; intel?: bo
     requests.push(request);
     if (path === "/api/session") return route.fulfill({ json: user(options.permissions ?? ["dashboard.view", "administration.view"], options.intel ?? true) });
     if (path === "/api/intel/businesses") return route.fulfill(options.list ?? { json: { businesses } });
-    const match = /^\/api\/intel\/([^/]+)\/(competitors|website|search-console)(\/commands)?$/.exec(path);
+    const match = /^\/api\/intel\/([^/]+)\/(competitors|website|search-console|google-ads)(\/commands)?$/.exec(path);
     if (match) {
       if (match[3]) return route.fulfill({ status: 202, json: { accepted: true } });
       const override = options.sections?.[`${match[1]}/${match[2]}`];
       if (override) return route.fulfill(override);
       const days = Number((url.searchParams.get("range") ?? "28d").slice(0, -1));
-      return route.fulfill({ json: match[2] === "competitors" ? sampleStaffTenant : match[2] === "website" ? website(days) : days === 7 ? search7 : search });
+      return route.fulfill({ json: match[2] === "competitors" ? sampleStaffTenant : match[2] === "website" ? website(days)
+        : match[2] === "google-ads" ? ads(days) : days === 7 ? search7 : search });
     }
     return route.fulfill({ status: 404, json: { error: "Not found" } });
   });
@@ -82,13 +91,15 @@ test("Intel opens from the Administration menu on an overview of both businesses
     await expect(card).toContainText(`${sampleStaffTenant.competitors.length} competitor`);
     await expect(card).toContainText("2 pages monitored · 1 change");
     await expect(card).toContainText("312 clicks · 18,400 impressions · Out of date");
-    for (const [label, view] of [["Competitor Intel", "competitors"], ["Site monitor", "website"], ["Search Console", "search"]] as const)
+    await expect(card).toContainText("$1,234.57 spent · 57 clicks");
+    for (const [label, view] of [["Competitor Intel", "competitors"], ["Site monitor", "website"], ["Search Console", "search"], ["Google Ads", "ads"]] as const)
       await expect(card.getByRole("link", { name: new RegExp(`^${label}`) })).toHaveAttribute("href", `/intel?business=${key}&view=${view}&range=28d`);
   }
   await expect(page.getByRole("group", { name: "Business" })).toHaveCount(0);
   expect(requests.filter(request => request.method() !== "GET")).toEqual([]);
   expect(intelPaths(requests).sort()).toEqual(["/api/intel/businesses",
-    ...["drone-services", "technologies"].flatMap(key => [`/api/intel/${key}/competitors`, `/api/intel/${key}/search-console?range=28d`, `/api/intel/${key}/website?range=28d`])].sort());
+    ...["drone-services", "technologies"].flatMap(key => [`/api/intel/${key}/competitors`, `/api/intel/${key}/search-console?range=28d`, `/api/intel/${key}/website?range=28d`,
+      `/api/intel/${key}/google-ads?range=28d`])].sort());
 
   await overviewCard(page, "Ledge Top Technologies").getByRole("link", { name: /^Search Console/ }).click();
   await expect(page).toHaveURL(/\/intel\?business=technologies&view=search&range=28d$/);
@@ -315,3 +326,81 @@ test("Intel fits a phone screen", async ({ page }) => {
   await expect(page.getByRole("table", { name: "Top searches" })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+test("Google Ads shows exactly what was reported for the chosen period, in the account's currency and time zone", async ({ page }) => {
+  const requests = await mockOps(page);
+  await page.goto("/intel?business=drone-services&view=ads&range=28d");
+  const totals = page.getByRole("list", { name: "Google Ads totals" });
+  await expect(totals).toContainText("Spend$1,234.57");
+  await expect(totals).toContainText("Impressions9,100");
+  await expect(totals).toContainText("Clicks57");
+  await expect(totals).toContainText("Conversions4.5");
+  await expect(page.getByText("Sep 23, 2026 – Oct 20, 2026 · Google Ads")).toBeVisible();
+  await expect(page.getByText("Days and amounts follow the account's time zone (America/Chicago) and currency (USD).")).toBeVisible();
+  // No made-up figures: nothing beyond the four reported totals.
+  await expect(totals.getByRole("listitem")).toHaveCount(4);
+  await page.getByLabel("Period").selectOption("7d");
+  await expect(page.getByText("Oct 14, 2026 – Oct 20, 2026 · Google Ads")).toBeVisible();
+  expect(intelPaths(requests).filter(path => path.includes("google-ads"))).toEqual(["/api/intel/drone-services/google-ads?range=28d", "/api/intel/drone-services/google-ads?range=7d"]);
+  expect(requests.filter(request => request.method() !== "GET")).toEqual([]);
+});
+
+for (const [state, reason, said] of [["unknown", "not_checked", "Not checked yet"], ["failed", "provider_error", "Google Ads did not respond"],
+  ["source_stale", "source_stale", "The source hasn't been refreshed recently"]] as const)
+  test(`Google Ads ${state} totals are never shown as zero and say why`, async ({ page }) => {
+    await mockOps(page, { sections: { "drone-services/google-ads": { json: { ...ads(), totals: { costMicros: null, impressions: null, clicks: null, conversions: null, state, reason },
+      freshness: { collectedAt: "2026-10-23T06:00:00Z", asOf: null, state } } } } });
+    await page.goto("/intel?business=drone-services&view=ads&range=28d");
+    const totals = page.getByRole("list", { name: "Google Ads totals" });
+    await expect(totals.getByText("Not available")).toHaveCount(4);
+    await expect(totals).not.toContainText("$0");
+    await expect(page.getByText(`Google Ads didn't report totals for this period: ${said}.`)).toBeVisible();
+  });
+
+test("Google Ads explains a missing account, a missing connection, no data yet and an unreported period", async ({ page }) => {
+  await mockOps(page, { sections: {
+    "drone-services/google-ads": { json: { ...ads(), period: null, currencyCode: null,
+      totals: { costMicros: null, impressions: null, clicks: null, conversions: null, state: "no_account", reason: "no_account" },
+      freshness: { collectedAt: "2026-10-23T06:00:00Z", asOf: null, state: "no_account" } } },
+    "technologies/google-ads": { status: 404, json: { error: "intel_google_ads_not_connected" } } } });
+  await page.goto("/intel?business=drone-services&view=ads&range=28d");
+  await expect(page.getByText("No Google Ads account is connected for Ledge Top Drone Services.")).toBeVisible();
+  await page.getByRole("group", { name: "Business" }).getByRole("button", { name: "Ledge Top Technologies" }).click();
+  await expect(page.getByText("Google Ads isn't connected for Ledge Top Technologies yet.")).toBeVisible();
+  for (const [code, text] of [["intel_google_ads_awaiting_first_data", "Waiting for Google Ads data"], ["intel_google_ads_range_unavailable", "No Google Ads data for this period"]] as const) {
+    await page.unrouteAll({ behavior: "ignoreErrors" });
+    await mockOps(page, { sections: { "drone-services/google-ads": { status: 404, json: { error: code } } } });
+    await page.goto("/intel?business=drone-services&view=ads&range=28d");
+    await expect(page.getByText(text)).toBeVisible();
+  }
+});
+
+for (const [label, json] of [
+  ["a different period", { ...ads(28), rangeSelection: "7d" }],
+  ["a period of the wrong length", { ...ads(28), period: { ...adsPeriod(28), start: "2026-09-24" } }],
+  ["figures that disagree with their state", { ...ads(), totals: { ...ads().totals, state: "unknown", reason: "not_checked" } }],
+  ["observed totals with a missing figure", { ...ads(), totals: { ...ads().totals, clicks: null } }],
+  ["a non-numeric amount", { ...ads(), totals: { ...ads().totals, costMicros: "12.5" } }],
+  ["spend above the feed's signed-int63 limit", { ...ads(), totals: { ...ads().totals, costMicros: "9223372036854775808" } }],
+  ["clicks above the feed's signed-int63 limit", { ...ads(), totals: { ...ads().totals, clicks: "9223372036854775808" } }],
+  ["an unknown schema", { ...ads(), schema: "ops.intel.owner-google-ads.v2" }],
+] as const)
+  test(`a Google Ads reply with ${label} shows an error, not numbers`, async ({ page }) => {
+    await mockOps(page, { sections: { "drone-services/google-ads": { json } } });
+    await page.goto("/intel?business=drone-services&view=ads&range=28d");
+    await expect(page.getByText("This view couldn't be loaded.")).toBeVisible();
+    await expect(page.getByRole("list", { name: "Google Ads totals" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
+  });
+
+for (const [currencyCode, spend] of [["JPY", "¥1"], ["USD", "$1.23"], ["KWD", "KWD 1.235"]] as const)
+  test(`Google Ads preserves conversion precision and rounds ${currencyCode} spend only once`, async ({ page }) => {
+    await mockOps(page, { sections: { "drone-services/google-ads": { json: {
+      ...ads(), currencyCode,
+      totals: { ...ads().totals, costMicros: "1234567", conversions: "900719925474099.123456" },
+    } } } });
+    await page.goto("/intel?business=drone-services&view=ads&range=28d");
+    const totals = page.getByRole("list", { name: "Google Ads totals" });
+    await expect(totals).toContainText(`Spend${spend}`);
+    await expect(totals).toContainText("Conversions900,719,925,474,099.123456");
+  });

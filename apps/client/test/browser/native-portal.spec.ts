@@ -1350,3 +1350,85 @@ test("native model routes retain client navigation and pin bootstrap to their ex
   expect(modelSessions.every(call => call.path.includes("/workspace-b/"))).toBe(true);
   await expect(page.locator("iframe")).toHaveCount(0);
 });
+
+test("the unified requests page explains when online requests aren't on, instead of hiding New request", async ({page}) => {
+  // The default contexts have requestV2 = false, so no account can take requests and none load request history.
+  await mock(page); await page.goto("/portal/requests");
+  await expect(page.getByRole("heading", {name: "Service requests"})).toBeVisible();
+  const unavailable = page.locator(".unified-portal-request-unavailable");
+  await expect(unavailable.getByRole("heading", {name: "New requests aren’t available online yet"})).toBeVisible();
+  await expect(unavailable).toContainText("contact your Ledge Top contact");
+  await expect(page.getByRole("button", {name: "New request"})).toHaveCount(0);
+  // History was never loaded, so the page doesn't claim there are no requests.
+  await expect(page.getByText("No requests yet")).toHaveCount(0);
+  await expect(page.getByText("Request history isn’t shown here yet")).toBeVisible();
+  await expect(page.locator(".client-portal-main a[href^=\"mailto:\"]")).toHaveCount(0);
+  await unavailable.getByRole("button", {name: "Go to your account"}).click();
+  await expect(page).toHaveURL(/\/portal\/account$/);
+});
+
+test("the unified requests page says it couldn't check when every account fails, rather than showing nothing", async ({page}) => {
+  await mock(page, (route, call) => /\/api\/client\/v2\/workspaces\/workspace-[bc]\/context$/.test(call.path)
+    ? route.fulfill({status: 503, json: {error: "Unavailable"}}) : undefined);
+  await page.goto("/portal/requests");
+  await expect(page.locator(".unified-portal-request-unavailable").getByRole("heading", {name: "We couldn’t check new requests"})).toBeVisible();
+  await expect(page.getByRole("heading", {name: "New requests aren’t available online yet"})).toHaveCount(0);
+  await expect(page.locator(".unified-portal-problems").getByRole("button", {name: "Try again"})).toBeVisible();
+  await expect(page.getByRole("button", {name: "New request"})).toHaveCount(0);
+  // Nothing was read, so the history never claims to be empty.
+  await expect(page.getByText("No requests yet")).toHaveCount(0);
+  await expect(page.getByText("Request history couldn’t be loaded")).toBeVisible();
+});
+
+test("with one account ready and another failed, an empty history is not reported as no requests", async ({page}) => {
+  const calls = await mock(page, (route, call) => call.path === "/api/client/v2/workspaces/workspace-c/context"
+    ? route.fulfill({status: 503, json: {error: "Unavailable"}})
+    : call.path === "/api/client/v2/workspaces/workspace-b/context" ? route.fulfill({json: requestContext("workspace-b")}) : undefined);
+  await page.goto("/portal/requests");
+  // The ready account takes requests, so New request is offered even though the other failed.
+  await expect(page.getByRole("button", {name: "New request"})).toBeEnabled();
+  await expect(page.locator(".unified-portal-problems")).toBeVisible();
+  await expect(page.getByText("No requests yet")).toHaveCount(0);
+  await expect(page.getByText("Request history couldn’t be loaded")).toBeVisible();
+  // Try again stays usable and checks the accounts again.
+  const before = calls.filter(call => call.path.endsWith("/workspace-c/context")).length;
+  await page.locator(".unified-portal-problems").getByRole("button", {name: "Try again"}).click();
+  await expect.poll(() => calls.filter(call => call.path.endsWith("/workspace-c/context")).length).toBeGreaterThan(before);
+});
+
+test("no requests yet only when every account's history loaded and is empty", async ({page}) => {
+  // The native accounts take requests; the primary account can't start one but still reads its history.
+  await mock(page, (route, call) => /\/api\/client\/v2\/workspaces\/workspace-[bc]\/context$/.test(call.path)
+    ? route.fulfill({json: requestContext(call.path.includes("workspace-c") ? "workspace-c" : "workspace-b")}) : undefined);
+  await page.goto("/portal/requests");
+  await expect(page.getByRole("button", {name: "New request"})).toBeEnabled();
+  await expect(page.getByText("No requests yet")).toBeVisible();
+  await expect(page.locator(".unified-portal-request-unavailable")).toHaveCount(0);
+});
+
+test("while accounts are still loading the requests page shows a disabled Checking button, not a missing one", async ({page}) => {
+  const held: Route[] = [];
+  await mock(page, (route, call) => /\/api\/client\/v2\/workspaces\/workspace-[bc]\/context$/.test(call.path) ? (held.push(route), Promise.resolve()) : undefined);
+  await page.goto("/portal/requests");
+  await expect(page.getByRole("button", {name: "Checking…"})).toBeDisabled();
+  await expect(page.locator(".unified-portal-request-unavailable")).toHaveCount(0);
+  for (const route of held.splice(0)) await route.fulfill({json: context(route.request().url().includes("workspace-c") ? "workspace-c" : "workspace-b")});
+  await expect(page.getByRole("heading", {name: "New requests aren’t available online yet"})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Checking…"})).toHaveCount(0);
+});
+
+for (const [label, body] of [["no request list", {}], ["a request list that isn't a list", {requests: "none"}]] as const)
+  test(`a successful history answer with ${label} is a load failure, not "No requests yet"`, async ({page}) => {
+    await mock(page, (route, call) => {
+      if (/\/api\/client\/v2\/workspaces\/workspace-[bc]\/context$/.test(call.path))
+        return route.fulfill({json: requestContext(call.path.includes("workspace-c") ? "workspace-c" : "workspace-b")});
+      if (call.path === "/api/client/service-requests" && call.workspace === "workspace-c") return route.fulfill({json: body});
+      return undefined;
+    });
+    await page.goto("/portal/requests");
+    const problems = page.locator(".unified-portal-problems");
+    await expect(problems).toContainText("Your requests couldn’t be loaded.");
+    await expect(page.getByText("No requests yet")).toHaveCount(0);
+    await expect(page.getByText("Request history couldn’t be loaded")).toBeVisible();
+    await expect(problems.getByRole("button", {name: "Try again"})).toBeVisible();
+  });
