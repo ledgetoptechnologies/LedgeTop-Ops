@@ -175,8 +175,13 @@ export async function verifyCloudflareAccessJwt(token, access, { now = Date.now(
   const parts = token.split('.');
   if (parts.length !== 3) fail('access_token_invalid');
   const header = decodeJwtPart(parts[0]), claims = decodeJwtPart(parts[1]);
-  if (!exactObject(header, ['alg', 'kid', 'typ']) || header.alg !== 'RS256' || typeof header.kid !== 'string'
-    || header.typ !== 'JWT' || !claims || typeof claims !== 'object' || Array.isArray(claims)) fail('access_token_invalid');
+  // RFC 7519 §5.1 makes `typ` optional. When supplied, keep this verifier's
+  // stricter accepted value and reject every other JOSE header parameter.
+  const headerKeys = header && typeof header === 'object' && Object.hasOwn(header, 'typ')
+    ? ['alg', 'kid', 'typ'] : ['alg', 'kid'];
+  if (!exactObject(header, headerKeys) || header.alg !== 'RS256' || typeof header.kid !== 'string'
+    || (Object.hasOwn(header, 'typ') && header.typ !== 'JWT')
+    || !claims || typeof claims !== 'object' || Array.isArray(claims)) fail('access_token_invalid');
   const audiences = typeof claims.aud === 'string' ? [claims.aud] : claims.aud;
   const seconds = Math.floor(now / 1000);
   if (claims.iss !== access.issuer || !Array.isArray(audiences) || audiences.length !== 1

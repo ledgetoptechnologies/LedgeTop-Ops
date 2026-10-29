@@ -38,11 +38,24 @@ function sourceEvidence(config, { cwd = REPOSITORY_ROOT, run = undefined,
     catch { stop('source_unavailable'); }
   };
   git(['cat-file','-e',`${source.commit}^{commit}`]);
-  const names = String(git(['ls-tree','-r','--name-only',source.commit,'--','apps/operations/migrations']))
+  const listedNames = String(git(['ls-tree','-r','--name-only',source.commit,'--','apps/operations/migrations']))
     .split(/\r?\n/u).filter(name => /^apps\/operations\/migrations\/\d{4}_.+\.sql$/u.test(name))
     .map(name => name.slice('apps/operations/migrations/'.length)).sort();
-  if (names.length !== 230 || names.some((name,index) => !name.startsWith(`${String(index+1).padStart(4,'0')}_`))
-    || sha(names.join('\n')) !== source.migrationNamesSha256) stop('migration_names_mismatch');
+  const seenNames = new Set(), nameByNumber = new Map();
+  for (const name of listedNames) {
+    const number = Number(name.slice(0,4));
+    if (seenNames.has(name) || number < 1 || nameByNumber.has(number)) stop('migration_names_mismatch');
+    seenNames.add(name);
+    nameByNumber.set(number,name);
+  }
+  const names = [];
+  for (let number = 1; number <= 230; number++) {
+    const name = nameByNumber.get(number);
+    if (!name) stop('migration_names_mismatch');
+    names.push(name);
+  }
+  if (!names.at(-1).startsWith('0230_') || sha(names.join('\n')) !== source.migrationNamesSha256)
+    stop('migration_names_mismatch');
   const modulePaths = ['scripts/native-staff-cutover-v1.mjs','scripts/native-staff-sync-preparation.mjs',
     'scripts/native-staff-cutover-access-group-observation.mjs','scripts/native-staff-bootstrap-d1.mjs'];
   const pinnedPaths = [...modulePaths, ...names.map(name => `apps/operations/migrations/${name}`)];
@@ -76,7 +89,7 @@ function sourceEvidence(config, { cwd = REPOSITORY_ROOT, run = undefined,
     migrationContentsSha256: contentHash, ...hashes });
 }
 
-/** Require a committed 0230 source tree, including all migration and runtime bytes. */
+/** Require the committed 0001–0230 source prefix, including its pinned migration and runtime bytes. */
 export function assertPinnedNativeStaffCutoverSource(config, options = {}) {
   sourceEvidence(config, options);
   return true;
