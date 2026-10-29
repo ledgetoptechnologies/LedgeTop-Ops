@@ -9,8 +9,8 @@ const { processingReadyEvent } = require('./processingReadyEvent');
 const { copyTaskPhotos } = require('./taskPhotoImports');
 const { discoverDatasetGcp } = require('./gcpDiscovery');
 
-async function reconcileCatalogSourceCleanups(processing,storage,limit=20){let cleaned=0;for(const item of processing.pendingCatalogSourceCleanups(limit)){try{const removed=await storage.removeAdoptedSourceIfMatches(item.rootKey,item.relativePath,{fingerprint:item.sourceFingerprint,byteSize:item.sourceByteSize,cleanupId:item.id,sourceDev:item.sourceDev,sourceIno:item.sourceIno,sourceCtimeNs:item.sourceCtimeNs,sourceMtimeNs:item.sourceMtimeNs});if(!removed)continue;processing.clearCatalogSourceCleanup(item.id);cleaned+=1;}catch(error){if(error?.restoredSourceIdentity)processing.refreshCatalogSourceCleanupIdentity(item.id,item,error.restoredSourceIdentity);/* durable journal retries during maintenance */}}return cleaned;}
-function reconcileCatalogAdoptionRecoveries(processing,storage,limit=20){let recovered=0;for(const item of processing.pendingCatalogAdoptionRecoveries(limit)){try{if(!item.datasetId||!processing.getDataset(item.datasetId,true))storage.reconcileAdoptionIntent(item.rootKey,item.relativePath,item.datasetRelative);processing.clearCatalogAdoptionIntent(item.id);recovered+=1;}catch{/* durable intent retries during maintenance */}}return recovered;}
+async function reconcileCatalogSourceCleanups(processing,storage,limit=20){if(!processing.referenceCatalogRecoveryAllowed())return 0;let cleaned=0;for(const item of processing.pendingCatalogSourceCleanups(limit)){try{if(!processing.referenceCatalogRecoveryAllowed())break;const removed=await storage.removeAdoptedSourceIfMatches(item.rootKey,item.relativePath,{fingerprint:item.sourceFingerprint,byteSize:item.sourceByteSize,cleanupId:item.id,sourceDev:item.sourceDev,sourceIno:item.sourceIno,sourceCtimeNs:item.sourceCtimeNs,sourceMtimeNs:item.sourceMtimeNs});if(!removed)continue;processing.clearCatalogSourceCleanup(item.id);cleaned+=1;}catch(error){if(error?.restoredSourceIdentity)processing.refreshCatalogSourceCleanupIdentity(item.id,item,error.restoredSourceIdentity);/* durable journal retries during maintenance */}}return cleaned;}
+function reconcileCatalogAdoptionRecoveries(processing,storage,limit=20){if(!processing.referenceCatalogRecoveryAllowed())return 0;let recovered=0;for(const item of processing.pendingCatalogAdoptionRecoveries(limit)){try{if(!processing.referenceCatalogRecoveryAllowed())break;if(!item.datasetId||!processing.getDataset(item.datasetId,true))storage.reconcileAdoptionIntent(item.rootKey,item.relativePath,item.datasetRelative);processing.clearCatalogAdoptionIntent(item.id);recovered+=1;}catch{/* durable intent retries during maintenance */}}return recovered;}
 
 function manifestHash(files) {
   const canonical = files.map(({ relativePath, byteSize, sha256 }) => ({ relativePath, byteSize, sha256 }));
@@ -105,6 +105,9 @@ async function previewImport(operation, { storage, config }, updateProgress, sig
 async function processOneDatasetOperation(deps, owner) {
   const operation = deps.processing.claimDatasetOperation(owner);
   if (!operation) return false;
+  // Hard-disabled reference admission makes an existing journal unsupported;
+  // this is an interim refusal, not a fence against old/external writers.
+  if(operation.operation_type==='catalog_map'&&!deps.processing.referenceCatalogRecoveryAllowed())return false;
   let progress = Number(operation.progress) || 0;
   let lostLease = false;
   const controller = new AbortController();
@@ -162,7 +165,7 @@ async function processOneDatasetOperation(deps, owner) {
     if(error?.code==='retained_import_busy'&&deps.processing.deferDatasetOperation(operation.id,owner,5_000))return true;
     if(operation.operation_type==='catalog_map'){
       const payload=JSON.parse(operation.payload_json||'{}');
-      if(payload.lodRecovery){try{deps.processing.rollbackLodRecoveryProvisional(operation.id,owner);cleanupLodRecoveryMaterialization(operation,deps);}catch{/* the operation remains failed and retryable with the same stable IDs */}}
+      if(payload.lodRecovery){try{if(deps.processing.rollbackLodRecoveryProvisional(operation.id,owner)===true)cleanupLodRecoveryMaterialization(operation,deps);}catch{/* the operation remains failed and retryable with the same stable IDs */}}
       else try{deps.processing.rollbackCatalogMapProvisional(operation.id,owner);}catch{/* the operation remains failed and retryable with the same stable IDs */}
     }
     deps.processing.failDatasetOperation(operation.id, owner, error.code || 'dataset_operation_failed', sanitizeLogMessage(error.message));
