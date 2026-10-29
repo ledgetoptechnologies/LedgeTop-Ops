@@ -2243,6 +2243,47 @@ const MIGRATIONS = [
       BEGIN SELECT RAISE(ABORT,'raw GCP source retained'); END;
   `},
 
+  // Isolated prototype only. Admission is unconditionally disabled. This is
+  // an indexed-data binding, not filesystem custody or a retention receipt.
+  {version:49,name:'viewer_source_binding_draft',sql:`
+    CREATE TABLE viewer_source_bindings (
+      id TEXT PRIMARY KEY NOT NULL,
+      attempt_id TEXT NOT NULL UNIQUE REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+      dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+      root_key TEXT NOT NULL, relative_path TEXT NOT NULL,
+      dataset_manifest_sha256 TEXT NOT NULL CHECK(length(dataset_manifest_sha256)=64 AND dataset_manifest_sha256 NOT GLOB '*[^0-9a-f]*'),
+      object_count INTEGER NOT NULL CHECK(object_count>0),
+      state TEXT NOT NULL CHECK(state IN ('building','prepared')), created_at TEXT NOT NULL
+    );
+    CREATE INDEX viewer_source_bindings_dataset_idx ON viewer_source_bindings(dataset_id);
+    CREATE TABLE viewer_source_binding_objects (
+      binding_id TEXT NOT NULL REFERENCES viewer_source_bindings(id) ON DELETE RESTRICT,
+      file_id TEXT NOT NULL REFERENCES dataset_files(id) ON DELETE RESTRICT,
+      relative_path TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size>=0),
+      sha256 TEXT NOT NULL CHECK(length(sha256)=64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+      PRIMARY KEY(binding_id,file_id)
+    );
+    CREATE TRIGGER viewer_source_binding_unavailable BEFORE INSERT ON viewer_source_bindings BEGIN SELECT RAISE(ABORT,'source binding admission unavailable'); END;
+    CREATE TRIGGER viewer_source_binding_no_replace BEFORE INSERT ON viewer_source_bindings WHEN EXISTS(SELECT 1 FROM viewer_source_bindings WHERE id=NEW.id OR rowid=NEW.rowid OR attempt_id=NEW.attempt_id) BEGIN SELECT RAISE(ABORT,'source binding replacement'); END;
+    CREATE TRIGGER viewer_source_binding_no_update BEFORE UPDATE ON viewer_source_bindings WHEN NOT (OLD.state='building' AND NEW.state='prepared' AND NEW.id IS OLD.id AND NEW.rowid IS OLD.rowid AND NEW.attempt_id IS OLD.attempt_id AND NEW.dataset_id IS OLD.dataset_id AND NEW.project_id IS OLD.project_id AND NEW.root_key IS OLD.root_key AND NEW.relative_path IS OLD.relative_path AND NEW.dataset_manifest_sha256 IS OLD.dataset_manifest_sha256 AND NEW.object_count IS OLD.object_count AND NEW.created_at IS OLD.created_at AND (SELECT count(*) FROM viewer_source_binding_objects WHERE binding_id=OLD.id)=OLD.object_count) BEGIN SELECT RAISE(ABORT,'source binding immutable'); END;
+    CREATE TRIGGER viewer_source_binding_no_delete BEFORE DELETE ON viewer_source_bindings BEGIN SELECT RAISE(ABORT,'source binding retained'); END;
+    CREATE TRIGGER viewer_source_binding_object_insert BEFORE INSERT ON viewer_source_binding_objects WHEN COALESCE((SELECT state FROM viewer_source_bindings WHERE id=NEW.binding_id),'')<>'building' OR NOT EXISTS(SELECT 1 FROM viewer_source_bindings b JOIN dataset_files f ON f.id=NEW.file_id AND f.dataset_id=b.dataset_id WHERE b.id=NEW.binding_id AND f.relative_path=NEW.relative_path AND f.byte_size=NEW.byte_size AND f.sha256=NEW.sha256) OR EXISTS(SELECT 1 FROM viewer_source_binding_objects WHERE rowid=NEW.rowid OR (binding_id=NEW.binding_id AND file_id=NEW.file_id)) BEGIN SELECT RAISE(ABORT,'source binding object conflict'); END;
+    CREATE TRIGGER viewer_source_binding_object_no_update BEFORE UPDATE ON viewer_source_binding_objects BEGIN SELECT RAISE(ABORT,'source binding object immutable'); END;
+    CREATE TRIGGER viewer_source_binding_object_no_delete BEFORE DELETE ON viewer_source_binding_objects BEGIN SELECT RAISE(ABORT,'source binding object retained'); END;
+    CREATE TRIGGER viewer_source_binding_dataset_guard_update BEFORE UPDATE ON datasets WHEN EXISTS(SELECT 1 FROM viewer_source_bindings WHERE dataset_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source binding dataset retained'); END;
+    CREATE TRIGGER viewer_source_binding_dataset_guard_delete BEFORE DELETE ON datasets WHEN EXISTS(SELECT 1 FROM viewer_source_bindings WHERE dataset_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source binding dataset retained'); END;
+    CREATE TRIGGER viewer_source_binding_dataset_guard_insert BEFORE INSERT ON datasets WHEN EXISTS(SELECT 1 FROM datasets d JOIN viewer_source_bindings b ON b.dataset_id=d.id WHERE d.id=NEW.id OR d.rowid=NEW.rowid OR (d.root_key=NEW.root_key AND d.relative_path=NEW.relative_path)) BEGIN SELECT RAISE(ABORT,'source binding dataset retained'); END;
+    CREATE TRIGGER viewer_source_binding_file_guard_insert BEFORE INSERT ON dataset_files WHEN EXISTS(SELECT 1 FROM viewer_source_bindings WHERE dataset_id=NEW.dataset_id) OR EXISTS(SELECT 1 FROM dataset_files f JOIN viewer_source_binding_objects b ON b.file_id=f.id WHERE f.id=NEW.id OR f.rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'source binding dataset files retained'); END;
+    CREATE TRIGGER viewer_source_binding_file_guard_update BEFORE UPDATE ON dataset_files WHEN EXISTS(SELECT 1 FROM viewer_source_bindings WHERE dataset_id=OLD.dataset_id OR dataset_id=NEW.dataset_id) BEGIN SELECT RAISE(ABORT,'source binding dataset files retained'); END;
+    CREATE TRIGGER viewer_source_binding_file_guard_delete BEFORE DELETE ON dataset_files WHEN EXISTS(SELECT 1 FROM viewer_source_bindings WHERE dataset_id=OLD.dataset_id) BEGIN SELECT RAISE(ABORT,'source binding dataset files retained'); END;
+    CREATE TRIGGER viewer_source_binding_attempt_guard_update BEFORE UPDATE ON processing_attempts WHEN EXISTS(SELECT 1 FROM viewer_source_bindings WHERE attempt_id=OLD.id) AND (NEW.id IS NOT OLD.id OR NEW.rowid IS NOT OLD.rowid OR NEW.dataset_id IS NOT OLD.dataset_id OR NEW.task_id IS NOT OLD.task_id OR NEW.attempt_number IS NOT OLD.attempt_number OR NEW.provider_id IS NOT OLD.provider_id OR NEW.provider_task_id IS NOT OLD.provider_task_id) BEGIN SELECT RAISE(ABORT,'source binding attempt identity retained'); END;
+    CREATE TRIGGER viewer_source_binding_attempt_guard_delete BEFORE DELETE ON processing_attempts WHEN EXISTS(SELECT 1 FROM viewer_source_bindings WHERE attempt_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source binding attempt identity retained'); END;
+    CREATE TRIGGER viewer_source_binding_attempt_guard_insert BEFORE INSERT ON processing_attempts WHEN EXISTS(SELECT 1 FROM processing_attempts a JOIN viewer_source_bindings b ON b.attempt_id=a.id WHERE a.id=NEW.id OR a.rowid=NEW.rowid OR (a.task_id=NEW.task_id AND a.attempt_number=NEW.attempt_number) OR (NEW.provider_id IS NOT NULL AND NEW.provider_task_id IS NOT NULL AND a.provider_id=NEW.provider_id AND a.provider_task_id=NEW.provider_task_id)) BEGIN SELECT RAISE(ABORT,'source binding attempt identity retained'); END;
+    CREATE TRIGGER viewer_source_binding_task_guard_update BEFORE UPDATE ON processing_tasks WHEN EXISTS(SELECT 1 FROM viewer_source_bindings b JOIN processing_attempts a ON a.id=b.attempt_id WHERE a.task_id=OLD.id) AND (NEW.id IS NOT OLD.id OR NEW.rowid IS NOT OLD.rowid OR NEW.dataset_id IS NOT OLD.dataset_id OR NEW.project_id IS NOT OLD.project_id) BEGIN SELECT RAISE(ABORT,'source binding task identity retained'); END;
+    CREATE TRIGGER viewer_source_binding_task_guard_delete BEFORE DELETE ON processing_tasks WHEN EXISTS(SELECT 1 FROM viewer_source_bindings b JOIN processing_attempts a ON a.id=b.attempt_id WHERE a.task_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source binding task identity retained'); END;
+    CREATE TRIGGER viewer_source_binding_task_guard_insert BEFORE INSERT ON processing_tasks WHEN EXISTS(SELECT 1 FROM processing_tasks t JOIN processing_attempts a ON a.task_id=t.id JOIN viewer_source_bindings b ON b.attempt_id=a.id WHERE t.id=NEW.id OR t.rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'source binding task identity retained'); END;
+  `},
 ];
 
 function applyMigrations(database) {
