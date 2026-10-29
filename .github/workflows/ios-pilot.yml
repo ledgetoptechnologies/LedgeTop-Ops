@@ -42,21 +42,26 @@ jobs:
             DerivedData/Build/Products/Debug-iphonesimulator/LTOpsPilot.app \
             LTOpsPilot-simulator.zip
       - name: Launch pilot in iPhone simulator
+        timeout-minutes: 7
         run: |
+          set -x
+          bounded() { python3 -c 'import subprocess,sys; subprocess.run(sys.argv[2:], timeout=int(sys.argv[1]), check=True)' "$@"; }
           DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(d["udid"] for group in data["devices"].values() for d in group if d["name"].startswith("iPhone")))')
-          xcrun simctl boot "$DEVICE_ID"
-          xcrun simctl bootstatus "$DEVICE_ID" -b
-          xcrun simctl install "$DEVICE_ID" DerivedData/Build/Products/Debug-iphonesimulator/LTOpsPilot.app
-          xcrun simctl launch "$DEVICE_ID" com.ledgetoptechnologies.ops.pilot
+          bounded 30 xcrun simctl boot "$DEVICE_ID"
+          bounded 180 xcrun simctl bootstatus "$DEVICE_ID" -b
+          bounded 30 xcrun simctl io "$DEVICE_ID" screenshot simulator-before-install.png
+          bounded 90 xcrun simctl install "$DEVICE_ID" DerivedData/Build/Products/Debug-iphonesimulator/LTOpsPilot.app
+          bounded 45 xcrun simctl launch "$DEVICE_ID" com.ledgetoptechnologies.ops.pilot
           sleep 5
           xcrun simctl io "$DEVICE_ID" screenshot pilot-simulator.png
           echo "IOS_SIMULATOR_ID=$DEVICE_ID" >> "$GITHUB_ENV"
       - name: Retain simulator screenshot
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: lt-ops-ios-screenshot-${{ github.sha }}
-          path: apps/ios-pilot/pilot-simulator.png
-          if-no-files-found: error
+          path: apps/ios-pilot/*simulator*.png
+          if-no-files-found: warn
           retention-days: 7
       - name: Exercise pilot user flows
         run: |
