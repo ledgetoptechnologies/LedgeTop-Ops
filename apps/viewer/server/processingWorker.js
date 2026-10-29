@@ -16,7 +16,8 @@ const {buildMeshRecoveryManifest}=require('./retainedManifest');
 const {canonicalDerivativeInput}=require('./derivativeInputSnapshot');
 const {verifyRecoveredIngestSources}=require('./processingIngestRecovery');
 
-function adapterFor(provider,config,providerCredentials){return new NodeOdmProvider({endpoint:provider.endpoint,token:providerCredentials.resolve(provider.id),providerType:provider.type,transferTimeoutMs:config.processingProviderTransferTimeoutMs});}
+function requireNodeOdmProvider(provider){if(!provider||!['nodeodm','clusterodm'].includes(provider.type))throw Object.assign(new Error('processing provider type is unavailable'),{code:'unsupported_provider_type'});}
+function adapterFor(provider,config,providerCredentials){requireNodeOdmProvider(provider);return new NodeOdmProvider({endpoint:provider.endpoint,token:providerCredentials.resolve(provider.id),providerType:provider.type,transferTimeoutMs:config.processingProviderTransferTimeoutMs});}
 function transition(processing,job,status,fields){const attempt=processing.transitionAttemptForJob(job.id,job.lease_owner,status,fields);if(!attempt)throw Object.assign(new Error('processing lease was lost or attempt was cancelled'),{code:'lease_lost'});return attempt;}
 function discoverOutputs(root){const candidates={glb:['odm_texturing/odm_textured_model_geo.glb','odm_texturing/textured_model.glb','textured_model.glb'],obj:['odm_texturing/odm_textured_model_geo.obj','odm_texturing/odm_textured_model.obj'],ortho:['odm_orthophoto/odm_orthophoto.tif'],orthoCutline:require('./orthophotoCutline').CUTLINE_PATHS,dsm:['odm_dem/dsm.tif'],dtm:['odm_dem/dtm.tif'],report:['odm_report/report.pdf','odm_report/odm_report.pdf'],pointCloud:['odm_georeferencing/odm_georeferenced_model.laz','odm_georeferencing/odm_georeferenced_model.ply'],ept:['entwine_pointcloud/ept.json'],nativeTiles:['3d_tiles/model/tileset.json']};const assets=[];for(const[kind,choices]of Object.entries(candidates)){const rel=choices.find((p)=>fs.existsSync(path.join(root,...p.split('/')))&&(kind!=='orthoCutline'||require('./orthophotoCutline').validateCutlineFile({relativePath:p,absolutePath:path.join(root,...p.split('/'))})));if(!rel)continue;const absolute=path.join(root,...rel.split('/'));assets.push({kind,relativePath:rel,absolutePath:absolute,format:kind==='nativeTiles'?'3dtiles':kind==='ept'?'ept':path.extname(rel).slice(1).toLowerCase(),contentType:kind==='report'?'application/pdf':undefined,byteSize:fs.statSync(absolute).size});}return assets;}
 
@@ -96,6 +97,9 @@ async function processReconcile(job,{processing,config,providerCredentials,signa
 
 async function processIngest(job,{processing,repository,storage,config,providerCredentials,signal}){
   const attempt=processing.getAttempt(job.attempt_id),task=processing.getTask(attempt.taskId),project=processing.getProject(task.projectId),provider=processing.getProvider(attempt.providerId);
+  // Historical attempts may have a deleted provider and still recover an
+  // existing local destination. Unknown concrete types remain unsupported.
+  if(provider)requireNodeOdmProvider(provider);
   const headroom=storage.space('models'),maximumExpansion=Math.max(0,headroom.available-headroom.reserve);
   if(maximumExpansion<1024*1024*1024)throw Object.assign(new Error('insufficient storage for result ingestion'),{code:'insufficient_storage'});
   const recoveredIngest=await verifyRecoveredIngestSources(processing,storage,job,signal);
