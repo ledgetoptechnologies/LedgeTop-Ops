@@ -2,6 +2,11 @@
 .swiftpm/
 xtool/
 DerivedData/
+DerivedData-device/
+*.xcresult/
+*.log
+LTOpsPilot-*.zip
+*simulator*.png
 xcuserdata/
 *.ipa
 *.p8

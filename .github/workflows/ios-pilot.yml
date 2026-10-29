@@ -15,7 +15,7 @@ jobs:
   simulator:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: apps/ios-pilot
@@ -42,18 +42,17 @@ jobs:
             DerivedData/Build/Products/Debug-iphonesimulator/LTOpsPilot.app \
             LTOpsPilot-simulator.zip
       - name: Launch pilot in iPhone simulator
-        timeout-minutes: 7
+        timeout-minutes: 10
         run: |
           set -x
           bounded() { python3 -c 'import subprocess,sys; subprocess.run(sys.argv[2:], timeout=int(sys.argv[1]), check=True)' "$@"; }
           DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(d["udid"] for group in data["devices"].values() for d in group if d["name"].startswith("iPhone")))')
           bounded 30 xcrun simctl boot "$DEVICE_ID"
           bounded 180 xcrun simctl bootstatus "$DEVICE_ID" -b
-          bounded 30 xcrun simctl io "$DEVICE_ID" screenshot simulator-before-install.png
-          bounded 90 xcrun simctl install "$DEVICE_ID" DerivedData/Build/Products/Debug-iphonesimulator/LTOpsPilot.app
-          bounded 45 xcrun simctl launch "$DEVICE_ID" com.ledgetoptechnologies.ops.pilot
+          bounded 120 xcrun simctl install "$DEVICE_ID" DerivedData/Build/Products/Debug-iphonesimulator/LTOpsPilot.app
+          bounded 120 xcrun simctl launch "$DEVICE_ID" com.ledgetoptechnologies.ops.pilot
           sleep 5
-          xcrun simctl io "$DEVICE_ID" screenshot pilot-simulator.png
+          bounded 90 xcrun simctl io "$DEVICE_ID" screenshot pilot-simulator.png
           echo "IOS_SIMULATOR_ID=$DEVICE_ID" >> "$GITHUB_ENV"
       - name: Retain simulator screenshot
         if: always()
@@ -64,6 +63,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
       - name: Exercise pilot user flows
+        timeout-minutes: 10
         run: |
           set -o pipefail
           xcodebuild -project LTOpsPilot.xcodeproj -scheme LTOpsPilot \
