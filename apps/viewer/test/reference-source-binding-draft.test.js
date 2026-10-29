@@ -122,6 +122,39 @@ test('resolved unrelated catalog operation does not match a disjoint indexed pat
  assert.equal(admit(f).objectCount,2);
 });
 
+test('unresolved adoption intent blocks binding even when its dataset is disjoint',t=>{
+ const f=fixture(t);enableOnlyForSyntheticFixture(f.db);
+ const other=f.p.createDataset({id:'other',projectId:'p',displayName:'Other',storageMode:'managed',rootKey:'datasets',relativePath:'disjoint'});
+ f.p.finalizeDataset(other.id,[{id:'otherfile',relativePath:'x.jpg',byteSize:1,sha256:'f'.repeat(64)}],'e'.repeat(64));
+ f.db.exec("INSERT INTO processing_tasks(id,project_id,dataset_id,display_name,status,created_at,updated_at) VALUES('other-task','p','other','Other','draft','t','t'); INSERT INTO processing_attempts(id,task_id,dataset_id,attempt_number,options_json,status,created_at,updated_at) VALUES('other-attempt','other-task','other',1,'{}','pending','t','t')");
+ const payload={ids:{attemptId:'other-attempt',datasetId:'other'},adoptionIntent:{rootKey:'dataset_import',relativePath:'source',datasetRelative:'synthetic'}};
+ f.db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES('adoption','catalog_map','synthetic',?,'failed','t','t','t')").run(JSON.stringify(payload));
+ assert.throws(()=>admit(f),{code:'source_binding_unavailable'});
+});
+
+test('binding blocks newly fetched and already fetched adoption recovery effects',t=>{
+ const f=fixture(t);enableOnlyForSyntheticFixture(f.db);admit(f);
+ const payload={ids:{attemptId:'a',datasetId:'d'},adoptionIntent:{rootKey:'dataset_import',relativePath:'source',datasetRelative:'synthetic'}};
+ f.db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES('adoption','catalog_map','synthetic',?,'failed','t','t','t')").run(JSON.stringify(payload));
+ assert.deepEqual(f.p.pendingCatalogAdoptionRecoveries(),[]);
+ let called=false;assert.equal(f.p.mutateCatalogAdoptionRecovery('adoption',()=>{called=true;}),false);assert.equal(called,false);
+ const {reconcileCatalogAdoptionRecoveries}=require('../server/datasetOperationWorker');
+ assert.equal(reconcileCatalogAdoptionRecoveries(f.p,{reconcileAdoptionIntent(){called=true;}}),0);assert.equal(called,false);
+ assert.equal(f.p.clearCatalogAdoptionIntent('adoption'),false);
+ assert.deepEqual(JSON.parse(f.db.prepare("SELECT payload_json FROM dataset_operations WHERE id='adoption'").get().payload_json),payload);
+ f.db.exec("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,lease_owner,available_at,created_at,updated_at) VALUES('new-adoption','catalog_map','synthetic','{}','leased','worker','t','t','t')");
+ assert.equal(f.p.setCatalogAdoptionIntent('new-adoption','worker',payload.adoptionIntent),false);
+});
+
+test('unbound adoption recovery invokes actual worker and clears its journal',t=>{
+ const f=fixture(t),payload={ids:{attemptId:'a',datasetId:'missing'},adoptionIntent:{rootKey:'dataset_import',relativePath:'source',datasetRelative:'destination'}};
+ f.db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES('adoption','catalog_map','synthetic',?,'failed','t','t','t')").run(JSON.stringify(payload));
+ const {reconcileCatalogAdoptionRecoveries}=require('../server/datasetOperationWorker');let args;
+ assert.equal(reconcileCatalogAdoptionRecoveries(f.p,{reconcileAdoptionIntent(...value){args=value;}}),1);
+ assert.deepEqual(args,['dataset_import','source','destination']);
+ assert.equal(JSON.parse(f.db.prepare("SELECT payload_json FROM dataset_operations WHERE id='adoption'").get().payload_json).adoptionIntent,undefined);
+});
+
 test('archive methods still work inside audited repository transaction without a binding',t=>{
  const f=fixture(t);f.db.exec("UPDATE processing_attempts SET status='failed' WHERE id='a'");
  assert.ok(f.p.auditedMutation({action:'test',entityType:'task'},()=>f.p.archiveTask('t')));

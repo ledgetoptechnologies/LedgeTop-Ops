@@ -23,13 +23,16 @@ The code is incomplete and must remain disabled until all of these are solved:
   mutation and recovery effect must participate in one durable overlap fence.
   Failed/cancelled/awaiting-derivatives indexed operations are conservatively
   held. Admission also holds unresolved retained-import cleanup globally,
-  catalog source-cleanup markers even after success, malformed catalog payloads,
+  catalog source-cleanup and adoption-intent markers even after success, malformed catalog payloads,
   and unresolved or overlapping payload-linked catalog attempts. The catalog
   scan fails closed above 10,000 rows. These checks are conservative metadata
   checks, not a complete enumeration of payload-only or cross-root effects.
   While any binding exists, current repository methods suppress all import-cleanup
-  claims and filesystem callbacks and catalog cleanup listing and clearing,
+  claims and filesystem callbacks and catalog cleanup and adoption recovery listing and clearing,
   including unrelated jobs; this global stall is not a production design.
+  Current adoption recovery rechecks immediately before its filesystem effect,
+  but this is only a best-effort check: binding can race after it, and no lock
+  covers the effect. Old and already-running writers remain unfenced.
   A catalog cleanup fetched before binding can still run asynchronously; old
   workers and other paths including upload cleanup do not honor these guards.
 * `applyStorageMutation` checks a binding before effects, but this draft does

@@ -22,7 +22,7 @@ function hasPendingSourceEffects(processing,source){
   if(!payload||typeof payload!=='object'||Array.isArray(payload)||!payload.ids||typeof payload.ids!=='object'||Array.isArray(payload.ids))return true;
   // Cleanup can target an aliased physical root; no logical-key comparison
   // can prove it disjoint. Even succeeded work can have cleanup outstanding.
-  if(Object.hasOwn(payload,'sourceCleanup'))return true;
+  if(Object.hasOwn(payload,'sourceCleanup')||Object.hasOwn(payload,'adoptionIntent'))return true;
   const payloadAttempt=payload.ids.attemptId,payloadDataset=payload.ids.datasetId;
   if(!validId(payloadAttempt)||payloadDataset!==undefined&&!validId(payloadDataset)||row.processing_attempt_id!==null&&row.processing_attempt_id!==payloadAttempt)return true;
   const attempt=attemptById.get(payloadAttempt);
