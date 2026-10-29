@@ -96,6 +96,48 @@ test('bound source conservatively blocks new import-cleanup claim and filesystem
  assert.equal(invoked,false);
 });
 
+test('in-flight import effect survives lease expiry and blocks reclaim and binding',t=>{
+ const f=fixture(t);enableOnlyForSyntheticFixture(f.db);
+ f.db.exec("INSERT INTO retained_imports(id,source_kind,staging_root_key,staging_relative_path,state,cleanup_jobs_inserted,created_at,updated_at) VALUES('ri','nodeodm_result','cache','stage','ready',1,'t','t'); INSERT INTO import_cleanup_jobs(id,retained_import_id,cleanup_type,root_key,relative_path,status,available_at,created_at,updated_at) VALUES('cleanup','ri','staging_tree','cache','stage','pending','2000-01-01T00:00:00.000Z','t','t')");
+ const job=f.p.claimImportCleanup('worker');assert.ok(job);
+ const applied=f.p.mutateImportCleanupFilesystem('cleanup','worker',job.lease_token,job.lease_generation,()=>{
+  assert.throws(()=>f.db.exec("UPDATE import_cleanup_jobs SET relative_path='changed' WHERE id='cleanup'"),/source import effect in flight/);
+  assert.throws(()=>f.db.exec("DELETE FROM import_cleanup_jobs WHERE id='cleanup'"),/source import effect in flight/);
+  assert.throws(()=>f.db.exec("INSERT OR REPLACE INTO import_cleanup_jobs(id,retained_import_id,cleanup_type,root_key,relative_path,status,available_at,created_at,updated_at) VALUES('replacement','ri','staging_tree','cache','changed','pending','t','t','t')"),/source import effect in flight/);
+  f.db.exec("UPDATE import_cleanup_jobs SET lease_expires_at='2000-01-01T00:00:00.000Z' WHERE id='cleanup'");
+  assert.equal(f.p.claimImportCleanup('late-worker'),null);
+  assert.throws(()=>admit(f),{code:'source_binding_unavailable'});
+ });
+ assert.equal(applied,true);assert.equal(f.p.mutateImportCleanupFilesystem('cleanup','worker',job.lease_token,job.lease_generation,()=>{}),false);const claim=f.db.prepare("SELECT * FROM viewer_source_effect_claims WHERE effect_type='import_cleanup'").get();
+ assert.equal(claim.state,'in_flight');assert.equal(claim.root_key,'cache');assert.equal(claim.relative_path,'stage');assert.equal(claim.lease_generation,job.lease_generation);
+ assert.equal(f.p.claimImportCleanup('late-worker'),null);
+});
+
+test('successful import effect releases only its claim without a DB lock across callback',t=>{
+ const f=fixture(t);f.db.exec("INSERT INTO retained_imports(id,source_kind,staging_root_key,staging_relative_path,state,cleanup_jobs_inserted,created_at,updated_at) VALUES('ri','nodeodm_result','cache','stage','ready',1,'t','t'); INSERT INTO import_cleanup_jobs(id,retained_import_id,cleanup_type,root_key,relative_path,status,available_at,created_at,updated_at) VALUES('cleanup','ri','staging_tree','cache','stage','pending','2000-01-01T00:00:00.000Z','t','t')");
+ const job=f.p.claimImportCleanup('worker');assert.ok(job);
+ for(let i=0;i<10000;i++)assert.equal(f.p.mutateImportCleanupFilesystem('cleanup','worker',job.lease_token,job.lease_generation,()=>{if(i===0)assert.equal(f.p.transaction(()=>true),true);}),true);
+ assert.equal(f.db.prepare("SELECT count(*) n FROM viewer_source_effect_claims WHERE effect_type='import_cleanup'").get().n,1);
+ assert.ok(f.p.persistImportCleanupQuarantineIntent('cleanup','worker',job.lease_token,job.lease_generation));
+ assert.equal(f.p.markImportCleanupQuarantined('cleanup','worker',job.lease_token,job.lease_generation),true);
+ assert.equal(f.p.completeImportCleanup('cleanup','worker',job.lease_token,job.lease_generation),true);
+ assert.equal(f.p.settleImportCleanupEffect('cleanup',job.source_effect_claim_id,'worker',job.lease_token,job.lease_generation),true);
+ assert.equal(f.db.prepare("SELECT state FROM viewer_source_effect_claims WHERE effect_type='import_cleanup'").get().state,'completed');
+});
+
+test('actual cleanup worker leaves failed and no-delete outcomes persistently uncertain',async t=>{
+ const {processOneImportCleanup}=require('../server/importCleanup');
+ for(const [id,rootPath,errorCode,expected] of [['failed','invalid-path',null,'pending'],['no-delete','webodm-task-imports/no-delete','EROFS','cleanup_skipped_read_only']]){
+  const f=fixture(t);f.db.prepare("INSERT INTO retained_imports(id,source_kind,staging_root_key,staging_relative_path,state,cleanup_jobs_inserted,created_at,updated_at) VALUES(?,'nodeodm_result','cache',?,'ready',1,'t','t')").run(id,rootPath);
+  f.db.prepare("INSERT INTO import_cleanup_jobs(id,retained_import_id,cleanup_type,root_key,relative_path,status,available_at,created_at,updated_at) VALUES(?,?,'staging_tree','cache',?,'pending','2000-01-01T00:00:00.000Z','t','t')").run(id,id,rootPath);
+  const storage={openCleanupRoot(){throw Object.assign(new Error('synthetic read-only'),{code:errorCode});}};
+  assert.equal(await processOneImportCleanup({processing:f.p,storage},'worker'),true);
+  assert.equal(f.db.prepare('SELECT status FROM import_cleanup_jobs WHERE id=?').get(id).status,expected);
+  assert.equal(f.db.prepare('SELECT state FROM viewer_source_effect_claims WHERE operation_id=?').get(id).state,'in_flight');
+  assert.equal(f.p.claimImportCleanup('replacement',{at:Date.now()+10000000}),null);
+ }
+});
+
 test('bound source conservatively suppresses newly queued catalog-source cleanup',t=>{
  const f=fixture(t);enableOnlyForSyntheticFixture(f.db);admit(f);
  const payload=JSON.stringify({ids:{attemptId:'a',datasetId:'d'},sourceCleanup:{rootKey:'dataset_import',relativePath:'source'}});
@@ -232,6 +274,20 @@ test('separate process death leaves a durable uncertain effect that blocks bindi
  }finally{
   if(db)db.close();for(const suffix of ['','-wal','-shm','-journal']){try{fs.unlinkSync(file+suffix);}catch(e){if(e.code!=='ENOENT')throw e;}}fs.rmdirSync(dir);
  }
+});
+
+test('separate import-cleanup process death leaves an unreclaimable uncertain effect',()=>{
+ const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),{spawnSync}=require('node:child_process');
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-import-effect-test-')),file=path.join(dir,'test.sqlite');let db;
+ try{
+  db=new DatabaseSync(file);db.exec('PRAGMA foreign_keys=ON');applyMigrations(db);
+  db.exec("INSERT INTO retained_imports(id,source_kind,staging_root_key,staging_relative_path,state,cleanup_jobs_inserted,created_at,updated_at) VALUES('ri','nodeodm_result','cache','stage','ready',1,'t','t'); INSERT INTO import_cleanup_jobs(id,retained_import_id,cleanup_type,root_key,relative_path,status,available_at,created_at,updated_at) VALUES('cleanup','ri','staging_tree','cache','stage','pending','2000-01-01T00:00:00.000Z','t','t')");
+  const script=`const {DatabaseSync}=require('node:sqlite');const {ProcessingRepository}=require(${JSON.stringify(require.resolve('../server/processingRepository'))});const db=new DatabaseSync(${JSON.stringify(file)});db.exec('PRAGMA foreign_keys=ON');const p=new ProcessingRepository(db),j=p.claimImportCleanup('child');p.mutateImportCleanupFilesystem(j.id,'child',j.lease_token,j.lease_generation,()=>process.exit(23));process.exit(24);`;
+  const child=spawnSync(process.execPath,['-e',script],{encoding:'utf8',timeout:10000});assert.equal(child.error,undefined);assert.equal(child.status,23,child.stderr);
+  assert.equal(db.prepare("SELECT state FROM viewer_source_effect_claims WHERE effect_type='import_cleanup'").get().state,'in_flight');
+  db.exec("UPDATE import_cleanup_jobs SET lease_expires_at='2000-01-01T00:00:00.000Z' WHERE id='cleanup'");
+  assert.equal(new ProcessingRepository(db).claimImportCleanup('replacement'),null);
+ }finally{if(db)db.close();for(const suffix of ['','-wal','-shm','-journal']){try{fs.unlinkSync(file+suffix);}catch(e){if(e.code!=='ENOENT')throw e;}}fs.rmdirSync(dir);}
 });
 
 test('two file-backed connections serialize draft binding against lifecycle admission',()=>{

@@ -30,7 +30,8 @@ The code is incomplete and must remain disabled until all of these are solved:
   While any binding exists, current repository methods suppress all import-cleanup
   claims and filesystem callbacks and catalog cleanup and adoption recovery listing and clearing,
   including unrelated jobs; this global stall is not a production design.
-  The current catalog adoption-recovery path acquires a durable claim in the
+  Current catalog adoption-recovery and import-cleanup jobs acquire durable
+  claims in the
   same SQLite transaction domain as draft binding admission, without holding a
   database lock over filesystem work. An interrupted effect remains in-flight
   and blocks all bindings and retries; no timeout or automatic clearing proves
@@ -38,7 +39,18 @@ The code is incomplete and must remain disabled until all of these are solved:
   is not a durable filesystem receipt: adoption recovery renames/removes
   without file and directory fsync, so power-loss durability and replay must be
   separately qualified before using completion as evidence. This is one
-  participating effect, not an authority over other cleanup paths; old
+  participating effects, not an authority over other cleanup paths. One import
+  claim covers the whole job, rather than creating a row for every file. A
+  completed claim is retained per job; no retirement or storage backpressure
+  exists, and its operational growth remains unqualified. An
+  unresolved import effect prevents its lease from being reclaimed even after
+  expiry; interrupted work needs a future independently verified recovery
+  procedure and does not automatically clear. No operator-facing recovery view
+  or closure authority exists. Failed and legitimate no-delete outcomes also
+  leave this global hold. Successful worker settlement checks that the job was
+  completed (that transition itself requires an unexpired lease), then matches
+  the original claim identity; settlement itself does not check lease expiry.
+  Other cleanup paths, old
   and already-running writers remain unfenced, and physical aliases are unknown.
   A catalog cleanup fetched before binding can still run asynchronously; old
   workers and other paths including upload cleanup do not honor these guards.
