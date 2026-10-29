@@ -156,7 +156,8 @@ class GcpRepository {
   confirmOdmCrs(id, actorId, input={}) {
     const set=this.getSet(id); if(!set || set.sourceFormat!=='emlid-all-columns-v1') throw Object.assign(new Error('A survey source is required'),{code:'gcp_crs_unmapped'});
     const c=Object.keys(input).length ? input : set.odmCrsCandidate;
-    if(!c || !Number.isInteger(c.epsgCode) || c.epsgCode<1000 || c.epsgCode>999999 || !['m','ftUS'].includes(c.horizontalUnit) || c.horizontalUnit!==set.provenance.linearUnit || c.verticalDatum!==set.provenance.verticalDatum) throw Object.assign(new Error('Enter the EPSG code and units for the source survey coordinate system and confirm its vertical datum'),{code:'gcp_crs_unmapped'});
+    const verified=set.odmCrsCandidate;
+    if(!c || !verified || c.epsgCode!==verified.epsgCode || c.horizontalUnit!==verified.horizontalUnit || c.verticalDatum!==verified.verticalDatum || c.horizontalUnit!==set.provenance.linearUnit || c.verticalDatum!==set.provenance.verticalDatum) throw Object.assign(new Error('Enter the EPSG code and units for the source survey coordinate system and confirm its vertical datum'),{code:'gcp_crs_unmapped'});
     this.database.prepare(`INSERT INTO gcp_odm_crs_confirmations(set_id,source_sha256,epsg_code,horizontal_unit,vertical_datum,confirmed_by,confirmed_at) VALUES (?,?,?,?,?,?,?)
       ON CONFLICT(set_id) DO UPDATE SET source_sha256=excluded.source_sha256,epsg_code=excluded.epsg_code,horizontal_unit=excluded.horizontal_unit,vertical_datum=excluded.vertical_datum,confirmed_by=excluded.confirmed_by,confirmed_at=excluded.confirmed_at`).run(id,set.sourceSha256,c.epsgCode,c.horizontalUnit,c.verticalDatum,actorId,now());
     return this.getSet(id);

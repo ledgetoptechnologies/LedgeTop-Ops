@@ -456,13 +456,14 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
         FROM gcp_image_correspondences marks
         JOIN gcp_points points ON points.id=marks.gcp_point_id
         JOIN dataset_files files ON files.id=marks.dataset_file_id
-        JOIN gcp_import_provenance provenance ON provenance.set_id=points.set_id
+        LEFT JOIN gcp_import_provenance provenance ON provenance.set_id=points.set_id
         JOIN gcp_sets sets ON sets.id=points.set_id
         LEFT JOIN gcp_odm_crs_confirmations confirmation ON confirmation.set_id=points.set_id
         WHERE marks.task_id=? ORDER BY points.external_id,files.relative_path,marks.id`).all(task.id);
+      if(marks.length!==markCount) throw Object.assign(new Error('GCP correspondence snapshot is incomplete'),{code:'gcp_snapshot_incomplete'});
       const emlid=marks.filter(mark=>mark.sourceAdapter==='emlid-all-columns-v1');
       const mapping=emlid[0];
-      if(emlid.length && (emlid.length!==marks.length || emlid.some(mark=>mark.confirmedSourceSha256!==mark.sourceSha256 || !Number.isInteger(mark.confirmedEpsg) || !['m','ftUS'].includes(mark.confirmedUnit) || mark.confirmedEpsg!==mapping.confirmedEpsg || mark.confirmedUnit!==mapping.confirmedUnit || mark.confirmedVerticalDatum!==mark.sourceVerticalDatum || mark.confirmedVerticalDatum!==mapping.confirmedVerticalDatum || mark.easting==null || mark.northing==null)))
+      if(emlid.length && (emlid.length!==marks.length || emlid.some(mark=>mark.confirmedSourceSha256!==mark.sourceSha256 || mark.sourceCoordinateSystem!=='NAD83(2011) / WISCRS Dodge and Jefferson (ftUS) + NAVD88(GEOID18) height (ftUS)' || mark.confirmedEpsg!==7600 || mark.confirmedUnit!=='ftUS' || mark.confirmedEpsg!==mapping.confirmedEpsg || mark.confirmedUnit!==mapping.confirmedUnit || mark.confirmedVerticalDatum!==mark.sourceVerticalDatum || mark.confirmedVerticalDatum!==mapping.confirmedVerticalDatum || mark.easting==null || mark.northing==null)))
         throw Object.assign(new Error('Emlid survey CRS and vertical datum must be mapped and confirmed before processing'),{code:'gcp_crs_confirmation_required'});
       const gcpList=odmGcpList(marks, emlid.length ? {epsgCode:mapping.confirmedEpsg,projected:true,horizontalUnit:mapping.confirmedUnit} : undefined);
       if(gcpList&&Buffer.byteLength(gcpList)>16*1024*1024)throw Object.assign(new Error('generated ODM GCP input is too large'),{code:'gcp_snapshot_too_large'});
