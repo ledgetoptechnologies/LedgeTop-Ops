@@ -360,8 +360,8 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   const gcpPoint = { id: 'gcp-point-1', externalId: 'ltds-1', label: 'ltds-1', latitude: 44.1, longitude: -88.2, elevationM: 220 };
   const gcpSet2={...gcpSet,id:'gcp-set-second',displayName:'Second control'};
   const gcpPoint2={...gcpPoint,id:'gcp-point-2',label:'ltds-2'};
-  if (pathname === '/api/v1/datasets/dataset-johnson/gcp-sets') return json({ sets: [gcpSet,gcpSet2] });
-  if (pathname === '/api/v1/gcp-sets/gcp-set-johnson') return json({ set: gcpSet, points: [gcpPoint,gcpPoint2] });
+  if (pathname === '/api/v1/datasets/dataset-johnson/gcp-sets') return json({ sets: runtime.gcpMissingSet?[]:[gcpSet,gcpSet2] });
+  if (pathname === '/api/v1/gcp-sets/gcp-set-johnson') return json({ set: gcpSet, points: runtime.gcpMissingPoint?[gcpPoint2]:[gcpPoint,gcpPoint2] });
   if (pathname === '/api/v1/gcp-sets/gcp-set-second') return json({ set:gcpSet2,points:[gcpPoint2] });
   if (pathname === '/api/v1/gcp-sets/gcp-set-johnson/odm-crs-confirm' && method === 'POST') { runtime.gcpCrsConfirmed=true; runtime.gcpConfirmedCrs=body.epsgCode?{...body,verticalUnit:'m'}:gcpSet.odmCrsCandidate; return json({ set: {...gcpSet,odmCrs:runtime.gcpConfirmedCrs,odmCrsConfirmed:true} }); }
   if (pathname === '/api/v1/tasks/task-johnson/gcp-correspondences' && method === 'GET') return json({ correspondences: runtime.correspondences });
@@ -948,6 +948,49 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "document.querySelector('.gcp-mark-row')?.textContent.includes('x 13, y 15')", `${viewport.name}: GCP correspondence was not updated`);
     await confirmAppAction(client, runtime, '[data-action="gcp-delete-mark"]', { title: 'Delete image mark', cancelFirst: true });
     await waitFor(client, "document.querySelector('.gcp-mark-row') === null", `${viewport.name}: GCP correspondence was not deleted`);
+    // An unindexed entry must keep the original browser history and preserve the draft in memory.
+    await client.evaluate(`document.querySelector('[data-action="task-return"]').click()`);
+    await waitFor(client, `!new URL(location.href).searchParams.has('panel') && Boolean(document.querySelector('.task-quick-actions'))`, 'Task return for unindexed-history setup failed');
+    await client.evaluate(`history.pushState(null,'',location.href);document.querySelector('[data-action="task-gcp"]').click()`);
+    await waitFor(client, `new URL(location.href).searchParams.get('panel')==='gcp' && Boolean(document.querySelector('.gcp-candidate[data-id="image-1"]'))`, 'GCP route after unindexed setup missing');
+    await client.evaluate(`document.querySelector('.gcp-candidate[data-id="image-1"]').click()`);
+    await waitFor(client, `Boolean(document.querySelector('.gcp-mark-form'))`, 'Image unavailable for unindexed-history test');
+    await client.evaluate(`(() => {const form=document.querySelector('.gcp-mark-form');form.elements.pixelX.value='21';form.elements.pixelY.value='22';form.elements.pixelY.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    await client.evaluate('history.back()');
+    await waitFor(client, `!new URL(location.href).searchParams.has('panel') && Boolean(document.querySelector('.task-quick-actions'))`, 'Unindexed Back did not traverse');
+    await client.evaluate('history.forward()');
+    await waitFor(client, `new URL(location.href).searchParams.get('panel')==='gcp' && document.querySelector('.gcp-mark-form [name=pixelX]')?.value==='21'`, 'Unindexed Forward did not restore draft');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelY]').value`),'22');
+    // An in-flight save may finish offscreen; returning must show the acknowledged coordinates.
+    let releaseDetachedSave;runtime.gcpSaveResponseGate=new Promise(resolve=>{releaseDetachedSave=resolve});
+    const detachedStart=runtime.requests.length;
+    await client.evaluate(`document.querySelector('.gcp-mark-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
+    await waitForRequest(runtime,detachedStart,'POST','/api/v1/tasks/task-johnson/gcp-correspondences');
+    await client.evaluate('history.back()');
+    await waitFor(client, `!new URL(location.href).searchParams.has('panel')`, 'Unindexed pending save did not preserve traversal');
+    releaseDetachedSave();runtime.gcpSaveResponseGate=null;
+    await waitFor(client, `!document.querySelector('#workspace').hasAttribute('aria-busy')`, 'Detached save did not settle');
+    await client.evaluate('history.forward()');
+    await waitFor(client, `new URL(location.href).searchParams.get('panel')==='gcp' && document.querySelector('.gcp-mark-row')?.textContent.includes('x 21, y 22')`, 'Detached save was not acknowledged on return');
+    await waitFor(client, `document.querySelector('.gcp-mark-form [name=pixelX]')?.disabled===false`, 'Detached save did not release the editor');
+    await confirmAppAction(client,runtime,'[data-action="gcp-delete-mark"]',{title:'Delete image mark'});
+    await waitFor(client, `!document.querySelector('.gcp-mark-row')`, 'Detached save cleanup failed');
+    await client.evaluate(`(() => {const form=document.querySelector('.gcp-mark-form');form.elements.pixelX.value='31';form.elements.pixelY.value='32';form.elements.pixelY.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    runtime.gcpMissingPoint=true;
+    await client.evaluate(`document.querySelector('.gcp-candidate-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
+    await waitFor(client, `document.querySelector('.gcp-warning[role=alert]')?.textContent.includes('unsaved mark is retained')`, 'Missing-point conflict did not appear');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').value`),'31');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').disabled`),true);
+    runtime.gcpMissingSet=true;
+    await client.evaluate(`document.querySelector('[data-action="gcp-retry-conflict"]').click()`);
+    await waitFor(client, `document.querySelector('.gcp-set-select')?.options.length===0 && document.querySelector('.gcp-warning[role=alert]')`, 'Missing set did not produce conflict');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]')?.value`),'31','Missing set hid the draft coordinates');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]')?.disabled`),true);
+    runtime.gcpMissingSet=false;runtime.gcpMissingPoint=false;
+    await client.evaluate(`document.querySelector('[data-action="gcp-retry-conflict"]').click()`);
+    await waitFor(client, `!document.querySelector('.gcp-warning[role=alert]') && document.querySelector('.gcp-mark-form [name=pixelX]')?.disabled===false`, 'Restored point did not clear conflict');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').value`),'31');
+    await client.evaluate(`(() => {const form=document.querySelector('.gcp-mark-form');form.elements.pixelX.value='';form.elements.pixelY.value='';form.elements.pixelY.dispatchEvent(new Event('input',{bubbles:true}));})()`);
     runtime.manualGcp=true; runtime.gcpCrsConfirmed=false; runtime.gcpConfirmedCrs=null;
     await client.evaluate('location.reload()');
     await waitFor(client, "document.querySelector('.gcp-crs-form') !== null", `${viewport.name}: manual CRS mapping form missing`);
@@ -1074,6 +1117,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "document.querySelector('#provider-edit-form') !== null", `${viewport.name}: provider edit form did not open`);
     await client.evaluate(`window.__providerBeforeChange=document.querySelector('#provider-inline-detail')`);
     await client.evaluate(`(() => { const form=document.querySelector('#provider-edit-form'); form.elements.admissionLimit.value='3'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
+    await waitForRequest(runtime, requestStart, 'PATCH', '/api/v1/processing/providers/provider-nodeodm');
     await waitFor(client, "!window.__providerBeforeChange.isConnected && document.querySelector('#workspace-modal')?.open === false && document.querySelector('[data-action=\"replace-provider-token\"]') !== null", `${viewport.name}: provider edit did not return to refreshed node detail`);
     await client.evaluate(`document.querySelector('[data-action="replace-provider-token"]').click()`);
     await waitFor(client, "document.querySelector('#provider-token-form') !== null", `${viewport.name}: provider token form did not open`);
