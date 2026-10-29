@@ -2,8 +2,7 @@
 
 Owner: Claude (UX/design + workspace frontend). Backend hierarchy, DTOs and processing protocol: Codex / Processing.
 Branch: `claude/viewer-workspace-redesign` from `origin/main` 2f458ff (includes PR 321).
-Status (2026-10-28): **PRs 1, 2, 3, 4 and 6 built and committed locally; PR 5 waits on Codex's delivery-stage
-enum fixture.** Not pushed or deployed; the branch needs updating from main (now 3f4eb771) before a PR.
+Status (2026-10-29): **all six steps built and committed locally.** Not pushed or deployed; the branch needs updating from main (now 3f4eb771) before a PR.
 
 | PR | Commits | Review |
 |---|---|---|
@@ -11,7 +10,7 @@ enum fixture.** Not pushed or deployed; the branch needs updating from main (now
 | 2 Loading/error states, a11y | 85bfccf0, fdfc27bf (readiness), 7e5e1acc (session guards) | Codex: all findings closed at 7e5e1acc |
 | 3 Projects page, customer grouping | c6d50455, a67e3a72 (filter/hidden/401) | Codex: closed |
 | 4 Project page, task tabs | 4982d6f9, b8c66469 (selected-row search, archived retry) | Codex: closed at b8c66469 |
-| 5 Processing page, stage chips | — | Waiting on the delivery-stage enum fixture |
+| 5 Processing page | (this commit) | Built on installed `attempt.status` + `submissionPhase` only, per Codex's reference (3f4eb771): the API has no delivery-stage field, so no stage chips or "delivered" state |
 | 6 Action menus, plain wording | 6fbfe6c5 | Sent to Codex |
 
 Test checkpoint at 6fbfe6c5 (Windows, after rebuild): every `test/workspace-*` file and

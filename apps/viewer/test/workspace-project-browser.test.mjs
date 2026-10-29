@@ -633,6 +633,12 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     const noOverflow = `Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <= window.innerWidth`;
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: dashboard overflows horizontally`);
+    await client.evaluate(`document.querySelector('.nav-link[data-section="processing"]').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('section')==='processing' && document.querySelector('.processing-row [data-action=\"task-runs\"]') !== null", `${viewport.name}: Processing page did not list in-progress tasks`);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: Processing page overflows horizontally`);
+    assert.equal(await client.evaluate(`/deliver/i.test(document.querySelector('#workspace-content').textContent)`), false, `${viewport.name}: Processing page must not claim delivery`);
+    await client.evaluate(`document.querySelector('.nav-link[data-section="dashboard"]').click()`);
+    await waitFor(client, "document.querySelector('#project-filter') !== null", `${viewport.name}: Projects did not return after Processing`);
 
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='Johnson'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('[data-project-name]')].map(row=>({name:row.dataset.projectName,hidden:row.hidden}))`), [

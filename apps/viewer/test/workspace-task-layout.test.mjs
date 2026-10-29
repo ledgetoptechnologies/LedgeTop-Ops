@@ -16,7 +16,7 @@ const context=vm.createContext({state,groupProjects,URL,URLSearchParams,location
   // this task-navigation harness. Capability refresh has its own focused tests.
   context.refreshProviderCapabilities=()=>{throw new Error('Task navigation must not refresh node capabilities');};
   vm.runInContext(`let lastProviderEntry=null;\n${source.slice(source.indexOf('function refreshOpenedProvider('),source.indexOf('function providerDetail('))}`,context);
-  vm.runInContext([...names,'taskOutputStage','logPanel','projectSearchText','projectStatusMatches','workspaceBreadcrumb','taskRunsPanel','moreMenu','attemptHistory','attemptLabel','disclosureAttributes','attemptDiagnosticPanel','projectRows'].map(declaration).join('\n'),context);
+  vm.runInContext([...names,'taskOutputStage','logPanel','projectSearchText','projectStatusMatches','workspaceBreadcrumb','taskRunsPanel','moreMenu','attemptHistory','attemptLabel','disclosureAttributes','attemptDiagnosticPanel','projectRows','PROCESSING_GROUPS','SUBMISSION_PHASE_LABELS','processing'].map(declaration).join('\n'),context);
   vm.runInContext(source.slice(source.indexOf('function canShareOutput('),source.indexOf('async function openShareModal(')),context);
   vm.runInContext(lines.find(line=>line.startsWith("addEventListener('popstate'")),context);
   const route=lines.find(line=>line.trimStart().startsWith("if(['task-gcp','task-settings','task-files','task-return']"));
@@ -260,4 +260,22 @@ test('an open project is never hidden by a search left over from the project lis
   const html=f.context.projectRows();
   assert.match(html,/class="project-row selected"/);
   assert.doesNotMatch(html,/class="project-row selected"[^>]*\shidden[\s>]/);
+});
+
+test('Processing groups tasks by their installed run status and never claims delivery',()=>{
+  const f=fixture();
+  f.state.tasks=[
+    {id:'t-failed',projectId:'project',displayName:'Failed run',latestAttempt:{id:'a1',status:'failed'}},
+    {id:'t-upload',projectId:'project',displayName:'Uploading run',latestAttempt:{id:'a2',status:'uploading',submissionPhase:'uploading_auxiliary',providerId:'provider'}},
+    {id:'t-done',projectId:'project',displayName:'Published run',latestAttempt:{id:'a3',status:'published'}},
+  ];
+  const html=f.context.processing();
+  assert.match(html,/id="processing-attention">Needs attention <span>1<\/span>/);
+  assert.match(html,/id="processing-preparing">Uploading and preparing <span>1<\/span>/);
+  assert.match(html,/Uploading other inputs/);
+  assert.match(html,/data-action="task-runs" data-id="t-failed"/);
+  assert.doesNotMatch(html,/Published run/,'finished work is not listed as processing');
+  assert.doesNotMatch(html,/deliver/i,'there is no delivery status to show');
+  f.state.tasks=[];
+  assert.match(f.context.processing(),/Nothing is processing right now/);
 });
