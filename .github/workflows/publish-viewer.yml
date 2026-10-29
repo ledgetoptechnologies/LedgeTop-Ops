@@ -2,11 +2,6 @@ name: Publish Operations Viewer image
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - 'apps/viewer/**'
-      - '.github/workflows/publish-viewer.yml'
-      - 'scripts/viewer-monorepo-boundaries.test.mjs'
   push:
     branches: [main]
     paths:
@@ -24,6 +19,7 @@ concurrency:
 
 jobs:
   verify-and-build:
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     defaults:
       run:
