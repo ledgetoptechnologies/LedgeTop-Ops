@@ -113,3 +113,65 @@ test('observation warning counts only current active, nonrecycled work and allow
  f.db.prepare("UPDATE projects SET status='active' WHERE id=?").run(f.project.id);assert.equal(counts().observationWarnings,1);
  f.db.prepare("UPDATE processing_tasks SET active_attempt_id=NULL WHERE id=?").run(f.task.id);assert.equal(counts().observationWarnings,0);
 });
+
+
+test('database failure while scheduling ingestion rolls back and retries without a false failure',async t=>{
+ const f=fixture(t),status={uuid:f.processing.getAttempt(f.attempt.id).providerTaskId,status:'completed',statusCode:40,progress:1},deps={processing:f.processing,config:{},adapterFactory:()=>({status:async()=>status,output:async()=>({lines:[],nextLine:0})})};
+ f.db.exec("CREATE TRIGGER fail_ingest BEFORE INSERT ON processing_jobs WHEN NEW.job_type='ingest' BEGIN SELECT RAISE(ABORT,'synthetic disk fault'); END");
+ f.db.prepare("UPDATE processing_jobs SET attempt_count=8 WHERE id='poll'").run();
+ await processOne(deps,'db-failure-worker');
+ assert.equal(f.processing.getAttempt(f.attempt.id).status,'running');assert.equal(f.processing.getAttemptProvenance(f.attempt.id)?.providerResult,null);
+ assert.equal(f.db.prepare("SELECT error_code FROM processing_jobs WHERE id='poll'").get().error_code,'provider_observation_persistence_unavailable');
+ assert.equal(f.db.prepare("SELECT COUNT(*) n FROM processing_jobs WHERE job_type='ingest'").get().n,0);
+ f.db.exec('DROP TRIGGER fail_ingest');f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id='poll'").run();await processOne(deps,'db-recovered-worker');
+ assert.equal(f.processing.getAttempt(f.attempt.id).status,'ingesting');assert.equal(f.db.prepare("SELECT COUNT(*) n FROM processing_jobs WHERE job_type='ingest' AND status='pending'").get().n,1);
+});
+
+test('terminal observation write failures retry instead of exhausting the retry budget',async t=>{
+ const f=fixture(t),deps={processing:f.processing,config:{},adapterFactory:()=>({status:async()=>({status:'failed',progress:0}),output:async()=>({lines:[],nextLine:0})})};
+ f.db.exec("CREATE TRIGGER fail_terminal BEFORE UPDATE OF status ON processing_attempts WHEN NEW.status='failed' BEGIN SELECT RAISE(ABORT,'synthetic disk fault'); END");
+ f.db.prepare("UPDATE processing_jobs SET attempt_count=8 WHERE id='poll'").run();await processOne(deps,'terminal-db-worker');
+ assert.equal(f.processing.getAttempt(f.attempt.id).status,'running');assert.equal(f.db.prepare("SELECT error_code FROM processing_jobs WHERE id='poll'").get().error_code,'provider_observation_persistence_unavailable');
+ f.db.exec('DROP TRIGGER fail_terminal');f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id='poll'").run();await processOne(deps,'terminal-recovered-worker');assert.equal(f.processing.getAttempt(f.attempt.id).status,'failed');
+});
+
+
+test('worker process death inside reconciliation transaction rolls back and a replacement resumes',async t=>{
+ const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),{spawnSync}=require('node:child_process'),{backup}=require('node:sqlite');
+ const f=fixture(t),dir=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-reconcile-crash-')),filename=path.join(dir,'fixture.sqlite');
+ t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ f.db.prepare("UPDATE processing_jobs SET status='leased',lease_owner='crash-worker',lease_expires_at='2999-01-01T00:00:00.000Z' WHERE id='poll'").run();
+ await backup(f.db,filename);
+ const script=`const {DatabaseSync}=require('node:sqlite'); const {ProcessingRepository}=require(process.argv[2]); const db=new DatabaseSync(process.argv[1]); db.function('simulate_process_death',()=>process.exit(73)); db.exec("CREATE TRIGGER crash_before_ingest BEFORE INSERT ON processing_jobs WHEN NEW.job_type='ingest' BEGIN SELECT simulate_process_death(); END"); const p=new ProcessingRepository(db); const attempt=p.getAttempt(process.argv[3]); p.advanceReconcileJob('poll','crash-worker',{uuid:attempt.providerTaskId,status:'completed',statusCode:40,progress:1}); process.exit(1);`;
+ const child=spawnSync(process.execPath,['-e',script,filename,require.resolve('../server/processingRepository'),f.attempt.id],{encoding:'utf8',timeout:10000});assert.equal(child.status,73,child.stderr);
+ const reopened=new DatabaseSync(filename);try{
+  const processing=new ProcessingRepository(reopened);assert.equal(processing.getAttempt(f.attempt.id).status,'running');assert.equal(reopened.prepare("SELECT status FROM processing_jobs WHERE id='poll'").get().status,'leased');assert.equal(reopened.prepare("SELECT COUNT(*) n FROM processing_jobs WHERE job_type='ingest'").get().n,0);
+  reopened.exec('DROP TRIGGER crash_before_ingest');reopened.prepare("UPDATE processing_jobs SET lease_expires_at='2000' WHERE id='poll'").run();
+  await processOne({processing,config:{},adapterFactory:()=>({status:async()=>({uuid:processing.getAttempt(f.attempt.id).providerTaskId,status:'completed',statusCode:40,progress:1}),output:async()=>({lines:[],nextLine:0})})},'replacement-worker');
+  assert.equal(processing.getAttempt(f.attempt.id).status,'ingesting');assert.equal(reopened.prepare("SELECT COUNT(*) n FROM processing_jobs WHERE job_type='ingest' AND status='pending'").get().n,1);
+ }finally{reopened.close();}
+});
+
+
+test('historical partial reconciliation safely resumes ingestion without duplicate jobs',async t=>{
+ for(const preexisting of [false,true]){
+  const f=fixture(t),attempt=f.processing.getAttempt(f.attempt.id);
+  f.db.prepare("UPDATE processing_attempts SET status='ingesting',upstream_completed_at='2020-01-01' WHERE id=?").run(attempt.id);
+  if(preexisting)f.db.prepare("INSERT INTO processing_jobs(id,attempt_id,job_type,status,available_at,created_at,updated_at) VALUES('existing-ingest',?,'ingest','pending','2000','2000','2000')").run(attempt.id);
+  await processOne({processing:f.processing,config:{},adapterFactory:()=>({status:async()=>({uuid:attempt.providerTaskId,status:'completed',statusCode:40,progress:1}),output:async()=>({lines:[],nextLine:0})})},'upgrade-worker');
+  assert.equal(f.processing.getAttempt(attempt.id).status,'ingesting');assert.equal(f.db.prepare("SELECT status FROM processing_jobs WHERE id='poll'").get().status,'complete');assert.equal(f.db.prepare("SELECT COUNT(*) n FROM processing_jobs WHERE attempt_id=? AND job_type='ingest' AND status IN ('pending','leased')").get(attempt.id).n,1);
+ }
+});
+
+test('historical committed reconcile can advance to running',async t=>{
+ const f=fixture(t);f.db.prepare("UPDATE processing_attempts SET status='committed' WHERE id=?").run(f.attempt.id);
+ await processOne({processing:f.processing,config:{},adapterFactory:()=>({status:async()=>({status:'running',progress:.5}),output:async()=>({lines:[],nextLine:0})})},'committed-upgrade-worker');
+ assert.equal(f.processing.getAttempt(f.attempt.id).status,'running');assert.equal(f.db.prepare("SELECT COUNT(*) n FROM processing_jobs WHERE attempt_id=? AND job_type='reconcile' AND status='pending'").get(f.attempt.id).n,1);
+});
+
+
+test('mismatched provider result identity raises a recoverable warning',async t=>{
+ const f=fixture(t);f.db.prepare("UPDATE processing_jobs SET attempt_count=8 WHERE id='poll'").run();
+ await processOne({processing:f.processing,config:{},adapterFactory:()=>({status:async()=>({uuid:'wrong-identity',status:'completed',statusCode:40,progress:1}),output:async()=>({lines:[],nextLine:0})})},'identity-worker');
+ assert.equal(f.processing.getAttempt(f.attempt.id).status,'running');assert.equal(f.db.prepare("SELECT error_code FROM processing_jobs WHERE id='poll'").get().error_code,'provider_result_identity_mismatch');assert.equal(processingJobCounts(f.db).observationWarnings,1);
+});
