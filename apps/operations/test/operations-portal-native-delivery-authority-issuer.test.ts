@@ -88,4 +88,3 @@ describe("operations native delivery issuer replay", () => {
       .rejects.toThrow("authority_denied");
   });
 });
-

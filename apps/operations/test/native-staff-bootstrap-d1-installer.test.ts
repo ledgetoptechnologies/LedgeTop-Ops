@@ -110,7 +110,7 @@ async function existingOwnerBootstrapFixture(){
       hash(priorBindingJson),priorResultJson,hash(priorResultJson)).run();
   return {owner,kstirn,employee,priorApprovalId,priorCommandId};
 }
-function planForExistingOwner(snap:any,p:{owner:Person;employee:Person;priorApprovalId:string;priorCommandId:string}){
+function planForExistingOwner(snap:any,p:{owner:Person;kstirn:Person;employee:Person;priorApprovalId:string;priorCommandId:string}){
   const area=`owner-initial-scope-${p.employee.id}`,ownerId=p.owner.id,employeeId=p.employee.id;
   const managementCaps=["staff.onboarding.create","staff.onboarding.approve","staff.admission.disable","staff.membership.manage",
     "staff.directory_grant.manage","staff.admin_delegation.manage","staff.admission.enable","staff.profile.edit","staff.profile.read"];
