@@ -8,20 +8,12 @@ on:
       - scripts/windows-*
       - apps/operations/public/favicon.ico
       - .github/workflows/windows-download.yml
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - apps/windows-download/**
-      - scripts/windows-*
-      - apps/operations/public/favicon.ico
-      - .github/workflows/windows-download.yml
-
 permissions:
   contents: read
 
 jobs:
   synthetic-transfer:
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: windows-latest
     timeout-minutes: 10
     defaults:
