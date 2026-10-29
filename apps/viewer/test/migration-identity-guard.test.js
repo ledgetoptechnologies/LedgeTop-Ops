@@ -17,6 +17,23 @@ test('wrong protected ledger names fail before journal mode or migration changes
  for(const version of [41,42]){const file=path.join(dir,`${version}.sqlite`),db=new DatabaseSync(file);db.exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL); INSERT INTO schema_migrations VALUES(${version},'other_feature','t'); CREATE TABLE untouched(value TEXT); INSERT INTO untouched VALUES('keep')`);db.close();const hash=()=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),before=hash();assert.throws(()=>openDatabase(file),{code:'migration_identity_conflict'});assert.equal(hash(),before);}
 });
 
+test('case-variant ledger, table and index collisions leave database bytes and journal mode unchanged',t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'migration-case-guard-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const hierarchy=MIGRATIONS.find(x=>x.version===42),cases=['ledger','gcp-table','hierarchy-table','hierarchy-index'];
+ for(const kind of cases){const file=path.join(dir,`${kind}.sqlite`),db=new DatabaseSync(file);db.exec('PRAGMA journal_mode=DELETE');
+  const ledger=kind==='ledger'?'SCHEMA_MIGRATIONS':'schema_migrations';db.exec(`CREATE TABLE ${ledger}(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)`);
+  if(kind==='gcp-table')db.exec('CREATE TABLE GCP_ODM_CRS_CONFIRMATIONS(id TEXT)');
+  if(kind==='hierarchy-table'||kind==='hierarchy-index'){let sql=hierarchy.sql;if(kind==='hierarchy-table')sql=sql.replaceAll('viewer_organizations','VIEWER_ORGANIZATIONS');else sql=sql.replaceAll('viewer_project_groups_org_idx','VIEWER_PROJECT_GROUPS_ORG_IDX');db.exec(sql);db.prepare('INSERT INTO schema_migrations VALUES (?,?,?)').run(42,hierarchy.name,'t');}
+  db.close();const hash=()=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),before=hash();assert.throws(()=>openDatabase(file),{code:'migration_identity_conflict'},kind);assert.equal(hash(),before,kind);
+  const check=new DatabaseSync(file,{readOnly:true});try{assert.equal(check.prepare('PRAGMA journal_mode').get().journal_mode,'delete',kind);}finally{check.close();}assert.equal(fs.existsSync(`${file}-wal`),false,kind);
+ }
+});
+
+test('index-name trigger collisions fail before changing database bytes or journal mode',t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'migration-trigger-overlap-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ for(const name of ['viewer_project_groups_org_idx','VIEWER_PROJECT_GROUPS_ORG_IDX']){const file=path.join(dir,`${name}.sqlite`),db=new DatabaseSync(file);db.exec('PRAGMA journal_mode=DELETE');for(const m of MIGRATIONS){db.exec(m.sql);m.after?.(db);db.prepare('INSERT INTO schema_migrations VALUES (?,?,?)').run(m.version,m.name,'t');}db.exec(`CREATE TRIGGER ${name} BEFORE DELETE ON viewer_project_groups BEGIN SELECT RAISE(ABORT,'blocked'); END`);db.close();const hash=()=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),before=hash();assert.throws(()=>openDatabase(file),{code:'migration_identity_conflict'},name);assert.equal(hash(),before,name);const check=new DatabaseSync(file,{readOnly:true});try{assert.equal(check.prepare('PRAGMA journal_mode').get().journal_mode,'delete',name);}finally{check.close();}assert.equal(fs.existsSync(`${file}-wal`),false,name);}
+});
+
 test('unrecorded protected tables and unknown protected ledger entries fail closed',t=>{
  const db=legacy();t.after(()=>db.close());db.exec('CREATE TABLE gcp_odm_crs_confirmations(id TEXT)');let before=schema(db);assert.throws(()=>applyMigrations(db),{code:'migration_identity_conflict'});assert.equal(schema(db),before);
  db.exec("DROP TABLE gcp_odm_crs_confirmations; INSERT INTO schema_migrations VALUES(42,'viewer_workspace_hierarchy','t')");before=schema(db);assert.throws(()=>applyMigrations(db),{code:'migration_identity_conflict'});assert.equal(schema(db),before);
