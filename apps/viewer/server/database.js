@@ -2047,16 +2047,23 @@ const MIGRATIONS = [
 ];
 
 function applyMigrations(database) {
-  database.exec(`
+  const {assertProtectedMigrationIdentity}=require('./migrationIdentityGuard');
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    assertProtectedMigrationIdentity(database,MIGRATIONS);
+    database.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY,
       name TEXT NOT NULL,
       applied_at TEXT NOT NULL
     )
-  `);
+    `);
+    database.exec('COMMIT');
+  } catch(error) { database.exec('ROLLBACK'); throw error; }
   for (const migration of MIGRATIONS) {
     database.exec('BEGIN IMMEDIATE');
     try {
+      assertProtectedMigrationIdentity(database,MIGRATIONS);
       // Re-check only after holding SQLite's write reservation. The API and
       // worker can start against the same fresh/upgraded volume concurrently;
       // a pre-lock snapshot would let the waiter apply an already-committed
@@ -2071,6 +2078,7 @@ function applyMigrations(database) {
       database.prepare(
         'INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)',
       ).run(migration.version, migration.name, new Date().toISOString());
+      assertProtectedMigrationIdentity(database,MIGRATIONS);
       database.exec('COMMIT');
     } catch (error) {
       database.exec('ROLLBACK');
@@ -2104,9 +2112,16 @@ function openDatabase(databasePath) {
   // SQLite's journal-mode transition may return SQLITE_BUSY without invoking
   // the configured busy handler during simultaneous first boot. Retry only
   // that bounded initialization transition; migration locking remains native.
-  withBusyRetry(() => database.exec('PRAGMA journal_mode=WAL'));
-  database.exec('PRAGMA synchronous=NORMAL');
-  try { applyMigrations(database); }
+  try {
+    // Detect known collisions before changing the existing database's journal
+    // mode or applying any migration. Recheck under every migration lock.
+    database.exec('BEGIN IMMEDIATE');
+    try {require('./migrationIdentityGuard').assertProtectedMigrationIdentity(database,MIGRATIONS);database.exec('ROLLBACK');}
+    catch(error){database.exec('ROLLBACK');throw error;}
+    withBusyRetry(() => database.exec('PRAGMA journal_mode=WAL'));
+    database.exec('PRAGMA synchronous=NORMAL');
+    applyMigrations(database);
+  }
   catch (error) { database.close(); throw error; }
   return database;
 }
