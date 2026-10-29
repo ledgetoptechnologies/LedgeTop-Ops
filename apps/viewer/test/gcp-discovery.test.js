@@ -94,6 +94,40 @@ test('failed raw-copy manifest protects partial CSV from dataset, container and 
  const {applyStorageMutation,purgeExpiredTrash}=require('../server/storageLifecycle');let removed=false;const storage={pathExistsStrict:()=>true,removeExact:()=>{removed=true;fs.unlinkSync(partialPath)}};const mutation={id:'prior',type:'purge',entityType:'dataset',entityId:d.id,status:'intent',sourceRootKey:'trash',sourceRelativePath:'source'};assert.throws(()=>applyStorageMutation(p,storage,mutation),{code:'retained_csv'});assert.deepEqual(purgeExpiredTrash(p,storage),[]);assert.equal(removed,false);assert.equal(fs.readFileSync(partialPath,'utf8'),raw);assert.equal(p.getTrash('partial').permanentlyDeletedAt,null);assert.equal(p.getTrash('container').permanentlyDeletedAt,null);
 });
 
+test('failed generic adoption retains a moved CSV before indexing, without protecting finalized non-CSV imports',async t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-adopt-retain-'));for(const name of ['datasets','models','cache','trash','imports'])fs.mkdirSync(path.join(root,name));
+ const db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true})});
+ const p=new ProcessingRepository(db),{StorageManager}=require('../server/storageManager'),{processOneDatasetOperation}=require('../server/datasetOperationWorker'),{applyStorageMutation,purgeExpiredTrash}=require('../server/storageLifecycle');
+ const storage=new StorageManager({datasetsMount:path.join(root,'datasets'),modelsMount:path.join(root,'models'),cacheMount:path.join(root,'cache'),trashMount:path.join(root,'trash'),datasetImportMount:path.join(root,'imports'),storageReserveBytes:0,storageReservePercent:0});storage.initialize();
+ const project=p.createProject({displayName:'Survey'}),body='original CSV bytes',subject='ops:test';
+ async function enqueue(name,withCsv){const source=path.join(root,'imports',name);fs.mkdirSync(source);fs.writeFileSync(path.join(source,'photo.jpg'),'synthetic image');if(withCsv)fs.writeFileSync(path.join(source,'raw.csv'),body);const request={rootKey:'dataset_import',relativePath:name},preview=await storage.previewImport(request.rootKey,request.relativePath),record=p.createImportPreview({request,preview,createdBy:subject,createdSessionId:'session',expiresAt:'2099-01-01T00:00:00.000Z'});return p.createImportAdoptOperation({previewToken:record.token,sessionId:'session',subject,projectId:project.id,displayName:name,storageMode:'adopted'});}
+ const operation=await enqueue('with-csv',true),finalize=p.finalizeDataset.bind(p);p.finalizeDataset=()=>{throw Object.assign(new Error('injected after adoption'),{code:'fault_injected'})};
+ try{await processOneDatasetOperation({processing:p,storage,config:{}},'fixture-worker')}finally{p.finalizeDataset=finalize}
+ assert.equal(p.getDatasetOperation(operation.id).status,'failed');const dataset=p.getDataset(operation.datasetId,true);assert.equal(dataset.files.length,0);assert.equal(dataset.manifestSha256,null);
+ assert.equal(fs.existsSync(path.join(root,'imports','with-csv')),false);assert.equal(fs.readFileSync(path.join(root,'datasets',dataset.relativePath,'raw.csv'),'utf8'),body);
+ const trashMutation=p.beginTrashMutation(dataset.id,subject);assert.ok(trashMutation);applyStorageMutation(p,storage,trashMutation);const trash=p.getTrash(trashMutation.trashId);
+ assert.equal(p.datasetHasRetainedCsv(dataset.id),true);assert.equal(p.beginPurgeMutation(trash.id,subject),null);
+ assert.throws(()=>applyStorageMutation(p,storage,{id:'prior',type:'purge',entityType:'dataset',entityId:dataset.id,status:'intent',sourceRootKey:'trash',sourceRelativePath:trash.relativePath}),{code:'retained_csv'});
+ const plain=await enqueue('no-csv',false);await processOneDatasetOperation({processing:p,storage,config:{}},'fixture-worker');assert.equal(p.getDatasetOperation(plain.id).status,'succeeded');assert.equal(p.datasetHasRetainedCsv(plain.datasetId),false);
+ const originalPayload=db.prepare('SELECT payload_json FROM dataset_operations WHERE id=?').get(plain.id).payload_json;db.prepare("UPDATE dataset_operations SET payload_json='{}' WHERE id=?").run(plain.id);assert.equal(p.datasetHasRetainedCsv(plain.datasetId),true);db.prepare('UPDATE dataset_operations SET payload_json=? WHERE id=?').run(originalPayload,plain.id);
+ const plainMutation=p.beginTrashMutation(plain.datasetId,subject);applyStorageMutation(p,storage,plainMutation);db.prepare("UPDATE storage_trash SET purge_after='2020-01-01T00:00:00.000Z' WHERE id IN (?,?)").run(trash.id,plainMutation.trashId);
+ const purged=purgeExpiredTrash(p,storage);assert.ok(purged.some(item=>item.trashId===plainMutation.trashId));assert.equal(p.getTrash(trash.id).permanentlyDeletedAt,null);assert.equal(fs.readFileSync(path.join(root,'trash',trash.relativePath,'raw.csv'),'utf8'),body);
+});
+
+test('failed cross-device adoption and refused external CSV reference retain their sources',async t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-adopt-modes-'));for(const name of ['datasets','models','cache','trash','imports'])fs.mkdirSync(path.join(root,name));
+ const db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true})});
+ const p=new ProcessingRepository(db),{StorageManager}=require('../server/storageManager'),{processOneDatasetOperation}=require('../server/datasetOperationWorker');
+ const storage=new StorageManager({datasetsMount:path.join(root,'datasets'),modelsMount:path.join(root,'models'),cacheMount:path.join(root,'cache'),trashMount:path.join(root,'trash'),datasetImportMount:path.join(root,'imports'),storageReserveBytes:0,storageReservePercent:0});storage.initialize();
+ const project=p.createProject({displayName:'Survey'}),body='original CSV bytes',subject='ops:test';
+ async function enqueue(name,storageMode){const source=path.join(root,'imports',name);fs.mkdirSync(source);fs.writeFileSync(path.join(source,'raw.csv'),body);const request={rootKey:'dataset_import',relativePath:name},preview=await storage.previewImport(request.rootKey,request.relativePath),record=p.createImportPreview({request,preview,createdBy:subject,createdSessionId:'session',expiresAt:'2099-01-01T00:00:00.000Z'});return {source,operation:p.createImportAdoptOperation({previewToken:record.token,sessionId:'session',subject,projectId:project.id,displayName:name,storageMode})};}
+ const copied=await enqueue('copied','adopted'),stat=fs.statSync,finalize=p.finalizeDataset.bind(p);p.finalizeDataset=()=>{throw Object.assign(new Error('injected after copy'),{code:'fault_injected'})};
+ fs.statSync=(target,...args)=>{const actual=stat(target,...args);return String(target)===copied.source?new Proxy(actual,{get(value,key){return key==='dev'?actual.dev+1:Reflect.get(value,key)}}):actual};
+ try{await processOneDatasetOperation({processing:p,storage,config:{}},'fixture-worker')}finally{fs.statSync=stat;p.finalizeDataset=finalize}
+ assert.equal(p.getDatasetOperation(copied.operation.id).status,'failed');assert.equal(p.datasetHasRetainedCsv(copied.operation.datasetId),true);assert.equal(fs.readFileSync(path.join(copied.source,'raw.csv'),'utf8'),body);assert.equal(fs.readFileSync(path.join(root,'datasets',copied.operation.datasetId,'raw.csv'),'utf8'),body);
+ const external=await enqueue('external','external_reference');await processOneDatasetOperation({processing:p,storage,config:{}},'fixture-worker');assert.equal(p.getDatasetOperation(external.operation.id).status,'failed');assert.equal(p.datasetHasRetainedCsv(external.operation.datasetId),true);assert.equal(fs.readFileSync(path.join(external.source,'raw.csv'),'utf8'),body);
+});
+
 test('expired trash scan rotates in bounded pages past a large retained prefix',t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-pages-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
  const p=new ProcessingRepository(db),project=p.createProject({displayName:'Survey'}),insert=db.prepare("INSERT INTO storage_trash(id,entity_type,entity_id,root_key,relative_path,byte_size,purge_after,created_at) VALUES (?,?,?,'datasets','source',0,'2020-01-01','2020-01-01')");
@@ -114,5 +148,6 @@ test('malformed raw-copy and upload manifest paths fail closed',t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-malformed-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
  const p=new ProcessingRepository(db),project=p.createProject({displayName:'Survey'}),d=p.createDataset({projectId:project.id,displayName:'Malformed',storageMode:'managed',rootKey:'datasets',relativePath:'source'}),timestamp='2020-01-01T00:00:00.000Z';
  db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,dataset_id,payload_json,status,available_at,created_at,updated_at) VALUES ('bad','import_adopt','test',?,?,'failed',?,?,?)").run(d.id,JSON.stringify({rawPhotoCopy:true,files:[{relativePath:null}]}),timestamp,timestamp,timestamp);assert.equal(p.datasetHasRetainedCsv(d.id),true);
+ for(const payload of ['{}','[]','not-json']){db.prepare("UPDATE dataset_operations SET payload_json=? WHERE id='bad'").run(payload);assert.equal(p.datasetHasRetainedCsv(d.id),true);}
  db.prepare("DELETE FROM dataset_operations WHERE id='bad'").run();const u=p.createUpload({datasetId:d.id,subject:'test',files:[{relativePath:42}],chunkSize:2,expiresAt:timestamp});assert.equal(p.datasetHasRetainedCsv(d.id),true);assert.ok(u.upload.id);
 });
