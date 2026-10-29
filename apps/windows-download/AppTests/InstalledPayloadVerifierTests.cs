@@ -2,6 +2,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using LedgeTop.Files.Updates;
 
 internal static class InstalledPayloadVerifierTests
@@ -12,6 +14,8 @@ internal static class InstalledPayloadVerifierTests
     {
         ParserRefusals();
         MarkerRefusals();
+        await EmptyDirectoryFenceLifecycle();
+        await DirectoryListAccessDenied();
         using (var fixture = new Fixture(includeOrdinaryInstallerIni: true)) {
             await using (var verified = await fixture.Verify()) {
                 Require(verified.AppHostSha256 == Hash(fixture.Payload["LedgeTop.Files.exe"]) && verified.ManagedAssemblySha256 == Hash(fixture.Payload["LedgeTop.Files.dll"]) &&
@@ -74,6 +78,40 @@ internal static class InstalledPayloadVerifierTests
             if (created) await Refuses(() => fixture.Verify(), "owned payload reparse alias refused");
         }
         Console.WriteLine("Installed payload verifier: strict anchored parser, owned local fixtures, tamper/extra/missing refusal and retained-handle boundary passed. No installed profiles, registry, installer/app/provider execution or authentication.");
+    }
+
+    private static async Task EmptyDirectoryFenceLifecycle()
+    {
+        // Isolated generated path with no held child files: the earlier payload-root
+        // rename test could also be blocked by files rather than the directory handle.
+        using var fixture = new Fixture(); fixture.MakeDirectory("empty-fenced");
+        var directory = fixture.PathOf("empty-fenced"); var renamed = fixture.PathOf("empty-fenced-moved");
+        await using (var fence = new VerifiedInstalledPayload(directory)) {
+            fence.HoldDirectory(directory);
+            await Refuses(() => Directory.Move(directory, renamed), "directory handle alone must refuse rename while held");
+            Require(Directory.Exists(directory) && !Directory.Exists(renamed), "failed rename leaves fixture at its original path");
+            var child = Path.Combine(directory, "temporary.txt"); File.WriteAllText(child, "synthetic"); File.Delete(child);
+            await fence.RevalidateAsync(default); // rechecks held directory handle + empty tree
+        }
+        Directory.Move(directory, renamed); Directory.Move(renamed, directory);
+        Require(Directory.Exists(directory) && !Directory.Exists(renamed), "disposing the fence releases the generated directory");
+    }
+
+    private static async Task DirectoryListAccessDenied()
+    {
+        using var fixture = new Fixture(); fixture.MakeDirectory("no-list");
+        var directory = fixture.PathOf("no-list"); var info = new DirectoryInfo(directory);
+        var original = info.GetAccessControl(AccessControlSections.Access); var descriptor = original.GetSecurityDescriptorSddlForm(AccessControlSections.Access);
+        using var identity = WindowsIdentity.GetCurrent(); var sid = identity.User ?? throw new IOException("Current SID unavailable.");
+        try {
+            var denied = info.GetAccessControl(AccessControlSections.Access); denied.AddAccessRule(new FileSystemAccessRule(sid, FileSystemRights.ListDirectory, AccessControlType.Deny));
+            info.SetAccessControl(denied);
+            Require((File.GetAttributes(directory) & FileAttributes.Directory) != 0, "metadata remains visible when listing is denied");
+            await using var fence = new VerifiedInstalledPayload(directory);
+            await Refuses(() => fence.HoldDirectory(directory), "list-denied directory must fail closed");
+        } finally {
+            var restored = new DirectorySecurity(); restored.SetSecurityDescriptorSddlForm(descriptor, AccessControlSections.Access); info.SetAccessControl(restored);
+        }
     }
 
     private static void ParserRefusals()

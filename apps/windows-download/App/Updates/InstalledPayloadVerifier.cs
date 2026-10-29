@@ -31,7 +31,8 @@ internal static class InstalledPayloadVerifier
         var full = CanonicalRoot(root);
         var lease = new VerifiedInstalledPayload(full);
         try {
-            // Keep every ancestor from being renamed/replaced while payload handles remain held.
+            // Retain every ancestor for a bounded identity/sharing check. Other metadata
+            // writes and adversarial path races are not excluded by these handles.
             var ancestors = new Stack<string>();
             for (var directory = new DirectoryInfo(full); directory is not null; directory = directory.Parent) ancestors.Push(directory.FullName);
             while (ancestors.TryPop(out var directory)) lease.HoldDirectory(directory);
@@ -191,6 +192,7 @@ internal sealed class VerifiedInstalledPayload(string root) : IAsyncDisposable
 {
     private readonly List<IDisposable> handles = [];
     private readonly List<(string Path, FileStream Stream)> files = [];
+    private readonly List<(string Path, SafeFileHandle Handle)> directories = [];
     private HashSet<string> expectedFiles = new(StringComparer.OrdinalIgnoreCase), expectedDirectories = new(StringComparer.OrdinalIgnoreCase);
     private bool disposed;
     internal string InstallRoot { get; } = root;
@@ -202,7 +204,7 @@ internal sealed class VerifiedInstalledPayload(string root) : IAsyncDisposable
     internal string PayloadManifestSha256 { get; set; } = "";
     internal void HoldDirectory(string path)
     {
-        var handle = Open(path, true); handles.Add(handle);
+        var handle = Open(path, true); handles.Add(handle); directories.Add((path, handle));
     }
     internal FileStream HoldFile(string relative)
     {
@@ -223,6 +225,7 @@ internal sealed class VerifiedInstalledPayload(string root) : IAsyncDisposable
     internal Task RevalidateAsync(CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
+        foreach (var directory in directories) VerifyHandle(directory.Handle, directory.Path, true);
         var actualFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var actualDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var pending = new Stack<string>(); pending.Push(InstallRoot);
@@ -239,6 +242,7 @@ internal sealed class VerifiedInstalledPayload(string root) : IAsyncDisposable
         }
         InstalledPayloadVerifier.Require(actualFiles.SetEquals(expectedFiles) && actualDirs.SetEquals(expectedDirectories));
         foreach (var file in files) VerifyHandle(file.Stream.SafeFileHandle, file.Path, false);
+        foreach (var directory in directories) VerifyHandle(directory.Handle, directory.Path, true);
         return Task.CompletedTask;
     }
     public ValueTask DisposeAsync()
@@ -248,9 +252,11 @@ internal sealed class VerifiedInstalledPayload(string root) : IAsyncDisposable
     }
     private static SafeFileHandle Open(string path, bool directory)
     {
-        // Directory WRITE sharing avoids interfering with unrelated ancestor operations;
-        // DELETE sharing is always denied. Files deny both writes and deletion.
-        var handle = CreateFileW(path, directory ? 0x80u : 0x80000000u, directory ? 3u : 1u, IntPtr.Zero, 3, 0x00200000u | (directory ? 0x02000000u : 0u), IntPtr.Zero);
+        // Directory LIST_DIRECTORY + READ_ATTRIBUTES engages read sharing rather
+        // than an attributes-only open, which did not prevent rename in a local
+        // NTFS control. Deny DELETE sharing while allowing normal sibling writes.
+        // This is not a fence against all metadata/reparse races or path ABA.
+        var handle = CreateFileW(path, directory ? 0x81u : 0x80000000u, directory ? 3u : 1u, IntPtr.Zero, 3, 0x00200000u | (directory ? 0x02000000u : 0u), IntPtr.Zero);
         try { InstalledPayloadVerifier.Require(!handle.IsInvalid); VerifyHandle(handle, path, directory); return handle; }
         catch { handle.Dispose(); throw; }
     }
