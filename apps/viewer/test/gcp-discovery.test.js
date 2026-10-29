@@ -241,3 +241,31 @@ test('malformed raw-copy and upload manifest paths fail closed',t=>{
  for(const payload of ['{}','[]','not-json']){db.prepare("UPDATE dataset_operations SET payload_json=? WHERE id='bad'").run(payload);assert.equal(p.datasetHasRetainedCsv(d.id),true);}
  db.prepare("DELETE FROM dataset_operations WHERE id='bad'").run();const u=p.createUpload({datasetId:d.id,subject:'test',files:[{relativePath:42}],chunkSize:2,expiresAt:timestamp});assert.equal(p.datasetHasRetainedCsv(d.id),true);assert.ok(u.upload.id);
 });
+
+test('manual CSV import and lifecycle serialize, preserve exact original bytes through trash, restart and restore', {skip:process.platform!=='linux'}, async t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-manual-lifecycle-'));
+ for(const name of ['datasets','models','cache','trash','imports'])fs.mkdirSync(path.join(root,name));
+ const dbPath=path.join(root,'viewer.sqlite'),db=openDatabase(dbPath),peer=openDatabase(dbPath);
+ t.after(()=>{peer.close();db.close();fs.rmSync(root,{recursive:true,force:true})});
+ const p=new ProcessingRepository(db),other=new ProcessingRepository(peer),g=new GcpRepository(db);
+ const {StorageManager}=require('../server/storageManager'),{applyStorageMutation,purgeExpiredTrash}=require('../server/storageLifecycle');
+ const storage=new StorageManager({datasetsMount:path.join(root,'datasets'),modelsMount:path.join(root,'models'),cacheMount:path.join(root,'cache'),trashMount:path.join(root,'trash'),datasetImportMount:path.join(root,'imports'),storageReserveBytes:0,storageReservePercent:0});storage.initialize();
+ const project=p.createProject({displayName:'Synthetic'}),source='\uFEFFpoint_id,label,latitude,longitude,elevation_m\r\nA,é,44,-88,123\r\n',parsed=require('../server/gcpImport').parseGcpInterchange({format:'generic-csv-v1',content:source});
+ const make=name=>{const d=p.createDataset({projectId:project.id,displayName:name,storageMode:'managed',rootKey:'datasets',relativePath:name});fs.mkdirSync(path.join(root,'datasets',name));const photo=Buffer.from('photo');fs.writeFileSync(path.join(root,'datasets',name,'photo.jpg'),photo);p.finalizeDataset(d.id,[{id:`${name}-photo`,relativePath:'photo.jpg',byteSize:photo.length,sha256:digest(photo)}],digest(name));return d;};
+ const args=d=>({datasetId:d.id,displayName:'Control',sourceFormat:'generic-csv-v1',sourceFilename:'control.csv',sourceSha256:parsed.sourceSha256,sourceContent:source,crs:parsed.crs,elevationUnits:'m',points:parsed.points});
+ // The other SQLite connection commits a real trash intent after the initial
+ // import prechecks and before its BEGIN IMMEDIATE transaction.
+ const raced=make('raced'),transaction=g.transaction.bind(g);let competing;
+ g.transaction=fn=>{competing=other.beginTrashMutation(raced.id,'ops:test');return transaction(fn)};
+ try{assert.throws(()=>g.importSet(args(raced)),{code:'dataset_not_available'})}finally{g.transaction=transaction;}
+ assert.ok(competing);assert.equal(db.prepare('SELECT count(*) n FROM gcp_sets WHERE dataset_id=?').get(raced.id).n,0);
+ applyStorageMutation(other,storage,competing);assert.equal(p.getDataset(raced.id).status,'trashed');
+ // When import wins first, both direct and background purge must preserve the
+ // separately stored manual CSV; verify bytes after an independent DB reopen.
+ const kept=make('kept'),set=g.importSet(args(kept)),move=other.beginTrashMutation(kept.id,'ops:test');assert.ok(move);applyStorageMutation(other,storage,move);
+ db.prepare("UPDATE storage_trash SET purge_after='2020-01-01T00:00:00.000Z' WHERE id=?").run(move.trashId);
+ assert.equal(other.beginPurgeMutation(move.trashId,'ops:test'),null);purgeExpiredTrash(other,storage);
+ const reopened=openDatabase(dbPath);try{const saved=reopened.prepare('SELECT source_content,source_sha256 FROM gcp_sets WHERE id=?').get(set.id);assert.deepEqual(Buffer.from(saved.source_content,'utf8'),Buffer.from(source,'utf8'));assert.equal(saved.source_sha256,digest(Buffer.from(source,'utf8')))}finally{reopened.close()}
+ assert.equal(p.getTrash(move.trashId).permanentlyDeletedAt,null);const restore=other.beginRestoreMutation(move.trashId,'ops:test');assert.ok(restore);applyStorageMutation(other,storage,restore);
+ assert.equal(p.getDataset(kept.id).status,'finalized');assert.deepEqual(Buffer.from(db.prepare('SELECT source_content FROM gcp_sets WHERE id=?').get(set.id).source_content,'utf8'),Buffer.from(source,'utf8'));
+});
