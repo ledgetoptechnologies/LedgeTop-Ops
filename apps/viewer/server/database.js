@@ -2075,6 +2075,7 @@ const MIGRATIONS = [
     );
     INSERT INTO viewer_capacity_control(singleton,mode,legacy_state)
       VALUES(1,'disabled','unassessed');
+    CREATE TRIGGER viewer_capacity_control_no_replace BEFORE INSERT ON viewer_capacity_control WHEN EXISTS(SELECT 1 FROM viewer_capacity_control WHERE singleton=NEW.singleton OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'capacity control replacement is forbidden'); END;
     CREATE TABLE viewer_capacity_reservations (
       id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
       domain_id TEXT NOT NULL CHECK(length(domain_id) BETWEEN 1 AND 128),
@@ -2108,13 +2109,13 @@ const MIGRATIONS = [
       BEFORE DELETE ON viewer_capacity_reservations
       BEGIN SELECT RAISE(ABORT,'capacity reservation deletion is forbidden'); END;
     CREATE TRIGGER viewer_capacity_identity_immutable
-      BEFORE UPDATE OF id,domain_id,writer_kind,writer_id,owner_id,fence_token,owner_generation ON viewer_capacity_reservations
-      WHEN NEW.id IS NOT OLD.id OR NEW.domain_id IS NOT OLD.domain_id OR NEW.writer_kind IS NOT OLD.writer_kind OR NEW.writer_id IS NOT OLD.writer_id OR NEW.owner_id IS NOT OLD.owner_id OR NEW.fence_token IS NOT OLD.fence_token OR NEW.owner_generation IS NOT OLD.owner_generation
+      BEFORE UPDATE ON viewer_capacity_reservations
+      WHEN NEW.rowid IS NOT OLD.rowid OR NEW.id IS NOT OLD.id OR NEW.domain_id IS NOT OLD.domain_id OR NEW.writer_kind IS NOT OLD.writer_kind OR NEW.writer_id IS NOT OLD.writer_id OR NEW.owner_id IS NOT OLD.owner_id OR NEW.fence_token IS NOT OLD.fence_token OR NEW.owner_generation IS NOT OLD.owner_generation
       BEGIN SELECT RAISE(ABORT,'capacity reservation identity is immutable'); END;
     CREATE TRIGGER viewer_capacity_no_replacement
       BEFORE INSERT ON viewer_capacity_reservations
       WHEN EXISTS (SELECT 1 FROM viewer_capacity_reservations
-        WHERE id=NEW.id OR (domain_id=NEW.domain_id AND writer_kind=NEW.writer_kind AND writer_id=NEW.writer_id))
+        WHERE rowid=NEW.rowid OR id=NEW.id OR (domain_id=NEW.domain_id AND writer_kind=NEW.writer_kind AND writer_id=NEW.writer_id))
       BEGIN SELECT RAISE(ABORT,'capacity reservation replacement is forbidden'); END;
     CREATE TRIGGER viewer_capacity_materialized_monotonic
       BEFORE UPDATE OF materialized_bytes,materialized_inodes ON viewer_capacity_reservations
@@ -2136,9 +2137,9 @@ const MIGRATIONS = [
       permanent_csv INTEGER NOT NULL CHECK(permanent_csv IN (0,1)),
       PRIMARY KEY(intent_id,object_id)
     );
-    CREATE TRIGGER viewer_custody_intents_immutable BEFORE UPDATE ON viewer_custody_intents WHEN NOT (OLD.state='building' AND NEW.state='prepared' AND NEW.id=OLD.id AND NEW.job_id=OLD.job_id AND NEW.generation=OLD.generation AND NEW.environment=OLD.environment AND NEW.binding_sha256=OLD.binding_sha256 AND NEW.canonical_binding=OLD.canonical_binding AND NEW.created_at=OLD.created_at) BEGIN SELECT RAISE(ABORT,'custody intent immutable'); END;
-    CREATE TRIGGER viewer_custody_intents_no_replace BEFORE INSERT ON viewer_custody_intents WHEN EXISTS (SELECT 1 FROM viewer_custody_intents WHERE id=NEW.id OR (job_id=NEW.job_id AND generation=NEW.generation AND environment=NEW.environment)) BEGIN SELECT RAISE(ABORT,'custody intent replacement'); END;
-    CREATE TRIGGER viewer_custody_pins_no_late_insert BEFORE INSERT ON viewer_custody_pins WHEN COALESCE((SELECT state FROM viewer_custody_intents WHERE id=NEW.intent_id),'')<>'building' OR EXISTS (SELECT 1 FROM viewer_custody_pins WHERE intent_id=NEW.intent_id AND object_id=NEW.object_id) BEGIN SELECT RAISE(ABORT,'custody pin insertion forbidden'); END;
+    CREATE TRIGGER viewer_custody_intents_immutable BEFORE UPDATE ON viewer_custody_intents WHEN NOT (OLD.state='building' AND NEW.state='prepared' AND NEW.rowid=OLD.rowid AND NEW.id=OLD.id AND NEW.job_id=OLD.job_id AND NEW.generation=OLD.generation AND NEW.environment=OLD.environment AND NEW.binding_sha256=OLD.binding_sha256 AND NEW.canonical_binding=OLD.canonical_binding AND NEW.created_at=OLD.created_at) BEGIN SELECT RAISE(ABORT,'custody intent immutable'); END;
+    CREATE TRIGGER viewer_custody_intents_no_replace BEFORE INSERT ON viewer_custody_intents WHEN EXISTS (SELECT 1 FROM viewer_custody_intents WHERE rowid=NEW.rowid OR id=NEW.id OR (job_id=NEW.job_id AND generation=NEW.generation AND environment=NEW.environment)) BEGIN SELECT RAISE(ABORT,'custody intent replacement'); END;
+    CREATE TRIGGER viewer_custody_pins_no_late_insert BEFORE INSERT ON viewer_custody_pins WHEN COALESCE((SELECT state FROM viewer_custody_intents WHERE id=NEW.intent_id),'')<>'building' OR EXISTS (SELECT 1 FROM viewer_custody_pins WHERE rowid=NEW.rowid OR (intent_id=NEW.intent_id AND object_id=NEW.object_id)) BEGIN SELECT RAISE(ABORT,'custody pin insertion forbidden'); END;
     CREATE TRIGGER viewer_custody_intents_no_delete BEFORE DELETE ON viewer_custody_intents BEGIN SELECT RAISE(ABORT,'custody intent retention'); END;
     CREATE TRIGGER viewer_custody_pins_immutable BEFORE UPDATE ON viewer_custody_pins BEGIN SELECT RAISE(ABORT,'custody pin immutable'); END;
     CREATE TRIGGER viewer_custody_pins_no_delete BEFORE DELETE ON viewer_custody_pins BEGIN SELECT RAISE(ABORT,'custody pin retention'); END;
