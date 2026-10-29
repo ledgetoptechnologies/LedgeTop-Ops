@@ -2067,6 +2067,61 @@ const MIGRATIONS = [
     CREATE INDEX viewer_project_groups_org_idx ON viewer_project_groups(organization_id);
     CREATE INDEX viewer_project_hierarchy_org_idx ON viewer_project_hierarchy(organization_id,group_id);
   `},
+  {version:43,name:'viewer_cooperative_capacity_ledger',sql:`
+    CREATE TABLE viewer_capacity_control (
+      singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+      mode TEXT NOT NULL CHECK(mode IN ('disabled','cooperative')),
+      legacy_state TEXT NOT NULL CHECK(legacy_state IN ('unassessed','reconciling','verified'))
+    );
+    INSERT INTO viewer_capacity_control(singleton,mode,legacy_state)
+      VALUES(1,'disabled','unassessed');
+    CREATE TABLE viewer_capacity_reservations (
+      id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
+      domain_id TEXT NOT NULL CHECK(length(domain_id) BETWEEN 1 AND 128),
+      domain_revision TEXT NOT NULL CHECK(length(domain_revision) BETWEEN 1 AND 128),
+      writer_kind TEXT NOT NULL CHECK(length(writer_kind) BETWEEN 1 AND 64),
+      writer_id TEXT NOT NULL CHECK(length(writer_id) BETWEEN 1 AND 128),
+      writer_namespace TEXT NOT NULL CHECK(length(writer_namespace) BETWEEN 1 AND 256),
+      owner_id TEXT NOT NULL CHECK(length(owner_id) BETWEEN 1 AND 128),
+      fence_token TEXT NOT NULL CHECK(length(fence_token) BETWEEN 1 AND 128),
+      owner_generation INTEGER NOT NULL CHECK(typeof(owner_generation)='integer' AND owner_generation BETWEEN 1 AND 9007199254740991),
+      peak_bytes INTEGER NOT NULL CHECK(typeof(peak_bytes)='integer' AND peak_bytes BETWEEN 0 AND 9007199254740991),
+      materialized_bytes INTEGER NOT NULL DEFAULT 0 CHECK(typeof(materialized_bytes)='integer' AND materialized_bytes BETWEEN 0 AND peak_bytes),
+      remaining_bytes INTEGER NOT NULL CHECK(typeof(remaining_bytes)='integer' AND remaining_bytes=peak_bytes-materialized_bytes),
+      peak_inodes INTEGER NOT NULL CHECK(typeof(peak_inodes)='integer' AND peak_inodes BETWEEN 0 AND 9007199254740991),
+      materialized_inodes INTEGER NOT NULL DEFAULT 0 CHECK(typeof(materialized_inodes)='integer' AND materialized_inodes BETWEEN 0 AND peak_inodes),
+      remaining_inodes INTEGER NOT NULL CHECK(typeof(remaining_inodes)='integer' AND remaining_inodes=peak_inodes-materialized_inodes),
+      state TEXT NOT NULL CHECK(state IN ('requested','held','writing','quiescing','retained','complete','cancelled')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(domain_id,writer_kind,writer_id)
+    );
+    CREATE INDEX viewer_capacity_reservations_domain_idx ON viewer_capacity_reservations(domain_id,state);
+    CREATE TRIGGER viewer_capacity_state_transition
+      BEFORE UPDATE OF state ON viewer_capacity_reservations
+      WHEN NEW.state <> OLD.state AND NOT (
+        (OLD.state IN ('held','writing') AND NEW.state='quiescing') OR
+        (OLD.state='quiescing' AND NEW.state='retained')
+      )
+      BEGIN SELECT RAISE(ABORT,'capacity state transition forbidden'); END;
+    CREATE TRIGGER viewer_capacity_no_delete
+      BEFORE DELETE ON viewer_capacity_reservations
+      BEGIN SELECT RAISE(ABORT,'capacity reservation deletion is forbidden'); END;
+    CREATE TRIGGER viewer_capacity_identity_immutable
+      BEFORE UPDATE OF id,domain_id,writer_kind,writer_id,owner_id,fence_token,owner_generation ON viewer_capacity_reservations
+      WHEN NEW.id IS NOT OLD.id OR NEW.domain_id IS NOT OLD.domain_id OR NEW.writer_kind IS NOT OLD.writer_kind OR NEW.writer_id IS NOT OLD.writer_id OR NEW.owner_id IS NOT OLD.owner_id OR NEW.fence_token IS NOT OLD.fence_token OR NEW.owner_generation IS NOT OLD.owner_generation
+      BEGIN SELECT RAISE(ABORT,'capacity reservation identity is immutable'); END;
+    CREATE TRIGGER viewer_capacity_no_replacement
+      BEFORE INSERT ON viewer_capacity_reservations
+      WHEN EXISTS (SELECT 1 FROM viewer_capacity_reservations
+        WHERE id=NEW.id OR (domain_id=NEW.domain_id AND writer_kind=NEW.writer_kind AND writer_id=NEW.writer_id))
+      BEGIN SELECT RAISE(ABORT,'capacity reservation replacement is forbidden'); END;
+    CREATE TRIGGER viewer_capacity_materialized_monotonic
+      BEFORE UPDATE OF materialized_bytes,materialized_inodes ON viewer_capacity_reservations
+      WHEN NEW.materialized_bytes < OLD.materialized_bytes OR NEW.materialized_inodes < OLD.materialized_inodes
+      BEGIN SELECT RAISE(ABORT,'capacity materialization cannot decrease'); END;
+  `},
+
 
   // Reserved source-only reference journal. No provider route, scheduler or
   // custody authority is enabled by this schema; old writers still require a
