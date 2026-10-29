@@ -48,7 +48,8 @@ function detectProviderType(info) {
   if (/^2\./.test(info.version) && !clusterSentinel) return 'nodeodm';
   // NodeODM's 3.6.2 image reports its package version here. Accept only the
   // observed release and ODM engine until newer protocol versions are tested.
-  if (info.version === '3.6.2' && info.engine === 'odm' && info.engineVersion === '3.6.2' && !clusterSentinel) return 'nodeodm';
+  if (info.version === '3.6.2' && info.engine === 'odm' && info.engineVersion === '3.6.2'
+      && ![info.totalMemory,info.availableMemory,info.cpuCores].includes(99999999999)) return 'nodeodm';
   throw providerCapabilityError('provider_probe_ambiguous', 'The endpoint is NodeODM-compatible, but its engine type cannot be identified safely.');
 }
 

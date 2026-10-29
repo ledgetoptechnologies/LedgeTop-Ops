@@ -19,6 +19,8 @@ test('provider type detection requires positive NodeODM or ClusterODM capability
   assert.equal(detectProviderType(node362Info), 'nodeodm');
   for (const changed of [{version:'3.6.3'},{engine:'other'},{engineVersion:'3.6.3'}, {totalMemory:99999999999,availableMemory:99999999999,cpuCores:99999999999}])
     assert.throws(() => detectProviderType({...node362Info,...changed}), {code:'provider_probe_ambiguous'});
+  for (const field of ['totalMemory','availableMemory','cpuCores'])
+    assert.throws(() => detectProviderType({...node362Info,[field]:99999999999}), {code:'provider_probe_ambiguous'});
   assert.throws(() => detectProviderType({...node362Info,maxImages:undefined}), {code:'provider_probe_unsupported'});
 });
 
