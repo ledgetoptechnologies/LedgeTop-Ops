@@ -101,7 +101,20 @@
 /* The GCP workspace uses the full available page for large survey images. */
 .gcp-map-wrap{margin:4px 0}.gcp-map{display:block;width:100%;max-height:290px;border:1px solid #343942;border-radius:9px;background:#10191c}.gcp-map rect{fill:#10191c}.gcp-map line{stroke:#405055;stroke-width:.7;stroke-dasharray:3 5}.gcp-map-radius{fill:#f4510714;stroke:#f57335;stroke-width:1.5}.gcp-map-point circle{fill:#fa5209;stroke:#fff;stroke-width:2}.gcp-map-point path{stroke:#fff;stroke-width:1.5}.gcp-map text{fill:#e0e6e8;font:12px sans-serif}.gcp-map-camera{cursor:pointer;outline:none}.gcp-map-camera circle{fill:#69c9e6;stroke:#10191c;stroke-width:2}.gcp-map-camera:hover circle,.gcp-map-camera:focus circle,.gcp-map-camera.active circle{fill:#fff;stroke:#ff6d2b;stroke-width:3}.gcp-map-camera:focus circle{r:8}.gcp-marker-workspace{grid-template-columns:minmax(280px,380px) minmax(0,1fr)}.gcp-image-stage,.gcp-mark-image{max-height:min(78vh,1000px)}.gcp-candidates{max-height:300px}
 @media(max-width:1000px){.gcp-marker-workspace{grid-template-columns:1fr}.gcp-image-stage,.gcp-mark-image{max-height:70vh}}
+.gcp-geographic-dialog{width:min(1500px,96vw);max-width:none;height:min(1000px,92dvh);max-height:none;padding:18px;border:1px solid var(--border-strong);border-radius:12px;background:var(--surface-1);color:var(--text);overflow:auto}
+.gcp-geographic-dialog::backdrop{background:#000c}
+.gcp-geographic-dialog[open]{display:flex;flex-direction:column;gap:10px}
+.gcp-geographic-header,.gcp-geographic-tools{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.gcp-geographic-header h3,.gcp-geographic-header p{margin:0}.gcp-geographic-header p,.gcp-geographic-tools span{color:var(--muted);font-size:12px}
+.gcp-geographic-map{flex:1;min-height:300px;width:100%;border:1px solid var(--border-strong);border-radius:8px;background:#182125}
+.gcp-geographic-map.leaflet-container{background:#182125}
+.gcp-geo-icon{background:transparent;border:0}.gcp-geo-icon span{display:block;width:18px;height:18px;border:2px solid #fff;border-radius:50%;background:#56c3e1;box-shadow:0 1px 5px #000}
+.gcp-geo-point span{background:#ee5007;border-radius:3px;transform:rotate(45deg)}.gcp-geo-point.selected span{box-shadow:0 0 0 3px #fff,0 1px 6px #000}
+.gcp-geo-icon:focus-visible span{outline:3px solid #fff;outline-offset:3px}
+@media(max-width:700px){.gcp-geographic-dialog{width:98vw;height:94dvh;padding:10px}.gcp-geographic-header,.gcp-geographic-tools{align-items:flex-start;flex-wrap:wrap}.gcp-geographic-map{min-height:260px}}
 .gcp-crs-confirmation{padding:10px;border:1px solid #43504a;border-radius:8px;background:#141b17;font-size:12px}.gcp-crs-confirmation p{margin:5px 0}.gcp-crs-confirmation span{color:#9ddeac}
 .gcp-start-processing{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:14px 0;padding:14px;border:1px solid #586148;border-radius:10px;background:#172018}.gcp-start-processing p{margin:4px 0;color:var(--muted)}@media(max-width:720px){.gcp-start-processing{align-items:stretch;flex-direction:column}}
 
 .gcp-crs-form{display:grid;gap:8px}.gcp-crs-form label{display:grid;gap:5px;color:var(--muted)}.gcp-crs-form input,.gcp-crs-form select{width:100%;border:1px solid var(--border);border-radius:8px;background:#0d0e12;color:var(--text);padding:9px}
+
+.gcp-geo-pages{display:flex;flex-wrap:wrap;gap:8px 20px}.gcp-geo-pages>div{display:flex;align-items:center;flex-wrap:wrap;gap:6px}.gcp-geo-pages span{font-size:12px;color:var(--muted)}
