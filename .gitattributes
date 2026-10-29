@@ -17,3 +17,8 @@ scripts/native-staff-cutover-distribution-pin.mjs text eol=lf
 scripts/native-staff-cutover-owner-approval-cli.mjs text eol=lf
 scripts/data/production-auto-asset-bootstrap/*.json text eol=lf
 scripts/production-auto-migration-profile/*.json text eol=lf
+
+# Preserve exact shared contract fixture bytes across platforms.
+apps/viewer/test/fixtures/source-release-ack-v1.candidate.json text eol=lf
+apps/viewer/test/fixtures/source-release-ack-v1.negative-vectors.candidate.json text eol=lf
+apps/viewer/test/fixtures/source-retention-v1.contract.json text eol=lf

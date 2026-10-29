@@ -11,14 +11,16 @@ test('application database startup registers the catalog parser and leaves readi
 });
 test('coverage scan uses the operation type index and does not run in journal admission',t=>{const db=new DatabaseSync(':memory:');t.after(()=>db.close());applyMigrations(db);const plan=db.prepare("EXPLAIN QUERY PLAN SELECT 1 FROM dataset_operations o LEFT JOIN reference_catalog_projection p ON p.operation_id=o.id WHERE o.operation_type='catalog_map' AND p.operation_id IS NULL").all().map(x=>x.detail).join(' ');assert.match(plan,/viewer_reference_catalog_operation_idx/);const sql=db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='viewer_reference_projection_admission'").get().sql;assert.doesNotMatch(sql,/JOIN\s+dataset_operations/i);assert.doesNotMatch(sql,/FROM\s+dataset_operations/i);});
 
-test('populated version 15, 41 and 42 databases upgrade without losing their task and attempt',t=>{
- for(const version of [15,41,42]){
+test('populated version 15, 41, 42, 43 and 44 databases upgrade without losing their task and attempt',t=>{
+ for(const version of [15,41,42,43,44]){
   const db=new DatabaseSync(':memory:');try{
    db.exec('PRAGMA foreign_keys=ON; CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');
    for(const m of MIGRATIONS.filter(m=>m.version<=version)){db.exec(m.sql);m.after?.(db);db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(m.version,m.name,'t');}
    db.exec("INSERT INTO projects(id,display_name,status,created_at,updated_at) VALUES('p','Project','active','t','t'); INSERT INTO datasets(id,project_id,display_name,storage_mode,root_key,relative_path,status,created_at,updated_at) VALUES('d','p','Data','managed','datasets','d','finalized','t','t'); INSERT INTO processing_tasks(id,project_id,dataset_id,display_name,status,created_at,updated_at) VALUES('t','p','d','Task','draft','t','t'); INSERT INTO processing_attempts(id,task_id,dataset_id,attempt_number,options_json,status,created_at,updated_at) VALUES('a','t','d',1,'{}','failed','t','t')");
+   if(version>=43)db.exec("INSERT INTO viewer_capacity_reservations(id,domain_id,domain_revision,writer_kind,writer_id,writer_namespace,owner_id,fence_token,owner_generation,peak_bytes,remaining_bytes,peak_inodes,remaining_inodes,state,created_at,updated_at) VALUES('r','d','rev','test','w','ns','o','f',1,100,100,1,1,'held','t','t')");
+   if(version>=44)db.exec("INSERT INTO viewer_custody_intents VALUES('i','j',1,'staging','h','{}','building','t'); INSERT INTO viewer_custody_pins VALUES('i','csv',1,'h','source',1)");
    const before=db.prepare('SELECT id,task_id,dataset_id,attempt_number,status FROM processing_attempts').get();assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
-   applyMigrations(db);assert.deepEqual(db.prepare('SELECT id,task_id,dataset_id,attempt_number,status FROM processing_attempts').get(),before);assert.equal(db.prepare("SELECT display_name FROM processing_tasks WHERE id='t'").get().display_name,'Task');assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=45').get().name,'viewer_reference_attempt_journal');
+   applyMigrations(db);if(version>=43)assert.equal(db.prepare("SELECT remaining_bytes FROM viewer_capacity_reservations WHERE id='r'").get().remaining_bytes,100);if(version>=44)assert.equal(db.prepare("SELECT permanent_csv FROM viewer_custody_pins WHERE intent_id='i'").get().permanent_csv,1);assert.deepEqual(db.prepare('SELECT id,task_id,dataset_id,attempt_number,status FROM processing_attempts').get(),before);assert.equal(db.prepare("SELECT display_name FROM processing_tasks WHERE id='t'").get().display_name,'Task');assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=45').get().name,'viewer_reference_attempt_journal');
   }finally{db.close();}
  }
 });
