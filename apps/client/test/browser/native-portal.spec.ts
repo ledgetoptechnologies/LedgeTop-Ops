@@ -1350,3 +1350,40 @@ test("native model routes retain client navigation and pin bootstrap to their ex
   expect(modelSessions.every(call => call.path.includes("/workspace-b/"))).toBe(true);
   await expect(page.locator("iframe")).toHaveCount(0);
 });
+
+test("the unified requests page explains when online requests aren't on, instead of hiding New request", async ({page}) => {
+  // The default contexts have requestV2 = false, so no account can take requests and none load request history.
+  await mock(page); await page.goto("/portal/requests");
+  await expect(page.getByRole("heading", {name: "Service requests"})).toBeVisible();
+  const unavailable = page.locator(".unified-portal-request-unavailable");
+  await expect(unavailable.getByRole("heading", {name: "New requests aren’t available online yet"})).toBeVisible();
+  await expect(unavailable).toContainText("contact your Ledge Top contact");
+  await expect(page.getByRole("button", {name: "New request"})).toHaveCount(0);
+  // History was never loaded, so the page doesn't claim there are no requests.
+  await expect(page.getByText("No requests yet")).toHaveCount(0);
+  await expect(page.getByText("Request history isn’t shown here yet")).toBeVisible();
+  await expect(page.locator(".client-portal-main a[href^=\"mailto:\"]")).toHaveCount(0);
+  await unavailable.getByRole("button", {name: "Go to your account"}).click();
+  await expect(page).toHaveURL(/\/portal\/account$/);
+});
+
+test("the unified requests page says it couldn't check when every account fails, rather than showing nothing", async ({page}) => {
+  await mock(page, (route, call) => /\/api\/client\/v2\/workspaces\/workspace-[bc]\/context$/.test(call.path)
+    ? route.fulfill({status: 503, json: {error: "Unavailable"}}) : undefined);
+  await page.goto("/portal/requests");
+  await expect(page.locator(".unified-portal-request-unavailable").getByRole("heading", {name: "We couldn’t check new requests"})).toBeVisible();
+  await expect(page.getByRole("heading", {name: "New requests aren’t available online yet"})).toHaveCount(0);
+  await expect(page.locator(".unified-portal-problems").getByRole("button", {name: "Try again"})).toBeVisible();
+  await expect(page.getByRole("button", {name: "New request"})).toHaveCount(0);
+});
+
+test("while accounts are still loading the requests page shows a disabled Checking button, not a missing one", async ({page}) => {
+  const held: Route[] = [];
+  await mock(page, (route, call) => /\/api\/client\/v2\/workspaces\/workspace-[bc]\/context$/.test(call.path) ? (held.push(route), Promise.resolve()) : undefined);
+  await page.goto("/portal/requests");
+  await expect(page.getByRole("button", {name: "Checking…"})).toBeDisabled();
+  await expect(page.locator(".unified-portal-request-unavailable")).toHaveCount(0);
+  for (const route of held.splice(0)) await route.fulfill({json: context(route.request().url().includes("workspace-c") ? "workspace-c" : "workspace-b")});
+  await expect(page.getByRole("heading", {name: "New requests aren’t available online yet"})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Checking…"})).toHaveCount(0);
+});
