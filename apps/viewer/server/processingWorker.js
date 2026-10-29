@@ -17,6 +17,7 @@ const {canonicalDerivativeInput}=require('./derivativeInputSnapshot');
 const {verifyRecoveredIngestSources}=require('./processingIngestRecovery');
 
 function requireNodeOdmProvider(provider){if(!provider||!['nodeodm','clusterodm'].includes(provider.type))throw Object.assign(new Error('processing provider type is unavailable'),{code:'unsupported_provider_type'});}
+function requireNodeOdmAttempt(processing,id){if(processing.hasReferenceAttemptProtocol(id)||processing.hasReferenceAttemptJournal(id))throw Object.assign(new Error('reference processing is unavailable'),{code:'unsupported_provider_type'});}
 function adapterFor(provider,config,providerCredentials){requireNodeOdmProvider(provider);return new NodeOdmProvider({endpoint:provider.endpoint,token:providerCredentials.resolve(provider.id),providerType:provider.type,transferTimeoutMs:config.processingProviderTransferTimeoutMs});}
 function transition(processing,job,status,fields){const attempt=processing.transitionAttemptForJob(job.id,job.lease_owner,status,fields);if(!attempt)throw Object.assign(new Error('processing lease was lost or attempt was cancelled'),{code:'lease_lost'});return attempt;}
 function discoverOutputs(root){const candidates={glb:['odm_texturing/odm_textured_model_geo.glb','odm_texturing/textured_model.glb','textured_model.glb'],obj:['odm_texturing/odm_textured_model_geo.obj','odm_texturing/odm_textured_model.obj'],ortho:['odm_orthophoto/odm_orthophoto.tif'],orthoCutline:require('./orthophotoCutline').CUTLINE_PATHS,dsm:['odm_dem/dsm.tif'],dtm:['odm_dem/dtm.tif'],report:['odm_report/report.pdf','odm_report/odm_report.pdf'],pointCloud:['odm_georeferencing/odm_georeferenced_model.laz','odm_georeferencing/odm_georeferenced_model.ply'],ept:['entwine_pointcloud/ept.json'],nativeTiles:['3d_tiles/model/tileset.json']};const assets=[];for(const[kind,choices]of Object.entries(candidates)){const rel=choices.find((p)=>fs.existsSync(path.join(root,...p.split('/')))&&(kind!=='orthoCutline'||require('./orthophotoCutline').validateCutlineFile({relativePath:p,absolutePath:path.join(root,...p.split('/'))})));if(!rel)continue;const absolute=path.join(root,...rel.split('/'));assets.push({kind,relativePath:rel,absolutePath:absolute,format:kind==='nativeTiles'?'3dtiles':kind==='ept'?'ept':path.extname(rel).slice(1).toLowerCase(),contentType:kind==='report'?'application/pdf':undefined,byteSize:fs.statSync(absolute).size});}return assets;}
@@ -34,6 +35,7 @@ async function verifyProviderMeshClosure(root,outputs=discoverOutputs(root),{sig
 }
 
 async function processSubmit(job,{processing,storage,config,providerCredentials,signal,adapterFactory=adapterFor}){
+  requireNodeOdmAttempt(processing,job.attempt_id);
   let attempt={...processing.getAttempt(job.attempt_id),...processing.getAttemptSubmission(job.attempt_id)};const task=processing.getTask(attempt.taskId),dataset=processing.getDataset(attempt.datasetId||task.datasetId,true),provider=processing.getProvider(attempt.providerId),adapter=adapterFactory(provider,config,providerCredentials);
   const photo=/\.(?:jpe?g|png|tiff?|dng|raw|heic)$/i,auxiliary=/\.(?:txt|geojson|json|zip|las|laz)$/i,mapped=[];for(const file of dataset.files){const absolute=storage.resolve(dataset.rootKey,`${dataset.relativePath}/${file.relativePath}`,{mustExist:true}),stat=fs.statSync(absolute);if(stat.size!==file.byteSize||await hashFile(absolute,{signal})!==file.sha256)throw Object.assign(new Error('dataset source changed after finalization'),{code:'dataset_source_changed'});const role=file.processingRole||'auto',isPhoto=photo.test(file.relativePath),isAux=auxiliary.test(file.relativePath);if(role==='gcp_source'||role==='administrative'||(role==='auto'&&!isPhoto))continue;if(role==='image'&&!isPhoto)throw Object.assign(new Error('a dataset image role references an unsupported image type'),{code:'unsupported_source_file'});if(role==='provider_input'&&!isAux)throw Object.assign(new Error('a provider input role references an unsupported source type'),{code:'unsupported_source_file'});mapped.push({relativePath:file.relativePath,absolutePath:absolute,processingRole:role});}
   storage.requireProcessingHeadroom(dataset.byteSize,processing.activeProcessingReservationBytes(attempt.id),processing.activeDerivativeReservationBytes());
@@ -75,6 +77,7 @@ async function processSubmit(job,{processing,storage,config,providerCredentials,
 }
 
 async function processReconcile(job,{processing,config,providerCredentials,signal,adapterFactory=adapterFor}){
+  requireNodeOdmAttempt(processing,job.attempt_id);
   const attempt=processing.getAttempt(job.attempt_id),provider=processing.getProvider(attempt.providerId),adapter=adapterFactory(provider,config,providerCredentials);
   const status=await adapter.status(attempt.providerTaskId,{signal});
   let output=null;
@@ -97,7 +100,7 @@ async function processReconcile(job,{processing,config,providerCredentials,signa
 
 async function processIngest(job,{processing,repository,storage,config,providerCredentials,signal}){
   const attempt=processing.getAttempt(job.attempt_id),task=processing.getTask(attempt.taskId),project=processing.getProject(task.projectId),provider=processing.getProvider(attempt.providerId);
-  if(processing.hasReferenceAttemptJournal(attempt.id))throw Object.assign(new Error('reference ingest is unavailable'),{code:'unsupported_provider_type'});
+  requireNodeOdmAttempt(processing,job.attempt_id);
   // Historical attempts may have a deleted provider and still recover an
   // existing local destination. Unknown concrete types remain unsupported.
   if(provider)requireNodeOdmProvider(provider);

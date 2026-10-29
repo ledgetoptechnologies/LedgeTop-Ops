@@ -4,7 +4,7 @@ const assert=require('node:assert/strict');
 const {processReconcile}=require('../server/processingWorker');
 function fixture({status='running',outputError=null,appendError=null,cursorError=null,signal=null}={}){
  const calls=[],attempt={id:'attempt',providerId:'provider',providerTaskId:'upstream',providerOutputCursor:17},job={id:'job',attempt_id:'attempt',lease_owner:'owner'};
- const processing={getAttempt:()=>attempt,getProvider:()=>({id:'provider'}),appendLog:(...args)=>{if(appendError)throw appendError;calls.push(['log',...args]);},setOutputCursor:(...args)=>{if(cursorError)throw cursorError;calls.push(['cursor',...args]);},transitionAttemptForJob:(...args)=>{calls.push(['transition',...args]);return attempt;},completeAndEnqueueJob:(...args)=>{calls.push(['enqueue',...args]);return true;}};
+ const processing={hasReferenceAttemptProtocol:()=>false,hasReferenceAttemptJournal:()=>false,getAttempt:()=>attempt,getProvider:()=>({id:'provider'}),appendLog:(...args)=>{if(appendError)throw appendError;calls.push(['log',...args]);},setOutputCursor:(...args)=>{if(cursorError)throw cursorError;calls.push(['cursor',...args]);},transitionAttemptForJob:(...args)=>{calls.push(['transition',...args]);return attempt;},completeAndEnqueueJob:(...args)=>{calls.push(['enqueue',...args]);return true;}};
  const adapterFactory=()=>({status:async()=>({status,progress:.64}),output:async(_id,cursor)=>{assert.equal(cursor,17);if(outputError)throw outputError;return{lines:['actual provider record'],nextLine:18};}});
  return{calls,processing,run:()=>processReconcile(job,{processing,config:{},providerCredentials:{},signal,adapterFactory})};
 }

@@ -522,6 +522,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   }
   getAttempt(id) { return this.attempt(this.database.prepare('SELECT * FROM processing_attempts WHERE id=?').get(id)) || null; }
   hasReferenceAttemptJournal(id) { return Boolean(this.database.prepare('SELECT 1 FROM viewer_reference_attempt_journal WHERE attempt_id=?').get(id)); }
+  hasReferenceAttemptProtocol(id) { return Boolean(this.database.prepare('SELECT 1 FROM viewer_reference_attempt_protocols WHERE attempt_id=?').get(id)); }
   captureNewAttemptProvenance(id,provider,createdAt){
     // Only called inside new-attempt transactions. Historical rows stay unknown;
     // a later provider probe must never reconstruct an earlier producer.

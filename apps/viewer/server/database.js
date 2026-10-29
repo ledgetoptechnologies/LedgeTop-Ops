@@ -2180,6 +2180,21 @@ const MIGRATIONS = [
     CREATE TRIGGER viewer_reference_catalog_replace_update BEFORE UPDATE ON dataset_operations WHEN EXISTS(SELECT 1 FROM viewer_reference_attempt_journal) AND EXISTS(SELECT 1 FROM dataset_operations o WHERE o.operation_type='catalog_map' AND o.id IS NOT OLD.id AND (o.id=NEW.id OR o.rowid=NEW.rowid OR (NEW.upload_id IS NOT NULL AND o.upload_id=NEW.upload_id AND NEW.status IN ('queued','leased','awaiting_derivatives','succeeded') AND o.status IN ('queued','leased','awaiting_derivatives','succeeded')) OR (NEW.import_preview_id IS NOT NULL AND o.import_preview_id=NEW.import_preview_id AND NEW.status IN ('queued','leased','awaiting_derivatives','succeeded') AND o.status IN ('queued','leased','awaiting_derivatives','succeeded')) OR (NEW.processing_attempt_id IS NOT NULL AND o.processing_attempt_id=NEW.processing_attempt_id AND NEW.status='awaiting_derivatives' AND o.status='awaiting_derivatives'))) BEGIN SELECT RAISE(ABORT,'reference catalog replacement conflict'); END;
   `},
 
+  // Source-stage identity only. No API, scheduler or custody authority is
+  // enabled. Admission cannot be enabled by updating configuration or rows.
+  {version:46,name:'viewer_reference_protocol_identity',sql:`
+    CREATE TABLE viewer_reference_providers(id TEXT PRIMARY KEY NOT NULL,display_name TEXT NOT NULL,origin TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled=0));
+    CREATE TABLE viewer_reference_attempt_protocols(attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES processing_attempts(id) ON DELETE RESTRICT,reference_provider_id TEXT NOT NULL REFERENCES viewer_reference_providers(id) ON DELETE RESTRICT,protocol TEXT NOT NULL CHECK(protocol='reference-v1'));
+    CREATE TRIGGER viewer_reference_provider_unavailable BEFORE INSERT ON viewer_reference_providers BEGIN SELECT RAISE(ABORT,'reference provider unavailable'); END;
+    CREATE TRIGGER viewer_reference_provider_immutable BEFORE UPDATE ON viewer_reference_providers BEGIN SELECT RAISE(ABORT,'reference provider immutable'); END;
+    CREATE TRIGGER viewer_reference_provider_no_delete BEFORE DELETE ON viewer_reference_providers BEGIN SELECT RAISE(ABORT,'reference provider retained'); END;
+    CREATE TRIGGER viewer_reference_provider_no_replace BEFORE INSERT ON viewer_reference_providers WHEN EXISTS(SELECT 1 FROM viewer_reference_providers WHERE id=NEW.id OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'reference provider replacement'); END;
+    CREATE TRIGGER viewer_reference_protocol_unavailable BEFORE INSERT ON viewer_reference_attempt_protocols BEGIN SELECT RAISE(ABORT,'reference protocol unavailable'); END;
+    CREATE TRIGGER viewer_reference_protocol_immutable BEFORE UPDATE ON viewer_reference_attempt_protocols BEGIN SELECT RAISE(ABORT,'reference protocol immutable'); END;
+    CREATE TRIGGER viewer_reference_protocol_no_delete BEFORE DELETE ON viewer_reference_attempt_protocols BEGIN SELECT RAISE(ABORT,'reference protocol retained'); END;
+    CREATE TRIGGER viewer_reference_protocol_no_replace BEFORE INSERT ON viewer_reference_attempt_protocols WHEN EXISTS(SELECT 1 FROM viewer_reference_attempt_protocols WHERE attempt_id=NEW.attempt_id OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'reference protocol replacement'); END;
+  `},
+
 ];
 
 function applyMigrations(database) {

@@ -132,6 +132,7 @@ test('processIngest rejects a provider mesh without EPT before adopting it', asy
     database,
     getAttempt: () => attempt,
     getAttemptTransferProvenance: () => null,
+    hasReferenceAttemptProtocol: id => Boolean(database.prepare('SELECT 1 FROM viewer_reference_attempt_protocols WHERE attempt_id=?').get(id)),
     hasReferenceAttemptJournal: id => Boolean(database.prepare('SELECT 1 FROM viewer_reference_attempt_journal WHERE attempt_id=?').get(id)),
     getTask: () => task,
     getProject: () => ({ id:task.projectId, displayName:'EPT project' }),
