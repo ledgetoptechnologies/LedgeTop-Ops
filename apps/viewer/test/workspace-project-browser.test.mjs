@@ -322,11 +322,11 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
     ? json({ attempts: [{ id: 'attempt-johnson-old', attemptNumber: 1, providerId: 'provider-nodeodm', providerTaskId: 'nodeodm-41', status: 'failed', errorCode: 'obj2tiles_exit_nonzero', errorMessage: 'Textured tile conversion failed.', createdAt: '2026-08-17T12:00:00.000Z', startedAt: '2026-08-17T12:01:00.000Z', completedAt: '2026-08-17T12:04:00.000Z' }], nextCursor: null })
     : json({ attempts: [fixtures.tasks[0].latestAttempt], nextCursor: 'older-johnson-runs' });
   if (pathname === '/api/v1/tasks/task-quarry/attempts') return json({ attempts: [fixtures.tasks[1].latestAttempt], nextCursor: null });
-  const gcpSet = { id: 'gcp-set-johnson', displayName: 'Rome Dam control', pointCount: 1, crs: 'EPSG:32616', provenance: { coordinateSystem: 'NAD83 / UTM zone 16N', verticalDatum: 'NAVD88', linearUnit: 'ftUS' }, odmCrsCandidate: { epsgCode:7541, horizontalUnit:'m', verticalDatum:'NAVD88(GEOID18)', verticalUnit:'m' }, odmCrsConfirmed: Boolean(runtime.gcpCrsConfirmed) };
+  const gcpSet = { id: 'gcp-set-johnson', displayName: 'Rome Dam control', pointCount: 1, crs: 'EPSG:32616', provenance: { coordinateSystem: 'NAD83 / UTM zone 16N', verticalDatum: 'NAVD88', linearUnit: 'ftUS' }, odmCrsCandidate: runtime.manualGcp ? null : { epsgCode:7541, horizontalUnit:'m', verticalDatum:'NAVD88(GEOID18)', verticalUnit:'m' }, odmCrs: runtime.gcpConfirmedCrs, odmCrsConfirmed: Boolean(runtime.gcpCrsConfirmed) };
   const gcpPoint = { id: 'gcp-point-1', externalId: 'ltds-1', label: 'ltds-1', latitude: 44.1, longitude: -88.2, elevationM: 220 };
   if (pathname === '/api/v1/datasets/dataset-johnson/gcp-sets') return json({ sets: [gcpSet] });
   if (pathname === '/api/v1/gcp-sets/gcp-set-johnson') return json({ set: gcpSet, points: [gcpPoint] });
-  if (pathname === '/api/v1/gcp-sets/gcp-set-johnson/odm-crs-confirm' && method === 'POST') { runtime.gcpCrsConfirmed=true; return json({ set: {...gcpSet,odmCrsConfirmed:true} }); }
+  if (pathname === '/api/v1/gcp-sets/gcp-set-johnson/odm-crs-confirm' && method === 'POST') { runtime.gcpCrsConfirmed=true; runtime.gcpConfirmedCrs=body.epsgCode?{...body,verticalUnit:'m'}:gcpSet.odmCrsCandidate; return json({ set: {...gcpSet,odmCrs:runtime.gcpConfirmedCrs,odmCrsConfirmed:true} }); }
   if (pathname === '/api/v1/tasks/task-johnson/gcp-correspondences' && method === 'GET') return json({ correspondences: runtime.correspondences });
   if (pathname === '/api/v1/tasks/task-johnson/gcp-correspondences' && method === 'POST') {
     const correspondence = { id: 'gcp-mark-1', ...body };
@@ -573,7 +573,7 @@ async function confirmAppAction(client, runtime, selector, { title, fields = {},
 }
 
 async function verifyViewport(devTools, origin, viewport, runtime) {
-  runtime.gcpCrsConfirmed = false;
+  runtime.gcpCrsConfirmed = false; runtime.manualGcp = false; runtime.gcpConfirmedCrs = null;
   runtime.archivedProjects.clear();
   runtime.archivedTasks.clear();
   runtime.failNextStorage = false;
