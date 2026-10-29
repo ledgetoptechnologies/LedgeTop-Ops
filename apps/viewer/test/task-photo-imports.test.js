@@ -226,3 +226,25 @@ test('survey-preview route rejects a swapped ancestor rather than exposing an ou
   const response=await fetch(`http://127.0.0.1:${server.address().port}/api/v1/dataset-imports/survey-preview`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({paths:['raw/flight/a.jpg']})});
   assert.equal(fired,true);assert.equal(response.status,400);const payload=await response.json();assert.equal(payload.code,'invalid_import_path');assert.doesNotMatch(JSON.stringify(payload),/outside/);
 });
+
+
+test('transient inspection timeout releases the exact unattached reservation so the same key can succeed', async t => {
+  const context=fixture(t),db=openDatabase(path.join(context.root,'retry.sqlite')),processing=new ProcessingRepository(db);
+  const project=processing.createProject({displayName:'Retry project'});context.photo('raw/a.jpg');
+  const receipt={subject:'ops:test',key:'retry-same-key-0001',method:'POST',path:'/api/v1/dataset-imports/copy',requestHash:'a'.repeat(64)};
+  const router=express.Router(),app=express();app.use(express.json());let count=0;
+  const mutate=(req,res,next)=>{
+    const reservation=processing.reserveSubjectOperationReceipt(receipt);
+    if(!reservation.created)return res.status(409).json({code:'idempotency_in_progress'});
+    const original=res.json.bind(res);res.json=body=>{if(res.statusCode<500)processing.completeSubjectOperationReceipt(receipt.subject,receipt.key,res.statusCode,body);return original(body);};next();
+  };
+  const inspect=async input=>{if(count++===0)throw Object.assign(new Error('timeout'),{code:'import_inspection_timeout'});return selectWithSiblingSurvey(context.storage,input.paths,input.survey,input.maxFiles);};
+  mountTaskPhotoImports(router,{processing,storage:context.storage,config:context.config,authorize:()=>((req,_res,next)=>{req.actorId=receipt.subject;next();}),mutate,subjectReceipt:()=>receipt,inspect});app.use(router);
+  const server=await new Promise(resolve=>{const instance=app.listen(0,'127.0.0.1',()=>resolve(instance));});
+  t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));db.close();});
+  const request={method:'POST',headers:{'content-type':'application/json','Idempotency-Key':receipt.key},body:JSON.stringify({projectId:project.id,displayName:'Retry',paths:['raw']})};
+  const url=`http://127.0.0.1:${server.address().port}/api/v1/dataset-imports/copy`;
+  const first=await fetch(url,request);assert.equal(first.status,503);assert.equal(processing.getSubjectOperationReceipt(receipt.subject,receipt.key),undefined);
+  const second=await fetch(url,request);assert.equal(second.status,202,JSON.stringify(await second.clone().json()));
+  assert.ok(processing.getSubjectOperationReceipt(receipt.subject,receipt.key).operationId);
+});

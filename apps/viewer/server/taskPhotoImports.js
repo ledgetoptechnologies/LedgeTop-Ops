@@ -215,6 +215,8 @@ function mountTaskPhotoImports(router, { processing, storage, authorize, mutate,
     catch (error) { res.status(error.code === 'import_mount_unavailable' ? 503 : 400).json({ code: error.code || 'import_path_unavailable', error: 'The import folder is unavailable.' }); }
   });
   router.post('/api/v1/dataset-imports/copy', authorize('viewer.datasets.import'), mutate, async (req, res) => {
+    const receipt = !req.servicePrincipal ? subjectReceipt(req) : null;
+    const reservation = receipt ? processing.getSubjectOperationReceipt(receipt.subject, receipt.key) : null;
     try {
       const body = req.body || {}, project = processing.getProject(body.projectId);
       if (!project || project.status !== 'active') fail('invalid_project');
@@ -231,7 +233,16 @@ function mountTaskPhotoImports(router, { processing, storage, authorize, mutate,
         return { dataset, operation: processing.getDatasetOperation(id) };
       });
       res.status(202).set('Location', `/api/v1/operations/${result.operation.id}`).set('Retry-After', '2').json(result);
-    } catch (error) { const message = error.code === 'multiple_survey_csv_candidates' ? 'Multiple survey CSV files were found. Select the intended CSV in the server browser along with your photos.' : error.code === 'survey_discovery_limit' ? 'Survey CSV search exceeded its limit. Select your survey CSV explicitly along with your photos.' : error.code || 'Raw images could not be selected.'; res.status(error.code === 'dataset_name_conflict' ? 409 : 400).json({ code: error.code || 'raw_import_failed', error: message }); }
+    } catch (error) {
+      if (['import_inspection_timeout', 'import_inspection_busy', 'import_inspection_failed'].includes(error.code)) {
+        // Remove only the exact still-unattached reservation created for this
+        // attempt. Service idempotency releases its own reservation on 5xx.
+        if (receipt && reservation && reservation.method === receipt.method && reservation.path === receipt.path && reservation.requestHash === receipt.requestHash) {
+          processing.database.prepare('DELETE FROM subject_operation_receipts WHERE subject=? AND client_key=? AND method=? AND path=? AND request_sha256=? AND created_at=? AND operation_id IS NULL AND response_status IS NULL').run(receipt.subject,receipt.key,receipt.method,receipt.path,receipt.requestHash,reservation.createdAt);
+        }
+        return res.status(503).json({code:error.code,error:'Source inspection is temporarily unavailable. Please retry.'});
+      }
+      const message = error.code === 'multiple_survey_csv_candidates' ? 'Multiple survey CSV files were found. Select the intended CSV in the server browser along with your photos.' : error.code === 'survey_discovery_limit' ? 'Survey CSV search exceeded its limit. Select your survey CSV explicitly along with your photos.' : error.code || 'Raw images could not be selected.'; res.status(error.code === 'dataset_name_conflict' ? 409 : 400).json({ code: error.code || 'raw_import_failed', error: message }); }
   });
 }
 
