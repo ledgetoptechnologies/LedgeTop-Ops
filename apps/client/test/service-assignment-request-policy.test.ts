@@ -47,6 +47,7 @@ import {
   nativeRequestMutationGuardSql,
   resolveNativeRequestAuthority,
 } from "../src/worker/client-portal/native-request-authority";
+import { readClientRequestReadiness } from "../src/worker/client-portal/request-readiness";
 
 const sourceId = "project-alpha:primary";
 const secondarySourceId = "project-alpha:secondary";
@@ -421,6 +422,77 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
       VALUES ('native-project-directory-read',?,'portal-policy-identity','directory.read','allow','project',
         'native-request-project','project_alpha','read-v1','active')`).bind(secondarySession.workspaceId).run();
   }
+
+  it("reports common project request support when only a native secondary project is authorized", async () => {
+    await seedNativeRequestProject(true);
+    await db.prepare(`INSERT INTO portal_v2_entitlements
+      (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,source_version,status)
+      VALUES ('secondary-project-request',?,'portal-policy-identity','request.create','allow','project',
+        'native-request-project','project_alpha','request-secondary-v1','active')`).bind(secondarySession.workspaceId).run();
+    await db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id='secondary-request-root'").run();
+
+    const principal = { issuer: "https://issuer.test", subject: "policy-subject", email: "policy@example.test" };
+    expect(await resolveNativeRequestAuthority(env, secondarySession, "native-request-project")).not.toBeNull();
+
+    // The native project is the only request grant. Common catalog support
+    // must still be based on the exact current workspace/source, while the
+    // root decision remains denied and a selected project is independently
+    // checked against its own authority.
+    expect(await readClientRequestReadiness(env, principal, secondarySession, null, null)).toMatchObject({
+      canStartRequest: false, reason: "request_not_permitted",
+      root: { canStartRequest: false, reason: "request_not_permitted" }, projectRequestsSupported: true,
+    });
+    expect(await readClientRequestReadiness(
+      { ...env, CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED: "false" },
+      principal, secondarySession, null, "native-request-project",
+    )).toMatchObject({
+      canStartRequest: true, reason: "ready",
+      root: { canStartRequest: false, reason: "request_not_permitted" }, projectRequestsSupported: true,
+      workspaceId: secondarySession.workspaceId,
+    });
+
+    // A primary catalog cannot satisfy this secondary workspace's common
+    // prerequisites.
+    await db.batch([
+      db.prepare("UPDATE pa_service_catalog_items SET active=0 WHERE source_id=?").bind(secondarySourceId),
+      db.prepare(`INSERT INTO pa_service_catalog_items
+        (source_id,public_id,source_version,name,category,source_updated_at)
+        VALUES (?,'readiness-wrong-source','wrong-source-v1','Wrong source service','Mapping',datetime('now'))`)
+        .bind(sourceId),
+    ]);
+    try {
+      expect(await readClientRequestReadiness(env, principal, secondarySession, null, null)).toMatchObject({
+        canStartRequest: false, reason: "catalog_unavailable", projectRequestsSupported: false,
+      });
+      expect(await readClientRequestReadiness(env, principal, secondarySession, null, "native-request-project")).toMatchObject({
+        canStartRequest: false, reason: "catalog_unavailable", projectRequestsSupported: false,
+        root: { canStartRequest: false, reason: "catalog_unavailable" },
+      });
+    } finally {
+      await db.batch([
+        db.prepare("UPDATE pa_service_catalog_items SET active=1 WHERE source_id=?").bind(secondarySourceId),
+        db.prepare("DELETE FROM pa_service_catalog_items WHERE source_id=? AND public_id='readiness-wrong-source'").bind(sourceId),
+      ]);
+    }
+
+    // A project-scoped deny stays authoritative even while common picker
+    // prerequisites remain available and the workspace root is denied.
+    await db.prepare(`INSERT INTO portal_v2_entitlements
+      (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,source_version,status)
+      VALUES ('secondary-readiness-project-deny',?,'portal-policy-identity','request.create','deny','project',
+        'native-request-project','project_alpha','deny-v1','active')`).bind(secondarySession.workspaceId).run();
+    try {
+      expect(await readClientRequestReadiness(env, principal, secondarySession, null, null)).toMatchObject({
+        canStartRequest: false, reason: "request_not_permitted", projectRequestsSupported: true,
+      });
+      expect(await readClientRequestReadiness(env, principal, secondarySession, null, "native-request-project")).toMatchObject({
+        canStartRequest: false, reason: "project_unavailable", projectRequestsSupported: true,
+        root: { canStartRequest: false, reason: "request_not_permitted" },
+      });
+    } finally {
+      await db.prepare("DELETE FROM portal_v2_entitlements WHERE id='secondary-readiness-project-deny'").run();
+    }
+  });
 
   it("project-readable request authority allows a general organization request but rejects a guessed unreadable project", async () => {
     await seedNativeRequestProject();
