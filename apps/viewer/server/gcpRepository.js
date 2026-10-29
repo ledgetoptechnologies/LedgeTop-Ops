@@ -47,7 +47,7 @@ class GcpRepository {
       provenance: row.adapter ? { adapter: row.adapter, coordinateSystem: row.coordinate_system,
         verticalDatum: row.vertical_datum, linearUnit: row.linear_unit,
         elevationSource: row.elevation_source, geographicCrossCheck: row.geographic_cross_check } : null,
-      odmCrsCandidate: candidate, odmCrsConfirmed: Boolean(confirmation && confirmation.source_sha256===row.source_sha256), odmCrs: confirmation && confirmation.source_sha256===row.source_sha256 ? {epsgCode:confirmation.epsg_code,horizontalUnit:confirmation.horizontal_unit,verticalDatum:confirmation.vertical_datum,verticalUnit:'m'} : null,
+      odmCrsCandidate: candidate, odmCrsConfirmed: Boolean(candidate && confirmation && confirmation.source_sha256===row.source_sha256 && confirmation.epsg_code===candidate.epsgCode && confirmation.horizontal_unit===candidate.horizontalUnit && confirmation.vertical_datum===candidate.verticalDatum), odmCrs: candidate && confirmation && confirmation.source_sha256===row.source_sha256 && confirmation.epsg_code===candidate.epsgCode && confirmation.horizontal_unit===candidate.horizontalUnit && confirmation.vertical_datum===candidate.verticalDatum ? {epsgCode:confirmation.epsg_code,horizontalUnit:confirmation.horizontal_unit,verticalDatum:confirmation.vertical_datum,verticalUnit:'m'} : null,
       pointCount: Number(row.point_count || 0), createdBy: row.created_by,
       createdAt: row.created_at, updatedAt: row.updated_at,
     };
