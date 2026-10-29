@@ -1,5 +1,11 @@
 // Site data stays local unless the operator explicitly enables aerial tiles.
 export const AERIAL_TILES='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+export const MAP_PAGE_SIZE=100;
+export function mapPage(items,page=0) {
+  const values=Array.isArray(items)?items:[],pages=Math.max(1,Math.ceil(values.length/MAP_PAGE_SIZE));
+  const current=Number.isInteger(page)?Math.max(0,Math.min(page,pages-1)):0;
+  return {items:values.slice(current*MAP_PAGE_SIZE,(current+1)*MAP_PAGE_SIZE),current,pages,total:values.length};
+}
 function position(item) {
   if(item?.latitude==null||item?.longitude==null)return null;
   if (![item.latitude,item.longitude].every(value=>typeof value==='number'||typeof value==='string'&&value.trim()!==''))return null;

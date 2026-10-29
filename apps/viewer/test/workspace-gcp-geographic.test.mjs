@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mountGcpGeographicMap,AERIAL_TILES} from '../workspace-gcp-geographic.mjs';
+import {mountGcpGeographicMap,AERIAL_TILES,mapPage,MAP_PAGE_SIZE} from '../workspace-gcp-geographic.mjs';
 
 function leaflet() {
   const state={markers:[],tiles:[],removed:0,resized:0};
@@ -29,4 +29,10 @@ test('camera positions near the antimeridian fit near the selected point',()=>{
 test('failed map initialization releases the partially mounted map',()=>{
  const {L,state}=leaflet();L.circle=()=>{throw Error('synthetic failure')};
  assert.throws(()=>mountGcpGeographicMap({L,element:{},point:{latitude:0,longitude:0},radiusM:15.24}));assert.equal(state.removed,1);
+});
+
+test('large loaded datasets stay reachable through bounded pages',()=>{
+ const items=Array.from({length:20000},(_,id)=>({id}));
+ const seen=[];for(let i=0;i<mapPage(items).pages;i++){const page=mapPage(items,i);assert.ok(page.items.length<=MAP_PAGE_SIZE);seen.push(...page.items.map(item=>item.id))}
+ assert.deepEqual(seen,items.map(item=>item.id));assert.equal(mapPage(items,-1).current,0);assert.equal(mapPage(items,999).current,199);assert.deepEqual(mapPage([],0),{items:[],current:0,pages:1,total:0});
 });
