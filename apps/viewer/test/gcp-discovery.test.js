@@ -72,3 +72,24 @@ test('external referenced source cannot delete the retained database copy',t=>{
  const parsed=require('../server/gcpImport').parseGcpInterchange({format:'generic-csv-v1',content:source}),g=new GcpRepository(db),set=g.importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'generic-csv-v1',sourceFileId:'external-csv',sourceFilename:'control.csv',sourceSha256:parsed.sourceSha256,sourceContent:source,crs:parsed.crs,elevationUnits:'m',provenance:parsed.provenance,points:parsed.points});
  assert.throws(()=>g.deleteSet(set.id),{code:'retained_csv'});assert.equal(db.prepare('SELECT source_content FROM gcp_sets WHERE id=?').get(set.id).source_content,source);
 });
+
+test('retained datasets and containers do not starve later expired trash',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-batch-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
+ const p=new ProcessingRepository(db),project=p.createProject({displayName:'Survey'}),insert=db.prepare("INSERT INTO storage_trash(id,entity_type,entity_id,root_key,relative_path,byte_size,purge_after,created_at) VALUES (?,?,?,'datasets','source',0,'2020-01-01','2020-01-01')");
+ const protectedIds=[];
+ for(let i=0;i<21;i++){const d=p.createDataset({projectId:project.id,displayName:`Retain ${i}`,storageMode:'managed',rootKey:'datasets',relativePath:`source${i}`});p.finalizeDataset(d.id,[{id:`csv${i}`,relativePath:'raw.CSV',byteSize:1,sha256:digest('x')}],digest('m'));db.prepare("UPDATE datasets SET status='trashed' WHERE id=?").run(d.id);insert.run(`protected-${i}`,'dataset',d.id);protectedIds.push(`protected-${i}`);}
+ const eligible=p.createDataset({projectId:project.id,displayName:'Eligible',storageMode:'external_reference',rootKey:'datasets',relativePath:'external'});db.prepare("UPDATE datasets SET status='trashed' WHERE id=?").run(eligible.id);insert.run('eligible','dataset',eligible.id);
+ assert.equal(p.expiredTrash().slice(0,20).every(item=>protectedIds.includes(item.id)),true);
+ const {purgeExpiredTrash}=require('../server/storageLifecycle');const result=purgeExpiredTrash(p,{},{});assert.equal(result.find(item=>item.trashId==='eligible')?.status,'complete');assert.ok(p.getTrash('eligible').permanentlyDeletedAt);for(const id of protectedIds)assert.equal(p.getTrash(id).permanentlyDeletedAt,null);
+});
+
+test('failed raw-copy manifest protects partial CSV from dataset, container and replay purge',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-partial-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
+ const p=new ProcessingRepository(db),project=p.createProject({displayName:'Survey'}),d=p.createDataset({projectId:project.id,displayName:'Partial',storageMode:'managed',rootKey:'datasets',relativePath:'source'}),timestamp='2020-01-01T00:00:00.000Z';
+ const manifest={rawPhotoCopy:true,files:[{sourcePath:'survey/raw.csv',relativePath:'raw.csv'}]};
+ db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,dataset_id,payload_json,status,available_at,created_at,updated_at) VALUES ('copy','import_adopt','test',?,?,'failed',?,?,?)").run(d.id,JSON.stringify(manifest),timestamp,timestamp,timestamp);
+ db.prepare("UPDATE datasets SET status='trashed' WHERE id=?").run(d.id);const insert=db.prepare("INSERT INTO storage_trash(id,entity_type,entity_id,root_key,relative_path,byte_size,purge_after,created_at) VALUES (?,?,?,'datasets','source',0,?,?)");insert.run('partial','dataset',d.id,timestamp,timestamp);insert.run('container','project',project.id,timestamp,timestamp);db.prepare("INSERT INTO container_trash_members(container_trash_id,member_trash_id,entity_type,entity_id,created_at) VALUES ('container','partial','dataset',?,?)").run(d.id,timestamp);
+ const partialPath=path.join(root,'raw.csv'),raw='partial copy of survey data';fs.writeFileSync(partialPath,raw);
+ assert.equal(p.datasetHasRetainedCsv(d.id),true);assert.equal(p.beginPurgeMutation('partial','test'),null);
+ const {applyStorageMutation,purgeExpiredTrash}=require('../server/storageLifecycle');let removed=false;const storage={pathExistsStrict:()=>true,removeExact:()=>{removed=true;fs.unlinkSync(partialPath)}};const mutation={id:'prior',type:'purge',entityType:'dataset',entityId:d.id,status:'intent',sourceRootKey:'trash',sourceRelativePath:'source'};assert.throws(()=>applyStorageMutation(p,storage,mutation),{code:'retained_csv'});assert.deepEqual(purgeExpiredTrash(p,storage),[]);assert.equal(removed,false);assert.equal(fs.readFileSync(partialPath,'utf8'),raw);assert.equal(p.getTrash('partial').permanentlyDeletedAt,null);assert.equal(p.getTrash('container').permanentlyDeletedAt,null);
+});

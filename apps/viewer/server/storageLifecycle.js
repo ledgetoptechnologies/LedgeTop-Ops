@@ -58,8 +58,14 @@ function reconcileStorageMutations(processing,storage,limit=20){const results=[]
 
 function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit=20,onPurged=null}={}){
   const results=[];
-  for(const item of processing.expiredTrash().slice(0,Math.max(1,Math.min(Number(limit)||20,100)))){
+  const batchLimit=Math.max(1,Math.min(Number(limit)||20,100));
+  for(const item of processing.expiredTrash()){
+    if(results.length>=batchLimit)break;
     try{
+      // Protected entries do not consume the work budget; check containers as
+      // well as standalone datasets before attempting any child purge.
+      if(item.entityType==='dataset'&&processing.datasetHasRetainedCsv(item.entityId))continue;
+      if(['project','task'].includes(item.entityType)&&processing.listContainerTrashMembers(item.id).some(member=>member.entityType==='dataset'&&processing.datasetHasRetainedCsv(member.entityId)))continue;
       if(item.entityType==='output'&&require('./outputSupersession').automaticSupersessionTrash(processing,item.id)){results.push({trashId:item.id,status:'deferred',errorCode:'supersession_reverification_required'});continue;}
       if(item.entityType==='project'||item.entityType==='task'){
         const {purgeContainerTrash}=require('./containerLifecycle');
