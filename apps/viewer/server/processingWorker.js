@@ -113,8 +113,7 @@ async function processReconcile(job,{processing,config,providerCredentials,signa
   // Keep storage errors outside the best-effort provider read catch. Advance
   // the provider cursor only after successfully persisting the received batch.
   try{
-    if(output){for(const line of output.lines)processing.appendLog(attempt.id,'provider',line);processing.setOutputCursor(attempt.id,output.nextLine);}
-    else processing.appendLog(attempt.id,'warn','Processing output could not be refreshed. Provider status is still being tracked; the output cursor has not advanced.');
+    if(!processing.persistReconcileObservation(job.id,job.lease_owner,attempt.id,output))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
   }catch(error){
     if(signal?.aborted||error?.name==='AbortError'||['ABORT_ERR','lease_lost'].includes(error?.code))throw error;
     if(error&&typeof error==='object'&&Object.isExtensible(error)){Object.defineProperty(error,observationPersistenceError,{value:true});throw error;}

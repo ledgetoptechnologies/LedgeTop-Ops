@@ -256,3 +256,24 @@ test('late reconcile output after heartbeat failure cannot advance cursor or per
   assert.equal(f.db.prepare("SELECT lease_owner FROM processing_jobs WHERE id='poll'").get().lease_owner,'replacement-worker');
  }finally{f.processing.heartbeatJob=originalHeartbeat;global.setInterval=originalInterval;global.clearInterval=originalClear;}
 });
+
+test('reclaimed or expired reconciliation cannot persist stale observations before heartbeat',async t=>{
+ for(const mode of ['reclaimed','expired','warning']){
+  const f=fixture(t);let resolveOutput,enteredResolve;const entered=new Promise(resolve=>{enteredResolve=resolve});
+  const work=processOne({processing:f.processing,config:{},adapterFactory:()=>({status:async()=>({status:'running',progress:.5}),output:async()=>{enteredResolve();return await new Promise(resolve=>{resolveOutput=resolve})}})},'old-worker');
+  await entered;f.db.prepare("UPDATE processing_jobs SET lease_expires_at='2000' WHERE id='poll'").run();
+  if(mode!=='expired')assert.equal(f.processing.claimJob('replacement-worker').id,'poll');
+  resolveOutput(mode==='warning'?null:{lines:['stale record'],nextLine:12});await work;
+  assert.equal(f.processing.getAttempt(f.attempt.id).providerOutputCursor,0);
+  assert.equal(f.db.prepare("SELECT count(*) n FROM processing_logs WHERE attempt_id=?").get(f.attempt.id).n,0);
+  if(mode!=='expired')assert.equal(f.db.prepare("SELECT lease_owner FROM processing_jobs WHERE id='poll'").get().lease_owner,'replacement-worker');
+ }
+});
+
+test('observation persistence rolls back logs when cursor storage fails',async t=>{
+ const f=fixture(t),original=f.processing.setOutputCursor.bind(f.processing);f.processing.setOutputCursor=()=>{throw Error('synthetic cursor failure')};
+ try{await processOne({processing:f.processing,config:{},adapterFactory:()=>({status:async()=>({status:'running'}),output:async()=>({lines:['rollback record'],nextLine:5})})},'worker');}
+ finally{f.processing.setOutputCursor=original;}
+ assert.equal(f.processing.getAttempt(f.attempt.id).providerOutputCursor,0);
+ assert.equal(f.db.prepare("SELECT count(*) n FROM processing_logs WHERE attempt_id=? AND message='rollback record'").get(f.attempt.id).n,0);
+});
