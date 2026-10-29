@@ -43,4 +43,3 @@ test('runtime identity rejects a symlinked source stamp', (t) => {
   }
   assert.equal(readRuntimeRevision(link), null);
 });
-
