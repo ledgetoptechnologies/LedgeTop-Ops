@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash, createPublicKey, generateKeyPairSync, sign as signBytes, verify as verifyBytes, constants } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { assertPinnedIssuerDistribution } from './native-staff-bootstrap-owner-approval-distribution-pin.mjs';
+import { assertPinnedIssuerDistribution, PINNED_OWNER_APPROVAL_DISTRIBUTION_SHA256 } from './native-staff-bootstrap-owner-approval-distribution-pin.mjs';
+import { NATIVE_STAFF_CUTOVER_DISTRIBUTION_FILES } from './native-staff-cutover-distribution-pin.mjs';
+import { PINNED_NATIVE_STAFF_CUTOVER_DISTRIBUTION_SHA256 } from './native-staff-cutover-distribution-pin-value.mjs';
 import {
   BOOTSTRAP_OWNER_APPROVAL_KIND, canonicalJson, buildOwnerApprovalReceipt,
   assertPinnedInstallerSource, ownerApprovalConsentText, parseTrustConfig, verifyCloudflareAccessJwt,
@@ -178,6 +180,50 @@ test('fails closed on an unprovisioned distribution pin and verifies exact execu
     writeFileSync(path.join(root, files[0]), 'modified');
     assert.throws(() => assertPinnedIssuerDistribution({ root, expectedSha256: sha(manifest) }), /issuer_distribution_file_mismatch/u);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('public bootstrap and cutover manifests pin every exact runtime file while both distribution pins remain unprovisioned', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const bootstrapManifestPath = path.join(root, 'scripts/native-staff-bootstrap-owner-approval-distribution-manifest.json');
+  const cutoverManifestPath = path.join(root, 'scripts/native-staff-cutover-distribution-manifest.json');
+  const bootstrapBytes = readFileSync(bootstrapManifestPath);
+  const bootstrapManifest = JSON.parse(bootstrapBytes.toString('utf8'));
+  const cutoverManifestBytes = readFileSync(cutoverManifestPath);
+  const cutoverManifest = JSON.parse(cutoverManifestBytes.toString('utf8'));
+  assert.deepEqual(Object.keys(bootstrapManifest).sort(), ['files', 'kind', 'schemaVersion']);
+  assert.equal(bootstrapManifest.schemaVersion, 1);
+  assert.equal(bootstrapManifest.kind, 'operations-native-staff-bootstrap-issuer-distribution-v1');
+  assert.equal(assertPinnedIssuerDistribution({ root, expectedSha256: sha(bootstrapBytes) }), true);
+  assert.deepEqual(Object.keys(cutoverManifest).sort(), ['files', 'kind', 'schemaVersion']);
+  assert.equal(cutoverManifest.schemaVersion, 1);
+  assert.equal(cutoverManifest.kind, 'operations-native-staff-cutover-runtime-manifest-v1');
+  const expectedCutoverFiles = [...NATIVE_STAFF_CUTOVER_DISTRIBUTION_FILES].sort();
+  assert.deepEqual(cutoverManifest.files.map(entry => entry.path), expectedCutoverFiles);
+  const seen = new Set();
+  for (const entry of cutoverManifest.files) {
+    assert.deepEqual(Object.keys(entry).sort(), ['path', 'sha256']);
+    assert.match(entry.sha256, /^[0-9a-f]{64}$/u);
+    assert.equal(seen.has(entry.path), false, entry.path);
+    seen.add(entry.path);
+    const target = path.resolve(root, entry.path);
+    const relative = path.relative(root, target);
+    assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative), entry.path);
+    const info = lstatSync(target);
+    assert.ok(info.isFile() && !info.isSymbolicLink(), entry.path);
+    assert.equal(sha(readFileSync(target)), entry.sha256, entry.path);
+  }
+  const uniqueEntry = (manifest, relative) => {
+    const entries = manifest.files.filter(entry => entry.path === relative);
+    assert.equal(entries.length, 1, relative);
+    return entries[0];
+  };
+  const ownerModuleSha256 = sha(readFileSync(path.join(root, 'scripts/native-staff-bootstrap-owner-approval.mjs')));
+  assert.equal(uniqueEntry(bootstrapManifest, 'scripts/native-staff-bootstrap-owner-approval.mjs').sha256, ownerModuleSha256);
+  assert.equal(uniqueEntry(cutoverManifest, 'scripts/native-staff-bootstrap-owner-approval.mjs').sha256, ownerModuleSha256);
+  assert.equal(uniqueEntry(cutoverManifest, 'scripts/native-staff-bootstrap-owner-approval-distribution-manifest.json').sha256,
+    sha(bootstrapBytes));
+  assert.equal(PINNED_OWNER_APPROVAL_DISTRIBUTION_SHA256, '0'.repeat(64));
+  assert.equal(PINNED_NATIVE_STAFF_CUTOVER_DISTRIBUTION_SHA256, '0'.repeat(64));
 });
 
 test('verifies the exact human Access JWT while allowing the optional RFC typ header only when absent or JWT', async () => {

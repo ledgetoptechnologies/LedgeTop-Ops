@@ -1,0 +1,1285 @@
+{
+  "schemaVersion": 1,
+  "purpose": "offline retained frontend asset packet; not a deployment or active-namespace proof",
+  "application": "client",
+  "sourceCommit": "b0c99cdd7303ca9eea9830b5be6d3a8cf990f24a",
+  "buildReceiptSHA256": "be626dce2c1865947ebe3569be995e27e094807fad4b4c66b041d729c90097c8",
+  "packageFingerprints": [
+    {
+      "bytes": 1682,
+      "sha256": "6d60bc9d2192f73d1e4d38753c286457c21124a9161b9ac4c59c42da4aa2db16",
+      "path": "apps/client/package.json"
+    },
+    {
+      "bytes": 132102,
+      "sha256": "910ef2fe80303d2367f1937a3569b130f38bea52da9fc11102c9a76ce5f0a535",
+      "path": "apps/client/package-lock.json"
+    },
+    {
+      "bytes": 405,
+      "sha256": "32cb654090834b788b095a2d4e34325d93f7382f361ee9b9edfd68665d27596d",
+      "path": "packages/ui/package.json"
+    },
+    {
+      "bytes": 1091,
+      "sha256": "70ab7d50ef5893f7b305e3510d21f495be6e8fd63e3d103d6009f0052926a513",
+      "path": "packages/shared/package.json"
+    }
+  ],
+  "priorActive": {
+    "acceptedReceiptPath": "C:/Projects/Ledge Top Operations/release-records/unification-20261024/client-c880-accepted-20261028.json",
+    "acceptedReceiptSHA256": "085e77d2b0e28ed7d11619c422710f7e6ffd87219c7d1c243a1744b6f2393c4b",
+    "cutoverAt": "2026-10-28T01:14:05.10392Z",
+    "priorEarliestPermittedPruningAt": "2026-10-30T01:14:06Z",
+    "priorPacketManifestSHA256": "49a8a67e97142e7b47659afd9aa408f02b37d09aa8d10d3d49340c2f147301bd",
+    "activeAssetCount": 153,
+    "activeAssetBytes": 82318114,
+    "activeAssetManifestSHA256": "7424b7274466cc30c08a0cc2e66526faab436ac54184a9e0166959936ab52096",
+    "nonIndexCount": 152,
+    "nonIndexBytes": 82317366,
+    "oldIndexSavedOutsideUpload": {
+      "path": "retained-old-index.html",
+      "size": 748,
+      "sha256": "dc989dad8f578a17236862dfda958cc3782f8a3410e832b51ebd129312e9a0c4",
+      "mime": "text/html",
+      "servedAfterCutover": false
+    }
+  },
+  "candidate": {
+    "fileCount": 22,
+    "totalBytes": 8384942,
+    "manifestSHA256": "67852aebaffe0df56a13544ac85e255b485f4cd17b156f72589ce6d8201b08c1",
+    "mainScript": {
+      "path": "/assets/index-Bs5GZNBO.js",
+      "sha256": "9c60562d5e5abd82a5df414e0219b9056ae9a670bc19234ef9609ad51f0ff0ed"
+    }
+  },
+  "retention": {
+    "minimumRetentionHours": 48,
+    "priorEarliestPermittedPruningAt": "2026-10-30T01:14:06Z",
+    "earliestPermittedPruningAt": "2026-10-30T01:14:06Z",
+    "nextCutoverAt": null,
+    "newFloorRequiresConfirmedActualCutover": true,
+    "automaticPruning": false
+  },
+  "replacement": {
+    "onlyPath": "/index.html",
+    "oldIndexExcludedFromUpload": true
+  },
+  "union": {
+    "fileCount": 167,
+    "totalBytes": 90534186,
+    "manifestSHA256": "872e25744fc7854e71651f5cf2d099d41db827da3c042842fb4d43438d7105a9",
+    "files": [
+      {
+        "path": "/apple-touch-icon.png",
+        "size": 4067,
+        "sha256": "8a9e497676efdb4213640f680bc2631b3c91e57b4c69512dcffef28d47f96bdc",
+        "mime": "image/png",
+        "provenance": "retained-and-current-build-identical"
+      },
+      {
+        "path": "/assets/ClientPortalApp-BDu-PEoM.js",
+        "size": 334912,
+        "sha256": "d1b97c984c3561a0caed01894220e3c2269b5b2c77d3908c1c43b083a87a29e9",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-BDu-PEoM.js.map",
+        "size": 1189278,
+        "sha256": "fa390b69ef5c6fec789f5f60ed23bdf6c24db64978561fd126c0a0de79dc9d2c",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-BP54OytM.js",
+        "size": 309001,
+        "sha256": "aa96585f296e20383d754b70a20d60ef2e1f89d27ee9bc8bedcf5d9f884473ca",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-BP54OytM.js.map",
+        "size": 1143503,
+        "sha256": "d5dec6cabf2d9163c1bef5e200a0ac69661e8d958cd68d7a10790c678e67fa06",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-CH_pmRjl.js",
+        "size": 333939,
+        "sha256": "44814ef74ea27392d3f93e613be643242ec4b11f8dcc397ccdd15a0d066adb3f",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-CH_pmRjl.js.map",
+        "size": 1186272,
+        "sha256": "c649775fc3d3888f4c593b2a332c3300a727cae961c97ce37ed0ee3a418052a7",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-CIk7LzJ5.js",
+        "size": 334912,
+        "sha256": "ad451c663a781c6bcd9fa653bd3e73ed3b1c5080693dd67420ed9f0aaddaa8fe",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-CIk7LzJ5.js.map",
+        "size": 1189278,
+        "sha256": "86dfa7683823cc4bf795fa7d22f56f564848cd505216d7c20eeb3a29986d57c8",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-CjsuZDWj.js",
+        "size": 334912,
+        "sha256": "fd03acecd56ee6fbb27cf7d9fe23b9f0ce979203bca05c5b7701686296616c63",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-CjsuZDWj.js.map",
+        "size": 1189278,
+        "sha256": "fb62e11b1ce13c507bd4aca462b2d52b87e57017b9dfc495ba489b8343e418b2",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-Cnm_W808.js",
+        "size": 334062,
+        "sha256": "7089c0dec95790c062a4a88815a9529f45f076078999239c54c51ae8a28677ce",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-Cnm_W808.js.map",
+        "size": 1185335,
+        "sha256": "902ceb4054dc46fbf9e8c2047e15401a6629a151576d65f34b398b6c1572819b",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-DEsO9IDh.js",
+        "size": 335842,
+        "sha256": "17ce49cb4bad53c75862c311cf8386f8e02ade38fb762384e08d7d79d405363a",
+        "mime": "text/javascript",
+        "provenance": "new-candidate-asset"
+      },
+      {
+        "path": "/assets/ClientPortalApp-DEsO9IDh.js.map",
+        "size": 1193539,
+        "sha256": "18475e2d7701ceda5d02fc62dc3080a8109e2f20b302088a04f2a1dae54f19cb",
+        "mime": "application/json",
+        "provenance": "new-candidate-asset"
+      },
+      {
+        "path": "/assets/ClientPortalApp-EyECSDTu.js",
+        "size": 309358,
+        "sha256": "a6715c56cde3537a6b14a7d251e916c51a24d99a32eaa2851ed0315fa9573d0c",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-EyECSDTu.js.map",
+        "size": 1130836,
+        "sha256": "76cf1ee6aeb5e66fc22123a9e4d5d1e4b4892d4bfbcd2343241c0abc2f2cea79",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-nN9kOd_B.js",
+        "size": 333199,
+        "sha256": "3db82b7aaa42b7ed7ec7533aa51a33b2864a2a2a5378ffd3f57a6727d996270f",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-nN9kOd_B.js.map",
+        "size": 1180237,
+        "sha256": "2355c0e43d0a1816459a531942c4fda377bbe8668d1b59b7c3d63715fc8a5d0b",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-rE1BfXxQ.js",
+        "size": 309392,
+        "sha256": "815fde423f3b7c251874c7c16f010c51149d7acb2f52c7057625458297458fc3",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-rE1BfXxQ.js.map",
+        "size": 1145421,
+        "sha256": "1e11c9a4b0751783689f92b805b756618e3abd12f4ffa1729236c242b68e2a91",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-st-9LBj1.js",
+        "size": 333810,
+        "sha256": "942207677654202268ca92e238c54b60614961b2cda5eeb987831721be693c86",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-st-9LBj1.js.map",
+        "size": 1184239,
+        "sha256": "70fed6c9781fb814e56a5bee4e00fba98a51a122871cb96406a91b82d2d31b66",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ClientPortalApp-TSsfPt5A.css",
+        "size": 13635,
+        "sha256": "1a3111c192e78159010a97b5cc3a6cbcba60b9d97af8a21b2fb929400ef680c4",
+        "mime": "text/css",
+        "provenance": "retained-and-current-build-identical"
+      },
+      {
+        "path": "/assets/DeliveryApp-B-KrAChX.js",
+        "size": 40686,
+        "sha256": "42b153745c60a7cb86ff740da488ff5adec27d65d1d60dc09d20ec32ac545d33",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-B-KrAChX.js.map",
+        "size": 132501,
+        "sha256": "48a3bffd4d3196e167318fc1d74c3fcf03b33b6b7827d99523d82af6cadaceb1",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-B0Uvxap2.js",
+        "size": 40686,
+        "sha256": "add39aae410d5326baa429d5f7dd08fcc4f680f3b911ed10db4e5e23aad3ea1e",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-B0Uvxap2.js.map",
+        "size": 132479,
+        "sha256": "6fe4629f448cdd2328dc9475503df9a3633490248bf0fc1f0ac38543c46a7acd",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-B4TiY5P9.js",
+        "size": 40686,
+        "sha256": "9f0dea6198bd300e92ab18cf6f86a22cb5f6b4a59063eb3b7add1bc466ebede3",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-B4TiY5P9.js.map",
+        "size": 132501,
+        "sha256": "1dfd4244f657d59464ea61debc64c0901cb87db914d6a5e3f7dbd76c0115d773",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-BgImX-5C.js",
+        "size": 40686,
+        "sha256": "efdce9a7360c0a8840de4b4e22cd1aa9a2ea6a4b272fc90922a3a4636aeeff75",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-BgImX-5C.js.map",
+        "size": 132501,
+        "sha256": "4d6aecede80fd997bba5675cdffa870586ea98fd4fff01c9f1f4856750b23b8c",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-C0jussJv.js",
+        "size": 40686,
+        "sha256": "55d030e3ddf5038487ca78942b7a864cd7e2c042a694a49d45894044c6dab162",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-C0jussJv.js.map",
+        "size": 132501,
+        "sha256": "d5d73b8d947e3871cea3038dead9c8dd2152f74568d8d9fb95dea3fa59c2efe9",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-CGZqf3_3.js",
+        "size": 40549,
+        "sha256": "1bd3b9f14fd05990820ced81ad60590e69b176c63225e6f2f03f46822260cfb7",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-CGZqf3_3.js.map",
+        "size": 129430,
+        "sha256": "ea769d3d47bc7b457fc6df3edfe2081d42dd4dd099f0e05bc06d92cda0bf7e1f",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-CXKPZmdp.js",
+        "size": 40686,
+        "sha256": "7ee70cc458368f668a4e93278799948a0a81630e01ca7bde6982d69da0d35fc0",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-CXKPZmdp.js.map",
+        "size": 132501,
+        "sha256": "207ace4f3b065725b2690992026333b1f509e0bd4bfe867e94a7d27cedab101b",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-CzYYmTuX.js",
+        "size": 40686,
+        "sha256": "07c662a1ed952d8cfe237c88895209f9635fe8795eb83b057a89241962007ade",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-CzYYmTuX.js.map",
+        "size": 132501,
+        "sha256": "69374b2322ee6d38a45531d047aedbdd2fdb46635f0d0359ddac5b6d24ec2632",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-DwmM27Ep.js",
+        "size": 40686,
+        "sha256": "38f6fb93a62ed10a5893133797f612779125aa9ca6d4b1a2db2673a205462fac",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-DwmM27Ep.js.map",
+        "size": 132501,
+        "sha256": "5c977a5f44349a92a4d6b7b7ea1f73d5486784992f847c33a4d33bf38cfe1f63",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-gssuVqhj.js",
+        "size": 40686,
+        "sha256": "af33f083d6dacc6a58129caaf003d584044a5c5d53cb5b69492ebb1553ef2b68",
+        "mime": "text/javascript",
+        "provenance": "new-candidate-asset"
+      },
+      {
+        "path": "/assets/DeliveryApp-gssuVqhj.js.map",
+        "size": 132501,
+        "sha256": "9b65582ef2209125be187d949720906326db80f9d3b41561d4c1b3a69e234e8a",
+        "mime": "application/json",
+        "provenance": "new-candidate-asset"
+      },
+      {
+        "path": "/assets/DeliveryApp-loPJOkfC.js",
+        "size": 40549,
+        "sha256": "e6f1e88584c229773d3768f3d9778eac1ab9d521857f59728672385c6571e3f4",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/DeliveryApp-loPJOkfC.js.map",
+        "size": 131902,
+        "sha256": "be1afc43425f6519f564f51f149f88b06bc09888633dd56f328c14cf54e219ee",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap--ov2tpTH.js",
+        "size": 1615705,
+        "sha256": "aedaca01a32da89b70db750300557bfd2a61014990080db0fc52985d1d4998ed",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap--ov2tpTH.js.map",
+        "size": 3369289,
+        "sha256": "47d6e909b4b5d1a94bf3e6668cd6deb262da88c23c726373a42f9cd25fb486ac",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-Blh1PBo7.js",
+        "size": 1615705,
+        "sha256": "164e1631baad687124d6feeb92cd1a1624bbcd73272be9536bd67d53b73d9aaa",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-Blh1PBo7.js.map",
+        "size": 3369289,
+        "sha256": "b93fa0557a7f9850919d8e2daad0f26cd15160303185958a6c7da7ae6c9ebdd7",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-BpPXSu3Q.js",
+        "size": 1615705,
+        "sha256": "18076d727aedfc7a443b61a5f9b2e030b2015802c78f03583a9431822a0e202e",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-BpPXSu3Q.js.map",
+        "size": 3369289,
+        "sha256": "2a414844d96ec06d08fa0685200f092fe74f56b3eb9c2b6da19c66b93857da76",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-BRd0zUtb.js",
+        "size": 1615705,
+        "sha256": "db47bf034cd4704c1c5fbd19a04764fec4d92bc1f7dd1c937d426c026b891da3",
+        "mime": "text/javascript",
+        "provenance": "new-candidate-asset"
+      },
+      {
+        "path": "/assets/ImageLocationMap-BRd0zUtb.js.map",
+        "size": 3369289,
+        "sha256": "6bd141accc41dabaeb938bbf3ccee2e53b17e4fbec02f02e5cad91830971b57c",
+        "mime": "application/json",
+        "provenance": "new-candidate-asset"
+      },
+      {
+        "path": "/assets/ImageLocationMap-BsgQzr1p.js",
+        "size": 1611696,
+        "sha256": "ee34033c78bd79528d48d158abc4270b5aef7435c8ed4c048d01ff2184331fb4",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-BsgQzr1p.js.map",
+        "size": 3358486,
+        "sha256": "569182a69e010d82984525df1e1cb5c0e957a59c58c37ceffe9663f27e4699bf",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-CeApXp8Y.js",
+        "size": 1611696,
+        "sha256": "121540c0e20e458067cef59a73e199d85e43ad7688fa3ae4e92f66474156e9e4",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-CeApXp8Y.js.map",
+        "size": 3358110,
+        "sha256": "cbe53d664369aa280de83282900872773202b065f6605bb8fa1c27e907d0e68e",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-CLhiEIDm.js",
+        "size": 1615705,
+        "sha256": "629ce0b523f24b1620ad8041abd82f6fead53f9401c5510a7386db256ea53852",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-CLhiEIDm.js.map",
+        "size": 3369289,
+        "sha256": "a843b2f0381f41e5e5a4461eb1bd3d33dbfb2f2729dd24a588817e600cfd9512",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-CokHMRYn.js",
+        "size": 1615705,
+        "sha256": "16ccea2319b05b5526c8bd1458d248394970036ef8c1a93449cd2fa1680c44c9",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-CokHMRYn.js.map",
+        "size": 3369289,
+        "sha256": "ddcadc32c6a7edd97c2e57759d5907fcfd5267d98d9455e4cf0e8940120233a8",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-CVEE2wJX.js",
+        "size": 1615705,
+        "sha256": "34edbd5eb99657d5b7b819601d9a9ef596e9d9436f55b113ee260652df3766c8",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-CVEE2wJX.js.map",
+        "size": 3369289,
+        "sha256": "e7fd1e8e26024a525302e1c0bc89b0ac6dcaef4973323c37fa82c40a8930c970",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-CXNL8wMQ.js",
+        "size": 1615705,
+        "sha256": "b6a408708c0200d6138b0660cd8dfa49f53227c28c546395f17629ed3f88a0de",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-CXNL8wMQ.js.map",
+        "size": 3369289,
+        "sha256": "3d77a5ed3bc369c8366a2ec604deeff460618237ce450f777ad7da9e28d9fa45",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-D9clvDf2.js",
+        "size": 1615705,
+        "sha256": "8d1537c268ab00945c238b91def565d957de0c8795ce6b2b98ed731d942cd6dc",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-D9clvDf2.js.map",
+        "size": 3369289,
+        "sha256": "3548e5a449104c7799383027516f36756a337fcefa2454e12713756b25c767b3",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/ImageLocationMap-syaQp-21.css",
+        "size": 1880,
+        "sha256": "823e5a335ccb0af629d5c06e6ee6a350b80a6490f5beb51a646c8b683fc2f7b8",
+        "mime": "text/css",
+        "provenance": "retained-and-current-build-identical"
+      },
+      {
+        "path": "/assets/index-0KlhAVOL.js",
+        "size": 271286,
+        "sha256": "bbdd7c0d245206ea483be8be2bba95925e89a54a820bb6ed8f20386a63a1ce16",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-0KlhAVOL.js.map",
+        "size": 1239980,
+        "sha256": "2df240e828efb15bd0680d09dd8a4a4f73c7c6dcbe4f351494be60d88e4ee157",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-B5hGp9zC.js",
+        "size": 268028,
+        "sha256": "5b5ba9ed7c46544b1f5970d8c4de7f9234b7bf16c25192a3ecd199bc18af3367",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-B5hGp9zC.js.map",
+        "size": 1227728,
+        "sha256": "dc262380836400abd1756766bee6093ba788f610e9818664bd43f39571a39d26",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-BHPEVd8l.css",
+        "size": 144814,
+        "sha256": "1131f75994e8571cb15fe2dab51b6d2f490de41d02742dad40e4612cf736a762",
+        "mime": "text/css",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-Bs5GZNBO.js",
+        "size": 267068,
+        "sha256": "9c60562d5e5abd82a5df414e0219b9056ae9a670bc19234ef9609ad51f0ff0ed",
+        "mime": "text/javascript",
+        "provenance": "new-candidate-asset"
+      },
+      {
+        "path": "/assets/index-Bs5GZNBO.js.map",
+        "size": 1233373,
+        "sha256": "3689b27419dfde534afa1bc3b68cbc916a9f615c84e69e81a8c93ebea4071ea5",
+        "mime": "application/json",
+        "provenance": "new-candidate-asset"
+      },
+      {
+        "path": "/assets/index-BsbYdBlK.js",
+        "size": 268140,
+        "sha256": "ff32c9bb2321bb1fffc9ed9ad7ff9dde5f351c83662893c29dea193b56850672",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-BsbYdBlK.js.map",
+        "size": 1227890,
+        "sha256": "4c44bc0ea17a71a73ff8b488095bac973571a86b1c3f35a7da6c2245610026e3",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-BwWLW-SX.css",
+        "size": 144941,
+        "sha256": "c644a96704796298f2075a8ef83c1004f33680dc591fc9dbd128f55f4a858447",
+        "mime": "text/css",
+        "provenance": "retained-and-current-build-identical"
+      },
+      {
+        "path": "/assets/index-BZomjKb8.css",
+        "size": 145562,
+        "sha256": "162bad84a4e3b7932893f77c10b7bf0c4597b26462f60c97b8ccb13dbdf30a3b",
+        "mime": "text/css",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-C0Rl53lM.js",
+        "size": 267175,
+        "sha256": "347d39f5d138c1add0f906d212e9d33da7866896aa5db760a04a52a5cbdcdb1e",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-C0Rl53lM.js.map",
+        "size": 1222592,
+        "sha256": "b4c003978aad3455dc627478995fb7a00f4b561301c231da522b3321df48574d",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-CBGQbgrM.js",
+        "size": 257286,
+        "sha256": "2e63e2bde35f05b2447683480c9764fdfd86846565883a618f7752300192bfd4",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-CBGQbgrM.js.map",
+        "size": 1137801,
+        "sha256": "a7505797b7abd269ad70c1489dca6ee033e9f378c070b02961b20e922b40a3ef",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-CiRxcYZv.js",
+        "size": 267185,
+        "sha256": "95dfcfd816395c22c3f4cbbc28e75f2e013fa94d5caed987977cb0cfaabc509e",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-CiRxcYZv.js.map",
+        "size": 1222482,
+        "sha256": "e27574e17ce6f16ba1b9f3f8f2f53fda6b74d90afc0082a20f6001367b2e6ee0",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-CN74fUPd.js",
+        "size": 271298,
+        "sha256": "9e6201ad8f2f8368398b2126172090763cd54baefde6f1c47adc7caf2234e032",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-CN74fUPd.js.map",
+        "size": 1239995,
+        "sha256": "1b0012d4d7084ac245dcc08d9486b850598deeca8bc67819a5dfcaee8abcdd07",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-CUSBBjCi.css",
+        "size": 144885,
+        "sha256": "45668db85f686aac1ffe4907a39dd227e171fb8fc4de6354f77acf9ad8ae317c",
+        "mime": "text/css",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-DOcwOom7.js",
+        "size": 270720,
+        "sha256": "0c686cc2b574765ccff8372fc799cb776e74591e38edfc9f8288e930fa2e278c",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-DOcwOom7.js.map",
+        "size": 1237517,
+        "sha256": "619bcd30a12bd3e9f1bd2d601304ec76453c688fc7a4278614f06bd09810b543",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-DUyGiKO1.css",
+        "size": 130911,
+        "sha256": "18104f1f46811291ac9fe58d6d70c6e1d45733d0e18bb39bd48f119540fab78c",
+        "mime": "text/css",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-Gpfc_u1d.js",
+        "size": 257259,
+        "sha256": "d68a12dcd8fd14fa6bd3a0a6a9524f9454f572c503deff3f7b40f841493bac99",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-Gpfc_u1d.js.map",
+        "size": 1131443,
+        "sha256": "d247ddd6da1027c887c0115b3724ac7f4dcc5939add6231689b408177d778c0e",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-H3uQ6Pdk.css",
+        "size": 130300,
+        "sha256": "69cfe6cbb6c5329f3b34abc39365f9758093b90eacd3ed536df9b01bbf5a8c44",
+        "mime": "text/css",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-m7SUUyUO.js",
+        "size": 257302,
+        "sha256": "5b72e47d2fbf2be7b2f5922ba6ec71c4280cce3f1f31c4c7c2fc7615524a47d2",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/index-m7SUUyUO.js.map",
+        "size": 1137259,
+        "sha256": "4a9325d9c12b8e41cc0199fdf9008b45fca053aef59ad670bf4676dea4fcc392",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-B7cuWAND.js",
+        "size": 2403,
+        "sha256": "4f729276e2180fdbdc0ee5d0c8f1f2c7fe81cd1e240e9d7da74de7da096f291a",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-B7cuWAND.js.map",
+        "size": 5313,
+        "sha256": "5341404cb56fb7d2c1d30ef675be40816687a78b221fd1b4a3e01c715694b3ca",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-BG2kd2jh.js",
+        "size": 2403,
+        "sha256": "c12c1a49290bf2d54adf41a4335443de9e1a751daf6bf28ec245142e829e59a8",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-BG2kd2jh.js.map",
+        "size": 5313,
+        "sha256": "bf06779bf86b8447f70a17fd6a425a482559de6b8711d0e92b232a826243f1f5",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-C5BeWUj7.js",
+        "size": 2403,
+        "sha256": "5e9ad093dc197ef0799b8335bd4b42dd41100bac2f5b7d288625d3e8562bbd08",
+        "mime": "text/javascript",
+        "provenance": "new-candidate-asset"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-C5BeWUj7.js.map",
+        "size": 5313,
+        "sha256": "0f3339cb349923f2d8ed317b2f5185ffa3021336b361061b6124763da91cf7a9",
+        "mime": "application/json",
+        "provenance": "new-candidate-asset"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-CFhPvkxx.js",
+        "size": 2403,
+        "sha256": "c434bfa359e2563525dcfe7f94c3eb44995f75d86d817c35e3012f04b22b9595",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-CFhPvkxx.js.map",
+        "size": 5313,
+        "sha256": "023e114ea3d24a9e398046967a570b14c5686417af9d74177c23db1fcd457c80",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-CgKzbhD-.js",
+        "size": 2403,
+        "sha256": "683ebef7816ca2e0ed910f09184e9604c2f8dd8760724c780e740972ce455de8",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-CgKzbhD-.js.map",
+        "size": 5313,
+        "sha256": "1af68685be7567dc774fcd98cb07f8ef1c819601cc2f04e0be699b0434f03118",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-Ck4farhe.js",
+        "size": 2403,
+        "sha256": "12c79ea93712b84ce8a42692639348f721cbdeba4ff27caf52ad75690ed700cf",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-Ck4farhe.js.map",
+        "size": 5207,
+        "sha256": "779ff2edaef8aae946ede4158e1f1ed525b535ca771c5277e81de17aacb4e246",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-DQTHYQ2R.js",
+        "size": 2403,
+        "sha256": "97645c8396827f5275b1b0640234f70f5f4673a26edde2dc2707c8144075d389",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-DQTHYQ2R.js.map",
+        "size": 5313,
+        "sha256": "76cca1c225de18f7ee3d7b6f52fcffec666f54b27de0aa1604facebb57be5b2a",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-DY0t5TQ2.js",
+        "size": 2403,
+        "sha256": "5e852321a7c5ea8c5fa459bf82a59c04bf62a78c8539369ba04ba676355e31f1",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-DY0t5TQ2.js.map",
+        "size": 5313,
+        "sha256": "e9d663c33ae6db539c90b0d8bc78b2c64495463a6fa89adfd8b5fa6c8b499ea2",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-KfpRNxXN.js",
+        "size": 2403,
+        "sha256": "e645bd0c5f73ff690fcd4a4df96cb79e483b647b63ca68ec0ff3d861582f6c60",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-KfpRNxXN.js.map",
+        "size": 5313,
+        "sha256": "55c2c0dda124d1736d9b5a06018d6f38fe834f8c0a98b82245e28afc27a4ffac",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-OlKeVB0y.js",
+        "size": 2403,
+        "sha256": "4e6f2bb9be87db2904dbccb5e149cc2ac3d65cc9b9134812dcb785fd0c85c902",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-OlKeVB0y.js.map",
+        "size": 5313,
+        "sha256": "90cafc1cca6cf8621cb1aa528cdd42f286c20239b4fa229f4de807d4644e3e00",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-zV0lm5Gq.js",
+        "size": 2403,
+        "sha256": "ced185b21a3430d220d3267d5a37c892327a6594eb0d32b4952f7da30e03d666",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/InvitationAcceptanceApp-zV0lm5Gq.js.map",
+        "size": 5313,
+        "sha256": "47f2d5fdf22367f847d6690877dd4390d0d30f5678b4d306fcef70a1e5b077d1",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-01z6SVPt.js",
+        "size": 2977,
+        "sha256": "555a7c7233cca32280cd211f1c1dd99143fa597efd5bb0f7609b15c702e59ba7",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-01z6SVPt.js.map",
+        "size": 7077,
+        "sha256": "e0b517feda1f605990d42507e8f24e5a4352cc83244048688a05929e29d5ff34",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-BBzBHN44.js",
+        "size": 2877,
+        "sha256": "25a041e421d00a77bc2e759eeda161969dfbc94a439240dff61be8f977d6a692",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-BBzBHN44.js.map",
+        "size": 6789,
+        "sha256": "26c9b4d34e2203ab9baec3e563f76cd44e2d33534a1cee47654ff51bca50fee8",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-BiVj7UVy.js",
+        "size": 2836,
+        "sha256": "da25e65ba4a6b69ff95c81f560fb3da419194cd563d60daf3c75ca5e70b7cff7",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-BiVj7UVy.js.map",
+        "size": 6635,
+        "sha256": "f79733f9b65db749a2b6dba4794e3392a52e04a5e7616dfcb208861017bce1fb",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-Bsbm2F2u.js",
+        "size": 2977,
+        "sha256": "e9bedc8a694dfa0a7affe46b092b2cc6f299d0017d9769ce69030d033f4bd2d8",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-Bsbm2F2u.js.map",
+        "size": 7077,
+        "sha256": "f8a3ad5dee85b088677f6d5405cd850c89464ba094791eaedc245348f5336a7b",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-CmsAENxp.js",
+        "size": 2977,
+        "sha256": "443bc31516bba26b228097f25d599b41d65ee6d898490f98255b29e80428882f",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-CmsAENxp.js.map",
+        "size": 7077,
+        "sha256": "1afa42bd26d0b9450b667d1edb79cf84451433cacdf30911f1abe7adc5beadcb",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-D9fZTcvH.js",
+        "size": 2977,
+        "sha256": "b36464a1036fa61052f21f7640a697d0b9024a09c437c74b6d9386cccc7067ef",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-D9fZTcvH.js.map",
+        "size": 7077,
+        "sha256": "d739467f4a5ea51d2114098ef400f96694f4f87a177d81c9cdc255cd06bfc9f4",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-DcsBsYDh.js",
+        "size": 2977,
+        "sha256": "db79c4f46a64dfaaa21c531c0c02bef88f395e5ccd75b5623eb8a2017e3f1983",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-DcsBsYDh.js.map",
+        "size": 7077,
+        "sha256": "d98c3c50dcf46021c9fbe69ede4ecf6da914465cbd0b87452825fd658679b268",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-DTCwUzNu.js",
+        "size": 2836,
+        "sha256": "3a142b5212276a08164e9409bb1fea1db39a0b4e224100431f5ab9563ea3c865",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-DTCwUzNu.js.map",
+        "size": 6789,
+        "sha256": "b35a9cd20a3b87d797fc0e863b4825d13d9d21fb13a1ec11b4b83aec72a67736",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-HPaRfr3h.js",
+        "size": 3002,
+        "sha256": "8751db62f3fa0e30e00a11207e2e8fd571bb75ea2b9161d01f3834a9246baeff",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-HPaRfr3h.js.map",
+        "size": 7229,
+        "sha256": "b74aef8c567caeba0cb0a674e658346898f3cf9ba22c7c3ee895deba96d87384",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-tpEt4jQp.js",
+        "size": 2977,
+        "sha256": "ee88edee56da1f886e07928a1c2302ee29fb32837d658aaeb2719d94ba3f21af",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-tpEt4jQp.js.map",
+        "size": 7077,
+        "sha256": "ac52c6c1a83a182cb02deabb55455554838e64d46c068e499ba64047333b4488",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-wjE-aQcq.js",
+        "size": 3002,
+        "sha256": "fc6ae96882e56035645d033a440a55b053e9c15fae8402b7345edf1ff362156b",
+        "mime": "text/javascript",
+        "provenance": "new-candidate-asset"
+      },
+      {
+        "path": "/assets/PortalBootstrapApp-wjE-aQcq.js.map",
+        "size": 7229,
+        "sha256": "7cfd106224dc16d4f65eeed39bb4b7481c1b6746593b1251d6b49dbef1bc78b2",
+        "mime": "application/json",
+        "provenance": "new-candidate-asset"
+      },
+      {
+        "path": "/assets/PortalShell-bBz-JRZT.js",
+        "size": 1748,
+        "sha256": "f04cb5b74dfd2943e45b36de505d640f0a5effcf187068c6aef523c6a50b76d7",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalShell-bBz-JRZT.js.map",
+        "size": 4900,
+        "sha256": "4761df205a1b3cbf758b00991c238e1108d8dcecc84ae583fe05e96430bb2a33",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalShell-BfbHGJEM.js",
+        "size": 1748,
+        "sha256": "4a789dbbf93b6601490eac72d5fb50e64042514a6130443dc31620a08a583078",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalShell-BfbHGJEM.js.map",
+        "size": 4900,
+        "sha256": "b54c936519a2e2d2eafd446cd1d323c3fdae282ae66d50e7a55e37cd660808b3",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalShell-BOaGtumr.js",
+        "size": 1748,
+        "sha256": "6bd0a1f1c7e1b13f049ad6c21b1b1957bf21b1cb9cf370ce964d19227531e097",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalShell-BOaGtumr.js.map",
+        "size": 4900,
+        "sha256": "ac0d467222dba39c46e8b9677421fbad8adf10a48613cfca58eb511fc92fc9f7",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalShell-BSwuUlz3.js",
+        "size": 671,
+        "sha256": "c460af8b4ce70982c5c9b680597a037e52c2997230463a734151b7d9ea10f27e",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalShell-BSwuUlz3.js.map",
+        "size": 1680,
+        "sha256": "0eeb99ac54eb1e07e8f05bbe4f0b6e6d028788de5c322f636172fd3c3aada026",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalShell-C2343Uqi.js",
+        "size": 1748,
+        "sha256": "83cb45220e7b476a04e82025fcff89ff9ce7f53cbb3ba437fce088695872210d",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalShell-C2343Uqi.js.map",
+        "size": 4900,
+        "sha256": "23a1249bcb6e3d2c015e135a67df2bed5b266d62d1132076f519bccc27c649d2",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalShell-Da6MeMLK.js",
+        "size": 1748,
+        "sha256": "b10dfb3d4755d9364d8dffc7375e1b5ad5e2d3ad54df3fb9a20aa506a365d408",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalShell-Da6MeMLK.js.map",
+        "size": 4900,
+        "sha256": "8c7de6474304d519f788f48a078dc776ce8397f57f88efbf19f68638fa8b27d3",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalShell-DfXx_SQs.js",
+        "size": 671,
+        "sha256": "18e670bf15703ce0d781654a3a374dd7fbfaed8a663dcd4ee15daf60bb57d549",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalShell-DfXx_SQs.js.map",
+        "size": 1680,
+        "sha256": "05046aced33d0ab5891a698a4d8e8d1c1e50764fbc35bdda172bd33a577f247b",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalShell-mqux_EBg.js",
+        "size": 1748,
+        "sha256": "0c57c409a67623d3eb53bcd1cd6cd5de3b49b7f822e7acdad8a05a41c06fcf08",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalShell-mqux_EBg.js.map",
+        "size": 4900,
+        "sha256": "338f66860e828b2614c92d0e0e8cee91d211a6859b8ccb13bb005aa318f173e3",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalShell-SzFxzTCQ.js",
+        "size": 671,
+        "sha256": "2a41440b58160341fab1b32de2718cab64db31c089dba0375e9d5f6465c2ceb4",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/PortalShell-SzFxzTCQ.js.map",
+        "size": 1634,
+        "sha256": "330461c784844213686c82d0f6f941fe190861b6de620505d57d64ca2fd71ee2",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/startup-deadline-CZzfqnKG.js",
+        "size": 2285,
+        "sha256": "1c83651d4199c1b77baf49d85c8e82a92beab8aa3471acae87cab172d061a1c9",
+        "mime": "text/javascript",
+        "provenance": "new-candidate-asset"
+      },
+      {
+        "path": "/assets/startup-deadline-CZzfqnKG.js.map",
+        "size": 7837,
+        "sha256": "202e2c45024d537010744a54c7322121ac251a9fdfe9f67707d843d790bb7147",
+        "mime": "application/json",
+        "provenance": "new-candidate-asset"
+      },
+      {
+        "path": "/assets/startup-deadline-DItyzlPg.js",
+        "size": 2285,
+        "sha256": "9998fa13e15c5550529d7b74999efe62f9f2f4270a3702253fb2d89d79414b42",
+        "mime": "text/javascript",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/assets/startup-deadline-DItyzlPg.js.map",
+        "size": 7837,
+        "sha256": "c11cdb903212962de15dc86d4ec5f4336798fbdae2e619ca063ddae758db5917",
+        "mime": "application/json",
+        "provenance": "retained-prior-active"
+      },
+      {
+        "path": "/favicon-32x32.png",
+        "size": 1209,
+        "sha256": "e0df0a45efbc91a0c4f0cd1559a84b48a702fef8112252c29db6260982b064a3",
+        "mime": "image/png",
+        "provenance": "retained-and-current-build-identical"
+      },
+      {
+        "path": "/favicon.ico",
+        "size": 1889,
+        "sha256": "4475e1abc388373b2e6c77b91e229e55e65b4efa1435e5aa816056873ad30e36",
+        "mime": "image/x-icon",
+        "provenance": "retained-and-current-build-identical"
+      },
+      {
+        "path": "/favicon.svg",
+        "size": 501,
+        "sha256": "a3c761eb66191b0d4c804b2b1352e4c7980cdaf359c12235e21e4420446873ef",
+        "mime": "image/svg+xml",
+        "provenance": "retained-and-current-build-identical"
+      },
+      {
+        "path": "/index.html",
+        "size": 748,
+        "sha256": "34e23c346ead94ab19e617e84427b7990d7bebfe439d232eabaae499fa53fb97",
+        "mime": "text/html",
+        "provenance": "new-candidate-index"
+      }
+    ]
+  },
+  "limits": {
+    "maxFiles": 1024,
+    "maxFileBytes": 16777216,
+    "existingVerifierMaxTotalBytes": 134217728,
+    "existingVerifierMaxTotalExceeded": false,
+    "existingVerifierOverageBytes": 0
+  },
+  "buildOutputFence": {
+    "includedRoot": "apps/client/dist/client",
+    "excludedPaths": [
+      ".assetsignore",
+      ".dev.vars",
+      "wrangler.json",
+      "wrangler.jsonc",
+      "apps/*/dist/ledgetop_*"
+    ],
+    "observedCandidateFiles": 22,
+    "sharedUiSource": {
+      "previousCommit": "c88011f7600e5f04dc96d5ab7ed1eacfa157c7c8",
+      "previousPackagesUiTree": "7171a159a0882433266f37a9270daba9c290f186",
+      "currentPackagesUiTree": "ec810becab7e4c5edf68f9baa2fdeb2759ec6c24",
+      "previousIndexTsxSHA256": "a9503abe04cca4e96e09b478d772d7c38459b76365859d651311ddfcf61de28c",
+      "currentIndexTsxSHA256": "cd52cf358bae16820e6edfb65e970ea8ed1a5d967824f2ca7ad3ebd86b2c8743",
+      "sourceChanged": true
+    },
+    "frontendEntryChange": {
+      "previousMainScript": "/assets/index-CN74fUPd.js",
+      "currentMainScript": "/assets/index-Bs5GZNBO.js",
+      "changed": true
+    }
+  },
+  "qualification": {
+    "offlineBytesVerified": true,
+    "providerCalls": 0,
+    "authenticationCalls": 0,
+    "deployed": false,
+    "activeNamespaceVerified": false,
+    "pruningPerformed": false,
+    "releaseQualified": false
+  }
+}

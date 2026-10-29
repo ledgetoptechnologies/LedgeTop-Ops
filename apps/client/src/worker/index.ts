@@ -1,6 +1,7 @@
 import { Hono, type MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { secureHeaders } from "hono/secure-headers";
+import { isOperationsNativeRecipientEnrollmentRoute } from "../client/client-portal-recipient-enrollment-route";
 import { isMovedSourceMarker, type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
 import { decodeItemRef, encodeItemRef, indexedImmediateChildVisibility, isHiddenKey, keyWithinRoot, kindForKey, mimeForKey, normalizeRoot, parseRange, prefixHasBrowsableEntry, safeFileName, streamPlayerUrl } from "./files";
 import { BULK_DOWNLOAD_RESUME_COOKIE, createBulkDownloadResumeCookie, createSessionCookie, hmac, parseCookie, randomSecret, sha256, verifyAccessCode, verifyRotatingBulkDownloadResumeCookie, verifyRotatingSessionCookie } from "./security";
@@ -162,10 +163,34 @@ export function authenticatedPreviewFrameAllowed(path: string, method: string, r
   return /^(application\/(pdf|json)|text\/(plain|csv)|image\/(avif|gif|jpeg|png|webp)|audio\/(aac|flac|mpeg|ogg|wav|webm)|video\/(mp4|mpeg|ogg|quicktime|webm))$/.test(type);
 }
 
+function isPrivatePortalSpaPath(pathname: string, origin: string): boolean {
+  const path = pathname;
+  if (path === "/portal") return true;
+  if (!path.startsWith("/portal/")) return false;
+  // These explicit entrypoints render standalone public recipient/invitation
+  // applications before ClientPortalApp and do not expose its Viewer launcher.
+  if (path === "/portal/invitations/accept"
+    || /^\/portal\/recipient-enrollment\/[^/]+$/.test(path)
+    || isOperationsNativeRecipientEnrollmentRoute(origin, path)) return false;
+  // Other /portal/* paths enter the authenticated SPA, including its not-found
+  // view, whose shared navigation can move to Viewer controls using pushState.
+  return true;
+}
+
 export const deliverySecurityHeaders: MiddlewareHandler = async (c, next) => {
   await (framePolicyForPath(c.req.path, c.req.method).xFrameOptions === "SAMEORIGIN"
     ? frameablePdfSecurityHeaders(c, next)
     : lockedSecurityHeaders(c, next));
+  if ((c.req.method === "GET" || c.req.method === "HEAD")
+    && isPrivatePortalSpaPath(c.req.path, new URL(c.req.url).origin)
+    && c.res.status === 200
+    && c.res.headers.get("Content-Type")?.split(";", 1)[0]?.trim().toLowerCase() === "text/html") {
+    // The authenticated Portal is an SPA: history navigation can move from
+    // account or project-list pages to Viewer launch controls without a new
+    // response. Keep the opener policy on its private HTML shell only.
+    // Public links, APIs and downloads retain strict same-origin COOP.
+    c.header("Cross-Origin-Opener-Policy", "same-origin-allow-popups");
+  }
   // Authentication, current grants and safe inline MIME admission remain in
   // each resource route. Never make an error response or attachment frameable.
   if (authenticatedPreviewFrameAllowed(c.req.path, c.req.method, c.res)) {

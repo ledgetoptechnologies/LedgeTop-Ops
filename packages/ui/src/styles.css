@@ -604,5 +604,4 @@ html:has(.ltds-dialog[open]) { overflow: hidden; }
 .sign-in-recovery-actions > * { min-height: 44px; }
 .sign-in-recovery-actions a[aria-disabled="true"] { opacity: .65; pointer-events: none; }
 .sign-in-recovery-hint, .sign-in-recovery-help { color: var(--muted); font-size: .86rem; line-height: 1.45; }
-.sign-in-recovery-help a { color: inherit; font-weight: 760; overflow-wrap: anywhere; }
 @media (max-width: 560px) { .sign-in-recovery-actions > * { flex: 1 1 100%; justify-content: center; } }

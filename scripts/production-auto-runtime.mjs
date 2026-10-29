@@ -10,12 +10,16 @@ import { canonical, capture, deploymentSourceCommit, PROFILE, resourcesShape, va
 import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-ci.mjs';
 import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVersionWithVisibilityRetry } from './production-auto-provider.mjs';
 import { collectFrontendAssets, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
-import { createAssetVerificationNonce, executeAssetVerification } from './production-auto-verify.mjs';
+import { ASSET_VERIFICATION_LIMITS, createAssetVerificationNonce, executeAssetVerification } from './production-auto-verify.mjs';
 import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
-import { readProductionMigrationReadiness, validateProductionMigrationReadiness } from './production-auto-migration-readiness.mjs';
+import { validateProductionMigrationAdmission } from './production-auto-migration-readiness.mjs';
+import { loadPinnedAppendOnlyMigrationProfile,
+  readProductionMigrationReadiness as readProductionMigrationDiagnostics } from './production-auto-migration-classification.mjs';
 import { ProductionAutoJournal, loadPinnedProductionAutoRecipient } from './production-auto-journal.mjs';
 import { coordinateProductionAutoRelease } from './production-auto-coordinate.mjs';
 import { isProviderUtcTimestamp } from './production-auto-time.mjs';
+import { assetBootstrapVerificationEntries, completeAssetInventoryBootstrap, prepareAssetInventoryBootstrap,
+  readPinnedAssetInventoryBootstrap } from './production-auto-asset-bootstrap.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SHA = /^[a-f0-9]{64}$/u, UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
@@ -133,7 +137,10 @@ function assetVerifierEntries(ledger) {
   return ledger.assets.map(row => ({ path: row.path, size: row.size, sha256: row.sha256, contentType: row.mime }));
 }
 function parseLedger(snapshot, app, workerName, accountId) {
-  const module = snapshot[app].modern.modules?.find(row => row.name === '__ops_release_ledger.json');
+  const state = snapshot?.[app];
+  const activeId = activeVersion(state);
+  need(activeId === state.version?.id && state.modern?.id === activeId, 'runtime_active_ledger_version_mismatch');
+  const module = state.modern.modules?.find(row => row.name === '__ops_release_ledger.json');
   need(module && typeof module.content_base64 === 'string' && module.content_base64.length <= 12 * 1024 * 1024, 'runtime_active_ledger_missing');
   const bytes = Buffer.from(module.content_base64, 'base64'); need(bytes.length <= 8 * 1024 * 1024 && bytes.toString('base64') === module.content_base64);
   let ledger; try { ledger = JSON.parse(bytes.toString('utf8')); } catch { need(false, 'runtime_active_ledger_invalid'); }
@@ -145,7 +152,8 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   profile = PROFILE, providerFactory = options => new ProductionCloudflareProvider(options), ciFactory = options => new ProductionMainCI(options),
   journalFactory = options => new ProductionAutoJournal(options), recipientLoader = loadPinnedProductionAutoRecipient,
   readinessReader = readNativeStaffCutoverReadiness, sourceReader = deploymentSourceCommit, buildRunner = runBuild,
-  buildArtifactsReader, migrationReader = readProductionMigrationReadiness } = {}) {
+  buildArtifactsReader, migrationReader = readProductionMigrationDiagnostics,
+  assetBootstrapReader = readPinnedAssetInventoryBootstrap } = {}) {
   need(Object.values(WORKERS).some(row => row.name === workerName) && /^[a-f0-9]{40}$/u.test(sourceCommit ?? '')
     && typeof fetchImpl === 'function' && profile === PROFILE, 'runtime_target_or_profile_refused');
   const app = workerName === 'ledgetop-ops' ? 'operations' : 'client', target = WORKERS[app];
@@ -158,13 +166,14 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   const token = env.CLOUDFLARE_API_TOKEN;
   let migrationPins;
   const checkMigrations = async () => {
-    const observed = validateProductionMigrationReadiness(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl }), { sourceCommit });
+    const observed = validateProductionMigrationAdmission(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl,
+      appendOnlyProfile: loadPinnedAppendOnlyMigrationProfile() }), { sourceCommit });
     const { observedAt: _observedAt, ...pins } = observed;
     need(migrationPins === undefined || canonical(pins) === canonical(migrationPins), 'runtime_migration_readiness_drift');
     migrationPins = pins;
     return observed;
   };
-  let provider, journal, build, baselineCapture, expectedCapture, previousLedger, candidateVersionId, verifiedCI;
+  let provider, journal, build, baselineCapture, expectedCapture, previousLedger, assetBootstrap, candidateVersionId, verifiedCI;
   let durableRuntime = null, candidateReadbackVerified = false;
   let pendingCoordinatorFence = null, pendingTransition = null, verifiedDeploymentVersions = null;
   const currentCapture = async () => {
@@ -296,7 +305,16 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       ensureProvider();
       const snapshot = (await currentCapture()).raw;
       previousLedger = parseLedger(snapshot, app, workerName, accountId);
-      need(previousLedger.parentVersionId === snapshot[app].version.id, 'runtime_active_ledger_parent_mismatch');
+      assetBootstrap = assetBootstrapReader({ app, workerName, accountId,
+        activeVersionId: activeVersion(snapshot[app]) });
+      if (assetBootstrap) {
+        const prepared = prepareAssetInventoryBootstrap({ bootstrap: assetBootstrap, previous: previousLedger,
+          activeVersionId: activeVersion(snapshot[app]), workerName, accountId });
+        const total = prepared.rows.reduce((sum, row) => sum + row.size, 0);
+        need(prepared.rows.length <= ASSET_VERIFICATION_LIMITS.files
+          && prepared.rows.every(row => row.size <= ASSET_VERIFICATION_LIMITS.fileBytes)
+          && total <= ASSET_VERIFICATION_LIMITS.totalBytes, 'runtime_bootstrap_inventory_exceeds_verifier_bounds');
+      }
       return previousLedger;
     },
     readOldAssets: async ({ ledger }) => {
@@ -304,12 +322,26 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       await createJournalBeforeOldAssetRead(expectedCapture);
       await assertFence();
       const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName();
-      const result = await executeAssetVerification({ entries: assetVerifierEntries(ledger), timeoutMs: 300_000,
-        create: () => provider.createVerifier({ name, workerName, origin: target.origin, entries: assetVerifierEntries(ledger),
+      const verificationLedger = assetBootstrap
+        ? prepareAssetInventoryBootstrap({ bootstrap: assetBootstrap, previous: ledger,
+          activeVersionId: baselineCapture[app].version.id, workerName, accountId }) : null;
+      const verificationEntries = verificationLedger
+        ? assetBootstrapVerificationEntries(ledger, verificationLedger)
+        : assetVerifierEntries(ledger);
+      const result = await executeAssetVerification({ entries: verificationEntries, timeoutMs: 300_000,
+        create: () => provider.createVerifier({ name, workerName, origin: target.origin, entries: verificationEntries,
           nonceHash: nonce.nonceHash, versionId: baselineCapture[app].version.id }),
         fetchAsset: ({ path: assetPath }, { method, signal }) => provider.fetchVerifierAsset({ name, path: assetPath, method, bearer: nonce.bearer, signal }),
         remove: () => provider.removeVerifier(name), readAbsent: () => provider.verifierAbsent(name) });
-      await assertFence(); return result.assets;
+      await assertFence();
+      if (assetBootstrap) previousLedger = completeAssetInventoryBootstrap({ bootstrap: assetBootstrap,
+        previous: ledger, verifiedAssets: result.assets, activeVersionId: baselineCapture[app].version.id, workerName, accountId });
+      return result.assets;
+    },
+    completeInventory: async ({ previous, verifiedAssets, baseline }) => {
+      if (!assetBootstrap) return previous;
+      return completeAssetInventoryBootstrap({ bootstrap: assetBootstrap, previous, verifiedAssets,
+        activeVersionId: baseline.activeVersionId, workerName, accountId });
     },
     upload: async ({ baseline, ledger, manifest, payloads, recordIntent }) => {
       ensureProvider(); const tokenResponse = await provider.uploadAssets({ workerName, manifest,
@@ -432,5 +464,10 @@ export async function runProductionAutoRelease({ workerName = process.env.PRODUC
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try { const result = await runProductionAutoRelease(); console.log(JSON.stringify({ status: 'verified', ...result })); }
-  catch { console.error('Production retained-asset release held; inspect the durable journal and reconcile read-only.'); process.exitCode = 1; }
+  catch (error) {
+    const reason = ['migration_required_pending', 'migration_application_schema_confirmation_required'].includes(error?.code)
+      ? ` (${error.code})` : '';
+    console.error(`Production retained-asset release held${reason}; inspect the durable journal and reconcile read-only.`);
+    process.exitCode = 1;
+  }
 }

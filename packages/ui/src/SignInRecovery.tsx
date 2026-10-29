@@ -1,12 +1,9 @@
 import { ACCESS_LOGOUT, useAccessEmail, useAccessSignOut } from "./access-session";
 
-/** The one Ledge Top support mailbox shown on every sign-in problem page. */
-export const LEDGE_TOP_SUPPORT_EMAIL = "info@ledgetopdroneservices.com";
-
 /**
  * The way out of any page that can't open: denied, not set up yet, signed out, or simply unavailable.
- * It always offers the normal Cloudflare Access sign-out so another email can be used, a retry, and the
- * support address. It never links accounts or widens access.
+ * It always offers the normal Cloudflare Access sign-out so another email can be used and a retry, and points
+ * to the person who set up access. It never links accounts or widens access.
  */
 export function SignInRecovery({ returnTo = "/", lead = "different", onRetry }: {
   /** Where to land after signing out; Access shows its sign-in there. */
@@ -27,6 +24,6 @@ export function SignInRecovery({ returnTo = "/", lead = "different", onRetry }: 
         onClick={() => onRetry ? onRetry() : location.reload()}>Try again</button>
     </div>
     <p className="sign-in-recovery-hint">Signing out ends your Ledge Top sign-in in this browser, so other Ledge Top apps will ask you to sign in again too. It doesn't change any account.</p>
-    <p className="sign-in-recovery-help">Still stuck? Email <a href={`mailto:${LEDGE_TOP_SUPPORT_EMAIL}`}>{LEDGE_TOP_SUPPORT_EMAIL}</a>.</p>
+    <p className="sign-in-recovery-help">Still stuck? Ask your Ledge Top contact or administrator for help.</p>
   </div>;
 }

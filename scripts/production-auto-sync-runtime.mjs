@@ -12,7 +12,9 @@ import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-c
 import { ProductionCloudflareProvider, readCandidateVersionWithVisibilityRetry } from './production-auto-provider.mjs';
 import { readProductionAutoTriggerRun, runBuild } from './production-auto-runtime.mjs';
 import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
-import { readProductionMigrationReadiness, validateProductionMigrationReadiness } from './production-auto-migration-readiness.mjs';
+import { validateProductionMigrationAdmission } from './production-auto-migration-readiness.mjs';
+import { loadPinnedAppendOnlyMigrationProfile,
+  readProductionMigrationReadiness as readProductionMigrationDiagnostics } from './production-auto-migration-classification.mjs';
 import { ProductionAutoJournal, loadPinnedProductionAutoRecipient } from './production-auto-journal.mjs';
 import { isProviderUtcTimestamp } from './production-auto-time.mjs';
 
@@ -97,7 +99,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   fetchImpl = fetch, profile = PROFILE, sourceReader = deploymentSourceCommit, ciFactory = options => new ProductionMainCI(options),
   providerFactory = options => new ProductionCloudflareProvider(options), journalFactory = options => new ProductionAutoJournal(options),
   recipientLoader = loadPinnedProductionAutoRecipient, readinessReader = readNativeStaffCutoverReadiness,
-  buildRunner = runBuild, buildArtifactsReader, migrationReader = readProductionMigrationReadiness } = {}) {
+  buildRunner = runBuild, buildArtifactsReader, migrationReader = readProductionMigrationDiagnostics } = {}) {
   need(COMMIT.test(sourceCommit ?? '') && triggerRun?.sourceCommit === sourceCommit && typeof fetchImpl === 'function'
     && profile === PROFILE && env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
     && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN ?? '')
@@ -107,7 +109,8 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   const ci = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl }), token = env.CLOUDFLARE_API_TOKEN;
   let migrationPins;
   const checkMigrations = async () => {
-    const observed = validateProductionMigrationReadiness(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl }), { sourceCommit });
+    const observed = validateProductionMigrationAdmission(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl,
+      appendOnlyProfile: loadPinnedAppendOnlyMigrationProfile() }), { sourceCommit });
     const { observedAt: _observedAt, ...pins } = observed;
     need(migrationPins === undefined || canonical(pins) === canonical(migrationPins), 'sync_migration_readiness_drift');
     migrationPins = pins;
@@ -234,14 +237,16 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
       await journal.receipt(receipt);
       return { verifiedActive: true, candidateVersionId, deploymentId: final.state.deploymentId,
         moduleSHA256, sourceMapSHA256: candidateProof.sourceMapSHA256, releaseId: journal.releaseId };
-      } catch {
+      } catch (error) {
         if (journal) {
           let reconciliation = { readSucceeded: false };
           if (writesAttempted && provider && expected) {
             try { reconciliation = { readSucceeded: true, ...await reconcileReadOnly() }; }
             catch { /* Keep the original uncertainty; never retry or roll back. */ }
           }
-          const failureCode = codeFor(phase);
+          const migrationHoldCode = ['migration_required_pending', 'migration_application_schema_confirmation_required'].includes(error?.code)
+            ? error.code : null;
+          const failureCode = migrationHoldCode ?? codeFor(phase);
           const reconciliationCode = !writesAttempted ? 'not_attempted'
             : reconciliation.readSucceeded ? 'read_succeeded' : 'read_failed';
           try { await journal.receipt({ schemaVersion: 1, sourceCommit, workerName: WORKER, status: 'held', phase,
@@ -252,7 +257,11 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
             writesAttempted, failureCode, reconciliationCode, reconciliation }); }
           catch { /* Preserve the earlier durable intent as unresolved. */ }
         }
-        throw new Error('Ops Sync backend release held; inspect the durable journal and reconcile read-only.');
+        const migrationHoldCode = ['migration_required_pending', 'migration_application_schema_confirmation_required'].includes(error?.code)
+          ? error.code : null;
+        const held = new Error('Ops Sync backend release held; inspect the durable journal and reconcile read-only.');
+        if (migrationHoldCode) held.code = migrationHoldCode;
+        throw held;
       }
     },
   };
@@ -273,5 +282,10 @@ export async function runProductionAutoSyncRelease({ env = process.env, fetchImp
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try { console.log(JSON.stringify(await runProductionAutoSyncRelease())); }
-  catch { console.error('Ops Sync automatic backend release held; inspect the durable journal and reconcile read-only.'); process.exitCode = 1; }
+  catch (error) {
+    const reason = ['migration_required_pending', 'migration_application_schema_confirmation_required'].includes(error?.code)
+      ? ` (${error.code})` : '';
+    console.error(`Ops Sync automatic backend release held${reason}; inspect the durable journal and reconcile read-only.`);
+    process.exitCode = 1;
+  }
 }

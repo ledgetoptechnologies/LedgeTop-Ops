@@ -254,7 +254,7 @@ test('rejects dirty and untracked migration inventory before provider access', a
   assert.equal(untracked.calls.length, 0);
 });
 
-test('rechecks source HEAD and local blob bytes after both fake ledger reads', async (t) => {
+test('rechecks source HEAD and local blob bytes before reading the next ledger', async (t) => {
   const repo = tempRepository(t);
   const relative = 'apps/operations/migrations/0003_nonconsecutive.sql';
   const fixture = fetchForRepository(repo, { onQuery: (_databaseId, count) => {
@@ -264,7 +264,7 @@ test('rechecks source HEAD and local blob bytes after both fake ledger reads', a
     }
   } });
   await assert.rejects(readRepository(repo, fixture.fetchImpl), (error) => error.code === 'source_migration_bytes_changed_during_read');
-  assert.equal(fixture.calls.length, 2);
+  assert.equal(fixture.calls.length, 1);
 });
 
 test('rejects a migration-tree commit created during the fake D1 read', async (t) => {
@@ -278,7 +278,7 @@ test('rejects a migration-tree commit created during the fake D1 read', async (t
     }
   } });
   await assert.rejects(readRepository(repo, fixture.fetchImpl), (error) => error.code === 'source_commit_changed_during_read');
-  assert.equal(fixture.calls.length, 2);
+  assert.equal(fixture.calls.length, 1);
 });
 
 for (const stalled of ['fetch', 'body']) {

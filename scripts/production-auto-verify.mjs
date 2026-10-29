@@ -6,13 +6,15 @@ import { createHash, randomBytes } from "node:crypto";
 // https://developers.cloudflare.com/workers/versions-and-deployments/version-overrides/
 const TARGETS = { "ledgetop-ops": "https://ops.ledgetop.app", "ledgetop-clients": "https://portal.ledgetop.app" };
 const HASH = /^[a-f0-9]{64}$/u, UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
-const MAX_FILE = 16 * 1024 * 1024, MAX_TOTAL = 128 * 1024 * 1024;
+export const ASSET_VERIFICATION_LIMITS = Object.freeze({ files: 1024, fileBytes: 16 * 1024 * 1024,
+  totalBytes: 256 * 1024 * 1024 });
+const { fileBytes: MAX_FILE, totalBytes: MAX_TOTAL, files: MAX_FILES } = ASSET_VERIFICATION_LIMITS;
 const fail = () => { throw Error("static_asset_verification_refused"); };
 const need = value => { if (!value) fail(); };
 const digest = value => createHash("sha256").update(value).digest("hex");
 const mime = value => typeof value === "string" ? value.split(";", 1)[0].trim().toLowerCase() : "";
 function manifest(entries) {
-  need(Array.isArray(entries) && entries.length > 0 && entries.length <= 1024);
+  need(Array.isArray(entries) && entries.length > 0 && entries.length <= MAX_FILES);
   const paths = new Set(); let total = 0;
   return entries.map(entry => {
     need(entry && Object.getPrototypeOf(entry) === Object.prototype && Object.keys(entry).sort().join() === "contentType,path,sha256,size");

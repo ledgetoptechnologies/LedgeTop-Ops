@@ -280,7 +280,7 @@ for (const kind of ['file', 'count', 'total']) test(`union ${kind} verifier boun
   f.adapter.build = async input => {
     const value = await build(input), sample = value.assets.entries[0];
     if (kind === 'file') value.assets.entries[0].size = 16 * 1024 * 1024 + 1;
-    else value.assets.entries = Array.from({ length: kind === 'count' ? 1025 : 9 }, (_, i) => ({
+    else value.assets.entries = Array.from({ length: kind === 'count' ? 1025 : 17 }, (_, i) => ({
       ...sample, path: `/assets/bounded-${i}.js`, size: kind === 'count' ? 1 : 16 * 1024 * 1024 }));
     return value;
   };

@@ -6,7 +6,10 @@ const clock = (seconds: number) => {
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
 };
 
-/** Persistent controls complement the browser's native player, which can hide its controls during playback. */
+/**
+ * One persistent control bar replaces the browser's native controls, which can hide during playback.
+ * Fullscreen uses the player element where supported, otherwise the video's own fullscreen (iPhone Safari).
+ */
 export function VideoPlayer({ src, name, onError }: { src: string; name: string; onError?: () => void }) {
   const root = useRef<HTMLDivElement>(null);
   const media = useRef<HTMLVideoElement>(null);
@@ -60,14 +63,14 @@ export function VideoPlayer({ src, name, onError }: { src: string; name: string;
       else {
         const video = media.current as (HTMLVideoElement & { webkitEnterFullscreen?: () => void }) | null;
         if (video?.webkitEnterFullscreen) video.webkitEnterFullscreen();
-        else setNotice("Fullscreen is unavailable in this browser. You can use the video's native controls.");
+        else setNotice("Fullscreen is not available in this browser.");
       }
-    } catch { setNotice("Fullscreen is unavailable in this browser. You can use the video's native controls."); }
+    } catch { setNotice("Fullscreen could not start. Try again once the video has loaded."); }
   };
 
   return <div ref={root} className="client-video-player" data-video-player aria-label={`Video player: ${name}`}>
     <div className="client-video-picture" aria-busy={loading && !blocked && !failed}>
-      <video ref={media} src={src} aria-label={name} controls autoPlay muted playsInline preload="metadata"
+      <video ref={media} src={src} aria-label={name} autoPlay muted playsInline preload="metadata"
         onLoadedData={() => setLoading(false)}
         onDurationChange={event => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
         onTimeUpdate={event => setPosition(event.currentTarget.currentTime)}
@@ -88,7 +91,7 @@ export function VideoPlayer({ src, name, onError }: { src: string; name: string;
       <span className="client-video-time" aria-label="Playback time">{clock(position)} / {clock(duration)}</span>
       <button type="button" disabled={failed} aria-label={muted ? "Unmute video" : "Mute video"} aria-pressed={!muted}
         onClick={() => { if (media.current) media.current.muted = !media.current.muted; }}>{muted ? "Unmute" : "Mute"}</button>
-      <button type="button" onClick={() => void toggleFullscreen()} aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}>{fullscreen ? "Exit fullscreen" : "Fullscreen"}</button>
+      <button type="button" disabled={failed} onClick={() => void toggleFullscreen()} aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}>{fullscreen ? "Exit fullscreen" : "Fullscreen"}</button>
     </div>
     {notice && <p className="client-video-notice" role="status">{notice}</p>}
   </div>;

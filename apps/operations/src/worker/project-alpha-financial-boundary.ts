@@ -20,6 +20,8 @@ export type FinancialDocument = Readonly<{
   total: string;
   amountPaid: string | null;
   balanceDue: string | null;
+  issueDate: string | null;
+  dueDate: string | null;
   documentUrl: string | null;
   actionUrl: string | null;
 }>;
@@ -47,6 +49,8 @@ export type FinancialExpectation = Readonly<{
 const SELECTOR_KEYS = ["kind", "externalId", "publicId", "revision", "projectionSha256", "authorizationGeneration"] as const;
 const MONEY = /^(?:0|[1-9][0-9]{0,17})\.[0-9]{2}$/;
 const MAX_BYTES = 128 * 1024;
+const LEGACY_DOCUMENT_KEYS = ["publicId", "kind", "status", "currency", "total", "amountPaid", "balanceDue", "documentUrl", "actionUrl"] as const;
+const DATED_DOCUMENT_KEYS = [...LEGACY_DOCUMENT_KEYS.slice(0, 7), "issueDate", "dueDate", ...LEGACY_DOCUMENT_KEYS.slice(7)] as const;
 
 export function isFinancialSelector(value: unknown): value is FinancialSelector {
   return plain(value) && exact(value, SELECTOR_KEYS)
@@ -80,12 +84,22 @@ function link(value: unknown, expectedOrigin: string, page: "public-doc" | "stri
       && /^[A-Za-z0-9_-]{16,64}$/.test(url.searchParams.get("token") ?? "");
   } catch { return false; }
 }
+function dateOnly(value: unknown): value is string | null {
+  if (value === null) return true;
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value) || value.startsWith("0000-")) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
+}
 function document(value: unknown, expectedOrigin: string): value is FinancialDocument {
-  if (!plain(value) || !exact(value, ["publicId", "kind", "status", "currency", "total", "amountPaid", "balanceDue", "documentUrl", "actionUrl"])
+  if (!plain(value) || (!exact(value, LEGACY_DOCUMENT_KEYS) && !exact(value, DATED_DOCUMENT_KEYS))
     || !publicId(value.publicId) || typeof value.currency !== "string" || !/^[A-Z]{3}$/.test(value.currency)
     || typeof value.total !== "string" || !MONEY.test(value.total)
+    || Object.hasOwn(value, "issueDate") !== Object.hasOwn(value, "dueDate")
+    || !dateOnly(Object.hasOwn(value, "issueDate") ? value.issueDate : null)
+    || !dateOnly(Object.hasOwn(value, "dueDate") ? value.dueDate : null)
     || !link(value.documentUrl, expectedOrigin, "public-doc")) return false;
-  if (value.kind === "contract") return ["pending", "active", "paused", "completed"].includes(String(value.status))
+  if (value.kind === "contract") return (value.issueDate ?? null) === null && (value.dueDate ?? null) === null
+    && ["pending", "active", "paused", "completed"].includes(String(value.status))
     && value.amountPaid === null && value.balanceDue === null
     && link(value.actionUrl, expectedOrigin, "public-doc")
     && (value.status === "pending" || value.documentUrl === null && value.actionUrl === null)
@@ -123,13 +137,17 @@ export function decodeProjectAlphaFinancialPage(bytes: Uint8Array, expected: Fin
       || value.nextCursor !== null && (typeof value.nextCursor !== "string" || !/^[A-Za-z0-9_-]{1,256}$/.test(value.nextCursor))
       || value.nextCursor !== null && (value.documents.length === 0 || value.documents.length >= value.snapshot.documentCount)) return null;
     const ids = new Set<string>();
+    const normalizedDocuments: FinancialDocument[] = [];
     for (const item of value.documents) {
       const identity = `${item.kind}:${item.publicId}`;
       if (ids.has(identity)) return null;
       ids.add(identity);
-      Object.freeze(item);
+      normalizedDocuments.push(Object.freeze({ ...item,
+        issueDate: Object.hasOwn(item, "issueDate") ? item.issueDate : null,
+        dueDate: Object.hasOwn(item, "dueDate") ? item.dueDate : null,
+      }));
     }
-    Object.freeze(value.selector); Object.freeze(value.snapshot); Object.freeze(value.documents);
-    return Object.freeze(value) as FinancialPage;
+    Object.freeze(value.selector); Object.freeze(value.snapshot);
+    return Object.freeze({ ...value, documents: Object.freeze(normalizedDocuments) }) as FinancialPage;
   } catch { return null; }
 }

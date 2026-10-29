@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { consumeClientPortalRecipientEnrollmentRoute, consumeOperationsNativeRecipientEnrollmentRoute }
   from "../src/client/client-portal-recipient-enrollment-route";
+import { isOperationsNativeRecipientEnrollmentRoute } from "../src/client/client-portal-recipient-enrollment-route";
 
 describe("client portal recipient enrollment route", () => {
   const intentId = "00000000-0000-4000-8000-000000000001";
@@ -41,20 +42,23 @@ describe("native Operations recipient route", () => {
       const replaceState = vi.fn();
       return { history: { state: null, replaceState }, replaceState };
     };
-    for (const origin of ["https://portal.ledgetopdroneservices.com", "https://portal-staging.ledgetopdroneservices.com",
+    for (const origin of ["https://portal.ledgetop.app", "https://portal.ledgetopdroneservices.com", "https://portal-staging.ledgetopdroneservices.com",
       "https://client-staging.ledgetopdroneservices.com", "http://127.0.0.1:4173"]) {
       const { history, replaceState } = historyFor();
       expect(consumeOperationsNativeRecipientEnrollmentRoute({ origin, pathname, search: "", hash: `#${token}` }, history))
         .toEqual({ intentId, opaqueToken: token });
       expect(replaceState).toHaveBeenCalledOnce();
+      expect(isOperationsNativeRecipientEnrollmentRoute(origin, pathname)).toBe(true);
     }
-    for (const origin of ["https://portal.ledgetoptechnologies.com", "https://portal-staging.ledgetoptechnologies.com", "https://project-alpha.ledgetopdroneservices.com", "https://client.ledgetopdroneservices.com", "http://localhost:4173",
+    for (const origin of ["https://portal.ledgetoptechnologies.com", "https://portal-staging.ledgetoptechnologies.com", "https://project-alpha.ledgetopdroneservices.com", "https://client.ledgetopdroneservices.com", "https://portal.ledgetop.app.evil.example", "https://portal.ledgetop.app:444", "http://portal.ledgetop.app", "http://localhost:4173", "http://127.0.0.1:19495",
       "http://portal.ledgetopdroneservices.com", "https://portal.ledgetopdroneservices.com.evil.example",
       "http://client-staging.ledgetopdroneservices.com", "https://client-staging.evil.example"]) {
       const { history, replaceState } = historyFor();
       expect(consumeOperationsNativeRecipientEnrollmentRoute({ origin, pathname, search: "", hash: `#${token}` }, history)).toBeNull();
+      expect(isOperationsNativeRecipientEnrollmentRoute(origin, pathname)).toBe(false);
       expect(replaceState).toHaveBeenCalledExactlyOnceWith(null, "", pathname);
     }
+    expect(isOperationsNativeRecipientEnrollmentRoute("https://portal.ledgetopdroneservices.com", `${pathname}/`)).toBe(false);
   });
   it("rejects query tokens and does not reinterpret legacy links", () => {
     const replaceState = vi.fn(), history = { state: null, replaceState };

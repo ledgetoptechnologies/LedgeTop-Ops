@@ -3940,12 +3940,19 @@ function ViewerDataOverview({session}:{session:Session}) {
       <Card title="Projects"><strong>{value.projects.active}</strong><small>{value.projects.total} total</small></Card>
       <Card title="Published models"><strong>{value.models.published}</strong><small>{value.models.total} total · {bytes(value.models.bytes)}</small></Card>
       <Card title="Active work"><strong>{value.jobs.queued + value.jobs.running}</strong><small>{value.jobs.queued} queued · {value.jobs.running} running · {value.jobs.reviewReady} ready for review</small></Card>
-      <Card title="Providers"><strong>{value.providers.healthy} healthy</strong><small>{value.providers.enabled} enabled · {value.providers.total} configured</small></Card>
+      <Card title="Processing services"><strong>{value.providers.enabled === 0 ? "None on" : value.providers.healthy >= value.providers.enabled ? "All working" : `${value.providers.healthy} of ${value.providers.enabled} working`}</strong>
+        <small>{value.providers.enabled} turned on{value.providers.total > value.providers.enabled ? ` · ${value.providers.total - value.providers.enabled} turned off` : ""}</small></Card>
       <Card title="Storage"><strong>{bytes(value.storage.usedBytes)}</strong><small>{value.storage.availableBytes === null ? "Available space unavailable" : `${bytes(value.storage.availableBytes)} available`}</small></Card>
-      <Card title="Platform"><StatusPill tone={value.platform.ready && value.platform.workerLive && !value.platform.lifecycleBlocked ? "success" : "warning"}>{value.platform.ready ? "ready" : "attention"}</StatusPill><small>{value.platform.workerLive ? "Worker online" : "Worker offline"}{value.platform.lifecycleBlocked ? " · lifecycle blocked" : ""}</small></Card>
+      <Card title="Viewer status">{value.platform.ready && value.platform.workerLive && !value.platform.lifecycleBlocked
+        ? <><StatusPill tone="success">Working</StatusPill><small>Everything is running normally.</small></>
+        : <><StatusPill tone="warning">Needs attention</StatusPill><small>{[
+          !value.platform.ready && "The Viewer isn't ready yet.",
+          !value.platform.workerLive && "Background processing isn't running.",
+          value.platform.lifecycleBlocked && "File storage changes are on hold until a storage problem is fixed in the Viewer.",
+        ].filter(Boolean).join(" ")}</small></>}</Card>
     </div>
     {value.jobs.failed > 0 && <p className="notice warning">{value.jobs.failed} processing job{value.jobs.failed === 1 ? " needs" : "s need"} attention. <button type="button" className="button-ghost button-small" disabled={opening} onClick={() => void openWorkspace()}>Review in Viewer</button></p>}
-    <small>Updated {date(value.generatedAt)}. Totals only; no model files or internal storage paths pass through Operations.</small>
+    <small>Updated {date(value.generatedAt)}</small>
     {allowed(session.user, "viewer.manage") && <ViewerQuickShare canCreatePublic={allowed(session.user, "viewer.share.create")} canRevokePublic={allowed(session.user, "viewer.share.revoke")} />}
     {allowed(session.user, "viewer.manage") && <ViewerConnectionDetails />}
   </div>;

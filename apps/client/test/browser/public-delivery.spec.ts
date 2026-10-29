@@ -298,7 +298,7 @@ test("image viewer matches Operations interaction and keeps PDF/video controls u
   await page.keyboard.press("Escape"); await expect(page.getByRole("dialog")).toHaveCount(0); await expect(trigger).toBeFocused();
 });
 
-test("opening an original video starts playback without pressing Play and keeps controls available", async ({ page }) => {
+test("opening an original video starts playback without pressing Play and shows one set of controls", async ({ page }) => {
   await mockShare(page, undefined, undefined, [rootVideo]);
   await page.route("**/api/public/shares/public/items/*/stream-ticket", route => route.fulfill({ status: 404, json: { error: "Preview unavailable" } }));
   const videoBytes = readFileSync(new URL("../fixtures/client-portal-seek.mp4", import.meta.url));
@@ -313,8 +313,9 @@ test("opening an original video starts playback without pressing Play and keeps 
   await page.getByRole("button", { name: "Preview Flight.mp4" }).click();
   const video = page.getByRole("dialog", { name: "Preview Flight.mp4" }).locator("video");
   await expect(video).toBeVisible();
+  await video.evaluate(element => { const media = element as HTMLVideoElement; media.defaultPlaybackRate = .1; media.playbackRate = .1; });
   await expect(video).toHaveJSProperty("muted", true);
-  await expect(video).toHaveJSProperty("controls", true);
+  await expect(video).toHaveJSProperty("controls", false);
   await expect.poll(() => video.evaluate(element => (element as HTMLVideoElement).currentTime)).toBeGreaterThan(0);
   const dialog = page.getByRole("dialog", { name: "Preview Flight.mp4" });
   await dialog.getByRole("button", { name: "Pause video", exact: true }).click();
@@ -345,8 +346,15 @@ test("a slow original video has a loading message and visible controls, then rep
   await expect(dialog.getByText("Loading video…", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Play video", exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Enter fullscreen" })).toBeVisible();
+  await expect(dialog.getByRole("slider", { name: "Seek video" })).toBeDisabled(); // No duration yet.
   finish();
   await expect(dialog.getByText("This video could not be loaded. You can download the original file.")).toBeVisible();
+  for (const control of [dialog.getByRole("button", { name: "Play video", exact: true }), dialog.getByRole("slider", { name: "Seek video" }),
+    dialog.getByRole("button", { name: "Unmute video" }), dialog.getByRole("button", { name: "Enter fullscreen" })]) {
+    await expect(control).toBeDisabled();
+    await expect(control).toHaveCSS("opacity", "0.45");
+    await expect(control).toHaveCSS("cursor", "not-allowed");
+  }
   await expect(dialog.getByRole("link", { name: "Download Flight.mp4" })).toBeVisible();
 });
 
@@ -374,6 +382,22 @@ test("blocked autoplay gives an explicit Play action that starts the same video"
   await dialog.getByRole("button", { name: "Play video", exact: true }).click();
   await expect.poll(() => dialog.locator("video").evaluate(element => (element as HTMLVideoElement).currentTime)).toBeGreaterThan(0);
   await expect(dialog.getByText("Playback is paused. Press Play to start the video.")).toHaveCount(0);
+});
+
+test("fullscreen falls back to the video's own fullscreen where the page cannot go fullscreen (iPhone Safari)", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(Element.prototype, "requestFullscreen", { configurable: true, value: undefined });
+    Object.defineProperty(HTMLVideoElement.prototype, "webkitEnterFullscreen", { configurable: true, value() { (window as unknown as { videoFullscreenCalls: number }).videoFullscreenCalls = ((window as unknown as { videoFullscreenCalls?: number }).videoFullscreenCalls ?? 0) + 1; } });
+  });
+  await mockShare(page, undefined, undefined, [rootVideo]);
+  await page.route("**/api/public/shares/public/items/*/stream-ticket", route => route.fulfill({ status: 404, json: { error: "Preview unavailable" } }));
+  await page.route("**/media/flight.mp4", route => route.fulfill({ contentType: "video/mp4", body: readFileSync(new URL("../fixtures/client-portal-seek.mp4", import.meta.url)) }));
+  await page.goto("/s/public?view=grid");
+  await page.getByRole("button", { name: "Preview Flight.mp4" }).click();
+  const dialog = page.getByRole("dialog", { name: "Preview Flight.mp4" });
+  await dialog.getByRole("button", { name: "Enter fullscreen" }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { videoFullscreenCalls?: number }).videoFullscreenCalls)).toBe(1);
+  await expect(dialog.locator(".client-video-notice")).toHaveCount(0);
 });
 
 test("image viewer supports a real two-touch pinch gesture and keeps the image bounded", async ({ page }) => {

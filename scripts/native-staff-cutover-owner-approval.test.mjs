@@ -150,6 +150,7 @@ test('owner consent artifact binds two actual fresh group observations and repla
 test('230-source pin requires the contiguous committed migration chain and a clean pinned Git diff',()=>{
   const root=fileURLToPath(new URL('../',import.meta.url)),names=readdirSync(path.join(root,'apps','operations','migrations'))
     .filter(name=>/^\d{4}_.+\.sql$/u.test(name)&&Number(name.slice(0,4))<=230).sort();
+  const reviewedSuccessor='0231_owner_google_ads_summary.sql';
   const modulePaths=['scripts/native-staff-cutover-v1.mjs','scripts/native-staff-sync-preparation.mjs',
     'scripts/native-staff-cutover-access-group-observation.mjs','scripts/native-staff-bootstrap-d1.mjs'];
   const moduleBytes=Object.fromEntries(modulePaths.map(name=>[name,readFileSync(path.join(root,name))]));
@@ -157,19 +158,27 @@ test('230-source pin requires the contiguous committed migration chain and a cle
   const config={source:{commit:'b'.repeat(40),migrationNamesSha256:sha(names.join('\n')),migrationContentsSha256:contentHash,
     cutoverModuleSha256:sha(moduleBytes[modulePaths[0]]),syncPreparationModuleSha256:sha(moduleBytes[modulePaths[1]]),
     accessGroupModuleSha256:sha(moduleBytes[modulePaths[2]]),installerModuleSha256:sha(moduleBytes[modulePaths[3]])}};
-  const fakeGit=(file,args)=>{
+  const fakeGitFor=(listedNames,diffStatus=0)=>(file,args)=>{
     if(file!=='git'||args[0]!=='-C')throw new Error('unexpected-git-call');
     const command=args[2];if(command==='cat-file')return '';
-    if(command==='ls-tree')return names.map(name=>`apps/operations/migrations/${name}`).join('\n');
+    if(command==='ls-tree')return listedNames.map(name=>`apps/operations/migrations/${name}`).join('\n');
+    if(command==='diff'&&diffStatus)throw Object.assign(new Error('pinned-source-diff'),{status:diffStatus});
     if(command==='diff')return '';
     throw new Error('unexpected-git-command');
   };
+  const fakeGit=fakeGitFor(names);
   assert.equal(assertPinnedNativeStaffCutoverSource(config,{cwd:root,run:fakeGit}),true);
+  assert.equal(assertPinnedNativeStaffCutoverSource(config,{cwd:root,run:fakeGitFor([...names,reviewedSuccessor])}),true,
+    'the pinned source attests only the exact 0001–0230 prefix when the reviewed 0231 source exists');
   assert.throws(()=>assertPinnedNativeStaffCutoverSource({...config,source:{...config.source,migrationNamesSha256:'0'.repeat(64)}},
     {cwd:root,run:fakeGit}),/migration_names_mismatch/u);
-  assert.throws(()=>assertPinnedNativeStaffCutoverSource(config,{cwd:root,run:(file,args,options)=>{
-    if(args[2]==='diff')throw Object.assign(new Error('pinned-source-diff'),{status:1});
-    return fakeGit(file,args,options);}}),/source_worktree_mismatch/u);
+  assert.throws(()=>assertPinnedNativeStaffCutoverSource(config,{cwd:root,run:fakeGitFor(names.filter(name=>name!=='0229_owner_intel_source_feed.sql'))}),
+    /migration_names_mismatch/u,'a missing migration in the pinned prefix is rejected');
+  assert.throws(()=>assertPinnedNativeStaffCutoverSource(config,{cwd:root,run:fakeGitFor([...names,'0230_duplicate.sql'])}),
+    /migration_names_mismatch/u,'a duplicate migration number is rejected');
+  assert.throws(()=>assertPinnedNativeStaffCutoverSource(config,{cwd:root,run:fakeGitFor([...names,names.at(-1)])}),
+    /migration_names_mismatch/u,'a duplicate migration name is rejected');
+  assert.throws(()=>assertPinnedNativeStaffCutoverSource(config,{cwd:root,run:fakeGitFor(names,1)}),/source_worktree_mismatch/u);
 });
 
 test('cutover receipt binds exact purpose, target/source, full preparation context, and live owner JWT',
