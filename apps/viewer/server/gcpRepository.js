@@ -119,6 +119,12 @@ class GcpRepository {
       throw Object.assign(new Error('GCP source checksum does not match its content'),{code:'invalid_gcp_input'});
     const id = crypto.randomUUID(), timestamp = now();
     return this.transaction(() => {
+      // Serialize admission with trash/restore/purge intent creation. A status
+      // read before BEGIN IMMEDIATE can become stale before the insert.
+      const currentDataset=this.dataset(datasetId);
+      const pending=this.database.prepare("SELECT 1 FROM storage_mutations WHERE entity_type='dataset' AND entity_id=? AND status IN ('intent','fs_applied','failed') LIMIT 1").get(datasetId);
+      if(!currentDataset || currentDataset.status!=='finalized' || pending)
+        throw Object.assign(new Error('dataset is not available for GCP import'),{code:'dataset_not_available'});
       this.database.prepare(`INSERT INTO gcp_sets(id,dataset_id,display_name,source_format,source_file_id,source_filename,
         source_sha256,source_content,source_byte_size,crs,elevation_units,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
         .run(id, datasetId, bounded(displayName, 160), sourceFormat === 'emlid-all-columns-v1' ? 'generic-csv-v1' : sourceFormat, sourceFileId,

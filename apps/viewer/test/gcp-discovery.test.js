@@ -31,6 +31,41 @@ test('CSV datasets are protected from direct and resumed purge',t=>{
  assert.throws(()=>applyStorageMutation(p,{pathExistsStrict:()=>true,removeExact:()=>{removed=true;}},mutation),{code:'retained_csv'});assert.equal(removed,false);
 });
 
+test('a separately imported GCP source protects its raw dataset from purge',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-manual-retain-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
+ const p=new ProcessingRepository(db),project=p.createProject({displayName:'Survey'}),dataset=p.createDataset({projectId:project.id,displayName:'Flight',storageMode:'managed',rootKey:'datasets',relativePath:'source'}),photo='synthetic image';
+ p.finalizeDataset(dataset.id,[{id:'photo',relativePath:'photo.jpg',byteSize:photo.length,sha256:digest(photo)}],digest('manifest'));
+ const source='point_id,label,latitude,longitude,elevation_m\nA,A,1,2,3\n',parsed=require('../server/gcpImport').parseGcpInterchange({format:'generic-csv-v1',content:source});
+ const set=new GcpRepository(db).importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'generic-csv-v1',sourceFilename:'control.csv',sourceSha256:parsed.sourceSha256,sourceContent:source,crs:parsed.crs,elevationUnits:'m',points:parsed.points});
+ assert.equal(set.sourceFileId,null);assert.equal(p.datasetHasRetainedCsv(dataset.id),true);
+ db.prepare("UPDATE datasets SET status='trashed' WHERE id=?").run(dataset.id);db.prepare("INSERT INTO storage_trash(id,entity_type,entity_id,root_key,relative_path,byte_size,purge_after,created_at) VALUES ('manual-trash','dataset',?,'datasets','source',?,'2020-01-01','2020-01-01')").run(dataset.id,photo.length);
+ db.prepare("INSERT INTO storage_trash(id,entity_type,entity_id,root_key,relative_path,byte_size,purge_after,created_at) VALUES ('manual-container','project',?,'datasets','source',0,'2020-01-01','2020-01-01')").run(project.id);
+ db.prepare("INSERT INTO container_trash_members(container_trash_id,member_trash_id,entity_type,entity_id,created_at) VALUES ('manual-container','manual-trash','dataset',?,'2020-01-01')").run(dataset.id);
+ assert.equal(p.containerHasRetainedCsv('manual-container'),true);
+ assert.equal(p.beginPurgeMutation('manual-trash','ops:test'),null);let removed=false;
+ assert.throws(()=>require('../server/storageLifecycle').applyStorageMutation(p,{pathExistsStrict:()=>true,removeExact:()=>{removed=true;}},{id:'prior',type:'purge',entityType:'dataset',entityId:dataset.id,status:'intent',sourceRootKey:'trash',sourceRelativePath:'source'}),{code:'retained_csv'});
+ assert.equal(removed,false);assert.equal(db.prepare('SELECT source_content FROM gcp_sets WHERE id=?').get(set.id).source_content,source);
+});
+
+test('manual GCP admission rejects a concurrent trash intent and stale finalized state',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-trash-admission-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
+ const p=new ProcessingRepository(db),project=p.createProject({displayName:'Survey'}),g=new GcpRepository(db),source='point_id,label,latitude,longitude,elevation_m\nA,A,1,2,3\n',parsed=require('../server/gcpImport').parseGcpInterchange({format:'generic-csv-v1',content:source});
+ const create=name=>{const d=p.createDataset({projectId:project.id,displayName:name,storageMode:'managed',rootKey:'datasets',relativePath:name});p.finalizeDataset(d.id,[],digest(name));return d;};
+ const args=d=>({datasetId:d.id,displayName:'Control',sourceFormat:'generic-csv-v1',sourceSha256:parsed.sourceSha256,sourceContent:source,crs:parsed.crs,elevationUnits:'m',points:parsed.points});
+ const pending=create('pending');assert.ok(p.beginTrashMutation(pending.id,'ops:test'));assert.throws(()=>g.importSet(args(pending)),{code:'dataset_not_available'});
+ db.prepare("UPDATE storage_mutations SET status='failed' WHERE entity_type='dataset' AND entity_id=?").run(pending.id);assert.throws(()=>g.importSet(args(pending)),{code:'dataset_not_available'});
+ const stale=create('stale'),transaction=g.transaction.bind(g);g.transaction=fn=>{db.prepare("UPDATE datasets SET status='trashed' WHERE id=?").run(stale.id);return transaction(fn);};
+ assert.throws(()=>g.importSet(args(stale)),{code:'dataset_not_available'});assert.equal(db.prepare('SELECT count(*) AS n FROM gcp_sets').get().n,0);
+});
+
+test('an external-reference dataset with a manual GCP source cannot be metadata-purged',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-external-manual-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
+ const p=new ProcessingRepository(db),project=p.createProject({displayName:'Survey'}),d=p.createDataset({projectId:project.id,displayName:'External',storageMode:'external_reference',rootKey:'datasets',relativePath:'flight'}),source='point_id,label,latitude,longitude,elevation_m\nA,A,1,2,3\n';
+ p.finalizeDataset(d.id,[],digest('manifest'));const parsed=require('../server/gcpImport').parseGcpInterchange({format:'generic-csv-v1',content:source});
+ new GcpRepository(db).importSet({datasetId:d.id,displayName:'Control',sourceFormat:'generic-csv-v1',sourceSha256:parsed.sourceSha256,sourceContent:source,crs:parsed.crs,elevationUnits:'m',points:parsed.points});
+ const trash=p.trashDataset(d.id,{actor:'ops:test'});assert.ok(trash);assert.equal(p.markTrashPurged(trash.id),null);assert.equal(p.getTrash(trash.id).permanentlyDeletedAt,null);
+});
+
 test('expired incomplete CSV uploads remain retained and resumable',t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-upload-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
  const p=new ProcessingRepository(db),project=p.createProject({displayName:'Survey'}),dataset=p.createDataset({projectId:project.id,displayName:'draft',storageMode:'managed',rootKey:'datasets',relativePath:'source'});
