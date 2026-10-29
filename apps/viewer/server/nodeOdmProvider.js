@@ -46,6 +46,9 @@ function detectProviderType(info) {
     && info.cpuCores === 99999999999;
   if (/^1\./.test(info.version) && clusterSentinel) return 'clusterodm';
   if (/^2\./.test(info.version) && !clusterSentinel) return 'nodeodm';
+  // NodeODM's 3.6.2 image reports its package version here. Accept only the
+  // observed release and ODM engine until newer protocol versions are tested.
+  if (info.version === '3.6.2' && info.engine === 'odm' && info.engineVersion === '3.6.2' && !clusterSentinel) return 'nodeodm';
   throw providerCapabilityError('provider_probe_ambiguous', 'The endpoint is NodeODM-compatible, but its engine type cannot be identified safely.');
 }
 
@@ -95,7 +98,8 @@ class NodeOdmProvider {
       availableMemory: info.availableMemory ?? null, cpuCores: info.cpuCores ?? null,
       providerType: detectedType, detectionMethod: 'capability-signature', options: normalizedOptions,
       testedBaseline: detectedType === 'clusterodm' ? '1.5.x' : '2.2.3',
-      compatibilityWarning: null,
+      compatibilityWarning: detectedType === 'nodeodm' && info.version === '3.6.2'
+        ? 'NodeODM 3.6.2 was detected; full processing compatibility has not yet been verified.' : null,
     };
     const compatibilityContract={apiVersion:capabilities.apiVersion,engine:capabilities.engine,engineVersion:capabilities.engineVersion,maxImages:capabilities.maxImages,maxParallelTasks:capabilities.maxParallelTasks,providerType:capabilities.providerType,options:capabilities.options};
     return { capabilities, fingerprint: crypto.createHash('sha256').update(JSON.stringify(compatibilityContract)).digest('hex') };
