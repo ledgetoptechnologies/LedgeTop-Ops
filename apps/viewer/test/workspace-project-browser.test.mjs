@@ -204,7 +204,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/tasks') return json({ tasks: fixtures.tasks.filter(item=>!runtime.archivedTasks.has(item.id)), nextCursor: null });
   if (pathname === '/api/v1/processing/providers' && method === 'GET') return json({ providers: fixtures.providers });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm' && method === 'PATCH') return json({ provider: { ...fixtures.providers[0], ...body } });
-  if (pathname === '/api/v1/processing/providers/provider-nodeodm/credential' && ['PUT', 'DELETE'].includes(method)) return json({ provider: fixtures.providers[0] });
+  if (pathname === '/api/v1/processing/providers/provider-nodeodm/credential' && ['PUT', 'DELETE'].includes(method)) return runtime.rejectProviderCredential ? json({error:'synthetic token failure'},500) : json({ provider: fixtures.providers[0] });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm/capabilities/probe' && method === 'POST') return json({ capabilities: fixtures.providers[0].capabilities, fingerprint: 'browser-fingerprint' });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm/capabilities/refresh' && method === 'POST') return json({ capabilities: fixtures.providers[0].capabilities, fingerprint: 'browser-fingerprint' });
   if (pathname === '/api/v1/processing/presets' && method === 'GET') return json({ presets: fixtures.presets });
@@ -454,6 +454,7 @@ function startFixtureServer() {
           await runtime.taskDetailResponseGate;
         }
         if (url.pathname === '/api/v1/tasks/task-johnson/gcp-correspondences' && request.method === 'POST' && runtime.gcpSaveResponseGate) await runtime.gcpSaveResponseGate;
+        if (url.pathname === '/api/v1/processing/providers/provider-nodeodm/credential' && request.method === 'PUT' && runtime.providerCredentialGate) await runtime.providerCredentialGate;
         if (manualFixture && request.method !== 'GET') console.log(`Synthetic mutation: ${request.method} ${url.pathname}`);
         result = url.pathname === '/api/v1/processing/outputs/output-johnson/assets/ortho' && runtime.failOrthophotoResponse
           ? json({ error: 'synthetic_preview_unavailable' }, 503)
@@ -1121,8 +1122,11 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "!window.__providerBeforeChange.isConnected && document.querySelector('#workspace-modal')?.open === false && document.querySelector('[data-action=\"replace-provider-token\"]') !== null", `${viewport.name}: provider edit did not return to refreshed node detail`);
     await client.evaluate(`document.querySelector('[data-action="replace-provider-token"]').click()`);
     await waitFor(client, "document.querySelector('#provider-token-form') !== null", `${viewport.name}: provider token form did not open`);
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: previous provider update remained busy`);
+    const tokenRequestStart=runtime.requests.length;
     await client.evaluate(`window.__providerBeforeChange=document.querySelector('#provider-inline-detail')`);
     await client.evaluate(`(() => { const form=document.querySelector('#provider-token-form'); form.elements.token.value='browser-secret-token'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
+    await waitForRequest(runtime,tokenRequestStart,'PUT','/api/v1/processing/providers/provider-nodeodm/credential');
     await waitFor(client, "!window.__providerBeforeChange.isConnected && document.querySelector('#workspace-modal')?.open === false && document.querySelector('[data-action=\"new-preset\"]') !== null", `${viewport.name}: provider token update did not return to refreshed node detail`);
     await client.evaluate(`document.querySelector('[data-action="new-preset"]').click()`);
     await waitFor(client, "document.querySelector('#preset-form') !== null", `${viewport.name}: preset form did not open`);
@@ -1499,4 +1503,13 @@ test('archived customer and group assignments survive default choices and change
       } finally {await client.command('Page.close').catch(()=>{});client.close()}
     });
   } finally {if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);}release();if(server)await new Promise(resolve=>server.close(resolve));await removeBrowserProfile(profile,t)}
+});
+
+test('provider token failure and busy submission keep the form available for retry', {timeout:60000,skip:manualFixture}, async t=>{
+ const executable=browserPath();if(!executable){t.skip('Chrome or Edge required');return}const release=await acquireBrowserHarnessLock({root});let server,runtime,origin,profile,browser,unblock;
+ try{({server,runtime,origin}=await startFixtureServer());profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});const devTools=await waitForDevTools(profile),target=await(await fetch(`${devTools}/json/new?about:blank`,{method:'PUT'})).json(),client=await CdpClient.connect(target.webSocketDebuggerUrl);
+ try{await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});await client.command('Page.navigate',{url:`${origin}/workspace?section=providers`});await waitFor(client,`Boolean(document.querySelector('[data-action="select-provider"]'))`,'Provider list missing');await client.evaluate(`document.querySelector('[data-action="select-provider"]').click()`);await waitFor(client,`Boolean(document.querySelector('[data-action="replace-provider-token"]'))`,'Provider actions missing');await client.evaluate(`document.querySelector('[data-action="replace-provider-token"]').click()`);await waitFor(client,`Boolean(document.querySelector('#provider-token-form'))`,'Token form missing');
+ runtime.rejectProviderCredential=true;runtime.providerCredentialGate=new Promise(resolve=>{unblock=resolve});await client.evaluate(`(()=>{const f=document.querySelector('#provider-token-form');f.elements.token.value='synthetic-token';f.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))})()`);await waitForRequest(runtime,0,'PUT','/api/v1/processing/providers/provider-nodeodm/credential');assert.equal(await client.evaluate(`document.querySelector('#provider-token-form').elements.token.disabled`),true);await client.evaluate(`document.querySelector('#provider-token-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);assert.equal(await client.evaluate(`document.querySelector('#provider-token-form').elements.token.value`),'synthetic-token');assert.equal(await client.evaluate(`document.querySelector('#workspace-toast').textContent.includes('Wait for the current action')`),true);assert.equal(runtime.requests.filter(x=>x.method==='PUT'&&x.path.endsWith('/credential')).length,1);unblock();runtime.providerCredentialGate=null;await waitFor(client,`document.querySelector('#workspace-toast').textContent.includes('synthetic token failure')`,'Failure not shown');assert.equal(await client.evaluate(`document.querySelector('#provider-token-form').elements.token.value`),'synthetic-token');runtime.rejectProviderCredential=false;await client.evaluate(`document.querySelector('#provider-token-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);await waitFor(client,`document.querySelector('#workspace-modal').open===false`,'Successful retry did not close form');assert.equal(runtime.requests.filter(x=>x.method==='PUT'&&x.path.endsWith('/credential')).length,2);
+ }finally{await client.command('Page.close').catch(()=>{});client.close()}
+ }finally{unblock?.();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);}release();if(server)await new Promise(resolve=>server.close(resolve));await removeBrowserProfile(profile,t)}
 });
