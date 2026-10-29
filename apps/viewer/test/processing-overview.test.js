@@ -27,13 +27,13 @@ test('overview counts only current attempts and drops resolved failures after re
   const f = fixture(t), original = f.task();
   assert.equal(f.counts().failed, 1);
   const retry = f.processing.retryAttempt(original.attempt.id, 'ops:test');
-  assert.deepEqual(f.counts(), { queued: 1, running: 0, reviewReady: 0, failed: 0 });
+  assert.deepEqual(f.counts(), { queued: 1, running: 0, reviewReady: 0, failed: 0, observationWarnings: 0 });
   f.processing.transitionAttempt(retry.id, 'running');
   assert.equal(f.counts().running, 1);
   f.processing.transitionAttempt(retry.id, 'ready_for_review');
   assert.equal(f.counts().reviewReady, 1);
   f.processing.transitionAttempt(retry.id, 'published');
-  assert.deepEqual(f.counts(), { queued: 0, running: 0, reviewReady: 0, failed: 0 });
+  assert.deepEqual(f.counts(), { queued: 0, running: 0, reviewReady: 0, failed: 0, observationWarnings: 0 });
   assert.equal(f.processing.getAttempt(original.attempt.id).status, 'failed');
 });
 

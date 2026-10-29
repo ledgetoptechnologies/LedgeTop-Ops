@@ -2,6 +2,7 @@
 const test=require('node:test'),assert=require('node:assert/strict'),{DatabaseSync}=require('node:sqlite');
 const {applyMigrations}=require('../server/database'),{ProcessingRepository}=require('../server/processingRepository'),{ViewerRepository}=require('../server/repository');
 const {processOne}=require('../server/processingWorker'),{ProviderCredentials}=require('../server/providerCredentials');
+const {processingJobCounts}=require('../server/processingOverview');
 
 function fixture(t){
  const db=new DatabaseSync(':memory:');t.after(()=>db.close());db.exec('PRAGMA foreign_keys=ON');applyMigrations(db);
@@ -11,7 +12,7 @@ function fixture(t){
  db.prepare("UPDATE processing_jobs SET status='complete' WHERE attempt_id=?").run(attempt.id);
  db.prepare("UPDATE processing_attempts SET status='running' WHERE id=?").run(attempt.id);
  db.prepare("INSERT INTO processing_jobs(id,attempt_id,job_type,status,available_at,created_at,updated_at) VALUES('poll',?,'reconcile','pending','2000','2000','2000')").run(attempt.id);
- return{db,processing,repository,attempt};
+ return{db,processing,repository,attempt,task,project};
 }
 
 test('transient poll failures must not mark a still-running provider task failed',async t=>{
@@ -83,4 +84,32 @@ test('error-log outage leaves lease for expiry and later status recovery without
  f.processing.appendLog=append;f.db.prepare("UPDATE processing_jobs SET lease_expires_at='2000' WHERE id='poll'").run();
  await processOne({processing:new ProcessingRepository(f.db),config:{},adapterFactory:()=>({status:async()=>({uuid:attempt.providerTaskId,status:'completed',statusCode:40,progress:1}),output:async()=>({lines:[],nextLine:0})})},'replacement-worker');
  assert.equal(f.processing.getAttempt(f.attempt.id).status,'ingesting');assert.equal(f.db.prepare("SELECT count(*) n FROM processing_jobs WHERE attempt_id=? AND job_type='ingest' AND status='pending'").get(f.attempt.id).n,1);
+});
+
+
+test('provider observation warnings remain distinct from failures, survive interruptions, and clear on recovery',async t=>{
+ const f=fixture(t),counts=()=>processingJobCounts(f.db),outage={processing:f.processing,config:{},adapterFactory:()=>({status:async()=>{throw Object.assign(new Error('private detail'),{status:401});}})};
+ await processOne(outage,'warning-worker');
+ assert.equal(counts().observationWarnings,1);assert.equal(counts().failed,0);
+ f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id='poll'").run();
+ await processOne({processing:f.processing,config:{},adapterFactory:()=>({status:async()=>{throw Object.assign(new Error('aborted'),{name:'AbortError'});}})},'interrupted-warning-worker');
+ assert.equal(counts().observationWarnings,1);
+ assert.equal(f.db.prepare("SELECT error_code FROM processing_jobs WHERE id='poll'").get().error_code,'provider_status_auth_failed');
+ f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id='poll'").run();
+ await processOne({processing:f.processing,config:{},adapterFactory:()=>({status:async()=>({status:'running',progress:.5}),output:async()=>({lines:[],nextLine:0})})},'recovered-warning-worker');
+ assert.equal(counts().observationWarnings,0);assert.equal(counts().failed,0);assert.equal(counts().running,1);
+});
+
+test('observation warning counts only current active, nonrecycled work and allowlisted codes',async t=>{
+ const f=fixture(t),counts=()=>processingJobCounts(f.db);
+ for(const code of ['provider_observation_unavailable','provider_status_unknown','provider_status_not_found','provider_status_auth_failed','provider_adapter_unavailable','provider_observation_persistence_unavailable']){
+  f.db.prepare("UPDATE processing_jobs SET error_code=? WHERE id='poll'").run(code);assert.equal(counts().observationWarnings,1,code);
+ }
+ f.db.prepare("UPDATE processing_jobs SET error_code='unrelated_internal_error' WHERE id='poll'").run();assert.equal(counts().observationWarnings,0);
+ f.db.prepare("UPDATE processing_jobs SET error_code='provider_status_not_found' WHERE id='poll'").run();
+ f.db.prepare("UPDATE processing_tasks SET status='archived' WHERE id=?").run(f.task.id);assert.equal(counts().observationWarnings,0);
+ f.db.prepare("UPDATE processing_tasks SET status='processing' WHERE id=?").run(f.task.id);
+ f.db.prepare("UPDATE projects SET status='archived' WHERE id=?").run(f.project.id);assert.equal(counts().observationWarnings,0);
+ f.db.prepare("UPDATE projects SET status='active' WHERE id=?").run(f.project.id);assert.equal(counts().observationWarnings,1);
+ f.db.prepare("UPDATE processing_tasks SET active_attempt_id=NULL WHERE id=?").run(f.task.id);assert.equal(counts().observationWarnings,0);
 });
