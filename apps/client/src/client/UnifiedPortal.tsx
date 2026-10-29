@@ -98,7 +98,9 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   const onlyRequestAccount = allAccountsReady && requestAccounts.length === 1 ? requestAccounts[0]! : null;
   // An account that can't take requests online doesn't load its request history either, so an empty list
   // there means "not shown", never "no requests". The page says which, instead of dropping the button.
-  const historyHidden = ready.some(result => !result.canRequest);
+  const historyHidden = ready.some(result => !result.historyLoaded);
+  // "No requests yet" only when every account answered and every account's history was actually read.
+  const historyComplete = !loading && failed.length === 0 && !historyHidden;
   const requestAvailability: "available" | "checking" | "unchecked" | "unavailable" = requestAccounts.length > 0 ? "available"
     : loading ? "checking" : failed.length > 0 ? "unchecked" : "unavailable";
 
@@ -191,9 +193,11 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     {requestChooser}{problems}{loadingNote}
     {requests.length > 0 && <RequestProgress requests={requests} />}
     <Card title="Request history">{!loading && requests.length === 0
-      ? historyHidden ? <EmptyState title="Request history isn’t shown here yet" detail="Online requests aren’t turned on for your account yet, so past requests aren’t listed here." />
-        : <EmptyState title="No requests yet" detail="Requests you submit will appear here." />
-      : <>{requestRows(requests)}{!loading && historyHidden && <p className="unified-portal-request-note">Requests for some of your work aren’t listed here yet.</p>}</>}</Card>
+      ? historyComplete ? <EmptyState title="No requests yet" detail="Requests you submit will appear here." />
+        : failed.length > 0 ? <EmptyState title="Request history couldn’t be loaded" detail="Some of your work didn’t load, so requests may be missing. Try again above." />
+        : <EmptyState title="Request history isn’t shown here yet" detail="Online requests aren’t turned on for your account yet, so past requests aren’t listed here." />
+      : <>{requestRows(requests)}{!loading && !historyComplete && <p className="unified-portal-request-note">{failed.length > 0
+        ? "Some request history couldn’t be loaded, so this list may be incomplete." : "Requests for some of your work aren’t listed here yet."}</p>}</>}</Card>
   </>;
 
   const openRequests = requests.filter(item => !CLOSED_REQUEST.has(item.request.status));

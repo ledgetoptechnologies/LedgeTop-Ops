@@ -40,7 +40,8 @@ export interface UnifiedRequest {
 }
 
 export type UnifiedAccountResult =
-  | { status: "ready"; account: UnifiedAccount; projects: UnifiedProject[]; requests: UnifiedRequest[]; canRequest: boolean }
+  /** historyLoaded: this account's request history was actually read, so an empty list really is empty. */
+  | { status: "ready"; account: UnifiedAccount; projects: UnifiedProject[]; requests: UnifiedRequest[]; canRequest: boolean; historyLoaded: boolean }
   | { status: "error"; account: UnifiedAccount; message: string };
 
 const KNOWN_BUSINESS_SOURCES = new Set([PRIMARY_SOURCE, "project-alpha:secondary"]);
@@ -104,7 +105,7 @@ export async function loadUnifiedAccount(
         canRequest ? request<{ requests: PortalServiceRequest[] }>("/api/client/service-requests", { signal, workspaceId }) : { requests: [] },
       ]);
       const unifiedProjects = projectsFrom(account, projects);
-      return { status: "ready", account, projects: unifiedProjects, canRequest,
+      return { status: "ready", account, projects: unifiedProjects, canRequest, historyLoaded: canRequest,
         requests: requestsFrom(account, Array.isArray(requests.requests) ? requests.requests : [], new Map(projects.map(item => [item.id, item.projectName]))) };
     }
     const [session, projects, requests] = await Promise.all([
@@ -113,7 +114,7 @@ export async function loadUnifiedAccount(
       request<{ requests: PortalServiceRequest[] }>("/api/client/service-requests", { signal, workspaceId }),
     ]);
     const projectList = Array.isArray(projects.projects) ? projects.projects : [];
-    return { status: "ready", account, projects: projectsFrom(account, projectList),
+    return { status: "ready", account, projects: projectsFrom(account, projectList), historyLoaded: true,
       canRequest: session.capabilities?.requestV2 === true && projectList.some(project => project.canRequestService),
       requests: requestsFrom(account, Array.isArray(requests.requests) ? requests.requests : [], new Map(projectList.map(item => [item.id, item.projectName]))) };
   } catch (caught) {

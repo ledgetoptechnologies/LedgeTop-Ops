@@ -1375,6 +1375,35 @@ test("the unified requests page says it couldn't check when every account fails,
   await expect(page.getByRole("heading", {name: "New requests aren’t available online yet"})).toHaveCount(0);
   await expect(page.locator(".unified-portal-problems").getByRole("button", {name: "Try again"})).toBeVisible();
   await expect(page.getByRole("button", {name: "New request"})).toHaveCount(0);
+  // Nothing was read, so the history never claims to be empty.
+  await expect(page.getByText("No requests yet")).toHaveCount(0);
+  await expect(page.getByText("Request history couldn’t be loaded")).toBeVisible();
+});
+
+test("with one account ready and another failed, an empty history is not reported as no requests", async ({page}) => {
+  const calls = await mock(page, (route, call) => call.path === "/api/client/v2/workspaces/workspace-c/context"
+    ? route.fulfill({status: 503, json: {error: "Unavailable"}})
+    : call.path === "/api/client/v2/workspaces/workspace-b/context" ? route.fulfill({json: requestContext("workspace-b")}) : undefined);
+  await page.goto("/portal/requests");
+  // The ready account takes requests, so New request is offered even though the other failed.
+  await expect(page.getByRole("button", {name: "New request"})).toBeEnabled();
+  await expect(page.locator(".unified-portal-problems")).toBeVisible();
+  await expect(page.getByText("No requests yet")).toHaveCount(0);
+  await expect(page.getByText("Request history couldn’t be loaded")).toBeVisible();
+  // Try again stays usable and checks the accounts again.
+  const before = calls.filter(call => call.path.endsWith("/workspace-c/context")).length;
+  await page.locator(".unified-portal-problems").getByRole("button", {name: "Try again"}).click();
+  await expect.poll(() => calls.filter(call => call.path.endsWith("/workspace-c/context")).length).toBeGreaterThan(before);
+});
+
+test("no requests yet only when every account's history loaded and is empty", async ({page}) => {
+  // The native accounts take requests; the primary account can't start one but still reads its history.
+  await mock(page, (route, call) => /\/api\/client\/v2\/workspaces\/workspace-[bc]\/context$/.test(call.path)
+    ? route.fulfill({json: requestContext(call.path.includes("workspace-c") ? "workspace-c" : "workspace-b")}) : undefined);
+  await page.goto("/portal/requests");
+  await expect(page.getByRole("button", {name: "New request"})).toBeEnabled();
+  await expect(page.getByText("No requests yet")).toBeVisible();
+  await expect(page.locator(".unified-portal-request-unavailable")).toHaveCount(0);
 });
 
 test("while accounts are still loading the requests page shows a disabled Checking button, not a missing one", async ({page}) => {
