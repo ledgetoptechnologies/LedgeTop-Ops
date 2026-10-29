@@ -304,3 +304,30 @@ test('lease expiry between observation and terminal result cannot fail a task',a
  assert.equal(f.db.prepare("SELECT status FROM processing_jobs WHERE id='poll'").get().status,'leased');
  assert.equal(f.db.prepare("SELECT count(*) n FROM event_outbox WHERE event_type='processing.failed'").get().n,0);
 });
+
+test('late provider failure cannot mutate an advanced or superseded attempt',async t=>{
+ for(const mode of ['derivatives','ready_for_review','superseded'])for(const response of ['terminal','error']){
+  const f=fixture(t);let finish,enteredResolve;const entered=new Promise(resolve=>{enteredResolve=resolve});
+  const work=processOne({processing:f.processing,config:{},adapterFactory:()=>({status:async()=>{enteredResolve();return await new Promise((resolve,reject)=>{finish=response==='terminal'?()=>resolve({status:'failed'}):()=>reject(Error('late provider error'))})},output:async()=>({lines:['late observation'],nextLine:7})})},'old-worker');
+  await entered;
+  if(mode==='superseded')f.db.prepare('UPDATE processing_tasks SET active_attempt_id=NULL WHERE id=?').run(f.processing.getAttempt(f.attempt.id).taskId);
+  else f.db.prepare('UPDATE processing_attempts SET status=? WHERE id=?').run(mode,f.attempt.id);
+  finish();await work;
+  assert.equal(f.processing.getAttempt(f.attempt.id).status,mode==='superseded'?'running':mode);
+  assert.equal(f.processing.getAttempt(f.attempt.id).providerOutputCursor,0);
+  assert.equal(f.db.prepare('SELECT count(*) n FROM processing_logs WHERE attempt_id=?').get(f.attempt.id).n,0);
+  const job=f.db.prepare("SELECT status,error_code FROM processing_jobs WHERE id='poll'").get();assert.equal(job.status,'leased');assert.equal(job.error_code,null);
+  assert.equal(f.db.prepare("SELECT count(*) n FROM event_outbox WHERE event_type='processing.failed'").get().n,0);
+ }
+});
+
+test('terminal settlement checks attempt eligibility after observation has committed',async t=>{
+ for(const mode of ['derivatives','ready_for_review','superseded']){
+  const f=fixture(t),persist=f.processing.persistReconcileObservation.bind(f.processing);
+  f.processing.persistReconcileObservation=(...args)=>{const result=persist(...args);if(mode==='superseded')f.db.prepare('UPDATE processing_tasks SET active_attempt_id=NULL WHERE id=?').run(f.processing.getAttempt(f.attempt.id).taskId);else f.db.prepare('UPDATE processing_attempts SET status=? WHERE id=?').run(mode,f.attempt.id);return result;};
+  await processOne({processing:f.processing,config:{},adapterFactory:()=>({status:async()=>({status:'failed'}),output:async()=>({lines:[],nextLine:0})})},'worker');
+  assert.equal(f.processing.getAttempt(f.attempt.id).status,mode==='superseded'?'running':mode);
+  assert.equal(f.db.prepare("SELECT status FROM processing_jobs WHERE id='poll'").get().status,'leased');
+  assert.equal(f.db.prepare("SELECT count(*) n FROM event_outbox WHERE event_type='processing.failed'").get().n,0);
+ }
+});
