@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
+const {TEST_SCHEMA:REFERENCE_CATALOG_PROJECTION_SCHEMA,installFunction:installReferenceCatalogIdentity}=require('./referenceCatalogProjection');
 
 const MIGRATIONS = [
   {
@@ -2087,11 +2088,14 @@ const MIGRATIONS = [
     CREATE TRIGGER viewer_reference_attempt_no_insert_replace BEFORE INSERT ON viewer_reference_attempt_journal WHEN EXISTS(SELECT 1 FROM viewer_reference_attempt_journal WHERE attempt_id=NEW.attempt_id OR submission_id=NEW.submission_id OR (NEW.job_id IS NOT NULL AND job_id=NEW.job_id)) BEGIN SELECT RAISE(ABORT,'reference attempt replacement'); END;
     CREATE TRIGGER viewer_reference_attempt_no_update_replace BEFORE UPDATE OF job_id ON viewer_reference_attempt_journal WHEN NEW.job_id IS NOT NULL AND EXISTS(SELECT 1 FROM viewer_reference_attempt_journal WHERE job_id=NEW.job_id AND attempt_id<>OLD.attempt_id) BEGIN SELECT RAISE(ABORT,'reference job replacement'); END;
     CREATE TRIGGER viewer_reference_attempt_no_delete BEFORE DELETE ON viewer_reference_attempt_journal BEGIN SELECT RAISE(ABORT,'reference attempt retention'); END;
+    ${REFERENCE_CATALOG_PROJECTION_SCHEMA}
+    CREATE TRIGGER viewer_reference_attempt_admission_unavailable BEFORE INSERT ON viewer_reference_attempt_journal WHEN COALESCE((SELECT authority_ready FROM reference_catalog_projection_state WHERE id=1),0)<>1 BEGIN SELECT RAISE(ABORT,'reference admission unavailable'); END;
   `},
 
 ];
 
 function applyMigrations(database) {
+  installReferenceCatalogIdentity(database);
   const {assertProtectedMigrationIdentity}=require('./migrationIdentityGuard');
   database.exec('BEGIN IMMEDIATE');
   try {

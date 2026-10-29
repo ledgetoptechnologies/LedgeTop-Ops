@@ -10,7 +10,7 @@ const protectedMigrations=[
   // Reserved by independent owners; this branch cannot safely interpret them.
   {version:43,name:'viewer_cooperative_capacity_ledger',objects:['viewer_capacity_control','viewer_capacity_reservations','viewer_capacity_reservations_domain_idx','viewer_capacity_materialized_monotonic','viewer_capacity_no_replacement','viewer_capacity_identity_immutable','viewer_capacity_no_delete','viewer_capacity_state_transition']},
   {version:44,name:'viewer_source_custody_dormant',objects:['viewer_custody_intents','viewer_custody_pins','viewer_custody_intents_immutable','viewer_custody_intents_no_replace','viewer_custody_pins_no_late_insert','viewer_custody_intents_no_delete','viewer_custody_pins_immutable','viewer_custody_pins_no_delete']},
-  {version:45,name:'viewer_reference_attempt_journal',objects:['viewer_reference_attempt_journal','viewer_reference_attempt_identity_immutable','viewer_reference_attempt_no_insert_replace','viewer_reference_attempt_no_update_replace','viewer_reference_attempt_no_delete']},
+  {version:45,name:'viewer_reference_attempt_journal',objects:['viewer_reference_attempt_journal','viewer_reference_attempt_identity_immutable','viewer_reference_attempt_no_insert_replace','viewer_reference_attempt_no_update_replace','viewer_reference_attempt_no_delete','viewer_reference_attempt_admission_unavailable','reference_catalog_projection','reference_catalog_payload_attempt_idx','reference_catalog_column_attempt_idx','reference_catalog_unresolved_idx','reference_catalog_projection_state','reference_catalog_projection_insert','reference_catalog_projection_update','reference_catalog_projection_delete']},
 
 ];
 // Strict comparison intentionally rejects harmless formatting differences as
@@ -34,6 +34,7 @@ function assertProtectedMigrationIdentity(database,migrations) {
     if(!expectedMigration)throw incompatible(`version ${spec.version} is not supported by this build`);
     const expected=new DatabaseSync(':memory:');
     try {
+      if(spec.version===45)expected.exec('CREATE TABLE dataset_operations(id TEXT PRIMARY KEY,operation_type TEXT,payload_json TEXT,processing_attempt_id TEXT)');
       expected.exec(expectedMigration.sql);
       for(let i=0;i<spec.objects.length;i++) {
         const object=spec.objects[i],matches=found[i],actual=matches[0],reference=expected.prepare('SELECT type,tbl_name,sql FROM sqlite_master WHERE name=?').get(object);

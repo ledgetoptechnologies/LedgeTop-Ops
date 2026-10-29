@@ -2,6 +2,13 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto');
 const {DatabaseSync}=require('node:sqlite');
 const {MIGRATIONS,applyMigrations,openDatabase}=require('../server/database');
+const {ReferenceCatalogProjection}=require('../server/referenceCatalogProjection');
+
+test('application database startup registers the catalog parser and leaves readiness disabled',t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'reference-startup-')),file=path.join(dir,'viewer.sqlite');t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));let db=openDatabase(file);
+ db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES(?,'catalog_map','test',?,'queued','t','t','t')").run('one','{"ids":{"attemptId":"a"}}');assert.equal(db.prepare("SELECT payload_attempt_id FROM reference_catalog_projection WHERE operation_id='one'").get().payload_attempt_id,'a');db.close();
+ db=openDatabase(file);try{const p=new ReferenceCatalogProjection(db);p.begin();p.backfill();assert.equal(p.state().authority_ready,0);db.prepare("UPDATE dataset_operations SET payload_json=? WHERE id='one'").run('{"ids":{"attemptId":"b"}}');assert.equal(db.prepare("SELECT payload_attempt_id FROM reference_catalog_projection WHERE operation_id='one'").get().payload_attempt_id,'b');}finally{db.close();}
+});
 
 test('populated version 15, 41 and 42 databases upgrade without losing their task and attempt',t=>{
  for(const version of [15,41,42]){
@@ -18,6 +25,8 @@ test('populated version 15, 41 and 42 databases upgrade without losing their tas
 test('fresh migrations install the dormant 45 journal and protect its identity',t=>{
  const db=new DatabaseSync(':memory:');t.after(()=>db.close());applyMigrations(db);
  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=45').get().name,'viewer_reference_attempt_journal');
+ assert.equal(db.prepare('SELECT authority_ready FROM reference_catalog_projection_state WHERE id=1').get().authority_ready,0);
+ assert.throws(()=>db.exec("INSERT INTO viewer_reference_attempt_journal(attempt_id,submission_id,environment,request_json,request_sha256,input_manifest_sha256) VALUES('a','s','staging','{}','h','m')"),/reference admission unavailable/);
  applyMigrations(db);
  db.exec('DROP TRIGGER viewer_reference_attempt_no_delete');
  assert.throws(()=>applyMigrations(db),{code:'migration_identity_conflict'});
@@ -45,7 +54,7 @@ test('foreign reserved ledgers and case-variant objects fail before WAL or disk 
 
 test('replacement attempts cannot erase another journal row even without recursive triggers',t=>{
  const db=new DatabaseSync(':memory:');t.after(()=>db.close());db.exec('PRAGMA recursive_triggers=OFF');
- db.exec("CREATE TABLE processing_attempts(id TEXT PRIMARY KEY); INSERT INTO processing_attempts VALUES('a'),('b'),('c')");db.exec(MIGRATIONS.find(m=>m.version===45).sql);
+ db.exec("CREATE TABLE processing_attempts(id TEXT PRIMARY KEY); INSERT INTO processing_attempts VALUES('a'),('b'),('c'); CREATE TABLE dataset_operations(id TEXT PRIMARY KEY,operation_type TEXT,payload_json TEXT,processing_attempt_id TEXT)");db.exec(MIGRATIONS.find(m=>m.version===45).sql);db.exec('DROP TRIGGER viewer_reference_attempt_admission_unavailable');
  const insert=db.prepare('INSERT INTO viewer_reference_attempt_journal(attempt_id,submission_id,environment,request_json,request_sha256,input_manifest_sha256,job_id,job_json,job_sha256) VALUES(?,?,?,?,?,?,?,?,?)');
  insert.run('a','s1','staging','{}','h','m','j1','{}','j');insert.run('b','s2','staging','{}','h','m',null,null,null);
  assert.throws(()=>db.exec("INSERT OR REPLACE INTO viewer_reference_attempt_journal(attempt_id,submission_id,environment,request_json,request_sha256,input_manifest_sha256,job_id,job_json,job_sha256) VALUES('c','s3','staging','{}','h','m','j1','{}','j')"));
@@ -54,7 +63,7 @@ test('replacement attempts cannot erase another journal row even without recursi
 });
 
 test('a journaled attempt cannot be deleted and a surrounding cleanup rolls back',t=>{
- const db=new DatabaseSync(':memory:');t.after(()=>db.close());db.exec('PRAGMA foreign_keys=ON; CREATE TABLE processing_attempts(id TEXT PRIMARY KEY); CREATE TABLE provisional_outputs(attempt_id TEXT); INSERT INTO processing_attempts VALUES(\'a\'); INSERT INTO provisional_outputs VALUES(\'a\')');db.exec(MIGRATIONS.find(m=>m.version===45).sql);
+ const db=new DatabaseSync(':memory:');t.after(()=>db.close());db.exec('PRAGMA foreign_keys=ON; CREATE TABLE processing_attempts(id TEXT PRIMARY KEY); CREATE TABLE provisional_outputs(attempt_id TEXT); CREATE TABLE dataset_operations(id TEXT PRIMARY KEY,operation_type TEXT,payload_json TEXT,processing_attempt_id TEXT); INSERT INTO processing_attempts VALUES(\'a\'); INSERT INTO provisional_outputs VALUES(\'a\')');db.exec(MIGRATIONS.find(m=>m.version===45).sql);db.exec('DROP TRIGGER viewer_reference_attempt_admission_unavailable');
  db.exec("INSERT INTO viewer_reference_attempt_journal(attempt_id,submission_id,environment,request_json,request_sha256,input_manifest_sha256) VALUES('a','s','staging','{}','h','m'); BEGIN IMMEDIATE; DELETE FROM provisional_outputs WHERE attempt_id='a'");
  assert.throws(()=>db.exec("DELETE FROM processing_attempts WHERE id='a'"));db.exec('ROLLBACK');
  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM processing_attempts').get().n,1);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM provisional_outputs').get().n,1);
