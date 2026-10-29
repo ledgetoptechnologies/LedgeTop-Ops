@@ -4,6 +4,9 @@ using System.Text.Json;
 using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
+if (args.Length >= 1 && args[0] == "--identity-refresh-transaction-tests")
+    return args.Length == 1 ? await LedgeTop.Files.Explorer.Tests.IdentityRefresh.IdentityRefreshTransactionTests.RunAsync() : 2;
+
 if (args.Length >= 1 && args[0] == "--company-hydration-source-gate-tests")
     return args.Length == 1 ? await CompanyHydrationSourceGateTests.RunAsync() : 2;
 if (args.Length == 1 && args[0] == "--branding-policy-tests") return await ExplorerBrandIconTests.RunAsync();

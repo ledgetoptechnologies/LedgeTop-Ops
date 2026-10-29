@@ -6,6 +6,12 @@ using System.Security.Cryptography;
 using LedgeTop.WindowsDownload;
 
 if (args.Length > 1 && args[0] == "--hydration-concurrency-only") { Environment.ExitCode = 2; return; }
+if (args.FirstOrDefault() == "--reference-preview-capture-fixture") {
+    if (args.Length != 4) { Environment.ExitCode = 2; return; }
+    try { await EmployeeReferenceTransitionPreviewTests.CaptureFixtureAsync(args[1], args[2], args[3]); }
+    catch { Console.Error.WriteLine("Synthetic reference preview capture failed."); Environment.ExitCode = 1; }
+    return;
+}
 if (args.Length > 0 && args[0] == "--synthetic-access-child-v1") {
     Environment.ExitCode = await AccessSessionTests.RunChildAsync(args);
     return;
@@ -41,7 +47,9 @@ var tests = new (string Name, Func<Task> Run)[] {
     .Concat(PlaceholderHydrationTests.Groups).Concat(CloudFilesProbeTests.Groups)
     .Concat(CloudFilesNativeTransferTests.Groups).Concat(CloudFilesCallbackTests.Groups).Concat(DownloaderInactivityTests.Groups)
     .Concat(CloudFilesConnectionTests.Groups).Concat(ExplorerDemoSourceTests.Groups).Concat(WindowsAppReleaseClientTests.Groups)
-    .Concat(PlaceholderCacheEvictionTests.Groups).Concat(HydrationTimingTests.Groups).Concat(HydrationConcurrencyTests.Groups).ToArray();
+    .Concat(PlaceholderCacheEvictionTests.Groups).Concat(HydrationTimingTests.Groups).Concat(HydrationConcurrencyTests.Groups)
+    .Concat(EmployeeReferenceTransitionPreviewTests.Groups).ToArray();
+if (args.Length == 1 && args[0] == "--reference-transition-preview-only") tests = EmployeeReferenceTransitionPreviewTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--hydration-concurrency-only") tests = HydrationConcurrencyTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--company-hydration-authority-only")
     tests = QueuedDownloadSourceTests.Groups.Where(test => test.Name.StartsWith("Company hydration", StringComparison.Ordinal)).ToArray();
