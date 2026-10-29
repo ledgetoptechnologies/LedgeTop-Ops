@@ -1,19 +1,14 @@
 name: iOS pilot simulator
 
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - apps/ios-pilot/**
-      - .github/workflows/ios-pilot.yml
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   simulator:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: macos-15
     timeout-minutes: 25
     defaults:
