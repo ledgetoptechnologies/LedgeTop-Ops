@@ -50,12 +50,29 @@ jobs:
           xcrun simctl launch "$DEVICE_ID" com.ledgetoptechnologies.ops.pilot
           sleep 5
           xcrun simctl io "$DEVICE_ID" screenshot pilot-simulator.png
+          echo "IOS_SIMULATOR_ID=$DEVICE_ID" >> "$GITHUB_ENV"
       - name: Retain simulator screenshot
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: lt-ops-ios-screenshot-${{ github.sha }}
           path: apps/ios-pilot/pilot-simulator.png
           if-no-files-found: error
+          retention-days: 7
+      - name: Exercise pilot user flows
+        run: |
+          set -o pipefail
+          xcodebuild -project LTOpsPilot.xcodeproj -scheme LTOpsPilot \
+            -configuration Debug -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
+            -derivedDataPath DerivedData -resultBundlePath PilotUITests.xcresult \
+            -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO test \
+            | tee ui-test.log
+      - name: Retain UI test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lt-ops-ios-ui-tests-${{ github.sha }}
+          path: apps/ios-pilot/PilotUITests.xcresult
+          if-no-files-found: warn
           retention-days: 7
       - name: Retain simulator app
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -64,11 +81,32 @@ jobs:
           path: apps/ios-pilot/LTOpsPilot-simulator.zip
           if-no-files-found: error
           retention-days: 7
+      - name: Build unsigned iPhone device app
+        run: |
+          set -o pipefail
+          xcodebuild -project LTOpsPilot.xcodeproj -scheme LTOpsPilot \
+            -configuration Debug -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath DerivedData-device CODE_SIGNING_ALLOWED=NO build \
+            | tee device-build.log
+          ditto -c -k --sequesterRsrc --keepParent \
+            DerivedData-device/Build/Products/Debug-iphoneos/LTOpsPilot.app \
+            LTOpsPilot-unsigned-device.zip
+      - name: Retain unsigned device app
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lt-ops-ios-unsigned-device-${{ github.sha }}
+          path: apps/ios-pilot/LTOpsPilot-unsigned-device.zip
+          if-no-files-found: error
+          retention-days: 7
       - name: Retain compiler log
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: lt-ops-ios-build-log-${{ github.sha }}
-          path: apps/ios-pilot/simulator-build.log
+          path: |
+            apps/ios-pilot/simulator-build.log
+            apps/ios-pilot/device-build.log
+            apps/ios-pilot/ui-test.log
           if-no-files-found: warn
           retention-days: 7

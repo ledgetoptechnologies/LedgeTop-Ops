@@ -91,7 +91,7 @@ struct JobsView: View {
                 Picker("Status", selection: $status) {
                     Text("All operations").tag(Optional<JobStatus>.none)
                     ForEach(JobStatus.allCases, id: \.self) { Text($0.rawValue).tag(Optional($0)) }
-                }
+                }.accessibilityIdentifier("operation-status-filter")
             }
             let jobs = model.workspace.matching(query, status: status)
             if jobs.isEmpty {
