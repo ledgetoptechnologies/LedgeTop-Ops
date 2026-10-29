@@ -99,7 +99,7 @@ export interface ViewerPlatformOverview {
   generatedAt: string;
   projects: { active: number; total: number };
   models: { published: number; total: number; bytes: number };
-  jobs: { queued: number; running: number; reviewReady: number; failed: number };
+  jobs: { queued: number; running: number; reviewReady: number; failed: number; observationWarnings?: number };
   providers: { enabled: number; healthy: number; total: number };
   storage: { usedBytes: number; availableBytes: number | null };
   platform: { ready: boolean; workerLive: boolean; lifecycleBlocked: boolean };
@@ -885,6 +885,7 @@ export class ViewerServiceClient {
     const projects = record(payload?.projects), models = record(payload?.models),
       jobs = record(payload?.jobs), providers = record(payload?.providers),
       storage = record(payload?.storage), platform = record(payload?.platform);
+    const hasObservationWarnings = jobs !== null && Object.prototype.hasOwnProperty.call(jobs, "observationWarnings");
     const counts = [
       projects?.active, projects?.total, models?.published, models?.total, models?.bytes,
       jobs?.queued, jobs?.running, jobs?.reviewReady, jobs?.failed,
@@ -894,6 +895,8 @@ export class ViewerServiceClient {
       !Number.isFinite(Date.parse(payload.generatedAt)) || !projects || !models || !jobs ||
       !providers || !storage || !platform ||
       counts.some(value => !Number.isSafeInteger(value) || (value as number) < 0) ||
+      (hasObservationWarnings &&
+        (!Number.isSafeInteger(jobs.observationWarnings) || (jobs.observationWarnings as number) < 0)) ||
       (storage.availableBytes !== null && (!Number.isSafeInteger(storage.availableBytes) || (storage.availableBytes as number) < 0)) ||
       typeof platform.ready !== "boolean" || typeof platform.workerLive !== "boolean" ||
       typeof platform.lifecycleBlocked !== "boolean" ||
@@ -916,6 +919,7 @@ export class ViewerServiceClient {
         running: jobs.running as number,
         reviewReady: jobs.reviewReady as number,
         failed: jobs.failed as number,
+        ...(hasObservationWarnings ? { observationWarnings: jobs.observationWarnings as number } : {}),
       },
       providers: {
         enabled: providers.enabled as number,
