@@ -9,17 +9,22 @@ const crypto = require('node:crypto');
 const fail = code => { const error = new Error(code); error.code = code; throw error; };
 const hash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 
-async function retainReferenceResult({source,authority,expectedSha256,expectedBytes,maxBytes,signal} = {}) {
+function checkAuthority(authority) {
   if (process.platform !== 'linux') fail('REFERENCE_SPOOL_UNAVAILABLE');
-  if (!source || typeof source[Symbol.asyncIterator] !== 'function' || !authority || !Number.isSafeInteger(authority.rootFd) || authority.rootFd < 0 || typeof authority.assertCurrent !== 'function' || typeof authority.device !== 'bigint' || typeof authority.inode !== 'bigint' || !hash(expectedSha256) || !Number.isSafeInteger(expectedBytes) || expectedBytes < 1 || !Number.isSafeInteger(maxBytes) || maxBytes < expectedBytes) fail('REFERENCE_SPOOL_INVALID');
+  if (!authority || !Number.isSafeInteger(authority.rootFd) || authority.rootFd < 0 || typeof authority.assertCurrent !== 'function' || typeof authority.device !== 'bigint' || typeof authority.inode !== 'bigint') fail('REFERENCE_SPOOL_INVALID');
+  if (authority.assertCurrent() !== true) fail('REFERENCE_SPOOL_AUTHORITY_LOST');
+  const info = fs.fstatSync(authority.rootFd,{bigint:true});
+  if (!info.isDirectory() || info.dev !== authority.device || info.ino !== authority.inode) fail('REFERENCE_SPOOL_AUTHORITY_LOST');
+}
+
+async function retainReferenceResult({source,authority,storageKey,expectedSha256,expectedBytes,maxBytes,signal} = {}) {
+  if (process.platform !== 'linux') fail('REFERENCE_SPOOL_UNAVAILABLE');
+  if (!source || typeof source[Symbol.asyncIterator] !== 'function' || !hash(storageKey) || !hash(expectedSha256) || !Number.isSafeInteger(expectedBytes) || expectedBytes < 1 || !Number.isSafeInteger(maxBytes) || maxBytes < expectedBytes) fail('REFERENCE_SPOOL_INVALID');
+  checkAuthority(authority);
   const rootFd = authority.rootFd, root = `/proc/self/fd/${rootFd}`;
-  function checkRoot() {
-    if (authority.assertCurrent() !== true) fail('REFERENCE_SPOOL_AUTHORITY_LOST');
-    const info = fs.fstatSync(rootFd,{bigint:true});
-    if (!info.isDirectory() || info.dev !== authority.device || info.ino !== authority.inode) fail('REFERENCE_SPOOL_AUTHORITY_LOST');
-  }
+  function checkRoot() { checkAuthority(authority); }
   checkRoot();
-  const tempName = `.reference-result-${crypto.randomUUID()}.tmp`, finalName = `${expectedSha256}.zip`;
+  const tempName = `.reference-result-${crypto.randomUUID()}.tmp`, finalName = `${storageKey}.zip`;
   const temp = `${root}/${tempName}`, final = `${root}/${finalName}`;
   let fd, created = false, linked = false;
   try {
@@ -51,4 +56,23 @@ async function retainReferenceResult({source,authority,expectedSha256,expectedBy
     if (fd !== undefined) fs.closeSync(fd);
   }
 }
-module.exports = {retainReferenceResult};
+
+function verifyRetainedReferenceResult({authority,storageKey,expectedSha256,expectedBytes,maxBytes} = {}) {
+  checkAuthority(authority);
+  if (!hash(storageKey) || !hash(expectedSha256) || !Number.isSafeInteger(expectedBytes) || expectedBytes < 1 || !Number.isSafeInteger(maxBytes) || maxBytes < expectedBytes) fail('REFERENCE_SPOOL_INVALID');
+  const rootFd=authority.rootFd, relativePath=`${storageKey}.zip`, target=`/proc/self/fd/${rootFd}/${relativePath}`;
+  let fd;
+  try {
+    fd=fs.openSync(target,fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC);
+    const before=fs.fstatSync(fd,{bigint:true});
+    if(!before.isFile() || before.nlink!==1n || before.size!==BigInt(expectedBytes)) fail('REFERENCE_SPOOL_CHANGED');
+    const digest=crypto.createHash('sha256'),buf=Buffer.alloc(1024*1024);let bytes=0,n;
+    while((n=fs.readSync(fd,buf,0,buf.length,null))>0){bytes+=n;if(bytes>expectedBytes || bytes>maxBytes)fail('REFERENCE_SPOOL_SIZE');digest.update(buf.subarray(0,n));}
+    if(bytes!==expectedBytes || digest.digest('hex')!==expectedSha256)fail('REFERENCE_SPOOL_DIGEST');
+    fs.fsyncSync(fd);fs.fsyncSync(rootFd);checkAuthority(authority);
+    const after=fs.fstatSync(fd,{bigint:true}),named=fs.lstatSync(target,{bigint:true});
+    if(!named.isFile() || named.isSymbolicLink() || after.nlink!==1n || before.dev!==after.dev || before.ino!==after.ino || before.size!==after.size || before.mtimeNs!==after.mtimeNs || before.ctimeNs!==after.ctimeNs || named.dev!==after.dev || named.ino!==after.ino || named.size!==after.size || named.mtimeNs!==after.mtimeNs || named.ctimeNs!==after.ctimeNs)fail('REFERENCE_SPOOL_CHANGED');
+    return Object.freeze({relativePath,byteSize:bytes,sha256:expectedSha256});
+  } finally { if(fd!==undefined)fs.closeSync(fd); }
+}
+module.exports = {retainReferenceResult,verifyRetainedReferenceResult,checkAuthority};

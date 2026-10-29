@@ -11,13 +11,19 @@ result object to be retained and verified. This draft explores copying a fully
 verified stream into an externally authorized Linux directory descriptor,
 syncing the file and directory, and refusing to overwrite an existing name.
 
-Before use, the application needs a durable journal binding the exact job,
-generation, environment, input and result manifests, object, local path and
-ownership state. It must reconcile a process failure before or after link,
-unlink, directory sync and receipt commit; a pre-existing result currently
-returns `EEXIST`, never authorizing acknowledgement. A linked final file may
-remain after an error. A temporary hard link may also remain after interruption;
-neither is safe to remove or reuse without independently verified ownership.
+The draft `referenceResultJournal.js` binds the job, generation, environment,
+input and result manifests, object, local path and root identity before it
+attempts a file write. A pre-existing object is rehashed and synced before the
+journal can record readiness. This does not issue an acceptance or prove the
+caller supplied authentic job/engine bindings and root authority.
+
+Before use the application must reconcile failures before or after link,
+unlink, directory sync and receipt commit. In particular a crash during fresh
+journal schema initialization can leave an empty or partial database: opening
+it intentionally fails closed and requires an ownership-verified recovery
+procedure. A linked final file may remain after an error. A temporary hard link
+may also remain after interruption; neither is safe to remove or reuse without
+independently verified ownership.
 
 The caller must supply verified root identity and exclusive writer fencing;
 the current function only checks a caller-supplied assertion and descriptor
