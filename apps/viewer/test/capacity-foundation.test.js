@@ -64,7 +64,7 @@ test('ledger records reject inconsistent or decreasing materialized amounts',t=>
     assert.throws(()=>db.exec(`UPDATE OR REPLACE viewer_capacity_reservations SET ${change} WHERE id='r'`),/identity is immutable/);
     assert.equal(db.prepare('SELECT COUNT(*) n FROM viewer_capacity_reservations').get().n,2);
   }
-  for(const field of ['owner_generation','peak_bytes','materialized_bytes','remaining_bytes','peak_inodes','materialized_inodes','remaining_inodes']) assert.throws(()=>db.prepare(`UPDATE viewer_capacity_reservations SET ${field}=10.5 WHERE id='r'`).run(),/CHECK constraint/,field);
+  for(const field of ['owner_generation','peak_bytes','materialized_bytes','remaining_bytes','peak_inodes','materialized_inodes','remaining_inodes']) assert.throws(()=>db.prepare(`UPDATE viewer_capacity_reservations SET ${field}=10.5 WHERE id='r'`).run(),/CHECK constraint|identity is immutable/,field);
 });
 
 

@@ -5,6 +5,7 @@
 // domain sampling, actual writer fencing and quiescence are implemented.
 const {evaluateCapacityBudget}=require('./capacityBudget');
 const {isCapacityObserver}=require('./capacityObservation');
+const {isQuiescenceVerifier}=require('./capacityQuiescence');
 function failure(code){return Object.assign(new Error(code),{code});}
 function text(value,max){if(typeof value!=='string'||!value.length||value.length>max)throw failure('capacity_request_invalid');return value;}
 function amount(value){if(!Number.isSafeInteger(value)||value<0)throw failure('capacity_request_invalid');return value;}
@@ -72,4 +73,24 @@ function quiesce(db,{id,ownerId,fenceToken,generation}){
     return {id,state:'quiescing',idempotent:false};
   });
 }
-module.exports={reserve,quiesce};
+// Records a conservative retained state only. It does not release any space,
+// prove future writes are fenced, or authorize subsequent writer activity.
+function reconcileRetained(db,binding,verifier){
+  binding=Object.freeze({id:text(binding.id,128),ownerId:text(binding.ownerId,128),fenceToken:text(binding.fenceToken,128),generation:amount(binding.generation)});
+  enabled(db);
+  if(!isQuiescenceVerifier(verifier))throw failure('capacity_quiescence_unavailable');
+  const snapshot=db.prepare('SELECT * FROM viewer_capacity_reservations WHERE id=?').get(binding.id);
+  if(!snapshot||snapshot.owner_id!==binding.ownerId||snapshot.fence_token!==binding.fenceToken||snapshot.owner_generation!==binding.generation)throw failure('capacity_owner_mismatch');
+  if(snapshot.state==='retained')return {id:binding.id,state:'retained',remainingBytes:snapshot.remaining_bytes,remainingInodes:snapshot.remaining_inodes,idempotent:true};
+  if(snapshot.state!=='quiescing')throw failure('capacity_state_invalid');
+  const receipt=verifier.check(binding);
+  return transaction(db,()=>{
+    enabled(db);verifier.validate(receipt,binding);
+    const row=db.prepare('SELECT * FROM viewer_capacity_reservations WHERE id=?').get(binding.id);
+    if(!row||row.owner_id!==binding.ownerId||row.fence_token!==binding.fenceToken||row.owner_generation!==binding.generation)throw failure('capacity_owner_mismatch');
+    if(row.state!=='quiescing')throw failure('capacity_state_invalid');
+    db.prepare("UPDATE viewer_capacity_reservations SET state='retained',updated_at=? WHERE id=?").run(new Date().toISOString(),binding.id);
+    return {id:binding.id,state:'retained',remainingBytes:row.remaining_bytes,remainingInodes:row.remaining_inodes,idempotent:false};
+  });
+}
+module.exports={reserve,quiesce,reconcileRetained};

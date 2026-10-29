@@ -2096,12 +2096,19 @@ const MIGRATIONS = [
       UNIQUE(domain_id,writer_kind,writer_id)
     );
     CREATE INDEX viewer_capacity_reservations_domain_idx ON viewer_capacity_reservations(domain_id,state);
+    CREATE TRIGGER viewer_capacity_state_transition
+      BEFORE UPDATE OF state ON viewer_capacity_reservations
+      WHEN NEW.state <> OLD.state AND NOT (
+        (OLD.state IN ('held','writing') AND NEW.state='quiescing') OR
+        (OLD.state='quiescing' AND NEW.state='retained')
+      )
+      BEGIN SELECT RAISE(ABORT,'capacity state transition forbidden'); END;
     CREATE TRIGGER viewer_capacity_no_delete
       BEFORE DELETE ON viewer_capacity_reservations
       BEGIN SELECT RAISE(ABORT,'capacity reservation deletion is forbidden'); END;
     CREATE TRIGGER viewer_capacity_identity_immutable
-      BEFORE UPDATE OF id,domain_id,writer_kind,writer_id ON viewer_capacity_reservations
-      WHEN NEW.id IS NOT OLD.id OR NEW.domain_id IS NOT OLD.domain_id OR NEW.writer_kind IS NOT OLD.writer_kind OR NEW.writer_id IS NOT OLD.writer_id
+      BEFORE UPDATE OF id,domain_id,writer_kind,writer_id,owner_id,fence_token,owner_generation ON viewer_capacity_reservations
+      WHEN NEW.id IS NOT OLD.id OR NEW.domain_id IS NOT OLD.domain_id OR NEW.writer_kind IS NOT OLD.writer_kind OR NEW.writer_id IS NOT OLD.writer_id OR NEW.owner_id IS NOT OLD.owner_id OR NEW.fence_token IS NOT OLD.fence_token OR NEW.owner_generation IS NOT OLD.owner_generation
       BEGIN SELECT RAISE(ABORT,'capacity reservation identity is immutable'); END;
     CREATE TRIGGER viewer_capacity_no_replacement
       BEFORE INSERT ON viewer_capacity_reservations

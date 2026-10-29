@@ -23,12 +23,11 @@ test('independent processes serialize competing reservations',async t=>{const di
 
 test('large retained ledgers fail closed at the accounting ceiling',t=>{
  const db=database(t);enableForTest(db);
- const add=db.prepare(`INSERT INTO viewer_capacity_reservations(id,domain_id,domain_revision,writer_kind,writer_id,writer_namespace,owner_id,fence_token,owner_generation,peak_bytes,materialized_bytes,remaining_bytes,peak_inodes,materialized_inodes,remaining_inodes,state,created_at,updated_at) VALUES(?,'domain','v1','upload',?,'scope','owner','token',1,0,0,0,0,0,0,'retained','t','t')`);
- db.exec('BEGIN');for(let i=0;i<10000;i++)add.run('r'+i,'w'+i);db.exec('COMMIT');
+ const add=db.prepare(`INSERT INTO viewer_capacity_reservations(id,domain_id,domain_revision,writer_kind,writer_id,writer_namespace,owner_id,fence_token,owner_generation,peak_bytes,materialized_bytes,remaining_bytes,peak_inodes,materialized_inodes,remaining_inodes,state,created_at,updated_at) VALUES(?,'domain','v1','upload',?,'scope','owner','token',1,0,0,0,0,0,0,?,'t','t')`);
+ db.exec('BEGIN');for(let i=0;i<10000;i++)add.run('r'+i,'w'+i,i===0?'held':'retained');db.exec('COMMIT');
  assert.throws(()=>reserve(db,request('new',0)),{code:'capacity_ledger_too_large'});assert.equal(db.prepare('SELECT count(*) n FROM viewer_capacity_reservations').get().n,10000);
- db.exec("UPDATE viewer_capacity_reservations SET state='held' WHERE id='r0'");
  assert.equal(reserve(db,{...request('r0',0),writerId:'w0',writerNamespace:'scope',ownerId:'owner',fenceToken:'token',peakInodes:0}).idempotent,true);
- add.run('overflow','overflow-writer');assert.throws(()=>reserve(db,request('new',0)),{code:'capacity_ledger_too_large'});
+ add.run('overflow','overflow-writer','retained');assert.throws(()=>reserve(db,request('new',0)),{code:'capacity_ledger_too_large'});
 });
 test('held retries after capacity falls cannot succeed as a new permission',t=>{
  const db=database(t);enableForTest(db);reserve(db,request('one'));
