@@ -30,9 +30,16 @@ The code is incomplete and must remain disabled until all of these are solved:
   While any binding exists, current repository methods suppress all import-cleanup
   claims and filesystem callbacks and catalog cleanup and adoption recovery listing and clearing,
   including unrelated jobs; this global stall is not a production design.
-  Current adoption recovery rechecks immediately before its filesystem effect,
-  but this is only a best-effort check: binding can race after it, and no lock
-  covers the effect. Old and already-running writers remain unfenced.
+  The current catalog adoption-recovery path acquires a durable claim in the
+  same SQLite transaction domain as draft binding admission, without holding a
+  database lock over filesystem work. An interrupted effect remains in-flight
+  and blocks all bindings and retries; no timeout or automatic clearing proves
+  it stopped. Only a returned synchronous callback records completion, which
+  is not a durable filesystem receipt: adoption recovery renames/removes
+  without file and directory fsync, so power-loss durability and replay must be
+  separately qualified before using completion as evidence. This is one
+  participating effect, not an authority over other cleanup paths; old
+  and already-running writers remain unfenced, and physical aliases are unknown.
   A catalog cleanup fetched before binding can still run asynchronously; old
   workers and other paths including upload cleanup do not honor these guards.
 * `applyStorageMutation` checks a binding before effects, but this draft does

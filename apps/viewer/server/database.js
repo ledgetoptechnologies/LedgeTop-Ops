@@ -2257,6 +2257,19 @@ const MIGRATIONS = [
       state TEXT NOT NULL CHECK(state IN ('building','prepared')), created_at TEXT NOT NULL
     );
     CREATE INDEX viewer_source_bindings_dataset_idx ON viewer_source_bindings(dataset_id);
+    CREATE TABLE viewer_source_effect_claims (
+      id TEXT PRIMARY KEY NOT NULL, operation_id TEXT NOT NULL,
+      effect_type TEXT NOT NULL CHECK(effect_type='catalog_adoption_recovery'),
+      root_key TEXT NOT NULL, relative_path TEXT NOT NULL, dataset_relative TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('in_flight','completed')),
+      created_at TEXT NOT NULL, completed_at TEXT,
+      CHECK((state='in_flight' AND completed_at IS NULL) OR (state='completed' AND completed_at IS NOT NULL))
+    );
+    CREATE UNIQUE INDEX viewer_source_effect_one_inflight ON viewer_source_effect_claims(operation_id) WHERE state='in_flight';
+    CREATE TRIGGER viewer_source_effect_block_bound BEFORE INSERT ON viewer_source_effect_claims WHEN EXISTS(SELECT 1 FROM viewer_source_bindings) BEGIN SELECT RAISE(ABORT,'source binding retained'); END;
+    CREATE TRIGGER viewer_source_effect_no_replace BEFORE INSERT ON viewer_source_effect_claims WHEN EXISTS(SELECT 1 FROM viewer_source_effect_claims WHERE id=NEW.id OR rowid=NEW.rowid OR (operation_id=NEW.operation_id AND state='in_flight' AND NEW.state='in_flight')) BEGIN SELECT RAISE(ABORT,'source effect claim retained'); END;
+    CREATE TRIGGER viewer_source_effect_no_delete BEFORE DELETE ON viewer_source_effect_claims BEGIN SELECT RAISE(ABORT,'source effect claim retained'); END;
+    CREATE TRIGGER viewer_source_effect_immutable BEFORE UPDATE ON viewer_source_effect_claims WHEN NOT (OLD.state='in_flight' AND NEW.state='completed' AND NEW.id IS OLD.id AND NEW.rowid IS OLD.rowid AND NEW.operation_id IS OLD.operation_id AND NEW.effect_type IS OLD.effect_type AND NEW.root_key IS OLD.root_key AND NEW.relative_path IS OLD.relative_path AND NEW.dataset_relative IS OLD.dataset_relative AND NEW.created_at IS OLD.created_at AND OLD.completed_at IS NULL AND NEW.completed_at IS NOT NULL) BEGIN SELECT RAISE(ABORT,'source effect claim immutable'); END;
     CREATE TABLE viewer_source_binding_objects (
       binding_id TEXT NOT NULL REFERENCES viewer_source_bindings(id) ON DELETE RESTRICT,
       file_id TEXT NOT NULL REFERENCES dataset_files(id) ON DELETE RESTRICT,

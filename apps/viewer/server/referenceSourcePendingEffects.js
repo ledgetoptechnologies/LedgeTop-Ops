@@ -9,6 +9,8 @@ const validId=x=>typeof x==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(x
 
 function hasPendingSourceEffects(processing,source){
  const db=processing.database;
+ // Unknown physical aliases mean an unclosed durable effect blocks globally.
+ if(db.prepare("SELECT 1 FROM viewer_source_effect_claims WHERE state='in_flight' LIMIT 1").get())return true;
  // Configured roots can alias physically. Until a real scope attestor exists,
  // any unresolved retained-import cleanup conservatively blocks admission.
  if(db.prepare("SELECT 1 FROM import_cleanup_jobs WHERE status<>'complete' LIMIT 1").get())return true;

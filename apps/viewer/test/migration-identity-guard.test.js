@@ -7,6 +7,22 @@ const {assertProtectedMigrationIdentity}=require('../server/migrationIdentityGua
 function legacy(){const db=new DatabaseSync(':memory:');db.exec('PRAGMA foreign_keys=ON');for(const m of MIGRATIONS.filter(x=>x.version<=40)){db.exec(m.sql);m.after?.(db);db.prepare('INSERT INTO schema_migrations VALUES (?,?,?)').run(m.version,m.name,'2000-01-01T00:00:00Z');}return db;}
 const schema=db=>JSON.stringify(db.prepare("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all());
 
+test('effect-claim missing, tampered and unrecorded identities fail before WAL',()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'effect-guard-test-'));
+ try{
+  for(const kind of ['missing','tampered','unrecorded']){
+   const file=path.join(dir,`${kind}.sqlite`);let db=new DatabaseSync(file);db.exec('PRAGMA journal_mode=DELETE');
+   if(kind==='unrecorded')db.exec('CREATE TABLE viewer_source_effect_claims(id TEXT)');
+   else{db.exec('PRAGMA foreign_keys=ON');applyMigrations(db);db.exec('DROP TRIGGER viewer_source_effect_no_delete');if(kind==='tampered')db.exec("CREATE TRIGGER viewer_source_effect_no_delete BEFORE DELETE ON viewer_source_effect_claims BEGIN SELECT 1; END");}
+   db.close();const before=crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+   assert.throws(()=>openDatabase(file),{code:'migration_identity_conflict'},kind);
+   assert.equal(crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),before,kind);
+   db=new DatabaseSync(file,{readOnly:true});try{assert.equal(db.prepare('PRAGMA journal_mode').get().journal_mode,'delete');}finally{db.close();}
+   assert.equal(fs.existsSync(`${file}-wal`),false);
+  }
+ }finally{for(const kind of ['missing','tampered','unrecorded'])for(const suffix of ['','-journal','-wal','-shm']){try{fs.unlinkSync(path.join(dir,`${kind}.sqlite${suffix}`));}catch(e){if(e.code!=='ENOENT')throw e;}}fs.rmdirSync(dir);}
+});
+
 test('v40 upgrades to canonical 41 and detects a modified or unrecorded protected table',t=>{
  const db=legacy();t.after(()=>db.close());applyMigrations(db);assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=41').get().name,'gcp_odm_crs_confirmations');assertProtectedMigrationIdentity(db,MIGRATIONS);
  db.exec('DROP TABLE gcp_odm_crs_confirmations');const before=schema(db);assert.throws(()=>applyMigrations(db),{code:'migration_identity_conflict'});assert.equal(schema(db),before);

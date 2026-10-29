@@ -153,6 +153,37 @@ test('unbound adoption recovery invokes actual worker and clears its journal',t=
  assert.equal(reconcileCatalogAdoptionRecoveries(f.p,{reconcileAdoptionIntent(...value){args=value;}}),1);
  assert.deepEqual(args,['dataset_import','source','destination']);
  assert.equal(JSON.parse(f.db.prepare("SELECT payload_json FROM dataset_operations WHERE id='adoption'").get().payload_json).adoptionIntent,undefined);
+ assert.equal(f.db.prepare("SELECT state FROM viewer_source_effect_claims WHERE operation_id='adoption'").get().state,'completed');
+});
+
+test('interrupted adoption effect remains uncertain and blocks binding and retry',t=>{
+ const f=fixture(t);enableOnlyForSyntheticFixture(f.db);
+ const payload={ids:{attemptId:'a',datasetId:'d'},adoptionIntent:{rootKey:'dataset_import',relativePath:'source',datasetRelative:'synthetic'}};
+ f.db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES('adoption','catalog_map','synthetic',?,'failed','t','t','t')").run(JSON.stringify(payload));
+ assert.throws(()=>f.p.mutateCatalogAdoptionRecovery('adoption',()=>{throw Error('interrupted');}),/interrupted/);
+ const claim=f.db.prepare('SELECT * FROM viewer_source_effect_claims').get();assert.equal(claim.state,'in_flight');assert.equal(claim.root_key,'dataset_import');assert.equal(claim.dataset_relative,'synthetic');
+ assert.throws(()=>f.db.prepare("UPDATE viewer_source_effect_claims SET rowid=rowid+1,state='completed',completed_at='t' WHERE id=?").run(claim.id),/source effect claim immutable/);
+ assert.equal(f.p.mutateCatalogAdoptionRecovery('adoption',()=>{throw Error('must not retry');}),false);
+ f.db.prepare("UPDATE dataset_operations SET status='succeeded',payload_json=? WHERE id='adoption'").run(JSON.stringify({ids:{attemptId:'a',datasetId:'d'}}));
+ assert.throws(()=>admit(f),{code:'source_binding_unavailable'});
+ assert.throws(()=>f.db.prepare('DELETE FROM viewer_source_effect_claims WHERE id=?').run(claim.id),/source effect claim retained/);
+});
+
+test('false adoption callback leaves the effect uncertain',t=>{
+ const f=fixture(t),payload={ids:{attemptId:'a',datasetId:'d'},adoptionIntent:{rootKey:'dataset_import',relativePath:'source',datasetRelative:'synthetic'}};
+ f.db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES('adoption','catalog_map','synthetic',?,'failed','t','t','t')").run(JSON.stringify(payload));
+ assert.throws(()=>f.p.mutateCatalogAdoptionRecovery('adoption',()=>false),/did not complete/);
+ assert.equal(f.db.prepare('SELECT state FROM viewer_source_effect_claims').get().state,'in_flight');
+});
+
+test('in-flight adoption intent cannot be cleared and changed identity never settles',t=>{
+ const f=fixture(t),payload={ids:{attemptId:'a',datasetId:'d'},adoptionIntent:{rootKey:'dataset_import',relativePath:'source',datasetRelative:'synthetic'}};
+ f.db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES('adoption','catalog_map','synthetic',?,'failed','t','t','t')").run(JSON.stringify(payload));
+ assert.equal(f.p.mutateCatalogAdoptionRecovery('adoption',()=>{
+  assert.equal(f.p.clearCatalogAdoptionIntent('adoption'),false);
+  f.db.prepare("UPDATE dataset_operations SET payload_json=? WHERE id='adoption'").run(JSON.stringify({...payload,ids:{attemptId:'a',datasetId:'different'}}));
+ }),false);
+ assert.equal(f.db.prepare('SELECT state FROM viewer_source_effect_claims').get().state,'in_flight');
 });
 
 test('archive methods still work inside audited repository transaction without a binding',t=>{
@@ -184,6 +215,25 @@ test('unsupported provisional migration identity fails closed',()=>{
  const db=new DatabaseSync(':memory:');try{db.exec("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT,applied_at TEXT); INSERT INTO schema_migrations VALUES(48,'foreign','t')");assert.throws(()=>applyMigrations(db),{code:'migration_identity_conflict'});}finally{db.close();}
 });
 
+test('separate process death leaves a durable uncertain effect that blocks binding',()=>{
+ const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),{spawnSync}=require('node:child_process');
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-effect-test-')),file=path.join(dir,'test.sqlite');let db;
+ try{
+  db=new DatabaseSync(file);db.exec('PRAGMA foreign_keys=ON');applyMigrations(db);const p=new ProcessingRepository(db);
+  p.createProject({id:'p',displayName:'Synthetic'});p.createDataset({id:'d',projectId:'p',displayName:'Synthetic',storageMode:'managed',rootKey:'datasets',relativePath:'synthetic'});
+  p.finalizeDataset('d',[{id:'file1',relativePath:'one.jpg',byteSize:3,sha256:'a'.repeat(64)}],'c'.repeat(64));
+  db.exec("INSERT INTO processing_tasks(id,project_id,dataset_id,display_name,status,created_at,updated_at) VALUES('t','p','d','T','draft','t','t'); INSERT INTO processing_attempts(id,task_id,dataset_id,attempt_number,options_json,status,created_at,updated_at) VALUES('a','t','d',1,'{}','pending','t','t'); UPDATE processing_tasks SET active_attempt_id='a' WHERE id='t'; DROP TRIGGER viewer_source_binding_unavailable");
+  db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES('adoption','catalog_map','synthetic',?,'failed','t','t','t')").run(JSON.stringify({ids:{attemptId:'a',datasetId:'d'},adoptionIntent:{rootKey:'dataset_import',relativePath:'source',datasetRelative:'synthetic'}}));
+  const script=`const {DatabaseSync}=require('node:sqlite');const {ProcessingRepository}=require(${JSON.stringify(require.resolve('../server/processingRepository'))});const db=new DatabaseSync(${JSON.stringify(file)});db.exec('PRAGMA foreign_keys=ON');new ProcessingRepository(db).mutateCatalogAdoptionRecovery('adoption',()=>process.exit(23));process.exit(24);`;
+  const child=spawnSync(process.execPath,['-e',script],{encoding:'utf8',timeout:10000});assert.equal(child.error,undefined);assert.equal(child.status,23,child.stderr);
+  assert.equal(db.prepare("SELECT state FROM viewer_source_effect_claims WHERE operation_id='adoption'").get().state,'in_flight');
+  db.prepare("UPDATE dataset_operations SET status='succeeded',payload_json=? WHERE id='adoption'").run(JSON.stringify({ids:{attemptId:'a',datasetId:'d'}}));
+  assert.throws(()=>prepareSourceBindingDraft(p,{id:'binding',attemptId:'a'}),{code:'source_binding_unavailable'});
+ }finally{
+  if(db)db.close();for(const suffix of ['','-wal','-shm','-journal']){try{fs.unlinkSync(file+suffix);}catch(e){if(e.code!=='ENOENT')throw e;}}fs.rmdirSync(dir);
+ }
+});
+
 test('two file-backed connections serialize draft binding against lifecycle admission',()=>{
  const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-binding-test-')),file=path.join(dir,'test.sqlite');
@@ -199,6 +249,10 @@ test('two file-backed connections serialize draft binding against lifecycle admi
   try{assert.throws(()=>prepareSourceBindingDraft(p2,{id:'binding',attemptId:'a'}),/database is locked/);}finally{db1.exec('ROLLBACK');}
   prepareSourceBindingDraft(p1,{id:'binding',attemptId:'a'});
   assert.equal(p2.beginTrashMutation('d','test'),null);
+  db1.prepare("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES('adoption','catalog_map','synthetic',?,'failed','t','t','t')").run(JSON.stringify({ids:{attemptId:'a',datasetId:'d'},adoptionIntent:{rootKey:'dataset_import',relativePath:'source',datasetRelative:'synthetic'}}));
+  const script=`const {DatabaseSync}=require('node:sqlite');const {ProcessingRepository}=require(${JSON.stringify(require.resolve('../server/processingRepository'))});const db=new DatabaseSync(${JSON.stringify(file)});db.exec('PRAGMA foreign_keys=ON');const admitted=new ProcessingRepository(db).mutateCatalogAdoptionRecovery('adoption',()=>process.exit(25));db.close();process.exit(admitted?24:0);`;
+  const child=require('node:child_process').spawnSync(process.execPath,['-e',script],{encoding:'utf8',timeout:10000});assert.equal(child.error,undefined);assert.equal(child.status,0,child.stderr);
+  assert.equal(db1.prepare('SELECT count(*) n FROM viewer_source_effect_claims').get().n,0);db1.exec("DELETE FROM dataset_operations WHERE id='adoption'");
   const d2=p1.createDataset({id:'d2',projectId:'p',displayName:'Synthetic 2',storageMode:'managed',rootKey:'datasets',relativePath:'synthetic2'});
   p1.finalizeDataset(d2.id,[{id:'file2',relativePath:'two.jpg',byteSize:3,sha256:'b'.repeat(64)}],'d'.repeat(64));
   db1.exec("INSERT INTO processing_tasks(id,project_id,dataset_id,display_name,status,created_at,updated_at) VALUES('t2','p','d2','T2','archived','t','t'); INSERT INTO processing_attempts(id,task_id,dataset_id,attempt_number,options_json,status,created_at,updated_at) VALUES('a2','t2','d2',1,'{}','pending','t','t'); UPDATE processing_tasks SET active_attempt_id='a2' WHERE id='t2'");
