@@ -489,7 +489,16 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     return this.transaction(()=>{ const task=this.getTask(input.taskId); if(!task||task.status==='archived') throw new Error('task is not processable'); const provider=input.providerId&&this.getProvider(input.providerId);if(!provider||!provider.enabled)throw Object.assign(new Error('an enabled processing provider is required'),{code:'provider_unavailable'});const datasetId=input.datasetId||task.datasetId,dataset=this.getDataset(datasetId),project=this.getProject(task.projectId);if(!dataset||dataset.status!=='finalized'||dataset.projectId!==task.projectId||!project||project.status!=='active')throw new Error('dataset and project must be active and finalized');const active=task.activeAttemptId&&this.getAttempt(task.activeAttemptId);if(active&&!['failed','cancelled','published'].includes(active.status))throw Object.assign(new Error('task already has an active attempt'),{code:'attempt_in_progress'});
       const n=this.database.prepare('SELECT COALESCE(MAX(attempt_number),0)+1 AS n FROM processing_attempts WHERE task_id=?').get(task.id).n;
       const id=crypto.randomUUID(),t=now(); this.database.prepare(`INSERT INTO processing_attempts(id,task_id,dataset_id,attempt_number,provider_id,provider_task_id,preset_id,options_json,capability_fingerprint,status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?)`).run(id,task.id,dataset.id,n,input.providerId,input.providerTaskId||crypto.randomUUID(),input.presetId||null,JSON.stringify(input.options||{}),input.capabilityFingerprint||null,input.createdBy||null,t,t);
-      const markCount=Number(this.database.prepare('SELECT COUNT(*) count FROM gcp_image_correspondences WHERE task_id=?').get(task.id).count);
+      const gcpSnapshot=this.buildTaskGcpSnapshot(task.id);if(gcpSnapshot)this.database.prepare('INSERT INTO processing_attempt_gcp_snapshots(attempt_id,sha256,content_text,correspondence_count,created_at) VALUES (?,?,?,?,?)').run(id,gcpSnapshot.sha256,gcpSnapshot.content,gcpSnapshot.correspondenceCount,t);
+      this.captureNewAttemptProvenance(id,provider,t);
+      this.database.prepare(`INSERT INTO processing_jobs(id,attempt_id,job_type,status,available_at,created_at,updated_at) VALUES (?,?,'submit','pending',?,?,?)`).run(crypto.randomUUID(),id,t,t,t);
+      this.database.prepare("UPDATE processing_tasks SET active_attempt_id=?,status='queued',updated_at=? WHERE id=?").run(id,t,task.id);
+      this.database.prepare('INSERT INTO audit_events(id,actor_type,actor_id,action,entity_type,entity_id,details_json,created_at) VALUES (?,?,?,?,?,?,?,?)').run(crypto.randomUUID(),'admin',input.createdBy||null,input.auditAction||'processing_attempt.created','processing_attempt',id,JSON.stringify({taskId:task.id,...(input.auditDetails||{})}),t);
+      if(this.database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='processing_events'").get())this.recordProcessingEvent({attemptId:id,eventType:'processing_attempt.queued',phase:'queued',details:{providerId:provider.id,taskId:task.id},createdAt:t});
+      return this.getAttempt(id); });
+  }
+  buildTaskGcpSnapshot(taskId) {
+      const markCount=Number(this.database.prepare('SELECT COUNT(*) count FROM gcp_image_correspondences WHERE task_id=?').get(taskId).count);
       if(markCount>100000)throw Object.assign(new Error('task has too many GCP image correspondences'),{code:'too_many_gcp_correspondences'});
       const marks=this.database.prepare(`SELECT points.set_id setId,points.longitude,points.latitude,points.elevation_m elevationM, provenance.adapter sourceAdapter,
         provenance.coordinate_system sourceCoordinateSystem, provenance.vertical_datum sourceVerticalDatum, points.easting, points.northing, sets.source_sha256 sourceSha256,
@@ -501,7 +510,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
         LEFT JOIN gcp_import_provenance provenance ON provenance.set_id=points.set_id
         JOIN gcp_sets sets ON sets.id=points.set_id
         LEFT JOIN gcp_odm_crs_confirmations confirmation ON confirmation.set_id=points.set_id
-        WHERE marks.task_id=? ORDER BY points.external_id,files.relative_path,marks.id`).all(task.id);
+        WHERE marks.task_id=? ORDER BY points.external_id,files.relative_path,marks.id`).all(taskId);
       if(marks.length!==markCount) throw Object.assign(new Error('GCP correspondence snapshot is incomplete'),{code:'gcp_snapshot_incomplete'});
       const emlid=marks.filter(mark=>mark.sourceAdapter==='emlid-all-columns-v1');
       const mapping=emlid[0];
@@ -511,14 +520,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
         throw Object.assign(new Error('Emlid survey CRS and vertical datum must be mapped and confirmed before processing'),{code:'gcp_crs_confirmation_required'});
       const gcpList=odmGcpList(marks, emlid.length ? {epsgCode:mapping.confirmedEpsg,projected:true,horizontalUnit:mapping.confirmedUnit} : undefined);
       if(gcpList&&Buffer.byteLength(gcpList)>16*1024*1024)throw Object.assign(new Error('generated ODM GCP input is too large'),{code:'gcp_snapshot_too_large'});
-      if(gcpList)this.database.prepare(`INSERT INTO processing_attempt_gcp_snapshots(attempt_id,sha256,content_text,correspondence_count,created_at)
-        VALUES (?,?,?,?,?)`).run(id,crypto.createHash('sha256').update(gcpList).digest('hex'),gcpList,marks.length,t);
-      this.captureNewAttemptProvenance(id,provider,t);
-      this.database.prepare(`INSERT INTO processing_jobs(id,attempt_id,job_type,status,available_at,created_at,updated_at) VALUES (?,?,'submit','pending',?,?,?)`).run(crypto.randomUUID(),id,t,t,t);
-      this.database.prepare("UPDATE processing_tasks SET active_attempt_id=?,status='queued',updated_at=? WHERE id=?").run(id,t,task.id);
-      this.database.prepare('INSERT INTO audit_events(id,actor_type,actor_id,action,entity_type,entity_id,details_json,created_at) VALUES (?,?,?,?,?,?,?,?)').run(crypto.randomUUID(),'admin',input.createdBy||null,input.auditAction||'processing_attempt.created','processing_attempt',id,JSON.stringify({taskId:task.id,...(input.auditDetails||{})}),t);
-      if(this.database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='processing_events'").get())this.recordProcessingEvent({attemptId:id,eventType:'processing_attempt.queued',phase:'queued',details:{providerId:provider.id,taskId:task.id},createdAt:t});
-      return this.getAttempt(id); });
+      return gcpList?{content:gcpList,sha256:crypto.createHash('sha256').update(gcpList).digest('hex'),correspondenceCount:marks.length}:null;
   }
   getAttempt(id) { return this.attempt(this.database.prepare('SELECT * FROM processing_attempts WHERE id=?').get(id)) || null; }
   // Unexposed draft transaction. Database admission is hard-disabled; this
@@ -526,9 +528,10 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   createReferenceAttemptDraft(input) { return this.transaction(()=>{
     const task=this.getTask(input.taskId),dataset=task&&this.getDataset(task.datasetId,true),project=task&&this.getProject(task.projectId),provider=this.database.prepare('SELECT * FROM viewer_reference_providers WHERE id=?').get(input.referenceProviderId);
     if(!task||task.status==='archived'||!dataset||dataset.status!=='finalized'||dataset.storageMode!=='managed'||!project||project.status!=='active'||dataset.projectId!==project.id||!provider)throw Object.assign(new Error('reference draft dependencies unavailable'),{code:'reference_draft_unavailable'});
-    if(this.database.prepare('SELECT 1 FROM gcp_image_correspondences WHERE task_id=? LIMIT 1').get(task.id))throw Object.assign(new Error('reference GCP snapshot integration unavailable'),{code:'reference_gcp_unavailable'});
+    if(this.database.prepare('SELECT 1 FROM gcp_image_correspondences m JOIN gcp_points p ON p.id=m.gcp_point_id JOIN gcp_sets s ON s.id=p.set_id LEFT JOIN dataset_files f ON f.id=s.source_file_id WHERE m.task_id=? AND (s.dataset_id<>? OR s.source_file_id IS NULL OR f.id IS NULL OR f.dataset_id<>s.dataset_id OR f.sha256<>s.source_sha256 OR f.byte_size<>s.source_byte_size) LIMIT 1').get(task.id,dataset.id))throw Object.assign(new Error('GCP survey source requires retained storage identity'),{code:'reference_gcp_source_unavailable'});
     const submissionId=typeof input.submissionId==='string'?input.submissionId.toLowerCase():input.submissionId;
-    const {submission}=require('./referenceSubmissionDraft').prepareReferenceSubmission({enabled:true,dataset,submissionId,capabilities:input.capabilities,optionsCatalog:input.optionsCatalog,odmOptions:input.options||{}}),body=JSON.stringify(submission),sha=crypto.createHash('sha256').update(body).digest('hex'),environment=input.capabilities.environment;
+    const gcpSnapshot=this.buildTaskGcpSnapshot(task.id),gcpArtifact=gcpSnapshot?{id:`gcp-${submissionId}`,relativePath:`reference-gcp/${submissionId}/gcp_list.txt`,sha256:gcpSnapshot.sha256,byteSize:Buffer.byteLength(gcpSnapshot.content,'utf8')}:null;
+    const {submission}=require('./referenceSubmissionDraft').prepareReferenceSubmission({enabled:true,dataset,managedGcp:gcpArtifact,submissionId,capabilities:input.capabilities,optionsCatalog:input.optionsCatalog,odmOptions:input.options||{}}),body=JSON.stringify(submission),sha=crypto.createHash('sha256').update(body).digest('hex'),environment=input.capabilities.environment;
     const old=this.database.prepare('SELECT j.*,a.task_id,a.created_by,p.reference_provider_id FROM viewer_reference_attempt_journal j JOIN processing_attempts a ON a.id=j.attempt_id JOIN viewer_reference_attempt_protocols p ON p.attempt_id=a.id WHERE j.submission_id=?').get(submission.submissionId);
     if(old){if(old.task_id!==task.id||old.created_by!==(input.createdBy||null)||old.reference_provider_id!==provider.id||old.environment!==environment||old.request_json!==body||old.request_sha256!==sha||old.input_manifest_sha256!==submission.manifest.sha256)throw Object.assign(new Error('reference draft identity conflict'),{code:'reference_draft_conflict'});return {attempt:this.getAttempt(old.attempt_id),replayed:true};}
     const active=task.activeAttemptId&&this.getAttempt(task.activeAttemptId);if(active&&!['failed','cancelled','published'].includes(active.status))throw Object.assign(new Error('task already has an active attempt'),{code:'attempt_in_progress'});
@@ -536,6 +539,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     this.database.prepare('INSERT INTO viewer_reference_attempt_genesis(attempt_id,reference_provider_id) VALUES(?,?)').run(attemptId,provider.id);
     this.database.prepare("INSERT INTO processing_attempts(id,task_id,dataset_id,attempt_number,provider_id,provider_task_id,options_json,status,created_by,created_at,updated_at) VALUES(?,?,?,?,NULL,NULL,'{}','pending',?,?,?)").run(attemptId,task.id,dataset.id,n,input.createdBy||null,t,t);
     this.database.prepare("INSERT INTO viewer_reference_attempt_protocols(attempt_id,reference_provider_id,protocol) VALUES(?,?,'reference-v1')").run(attemptId,provider.id);
+    if(gcpSnapshot){this.database.prepare('INSERT INTO processing_attempt_gcp_snapshots(attempt_id,sha256,content_text,correspondence_count,created_at) VALUES(?,?,?,?,?)').run(attemptId,gcpSnapshot.sha256,gcpSnapshot.content,gcpSnapshot.correspondenceCount,t);this.database.prepare('INSERT INTO viewer_reference_gcp_artifacts(attempt_id,object_id,relative_path,sha256,byte_size) VALUES(?,?,?,?,?)').run(attemptId,gcpArtifact.id,gcpArtifact.relativePath,gcpArtifact.sha256,gcpArtifact.byteSize);}
     this.database.prepare('INSERT INTO viewer_reference_attempt_journal(attempt_id,submission_id,environment,request_json,request_sha256,input_manifest_sha256) VALUES(?,?,?,?,?,?)').run(attemptId,submission.submissionId,environment,body,sha,submission.manifest.sha256);
     this.database.prepare('UPDATE processing_tasks SET active_attempt_id=?,updated_at=? WHERE id=?').run(attemptId,t,task.id);
     return {attempt:this.getAttempt(attemptId),replayed:false};
