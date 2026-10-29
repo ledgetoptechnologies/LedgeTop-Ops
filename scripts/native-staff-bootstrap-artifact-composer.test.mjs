@@ -66,6 +66,68 @@ function compose(f = fixture(), overrides = {}) {
     decisionReference: 'synthetic-review-ticket-1', ...overrides });
 }
 
+function existingOwnerInitialAuthorityRows(f, { omit = [], deny = [], malformed = {} } = {}) {
+  const ownerId = f.ownerId, employeeId = f.newId, areaId = `synthetic-owner-area-${employeeId}`;
+  const managementCaps = ['staff.onboarding.create', 'staff.onboarding.approve', 'staff.admission.disable',
+    'staff.membership.manage', 'staff.directory_grant.manage', 'staff.admin_delegation.manage',
+    'staff.admission.enable', 'staff.profile.edit', 'staff.profile.read'];
+  const rows = [
+    { table: 'native_business_areas', row: { id: areaId, name: 'Owner approved employee scope', active: 1 } },
+    { table: 'native_staff_target_memberships', row: { id: `synthetic-owner-membership-${employeeId}`, staff_id: employeeId,
+      scope_kind: 'business_area', business_area_id: areaId, division_id: null, active: 1, version: 1, created_by: ownerId } },
+    ...managementCaps.map(capability => ({ table: 'native_staff_management_delegations', row: {
+      id: `synthetic-owner-delegation-${ownerId}-${capability}`, actor_staff_id: ownerId, contract_version: 1,
+      authority_domain: 'staff_admin', capability, effect: deny.includes(capability) ? 'deny' : 'allow',
+      scope_kind: 'global', business_area_id: null, division_id: null, target_staff_id: null, active: 1, version: 1,
+      granted_by: malformed.provenance && capability === managementCaps[0] ? f.kstirnId : ownerId,
+    } })),
+    ...[
+      ...['directory.profile.view', 'directory.profile.edit', 'directory.identity.link', 'directory.enrollment.manage', 'directory.portal_access.manage']
+        .map(capability => ['directory', capability]),
+      ...managementCaps.slice(0, 6).map(capability => ['staff_admin', capability]),
+    ].map(([domain, capability]) => ({ table: 'native_staff_delegation_ceilings', row: {
+      id: `synthetic-owner-ceiling-${ownerId}-${domain}-${capability}`,
+      parent_delegation_id: `synthetic-owner-delegation-${ownerId}-${domain === 'directory' ? 'staff.directory_grant.manage' : 'staff.admin_delegation.manage'}`,
+      contract_version: 1, authority_domain: malformed.domain && domain === 'directory' && capability === 'directory.profile.view' ? 'staff_admin' : domain,
+      capability, effect: 'allow', grant_allow: 1, grant_deny: 1, operation_create: 1, operation_revoke: 1,
+      scope_kind: 'global', business_area_id: null, division_id: null,
+      resource_id: malformed.resource && capability === 'directory.profile.view' ? 'unexpected-resource' : null, target_staff_id: null,
+    } })),
+  ];
+  return rows.filter(item => !omit.includes(item.table === 'native_staff_management_delegations'
+    ? item.row.capability : item.table === 'native_staff_delegation_ceilings'
+      ? `${item.row.authority_domain}:${item.row.capability}` : item.table));
+}
+
+function emptyObservedControlPlane(f) {
+  const reviewedSnapshot = { ...f.reviewedSnapshot, controlPlaneStaffIds: [] };
+  return { ...f, reviewedSnapshot };
+}
+
+function withSnapshotState(f, mutate) {
+  const state = JSON.parse(f.reviewedSnapshot.snapshotJson);
+  mutate(state);
+  const snapshotJson = JSON.stringify(state);
+  return { ...f, reviewedSnapshot: { ...f.reviewedSnapshot, snapshotJson, snapshotSha256: sha(snapshotJson) } };
+}
+
+async function prepareComposedArtifact(artifact, ownerId) {
+  const plan = JSON.parse(artifact.canonicalPlanJson);
+  const now = new Date('2026-10-28T12:00:00.000Z');
+  const approval = { approvalId: plan.approvalId, approvedOperatorStaffId: ownerId,
+    approvedOperatorAccessSubject: 'access|synthetic-owner', issuedByStaffId: ownerId,
+    issuedByAccessSubject: 'access|synthetic-owner', issuedAt: now.toISOString(),
+    expiresAt: '2026-10-28T12:10:00.000Z' };
+  const trustEnvelope = { schemaVersion: 1, action: 'install-operations-native-staff-bootstrap', ownerSessionId: 'synthetic-session',
+    authorizationChallenge: 'synthetic-challenge', approvalId: approval.approvalId, commandId: artifact.commandId,
+    approvedOperatorStaffId: ownerId, approvedOperatorAccessSubject: approval.approvedOperatorAccessSubject,
+    issuedByStaffId: ownerId, issuedByAccessSubject: approval.issuedByAccessSubject, authorizedAt: approval.issuedAt,
+    expiresAt: approval.expiresAt, reviewedSnapshotSha256: artifact.reviewedSnapshot.snapshotSha256,
+    canonicalPlanSha256: sha(artifact.canonicalPlanJson), bindingEvidenceSha256: sha(artifact.bindingEvidenceJson),
+    consentPhrase: 'I approve this exact Operations staff cohort and native authority plan' };
+  return prepareNativeStaffBootstrapD1({ ...artifact, approval, trustEnvelope }, { verifyTrust: async () => true });
+}
+
 test('composes canonical draft from a populated 225-migration snapshot and records preservation evidence', () => {
   const f = fixture();
   const result = compose(f);
@@ -207,7 +269,74 @@ test('accepts only explicit cohort-scoped policy rows and excludes client grants
     id: 'synthetic-client-access', staff_id: f.newId, permission: 'directory.profile.view', effect: 'allow',
     scope_kind: 'global', business_area_id: null, division_id: null, resource_id: null, active: 1, granted_by: f.ownerId,
   } }] }), /policy_row_invalid/);
-  assert.throws(() => compose(f, { explicitPolicyRows: [{ ...explicit, row: { ...explicit.row, actor_staff_id: f.ownerId } }] }), /policy_mutates_protected_authority|policy_actor_not_new_cohort/);
+  assert.throws(() => compose(f, { explicitPolicyRows: [{ ...explicit, row: { ...explicit.row, actor_staff_id: f.ownerId } }] }), /owner_control_plane_package_incomplete/);
+});
+
+test('composes the explicit 9-delegation and 11-ceiling initial owner handoff from an observed empty control plane', async () => {
+  const f = emptyObservedControlPlane(fixture());
+  const explicitPolicyRows = existingOwnerInitialAuthorityRows(f);
+  const result = compose(f, { explicitPolicyRows });
+  const plan = JSON.parse(result.artifact.canonicalPlanJson);
+  const binding = JSON.parse(result.artifact.bindingEvidenceJson);
+  assert.deepEqual(binding.observedControlPlaneStaffIds, []);
+  assert.deepEqual(binding.plannedControlPlaneStaffIds, [f.ownerId]);
+  assert.deepEqual(plan.controlPlaneStaffIds, [f.ownerId]);
+  assert.equal(explicitPolicyRows.filter(item => item.table === 'native_staff_management_delegations'
+    && item.row.actor_staff_id === f.ownerId).length, 9);
+  assert.equal(explicitPolicyRows.filter(item => item.table === 'native_staff_delegation_ceilings').length, 11);
+  assert.equal(plan.rows.some(item => ['native_staff_admissions', 'native_staff_profiles'].includes(item.table)
+    && item.row.staff_id === f.ownerId), false);
+  assert.deepEqual(plan.rows.filter(item => ['native_staff_admissions', 'native_staff_profiles'].includes(item.table)
+    && item.row.staff_id === f.newId).map(item => item.table), ['native_staff_admissions', 'native_staff_profiles']);
+  assert.equal(JSON.parse(result.artifact.bindingEvidenceJson).preservation.protectedStaff.length, 2);
+  const prepared = await prepareComposedArtifact(result.artifact, f.ownerId);
+  assert.deepEqual(prepared.plan.controlPlaneStaffIds, [f.ownerId]);
+});
+
+test('refuses incomplete, denied, mis-scoped, wrong-domain, resource-bound, or non-owner-provenance owner packages', () => {
+  const f = emptyObservedControlPlane(fixture());
+  const complete = existingOwnerInitialAuthorityRows(f);
+  const cases = [
+    ['missing lifecycle delegation', existingOwnerInitialAuthorityRows(f, { omit: ['staff.profile.edit'] })],
+    ['missing ceiling', existingOwnerInitialAuthorityRows(f, { omit: ['staff_admin:staff.membership.manage'] })],
+    ['owner deny', existingOwnerInitialAuthorityRows(f, { deny: ['staff.profile.edit'] })],
+    ['non-owner provenance', existingOwnerInitialAuthorityRows(f, { malformed: { provenance: true } })],
+    ['wrong ceiling domain', existingOwnerInitialAuthorityRows(f, { malformed: { domain: true } })],
+    ['resource scoped ceiling', existingOwnerInitialAuthorityRows(f, { malformed: { resource: true } })],
+    ['owner employee membership mutation', complete.map(item => item.table === 'native_staff_target_memberships'
+      ? { ...item, row: { ...item.row, staff_id: f.ownerId } } : item)],
+  ];
+  for (const [label, explicitPolicyRows] of cases) {
+    assert.throws(() => compose(f, { explicitPolicyRows }), /owner_control_plane_package_incomplete|policy_provenance_not_preserved_owner|policy_mutates_protected_authority|policy_target_not_new_cohort/u, label);
+  }
+});
+
+test('refuses owner control-plane prediction when an active legacy membership fails the 0068 view', () => {
+  const original = emptyObservedControlPlane(fixture());
+  const packageRows = existingOwnerInitialAuthorityRows(original);
+  const cases = [
+    ['inactive area', state => {
+      state.rows.native_business_areas = [{ id: 'existing-owner-area', name: 'Existing', active: 0 }];
+      state.rows.native_staff_target_memberships = [{ id: 'bad-owner-membership', staff_id: original.ownerId,
+        scope_kind: 'business_area', business_area_id: 'existing-owner-area', division_id: null, active: 1 }];
+    }],
+    ['business area with division', state => {
+      state.rows.native_business_areas = [{ id: 'existing-owner-area', name: 'Existing', active: 1 }];
+      state.rows.native_business_divisions = [{ id: 'existing-owner-division', business_area_id: 'existing-owner-area', active: 1 }];
+      state.rows.native_staff_target_memberships = [{ id: 'bad-owner-membership', staff_id: original.ownerId,
+        scope_kind: 'business_area', business_area_id: 'existing-owner-area', division_id: 'existing-owner-division', active: 1 }];
+    }],
+    ['division without active matching division', state => {
+      state.rows.native_business_areas = [{ id: 'existing-owner-area', name: 'Existing', active: 1 }];
+      state.rows.native_business_divisions = [{ id: 'existing-owner-division', business_area_id: 'other-area', active: 1 }];
+      state.rows.native_staff_target_memberships = [{ id: 'bad-owner-membership', staff_id: original.ownerId,
+        scope_kind: 'division', business_area_id: 'existing-owner-area', division_id: 'existing-owner-division', active: 1 }];
+    }],
+  ];
+  for (const [label, mutate] of cases) {
+    const f = withSnapshotState(original, mutate);
+    assert.throws(() => compose(f, { explicitPolicyRows: packageRows }), /owner_control_plane_package_incomplete/u, label);
+  }
 });
 
 test('refuses unknown snapshot row shapes and non-active/unbound identities', () => {

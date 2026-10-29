@@ -12,6 +12,20 @@ const PRIMARY = Object.freeze({ native_business_areas: 'id', native_staff_admiss
   native_staff_target_memberships: 'id', native_staff_management_delegations: 'id', native_staff_admin_delegations: 'id',
   native_staff_delegation_ceilings: 'id', native_directory_grants: 'id', native_directory_assignments: 'record_id' });
 const REF_COLUMNS = Object.freeze(['staff_id', 'actor_staff_id', 'target_staff_id']);
+// Keep these requirements aligned with the read-only candidate views in
+// migrations 0068_native_staff_control_plane.sql and
+// 0225_native_staff_lifecycle_bridge.sql. The installer re-evaluates the
+// actual views after the proposed rows have been inserted in its atomic batch.
+const CONTROL_PLANE_ACTIONS = Object.freeze([
+  'staff.onboarding.create', 'staff.onboarding.approve', 'staff.admission.disable',
+  'staff.membership.manage', 'staff.directory_grant.manage', 'staff.admin_delegation.manage',
+]);
+const LIFECYCLE_ACTIONS = Object.freeze(['staff.profile.read', 'staff.profile.edit', 'staff.admission.enable']);
+const CONTROL_PLANE_CEILINGS = Object.freeze([
+  ...['directory.profile.view', 'directory.profile.edit', 'directory.identity.link', 'directory.enrollment.manage', 'directory.portal_access.manage']
+    .map(capability => ['directory', capability]),
+  ...CONTROL_PLANE_ACTIONS.map(capability => ['staff_admin', capability]),
+]);
 const MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024;
 const MAX_ROWS = 20_000;
 // Intentionally mirrors the exact source-chain pin enforced by
@@ -131,7 +145,7 @@ function identityRows(state, staffIds, ownerStaffId, kstirnStaffId, admittedBySt
   return rows;
 }
 
-function validatePreservedStaff(state, roles, controlPlaneStaffIds) {
+function validatePreservedStaff(state, roles) {
   if (!exactKeys(roles, ['ownerStaffId', 'kstirnStaffId'])) fail('preservation_roles_invalid');
   const ids = [requireId(roles.ownerStaffId), requireId(roles.kstirnStaffId)];
   if (ids[0] === ids[1]) fail('preservation_roles_invalid');
@@ -144,7 +158,6 @@ function validatePreservedStaff(state, roles, controlPlaneStaffIds) {
     if (index === 1 && !admission && !profile) continue;
     if (!admission || admission.active !== 1 || admission.bound_access_subject !== staff.access_subject
       || !profile || profile.login_email !== staff.email || profile.display_name !== staff.display_name) fail('protected_staff_binding_invalid');
-    if (!controlPlaneStaffIds.includes(staffId) && staffId === roles.ownerStaffId) fail('owner_not_control_plane_candidate');
   }
   return ids.map((staffId, index) => ({
     role: index === 0 ? 'owner' : 'kstirn', staffId,
@@ -155,7 +168,7 @@ function validatePreservedStaff(state, roles, controlPlaneStaffIds) {
   }));
 }
 
-function validateExplicitRows(policyRows, state, cohortIds, preservedIds) {
+function validateExplicitRows(policyRows, state, cohortIds, preservedIds, ownerStaffId) {
   if (!Array.isArray(policyRows) || policyRows.length > MAX_ROWS) fail('policy_rows_invalid');
   const generatedTableKeys = new Set(['native_staff_admissions', 'native_staff_profiles']);
   const forbiddenClientTables = new Set(['native_directory_grants', 'native_directory_assignments']);
@@ -180,14 +193,18 @@ function validateExplicitRows(policyRows, state, cohortIds, preservedIds) {
     for (const column of REF_COLUMNS) {
       const value = item.row[column];
       if (value == null) continue;
-      if (preservedIds.has(value) && column !== 'staff_id') fail('policy_mutates_protected_authority');
-      if (column === 'actor_staff_id' && !cohortIds.has(value)) fail('policy_actor_not_new_cohort');
+      if (preservedIds.has(value) && column !== 'staff_id'
+        && !(item.table === 'native_staff_management_delegations' && column === 'actor_staff_id' && value === ownerStaffId)) {
+        fail('policy_mutates_protected_authority');
+      }
+      if (column === 'actor_staff_id' && !cohortIds.has(value)
+        && !(item.table === 'native_staff_management_delegations' && value === ownerStaffId)) fail('policy_actor_not_new_cohort');
       if (column === 'staff_id' && !cohortIds.has(value)) fail('policy_target_not_new_cohort');
       if (column === 'target_staff_id' && !cohortIds.has(value)) fail('policy_target_not_new_cohort');
     }
     for (const column of ['admitted_by', 'created_by', 'granted_by']) {
       const value = item.row[column];
-      if (value != null && !preservedIds.has(value)) fail('policy_provenance_not_preserved_owner');
+      if (value != null && value !== ownerStaffId) fail('policy_provenance_not_preserved_owner');
     }
     if (item.row.business_area_id != null && !knownAreas.has(item.row.business_area_id)) fail('policy_area_unbound');
     if (item.row.division_id != null && !knownDivisions.has(item.row.division_id)) fail('policy_division_unbound');
@@ -195,7 +212,109 @@ function validateExplicitRows(policyRows, state, cohortIds, preservedIds) {
     if (item.table === 'native_staff_delegation_ceilings'
       && (!planIds.has(item.row.parent_delegation_id) || (item.row.target_staff_id != null && !cohortIds.has(item.row.target_staff_id)))) fail('policy_ceiling_parent_invalid');
   }
-  return policyRows.map(row => cloneJson(row, 'policy_row_invalid'));
+  const cloned = policyRows.map(row => cloneJson(row, 'policy_row_invalid'));
+  for (const item of cloned) {
+    const row = item.row;
+    const targetsOwner = [row.staff_id, row.actor_staff_id, row.target_staff_id].includes(ownerStaffId);
+    if (!targetsOwner) continue;
+    if (item.table === 'native_staff_management_delegations' && row.actor_staff_id === ownerStaffId) continue;
+    if (item.table === 'native_staff_delegation_ceilings') {
+      const ownerDelegationIds = new Set(cloned.filter(candidate => candidate.table === 'native_staff_management_delegations'
+        && candidate.row.actor_staff_id === ownerStaffId).map(candidate => candidate.row.id));
+      if (ownerDelegationIds.has(row.parent_delegation_id)) continue; // Parent is checked by the strict owner-package validator below.
+    }
+    fail('policy_mutates_protected_authority');
+  }
+  return cloned;
+}
+
+function validateOwnerInitialAuthorityPackage(policyRows, ownerStaffId) {
+  const ownerDelegations = policyRows.filter(item => item.table === 'native_staff_management_delegations'
+    && item.row.actor_staff_id === ownerStaffId).map(item => item.row);
+  const requiredDelegations = [...CONTROL_PLANE_ACTIONS, ...LIFECYCLE_ACTIONS];
+  if (ownerDelegations.length !== requiredDelegations.length
+    || new Set(ownerDelegations.map(row => row.capability)).size !== requiredDelegations.length
+    || requiredDelegations.some(capability => !ownerDelegations.some(row => row.capability === capability))) return false;
+  if (ownerDelegations.some(row => row.contract_version !== 1 || row.authority_domain !== 'staff_admin'
+    || row.effect !== 'allow' || row.scope_kind !== 'global' || row.business_area_id !== null
+    || row.division_id !== null || row.target_staff_id !== null || row.active !== 1 || row.version !== 1
+    || row.granted_by !== ownerStaffId)) return false;
+
+  const ownerDelegationIds = new Set(ownerDelegations.map(row => row.id));
+  const ownerCeilings = policyRows.filter(item => item.table === 'native_staff_delegation_ceilings'
+    && ownerDelegationIds.has(item.row.parent_delegation_id)).map(item => item.row);
+  const ceilingKeys = new Set(ownerCeilings.map(row => `${row.authority_domain}\0${row.capability}`));
+  if (ownerCeilings.length !== CONTROL_PLANE_CEILINGS.length || ceilingKeys.size !== CONTROL_PLANE_CEILINGS.length
+    || CONTROL_PLANE_CEILINGS.some(([domain, capability]) => !ceilingKeys.has(`${domain}\0${capability}`))) return false;
+  return ownerCeilings.every(row => {
+    const expectedParent = row.authority_domain === 'directory' ? 'staff.directory_grant.manage' : 'staff.admin_delegation.manage';
+    return row.contract_version === 1 && row.effect === 'allow' && row.scope_kind === 'global'
+      && row.business_area_id === null && row.division_id === null && row.resource_id === null && row.target_staff_id === null
+      && row.grant_allow === 1 && row.grant_deny === 1 && row.operation_create === 1 && row.operation_revoke === 1
+      && ownerDelegations.some(parent => parent.id === row.parent_delegation_id && parent.capability === expectedParent);
+  });
+}
+
+function ownerWillBeControlPlaneCandidate(state, ownerStaffId, policyRows) {
+  const delegations = [
+    ...(state.rows.native_staff_management_delegations ?? []),
+    ...(state.rows.native_staff_admin_delegations ?? []),
+    ...policyRows.filter(item => item.table === 'native_staff_management_delegations').map(item => item.row),
+  ];
+  const activeGlobalAllow = (capability, legacy = false) => delegations.some(row =>
+    (legacy ? row.action : row.capability) === capability
+      && (legacy || row.contract_version === 1)
+      && row.actor_staff_id === ownerStaffId && row.effect === 'allow' && row.active === 1 && row.scope_kind === 'global');
+  const activeDeny = capability => delegations.some(row =>
+    row.capability === capability && row.actor_staff_id === ownerStaffId && row.effect === 'deny' && row.active === 1)
+    || (state.rows.native_staff_admin_delegations ?? []).some(row =>
+      row.action === capability && row.actor_staff_id === ownerStaffId && row.effect === 'deny' && row.active === 1);
+
+  const staff = (state.rows.staff_users ?? []).find(row => row?.id === ownerStaffId);
+  const admission = (state.rows.native_staff_admissions ?? []).find(row => row?.staff_id === ownerStaffId);
+  const profile = (state.rows.native_staff_profiles ?? []).find(row => row?.staff_id === ownerStaffId);
+  if (!staff || staff.status !== 'active' || typeof staff.email !== 'string' || staff.email.length < 3 || staff.email.length > 254
+    || staff.email !== staff.email.trim() || staff.email !== staff.email.toLowerCase() || !staff.email.includes('@')
+    || staff.email.includes('\0') || !admission || admission.active !== 1 || admission.bound_access_subject !== staff.access_subject
+    || typeof staff.access_subject !== 'string' || !staff.access_subject.trim() || staff.access_subject.length > 191
+    || staff.access_subject.includes('\0') || !profile || profile.login_email !== staff.email
+    || typeof profile.display_name !== 'string' || profile.display_name.length < 1 || profile.display_name.length > 160
+    || profile.display_name !== profile.display_name.trim() || profile.display_name.includes('\0')) return false;
+  const memberships = (state.rows.native_staff_target_memberships ?? []).filter(row => row?.staff_id === ownerStaffId && row.active === 1);
+  const areas = state.rows.native_business_areas ?? [];
+  const divisions = state.rows.native_business_divisions ?? [];
+  if (memberships.some(membership => {
+    const area = areas.find(row => row?.id === membership.business_area_id);
+    const division = divisions.find(row => row?.id === membership.division_id
+      && row?.business_area_id === membership.business_area_id);
+    return area?.active !== 1
+      || (membership.scope_kind === 'business_area' && membership.division_id !== null)
+      || (membership.scope_kind === 'division' && (membership.division_id == null || division?.active !== 1));
+  })) return false;
+  if (!CONTROL_PLANE_ACTIONS.every(capability =>
+    activeGlobalAllow(capability) || activeGlobalAllow(capability, true))
+      || [...CONTROL_PLANE_ACTIONS, ...LIFECYCLE_ACTIONS].some(activeDeny)
+      || !LIFECYCLE_ACTIONS.every(capability => activeGlobalAllow(capability))) return false;
+
+  const ceilingRows = [
+    ...(state.rows.native_staff_delegation_ceilings ?? []),
+    ...policyRows.filter(item => item.table === 'native_staff_delegation_ceilings').map(item => item.row),
+  ];
+  return CONTROL_PLANE_CEILINGS.every(([domain, capability]) => {
+    const parentCapability = domain === 'directory' ? 'staff.directory_grant.manage' : 'staff.admin_delegation.manage';
+    const parents = delegations.filter(row => row.actor_staff_id === ownerStaffId && row.capability === parentCapability
+      && row.contract_version === 1 && row.effect === 'allow' && row.active === 1 && row.scope_kind === 'global');
+    return parents.some(parent => ['allow', 'deny'].every(effect => ['create', 'revoke'].every(operation =>
+      ceilingRows.some(row => row.parent_delegation_id === parent.id && row.contract_version === 1
+        && row.authority_domain === domain && row.capability === capability && row.effect === 'allow'
+        && row.scope_kind === 'global' && (row.active ?? 1) === 1
+        && row[effect === 'allow' ? 'grant_allow' : 'grant_deny'] === 1
+        && row[operation === 'create' ? 'operation_create' : 'operation_revoke'] === 1))));
+  }) && !ceilingRows.some(row => row.effect === 'deny' && (row.active ?? 1) === 1
+    && CONTROL_PLANE_CEILINGS.some(([domain, capability]) => row.authority_domain === domain && row.capability === capability)
+    && delegations.some(parent => parent.id === row.parent_delegation_id && parent.actor_staff_id === ownerStaffId
+      && parent.capability === (row.authority_domain === 'directory' ? 'staff.directory_grant.manage' : 'staff.admin_delegation.manage')
+      && parent.contract_version === 1 && parent.effect === 'allow' && parent.active === 1));
 }
 
 /**
@@ -221,23 +340,33 @@ export function composeNativeStaffBootstrapArtifact({ reviewedSnapshot, proposed
   const cp = controlPlaneStaffIds.map(value => requireId(value, 'control_plane_invalid'));
   if (canonicalJson([...cp].sort()) !== canonicalJson([...snapshot.controlPlaneStaffIds].sort())
     || new Set(cp).size !== cp.length) fail('control_plane_mismatch');
-  const protectedRows = validatePreservedStaff(state, preservationRoles, cp);
+  const protectedRows = validatePreservedStaff(state, preservationRoles);
   const preservedIds = new Set(protectedRows.map(row => row.staffId));
   const cohortIdSet = new Set(cohort);
   for (const id of cohort) if (!staffMap(state).has(id)) fail('cohort_identity_missing');
   const derived = identityRows(state, cohort, preservationRoles.ownerStaffId, preservationRoles.kstirnStaffId,
     preservationRoles.ownerStaffId);
-  const supplied = validateExplicitRows(explicitPolicyRows, state, cohortIdSet, preservedIds);
+  const supplied = validateExplicitRows(explicitPolicyRows, state, cohortIdSet, preservedIds, preservationRoles.ownerStaffId);
+  const ownerIncludedInPolicy = supplied.some(item => item.table === 'native_staff_management_delegations'
+    && item.row.actor_staff_id === preservationRoles.ownerStaffId);
+  const ownerPackageComplete = !ownerIncludedInPolicy || validateOwnerInitialAuthorityPackage(supplied, preservationRoles.ownerStaffId);
+  const ownerCandidate = ownerPackageComplete && (cp.includes(preservationRoles.ownerStaffId)
+    ? (!ownerIncludedInPolicy || ownerWillBeControlPlaneCandidate(state, preservationRoles.ownerStaffId, supplied))
+    : ownerIncludedInPolicy && ownerWillBeControlPlaneCandidate(state, preservationRoles.ownerStaffId, supplied));
+  if (!ownerCandidate) fail(ownerIncludedInPolicy ? 'owner_control_plane_package_incomplete' : 'owner_not_control_plane_candidate');
+  const plannedControlPlaneStaffIds = [...new Set([...cp, preservationRoles.ownerStaffId])].sort();
   const cmp = (left, right) => left < right ? -1 : left > right ? 1 : 0;
   const rows = [...derived, ...supplied].sort((left, right) => ORDER[left.table] - ORDER[right.table]
     || cmp(left.table, right.table) || cmp(canonicalJson(left.row), canonicalJson(right.row)));
   const plan = { kind: 'operations-native-staff-bootstrap-install-v1', reviewedSnapshotSha256: snapshot.snapshotSha256,
-    approvalId, staffCohort: cohort, controlPlaneStaffIds: [...cp].sort(), rows };
+    approvalId, staffCohort: cohort, controlPlaneStaffIds: plannedControlPlaneStaffIds, rows };
   const inactiveStaffHistorySha256 = inactiveHistoryDigest(state);
   const binding = { kind: 'operations-native-staff-binding-review-v1', schemaVersion: 1,
     status: 'draft-not-approved', decisionReference, reviewedSnapshotSha256: snapshot.snapshotSha256,
     cohortIdentityBindings: cohort.map(staffId => ({ staffId, accessSubjectSha256: sha256(state.rows.staff_users.find(row => row.id === staffId).access_subject) })),
-    explicitPolicyRowsSha256: sha256(canonicalJson(supplied)), preservation: {
+    explicitPolicyRowsSha256: sha256(canonicalJson(supplied)),
+    observedControlPlaneStaffIds: [...cp].sort(), plannedControlPlaneStaffIds,
+    preservation: {
       protectedStaff: protectedRows, inactiveStaffHistorySha256,
       clientStateMutation: 'not-requested; directory grant and client assignment rows are excluded from this composer',
       installerMutationMode: 'existing-approved-installer-insert-only-atomic-batch',
