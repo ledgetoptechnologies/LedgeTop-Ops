@@ -56,16 +56,23 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
 
 function reconcileStorageMutations(processing,storage,limit=20){const results=[];for(const mutation of processing.pendingStorageMutations(limit)){try{results.push(applyStorageMutation(processing,storage,mutation));}catch(error){results.push({id:mutation.id,status:'failed',errorCode:error.code||'lifecycle_failed'});}}return results;}
 
+const trashScanCursors=new WeakMap();
 function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit=20,onPurged=null}={}){
   const results=[];
   const batchLimit=Math.max(1,Math.min(Number(limit)||20,100));
-  for(const item of processing.expiredTrash()){
+  // Rotate through at most 100 expired records per maintenance pass. A
+  // protected prefix cannot cause unbounded scans or starve later records.
+  const page=processing.expiredTrashPage(trashScanCursors.get(processing)||0,100);
+  if(!page.length){trashScanCursors.delete(processing);return results;}
+  for(const entry of page){
     if(results.length>=batchLimit)break;
+    trashScanCursors.set(processing,entry.rowId);
+    const item=entry.item;
     try{
       // Protected entries do not consume the work budget; check containers as
       // well as standalone datasets before attempting any child purge.
       if(item.entityType==='dataset'&&processing.datasetHasRetainedCsv(item.entityId))continue;
-      if(['project','task'].includes(item.entityType)&&processing.listContainerTrashMembers(item.id).some(member=>member.entityType==='dataset'&&processing.datasetHasRetainedCsv(member.entityId)))continue;
+      if(['project','task'].includes(item.entityType)&&processing.containerHasRetainedCsv(item.id))continue;
       if(item.entityType==='output'&&require('./outputSupersession').automaticSupersessionTrash(processing,item.id)){results.push({trashId:item.id,status:'deferred',errorCode:'supersession_reverification_required'});continue;}
       if(item.entityType==='project'||item.entityType==='task'){
         const {purgeContainerTrash}=require('./containerLifecycle');
