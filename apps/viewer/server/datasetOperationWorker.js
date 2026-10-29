@@ -54,14 +54,8 @@ async function adoptImport(operation, { processing, storage }, owner, updateProg
   const payload = JSON.parse(operation.payload_json || '{}');
   const existing = processing.getDataset(operation.dataset_id, true);
   const finishAuthorizationAndSource = () => {
-    if (payload.storageMode === 'adopted' && ['dataset_import', 'terra_import'].includes(payload.rootKey)) {
-      try {
-        const source = storage.resolve(payload.rootKey, payload.relativePath, { mustExist: true });
-        storage.removeAdoptedSource(source);
-      } catch (error) {
-        if (error.code !== 'ENOENT') throw error;
-      }
-    }
+    // Generic imports retain their original tree, even on replay or if the
+    // source pathname was replaced after the copy.
     if (!processing.consumeOperationImportPreview(operation.id, payload.previewId))
       throw Object.assign(new Error('import authorization was lost'), { code: 'preview_claim_lost' });
   };
@@ -74,6 +68,7 @@ async function adoptImport(operation, { processing, storage }, owner, updateProg
   const externalReference = payload.storageMode === 'external_reference';
   const adopted = await storage.adoptImport(payload.rootKey, payload.relativePath, existing.relativePath, {
     externalReference,
+    preserveSource: !externalReference,
     expectedFingerprint: payload.treeFingerprint,
     onProgress: updateProgress,
   });

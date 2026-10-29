@@ -43,6 +43,62 @@ async function hashTree(root,{signal=null}={}) {
 
 function readHead(filePath,maxBytes=256*1024) { const fd=fs.openSync(filePath,'r');try{const stat=fs.fstatSync(fd),buffer=Buffer.allocUnsafe(Math.min(maxBytes,stat.size));const bytes=fs.readSync(fd,buffer,0,buffer.length,0);return buffer.subarray(0,bytes);}finally{fs.closeSync(fd);} }
 
+// Open every source component without following symlinks, anchored to the
+// already opened import directory. Linux /proc is required for descriptor-
+// relative traversal; fail closed when it is unavailable.
+function openPinnedSource(rootFd, relativePath) {
+  const parts=relativePath.split('/'),opened=[];
+  try {
+    let parent=rootFd;
+    for(const part of parts.slice(0,-1)){
+      const fd=fs.openSync(`/proc/self/fd/${parent}/${part}`,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC);
+      opened.push(fd);parent=fd;
+    }
+    const fd=fs.openSync(`/proc/self/fd/${parent}/${parts.at(-1)}`,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC|fs.constants.O_NONBLOCK);
+    try {if(!fs.fstatSync(fd).isFile())throw new Error('import source is not a regular file');}
+    catch(error){fs.closeSync(fd);throw error;}
+    return fd;
+  } finally { for(const fd of opened.reverse())fs.closeSync(fd); }
+}
+
+function openPinnedDirectory(root, relativePath) {
+  let fd=fs.openSync(fs.realpathSync.native(root),fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC);
+  try {
+    for(const part of relativePath.split('/')) {
+      const next=fs.openSync(`/proc/self/fd/${fd}/${part}`,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC);
+      fs.closeSync(fd);fd=next;
+    }
+    return fd;
+  } catch(error) {fs.closeSync(fd);throw error;}
+}
+
+function scanPinnedTree(rootFd, root, maxFiles) {
+  const files=[];let byteSize=0;
+  const walk=(directoryFd,rel='')=>{
+    for(const entry of fs.readdirSync(`/proc/self/fd/${directoryFd}`,{withFileTypes:true})) {
+      const childRel=rel?`${rel}/${entry.name}`:entry.name;
+      if(entry.isSymbolicLink())throw new Error('import may not contain symbolic links');
+      if(entry.isDirectory()) {
+        const fd=fs.openSync(`/proc/self/fd/${directoryFd}/${entry.name}`,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC);
+        try{walk(fd,childRel);}finally{fs.closeSync(fd);}
+      } else if(entry.isFile()) {
+        if(files.length>=maxFiles)throw new Error('import contains too many files');
+        const fd=fs.openSync(`/proc/self/fd/${directoryFd}/${entry.name}`,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC|fs.constants.O_NONBLOCK);
+        let stat;try{stat=fs.fstatSync(fd,{bigint:true});if(!stat.isFile())throw new Error('import contains unsupported special files');}finally{fs.closeSync(fd);}
+        const size=Number(stat.size);if(!Number.isSafeInteger(size))throw new Error('import file is too large to index safely');byteSize+=size;if(!Number.isSafeInteger(byteSize))throw new Error('import is too large to index safely');
+        files.push({relativePath:childRel,byteSize:size,mtimeMs:Number(stat.mtimeNs/1000000n),ctimeMs:Number(stat.ctimeNs/1000000n),absolutePath:path.join(root,...childRel.split('/'))});
+      } else throw new Error('import contains unsupported special files');
+    }
+  };
+  walk(rootFd);files.sort((a,b)=>a.relativePath.localeCompare(b.relativePath));return {root,files,byteSize};
+}
+
+function capturedTreeFingerprint(scan) {
+  const hash=crypto.createHash('sha256');
+  for(const file of scan.files){if(!/^[a-f0-9]{64}$/.test(file.sha256||''))throw new Error('import source hash missing');hash.update(`${file.relativePath}\0${file.byteSize}\0${file.sha256}\n`);}
+  return hash.digest('hex');
+}
+
 function jpegMetadata(buffer) {
   const result = {};
   if (!Buffer.isBuffer(buffer) || buffer.length < 4 || buffer.readUInt16BE(0) !== 0xffd8) return result;
@@ -134,27 +190,45 @@ class StorageManager {
   cleanupUpload(uploadId){fs.rmSync(this.resolve('cache',`uploads/${uploadId}`),{recursive:true,force:true});}
   async assembleFile(upload,fileSpec,chunks,datasetRelative) { const output=this.resolve('datasets',`${datasetRelative}/${fileSpec.relativePath}`),result=(stat,sha)=>({id:fileSpec.id,relativePath:fileSpec.relativePath,byteSize:stat.size,sha256:sha,contentType:fileSpec.contentType||null,processingRole:fileSpec.processingRole||'auto',metadata:jpegMetadata(readHead(output))});fs.mkdirSync(path.dirname(output),{recursive:true});if(fs.existsSync(output)){const stat=fs.statSync(output),sha=await hashFile(output);if(stat.size!==fileSpec.byteSize||sha!==fileSpec.sha256)throw Object.assign(new Error('existing finalized file conflicts with manifest'),{code:'manifest_mismatch'});return result(stat,sha);}const temp=`${output}.${crypto.randomUUID()}.incomplete`;try{const sources=async function*(){for(const chunk of chunks){const input=fs.createReadStream(this.chunkPath(upload.id,fileSpec.id,chunk.chunk_index));for await(const bytes of input)yield bytes;}}.bind(this);await pipeline(sources(),fs.createWriteStream(temp,{flags:'wx'}));const stat=fs.statSync(temp);const sha=await hashFile(temp);if(stat.size!==fileSpec.byteSize||sha!==fileSpec.sha256)throw Object.assign(new Error('assembled file does not match manifest'),{code:'manifest_mismatch'});fs.renameSync(temp,output);return result(stat,sha);}catch(error){fs.rmSync(temp,{force:true});throw error;} }
   scanTree(rootKey,relativePath,{maxFiles=100000}={}) { const root=this.resolve(rootKey,relativePath,{mustExist:true});const stat=fs.lstatSync(root);if(!stat.isDirectory())throw new Error('import source must be a directory');const files=[];let bytes=0;const walk=(dir,rel='')=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){if(files.length>=maxFiles)throw new Error('import contains too many files');const childRel=rel?`${rel}/${entry.name}`:entry.name;const child=path.join(dir,entry.name);const childStat=fs.lstatSync(child,{bigint:true});if(childStat.isSymbolicLink())throw new Error('import may not contain symbolic links');if(childStat.isDirectory())walk(child,childRel);else if(childStat.isFile()){const byteSize=Number(childStat.size);if(!Number.isSafeInteger(byteSize))throw new Error('import file is too large to index safely');files.push({relativePath:childRel,byteSize,mtimeMs:Number(childStat.mtimeNs/1000000n),ctimeMs:Number(childStat.ctimeNs/1000000n),absolutePath:child});bytes+=byteSize;if(!Number.isSafeInteger(bytes))throw new Error('import is too large to index safely');}else throw new Error('import contains unsupported special files');}};walk(root);files.sort((a,b)=>a.relativePath.localeCompare(b.relativePath));return {root,files,byteSize:bytes}; }
-  async treeFingerprint(scan,{captureHashes=false,signal=null,onProgress=()=>{}}={}) { const hash=crypto.createHash('sha256');for(let index=0;index<scan.files.length;index+=1){const file=scan.files[index],sha256=await hashFile(file.absolutePath,{signal});if(captureHashes)file.sha256=sha256;hash.update(`${file.relativePath}\0${file.byteSize}\0${sha256}\n`);await onProgress((index+1)/Math.max(1,scan.files.length));}return hash.digest('hex');}
-  async previewImport(rootKey,relativePath,{maxFiles=100000,signal=null,onProgress=()=>{}}={}) { const scan=this.scanTree(rootKey,relativePath,{maxFiles});await onProgress(0.05);const destinationSpace=this.space('datasets',scan.byteSize),treeFingerprint=await this.treeFingerprint(scan,{signal,onProgress:(value)=>onProgress(0.05+0.9*value)});await onProgress(0.98);return {rootKey,relativePath:safeRelativePath(relativePath),fileCount:scan.files.length,byteSize:scan.byteSize,treeFingerprint,files:scan.files.slice(0,1000).map(({absolutePath,...file})=>file),truncated:scan.files.length>1000,sameFilesystem:fs.statSync(scan.root).dev===fs.statSync(this.roots.datasets).dev,destinationSpace}; }
+  async treeFingerprint(scan,{captureHashes=false,signal=null,onProgress=()=>{},sourceFd=null}={}) { const hash=crypto.createHash('sha256');for(let index=0;index<scan.files.length;index+=1){const file=scan.files[index];let fd;try{if(sourceFd!==null)fd=openPinnedSource(sourceFd,file.relativePath);const sha256=await hashFile(fd===undefined?file.absolutePath:`/proc/self/fd/${fd}`,{signal});if(captureHashes)file.sha256=sha256;hash.update(`${file.relativePath}\0${file.byteSize}\0${sha256}\n`);}finally{if(fd!==undefined)fs.closeSync(fd);}await onProgress((index+1)/Math.max(1,scan.files.length));}return hash.digest('hex');}
+  async previewImport(rootKey,relativePath,{maxFiles=100000,signal=null,onProgress=()=>{}}={}) { const root=this.resolve(rootKey,relativePath,{mustExist:true}),fd=openPinnedDirectory(this.roots[physicalStorageRootKey(rootKey)],safeRelativePath(relativePath));try{const scan=scanPinnedTree(fd,root,maxFiles);await onProgress(0.05);const destinationSpace=this.space('datasets',scan.byteSize),treeFingerprint=await this.treeFingerprint(scan,{sourceFd:fd,signal,onProgress:(value)=>onProgress(0.05+0.9*value)});await onProgress(0.98);return {rootKey,relativePath:safeRelativePath(relativePath),fileCount:scan.files.length,byteSize:scan.byteSize,treeFingerprint,files:scan.files.slice(0,1000).map(({absolutePath,...file})=>file),truncated:scan.files.length>1000,sameFilesystem:fs.fstatSync(fd).dev===fs.statSync(this.roots.datasets).dev,destinationSpace};}finally{fs.closeSync(fd);} }
   // Same-device adoption is an atomic rename. Deterministic destination and
   // `.incomplete` paths make a killed worker resumable without re-copying or
   // losing the source authorization boundary.
-  async adoptImport(rootKey,relativePath,datasetRelative,{externalReference=false,expectedFingerprint=null,maxFiles=100000,onProgress=()=>{}}={}) {
+  async adoptImport(rootKey,relativePath,datasetRelative,{externalReference=false,preserveSource=false,expectedFingerprint=null,maxFiles=100000,onProgress=()=>{}}={}) {
+    if(preserveSource&&!/^[a-f0-9]{64}$/.test(expectedFingerprint||''))throw Object.assign(new Error('approved import fingerprint is required'),{code:'invalid_import_fingerprint'});
     const destination=this.resolve('datasets',datasetRelative),incomplete=`${destination}.incomplete`;
+    // A promoted, verified destination is sufficient for recovery even when
+    // the original source was later removed or replaced with an unsafe path.
+    if(preserveSource&&!externalReference&&fs.existsSync(destination)){
+      const fd=fs.openSync(destination,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC);
+      try{const scan=scanPinnedTree(fd,destination,maxFiles),fingerprint=await this.treeFingerprint(scan,{captureHashes:true,sourceFd:fd});if(expectedFingerprint&&fingerprint!==expectedFingerprint)throw Object.assign(new Error('existing import destination conflicts with manifest'),{code:'manifest_mismatch'});for(const file of scan.files){const fileFd=openPinnedSource(fd,file.relativePath);try{file.metadata=jpegMetadata(readHead(`/proc/self/fd/${fileFd}`));}finally{fs.closeSync(fileFd);}}fsyncDirectoryTree(destination,{code:'import_durability_failed'});fsyncDirectory(path.dirname(destination),{code:'import_durability_failed'});return{rootKey:'datasets',relativePath:datasetRelative,scan,sourceToRemove:null};}finally{fs.closeSync(fd);}
+    }
     let source=null,before=null;
-    try{source=this.resolve(rootKey,relativePath,{mustExist:true});before=this.scanTree(rootKey,relativePath,{maxFiles});}catch(error){if(error.code!=='ENOENT'&&!/ENOENT/.test(error.message))throw error;}
-    if(externalReference){if(!before)throw Object.assign(new Error('import source is unavailable'),{code:'import_source_unavailable'});const fingerprint=await this.treeFingerprint(before,{captureHashes:true});if(expectedFingerprint&&fingerprint!==expectedFingerprint)throw Object.assign(new Error('import source changed after preview'),{code:'import_changed'});for(const file of before.files)file.metadata=jpegMetadata(readHead(file.absolutePath));return{rootKey,relativePath:safeRelativePath(relativePath),scan:before,sourceToRemove:null};}
-    const scanAndHash=async(root)=>{const scan=this.scanAbsolute(root,{maxFiles});await this.treeFingerprint(scan,{captureHashes:true});for(const file of scan.files)file.metadata=jpegMetadata(readHead(file.absolutePath));return scan;};
-    if(fs.existsSync(destination)){const scan=await scanAndHash(destination),fingerprint=await this.treeFingerprint(scan);if(expectedFingerprint&&fingerprint!==expectedFingerprint)throw Object.assign(new Error('existing import destination conflicts with manifest'),{code:'manifest_mismatch'});fsyncDirectoryTree(destination,{code:'import_durability_failed'});fsyncDirectory(path.dirname(destination),{code:'import_durability_failed'});return{rootKey:'datasets',relativePath:datasetRelative,scan,sourceToRemove:source};}
-    if(fs.existsSync(incomplete)&&!before){const staged=await scanAndHash(incomplete),fingerprint=await this.treeFingerprint(staged);if(expectedFingerprint&&fingerprint!==expectedFingerprint)throw Object.assign(new Error('staged import conflicts with manifest'),{code:'manifest_mismatch'});fsyncDirectoryTree(incomplete,{code:'import_durability_failed'});fs.renameSync(incomplete,destination);fsyncDirectory(path.dirname(destination),{code:'import_durability_failed'});return{rootKey:'datasets',relativePath:datasetRelative,scan:await scanAndHash(destination),sourceToRemove:null};}
+    try{source=this.resolve(rootKey,relativePath,{mustExist:true});if(preserveSource||externalReference){const fd=openPinnedDirectory(this.roots[physicalStorageRootKey(rootKey)],safeRelativePath(relativePath));try{before=scanPinnedTree(fd,source,maxFiles);}finally{fs.closeSync(fd);}}else before=this.scanTree(rootKey,relativePath,{maxFiles});}catch(error){if(error.code!=='ENOENT'&&!/ENOENT/.test(error.message))throw error;}
+    if(externalReference){if(!before)throw Object.assign(new Error('import source is unavailable'),{code:'import_source_unavailable'});const fd=openPinnedDirectory(this.roots[physicalStorageRootKey(rootKey)],safeRelativePath(relativePath));try{const fingerprint=await this.treeFingerprint(before,{captureHashes:true,sourceFd:fd});if(expectedFingerprint&&fingerprint!==expectedFingerprint)throw Object.assign(new Error('import source changed after preview'),{code:'import_changed'});for(const file of before.files){const fileFd=openPinnedSource(fd,file.relativePath);try{file.metadata=jpegMetadata(readHead(`/proc/self/fd/${fileFd}`));}finally{fs.closeSync(fileFd);}}return{rootKey,relativePath:safeRelativePath(relativePath),scan:before,sourceToRemove:null};}finally{fs.closeSync(fd);}}
+    const scanAndHash=async(root)=>{if(!preserveSource){const scan=this.scanAbsolute(root,{maxFiles});await this.treeFingerprint(scan,{captureHashes:true});for(const file of scan.files)file.metadata=jpegMetadata(readHead(file.absolutePath));return scan;}const fd=fs.openSync(root,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC);try{const scan=scanPinnedTree(fd,root,maxFiles);await this.treeFingerprint(scan,{captureHashes:true,sourceFd:fd});for(const file of scan.files){const fileFd=openPinnedSource(fd,file.relativePath);try{file.metadata=jpegMetadata(readHead(`/proc/self/fd/${fileFd}`));}finally{fs.closeSync(fileFd);}}return scan;}finally{fs.closeSync(fd);}};
+    const fingerprintScan=scan=>preserveSource?capturedTreeFingerprint(scan):this.treeFingerprint(scan);
+    if(fs.existsSync(destination)){const scan=await scanAndHash(destination),fingerprint=await fingerprintScan(scan);if(expectedFingerprint&&fingerprint!==expectedFingerprint)throw Object.assign(new Error('existing import destination conflicts with manifest'),{code:'manifest_mismatch'});fsyncDirectoryTree(destination,{code:'import_durability_failed'});fsyncDirectory(path.dirname(destination),{code:'import_durability_failed'});return{rootKey:'datasets',relativePath:datasetRelative,scan,sourceToRemove:source};}
+    if(fs.existsSync(incomplete)&&!before){const staged=await scanAndHash(incomplete),fingerprint=await fingerprintScan(staged);if(expectedFingerprint&&fingerprint!==expectedFingerprint)throw Object.assign(new Error('staged import conflicts with manifest'),{code:'manifest_mismatch'});fsyncDirectoryTree(incomplete,{code:'import_durability_failed'});fs.renameSync(incomplete,destination);fsyncDirectory(path.dirname(destination),{code:'import_durability_failed'});return{rootKey:'datasets',relativePath:datasetRelative,scan:await scanAndHash(destination),sourceToRemove:null};}
     if(!before||!source)throw Object.assign(new Error('import source is unavailable'),{code:'import_source_unavailable'});
-    const fingerprint=await this.treeFingerprint(before,{captureHashes:true});if(expectedFingerprint&&fingerprint!==expectedFingerprint)throw Object.assign(new Error('import source changed after preview'),{code:'import_changed'});for(const file of before.files)file.metadata=jpegMetadata(readHead(file.absolutePath));
-    const sameDevice=fs.statSync(source).dev===fs.statSync(this.roots.datasets).dev;if(!sameDevice)this.requireSpace('datasets',before.byteSize);fs.mkdirSync(path.dirname(destination),{recursive:true});fs.rmSync(incomplete,{recursive:true,force:true});
+    const sourceFd=preserveSource?openPinnedDirectory(this.roots[physicalStorageRootKey(rootKey)],safeRelativePath(relativePath)):null;
+    try {
+    const fingerprint=await this.treeFingerprint(before,{captureHashes:true,sourceFd});if(expectedFingerprint&&fingerprint!==expectedFingerprint)throw Object.assign(new Error('import source changed after preview'),{code:'import_changed'});for(const file of before.files){let fd;try{if(sourceFd!==null)fd=openPinnedSource(sourceFd,file.relativePath);file.metadata=jpegMetadata(readHead(fd===undefined?file.absolutePath:`/proc/self/fd/${fd}`));}finally{if(fd!==undefined)fs.closeSync(fd);}}
+    const sameDevice=(sourceFd===null?fs.statSync(source):fs.fstatSync(sourceFd)).dev===fs.statSync(this.roots.datasets).dev;fs.mkdirSync(path.dirname(destination),{recursive:true});
+    if(preserveSource&&fs.existsSync(incomplete)){
+      let staged=null;try{const stat=fs.lstatSync(incomplete);if(stat.isDirectory()&&!stat.isSymbolicLink())staged=await scanAndHash(incomplete);}catch{/* keep uncertain residue rather than deleting it */}
+      if(staged&&capturedTreeFingerprint(staged)===fingerprint){fsyncDirectoryTree(incomplete,{code:'import_durability_failed'});fs.renameSync(incomplete,destination);fsyncDirectory(path.dirname(destination),{code:'import_durability_failed'});return{rootKey:'datasets',relativePath:datasetRelative,scan:await scanAndHash(destination),sourceToRemove:null};}
+      const retained=`${incomplete}.retained-${crypto.randomUUID()}`;fs.renameSync(incomplete,retained);fsyncDirectory(path.dirname(incomplete),{code:'import_durability_failed'});
+    }
+    if(!sameDevice||preserveSource)this.requireSpace('datasets',before.byteSize);
+    if(!preserveSource)fs.rmSync(incomplete,{recursive:true,force:true});
     try{
-      if(sameDevice){fs.renameSync(source,incomplete);fsyncDirectory(path.dirname(incomplete),{code:'import_durability_failed'});fsyncDirectory(path.dirname(source),{code:'import_durability_failed'});}
-      else{for(let index=0;index<before.files.length;index+=1){const file=before.files[index],target=path.join(incomplete,...file.relativePath.split('/'));fs.mkdirSync(path.dirname(target),{recursive:true});await pipeline(fs.createReadStream(file.absolutePath),fs.createWriteStream(target,{flags:'wx'}));await onProgress(0.7*(index+1)/Math.max(1,before.files.length));}}
-      const staged=await scanAndHash(incomplete),stagedFingerprint=await this.treeFingerprint(staged);if(stagedFingerprint!==fingerprint)throw Object.assign(new Error('adopted import verification failed'),{code:'manifest_mismatch'});fsyncDirectoryTree(incomplete,{code:'import_durability_failed'});fs.renameSync(incomplete,destination);fsyncDirectory(path.dirname(destination),{code:'import_durability_failed'});const scan=await scanAndHash(destination);await onProgress(0.98);return{rootKey:'datasets',relativePath:datasetRelative,scan,sourceToRemove:sameDevice?null:source};
-    }catch(error){if(!sameDevice)fs.rmSync(incomplete,{recursive:true,force:true});throw error;}
+      if(sameDevice&&!preserveSource){fs.renameSync(source,incomplete);fsyncDirectory(path.dirname(incomplete),{code:'import_durability_failed'});fsyncDirectory(path.dirname(source),{code:'import_durability_failed'});}
+      else{for(let index=0;index<before.files.length;index+=1){const file=before.files[index],target=path.join(incomplete,...file.relativePath.split('/'));fs.mkdirSync(path.dirname(target),{recursive:true});const input=preserveSource?fs.createReadStream(null,{fd:openPinnedSource(sourceFd,file.relativePath),autoClose:true}):fs.createReadStream(file.absolutePath);await pipeline(input,fs.createWriteStream(target,{flags:'wx'}));await onProgress(0.7*(index+1)/Math.max(1,before.files.length));}}
+      const staged=await scanAndHash(incomplete),stagedFingerprint=await fingerprintScan(staged);if(stagedFingerprint!==fingerprint)throw Object.assign(new Error('adopted import verification failed'),{code:'manifest_mismatch'});fsyncDirectoryTree(incomplete,{code:'import_durability_failed'});fs.renameSync(incomplete,destination);fsyncDirectory(path.dirname(destination),{code:'import_durability_failed'});const scan=await scanAndHash(destination);await onProgress(0.98);return{rootKey:'datasets',relativePath:datasetRelative,scan,sourceToRemove:sameDevice?null:source};
+    }catch(error){if(!sameDevice&&!preserveSource)fs.rmSync(incomplete,{recursive:true,force:true});throw error;}
+    } finally { if(sourceFd!==null)fs.closeSync(sourceFd); }
   }
   scanAbsolute(root,{maxFiles=100000}={}) { const files=[];let byteSize=0;const walk=(dir,rel='')=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){if(files.length>=maxFiles)throw new Error('too many files');const p=path.join(dir,entry.name),r=rel?`${rel}/${entry.name}`:entry.name,s=fs.lstatSync(p);if(s.isSymbolicLink())throw new Error('symbolic links are forbidden');if(s.isDirectory())walk(p,r);else if(s.isFile()){files.push({absolutePath:p,relativePath:r,byteSize:s.size,mtimeMs:Math.trunc(s.mtimeMs),ctimeMs:Math.trunc(s.ctimeMs)});byteSize+=s.size;}else throw new Error('special files are forbidden');}};walk(root);files.sort((a,b)=>a.relativePath.localeCompare(b.relativePath));return{files,byteSize}; }
   async removeAdoptedSourceIfMatches(rootKey,relativePath,{fingerprint,byteSize,cleanupId,sourceDev,sourceIno,sourceCtimeNs,sourceMtimeNs,maxFiles=100000}={}){
