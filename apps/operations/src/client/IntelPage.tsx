@@ -3,6 +3,7 @@ import { EmptyState, Skeleton } from "@ltds/ui";
 import { UNKNOWN_REASON_TEXT, type EvidenceState, type FetchStatus, type StaffTenantView, type UnknownReason } from "@ltds/shared/competitor-intel";
 import { ApiError } from "./api";
 import { CompetitorIntelTenant } from "./CompetitorIntel";
+import { formatGoogleAdsConversions, formatGoogleAdsCostMicros, formatGoogleAdsWhole } from "./intel-format";
 import {
   INTEL_RANGES, IntelUnavailable, loadCompetitors, loadGoogleAds, loadIntelBusinesses, loadSearchStats, loadWebsiteMonitor,
   type GoogleAdsSummary, type IntelBusiness, type IntelRange, type SearchRow, type SearchStats, type SiteChangeType, type SourceReason, type StatedFact, type WebsiteMonitor,
@@ -168,7 +169,7 @@ function BusinessSummary({ business, go }: { business: IntelBusiness; go: Go }) 
         value.totals.impressions === null ? "Impressions not available" : plural(value.totals.impressions, "impression", "impressions"),
         value.freshness.stale ? "Out of date" : ""]} />
       <SummaryRow {...row("ads")} state={ads} retry={retryAds} summary={value => value.totals.state === "observed"
-        ? [`${adsCost(value.totals.costMicros!, value.currencyCode!)} spent`, adsCountText(value.totals.clicks!, "click", "clicks")]
+        ? [`${formatGoogleAdsCostMicros(value.totals.costMicros!, value.currencyCode!)} spent`, adsCountText(value.totals.clicks!, "click", "clicks")]
         : [unknownText(adsEvidence(value.totals.state), value.totals.reason)]} />
     </ul>
   </section>;
@@ -349,14 +350,8 @@ function Search({ business, range }: { business: IntelBusiness; range: IntelRang
   </Status>;
 }
 
-/** Exact amounts from the feed's decimal strings: whole numbers stay whole, cost is micros of the account currency. */
-const adsWhole = (value: string) => BigInt(value).toLocaleString();
-const adsCountText = (value: string, one: string, many: string) => `${adsWhole(value)} ${value === "1" ? one : many}`;
-function adsCost(micros: string, currency: string) {
-  const cents = (BigInt(micros) + 5_000n) / 10_000n;
-  return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(Number(cents) / 100);
-}
-const adsConversions = (value: string) => Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
+/** Exact values from decimal feed strings; currency display rounds once to native minor-unit precision. */
+const adsCountText = (value: string, one: string, many: string) => `${formatGoogleAdsWhole(value)} ${value === "1" ? one : many}`;
 /** The Ads states, in the wording the other sources use. */
 const adsEvidence = (state: GoogleAdsSummary["totals"]["state"]): EvidenceState =>
   state === "observed" ? "observed" : state === "failed" ? "failed" : state === "no_account" ? "not_connected" : "unknown";
@@ -382,10 +377,10 @@ function GoogleAds({ business, range }: { business: IntelBusiness; range: IntelR
         <Freshness range={period} fetchedAt={ads.freshness.collectedAt} stale={totals.state === "source_stale"} source="Google Ads" />
         <Coverage notes={notes} />
         <div className="intel-metrics" role="list" aria-label="Google Ads totals">
-          <Metric label="Spend" value={figure(totals.costMicros, value => adsCost(value, currencyCode))} />
-          <Metric label="Impressions" value={figure(totals.impressions, adsWhole)} />
-          <Metric label="Clicks" value={figure(totals.clicks, adsWhole)} />
-          <Metric label="Conversions" value={figure(totals.conversions, adsConversions)} />
+          <Metric label="Spend" value={figure(totals.costMicros, value => formatGoogleAdsCostMicros(value, currencyCode))} />
+          <Metric label="Impressions" value={figure(totals.impressions, formatGoogleAdsWhole)} />
+          <Metric label="Clicks" value={figure(totals.clicks, formatGoogleAdsWhole)} />
+          <Metric label="Conversions" value={figure(totals.conversions, formatGoogleAdsConversions)} />
         </div>
       </>;
     }}

@@ -1,6 +1,7 @@
 import type { EvidenceState, FetchStatus, StaffTenantView } from "@ltds/shared/competitor-intel";
 import { ApiError, api } from "./api";
 import { bool, isTenantView, list, num, oneOf, orNull, shape, str, text, type Check } from "./intel-validate";
+import { isGoogleAdsInt63 } from "./intel-format";
 
 /** Ledge Top's own businesses, as the server lets this person see them. Intel is internal: clients never see it. */
 export type IntelBusiness = { key: string; name: string };
@@ -111,7 +112,7 @@ const isWebsite = shape({
     dataRange: orNull(span), partial: bool, partialReason: reason, limits: list(text) }),
   receipt,
 });
-const whole: Check = value => typeof value === "string" && /^(?:0|[1-9][0-9]{0,18})$/.test(value);
+const whole: Check = isGoogleAdsInt63;
 const metric: Check = value => typeof value === "string" && /^(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,6})?$/.test(value);
 const zone: Check = value => {
   if (typeof value !== "string" || !value || value.length > 64) return false;

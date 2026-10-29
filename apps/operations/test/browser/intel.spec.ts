@@ -381,6 +381,8 @@ for (const [label, json] of [
   ["figures that disagree with their state", { ...ads(), totals: { ...ads().totals, state: "unknown", reason: "not_checked" } }],
   ["observed totals with a missing figure", { ...ads(), totals: { ...ads().totals, clicks: null } }],
   ["a non-numeric amount", { ...ads(), totals: { ...ads().totals, costMicros: "12.5" } }],
+  ["spend above the feed's signed-int63 limit", { ...ads(), totals: { ...ads().totals, costMicros: "9223372036854775808" } }],
+  ["clicks above the feed's signed-int63 limit", { ...ads(), totals: { ...ads().totals, clicks: "9223372036854775808" } }],
   ["an unknown schema", { ...ads(), schema: "ops.intel.owner-google-ads.v2" }],
 ] as const)
   test(`a Google Ads reply with ${label} shows an error, not numbers`, async ({ page }) => {
@@ -389,4 +391,16 @@ for (const [label, json] of [
     await expect(page.getByText("This view couldn't be loaded.")).toBeVisible();
     await expect(page.getByRole("list", { name: "Google Ads totals" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
+  });
+
+for (const [currencyCode, spend] of [["JPY", "¥1"], ["USD", "$1.23"], ["KWD", "KWD 1.235"]] as const)
+  test(`Google Ads preserves conversion precision and rounds ${currencyCode} spend only once`, async ({ page }) => {
+    await mockOps(page, { sections: { "drone-services/google-ads": { json: {
+      ...ads(), currencyCode,
+      totals: { ...ads().totals, costMicros: "1234567", conversions: "900719925474099.123456" },
+    } } } });
+    await page.goto("/intel?business=drone-services&view=ads&range=28d");
+    const totals = page.getByRole("list", { name: "Google Ads totals" });
+    await expect(totals).toContainText(`Spend${spend}`);
+    await expect(totals).toContainText("Conversions900,719,925,474,099.123456");
   });
