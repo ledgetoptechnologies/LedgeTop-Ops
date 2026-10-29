@@ -521,6 +521,25 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       return this.getAttempt(id); });
   }
   getAttempt(id) { return this.attempt(this.database.prepare('SELECT * FROM processing_attempts WHERE id=?').get(id)) || null; }
+  // Unexposed draft transaction. Database admission is hard-disabled; this
+  // neither pins source bytes nor queues work or establishes custody.
+  createReferenceAttemptDraft(input) { return this.transaction(()=>{
+    const task=this.getTask(input.taskId),dataset=task&&this.getDataset(task.datasetId,true),project=task&&this.getProject(task.projectId),provider=this.database.prepare('SELECT * FROM viewer_reference_providers WHERE id=?').get(input.referenceProviderId);
+    if(!task||task.status==='archived'||!dataset||dataset.status!=='finalized'||dataset.storageMode!=='managed'||!project||project.status!=='active'||dataset.projectId!==project.id||!provider)throw Object.assign(new Error('reference draft dependencies unavailable'),{code:'reference_draft_unavailable'});
+    if(this.database.prepare('SELECT 1 FROM gcp_image_correspondences WHERE task_id=? LIMIT 1').get(task.id))throw Object.assign(new Error('reference GCP snapshot integration unavailable'),{code:'reference_gcp_unavailable'});
+    const submissionId=typeof input.submissionId==='string'?input.submissionId.toLowerCase():input.submissionId;
+    const {submission}=require('./referenceSubmissionDraft').prepareReferenceSubmission({enabled:true,dataset,submissionId,capabilities:input.capabilities,optionsCatalog:input.optionsCatalog,odmOptions:input.options||{}}),body=JSON.stringify(submission),sha=crypto.createHash('sha256').update(body).digest('hex'),environment=input.capabilities.environment;
+    const old=this.database.prepare('SELECT j.*,a.task_id,a.created_by,p.reference_provider_id FROM viewer_reference_attempt_journal j JOIN processing_attempts a ON a.id=j.attempt_id JOIN viewer_reference_attempt_protocols p ON p.attempt_id=a.id WHERE j.submission_id=?').get(submission.submissionId);
+    if(old){if(old.task_id!==task.id||old.created_by!==(input.createdBy||null)||old.reference_provider_id!==provider.id||old.environment!==environment||old.request_json!==body||old.request_sha256!==sha||old.input_manifest_sha256!==submission.manifest.sha256)throw Object.assign(new Error('reference draft identity conflict'),{code:'reference_draft_conflict'});return {attempt:this.getAttempt(old.attempt_id),replayed:true};}
+    const active=task.activeAttemptId&&this.getAttempt(task.activeAttemptId);if(active&&!['failed','cancelled','published'].includes(active.status))throw Object.assign(new Error('task already has an active attempt'),{code:'attempt_in_progress'});
+    const attemptId=crypto.randomUUID(),t=now(),n=this.database.prepare('SELECT COALESCE(MAX(attempt_number),0)+1 AS n FROM processing_attempts WHERE task_id=?').get(task.id).n;
+    this.database.prepare('INSERT INTO viewer_reference_attempt_genesis(attempt_id,reference_provider_id) VALUES(?,?)').run(attemptId,provider.id);
+    this.database.prepare("INSERT INTO processing_attempts(id,task_id,dataset_id,attempt_number,provider_id,provider_task_id,options_json,status,created_by,created_at,updated_at) VALUES(?,?,?,?,NULL,NULL,'{}','pending',?,?,?)").run(attemptId,task.id,dataset.id,n,input.createdBy||null,t,t);
+    this.database.prepare("INSERT INTO viewer_reference_attempt_protocols(attempt_id,reference_provider_id,protocol) VALUES(?,?,'reference-v1')").run(attemptId,provider.id);
+    this.database.prepare('INSERT INTO viewer_reference_attempt_journal(attempt_id,submission_id,environment,request_json,request_sha256,input_manifest_sha256) VALUES(?,?,?,?,?,?)').run(attemptId,submission.submissionId,environment,body,sha,submission.manifest.sha256);
+    this.database.prepare('UPDATE processing_tasks SET active_attempt_id=?,updated_at=? WHERE id=?').run(attemptId,t,task.id);
+    return {attempt:this.getAttempt(attemptId),replayed:false};
+  }); }
   hasReferenceAttemptJournal(id) { return Boolean(this.database.prepare('SELECT 1 FROM viewer_reference_attempt_journal WHERE attempt_id=?').get(id)); }
   hasReferenceAttemptProtocol(id) { return Boolean(this.database.prepare('SELECT 1 FROM viewer_reference_attempt_protocols WHERE attempt_id=?').get(id)); }
   captureNewAttemptProvenance(id,provider,createdAt){
