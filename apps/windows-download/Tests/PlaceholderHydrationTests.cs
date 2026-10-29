@@ -94,7 +94,13 @@ internal static class PlaceholderHydrationTests
         var sink = new Sink {BeforeWrite=()=>{var file=Directory.GetFiles(f.Root,"example.bin",SearchOption.AllDirectories).Single();try {using var writer=new FileStream(file,FileMode.Open,FileAccess.Write,FileShare.ReadWrite);}catch(IOException){blocked=true;}}};
         await f.Coordinator.HydrateAsync(Identity,0,4096,sink);Assert(blocked);
         using var another = new PlaceholderHydrationCoordinator(f.Source,"pilot",f.Root);
-        var attempted = false; var exclusive = new Sink { BeforeWrite = () => { var nested = new Sink(); try { another.HydrateAsync(Identity,0,4096,nested).GetAwaiter().GetResult(); } catch(TransferException) { attempted = true; } } };
+        var attempted = false; var exclusive = new Sink { BeforeWrite = () => {
+            var nested = new Sink(); using var cancel = new CancellationTokenSource();
+            var waiting = another.HydrateAsync(Identity,0,4096,nested,cancel.Token);
+            Assert(!waiting.IsCompleted); cancel.Cancel();
+            try { waiting.GetAwaiter().GetResult(); } catch(OperationCanceledException) { attempted = true; }
+            Assert(nested.Failed == 1 && nested.Complete == 0);
+        } };
         await f.Coordinator.HydrateAsync(Identity,0,4096,exclusive); Assert(attempted);
         var bad = new Sink {ThrowComplete=true};await Reject(()=>f.Coordinator.HydrateAsync(Identity,0,4096,bad));Assert(bad.Complete==1&&bad.Failed==0);
     }

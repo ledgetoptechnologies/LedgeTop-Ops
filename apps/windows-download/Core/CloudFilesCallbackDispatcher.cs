@@ -15,6 +15,8 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
         TaskCompletionSource Completion) { internal readonly object CancelSync = new(); internal bool Ending; internal Task? CancelTask; }
     private readonly object sync = new();
     private readonly Dictionary<CloudFilesRequestKey, Entry> requests = [];
+    private readonly HashSet<Task> cacheWork = [];
+    private readonly CancellationTokenSource cacheStop = new();
     private readonly PlaceholderHydrationCoordinator coordinator;
     private readonly CloudFilesCallbackHydrator hydrate;
     private readonly string channel, alias, origin, principal;
@@ -32,7 +34,32 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
         this.channel = channel; this.principal = principal; this.connection = connection; this.maximumRequests = maximumRequests;
         alias = source.Alias; origin = source.Origin.GetLeftPart(UriPartial.Authority);
         this.hydrate = hydrate ?? throw new ArgumentNullException(nameof(hydrate));
-        coordinator = new(source, channel, stateRoot);
+        coordinator = new(source, channel, stateRoot, expectedPrincipal: principal);
+    }
+
+    internal Task EvictVerifiedCacheAsync(PlaceholderIdentity identity, CancellationToken cancellationToken = default)
+    {
+        identity.Encode();
+        if (identity.Channel != channel || identity.SourceAlias != alias || identity.Origin != origin || identity.PrincipalId != principal)
+            throw new TransferException("Cache eviction does not match this connection.");
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (sync) {
+            if (stopping) throw new TransferException("Callback provider is stopping.");
+            if (cacheWork.Count >= maximumRequests) throw new TransferException("Cache reclamation request limit reached.");
+            cacheWork.Add(completion.Task);
+        }
+        _ = RunEvictionAsync(identity, cancellationToken, completion);
+        return completion.Task;
+    }
+    private async Task RunEvictionAsync(PlaceholderIdentity identity, CancellationToken caller, TaskCompletionSource completion)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(caller, cacheStop.Token);
+        try {
+            await coordinator.EvictVerifiedCacheAsync(identity, linked.Token).ConfigureAwait(false);
+            completion.TrySetResult();
+        } catch (OperationCanceledException) when (linked.IsCancellationRequested) { completion.TrySetCanceled(linked.Token); }
+        catch { completion.TrySetException(new TransferException("Verified cache reclamation was not confirmed; local data was preserved.")); }
+        finally { lock (sync) cacheWork.Remove(completion.Task); }
     }
 
     internal Task FetchDataAsync(ReadOnlyMemory<byte> borrowedIdentity, CloudFilesOperationContext context)
@@ -96,10 +123,14 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
     private async Task DrainAsync(Entry[] entries)
     {
         await Task.Yield();
+        await cacheStop.CancelAsync();
         await Task.WhenAll(entries.Select(entry => Observe(RequestCancel(entry))));
         await Task.WhenAll(entries.Select(entry => Observe(entry.Completion.Task)));
+        Task[] cache; lock (sync) cache = cacheWork.ToArray();
+        await Task.WhenAll(cache.Select(Observe));
         // Includes the native hydrator's joined keepalive and terminal operation lifetime.
         coordinator.Dispose();
+        cacheStop.Dispose();
 
     }
     private async Task RunAsync(Entry entry, PlaceholderIdentity identity)

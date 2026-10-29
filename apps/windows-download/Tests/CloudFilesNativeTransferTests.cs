@@ -14,7 +14,8 @@ internal static class CloudFilesNativeTransferTests {
         ("native post-download authorization denies all bytes and settles unavailable",Authorization),
         ("native HRESULT and thrown failure do not retry data",Failures),
         ("native cancellation preserves synchronous pin and settles only uncommitted IO",Cancellation),
-        ("native progress heartbeat joins before final success and unavailable settlement",Progress)
+        ("native progress heartbeat joins before final success and unavailable settlement",Progress),
+        ("hydration diagnostics preserve stage HTTP and native primary through terminal once wrappers",Diagnostics)
     ];
     private static void Assert(bool value){if(!value)throw new Exception("Native transfer assertion failed.");}
     private static async Task Reject(Func<Task> run){try{await run();}catch(TransferException e){Assert(!e.Message.Contains("SECRET"));return;}throw new Exception("Expected native rejection.");}
@@ -85,11 +86,82 @@ internal static class CloudFilesNativeTransferTests {
                 using var observer=token.Register(()=>{if(throwObserver)throw new Exception("SECRET observer");});
                 await Task.Delay(Timeout.Infinite,token);
             };
-            var b=new Boundary{FailProgressAfter=2};await Reject(()=>Run(f,b).WaitAsync(TimeSpan.FromSeconds(5)));
+            var b=new Boundary{FailProgressAfter=2};
+            try{await Run(f,b).WaitAsync(TimeSpan.FromSeconds(5));throw new Exception("Expected heartbeat failure.");}
+            catch(TransferException error){Assert(error.HydrationFailure is{Stage:HydrationStage.NativeProgress,Category:HydrationFailureCategory.Native,NativeHResult:unchecked((int)0x80004005)}&&!error.Message.Contains("SECRET"));}
             Assert(b.Successes.Count==0&&b.Failures.Single().Status==CloudFilesNativeTransfer.Unavailable&&b.Events.Last()=="failure");
         }
         using(var f=new Fixture()){
             var b=new Boundary{FailProgressAfter=1};await Reject(()=>Run(f,b));Assert(b.Failures.Count==1&&f.Source.Resolves==0);
+        }
+    }
+    private static async Task Diagnostics(){
+        foreach(var reason in new[]{LoginFailureReason.TokenExpired,LoginFailureReason.HttpUnauthorized,LoginFailureReason.Unknown})using(var f=new Fixture()){
+            var operation=reason==LoginFailureReason.HttpUnauthorized?LoginFailureOperation.QueueResolve:reason==LoginFailureReason.Unknown?LoginFailureOperation.Unknown:LoginFailureOperation.CachedToken;
+            f.Source.ResolveFailure=reason==LoginFailureReason.Unknown?new LoginRequiredException():new LoginRequiredException(reason,operation);
+            var b=new Boundary{SettlementResult=unchecked((int)0x80070057)};
+            try{await Run(f,b);throw new Exception("Expected bounded auth diagnostic.");}
+            catch(TransferException error){
+                var d=error.HydrationFailure??throw new Exception("Auth diagnostic lost.");
+                Assert(d.Stage==HydrationStage.AuthorizationBefore&&d.Category==HydrationFailureCategory.LoginRequired&&d.LoginReason==reason&&d.LoginOperation==operation);
+                Assert(d.HttpStatus is null&&d.Reason==TransferFailureReason.Unknown&&d.SettlementHResult==unchecked((int)0x80070057));
+                Assert(d.ActivityText.Contains("auth="+operation+"/"+reason)&&d.ActivityText.Contains("HTTP 401")== (reason==LoginFailureReason.HttpUnauthorized));
+                Assert(error.InnerException is null&&!d.ActivityText.Contains("https://")&&!d.ActivityText.Contains("SECRET"));
+            }
+            Assert(b.Failures.Count==1&&b.Successes.Count==0);
+        }
+        foreach(var invalid in new Action[]{
+            ()=>_ = new HydrationFailureDiagnostic(HydrationStage.AuthorizationBefore,HydrationFailureCategory.Transfer,loginReason:LoginFailureReason.TokenExpired,loginOperation:LoginFailureOperation.CachedToken),
+            ()=>_ = new HydrationFailureDiagnostic(HydrationStage.AuthorizationBefore,HydrationFailureCategory.LoginRequired,loginReason:(LoginFailureReason)999,loginOperation:LoginFailureOperation.CachedToken),
+            ()=>_ = new HydrationFailureDiagnostic(HydrationStage.AuthorizationBefore,HydrationFailureCategory.LoginRequired,loginReason:LoginFailureReason.TokenExpired),
+            ()=>_ = new HydrationFailureDiagnostic(HydrationStage.AuthorizationBefore,HydrationFailureCategory.LoginRequired,loginReason:LoginFailureReason.TokenExpired,loginOperation:(LoginFailureOperation)999)
+        }){var refused=false;try{invalid();}catch(ArgumentException){refused=true;}Assert(refused);}
+        using(var f=new Fixture()){
+            f.Source.ResolveFailure=new DownloadsPausedException();var b=new Boundary();
+            try{await Run(f,b);throw new Exception("Expected paused diagnostic.");}
+            catch(TransferException error){
+                var d=error.HydrationFailure??throw new Exception("Paused diagnostic lost.");
+                Assert(d.Stage==HydrationStage.AuthorizationBefore&&d.Category==HydrationFailureCategory.DownloadsPaused);
+                Assert(d.ActivityText.StartsWith("Downloads are paused.")&&!d.ActivityText.Contains("LoginRequired")&&d.HttpStatus is null);
+            }
+            Assert(b.Failures.Count==1&&b.Successes.Count==0);
+        }
+        foreach(var before in new[]{true,false})using(var f=new Fixture()){
+            var failure=new TransferException("SECRET https://private.invalid/token/path",TransferFailureReason.UnexpectedHttpStatus,before?502:503);
+            if(before)f.Source.ResolveFailure=failure;else f.Source.DownloadFailure=failure;
+            var b=new Boundary{SettlementResult=unchecked((int)0x80070057)};
+            try{await Run(f,b);throw new Exception("Expected diagnostic failure.");}
+            catch(TransferException error){
+                var d=error.HydrationFailure??throw new Exception("Hydration diagnostic was lost.");
+                Assert(d.Stage==(before?HydrationStage.AuthorizationBefore:HydrationStage.Download)&&d.Category==HydrationFailureCategory.Transfer&&d.HttpStatus==(before?502:503));
+                Assert(d.Reason==TransferFailureReason.UnexpectedHttpStatus&&d.NativeHResult is null&&error.InnerException is null);
+                Assert(d.SettlementHResult==unchecked((int)0x80070057)); // A failed native acknowledgement cannot replace the source's primary stage/status.
+                Assert(!d.ActivityText.Contains("SECRET")&&!d.ActivityText.Contains("https://")&&!d.ActivityText.Contains("token/path")&&!error.Message.Contains("SECRET"));
+            }
+            Assert(b.Successes.Count==0&&b.Failures.Count==1);
+        }
+        using(var f=new Fixture()){
+            f.Source.AfterDownload=()=>f.Source.Denied=true;var b=new Boundary();
+            try{await Run(f,b);throw new Exception("Expected post-download authorization refusal.");}
+            catch(TransferException error){Assert(error.HydrationFailure is{Stage:HydrationStage.AuthorizationAfter,Category:HydrationFailureCategory.AccessDenied,HttpStatus:null});}
+            Assert(b.Successes.Count==0&&b.Failures.Count==1);
+        }
+        foreach(var progress in new[]{true,false})using(var f=new Fixture()){
+            var b=new Boundary{FailProgressAfter=progress?1:int.MaxValue,FailureMode=progress?"":"HRESULT",SettlementResult=unchecked((int)0x80070057)};
+            try{await Run(f,b);throw new Exception("Expected native failure.");}
+            catch(TransferException error){
+                var d=error.HydrationFailure??throw new Exception("Native diagnostic was lost.");
+                Assert(d.Stage==(progress?HydrationStage.NativeProgress:HydrationStage.NativeTransfer)&&d.Category==HydrationFailureCategory.Native);
+                Assert(d.NativeHResult==unchecked((int)0x80004005)&&d.SettlementHResult==unchecked((int)0x80070057));
+                Assert(d.ActivityText.Contains("native=0x80004005")&&d.ActivityText.Contains("settlement=0x80070057"));
+            }
+            Assert(b.Failures.Count==1&&(progress?b.Successes.Count==0:b.Successes.Count==1));
+        }
+        using(var f=new Fixture()){
+            var b=new Boundary{FailureMode="throw"};
+            try{await Run(f,b);throw new Exception("Expected thrown native error.");}
+            catch(TransferException error){Assert(error.HydrationFailure is{Stage:HydrationStage.NativeTransfer,Category:HydrationFailureCategory.Unknown,NativeHResult:null}&& !error.HydrationFailure.ActivityText.Contains("SECRET"));}
+            Assert(b.Failures.Count==1);
         }
     }
     private sealed record Call(int Status,long Offset,long Length,byte[] Data);
@@ -97,7 +169,7 @@ internal static class CloudFilesNativeTransferTests {
         internal readonly List<Call> Successes=[],Failures=[];
         internal readonly List<string> Events=[];
         internal readonly TaskCompletionSource TwoReports=new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal string FailureMode="";internal int FailProgressAfter=int.MaxValue,ProgressCalls;
+        internal string FailureMode="";internal int FailProgressAfter=int.MaxValue,ProgressCalls,SettlementResult;
         internal Action<long>? DuringSuccess;
         public int ReportProgress(long connectionKey,long transferKey,long total,long completed){
             Assert(connectionKey==Context.ConnectionKey&&transferKey==Context.TransferKey&&total==1&&completed==0);
@@ -113,7 +185,7 @@ internal static class CloudFilesNativeTransferTests {
             var status=Marshal.ReadInt32(parameters,12);var pointer=Marshal.ReadIntPtr(parameters,16);
             var offset=Marshal.ReadInt64(parameters,24);var length=Marshal.ReadInt64(parameters,32);
             Assert(offset%4096==0&&length>0&&(length%4096==0||offset+length==Bytes.Length));
-            if(status!=0){Assert(pointer==0);Failures.Add(new(status,offset,length,[]));Events.Add("failure");return 0;}
+            if(status!=0){Assert(pointer==0);Failures.Add(new(status,offset,length,[]));Events.Add("failure");return SettlementResult;}
             Assert(pointer!=0&&length<=65536);DuringSuccess?.Invoke(offset+length);GC.Collect();GC.WaitForPendingFinalizers();
             var bytes=new byte[(int)length];Marshal.Copy(pointer,bytes,0,bytes.Length);
             Assert(bytes.SequenceEqual(Bytes.Skip((int)offset).Take((int)length)));
@@ -125,17 +197,19 @@ internal static class CloudFilesNativeTransferTests {
     private sealed class Source:IQueuedDownloadSource{
         public string Alias=>"portal";public Uri Origin=>new("https://source.example.invalid");
         internal int Resolves;internal bool Denied;internal Action? AfterDownload;internal Func<CancellationToken,Task>? BeforeDownload;
+        internal Exception? ResolveFailure,DownloadFailure;
         public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken=default){
             cancellationToken.ThrowIfCancellationRequested();if(Denied)throw new AccessDeniedException();
             return Task.FromResult(new QueuedDownloadSession(Principal,DateTimeOffset.UtcNow.AddHours(1)));
         }
         public Task<ResolvedQueuedDownload> ResolveAsync(string resourceReference,CancellationToken cancellationToken=default){
-            cancellationToken.ThrowIfCancellationRequested();Resolves++;var id=Identity;
+            cancellationToken.ThrowIfCancellationRequested();Resolves++;if(ResolveFailure is{} failure)throw failure;var id=Identity;
             return Task.FromResult(new ResolvedQueuedDownload(Principal,id.LogicalFileId,id.RemoteVersion,
                 new DownloadSpec(id.LogicalFileId+":"+id.RemoteVersion,new Uri(Origin,"/synthetic"),id.FileName,id.Length,id.ETag,id.Sha256)));
         }
         public async Task<string> DownloadAsync(DownloadSpec spec,string destination,IProgress<DownloadProgress>? progress=null,CancellationToken cancellationToken=default){
             if(BeforeDownload is not null)await BeforeDownload(cancellationToken);
+            if(DownloadFailure is{} failure)throw failure;
             var path=Path.Combine(destination,spec.FileName);await File.WriteAllBytesAsync(path,Bytes,cancellationToken);AfterDownload?.Invoke();return path;
         }
     }
