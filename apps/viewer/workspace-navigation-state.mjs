@@ -2,6 +2,7 @@
 const count=value=>Number.isSafeInteger(value)&&value>0?value:0;
 export function hasUnsavedGcpMark(gcpWorkspaces={},taskDetails={}){
   return Object.entries(gcpWorkspaces).some(([taskId,workspace])=>{
+    if(workspace?.draftPartial&&workspace?.pointId&&workspace?.activeImage?.id)return true;
     const draft=workspace?.draftPixel;
     if(!workspace?.pointId||!workspace?.activeImage?.id||!draft
       ||!Number.isFinite(draft.pixelX)||!Number.isFinite(draft.pixelY))return false;

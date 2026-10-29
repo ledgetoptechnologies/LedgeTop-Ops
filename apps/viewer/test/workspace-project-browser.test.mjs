@@ -358,8 +358,11 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/tasks/task-quarry/attempts') return json({ attempts: [fixtures.tasks[1].latestAttempt], nextCursor: null });
   const gcpSet = { id: 'gcp-set-johnson', displayName: 'Rome Dam control', pointCount: 1, crs: 'EPSG:32616', provenance: { coordinateSystem: 'NAD83 / UTM zone 16N', verticalDatum: 'NAVD88', linearUnit: 'ftUS' }, odmCrsCandidate: runtime.manualGcp ? null : { epsgCode:7541, horizontalUnit:'m', verticalDatum:'NAVD88(GEOID18)', verticalUnit:'m' }, odmCrs: runtime.gcpConfirmedCrs, odmCrsConfirmed: Boolean(runtime.gcpCrsConfirmed) };
   const gcpPoint = { id: 'gcp-point-1', externalId: 'ltds-1', label: 'ltds-1', latitude: 44.1, longitude: -88.2, elevationM: 220 };
-  if (pathname === '/api/v1/datasets/dataset-johnson/gcp-sets') return json({ sets: [gcpSet] });
-  if (pathname === '/api/v1/gcp-sets/gcp-set-johnson') return json({ set: gcpSet, points: [gcpPoint] });
+  const gcpSet2={...gcpSet,id:'gcp-set-second',displayName:'Second control'};
+  const gcpPoint2={...gcpPoint,id:'gcp-point-2',label:'ltds-2'};
+  if (pathname === '/api/v1/datasets/dataset-johnson/gcp-sets') return json({ sets: [gcpSet,gcpSet2] });
+  if (pathname === '/api/v1/gcp-sets/gcp-set-johnson') return json({ set: gcpSet, points: [gcpPoint,gcpPoint2] });
+  if (pathname === '/api/v1/gcp-sets/gcp-set-second') return json({ set:gcpSet2,points:[gcpPoint2] });
   if (pathname === '/api/v1/gcp-sets/gcp-set-johnson/odm-crs-confirm' && method === 'POST') { runtime.gcpCrsConfirmed=true; runtime.gcpConfirmedCrs=body.epsgCode?{...body,verticalUnit:'m'}:gcpSet.odmCrsCandidate; return json({ set: {...gcpSet,odmCrs:runtime.gcpConfirmedCrs,odmCrsConfirmed:true} }); }
   if (pathname === '/api/v1/tasks/task-johnson/gcp-correspondences' && method === 'GET') return json({ correspondences: runtime.correspondences });
   if (pathname === '/api/v1/tasks/task-johnson/gcp-correspondences' && method === 'POST') {
@@ -376,7 +379,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
     return { status: 204, body: Buffer.alloc(0), type: 'application/json' };
   }
   if (pathname === '/api/v1/datasets/dataset-johnson/gcp-images') { const next = url.searchParams.get('offset') === '1'; return json({ images: [next ? { id:'image-2', relativePath:'DJI_0002.JPG', distanceM:5,latitude:44.10003,longitude:-88.2,width:100,height:80 } : { id: 'image-1', relativePath: 'DJI_0001.JPG', distanceM: 4.2, latitude:44.10002, longitude:-88.2, width: 100, height: 80 }], pagination: {offset:next?1:0,limit:200,total:2,nextOffset:next?null:1}, ranking: { mode: 'radius', notice: 'Nearby photos', warnings: [] } }); }
-  if (pathname === '/api/v1/datasets/dataset-johnson/gcp-images/image-1/content') return { status: 200, body: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="80"><rect width="100" height="80" fill="#555"/></svg>'), type: 'image/svg+xml' };
+  if (['/api/v1/datasets/dataset-johnson/gcp-images/image-1/content','/api/v1/datasets/dataset-johnson/gcp-images/image-2/content'].includes(pathname)) return { status: 200, body: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="80"><rect width="100" height="80" fill="#555"/></svg>'), type: 'image/svg+xml' };
   if (pathname === '/api/v1/attempts/attempt-johnson') {
     const sequence = ++runtime.logSequence;
     return json({
@@ -450,6 +453,7 @@ function startFixtureServer() {
         if (url.pathname === '/api/v1/tasks/task-johnson' && runtime.taskDetailResponseGate) {
           await runtime.taskDetailResponseGate;
         }
+        if (url.pathname === '/api/v1/tasks/task-johnson/gcp-correspondences' && request.method === 'POST' && runtime.gcpSaveResponseGate) await runtime.gcpSaveResponseGate;
         if (manualFixture && request.method !== 'GET') console.log(`Synthetic mutation: ${request.method} ${url.pathname}`);
         result = url.pathname === '/api/v1/processing/outputs/output-johnson/assets/ortho' && runtime.failOrthophotoResponse
           ? json({ error: 'synthetic_preview_unavailable' }, 503)
@@ -855,7 +859,90 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     await client.evaluate(`document.querySelector('.gcp-map-camera[data-id="image-1"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
     await waitFor(client, "document.querySelector('.gcp-mark-form') !== null", `${viewport.name}: private GCP image did not open`);
+    // An unsaved pixel must survive selection cancellation, including map, point and set controls.
+    await client.evaluate(`(() => { const form=document.querySelector('.gcp-mark-form'); form.elements.pixelX.value='12'; form.elements.pixelY.value='14'; form.elements.pixelY.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+    for(const selector of ['.gcp-map-camera[data-id="image-2"]','.gcp-point-select','.gcp-set-select']) {
+      if(selector.includes('select')) await client.evaluate(`(() => { const el=document.querySelector(${JSON.stringify(selector)}); el.value=el.options[1].value; el.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+      else await client.evaluate(`document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
+      await waitFor(client, `Boolean(document.querySelector('.workspace-decision[open]'))`, 'Unsaved GCP confirmation missing');
+      await client.evaluate(`document.querySelector('.workspace-decision [aria-label="Cancel and close dialog"]').click()`);
+      await waitFor(client, `!document.querySelector('.workspace-decision')`, 'Unsaved GCP cancel did not close');
+      assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').value`),'12');
+      assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=imageFileId]').value`),'image-1');
+      assert.equal(await client.evaluate(`document.querySelector('.gcp-point-select').value`),'gcp-point-1');
+      assert.equal(await client.evaluate(`document.querySelector('.gcp-set-select').value`),'gcp-set-johnson');
+    }
+    await confirmAppAction(client,runtime,'.gcp-candidate[data-id="image-2"]',{title:'Discard unsaved mark?'});
+    await waitFor(client, `document.querySelector('.gcp-mark-form [name=imageFileId]')?.value==='image-2'`, 'Confirmed discard did not switch photo');
+    await client.evaluate(`document.querySelector('.gcp-candidate[data-id="image-1"]').click()`);
+    await waitFor(client, `document.querySelector('.gcp-mark-form [name=imageFileId]')?.value==='image-1'`, 'Returning to original photo failed');
+    await client.evaluate(`(() => { const form=document.querySelector('.gcp-mark-form'); form.elements.pixelX.value='12'; form.elements.pixelX.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+    await client.evaluate(`document.querySelector('.gcp-candidate-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
+    await waitFor(client, `Boolean(document.querySelector('[data-action="gcp-load-more"]'))`, 'Search did not refresh candidate page');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]')?.value`),'12','Partial coordinate was lost on search rerender');
+    await client.evaluate(`document.querySelector('[data-action="gcp-load-more"]').click()`);
+    await waitFor(client, `Boolean(document.querySelector('.gcp-map-camera[data-id="image-2"]'))`, 'Next photos did not reload');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').value`),'12');
+    await client.evaluate(`document.querySelector('[data-action="task-return"]').click()`);
+    await waitFor(client, `Boolean(document.querySelector('.workspace-decision[open]'))`, 'Task navigation lost a partial mark without confirmation');
+    await client.evaluate(`document.querySelector('.workspace-decision [aria-label="Cancel and close dialog"]').click()`);
+    await waitFor(client, `!document.querySelector('.workspace-decision')`, 'Navigation cancellation did not close');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').value`),'12');
+    await client.evaluate('history.back()');
+    await waitFor(client, `Boolean(document.querySelector('.workspace-decision[open]'))`, 'Browser Back lost a partial mark without confirmation');
+    await client.evaluate('history.back()');
+    await waitFor(client, `new URL(location.href).searchParams.get('panel')==='gcp' && Boolean(document.querySelector('.workspace-decision[open]'))`, 'Repeated Back did not restore GCP while confirmation remained open');
+    await client.evaluate(`document.querySelector('.workspace-decision [aria-label="Cancel and close dialog"]').click()`);
+    await waitFor(client, `!document.querySelector('.workspace-decision') && new URL(location.href).searchParams.get('panel')==='gcp'`, 'Cancelled Back did not restore the current GCP URL');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').value`),'12');
+    await client.evaluate('history.back()');
+    await waitFor(client, `Boolean(document.querySelector('.workspace-decision[open]'))`, 'Accepted Back confirmation missing');
+    await client.evaluate(`document.querySelector('.workspace-decision[open] button[type="submit"]').click()`);
+    await waitFor(client, `!new URL(location.href).searchParams.has('panel') && Boolean(document.querySelector('.task-quick-actions'))`, 'Accepted Back did not leave GCP');
+    const afterAcceptedBack=await client.evaluate('location.href');
+    await client.evaluate('history.back()');
+    await waitFor(client, `location.href!==${JSON.stringify(afterAcceptedBack)}`, 'Repeated Back stayed on a duplicate history entry');
+    await client.evaluate('history.forward()');
+    await waitFor(client, `location.href===${JSON.stringify(afterAcceptedBack)}`, 'Forward failed to restore task route');
+    await client.evaluate('history.forward()');
+    await waitFor(client, `new URL(location.href).searchParams.get('panel')==='gcp' && Boolean(document.querySelector('.gcp-map-camera[data-id="image-1"]'))`, 'Forward failed to restore GCP route');
+    await client.evaluate(`document.querySelector('.gcp-candidate[data-id="image-1"]').click()`);
+    await waitFor(client, `Boolean(document.querySelector('.gcp-mark-form'))`, 'Could not reopen GCP image');
+    await client.evaluate(`(() => {const input=document.querySelector('.gcp-mark-form [name=pixelX]');input.value='12';input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    await client.evaluate(`document.querySelector('[data-action="gcp-load-more"]')?.click()`);
+    await waitFor(client, `Boolean(document.querySelector('.gcp-map-camera[data-id="image-2"]'))`, 'GCP candidates did not reload after Forward');
+    await client.evaluate(`document.querySelector('.gcp-map-camera[data-id="image-2"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
+    await waitFor(client, `Boolean(document.querySelector('.workspace-decision[open]'))`, 'Partial coordinates should not be discarded silently');
+    await client.evaluate(`document.querySelector('.workspace-decision [aria-label="Cancel and close dialog"]').click()`);
+    await waitFor(client, `!document.querySelector('.workspace-decision')`, 'Partial mark cancel did not close');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').value`),'12');
+    await waitFor(client, `document.querySelector('.gcp-mark-image')?.naturalWidth>0`, 'Source image failed to load');
+    const clicked=await client.evaluate(`(() => {const image=document.querySelector('.gcp-mark-image'),rect=image.getBoundingClientRect();image.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:rect.left+rect.width*.35,clientY:rect.top+rect.height*.4}));const form=document.querySelector('.gcp-mark-form');return [form.elements.pixelX.value,form.elements.pixelY.value]})()`);
+    await client.evaluate(`document.querySelector('.gcp-candidate-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
+    await waitFor(client, `Boolean(document.querySelector('[data-action="gcp-load-more"]'))`, 'Image click test search did not finish');
+    assert.deepEqual(await client.evaluate(`(() => {const form=document.querySelector('.gcp-mark-form');return [form.elements.pixelX.value,form.elements.pixelY.value]})()`),clicked,'Clicked coordinates changed on rerender');
+    await client.evaluate(`document.querySelector('[data-action="gcp-load-more"]').click()`);
+    await waitFor(client, `Boolean(document.querySelector('.gcp-map-camera[data-id="image-2"]'))`, 'Image click test candidates did not reload');
+    await client.evaluate(`(() => {const form=document.querySelector('.gcp-mark-form');form.elements.pixelX.value='12';form.elements.pixelY.value='14';form.elements.pixelY.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+
+    let releaseGcpSave;runtime.gcpSaveResponseGate=new Promise(resolve=>{releaseGcpSave=resolve});
+    const saveRequestStart=runtime.requests.length;
     await client.evaluate(`(() => { const form=document.querySelector('.gcp-mark-form'); form.elements.pixelX.value='12'; form.elements.pixelY.value='14'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
+    await waitForRequest(runtime,saveRequestStart,'POST','/api/v1/tasks/task-johnson/gcp-correspondences');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').disabled`),true);
+    await client.evaluate(`document.querySelector('[data-action="task-return"]').click()`);
+    assert.equal(await client.evaluate(`new URL(location.href).searchParams.get('panel')`),'gcp','Pending save allowed task navigation');
+    await client.evaluate(`history.back()`);
+    await waitFor(client, `new URL(location.href).searchParams.get('panel')==='gcp'`, 'Pending save did not restore GCP URL after Back');
+    await client.evaluate(`document.querySelector('.gcp-candidate-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
+    await waitFor(client, `Boolean(document.querySelector('[data-action="gcp-load-more"]'))`, 'Search during save did not rerender');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').disabled`),true,'Rerender re-enabled pending mark editing');
+    await client.evaluate(`document.querySelector('[data-action="gcp-load-more"]').click()`);
+    await waitFor(client, `Boolean(document.querySelector('.gcp-map-camera[data-id="image-2"]'))`, 'Photos did not reload during pending save');
+    await client.evaluate(`document.querySelector('.gcp-map-camera[data-id="image-2"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=imageFileId]').value`),'image-1');
+    releaseGcpSave();runtime.gcpSaveResponseGate=null;
+
     await waitFor(client, "document.querySelector('.gcp-mark-row')?.textContent.includes('x 12, y 14')", `${viewport.name}: GCP correspondence was not created`);
     await client.evaluate(`(() => { const form=document.querySelector('.gcp-mark-form'); form.elements.pixelX.value='13'; form.elements.pixelY.value='15'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
     await waitFor(client, "document.querySelector('.gcp-mark-row')?.textContent.includes('x 13, y 15')", `${viewport.name}: GCP correspondence was not updated`);
