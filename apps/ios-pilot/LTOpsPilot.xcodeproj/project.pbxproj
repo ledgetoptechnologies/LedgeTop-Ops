@@ -1,0 +1,28 @@
+// !$*UTF8*$!
+{
+ archiveVersion = 1;
+ classes = {};
+ objectVersion = 56;
+ objects = {
+  A00000000000000000000001 = {isa = PBXBuildFile; fileRef = A00000000000000000000003; };
+  A00000000000000000000002 = {isa = PBXBuildFile; fileRef = A00000000000000000000004; };
+  A00000000000000000000003 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LTOpsCore/Operations.swift; sourceTree = "<group>"; };
+  A00000000000000000000004 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LTOpsPilot/LTOpsPilotApp.swift; sourceTree = "<group>"; };
+  A00000000000000000000005 = {isa = PBXFileReference; explicitFileType = wrapper.application; path = LTOpsPilot.app; sourceTree = BUILT_PRODUCTS_DIR; };
+  A00000000000000000000006 = {isa = PBXGroup; children = (A00000000000000000000003, A00000000000000000000004, A00000000000000000000007); sourceTree = "<group>"; };
+  A00000000000000000000007 = {isa = PBXGroup; children = (A00000000000000000000005); name = Products; sourceTree = "<group>"; };
+  A00000000000000000000008 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000001, A00000000000000000000002); runOnlyForDeploymentPostprocessing = 0; };
+  A00000000000000000000009 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+  A0000000000000000000000A = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+  A0000000000000000000000B = {isa = PBXNativeTarget; buildConfigurationList = A0000000000000000000000D; buildPhases = (A00000000000000000000008, A00000000000000000000009, A0000000000000000000000A); buildRules = (); dependencies = (); name = LTOpsPilot; productName = LTOpsPilot; productReference = A00000000000000000000005; productType = "com.apple.product-type.application"; };
+  A0000000000000000000000C = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 1600; }; buildConfigurationList = A0000000000000000000000E; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = A00000000000000000000006; productRefGroup = A00000000000000000000007; projectDirPath = ""; projectRoot = ""; targets = (A0000000000000000000000B); };
+  A0000000000000000000000D = {isa = XCConfigurationList; buildConfigurations = (A0000000000000000000000F, A00000000000000000000010); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+  A0000000000000000000000E = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000011, A00000000000000000000012); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+  A0000000000000000000000F = {isa = XCBuildConfiguration; baseConfigurationReference = A00000000000000000000013; buildSettings = {SWIFT_OPTIMIZATION_LEVEL = "-Onone"; }; name = Debug; };
+  A00000000000000000000010 = {isa = XCBuildConfiguration; baseConfigurationReference = A00000000000000000000013; buildSettings = {}; name = Release; };
+  A00000000000000000000011 = {isa = XCBuildConfiguration; buildSettings = {SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SWIFT_VERSION = 6.0; CLANG_ENABLE_MODULES = YES; }; name = Debug; };
+  A00000000000000000000012 = {isa = XCBuildConfiguration; buildSettings = {SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SWIFT_VERSION = 6.0; CLANG_ENABLE_MODULES = YES; }; name = Release; };
+  A00000000000000000000013 = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Pilot.xcconfig; sourceTree = "<group>"; };
+ };
+ rootObject = A0000000000000000000000C;
+}

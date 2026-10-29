@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+xtool/
+DerivedData/
+xcuserdata/
+*.ipa
+*.p8
+*.p12
+*.mobileprovision
