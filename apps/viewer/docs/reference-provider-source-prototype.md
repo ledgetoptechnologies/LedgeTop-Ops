@@ -1,0 +1,9 @@
+# Processing reference provider source prototype
+
+This is unexposed, default-off source-only work. It is not connected to Viewer scheduling, provider registration, ingest, routes or production configuration, and it issues no source-custody receipt. The submission planner does not read, pin, persist, or verify files. Its managed GCP and dataset metadata are caller assertions; they are not proof of source ownership or retention. Raw CSV IDs are recorded separately, but this code does not enforce their retention.
+
+The copied reference transport and broker are not an activated service. Their credentials, holder identity, admission, grant routing, durable immutable request, generated managed GCP materialization, source and result verification, and crash recovery require integrated review and real synthetic app-path testing. No ACK or cleanup is authorized by this prototype.
+
+The v1 contract retains its 10,000-object and 4 MiB bounds. The options catalog is currently accepted only when its Python-computed fingerprint can be reproduced by the existing nonnegative-safe-integer canonicalizer. Actual Processing catalogs can contain floats or negative values, including lexical 1.0; JSON.parse cannot reconstruct Python numeric representation. This is a temporary fail-closed restriction, not a supported interoperability profile. Lossless shared canonical bytes/representation and authoritative cross-language vectors are required before full compatibility or activation.
+
+Before a real integration, allocate protected migrations with the existing version-43/44 owners and detect conflicting legacy ledgers. Enforce authoritative single-holder identity, every writer and purge path, old-process and open-FD drain, immutable managed file mapping and permanent CSV retention. A point-in-time hash or caller-supplied `managedGcp` field is not a custody guarantee.
