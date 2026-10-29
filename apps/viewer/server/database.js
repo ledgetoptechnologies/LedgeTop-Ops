@@ -2123,6 +2123,27 @@ const MIGRATIONS = [
   `},
 
 
+  {version:44,name:'viewer_source_custody_dormant',sql:`
+    CREATE TABLE viewer_custody_intents (
+      id TEXT PRIMARY KEY NOT NULL, job_id TEXT NOT NULL, generation INTEGER NOT NULL, environment TEXT NOT NULL, binding_sha256 TEXT NOT NULL,
+      canonical_binding TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('building','prepared')),
+      created_at TEXT NOT NULL, UNIQUE(job_id,generation,environment)
+    );
+    CREATE TABLE viewer_custody_pins (
+      intent_id TEXT NOT NULL REFERENCES viewer_custody_intents(id) ON DELETE RESTRICT,
+      object_id TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size>=0),
+      sha256 TEXT NOT NULL, kind TEXT NOT NULL,
+      permanent_csv INTEGER NOT NULL CHECK(permanent_csv IN (0,1)),
+      PRIMARY KEY(intent_id,object_id)
+    );
+    CREATE TRIGGER viewer_custody_intents_immutable BEFORE UPDATE ON viewer_custody_intents WHEN NOT (OLD.state='building' AND NEW.state='prepared' AND NEW.id=OLD.id AND NEW.job_id=OLD.job_id AND NEW.generation=OLD.generation AND NEW.environment=OLD.environment AND NEW.binding_sha256=OLD.binding_sha256 AND NEW.canonical_binding=OLD.canonical_binding AND NEW.created_at=OLD.created_at) BEGIN SELECT RAISE(ABORT,'custody intent immutable'); END;
+    CREATE TRIGGER viewer_custody_intents_no_replace BEFORE INSERT ON viewer_custody_intents WHEN EXISTS (SELECT 1 FROM viewer_custody_intents WHERE id=NEW.id OR (job_id=NEW.job_id AND generation=NEW.generation AND environment=NEW.environment)) BEGIN SELECT RAISE(ABORT,'custody intent replacement'); END;
+    CREATE TRIGGER viewer_custody_pins_no_late_insert BEFORE INSERT ON viewer_custody_pins WHEN COALESCE((SELECT state FROM viewer_custody_intents WHERE id=NEW.intent_id),'')<>'building' OR EXISTS (SELECT 1 FROM viewer_custody_pins WHERE intent_id=NEW.intent_id AND object_id=NEW.object_id) BEGIN SELECT RAISE(ABORT,'custody pin insertion forbidden'); END;
+    CREATE TRIGGER viewer_custody_intents_no_delete BEFORE DELETE ON viewer_custody_intents BEGIN SELECT RAISE(ABORT,'custody intent retention'); END;
+    CREATE TRIGGER viewer_custody_pins_immutable BEFORE UPDATE ON viewer_custody_pins BEGIN SELECT RAISE(ABORT,'custody pin immutable'); END;
+    CREATE TRIGGER viewer_custody_pins_no_delete BEFORE DELETE ON viewer_custody_pins BEGIN SELECT RAISE(ABORT,'custody pin retention'); END;
+  `},
+
   // Reserved source-only reference journal. No provider route, scheduler or
   // custody authority is enabled by this schema; old writers still require a
   // separate owner-verified drain/fence before any real submission.
