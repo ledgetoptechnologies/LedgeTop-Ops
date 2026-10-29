@@ -2096,6 +2096,9 @@ const MIGRATIONS = [
       UNIQUE(domain_id,writer_kind,writer_id)
     );
     CREATE INDEX viewer_capacity_reservations_domain_idx ON viewer_capacity_reservations(domain_id,state);
+    CREATE TRIGGER viewer_capacity_no_delete
+      BEFORE DELETE ON viewer_capacity_reservations
+      BEGIN SELECT RAISE(ABORT,'capacity reservation deletion is forbidden'); END;
     CREATE TRIGGER viewer_capacity_identity_immutable
       BEFORE UPDATE OF id,domain_id,writer_kind,writer_id ON viewer_capacity_reservations
       WHEN NEW.id IS NOT OLD.id OR NEW.domain_id IS NOT OLD.domain_id OR NEW.writer_kind IS NOT OLD.writer_kind OR NEW.writer_id IS NOT OLD.writer_id
