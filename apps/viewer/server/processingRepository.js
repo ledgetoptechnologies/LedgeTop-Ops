@@ -449,7 +449,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       const id=crypto.randomUUID(),t=now(); this.database.prepare(`INSERT INTO processing_attempts(id,task_id,dataset_id,attempt_number,provider_id,provider_task_id,preset_id,options_json,capability_fingerprint,status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?)`).run(id,task.id,dataset.id,n,input.providerId,input.providerTaskId||crypto.randomUUID(),input.presetId||null,JSON.stringify(input.options||{}),input.capabilityFingerprint||null,input.createdBy||null,t,t);
       const markCount=Number(this.database.prepare('SELECT COUNT(*) count FROM gcp_image_correspondences WHERE task_id=?').get(task.id).count);
       if(markCount>100000)throw Object.assign(new Error('task has too many GCP image correspondences'),{code:'too_many_gcp_correspondences'});
-      const marks=this.database.prepare(`SELECT points.longitude,points.latitude,points.elevation_m elevationM, provenance.adapter sourceAdapter,
+      const marks=this.database.prepare(`SELECT points.set_id setId,points.longitude,points.latitude,points.elevation_m elevationM, provenance.adapter sourceAdapter,
         provenance.coordinate_system sourceCoordinateSystem, provenance.vertical_datum sourceVerticalDatum, points.easting, points.northing, sets.source_sha256 sourceSha256,
         confirmation.source_sha256 confirmedSourceSha256, confirmation.epsg_code confirmedEpsg, confirmation.horizontal_unit confirmedUnit, confirmation.vertical_datum confirmedVerticalDatum,
         marks.pixel_x pixelX,marks.pixel_y pixelY,files.relative_path relativePath
@@ -463,7 +463,9 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       if(marks.length!==markCount) throw Object.assign(new Error('GCP correspondence snapshot is incomplete'),{code:'gcp_snapshot_incomplete'});
       const emlid=marks.filter(mark=>mark.sourceAdapter==='emlid-all-columns-v1');
       const mapping=emlid[0];
-      if(emlid.length && (emlid.length!==marks.length || emlid.some(mark=>mark.confirmedSourceSha256!==mark.sourceSha256 || mark.sourceCoordinateSystem!=='NAD83(2011) / WISCRS Dodge and Jefferson (ftUS) + NAVD88(GEOID18) height (ftUS)' || mark.confirmedEpsg!==7600 || mark.confirmedUnit!=='ftUS' || mark.confirmedEpsg!==mapping.confirmedEpsg || mark.confirmedUnit!==mapping.confirmedUnit || mark.confirmedVerticalDatum!==mark.sourceVerticalDatum || mark.confirmedVerticalDatum!==mapping.confirmedVerticalDatum || mark.easting==null || mark.northing==null)))
+      const gcpRepo = new (require('./gcpRepository').GcpRepository)(this.database);
+      if(emlid.some(mark=>!gcpRepo.getSet(mark.setId)?.odmCrsConfirmed)) throw Object.assign(new Error('Survey CRS confirmation is stale'),{code:'gcp_crs_confirmation_required'});
+      if(emlid.length && (emlid.length!==marks.length || emlid.some(mark=>mark.confirmedSourceSha256!==mark.sourceSha256 || !Number.isInteger(mark.confirmedEpsg) || !['m','ftUS'].includes(mark.confirmedUnit) || mark.confirmedEpsg!==mapping.confirmedEpsg || mark.confirmedUnit!==mapping.confirmedUnit || mark.confirmedVerticalDatum!==mark.sourceVerticalDatum || mark.confirmedVerticalDatum!==mapping.confirmedVerticalDatum || mark.easting==null || mark.northing==null)))
         throw Object.assign(new Error('Emlid survey CRS and vertical datum must be mapped and confirmed before processing'),{code:'gcp_crs_confirmation_required'});
       const gcpList=odmGcpList(marks, emlid.length ? {epsgCode:mapping.confirmedEpsg,projected:true,horizontalUnit:mapping.confirmedUnit} : undefined);
       if(gcpList&&Buffer.byteLength(gcpList)>16*1024*1024)throw Object.assign(new Error('generated ODM GCP input is too large'),{code:'gcp_snapshot_too_large'});

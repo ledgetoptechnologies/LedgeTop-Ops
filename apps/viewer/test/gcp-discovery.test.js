@@ -49,3 +49,17 @@ test('manual CRS mapping requires source units and original vertical datum',t=>{
  assert.throws(()=>g.confirmOdmCrs(set.id,'ops:test',{epsgCode:32616,horizontalUnit:'ftUS',verticalDatum:parsed.provenance.verticalDatum}),{code:'gcp_crs_unmapped'});
  assert.throws(()=>g.confirmOdmCrs(set.id,'ops:test',{epsgCode:32616,horizontalUnit:'m',verticalDatum:parsed.provenance.verticalDatum}),{code:'gcp_crs_unmapped'});
 });
+
+test('PROJ validates the declared projected CRS, units, every survey coordinate, and confirmation freshness',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-proj-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
+ const p=new ProcessingRepository(db),project=p.createProject({displayName:'Survey'}),dataset=p.createDataset({projectId:project.id,displayName:'Flight',storageMode:'managed',rootKey:'datasets',relativePath:'source'});p.finalizeDataset(dataset.id,[],digest('empty'));
+ const source='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,500000,0,100,0,-87,110,UTM example (m) + height (m)\n',parsed=require('../server/gcpImport').parseGcpInterchange({format:'emlid-all-columns-v1',content:source}),g=new GcpRepository(db);
+ const set=g.importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'emlid-all-columns-v1',sourceSha256:parsed.sourceSha256,sourceContent:source,crs:parsed.crs,elevationUnits:'m',provenance:parsed.provenance,points:parsed.points});
+ const input={epsgCode:32616,horizontalUnit:'m',verticalDatum:parsed.provenance.verticalDatum};
+ for(const epsgCode of [4326,7600,32615])assert.throws(()=>g.confirmOdmCrs(set.id,'ops:test',{...input,epsgCode}),{code:'gcp_crs_unmapped'});
+ assert.equal(g.confirmOdmCrs(set.id,'ops:test',input).odmCrsConfirmed,true);
+ db.prepare('UPDATE gcp_odm_crs_confirmations SET epsg_code=32615 WHERE set_id=?').run(set.id);assert.equal(g.getSet(set.id).odmCrsConfirmed,false);
+ assert.equal(g.confirmOdmCrs(set.id,'ops:test',input).odmCrsConfirmed,true);
+ db.prepare('UPDATE gcp_points SET easting=easting+100 WHERE set_id=?').run(set.id);assert.equal(g.getSet(set.id).odmCrsConfirmed,false);
+ assert.throws(()=>g.confirmOdmCrs(set.id,'ops:test',input),{code:'gcp_crs_unmapped'});
+});

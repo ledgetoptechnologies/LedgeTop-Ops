@@ -115,7 +115,7 @@ test('each processing attempt snapshots deterministic private ODM correspondence
 
 test('Emlid survey requires explicit mapping confirmation and snapshots metric projected XYZ',t=>{
  const {processing,gcp,project,dataset}=datasetFixture(t), {parseGcpInterchange}=require('../server/gcpImport');
- const source='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,1000,2000,100,43,-88.8,110,NAD83(2011) / WISCRS Dodge and Jefferson (ftUS) + NAVD88(GEOID18) height (ftUS)\n',parsed=parseGcpInterchange({format:'emlid-all-columns-v1',content:source});
+ const source='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,1000,2000,100,41.434647213675284,-91.92188915701674,110,NAD83(2011) / WISCRS Dodge and Jefferson (ftUS) + NAVD88(GEOID18) height (ftUS)\n',parsed=parseGcpInterchange({format:'emlid-all-columns-v1',content:source});
  const set=gcp.importSet({datasetId:dataset.id,displayName:'Emlid',sourceFormat:'emlid-all-columns-v1',sourceSha256:parsed.sourceSha256,sourceContent:source,crs:parsed.crs,elevationUnits:'m',provenance:parsed.provenance,points:parsed.points,createdBy:'ops:1'});
  assert.equal(set.odmCrsCandidate.epsgCode,7600);assert.equal(set.odmCrsConfirmed,false);
  const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Model'});gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'near',pixelX:120,pixelY:240,createdBy:'ops:1'});
@@ -138,8 +138,9 @@ test('legacy GCP set without provenance is never omitted from attempt snapshot',
 
 test('verified survey mapping rejects geographic or wrong-unit EPSG',t=>{
  const {gcp,dataset}=datasetFixture(t),{parseGcpInterchange}=require('../server/gcpImport');
- const source='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,1000,2000,100,43,-88.8,110,NAD83(2011) / WISCRS Dodge and Jefferson (ftUS) + NAVD88(GEOID18) height (ftUS)\n',parsed=parseGcpInterchange({format:'emlid-all-columns-v1',content:source});
+ const source='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,1000,2000,100,41.434647213675284,-91.92188915701674,110,NAD83(2011) / WISCRS Dodge and Jefferson (ftUS) + NAVD88(GEOID18) height (ftUS)\n',parsed=parseGcpInterchange({format:'emlid-all-columns-v1',content:source});
  const set=gcp.importSet({datasetId:dataset.id,displayName:'Survey',sourceFormat:'emlid-all-columns-v1',sourceSha256:parsed.sourceSha256,sourceContent:source,crs:parsed.crs,elevationUnits:'m',provenance:parsed.provenance,points:parsed.points});
  for(const epsgCode of [4326,7541])assert.throws(()=>gcp.confirmOdmCrs(set.id,'ops:1',{epsgCode,horizontalUnit:'ftUS',verticalDatum:parsed.provenance.verticalDatum}),{code:'gcp_crs_unmapped'});
  assert.equal(gcp.confirmOdmCrs(set.id,'ops:1',{}).odmCrs.epsgCode,7600);
+ const db=gcp.database;db.prepare('UPDATE gcp_points SET latitude=latitude+1 WHERE set_id=?').run(set.id);assert.equal(gcp.getSet(set.id).odmCrsConfirmed,false);
 });

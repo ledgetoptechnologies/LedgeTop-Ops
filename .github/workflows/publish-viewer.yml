@@ -47,6 +47,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install PROJ validation runtime
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-gdal proj-data
+
       - name: Run checks
         run: npm run check
 

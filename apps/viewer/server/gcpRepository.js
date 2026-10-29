@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const path = require('node:path');
+const {validateSurveyCrs,surveyValidationHash} = require('./gcpCrsValidation');
 
 const now = () => new Date().toISOString();
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
@@ -39,6 +40,8 @@ class GcpRepository {
   set(row) {
     const candidate = row && odmCrsCandidate(row);
     const confirmation = row && this.database.prepare('SELECT * FROM gcp_odm_crs_confirmations WHERE set_id=?').get(row.id);
+    const points = row && confirmation ? this.database.prepare('SELECT * FROM gcp_points WHERE set_id=? ORDER BY external_id,id').all(row.id).map(point=>this.point(point)) : [];
+    const verified = Boolean(confirmation && confirmation.source_sha256===row.source_sha256 && confirmation.validation_sha256===surveyValidationHash(row.source_sha256,{epsgCode:confirmation.epsg_code,horizontalUnit:confirmation.horizontal_unit,verticalDatum:confirmation.vertical_datum},points));
     return row && {
       id: row.id, datasetId: row.dataset_id, displayName: row.display_name,
       sourceFormat: row.adapter || row.source_format, sourceFileId: row.source_file_id,
@@ -47,7 +50,7 @@ class GcpRepository {
       provenance: row.adapter ? { adapter: row.adapter, coordinateSystem: row.coordinate_system,
         verticalDatum: row.vertical_datum, linearUnit: row.linear_unit,
         elevationSource: row.elevation_source, geographicCrossCheck: row.geographic_cross_check } : null,
-      odmCrsCandidate: candidate, odmCrsConfirmed: Boolean(candidate && confirmation && confirmation.source_sha256===row.source_sha256 && confirmation.epsg_code===candidate.epsgCode && confirmation.horizontal_unit===candidate.horizontalUnit && confirmation.vertical_datum===candidate.verticalDatum), odmCrs: candidate && confirmation && confirmation.source_sha256===row.source_sha256 && confirmation.epsg_code===candidate.epsgCode && confirmation.horizontal_unit===candidate.horizontalUnit && confirmation.vertical_datum===candidate.verticalDatum ? {epsgCode:confirmation.epsg_code,horizontalUnit:confirmation.horizontal_unit,verticalDatum:confirmation.vertical_datum,verticalUnit:'m'} : null,
+      odmCrsCandidate: candidate, odmCrsConfirmed: verified, odmCrs: verified ? {epsgCode:confirmation.epsg_code,horizontalUnit:confirmation.horizontal_unit,verticalDatum:confirmation.vertical_datum,verticalUnit:'m'} : null,
       pointCount: Number(row.point_count || 0), createdBy: row.created_by,
       createdAt: row.created_at, updatedAt: row.updated_at,
     };
@@ -156,10 +159,11 @@ class GcpRepository {
   confirmOdmCrs(id, actorId, input={}) {
     const set=this.getSet(id); if(!set || set.sourceFormat!=='emlid-all-columns-v1') throw Object.assign(new Error('A survey source is required'),{code:'gcp_crs_unmapped'});
     const c=Object.keys(input).length ? input : set.odmCrsCandidate;
-    const verified=set.odmCrsCandidate;
-    if(!c || !verified || c.epsgCode!==verified.epsgCode || c.horizontalUnit!==verified.horizontalUnit || c.verticalDatum!==verified.verticalDatum || c.horizontalUnit!==set.provenance.linearUnit || c.verticalDatum!==set.provenance.verticalDatum) throw Object.assign(new Error('Enter the EPSG code and units for the source survey coordinate system and confirm its vertical datum'),{code:'gcp_crs_unmapped'});
-    this.database.prepare(`INSERT INTO gcp_odm_crs_confirmations(set_id,source_sha256,epsg_code,horizontal_unit,vertical_datum,confirmed_by,confirmed_at) VALUES (?,?,?,?,?,?,?)
-      ON CONFLICT(set_id) DO UPDATE SET source_sha256=excluded.source_sha256,epsg_code=excluded.epsg_code,horizontal_unit=excluded.horizontal_unit,vertical_datum=excluded.vertical_datum,confirmed_by=excluded.confirmed_by,confirmed_at=excluded.confirmed_at`).run(id,set.sourceSha256,c.epsgCode,c.horizontalUnit,c.verticalDatum,actorId,now());
+    if(!c || !Number.isInteger(c.epsgCode) || c.epsgCode<1000 || c.epsgCode>999999 || !['m','ftUS'].includes(c.horizontalUnit) || c.horizontalUnit!==set.provenance.linearUnit || c.verticalDatum!==set.provenance.verticalDatum) throw Object.assign(new Error('Enter the EPSG code and units for the source survey coordinate system and confirm its vertical datum'),{code:'gcp_crs_unmapped'});
+    const points=this.getSet(id,true).points; validateSurveyCrs(c,points);
+    const validationHash=surveyValidationHash(set.sourceSha256,c,points);
+    this.database.prepare(`INSERT INTO gcp_odm_crs_confirmations(set_id,source_sha256,epsg_code,horizontal_unit,vertical_datum,validation_sha256,confirmed_by,confirmed_at) VALUES (?,?,?,?,?,?,?,?)
+      ON CONFLICT(set_id) DO UPDATE SET source_sha256=excluded.source_sha256,epsg_code=excluded.epsg_code,horizontal_unit=excluded.horizontal_unit,vertical_datum=excluded.vertical_datum,validation_sha256=excluded.validation_sha256,confirmed_by=excluded.confirmed_by,confirmed_at=excluded.confirmed_at`).run(id,set.sourceSha256,c.epsgCode,c.horizontalUnit,c.verticalDatum,validationHash,actorId,now());
     return this.getSet(id);
   }
 

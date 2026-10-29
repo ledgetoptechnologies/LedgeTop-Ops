@@ -122,7 +122,7 @@ LABEL org.opencontainers.image.revision="${VIEWER_SOURCE_COMMIT}"
 WORKDIR /app
 RUN groupmod --gid 568 node \
     && usermod --uid 568 --gid 568 node
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libpng16-16 libjpeg62-turbo libturbojpeg0 zlib1g \
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libpng16-16 libjpeg62-turbo libturbojpeg0 zlib1g python3-gdal proj-data \
     && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 COPY scripts/patch-3d-tiles-renderer.mjs scripts/install-basis-transcoder.mjs ./scripts/
