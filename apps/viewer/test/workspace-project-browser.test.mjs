@@ -1315,3 +1315,27 @@ test('companion product restore is explicit, immutable-version scoped, and permi
     await removeBrowserProfile(profile, t);
   }
 });
+
+test('mobile project creation follows project write permission', { timeout: 60000 }, async t => {
+  const executable = browserPath(); if (!executable) { t.skip('Edge unavailable'); return; }
+  const release = await acquireBrowserHarnessLock({root}); let server, runtime, origin, profile, browser;
+  try {
+    ({server,runtime,origin} = await startFixtureServer());
+    profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
+    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    const devTools=await waitForDevTools(profile);
+    for (const allowed of [false,true]) {
+      runtime.permissions=allowed ? ['viewer.projects.read','viewer.projects.write'] : ['viewer.projects.read'];
+      const target=await (await fetch(`${devTools}/json/new?about:blank`,{method:'PUT'})).json();
+      const client=await CdpClient.connect(target.webSocketDebuggerUrl);
+      try {
+        await client.command('Page.enable'); await client.command('Runtime.enable');
+        await client.command('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
+        await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token', ${JSON.stringify(token)});`});
+        await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard`});
+        await waitFor(client,`Boolean(document.querySelector('#project-filter'))`,'Dashboard failed to load');
+        assert.equal(await client.evaluate(`Boolean(document.querySelector('[data-new-project]'))`),allowed,`Project creation for write=${allowed}`);
+      } finally { await client.command('Page.close').catch(()=>{}); client.close(); }
+    }
+  } finally { if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);} release(); if(server)await new Promise(resolve=>server.close(resolve)); await removeBrowserProfile(profile,t); }
+});
