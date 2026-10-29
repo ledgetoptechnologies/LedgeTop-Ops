@@ -9,7 +9,7 @@ import { createMeasurementDraftRecovery } from './measurement-draft-recovery.mjs
 import { captureMeasurementReportOrtho } from './measurement-report-ortho.mjs';
 import { installSidebarResize } from './viewer-sidebar-resize.mjs';
 import { renderStaffNavigation, installStaffNavigationGuard, hasUnfinishedMeasurements } from './viewer-staff-navigation.mjs';
-import { renderClientNavigation } from './viewer-client-navigation.mjs';
+import { clientPortalTarget, renderClientNavigation } from './viewer-client-navigation.mjs';
 import { createViewerSessionCapabilityStore, VIEWER_SESSION_STORAGE_PREFIX as SESSION_STORAGE_PREFIX } from './viewer-session-capability-store.mjs';
 import { projectMeasurementBoundary } from './measurement-projection.mjs';
 import { createMeasurementAdminClient } from './measurement-admin-client.mjs';
@@ -1666,7 +1666,27 @@ async function bootstrapSession() {
     window.__ltdsViewerStartupDiagnostics?.mark('bootstrap-failed');
     if (sessionStorageKey) sessionCapabilities.clear(sessionStorageKey);
     updateLoading('Viewer session unavailable', String(error.message || error));
+    showSessionRecovery();
   }
+}
+
+function showSessionRecovery() {
+  const recovery = document.getElementById('session-recovery');
+  if (!recovery) return;
+  document.body.classList.add('session-bootstrap-failed');
+  recovery.hidden = false;
+  const link = document.getElementById('recovery-client-portal');
+  if (!link || window.parent !== window) return;
+  // Fetch only a deployment-owned destination, never a URL parameter or
+  // caller-controlled opener. A failure leaves the local workspace link.
+  fetch('/api/v1/session-recovery', { cache: 'no-store' }).then(response => {
+    if (!response.ok) throw new Error('Recovery unavailable');
+    return response.json();
+  }).then(({ clientPortalOrigin }) => {
+    const target = clientPortalTarget({ audience: 'client', clientPortalOrigin },
+      { viewMode: 'session', topLevel: true });
+    if (target) { link.href = target; link.hidden = false; }
+  }).catch(() => {});
 }
 
 async function handleSessionRenewalMessage(data, { reviewChannel = false } = {}) {

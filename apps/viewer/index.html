@@ -206,6 +206,11 @@
     #loading-text { color: #aaa; font-size: 13px; letter-spacing: 0.4px; }
     #loading-progress { color: var(--brand-orange); font-size: 13px; font-weight: 700; min-height: 18px; }
     #loading-cancel { display: none; pointer-events: auto; min-height: 40px; padding: 8px 14px; border-radius: 7px; border: 1px solid #ff8a65; background: #25252b; color: #fff; cursor: pointer; }
+    body.session-bootstrap-failed #app { display: none; }
+    #session-recovery { min-height: 100vh; display: grid; place-content: center; text-align: center; padding: 24px; background: #09090c; color: #fff; }
+    #session-recovery[hidden] { display: none; }
+    #session-recovery p { color: #bbb; }
+    #session-recovery a { color: #ff9a68; display: inline-block; padding: 12px; }
 
     #floating-controls { position: absolute; top: 14px; right: 14px; z-index: 120; display: flex; gap: 8px; }
     .icon-btn {
@@ -425,6 +430,11 @@
   </style>
 </head>
 <body>
+<main id="session-recovery" hidden>
+  <h1>Viewer session unavailable</h1>
+  <p>Return to your workspace to open this model again. If you still need access, contact your administrator.</p>
+  <div><a id="recovery-client-portal" hidden>Client Portal</a><a href="/workspace">Viewer workspace</a></div>
+</main>
 <div id="app">
   <header id="topbar">
     <div id="brand">

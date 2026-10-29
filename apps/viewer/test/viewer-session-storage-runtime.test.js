@@ -7,7 +7,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 const { createViewerSessionCapabilityStore, VIEWER_SESSION_STORAGE_PREFIX: PREFIX } = require('../viewer-session-capability-store.mjs');
 const { renderStaffNavigation } = require('../viewer-staff-navigation.mjs');
-const { renderClientNavigation } = require('../viewer-client-navigation.mjs');
+const { clientPortalTarget, renderClientNavigation } = require('../viewer-client-navigation.mjs');
 const { measurementAssetBearer } = require('../measurement-surface-client.mjs');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
@@ -35,7 +35,8 @@ function fixture({ denied = 'getter', active = false, reject = false } = {}) {
   Object.defineProperty(window, 'sessionStorage', { get: () => denied === 'getter' ? blocked() : storage });
   const sessionCapabilities = createViewerSessionCapabilityStore({ storage: () => window.sessionStorage });
   const context = vm.createContext({
-    window, URL, AbortController, renderStaffNavigation, renderClientNavigation, dom: {},
+    window, URL, AbortController, renderStaffNavigation, renderClientNavigation, clientPortalTarget, dom: {},
+    document: { getElementById: () => null },
     VIEW_MODE: 'session', SESSION_GRANT: active ? null : GRANT, SESSION_STORAGE_PREFIX: PREFIX,
     sessionStorageKey: active ? KEY : null, sessionCapabilities,
     location: { href: `https://viewer.example/session/${active ? 'active/synthetic-session' : GRANT}` },
@@ -143,6 +144,41 @@ test('unavailable persistence on reload fails visibly without issuing or inventi
   assert.equal(f.calls[0].options.headers.Authorization, undefined);
   assert.equal(f.loading.at(-1)[0], 'Viewer session unavailable');
   assert.equal(f.sessionCapabilities.read(KEY), null);
+});
+
+test('denied bootstrap replaces viewer controls and uses only the configured portal origin', async () => {
+  const f = fixture({ active: true, reject: true });
+  const recovery = { hidden: true }, link = { hidden: true }, classes = [];
+  f.context.document = { body: { classList: { add: name => classes.push(name) } },
+    getElementById: id => ({ 'session-recovery': recovery, 'recovery-client-portal': link })[id] || null };
+  f.context.window.parent = f.context.window;
+  const originalFetch = f.context.fetch;
+  f.context.fetch = async (url, options) => url === '/api/v1/session-recovery'
+    ? { ok: true, json: async () => ({ clientPortalOrigin: 'https://portal.example.test' }) }
+    : originalFetch(url, options);
+  await f.context.bootstrapSession();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(classes, ['session-bootstrap-failed']);
+  assert.equal(recovery.hidden, false);
+  assert.equal(link.href, 'https://portal.example.test/portal');
+  assert.equal(link.hidden, false);
+  assert.equal(f.initialized.length, 0);
+});
+
+test('invalid recovery destination cannot become a link', async () => {
+  const f = fixture({ active: true, reject: true });
+  const link = { hidden: true };
+  f.context.document = { body: { classList: { add() {} } },
+    getElementById: id => id === 'session-recovery' ? {} : link };
+  f.context.window.parent = f.context.window;
+  const originalFetch = f.context.fetch;
+  f.context.fetch = async (url, options) => url === '/api/v1/session-recovery'
+    ? { ok: true, json: async () => ({ clientPortalOrigin: 'javascript:alert(1)' }) }
+    : originalFetch(url, options);
+  await f.context.bootstrapSession();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(link.hidden, true);
+  assert.equal(link.href, undefined);
 });
 
 test('bootstrap denial cannot throw during cleanup or revive stale storage after failed removal', async () => {

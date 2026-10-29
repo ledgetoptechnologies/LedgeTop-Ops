@@ -248,6 +248,10 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
     body: JSON.stringify({ grant: grant.grant }),
   })).status, 410);
 
+  const recovery = await fetch(`${baseUrl}/api/v1/session-recovery`);
+  assert.equal(recovery.status, 200);
+  assert.equal(recovery.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(await recovery.json(), { clientPortalOrigin: 'https://client.example.test' });
   const current = await fetch(`${baseUrl}/api/v1/sessions/current`, {
     headers: { Authorization: `Bearer ${browserSession.accessToken}` },
   });
