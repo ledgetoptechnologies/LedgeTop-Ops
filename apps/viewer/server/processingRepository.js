@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const {config}=require('./config');
 const workspaceHierarchy = require('./workspaceHierarchy');
 const path = require('node:path');
 const { storageTrashRetentionMs } = require('./storageRetention');
@@ -196,9 +197,11 @@ function indexedFileMetadata(file) {
 }
 
 class ProcessingRepository {
-  constructor(database, { logMaxBytes = 10 * 1024 * 1024 } = {}) {
+  constructor(database, { logMaxBytes = 10 * 1024 * 1024, sourceEffectClaimLimit = config.sourceEffectClaimLimit } = {}) {
     this.database = database;
     this.logMaxBytes = logMaxBytes;
+    if(!Number.isSafeInteger(sourceEffectClaimLimit)||sourceEffectClaimLimit<1||sourceEffectClaimLimit>1000000)throw new Error('invalid source effect claim limit');
+    this.sourceEffectClaimLimit=sourceEffectClaimLimit;
     workspaceHierarchy.assertDatabase(database);
     this.seedPresets();
   }
@@ -345,6 +348,8 @@ class ProcessingRepository {
   }
   activeDatasetOperations(id){const operations=Number(this.database.prepare("SELECT COUNT(*) AS count FROM dataset_operations WHERE dataset_id=? AND status IN ('queued','leased')").get(id)?.count||0),mutations=Number(this.database.prepare("SELECT COUNT(*) AS count FROM storage_mutations WHERE entity_type='dataset' AND entity_id=? AND status IN ('intent','fs_applied','failed')").get(id)?.count||0);return operations+mutations;}
   hasAnySourceBinding(){return Boolean(this.database.prepare('SELECT 1 FROM viewer_source_bindings LIMIT 1').get());}
+  sourceEffectClaimsAtLimit(){return Boolean(this.database.prepare('SELECT 1 FROM viewer_source_effect_claims LIMIT 1 OFFSET ?').get(this.sourceEffectClaimLimit-1));}
+  sourceEffectClaimStatus(){const total=Number(this.database.prepare('SELECT COUNT(*) n FROM viewer_source_effect_claims').get().n),inFlight=Number(this.database.prepare("SELECT COUNT(*) n FROM viewer_source_effect_claims WHERE state='in_flight'").get().n),items=this.database.prepare("SELECT id,operation_id,effect_type,created_at FROM viewer_source_effect_claims WHERE state='in_flight' ORDER BY created_at,id LIMIT 50").all().map(row=>({id:row.id,operationId:row.operation_id,effectType:row.effect_type,createdAt:row.created_at}));return{total,inFlight,limit:this.sourceEffectClaimLimit,atLimit:total>=this.sourceEffectClaimLimit,items,truncated:inFlight>items.length};}
   hasSourceBinding(id){
     const direct=this.database.prepare('SELECT 1 FROM viewer_source_bindings WHERE dataset_id=? LIMIT 1').get(id);if(direct)return true;
     const dataset=this.database.prepare('SELECT root_key,relative_path FROM datasets WHERE id=?').get(id);if(!dataset)return false;
@@ -1189,8 +1194,8 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   journalRetainedImportCleanup(row,t=now()){this.database.prepare("INSERT OR IGNORE INTO import_cleanup_jobs(id,retained_import_id,cleanup_type,root_key,relative_path,status,available_at,created_at,updated_at) VALUES (?,?, 'staging_tree',?,?, 'pending',?,?,?)").run(`${row.id}:staging`,row.id,row.staging_root_key,row.staging_relative_path,t,t,t);if(row.source_kind==='backup_zip')this.database.prepare("INSERT OR IGNORE INTO import_cleanup_jobs(id,retained_import_id,cleanup_type,root_key,relative_path,expected_byte_size,expected_sha256,expected_dev,expected_ino,expected_ctime_ns,expected_mtime_ns,status,available_at,created_at,updated_at) VALUES (?,?, 'source_zip',?,?,?,?,?,?,?,?, 'pending',?,?,?)").run(`${row.id}:source`,row.id,row.source_root_key,row.source_relative_path,row.source_byte_size,row.source_sha256,row.source_dev,row.source_ino,row.source_ctime_ns,row.source_mtime_ns,t,t,t);}
   importCleanupJob(row){return row&&{id:row.id,retainedImportId:row.retained_import_id,type:row.cleanup_type,status:row.status,attemptCount:Number(row.attempt_count)||0,availableAt:row.available_at,completedAt:row.completed_at||null};}
   getImportCleanupJob(id){return this.importCleanupJob(this.database.prepare('SELECT * FROM import_cleanup_jobs WHERE id=?').get(id));}
-  retryTerminalImportCleanup(id,actorId,{at=Date.now()}={}){return this.transaction(()=>{const allowed=['source_changed','cleanup_skipped_cross_mount','cleanup_skipped_read_only','cleanup_skipped_hardlink','cleanup_quarantine_conflict','failed'],row=this.database.prepare(`SELECT * FROM import_cleanup_jobs WHERE id=? AND status IN (${allowed.map(()=>'?').join(',')})`).get(id,...allowed);if(!row)return null;const t=new Date(Number.isFinite(Number(at))?Number(at):Date.now()).toISOString(),changed=this.database.prepare(`UPDATE import_cleanup_jobs SET status='pending',available_at=?,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,last_error=NULL,completed_at=NULL,updated_at=? WHERE id=? AND status=?`).run(t,t,id,row.status);if(changed.changes!==1)return null;this.insertAudit({actorId:bounded(actorId,200)||null,action:'import_cleanup.retry_requested',entityType:'import_cleanup_job',entityId:id,details:{retainedImportId:row.retained_import_id,cleanupType:row.cleanup_type,priorOutcome:row.status}});return this.getImportCleanupJob(id);});}
-  claimImportCleanup(owner,{leaseSeconds=300,at=Date.now()}={}){return this.transaction(()=>{if(this.hasAnySourceBinding())return null;const leaseOwner=bounded(owner,200);if(!leaseOwner)throw Object.assign(new Error('cleanup lease owner is required'),{code:'invalid_cleanup_owner'});const atMs=Number.isFinite(Number(at))?Number(at):Date.now(),t=new Date(atMs).toISOString(),row=this.database.prepare(`SELECT j.* FROM import_cleanup_jobs j JOIN retained_imports r ON r.id=j.retained_import_id
+  retryTerminalImportCleanup(id,actorId,{at=Date.now()}={}){return this.transaction(()=>{if(this.sourceEffectClaimsAtLimit()||this.database.prepare("SELECT 1 FROM viewer_source_effect_claims WHERE operation_id=? AND effect_type='import_cleanup' AND state='in_flight'").get(id))return null;const allowed=['source_changed','cleanup_skipped_cross_mount','cleanup_skipped_read_only','cleanup_skipped_hardlink','cleanup_quarantine_conflict','failed'],row=this.database.prepare(`SELECT * FROM import_cleanup_jobs WHERE id=? AND status IN (${allowed.map(()=>'?').join(',')})`).get(id,...allowed);if(!row)return null;const t=new Date(Number.isFinite(Number(at))?Number(at):Date.now()).toISOString(),changed=this.database.prepare(`UPDATE import_cleanup_jobs SET status='pending',available_at=?,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,last_error=NULL,completed_at=NULL,updated_at=? WHERE id=? AND status=?`).run(t,t,id,row.status);if(changed.changes!==1)return null;this.insertAudit({actorId:bounded(actorId,200)||null,action:'import_cleanup.retry_requested',entityType:'import_cleanup_job',entityId:id,details:{retainedImportId:row.retained_import_id,cleanupType:row.cleanup_type,priorOutcome:row.status}});return this.getImportCleanupJob(id);});}
+  claimImportCleanup(owner,{leaseSeconds=300,at=Date.now()}={}){return this.transaction(()=>{if(this.hasAnySourceBinding()||this.sourceEffectClaimsAtLimit())return null;const leaseOwner=bounded(owner,200);if(!leaseOwner)throw Object.assign(new Error('cleanup lease owner is required'),{code:'invalid_cleanup_owner'});const atMs=Number.isFinite(Number(at))?Number(at):Date.now(),t=new Date(atMs).toISOString(),row=this.database.prepare(`SELECT j.* FROM import_cleanup_jobs j JOIN retained_imports r ON r.id=j.retained_import_id
       WHERE r.state='ready' AND NOT EXISTS (SELECT 1 FROM viewer_source_effect_claims c WHERE c.effect_type='import_cleanup' AND c.operation_id=j.id AND c.state='in_flight') AND ((j.status='pending' AND j.available_at<=?) OR (j.status IN ('leased','quarantined') AND j.lease_expires_at<=?))
       ORDER BY CASE j.status WHEN 'quarantined' THEN 0 WHEN 'leased' THEN 1 ELSE 2 END,j.available_at,j.created_at,j.id LIMIT 1`).get(t,t);if(!row)return null;const duration=Math.max(30,Math.min(Number(leaseSeconds)||300,3600))*1000,until=new Date(atMs+duration).toISOString(),token=crypto.randomBytes(16).toString('hex'),changed=this.database.prepare(`UPDATE import_cleanup_jobs SET
       status=CASE WHEN status='quarantined' THEN 'quarantined' ELSE 'leased' END,
@@ -1293,7 +1298,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   mutateCatalogAdoptionRecovery(id,mutate){
     if(typeof mutate!=='function')throw new TypeError('recovery mutation is required');
     const claim=this.transaction(()=>{
-      if(this.hasAnySourceBinding()||!this.referenceCatalogRecoveryAllowed(id))return null;
+      if(this.hasAnySourceBinding()||this.sourceEffectClaimsAtLimit()||!this.referenceCatalogRecoveryAllowed(id))return null;
       if(this.database.prepare("SELECT 1 FROM viewer_source_effect_claims WHERE operation_id=? AND state='in_flight'").get(id))return null;
       const row=this.database.prepare("SELECT payload_json FROM dataset_operations WHERE id=? AND operation_type='catalog_map' AND status IN ('failed','cancelled')").get(id);if(!row)return null;
       const payload=json(row.payload_json),intent=payload.adoptionIntent;if(!intent||typeof intent!=='object'||!intent.rootKey||!intent.relativePath||!intent.datasetRelative)return null;

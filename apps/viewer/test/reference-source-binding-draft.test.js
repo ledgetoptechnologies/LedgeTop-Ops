@@ -138,6 +138,47 @@ test('actual cleanup worker leaves failed and no-delete outcomes persistently un
  }
 });
 
+test('claim capacity blocks new jobs and exposes only bounded safe diagnostics',t=>{
+ const f=fixture(t),p=new ProcessingRepository(f.db,{sourceEffectClaimLimit:1});
+ for(const id of ['one','two']){f.db.prepare("INSERT INTO retained_imports(id,source_kind,staging_root_key,staging_relative_path,state,cleanup_jobs_inserted,created_at,updated_at) VALUES(?,'nodeodm_result','cache',?,'ready',1,'t','t')").run(id,`private/${id}`);f.db.prepare("INSERT INTO import_cleanup_jobs(id,retained_import_id,cleanup_type,root_key,relative_path,status,available_at,created_at,updated_at) VALUES(?,?,'staging_tree','cache',?,'pending','2000-01-01T00:00:00.000Z','t','t')").run(id,id,`private/${id}`);}
+ assert.ok(p.claimImportCleanup('worker'));const status=p.sourceEffectClaimStatus();assert.equal(status.atLimit,true);assert.equal(status.total,1);assert.equal(status.inFlight,1);assert.equal(status.items.length,1);
+ assert.equal(JSON.stringify(status).includes('private/'),false);assert.equal(JSON.stringify(status).includes('lease_token'),false);
+ assert.equal(p.claimImportCleanup('other'),null);assert.equal(f.db.prepare("SELECT count(*) n FROM import_cleanup_jobs WHERE status='pending'").get().n,1);
+});
+
+test('claim diagnostics truncate safely and count completed claims toward capacity',t=>{
+ const f=fixture(t),p=new ProcessingRepository(f.db,{sourceEffectClaimLimit:52});
+ const insert=f.db.prepare("INSERT INTO viewer_source_effect_claims(id,operation_id,effect_type,root_key,relative_path,dataset_relative,state,created_at,completed_at) VALUES(?,?,'catalog_adoption_recovery','private-root','private-path','private-dataset',?,?,?)");
+ for(let i=0;i<51;i++)insert.run(`claim-${i}`,`op-${i}`,'in_flight','t',null);
+ insert.run('completed','op-completed','completed','t','t');
+ const status=p.sourceEffectClaimStatus();assert.equal(status.total,52);assert.equal(status.inFlight,51);assert.equal(status.items.length,50);assert.equal(status.truncated,true);assert.equal(status.atLimit,true);assert.equal(JSON.stringify(status).includes('private'),false);
+});
+
+test('invalid source effect capacity config is rejected',()=>{
+ const {spawnSync}=require('node:child_process');const configPath=require.resolve('../server/config');
+ for(const value of ['0','12junk','1000001']){const child=spawnSync(process.execPath,['-e',`const {validate}=require(${JSON.stringify(configPath)});process.exit(validate().some(x=>x.includes('SOURCE_EFFECT_CLAIM_LIMIT'))?0:1)`],{env:{...process.env,SOURCE_EFFECT_CLAIM_LIMIT:value},encoding:'utf8',timeout:10000});assert.equal(child.error,undefined);assert.equal(child.status,0,child.stderr);}
+});
+
+test('effect status endpoint requires storage permission and omits paths and tokens',async t=>{
+ const f=fixture(t),express=require('express'),auth=require('../server/auth'),{ViewerRepository}=require('../server/repository'),{createProcessingApi}=require('../server/processingApi');
+ f.db.exec("INSERT INTO viewer_source_effect_claims(id,operation_id,effect_type,root_key,relative_path,dataset_relative,lease_owner,lease_token,lease_generation,state,created_at) VALUES('claim','job','import_cleanup','private-root','private-path','private-dataset','owner','secret-token',1,'in_flight','t')");
+ const admin='admin-token-for-effect-test-0123456789',reader='reader-token-for-effect-test-0123456789';
+ for(const [token,permissions] of [[admin,['viewer.storage.purge']],[reader,['viewer.datasets.read']]])f.p.createAdminSession({tokenHash:auth.hashToken(token),subject:'synthetic',permissions,displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
+ const app=express();app.use(createProcessingApi({repository:new ViewerRepository(f.db),processing:f.p,storage:{roots:{}}}));
+ const server=await new Promise(resolve=>{const value=app.listen(0,'127.0.0.1',()=>resolve(value));});
+ try{const url=`http://127.0.0.1:${server.address().port}/api/v1/storage/effect-claims`;assert.equal((await fetch(url)).status,401);assert.equal((await fetch(url,{headers:{authorization:`Bearer ${reader}`}})).status,403);const response=await fetch(url,{headers:{authorization:`Bearer ${admin}`}});assert.equal(response.status,200);const body=await response.json();assert.equal(body.inFlight,1);assert.equal(JSON.stringify(body).includes('private'),false);assert.equal(JSON.stringify(body).includes('secret-token'),false);}finally{await new Promise((resolve,reject)=>server.close(error=>error?reject(error):resolve()));}
+});
+
+test('concurrent processes cannot exceed a shared one-claim limit',async()=>{
+ const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),{spawn}=require('node:child_process');const dir=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-quota-test-')),file=path.join(dir,'db.sqlite');let db;
+ try{db=new DatabaseSync(file);db.exec('PRAGMA foreign_keys=ON');applyMigrations(db);
+  for(const id of ['one','two']){db.prepare("INSERT INTO retained_imports(id,source_kind,staging_root_key,staging_relative_path,state,cleanup_jobs_inserted,created_at,updated_at) VALUES(?,'nodeodm_result','cache',?,'ready',1,'t','t')").run(id,id);db.prepare("INSERT INTO import_cleanup_jobs(id,retained_import_id,cleanup_type,root_key,relative_path,status,available_at,created_at,updated_at) VALUES(?,?,'staging_tree','cache',?,'pending','2000-01-01T00:00:00.000Z','t','t')").run(id,id,id);}
+  const script=`const {DatabaseSync}=require('node:sqlite');const {ProcessingRepository}=require(${JSON.stringify(require.resolve('../server/processingRepository'))});const db=new DatabaseSync(${JSON.stringify(file)});db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000');const result=new ProcessingRepository(db,{sourceEffectClaimLimit:1}).claimImportCleanup(process.argv[1]);db.close();process.stdout.write(result?'1':'0');`;
+  const run=id=>new Promise((resolve,reject)=>{const child=spawn(process.execPath,['-e',script,id],{stdio:['ignore','pipe','pipe']}),timer=setTimeout(()=>child.kill(),10000);let out='',err='';child.stdout.on('data',x=>out+=x);child.stderr.on('data',x=>err+=x);child.on('error',error=>{clearTimeout(timer);reject(error);});child.on('close',code=>{clearTimeout(timer);if(code!==0)reject(Error(err));else resolve(out);});});
+  const settled=await Promise.allSettled([run('worker-one'),run('worker-two')]);for(const result of settled)if(result.status==='rejected')throw result.reason;const results=settled.map(result=>result.value);assert.deepEqual(results.sort(),['0','1']);assert.equal(db.prepare('SELECT count(*) n FROM viewer_source_effect_claims').get().n,1);
+ }finally{if(db)db.close();for(const suffix of ['','-wal','-shm','-journal']){try{fs.unlinkSync(file+suffix);}catch(e){if(e.code!=='ENOENT')throw e;}}fs.rmdirSync(dir);}
+});
+
 test('bound source conservatively suppresses newly queued catalog-source cleanup',t=>{
  const f=fixture(t);enableOnlyForSyntheticFixture(f.db);admit(f);
  const payload=JSON.stringify({ids:{attemptId:'a',datasetId:'d'},sourceCleanup:{rootKey:'dataset_import',relativePath:'source'}});

@@ -41,12 +41,16 @@ The code is incomplete and must remain disabled until all of these are solved:
   separately qualified before using completion as evidence. This is one
   participating effects, not an authority over other cleanup paths. One import
   claim covers the whole job, rather than creating a row for every file. A
-  completed claim is retained per job; no retirement or storage backpressure
-  exists, and its operational growth remains unqualified. An
+  completed claim is retained per job; no retirement exists. New claim creation
+  pauses at `SOURCE_EFFECT_CLAIM_LIMIT` (default 10000, maximum 1000000), and
+  the limit must agree across all API and worker processes. This configurable
+  cap does not establish a shared policy or a safe cleanup/recovery procedure;
+  query cost and responsiveness at large limits have not been qualified. An
   unresolved import effect prevents its lease from being reclaimed even after
   expiry; interrupted work needs a future independently verified recovery
-  procedure and does not automatically clear. No operator-facing recovery view
-  or closure authority exists. Failed and legitimate no-delete outcomes also
+  procedure and does not automatically clear. The admin-only diagnostics view
+  lists active or unresolved effects without deciding whether a writer stopped;
+  no operator clearance action or closure authority exists. Failed and legitimate no-delete outcomes also
   leave this global hold. Successful worker settlement checks that the job was
   completed (that transition itself requires an unexpired lease), then matches
   the original claim identity; settlement itself does not check lease expiry.
