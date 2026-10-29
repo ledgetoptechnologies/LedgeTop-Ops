@@ -5,6 +5,11 @@ const test = require('node:test');
 const { openDatabase } = require('../server/database');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { processingJobCounts } = require('../server/processingOverview');
+const express = require('express');
+const { ViewerRepository } = require('../server/repository');
+const { createProcessingApi } = require('../server/processingApi');
+const { signServiceRequest } = require('../server/serviceAuth');
+const { config } = require('../server/config');
 
 function fixture(t) {
   const db = openDatabase(':memory:');
@@ -48,4 +53,32 @@ test('recycled projects and tasks stop alerting and restored work becomes visibl
   assert.equal(f.counts().failed, 2);
   f.db.prepare('UPDATE processing_tasks SET purged_at=? WHERE id=?').run(new Date().toISOString(), current.task.id);
   assert.equal(f.counts().failed, 1);
+});
+
+test('authenticated overview route serializes observation warnings separately from failures', async t => {
+  const f = fixture(t), keyId = 'overview-test', secret = 'synthetic-overview-service-secret-32-characters';
+  const oldKeys = config.serviceAuthKeys, oldKeyId = config.serviceAuthKeyId, oldSecret = config.serviceAuthSecret;
+  config.serviceAuthKeys = { [keyId]: secret };
+  config.serviceAuthKeyId = keyId;
+  config.serviceAuthSecret = secret;
+  t.after(() => { config.serviceAuthKeys = oldKeys; config.serviceAuthKeyId = oldKeyId; config.serviceAuthSecret = oldSecret; });
+  function addWarning(code, archived = false) {
+    const work = f.task('running');
+    f.db.prepare("INSERT INTO processing_jobs(id,attempt_id,job_type,status,available_at,created_at,updated_at,error_code) VALUES (?,?,'reconcile','pending','2000','2000','2000',?)").run(crypto.randomUUID(), work.attempt.id, code);
+    if (archived) f.db.prepare("UPDATE processing_tasks SET status='archived' WHERE id=?").run(work.task.id);
+  }
+  addWarning('provider_status_auth_failed');
+  addWarning('unrelated_internal_error');
+  addWarning('provider_status_not_found', true);
+  const app = express();
+  app.use(createProcessingApi({ repository: new ViewerRepository(f.db), processing: f.processing,
+    storage: { space: () => ({ available: 1024 }) }, providerCredentials: {} }));
+  const server = await new Promise(resolve => { const listener = app.listen(0, '127.0.0.1', () => resolve(listener)); });
+  t.after(() => new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  const url = `http://127.0.0.1:${server.address().port}/api/v1/overview`;
+  assert.equal((await fetch(url)).status, 401);
+  const headers = signServiceRequest({ secret, keyId, method: 'GET', path: '/api/v1/overview' });
+  const response = await fetch(url, { headers });
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).jobs, { queued: 0, running: 2, reviewReady: 0, failed: 0, observationWarnings: 1 });
 });
