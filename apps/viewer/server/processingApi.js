@@ -46,7 +46,7 @@ function requireIdempotencyKey(req,res,next){const key=req.get('Idempotency-Key'
 function optionDomain(spec){if(Array.isArray(spec.domain))return spec.domain;if(spec.domain&&typeof spec.domain==='object')return spec.domain;if(typeof spec.domain==='string'){try{return JSON.parse(spec.domain);}catch{return null;}}return null;}
 function validateProviderOptions(options,byName){if(!options||Array.isArray(options)||typeof options!=='object'||Object.keys(options).length>200||Buffer.byteLength(JSON.stringify(options))>64*1024)return'invalid_provider_options';for(const[name,value]of Object.entries(options)){const spec=byName.get(name);if(!spec)return'invalid_provider_option';if(spec.type==='bool'&&typeof value!=='boolean')return'invalid_provider_option';if(spec.type==='int'&&!Number.isInteger(value))return'invalid_provider_option';if(spec.type==='float'&&(typeof value!=='number'||!Number.isFinite(value)))return'invalid_provider_option';if(!['bool','int','float'].includes(spec.type)&&(typeof value!=='string'||value.length>4000))return'invalid_provider_option';const domain=optionDomain(spec);if(Array.isArray(domain)&&!domain.includes(value))return'invalid_provider_option';if(domain&&!Array.isArray(domain)&&typeof value==='number'&&((Number.isFinite(domain.min)&&value<domain.min)||(Number.isFinite(domain.max)&&value>domain.max)))return'invalid_provider_option';}return null;}
 
-function createProcessingApi({ repository, processing, storage, providerCredentials, providerFetch, clientGrantFetch }) {
+function createProcessingApi({ repository, processing, storage, providerCredentials, providerFetch, clientGrantFetch, taskPhotoInspect }) {
   const router=express.Router();
   const productTickets=createDownloadCapabilities();
   const storageUsage=createStorageUsageMonitor({storage,database:processing.database});
@@ -130,7 +130,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   }
   const providerView=(provider)=>providerCredentials?providerCredentials.view(provider):provider;
   const subjectReceipt=(req)=>({subject:req.actorId,key:req.get('Idempotency-Key'),method:req.method,path:req.originalUrl,requestHash:sha256Hex(Buffer.concat([Buffer.from(`${req.method}\n${req.originalUrl}\n`),req.rawBody||Buffer.alloc(0)]))});
-  mountTaskPhotoImports(router,{processing,storage,authorize,mutate,subjectReceipt,config});
+  mountTaskPhotoImports(router,{processing,storage,authorize,mutate,subjectReceipt,config,inspect:taskPhotoInspect});
   const providerAdmission=(endpoint)=>admitProviderEndpoint(endpoint,{exactOrigins:config.processingProviderOrigins,allowedCidrs:config.processingProviderAllowedCidrs});
   const providerCredentialFailure=(res,e)=>error(res,e.code==='provider_in_use'?409:e.code==='invalid_provider_credential'?400:503,e.code||'provider_credential_unavailable');
   const providerProbeFailure=(res,e)=>{

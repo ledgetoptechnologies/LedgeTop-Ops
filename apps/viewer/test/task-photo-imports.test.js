@@ -238,7 +238,7 @@ test('transient inspection timeout releases the exact unattached reservation so 
     if(!reservation.created)return res.status(409).json({code:'idempotency_in_progress'});
     const original=res.json.bind(res);res.json=body=>{if(res.statusCode<500)processing.completeSubjectOperationReceipt(receipt.subject,receipt.key,res.statusCode,body);return original(body);};next();
   };
-  const inspect=async input=>{if(count++===0)throw Object.assign(new Error('timeout'),{code:'import_inspection_timeout'});return selectWithSiblingSurvey(context.storage,input.paths,input.survey,input.maxFiles);};
+  const inspect=async input=>{const attempt=count++;if(attempt===0)throw Object.assign(new Error('timeout'),{code:'import_inspection_timeout'});if(attempt===2){processing.database.prepare('UPDATE subject_operation_receipts SET created_at=? WHERE subject=? AND client_key=?').run('2099-01-01T00:00:00.000Z',receipt.subject,receipt.key);throw Object.assign(new Error('timeout'),{code:'import_inspection_timeout'});}return selectWithSiblingSurvey(context.storage,input.paths,input.survey,input.maxFiles);};
   mountTaskPhotoImports(router,{processing,storage:context.storage,config:context.config,authorize:()=>((req,_res,next)=>{req.actorId=receipt.subject;next();}),mutate,subjectReceipt:()=>receipt,inspect});app.use(router);
   const server=await new Promise(resolve=>{const instance=app.listen(0,'127.0.0.1',()=>resolve(instance));});
   t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));db.close();});
@@ -247,4 +247,25 @@ test('transient inspection timeout releases the exact unattached reservation so 
   const first=await fetch(url,request);assert.equal(first.status,503);assert.equal(processing.getSubjectOperationReceipt(receipt.subject,receipt.key),undefined);
   const second=await fetch(url,request);assert.equal(second.status,202,JSON.stringify(await second.clone().json()));
   assert.ok(processing.getSubjectOperationReceipt(receipt.subject,receipt.key).operationId);
+  receipt.key='new-owner-key-00001';
+  const third=await fetch(url,{...request,headers:{...request.headers,'Idempotency-Key':receipt.key}});
+  assert.equal(third.status,503);assert.equal(processing.getSubjectOperationReceipt(receipt.subject,receipt.key).createdAt,'2099-01-01T00:00:00.000Z','old attempt must not delete a replacement reservation');
+});
+
+
+test('production mutation middleware retries the same import key after inspection timeout', async t => {
+  const context=fixture(t),database=openDatabase(path.join(context.root,'actual-retry.sqlite'));
+  const processing=new ProcessingRepository(database),repository=new ViewerRepository(database),token='test-inspection-retry-token-000000000000';
+  const project=processing.createProject({displayName:'Retry source'});context.photo('raw/a.jpg');
+  processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:retry',permissions:['viewer.datasets.import'],expiresAt:new Date(Date.now()+600000).toISOString()});
+  let attempts=0;const taskPhotoInspect=async input=>{if(attempts++===0)throw Object.assign(new Error('timeout'),{code:'import_inspection_timeout'});return selectWithSiblingSurvey(context.storage,input.paths,input.survey,input.maxFiles);};
+  const app=express();app.use(express.json({verify:(req,res,bytes)=>{req.rawBody=bytes;}}));app.use(createProcessingApi({repository,processing,storage:context.storage,taskPhotoInspect}));
+  const server=await new Promise(resolve=>{const instance=app.listen(0,'127.0.0.1',()=>resolve(instance));});
+  t.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));database.close();});
+  const url=`http://127.0.0.1:${server.address().port}/api/v1/dataset-imports/copy`;
+  const request={method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','Idempotency-Key':'actual-retry-key-000001'},body:JSON.stringify({projectId:project.id,displayName:'Retry source',paths:['raw']})};
+  const first=await fetch(url,request);assert.equal(first.status,503,JSON.stringify(await first.clone().json()));
+  const second=await fetch(url,request);assert.equal(second.status,202,JSON.stringify(await second.clone().json()));
+  const third=await fetch(url,request);assert.equal(third.status,202);assert.equal(third.headers.get('idempotency-replayed'),'true');
+  assert.equal((await second.json()).operation.id,(await third.json()).operation.id);
 });
