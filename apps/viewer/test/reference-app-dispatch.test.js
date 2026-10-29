@@ -33,3 +33,22 @@ test('status awaiting response rechecks active task and project before result or
 
 
 
+
+test('incomplete or conflicting reference identity cannot be claimed, selected, or read',async t=>{
+ const cases=[
+  ["missing protocol","DELETE FROM viewer_reference_attempt_protocols WHERE attempt_id='a'"],
+  ["missing genesis","DELETE FROM viewer_reference_attempt_genesis WHERE attempt_id='a'"],
+  ["missing provider","DELETE FROM viewer_reference_providers WHERE id='r'"],
+  ["mismatched provider identities","UPDATE viewer_reference_attempt_protocols SET reference_provider_id='other' WHERE attempt_id='a'"],
+  ["legacy provider id","UPDATE processing_attempts SET provider_id='legacy' WHERE id='a'"],
+  ["legacy provider task id","UPDATE processing_attempts SET provider_task_id='legacy' WHERE id='a'"]
+ ];
+ for(const [name,change] of cases) await t.test(name,t=>{
+  const f=fixture(t),claim=f.journal.claim('a','worker');assert.ok(claim);
+  // In-memory fault injection deliberately bypasses immutable schema guards only here.
+  f.db.exec('PRAGMA foreign_keys=OFF');
+  for(const row of f.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('viewer_reference_attempt_protocols','viewer_reference_attempt_genesis','viewer_reference_providers','processing_attempts')").all()) f.db.exec('DROP TRIGGER "'+row.name.replaceAll('"','""')+'"');
+  f.db.exec(change);assert.throws(()=>f.journal.read(claim),{code:'reference_dispatch_lease_lost'});
+  f.journal.release(claim);assert.equal(f.journal.claim('a','worker2'),null);assert.equal(f.journal.claimNext('worker3'),null);
+ });
+});
