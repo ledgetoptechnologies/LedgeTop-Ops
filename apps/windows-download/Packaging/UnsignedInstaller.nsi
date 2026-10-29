@@ -557,23 +557,34 @@ Section "Install"
 SectionEnd
 
 ; Only the exact recorded generated V2 preview is eligible. Missing ownership is
-; a no-op, not proof that arbitrary old navigation entries are absent. No files
-; are deleted and connected Company/Client roots are never prepared by this CLI.
+; a no-op, not proof that arbitrary old navigation entries are absent. Windows
+; can remove online-only placeholders; connected Company/Client roots are never
+; prepared by this CLI.
 Function RetireOwnedLegacyPreview
   Push $0
+  ; Silent upgrades never approve detaching an old preview.
+  IfSilent retire_legacy_done
   retire_legacy_retry:
+  ClearErrors
+  ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-probe-legacy-preview' $0
+  IfErrors retire_legacy_review
+  StrCmp $0 11 retire_legacy_done
+  StrCmp $0 0 retire_legacy_confirm
+  StrCmp $0 10 retire_legacy_busy retire_legacy_review
+  retire_legacy_confirm:
+  MessageBox MB_YESNO|MB_ICONEXCLAMATION "Setup found an owned old LedgeTop Files Preview. Remove its Explorer connection? Windows may remove online-only entries, and partially downloaded or locally changed files may not be preserved. Back up files you need first.$\r$\n$\r$\nChoose No to leave the old connection in place and finish installing." /SD IDNO IDYES retire_legacy_remove IDNO retire_legacy_done
+  retire_legacy_remove:
   ClearErrors
   ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-retire-legacy-preview' $0
   IfErrors retire_legacy_review
   StrCmp $0 0 retire_legacy_done
-  StrCmp $0 10 0 retire_legacy_review
+  StrCmp $0 10 retire_legacy_busy retire_legacy_review
+  retire_legacy_busy:
   DetailPrint "Old Explorer preview retirement deferred: app still running. Installation is complete."
-  IfSilent retire_legacy_done
-  MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "LedgeTop Files is installed.$\r$\n$\r$\nA LedgeTop Files app is still running. Use its tray icon near the Windows clock to Quit, including any old LedgeTop Files Preview app. Then choose Retry to remove the old preview entry. Downloaded and modified files stay on this PC.$\r$\n$\r$\nChoose Cancel to continue to Finish and leave the old entry for later." /SD IDCANCEL IDRETRY retire_legacy_retry IDCANCEL retire_legacy_done
+  MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "LedgeTop Files is installed.$\r$\n$\r$\nA LedgeTop Files app is still running. Use its tray icon near the Windows clock to Quit, including any old LedgeTop Files Preview app. Before choosing Retry, back up files you need: Windows may remove online-only entries, and partially downloaded or locally changed files may not be preserved.$\r$\n$\r$\nChoose Cancel to continue to Finish and leave the old entry for later." /SD IDCANCEL IDRETRY retire_legacy_retry IDCANCEL retire_legacy_done
   retire_legacy_review:
-  DetailPrint "Old Explorer preview retirement needs ownership review. Installation is complete; local files were kept."
-  IfSilent retire_legacy_done
-  MessageBox MB_ICONINFORMATION "LedgeTop Files is installed.$\r$\n$\r$\nSetup could not confirm removal of the old Explorer preview. Local files were kept. Continue to Finish; if the old entry remains, ask LedgeTop support to check its saved ownership record. Setup will not guess or repeat an uncertain removal." /SD IDOK
+  DetailPrint "Old Explorer preview retirement needs ownership review. Installation is complete; check the old folder."
+  MessageBox MB_ICONINFORMATION "LedgeTop Files is installed.$\r$\n$\r$\nSetup could not confirm removal of the old Explorer preview. Check the old folder for files that remain. Continue to Finish; if the old entry remains, ask LedgeTop support to check its saved ownership record. Setup will not guess or repeat an uncertain removal." /SD IDOK
   retire_legacy_done:
   ClearErrors
   Pop $0
@@ -672,6 +683,14 @@ Function un.onInit
 FunctionEnd
 
 Section "Uninstall"
+  ; The uninstaller cannot silently consent to Windows deleting online-only
+  ; placeholders while detaching its recorded connections.
+  IfSilent un_user_refused
+  MessageBox MB_YESNO|MB_ICONEXCLAMATION "Uninstall will remove LedgeTop Files connections from File Explorer. Windows may remove online-only files, and partially downloaded or locally changed files may not be preserved. Back up files you need before continuing.$\r$\n$\r$\nContinue uninstalling?" /SD IDNO IDYES un_user_confirmed IDNO un_user_refused
+  un_user_refused:
+    SetErrorLevel 20
+    Abort
+  un_user_confirmed:
   Call un.CheckFixedPath
   !insertmacro ValidatePayloadPaths
   ClearErrors
@@ -682,7 +701,7 @@ Section "Uninstall"
     MessageBox MB_ICONSTOP "A LedgeTop Files app is still running.$\r$\n$\r$\nNear the Windows clock, open the LT tray icon and choose Quit LedgeTop Files. Also quit any old LedgeTop Files Preview tray icon. Closing Settings does not quit the app.$\r$\n$\r$\nThen run uninstall again." /SD IDOK
     Goto un_cleanup_refused
   un_cleanup_review:
-    MessageBox MB_ICONSTOP "Uninstall could not verify this PC's file connections. No installed files were deleted. Ask LedgeTop support for help before trying again. Cleanup code: $0" /SD IDOK
+    MessageBox MB_ICONSTOP "Uninstall could not verify this PC's file connections. No installed app files were deleted; connection cleanup may be incomplete. Check the old folders and ask LedgeTop support before trying again. Cleanup code: $0" /SD IDOK
   un_cleanup_refused:
     SetErrorLevel $0
     Abort
@@ -708,7 +727,7 @@ Section "Uninstall"
   ; Older versions and unknown residual files are deliberately retained.
   Goto un_done
   un_failed:
-    MessageBox MB_ICONSTOP "Uninstall stopped. Owned integration or payload removal needs review; user files were retained." /SD IDOK
+    MessageBox MB_ICONSTOP "Uninstall stopped. Connection or app-file removal needs review. Check the old folders and ask LedgeTop support before trying again." /SD IDOK
     SetErrorLevel 20
     Abort
   un_done:

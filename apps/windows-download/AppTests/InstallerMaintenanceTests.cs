@@ -105,6 +105,17 @@ internal static class InstallerMaintenanceTests
         var log = new List<string>();
         var sources = new List<FakeSession>();
         var thread = Environment.CurrentManagedThreadId;
+        foreach (var outcome in Enum.GetValues<LegacyExplorerPreviewCleanupResult>()) {
+            var probeLog = new List<string>(); var calls = 0;
+            var code = await InstallerMaintenance.RunAsync((true, ReleaseChannel.Pilot), [InstallerMaintenance.ProbeLegacyArgument],
+                () => new Owner(probeLog, thread), _ => throw new Exception("Probe cannot prepare connected sources."), remove => {
+                    Require(!remove && calls++ == 0, "probe is read-only and runs once"); return Task.FromResult(outcome);
+                });
+            var expected = outcome == LegacyExplorerPreviewCleanupResult.RecordedProfile ? 0 :
+                outcome is LegacyExplorerPreviewCleanupResult.NoKnownReceipt or LegacyExplorerPreviewCleanupResult.AlreadyRemovedVerified ? 11 :
+                outcome == LegacyExplorerPreviewCleanupResult.Busy ? 10 : 20;
+            Require(code == expected && calls == 1 && probeLog.SequenceEqual(["owner-dispose"]), "probe classifies without removal");
+        }
         foreach (var compiled in new (bool Packaged, ReleaseChannel? Channel)[] { (false, null), (true, ReleaseChannel.Stable) })
             Require(await InstallerMaintenance.RunAsync(compiled, [InstallerMaintenance.RetireLegacyArgument],
                 () => throw new Exception("No owner on unsupported retirement."), _ => throw new Exception(),

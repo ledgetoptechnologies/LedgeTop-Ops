@@ -181,8 +181,8 @@ internal sealed class ExplorerPreviewWindow : Window
 
         var removal = new StackPanel(); removal.Children.Add(Heading(presentation.Generated ? "Manage this preview" : "Manage this connection"));
         removal.Children.Add(Body(presentation.Generated
-            ? "Remove the Explorer registration and stop preview downloads. Files already downloaded stay on this PC."
-            : "Remove this Explorer connection and stop downloads. Files already downloaded stay on this PC."));
+            ? "Remove the Explorer registration and stop preview downloads. Windows may remove online-only files; back up files you need first."
+            : "Remove this Explorer connection and stop downloads. Windows may remove online-only files, and partially downloaded or locally changed files may not be preserved. Back up files you need first."));
         RemoveButton.HorizontalAlignment = HorizontalAlignment.Left; RemoveButton.Margin = new Thickness(0, 12, 0, 0);
         RemoveButton.Foreground = Brush("ErrorInk"); removal.Children.Add(RemoveButton);
         var quitButton = new Button { Content = "Quit LedgeTop Files", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 12, 0, 0), ToolTip = "Stop downloads and quit (Ctrl+Q). Local files stay on this PC." };
@@ -289,8 +289,8 @@ internal sealed class ExplorerPreviewWindow : Window
             catch (Exception error) {
                 problem = presentation.Generated ? "The preview couldn't finish that action. Check Activity, then try again."
                     : "The connection couldn't finish that action. Check Activity, then try again.";
-                localActivity.Add(presentation.Generated ? "A preview action could not finish. No local files were deleted."
-                    : "A connection action could not finish. No local files were deleted.");
+                localActivity.Add(presentation.Generated ? "A preview action could not finish. Check Activity for its outcome."
+                    : "A connection action could not finish. Check Activity for its outcome.");
                 localActivity.Add(trace.Failure(error, settings: true));
             } finally { busy = false; Refresh(); }
         }
@@ -541,7 +541,7 @@ internal sealed class ExplorerPreviewWindow : Window
         detail.Text = problem.Length > 0 ? problem : quitting ? "Stopping downloads and disconnecting the preview. Files already on this PC stay here." : state switch {
             ExplorerPreviewState.Running => "Open your files folder to try files on demand. You can keep this window closed while the preview runs in the tray.",
             ExplorerPreviewState.Paused => "Online-only files cannot download while paused. Files already kept on this device remain available.",
-            ExplorerPreviewState.Removed => "The preview no longer appears as a connected Explorer location. Your local files have been preserved.",
+            ExplorerPreviewState.Removed => "The preview no longer appears as a connected Explorer location. Check the old folder for files that remain.",
             ExplorerPreviewState.Failed => "The Explorer preview couldn't start or complete an operation. Check Activity before trying again.",
             _ => "Start a simulated sign-in to try generated files in an isolated folder. No real account or files are connected."
         };
@@ -550,7 +550,7 @@ internal sealed class ExplorerPreviewWindow : Window
             : state switch {
                 ExplorerPreviewState.Running => "Open your files folder in Explorer. You can close this window while downloads continue in the tray.",
                 ExplorerPreviewState.Paused => "Online-only files cannot download while paused. Files already on this device remain available.",
-                ExplorerPreviewState.Removed => "This Explorer connection was removed. Downloaded and modified local files were preserved.",
+                ExplorerPreviewState.Removed => "This Explorer connection was removed. Check the old folder for files that remain; Windows may have removed online-only files.",
                 ExplorerPreviewState.Failed => "Check Activity for the connection problem. You can remove this PC's existing connection without signing in.",
                 ExplorerPreviewState.Starting => "Signing in and preparing the files this account is allowed to read.",
                 _ => "Sign in to connect this source. Files appear in Explorer and download when you open them. You can remove an existing connection here without signing in."
@@ -558,7 +558,7 @@ internal sealed class ExplorerPreviewWindow : Window
         if (!presentation.Generated && !quitting && problem.Length == 0 && state == ExplorerPreviewState.Running &&
             session is ConnectedExplorerSession { InventoryEmpty: true }) {
             status.Text = "Connected — saved file list is empty";
-            detail.Text = "You're signed in, but this PC's saved file list is empty. Sign in and refresh the file list to check current sharing. If files are found, Explorer uses a new owned folder; the old folder and all local files are kept.";
+            detail.Text = "You're signed in, but this PC's saved file list is empty. Sign in and refresh the file list to check current sharing. If files are found, Explorer uses a new folder. Back up anything you need from the old folder first; Windows may remove online-only files.";
         }
         if (!presentation.Generated && !quitting && !busy && !updateMaintenance && session is ConnectedExplorerSession { CanRecoverTransientSession: true }) {
             status.Text = "Waiting to reconnect";

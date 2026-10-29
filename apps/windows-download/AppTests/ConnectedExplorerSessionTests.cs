@@ -414,7 +414,7 @@ internal static class ConnectedExplorerSessionTests
             if (mode == "refresh") {
                 Check(removed == 1 && f.Captures == 2 && f.EngineStarts == 2 && !session.InventoryEmpty && !session.CanRefreshEmptyInventory,
                     "explicit sign-in refresh rotates only an empty generation after capture and exact removal");
-                Check(session.Activity.Any(line => line.Contains("old folder and all local files were kept", StringComparison.Ordinal)), "refresh explains retained old folder/new owned folder");
+                Check(session.Activity.Any(line => line.Contains("check the previous folder for local files", StringComparison.Ordinal)), "refresh directs users to check the previous folder");
                 var captures = f.Captures; await session.StartAsync();
                 Check(f.Captures == captures && f.Log.Count(item => item == "engine-remove") == 1, "nonempty explicit reconnect never recaptures or removes");
             } else if (mode == "still-empty") Check(removed == 0 && session.InventoryEmpty && f.Captures == 2 &&

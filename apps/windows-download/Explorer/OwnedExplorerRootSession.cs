@@ -176,7 +176,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
                 catch { Add("Provider shutdown could not be confirmed. Its owned registration was retained for review."); }
             }
             SetState(ExplorerPreviewState.Failed);
-            Add("The preview stopped at a safety check. Local files were kept. Remove preview handles normal cleanup; interrupted Windows changes may need ownership review.");
+            Add("The preview stopped at a safety check. An interrupted Windows change may need ownership review.");
             throw;
         }
         finally { operations.Release(); }
@@ -317,13 +317,13 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
             if (p.Phase <= Phase.NativeRegisterIntent || p.Phase == Phase.NativeRemoveIntent)
             {
                 Save(p with { Phase = Phase.Removed }); SetState(ExplorerPreviewState.Removed);
-                Add("The preview integration is removed. Local files have been kept."); return;
+                Add("The preview integration was removed. Online-only items may no longer be present in the local folder."); return;
             }
             throw new IOException("The native registration disappeared outside the recorded removal sequence; it was not recreated.");
         }
         if (p.Phase == Phase.NativeRemoveIntent)
         {
-            Add("Windows removal has an incomplete recorded outcome. The preview needs ownership review; removal was not repeated and local files were kept.");
+            Add("Windows removal has an incomplete recorded outcome. The preview needs ownership review; removal was not repeated.");
             throw new IOException("The recorded Windows removal is incomplete. Inspect the exact saved registration before any further change.");
         }
         registration ??= ShellRegistration.OpenOwned(p.Root, shellId, Context(p), p.Icon,
@@ -341,7 +341,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
         Save(profile! with { Phase = Phase.Removed });
         source.Dispose(); source = null;
         SetState(ExplorerPreviewState.Removed);
-        Add("The preview integration is removed. Downloaded and modified local files have been kept.");
+        Add("The preview integration was removed. Check the previous folder for local files; online-only items may no longer be present.");
     }
 
     private void VerifyPinnedRoot(Profile p, ShellRegistration native, bool allowUnrecordedId = false)
@@ -538,7 +538,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
         catch
         {
             SetState(ExplorerPreviewState.Failed);
-            Add("The preview could not confirm shutdown. Its integration and local files were retained for review.");
+            Add("The preview could not confirm shutdown. Its integration needs ownership review.");
             throw;
         }
         finally { operations.Release(); }

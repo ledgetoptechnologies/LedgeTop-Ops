@@ -176,7 +176,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             var person = await CurrentPersonAsync(backend, selected, token, trace, explicitLogin ? null : index!.PrincipalId);
             Add("Sign-in confirmed. Preparing your files for Explorer.");
             if (index is { } previous && previous.PrincipalId != person && !previousRemoved) {
-                Add("A different account is signed in. Remove the previous Explorer connection before connecting this account. Local files are kept.");
+                Add("A different account is signed in. The previous Explorer connection needs review before connecting this account.");
                 throw new AccessDeniedException();
             }
             var scope = new ExplorerRootScope(channel, alias, origin, person);
@@ -197,7 +197,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             var refreshedEmpty = false;
             if (explicitLogin && !previousRemoved && index is not null &&
                 inventory is { Files.Count: 0, Directories.Count: 0 } empty && candidate.Session.State == ExplorerPreviewState.NotStarted) {
-                Add("Checking the current file list after your explicit sign-in. Local files will be kept.");
+                Add("Checking the current file list after your explicit sign-in.");
                 var refreshed = await CaptureInventoryAsync(backend, scope, person, token, trace);
                 _ = await CurrentPersonAsync(backend, selected, token, trace, person);
                 token.ThrowIfCancellationRequested();
@@ -220,8 +220,8 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                     trace.Phase = ConnectionPhase.ProviderPreparation;
                     SetEngine(Create(scope, lifetimeSource, inventory));
                     refreshedEmpty = true;
-                    Add("The empty connection was refreshed. Its old folder and all local files were kept; Explorer will use a new owned folder.");
-                } else Add("The current authorized file list is still empty. The existing connection and local files were kept.");
+                    Add("The empty connection was refreshed. Explorer will use a new owned folder; check the previous folder for local files.");
+                } else Add("The current authorized file list is still empty. The existing connection remains in place.");
             }
             if (inventory is null) {
                 if (candidate.Session.State is not (ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed))
@@ -347,7 +347,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         trace.Phase = ConnectionPhase.OwnershipPublication;
         SaveIndex(index.PrincipalId, removed: true);
         SetState(ExplorerPreviewState.Removed);
-        Add("The Explorer connection was removed. Downloaded and modified local files have been kept.");
+        Add("The Explorer connection was removed. Check the previous folder for local files; online-only items may no longer be present.");
     });
 
     private async Task OperateAsync(ConnectionAction operation, Func<CancellationToken, ConnectionFailureTrace, Task> action, CancellationToken requestedCancellation = default)
@@ -630,7 +630,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                 cancellation.Dispose(); done.TrySetResult();
             } catch (Exception error) {
                 SetState(ExplorerPreviewState.Failed);
-                Add("The Explorer connection could not confirm shutdown. Its saved ownership and local files were retained.");
+                Add("The Explorer connection could not confirm shutdown. Its saved ownership needs review.");
                 var primary = trace.Failure(error);
                 Add(primary);
                 TryPersistFailure(primary);
@@ -665,7 +665,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             ". Ask your LedgeTop contact to check this source. Local files were kept.",
         TransferException => "The file service or its metadata could not be verified. Check your connection, then ask your LedgeTop contact to check this source if it continues.",
         IOException => "The owned local Explorer connection needs ownership review. Try Remove for normal cleanup; if that is also blocked, keep the saved files and ask your LedgeTop contact to review the connection.",
-        _ => "The Explorer action could not finish safely. Check the connection and try again. Local files were kept and the saved connection remains available for cleanup."
+        _ => "The Explorer action could not finish safely. Check the connection and ask your LedgeTop contact for help."
     };
     private static string Hash(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
     private static string CanonicalOrigin(Uri value)

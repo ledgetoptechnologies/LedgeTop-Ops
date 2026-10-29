@@ -13,6 +13,7 @@ internal static class InstallerMaintenance
     internal const string QuitArgument = "--installer-request-quit";
     internal const string LegacyRemoveArgument = "--installer-remove-legacy-preview";
     internal const string RetireLegacyArgument = "--installer-retire-legacy-preview";
+    internal const string ProbeLegacyArgument = "--installer-probe-legacy-preview";
     internal static bool Requested(IReadOnlyList<string> arguments) => arguments.Any(value => value.StartsWith("--installer", StringComparison.OrdinalIgnoreCase));
 
     internal static Task<int> RunAsync((bool Packaged, ReleaseChannel? Channel) compiled, IReadOnlyList<string> arguments) =>
@@ -99,12 +100,22 @@ internal static class InstallerMaintenance
         Func<bool, Task<LegacyExplorerPreviewCleanupResult>> legacyCleanup)
     {
         if (!compiled.Packaged || compiled.Channel != ReleaseChannel.Pilot || arguments.Count != 1 ||
-            arguments[0] is not (CheckArgument or RemoveArgument or LegacyRemoveArgument or RetireLegacyArgument)) return 20;
+            arguments[0] is not (CheckArgument or RemoveArgument or LegacyRemoveArgument or RetireLegacyArgument or ProbeLegacyArgument)) return 20;
         var sessions = new List<IExplorerPreviewSession>();
         var result = 20;
         try {
             using var owner = tryOwn();
             if (owner is null) return 10;
+            if (arguments[0] == ProbeLegacyArgument) {
+                // Read-only probe is only a UI hint; the subsequent cleanup repeats
+                // all ownership checks. Missing is not proof all entries are absent.
+                return await legacyCleanup(false) switch {
+                    LegacyExplorerPreviewCleanupResult.RecordedProfile => 0,
+                    LegacyExplorerPreviewCleanupResult.NoKnownReceipt or LegacyExplorerPreviewCleanupResult.AlreadyRemovedVerified => 11,
+                    LegacyExplorerPreviewCleanupResult.Busy => 10,
+                    _ => 20
+                };
+            }
             if (arguments[0] is LegacyRemoveArgument or RetireLegacyArgument) {
                 // Explicit repair for the old portable demo; never prepare/remove Company or Client roots.
                 // Installation retirement treats no receipt as a no-op, never proof of navigation absence.

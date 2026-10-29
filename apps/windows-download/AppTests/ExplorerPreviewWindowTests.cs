@@ -106,6 +106,8 @@ internal static class ExplorerPreviewWindowTests
                 var labels = Labels((DependencyObject)connected.Content);
                 True(!labels.Contains("simulated sign-in") && !labels.Contains("DEMO DATA") && !labels.Contains("Demo account"),
                     "connected settings do not claim generated data or simulated sign-in");
+                True(labels.Contains("Windows may remove online-only files") && labels.Contains("partially downloaded or locally changed files") && labels.Contains("Back up"),
+                    "removal description does not promise that every placeholder or local modification survives");
                 Snap(connected, Path.Combine(screenshots, "connected-settings-before-sign-in.png"));
                 await connected.RemovePreviewAsync();
                 True(prepared.Removals == 1 && prepared.Starts == 0 && connectedFactoryCalls == 0 && File.Exists(retained),

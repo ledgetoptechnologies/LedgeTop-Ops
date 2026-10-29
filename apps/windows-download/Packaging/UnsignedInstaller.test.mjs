@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 const source = (await readFile(new URL('./UnsignedInstaller.nsi', import.meta.url), 'utf8')).replaceAll('\r\n', '\n');
 const active = source.split('\n').filter(line => !line.trimStart().startsWith(';')).join('\n');
 const builder = (await readFile(new URL('../../../scripts/windows-unsigned-installer.ps1', import.meta.url), 'utf8')).replaceAll('\r\n', '\n');
+const updateHelper = (await readFile(new URL('../App/Updates/ExeUpdateWindowsHelper.cs', import.meta.url), 'utf8')).replaceAll('\r\n', '\n');
 const install = active.slice(active.indexOf('Section "Install"'), active.indexOf('Function un.onInit'));
 const init = active.slice(active.indexOf('Function .onInit'), active.indexOf('Section "Install"'));
 const uninit = active.slice(active.indexOf('Function un.onInit'), active.indexOf('Section "Uninstall"'));
@@ -19,20 +20,44 @@ test('legacy V2 retirement runs only after successful activation and never rolls
   assert.match(install, /StrCmp \$StartupFailed 1 activation_failed\n  Call RetireOwnedLegacyPreview\n  Goto install_done/);
   before(install, 'Call RetireOwnedLegacyPreview', 'StrCpy $FinishLaunchReady 1');
   assert.equal((active.match(/Call RetireOwnedLegacyPreview/g) ?? []).length, 1);
-  assert.equal((legacyRetirement.match(/ExecWait/g) ?? []).length, 1);
+  assert.equal((legacyRetirement.match(/ExecWait/g) ?? []).length, 2);
+  before(legacyRetirement, 'IfSilent retire_legacy_done', '--installer-probe-legacy-preview');
+  before(legacyRetirement, '--installer-probe-legacy-preview', 'retire_legacy_confirm:');
+  before(legacyRetirement, 'IDYES retire_legacy_remove IDNO retire_legacy_done', '--installer-retire-legacy-preview');
   assert.match(legacyRetirement, /--installer-retire-legacy-preview' \$0/);
   assert.doesNotMatch(legacyRetirement, /--installer-remove-connections|--installer-remove-legacy-preview|WriteReg|WriteINI|Delete|RMDir|Abort|SetErrorLevel|install_failed|activation_failed|--installer-request-quit/);
 });
 
-test('legacy retirement retries only definite busy; unknown and silent outcomes continue to Finish', () => {
-  assert.match(legacyRetirement, /IfErrors retire_legacy_review\n  StrCmp \$0 0 retire_legacy_done\n  StrCmp \$0 10 0 retire_legacy_review/);
-  assert.equal((legacyRetirement.match(/IfSilent retire_legacy_done/g) ?? []).length, 2);
+test('legacy retirement requires confirmation, retries only definite busy and silently defers', () => {
+  assert.match(legacyRetirement, /IfErrors retire_legacy_review\n  StrCmp \$0 11 retire_legacy_done\n  StrCmp \$0 0 retire_legacy_confirm\n  StrCmp \$0 10 retire_legacy_busy retire_legacy_review/);
+  assert.match(legacyRetirement, /IfErrors retire_legacy_review\n  StrCmp \$0 0 retire_legacy_done\n  StrCmp \$0 10 retire_legacy_busy retire_legacy_review/);
+  assert.equal((legacyRetirement.match(/IfSilent retire_legacy_done/g) ?? []).length, 1);
   assert.match(legacyRetirement, /IDRETRY retire_legacy_retry IDCANCEL retire_legacy_done/);
   const unknown = legacyRetirement.slice(legacyRetirement.indexOf('retire_legacy_review:'));
   assert.doesNotMatch(unknown, /IDRETRY|Goto retire_legacy_retry|ExecWait|\bCall\b/);
   assert(unknown.includes('Setup will not guess or repeat an uncertain removal.'));
-  assert(legacyRetirement.includes('Downloaded and modified files stay on this PC.'));
+  assert(legacyRetirement.includes('Windows may remove online-only entries'));
+  assert(legacyRetirement.includes('partially downloaded or locally changed files may not be preserved'));
+  assert(unknown.includes('Check the old folder for files that remain.'));
   assert.match(unknown, /retire_legacy_done:\n  ClearErrors\n  Pop \$0\nFunctionEnd/);
+});
+
+test('uninstall explicitly warns before connection removal; silent and declined cases refuse', () => {
+  before(uninstall, 'IfSilent un_user_refused', 'MessageBox MB_YESNO');
+  before(uninstall, 'IDYES un_user_confirmed IDNO un_user_refused', '--installer-remove-connections');
+  assert.match(uninstall, /un_user_refused:\n    SetErrorLevel 20\n    Abort\n  un_user_confirmed:/);
+  assert(uninstall.includes('Windows may remove online-only files'));
+  assert(uninstall.includes('partially downloaded or locally changed files may not be preserved'));
+  assert(!uninstall.includes('user files were retained'));
+});
+
+test('silent update launches setup, while silent uninstall refusal is scoped to uninstall cleanup', () => {
+  assert.match(updateHelper, /Spawn\(offer\.Handoff\.Candidate\.InstallerPath, \["\/S"\], true\)/);
+  assert.doesNotMatch(updateHelper, /uninstall\.exe/i);
+  assert.doesNotMatch(install, /IfSilent un_user_refused|--installer-remove-connections/);
+  before(install, 'Call RetireOwnedLegacyPreview', 'Goto install_done');
+  before(legacyRetirement, 'IfSilent retire_legacy_done', '--installer-retire-legacy-preview');
+  assert.match(uninstall, /IfSilent un_user_refused/);
 });
 
 test('explicit immutable builder inputs have no installable defaults', () => {
@@ -172,7 +197,7 @@ test('only busy code10 gives tray Quit guidance at both setup checks and uninsta
     assert(busy.includes('LT tray icon') && busy.includes('choose Quit LedgeTop Files'));
     assert(busy.includes('Closing Settings does not quit the app.'));
     assert(busy.includes(`Goto ${refused}`));
-    assert(unknown.includes('Ask LedgeTop support for help before trying again.'));
+    assert(unknown.includes('LedgeTop support') && unknown.includes('before trying again'));
     assert(unknown.includes('code: $0'));
     assert.doesNotMatch(unknown, /Then run (?:setup|uninstall) again/);
     assert.doesNotMatch(block, /ExecWait|ExecShell|\bCall\b|WriteReg|Delete|CreateDirectory/);
@@ -181,11 +206,11 @@ test('only busy code10 gives tray Quit guidance at both setup checks and uninsta
   assert(secondBusy.includes('If setup says this version already exists'));
   const uninstallBusy = uninstall.slice(0, uninstall.indexOf('un_cleanup_review:'));
   assert(uninstallBusy.includes('Also quit any old LedgeTop Files Preview tray icon.'));
-  assert.equal((active.match(/ExecWait/g) ?? []).length, 5, 'graceful quit and post-activation legacy-only retirement maintenance commands');
+  assert.equal((active.match(/ExecWait/g) ?? []).length, 6, 'graceful quit, legacy read-only probe and confirmed retirement');
 });
 test('silent refusal has safe default dialog and nonzero explicit exit status', () => {
   for (const line of active.split('\n').filter(s => s.trimStart().startsWith('MessageBox ')))
-    assert(line.endsWith('/SD IDOK') || line.includes('/SD IDNO IDYES preflight_stop IDNO preflight_refused') || line.includes('/SD IDCANCEL IDRETRY preflight_retry IDCANCEL preflight_refused') || line.includes('/SD IDCANCEL IDRETRY retire_legacy_retry IDCANCEL retire_legacy_done'));
+    assert(line.endsWith('/SD IDOK') || line.includes('/SD IDNO IDYES preflight_stop IDNO preflight_refused') || line.includes('/SD IDCANCEL IDRETRY preflight_retry IDCANCEL preflight_refused') || line.includes('/SD IDCANCEL IDRETRY retire_legacy_retry IDCANCEL retire_legacy_done') || line.includes('/SD IDNO IDYES retire_legacy_remove IDNO retire_legacy_done') || line.includes('/SD IDNO IDYES un_user_confirmed IDNO un_user_refused'));
   for (const [index, line] of active.split('\n').entries()) if (line.trim() === 'Abort')
     assert(active.split('\n')[index - 1].trim().startsWith('SetErrorLevel '));
 });
