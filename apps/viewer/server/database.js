@@ -2066,6 +2066,41 @@ const MIGRATIONS = [
     CREATE INDEX viewer_project_groups_org_idx ON viewer_project_groups(organization_id);
     CREATE INDEX viewer_project_hierarchy_org_idx ON viewer_project_hierarchy(organization_id,group_id);
   `},
+  {version:43,name:'viewer_cooperative_capacity_ledger',sql:`
+    CREATE TABLE viewer_capacity_control (
+      singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+      mode TEXT NOT NULL CHECK(mode IN ('disabled','cooperative')),
+      legacy_state TEXT NOT NULL CHECK(legacy_state IN ('unassessed','reconciling','verified'))
+    );
+    INSERT INTO viewer_capacity_control(singleton,mode,legacy_state)
+      VALUES(1,'disabled','unassessed');
+    CREATE TABLE viewer_capacity_reservations (
+      id TEXT PRIMARY KEY,
+      domain_id TEXT NOT NULL CHECK(length(domain_id) BETWEEN 1 AND 128),
+      domain_revision TEXT NOT NULL CHECK(length(domain_revision) BETWEEN 1 AND 128),
+      writer_kind TEXT NOT NULL CHECK(length(writer_kind) BETWEEN 1 AND 64),
+      writer_id TEXT NOT NULL CHECK(length(writer_id) BETWEEN 1 AND 128),
+      writer_namespace TEXT NOT NULL CHECK(length(writer_namespace) BETWEEN 1 AND 256),
+      owner_id TEXT NOT NULL CHECK(length(owner_id) BETWEEN 1 AND 128),
+      fence_token TEXT NOT NULL CHECK(length(fence_token) BETWEEN 1 AND 128),
+      owner_generation INTEGER NOT NULL CHECK(typeof(owner_generation)='integer' AND owner_generation BETWEEN 1 AND 9007199254740991),
+      peak_bytes INTEGER NOT NULL CHECK(typeof(peak_bytes)='integer' AND peak_bytes BETWEEN 0 AND 9007199254740991),
+      materialized_bytes INTEGER NOT NULL DEFAULT 0 CHECK(typeof(materialized_bytes)='integer' AND materialized_bytes BETWEEN 0 AND peak_bytes),
+      remaining_bytes INTEGER NOT NULL CHECK(typeof(remaining_bytes)='integer' AND remaining_bytes=peak_bytes-materialized_bytes),
+      peak_inodes INTEGER NOT NULL CHECK(typeof(peak_inodes)='integer' AND peak_inodes BETWEEN 0 AND 9007199254740991),
+      materialized_inodes INTEGER NOT NULL DEFAULT 0 CHECK(typeof(materialized_inodes)='integer' AND materialized_inodes BETWEEN 0 AND peak_inodes),
+      remaining_inodes INTEGER NOT NULL CHECK(typeof(remaining_inodes)='integer' AND remaining_inodes=peak_inodes-materialized_inodes),
+      state TEXT NOT NULL CHECK(state IN ('requested','held','writing','quiescing','retained','complete','cancelled')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(domain_id,writer_kind,writer_id)
+    );
+    CREATE INDEX viewer_capacity_reservations_domain_idx ON viewer_capacity_reservations(domain_id,state);
+    CREATE TRIGGER viewer_capacity_materialized_monotonic
+      BEFORE UPDATE OF materialized_bytes,materialized_inodes ON viewer_capacity_reservations
+      WHEN NEW.materialized_bytes < OLD.materialized_bytes OR NEW.materialized_inodes < OLD.materialized_inodes
+      BEGIN SELECT RAISE(ABORT,'capacity materialization cannot decrease'); END;
+  `},
 ];
 
 function applyMigrations(database) {

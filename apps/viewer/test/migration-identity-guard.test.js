@@ -31,7 +31,7 @@ test('case-variant ledger, table and index collisions leave database bytes and j
 
 test('index-name trigger collisions fail before changing database bytes or journal mode',t=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'migration-trigger-overlap-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
- for(const name of ['viewer_project_groups_org_idx','VIEWER_PROJECT_GROUPS_ORG_IDX']){const file=path.join(dir,`${name}.sqlite`),db=new DatabaseSync(file);db.exec('PRAGMA journal_mode=DELETE');for(const m of MIGRATIONS){db.exec(m.sql);m.after?.(db);db.prepare('INSERT INTO schema_migrations VALUES (?,?,?)').run(m.version,m.name,'t');}db.exec(`CREATE TRIGGER ${name} BEFORE DELETE ON viewer_project_groups BEGIN SELECT RAISE(ABORT,'blocked'); END`);db.close();const hash=()=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),before=hash();assert.throws(()=>openDatabase(file),{code:'migration_identity_conflict'},name);assert.equal(hash(),before,name);const check=new DatabaseSync(file,{readOnly:true});try{assert.equal(check.prepare('PRAGMA journal_mode').get().journal_mode,'delete',name);}finally{check.close();}assert.equal(fs.existsSync(`${file}-wal`),false,name);}
+ for(const [index,name] of ['viewer_project_groups_org_idx','VIEWER_PROJECT_GROUPS_ORG_IDX'].entries()){const file=path.join(dir,`collision-${index}.sqlite`),db=new DatabaseSync(file);db.exec('PRAGMA journal_mode=DELETE');for(const m of MIGRATIONS){db.exec(m.sql);m.after?.(db);db.prepare('INSERT INTO schema_migrations VALUES (?,?,?)').run(m.version,m.name,'t');}db.exec(`CREATE TRIGGER ${name} BEFORE DELETE ON viewer_project_groups BEGIN SELECT RAISE(ABORT,'blocked'); END`);db.close();const hash=()=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),before=hash();assert.throws(()=>openDatabase(file),{code:'migration_identity_conflict'},name);assert.equal(hash(),before,name);const check=new DatabaseSync(file,{readOnly:true});try{assert.equal(check.prepare('PRAGMA journal_mode').get().journal_mode,'delete',name);}finally{check.close();}assert.equal(fs.existsSync(`${file}-wal`),false,name);}
 });
 
 test('unrecorded protected tables and unknown protected ledger entries fail closed',t=>{
@@ -68,4 +68,20 @@ test('hierarchy 42 with a missing index or foreign ledger name refuses before ap
 
 test('unexpected hierarchy indexes and triggers refuse before any migration',()=>{
  for(const extra of ['CREATE INDEX unexpected_hierarchy_index ON viewer_organizations(display_name)',"CREATE TRIGGER unexpected_hierarchy_trigger BEFORE DELETE ON viewer_organizations BEGIN SELECT RAISE(ABORT,'blocked'); END"]){const db=legacy();try{const migration=MIGRATIONS.find(x=>x.version===42);db.exec(migration.sql);db.prepare('INSERT INTO schema_migrations VALUES (?,?,?)').run(42,migration.name,'t');db.exec(extra);const before=schema(db);assert.throws(()=>applyMigrations(db),{code:'migration_identity_conflict'});assert.equal(schema(db),before);assert.equal(db.prepare('SELECT 1 FROM schema_migrations WHERE version=41').get(),undefined);}finally{db.close();}}
+});
+
+
+test('capacity ledger collisions fail before changing existing schema or ledger',()=>{
+ for(const kind of ['foreign-name','unrecorded-table','case-table','foreign-trigger']){
+  const db=legacy();try {
+   for(const m of MIGRATIONS.filter(x=>x.version===41||x.version===42)){db.exec(m.sql);m.after?.(db);db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(m.version,m.name,'t');}
+   const m=MIGRATIONS.find(x=>x.version===43);
+   if(kind==='foreign-name')db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(43,'other_feature','t');
+   if(kind==='unrecorded-table')db.exec('CREATE TABLE viewer_capacity_control(singleton INTEGER)');
+   if(kind==='case-table'){db.exec(m.sql.replaceAll('viewer_capacity_control','VIEWER_CAPACITY_CONTROL'));db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(43,m.name,'t');}
+   if(kind==='foreign-trigger'){db.exec(m.sql);db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(43,m.name,'t');db.exec("CREATE TRIGGER other_capacity_trigger BEFORE DELETE ON viewer_capacity_reservations BEGIN SELECT RAISE(ABORT,'blocked'); END");}
+   const before=schema(db), ledger=JSON.stringify(db.prepare('SELECT * FROM schema_migrations ORDER BY version').all());
+   assert.throws(()=>applyMigrations(db),{code:'migration_identity_conflict'},kind);assert.equal(schema(db),before,kind);assert.equal(JSON.stringify(db.prepare('SELECT * FROM schema_migrations ORDER BY version').all()),ledger,kind);
+  }finally{db.close();}
+ }
 });

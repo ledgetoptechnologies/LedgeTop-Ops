@@ -7,6 +7,7 @@ const {DatabaseSync}=require('node:sqlite');
 const protectedMigrations=[
   {version:41,name:'gcp_odm_crs_confirmations',objects:['gcp_odm_crs_confirmations']},
   {version:42,name:'viewer_workspace_hierarchy',objects:['viewer_organizations','viewer_project_groups','viewer_project_hierarchy','viewer_project_groups_org_idx','viewer_project_hierarchy_org_idx']},
+  {version:43,name:'viewer_cooperative_capacity_ledger',objects:['viewer_capacity_control','viewer_capacity_reservations','viewer_capacity_reservations_domain_idx','viewer_capacity_materialized_monotonic']},
 ];
 // Strict comparison intentionally rejects harmless formatting differences as
 // well; normalizing whitespace could alter quoted SQL literals.
