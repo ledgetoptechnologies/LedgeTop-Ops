@@ -104,3 +104,15 @@ test('expired trash scan rotates in bounded pages past a large retained prefix',
  assert.deepEqual(purgeExpiredTrash(restart(),{}),[]);db.prepare("UPDATE storage_trash SET purge_after='2020-01-01' WHERE id='early'").run();for(let i=0;i<3;i++){const extra=p.createDataset({projectId:project.id,displayName:`New ${i}`,storageMode:'external_reference',rootKey:'datasets',relativePath:`new${i}`});db.prepare("UPDATE datasets SET status='trashed' WHERE id=?").run(extra.id);insert.run(`new-${i}`,'dataset',extra.id);}
  assert.deepEqual(purgeExpiredTrash(restart(),{}),[]);assert.equal(purgeExpiredTrash(restart(),{})[0]?.trashId,'later');assert.deepEqual(counts,[100,100,6]);assert.equal(purgeExpiredTrash(restart(),{})[0]?.trashId,'early');assert.ok(p.getTrash('early').permanentlyDeletedAt);assert.ok(p.getTrash('later').permanentlyDeletedAt);assert.equal(p.getTrash('retained-0').permanentlyDeletedAt,null);
 });
+
+test('trash scan lease prevents stale workers from overwriting progress and recovers after expiry',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-lease-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
+ const a=new ProcessingRepository(db),b=new ProcessingRepository(db),now=Date.now();assert.equal(a.acquireTrashScanLease('worker-a',now,1000),true);assert.equal(b.acquireTrashScanLease('worker-b',now+1,1000),false);a.saveTrashScanCursor('worker-a',{after:0,highWater:3});assert.equal(b.acquireTrashScanLease('worker-b',now+1001,900000),true);assert.throws(()=>a.saveTrashScanCursor('worker-a',{after:3,highWater:3}),{code:'trash_scan_lease_lost'});a.releaseTrashScanLease('worker-a');assert.throws(()=>a.renewTrashScanLease('worker-a'),{code:'trash_scan_lease_lost'});b.saveTrashScanCursor('worker-b',{after:2,highWater:3});assert.deepEqual(new ProcessingRepository(db).trashScanCursor(),{after:2,highWater:3});b.releaseTrashScanLease('worker-b');assert.equal(a.acquireTrashScanLease('worker-c'),true);a.releaseTrashScanLease('worker-c');
+});
+
+test('malformed raw-copy and upload manifest paths fail closed',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-malformed-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
+ const p=new ProcessingRepository(db),project=p.createProject({displayName:'Survey'}),d=p.createDataset({projectId:project.id,displayName:'Malformed',storageMode:'managed',rootKey:'datasets',relativePath:'source'}),timestamp='2020-01-01T00:00:00.000Z';
+ db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,dataset_id,payload_json,status,available_at,created_at,updated_at) VALUES ('bad','import_adopt','test',?,?,'failed',?,?,?)").run(d.id,JSON.stringify({rawPhotoCopy:true,files:[{relativePath:null}]}),timestamp,timestamp,timestamp);assert.equal(p.datasetHasRetainedCsv(d.id),true);
+ db.prepare("DELETE FROM dataset_operations WHERE id='bad'").run();const u=p.createUpload({datasetId:d.id,subject:'test',files:[{relativePath:42}],chunkSize:2,expiresAt:timestamp});assert.equal(p.datasetHasRetainedCsv(d.id),true);assert.ok(u.upload.id);
+});

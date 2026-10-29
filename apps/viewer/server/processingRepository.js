@@ -136,8 +136,8 @@ function validLodProvenance(value, glbSha256, tilesManifestSha256, obj=null) {
 }
 function retainedCsvPredicate(datasetId) {
   return `(EXISTS (SELECT 1 FROM dataset_files f WHERE f.dataset_id=${datasetId} AND lower(substr(f.relative_path,-4))='.csv') OR
-    EXISTS (SELECT 1 FROM upload_sessions u WHERE u.dataset_id=${datasetId} AND CASE WHEN NOT json_valid(u.expected_manifest_json) THEN 1 WHEN json_type(u.expected_manifest_json) IS NOT 'array' THEN 1 ELSE EXISTS (SELECT 1 FROM json_each(u.expected_manifest_json) j WHERE CASE WHEN j.type IS NOT 'object' THEN 1 ELSE lower(substr(json_extract(j.value,'$.relativePath'),-4))='.csv' END) END) OR
-    EXISTS (SELECT 1 FROM dataset_operations o WHERE o.dataset_id=${datasetId} AND o.operation_type='import_adopt' AND CASE WHEN NOT json_valid(o.payload_json) THEN 1 WHEN json_type(o.payload_json) IS NOT 'object' THEN 1 WHEN json_extract(o.payload_json,'$.rawPhotoCopy')=1 THEN CASE WHEN json_type(o.payload_json,'$.files') IS NOT 'array' THEN 1 ELSE EXISTS (SELECT 1 FROM json_each(o.payload_json,'$.files') j WHERE CASE WHEN j.type IS NOT 'object' THEN 1 ELSE lower(substr(json_extract(j.value,'$.relativePath'),-4))='.csv' OR lower(substr(json_extract(j.value,'$.sourcePath'),-4))='.csv' END) END ELSE 0 END))`;
+    EXISTS (SELECT 1 FROM upload_sessions u WHERE u.dataset_id=${datasetId} AND CASE WHEN NOT json_valid(u.expected_manifest_json) THEN 1 WHEN json_type(u.expected_manifest_json) IS NOT 'array' THEN 1 ELSE EXISTS (SELECT 1 FROM json_each(u.expected_manifest_json) j WHERE CASE WHEN j.type IS NOT 'object' THEN 1 WHEN json_type(j.value,'$.relativePath') IS NOT 'text' THEN 1 ELSE lower(substr(json_extract(j.value,'$.relativePath'),-4))='.csv' END) END) OR
+    EXISTS (SELECT 1 FROM dataset_operations o WHERE o.dataset_id=${datasetId} AND o.operation_type='import_adopt' AND CASE WHEN NOT json_valid(o.payload_json) THEN 1 WHEN json_type(o.payload_json) IS NOT 'object' THEN 1 WHEN json_extract(o.payload_json,'$.rawPhotoCopy')=1 THEN CASE WHEN json_type(o.payload_json,'$.files') IS NOT 'array' THEN 1 ELSE EXISTS (SELECT 1 FROM json_each(o.payload_json,'$.files') j WHERE CASE WHEN j.type IS NOT 'object' THEN 1 WHEN json_type(j.value,'$.relativePath') IS NOT 'text' OR json_type(j.value,'$.sourcePath') IS NOT 'text' THEN 1 ELSE lower(substr(json_extract(j.value,'$.relativePath'),-4))='.csv' OR lower(substr(json_extract(j.value,'$.sourcePath'),-4))='.csv' END) END ELSE 0 END))`;
 }
 function bounded(value, max = 240) { return String(value || '').trim().slice(0, max); }
 const DIAGNOSTIC_DETAIL_KEYS=new Set(['recoveryRevision','sourceOutputId','sourceVersionId','targetVersionId','manifestSha256','derivativeType','manualRetryCount','operationType','status','verified','resourcePressure','exitCode','metric','observed','limit','grayZoneLimit','policyRevision','acceptance','numericalAgreement','equivalenceSha256','reason','replacementOutputId','proofFailureReason','unmappedFileCount','unmappedByteSize','artifactKind','errorCode','retryAfter','byteSize','trashId','preservedFileCount','preservationGroupCount','preservationMethod']);
@@ -350,12 +350,24 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     const value=json(this.database.prepare("SELECT value FROM app_state WHERE key='trash_retention_scan_cursor'").get()?.value,null);
     return value && Number.isSafeInteger(value.after) && value.after>=0 && Number.isSafeInteger(value.highWater) && value.highWater>=value.after ? value : null;
   }
-  saveTrashScanCursor(value) {
-    this.database.prepare("INSERT INTO app_state(key,value,updated_at) VALUES ('trash_retention_scan_cursor',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(JSON.stringify(value),now());
+  acquireTrashScanLease(owner,at=Date.now(),ttlMs=900000) {
+    return this.transaction(()=>{const lease=json(this.database.prepare("SELECT value FROM app_state WHERE key='trash_retention_scan_lease'").get()?.value,null);if(lease && lease.until>at && lease.owner!==owner)return false;this.database.prepare("INSERT INTO app_state(key,value,updated_at) VALUES ('trash_retention_scan_lease',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(JSON.stringify({owner,until:at+ttlMs}),now());return true;});
   }
-  startTrashScan() {
-    const highWater=this.database.prepare('SELECT COALESCE(MAX(rowid),0) AS max FROM storage_trash').get().max;
-    const cursor={after:0,highWater};this.saveTrashScanCursor(cursor);return cursor;
+  requireTrashScanLease(owner,at=Date.now()) {
+    const lease=json(this.database.prepare("SELECT value FROM app_state WHERE key='trash_retention_scan_lease'").get()?.value,null);
+    if(!lease||lease.owner!==owner||lease.until<=at)throw Object.assign(new Error('trash scan lease lost'),{code:'trash_scan_lease_lost'});
+  }
+  renewTrashScanLease(owner,at=Date.now(),ttlMs=900000) {
+    return this.transaction(()=>{this.requireTrashScanLease(owner,at);this.database.prepare("UPDATE app_state SET value=?,updated_at=? WHERE key='trash_retention_scan_lease'").run(JSON.stringify({owner,until:at+ttlMs}),now());});
+  }
+  releaseTrashScanLease(owner) {
+    return this.transaction(()=>{const lease=json(this.database.prepare("SELECT value FROM app_state WHERE key='trash_retention_scan_lease'").get()?.value,null);if(lease?.owner===owner)this.database.prepare("DELETE FROM app_state WHERE key='trash_retention_scan_lease'").run();});
+  }
+  saveTrashScanCursor(owner,value) {
+    return this.transaction(()=>{this.requireTrashScanLease(owner);this.database.prepare("INSERT INTO app_state(key,value,updated_at) VALUES ('trash_retention_scan_cursor',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(JSON.stringify(value),now());});
+  }
+  startTrashScan(owner) {
+    return this.transaction(()=>{this.requireTrashScanLease(owner);const highWater=this.database.prepare('SELECT COALESCE(MAX(rowid),0) AS max FROM storage_trash').get().max;const cursor={after:0,highWater};this.database.prepare("INSERT INTO app_state(key,value,updated_at) VALUES ('trash_retention_scan_cursor',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(JSON.stringify(cursor),now());return cursor;});
   }
   expiredTrashPage(afterRowId=0,highWater=Number.MAX_SAFE_INTEGER,limit=100,at=Date.now()){
     const rows=this.database.prepare('SELECT t.rowid AS scan_rowid,t.id FROM storage_trash t WHERE t.rowid>? AND t.rowid<=? AND t.permanently_deleted_at IS NULL AND t.purge_after<=? AND NOT EXISTS (SELECT 1 FROM container_trash_members m WHERE m.member_trash_id=t.id) ORDER BY t.rowid LIMIT ?').all(afterRowId,highWater,new Date(at).toISOString(),limit);

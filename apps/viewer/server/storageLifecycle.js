@@ -61,12 +61,16 @@ function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit
   const batchLimit=Math.max(1,Math.min(Number(limit)||20,100));
   // Rotate through at most 100 expired records per maintenance pass. A
   // protected prefix cannot cause unbounded scans or starve later records.
-  let cursor=processing.trashScanCursor()||processing.startTrashScan();
+  const leaseOwner=require('node:crypto').randomUUID();
+  if(!processing.acquireTrashScanLease(leaseOwner))return results;
+  try{
+  let cursor=processing.trashScanCursor()||processing.startTrashScan(leaseOwner);
   let page=processing.expiredTrashPage(cursor.after,cursor.highWater,100);
-  if(!page.length){cursor=processing.startTrashScan();page=processing.expiredTrashPage(cursor.after,cursor.highWater,100);}
+  if(!page.length){cursor=processing.startTrashScan(leaseOwner);page=processing.expiredTrashPage(cursor.after,cursor.highWater,100);}
   if(!page.length)return results;
   for(const entry of page){
     if(results.length>=batchLimit)break;
+    processing.renewTrashScanLease(leaseOwner);
     const item=entry.item;
     try{
       // Protected entries do not consume the work budget; check containers as
@@ -101,9 +105,10 @@ function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit
       }
       if(processing.getTrash(item.id)?.permanentlyDeletedAt)onPurged?.(item);
     }catch(error){results.push({trashId:item.id,status:'failed',errorCode:error.code||'lifecycle_failed'});}
-    finally{processing.saveTrashScanCursor({after:entry.rowId,highWater:cursor.highWater});}
+    finally{processing.saveTrashScanCursor(leaseOwner,{after:entry.rowId,highWater:cursor.highWater});}
   }
   return results;
+  }finally{processing.releaseTrashScanLease(leaseOwner);}
 }
 
 module.exports={applyStorageMutation,reconcileStorageMutations,purgeExpiredTrash};
