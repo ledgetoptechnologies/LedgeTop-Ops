@@ -7,6 +7,11 @@ const {DatabaseSync}=require('node:sqlite');
 const protectedMigrations=[
   {version:41,name:'gcp_odm_crs_confirmations',objects:['gcp_odm_crs_confirmations']},
   {version:42,name:'viewer_workspace_hierarchy',objects:['viewer_organizations','viewer_project_groups','viewer_project_hierarchy','viewer_project_groups_org_idx','viewer_project_hierarchy_org_idx']},
+  // Reserved by independent owners; this branch cannot safely interpret them.
+  {version:43,name:'viewer_cooperative_capacity_ledger',objects:['viewer_capacity_control','viewer_capacity_reservations','viewer_capacity_reservations_domain_idx','viewer_capacity_materialized_monotonic','viewer_capacity_no_replacement','viewer_capacity_identity_immutable','viewer_capacity_no_delete','viewer_capacity_state_transition']},
+  {version:44,name:'viewer_source_custody_dormant',objects:['viewer_custody_intents','viewer_custody_pins','viewer_custody_intents_immutable','viewer_custody_intents_no_replace','viewer_custody_pins_no_late_insert','viewer_custody_intents_no_delete','viewer_custody_pins_immutable','viewer_custody_pins_no_delete']},
+  {version:45,name:'viewer_reference_attempt_journal',objects:['viewer_reference_attempt_journal','viewer_reference_attempt_identity_immutable','viewer_reference_attempt_no_insert_replace','viewer_reference_attempt_no_update_replace','viewer_reference_attempt_no_delete']},
+
 ];
 // Strict comparison intentionally rejects harmless formatting differences as
 // well; normalizing whitespace could alter quoted SQL literals.

@@ -2066,6 +2066,29 @@ const MIGRATIONS = [
     CREATE INDEX viewer_project_groups_org_idx ON viewer_project_groups(organization_id);
     CREATE INDEX viewer_project_hierarchy_org_idx ON viewer_project_hierarchy(organization_id,group_id);
   `},
+
+  // Reserved source-only reference journal. No provider route, scheduler or
+  // custody authority is enabled by this schema; old writers still require a
+  // separate owner-verified drain/fence before any real submission.
+  {version:45,name:'viewer_reference_attempt_journal',sql:`
+    CREATE TABLE viewer_reference_attempt_journal (
+      attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+      submission_id TEXT NOT NULL UNIQUE,
+      environment TEXT NOT NULL CHECK(environment IN ('staging','production')),
+      request_json TEXT NOT NULL, request_sha256 TEXT NOT NULL,
+      input_manifest_sha256 TEXT NOT NULL,
+      lease_generation INTEGER NOT NULL DEFAULT 0 CHECK(typeof(lease_generation)='integer' AND lease_generation>=0 AND lease_generation<=9007199254740991),
+      lease_owner TEXT, lease_expires_ms INTEGER CHECK(lease_expires_ms IS NULL OR (typeof(lease_expires_ms)='integer' AND lease_expires_ms>=0 AND lease_expires_ms<=9007199254740991)),
+      job_id TEXT UNIQUE, job_json TEXT, job_sha256 TEXT,
+      CHECK((lease_owner IS NULL)=(lease_expires_ms IS NULL)),
+      CHECK((job_id IS NULL)=(job_json IS NULL)), CHECK((job_json IS NULL)=(job_sha256 IS NULL))
+    );
+    CREATE TRIGGER viewer_reference_attempt_identity_immutable BEFORE UPDATE ON viewer_reference_attempt_journal WHEN NEW.lease_generation<OLD.lease_generation OR NEW.attempt_id<>OLD.attempt_id OR NEW.submission_id<>OLD.submission_id OR NEW.environment<>OLD.environment OR NEW.request_json<>OLD.request_json OR NEW.request_sha256<>OLD.request_sha256 OR NEW.input_manifest_sha256<>OLD.input_manifest_sha256 OR (OLD.job_json IS NOT NULL AND (NEW.job_id IS NOT OLD.job_id OR NEW.job_json IS NOT OLD.job_json OR NEW.job_sha256 IS NOT OLD.job_sha256)) BEGIN SELECT RAISE(ABORT,'reference attempt immutable'); END;
+    CREATE TRIGGER viewer_reference_attempt_no_insert_replace BEFORE INSERT ON viewer_reference_attempt_journal WHEN EXISTS(SELECT 1 FROM viewer_reference_attempt_journal WHERE attempt_id=NEW.attempt_id OR submission_id=NEW.submission_id OR (NEW.job_id IS NOT NULL AND job_id=NEW.job_id)) BEGIN SELECT RAISE(ABORT,'reference attempt replacement'); END;
+    CREATE TRIGGER viewer_reference_attempt_no_update_replace BEFORE UPDATE OF job_id ON viewer_reference_attempt_journal WHEN NEW.job_id IS NOT NULL AND EXISTS(SELECT 1 FROM viewer_reference_attempt_journal WHERE job_id=NEW.job_id AND attempt_id<>OLD.attempt_id) BEGIN SELECT RAISE(ABORT,'reference job replacement'); END;
+    CREATE TRIGGER viewer_reference_attempt_no_delete BEFORE DELETE ON viewer_reference_attempt_journal BEGIN SELECT RAISE(ABORT,'reference attempt retention'); END;
+  `},
+
 ];
 
 function applyMigrations(database) {
