@@ -7,6 +7,7 @@ const {DatabaseSync}=require('node:sqlite');
 const protectedMigrations=[
   {version:41,name:'gcp_odm_crs_confirmations',objects:['gcp_odm_crs_confirmations']},
   {version:42,name:'viewer_workspace_hierarchy',objects:['viewer_organizations','viewer_project_groups','viewer_project_hierarchy','viewer_project_groups_org_idx','viewer_project_hierarchy_org_idx']},
+  {version:44,name:'viewer_source_custody_dormant',objects:['viewer_custody_intents','viewer_custody_pins','viewer_custody_intents_immutable','viewer_custody_intents_no_replace','viewer_custody_pins_no_late_insert','viewer_custody_intents_no_delete','viewer_custody_pins_immutable','viewer_custody_pins_no_delete']},
 ];
 // Strict comparison intentionally rejects harmless formatting differences as
 // well; normalizing whitespace could alter quoted SQL literals.
@@ -20,6 +21,8 @@ function assertProtectedMigrationIdentity(database,migrations) {
   const ledgers=database.prepare("SELECT type,name FROM sqlite_master WHERE name=? COLLATE NOCASE").all('schema_migrations');
   if(ledgers.length>1||ledgers.some(row=>row.type!=='table'||row.name!=='schema_migrations'))throw incompatible('noncanonical migration ledger');
   const ledger=ledgers[0];
+  // Capacity migration 43 is under separate review; refuse every existing 43 until integrated.
+  if(ledger&&database.prepare('SELECT 1 FROM schema_migrations WHERE version=43').get())throw incompatible('version 43 not yet integrated');
   for(const spec of protectedMigrations) {
     const entry=ledger?database.prepare('SELECT name FROM schema_migrations WHERE version=?').get(spec.version):null;
     const found=spec.objects.map(name=>database.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name=? COLLATE NOCASE").all(name));
