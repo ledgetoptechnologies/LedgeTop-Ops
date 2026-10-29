@@ -70,3 +70,8 @@ test('failed chunk or cancelled upload never finalizes and can be resumed by res
   const controller=new AbortController(),f=await transport({signal:controller.signal,onChunk:()=>controller.abort()});await assert.rejects(f.run(),{name:'AbortError'});assert.equal(f.chunks.length,1);assert.equal(f.calls.length,1);
   await assert.rejects(prepareTaskPhotos([file('a.jpg')],{signal:controller.signal}),{name:'AbortError'});
 });
+
+test('photo selection retains raw survey CSV while ignoring unrelated files',async()=>{
+ const prepared=await prepareTaskPhotos([file('photos/a.jpg','photo'),file('photos/survey.csv','raw csv'),file('photos/readme.txt','note')]);
+ assert.equal(prepared.items.length,2);assert.deepEqual(prepared.manifest.map(x=>x.processingRole),['image','gcp_source']);assert.deepEqual(prepared.ignored,['photos/readme.txt']);
+});
