@@ -28,12 +28,21 @@ final class PilotModel: ObservableObject {
 }
 
 struct PilotRoot: View {
+    @StateObject private var live = LivePilotModel()
+    var body: some View {
+        if live.active { LivePilotWorkspace(model: live) }
+        else { DemoPilotRoot(live: live) }
+    }
+}
+
+struct DemoPilotRoot: View {
+    @ObservedObject var live: LivePilotModel
     @StateObject private var model = PilotModel()
     var body: some View {
         TabView {
             NavigationStack { TodayView(model: model) }.tabItem { Label("Today", systemImage: "sun.max") }
             NavigationStack { JobsView(model: model) }.tabItem { Label("Operations", systemImage: "square.stack.3d.up") }
-            NavigationStack { PilotSettings(model: model) }.tabItem { Label("Pilot", systemImage: "info.circle") }
+            NavigationStack { PilotSettings(model: model, live: live) }.tabItem { Label("Pilot", systemImage: "info.circle") }
         }
         .task { if model.workspace.operations.isEmpty { await model.reload() } }
     }
@@ -145,9 +154,10 @@ struct OperationDetail: View {
 
 struct PilotSettings: View {
     @ObservedObject var model: PilotModel
+    @ObservedObject var live: LivePilotModel
     var body: some View {
         Form {
-            Section("LT Ops for iPhone") {
+            Section("LT Ops pilot") {
                 DemoNotice()
                 LabeledContent("Version", value: "0.1.0 pilot")
                 LabeledContent("Connection", value: "Offline demo")
@@ -158,7 +168,8 @@ struct PilotSettings: View {
                 Text("Resets checklist changes. No production accounts, clients, or files are accessed.").font(.footnote).foregroundStyle(.secondary)
             }
             Section("Next pilot milestone") {
-                Text("Connect a reviewed staff sign-in flow and read-only staging API, then test on your iPhone before adding live changes or file access.")
+                Button("Open read-only live workspace") { live.openLive() }
+                Text(live.configured ? "Sign in with Cloudflare Access to read permitted operation summaries." : "Live access is not ready in this pilot build yet.")
             }
         }.navigationTitle("About the pilot")
     }

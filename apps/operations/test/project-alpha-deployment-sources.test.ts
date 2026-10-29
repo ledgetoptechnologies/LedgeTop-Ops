@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import {
+  assertDeploymentConfiguredProjectAlphaConnectorsForRead,
   ensureDeploymentConfiguredProjectAlphaConnectors, listProjectAlphaConnectors, resolveProjectAlphaConnector,
   type ProjectAlphaConnectorEnvironment,
 } from "../src/worker/project-alpha-connectors";
@@ -41,6 +42,24 @@ beforeEach(async () => {
 afterEach(async () => { await runtime.dispose(); });
 
 describe("deployment-configured Project Alpha sources", () => {
+  it('validates mobile read configuration without enrolling, reconciling, or writing connector state', async () => {
+    await expect(assertDeploymentConfiguredProjectAlphaConnectorsForRead(env)).rejects.toMatchObject({ code: 'changed' });
+    expect(await db.prepare('SELECT count(*) total FROM pa_connectors').first('total')).toBe(0);
+    await ensureDeploymentConfiguredProjectAlphaConnectors(env);
+    const before = await db.prepare('SELECT * FROM pa_connectors ORDER BY source_id').all();
+    const audit = await db.prepare('SELECT count(*) total FROM pa_connector_audit').first('total');
+    await expect(assertDeploymentConfiguredProjectAlphaConnectorsForRead(env)).resolves.toBeUndefined();
+    const manifest = JSON.parse(env.PROJECT_ALPHA_CONNECTOR_SOURCES!) as { version: number; sources: Array<Record<string, unknown>> };
+    await expect(assertDeploymentConfiguredProjectAlphaConnectorsForRead({ ...env,
+      PROJECT_ALPHA_CONNECTOR_SOURCES: JSON.stringify({ ...manifest, sources: manifest.sources.slice(0, 1) }) })).rejects.toMatchObject({ code: 'changed' });
+    manifest.sources[1]!.snapshotOrigin = 'https://changed.example.test';
+    await expect(assertDeploymentConfiguredProjectAlphaConnectorsForRead({ ...env,
+      PROJECT_ALPHA_CONNECTOR_SOURCES: JSON.stringify(manifest) })).rejects.toMatchObject({ code: 'changed' });
+    await expect(assertDeploymentConfiguredProjectAlphaConnectorsForRead({ ...env,
+      PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS: '{invalid' })).rejects.toMatchObject({ code: 'credentials_unavailable' });
+    expect((await db.prepare('SELECT * FROM pa_connectors ORDER BY source_id').all()).results).toEqual(before.results);
+    expect(await db.prepare('SELECT count(*) total FROM pa_connector_audit').first('total')).toBe(audit);
+  }, 120_000);
   it("bootstraps LTDS then LTT from deployment configuration and never exposes credentials", async () => {
     await ensureDeploymentConfiguredProjectAlphaConnectors({ ...env, PROJECT_ALPHA_CONNECTOR_EVENT_CREDENTIALS: undefined });
     const connectors = await listProjectAlphaConnectors(env);

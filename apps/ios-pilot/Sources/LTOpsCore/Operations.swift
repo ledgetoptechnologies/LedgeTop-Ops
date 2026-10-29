@@ -27,8 +27,8 @@ public struct FieldOperation: Identifiable, Equatable, Sendable {
     public var progress: Double { tasks.isEmpty ? 0 : Double(completedCount) / Double(tasks.count) }
 }
 
-/// A deliberately read-only boundary. Production auth and API contracts must be
-/// reviewed separately; this pilot never contacts the Operations service.
+/// The synthetic workspace boundary. The separate MobilePilotAPI uses dedicated
+/// read-only endpoints and never maps live records into these demo fields.
 public protocol OperationsService: Sendable {
     func loadOperations() async throws -> [FieldOperation]
 }

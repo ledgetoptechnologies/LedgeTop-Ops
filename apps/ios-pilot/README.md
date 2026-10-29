@@ -16,11 +16,46 @@ a second unrelated repository. Merge only after review and device validation.
 - Pilot: explicit offline status and reset demo workspace.
 
 All three sample clients and training sites are fictional. Refresh/reset restores
-the samples; task changes are intentionally not saved between app launches. No
-network calls, credentials, production data, file transfers, or access grants are
-implemented. No flight clearance is inferred from a checklist. Future integration
-must preserve the existing staff identity and source-qualified authorization
-contracts; the `OperationsService` boundary currently offers reads only.
+the samples; task changes are intentionally not saved between app launches. The
+app starts in Demo. No flight clearance is inferred from a checklist.
+
+## Read-only connection (implemented, disabled pending activation)
+
+The Pilot tab opens a separate read-only workspace. The default `Info.plist`
+sets `LTOpsLiveEnabled` to false, so this build cannot initiate live sign-in.
+Its proposed origin is `https://ops-staging.ledgetopdroneservices.com`.
+The only other source-allowlisted origin is `https://ops.ledgetop.app`; there is
+no user-entered URL or arbitrary API client. Staging is labeled separately.
+These hostnames come from the existing application configuration; their presence
+does not establish that the mobile endpoints or Access policies are deployed.
+
+After the backend is reviewed, staged, and enabled, an explicitly approved build
+can set `LTOpsLiveEnabled` to true. Both Xcode and xtool use the same `Info.plist`.
+Switching environments requires a new build; each launch removes prior pilot
+sessions and requires a new interactive sign-in.
+
+The sign-in implementation opens Cloudflare Access with `ASWebAuthenticationSession`,
+using a secure random state and PKCE S256 challenge. The fixed custom callback is
+`com.ledgetoptechnologies.ops.pilot://auth/callback`, registered in `Info.plist`.
+It requires neither Associated Domains nor a paid Apple entitlement. The actual
+callback, Personal Team signing, and device behavior remain acceptance gates.
+
+The client redeems a single-use code at `/mobile-pilot/v1/token`, then uses the
+short-lived opaque session only for `/mobile-pilot/v1/session` and operation
+list/detail reads. It never forwards an Access cookie or staff JWT into a general
+web API. Sessions are stored using a device-only, unlocked-only Keychain item
+keyed by origin; business records remain in memory. API requests use an ephemeral
+URLSession with no cookies, disk cache, or redirects. Explicit sign-out attempts
+server session revocation and clears the app immediately even if offline.
+The browser's SSO session is independent and may remain signed in.
+
+The live screen has no checklist toggles, edits, delivery controls, or files.
+It preserves server statuses and displays only supplied fields. Counts and
+search describe **loaded records**, with explicit Load more pagination; they
+are not global dashboard totals. Permission failures and session expiry clear
+the displayed data. A failed live request never silently switches to demo.
+Generation guards prevent responses from a cancelled sign-in, old detail view,
+or signed-out session from restoring data.
 
 ## Run with Xcode on a Mac
 
@@ -94,8 +129,9 @@ On Windows with Docker Desktop:
 docker run --rm --mount "type=bind,source=$($PWD.Path),target=/src" -w /src swift:6.0 swift test
 ```
 
-This checks search/status composition, task ownership boundaries, progress,
-and reset behavior. On Linux and macOS `os(iOS)` excludes the UI: a passing
+This checks demo behavior plus callback validation, fixed-origin configuration,
+pagination/deduplication, expiry, and fail-closed API responses. On Linux and
+macOS `os(iOS)` excludes the UI: a passing
 Linux test run does **not** establish that the iPhone app compiles or renders.
 Run the Xcode/xtool build and the following checks before calling device QA done:
 
@@ -106,6 +142,17 @@ Run the Xcode/xtool build and the following checks before calling device QA done
 5. Check large Dynamic Type, dark mode, VoiceOver labels, and portrait/landscape.
 6. Disable networking; verify all demo flows still work.
 
-No existing web/Worker deployment workflows were changed. This new pilot is not
-connected to automatic production release. Hub update review was not claimed:
-this was a new task with no exposed Hub MCP or established linked-chat checkpoint.
+Before enabling the live pilot, also verify on the actual iPad:
+
+1. Access browser sign-in returns to this app and an intercepted code cannot be redeemed without its verifier.
+2. Cancel sign-in and sign out during each in-flight stage; no data reappears.
+3. Session expiry, staff revocation, and removed source/division access clear or deny data.
+4. Only approved synthetic staging operations are visible; two-source IDs remain distinct.
+5. Load more and refresh do not imply global totals or retain inaccessible rows.
+6. Failed sign-in/offline refresh shows an error without replacing live data with samples.
+
+Local Swift tests and iOS-target syntax parsing do not prove a native build,
+successful Cloudflare sign-in, or device acceptance. The read-only code has not
+been installed over the working demo. GitHub Actions must remain main-only;
+feature-branch validation is local. See [backend pilot release notes](BACKEND-ROLLOUT.md) for
+the separate Access-routing, schema, and deployment prerequisites.

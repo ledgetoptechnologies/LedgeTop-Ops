@@ -1,4 +1,5 @@
 import { localDivisionJoin } from "./local-project-division";
+import { handleIosPilot } from "./ios-pilot-routes";
 import { Hono, type Context } from "hono";
 import { dispatchCompetitorIntelIngest } from "./competitor-intel-ingest-routes";
 import { registerOperationsAppReleaseRoutes } from "./app-release-routes";
@@ -662,6 +663,10 @@ app.use(OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE, dispatchOperationsNativeStaffLif
 app.use(`${OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE}/*`, dispatchOperationsNativeStaffLifecycle);
 registerStaffLoginClaimRoute(app);
 registerNativeStaffCohortReviewRoute(app);
+// Exact mobile surface: never bypass Access or staff auth for general /api/*.
+app.use('/api/mobile-pilot/authorize', c => handleIosPilot(c.req.raw, c.env));
+app.use('/mobile-pilot/v1', c => handleIosPilot(c.req.raw, c.env));
+app.use('/mobile-pilot/v1/*', c => handleIosPilot(c.req.raw, c.env));
 app.use("/api/*", async (c, next) => {
   if (viewerMachineEventRequest(c.req.method, c.req.path) || projectAlphaDeliveryMachineRequest(c.req.method, c.req.path)) {
     await next();

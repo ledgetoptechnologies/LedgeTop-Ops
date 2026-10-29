@@ -89,6 +89,8 @@ export type Env = Omit<
   | "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION_DISPATCH_ENABLED"
   | "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION"
 > & {
+  /** Absent/false keeps every mobile pilot route disabled. Requires separate Access ingress review. */
+  IOS_PILOT_ENABLED?: string;
   /** Optional HTTP asset service, absent until a separately reviewed UI release packet is installed. */
   UI_RELEASE_ASSETS?: Pick<Fetcher, "fetch">;
   /** Optional isolated binary store for reviewed pilot app releases. */

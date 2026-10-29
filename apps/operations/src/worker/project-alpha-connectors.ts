@@ -500,6 +500,32 @@ export function deploymentAllowsProjectAlphaSource(env: ProjectAlphaConnectorEnv
   return configured.some(entry => entry.registration.sourceId === id && entry.enabled);
 }
 
+/** Read-only consumers must never silently reconcile connector configuration.
+ * Require the reviewed manifest to have already been materialized, including
+ * hidden/removed sources, and preserve normal credential validation. */
+export async function assertDeploymentConfiguredProjectAlphaConnectorsForRead(env: ProjectAlphaConnectorEnvironment): Promise<void> {
+  const configured = deploymentSources(env);
+  if (!configured.length) {
+    if (env.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED === 'true')
+      return fail('credentials_unavailable', 'Deployment source manifest is required');
+    return;
+  }
+  const db = database(env);
+  const rows = (await db.prepare('SELECT * FROM pa_connectors ORDER BY source_id LIMIT ?').bind(MAX_CONNECTORS + 1).all<ConnectorRow>()).results;
+  if (rows.length > MAX_CONNECTORS) return fail('capacity', 'The connector registry exceeds its supported limit');
+  for (const entry of configured) {
+    const row = rows.find(row => row.source_id === entry.registration.sourceId);
+    if (!row || !matchesDeploymentIdentity(row, entry)
+      || row.state !== (entry.enabled ? 'active' : 'suspended')
+      || row.read_visible !== Number(entry.readVisible) || row.display_name !== entry.registration.displayName)
+      return fail('changed', 'Connector configuration requires reconciliation before reading');
+    await verifiedDeploymentConfiguration(env, row, entry);
+  }
+  const declared = new Set(configured.map(entry => entry.registration.sourceId));
+  if (rows.some(row => !declared.has(row.source_id) && (row.read_visible !== 0 || !['suspended', 'retired'].includes(row.state))))
+    return fail('changed', 'Removed connector configuration requires reconciliation before reading');
+}
+
 /**
  * Materialize the reviewed deployment manifest into the durable registry.
  *
