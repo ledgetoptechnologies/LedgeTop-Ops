@@ -175,3 +175,46 @@ test('mismatched provider result identity raises a recoverable warning',async t=
  await processOne({processing:f.processing,config:{},adapterFactory:()=>({status:async()=>({uuid:'wrong-identity',status:'completed',statusCode:40,progress:1}),output:async()=>({lines:[],nextLine:0})})},'identity-worker');
  assert.equal(f.processing.getAttempt(f.attempt.id).status,'running');assert.equal(f.db.prepare("SELECT error_code FROM processing_jobs WHERE id='poll'").get().error_code,'provider_result_identity_mismatch');assert.equal(processingJobCounts(f.db).observationWarnings,1);
 });
+
+
+test('transient attempt and provider lookup errors remain recoverable after many retries',async t=>{
+ for(const method of ['getAttempt','getProvider']){
+  const f=fixture(t),original=f.processing[method].bind(f.processing),status={uuid:f.processing.getAttempt(f.attempt.id).providerTaskId,status:'completed',statusCode:40,progress:1};let remaining=1,called=0;
+  f.db.prepare("UPDATE processing_jobs SET attempt_count=8 WHERE id='poll'").run();
+  f.processing[method]=(...args)=>{if(remaining-- > 0)throw new Error('synthetic secret database read');return original(...args)};
+  const deps={processing:f.processing,config:{},adapterFactory:()=>({status:async()=>{called++;return status},output:async()=>({lines:[],nextLine:0})})};
+  await processOne(deps,'read-failure-worker');
+  const job=f.db.prepare("SELECT status,error_code,error_message FROM processing_jobs WHERE id='poll'").get();assert.equal(job.status,'pending');assert.equal(job.error_code,'provider_observation_persistence_unavailable');assert.doesNotMatch(job.error_message,/secret/);assert.equal(called,0);assert.equal(f.processing.getAttempt(f.attempt.id).status,'running');assert.equal(processingJobCounts(f.db).observationWarnings,1);
+  f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id='poll'").run();await processOne(deps,'read-recovered-worker');assert.equal(f.processing.getAttempt(f.attempt.id).status,'ingesting');assert.equal(processingJobCounts(f.db).observationWarnings,0);
+ }
+});
+
+test('advanced attempts settle their stale reconcile job without contacting the provider',async t=>{
+ for(const state of ['cancelled','published','failed','derivatives','ready_for_review']){
+  const f=fixture(t);let called=0;f.db.prepare("UPDATE processing_attempts SET status=? WHERE id=?").run(state,f.attempt.id);
+  f.db.prepare("UPDATE processing_jobs SET attempt_count=8 WHERE id='poll'").run();
+  await processOne({processing:f.processing,config:{},adapterFactory:()=>{called++;throw Error('must not access provider')}},'stale-read-worker');
+  assert.equal(called,0);assert.equal(f.processing.getAttempt(f.attempt.id).status,state);const job=f.db.prepare("SELECT status,error_code FROM processing_jobs WHERE id='poll'").get();assert.equal(job.status,'cancelled');assert.equal(job.error_code,'stale_reconcile_attempt');
+ }
+});
+
+test('missing attempt is diagnosed as unknown without contacting the provider',async t=>{
+ const f=fixture(t);let called=0;f.processing.getAttempt=()=>null;
+ await processOne({processing:f.processing,config:{},adapterFactory:()=>{called++;throw Error('must not access provider')}},'missing-attempt-worker');
+ assert.equal(called,0);const job=f.db.prepare("SELECT status,error_code FROM processing_jobs WHERE id='poll'").get();assert.equal(job.status,'pending');assert.equal(job.error_code,'provider_attempt_unavailable');
+});
+
+test('missing provider is a recoverable warning rather than a failed attempt',async t=>{
+ const f=fixture(t);let called=0;f.db.prepare("UPDATE processing_jobs SET attempt_count=8 WHERE id='poll'").run();f.processing.getProvider=()=>null;
+ await processOne({processing:f.processing,config:{},adapterFactory:()=>{called++;throw Error('must not access provider')}},'provider-missing-worker');
+ assert.equal(called,0);assert.equal(f.processing.getAttempt(f.attempt.id).status,'running');assert.equal(f.db.prepare("SELECT error_code FROM processing_jobs WHERE id='poll'").get().error_code,'provider_adapter_unavailable');assert.equal(processingJobCounts(f.db).observationWarnings,1);
+});
+
+
+test('stale-job settlement is fenced by live lease and advanced attempt state',t=>{
+ const f=fixture(t);f.db.prepare("UPDATE processing_attempts SET status='failed' WHERE id=?").run(f.attempt.id);const job=f.processing.claimJob('owner');assert.equal(job.id,'poll');
+ assert.equal(f.processing.settleStaleReconcileJob('poll','other-owner'),false);
+ f.db.prepare("UPDATE processing_attempts SET status='running' WHERE id=?").run(f.attempt.id);assert.equal(f.processing.settleStaleReconcileJob('poll','owner'),false);
+ f.db.prepare("UPDATE processing_attempts SET status='failed' WHERE id=?").run(f.attempt.id);f.db.prepare("UPDATE processing_jobs SET lease_expires_at='2000' WHERE id='poll'").run();assert.equal(f.processing.settleStaleReconcileJob('poll','owner'),false);
+ assert.equal(f.db.prepare("SELECT status FROM processing_jobs WHERE id='poll'").get().status,'leased');
+});

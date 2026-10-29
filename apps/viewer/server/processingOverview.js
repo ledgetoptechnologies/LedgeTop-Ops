@@ -13,7 +13,7 @@ function processingJobCounts(database) {
         SELECT 1 FROM processing_jobs j WHERE j.attempt_id=a.id AND j.job_type='reconcile'
           AND j.status IN ('pending','leased') AND j.error_code IN (
             'provider_observation_unavailable','provider_status_unknown','provider_status_not_found',
-            'provider_status_auth_failed','provider_adapter_unavailable','provider_observation_persistence_unavailable','provider_result_identity_mismatch'
+            'provider_status_auth_failed','provider_adapter_unavailable','provider_observation_persistence_unavailable','provider_result_identity_mismatch','provider_attempt_unavailable'
           )
       ) THEN 1 ELSE 0 END),0) AS observationWarnings
     FROM processing_attempts a
