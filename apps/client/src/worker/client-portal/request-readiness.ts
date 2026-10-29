@@ -6,6 +6,7 @@ import type { ClientPortalSession, VerifiedClientPrincipal } from "./types";
 import {
   portalHierarchyV2Enabled,
   readEffectiveWorkspaceRequestProof,
+  resolveNativePortalWorkspaceReadContext,
   type EffectivePortalWorkspaceContext,
 } from "./workspace-v2";
 import { readServiceAssignmentPolicy, serviceAssignmentRequestPolicyEnabled } from "./service-assignment-policy";
@@ -71,7 +72,7 @@ export async function readClientRequestReadiness(
 ): Promise<ClientRequestReadiness> {
   const mode = env.CLIENT_PORTAL_REQUEST_V2_ENABLED === "true" ? "catalog" : "legacy";
   if (session.nativeSourceId) {
-    return readNativeClientRequestReadiness(env, session, projectId, backendConfigured, mode);
+    return readNativeClientRequestReadiness(env, principal, session, projectId, backendConfigured, mode);
   }
   // Login middleware owns eligibility provisioning. Repeated readiness reads
   // only verify established identities/bridges and must not repair grants.
@@ -196,6 +197,7 @@ export async function readClientRequestReadiness(
 
 async function readNativeClientRequestReadiness(
   env: Env,
+  principal: VerifiedClientPrincipal,
   session: ClientPortalSession,
   projectId: string | null,
   backendConfigured: boolean,
@@ -217,18 +219,45 @@ async function readNativeClientRequestReadiness(
     // revisions both participate in the same before/after freshness proof.
     authority: proof.authority,
   });
+  const stableWorkspaceContext = (context: Awaited<ReturnType<typeof resolveNativePortalWorkspaceReadContext>>) => context && ({
+    sourceId: context.sourceId,
+    workspaceId: context.workspaceId,
+    identityId: context.identityId,
+    rootType: context.rootType,
+    rootPublicId: context.rootPublicId,
+    generationId: context.generationId,
+    membershipSourceVersion: context.membershipSourceVersion,
+    authority: context.authority,
+    contextVersion: context.contextVersion,
+  });
   async function snapshot(assignmentWindows?: {
     root?: { evaluatedAt: string; expiresAt: string };
     project?: { evaluatedAt: string; expiresAt: string };
   }) {
     const rootProof = schemaReady ? await resolveNativeRequestAuthority(env, session, null) : null;
     const projectProof = schemaReady && projectId ? await resolveNativeRequestAuthority(env, session, projectId) : null;
+    const resolvedWorkspace = schemaReady && session.workspaceId
+      ? await resolveNativePortalWorkspaceReadContext(env, principal, session.workspaceId) : null;
+    // Common picker support comes from a fresh, exact source/workspace context,
+    // never from a root request grant. Keep the session's native coordinates
+    // as consistency checks; target-specific request authority remains in the
+    // independent root/project proofs above.
+    const workspaceContext = resolvedWorkspace && resolvedWorkspace.sourceId === session.nativeSourceId
+      && (!session.nativePortalIdentityId || resolvedWorkspace.identityId === session.nativePortalIdentityId)
+      ? resolvedWorkspace : null;
+    const alignProof = (proof: Awaited<ReturnType<typeof resolveNativeRequestAuthority>>) => proof && workspaceContext
+      && proof.sourceId === workspaceContext.sourceId && proof.workspaceId === workspaceContext.workspaceId
+      && proof.identityId === workspaceContext.identityId && proof.rootType === workspaceContext.rootType
+      && proof.rootPublicId === workspaceContext.rootPublicId && proof.generationId === workspaceContext.generationId
+      && JSON.stringify(proof.authority) === JSON.stringify(workspaceContext.authority) ? proof : null;
+    const currentRootProof = alignProof(rootProof);
+    const currentProjectProof = alignProof(projectProof);
     let catalogAvailable = false;
-    if (rootProof && backendConfigured && mode === "catalog") {
+    if (workspaceContext && backendConfigured && mode === "catalog") {
       try {
         catalogAvailable = await env.DELIVERY_DB.withSession("first-primary").prepare(
           "SELECT 1 available FROM pa_service_catalog_items WHERE source_id=? AND active=1 LIMIT 1",
-        ).bind(rootProof.sourceId).first<number>("available") === 1;
+        ).bind(workspaceContext.sourceId).first<number>("available") === 1;
       } catch (error) {
         if (!/no such table:\s*(?:main\.)?pa_service_catalog_items\b|no such column:\s*source_id\b/i.test(
           error instanceof Error ? error.message : String(error),
@@ -236,12 +265,13 @@ async function readNativeClientRequestReadiness(
       }
     }
     const assignmentPolicy = serviceAssignmentRequestPolicyEnabled(env);
-    const rootAssignment = assignmentPolicy && rootProof && catalogAvailable && backendConfigured && mode === "catalog"
+    const rootAssignment = assignmentPolicy && currentRootProof && catalogAvailable && backendConfigured && mode === "catalog"
       ? await readServiceAssignmentPolicy(env, session, null, assignmentWindows?.root) : null;
-    const projectAssignment = assignmentPolicy && projectProof && catalogAvailable && backendConfigured && mode === "catalog" && projectId
+    const projectAssignment = assignmentPolicy && currentProjectProof && catalogAvailable && backendConfigured && mode === "catalog" && projectId
       ? await readServiceAssignmentPolicy(env, session, projectId, assignmentWindows?.project) : null;
     return {
-      schemaReady, rootProof: stableProof(rootProof), projectProof: stableProof(projectProof), catalogAvailable,
+      schemaReady, workspaceContext: stableWorkspaceContext(workspaceContext),
+      rootProof: stableProof(currentRootProof), projectProof: stableProof(currentProjectProof), catalogAvailable,
       assignmentPolicy, rootAssignment, projectAssignment,
     };
   }
@@ -261,15 +291,16 @@ async function readNativeClientRequestReadiness(
   }
   const commonReason: RequestReadinessReason | null = !after.schemaReady
     ? "request_unavailable"
-    : !after.rootProof
+    : !after.workspaceContext
     ? "request_not_permitted"
     : !backendConfigured || mode !== "catalog" ? "request_unavailable"
       : !after.catalogAvailable ? "catalog_unavailable" : null;
   const root: RequestReadinessDecision = {
-    canStartRequest: commonReason === null
+    canStartRequest: commonReason === null && after.rootProof !== null
       && (!after.assignmentPolicy || after.rootAssignment?.state === "ready"),
-    reason: commonReason ?? (after.rootAssignment?.state === "no_services_assigned" ? "no_services_assigned"
-      : after.assignmentPolicy && after.rootAssignment?.state !== "ready" ? "service_assignments_unavailable" : "ready"),
+    reason: commonReason ?? (!after.rootProof ? "request_not_permitted"
+      : after.rootAssignment?.state === "no_services_assigned" ? "no_services_assigned"
+        : after.assignmentPolicy && after.rootAssignment?.state !== "ready" ? "service_assignments_unavailable" : "ready"),
   };
   const target: RequestReadinessDecision = projectId ? {
     canStartRequest: commonReason === null && after.projectProof !== null
