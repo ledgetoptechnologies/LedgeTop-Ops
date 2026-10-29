@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   verify-and-publish:
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:

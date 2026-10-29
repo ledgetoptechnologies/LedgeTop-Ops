@@ -8,7 +8,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const directory = path.join(root, '.github/workflows');
 const read = filename => fs.readFileSync(filename, 'utf8').replace(/\r\n/g, '\n');
 
-// Hosted runners are main-only. PR and work-branch checks run locally before merge.
+// Hosted runs are for pushes to main only. Pull requests and other branches
+// are tested locally before merge; a PR targeting main is still not a main run.
 const MAIN_ONLY = '    branches: [main]';
 // Deliberately accept only the small trigger syntax used here. A new event or
 // YAML representation needs policy review rather than silently bypassing it.
@@ -16,31 +17,24 @@ function assertTriggerPolicy(source) {
   assert.equal((source.match(/^on:/gm) ?? []).length, 1, 'one explicit trigger mapping is required');
   const mapping = source.match(/^on:\n((?:[ \t].*\n|\n)*)/m)?.[1];
   assert.ok(mapping, 'triggers must use an explicit block mapping');
+  for (const line of mapping.split('\n').filter(line => /^  \S/.test(line))) {
+    assert.match(line, /^  (?:push):$/, 'each event must use a supported block representation');
+  }
   const events = [...mapping.matchAll(/^  ([a-z_]+):\s*$/gm)].map(match => match[1]);
   assert.ok(events.length > 0, 'at least one supported event is required');
   assert.equal(new Set(events).size, events.length, 'duplicate events are forbidden');
-  for (const line of mapping.split('\n').filter(line => /^  \S/.test(line))) {
-    assert.match(line, /^  (?:push|workflow_dispatch):$/, 'each event must use a supported block representation');
-  }
+  for (const event of events) assert.ok(['push'].includes(event), `unsupported event: ${event}`);
   for (const block of mapping.split(/^  (?=[a-z_]+:)/m).slice(1)) {
     const [event, ...lines] = block.trimEnd().split('\n');
-    if (event === 'workflow_dispatch:') {
-      const jobs = source.slice(source.indexOf('\njobs:\n') + 7).split(/^  (?=[A-Za-z0-9_-]+:\n)/m).slice(1);
-      assert.ok(jobs.length > 0, 'manual dispatch requires guarded jobs');
-      for (const job of jobs) {
-        const header = job.split(/^    (?:steps|uses):/m)[0];
-        assert.match(header, /^    if: \$\{\{ github\.ref == 'refs\/heads\/main'(?: && \(| \}\})/m,
-          'manual dispatch requires every job to be main-guarded');
-      }
-      continue;
-    }
-    assert.equal(event, 'push:', 'only main push or guarded manual events are allowed');
-    assert.equal(lines.filter(line => line === MAIN_ONLY).length, 1, 'push must explicitly target only main');
+    assert.equal(lines.filter(line => line === MAIN_ONLY).length, 1,
+      `${event.slice(0, -1)} must explicitly target only main`);
     for (const line of lines) {
-      assert.ok(!line.trim() || line === MAIN_ONLY || line === '    paths:' ||
-        /^      - (?:'[^']+'|"[^"]+"|[^\s'"#][^#]*)$/.test(line), `unsupported trigger filter: ${line}`);
+      assert.ok(!line.trim() || line === MAIN_ONLY ||
+        line === '    paths:' || /^      - (?:'[^']+'|"[^"]+"|[^\s'"#][^#]*)$/.test(line),
+      `unsupported trigger filter: ${line}`);
     }
   }
+
 }
 
 for (const name of fs.readdirSync(directory).filter(name => /\.ya?ml$/.test(name)).sort()) {
@@ -146,6 +140,7 @@ test('policy rejects every pull-request event even when the target is main', () 
       assert.throws(() => assertTriggerPolicy(`on:\n  ${event}:\n${filter}  push:\n${MAIN_ONLY}\n\njobs:\n`));
     }
   }
+  assert.throws(() => assertTriggerPolicy(`on:\n  push:\n${MAIN_ONLY}\n    types: [opened]\n\njobs:\n`));
 });
 
 test('trigger policy is enforced by ordinary source-invariants CI', () => {

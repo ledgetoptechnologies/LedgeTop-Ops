@@ -28,11 +28,11 @@
     },
     {
       "path": "scripts/native-staff-bootstrap-d1.mjs",
-      "sha256": "8b75f42bae5bafd84105dc9a8aa72a5e8235abe22138a26b251dbfb3a87622af"
+      "sha256": "057cb9d709066dafcecbfbd97945ba244b34493d8c0abfbd2d9752fada528ee0"
     },
     {
       "path": "scripts/native-staff-bootstrap-owner-approval-distribution-manifest.json",
-      "sha256": "8a8a1783ace9351b964fe796eeb12fb1754ff0950c54b5666094e220669990a8"
+      "sha256": "834d6b1e11218d757cd63a65d841153fdf74fe516de305598948b5a02e8ac74d"
     },
     {
       "path": "scripts/native-staff-bootstrap-owner-approval-distribution-pin-value.mjs",
@@ -44,7 +44,7 @@
     },
     {
       "path": "scripts/native-staff-bootstrap-owner-approval.mjs",
-      "sha256": "9c6cd296ce075455d19b593d31f746e5348e38a4e5757214bcf9fc33665610db"
+      "sha256": "8d41d67349f233613fda7e4ca9ae0f1159574ffc803e32f779216db710eae871"
     },
     {
       "path": "scripts/native-staff-cutover-access-group-observation.mjs",
@@ -68,11 +68,11 @@
     },
     {
       "path": "scripts/native-staff-cutover-owner-approval.mjs",
-      "sha256": "c983608cd8a9ffa1b1e61d53a6f3a39699f24f21dced8ea81e80c0840703da43"
+      "sha256": "40cb49797b0df2ec6cf843f32878fc1216decaacbd0e21ec3906048acbc31105"
     },
     {
       "path": "scripts/native-staff-cutover-v1.mjs",
-      "sha256": "df659ec6ce39c4b3565774458d62a9656a401fa1e354d35e35d95fbf73194ebe"
+      "sha256": "eb364d0c2920f16a32b15ae46840ba04e30cf00457464aa514de36558e18a802"
     },
     {
       "path": "scripts/native-staff-sync-preparation.mjs",
