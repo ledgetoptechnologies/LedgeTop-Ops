@@ -541,6 +541,8 @@ Section "Install"
   IfErrors activation_failed
   Call MigrateStartupCommand
   StrCmp $StartupFailed 1 activation_failed
+  ; Activation is complete. Legacy retirement cannot roll back or fail this install.
+  Call RetireOwnedLegacyPreview
   Goto install_done
   install_failed:
     MessageBox MB_ICONSTOP "Installation stopped before activation. The new version's files were retained for review; existing versions and user data were kept." /SD IDOK
@@ -553,6 +555,29 @@ Section "Install"
   install_done:
   StrCpy $FinishLaunchReady 1
 SectionEnd
+
+; Only the exact recorded generated V2 preview is eligible. Missing ownership is
+; a no-op, not proof that arbitrary old navigation entries are absent. No files
+; are deleted and connected Company/Client roots are never prepared by this CLI.
+Function RetireOwnedLegacyPreview
+  Push $0
+  retire_legacy_retry:
+  ClearErrors
+  ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-retire-legacy-preview' $0
+  IfErrors retire_legacy_review
+  StrCmp $0 0 retire_legacy_done
+  StrCmp $0 10 0 retire_legacy_review
+  DetailPrint "Old Explorer preview retirement deferred: app still running. Installation is complete."
+  IfSilent retire_legacy_done
+  MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "LedgeTop Files is installed.$\r$\n$\r$\nA LedgeTop Files app is still running. Use its tray icon near the Windows clock to Quit, including any old LedgeTop Files Preview app. Then choose Retry to remove the old preview entry. Downloaded and modified files stay on this PC.$\r$\n$\r$\nChoose Cancel to continue to Finish and leave the old entry for later." /SD IDCANCEL IDRETRY retire_legacy_retry IDCANCEL retire_legacy_done
+  retire_legacy_review:
+  DetailPrint "Old Explorer preview retirement needs ownership review. Installation is complete; local files were kept."
+  IfSilent retire_legacy_done
+  MessageBox MB_ICONINFORMATION "LedgeTop Files is installed.$\r$\n$\r$\nSetup could not confirm removal of the old Explorer preview. Local files were kept. Continue to Finish; if the old entry remains, ask LedgeTop support to check its saved ownership record. Setup will not guess or repeat an uncertain removal." /SD IDOK
+  retire_legacy_done:
+  ClearErrors
+  Pop $0
+FunctionEnd
 
 ; MUI calls this only when the interactive Finish checkbox is checked. The silent
 ; helper owns its own verified relaunch and must never reach a normal launch here.

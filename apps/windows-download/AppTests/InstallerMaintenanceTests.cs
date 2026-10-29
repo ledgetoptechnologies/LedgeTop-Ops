@@ -105,6 +105,33 @@ internal static class InstallerMaintenanceTests
         var log = new List<string>();
         var sources = new List<FakeSession>();
         var thread = Environment.CurrentManagedThreadId;
+        foreach (var compiled in new (bool Packaged, ReleaseChannel? Channel)[] { (false, null), (true, ReleaseChannel.Stable) })
+            Require(await InstallerMaintenance.RunAsync(compiled, [InstallerMaintenance.RetireLegacyArgument],
+                () => throw new Exception("No owner on unsupported retirement."), _ => throw new Exception(),
+                _ => throw new Exception()) == 20, "retirement remains packaged-pilot-only");
+        foreach (var outcome in Enum.GetValues<LegacyExplorerPreviewCleanupResult>()) {
+            var retirementLog = new List<string>(); var calls = 0;
+            var code = await InstallerMaintenance.RunAsync((true, ReleaseChannel.Pilot), [InstallerMaintenance.RetireLegacyArgument],
+                () => new Owner(retirementLog, thread), _ => throw new Exception("Retirement must never prepare a connected source."), remove => {
+                    Require(remove && calls++ == 0 && retirementLog.Count == 0, "retirement holds its singleton for one fixed legacy operation");
+                    return Task.FromResult(outcome);
+                });
+            var expected = outcome is LegacyExplorerPreviewCleanupResult.NoKnownReceipt or LegacyExplorerPreviewCleanupResult.Removed or LegacyExplorerPreviewCleanupResult.AlreadyRemovedVerified
+                ? 0 : outcome == LegacyExplorerPreviewCleanupResult.Busy ? 10 : 20;
+            Require(code == expected && calls == 1 && retirementLog.SequenceEqual(["owner-dispose"]),
+                "retirement distinguishes absent/no-op, confirmed cleanup, busy and unknown without connected cleanup");
+        }
+        var drainLog = new List<string>(); var release = new TaskCompletionSource<LegacyExplorerPreviewCleanupResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var retirement = InstallerMaintenance.RunAsync((true, ReleaseChannel.Pilot), [InstallerMaintenance.RetireLegacyArgument],
+            () => new Owner(drainLog, thread), _ => throw new Exception("No connected source during retirement."), _ => release.Task);
+        Require(!retirement.IsCompleted && drainLog.Count == 0, "retirement retains thread-affine owner while legacy cleanup drains");
+        release.SetResult(LegacyExplorerPreviewCleanupResult.Removed);
+        Require(await retirement == 0 && drainLog.SequenceEqual(["owner-dispose"]), "retirement releases owner only after completed cleanup on its owning thread");
+        Require(await InstallerMaintenance.RunAsync((true, ReleaseChannel.Pilot), [InstallerMaintenance.RetireLegacyArgument],
+            () => null, _ => throw new Exception(), _ => throw new Exception()) == 10, "active pilot prevents retirement before legacy work");
+        Require(await InstallerMaintenance.RunAsync((true, ReleaseChannel.Pilot), [InstallerMaintenance.RetireLegacyArgument],
+            () => new Owner(new List<string>(), thread), _ => throw new Exception(), _ => throw new IOException()) == 20,
+            "unknown retirement failure refuses without fallback or connected work");
         foreach (var outcome in Enum.GetValues<LegacyExplorerPreviewCleanupResult>()) {
             var calls = 0;
             var code = await InstallerMaintenance.RunAsync((true, ReleaseChannel.Pilot), [InstallerMaintenance.LegacyRemoveArgument],

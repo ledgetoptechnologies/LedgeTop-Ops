@@ -12,6 +12,7 @@ internal static class InstallerMaintenance
     internal const string CheckArgument = "--installer-check", RemoveArgument = "--installer-remove-connections";
     internal const string QuitArgument = "--installer-request-quit";
     internal const string LegacyRemoveArgument = "--installer-remove-legacy-preview";
+    internal const string RetireLegacyArgument = "--installer-retire-legacy-preview";
     internal static bool Requested(IReadOnlyList<string> arguments) => arguments.Any(value => value.StartsWith("--installer", StringComparison.OrdinalIgnoreCase));
 
     internal static Task<int> RunAsync((bool Packaged, ReleaseChannel? Channel) compiled, IReadOnlyList<string> arguments) =>
@@ -98,17 +99,20 @@ internal static class InstallerMaintenance
         Func<bool, Task<LegacyExplorerPreviewCleanupResult>> legacyCleanup)
     {
         if (!compiled.Packaged || compiled.Channel != ReleaseChannel.Pilot || arguments.Count != 1 ||
-            arguments[0] is not (CheckArgument or RemoveArgument or LegacyRemoveArgument)) return 20;
+            arguments[0] is not (CheckArgument or RemoveArgument or LegacyRemoveArgument or RetireLegacyArgument)) return 20;
         var sessions = new List<IExplorerPreviewSession>();
         var result = 20;
         try {
             using var owner = tryOwn();
             if (owner is null) return 10;
-            if (arguments[0] == LegacyRemoveArgument) {
+            if (arguments[0] is LegacyRemoveArgument or RetireLegacyArgument) {
                 // Explicit repair for the old portable demo; never prepare/remove Company or Client roots.
-                // NoKnownReceipt is a refusal here because this command specifically promises legacy cleanup.
+                // Installation retirement treats no receipt as a no-op, never proof of navigation absence.
+                // Explicit repair still refuses a missing receipt. Both reuse exact persisted ownership
+                // and removal phases; neither guesses a registry entry or replays ambiguous unregister.
                 return await legacyCleanup(true) switch {
                     LegacyExplorerPreviewCleanupResult.Removed or LegacyExplorerPreviewCleanupResult.AlreadyRemovedVerified => 0,
+                    LegacyExplorerPreviewCleanupResult.NoKnownReceipt when arguments[0] == RetireLegacyArgument => 0,
                     LegacyExplorerPreviewCleanupResult.Busy => 10,
                     _ => 20
                 };

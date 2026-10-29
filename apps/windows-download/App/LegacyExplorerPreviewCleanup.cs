@@ -14,7 +14,8 @@ internal enum LegacyExplorerPreviewReceiptState { Missing, Present, Unknown }
 /// that an untracked Explorer entry is absent. Does not start a provider, authenticate, delete files,
 /// enumerate registrations, or accept a path from the caller. Caller must preserve its UI context:
 /// the legacy SingleInstance mutex must be released on the same thread that acquired it.
-/// Not wired to installer/startup; invocation needs a separately reviewed maintenance hook.
+/// Invoked by packaged-pilot uninstall, explicit repair, and post-activation installation retirement;
+/// ordinary app startup does not invoke cleanup.
 /// </summary>
 internal static class LegacyExplorerPreviewCleanup
 {

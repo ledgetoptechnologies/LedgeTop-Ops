@@ -10,7 +10,30 @@ const uninit = active.slice(active.indexOf('Function un.onInit'), active.indexOf
 const uninstall = active.slice(active.indexOf('Section "Uninstall"'));
 const finishStart = active.slice(active.indexOf('Function FinishStartLedgeTopFiles'), active.indexOf('Function un.onInit'));
 const outsideFinishStart = active.replace(finishStart, '');
+const legacyRetirement = active.slice(active.indexOf('Function RetireOwnedLegacyPreview'), active.indexOf('Function FinishStartLedgeTopFiles'));
 const before = (text, a, b) => assert(text.indexOf(a) >= 0 && text.indexOf(a) < text.indexOf(b), `${a} must precede ${b}`);
+
+test('legacy V2 retirement runs only after successful activation and never rolls installation back', () => {
+  before(install, 'WriteUninstaller', 'Call RetireOwnedLegacyPreview');
+  before(install, 'Call MigrateStartupCommand', 'Call RetireOwnedLegacyPreview');
+  assert.match(install, /StrCmp \$StartupFailed 1 activation_failed\n  Call RetireOwnedLegacyPreview\n  Goto install_done/);
+  before(install, 'Call RetireOwnedLegacyPreview', 'StrCpy $FinishLaunchReady 1');
+  assert.equal((active.match(/Call RetireOwnedLegacyPreview/g) ?? []).length, 1);
+  assert.equal((legacyRetirement.match(/ExecWait/g) ?? []).length, 1);
+  assert.match(legacyRetirement, /--installer-retire-legacy-preview' \$0/);
+  assert.doesNotMatch(legacyRetirement, /--installer-remove-connections|--installer-remove-legacy-preview|WriteReg|WriteINI|Delete|RMDir|Abort|SetErrorLevel|install_failed|activation_failed|--installer-request-quit/);
+});
+
+test('legacy retirement retries only definite busy; unknown and silent outcomes continue to Finish', () => {
+  assert.match(legacyRetirement, /IfErrors retire_legacy_review\n  StrCmp \$0 0 retire_legacy_done\n  StrCmp \$0 10 0 retire_legacy_review/);
+  assert.equal((legacyRetirement.match(/IfSilent retire_legacy_done/g) ?? []).length, 2);
+  assert.match(legacyRetirement, /IDRETRY retire_legacy_retry IDCANCEL retire_legacy_done/);
+  const unknown = legacyRetirement.slice(legacyRetirement.indexOf('retire_legacy_review:'));
+  assert.doesNotMatch(unknown, /IDRETRY|Goto retire_legacy_retry|ExecWait|\bCall\b/);
+  assert(unknown.includes('Setup will not guess or repeat an uncertain removal.'));
+  assert(legacyRetirement.includes('Downloaded and modified files stay on this PC.'));
+  assert.match(unknown, /retire_legacy_done:\n  ClearErrors\n  Pop \$0\nFunctionEnd/);
+});
 
 test('explicit immutable builder inputs have no installable defaults', () => {
   for (const name of ['APP_VERSION', 'OUTPUT_FILE', 'PAYLOAD_MANIFEST_SHA256', 'PAYLOAD_INCLUDE', 'SOURCE_COMMIT'])
@@ -158,11 +181,11 @@ test('only busy code10 gives tray Quit guidance at both setup checks and uninsta
   assert(secondBusy.includes('If setup says this version already exists'));
   const uninstallBusy = uninstall.slice(0, uninstall.indexOf('un_cleanup_review:'));
   assert(uninstallBusy.includes('Also quit any old LedgeTop Files Preview tray icon.'));
-  assert.equal((active.match(/ExecWait/g) ?? []).length, 4, 'one extra bounded graceful quit maintenance command');
+  assert.equal((active.match(/ExecWait/g) ?? []).length, 5, 'graceful quit and post-activation legacy-only retirement maintenance commands');
 });
 test('silent refusal has safe default dialog and nonzero explicit exit status', () => {
   for (const line of active.split('\n').filter(s => s.trimStart().startsWith('MessageBox ')))
-    assert(line.endsWith('/SD IDOK') || line.includes('/SD IDNO IDYES preflight_stop IDNO preflight_refused') || line.includes('/SD IDCANCEL IDRETRY preflight_retry IDCANCEL preflight_refused'));
+    assert(line.endsWith('/SD IDOK') || line.includes('/SD IDNO IDYES preflight_stop IDNO preflight_refused') || line.includes('/SD IDCANCEL IDRETRY preflight_retry IDCANCEL preflight_refused') || line.includes('/SD IDCANCEL IDRETRY retire_legacy_retry IDCANCEL retire_legacy_done'));
   for (const [index, line] of active.split('\n').entries()) if (line.trim() === 'Abort')
     assert(active.split('\n')[index - 1].trim().startsWith('SetErrorLevel '));
 });
