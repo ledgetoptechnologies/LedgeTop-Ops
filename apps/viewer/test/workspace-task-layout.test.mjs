@@ -16,7 +16,7 @@ const context=vm.createContext({state,groupProjects,URL,URLSearchParams,location
   // this task-navigation harness. Capability refresh has its own focused tests.
   context.refreshProviderCapabilities=()=>{throw new Error('Task navigation must not refresh node capabilities');};
   vm.runInContext(`let lastProviderEntry=null;\n${source.slice(source.indexOf('function refreshOpenedProvider('),source.indexOf('function providerDetail('))}`,context);
-  vm.runInContext([...names,'taskOutputStage','logPanel','projectSearchText','projectStatusMatches','workspaceBreadcrumb','taskRunsPanel','attemptHistory','attemptLabel','disclosureAttributes','attemptDiagnosticPanel','projectRows'].map(declaration).join('\n'),context);
+  vm.runInContext([...names,'taskOutputStage','logPanel','projectSearchText','projectStatusMatches','workspaceBreadcrumb','taskRunsPanel','moreMenu','attemptHistory','attemptLabel','disclosureAttributes','attemptDiagnosticPanel','projectRows'].map(declaration).join('\n'),context);
   vm.runInContext(source.slice(source.indexOf('function canShareOutput('),source.indexOf('async function openShareModal(')),context);
   vm.runInContext(lines.find(line=>line.startsWith("addEventListener('popstate'")),context);
   const route=lines.find(line=>line.trimStart().startsWith("if(['task-gcp','task-settings','task-files','task-return']"));
@@ -115,7 +115,7 @@ test('project summary counts ready tasks once and distinguishes source collectio
   f.state.datasets=[{id:'dataset',projectId:'project',status:'finalized'},{id:'unused',projectId:'project',status:'draft'},{id:'old',projectId:'project',status:'trashed'},{id:'archived',projectId:'project',status:'archived'}];
   f.state.outputs=[{taskId:'task',status:'ready'},{taskId:'task',status:'published',activePublished:true}];
   vm.runInContext(declaration('projectRows'),f.context);
-  const html=f.context.projectRows();assert.match(html,/<strong>1<\/strong><small>ready/);assert.match(html,/<strong>2<\/strong><small>source sets/);assert.doesNotMatch(html,/<small>published/);
+  const html=f.context.projectRows();assert.match(html,/<strong>1<\/strong><small>ready/);assert.match(html,/<strong>2<\/strong><small>datasets/);assert.doesNotMatch(html,/<small>published/);
 });
 
 test('project actions prioritize enabled new task for empty projects and keep secondary actions in More',()=>{
@@ -178,7 +178,7 @@ test('route parsing and validation reject invalid panels, cross-project tasks an
 test('direct task page hydration renders loading before asynchronous details, once only',()=>{
   const f=fixture();delete f.state.taskDetails.task;
   f.context.taskAction('task-gcp','task');
-  assert.match(f.content.innerHTML,/Loading authoritative task details/);assert.doesNotMatch(f.content.innerHTML,/gcp-import-form/);
+  assert.match(f.content.innerHTML,/Loading task details/);assert.doesNotMatch(f.content.innerHTML,/gcp-import-form/);
   assert.equal(f.events.filter(event=>event[0]==='hydrate').length,1);
   f.context.hydrateExpandedTask();assert.equal(f.events.filter(event=>event[0]==='hydrate').length,1);
 });

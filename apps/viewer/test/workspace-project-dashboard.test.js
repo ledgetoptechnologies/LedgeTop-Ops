@@ -71,7 +71,7 @@ test('project detail owns import processing GCP outputs review and sharing',()=>
 
 test('task details render authoritative metrics and bounded sanitized API log tails',()=>{
   for(const label of ['Average GSD','Surveyed area','Source images','Reconstructed points','Georeferencing CRS','Processing duration','Outputs','Task disk usage'])assert.ok(source.includes(label),label);
-  assert.match(source,/Some survey statistics are not available yet\. These fields are separate from node connection health\./);
+  assert.match(source,/Figures shown as Unavailable were not recorded for this run\./);
   assert.match(source,/class="task-facts"/);
   assert.doesNotMatch(source,/class="task-metrics"/);
   for(const destination of ['Task settings','Processing history','Ground control points','Model files','Task files'])assert.ok(source.includes(destination),destination);
