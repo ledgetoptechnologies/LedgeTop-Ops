@@ -10,6 +10,15 @@ disabled in the shipped configuration. The user has been asked to verify launch;
 this receipt does not claim live sign-in, backend activation, or device acceptance.
 The task-owned USB relay was stopped after installation.
 
+Beau confirmed this build opens and shows the live-workspace option. Two pilot
+copies were present because signing and installation prefixed the bundle ID
+twice on the new build. With Beau's instruction to remove the old copy, the
+older single-prefix demo was uninstalled; a device app listing verified that
+only the double-prefix updated pilot remained. Future installs must inspect the
+effective signed bundle ID first, update the existing copy, and verify that one
+pilot remains; do not blindly uninstall a copy containing needed data. The
+task-owned relay was stopped after this cleanup.
+
 ## Read-only client source — October 29, 2026
 
 Worktree: `C:\Projects\Ledge Top Operations\ios-pilot`, branch
