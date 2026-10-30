@@ -87,6 +87,14 @@ test('photo selection retains raw survey CSV while ignoring unrelated files',asy
  assert.equal(prepared.items.length,2);assert.deepEqual(prepared.manifest.map(x=>x.processingRole),['image','gcp_source']);assert.deepEqual(prepared.ignored,['photos/readme.txt']);
 });
 
+test('photo selection accepts up to 256 GiB without reading file bytes',()=>{
+ let reads=0;const make=index=>({name:`image-${index}.jpg`,size:64*1024**2,arrayBuffer(){reads++;throw new Error('unexpected read')}});
+ const files=Array.from({length:4096},(_,i)=>make(i));
+ assert.equal(inspectTaskPhotos(files).totalBytes,256*1024**3);
+ assert.throws(()=>inspectTaskPhotos([...files,make(4096)]),/transfer size limit/);
+ assert.equal(reads,0);
+});
+
 test('node capacity warnings use photo inputs and never assume missing limits',()=>{
  const files=[{name:'a.jpg',size:6},{name:'b.jpg',size:6},{name:'survey.csv',size:1000}];
  assert.match(providerPhotoLimitWarning(files,{capabilities:{maxImages:1,ledgetopMaxInputBytes:10}}),/image count and input size/);
