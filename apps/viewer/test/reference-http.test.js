@@ -14,7 +14,7 @@ const {createReferenceBrokerHandler} = require('../server/referenceHttp');
 async function fixture(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(),'reference-http-'));
   const source = path.join(root,'image.jpg'); fs.writeFileSync(source,'abcdef');
-  const broker = new ReferenceTransferBroker({databasePath:path.join(root,'private.db'),managedRoot:root,environment:'staging'});
+  const broker = new ReferenceTransferBroker({databasePath:path.join(root,'private.db'),managedRoot:root,environment:'staging',allowCreate:true});
   const manifest = {id:'manifest-1',revision:1,sha256:'0'.repeat(64),totalBytes:6,objectCount:1,
     inputCounts:{images:1,lidarObjects:0,points:0},objects:[{id:'image-1',name:'image.jpg',byteSize:6,sha256:p.sha256('abcdef'),kind:'image',mediaType:'image/jpeg'}]};
   manifest.sha256=p.manifestSha256(manifest);

@@ -19,7 +19,7 @@ function safeInt(n) { if (!Number.isSafeInteger(n) || n < 0) fail('INVALID_INTEG
 function slug(s) { if (typeof s !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(s)) fail('INVALID_ID'); }
 function exact(o, fields) { if (!o || typeof o !== 'object' || Array.isArray(o) || ![Object.prototype,null].includes(Object.getPrototypeOf(o)) || Object.keys(o).some(k => !fields.includes(k))) fail('EXTRA_FIELDS'); }
 class ReferenceTransferBroker {
-  constructor({ databasePath, managedRoot, environment, now = Date.now, maxGrantTtlMs = 300000, maxConcurrentRequests = 2, maxConcurrentBytes = 67108864, maxResponseBytes = 16777216, maxRequests = 100 }) {
+  constructor({ databasePath, managedRoot, environment, now = Date.now, maxGrantTtlMs = 300000, maxConcurrentRequests = 2, maxConcurrentBytes = 67108864, maxResponseBytes = 16777216, maxRequests = 100, allowCreate = false }) {
     if (!['staging', 'production'].includes(environment)) fail('INVALID_ENVIRONMENT');
     this.environment = environment; this.now = now; this.root = fs.realpathSync(managedRoot);
     this.streams = new Set();
@@ -37,22 +37,25 @@ class ReferenceTransferBroker {
       if(rows.some((x,i)=>x.length!==1||x[0].name!==names[i]||x[0].type!==expected[i][0]||x[0].sql!==expected[i][1]))fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
       const extra=db.prepare("SELECT name FROM sqlite_master WHERE type IN ('trigger','index') AND sql IS NOT NULL AND tbl_name COLLATE NOCASE IN ('reference_grants','reference_job_usage') AND name<>'reference_grants_job' LIMIT 1").get();
       if(extra)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
-      const grants=db.prepare('SELECT job_id,metadata,used_bytes,reserved_bytes,requests,in_flight FROM reference_grants').all(),jobs=db.prepare('SELECT * FROM reference_job_usage').all(),jobMap=new Map(jobs.map(job=>[job.job_id,job])),sums=new Map();
-      for(const grant of grants){let metadata;try{metadata=JSON.parse(grant.metadata)}catch{fail('TRANSFER_ACCOUNTING_UNAVAILABLE')};const usage=jobMap.get(grant.job_id);if(!usage||metadata.manifestSha256!==usage.manifest_sha256||metadata.environment!==usage.environment||![grant.used_bytes,grant.reserved_bytes,grant.requests,grant.in_flight].every(x=>Number.isSafeInteger(x)&&x>=0)||grant.in_flight>grant.requests)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');const total=sums.get(grant.job_id)||{bytes:0,requests:0};total.bytes+=grant.used_bytes+grant.reserved_bytes;total.requests+=grant.requests;if(!Number.isSafeInteger(total.bytes)||!Number.isSafeInteger(total.requests))fail('TRANSFER_ACCOUNTING_UNAVAILABLE');sums.set(grant.job_id,total);}
+      const grants=db.prepare('SELECT job_id,CASE WHEN length(CAST(metadata AS BLOB))<=65536 THEN metadata END AS metadata,used_bytes,reserved_bytes,requests,in_flight FROM reference_grants LIMIT 10001').iterate(),jobs=db.prepare('SELECT * FROM reference_job_usage LIMIT 10001').all(),jobMap=new Map(jobs.map(job=>[job.job_id,job])),sums=new Map();
+      if(jobs.length>10000)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');let grantCount=0;
+      for(const grant of grants){if(++grantCount>10000)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');let metadata;try{metadata=JSON.parse(grant.metadata)}catch{fail('TRANSFER_ACCOUNTING_UNAVAILABLE')};const usage=jobMap.get(grant.job_id);if(!metadata||!usage||metadata.manifestSha256!==usage.manifest_sha256||metadata.environment!==usage.environment||![grant.used_bytes,grant.reserved_bytes,grant.requests,grant.in_flight].every(x=>Number.isSafeInteger(x)&&x>=0)||grant.in_flight>grant.requests)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');const total=sums.get(grant.job_id)||{bytes:0,requests:0};total.bytes+=grant.used_bytes+grant.reserved_bytes;total.requests+=grant.requests;if(!Number.isSafeInteger(total.bytes)||!Number.isSafeInteger(total.requests))fail('TRANSFER_ACCOUNTING_UNAVAILABLE');sums.set(grant.job_id,total);}
       for(const job of jobs){const sum=sums.get(job.job_id)||{bytes:0,requests:0};if(!['staging','production'].includes(job.environment)||!/^([a-f0-9]{64})$/.test(job.manifest_sha256)||![job.byte_limit,job.request_limit,job.charged_bytes,job.requests].every(x=>Number.isSafeInteger(x)&&x>=0)||job.charged_bytes>job.byte_limit||job.requests>job.request_limit||sum.bytes>job.charged_bytes||sum.requests!==job.requests)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');}
       return true;
     };
-    // Validate existing files in a read-only connection before journal-mode,
-    // chmod or schema changes; inspect again while holding the SQLite lock.
-    if(fs.existsSync(databasePath)){let probe;try{probe=new DatabaseSync(databasePath,{readOnly:true});inspect(probe)}catch(error){if(error instanceof ReferenceTransferError)throw error;fail('TRANSFER_ACCOUNTING_UNAVAILABLE')}finally{probe?.close()}}
+    // A fresh database must be explicitly authorized and created exclusively.
+    let fresh=false;
+    if(!fs.existsSync(databasePath)){if(allowCreate!==true)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');let fd;try{fd=fs.openSync(databasePath,'wx',0o600);fresh=true}finally{if(fd!==undefined)fs.closeSync(fd)}}
+    if(!fresh){let probe;try{probe=new DatabaseSync(databasePath,{readOnly:true});probe.exec('BEGIN');if(!inspect(probe))fail('TRANSFER_ACCOUNTING_UNAVAILABLE');probe.exec('COMMIT')}catch(error){if(error instanceof ReferenceTransferError)throw error;fail('TRANSFER_ACCOUNTING_UNAVAILABLE')}finally{probe?.close()}}
     this.db = new DatabaseSync(databasePath);
     try{
-      this.db.exec('BEGIN IMMEDIATE');
-      if(!inspect(this.db))this.db.exec(`${grantsSql}; ${indexSql}; ${usageSql};`);
+      if(fresh)this.db.exec('PRAGMA journal_mode=WAL');
+      else if(String(this.db.prepare('PRAGMA journal_mode').get().journal_mode).toLowerCase()!=='wal')fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+      this.db.exec('PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; BEGIN IMMEDIATE');
+      const existing=inspect(this.db);if(fresh){if(existing)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');this.db.exec(`${grantsSql}; ${indexSql}; ${usageSql};`)}else if(!existing)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
       this.db.exec('COMMIT');
-      this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000');
-      fs.chmodSync(databasePath,0o600);
     }catch(error){try{this.db.exec('ROLLBACK')}catch{}this.db.close();if(error instanceof ReferenceTransferError)throw error;fail('TRANSFER_ACCOUNTING_UNAVAILABLE');}
+
   }
   tx(fn) { this.db.exec('BEGIN IMMEDIATE'); try { const out = fn(); this.db.exec('COMMIT'); return out; } catch (e) { this.db.exec('ROLLBACK'); throw e; } }
   source(file) {
