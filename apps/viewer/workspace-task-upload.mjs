@@ -1,6 +1,6 @@
 // Staff-only upload orchestration. Authorization and dataset admission remain server-owned.
 export const TASK_PHOTO_ACCEPT = '.jpg,.jpeg,.png,.tif,.tiff,.csv';
-export const TASK_PHOTO_LIMITS = Object.freeze({maxFiles:20000,maxFileBytes:64*1024**2,maxTotalBytes:128*1024**3,maxManifestBytes:5*1024**2});
+export const TASK_PHOTO_LIMITS = Object.freeze({maxFiles:20000,maxFileBytes:64*1024**2,maxTotalBytes:256*1024**3,maxManifestBytes:5*1024**2});
 const photo = /\.(?:jpe?g|png|tiff?)$/i;
 const sourceCsv = /\.csv$/i;
 const check = signal => { if(signal?.aborted)throw signal.reason||new DOMException('Upload cancelled','AbortError'); };
