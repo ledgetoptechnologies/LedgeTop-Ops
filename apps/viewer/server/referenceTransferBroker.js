@@ -7,8 +7,19 @@ const { randomBytes, randomUUID, timingSafeEqual } = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const { Readable } = require('node:stream');
 const p = require('./referenceProtocol');
-const STORED_METADATA_LIMIT=p.LIMITS.metadataBytes, STORED_FILES_LIMIT=p.LIMITS.metadataBytes, STORED_IDENTITY_LIMIT=2*p.LIMITS.metadataBytes, STORED_AGGREGATE_LIMIT=4*p.LIMITS.metadataBytes;
+const STORED_METADATA_LIMIT=p.LIMITS.metadataBytes, STORED_FILES_LIMIT=p.LIMITS.metadataBytes, STORED_IDENTITY_LIMIT=2*p.LIMITS.metadataBytes, STORED_AGGREGATE_LIMIT=4*p.LIMITS.metadataBytes, DATABASE_GRANT_LIMIT=64*1024*1024;
 function validateStoredSizes(metadata,files,identity){const sizes=[metadata,files,identity].map(x=>typeof x==='string'?Buffer.byteLength(x,'utf8'):Infinity);if(sizes[0]>STORED_METADATA_LIMIT||sizes[1]>STORED_FILES_LIMIT||sizes[2]>STORED_IDENTITY_LIMIT||sizes.reduce((a,b)=>a+b,0)>STORED_AGGREGATE_LIMIT)fail('GRANT_METADATA_LIMIT');}
+function validateAggregateBytes(total,additional=0){if(!Number.isSafeInteger(total)||total<0||!Number.isSafeInteger(additional)||additional<0||total>DATABASE_GRANT_LIMIT-additional)fail('GRANT_STORAGE_LIMIT');}
+function grantBytes(db){const row=db.prepare('SELECT COALESCE(SUM(length(CAST(metadata AS BLOB))+length(CAST(files AS BLOB))+length(CAST(identity AS BLOB))),0) AS n FROM reference_grants').get();validateAggregateBytes(row.n);return row.n;}
+function checkedGrant(db,id){
+ const lengths=db.prepare('SELECT length(CAST(metadata AS BLOB)) m,length(CAST(files AS BLOB)) f,length(CAST(identity AS BLOB)) i FROM reference_grants WHERE id=?').get(id);if(!lengths)return null;
+ if(![lengths.m,lengths.f,lengths.i].every(x=>Number.isSafeInteger(x)&&x>=0)||lengths.m>STORED_METADATA_LIMIT||lengths.f>STORED_FILES_LIMIT||lengths.i>STORED_IDENTITY_LIMIT||lengths.m+lengths.f+lengths.i>STORED_AGGREGATE_LIMIT)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+ const row=db.prepare('SELECT * FROM reference_grants WHERE id=?').get(id);let meta,files,identity;try{meta=JSON.parse(row.metadata);files=JSON.parse(row.files);identity=JSON.parse(row.identity)}catch{fail('TRANSFER_ACCOUNTING_UNAVAILABLE')}
+ const keys=['jobId','generation','reservationId','manifestSha256','environment','objectIds','nonce','byteBudget','expiresAt'];
+ if(!meta||Array.isArray(meta)||Object.keys(meta).length!==keys.length||keys.some(k=>!Object.hasOwn(meta,k))||meta.jobId!==row.job_id||meta.reservationId!==row.reservation_id||!Array.isArray(meta.objectIds)||meta.objectIds.length>p.LIMITS.objects||new Set(meta.objectIds).size!==meta.objectIds.length||!files||Array.isArray(files)||typeof files!=='object'||Object.keys(files).length!==meta.objectIds.length||!identity||typeof identity.capabilityFingerprint!=='string'||!/^[a-f0-9]{64}$/.test(identity.capabilityFingerprint)||JSON.stringify(meta)!==row.metadata||JSON.stringify(files)!==row.files||JSON.stringify({metadata:meta,files,capabilityFingerprint:identity.capabilityFingerprint})!==row.identity)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+ for(const id of meta.objectIds){const file=files[id];if(typeof id!=='string'||!Object.hasOwn(files,id)||!file||Object.keys(file).length!==3||typeof file.path!=='string'||!path.isAbsolute(file.path)||!Number.isSafeInteger(file.byteSize)||file.byteSize<0||!/^[a-f0-9]{64}$/.test(file.sha256))fail('TRANSFER_ACCOUNTING_UNAVAILABLE');}
+ return {row,metadata:meta,files};
+}
 class ReferenceTransferError extends Error {
   constructor(code) { super(code); this.name = 'ReferenceTransferError'; this.code = code; }
 }
@@ -16,7 +27,7 @@ const fail = code => { throw new ReferenceTransferError(code); };
 // readObject returns a paused Readable in body. Consume or destroy it; destroy/EOF/error
 // releases the unconsumed reservation. Bytes pushed into the stream count as spent,
 // including buffered bytes on cancellation. No plaintext token is recoverable on retry.
-const ERROR_CODES = Object.freeze(['INVALID_INTEGER','INVALID_ID','EXTRA_FIELDS','INVALID_ENVIRONMENT','INVALID_LIMIT','DURABLE_DATABASE_REQUIRED','UNSAFE_SOURCE','SYMLINK_SOURCE','SOURCE_UNAVAILABLE','RESERVATION_REQUIRED','CAPABILITY_BINDING','INVALID_EXPIRY','RESERVATION_BINDING','OBJECT_SET_BINDING','STALE_RESERVATION','INVALID_REQUEST','UNAUTHORIZED','OBJECT_NOT_GRANTED','INVALID_RANGE','TRANSFER_LIMIT','SOURCE_CHANGED','TRANSFER_ACCOUNTING_UNAVAILABLE','GRANT_METADATA_LIMIT']);
+const ERROR_CODES = Object.freeze(['INVALID_INTEGER','INVALID_ID','EXTRA_FIELDS','INVALID_ENVIRONMENT','INVALID_LIMIT','DURABLE_DATABASE_REQUIRED','UNSAFE_SOURCE','SYMLINK_SOURCE','SOURCE_UNAVAILABLE','RESERVATION_REQUIRED','CAPABILITY_BINDING','INVALID_EXPIRY','RESERVATION_BINDING','OBJECT_SET_BINDING','STALE_RESERVATION','INVALID_REQUEST','UNAUTHORIZED','OBJECT_NOT_GRANTED','INVALID_RANGE','TRANSFER_LIMIT','SOURCE_CHANGED','TRANSFER_ACCOUNTING_UNAVAILABLE','GRANT_METADATA_LIMIT','GRANT_STORAGE_LIMIT']);
 function safeInt(n) { if (!Number.isSafeInteger(n) || n < 0) fail('INVALID_INTEGER'); return n; }
 function slug(s) { if (typeof s !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(s)) fail('INVALID_ID'); }
 function exact(o, fields) { if (!o || typeof o !== 'object' || Array.isArray(o) || ![Object.prototype,null].includes(Object.getPrototypeOf(o)) || Object.keys(o).some(k => !fields.includes(k))) fail('EXTRA_FIELDS'); }
@@ -39,9 +50,11 @@ class ReferenceTransferBroker {
       if(rows.some((x,i)=>x.length!==1||x[0].name!==names[i]||x[0].type!==expected[i][0]||x[0].sql!==expected[i][1]))fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
       const extra=db.prepare("SELECT name FROM sqlite_master WHERE type IN ('trigger','index') AND sql IS NOT NULL AND tbl_name COLLATE NOCASE IN ('reference_grants','reference_job_usage') AND name<>'reference_grants_job' LIMIT 1").get();
       if(extra)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
-      const grants=db.prepare(`SELECT job_id,CASE WHEN length(CAST(metadata AS BLOB))<=${STORED_METADATA_LIMIT} AND length(CAST(files AS BLOB))<=${STORED_FILES_LIMIT} AND length(CAST(identity AS BLOB))<=${STORED_IDENTITY_LIMIT} AND length(CAST(metadata AS BLOB))+length(CAST(files AS BLOB))+length(CAST(identity AS BLOB))<=${STORED_AGGREGATE_LIMIT} THEN metadata END AS metadata,used_bytes,reserved_bytes,requests,in_flight FROM reference_grants LIMIT 10001`).iterate(),jobs=db.prepare('SELECT * FROM reference_job_usage LIMIT 10001').all(),jobMap=new Map(jobs.map(job=>[job.job_id,job])),sums=new Map();
+      grantBytes(db);
+      const grants=db.prepare('SELECT id,job_id,used_bytes,reserved_bytes,requests,in_flight FROM reference_grants LIMIT 10001').iterate(),jobs=db.prepare('SELECT * FROM reference_job_usage LIMIT 10001').all(),jobMap=new Map(jobs.map(job=>[job.job_id,job])),sums=new Map();
       if(jobs.length>10000)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');let grantCount=0;
-      for(const grant of grants){if(++grantCount>10000)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');let metadata;try{metadata=JSON.parse(grant.metadata)}catch{fail('TRANSFER_ACCOUNTING_UNAVAILABLE')};const usage=jobMap.get(grant.job_id);if(!metadata||!usage||metadata.manifestSha256!==usage.manifest_sha256||metadata.environment!==usage.environment||![grant.used_bytes,grant.reserved_bytes,grant.requests,grant.in_flight].every(x=>Number.isSafeInteger(x)&&x>=0)||grant.in_flight>grant.requests)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');const total=sums.get(grant.job_id)||{bytes:0,requests:0};total.bytes+=grant.used_bytes+grant.reserved_bytes;total.requests+=grant.requests;if(!Number.isSafeInteger(total.bytes)||!Number.isSafeInteger(total.requests))fail('TRANSFER_ACCOUNTING_UNAVAILABLE');sums.set(grant.job_id,total);}
+      for(const grant of grants){if(++grantCount>10000)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');const metadata=checkedGrant(db,grant.id)?.metadata,usage=jobMap.get(grant.job_id);if(!metadata||!usage||metadata.manifestSha256!==usage.manifest_sha256||metadata.environment!==usage.environment||![grant.used_bytes,grant.reserved_bytes,grant.requests,grant.in_flight].every(x=>Number.isSafeInteger(x)&&x>=0)||grant.in_flight>grant.requests)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');const total=sums.get(grant.job_id)||{bytes:0,requests:0};total.bytes+=grant.used_bytes+grant.reserved_bytes;total.requests+=grant.requests;if(!Number.isSafeInteger(total.bytes)||!Number.isSafeInteger(total.requests))fail('TRANSFER_ACCOUNTING_UNAVAILABLE');sums.set(grant.job_id,total);}
+
       for(const job of jobs){const sum=sums.get(job.job_id)||{bytes:0,requests:0};if(!['staging','production'].includes(job.environment)||!/^([a-f0-9]{64})$/.test(job.manifest_sha256)||![job.byte_limit,job.request_limit,job.charged_bytes,job.requests].every(x=>Number.isSafeInteger(x)&&x>=0)||job.charged_bytes>job.byte_limit||job.requests>job.request_limit||sum.bytes>job.charged_bytes||sum.requests!==job.requests)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');}
       return true;
     };
@@ -96,16 +109,17 @@ class ReferenceTransferBroker {
       if(usage&&(usage.environment!==this.environment||usage.manifest_sha256!==manifest.sha256||usage.byte_limit!==byteLimit||usage.request_limit!==this.settings.maxRequests))fail('RESERVATION_BINDING');
       if(!usage&&this.db.prepare('SELECT COUNT(*) AS n FROM reference_job_usage').get().n>=10000)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
       if(!usage)this.db.prepare('INSERT INTO reference_job_usage(job_id,environment,manifest_sha256,byte_limit,request_limit) VALUES(?,?,?,?,?)').run(jobId,this.environment,manifest.sha256,byteLimit,this.settings.maxRequests);
-      const previous = this.db.prepare('SELECT * FROM reference_grants WHERE job_id=? AND revoked=0 AND expires_ms>? ORDER BY rowid DESC LIMIT 1').get(jobId, now);
+      const previousId=this.db.prepare('SELECT id FROM reference_grants WHERE job_id=? AND revoked=0 AND expires_ms>? ORDER BY rowid DESC LIMIT 1').get(jobId,now);const previous=previousId?checkedGrant(this.db,previousId.id).row:null;
       if (previous && previous.identity === identity && input.replace !== true) return { grantId: previous.id, grant: JSON.parse(previous.metadata), reused: true, tokenRecoverable: false };
-      const latest = this.db.prepare('SELECT * FROM reference_grants WHERE job_id=? ORDER BY rowid DESC LIMIT 1').get(jobId);
+      const latestId=this.db.prepare('SELECT id FROM reference_grants WHERE job_id=? ORDER BY rowid DESC LIMIT 1').get(jobId);const latest=latestId?checkedGrant(this.db,latestId.id).row:null;
       if (latest) {
         const latestMeta = JSON.parse(latest.metadata);
         if (latestMeta.manifestSha256 !== metadata.manifestSha256 || latest.files !== filesJson) fail('RESERVATION_BINDING');
-        let seen=false;for(const row of this.db.prepare(`SELECT CASE WHEN length(CAST(metadata AS BLOB))<=${STORED_METADATA_LIMIT} THEN metadata END AS metadata FROM reference_grants WHERE job_id=?`).iterate(jobId)){if(!row.metadata)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');if(JSON.parse(row.metadata).nonce===reservation.nonce){seen=true;break;}}
+        let seen=false;for(const prior of this.db.prepare('SELECT id FROM reference_grants WHERE job_id=?').iterate(jobId)){if(checkedGrant(this.db,prior.id).metadata.nonce===reservation.nonce){seen=true;break;}}
         if (generation < latestMeta.generation || (seen && (latestMeta.nonce !== reservation.nonce || latest.revoked || latest.expires_ms <= now))) fail('STALE_RESERVATION');
       }
       if(this.db.prepare('SELECT COUNT(*) AS n FROM reference_grants').get().n>=10000)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+      validateAggregateBytes(grantBytes(this.db),Buffer.byteLength(metadataJson)+Buffer.byteLength(filesJson)+Buffer.byteLength(identity));
       this.db.prepare('UPDATE reference_grants SET revoked=1 WHERE job_id=?').run(jobId);
       const grantId = randomUUID(), token = randomBytes(32).toString('base64url');
       this.db.prepare('INSERT INTO reference_grants(id,job_id,reservation_id,identity,token_hash,metadata,files,expires_ms) VALUES(?,?,?,?,?,?,?,?)').run(grantId, jobId, reservation.reservationId, identity, p.sha256(Buffer.from(token)), metadataJson, filesJson, expires);
@@ -130,9 +144,9 @@ class ReferenceTransferBroker {
     const tokenHash = p.sha256(Buffer.from(authorization.slice(7)));
     let reserved;
     this.tx(() => {
-      const row = this.db.prepare('SELECT * FROM reference_grants WHERE id=?').get(grantId);
+      const checked=checkedGrant(this.db,grantId),row=checked?.row;
       if (!row || !timingSafeEqual(Buffer.from(row.token_hash), Buffer.from(tokenHash)) || row.revoked || row.expires_ms <= this.now()) fail('UNAUTHORIZED');
-      const metadata = JSON.parse(row.metadata), files = JSON.parse(row.files), file = files[objectId]; if (!file || !metadata.objectIds.includes(objectId)) fail('OBJECT_NOT_GRANTED');
+      const metadata=checked.metadata,files=checked.files,file=files[objectId]; if (!file || !metadata.objectIds.includes(objectId)) fail('OBJECT_NOT_GRANTED');
       const totalBytes = metadata.objectIds.reduce((sum, id) => sum + BigInt(files[id].byteSize), 0n);
       if (totalBytes > BigInt(Number.MAX_SAFE_INTEGER)) fail('RESERVATION_BINDING');
       p.validateTransferByteBudget(Number(totalBytes), metadata.byteBudget);
@@ -225,4 +239,4 @@ class ReferenceTransferBroker {
   }
   close() { for (const stream of this.streams) stream.destroy(); this.db.close(); }
 }
-module.exports = { ReferenceTransferBroker, ReferenceTransferError, ERROR_CODES, validateStoredSizes, STORED_METADATA_LIMIT, STORED_FILES_LIMIT, STORED_IDENTITY_LIMIT, STORED_AGGREGATE_LIMIT };
+module.exports = { ReferenceTransferBroker, ReferenceTransferError, ERROR_CODES, validateStoredSizes, STORED_METADATA_LIMIT, STORED_FILES_LIMIT, STORED_IDENTITY_LIMIT, STORED_AGGREGATE_LIMIT, DATABASE_GRANT_LIMIT, validateAggregateBytes };
