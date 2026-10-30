@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash, createPublicKey, generateKeyPairSync, sign as signBytes, verify as verifyBytes, constants } from 'node:crypto';
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -355,6 +355,9 @@ test('requires a signed issue-state, rejects revoked receipt, and holds a one-sh
     assert.throws(() => readNativeStaffBootstrapApprovalRegistry(config), /approval_registry_invalid/u);
     writeFileSync(statePath, validState);
     const revoked = makeReceipt(1), accepted = makeReceipt(2);
+    assert.throws(() => issueNativeStaffBootstrapApproval(config, makeReceipt(3), () => Buffer.alloc(384, 7).toString('base64')),
+      /approval_registry_signature_invalid/u);
+    assert.equal(readFileSync(statePath, 'utf8'), validState);
     issueNativeStaffBootstrapApproval(config, revoked, sign);
     issueNativeStaffBootstrapApproval(config, accepted, sign);
     const issued = readNativeStaffBootstrapApprovalRegistry(config);
@@ -373,6 +376,29 @@ test('requires a signed issue-state, rejects revoked receipt, and holds a one-sh
       .find(entry => entry.approvalId === accepted.payload.trustEnvelope.approvalId).state, 'consumed');
     assert.throws(() => acquireNativeStaffBootstrapApprovalLease(config, accepted, sign), /approval_registry_not_issuable/u);
     assert.throws(() => lease.finish('uncertain'), /approval_registry_finish_invalid/u);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('registry initialization refuses any pre-existing file, including stale temp files', () => {
+  const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 3072 });
+  const config = makeConfig(publicKey.export({ type: 'spki', format: 'pem' }));
+  const sign = payload => signBytes('sha256', Buffer.from(payload), { key: privateKey,
+    padding: constants.RSA_PKCS1_PSS_PADDING, saltLength: 32 }).toString('base64');
+  for (const name of ['operator-notes.txt', 'approval-state.json.stale.tmp']) {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'ops-approval-registry-init-'));
+    config.receiptDirectory = directory;
+    try {
+      writeFileSync(path.join(directory, name), 'synthetic');
+      assert.throws(() => initializeNativeStaffBootstrapApprovalRegistry(config, sign), /approval_registry_already_initialized/u);
+      assert.deepEqual(readdirSync(directory), [name]);
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  }
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'ops-approval-registry-bad-init-'));
+  config.receiptDirectory = directory;
+  try {
+    assert.throws(() => initializeNativeStaffBootstrapApprovalRegistry(config, () => Buffer.alloc(384, 7).toString('base64')),
+      /approval_registry_signature_invalid/u);
+    assert.deepEqual(readdirSync(directory), []);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

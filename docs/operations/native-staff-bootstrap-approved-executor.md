@@ -63,4 +63,8 @@ Registry signatures detect modification and forward forks, but a local actor
 able to restore an earlier signed registry file can roll back its sequence;
 the current design assumes the trusted Windows host and its receipt-directory
 ACLs are not rolled back. No automatic recovery or replay is provided after an
-uncertain dispatch.
+uncertain dispatch. Provisioning initializes the registry only when its receipt
+directory is otherwise empty under the exclusive lock. State publication
+validates the signature before replacing the state file and flushes the owned
+temporary file before rename. This does not claim Windows write-through or
+directory-entry durability across power loss.
