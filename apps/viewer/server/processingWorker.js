@@ -172,8 +172,9 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   let stagedCommitment=null,initialCommitment=null;
   const readCommitment=async()=>{
     if(!binding||!processing.attemptRequiresReservation?.(attempt.id)||typeof providerCredentials.resolveStagedCommitmentCredential!=='function')throw Object.assign(new Error('Staged commitment is unavailable'),{code:'staged_commitment_unavailable'});
-    const capability=attemptCapability(processing,providerCredentials,attempt);
-    const bearer=await providerCredentials.resolveStagedCommitmentCredential(binding.credentialRef);
+    let capability,bearer;
+    try{capability=attemptCapability(processing,providerCredentials,attempt);bearer=await providerCredentials.resolveStagedCommitmentCredential(binding.credentialRef);}
+    catch(error){if(signal?.aborted||error?.name==='AbortError')throw error;throw Object.assign(new Error('Staged commitment credentials are unavailable'),{code:'staged_commitment_unavailable'});}
     return require('./stagedCommitmentClient').getStagedCommitment({enabled:true,origin:binding.origin,principalId:binding.principalId,authorityId:binding.authorityId,environment:binding.environment,bearer,capability,taskId:attempt.providerTaskId,signal});
   };
 
@@ -223,7 +224,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
       stagedCommitment=fresh;
     }
 
-  }else if(recoveredIngest||processing.hasArchiveCaptureIntent(attempt.id)){
+  }else if(binding||recoveredIngest||processing.hasArchiveCaptureIntent(attempt.id)){
     throw Object.assign(new Error('recovered archive receipt is unavailable'),{code:'ingest_recovery_state_changed'});
   }
   // Only pre-existing unmarked historical directories retain the legacy path.
