@@ -158,6 +158,16 @@ test('project Delete cascades owned storage into 30-day trash and restore/purge 
   const { purgeContainerTrash } = require('../server/containerLifecycle'); assert.equal(purgeContainerTrash(context.processing, context.storage, trash.id, 'ops:lifecycle').permanentlyDeletedAt !== null, true, 'repeat purge is idempotent');
 });
 
+test('project trash retry retains a child moved before membership was recorded', {skip:process.env.LTDS_CONTAINER_RECOVERY_REGRESSION!=='1'}, async t => {
+  const context=await fixture(t),project=context.processing.createProject({displayName:'Synthetic recovery'}),dataset=finalizedDataset(context,project,'Synthetic child');
+  const add=context.processing.addContainerTrashMember.bind(context.processing);let interrupted=false;
+  context.processing.addContainerTrashMember=(containerId,memberId)=>{if(!interrupted){interrupted=true;throw Object.assign(new Error('injected membership failure'),{code:'fault_injected'});}return add(containerId,memberId);};
+  const first=await context.request('DELETE',`/api/v1/projects/${project.id}`,{});assert.equal(first.status,409);assert.equal(interrupted,true);assert.equal(context.processing.getDataset(dataset.id).status,'trashed');
+  context.processing.addContainerTrashMember=add;
+  const retry=await context.request('DELETE',`/api/v1/projects/${project.id}`,{});assert.equal(retry.status,200);const root=(await retry.json()).trash;
+  assert.ok(context.processing.listContainerTrashMembers(root.id).some(item=>item.entityType==='dataset'&&item.entityId===dataset.id),'retry must retain the moved child under its original container');
+});
+
 test('container restore preflights every member before changing files or metadata', async t => {
   const context = await fixture(t), project = context.processing.createProject({ displayName: 'Preflight project' }), dataset = finalizedDataset(context, project, 'Preflight dataset'), task = context.processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Preflight task' }), provider = context.processing.upsertProvider({ type: 'nodeodm', displayName: 'Preflight ODM', endpoint: 'http://127.0.0.1:3002', enabled: true }), output = readyManagedOutput(context, project, dataset, task, provider, 'Preflight output'), datasetDirectory = path.join(context.config.datasetsMount, dataset.relativePath);
   let response = await context.request('DELETE', `/api/v1/projects/${project.id}`, {}); assert.equal(response.status, 200); const trash = (await response.json()).trash;
