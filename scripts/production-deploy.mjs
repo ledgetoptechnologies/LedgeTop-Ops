@@ -445,12 +445,12 @@ function privateDirectory(directory) {
   }
 }
 export function preparePrivateProductionDirectory(directory) { return privateDirectory(directory); }
-export async function runNativeProductionCommand(cli, args, directory, phase, cwd = ROOT) {
+export async function runNativeProductionCommand(cli, args, directory, phase, cwd = ROOT, env = process.env) {
   const logPath = path.join(directory, `${phase}.private.log`);
   const log = fs.openSync(logPath, 'wx', 0o600);
   const intent = { argv: [process.execPath, '--no-warnings', cli, ...args], phase, automaticRetry: false };
   fs.writeFileSync(path.join(directory, `${phase}-intent.json`), JSON.stringify(intent), { flag: 'wx', mode: 0o600 });
-  const child = spawn(process.execPath, ['--no-warnings', cli, ...args], { cwd, env: nativeEnvironment(process.env), stdio: ['ignore', log, log], windowsHide: true });
+  const child = spawn(process.execPath, ['--no-warnings', cli, ...args], { cwd, env: nativeEnvironment(env), stdio: ['ignore', log, log], windowsHide: true });
   fs.writeFileSync(path.join(directory, `${phase}-pid.json`), JSON.stringify({ pid: child.pid, startedAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 });
   const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
   fs.closeSync(log);

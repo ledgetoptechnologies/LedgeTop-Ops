@@ -8,6 +8,7 @@ import { validateOrdinaryFrontendReleasePlan } from './ordinary-frontend-release
 import { collectFrontendAssets, ledgerBytes, mergeAssetLedger, validateAssetLedger } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { verifyOrdinaryFrontendCandidateModules } from './ordinary-frontend-candidate-verifier.mjs';
+import { validateOpsLegacyLedgerBootstrap } from './ordinary-frontend-ops-ledger-bootstrap.mjs';
 
 const WORKERS = Object.freeze({ operations: 'ledgetop-ops', client: 'ledgetop-clients' });
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
@@ -57,8 +58,12 @@ function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, 
   need(UUID.test(parentVersionId ?? ''), 'Captured active parent version is required');
   need(previousAssetBytes instanceof Map, 'Complete independently verified prior asset bytes are required');
   const prior = validateAssetLedger(previousLedger, { workerName, accountId });
-  const installedPrior = validateInstalledRetainedLedger(snapshot, { app, workerName, accountId });
-  need(equal(prior, installedPrior), 'Prior asset ledger differs from the ledger embedded in captured active version');
+  if (app === 'operations' && parentVersionId === 'a45943f4-e5c5-4142-9057-fb9adb5cf739') {
+    validateOpsLegacyLedgerBootstrap(snapshot, { previousLedger: prior, previousAssetBytes });
+  } else {
+    const installedPrior = validateInstalledRetainedLedger(snapshot, { app, workerName, accountId });
+    need(equal(prior, installedPrior), 'Prior asset ledger differs from the ledger embedded in captured active version');
+  }
   need(typeof observedAt === 'string' && Number.isFinite(Date.parse(observedAt))
     && new Date(Date.parse(observedAt)).toISOString() === observedAt, 'Canonical observation time required');
 
@@ -80,6 +85,9 @@ function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, 
     ordinaryPlan: pinnedOrdinaryPlan, ordinaryPlanSHA256: planHash, retentionLedger: ledger, retentionLedgerSHA256: hash(bytes),
     nativeAdditionalModule: modulePin,
     additionalModuleRule: Object.freeze({ type: 'Text', globs: Object.freeze(['__ops_release_ledger.json']), fallthrough: false }),
+    assetProviderIdentifierProvenance: Object.freeze({ schema: 'sha256-prefix32-v1',
+      newIdentifiers: 'reconstructed-from-exact-verified-asset-bytes', priorOpaqueIdentifiers: 'preserved-verbatim',
+      observedWranglerBlake3Identifiers: false }),
     retentionPolicy: Object.freeze({ minimumHours: 48, automaticPruning: false }),
     offlineOnly: true, deploymentEnabled: false,
     nativeExecutionQualification: { ready: false, reason: 'versioned-native-executor-and-authority-qualification-required' } });
@@ -134,6 +142,12 @@ export function retainedNativeConfig(plan, staged) {
   need(plan?.schemaVersion === 2 && staged?.main === path.join(staged.directory, 'index.js')
     && staged?.sourceMap === path.join(staged.directory, 'index.js.map'), 'Verified retained module stage required');
   const config = structuredClone(plan.ordinaryPlan.config);
+  need(config.no_bundle === true && config.upload_source_maps === true,
+    'Pinned native unbundled main/map upload configuration is required');
+  need(plan.accountId === NATIVE_STAFF_PRODUCTION_TARGET.accountId
+    && (config.account_id === undefined || config.account_id === plan.accountId),
+  'Native account selection differs from the exact production account pin');
+  config.account_id = plan.accountId;
   need(!Array.isArray(config.rules) || config.rules.length === 0,
     'Existing module rules require separate review before retained ledger inclusion');
   config.main = staged.main;
@@ -144,13 +158,13 @@ export function retainedNativeConfig(plan, staged) {
   return config;
 }
 
-/** Verify the exact three-module v2 contract while delegating all original
- * runtime, main/map, binding and assets-config checks to the v1 verifier. */
+/** Verify the v2 ledger plus exact main and provider-optional map while
+ * delegating runtime, returned-map, binding and assets-config checks. */
 export function verifyOrdinaryFrontendRetainedCandidateModules({ before, plan, candidate, modern } = {}) {
   need(plan?.schemaVersion === 2 && plan.contract === 'ordinary-frontend-retained-native-module-v2'
-    && Array.isArray(modern?.modules) && modern.modules.length === 3
-    && new Set(modern.modules.map(row => row?.name)).size === 3,
-  'Exact retained three-module candidate required');
+    && Array.isArray(modern?.modules) && modern.modules.length >= 2 && modern.modules.length <= 3
+    && new Set(modern.modules.map(row => row?.name)).size === modern.modules.length,
+  'Exact retained candidate modules required');
   const module = modern.modules.find(row => row.name === '__ops_release_ledger.json');
   need(module && typeof module.content_base64 === 'string', 'Candidate retained ledger module missing');
   const bytes = Buffer.from(module.content_base64, 'base64');
@@ -164,7 +178,7 @@ export function verifyOrdinaryFrontendRetainedCandidateModules({ before, plan, c
     && ledger.sourceCommit === plan.sourceCommit, 'Candidate ledger lineage or identity mismatch');
   const nativeModules = modern.modules.filter(row => row.name !== module.name);
   const runtimeProof = verifyOrdinaryFrontendCandidateModules({ before, plan: plan.ordinaryPlan, candidate,
-    modern: { ...modern, modules: nativeModules } });
+    modern: { ...modern, modules: nativeModules }, allowProviderOmittedMap: true });
   return Object.freeze({ ...runtimeProof, retainedLedgerModuleVerified: true,
     retainedLedgerSHA256: plan.retentionLedgerSHA256, retainedAssetCount: ledger.assets.length,
     retainedAssetBytes: ledger.assets.reduce((sum, row) => sum + row.size, 0) });

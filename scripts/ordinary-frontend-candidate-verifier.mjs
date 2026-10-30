@@ -111,7 +111,7 @@ export function ordinaryFrontendExecutionQualification(namespaceQualification) {
 }
 
 /** Verify candidate runtime modules and native resource/config invariants. */
-export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate, modern } = {}) {
+export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate, modern, allowProviderOmittedMap = false } = {}) {
   need(plan?.schemaVersion === 1 && ['operations','client'].includes(plan.application)
     && plan.offlineOnly === true && plan.deploymentEnabled === false,
   'Pinned offline ordinary frontend plan is required');
@@ -124,20 +124,28 @@ export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate
     && pinnedMapBytes.length === plan.release.sourceMap.size && hash(pinnedMapBytes) === plan.release.sourceMap.sha256,
   'Pinned Worker main or source map changed');
   const modules = modern.modules;
-  need(Array.isArray(modules) && modules.length === 2 && new Set(modules.map(row => row.name)).size === 2,
-    'Candidate must expose exactly the pinned main and source map modules');
+  const allowedNames = allowProviderOmittedMap ? ['index.js', 'index.js.map'] : ['index.js', 'index.js.map'];
+  need(Array.isArray(modules) && modules.length >= (allowProviderOmittedMap ? 1 : 2) && modules.length <= 2
+    && new Set(modules.map(row => row.name)).size === modules.length
+    && modules.every(row => allowedNames.includes(row.name))
+    && modules.some(row => row.name === 'index.js')
+    && (allowProviderOmittedMap || modules.some(row => row.name === 'index.js.map')),
+  'Candidate must expose the pinned main and only an optional source map module');
   const main = strictModuleBytes(modules.find(row => row.name === 'index.js'), 'index.js');
-  const map = strictModuleBytes(modules.find(row => row.name === 'index.js.map'), 'index.js.map');
   need(hash(main) === plan.release.main.sha256 && main.equals(pinnedMain), 'Candidate main bytes differ from pinned release');
   let sourceMap;
   try { sourceMap = JSON.parse(pinnedMapBytes.toString('utf8')); } catch { throw new Error('Pinned source map JSON invalid'); }
-  try { JSON.parse(map.toString('utf8')); } catch { throw new Error('Candidate source map JSON invalid'); }
-  verifyCandidate(before, app, candidate, modern, pinnedMain, sourceMap);
+  const mapModule = modules.find(row => row.name === 'index.js.map');
+  if (mapModule) {
+    const map = strictModuleBytes(mapModule, 'index.js.map');
+    try { JSON.parse(map.toString('utf8')); } catch { throw new Error('Candidate source map JSON invalid'); }
+  }
+  const runtimeProof = verifyCandidate(before, app, candidate, modern, pinnedMain, sourceMap);
   need(equal(candidate.resources.bindings, plan.expectedBindings)
     && equal(modern.assets ?? null, plan.expectedAssetsConfiguration),
   'Candidate bindings or asset routing config changed');
   return Object.freeze({ candidateModulesVerified: true, pinnedMainSHA256: plan.release.main.sha256,
-    pinnedSourceMapSHA256: plan.release.sourceMap.sha256, returnedSourceMapSemanticsVerified: true,
+    pinnedSourceMapSHA256: plan.release.sourceMap.sha256, ...runtimeProof,
     bindingAndRoutingProfileVerified: true });
 }
 

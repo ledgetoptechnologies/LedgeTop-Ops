@@ -4,17 +4,20 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { hash } from './production-deploy.mjs';
-import { PROFILE } from './production-deploy.mjs';
+import { PROFILE, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256, ORDINARY_FRONTEND_PREFLIGHT_MODE,
+  ordinaryFrontendPreflightDescriptor } from './production-deploy.mjs';
 import { mergeAssetLedger, ledgerBytes } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { retainedNativeConfig, stageOrdinaryFrontendRetainedModules,
   verifyOrdinaryFrontendRetainedCandidateModules } from './ordinary-frontend-retained-plan.mjs';
-import { readInstalledRetainedAssetLedger, readOrdinaryFrontendNamespaceAssets } from './ordinary-frontend-retained-executor.mjs';
+import { readInstalledRetainedAssetLedger } from './ordinary-frontend-retained-executor.mjs';
+import { OPS_LEGACY_LEDGER_BOOTSTRAP, prepareOpsLegacyLedgerBootstrap } from './ordinary-frontend-ops-ledger-bootstrap.mjs';
 
 const BASELINE = '11111111-1111-4111-8111-111111111111';
 const CANDIDATE = '22222222-2222-4222-8222-222222222222';
 const COMMIT = '8e8554667c7de62cf3be44b5a650697c10f7c9bf';
 const ACCOUNT = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
+const ACCEPTED_PROFILE = JSON.parse(fs.readFileSync(new URL('./test-fixtures/ordinary-frontend-accepted-profile-v3.test.json', import.meta.url)));
 const MAP = Buffer.from(JSON.stringify({ version: 3, sources: ['worker.ts'], sourcesContent: ['source'], names: [], mappings: '' }));
 
 function testPlan(t) {
@@ -45,7 +48,7 @@ function testPlan(t) {
   const bytes = ledgerBytes(retentionLedger);
   const ordinaryPlan = { schemaVersion: 1, application: 'operations', sourceCommit, offlineOnly: true, deploymentEnabled: false,
     release: { main: { path: main, size: mainBytes.length, sha256: hash(mainBytes) }, sourceMap: { path: map, size: mapBytes.length, sha256: hash(mapBytes) }, assets: { directory: assets } },
-    config: { main, find_additional_modules: false, rules: [], assets: { directory: assets, binding: 'ASSETS' } },
+    config: { main, no_bundle: true, upload_source_maps: true, find_additional_modules: false, rules: [], assets: { directory: assets, binding: 'ASSETS' } },
     expectedBindings: resources.bindings, expectedAssetsConfiguration: before.operations.modern.assets,
   };
   const plan = { schemaVersion: 2, contract: 'ordinary-frontend-retained-native-module-v2', application: 'operations', workerName, accountId: ACCOUNT,
@@ -60,8 +63,11 @@ test('Wrangler v2 config narrowly discovers only the pinned retained ledger modu
   const f = testPlan(t), staged = stageOrdinaryFrontendRetainedModules(f.plan, path.join(f.root, 'stage'));
   const config = retainedNativeConfig(f.plan, staged);
   assert.equal(config.main, staged.main); assert.equal(config.find_additional_modules, true);
+  assert.equal(config.account_id, ACCOUNT);
   assert.equal(config.base_dir, staged.directory); assert.equal(config.assets.directory, f.ordinaryPlan.release.assets.directory);
   assert.deepEqual(config.rules, [{ type: 'Text', globs: ['__ops_release_ledger.json'], fallthrough: false }]);
+  const wrongAccount = structuredClone(f.plan); wrongAccount.accountId = 'f'.repeat(32);
+  assert.throws(() => retainedNativeConfig(wrongAccount, staged), /Native account selection/);
   assert.deepEqual(fs.readdirSync(staged.directory).sort(), ['__ops_release_ledger.json', 'index.js', 'index.js.map']);
   assert.deepEqual(fs.readFileSync(staged.ledger), f.bytes);
 });
@@ -76,28 +82,16 @@ test('retained candidate verifier accepts exact runtime pair plus canonical ledg
   const proof = verifyOrdinaryFrontendRetainedCandidateModules({ before: f.before, plan: f.plan, candidate, modern });
   assert.equal(proof.candidateModulesVerified, true); assert.equal(proof.retainedLedgerModuleVerified, true);
   assert.equal(proof.retainedLedgerSHA256, hash(f.bytes));
+  const mapOmitted = structuredClone(modern); mapOmitted.modules = mapOmitted.modules.filter(row => row.name !== 'index.js.map');
+  const noMapProof = verifyOrdinaryFrontendRetainedCandidateModules({ before: f.before, plan: f.plan, candidate, modern: mapOmitted });
+  assert.equal(noMapProof.providerDidNotExposeSourceMap, true);
+  assert.equal(noMapProof.returnedSourceMapSemanticsVerified, false);
+  const badMap = structuredClone(modern); badMap.modules.find(row => row.name === 'index.js.map').content_base64 = Buffer.from('{}').toString('base64');
+  assert.throws(() => verifyOrdinaryFrontendRetainedCandidateModules({ before: f.before, plan: f.plan, candidate, modern: badMap }), /source map (?:differs|structure invalid)/i);
   const changed = structuredClone(modern); changed.modules[2].content_base64 = Buffer.from('{"schemaVersion":1}').toString('base64');
   assert.throws(() => verifyOrdinaryFrontendRetainedCandidateModules({ before: f.before, plan: f.plan, candidate, modern: changed }), /bytes or MIME differ/);
   const extra = structuredClone(modern); extra.modules.push({ name: 'extra.txt', content_base64: 'eA==' });
-  assert.throws(() => verifyOrdinaryFrontendRetainedCandidateModules({ before: f.before, plan: f.plan, candidate, modern: extra }), /three-module/);
-});
-
-test('active namespace reader pins exact public origins, special index routes, and all old/new bytes', async () => {
-  const indexBytes = Buffer.from('<h1>ok</h1>'), bundleBytes = Buffer.from('export {}');
-  const rows = [
-    { path: '/index.html', size: indexBytes.length, sha256: hash(indexBytes), mime: 'text/html' },
-    { path: '/assets/a.js', size: bundleBytes.length, sha256: hash(bundleBytes), mime: 'text/javascript' },
-  ];
-  const calls = [], bodies = new Map([['/portal', indexBytes], ['/assets/a.js', bundleBytes]]);
-  const verified = await readOrdinaryFrontendNamespaceAssets({ workerName: 'ledgetop-clients', origin: 'https://portal.ledgetop.app', entries: rows,
-    fetchImpl: async (url, init) => {
-      calls.push([new URL(url).pathname, init.method]); const bytes = bodies.get(new URL(url).pathname);
-      return new Response(init.method === 'HEAD' ? null : bytes, { status: 200, headers: { 'Content-Type': rows.find(row => row.path === (new URL(url).pathname === '/portal' ? '/index.html' : new URL(url).pathname)).mime } });
-    } });
-  assert.deepEqual(calls, [['/portal', 'HEAD'], ['/portal', 'GET'], ['/assets/a.js', 'HEAD'], ['/assets/a.js', 'GET']]);
-  assert.deepEqual(verified, new Map([['/index.html', indexBytes], ['/assets/a.js', bundleBytes]]));
-  await assert.rejects(readOrdinaryFrontendNamespaceAssets({ workerName: 'ledgetop-clients', origin: 'https://unreviewed.example', entries: rows,
-    fetchImpl: async () => { throw Error('must not be called'); } }), /Namespace inventory/);
+  assert.throws(() => verifyOrdinaryFrontendRetainedCandidateModules({ before: f.before, plan: f.plan, candidate, modern: extra }), /retained candidate modules/);
 });
 
 test('installed ledger is bound to active version bytes while preserving its historical parent lineage', t => {
@@ -116,14 +110,38 @@ test('installed ledger is bound to active version bytes while preserving its his
   assert.throws(() => readInstalledRetainedAssetLedger(wrongVersion, { app: 'operations', workerName: 'ledgetop-ops' }), /captured production version/);
 });
 
+test('Ops legacy bootstrap is pinned only to the exact observed version and module bytes', () => {
+  assert.deepEqual(ordinaryFrontendPreflightDescriptor(ACCEPTED_PROFILE, ORDINARY_FRONTEND_PREFLIGHT_MODE),
+    { mode: ORDINARY_FRONTEND_PREFLIGHT_MODE, profileSHA256: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 });
+  assert.equal(prepareOpsLegacyLedgerBootstrap({ operations: { version: { id: '11111111-1111-4111-8111-111111111111' } } }), null);
+  const actualVersion = OPS_LEGACY_LEDGER_BOOTSTRAP.activeVersionId;
+  assert.throws(() => prepareOpsLegacyLedgerBootstrap({ operations: { version: { id: actualVersion }, modern: { id: actualVersion, modules: [] } } }),
+    /legacy-ledger module missing or duplicated/);
+});
+
 test('executor refuses before capture or native mutation unless the original accepted profile is supplied', async () => {
   const calls = { source: 0, capture: 0, native: 0 };
   const { executeOrdinaryFrontendRetainedRelease } = await import('./ordinary-frontend-retained-executor.mjs');
   await assert.rejects(executeOrdinaryFrontendRetainedRelease({ app: 'client', plan: { schemaVersion: 2,
     contract: 'ordinary-frontend-retained-native-module-v2', ordinaryPlan: { application: 'client' } }, profile: PROFILE,
     reader: {}, cli: 'C:/unused/wrangler.js', journalDirectory: path.join(os.tmpdir(), 'held-no-profile'),
+    artifactSourceRoot: path.resolve(os.tmpdir(), 'artifact-source'), executorSourceRoot: path.resolve(os.tmpdir(), 'executor-source'),
     sourceReader: () => { calls.source++; return COMMIT; }, captureFn: async () => { calls.capture++; return {}; },
     runNative: async () => { calls.native++; return 'Worker Version ID: 22222222-2222-4222-8222-222222222222'; } }),
   /Original exact installed profile v3 is required/);
   assert.deepEqual(calls, { source: 0, capture: 0, native: 0 });
+});
+
+test('executor separately pins artifact source and clean executor checkout before capture', async () => {
+  const calls = { capture: 0, native: 0 }, artifactRoot = path.resolve(os.tmpdir(), 'artifact-source'), executorRoot = path.resolve(os.tmpdir(), 'executor-source');
+  const { executeOrdinaryFrontendRetainedRelease } = await import('./ordinary-frontend-retained-executor.mjs');
+  await assert.rejects(executeOrdinaryFrontendRetainedRelease({ app: 'client', plan: { schemaVersion: 2,
+    contract: 'ordinary-frontend-retained-native-module-v2', sourceCommit: COMMIT, ordinaryPlan: { application: 'client', sourceCommit: COMMIT } },
+    profile: ACCEPTED_PROFILE, reader: {}, cli: 'C:/unused/wrangler.js', journalDirectory: path.resolve(os.tmpdir(), 'held-source-pin'),
+    assetVerifierProvider: { createVerifier() {}, fetchVerifierAsset() {}, removeVerifier() {}, verifierAbsent() { return true; } },
+    artifactSourceRoot: artifactRoot, executorSourceRoot: executorRoot,
+    sourceReader: root => root === artifactRoot ? 'f'.repeat(40) : COMMIT,
+    captureFn: async () => { calls.capture++; return {}; }, runNative: async () => { calls.native++; return ''; } }),
+  /artifacts and clean executor checkout provenance/);
+  assert.deepEqual(calls, { capture: 0, native: 0 });
 });
