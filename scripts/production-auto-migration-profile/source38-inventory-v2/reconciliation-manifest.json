@@ -1,0 +1,3597 @@
+{
+  "schemaVersion": 1,
+  "status": "review-candidate-not-release-authority",
+  "source": {
+    "repository": "ltds-ops-monorepo",
+    "githubRepository": "ledgetoptechnologies/LedgeTop-Ops",
+    "commit": "38ad7ebcfc09e4334de846d5307e7dac5a0ff327",
+    "worktreeVerifiedAgainstCommit": true
+  },
+  "observedAt": "2026-10-30T13:12:00.669Z",
+  "databases": {
+    "operations": {
+      "databaseId": "6ebf7514-d306-4615-ae56-ad869c874dbd",
+      "rowCount": 225,
+      "orderedRows": [
+        {
+          "name": "0001_operations.sql",
+          "id": 1
+        },
+        {
+          "name": "0002_seed_acl.sql",
+          "id": 2
+        },
+        {
+          "name": "0003_airspace_retention.sql",
+          "id": 3
+        },
+        {
+          "name": "0004_project_alpha_authority.sql",
+          "id": 4
+        },
+        {
+          "name": "0005_project_alpha_ops_acl.sql",
+          "id": 5
+        },
+        {
+          "name": "0006_airspace_sync_fingerprints.sql",
+          "id": 6
+        },
+        {
+          "name": "0007_pa_projection_fingerprints.sql",
+          "id": 7
+        },
+        {
+          "name": "0008_project_units_task_assignments.sql",
+          "id": 8
+        },
+        {
+          "name": "0009_project_managers.sql",
+          "id": 9
+        },
+        {
+          "name": "0010_delivery_reliability.sql",
+          "id": 10
+        },
+        {
+          "name": "0011_r2_crud_jobs.sql",
+          "id": 11
+        },
+        {
+          "name": "0012_incoming_request_acl.sql",
+          "id": 12
+        },
+        {
+          "name": "0013_dropbox_import.sql",
+          "id": 13
+        },
+        {
+          "name": "0014_staff_acl_controls.sql",
+          "id": 14
+        },
+        {
+          "name": "0015_staff_acl_explicit_controls.sql",
+          "id": 15
+        },
+        {
+          "name": "0016_projection_entity_leases.sql",
+          "id": 16
+        },
+        {
+          "name": "0017_operational_job_briefs.sql",
+          "id": 17
+        },
+        {
+          "name": "0018_browser_upload_intents.sql",
+          "id": 18
+        },
+        {
+          "name": "0019_browser_upload_conflict_resolution.sql",
+          "id": 19
+        },
+        {
+          "name": "0020_internal_sop_library.sql",
+          "id": 20
+        },
+        {
+          "name": "0021_project_alpha_sync_hardening.sql",
+          "id": 21
+        },
+        {
+          "name": "0022_r2_operation_retries.sql",
+          "id": 22
+        },
+        {
+          "name": "0023_project_task_sop_links.sql",
+          "id": 23
+        },
+        {
+          "name": "0024_administration_view_admin_grant.sql",
+          "id": 24
+        },
+        {
+          "name": "0025_sop_assignment_permission.sql",
+          "id": 25
+        },
+        {
+          "name": "0026_viewer_permissions.sql",
+          "id": 26
+        },
+        {
+          "name": "0027_viewer_processing_control_plane.sql",
+          "id": 27
+        },
+        {
+          "name": "0028_viewer_processing_labels.sql",
+          "id": 28
+        },
+        {
+          "name": "0029_viewer_machine_rate_limits.sql",
+          "id": 29
+        },
+        {
+          "name": "0030_viewer_client_grant_bridge_rate_limit.sql",
+          "id": 30
+        },
+        {
+          "name": "0031_project_alpha_delivery_intent_rate_limits.sql",
+          "id": 31
+        },
+        {
+          "name": "0032_client_hub_directory.sql",
+          "id": 32
+        },
+        {
+          "name": "0033_projection_sources.sql",
+          "id": 33
+        },
+        {
+          "name": "0034_client_hub_projection_sources.sql",
+          "id": 34
+        },
+        {
+          "name": "0035_project_alpha_connectors.sql",
+          "id": 35
+        },
+        {
+          "name": "0036_business_parties.sql",
+          "id": 36
+        },
+        {
+          "name": "0037_client_business_activity.sql",
+          "id": 37
+        },
+        {
+          "name": "0038_project_alpha_snapshot_recovery.sql",
+          "id": 38
+        },
+        {
+          "name": "0039_portal_connector_coordination.sql",
+          "id": 39
+        },
+        {
+          "name": "0040_native_delivery_authorizations.sql",
+          "id": 40
+        },
+        {
+          "name": "0041_invitation_review_authorizations.sql",
+          "id": 41
+        },
+        {
+          "name": "0042_client_hub_secondary_portal_visibility.sql",
+          "id": 42
+        },
+        {
+          "name": "0043_project_operational_memory.sql",
+          "id": 43
+        },
+        {
+          "name": "0044_project_operational_copy_forward.sql",
+          "id": 44
+        },
+        {
+          "name": "0045_organization_operational_contacts.sql",
+          "id": 45
+        },
+        {
+          "name": "0046_project_alpha_project_management_routes.sql",
+          "id": 46
+        },
+        {
+          "name": "0047_project_memory_staff_attachments.sql",
+          "id": 47
+        },
+        {
+          "name": "0048_business_party_lifecycle.sql",
+          "id": 48
+        },
+        {
+          "name": "0049_project_alpha_delivery_source_rate_limits.sql",
+          "id": 49
+        },
+        {
+          "name": "0050_project_alpha_draft_quote_credentials.sql",
+          "id": 50
+        },
+        {
+          "name": "0051_client_hub_internal_notes.sql",
+          "id": 51
+        },
+        {
+          "name": "0052_project_operational_reassignment_recovery.sql",
+          "id": 52
+        },
+        {
+          "name": "0053_project_internal_notes.sql",
+          "id": 53
+        },
+        {
+          "name": "0054_project_alpha_directory_outbox.sql",
+          "id": 54
+        },
+        {
+          "name": "0055_operations_directory_authority.sql",
+          "id": 55
+        },
+        {
+          "name": "0056_operations_directory_materialization.sql",
+          "id": 56
+        },
+        {
+          "name": "0057_native_directory_permissions.sql",
+          "id": 57
+        },
+        {
+          "name": "0058_operations_directory_write_authority.sql",
+          "id": 58
+        },
+        {
+          "name": "0059_native_staff_profiles.sql",
+          "id": 59
+        },
+        {
+          "name": "0060_native_staff_bootstrap.sql",
+          "id": 60
+        },
+        {
+          "name": "0061_native_staff_administration.sql",
+          "id": 61
+        },
+        {
+          "name": "0062_project_alpha_project_outbox.sql",
+          "id": 62
+        },
+        {
+          "name": "0063_project_alpha_project_adoption.sql",
+          "id": 63
+        },
+        {
+          "name": "0064_project_alpha_project_history_epoch.sql",
+          "id": 64
+        },
+        {
+          "name": "0065_project_alpha_directory_history_epoch.sql",
+          "id": 65
+        },
+        {
+          "name": "0066_operations_directory_original_actor_subject.sql",
+          "id": 66
+        },
+        {
+          "name": "0067_native_staff_management_authority.sql",
+          "id": 67
+        },
+        {
+          "name": "0068_native_staff_control_plane.sql",
+          "id": 68
+        },
+        {
+          "name": "0069_native_staff_management_commands.sql",
+          "id": 69
+        },
+        {
+          "name": "0070_native_staff_pending_onboarding.sql",
+          "id": 70
+        },
+        {
+          "name": "0071_native_staff_management_targets.sql",
+          "id": 71
+        },
+        {
+          "name": "0072_native_staff_onboarding_cancel.sql",
+          "id": 72
+        },
+        {
+          "name": "0073_native_staff_onboarding_create.sql",
+          "id": 73
+        },
+        {
+          "name": "0074_native_staff_onboarding_approve.sql",
+          "id": 74
+        },
+        {
+          "name": "0075_native_staff_onboarding_rate_limits.sql",
+          "id": 75
+        },
+        {
+          "name": "0076_native_staff_onboarding_handoff.sql",
+          "id": 76
+        },
+        {
+          "name": "0077_client_onboarding_submissions.sql",
+          "id": 77
+        },
+        {
+          "name": "0078_client_onboarding_issuance.sql",
+          "id": 78
+        },
+        {
+          "name": "0079_client_onboarding_rate_limits.sql",
+          "id": 79
+        },
+        {
+          "name": "0080_client_onboarding_handoffs.sql",
+          "id": 80
+        },
+        {
+          "name": "0081_operations_directory_relationships.sql",
+          "id": 81
+        },
+        {
+          "name": "0082_operations_directory_intent_relationship_dependencies.sql",
+          "id": 82
+        },
+        {
+          "name": "0083_client_onboarding_decisions.sql",
+          "id": 83
+        },
+        {
+          "name": "0084_operations_directory_delivery_checkpoint.sql",
+          "id": 84
+        },
+        {
+          "name": "0085_operations_directory_admission_version.sql",
+          "id": 85
+        },
+        {
+          "name": "0086_native_shared_projects.sql",
+          "id": 86
+        },
+        {
+          "name": "0087_project_alpha_api_v2_incidents.sql",
+          "id": 87
+        },
+        {
+          "name": "0088_project_alpha_api_v2_incident_alerts.sql",
+          "id": 88
+        },
+        {
+          "name": "0089_project_alpha_api_v2_monitor_lifecycle.sql",
+          "id": 89
+        },
+        {
+          "name": "0090_project_alpha_api_v2_monitor_retirement.sql",
+          "id": 90
+        },
+        {
+          "name": "0091_native_integration_control.sql",
+          "id": 91
+        },
+        {
+          "name": "0092_native_integration_grant_management.sql",
+          "id": 92
+        },
+        {
+          "name": "0093_native_integration_alert_reconciliation.sql",
+          "id": 93
+        },
+        {
+          "name": "0094_client_onboarding_submission_notifications.sql",
+          "id": 94
+        },
+        {
+          "name": "0095_client_onboarding_notification_scan.sql",
+          "id": 95
+        },
+        {
+          "name": "0096_native_workforce_foundation.sql",
+          "id": 96
+        },
+        {
+          "name": "0097_native_workforce_authority.sql",
+          "id": 97
+        },
+        {
+          "name": "0098_native_workforce_time_record_receipts.sql",
+          "id": 98
+        },
+        {
+          "name": "0099_native_workforce_time_submit_review_receipts.sql",
+          "id": 99
+        },
+        {
+          "name": "0100_native_workforce_authority_grant_change_receipts.sql",
+          "id": 100
+        },
+        {
+          "name": "0101_native_workforce_grant_issuer.sql",
+          "id": 101
+        },
+        {
+          "name": "0102_native_workforce_grant_issuance.sql",
+          "id": 102
+        },
+        {
+          "name": "0103_client_onboarding_recipient_identity_bindings.sql",
+          "id": 103
+        },
+        {
+          "name": "0104_client_onboarding_prefill_disclosures.sql",
+          "id": 104
+        },
+        {
+          "name": "0105_client_onboarding_disclosure_recipient.sql",
+          "id": 105
+        },
+        {
+          "name": "0106_client_onboarding_prefill_binding_commands.sql",
+          "id": 106
+        },
+        {
+          "name": "0107_client_onboarding_prefill_authorization_intents.sql",
+          "id": 107
+        },
+        {
+          "name": "0108_native_workforce_time_beneficiary_selection.sql",
+          "id": 108
+        },
+        {
+          "name": "0109_native_workforce_time_beneficiary_selection_issuance.sql",
+          "id": 109
+        },
+        {
+          "name": "0110_native_workforce_time_beneficiary_selection_lifecycle.sql",
+          "id": 110
+        },
+        {
+          "name": "0111_project_alpha_existing_directory_binding_review_evidence.sql",
+          "id": 111
+        },
+        {
+          "name": "0112_project_alpha_existing_directory_binding_acquisition_ledger.sql",
+          "id": 112
+        },
+        {
+          "name": "0113_project_alpha_existing_directory_binding_acquired_mapping_receipts.sql",
+          "id": 113
+        },
+        {
+          "name": "0114_project_alpha_existing_directory_binding_acquisition_response_receipts.sql",
+          "id": 114
+        },
+        {
+          "name": "0115_project_alpha_existing_directory_binding_review_local_revision_fence.sql",
+          "id": 115
+        },
+        {
+          "name": "0116_project_alpha_acquired_canonical_mapping_activation.sql",
+          "id": 116
+        },
+        {
+          "name": "0117_project_alpha_native_owner_epoch_claims.sql",
+          "id": 117
+        },
+        {
+          "name": "0118_project_alpha_existing_directory_binding_revision_refresh_ledger.sql",
+          "id": 118
+        },
+        {
+          "name": "0119_project_alpha_project_v2_persistence_ledger.sql",
+          "id": 119
+        },
+        {
+          "name": "0120_project_alpha_project_v2_canonical_settlement.sql",
+          "id": 120
+        },
+        {
+          "name": "0121_project_alpha_project_v2_settlement_proof_expiry.sql",
+          "id": 121
+        },
+        {
+          "name": "0122_project_alpha_project_v2_canonical_activation.sql",
+          "id": 122
+        },
+        {
+          "name": "0123_native_directory_authority_history.sql",
+          "id": 123
+        },
+        {
+          "name": "0124_project_alpha_project_adoption_review_evidence.sql",
+          "id": 124
+        },
+        {
+          "name": "0125_project_alpha_existing_directory_binding_activation.sql",
+          "id": 125
+        },
+        {
+          "name": "0126_project_alpha_project_active_directory_mapping_bridge.sql",
+          "id": 126
+        },
+        {
+          "name": "0127_project_alpha_existing_directory_binding_activation_evidence_transition.sql",
+          "id": 127
+        },
+        {
+          "name": "0128_project_alpha_project_adoption_bind_bridge.sql",
+          "id": 128
+        },
+        {
+          "name": "0129_project_alpha_existing_directory_binding_activation_relationship.sql",
+          "id": 129
+        },
+        {
+          "name": "0130_project_alpha_project_adoption_review_producer.sql",
+          "id": 130
+        },
+        {
+          "name": "0131_project_alpha_project_active_directory_mapping_guards.sql",
+          "id": 131
+        },
+        {
+          "name": "0132_operations_directory_acquired_relationship_dependencies.sql",
+          "id": 132
+        },
+        {
+          "name": "0133_project_alpha_directory_relationship_outbox.sql",
+          "id": 133
+        },
+        {
+          "name": "0134_native_directory_create_admission_relationships.sql",
+          "id": 134
+        },
+        {
+          "name": "0135_operations_directory_relationship_canonical_ids.sql",
+          "id": 135
+        },
+        {
+          "name": "0136_project_alpha_directory_reconciliation.sql",
+          "id": 136
+        },
+        {
+          "name": "0137_project_alpha_directory_reconciliation_scheduler.sql",
+          "id": 137
+        },
+        {
+          "name": "0138_project_alpha_directory_reconciliation_review.sql",
+          "id": 138
+        },
+        {
+          "name": "0139_native_directory_staging_empty_enrollment_fixture_guard.sql",
+          "id": 139
+        },
+        {
+          "name": "0140_client_onboarding_one_time_reveal.sql",
+          "id": 140
+        },
+        {
+          "name": "0141_deferred_directory_client_materialization.sql",
+          "id": 141
+        },
+        {
+          "name": "0142_client_portal_access_authority_outbox.sql",
+          "id": 142
+        },
+        {
+          "name": "0143_client_portal_workspace_binding_selection.sql",
+          "id": 143
+        },
+        {
+          "name": "0144_client_portal_workspace_binding_outbox.sql",
+          "id": 144
+        },
+        {
+          "name": "0145_client_portal_authority_v2_outbox.sql",
+          "id": 145
+        },
+        {
+          "name": "0146_ops_customer_service_enrollments.sql",
+          "id": 146
+        },
+        {
+          "name": "0147_client_portal_authority_v3_permissions.sql",
+          "id": 147
+        },
+        {
+          "name": "0148_client_portal_recipient_enrollment.sql",
+          "id": 148
+        },
+        {
+          "name": "0149_client_portal_recipient_enrollment_sql_fences.sql",
+          "id": 149
+        },
+        {
+          "name": "0150_client_portal_recipient_enrollment_cancellation.sql",
+          "id": 150
+        },
+        {
+          "name": "0151_verified_recipient_delivery_authority_outbox.sql",
+          "id": 151
+        },
+        {
+          "name": "0152_operations_portal_workspace_reservations.sql",
+          "id": 152
+        },
+        {
+          "name": "0153_operations_portal_workspace_publication_outbox.sql",
+          "id": 153
+        },
+        {
+          "name": "0154_operations_portal_native_recipient_authority.sql",
+          "id": 154
+        },
+        {
+          "name": "0155_operations_portal_workspace_publication_cancellations.sql",
+          "id": 155
+        },
+        {
+          "name": "0156_operations_portal_workspace_publication_invocations.sql",
+          "id": 156
+        },
+        {
+          "name": "0157_operations_portal_native_workspace_cleanup.sql",
+          "id": 157
+        },
+        {
+          "name": "0158_operations_portal_native_delivery_authority.sql",
+          "id": 158
+        },
+        {
+          "name": "0159_operations_portal_native_delivery_recovery_invocations.sql",
+          "id": 159
+        },
+        {
+          "name": "0160_operations_portal_native_recipient_labels.sql",
+          "id": 160
+        },
+        {
+          "name": "0161_project_alpha_api_v2_inventory_observations.sql",
+          "id": 161
+        },
+        {
+          "name": "0162_project_alpha_directory_read_adoption_claims.sql",
+          "id": 162
+        },
+        {
+          "name": "0163_project_alpha_directory_read_adoption_field_review_receipts.sql",
+          "id": 163
+        },
+        {
+          "name": "0164_project_alpha_directory_read_adoption_authority_recheck.sql",
+          "id": 164
+        },
+        {
+          "name": "0165_project_alpha_inventory_generation_surface_scope.sql",
+          "id": 165
+        },
+        {
+          "name": "0166_project_alpha_reviewed_standalone_display.sql",
+          "id": 166
+        },
+        {
+          "name": "0167_project_alpha_directory_read_adoption_finalizations.sql",
+          "id": 167
+        },
+        {
+          "name": "0168_project_alpha_directory_read_adoption_local_profiles.sql",
+          "id": 168
+        },
+        {
+          "name": "0169_project_alpha_existing_directory_binding_generation_evidence.sql",
+          "id": 169
+        },
+        {
+          "name": "0170_project_alpha_active_directory_project_guard.sql",
+          "id": 170
+        },
+        {
+          "name": "0171_project_alpha_active_directory_update_guard.sql",
+          "id": 171
+        },
+        {
+          "name": "0172_project_alpha_active_directory_consumer_guards.sql",
+          "id": 172
+        },
+        {
+          "name": "0173_operations_directory_intent_acquired_destination_transition.sql",
+          "id": 173
+        },
+        {
+          "name": "0174_project_alpha_directory_preserved_external_identity.sql",
+          "id": 174
+        },
+        {
+          "name": "0175_operations_directory_acquired_parent_enrollment_identity.sql",
+          "id": 175
+        },
+        {
+          "name": "0176_operations_directory_acquired_intent_authority.sql",
+          "id": 176
+        },
+        {
+          "name": "0177_operations_directory_acquired_intent_update_authority.sql",
+          "id": 177
+        },
+        {
+          "name": "0178_project_alpha_project_inbound_reconciliation.sql",
+          "id": 178
+        },
+        {
+          "name": "0179_project_alpha_acquired_native_identity_collision.sql",
+          "id": 179
+        },
+        {
+          "name": "0180_project_alpha_project_v2_recovery_authorization.sql",
+          "id": 180
+        },
+        {
+          "name": "0181_project_alpha_directory_create_generation_recovery.sql",
+          "id": 181
+        },
+        {
+          "name": "0182_project_alpha_directory_relationship_recovery_guard.sql",
+          "id": 182
+        },
+        {
+          "name": "0183_project_alpha_binding_standalone_relationship_rows.sql",
+          "id": 183
+        },
+        {
+          "name": "0184_project_alpha_directory_relationship_generation_recovery.sql",
+          "id": 184
+        },
+        {
+          "name": "0185_project_alpha_directory_binding_generation_epochs.sql",
+          "id": 185
+        },
+        {
+          "name": "0186_project_alpha_directory_conflict_evidence_binding.sql",
+          "id": 186
+        },
+        {
+          "name": "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+          "id": 187
+        },
+        {
+          "name": "0188_client_hub_native_project_preparations.sql",
+          "id": 188
+        },
+        {
+          "name": "0189_client_hub_native_project_uncertain_recovery.sql",
+          "id": 189
+        },
+        {
+          "name": "0190_client_hub_native_project_preparation_authority.sql",
+          "id": 190
+        },
+        {
+          "name": "0191_operations_portal_native_billing_authority.sql",
+          "id": 191
+        },
+        {
+          "name": "0192_ops_service_definition_authority.sql",
+          "id": 192
+        },
+        {
+          "name": "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
+          "id": 193
+        },
+        {
+          "name": "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+          "id": 194
+        },
+        {
+          "name": "0195_client_hub_native_project_current_owner_observation.sql",
+          "id": 195
+        },
+        {
+          "name": "0196_native_directory_maintenance_authority.sql",
+          "id": 196
+        },
+        {
+          "name": "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql",
+          "id": 197
+        },
+        {
+          "name": "0198_native_directory_active_binding_revision_refresh.sql",
+          "id": 198
+        },
+        {
+          "name": "0199_native_directory_profile_binding_continuations.sql",
+          "id": 199
+        },
+        {
+          "name": "0200_native_directory_active_binding_refresh_supersessions.sql",
+          "id": 200
+        },
+        {
+          "name": "0201_native_directory_lifecycle.sql",
+          "id": 201
+        },
+        {
+          "name": "0202_reviewed_import_enrollment.sql",
+          "id": 202
+        },
+        {
+          "name": "0203_effective_native_directory_enrollment_consumers.sql",
+          "id": 203
+        },
+        {
+          "name": "0204_native_project_archive_restore.sql",
+          "id": 204
+        },
+        {
+          "name": "0205_native_billing_source_authority.sql",
+          "id": 205
+        },
+        {
+          "name": "0206_native_directory_existing_import.sql",
+          "id": 206
+        },
+        {
+          "name": "0207_shared_directory_profiles.sql",
+          "id": 207
+        },
+        {
+          "name": "0208_shared_profile_portal_authority.sql",
+          "id": 208
+        },
+        {
+          "name": "0209_shared_profile_portal_native_writes.sql",
+          "id": 209
+        },
+        {
+          "name": "0210_admin_finance_summary_permission.sql",
+          "id": 210
+        },
+        {
+          "name": "0211_native_directory_create_observations.sql",
+          "id": 211
+        },
+        {
+          "name": "0212_primary_portal_directory_correspondence.sql",
+          "id": 212
+        },
+        {
+          "name": "0213_client_onboarding_notification_attempts.sql",
+          "id": 213
+        },
+        {
+          "name": "0214_client_onboarding_portal_activation.sql",
+          "id": 214
+        },
+        {
+          "name": "0215_local_project_division_authority.sql",
+          "id": 215
+        },
+        {
+          "name": "0216_client_onboarding_existing_company.sql",
+          "id": 216
+        },
+        {
+          "name": "0217_client_onboarding_shared_company_plans.sql",
+          "id": 217
+        },
+        {
+          "name": "0218_client_onboarding_shared_company_approval.sql",
+          "id": 218
+        },
+        {
+          "name": "0219_staging_agent_read_authority.sql",
+          "id": 219
+        },
+        {
+          "name": "0220_directory_profile_generation_recovery.sql",
+          "id": 220
+        },
+        {
+          "name": "0221_portal_correspondence_lifecycle_write_guards.sql",
+          "id": 221
+        },
+        {
+          "name": "0222_employee_read_roots.sql",
+          "id": 222
+        },
+        {
+          "name": "0223_employee_read_provisioning.sql",
+          "id": 223
+        },
+        {
+          "name": "0224_windows_portal_publication_chain_index.sql",
+          "id": 224
+        },
+        {
+          "name": "0225_native_staff_lifecycle_bridge.sql",
+          "id": 225
+        }
+      ],
+      "orderedRowsSha256": "f726f6e5ef99ef0930f04fc3257056e2a8879a3fb4eecc91a77d3d7ed87392f0",
+      "orderedNamesSha256": "e9ca08f7e051a7581da54ba585b740d0cbf033c91f69470649750ae2fdabd8a7",
+      "sourceMigrationCount": 231,
+      "sourceMigrations": [
+        {
+          "name": "0001_operations.sql",
+          "gitBlobOid": "560d2465221537d5a432c933642e0f5e1c7dcb1a",
+          "sha256": "818d8dc94bc5a825a80bddcfd438a8fb2b973b9bba79b7940728f515062fe362"
+        },
+        {
+          "name": "0002_seed_acl.sql",
+          "gitBlobOid": "2eaa3a2139243927c67fd07f47e42869c3eee763",
+          "sha256": "8ce802983305ede3cddf837010fc332dd550d327739097be4aee765cbb42b4cb"
+        },
+        {
+          "name": "0003_airspace_retention.sql",
+          "gitBlobOid": "dc49096c0ae9dab2320c2364033629afade81ee7",
+          "sha256": "2597685a6d6549134950f9e04a5f2bacdf8fa72dfc2315f3b29e6f5460c08f4e"
+        },
+        {
+          "name": "0004_project_alpha_authority.sql",
+          "gitBlobOid": "37cd11e76312b9399b64a893a93002ea4b98cb35",
+          "sha256": "8ce602d261b6ecb6db1cc4f09ee575509ef1e478e149bf78afea4583076901a7"
+        },
+        {
+          "name": "0005_project_alpha_ops_acl.sql",
+          "gitBlobOid": "4fbf2288158690007c38451d2c3d75de9761f508",
+          "sha256": "b20787a1ad4f5c5ed7a0bd1b1572d9b9d50a1ca0778f1f7c714fdc7408ab3139"
+        },
+        {
+          "name": "0006_airspace_sync_fingerprints.sql",
+          "gitBlobOid": "7f492c107342cbcf656c236a7192808eca77f7f0",
+          "sha256": "23a5ec95f566e855452b64bd399b395f071cc15fd08578aee60f01a128a4d2f3"
+        },
+        {
+          "name": "0007_pa_projection_fingerprints.sql",
+          "gitBlobOid": "2be29a8f920c26ceb1a261350681d6b3de630cc5",
+          "sha256": "ecc3a4e0bbcc4389dcb6011725d0e8e1d47f31c45fc4c280e3bcd7833406f2fd"
+        },
+        {
+          "name": "0008_project_units_task_assignments.sql",
+          "gitBlobOid": "d0f3d0e2d3cad2542278357b6ea1752361d0a152",
+          "sha256": "34b230291f205429ae818e683c5ca6f25ff141dc0ab377feb85a37dba538a7d5"
+        },
+        {
+          "name": "0009_project_managers.sql",
+          "gitBlobOid": "df84aeab7048be0cc79adc1db4838b13494b22fa",
+          "sha256": "d8e226b799740c5566d055c21ba49d0896b0ae4279184e216c4126b3b9f5b2dc"
+        },
+        {
+          "name": "0010_delivery_reliability.sql",
+          "gitBlobOid": "0e2e72b46b12787ffc95d7e2e6707880f8368143",
+          "sha256": "15a41638758d98dbe2f6c8520572eb7bf8e2071c52feb1dcafa6379f4fda1057"
+        },
+        {
+          "name": "0011_r2_crud_jobs.sql",
+          "gitBlobOid": "a7627418a2f995f429fdfcb00c619f8a5de2e369",
+          "sha256": "aca1bef73fdf98e4bc8af41733842b4eedef51b2cafc4ecd4605a16d072bc9ad"
+        },
+        {
+          "name": "0012_incoming_request_acl.sql",
+          "gitBlobOid": "b35f756b08953633aeeec04b67596e17df2b20ac",
+          "sha256": "b7531bc261ccbdb9b715fdce6966f07b03a980adee4a19bb0b062a1b95a8a7a7"
+        },
+        {
+          "name": "0013_dropbox_import.sql",
+          "gitBlobOid": "ee903a05909e645c50036ca9eca58fa36482efe6",
+          "sha256": "7e46624a73b88d35904649ea015c8c7cf589409160ed5ca2d09bca097d584c85"
+        },
+        {
+          "name": "0014_staff_acl_controls.sql",
+          "gitBlobOid": "675a7c64669237d7335d55df4791b9fd3f861338",
+          "sha256": "ae8377e959c99e8748cf9f43e2e527959f18b7621e93641c9f96aaf096ab9500"
+        },
+        {
+          "name": "0015_staff_acl_explicit_controls.sql",
+          "gitBlobOid": "0e60796d6ec6b7bfc2820f0c95072b440e5e57f4",
+          "sha256": "a18fe7e8ccabb88bb16a595c22ffd6e7abeb1e987812ad8431d6668fab856cad"
+        },
+        {
+          "name": "0016_projection_entity_leases.sql",
+          "gitBlobOid": "c7b9999b661a9ed98161e54bc5a21ad761aecca8",
+          "sha256": "55c7f1f38726b2f6a546773872eb8d959f348b84bba09ab923280d5af74c5eb1"
+        },
+        {
+          "name": "0017_operational_job_briefs.sql",
+          "gitBlobOid": "8865db46b44d93d79cbff268555c6c7008eb60e0",
+          "sha256": "0325024239d545ba9d936ca49c66ea4aa1ae2e7c9810ebfe07f05d43ee85fad3"
+        },
+        {
+          "name": "0018_browser_upload_intents.sql",
+          "gitBlobOid": "e73595b799ffb2d2e1947625dda3cf9f6577e135",
+          "sha256": "960170e2209d93d9bcc1af40f92b46dadf5fa9cb36ed3bef19f94081607dc294"
+        },
+        {
+          "name": "0019_browser_upload_conflict_resolution.sql",
+          "gitBlobOid": "923c5f38d6abb56d9fa8a0e9d208e49185f15fc4",
+          "sha256": "f0b14f27f8e4b557d52199d74c0030988bf1ef6c697bcb07ba3686e296bcdc62"
+        },
+        {
+          "name": "0020_internal_sop_library.sql",
+          "gitBlobOid": "b4ecfa90b9fa59270359af060de25c4aa19fa32f",
+          "sha256": "3139906a18d67d353661c07724aac9344534269fbeefbc897f735deb5817945c"
+        },
+        {
+          "name": "0021_project_alpha_sync_hardening.sql",
+          "gitBlobOid": "1837336c2c1b0be6fe965522325447ae47100f9a",
+          "sha256": "c5dc937cd8532ed039c0112888111de44d39dd6f798ca5b95d0b90e018c9abcb"
+        },
+        {
+          "name": "0022_r2_operation_retries.sql",
+          "gitBlobOid": "88892a58aeef52208169aaea84d3b44f48294d62",
+          "sha256": "c86dc21b39de55abf564915db17e71b48a1d469736bc6ec527ec6aea16adcb5e"
+        },
+        {
+          "name": "0023_project_task_sop_links.sql",
+          "gitBlobOid": "19a8b45210197fb718de4b2640cb1ec73c85afa7",
+          "sha256": "968547ab9f43b7c4fc7148faebd3b60c6a4b043474e5eb3b53b5d2ee3dcec487"
+        },
+        {
+          "name": "0024_administration_view_admin_grant.sql",
+          "gitBlobOid": "982db321b2ac1e3404f14d3eef6eeba750d48d7d",
+          "sha256": "38287130f5a2cea4645ed3f9f3bc09f79e02722842dff753b71b5f4971ba4941"
+        },
+        {
+          "name": "0025_sop_assignment_permission.sql",
+          "gitBlobOid": "e913621bdc01c0904c61b9c2612e7cf5fa15782a",
+          "sha256": "4bcc815a116b557bfd8e9c7af90c1a0031977d50069c77084583700d9ee03bd9"
+        },
+        {
+          "name": "0026_viewer_permissions.sql",
+          "gitBlobOid": "108f24c24d458f74a9ef7bc13d97e27910d654b3",
+          "sha256": "13b083ecfc22fee7b64501ef89066e0bb729dc7bfb58f70ee858dc5779edb938"
+        },
+        {
+          "name": "0027_viewer_processing_control_plane.sql",
+          "gitBlobOid": "b23e61c73b8acc86648e3ed53a0de2422cd43e96",
+          "sha256": "011e17079578b57d5bf0678edca1cea51b48cdb379efb9f95b4d5d51a0743252"
+        },
+        {
+          "name": "0028_viewer_processing_labels.sql",
+          "gitBlobOid": "3c82e6c2cd912ab40d9bb80fe0dd4a817bc01488",
+          "sha256": "0b1d31ff8a7aaddfb7918b087254c0b37882939d1d1b5e44cac8b9991f30f790"
+        },
+        {
+          "name": "0029_viewer_machine_rate_limits.sql",
+          "gitBlobOid": "d15325bf5b53675df1287ba8f55496f09efd20f9",
+          "sha256": "e5f50cee5c4ef23acdc5461c8810c000b527b3f6e4d646b37c6bb4d67245ca8a"
+        },
+        {
+          "name": "0030_viewer_client_grant_bridge_rate_limit.sql",
+          "gitBlobOid": "c1cefceb28093014e4e412d41ac2730f1b663acb",
+          "sha256": "98c52607b27e7f7c233a481b2922b2939bea9f408db620392fb644ea46f227db"
+        },
+        {
+          "name": "0031_project_alpha_delivery_intent_rate_limits.sql",
+          "gitBlobOid": "a62614200670acbf5bbf76d6292ecccbd4466494",
+          "sha256": "077b1bf758cadcbeb3ebea2848f8ffcce33c7897405975dbf3fe180301369bca"
+        },
+        {
+          "name": "0032_client_hub_directory.sql",
+          "gitBlobOid": "b65cd21f6d3285b62ef6bb40cfec35c9a449a53c",
+          "sha256": "c85cb341bcc092c99d596526095050341704dc0ff83e1f30f8678db24e7b45d4"
+        },
+        {
+          "name": "0033_projection_sources.sql",
+          "gitBlobOid": "56922072d9624cd25892e8c71305f1e89417ea12",
+          "sha256": "65da94a38bacad280f58f1f00c3966caf5a211598bda202a24c180eacfd60c35"
+        },
+        {
+          "name": "0034_client_hub_projection_sources.sql",
+          "gitBlobOid": "4bd1617131fe243958229cee796472373d17d847",
+          "sha256": "24910e04601e14f42be3b5f9bec9528867e140ed4ef4157b706de52cef97005b"
+        },
+        {
+          "name": "0035_project_alpha_connectors.sql",
+          "gitBlobOid": "df49d25bdfa9cf62a9de429d6cd24a1642639146",
+          "sha256": "b150ea83c907a31f0c0bcbbbc0ff30ddb7e9aad2db05263286246a4e70da5789"
+        },
+        {
+          "name": "0036_business_parties.sql",
+          "gitBlobOid": "b3505c569a27d7c8116c5189645b3b9900ca8af8",
+          "sha256": "e66dad868f50661355ff28c97ef65fa53177dd1ecfa01f17ff8970630b761eda"
+        },
+        {
+          "name": "0037_client_business_activity.sql",
+          "gitBlobOid": "94210c89da792b04c482966fbd260ff0fd2a2853",
+          "sha256": "21d21288cf03ba60d7628007bf437a6ade50fae557120f9a3629b0b78aa25834"
+        },
+        {
+          "name": "0038_project_alpha_snapshot_recovery.sql",
+          "gitBlobOid": "21e098280d82a7bc3a917ec4eded24b676bee128",
+          "sha256": "220d0651c5144238ba5f175810ab445af6e3f5523c882ac02971a5a82602c943"
+        },
+        {
+          "name": "0039_portal_connector_coordination.sql",
+          "gitBlobOid": "97d256750668f1600d2a2c6d0b1865a10be4f386",
+          "sha256": "ba0839a040535731904da3d00d91846f39139f23aac40d3957b3eb7bc680b01d"
+        },
+        {
+          "name": "0040_native_delivery_authorizations.sql",
+          "gitBlobOid": "24fc7eec3957b8f81b48ebddfcf95dfbb086cc44",
+          "sha256": "1d49a2dc93c2d21ee8a4a0ea41aec39d1d02833f8b739c22e9d6de43b69adf1e"
+        },
+        {
+          "name": "0041_invitation_review_authorizations.sql",
+          "gitBlobOid": "af6aa7eb23adaab1f40ffba2e257622d1279f601",
+          "sha256": "16229b1f6844d633c607be8c5b779882bab1fc1943719108f0ddfb5f751a17eb"
+        },
+        {
+          "name": "0042_client_hub_secondary_portal_visibility.sql",
+          "gitBlobOid": "4056824a1ff07bcd7cd15626add179d731fa3fda",
+          "sha256": "b89b9972233952a9e1c630728416887eff83d13f427e634c23c58ca8ae753320"
+        },
+        {
+          "name": "0043_project_operational_memory.sql",
+          "gitBlobOid": "b95e949eab318388e30898a98da315ca235f6805",
+          "sha256": "b58a5764d7f30cec911a0ef15f005871a16355e395e0aedbb8b914f68ea060ac"
+        },
+        {
+          "name": "0044_project_operational_copy_forward.sql",
+          "gitBlobOid": "7afaeef3737fc961669e914ea5e90018dfc4391c",
+          "sha256": "ef84b69fdc8c182bd484dae6347933ac44ef298d5cf53eb428283301793d66f9"
+        },
+        {
+          "name": "0045_organization_operational_contacts.sql",
+          "gitBlobOid": "6792e6c5d8f0ac0b12d1ad20707feb45e95497d4",
+          "sha256": "43170c4336e4c9d15def7c66d9183edeb769dd4835dc8eeee78785f7c03f3491"
+        },
+        {
+          "name": "0046_project_alpha_project_management_routes.sql",
+          "gitBlobOid": "651ba10545d241fc4e1251332de9f0ecfc75bced",
+          "sha256": "1dec10b4ca21709867a34b7aefa66f1bc37a7fb7e2701c67c33581091417946e"
+        },
+        {
+          "name": "0047_project_memory_staff_attachments.sql",
+          "gitBlobOid": "c810d193b18a3b78f7d86e67a58d15e4e063bd33",
+          "sha256": "7f141b8a327172554ba19accdba2930476dac848b35c03e22223595c443b654b"
+        },
+        {
+          "name": "0048_business_party_lifecycle.sql",
+          "gitBlobOid": "a2b79a64ad9d4d44128dced51f9ea3d4db2cd4d3",
+          "sha256": "40933f7372cd0e66d96e78e3ecfd7d7c2a538cf103354e750c03643d3954c365"
+        },
+        {
+          "name": "0049_project_alpha_delivery_source_rate_limits.sql",
+          "gitBlobOid": "57671698e4a3ba12004211c41de3e8c25cef16df",
+          "sha256": "e98da1a27e9eafe4ec78761f09e78f3659d60eb379cb9b56923bd8fa93bd1090"
+        },
+        {
+          "name": "0050_project_alpha_draft_quote_credentials.sql",
+          "gitBlobOid": "ad9606de4e7aaf0a1f760cb8991729d700fbc44c",
+          "sha256": "b9eb9322a90c944b9646d91391f7cc0f3abb5aee8c1978e9f7b3a17ddd00a437"
+        },
+        {
+          "name": "0051_client_hub_internal_notes.sql",
+          "gitBlobOid": "fea7973c3f904828b5e3fb135d9dada8f8782030",
+          "sha256": "efa313d89e7831a949005c63129198f88cff639feb1fe23d62a7b72c3514d0dc"
+        },
+        {
+          "name": "0052_project_operational_reassignment_recovery.sql",
+          "gitBlobOid": "b0f1d236d043ddff702d0345dccf8824663085ee",
+          "sha256": "55f311399d3cf8b68d00fe8127c0d0b544bb1e881674ea55d7703c8dc1adc32b"
+        },
+        {
+          "name": "0053_project_internal_notes.sql",
+          "gitBlobOid": "fbdc95baeb264fd64f45dd8b38d9e8a91fe0b7a8",
+          "sha256": "6d78b227ace8c24814ece1b8077b5b933c29604f4a73ec73bfa91f59d4cc9ab3"
+        },
+        {
+          "name": "0054_project_alpha_directory_outbox.sql",
+          "gitBlobOid": "23492921c4f2737296d230bffed1b3131f05ad59",
+          "sha256": "526676613c8bdde15c2979e8d252e5daad4e7dcfd88766c2834268aebe1e85cf"
+        },
+        {
+          "name": "0055_operations_directory_authority.sql",
+          "gitBlobOid": "4ff4c402cba69c66d040680c77dd48681fcc884c",
+          "sha256": "8d9d13951ee8554d2345e89136d32c43c91a0eac0cdd496022d5774095089cfb"
+        },
+        {
+          "name": "0056_operations_directory_materialization.sql",
+          "gitBlobOid": "816d5efc07512d666e080c2795083dfb62c77124",
+          "sha256": "388ae8384d67a45bf9c8577fc5bc9f473df524203d1a27d62ca5c67806efdc57"
+        },
+        {
+          "name": "0057_native_directory_permissions.sql",
+          "gitBlobOid": "5ad790f5c603acbac307d8d700849e0682652c6e",
+          "sha256": "c9db4edcfcd4f33752befeba2ef9ab627436c58a17c9382442e1908693ba7f2a"
+        },
+        {
+          "name": "0058_operations_directory_write_authority.sql",
+          "gitBlobOid": "b7259819a9a41348b67d8a9db2baec027ebcb4e3",
+          "sha256": "ec80f1ff70ec5c34f60260eb092eb2052d42e41474269d5a84801217899feb58"
+        },
+        {
+          "name": "0059_native_staff_profiles.sql",
+          "gitBlobOid": "69e6d19d3d518133a551349962d84354ef25fd21",
+          "sha256": "7d33e401003bd04b571c6e57a89335090b8dce1ecfb0894c745c5eda2bbddbd1"
+        },
+        {
+          "name": "0060_native_staff_bootstrap.sql",
+          "gitBlobOid": "1d3e109646f2a07fea88c6fceb987f82f8181b93",
+          "sha256": "4d4bee3069fdbc754dfe7e89a9697d98968dd49dab84dd471d474a6b087c15ba"
+        },
+        {
+          "name": "0061_native_staff_administration.sql",
+          "gitBlobOid": "c6eb5c511368ce2b3c23cb16281af97e84cc49b4",
+          "sha256": "9973c425fb9a4ee09a3e0e29cbd663a51ace8974cffb4061638b4fa1aac93b5e"
+        },
+        {
+          "name": "0062_project_alpha_project_outbox.sql",
+          "gitBlobOid": "25193855c2000d0bbcec156667724f8f521553de",
+          "sha256": "53458f29a15a9f083ca74396acb992ce5c088b80d89c89fc48ebd208fc2fb163"
+        },
+        {
+          "name": "0063_project_alpha_project_adoption.sql",
+          "gitBlobOid": "9c1a78e791b8ea4f94b1236b354f737283340cb3",
+          "sha256": "0d61a50e6108e78cb0fbf583575cc131502ff926c52dd745dd0a11004402ca29"
+        },
+        {
+          "name": "0064_project_alpha_project_history_epoch.sql",
+          "gitBlobOid": "3eb06c0fdca3ec379f90e00268c32a539f2fb30a",
+          "sha256": "a49030d307761e54bfc7d65b96a3bae3019143a144130bb8a0edbc29e9266dc1"
+        },
+        {
+          "name": "0065_project_alpha_directory_history_epoch.sql",
+          "gitBlobOid": "eb848f2c21ccb2873705f2b843c0230b17be01ae",
+          "sha256": "cd61937188c1f7ac6e4cec1826d70e5c8bf3ac01e9acd01fee568c6e9d3ddebf"
+        },
+        {
+          "name": "0066_operations_directory_original_actor_subject.sql",
+          "gitBlobOid": "3a449cfa39729a5246726f7317d7b805b713c299",
+          "sha256": "2c8e4e471602cb8463588035ab127943b8469b149fb3910c7411d39aa2cf5834"
+        },
+        {
+          "name": "0067_native_staff_management_authority.sql",
+          "gitBlobOid": "645b29fd4e14d778764fac05ac4e4c020b7c717b",
+          "sha256": "a51ced722d8abfaf50576aa1d06336b70ce4bf4a70666ee51b98fee37cdf177c"
+        },
+        {
+          "name": "0068_native_staff_control_plane.sql",
+          "gitBlobOid": "c8c0758017b2dcb17b1edf4a400e7754d2f693d6",
+          "sha256": "fc524d3d4cfd7343c764f0ffdee1711ace7281b951c0062d3af93fdec4701b9e"
+        },
+        {
+          "name": "0069_native_staff_management_commands.sql",
+          "gitBlobOid": "83ea240c993be4a9efe53c31dc1ea38c5451e3c8",
+          "sha256": "cff3e7e731738e66a2c1cca50491eb5dedb8d28d70be9fc1aea13e16c94ef42c"
+        },
+        {
+          "name": "0070_native_staff_pending_onboarding.sql",
+          "gitBlobOid": "3a2368518971afcf3eaf6b5b1fef2d79c2124afd",
+          "sha256": "3a28dfed6bbe8491071f1050b4913819f85638ccb9272b1050c7b12827fcd538"
+        },
+        {
+          "name": "0071_native_staff_management_targets.sql",
+          "gitBlobOid": "15c3b4083eee9ce38378092a3f2d1f6f0b9356bc",
+          "sha256": "e18da0e2baaa1cc847c8e6b0ddc2131016228aa2c6d89fccf2ad88823b395891"
+        },
+        {
+          "name": "0072_native_staff_onboarding_cancel.sql",
+          "gitBlobOid": "b99a5d678dc02e15b8f7d418556c7333ac2cae6e",
+          "sha256": "da5d18b1bf6180a74153dabaf8422ab6ae147a84ef3e6685ae4b22d0777b5f5d"
+        },
+        {
+          "name": "0073_native_staff_onboarding_create.sql",
+          "gitBlobOid": "e39fbf829a4ae354303cf88e8fb259e2f6cbc0b8",
+          "sha256": "de179b09d7f1754d7d468b350ef13aa1877e4e63cbfae53f50f48a04e83cc33a"
+        },
+        {
+          "name": "0074_native_staff_onboarding_approve.sql",
+          "gitBlobOid": "010d9729a8195ccab466b28dfe6f520f5281b615",
+          "sha256": "8cd02cafe8455fbad48957cb6208b9d66361264ee1756bb168c3b45b57ac8c13"
+        },
+        {
+          "name": "0075_native_staff_onboarding_rate_limits.sql",
+          "gitBlobOid": "6bb9818b006b7e0f5410fd1db991e8ded722c835",
+          "sha256": "a4c40e63f4fea710e756565b06c0772d1ed27f79cee1579c83ec737ac08628a3"
+        },
+        {
+          "name": "0076_native_staff_onboarding_handoff.sql",
+          "gitBlobOid": "a93258badc50f7bdd6660d512cfab1ebbe432e68",
+          "sha256": "48822e95837013b981b392c13e68048ba43e89c45a044245ba81ec8c8438a0c5"
+        },
+        {
+          "name": "0077_client_onboarding_submissions.sql",
+          "gitBlobOid": "1b5db9af1d13002f04417f404cceb252f73b27a2",
+          "sha256": "f076d7dccf079278a56b9c0b68d5d1d8c4137ac6d6b50a323b8ddd91ce2f8f46"
+        },
+        {
+          "name": "0078_client_onboarding_issuance.sql",
+          "gitBlobOid": "dd3b1418c437a389d15fcd17a6881f002e17b6de",
+          "sha256": "5748fa12e454a1284622114f076aae2a762c3c266ed4cde59a0047a46b0eadfb"
+        },
+        {
+          "name": "0079_client_onboarding_rate_limits.sql",
+          "gitBlobOid": "a0e76374bfc51706dab791b612f40efc0399f50a",
+          "sha256": "d4312bf847c568f68346888a86896e2fe92fa877faa1130608667b13683f0dd5"
+        },
+        {
+          "name": "0080_client_onboarding_handoffs.sql",
+          "gitBlobOid": "214a980fdbe4ee2e48457bd4369f5d0427454c57",
+          "sha256": "572c4fb59ec535e570c33db21b7aa1269b43ba9fb43622db4d18fdb38b979108"
+        },
+        {
+          "name": "0081_operations_directory_relationships.sql",
+          "gitBlobOid": "a7fa688e6befab772af4c8125d7b4cc2f34284aa",
+          "sha256": "c7491093d5ab0fd56533e33050acb5a4060a5b14df40a3ce466405d7c02996f5"
+        },
+        {
+          "name": "0082_operations_directory_intent_relationship_dependencies.sql",
+          "gitBlobOid": "ba9205086c72de8272f05108b07283aba63fb271",
+          "sha256": "4a8629cfd911280dacb6def99755078c453e33cae7060da06cd67659036e72b3"
+        },
+        {
+          "name": "0083_client_onboarding_decisions.sql",
+          "gitBlobOid": "4327046ea89c7d4656869d3dbae87fa3cbcf5819",
+          "sha256": "9ff6857af2e3b51e183e04349b322d0762b3a50ece66018bea669f2e515ed9ce"
+        },
+        {
+          "name": "0084_operations_directory_delivery_checkpoint.sql",
+          "gitBlobOid": "c40afe350d2a3b069635d0795853de3a499e8223",
+          "sha256": "81e135eac67133fd4e72f49f16a24c57fb1b4c5e5a3b08fb7a0259942611aebe"
+        },
+        {
+          "name": "0085_operations_directory_admission_version.sql",
+          "gitBlobOid": "a3e10f1a1935f7fe20e879dda0c0f649e5967215",
+          "sha256": "1fea384c8d9a2b9c1e7b13b48c18e5273f762d848afd33708645f8952e50d4f8"
+        },
+        {
+          "name": "0086_native_shared_projects.sql",
+          "gitBlobOid": "ea83c49034b38d58865fed879e13b78632000b4c",
+          "sha256": "87d0a30d55edb175cce0dd92bf8f957ec862e6f8ed70d0c31a5aa768d3beafa2"
+        },
+        {
+          "name": "0087_project_alpha_api_v2_incidents.sql",
+          "gitBlobOid": "f692414435fc3ac086bb3b29574457ca7c4df5ba",
+          "sha256": "9ef4245ae58e852838b8fb6559d9280b6713df7d88a34a39807f9de4cf8b692d"
+        },
+        {
+          "name": "0088_project_alpha_api_v2_incident_alerts.sql",
+          "gitBlobOid": "b880eb45fd747a17b03fa55e996c6c5314a31ecd",
+          "sha256": "81a1b651a81374e5509708aa2dc339507dc443ec921ddf4f12fa9f5c062333ef"
+        },
+        {
+          "name": "0089_project_alpha_api_v2_monitor_lifecycle.sql",
+          "gitBlobOid": "0a5082beed8288a2293966d2ac6b6c92edca4fce",
+          "sha256": "342b257a86f69ac666325c7933c6d87f5b4a910af3d9b53070a44bf33dc4ca98"
+        },
+        {
+          "name": "0090_project_alpha_api_v2_monitor_retirement.sql",
+          "gitBlobOid": "80d472306fed5f5b0c82fe9a116a316d3a507764",
+          "sha256": "953b8d37796a263df06f509413e8a985739a1f47e3bcad12089928a0a0c06fbc"
+        },
+        {
+          "name": "0091_native_integration_control.sql",
+          "gitBlobOid": "e1feb091f8907c2c573de49d4811091e21c6e1fc",
+          "sha256": "c364423dcfd70ca363635fd71fd4859e5ccf012004c2f193e8c92f79921701d1"
+        },
+        {
+          "name": "0092_native_integration_grant_management.sql",
+          "gitBlobOid": "ec62b5091bd53905d0aa8874f65d80dd2b0266c2",
+          "sha256": "968b48ed838471c9455bebdbb62f12517a33da1072a507b4a1d0fdee0af191a3"
+        },
+        {
+          "name": "0093_native_integration_alert_reconciliation.sql",
+          "gitBlobOid": "7695c3cbfb21e652df9fc7e162fc5f1f482b6d34",
+          "sha256": "811ac0d7db3204e445d5334027ef0944aacd2839783a09e87893229efc49ec1d"
+        },
+        {
+          "name": "0094_client_onboarding_submission_notifications.sql",
+          "gitBlobOid": "082cc10fd1cfe1eb028543bffdaa82c2fd4c5c9c",
+          "sha256": "5d028b89247fab82bde2bde4269305067926e7184d9641cd9da95ea6a4c14eac"
+        },
+        {
+          "name": "0095_client_onboarding_notification_scan.sql",
+          "gitBlobOid": "23336f02dbfc0f97f9f9d356515883aab7ade2e8",
+          "sha256": "ad199ae8be0bc83c772d6e080b5a6889cc7972d5f480578e0b45295cfce0d4ba"
+        },
+        {
+          "name": "0096_native_workforce_foundation.sql",
+          "gitBlobOid": "aafda072b8ce55b7022612a6fbf286eed4bd88f5",
+          "sha256": "7c1c4bc89614f63e8990a98861e31a13f116c4b1300a92aef20685ccf55ae805"
+        },
+        {
+          "name": "0097_native_workforce_authority.sql",
+          "gitBlobOid": "3b7dfe1887fb169a9af28e20b3353409e4afc5ba",
+          "sha256": "8dce3a899590df79ca687be9250b79156f7477af1e7e01fe0ed40f07e3adf885"
+        },
+        {
+          "name": "0098_native_workforce_time_record_receipts.sql",
+          "gitBlobOid": "40fe423c32b6acd86985d9194590e89def447418",
+          "sha256": "e26d4377d5593cf7cecb3fe102104940eeacce934ddd3c6b5dd5e531fb57bd85"
+        },
+        {
+          "name": "0099_native_workforce_time_submit_review_receipts.sql",
+          "gitBlobOid": "8c3778aba916d2b8e32bb40fea9686f3cc5345f3",
+          "sha256": "ac914dbaf9fc6e4919e9aea04be81e1c0727d7387f8e110f9bd1ed72d852847b"
+        },
+        {
+          "name": "0100_native_workforce_authority_grant_change_receipts.sql",
+          "gitBlobOid": "297bd96634d3b7260a130ad83e19b9c77f6b3251",
+          "sha256": "548f4122f82de1033072b0200d50a61aef868bf80c463df847e5204c0e6694ac"
+        },
+        {
+          "name": "0101_native_workforce_grant_issuer.sql",
+          "gitBlobOid": "1b5e4412217105ffe0bd95cde1b52589a92ac608",
+          "sha256": "198d3d3c9e215de0e8ab7395d0c9df1be8922c6ce04d43d86d8cc0e41ebccc01"
+        },
+        {
+          "name": "0102_native_workforce_grant_issuance.sql",
+          "gitBlobOid": "33bd04c3d42268e74753717c53b9e559a77e9138",
+          "sha256": "01f3be67680dc52af74d22b24bf13d737b54d11227442b46f75c4953e2a238a1"
+        },
+        {
+          "name": "0103_client_onboarding_recipient_identity_bindings.sql",
+          "gitBlobOid": "6d43912070de4e5320a37b4e382eaa799b9f06f0",
+          "sha256": "f6ce1b8a90192298c5b728e50b2e404017a83db1e944b05a13f1c0feba95c7e1"
+        },
+        {
+          "name": "0104_client_onboarding_prefill_disclosures.sql",
+          "gitBlobOid": "4644b1c88030b71d98cfef6e3d08f949eae3a8ea",
+          "sha256": "6beb25a132741d2d7028f19947443f6285f62ce2f7de6b50b1b7adea9e531b38"
+        },
+        {
+          "name": "0105_client_onboarding_disclosure_recipient.sql",
+          "gitBlobOid": "5d17f4bf296d88aaaf8837b291bac299fc93bb00",
+          "sha256": "81e4ff9bced9875ecfb8c6a66e05b19291ffad8f08fc5e13b0e790d3e19f823d"
+        },
+        {
+          "name": "0106_client_onboarding_prefill_binding_commands.sql",
+          "gitBlobOid": "986a0096953cd3fd0c0eee035157c87d9c8e6b98",
+          "sha256": "a1f418887ca4a16698ab04941f974901c252b3ea733e84c03aeef32b9d05d44b"
+        },
+        {
+          "name": "0107_client_onboarding_prefill_authorization_intents.sql",
+          "gitBlobOid": "e2cce3409de214b2a86ee5f9170e87dfb3201b30",
+          "sha256": "53fd49f70c166614ae8e8c441d213e19aaed3e36ce777727cdec1e29afd0c572"
+        },
+        {
+          "name": "0108_native_workforce_time_beneficiary_selection.sql",
+          "gitBlobOid": "7504d59cd093c90d817cefb727652eb987860cc7",
+          "sha256": "333bcfbfa8ef3b397d538159f4049f9ca74ab66b1559f88df0aaf37ff0009162"
+        },
+        {
+          "name": "0109_native_workforce_time_beneficiary_selection_issuance.sql",
+          "gitBlobOid": "bb48c5acbaf70fb5d2a152ed381cd599ddf2760e",
+          "sha256": "f5a50a4e7202ec94eb8cdf3502ca4e38e70d4e9ef4070d36fe65f2650d557823"
+        },
+        {
+          "name": "0110_native_workforce_time_beneficiary_selection_lifecycle.sql",
+          "gitBlobOid": "19908a5f315befb2f2109c0e29ccc4c646127780",
+          "sha256": "849238c126a70c2f825d6d4405c9f2cbd5fa3f0ab4015a25cfac1f56cdf2452c"
+        },
+        {
+          "name": "0111_project_alpha_existing_directory_binding_review_evidence.sql",
+          "gitBlobOid": "864d899a4a84226e9fda58a31afb6a4f537c3367",
+          "sha256": "783c3678d27ff68c3ab9ad9401072da66387aaf843d750108b719e9dcf5340b5"
+        },
+        {
+          "name": "0112_project_alpha_existing_directory_binding_acquisition_ledger.sql",
+          "gitBlobOid": "fccb5a15a61d6b9f0e228df0c9f2e199d9de17c1",
+          "sha256": "d45033a93fb007d2e2a147be043780e8bb1336e24928f305df8ec6dbe62bfac7"
+        },
+        {
+          "name": "0113_project_alpha_existing_directory_binding_acquired_mapping_receipts.sql",
+          "gitBlobOid": "96e62df14bf63846ce274478b286911c9f4cc04f",
+          "sha256": "89fd34e2dd48bc64bb2d0185a42b4bc50c293ff145834b999f112693a3e63e83"
+        },
+        {
+          "name": "0114_project_alpha_existing_directory_binding_acquisition_response_receipts.sql",
+          "gitBlobOid": "c31fe222dd2085a91ffaf769a66dccc045aaf0eb",
+          "sha256": "e8f83ed07b31ca43ff44d7a4deda1894af3be25479db85d5e001339f9dc7eaf8"
+        },
+        {
+          "name": "0115_project_alpha_existing_directory_binding_review_local_revision_fence.sql",
+          "gitBlobOid": "a7013853829f8cc299aa46c505b2278b6dacb5ef",
+          "sha256": "e5e19a27d09c24fd1dc3634b4c349eb14244f45d54627fe2e9dcb27ae71df84e"
+        },
+        {
+          "name": "0116_project_alpha_acquired_canonical_mapping_activation.sql",
+          "gitBlobOid": "2df1107b9a24670dae0f75274a18c013718a1c85",
+          "sha256": "1c5aacf41becd9089f8c841ba7e36bbadf51f1a32aa382c14a27d766ffd47d25"
+        },
+        {
+          "name": "0117_project_alpha_native_owner_epoch_claims.sql",
+          "gitBlobOid": "43c6421c5848b81e7dc84cfb39d5067bc7e0af9f",
+          "sha256": "8cbf5364f62c3c73265429edaf641c3b2a2b475d86f34212673baf990403c35b"
+        },
+        {
+          "name": "0118_project_alpha_existing_directory_binding_revision_refresh_ledger.sql",
+          "gitBlobOid": "bdad386d565a9d0280b5856f32c9a74171d80aba",
+          "sha256": "2bfe32e791d37d00f10b9fae45073f3001d0d037399ed9f2bcc11c426511de1f"
+        },
+        {
+          "name": "0119_project_alpha_project_v2_persistence_ledger.sql",
+          "gitBlobOid": "f4268ef80e607eea5cef56f0ebe71019cb2e9d4f",
+          "sha256": "64bff7d8ace25a364533fe5956c6c6261f2a08a81641fc74b30dd17db8da7877"
+        },
+        {
+          "name": "0120_project_alpha_project_v2_canonical_settlement.sql",
+          "gitBlobOid": "2912969ee1a1b70d7b3622fa273b390c3f6ef071",
+          "sha256": "6e1fa026ac7221398ff09dab9e42b02db22ed2127a4ff70b2cf0eb104d7aedb8"
+        },
+        {
+          "name": "0121_project_alpha_project_v2_settlement_proof_expiry.sql",
+          "gitBlobOid": "320e8bffe76805b05ce8e168d708751082267cd0",
+          "sha256": "a177100b32f43718411563dad4ed5c453300420b43a66ccf8146f919222651be"
+        },
+        {
+          "name": "0122_project_alpha_project_v2_canonical_activation.sql",
+          "gitBlobOid": "da4c85c32ba061ad2cb88c76a4bdc2730666b68c",
+          "sha256": "314d0d5bdd0585cd619c7e0a6fe3847437802a49152c50b49b4afc2c7e623853"
+        },
+        {
+          "name": "0123_native_directory_authority_history.sql",
+          "gitBlobOid": "e8bb3365974cc0a157fe5b8783c04adfd11c3719",
+          "sha256": "5e36893c738c6a058271db521e4c5e8907009f135c25ee635f2f1ec709b3caf5"
+        },
+        {
+          "name": "0124_project_alpha_project_adoption_review_evidence.sql",
+          "gitBlobOid": "547d92a686f956efcc407762f634842596dd10fa",
+          "sha256": "b35a14babab1e10caf5420fe8d1209a81009b5bd55cfcb0361a4a3085c503a05"
+        },
+        {
+          "name": "0125_project_alpha_existing_directory_binding_activation.sql",
+          "gitBlobOid": "904029d4925b58aa5048a5b8c055f6dddd3df732",
+          "sha256": "e0d743ae358a0a3f6931090a08d051fcf9172d328b3cc51bb3627a70b86d1eb4"
+        },
+        {
+          "name": "0126_project_alpha_project_active_directory_mapping_bridge.sql",
+          "gitBlobOid": "663205bd0ac1308a0c84eca4f40350d6cd5490cf",
+          "sha256": "b488a6cc4b70f7412543b97caee423ab42e20ec5d1e58ec27427b3a16f717ab0"
+        },
+        {
+          "name": "0127_project_alpha_existing_directory_binding_activation_evidence_transition.sql",
+          "gitBlobOid": "3d4cb83498ab5d78611bc54fd26cfacbffae86f2",
+          "sha256": "15bc4bdfdf14b56e6e1a5e7d0ac312c733eda4716c2fbd6759d32735faab41b5"
+        },
+        {
+          "name": "0128_project_alpha_project_adoption_bind_bridge.sql",
+          "gitBlobOid": "8997ca5b49fbbd0c5198348a6b30b6f73cebf524",
+          "sha256": "bda18bf18fdf9c1b7871c52eba135748738bb35875bf71ba96c67c096eabf8b8"
+        },
+        {
+          "name": "0129_project_alpha_existing_directory_binding_activation_relationship.sql",
+          "gitBlobOid": "5e44e287321119b47ea0e81f83cbf13592570b54",
+          "sha256": "55161df452234c14f33013f15b9d2bbc8f126be7fad27f30e768c8812f66bdf3"
+        },
+        {
+          "name": "0130_project_alpha_project_adoption_review_producer.sql",
+          "gitBlobOid": "f2db5b8ab0d53424b285642e18d2dbf2d2de9aab",
+          "sha256": "1557e539cd388ba3bb06844d02848acdd32359a4de10f1a2561b24ffc53b9b1d"
+        },
+        {
+          "name": "0131_project_alpha_project_active_directory_mapping_guards.sql",
+          "gitBlobOid": "5be22fab3ea852ad948a4604663840df7b32e3c4",
+          "sha256": "f6b8fed47d742edbf3b7e98c12b9e341b5f614bb170473723778311dd13d1754"
+        },
+        {
+          "name": "0132_operations_directory_acquired_relationship_dependencies.sql",
+          "gitBlobOid": "9d5553c547357c6e0faa54a3e909b6db1c310380",
+          "sha256": "6c0570a2a89e9159296233cc5fc7cc21f57361329743ea643f1aec0140ad0d90"
+        },
+        {
+          "name": "0133_project_alpha_directory_relationship_outbox.sql",
+          "gitBlobOid": "9e42ecb8cee7909bcecf8c16b63cc9e3172edd7c",
+          "sha256": "f6bca8fc4621f6ac94136cc2b779bc567eac51673fb0a8c06aac06f08d747c06"
+        },
+        {
+          "name": "0134_native_directory_create_admission_relationships.sql",
+          "gitBlobOid": "e18c2a204529375bbd30c921c3d93d9369b13657",
+          "sha256": "b599716f47bded47eb0bd966f6c025d73df0d89bb1813b4b7089744bb2ff5a37"
+        },
+        {
+          "name": "0135_operations_directory_relationship_canonical_ids.sql",
+          "gitBlobOid": "137876087f5c3423b1a4833e3d01579f9e30f19a",
+          "sha256": "b6add703d9d1881c5f5540e42eb40de8c7d83304b526bc7a7a15485c624b1105"
+        },
+        {
+          "name": "0136_project_alpha_directory_reconciliation.sql",
+          "gitBlobOid": "5cb5fe0ec210c58dbbce95e01684fe1293da2a4c",
+          "sha256": "7bf597ed91bacad81e7cd6bc495d496eace2588c81f7f14e1dce3636974fe909"
+        },
+        {
+          "name": "0137_project_alpha_directory_reconciliation_scheduler.sql",
+          "gitBlobOid": "8fb039665aa8c1cc2534b4a485eebf720fef9198",
+          "sha256": "88163dc83f69709ca36e0cb88e3665e883a411885431e3c282c13a9fb861d701"
+        },
+        {
+          "name": "0138_project_alpha_directory_reconciliation_review.sql",
+          "gitBlobOid": "bd211ac07fbff9529a43365ccb97ff0f786e058d",
+          "sha256": "51a9b8b8363b89d9d8b19249eaa19d84ca1421fa23c1e477176fefd2bd834b68"
+        },
+        {
+          "name": "0139_native_directory_staging_empty_enrollment_fixture_guard.sql",
+          "gitBlobOid": "81ea5826345435bd6e223ca5e80ba23e93e0ae8e",
+          "sha256": "b76270118399a700698de5fcf9bb07a03f96db694f0436c4bcc567676ecf4501"
+        },
+        {
+          "name": "0140_client_onboarding_one_time_reveal.sql",
+          "gitBlobOid": "de91dc3ffad95e0b8220d76f3a9bcad5d99e1eaf",
+          "sha256": "184b0c11946e9f8e5f8cdab766d4ea20cd6e5e8e13f6ede558d83b53577a00b8"
+        },
+        {
+          "name": "0141_deferred_directory_client_materialization.sql",
+          "gitBlobOid": "04a4ed9bd9f542d14125814411ae88a6e6ded0b3",
+          "sha256": "c3dd120dedf091f70d958c1182964105c85963e9f908d8e21479c9fbc095d531"
+        },
+        {
+          "name": "0142_client_portal_access_authority_outbox.sql",
+          "gitBlobOid": "9a6c19f5efa2ac3745c0ab6f43f878d0f9c69a18",
+          "sha256": "45bba8f68aee1dc521e9fc11aa4bea5220510153a04a40ff4a9c540429441c50"
+        },
+        {
+          "name": "0143_client_portal_workspace_binding_selection.sql",
+          "gitBlobOid": "79204b7e5955a751ac287e5e2a08e0362ff06c89",
+          "sha256": "8931bcc2406b1b62b60154d48aab96760c3a65be393f9decf22ac1d157ef696d"
+        },
+        {
+          "name": "0144_client_portal_workspace_binding_outbox.sql",
+          "gitBlobOid": "092223397963c19aaa5ef79761a8fd245cb0fd35",
+          "sha256": "fc51205ed278e76a76004d24315f09a361ea61668b6d65ca063b958c0d9c93c0"
+        },
+        {
+          "name": "0145_client_portal_authority_v2_outbox.sql",
+          "gitBlobOid": "0fd67096acb60cbd886179100a8f91e000a39889",
+          "sha256": "b4e63f78164b619ac49051ebd03933a9c156b6e76bb5c938c9baee2e5dd51e79"
+        },
+        {
+          "name": "0146_ops_customer_service_enrollments.sql",
+          "gitBlobOid": "0b556c15a6f6f085b2817408fe59439c3d69a091",
+          "sha256": "7f0c63b1be17da53b9d0915e2283fae8d7cf21c55b6264905b868180812a734f"
+        },
+        {
+          "name": "0147_client_portal_authority_v3_permissions.sql",
+          "gitBlobOid": "0dc99a1e46ef5c39b09e42a6932dc40044875ce3",
+          "sha256": "6cce30c654f01a783d7b59d34d08b0dc94dfd232293c2958fd48f4227217f800"
+        },
+        {
+          "name": "0148_client_portal_recipient_enrollment.sql",
+          "gitBlobOid": "77f6632d32e28462a4f3dadb4ba05fba55d78d46",
+          "sha256": "cedeca2b96c50968e48d79e35b0e482cee8f946f1c2455c814be0e33f89e04be"
+        },
+        {
+          "name": "0149_client_portal_recipient_enrollment_sql_fences.sql",
+          "gitBlobOid": "38d02218f0eb2e8f492853c9f41eff2d545e7507",
+          "sha256": "d409844683797777d52d3af8faa493506037242a3390a48449c41482e23ab146"
+        },
+        {
+          "name": "0150_client_portal_recipient_enrollment_cancellation.sql",
+          "gitBlobOid": "72fd545141f25d5135bc37f8a564ecff62eb60a8",
+          "sha256": "939ecb0d3413070cb9b1f2232993b9e02b0a9dda9538a5e28a95bce5c139d2c3"
+        },
+        {
+          "name": "0151_verified_recipient_delivery_authority_outbox.sql",
+          "gitBlobOid": "1e82212d6451254e8c396e7337212f967b9d3bb8",
+          "sha256": "02334ce63836b054370adda21722c629e848074467baf3912156ca53c38732a9"
+        },
+        {
+          "name": "0152_operations_portal_workspace_reservations.sql",
+          "gitBlobOid": "6fd9165702cccbd6976544bb85d2ef94b16bb383",
+          "sha256": "ce079e99dad9d57e4e1ddad69841329879f7a7409d1c7a0f2ce18483dd85f993"
+        },
+        {
+          "name": "0153_operations_portal_workspace_publication_outbox.sql",
+          "gitBlobOid": "a61a6596e49f329636379abfc96af858168fb4e9",
+          "sha256": "7eec18defdb2e22593dad0a5cbedc01615285c1b1b8f92cfe46ee945e1f33ad2"
+        },
+        {
+          "name": "0154_operations_portal_native_recipient_authority.sql",
+          "gitBlobOid": "e79feae85efa6d37e9a87a7f3a1e6520a16900c6",
+          "sha256": "01d7aa68c70c5321c4f6974051a25ed0dd8b2fdd6db9f348f01334147c8a777d"
+        },
+        {
+          "name": "0155_operations_portal_workspace_publication_cancellations.sql",
+          "gitBlobOid": "b29959c6850e49302d4f07d9455515556b130d54",
+          "sha256": "0ef7cf0a8ed92047d0856666f9edb0efbf107ca5473d1f9e51f0b624dc31d4f8"
+        },
+        {
+          "name": "0156_operations_portal_workspace_publication_invocations.sql",
+          "gitBlobOid": "d039d57e077e03bd00f9061b44c8a66dedb15a35",
+          "sha256": "0cc8d7ab4b9ccd906c1c83b52db37e9fde702449973d81dd0490f52c47e8a819"
+        },
+        {
+          "name": "0157_operations_portal_native_workspace_cleanup.sql",
+          "gitBlobOid": "3a0c45fae13926806522f31d8efc8a215197ea8c",
+          "sha256": "14c2e291ec972fb2293d15a52df69c8a3711279d3d4fb7dbf5a19c65c5ee0e1b"
+        },
+        {
+          "name": "0158_operations_portal_native_delivery_authority.sql",
+          "gitBlobOid": "f1a16c4c96ae6a794c1e0add171d06fa136ce894",
+          "sha256": "034c830a00eab4ac259493e4af36d2eab2ab4f91883278fc1cbf578fffefb35b"
+        },
+        {
+          "name": "0159_operations_portal_native_delivery_recovery_invocations.sql",
+          "gitBlobOid": "83fc2d1d47dafe5dc85b565380633200fcab014b",
+          "sha256": "9858a8da92f7cd96a73197eea499e8a6417aca3da3c0e61fc4062e701806a142"
+        },
+        {
+          "name": "0160_operations_portal_native_recipient_labels.sql",
+          "gitBlobOid": "01c6531cf7f6d52027c61320ee9b0d21944c6c85",
+          "sha256": "f9174b07d194e1ccd8cadbfdee7d151a25e8d355489f4c10926534f9d93db06e"
+        },
+        {
+          "name": "0161_project_alpha_api_v2_inventory_observations.sql",
+          "gitBlobOid": "9d26b13c9f0273bd91d24ff60ea752a48e211c63",
+          "sha256": "1b6fbb3b3ce8b50dbb553fd38ec8544c25f88a2837d8523b5ddeb0494534bd45"
+        },
+        {
+          "name": "0162_project_alpha_directory_read_adoption_claims.sql",
+          "gitBlobOid": "915cbfd5ca0510e94246401d866109dd0a1ef9e3",
+          "sha256": "4bd97d25bd96a0a872bd3106ab936ab3fe1806b7456aec6cf02c92195715d1b0"
+        },
+        {
+          "name": "0163_project_alpha_directory_read_adoption_field_review_receipts.sql",
+          "gitBlobOid": "480b87e82e28c05e3b169d0d6c2c532744fd00d2",
+          "sha256": "ef4abf5411e8fd4e10d4daeb94dd4ca3469ae7d179d2b135a9d04ca4a0cf12aa"
+        },
+        {
+          "name": "0164_project_alpha_directory_read_adoption_authority_recheck.sql",
+          "gitBlobOid": "63fd54d472ccd64ec141f145f60d415b956ef1f0",
+          "sha256": "e54cf701bf8943f13223b998b8c4e8209232762c86834b1e7a384b8775ddb5a4"
+        },
+        {
+          "name": "0165_project_alpha_inventory_generation_surface_scope.sql",
+          "gitBlobOid": "f402dc3e5408fa9f25e2605af63e5c3c425ae9f7",
+          "sha256": "efbe9458b09ee22abe6fb496c05f71c6589baa0eed9692d5008aefb0e5fc6f6e"
+        },
+        {
+          "name": "0166_project_alpha_reviewed_standalone_display.sql",
+          "gitBlobOid": "864a1b8733b895cf02f61edcc44612ff889c50c4",
+          "sha256": "84fbbd9914fb911d7056657ae5bffc703f22519a209e9e304db72dee4f33a501"
+        },
+        {
+          "name": "0167_project_alpha_directory_read_adoption_finalizations.sql",
+          "gitBlobOid": "154771c192303406906bfd0e3c521827308636cd",
+          "sha256": "807c48566dce6d741e482b15d6b040d7463cbc5e4deefb4d72a4b9a3d5b16886"
+        },
+        {
+          "name": "0168_project_alpha_directory_read_adoption_local_profiles.sql",
+          "gitBlobOid": "68430fb21b97309df9e09d678c3b380654364265",
+          "sha256": "a8ccc227611cb519fb0cfb253ff2c50aec66850e62a33024a587525b24eaaaa4"
+        },
+        {
+          "name": "0169_project_alpha_existing_directory_binding_generation_evidence.sql",
+          "gitBlobOid": "d52ad11faf16ebc5c6e74d74d200214885042836",
+          "sha256": "efba1fc86e73674bf7866cbdc78f8c83024fbe2fae53de3375bdc00c3a37006e"
+        },
+        {
+          "name": "0170_project_alpha_active_directory_project_guard.sql",
+          "gitBlobOid": "f6fe84474e06e1b7245bdc1b63031f99396725c5",
+          "sha256": "68c1680a8def3ce75049323c6fc492436e5faa3ba80506a9a42eee4f24ca9c39"
+        },
+        {
+          "name": "0171_project_alpha_active_directory_update_guard.sql",
+          "gitBlobOid": "912796b63f89b559aafb9df09d5f7ff88a75f4cf",
+          "sha256": "313b2b91eb422792a0c758d5525ee173b44b488e0d7797363acb8ce4d53ba8d8"
+        },
+        {
+          "name": "0172_project_alpha_active_directory_consumer_guards.sql",
+          "gitBlobOid": "99f15e579f7ec2936ffa11cb80b6730f6124dce4",
+          "sha256": "8bff055cd1c2100e4c9bc0d86f471223e9a9f393e3b3396c3e3e2ded78159677"
+        },
+        {
+          "name": "0173_operations_directory_intent_acquired_destination_transition.sql",
+          "gitBlobOid": "6c053423cb45d7eb935ade4e125f3805d262fe5e",
+          "sha256": "11f1bfcfacd72d8827d9ad0dca96407d0bd1f0d5043119ad88862dd48efa8b57"
+        },
+        {
+          "name": "0174_project_alpha_directory_preserved_external_identity.sql",
+          "gitBlobOid": "5c5ce0c6ee6b0c495e6db7184b74b0bf62989989",
+          "sha256": "9e794a73b75e025edc04967888631b9336931eb16113f42d855bea3fcb30a158"
+        },
+        {
+          "name": "0175_operations_directory_acquired_parent_enrollment_identity.sql",
+          "gitBlobOid": "cc43b457a31e9e46e53b8cf116723f29f5196441",
+          "sha256": "de022736243342f203fcf9a1cb22993e49c50bbb18c7b3b2fc95d8fb3fa48ed0"
+        },
+        {
+          "name": "0176_operations_directory_acquired_intent_authority.sql",
+          "gitBlobOid": "7149a1af97c3ce9c47c1d5aa118b60fc8ce34f91",
+          "sha256": "026de6421dd219afcf807d6bf24c62d59acb77c2c4b1da21dac3c87c5b0278f0"
+        },
+        {
+          "name": "0177_operations_directory_acquired_intent_update_authority.sql",
+          "gitBlobOid": "5435ad1daaf710941ca5d9facd14b45151da3ae9",
+          "sha256": "81ee5947ef7cb7e529542f88b1e431744daa7619243b22bd23eafc7cad0a3238"
+        },
+        {
+          "name": "0178_project_alpha_project_inbound_reconciliation.sql",
+          "gitBlobOid": "69cf934253ffe3c68028792be29dcbbbae39cf08",
+          "sha256": "eb92d93138a75329003eb18c06d714a6fb8365fcc383982a58939a9ab6969e60"
+        },
+        {
+          "name": "0179_project_alpha_acquired_native_identity_collision.sql",
+          "gitBlobOid": "dad8d767e9701f6fe2fe4557770aa5322b5c192f",
+          "sha256": "58a00c5c0c9ddf5892062d17b3e1e7bccd47705c97777454f042cb28cdb922f7"
+        },
+        {
+          "name": "0180_project_alpha_project_v2_recovery_authorization.sql",
+          "gitBlobOid": "ee4ed8e4ff94c5925ae630ff18f11cce83375887",
+          "sha256": "deb385a1f97f2e82c7b4e634e19ae7fd406efe6368e89ac0085aed440a2a3528"
+        },
+        {
+          "name": "0181_project_alpha_directory_create_generation_recovery.sql",
+          "gitBlobOid": "88188610082c65b1cd1b9ea0633b1281453d8423",
+          "sha256": "8b0be2c23cb8a45dd1dd46e78067e00bfd8d5dbf2cc2294219e85d1e26915bd6"
+        },
+        {
+          "name": "0182_project_alpha_directory_relationship_recovery_guard.sql",
+          "gitBlobOid": "1b207c49b7cb8fcf1f06853e8e3b123ab21362b4",
+          "sha256": "1aeef8de3a6f3fb4f08a2b3e6c69d02c6fb0cb9d2c092b4cb507ed1759992b0f"
+        },
+        {
+          "name": "0183_project_alpha_binding_standalone_relationship_rows.sql",
+          "gitBlobOid": "5e113620b57dd1e5fc3ebc81f612ec60f187e83d",
+          "sha256": "70b155e7ff2bda667832f14a5bea72523dd3e0fb285ce91f48c3e4a44e05ccac"
+        },
+        {
+          "name": "0184_project_alpha_directory_relationship_generation_recovery.sql",
+          "gitBlobOid": "d49a917b29df937bdb7b36675a21ae9f757e09a4",
+          "sha256": "12ccc3ccc3c3ad56edb8b21245a279581548c509d884b0ed5df6041988225f3b"
+        },
+        {
+          "name": "0185_project_alpha_directory_binding_generation_epochs.sql",
+          "gitBlobOid": "9b2bb26a0fd5062d855585aeec286d6e49acd246",
+          "sha256": "3c536f6e8ea3c745e0167d3a81308abbac7e9b24c127a95a3a8ab1d7c9fcd39e"
+        },
+        {
+          "name": "0186_project_alpha_directory_conflict_evidence_binding.sql",
+          "gitBlobOid": "7eb43b59c387a38b0acb565fb61a4733ec5f5722",
+          "sha256": "6d19b3e6be44382c51681444e95a501845f8f3958e83930c5fba50501951fd92"
+        },
+        {
+          "name": "0187_operations_portal_native_delivery_literal_prefix_guard.sql",
+          "gitBlobOid": "43b792cf8c031fa20debf2534b09e929308b7c90",
+          "sha256": "ded89fe037cfb56f9ddf4316a4ddcc67c8ae00e58d66eebec9a8129c6536eb28"
+        },
+        {
+          "name": "0188_client_hub_native_project_preparations.sql",
+          "gitBlobOid": "9fb775abf503e9b51ce0a6ddd970fe4e5c17f35c",
+          "sha256": "5c455a13128a912a716d75b2dbba9bcde64bfd8479495036d4f63bbf3a7098bc"
+        },
+        {
+          "name": "0189_client_hub_native_project_uncertain_recovery.sql",
+          "gitBlobOid": "e7f086aca0be24b9cadd1b67a2c2ba1062f457a4",
+          "sha256": "e7ee262257b677589cf089e0157fdf09863f3e14c2852b5da6bb51eff717a745"
+        },
+        {
+          "name": "0190_client_hub_native_project_preparation_authority.sql",
+          "gitBlobOid": "c1911fa9f09229e7f884e7d0ee322af376ee3851",
+          "sha256": "a662cd4a50c5eaee7a02bf720b1e5399d5d05712022fdd1426413fc707a83882"
+        },
+        {
+          "name": "0191_operations_portal_native_billing_authority.sql",
+          "gitBlobOid": "26158794e09900efd154d02b937b8a65546b9025",
+          "sha256": "46b1adb3e6addb91ae108762af9cc8c855ec7a9ccc2e988d5dce056e697ffdfc"
+        },
+        {
+          "name": "0192_ops_service_definition_authority.sql",
+          "gitBlobOid": "024f947d8092f59d5db089ebb3c3a952470c82c6",
+          "sha256": "8a2d278e0a3a852b08d23efcb9c278a44ba3ea01da89742bba5d3909c3b1d8b9"
+        },
+        {
+          "name": "0193_operations_portal_native_delivery_dead_conflict_recovery.sql",
+          "gitBlobOid": "7f6f588d5e73a2b662d31c046b76aaf2a22b66d0",
+          "sha256": "2454b60512fa5aec38942d9bd62338f753b527c2e4319e6e7e391509f59bfa56"
+        },
+        {
+          "name": "0194_operations_portal_native_delivery_terminal_cancellations.sql",
+          "gitBlobOid": "cb6f64ae854202d02049a968c334d75d7393e754",
+          "sha256": "75a8852921ff81e2926c97acc1636a38fc7dae13b45e653cceda93c23f962f6d"
+        },
+        {
+          "name": "0195_client_hub_native_project_current_owner_observation.sql",
+          "gitBlobOid": "64fba72f1761fd37f0f76e3e0c2375619616faf8",
+          "sha256": "aaa8b35e502ed634cd38ed16c5a870a91f63c0ee578a031aec15744e7947ea44"
+        },
+        {
+          "name": "0196_native_directory_maintenance_authority.sql",
+          "gitBlobOid": "bdb0b63746a52a20fa287608e549ea58eb7784ac",
+          "sha256": "84fe7276bb83bb72da6637d5b6827b56e80094c14acbc872935c444fb2a3870a"
+        },
+        {
+          "name": "0197_operations_portal_native_delivery_cancellation_checkpoint_scope.sql",
+          "gitBlobOid": "b931f68b8d222975089ee8a15756ee2c5d9edb29",
+          "sha256": "9cf2194a57cf7888c768d492c78cacf842e3f6c6814d3f395e6fa8f4d0a31a76"
+        },
+        {
+          "name": "0198_native_directory_active_binding_revision_refresh.sql",
+          "gitBlobOid": "bdb610eed902f90b26c8e7b3206676acda6edb7b",
+          "sha256": "a51026608eb70a0645540cfe12bad51feb7a97f924e0b2c3b83837a3ae2fa7c3"
+        },
+        {
+          "name": "0199_native_directory_profile_binding_continuations.sql",
+          "gitBlobOid": "3b57a5bb0a7169cf0dafcac0996c792e1bd6c69f",
+          "sha256": "056007062980460404fe85093cb796b855b91c23351a323457e91d5b053a2006"
+        },
+        {
+          "name": "0200_native_directory_active_binding_refresh_supersessions.sql",
+          "gitBlobOid": "32d596cdfb6dd3055413dda6cd5c1b62c79b1fc3",
+          "sha256": "0e0ade02ba1088a8f3ef33d5d30d5be92441a879c984ccc822c15db6368ede5d"
+        },
+        {
+          "name": "0201_native_directory_lifecycle.sql",
+          "gitBlobOid": "c869fa260e00739024b6aa72ffcb80135ab2a676",
+          "sha256": "7bdd6d02c5ab97ba705e9a6d32238917ffb9a0757f3aa49d4eb8dcf7795e2878"
+        },
+        {
+          "name": "0202_reviewed_import_enrollment.sql",
+          "gitBlobOid": "2fdf6a66a7a386656c70e14b3001bcda1ed8fc69",
+          "sha256": "77388f0dfa96e3715ef9754dd2dc92a7b1ec18139be0b8bf4590b79a3a77cedf"
+        },
+        {
+          "name": "0203_effective_native_directory_enrollment_consumers.sql",
+          "gitBlobOid": "8c628084b0085e97e4c517864bd20320a7e8e9ba",
+          "sha256": "3e331b0de53c0e4ca0b22395b879ef0e799f66872c2f49afd4ef7f7a58be0008"
+        },
+        {
+          "name": "0204_native_project_archive_restore.sql",
+          "gitBlobOid": "9719bf686cff32e128bef459b968ba34f3cb63a9",
+          "sha256": "f74d721311f3c0b978a5ff246a99f8ef179c8b7a3d3c42940393ee9fd44b212b"
+        },
+        {
+          "name": "0205_native_billing_source_authority.sql",
+          "gitBlobOid": "6d5561f3a064f1c045e769766e5c5275f21ca65f",
+          "sha256": "c89d39bec75ed249a9bb33497bb36739aa3d55e01f60bac25178bacf0150f564"
+        },
+        {
+          "name": "0206_native_directory_existing_import.sql",
+          "gitBlobOid": "28026ff5f91f3bb3caf00898067d1380c4bd0736",
+          "sha256": "0af4b3a078eda8a701fdfc1e898e5dc539831537e0d2a461f6acee124ce6b7c2"
+        },
+        {
+          "name": "0207_shared_directory_profiles.sql",
+          "gitBlobOid": "8f8571b6edb3d66a81c140aec9f4a6e5075d409d",
+          "sha256": "cdd4947b8bf5ab672184ed3e4f8f3fb0b4afbd0edd0707e1772569f66f4f3d49"
+        },
+        {
+          "name": "0208_shared_profile_portal_authority.sql",
+          "gitBlobOid": "221845d0aca78eb092894d9b2fa7615979233e7d",
+          "sha256": "a00f580d85f8e857399a2520437836e3a1f09e7bddba1b4a6b27a6b66f3e9688"
+        },
+        {
+          "name": "0209_shared_profile_portal_native_writes.sql",
+          "gitBlobOid": "a972a7a9272627be8189d3e7922df21c18ada73c",
+          "sha256": "635ee4f206e95ca584097159b1bd9a8489ea77cb900aa5c1106832d42b7e0f8f"
+        },
+        {
+          "name": "0210_admin_finance_summary_permission.sql",
+          "gitBlobOid": "2fed57424247f903994dd4abcb78f474d6e3ec03",
+          "sha256": "723c8c17880a9a8909422422b55275a8aadcf424ff7ba3bcc93f92c52917fe9d"
+        },
+        {
+          "name": "0211_native_directory_create_observations.sql",
+          "gitBlobOid": "7d1407454804b63257d5e2be475b8fb5882ff392",
+          "sha256": "cb5ef5f3f0986e71f4a4f5ea7736306e1ef23ddf97e509d2a2566f1b52dbbca7"
+        },
+        {
+          "name": "0212_primary_portal_directory_correspondence.sql",
+          "gitBlobOid": "bef75d23b353b3e7e3995b423d46804600aa25a4",
+          "sha256": "3ac44b2cda2182a1bff154da4e6909d7ace02ba7ac17f1cbc4fc734796935d6f"
+        },
+        {
+          "name": "0213_client_onboarding_notification_attempts.sql",
+          "gitBlobOid": "778aec1e6bf8743ea29cbfe55048bd6cf5853281",
+          "sha256": "6247935f8aab5f63998951a3945857b23967242586e153412bd75d0e33a02b6c"
+        },
+        {
+          "name": "0214_client_onboarding_portal_activation.sql",
+          "gitBlobOid": "ee6c95d3c4e542faa19abedcbcef9c513c1ea230",
+          "sha256": "120bc89960d04ead6fd772285775aa574a2b6071a982c03c91dfb8f0f37463a4"
+        },
+        {
+          "name": "0215_local_project_division_authority.sql",
+          "gitBlobOid": "9d2eacac306a956d8d6348603f2a2fdbc5858dc0",
+          "sha256": "62556fe4aa0af571d0c85eab197bea498ba73e76d6408a2a87f376d0c99f58c4"
+        },
+        {
+          "name": "0216_client_onboarding_existing_company.sql",
+          "gitBlobOid": "2afe8186236c7af81f9bab67f84b177e9689c460",
+          "sha256": "f60c4c9c8784fd2660c655cb691e2f7d96350e0caf25cc3d0b21d002f177049a"
+        },
+        {
+          "name": "0217_client_onboarding_shared_company_plans.sql",
+          "gitBlobOid": "0b0dadddc2f10ea79e05cde07661af7270316388",
+          "sha256": "6178a51a9a7153ed3224569cdd98cd5080986f941009731bb5eb53b3bddfd934"
+        },
+        {
+          "name": "0218_client_onboarding_shared_company_approval.sql",
+          "gitBlobOid": "ecb7cb7fbfaaeba2c96370c7ea04dd88faf6c952",
+          "sha256": "623a3303ed58f260866735a1d4c769c12f8ffeae5e7dc2d4ad6a774b7c88801b"
+        },
+        {
+          "name": "0219_staging_agent_read_authority.sql",
+          "gitBlobOid": "4916e1f66cde09f993bcfaf816e5980499937f35",
+          "sha256": "622f41e5e61b9389fa2d01ad40bd38a3483b75be5e9f36e17786f7f6f22f272d"
+        },
+        {
+          "name": "0220_directory_profile_generation_recovery.sql",
+          "gitBlobOid": "18c4a05e91aae76e598ada573931c89104578c63",
+          "sha256": "87285f8df2703fc4d4ee09dba92f96008ecbefa74a3a6692ca18c65f359b37c2"
+        },
+        {
+          "name": "0221_portal_correspondence_lifecycle_write_guards.sql",
+          "gitBlobOid": "fa45c3ebf77f069c123b20172dc2bbb566daf2dd",
+          "sha256": "10aba7d094dbcf35276d95552f8d518fbfeed41ca8ce91f04818e1c863793e18"
+        },
+        {
+          "name": "0222_employee_read_roots.sql",
+          "gitBlobOid": "ab5b32a74fc7718cf54cfe282a3f0b558dfa8652",
+          "sha256": "1b91e7eebe6580df7a780a8b473e3325fde2d9a8a8dc37282bc40c6f32e8edda"
+        },
+        {
+          "name": "0223_employee_read_provisioning.sql",
+          "gitBlobOid": "f33b1bf4f3ed357cfea14f0e82a3a385ecd52d2c",
+          "sha256": "d55a0d5e16f37f231e0938516a1ee7248b0e3b4190e8de5e6c68e1e9a3e1810a"
+        },
+        {
+          "name": "0224_windows_portal_publication_chain_index.sql",
+          "gitBlobOid": "a95e8eefe0eff504cff2e42a376a293cd1081505",
+          "sha256": "4252667cceb62ca9bbbb3efd8804a7dc69f58dae1396240f0109fbac6abbcd15"
+        },
+        {
+          "name": "0225_native_staff_lifecycle_bridge.sql",
+          "gitBlobOid": "f8b68381f455e5e863eadc211e500a90283080ea",
+          "sha256": "1363221a710d774fc9e4c7547f7199d2bdc6b41ca62c8078c98ac5334603c175"
+        },
+        {
+          "name": "0226_staff_login_bindings.sql",
+          "gitBlobOid": "46df71ee49ea588b70a00949033a53f60ecce8c4",
+          "sha256": "c25b03f4499c6de80d586a583c0e59b8c39b264248645c59733304ebe751d0c5"
+        },
+        {
+          "name": "0227_owner_intel_reads.sql",
+          "gitBlobOid": "57c41601fad7fb7003d55e2802bcb7a485c441c9",
+          "sha256": "7e0d5efb1fdd99020b9f49292aa3fc06231c2ebabc99828c58a8959f8b06ece9"
+        },
+        {
+          "name": "0228_competitor_intel_ingest.sql",
+          "gitBlobOid": "dcbcef66cce49e1f8c8478c7868a3713cd914f06",
+          "sha256": "8aec846b8a170ff36fcd6bd6036a3c725ced3e1c0e9b0677bdc9a9661e360b8d"
+        },
+        {
+          "name": "0229_owner_intel_source_feed.sql",
+          "gitBlobOid": "006dd16ca7f9eda63e8d664962ca949724b4fcd3",
+          "sha256": "50e6dbd1899a2e601e8218feb4d7af4ca60717551c768b8d904f56cad4ac4c5d"
+        },
+        {
+          "name": "0230_app_release_pilot.sql",
+          "gitBlobOid": "352a0178f4b3e3626775498a6bd143132a549280",
+          "sha256": "824bdd58e12a2db1821131aadec48982ff324219cd15c257d7ccc897eaabe45b"
+        },
+        {
+          "name": "0231_owner_google_ads_summary.sql",
+          "gitBlobOid": "a8a2ef010e637b5a77e6d3d09048d142afdcff70",
+          "sha256": "d1c778d0e10a21b25663f89783ceb7ace664e4d70eb2b5e121375e6ef1f80481"
+        }
+      ],
+      "sourceOnlyPending": [
+        {
+          "name": "0226_staff_login_bindings.sql",
+          "gitBlobOid": "46df71ee49ea588b70a00949033a53f60ecce8c4",
+          "sha256": "c25b03f4499c6de80d586a583c0e59b8c39b264248645c59733304ebe751d0c5"
+        },
+        {
+          "name": "0227_owner_intel_reads.sql",
+          "gitBlobOid": "57c41601fad7fb7003d55e2802bcb7a485c441c9",
+          "sha256": "7e0d5efb1fdd99020b9f49292aa3fc06231c2ebabc99828c58a8959f8b06ece9"
+        },
+        {
+          "name": "0228_competitor_intel_ingest.sql",
+          "gitBlobOid": "dcbcef66cce49e1f8c8478c7868a3713cd914f06",
+          "sha256": "8aec846b8a170ff36fcd6bd6036a3c725ced3e1c0e9b0677bdc9a9661e360b8d"
+        },
+        {
+          "name": "0229_owner_intel_source_feed.sql",
+          "gitBlobOid": "006dd16ca7f9eda63e8d664962ca949724b4fcd3",
+          "sha256": "50e6dbd1899a2e601e8218feb4d7af4ca60717551c768b8d904f56cad4ac4c5d"
+        },
+        {
+          "name": "0230_app_release_pilot.sql",
+          "gitBlobOid": "352a0178f4b3e3626775498a6bd143132a549280",
+          "sha256": "824bdd58e12a2db1821131aadec48982ff324219cd15c257d7ccc897eaabe45b"
+        },
+        {
+          "name": "0231_owner_google_ads_summary.sql",
+          "gitBlobOid": "a8a2ef010e637b5a77e6d3d09048d142afdcff70",
+          "sha256": "d1c778d0e10a21b25663f89783ceb7ace664e4d70eb2b5e121375e6ef1f80481"
+        }
+      ],
+      "actualOnlyHistorical": []
+    },
+    "client": {
+      "databaseId": "7f40a7b7-c3ec-470e-a626-e798867f71f8",
+      "rowCount": 158,
+      "orderedRows": [
+        {
+          "name": "0001_initial.sql",
+          "id": 1
+        },
+        {
+          "name": "0002_seed_initial_staff.sql",
+          "id": 2
+        },
+        {
+          "name": "0003_delivery_platform.sql",
+          "id": 3
+        },
+        {
+          "name": "0004_stream_resumable.sql",
+          "id": 4
+        },
+        {
+          "name": "0005_share_lifecycle.sql",
+          "id": 5
+        },
+        {
+          "name": "0006_download_quota.sql",
+          "id": 6
+        },
+        {
+          "name": "0007_aliases_workflow_jobs.sql",
+          "id": 7
+        },
+        {
+          "name": "0008_trash_tombstones.sql",
+          "id": 8
+        },
+        {
+          "name": "0090_aliases_incoming_requests.sql",
+          "id": 9
+        },
+        {
+          "name": "0091_client_notifications.sql",
+          "id": 10
+        },
+        {
+          "name": "0092_preview_derivative_identity.sql",
+          "id": 11
+        },
+        {
+          "name": "0093_reusable_incoming_uploads.sql",
+          "id": 12
+        },
+        {
+          "name": "0094_cloud_transfers.sql",
+          "id": 13
+        },
+        {
+          "name": "0095_trash_object_manifests.sql",
+          "id": 14
+        },
+        {
+          "name": "0096_client_portal_foundation.sql",
+          "id": 15
+        },
+        {
+          "name": "0097_client_portal_team_acl.sql",
+          "id": 16
+        },
+        {
+          "name": "0098_client_access_sync_processing.sql",
+          "id": 17
+        },
+        {
+          "name": "0099_client_portal_request_notifications.sql",
+          "id": 18
+        },
+        {
+          "name": "0100_client_portal_release_hardening.sql",
+          "id": 19
+        },
+        {
+          "name": "0101_client_service_request_scoping.sql",
+          "id": 20
+        },
+        {
+          "name": "0102_client_service_request_area.sql",
+          "id": 21
+        },
+        {
+          "name": "0103_client_portal_workspace.sql",
+          "id": 22
+        },
+        {
+          "name": "0104_service_request_thread.sql",
+          "id": 23
+        },
+        {
+          "name": "0105_internal_folder_grants.sql",
+          "id": 24
+        },
+        {
+          "name": "0106_image_thumbnail_jobs.sql",
+          "id": 25
+        },
+        {
+          "name": "0107_thumbnail_cleanup_jobs.sql",
+          "id": 26
+        },
+        {
+          "name": "0108_thumbnail_backfill_runs.sql",
+          "id": 27
+        },
+        {
+          "name": "0109_image_asset_locations.sql",
+          "id": 28
+        },
+        {
+          "name": "0110_thumbnail_backfill_jobs_scope.sql",
+          "id": 29
+        },
+        {
+          "name": "0111_thumbnail_render_provenance.sql",
+          "id": 30
+        },
+        {
+          "name": "0112_thumbnail_renderer_coordination.sql",
+          "id": 31
+        },
+        {
+          "name": "0113_thumbnail_backfill_controls.sql",
+          "id": 32
+        },
+        {
+          "name": "0112_public_share_location_privacy.sql",
+          "id": 33
+        },
+        {
+          "name": "0114_delivery_share_prefix_lookup.sql",
+          "id": 34
+        },
+        {
+          "name": "0115_client_workspace_notifications.sql",
+          "id": 35
+        },
+        {
+          "name": "0116_incoming_upload_hardening.sql",
+          "id": 36
+        },
+        {
+          "name": "0117_service_request_v2.sql",
+          "id": 37
+        },
+        {
+          "name": "0118_staff_work_area_revisions.sql",
+          "id": 38
+        },
+        {
+          "name": "0119_client_request_attachments.sql",
+          "id": 39
+        },
+        {
+          "name": "0120_project_alpha_draft_quote_receipts.sql",
+          "id": 40
+        },
+        {
+          "name": "0121_client_workspace_hierarchy_v2.sql",
+          "id": 41
+        },
+        {
+          "name": "0122_project_alpha_service_catalog_projection.sql",
+          "id": 42
+        },
+        {
+          "name": "0123_portal_v2_membership_management.sql",
+          "id": 43
+        },
+        {
+          "name": "0124_client_delegated_public_shares.sql",
+          "id": 44
+        },
+        {
+          "name": "0125_project_alpha_portal_projection.sql",
+          "id": 45
+        },
+        {
+          "name": "0126_delivery_share_recipient_snapshots.sql",
+          "id": 46
+        },
+        {
+          "name": "0127_portal_invitation_secret_scrub.sql",
+          "id": 47
+        },
+        {
+          "name": "0128_project_alpha_catalog_compatibility.sql",
+          "id": 48
+        },
+        {
+          "name": "0129_portal_hierarchy_relations.sql",
+          "id": 49
+        },
+        {
+          "name": "0130_client_delegated_share_provisioning.sql",
+          "id": 50
+        },
+        {
+          "name": "0131_video_thumbnail_recovery_backfill.sql",
+          "id": 51
+        },
+        {
+          "name": "0132_portal_v2_legacy_member_bridges.sql",
+          "id": 52
+        },
+        {
+          "name": "0133_portal_invitation_access_enrollment_receipts.sql",
+          "id": 53
+        },
+        {
+          "name": "0134_rejected_request_attachment_submit_guard.sql",
+          "id": 54
+        },
+        {
+          "name": "0135_security_scan_followups.sql",
+          "id": 55
+        },
+        {
+          "name": "0136_portal_v2_identity_denials.sql",
+          "id": 56
+        },
+        {
+          "name": "0137_authenticated_delivery_grants.sql",
+          "id": 57
+        },
+        {
+          "name": "0138_viewer_model_associations.sql",
+          "id": 58
+        },
+        {
+          "name": "0139_thumbnail_claim_queue_index.sql",
+          "id": 59
+        },
+        {
+          "name": "0140_truenas_thumbnail_provenance.sql",
+          "id": 60
+        },
+        {
+          "name": "0141_viewer_client_preferences.sql",
+          "id": 61
+        },
+        {
+          "name": "0142_client_viewer_shares.sql",
+          "id": 62
+        },
+        {
+          "name": "0143_viewer_session_revocation_outbox.sql",
+          "id": 63
+        },
+        {
+          "name": "0144_viewer_client_grants.sql",
+          "id": 64
+        },
+        {
+          "name": "0145_portal_identity_eligibility.sql",
+          "id": 65
+        },
+        {
+          "name": "0146_viewer_client_grant_audit.sql",
+          "id": 66
+        },
+        {
+          "name": "0147_project_alpha_delivery_intents.sql",
+          "id": 67
+        },
+        {
+          "name": "0148_single_file_delivery_shares.sql",
+          "id": 68
+        },
+        {
+          "name": "0149_portal_operations_management.sql",
+          "id": 69
+        },
+        {
+          "name": "0150_delivery_share_history_index.sql",
+          "id": 70
+        },
+        {
+          "name": "0151_thumbnail_render_not_before.sql",
+          "id": 71
+        },
+        {
+          "name": "0152_portal_identity_read_indexes.sql",
+          "id": 72
+        },
+        {
+          "name": "0153_client_folder_notification_batches.sql",
+          "id": 73
+        },
+        {
+          "name": "0154_notification_batch_controls.sql",
+          "id": 74
+        },
+        {
+          "name": "0155_client_feedback.sql",
+          "id": 75
+        },
+        {
+          "name": "0156_catalog_source_isolation.sql",
+          "id": 76
+        },
+        {
+          "name": "0157_delivery_source_provenance.sql",
+          "id": 77
+        },
+        {
+          "name": "0158_portal_source_ownership.sql",
+          "id": 78
+        },
+        {
+          "name": "0159_delivery_intent_source_provenance.sql",
+          "id": 79
+        },
+        {
+          "name": "0160_project_alpha_quote_destinations.sql",
+          "id": 80
+        },
+        {
+          "name": "0161_portal_delivery_notification_batches.sql",
+          "id": 81
+        },
+        {
+          "name": "0162_portal_source_authorities.sql",
+          "id": 82
+        },
+        {
+          "name": "0163_native_staff_delivery_bindings.sql",
+          "id": 83
+        },
+        {
+          "name": "0164_project_access_terms.sql",
+          "id": 84
+        },
+        {
+          "name": "0165_workspace_invitation_approvals.sql",
+          "id": 85
+        },
+        {
+          "name": "0166_workspace_address_book.sql",
+          "id": 86
+        },
+        {
+          "name": "0167_workspace_peer_administrators.sql",
+          "id": 87
+        },
+        {
+          "name": "0168_project_alpha_service_assignments.sql",
+          "id": 88
+        },
+        {
+          "name": "0169_project_access_expiry_notifications.sql",
+          "id": 89
+        },
+        {
+          "name": "0170_authenticated_delivery_change_notifications.sql",
+          "id": 90
+        },
+        {
+          "name": "0171_secondary_workspace_membership_management.sql",
+          "id": 91
+        },
+        {
+          "name": "0172_project_access_authority_history.sql",
+          "id": 92
+        },
+        {
+          "name": "0173_invitation_request_foreign_key_repair.sql",
+          "id": 93
+        },
+        {
+          "name": "0174_service_assignment_request_policy.sql",
+          "id": 94
+        },
+        {
+          "name": "0175_authenticated_delivery_notification_policy_consistency.sql",
+          "id": 95
+        },
+        {
+          "name": "0176_secondary_invitation_delegation_recheck.sql",
+          "id": 96
+        },
+        {
+          "name": "0177_domain_neutral_delivery_notifications.sql",
+          "id": 97
+        },
+        {
+          "name": "0178_domain_neutral_delivery_notification_contract.sql",
+          "id": 98
+        },
+        {
+          "name": "0179_service_assignment_policy_proof_v2.sql",
+          "id": 99
+        },
+        {
+          "name": "0180_service_assignment_policy_v1_contract.sql",
+          "id": 100
+        },
+        {
+          "name": "0181_service_assignment_request_policy_reviews.sql",
+          "id": 101
+        },
+        {
+          "name": "0182_portal_delivery_notification_source_ready.sql",
+          "id": 102
+        },
+        {
+          "name": "0183_portal_delivery_notification_direct_source_ready.sql",
+          "id": 103
+        },
+        {
+          "name": "0184_native_client_feedback.sql",
+          "id": 104
+        },
+        {
+          "name": "0185_native_service_request_ownership.sql",
+          "id": 105
+        },
+        {
+          "name": "0186_delivery_notification_authority_provenance.sql",
+          "id": 106
+        },
+        {
+          "name": "0187_authenticated_content_audit.sql",
+          "id": 107
+        },
+        {
+          "name": "0188_native_feedback_completion_notices.sql",
+          "id": 108
+        },
+        {
+          "name": "0189_primary_staff_folder_bindings.sql",
+          "id": 109
+        },
+        {
+          "name": "0190_portal_contact_assignments_v4.sql",
+          "id": 110
+        },
+        {
+          "name": "0191_portal_projection_wire_contract_claim.sql",
+          "id": 111
+        },
+        {
+          "name": "0192_contact_assignment_billing_independence.sql",
+          "id": 112
+        },
+        {
+          "name": "0193_bulk_download_parts.sql",
+          "id": 113
+        },
+        {
+          "name": "0194_client_delegated_share_expiry.sql",
+          "id": 114
+        },
+        {
+          "name": "0195_legacy_workspace_authority_lifecycle.sql",
+          "id": 115
+        },
+        {
+          "name": "0196_bulk_download_archive_cache.sql",
+          "id": 116
+        },
+        {
+          "name": "0197_portal_root_access_policy.sql",
+          "id": 117
+        },
+        {
+          "name": "0198_incoming_upload_owner_notifications.sql",
+          "id": 118
+        },
+        {
+          "name": "0199_native_viewer_grants.sql",
+          "id": 119
+        },
+        {
+          "name": "0199_incoming_upload_pickup_lifecycle.sql",
+          "id": 120
+        },
+        {
+          "name": "0200_native_feedback_workspace_history.sql",
+          "id": 121
+        },
+        {
+          "name": "0201_native_draft_quote_notifications.sql",
+          "id": 122
+        },
+        {
+          "name": "0202_native_delivery_recipient_events.sql",
+          "id": 123
+        },
+        {
+          "name": "0203_primary_delivery_authority.sql",
+          "id": 124
+        },
+        {
+          "name": "0204_delivery_change_receipts.sql",
+          "id": 125
+        },
+        {
+          "name": "0205_authenticated_delivery_change_sequence.sql",
+          "id": 126
+        },
+        {
+          "name": "0206_delivery_index_provider_identity.sql",
+          "id": 127
+        },
+        {
+          "name": "0207_delivery_change_projection.sql",
+          "id": 128
+        },
+        {
+          "name": "0208_authenticated_delivery_change_batch_provider_identity.sql",
+          "id": 129
+        },
+        {
+          "name": "0209_authenticated_delivery_change_recipient_events.sql",
+          "id": 130
+        },
+        {
+          "name": "0210_client_delegated_share_expiry_health.sql",
+          "id": 131
+        },
+        {
+          "name": "0211_incoming_upload_verification_lifecycle.sql",
+          "id": 132
+        },
+        {
+          "name": "0212_incoming_upload_archive_inventory.sql",
+          "id": 133
+        },
+        {
+          "name": "0213_incoming_rclone_promotion.sql",
+          "id": 134
+        },
+        {
+          "name": "0214_ops_inventory_catalog_staging.sql",
+          "id": 135
+        },
+        {
+          "name": "0215_operations_portal_access_authority_shadow.sql",
+          "id": 136
+        },
+        {
+          "name": "0216_client_authority_workspace_ownership_claim.sql",
+          "id": 137
+        },
+        {
+          "name": "0217_client_authority_workspace_claim_evidence.sql",
+          "id": 138
+        },
+        {
+          "name": "0218_client_authority_workspace_binding.sql",
+          "id": 139
+        },
+        {
+          "name": "0219_operations_portal_authority_v2.sql",
+          "id": 140
+        },
+        {
+          "name": "0220_operations_portal_authority_v3_permissions.sql",
+          "id": 141
+        },
+        {
+          "name": "0221_verified_recipient_delivery_authority.sql",
+          "id": 142
+        },
+        {
+          "name": "0222_verified_recipient_delivery_cross_manager_revoke.sql",
+          "id": 143
+        },
+        {
+          "name": "0223_operations_portal_workspace_publications.sql",
+          "id": 144
+        },
+        {
+          "name": "0224_operations_portal_native_recipient_authority.sql",
+          "id": 145
+        },
+        {
+          "name": "0225_operations_portal_workspace_publication_cancellations.sql",
+          "id": 146
+        },
+        {
+          "name": "0226_operations_portal_native_workspace_cleanup.sql",
+          "id": 147
+        },
+        {
+          "name": "0227_operations_portal_native_delivery_authority.sql",
+          "id": 148
+        },
+        {
+          "name": "0228_operations_portal_native_content_start_audit.sql",
+          "id": 149
+        },
+        {
+          "name": "0229_operations_portal_native_delivery_regrant.sql",
+          "id": 150
+        },
+        {
+          "name": "0230_operations_portal_native_delivery_terminal_cancellations.sql",
+          "id": 151
+        },
+        {
+          "name": "0231_portal_primary_private_ingress_authority.sql",
+          "id": 152
+        },
+        {
+          "name": "0232_shared_profile_edit_authority.sql",
+          "id": 153
+        },
+        {
+          "name": "0233_explicit_primary_workspace_folder_ownership.sql",
+          "id": 154
+        },
+        {
+          "name": "0234_pa_principal_reenrollment.sql",
+          "id": 155
+        },
+        {
+          "name": "0237_viewer_direct_client_grants.sql",
+          "id": 156
+        },
+        {
+          "name": "0238_viewer_direct_session_intents.sql",
+          "id": 157
+        },
+        {
+          "name": "0240_viewer_direct_grant_receipt_immutability.sql",
+          "id": 158
+        }
+      ],
+      "orderedRowsSha256": "5b68178ca8f66e79407abe28d10aa393a7d37f15fdbd4309e01e2b4aac198a4e",
+      "orderedNamesSha256": "8964f7012574c7aea19e94529729a8fa3255687707c17df8bb0a08bea8136ee6",
+      "sourceMigrationCount": 161,
+      "sourceMigrations": [
+        {
+          "name": "0001_initial.sql",
+          "gitBlobOid": "37fa641ab3a5c73b0d511ae31b93579d2c7b60ec",
+          "sha256": "849051c5b54eac8044a1ead52f745ccf96f6eafd23b1e6678391f1872e7b33a9"
+        },
+        {
+          "name": "0002_seed_initial_staff.sql",
+          "gitBlobOid": "2e3fa5e345bdb1dacd8e36148f6a52ae6d4186da",
+          "sha256": "d43095aa358550280efa54f8e7f9ebf7fbcfcb8aa333e7cc80d156cf46fe945e"
+        },
+        {
+          "name": "0003_delivery_platform.sql",
+          "gitBlobOid": "6e62f5b63b156f05b379c9395946f385836b7ca0",
+          "sha256": "a950ee5d0c90c5d8e7eb4ffaae53374b24bfe1e204c3bf0a997b8bc18ce0a90e"
+        },
+        {
+          "name": "0004_stream_resumable.sql",
+          "gitBlobOid": "ab2f5c3371544ceb1c3f2d89a9b1783e504675c6",
+          "sha256": "f0a0d7940e4a9513632d1e29433d57c2357b72056a95ce893992171e95812317"
+        },
+        {
+          "name": "0005_share_lifecycle.sql",
+          "gitBlobOid": "f8c8e0ad6d0b0142f6cb206b6827fd05b4f80785",
+          "sha256": "bd403557b163b324b74c5c98dda1059be0502f6c1e03f6694daa81bacb96210a"
+        },
+        {
+          "name": "0006_download_quota.sql",
+          "gitBlobOid": "c8a047ae597271c7ee861bfda84ac3afc31039ae",
+          "sha256": "7fee40c6ac1bdae9ab54193053a70ce39b9190f5b30fd834dcc66bb23783a0cf"
+        },
+        {
+          "name": "0007_aliases_workflow_jobs.sql",
+          "gitBlobOid": "8cded518f5025bc4105f3557f94798d0d0634510",
+          "sha256": "18cf2331d45fd2b61128271adc863df25d14b52b23d51272152aba87565a0f3e"
+        },
+        {
+          "name": "0008_trash_tombstones.sql",
+          "gitBlobOid": "cbbda33fdc6f3a6d2bf4d2a69709e124f00c3513",
+          "sha256": "9fccd5890281047bde1d554ac45599a2113c6cdbb452eacb892eefb8a879a3a3"
+        },
+        {
+          "name": "0090_aliases_incoming_requests.sql",
+          "gitBlobOid": "2c5ea76b4134b92f047cf24211fab1e8f3927f8a",
+          "sha256": "b49d1c68c356e3b9a3054d6e7c0d0d3f8eb295a75204a9b72f7e0c05b423ab89"
+        },
+        {
+          "name": "0091_client_notifications.sql",
+          "gitBlobOid": "ce0444bbe8d2682d3c41d4a941c6cb060f380dcd",
+          "sha256": "2439aa432c5e39796b3e5c2e93b56e15a4457a0ab266d675a4a99c99b081e392"
+        },
+        {
+          "name": "0092_preview_derivative_identity.sql",
+          "gitBlobOid": "0e95277f7b8f7b5b64c5748c5be3ea831a1ab626",
+          "sha256": "8a565d3b5165ccb05ef7f435045736c7215a8065f8b3033d08f8fa7fad1b5041"
+        },
+        {
+          "name": "0093_reusable_incoming_uploads.sql",
+          "gitBlobOid": "1c21f750d8abb3f5b12cd867a2cb586cee4ec55f",
+          "sha256": "7dea80aeb5a40101811c28e7caf62f8d421c0c69309a85bbf3cd4b7390df20b2"
+        },
+        {
+          "name": "0094_cloud_transfers.sql",
+          "gitBlobOid": "989ce90501193a812f71611fe4f0f20a85cd43be",
+          "sha256": "8a8bb5ad1c8c3f050a8c1b000f57ce77fa2fb240af97befc5062e7a23032a18c"
+        },
+        {
+          "name": "0095_trash_object_manifests.sql",
+          "gitBlobOid": "3173936e1f351feec1914d76f7788710b53873df",
+          "sha256": "9ffe54408b8362310fd4c02130b58d0fab521c9efafa3fa11bfc9ed0d822c8bb"
+        },
+        {
+          "name": "0096_client_portal_foundation.sql",
+          "gitBlobOid": "7cd6e38da826570f361fbad59ae52df5b9547f96",
+          "sha256": "412073b80bae88a349521dab3824749b570ca18ca72aece972196b9e54da82fe"
+        },
+        {
+          "name": "0097_client_portal_team_acl.sql",
+          "gitBlobOid": "72a8842782487cb2ee1d793a146499a920d92ea0",
+          "sha256": "75553f83eb03d18774a8e5e6f648659d3e052bc15783291ebd507aa647b051da"
+        },
+        {
+          "name": "0098_client_access_sync_processing.sql",
+          "gitBlobOid": "1a8c1e8f2b5eb2a3285b1b5c6e6663436ce9d6a5",
+          "sha256": "a77a6d1deb7b538d375e34ef19f5fad92febef4be1d788f252f4de7bf11ab244"
+        },
+        {
+          "name": "0099_client_portal_request_notifications.sql",
+          "gitBlobOid": "6d5b314a09d40d603e71edec342298967094af8b",
+          "sha256": "4e1f0036c3a0165baaf379d6ac59cc18f40cb343ea7dcd9783024ae0858cbea0"
+        },
+        {
+          "name": "0100_client_portal_release_hardening.sql",
+          "gitBlobOid": "0bd17063f04203795b92cf9c859c8e871bd96f41",
+          "sha256": "242799db2734b3ecb56039f87b5ee16442c090ecf71d117b954d5c049d7c4e1b"
+        },
+        {
+          "name": "0101_client_service_request_scoping.sql",
+          "gitBlobOid": "e7eb2dbbe35cb824a1763bb2c2700591756904f7",
+          "sha256": "3ad1ba9a82581693f1a5c1440711c87b89bb7e790ecd36b2140e95502f429950"
+        },
+        {
+          "name": "0102_client_service_request_area.sql",
+          "gitBlobOid": "bef7164f58746d4706a8215f19f21ecd93cc665b",
+          "sha256": "21ca0e9bd0dce57463d8e11acf5c78a705723d7aa042647debe91ce25f92862c"
+        },
+        {
+          "name": "0103_client_portal_workspace.sql",
+          "gitBlobOid": "19b3b9055a7882072e4483d6eec380f5043b7e18",
+          "sha256": "e8aa2350e6276d8e2043fca05c01dbf83494799d19f9901561c82610bf000298"
+        },
+        {
+          "name": "0104_service_request_thread.sql",
+          "gitBlobOid": "7c82a61aaf60fad20cd88604882903230883dcaf",
+          "sha256": "62f61ec6b64152203326c8a4715f9f1ec8bb3e98ebf9cbb008a07d1b50878e7c"
+        },
+        {
+          "name": "0105_internal_folder_grants.sql",
+          "gitBlobOid": "a5b5bdbe462a36fd0ddd6bc90101bc449d57d913",
+          "sha256": "155c5084ad1a1ddd8cc68bba4d16b349030605963e881b9a57bf5099dd9980db"
+        },
+        {
+          "name": "0106_image_thumbnail_jobs.sql",
+          "gitBlobOid": "2d818b780d3fb9d52a826808d0a80291fc1b0d22",
+          "sha256": "86afb4321a954280749d6a4e2095bc6984d0c1ecda8f17a2303898db215f4db8"
+        },
+        {
+          "name": "0107_thumbnail_cleanup_jobs.sql",
+          "gitBlobOid": "a98fda573c203500fb58d417271f6a850b58e68a",
+          "sha256": "e877c06bdc66263cfd2cf03bc6f3fc9672d133b99e54159053b9d5f535911a3a"
+        },
+        {
+          "name": "0108_thumbnail_backfill_runs.sql",
+          "gitBlobOid": "73e2a06b14b50874a34653bcce63eec6a095c4bb",
+          "sha256": "b09c158af57fb57779d00ae990978e6c3c3f0e744083d6c38a49a0484f1dde74"
+        },
+        {
+          "name": "0109_image_asset_locations.sql",
+          "gitBlobOid": "7aa08b308eea14c8319b3ca3ad2196fe0696b1f1",
+          "sha256": "b3a9220752887a834d5883eb8650c7df8dbd09f2df1b97f3fcdc13b3b29b6e74"
+        },
+        {
+          "name": "0110_thumbnail_backfill_jobs_scope.sql",
+          "gitBlobOid": "edaf3ad7f79ac3db52890ff3fa8d916a892408ac",
+          "sha256": "d84f96c51563f8dc7d50bc949284aaef62e240448c8a62322e55c6aa47caa8dd"
+        },
+        {
+          "name": "0111_thumbnail_render_provenance.sql",
+          "gitBlobOid": "9322d6c084c9f9e2a1c0c8ba942508ddaa57a665",
+          "sha256": "3b4d6ca1681a8774d11a97c6a635d955e923e5819da6d236d172fb1376f6fe76"
+        },
+        {
+          "name": "0112_public_share_location_privacy.sql",
+          "gitBlobOid": "ccf488071ecf9c7806b5fcc988f4d9bff68bc87d",
+          "sha256": "f9e869958f65a4aa646c65ed6a7c8f0b8f3b89328c050762d74084c425c61384"
+        },
+        {
+          "name": "0114_delivery_share_prefix_lookup.sql",
+          "gitBlobOid": "98d2088af79b582486ea132ced24c05272640e04",
+          "sha256": "dcd953706ea46e7fbc05fe8c929a80fcc191337727cddb77ac4702a8c880d864"
+        },
+        {
+          "name": "0115_client_workspace_notifications.sql",
+          "gitBlobOid": "318040459bf28dbdb2fbd27b7863b0710eaae6fb",
+          "sha256": "0f459da92a059070fa9c965f2a29cb9dd30f63452d7d3a088c31a11a8842dbaa"
+        },
+        {
+          "name": "0116_incoming_upload_hardening.sql",
+          "gitBlobOid": "6069ef6ff5dc29a4e12ff050789eff881937667d",
+          "sha256": "7ed87f3a23f64d406515c267f41188771edb7858eb5b4ebc8e0fe2e3bffc95c7"
+        },
+        {
+          "name": "0117_service_request_v2.sql",
+          "gitBlobOid": "4d195e26a3938ebbe46afbb8f603aa00dfee3733",
+          "sha256": "432869d6d39f31cf98f49ef1c9086ac4ec08afa7328bb8c0775bad3a1591b74b"
+        },
+        {
+          "name": "0118_staff_work_area_revisions.sql",
+          "gitBlobOid": "057508516a8e8bb2b1ef4e6d8a22de8ef8822fcf",
+          "sha256": "5693efdfd5ae947bb2f9b3f0151207d979efb79ed15617f2bafa62585e70ec3f"
+        },
+        {
+          "name": "0119_client_request_attachments.sql",
+          "gitBlobOid": "b804b5d55492d368c3cd4352ec790a3ec6af5da0",
+          "sha256": "9903235643c9381e70fda26a68fc8fad171b286db2303b7ce6895e4d486d351f"
+        },
+        {
+          "name": "0120_project_alpha_draft_quote_receipts.sql",
+          "gitBlobOid": "c1851d5b07a6926f3817e86225ad6a12f61139ba",
+          "sha256": "0f38d1c072dc5c5a075507eab38550222873976221dc2050707cc9da061d1ac3"
+        },
+        {
+          "name": "0121_client_workspace_hierarchy_v2.sql",
+          "gitBlobOid": "a2e2c4458e1c10d090a66a97d6063f8fd5824bfb",
+          "sha256": "d90dffba0d9ea27d74acc97d40d3b923a8fb7c575adb3e940477634efdb575a4"
+        },
+        {
+          "name": "0122_project_alpha_service_catalog_projection.sql",
+          "gitBlobOid": "ea636686ae2a20be225b8ddc9c6534c90a636663",
+          "sha256": "0819f6ee5a2eec808dc0563f9f31b8c02472de2941694817eb7312ab2ff0a611"
+        },
+        {
+          "name": "0123_portal_v2_membership_management.sql",
+          "gitBlobOid": "f0490758f4fc31078c08f865177d8b3e90e60f8b",
+          "sha256": "212376d0c334595c78f534579a9040d03885f8ea5128fb8aacdfb77442e5d5c7"
+        },
+        {
+          "name": "0124_client_delegated_public_shares.sql",
+          "gitBlobOid": "694d7d03a8145d27a4f1313c1888182d9b190676",
+          "sha256": "d4030cd64a6d267fad6fbb7a72e1bdc2d61cf858a64b1ea7e163e38bbe131d45"
+        },
+        {
+          "name": "0125_project_alpha_portal_projection.sql",
+          "gitBlobOid": "b8f2af3cdb313e196ecbca4a2e0ed37f2d552ee7",
+          "sha256": "f9ebbdc62cd8295504fd6b51325ed6dd9071700ed952aba0defa0c47adce5658"
+        },
+        {
+          "name": "0126_delivery_share_recipient_snapshots.sql",
+          "gitBlobOid": "637528d8ca5e0599c210d1978800d2fefc7519a9",
+          "sha256": "076bb0fa766e8a7af2a56a9bf877ec9d4063bf099da01f31295439e1197210c6"
+        },
+        {
+          "name": "0127_portal_invitation_secret_scrub.sql",
+          "gitBlobOid": "7a9d353a6d7c75b9f85cf75b7228ae50089d8061",
+          "sha256": "c0a93757dd3cae869c166a88a8b5f109f0097cd1df8074acdf721d67fd344462"
+        },
+        {
+          "name": "0128_project_alpha_catalog_compatibility.sql",
+          "gitBlobOid": "bd0dba388de4661d45bab006a9f3d2ce5dece34c",
+          "sha256": "4bbff790a5f7b24ea6075f636c88618036eb56111377b12366f2576fc95ae06b"
+        },
+        {
+          "name": "0129_portal_hierarchy_relations.sql",
+          "gitBlobOid": "efed87be3cfd866537065886c91eb1e670c2a044",
+          "sha256": "797a04dadbefa8ea7fcc3a6e632aea3efc8dfc8ba04eec95a9e6bdd36169981d"
+        },
+        {
+          "name": "0130_client_delegated_share_provisioning.sql",
+          "gitBlobOid": "aa202404ad34a400d342ddd91f12b3aaa96e4c61",
+          "sha256": "397adb9f55fb0eb52ce5d5e6f9f54a3fa6c763d0a015c8703d23b05d4a7cacc8"
+        },
+        {
+          "name": "0131_video_thumbnail_recovery_backfill.sql",
+          "gitBlobOid": "dbc30353b34865a9b5af3990274d52d073406d57",
+          "sha256": "e471ae49e56f3fdd9a1cefea80648db7362c259c1d40d0d50486c227241d3906"
+        },
+        {
+          "name": "0132_portal_v2_legacy_member_bridges.sql",
+          "gitBlobOid": "c05c3334899cc8bba3df6f9626b9ba8b4b6aafef",
+          "sha256": "fda4feee35b1787332743c2458dd3244624a8430a8c53aa30f806d3326a87688"
+        },
+        {
+          "name": "0133_portal_invitation_access_enrollment_receipts.sql",
+          "gitBlobOid": "d35acd3a8f5016c49379a9143dee1b983db3b8ba",
+          "sha256": "86b35781c9fb08925e630d2c1969d123bdea3a57ae094b7f165f7b072d1d9aab"
+        },
+        {
+          "name": "0134_rejected_request_attachment_submit_guard.sql",
+          "gitBlobOid": "0d2e68ce0dc7b213ce03d147509467dfa6098338",
+          "sha256": "a0dc280e204da015a98a038f9299e8d3ed2d0ccc158d77f10344a4b3c604bdd7"
+        },
+        {
+          "name": "0135_security_scan_followups.sql",
+          "gitBlobOid": "445aaf1b27a298f8d903eb968f6d23d4560becb4",
+          "sha256": "a030292c5bac57865b591311517d1e044499eeaabf6be46ce166db426dc59459"
+        },
+        {
+          "name": "0136_portal_v2_identity_denials.sql",
+          "gitBlobOid": "c5034a3fe2dea475bd78d5c410d8f89509c08ee5",
+          "sha256": "3ad7b54244e2c6b6b9d4fc346d59f1fb81841968b27f655f37e43645131b33d2"
+        },
+        {
+          "name": "0137_authenticated_delivery_grants.sql",
+          "gitBlobOid": "a379098c7a51cdefa8a10be09e48cd7e65981809",
+          "sha256": "f95e104e1ae677b70091c4c0741cac27b7873235396fa7ff2ec8f598f9849d09"
+        },
+        {
+          "name": "0138_viewer_model_associations.sql",
+          "gitBlobOid": "c022517a26f0f8527a92ec2de5dbabf4275ceed9",
+          "sha256": "f5ccdacf0abd81c35ecbe090ce50fe22c187bd1eb09b24f062f35b71ade28b02"
+        },
+        {
+          "name": "0139_thumbnail_claim_queue_index.sql",
+          "gitBlobOid": "96e2ed8fbb49928a14de674bc46984a7aa6d1b38",
+          "sha256": "b11a78a30bbc58ca9c2262316246375c6b4026f08a251ca5daa0d3e61f870131"
+        },
+        {
+          "name": "0140_truenas_thumbnail_provenance.sql",
+          "gitBlobOid": "17ae775cf4fdf7949793ce0104341afde342db3e",
+          "sha256": "1c1e43226c67036589dfb350d59b9e5b1ac001e752955e7ea3a76277695be3f0"
+        },
+        {
+          "name": "0141_viewer_client_preferences.sql",
+          "gitBlobOid": "097bd53e55d50d8469b0499bcf0242c355fcdfed",
+          "sha256": "6364d64a0fb1987c8c9083f93c676378bc7320e8dbc1630634311913e00f1cd8"
+        },
+        {
+          "name": "0142_client_viewer_shares.sql",
+          "gitBlobOid": "6c814c45f9667fb5a94cce8fa1e14c7bebaf9dd6",
+          "sha256": "0bf99fc7db633538900dabde56425d24d6a941d42bd974669c0a40704a7b7c2c"
+        },
+        {
+          "name": "0143_viewer_session_revocation_outbox.sql",
+          "gitBlobOid": "966d1c882de2d5b492d237ed6161b6d516dcec1d",
+          "sha256": "bbbec6c47399b4018d37a77e24c4304c8999727184746bac760cecd774751ef0"
+        },
+        {
+          "name": "0144_viewer_client_grants.sql",
+          "gitBlobOid": "cd8c0cb219a7fb1adb3e44021682bd18e7969df8",
+          "sha256": "49c661380b7bc606fe2132064075b21361bbf684804352a1f6944aeff74b14d9"
+        },
+        {
+          "name": "0145_portal_identity_eligibility.sql",
+          "gitBlobOid": "eead2af944fb7a46d4a6b4c0fdb9a887e8d0464b",
+          "sha256": "1ef966bfdb726b6778c656f37d52e8c35aee132a63f6792d0ddd89a90cd6bbe0"
+        },
+        {
+          "name": "0146_viewer_client_grant_audit.sql",
+          "gitBlobOid": "1c30518c947ec22ae50767a708c900518c0c26c0",
+          "sha256": "13531e5228ba46e8be100e9f2f93291f9f07866743851c1e0ad5b3fce679d911"
+        },
+        {
+          "name": "0147_project_alpha_delivery_intents.sql",
+          "gitBlobOid": "0341629bbb998555b26c4bf9d22c8b917c0e5e13",
+          "sha256": "0659120979a7bd902b62fb04f335226f619c488731b0bdcd7b79c634b234361f"
+        },
+        {
+          "name": "0148_single_file_delivery_shares.sql",
+          "gitBlobOid": "6c5fbfca4bf8c7e7c87d64ef8f1e93c09fc09af8",
+          "sha256": "ff35a82c7831bb36af3d75f4099d4df26d98f3bb5f0a23480e9ddcb792ece23b"
+        },
+        {
+          "name": "0149_portal_operations_management.sql",
+          "gitBlobOid": "4b3546cbbec32ac6b4fc9bf4cb9e76fd789dadb5",
+          "sha256": "a049c5c89e7655e812fc7c8d6c29047860267181495754f5cd6516e32cc4dd54"
+        },
+        {
+          "name": "0150_delivery_share_history_index.sql",
+          "gitBlobOid": "9b2e14c13a6ad47792492b10263765bed5354cf8",
+          "sha256": "6092dd235381f23de3deec86b857b2bda4b86646d8d61c14357d97a21a133537"
+        },
+        {
+          "name": "0151_thumbnail_render_not_before.sql",
+          "gitBlobOid": "d313399289bdc528579ebcc311b383620cd717bc",
+          "sha256": "c4d3a4fd9deb042f702b47e00bdd3ab58ee6c2285b7ff1bb94ca336cebe8849f"
+        },
+        {
+          "name": "0152_portal_identity_read_indexes.sql",
+          "gitBlobOid": "ab4237367d2a1da1c1570205424b351330457ea8",
+          "sha256": "aff253b0782593437d60b9a30838f4435a1ea648be4d9f094f711928812548b8"
+        },
+        {
+          "name": "0153_client_folder_notification_batches.sql",
+          "gitBlobOid": "ef4b54a7a1bb26fb197fad077b91591b6e670f39",
+          "sha256": "b27a1bf5da99dfd3880248adc41b121a567ca6a2116cbf5c405494fdc8e654d3"
+        },
+        {
+          "name": "0154_notification_batch_controls.sql",
+          "gitBlobOid": "9b92c61b2d493e3679b85ee8d2e9b8f38abf4ff0",
+          "sha256": "7bf9892b972cd07c64a886dd5002a4bb7215f42514d066635add542ed4599aa2"
+        },
+        {
+          "name": "0155_client_feedback.sql",
+          "gitBlobOid": "33a8b1c79b75125e10ae482f711dc97433e2fae6",
+          "sha256": "e87deff6d3f50131d377e8ec5453dea7d1961806c043a72b9086d6ff8c56a1a7"
+        },
+        {
+          "name": "0156_catalog_source_isolation.sql",
+          "gitBlobOid": "229e67ceb3ccc4575f4c2fac810c1b51cac37902",
+          "sha256": "e5627df144b3c8a64b2e54d5ac10e25be36da0cc02438b8b0779c898be941db4"
+        },
+        {
+          "name": "0157_delivery_source_provenance.sql",
+          "gitBlobOid": "2665a2cfbac7e0d4c3e4a231eb6a6d91339e07bf",
+          "sha256": "702f9dddefa3cbd646f102f7204017281332c715063f952db9725eddd7e5c2a9"
+        },
+        {
+          "name": "0158_portal_source_ownership.sql",
+          "gitBlobOid": "8f4d71c2c74d3233add4b85a46859f757840936b",
+          "sha256": "9a46b9052ba18fe17573d08361e0ef425735e0debb1a2ba3965f70661a55a5dd"
+        },
+        {
+          "name": "0159_delivery_intent_source_provenance.sql",
+          "gitBlobOid": "931308e34e3c1628d3bbb5a3aefc804cef9fa596",
+          "sha256": "4d31236069436d749eee46f1a5c9c68949bb956bba08cb7bdbe01952917014c7"
+        },
+        {
+          "name": "0160_project_alpha_quote_destinations.sql",
+          "gitBlobOid": "5d8cf40c42809a92df394b41098448ef7820774d",
+          "sha256": "9ee3d0a498c5da11f14ad1e6e6c0955a2e675f5b7e69da588018e384a9e2d24b"
+        },
+        {
+          "name": "0161_portal_delivery_notification_batches.sql",
+          "gitBlobOid": "18a093c0d5c211c26f192262d07ec792f14fee83",
+          "sha256": "950317581b71a86a8056791c7df04e04909762851d9fb1bb8e199f66b805c9f7"
+        },
+        {
+          "name": "0162_portal_source_authorities.sql",
+          "gitBlobOid": "45f57351d564d5fc0c3a1fcfacd1de68c28a9eda",
+          "sha256": "a6a6eb164e8b77ee84df7746b0d630f46a60a33774b3b4e22eae68425e0052a0"
+        },
+        {
+          "name": "0163_native_staff_delivery_bindings.sql",
+          "gitBlobOid": "bf4429e00831b37a7e5696a1d7f3b2991fa6125a",
+          "sha256": "dfa21e6be6883f0eae939fd3c41c4b5ce605b726936dbb622d0845ed84cb5afc"
+        },
+        {
+          "name": "0164_project_access_terms.sql",
+          "gitBlobOid": "7037e91eb80ecda5094db74aa6273d966d4eaf7f",
+          "sha256": "e4eb4e71f8f18d697efcc28b1b614ca5d3a26845fa0c5a3ac95b599ca637e4d6"
+        },
+        {
+          "name": "0165_workspace_invitation_approvals.sql",
+          "gitBlobOid": "017b4235262490d19da0ebe6f4f8fc2b8b55506a",
+          "sha256": "bc6850493b86b689f26a5124c7c2c1b69e6ddb6da5b0fbe66f626ec28e462efd"
+        },
+        {
+          "name": "0166_workspace_address_book.sql",
+          "gitBlobOid": "a98c70bcaf58e1a9d3e3c3faa9656a4943842842",
+          "sha256": "bb116ba16328e7c4bc1d86f0b773e9daf9656065ee0ee0dd3fb873fd2b04e353"
+        },
+        {
+          "name": "0167_workspace_peer_administrators.sql",
+          "gitBlobOid": "e17c5f5f68998d6c85ccdef34491e6ce336ba5c6",
+          "sha256": "9105960444036a160058d4e2276f4fb5680b68697422184f3b4b8829aa34d623"
+        },
+        {
+          "name": "0168_project_alpha_service_assignments.sql",
+          "gitBlobOid": "05f0a2244f6c4eeafa63696aa7e4c1de4a2ea9e4",
+          "sha256": "0e2a1200ac552b150d8203bc98808e7862a68f29e7e285d46e4be06c7e6c7a61"
+        },
+        {
+          "name": "0169_project_access_expiry_notifications.sql",
+          "gitBlobOid": "da092f0100d3ab3e52578cb8a9fb50af1dbba36f",
+          "sha256": "dff71ba70b2965d7840b6e0e0bf235ad3b70e16b1da92e9be3ee27e8b297fae1"
+        },
+        {
+          "name": "0170_authenticated_delivery_change_notifications.sql",
+          "gitBlobOid": "78676936d191edf2d9b465d0391157fa7a04aa25",
+          "sha256": "feb1af6ad3c3d4e38289b963c6b6ad99ad51caed15056bace36043604d313d0a"
+        },
+        {
+          "name": "0171_secondary_workspace_membership_management.sql",
+          "gitBlobOid": "8f7e03581687b1e10ae6224b47ab3b805c4c3f92",
+          "sha256": "483eac0b42a86b8cb0ae17619994103985f8d9a3c3056ce74bee3fe29532c213"
+        },
+        {
+          "name": "0172_project_access_authority_history.sql",
+          "gitBlobOid": "f215c7a3d495f09edf9a6ffd7dff1ffe29b6d8e2",
+          "sha256": "5ec0240c86a56dc41833aa08a05d2fbd96f759b8a85aebf2743c59ee2f16ca2a"
+        },
+        {
+          "name": "0173_invitation_request_foreign_key_repair.sql",
+          "gitBlobOid": "636b8fd3c6e1e80e271034e7c8fbad3899526fbc",
+          "sha256": "d8f0f84ca2edac2e90716542429e739a35f6476e46916d3000146c3c2a35ee30"
+        },
+        {
+          "name": "0174_service_assignment_request_policy.sql",
+          "gitBlobOid": "c613c105a1816b1a64197497bb93a902051f190a",
+          "sha256": "12d865fa7dc1f0224e17458c73dbf688f084e7d17012cfba6f57859b32b5acc6"
+        },
+        {
+          "name": "0175_authenticated_delivery_notification_policy_consistency.sql",
+          "gitBlobOid": "84580d258e376ffcb769678769407091c8576c76",
+          "sha256": "aa766fe49d4283048bb113005a245e7c29650f4031c18bc5602c2b1c75403cec"
+        },
+        {
+          "name": "0176_secondary_invitation_delegation_recheck.sql",
+          "gitBlobOid": "4f0a9b253c7843eeb75d5fbb2d5a6179d2e8e113",
+          "sha256": "f75decd9fdf94edb28de0c99a7804a70bb9c630a03f2f54cda75ac4445f227f8"
+        },
+        {
+          "name": "0177_domain_neutral_delivery_notifications.sql",
+          "gitBlobOid": "24adba1163c856c549fdbedc967b445e15b1d1df",
+          "sha256": "8f2a2c6c2c2561ee5b03512e8eb81f14e086d425d6789328f26dc3d0ff8e06e1"
+        },
+        {
+          "name": "0178_domain_neutral_delivery_notification_contract.sql",
+          "gitBlobOid": "aa75625eb81bf633daa384f09d72c14a5ad05183",
+          "sha256": "6aa50b3f63a336630057950414ecba894185d7eacbaafe66b2221af819651273"
+        },
+        {
+          "name": "0179_service_assignment_policy_proof_v2.sql",
+          "gitBlobOid": "b190eb80c9c7498ea09eee04460cb8f7cdccef74",
+          "sha256": "078e15c9eac91abe827f043cbc6341ece34392e230ab6404f4022021ff964941"
+        },
+        {
+          "name": "0180_service_assignment_policy_v1_contract.sql",
+          "gitBlobOid": "e98797631933a8fe0fbb77deb62738669b4233dd",
+          "sha256": "ed99cb711cee8babb560b591b9abc19ec5b5921d976ac62be7af18f7443210c6"
+        },
+        {
+          "name": "0181_service_assignment_request_policy_reviews.sql",
+          "gitBlobOid": "cafea400ad4ed3943597ad88424c3ca4d238f6f7",
+          "sha256": "061b99d36c70f93b36d1dc3214de7fc8e6be5a29e239c86c6123837fdb200dd7"
+        },
+        {
+          "name": "0182_portal_delivery_notification_source_ready.sql",
+          "gitBlobOid": "fab94693a708cd9a779aba48ecfd9393ef427e81",
+          "sha256": "d06f953df70aa1d99ba649aa20819c215e9f2a1fdc80386a8d3cf6864cfb64e3"
+        },
+        {
+          "name": "0183_portal_delivery_notification_direct_source_ready.sql",
+          "gitBlobOid": "6b72cf3206cdf821dee93a60ff0c951d6da25e2a",
+          "sha256": "c3177261a9ac45162119c7ebbdd800552e45b5885ea1eeab97922f932964f539"
+        },
+        {
+          "name": "0184_native_client_feedback.sql",
+          "gitBlobOid": "3f5358f2e13d716b8dbfe34dfcda83d02c63e8ee",
+          "sha256": "3c0e8c3ef805531e38cc1853180bcc59131eeb0dfc6924fcf19d7db348f276a7"
+        },
+        {
+          "name": "0185_native_service_request_ownership.sql",
+          "gitBlobOid": "16f4fc27763484951a95215c4599b1943aa982c4",
+          "sha256": "425445a6a5f83e5662d6dce5b482cc30f6e9e7b7d3da2c13d84980eaf6ef406c"
+        },
+        {
+          "name": "0186_delivery_notification_authority_provenance.sql",
+          "gitBlobOid": "0ccee7f82e937db913d67a0f3a04337af96ce84c",
+          "sha256": "52b95190e432d783e7c3c92eb46279469444fddf64b4e689bf6f8dec54b97f40"
+        },
+        {
+          "name": "0187_authenticated_content_audit.sql",
+          "gitBlobOid": "a0505f5340575d32c8304282212902220e4ed6e7",
+          "sha256": "e67e7cb2713e09e5af9afbf638ec64ca8ac9aa88516120223c6f8adb29266444"
+        },
+        {
+          "name": "0188_native_feedback_completion_notices.sql",
+          "gitBlobOid": "fe69ad382e51f7c1c58db2d2ad179de0ef095f4a",
+          "sha256": "a8243c38beb2031104820e311698a37f4120b96c4d648d210d3ea8dbbdf772d1"
+        },
+        {
+          "name": "0189_primary_staff_folder_bindings.sql",
+          "gitBlobOid": "aaab56dced3b6b802d7593750ecc6b5305d01df3",
+          "sha256": "08bde755ab5e8e9458e0df6ef34886b80320543daa7bafaf2cc788d56ba519b5"
+        },
+        {
+          "name": "0190_portal_contact_assignments_v4.sql",
+          "gitBlobOid": "57e7124dde55742f6d6786649a1a91a34a0ba4f8",
+          "sha256": "88d987c59641b4c4bf906f8e5686eaf61567920180453344a2c1c0203fea257b"
+        },
+        {
+          "name": "0191_portal_projection_wire_contract_claim.sql",
+          "gitBlobOid": "96c09c1cccaf72044d2dd36a19c6705422f70ba3",
+          "sha256": "da11dc932b40e35511c5808c473d9c416201b47f691df1d86df733044737b517"
+        },
+        {
+          "name": "0192_contact_assignment_billing_independence.sql",
+          "gitBlobOid": "4f37737a97b210593544bfca4633d443dd907df4",
+          "sha256": "2ad7af31cb5f926fde76428102a677a628337bc8009ef7e5b7dd9bcef7f255d6"
+        },
+        {
+          "name": "0193_bulk_download_parts.sql",
+          "gitBlobOid": "56d6782e77e5bf03ee9706de2020fba493aa59a2",
+          "sha256": "a92912b28f974b460ae78fb8f899e135d095c4c57bb6f03d8abce1bcfa508cb2"
+        },
+        {
+          "name": "0194_client_delegated_share_expiry.sql",
+          "gitBlobOid": "1ed2734ec450a3027c26a578cefb5c2e4c741ef6",
+          "sha256": "530afcadebee0dbe974c247f76ed83586a979b5e9f519d8620efe747b8094c1c"
+        },
+        {
+          "name": "0195_legacy_workspace_authority_lifecycle.sql",
+          "gitBlobOid": "7483417ac5ac6f1e734acd562f7808f08ec63016",
+          "sha256": "d13c92259d98e1b3d385666b150b59711334f5fe3706901a3bb5dfb2cb38e283"
+        },
+        {
+          "name": "0196_bulk_download_archive_cache.sql",
+          "gitBlobOid": "dd274bf6237551fd588865caeb8908d238639cd7",
+          "sha256": "3f0b83723747bab4bd21ca5a339cdebf45ad9eec40b3d5eb8168e60ab83fbd7a"
+        },
+        {
+          "name": "0197_portal_root_access_policy.sql",
+          "gitBlobOid": "b53bac1f596663895eca5b9864f4b6e86ed32235",
+          "sha256": "a8411d99200c34112c266eb5a40470369c97d5955bf9e7a076dad03ca05e9918"
+        },
+        {
+          "name": "0198_incoming_upload_owner_notifications.sql",
+          "gitBlobOid": "3bcd4d4a81a0e86ccdfc412ec1af23688d98e146",
+          "sha256": "02a0bb48310581c503712a218807eae532e2a7fe226d46012722792050b8ff97"
+        },
+        {
+          "name": "0199_incoming_upload_pickup_lifecycle.sql",
+          "gitBlobOid": "1a0f4273288dc9341cbad352972aa00112cd969b",
+          "sha256": "161a4169343218d7c1b54c8f8722d5b2b13f4fd15aae42808d26ed57b638359e"
+        },
+        {
+          "name": "0199_native_viewer_grants.sql",
+          "gitBlobOid": "7558782e82e1d5bb24ae4766da3c88f3797e1ce3",
+          "sha256": "a74a85a91418057a3fd5a2257a1857f8e059a9a5bc9dc00941e5275935775083"
+        },
+        {
+          "name": "0200_native_feedback_workspace_history.sql",
+          "gitBlobOid": "979a82a199b454c1615dfb39236d1cd02ccda150",
+          "sha256": "af7465bc2b4b4c19ef6601064f074b1c1aee17b8341c1061f5bb5c6d7293b80a"
+        },
+        {
+          "name": "0201_native_draft_quote_notifications.sql",
+          "gitBlobOid": "7d5527d545a2be07c00ee46bdf896cfceca1208e",
+          "sha256": "9d7f526ebcb1165cc8ca86b5791181da7befd7f5948edcb3830c8711fbbdc7e6"
+        },
+        {
+          "name": "0202_native_delivery_recipient_events.sql",
+          "gitBlobOid": "29391492c7f268f2816b141c24b4a5f11bb8381f",
+          "sha256": "d9a608a6eb8b88c53813cb0bd21395831a81ea101a73994c1f4a62384527e1ad"
+        },
+        {
+          "name": "0203_primary_delivery_authority.sql",
+          "gitBlobOid": "f5c4d26445f754f3ea4f5affd5b999519eb1c314",
+          "sha256": "1b9c7b69a844f7ff8f4af5dd35c238cdbf940591aa95fdc9ab9f07380ed1a7a6"
+        },
+        {
+          "name": "0204_delivery_change_receipts.sql",
+          "gitBlobOid": "db805aaada66305d11b0c15a04b2528d0b457ccc",
+          "sha256": "784fc85c418b92e6253a2d387ff909767679e731f41cb6275eaf6ed4c82bfd44"
+        },
+        {
+          "name": "0205_authenticated_delivery_change_sequence.sql",
+          "gitBlobOid": "a971eb77150e1371ff11ad3e91d16a3126b0cd42",
+          "sha256": "ddaa76f88a09b9388b12c9e3ed2124ea9706e4f1f3bbea29c9bbd8e243e62e2b"
+        },
+        {
+          "name": "0206_delivery_index_provider_identity.sql",
+          "gitBlobOid": "bdad477453ef8d7d2f32bb87899f1b909003bf7a",
+          "sha256": "2225b7957cefd5e6ed8711f3c4ce0b5fc2106eb5cfd02c6f8bee760f6e3a7d8d"
+        },
+        {
+          "name": "0207_delivery_change_projection.sql",
+          "gitBlobOid": "28339140c7344a55eaf2a6bda67d3465c7016e89",
+          "sha256": "c852f088fb8bf78f706a76881fdd870a623b78110629476f52e5761de62fc7d0"
+        },
+        {
+          "name": "0208_authenticated_delivery_change_batch_provider_identity.sql",
+          "gitBlobOid": "ec00455c0b7d168d3de1e4471315fa33ad583af9",
+          "sha256": "d74ffdbd88c57bf890cb8af7eab02239231e4edb74f32886e4a277d607ba8a5c"
+        },
+        {
+          "name": "0209_authenticated_delivery_change_recipient_events.sql",
+          "gitBlobOid": "22f220a010ea7a5f3c91eca6aa8882107cf5eb83",
+          "sha256": "598f4141c7d5161c228cfdf5e6a06927d9fbe6da8aa7b4d42d60bd878ebf2dca"
+        },
+        {
+          "name": "0210_client_delegated_share_expiry_health.sql",
+          "gitBlobOid": "7050b98fca0c48b9637ee2edbeff3e84d3e15665",
+          "sha256": "4164cfddd8845b657fc385070a350f763816036bef138d9d4b0f06cf341ff93f"
+        },
+        {
+          "name": "0211_incoming_upload_verification_lifecycle.sql",
+          "gitBlobOid": "01afa827c29055fa41cac2816c57e7d33d77f6c4",
+          "sha256": "92a53b660a5b736b57780d5137790060e3d1d002314e13e6b106f2acbd59a290"
+        },
+        {
+          "name": "0212_incoming_upload_archive_inventory.sql",
+          "gitBlobOid": "75237c6fa6c070d5f65cd0fc5f4d0ed10b74d13a",
+          "sha256": "db0dd828e00111eb72ecd29559463af217e543926cf4be85658ff124afc73abf"
+        },
+        {
+          "name": "0213_incoming_rclone_promotion.sql",
+          "gitBlobOid": "2a3f1daef4e5a01fea3161319327f0b53a0ffd7c",
+          "sha256": "2a2068d12f3b65114cd803a25ebd53a367d7e0587f4141926a2b0188969ec24e"
+        },
+        {
+          "name": "0214_ops_inventory_catalog_staging.sql",
+          "gitBlobOid": "2bc4285bc99eaeaeb24fb06397bbb87b64cc11b8",
+          "sha256": "8c46f614d598bb3490338d5a5e0260c6335977313c2fe4d1abbedcf7e0e0c37e"
+        },
+        {
+          "name": "0215_operations_portal_access_authority_shadow.sql",
+          "gitBlobOid": "f8cbd2960c2a8f65b74e872cf595ac22cbc136ab",
+          "sha256": "2560f543e980996910a9d4cbefe9e0ec80344f677e659a4f0b6c0ac232afd26f"
+        },
+        {
+          "name": "0216_client_authority_workspace_ownership_claim.sql",
+          "gitBlobOid": "79bafc9aa6fb5736eb4aa82ec2efd97a9029f902",
+          "sha256": "a2e5ffddb87339b83e25d26118f88b400b3be84968223c3f4dbfda25eca3311e"
+        },
+        {
+          "name": "0217_client_authority_workspace_claim_evidence.sql",
+          "gitBlobOid": "13cfd42f2d9b982ecd75fd6729978d61a1d7d80b",
+          "sha256": "a246c25ee99c33bf5868f9cb3ecdccf51a457bf431140e966721fb79817c4c44"
+        },
+        {
+          "name": "0218_client_authority_workspace_binding.sql",
+          "gitBlobOid": "2973f79984ad2dc13ee2f9ca23497380e2d7d892",
+          "sha256": "39eb9d47b254144b194bce6ebbf5b7800264427e759b6e6772f25cc912f10356"
+        },
+        {
+          "name": "0219_operations_portal_authority_v2.sql",
+          "gitBlobOid": "ae6d2c80c2154ec627338c4f8070ad75e64cd838",
+          "sha256": "703431fe6e02c7cf86f31153698ef23ec421a6f721f627eb603025e3311da78b"
+        },
+        {
+          "name": "0220_operations_portal_authority_v3_permissions.sql",
+          "gitBlobOid": "8bb84c4be95502e40b2627418d431682ee77eb72",
+          "sha256": "d0e168f48dfe197a6177e6a332fa7853e44c424867a00518469c00b6fd643549"
+        },
+        {
+          "name": "0221_verified_recipient_delivery_authority.sql",
+          "gitBlobOid": "5e05927e0e23163c212c094395b9b6f393208a35",
+          "sha256": "e497bfc54715248429817a674d8bf68443e69e0da80cbc3935887dac32e6e03f"
+        },
+        {
+          "name": "0222_verified_recipient_delivery_cross_manager_revoke.sql",
+          "gitBlobOid": "ab1e2e09a6c97c77b072e98809880a5a779b4fd4",
+          "sha256": "ca0eb312a3b5ea2124c85f4b6203c323428ac311d2f47c4c5015dd59a6d02f9a"
+        },
+        {
+          "name": "0223_operations_portal_workspace_publications.sql",
+          "gitBlobOid": "0c8dd0ab541f0ac963884dc58f7296885480d080",
+          "sha256": "76cdd989fc87dd5e52d8393cdebbf2fb6aef8762e29d448503791be0614f3d83"
+        },
+        {
+          "name": "0224_operations_portal_native_recipient_authority.sql",
+          "gitBlobOid": "5e6bb7337f3ba19fab18c7d4d1badbce7a0d3fb4",
+          "sha256": "5835ae5f2a825a9073b21c43f4507f7873b6a25c1019cf161cb66e1c6275a8b0"
+        },
+        {
+          "name": "0225_operations_portal_workspace_publication_cancellations.sql",
+          "gitBlobOid": "e702cb61e0e8e947adc538e8da5cca1bc718782f",
+          "sha256": "1f878648bd575efa7e281073b9744a19838cc56c4460b48ce4f95d44609a3274"
+        },
+        {
+          "name": "0226_operations_portal_native_workspace_cleanup.sql",
+          "gitBlobOid": "2f22cc7ebf24bd51b09945e9b31d6935cdc4761d",
+          "sha256": "0cc2acd02386f84cf3938f7fe5514a162878dfbc89a13516c12e759eb285bfc3"
+        },
+        {
+          "name": "0227_operations_portal_native_delivery_authority.sql",
+          "gitBlobOid": "4cab4e69eaa5cd25798b12cfdcaf466d0ee98e08",
+          "sha256": "1ad80368d40f9fac270a60cbb8833f9a7e647679dbccd2424af55ca18921e07d"
+        },
+        {
+          "name": "0228_operations_portal_native_content_start_audit.sql",
+          "gitBlobOid": "52e85e54da8cb747a70b9e10743c4cff68b27b82",
+          "sha256": "441a11ca0992479f953de662de42041d35c9e41342bc345d59396fdcde569040"
+        },
+        {
+          "name": "0229_operations_portal_native_delivery_regrant.sql",
+          "gitBlobOid": "43b9f998117a3a05e5ecd7cb197d750cbba8009f",
+          "sha256": "1ac5f5df43dca126b28c05b50803a158ed54618c3e136669d06005cbaf56e3a9"
+        },
+        {
+          "name": "0230_operations_portal_native_delivery_terminal_cancellations.sql",
+          "gitBlobOid": "35263bcac142d01c00186f9b1883e3a206d02b53",
+          "sha256": "484231c43eee9957f6d1427bf8caedd409db78f40a7aca08115cbc85e1951c77"
+        },
+        {
+          "name": "0231_portal_primary_private_ingress_authority.sql",
+          "gitBlobOid": "5dff9f6530cd287dca3acacdfd44a885c2ef28a0",
+          "sha256": "b5582f703cf2e00567f49998922e9d1aaee86455c43c1fdc7a1326cd436e3353"
+        },
+        {
+          "name": "0232_shared_profile_edit_authority.sql",
+          "gitBlobOid": "0392e82d5936dec4dad0d7580f02938289bdf9cc",
+          "sha256": "3c2b3ddbdb920739c8f4ab8f437808749f5f83581b098518c5efd41c2e0b0073"
+        },
+        {
+          "name": "0233_explicit_primary_workspace_folder_ownership.sql",
+          "gitBlobOid": "a7d37245fbbce813d2f3dec0ca115744e9395635",
+          "sha256": "7d419b99aab73086c60571cd854d49b62351d5c43ad4347e5da1a1e2fb18878a"
+        },
+        {
+          "name": "0234_pa_principal_reenrollment.sql",
+          "gitBlobOid": "fbfa6e1d967df21ac9140a5e80f02be9772ce47d",
+          "sha256": "40d6e811b19ade969ecfd68a6ea223e80cf67e8adadf818e7b1f885befa1a49b"
+        },
+        {
+          "name": "0235_windows_portal_successor_candidates.sql",
+          "gitBlobOid": "4f3698714c7061ba9c455b12a5211b7acddbe650",
+          "sha256": "50046477dda2efe378d4b01c7de9f4ff2383d1511cf56c4c7a9633b4e41c0841"
+        },
+        {
+          "name": "0236_windows_portal_successor_content_start_audit.sql",
+          "gitBlobOid": "29f5c96adfa974540f824e41d423fde896f839cd",
+          "sha256": "fcbc6f9f802dee3e2bfe592f1476f485b24d7f5414ca86143ddd9a299e82ffcf"
+        },
+        {
+          "name": "0237_viewer_direct_client_grants.sql",
+          "gitBlobOid": "916afd95934b4a8d10a6e7fc0696693b92ed7f2c",
+          "sha256": "6c8527f21d7c8bc44a54c3fe66731a18e7e8b0a185a6f61c8a8af4fc02efc4cd"
+        },
+        {
+          "name": "0238_viewer_direct_session_intents.sql",
+          "gitBlobOid": "25c1f08db7896dbb4c0aefd02591aed3da5b26d4",
+          "sha256": "597a058166aadbe1fe00c10158fb70467956e97f4fb99cd0a047a4022d256d18"
+        },
+        {
+          "name": "0239_native_project_assignment_proof_v3.sql",
+          "gitBlobOid": "7d487ae0eab2fa3dd829a1e16b68502007f10b66",
+          "sha256": "40d2e31d4d8d4fbf60752aee8fd4ec8d65ece6d7a728d7215303372b48a4e40a"
+        },
+        {
+          "name": "0240_viewer_direct_grant_receipt_immutability.sql",
+          "gitBlobOid": "4e2e8e5249e708d80fe638aefa3e9fd379461eaf",
+          "sha256": "01e72b268ce49b3b7d684a68be2809c972414033a8e60e543d1d8aa442427af2"
+        },
+        {
+          "name": "0241_app_release_pilot.sql",
+          "gitBlobOid": "54e33aef18145276d13e37d2de13721bbf597b9f",
+          "sha256": "c93f3549f143bcb7cdfe64131b4ae7616df72c8fb9881562a082534b5f5f5048"
+        },
+        {
+          "name": "0242_client_ops_triage_inquiries.sql",
+          "gitBlobOid": "4f2b0bcf77a7a5cf6b67e4730ae79254b909e356",
+          "sha256": "8f25db33d95c77425a52031d0e4255b133e2a2b91025d427c0d118ee305a4b66"
+        }
+      ],
+      "sourceOnlyPending": [
+        {
+          "name": "0235_windows_portal_successor_candidates.sql",
+          "gitBlobOid": "4f3698714c7061ba9c455b12a5211b7acddbe650",
+          "sha256": "50046477dda2efe378d4b01c7de9f4ff2383d1511cf56c4c7a9633b4e41c0841"
+        },
+        {
+          "name": "0236_windows_portal_successor_content_start_audit.sql",
+          "gitBlobOid": "29f5c96adfa974540f824e41d423fde896f839cd",
+          "sha256": "fcbc6f9f802dee3e2bfe592f1476f485b24d7f5414ca86143ddd9a299e82ffcf"
+        },
+        {
+          "name": "0239_native_project_assignment_proof_v3.sql",
+          "gitBlobOid": "7d487ae0eab2fa3dd829a1e16b68502007f10b66",
+          "sha256": "40d2e31d4d8d4fbf60752aee8fd4ec8d65ece6d7a728d7215303372b48a4e40a"
+        },
+        {
+          "name": "0241_app_release_pilot.sql",
+          "gitBlobOid": "54e33aef18145276d13e37d2de13721bbf597b9f",
+          "sha256": "c93f3549f143bcb7cdfe64131b4ae7616df72c8fb9881562a082534b5f5f5048"
+        },
+        {
+          "name": "0242_client_ops_triage_inquiries.sql",
+          "gitBlobOid": "4f2b0bcf77a7a5cf6b67e4730ae79254b909e356",
+          "sha256": "8f25db33d95c77425a52031d0e4255b133e2a2b91025d427c0d118ee305a4b66"
+        }
+      ],
+      "actualOnlyHistorical": [
+        {
+          "name": "0112_thumbnail_renderer_coordination.sql",
+          "id": 31
+        },
+        {
+          "name": "0113_thumbnail_backfill_controls.sql",
+          "id": 32
+        }
+      ]
+    }
+  }
+}
