@@ -68,6 +68,7 @@ function createReferenceBrokerHandler({broker, enabled = false,
       if (code === 'UNAUTHORIZED' || code === 'OBJECT_NOT_GRANTED') json(res,401,'unauthorized');
       else if (code === 'INVALID_RANGE') json(res,416,'invalid_range');
       else if (code === 'TRANSFER_LIMIT') json(res,429,'transfer_limit');
+      else if (code === 'TRANSFER_ACCOUNTING_UNAVAILABLE') json(res,503,'transfer_accounting_unavailable');
       else if (['SOURCE_CHANGED','SOURCE_UNAVAILABLE','UNSAFE_SOURCE','SYMLINK_SOURCE'].includes(code)) json(res,409,'source_unavailable');
       else json(res,500,'reference_unavailable');
       return true;

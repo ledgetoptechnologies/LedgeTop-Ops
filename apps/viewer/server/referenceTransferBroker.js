@@ -14,7 +14,7 @@ const fail = code => { throw new ReferenceTransferError(code); };
 // readObject returns a paused Readable in body. Consume or destroy it; destroy/EOF/error
 // releases the unconsumed reservation. Bytes pushed into the stream count as spent,
 // including buffered bytes on cancellation. No plaintext token is recoverable on retry.
-const ERROR_CODES = Object.freeze(['INVALID_INTEGER','INVALID_ID','EXTRA_FIELDS','INVALID_ENVIRONMENT','INVALID_LIMIT','DURABLE_DATABASE_REQUIRED','UNSAFE_SOURCE','SYMLINK_SOURCE','SOURCE_UNAVAILABLE','RESERVATION_REQUIRED','CAPABILITY_BINDING','INVALID_EXPIRY','RESERVATION_BINDING','OBJECT_SET_BINDING','STALE_RESERVATION','INVALID_REQUEST','UNAUTHORIZED','OBJECT_NOT_GRANTED','INVALID_RANGE','TRANSFER_LIMIT','SOURCE_CHANGED']);
+const ERROR_CODES = Object.freeze(['INVALID_INTEGER','INVALID_ID','EXTRA_FIELDS','INVALID_ENVIRONMENT','INVALID_LIMIT','DURABLE_DATABASE_REQUIRED','UNSAFE_SOURCE','SYMLINK_SOURCE','SOURCE_UNAVAILABLE','RESERVATION_REQUIRED','CAPABILITY_BINDING','INVALID_EXPIRY','RESERVATION_BINDING','OBJECT_SET_BINDING','STALE_RESERVATION','INVALID_REQUEST','UNAUTHORIZED','OBJECT_NOT_GRANTED','INVALID_RANGE','TRANSFER_LIMIT','SOURCE_CHANGED','TRANSFER_ACCOUNTING_UNAVAILABLE']);
 function safeInt(n) { if (!Number.isSafeInteger(n) || n < 0) fail('INVALID_INTEGER'); return n; }
 function slug(s) { if (typeof s !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(s)) fail('INVALID_ID'); }
 function exact(o, fields) { if (!o || typeof o !== 'object' || Array.isArray(o) || ![Object.prototype,null].includes(Object.getPrototypeOf(o)) || Object.keys(o).some(k => !fields.includes(k))) fail('EXTRA_FIELDS'); }
@@ -27,7 +27,7 @@ class ReferenceTransferBroker {
     for (const v of Object.values(this.settings)) if (!safeInt(v)) fail('INVALID_LIMIT');
     if (typeof databasePath !== 'string' || databasePath === ':memory:') fail('DURABLE_DATABASE_REQUIRED');
     this.db = new DatabaseSync(databasePath);
-    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS reference_grants (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, reservation_id TEXT NOT NULL, identity TEXT NOT NULL, token_hash TEXT NOT NULL, metadata TEXT NOT NULL, files TEXT NOT NULL, expires_ms INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, used_bytes INTEGER NOT NULL DEFAULT 0, reserved_bytes INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0, in_flight INTEGER NOT NULL DEFAULT 0); CREATE INDEX IF NOT EXISTS reference_grants_job ON reference_grants(job_id);');
+    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS reference_grants (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, reservation_id TEXT NOT NULL, identity TEXT NOT NULL, token_hash TEXT NOT NULL, metadata TEXT NOT NULL, files TEXT NOT NULL, expires_ms INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, used_bytes INTEGER NOT NULL DEFAULT 0, reserved_bytes INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0, in_flight INTEGER NOT NULL DEFAULT 0); CREATE INDEX IF NOT EXISTS reference_grants_job ON reference_grants(job_id); CREATE TABLE IF NOT EXISTS reference_job_usage (job_id TEXT PRIMARY KEY, environment TEXT NOT NULL, manifest_sha256 TEXT NOT NULL, byte_limit INTEGER NOT NULL, request_limit INTEGER NOT NULL, charged_bytes INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0);');
     try { fs.chmodSync(databasePath, 0o600); } catch (e) { this.db.close(); throw e; }
   }
   tx(fn) { this.db.exec('BEGIN IMMEDIATE'); try { const out = fn(); this.db.exec('COMMIT'); return out; } catch (e) { this.db.exec('ROLLBACK'); throw e; } }
@@ -59,6 +59,12 @@ class ReferenceTransferBroker {
     const metadata = { jobId, generation, reservationId: reservation.reservationId, manifestSha256: manifest.sha256, environment: this.environment, objectIds: manifest.objects.map(o => o.id), nonce: reservation.nonce, byteBudget: reservation.byteBudget, expiresAt: reservation.expiresAt };
     const identity = JSON.stringify({ metadata, files, capabilityFingerprint: input.capabilityFingerprint });
     return this.tx(() => {
+      const usage=this.db.prepare('SELECT * FROM reference_job_usage WHERE job_id=?').get(jobId);
+      const legacy=this.db.prepare('SELECT 1 FROM reference_grants WHERE job_id=? LIMIT 1').get(jobId);
+      if(!usage&&legacy)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+      const byteLimit=p.transferByteBudgetLimit(manifest.totalBytes);
+      if(usage&&(usage.environment!==this.environment||usage.manifest_sha256!==manifest.sha256||usage.byte_limit!==byteLimit||usage.request_limit!==this.settings.maxRequests))fail('RESERVATION_BINDING');
+      if(!usage)this.db.prepare('INSERT INTO reference_job_usage(job_id,environment,manifest_sha256,byte_limit,request_limit) VALUES(?,?,?,?,?)').run(jobId,this.environment,manifest.sha256,byteLimit,this.settings.maxRequests);
       const previous = this.db.prepare('SELECT * FROM reference_grants WHERE job_id=? AND revoked=0 AND expires_ms>? ORDER BY rowid DESC LIMIT 1').get(jobId, now);
       if (previous && previous.identity === identity && input.replace !== true) return { grantId: previous.id, grant: JSON.parse(previous.metadata), reused: true, tokenRecoverable: false };
       const latest = this.db.prepare('SELECT * FROM reference_grants WHERE job_id=? ORDER BY rowid DESC LIMIT 1').get(jobId);
@@ -105,8 +111,14 @@ class ReferenceTransferBroker {
         safeInt(start); safeInt(end); if (start > end || end >= file.byteSize) fail('INVALID_RANGE');
       }
       const length = file.byteSize === 0 && range === undefined ? 0 : end - start + 1;
-      const totals = this.db.prepare('SELECT COALESCE(SUM(in_flight),0) requests, COALESCE(SUM(reserved_bytes),0) bytes FROM reference_grants WHERE revoked=0 AND expires_ms>?').get(this.now());
-      if (length > this.settings.maxResponseBytes || totals.requests >= this.settings.maxConcurrentRequests || totals.bytes + length > this.settings.maxConcurrentBytes || row.used_bytes + row.reserved_bytes + length > metadata.byteBudget || row.requests >= this.settings.maxRequests) fail('TRANSFER_LIMIT');
+      const totals = this.db.prepare('SELECT COALESCE(SUM(in_flight),0) requests, COALESCE(SUM(reserved_bytes),0) bytes FROM reference_grants WHERE expires_ms>?').get(this.now());
+      const usage=this.db.prepare('SELECT * FROM reference_job_usage WHERE job_id=?').get(row.job_id);
+      if(!usage||usage.environment!==this.environment||usage.manifest_sha256!==metadata.manifestSha256)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+      if (length > this.settings.maxResponseBytes || totals.requests >= this.settings.maxConcurrentRequests || totals.bytes + length > this.settings.maxConcurrentBytes || row.used_bytes + row.reserved_bytes + length > metadata.byteBudget || row.requests >= this.settings.maxRequests || usage.requests>=usage.request_limit || length>usage.byte_limit-usage.charged_bytes) fail('TRANSFER_LIMIT');
+      // Charge the full reservation before opening the source. It is never
+      // refunded, even if a process dies or a stream is cancelled; no crash
+      // can manufacture fresh budget across grant epochs.
+      this.db.prepare('UPDATE reference_job_usage SET charged_bytes=charged_bytes+?,requests=requests+1 WHERE job_id=?').run(length,row.job_id);
       this.db.prepare('UPDATE reference_grants SET reserved_bytes=reserved_bytes+?,requests=requests+1,in_flight=in_flight+1 WHERE id=?').run(length, grantId);
       reserved = { file, start, end, length, partial: range !== undefined };
     });
@@ -160,7 +172,8 @@ class ReferenceTransferBroker {
             if (this.destroyed || !reserved) return;
             const current = broker.db.prepare('SELECT revoked,expires_ms FROM reference_grants WHERE id=?').get(grantId);
             if (current.revoked || current.expires_ms <= broker.now()) fail('UNAUTHORIZED');
-            broker.db.prepare('UPDATE reference_grants SET reserved_bytes=reserved_bytes-?,used_bytes=used_bytes+? WHERE id=?').run(bytesRead,bytesRead,grantId);
+            const charged=broker.db.prepare('UPDATE reference_grants SET reserved_bytes=reserved_bytes-?,used_bytes=used_bytes+? WHERE id=? AND revoked=0 AND expires_ms>? AND reserved_bytes>=?').run(bytesRead,bytesRead,grantId,broker.now(),bytesRead);
+            if(charged.changes!==1)fail('UNAUTHORIZED');
             reserved.remaining -= bytesRead; transferOffset += bytesRead; reading = false; this.push(chunk);
           })().catch(error => { reading = false; this.destroy(error instanceof ReferenceTransferError ? error : new ReferenceTransferError('SOURCE_UNAVAILABLE')); });
         },
