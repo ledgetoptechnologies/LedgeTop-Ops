@@ -195,7 +195,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     catch(error){if(binding)throw Object.assign(new Error('Staged commitment credentials or provider are unavailable'),{code:'staged_commitment_unavailable'});if(processing.attemptRequiresReservation?.(attempt.id))throw Object.assign(new Error('Provider observation unavailable; ingestion will resume'),{code:'provider_observation_unavailable'});throw error;}
     let response;
     try{response=await adapter.downloadAll(attempt.providerTaskId,{signal});}
-    catch(error){if(!signal?.aborted&&transientDownloadError(error))throw Object.assign(new Error('Provider download unavailable; ingestion will resume'),{code:'provider_observation_unavailable'});throw error;}
+    catch(error){if(!signal?.aborted&&(processing.attemptRequiresReservation?.(attempt.id)||transientDownloadError(error)))throw Object.assign(new Error('Provider download unavailable; ingestion will resume'),{code:'provider_observation_unavailable'});throw error;}
     let providerExpectation;
     try{providerExpectation=providerArchiveExpectation(response);}catch(error){try{await response.body?.cancel();}catch{}throw error;}
     if(binding&&!providerExpectation){try{await response.body?.cancel();}catch{}throw Object.assign(new Error('Provider archive identity is unavailable'),{code:'staged_commitment_conflict'});}
