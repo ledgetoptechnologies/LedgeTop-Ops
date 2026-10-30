@@ -77,14 +77,14 @@ describe('isolated read-only iOS pilot', { timeout: 120_000 }, () => {
   }
   async function signIn(): Promise<Token> { const response = await exchange(await code()); expect(response.status).toBe(200); return response.json(); }
   function read(path: string, token: Token, method = 'GET') { return route(path, { method, headers: { Authorization: `Bearer ${token.accessToken}` } }); }
-  function raceEnvironment(mutate: () => Promise<unknown>, queryPrefix = 'SELECT o.id,o.title'): Env {
-    let fired = false;
+  function raceEnvironment(mutate: () => Promise<unknown>, queryPrefix = 'SELECT o.id,o.title', occurrence = 1): Env {
+    let fired = false, matches = 0;
     const wrap = (statement: D1PreparedStatement, sql: string): D1PreparedStatement => new Proxy(statement, {
       get(target, key) {
         if (key === 'bind') return (...values: unknown[]) => wrap(target.bind(...values), sql);
-        if (key === 'all' && sql.startsWith(queryPrefix)) return async () => {
+        if (key === 'all' && sql.trimStart().startsWith(queryPrefix)) return async () => {
           const result = await target.all();
-          if (!fired) { fired = true; await mutate(); }
+          if (!fired && ++matches === occurrence) { fired = true; await mutate(); }
           return result;
         };
         const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value;
@@ -270,5 +270,35 @@ describe('isolated read-only iOS pilot', { timeout: 120_000 }, () => {
       { headers: { Authorization: 'Bearer oauth:synthetic' } }), raced, managedConfig);
     expect(response.status).toBe(403);
     expect(await response.text()).not.toContain('Operation late-revocation');
+  });
+  async function lateAssignmentRevocation(): Promise<{ response: Response; fired: boolean; active: unknown }> {
+    await db.prepare("UPDATE staff_role_assignments SET role_id='role-operator' WHERE staff_id=?").bind(fixture.owner.id).run();
+    await operation('late-assignment');
+    await db.prepare("INSERT INTO pa_operation_assignments VALUES('late-assignment','pa-human',1)").run();
+    let fired = false;
+    // Each scope reads grants twice. The fifth read is requirePermission in
+    // the final scope, after the final assignment visibility query has returned.
+    const raced = raceEnvironment(async () => {
+      fired = true;
+      await db.prepare("UPDATE pa_operation_assignments SET active=0 WHERE operation_id='late-assignment'").run();
+    }, 'SELECT rp.permission_key', 5);
+    const response = await handleManagedIosPilot(new Request(pilotOrigin + '/mobile-pilot/v1/operations',
+      { headers: { Authorization: 'Bearer oauth:synthetic' } }), raced, managedConfig);
+    const active = await db.prepare("SELECT active FROM pa_operation_assignments WHERE operation_id='late-assignment'").first('active');
+    return { response, fired, active };
+  }
+  it('documents the currently observed assignment revocation race', async () => {
+    const { response, fired, active } = await lateAssignmentRevocation();
+    expect(fired).toBe(true); expect(active).toBe(0);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('Operation late-assignment');
+  });
+  // Release blocker: current implementation returns data after the assignment
+  // has been revoked during its final, separately awaited scope check.
+  it.fails('must reject a row when its assignment is revoked during final scope verification', async () => {
+    const { response, fired, active } = await lateAssignmentRevocation();
+    expect(fired).toBe(true); expect(active).toBe(0);
+    expect(response.status).toBe(403);
+    expect(await response.text()).not.toContain('Operation late-assignment');
   });
 });

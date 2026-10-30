@@ -180,7 +180,20 @@ The full pre-review-change suite then passed 31 tests with a single worker in
 213 seconds. After review added a final permission recheck, the three focused
 managed-facade cases, including the new late-revocation regression, passed
 against real local D1 (15 other cases skipped). The final check narrows the
-revocation window; it is not an atomic database-version guarantee.
+revocation window; it is not an atomic database-version guarantee. A further
+security review found assignment or source visibility can change after the last
+visibility query while subsequent staff/scope checks await, allowing stale rows
+to be returned. This is a release blocker for real data. D1 sessions provide
+sequential consistency, not one snapshot across those awaits. A fix must use a
+single authoritative transactional read or a fully covered transactional
+authority epoch, preserving existing staff, ACL, assignment and connector
+semantics; alternating additional rechecks is insufficient. The final database
+snapshot defines the authorization point and cannot retract a response after a
+later revocation. A focused real-D1 diagnostic reproduced the race: an
+assignment was revoked during the final scope check and the stale operation was
+returned. The desired-denial regression is explicitly marked as an expected
+failure; it is not passing remediation evidence. Re-run race and equivalence
+tests after a full fix and before activation.
 The full final backend suite subsequently passed all 32 tests with a single
 worker. Swift 6.4 on WSL passed all 17 package tests, including five synthetic
 OAuth wire-format tests. Swift emitted an existing test-stub Sendable warning.
