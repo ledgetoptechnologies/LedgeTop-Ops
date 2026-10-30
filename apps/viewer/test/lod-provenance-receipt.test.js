@@ -126,6 +126,17 @@ test('hand-written provenance summary and matching asset digests do not grant se
   assert.equal(config.lodProvenanceVerified, false);
 });
 
+test('historical converter digest cannot register new derivative output', (t) => {
+  const c=fixture(t), item=candidate(c,{includeObj:true}), owner='lod-historical-registration';
+  const id=c.processing.enqueueDerivative(item.attemptId,'lod_audit',{optional:false});
+  const job=c.processing.claimDerivative(owner); assert.equal(job.id,id);
+  const provenance=v4Provenance();
+  const asset={versionId:item.versionId,rootKey:'models',relativePath:'receipt/tiles/tileset.json',format:'3dtiles',contentType:'application/json',byteSize:2,attemptId:item.attemptId,sha256:'c'.repeat(64),manifestSha256:'d'.repeat(64),manifestFiles:[{relativePath:'leaf.b3dm',byteSize:4,sha256:'e'.repeat(64)},{relativePath:'tileset.json',byteSize:2,sha256:'c'.repeat(64)}]};
+  const historical={...provenance,converter:{...provenance.converter,binarySha256:'3577688939806dabdf1f4620cc05debe6e178180a99bf0308f4b8483b8a36725'}};
+  assert.equal(c.processing.registerVerifiedLodAsset(job.id,owner,asset,historical,{leaseToken:job.lease_token}),false);
+  assert.ok(c.processing.registerVerifiedLodAsset(job.id,owner,asset,provenance,{leaseToken:job.lease_token}),'current allowed converter still registers');
+});
+
 test('LOD authority is issued only by an exact durable receipt for a completed verified job', (t) => {
   const c = fixture(t);
   const item = candidate(c);
