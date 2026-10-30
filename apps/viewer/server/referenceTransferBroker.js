@@ -91,6 +91,7 @@ class ReferenceTransferBroker {
       if(!usage&&legacy)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
       const byteLimit=p.transferByteBudgetLimit(manifest.totalBytes);
       if(usage&&(usage.environment!==this.environment||usage.manifest_sha256!==manifest.sha256||usage.byte_limit!==byteLimit||usage.request_limit!==this.settings.maxRequests))fail('RESERVATION_BINDING');
+      if(!usage&&this.db.prepare('SELECT COUNT(*) AS n FROM reference_job_usage').get().n>=10000)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
       if(!usage)this.db.prepare('INSERT INTO reference_job_usage(job_id,environment,manifest_sha256,byte_limit,request_limit) VALUES(?,?,?,?,?)').run(jobId,this.environment,manifest.sha256,byteLimit,this.settings.maxRequests);
       const previous = this.db.prepare('SELECT * FROM reference_grants WHERE job_id=? AND revoked=0 AND expires_ms>? ORDER BY rowid DESC LIMIT 1').get(jobId, now);
       if (previous && previous.identity === identity && input.replace !== true) return { grantId: previous.id, grant: JSON.parse(previous.metadata), reused: true, tokenRecoverable: false };
@@ -101,6 +102,7 @@ class ReferenceTransferBroker {
         const seen = this.db.prepare('SELECT metadata FROM reference_grants WHERE job_id=?').all(jobId).some(row => JSON.parse(row.metadata).nonce === reservation.nonce);
         if (generation < latestMeta.generation || (seen && (latestMeta.nonce !== reservation.nonce || latest.revoked || latest.expires_ms <= now))) fail('STALE_RESERVATION');
       }
+      if(this.db.prepare('SELECT COUNT(*) AS n FROM reference_grants').get().n>=10000)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
       this.db.prepare('UPDATE reference_grants SET revoked=1 WHERE job_id=?').run(jobId);
       const grantId = randomUUID(), token = randomBytes(32).toString('base64url');
       this.db.prepare('INSERT INTO reference_grants(id,job_id,reservation_id,identity,token_hash,metadata,files,expires_ms) VALUES(?,?,?,?,?,?,?,?)').run(grantId, jobId, reservation.reservationId, identity, p.sha256(Buffer.from(token)), JSON.stringify(metadata), JSON.stringify(files), expires);
