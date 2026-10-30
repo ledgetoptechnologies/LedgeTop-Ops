@@ -96,7 +96,7 @@ test('first initialization sends frozen name if task is renamed after capture',a
 test('historical attempt without a frozen request holds instead of sending mutable metadata',async t=>{
  const f=fixture(t),old=f.processing.getAttemptProvenance(f.attempt.id).submission;delete old.inputFiles;
  f.db.prepare('UPDATE processing_attempt_provenance SET submission_json=? WHERE attempt_id=?').run(JSON.stringify(old),f.attempt.id);
- let sent=0;const adapter={status:async()=>{throw Object.assign(new Error('missing'),{code:'provider_task_not_found'})},initialize:async()=>{sent++}};
+ let sent=0;const adapter={status:async()=>{sent++;throw Object.assign(new Error('missing'),{code:'provider_task_not_found'})},initialize:async()=>{sent++}};
  await processSubmit(f.job,{processing:f.processing,storage:f.storage,config:{},signal:new AbortController().signal,adapterFactory:()=>adapter});
  assert.equal(sent,0);assert.equal(f.processing.getInitializationSnapshot(f.attempt.id),null);
  assert.equal(f.db.prepare('SELECT status,error_code FROM processing_jobs WHERE id=?').get(f.job.id).status,'pending');
@@ -105,7 +105,7 @@ test('historical attempt without a frozen request holds instead of sending mutab
 test('prior initialization intent without a snapshot never sends or reconstructs a request',async t=>{
  const f=fixture(t),prior=f.processing.beginAttemptInitialization(f.job.id,'owner',{freshTaskMissing:true});assert.ok(prior);assert.equal(f.processing.getInitializationSnapshot(f.attempt.id),null);
  f.processing.updateTaskMetadata(f.attempt.taskId,{displayName:'Changed after intent'});let sent=0;
- const adapter={status:async()=>{throw Object.assign(new Error('missing'),{code:'provider_task_not_found'})},initialize:async()=>{sent++}};
+ const adapter={status:async()=>{sent++;throw Object.assign(new Error('missing'),{code:'provider_task_not_found'})},initialize:async()=>{sent++}};
  await processSubmit(f.job,{processing:f.processing,storage:f.storage,config:{},signal:new AbortController().signal,adapterFactory:()=>adapter});
  assert.equal(sent,0);assert.equal(f.processing.getInitializationSnapshot(f.attempt.id),null);
  assert.equal(f.db.prepare('SELECT status FROM processing_jobs WHERE id=?').get(f.job.id).status,'pending');

@@ -654,6 +654,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   validateInitializationSnapshotForJob(jobId,owner){return this.transactionOrOwned(()=>{
     const job=this.provenanceJob(jobId,owner,'submit');if(!job)return false;
     const attempt=this.getAttempt(job.attempt_id),requestSnapshot=this.getInitializationSnapshot(job.attempt_id);
+    if(!requestSnapshot&&(!this.getAttemptProvenance(attempt.id)?.submission?.inputFiles||this.getAttemptTransferProvenance(attempt.id)?.initialization||attempt.submissionPhase!=='new'))return 'unproven';
     if(requestSnapshot){
       const provider=this.getProvider(attempt.providerId),reservation=this.getAttemptReservation(attempt.id),binding=reservation?{keyId:reservation.keyId,ciphertextSha256:crypto.createHash('sha256').update(reservation.ciphertext).digest('hex')}:null;
       if(!provider||requestSnapshot.providerId!==provider.id||requestSnapshot.providerOrigin!==provider.endpoint||requestSnapshot.capabilityFingerprint!==(attempt.capabilityFingerprint||null)||JSON.stringify(requestSnapshot.reservationBinding)!==JSON.stringify(binding)||requestSnapshot.request?.uuid!==attempt.providerTaskId||JSON.stringify(requestSnapshot.request?.options)!==JSON.stringify(attempt.options)||requestSnapshot.request?.outputs!==null||typeof requestSnapshot.request?.name!=='string')throw Object.assign(new Error('Initialization snapshot binding changed'),{code:'initialization_snapshot_invalid'});
