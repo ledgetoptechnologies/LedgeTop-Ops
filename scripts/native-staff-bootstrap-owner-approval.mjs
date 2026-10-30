@@ -1,6 +1,6 @@
 import { createHash, createPublicKey, constants, randomBytes, randomUUID, verify as verifySignature } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, lstatSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { nativeStaffBootstrapD1InsertColumns } from './native-staff-bootstrap-d1.mjs';
@@ -511,18 +511,23 @@ function signedRegistryEnvelope(payload, config, protectedSign) {
 
 function persistRegistryState(config, payload, protectedSign) {
   const { state } = registryPaths(config), envelope = signedRegistryEnvelope(payload, config, protectedSign);
+  // Validate before touching the published path. A signer that returns a
+  // syntactically valid but incorrect signature must not replace good state.
+  const validated = validateRegistryState(envelope, config);
   const temporary = `${state}.${randomUUID()}.tmp`, bytes = `${canonicalJson(envelope)}\n`;
   let fd;
   try {
     fd = openSync(temporary, 'wx', 0o600);
-    writeFileSync(fd, bytes, { encoding: 'utf8' }); closeSync(fd); fd = undefined;
+    writeFileSync(fd, bytes, { encoding: 'utf8' });
+    fsyncSync(fd);
+    closeSync(fd); fd = undefined;
     renameSync(temporary, state);
   } catch {
     if (fd !== undefined) closeSync(fd);
     try { unlinkSync(temporary); } catch {}
     fail('approval_registry_write_failed');
   }
-  return validateRegistryState(envelope, config);
+  return validated;
 }
 
 function acquireRegistryLock(config) {
@@ -543,9 +548,9 @@ export function initializeNativeStaffBootstrapApprovalRegistry(config, protected
   if (typeof protectedSign !== 'function') fail('approval_registry_signer_required');
   const release = acquireRegistryLock(config);
   try {
-    const { state } = registryPaths(config);
-    try { lstatSync(state); fail('approval_registry_already_initialized'); }
-    catch (error) { if (error?.code !== 'ENOENT') throw error; }
+    const { state, lock } = registryPaths(config);
+    const lockName = path.basename(lock);
+    if (readdirSync(path.dirname(state)).some(name => name !== lockName)) fail('approval_registry_already_initialized');
     return persistRegistryState(config, { schemaVersion: 1, sequence: 0, previousStateSha256: null, entries: [] }, protectedSign);
   } finally { release(); }
 }

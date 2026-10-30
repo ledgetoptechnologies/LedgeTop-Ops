@@ -19,3 +19,16 @@ scripts/data/production-auto-asset-bootstrap/*.json text eol=lf
 scripts/production-auto-migration-profile/*.json text eol=lf
 apps/viewer/release-assets/viewer-gZcdd1xa.js -text
 scripts/native-staff-cohort-review-bridge-installed-profile.json text eol=lf
+scripts/native-staff-bootstrap-owner-approval.mjs text eol=lf
+scripts/native-staff-bootstrap-sign-dpapi.ps1 text eol=lf
+scripts/native-staff-bootstrap-approved-executor.mjs text eol=lf
+scripts/native-staff-bootstrap-approved-executor-config.mjs text eol=lf
+scripts/native-staff-bootstrap-d1.mjs text eol=lf
+scripts/native-staff-bootstrap-owner-approval-distribution-pin.mjs text eol=lf
+scripts/native-staff-bootstrap-owner-approval-distribution-pin-value.mjs text eol=lf
+scripts/native-staff-bootstrap-owner-approval-distribution-manifest.json text eol=lf
+scripts/native-staff-cutover-approved-executor-config.mjs text eol=lf
+scripts/native-staff-cutover-owner-approval.mjs text eol=lf
+scripts/native-staff-cutover-v1.mjs text eol=lf
+scripts/native-staff-sync-preparation.mjs text eol=lf
+scripts/native-staff-cutover-distribution-manifest.json text eol=lf

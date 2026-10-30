@@ -32,7 +32,7 @@
     },
     {
       "path": "scripts/native-staff-bootstrap-owner-approval-distribution-manifest.json",
-      "sha256": "834d6b1e11218d757cd63a65d841153fdf74fe516de305598948b5a02e8ac74d"
+      "sha256": "03481455e6cc1f5d595172d2c3f239a2c4743b150983fe356f5ebca5942d3c89"
     },
     {
       "path": "scripts/native-staff-bootstrap-owner-approval-distribution-pin-value.mjs",
@@ -44,7 +44,7 @@
     },
     {
       "path": "scripts/native-staff-bootstrap-owner-approval.mjs",
-      "sha256": "8d41d67349f233613fda7e4ca9ae0f1159574ffc803e32f779216db710eae871"
+      "sha256": "5d97b8875ff7995a38312fc60fb8fec6f11f28055e4e2316ca461d3c36c03d99"
     },
     {
       "path": "scripts/native-staff-cutover-access-group-observation.mjs",
