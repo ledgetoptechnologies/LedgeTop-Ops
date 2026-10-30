@@ -65,6 +65,20 @@ not enable it on that shared application: a mobile token must not gain access to
 the general API. A separate pilot-only hostname and Access application is a
 candidate; route only the read-only facade and reject other paths and methods.
 Verify host routing and token isolation with negative tests before activation.
+Routing review found that the existing Operations Worker has earlier dispatch
+paths and path-selective static asset handling. Mounting only a pilot path in
+that Worker would not prove all requests to the pilot hostname reach the narrow
+facade. Prefer a separate staging-only Worker without assets, schedules, queues,
+or general API dispatch; route every request through the facade and bind only
+the reviewed dependencies. D1 bindings are not intrinsically read-only, so
+application-level restrictions and negative tests remain necessary. Preserve
+the connector consistency contract and coordinate the staging database binding
+with the existing release owner before any deployment.
+An unconfigured standalone entrypoint now sends every fetch to the facade and
+defaults closed outside staging. Two local entrypoint tests and the Operations
+TypeScript check passed. Before deployment, add a reviewed exact-host allowlist
+and check Cloudflare DNS and Worker route collisions: merely requiring the pilot
+host to differ from the web hostname does not exclude another production alias.
 
 The separate Cloudflare account named `Staging` is distinct from the `Ledge Top`
 account that currently owns the Operations staging Access application and D1
@@ -103,7 +117,19 @@ addition, all 21 Swift package tests passed; its synthetic tests do not prove
 Cloudflare compatibility. The eventual app coordinator must still guard against
 late results after sign-out. Provider metadata examples and the API guide differ
 on issuer formatting and custom redirect support, which require staging evidence.
-The native client still uses the original custom-session protocol. End-to-end
+Read-only discovery on October 29 at the configured Ledge Top Access team's
+public authorization-server metadata returned an HTTPS issuer, S256 and public
+client authentication support, but did not advertise a registration endpoint.
+This was not a request for a dedicated OAuth-enabled pilot application and does
+not establish what its resource-scoped discovery will return. Registration and
+callback behavior must be verified after a safely isolated test application is
+prepared; the client currently rejects metadata without a registration endpoint.
+An unmounted coordinator now tests state and generation checks around OAuth
+sign-in and retains its access token in memory. All 25 Swift package tests passed.
+It does not cancel every underlying operation or revoke Cloudflare grants; the
+eventual app integration must handle those cases, use the Apple OS-random S256
+generator, and guard late data responses. The Apple-specific generator has not
+yet been built with an Apple SDK. The native client still uses the original custom-session protocol. End-to-end
 sign-in, Access ingress, and iPad behavior remain unverified.
 
 ## Local evidence

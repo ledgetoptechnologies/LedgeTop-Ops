@@ -4,8 +4,8 @@ import { readPilotOperations } from './ios-pilot-reads';
 import { IOS_PILOT_BASE, pilotSessionFromAccessClaims, recheckPilotSession } from './ios-pilot-session';
 import type { Env } from './types';
 
-/** This handler is intentionally not mounted. Before mounting, the deployment
- * must route only its dedicated hostname to it and keep the flag disabled until
+/** This handler has a separate staging entrypoint but is not deployed. Before
+ * deployment, route only its dedicated hostname to it and keep the flag disabled until
  * Access, OAuth redirects and cross-host token isolation have been validated. */
 export type ManagedPilotConfig = {
   enabled: string | undefined;
