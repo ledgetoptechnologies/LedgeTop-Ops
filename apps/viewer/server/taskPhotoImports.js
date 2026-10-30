@@ -191,8 +191,9 @@ async function previewPhotos(storage, paths, maxFiles = 20000) {
     else missingGpsCount++;
     if (scannedCount % 32 === 0) await new Promise(resolve => setImmediate(resolve));
   }
-  const photoCount = selected.files.filter(file => IMAGE.test(file.sourcePath)).length;
-  return { photoCount, scannedCount, locatedCount: points.length, missingGpsCount, unscannedCount: photoCount - scannedCount, points, truncated: scannedCount < photoCount };
+  const photos = selected.files.filter(file => IMAGE.test(file.sourcePath)), photoCount = photos.length;
+  const photoByteSize = photos.reduce((total,file) => total + file.byteSize, 0);
+  return { photoCount, photoByteSize, scannedCount, locatedCount: points.length, missingGpsCount, unscannedCount: photoCount - scannedCount, points, truncated: scannedCount < photoCount };
   } finally { if (rootFd !== null) fs.closeSync(rootFd); }
 }
 
