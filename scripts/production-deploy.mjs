@@ -62,8 +62,10 @@ export function ordinaryFrontendPreflightDescriptor(profile, mode) {
  * Apply the legacy Project Alpha profile checks to a preflight-only copy for
  * the exact accepted installed UI profile. The two actual values are checked
  * as string "true" against the pinned profile before the copy is normalized
- * to satisfy the older receiver/release declaration. The checked snapshot is
- * never changed; no runtime/config value is enabled or written here.
+ * to satisfy the older receiver/release declaration. The accepted installed
+ * profile also requires the inquiries flag to stay absent, so the default-off
+ * value is added only to this preflight copy. The checked snapshot is never
+ * changed; no runtime/config value is enabled or written here.
  */
 export function validateOrdinaryFrontendPreflightPreservation(clientVars, operationsVars, profile, mode) {
   need(mode === ORDINARY_FRONTEND_PREFLIGHT_MODE, 'Unreviewed ordinary frontend preflight mode');
@@ -74,12 +76,18 @@ export function validateOrdinaryFrontendPreflightPreservation(clientVars, operat
     && clientVars[ORDINARY_FRONTEND_PRESERVED_FLAGS.client] === 'true'
     && hash(clientVars[ORDINARY_FRONTEND_PRESERVED_FLAGS.client]) === trueHash,
   'Ordinary frontend Client viewer flag differs from pinned installed profile');
+  const ordinaryPreflightOnlyFalseFlag = 'CLIENT_PORTAL_OPS_INQUIRIES_ENABLED';
+  need(!Object.hasOwn(clientVars, ordinaryPreflightOnlyFalseFlag),
+    'Ordinary frontend profile requires the default-off inquiries flag to remain absent');
   need(operationsVars && Object.getPrototypeOf(operationsVars) === Object.prototype
     && typeof operationsVars[ORDINARY_FRONTEND_PRESERVED_FLAGS.operations] === 'string'
     && operationsVars[ORDINARY_FRONTEND_PRESERVED_FLAGS.operations] === 'true'
     && hash(operationsVars[ORDINARY_FRONTEND_PRESERVED_FLAGS.operations]) === trueHash,
   'Ordinary frontend Operations hierarchy flag differs from pinned installed profile');
   const legacyClientVars = { ...clientVars, [ORDINARY_FRONTEND_PRESERVED_FLAGS.client]: 'false' };
+  // The accepted installed profile omits this default-off flag. Add `false`
+  // only to the legacy preflight copy; never bind or write it into production.
+  legacyClientVars[ordinaryPreflightOnlyFalseFlag] = 'false';
   const legacyOperationsVars = { ...operationsVars, [ORDINARY_FRONTEND_PRESERVED_FLAGS.operations]: 'false' };
   const errors = validatePortalReleasePreflight(
     { name: 'ledgetop-clients', keep_vars: true, vars: legacyClientVars },
