@@ -44,7 +44,7 @@ RUN apt-get update \
 COPY third_party/obj2tiles/v1.6.2-bounded-concurrency.patch /tmp/obj2tiles.patch
 COPY third_party/obj2tiles/v1.6.2-imagesharp-3.2.0.patch /tmp/obj2tiles-security.patch
 COPY third_party/obj2tiles/locks /tmp/obj2tiles-locks
-RUN curl -fsSL -o /tmp/obj2tiles.tar.gz \
+RUN --mount=type=secret,id=sixlabors_license,required=true curl -fsSL -o /tmp/obj2tiles.tar.gz \
       "https://codeload.github.com/OpenDroneMap/Obj2Tiles/tar.gz/refs/tags/v${OBJ2TILES_VERSION}" \
     && echo "${OBJ2TILES_SOURCE_SHA256}  /tmp/obj2tiles.tar.gz" | sha256sum -c - \
     && echo "${OBJ2TILES_PATCH_SHA256}  /tmp/obj2tiles.patch" | sha256sum -c - \
@@ -66,6 +66,7 @@ RUN curl -fsSL -o /tmp/obj2tiles.tar.gz \
     done \
     && dotnet restore Obj2Tiles/Obj2Tiles.csproj --locked-mode -r "$rid" \
     && dotnet publish Obj2Tiles/Obj2Tiles.csproj -c Release -r "$rid" --self-contained true --no-restore \
+      -p:SixLaborsLicenseFile=/run/secrets/sixlabors_license \
       -p:PublishSingleFile=true -p:PublishTrimmed=false -p:DebuggerSupport=false -o /opt/obj2tiles \
     && test -x /opt/obj2tiles/Obj2Tiles \
     && /opt/obj2tiles/Obj2Tiles --version 2>&1 | grep -F "${OBJ2TILES_VERSION}" \

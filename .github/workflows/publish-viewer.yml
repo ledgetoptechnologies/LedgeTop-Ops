@@ -93,6 +93,8 @@ jobs:
           platforms: linux/amd64
           build-args: |
             VIEWER_SOURCE_COMMIT=${{ github.sha }}
+          secrets: |
+            "sixlabors_license=${{ secrets.SIXLABORS_LICENSE }}"
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           load: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
           tags: ${{ steps.candidate.outputs.ref }}
