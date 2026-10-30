@@ -194,7 +194,7 @@ assignment was revoked during the final scope check and the stale operation was
 returned. The local candidate now puts staff identity and admission, ACL grants,
 connector registry state, and the filtered operation projection in one D1 batch;
 it validates those results before returning the batch's rows. The full local
-pilot API suite passed 20 tests, including revocations immediately before that
+pilot API suite passed 24 tests, including revocations immediately before that
 batch for assignments, sources, sessions and roles, and a managed detail-route
 regression. Staff snapshot tests passed five cases, including admission-control
 and binding-schema changes between discovery and the final batch; ACL helper and existing ACL
@@ -207,7 +207,11 @@ validation: release configuration, actual Cloudflare sign-in and device checks
 still need verification before real-data activation.
 The private read-service integration and staging-entrypoint suites also passed
 five local tests against the updated candidate.
-The separate session-status endpoint does not use the same atomic batch.
+Both session-status route variants now validate session authority and retrieve
+the current displayed identity in a single D1 batch. Focused local tests cover
+an identity rename and admission revocation immediately before that batch; an
+independent review found no concrete defect. Actual provider and device behavior
+remain unverified.
 The earlier backend suite subsequently passed all 32 tests with a single
 worker. Swift 6.4 on WSL passed all 17 package tests, including five synthetic
 OAuth wire-format tests. Swift emitted an existing test-stub Sendable warning.

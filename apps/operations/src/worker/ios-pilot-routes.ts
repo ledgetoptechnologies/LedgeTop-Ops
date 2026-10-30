@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { readBoundedJson } from './bounded-json';
 import { admittedOperationsRequestOrigin } from './host-admission';
 import { readPilotOperations } from './ios-pilot-reads';
-import { authenticatePilotSession, IOS_PILOT_AUTHORIZE, IOS_PILOT_BASE, issuePilotCode, redeemPilotCode, recheckPilotSession } from './ios-pilot-session';
+import { authenticatePilotSession, IOS_PILOT_AUTHORIZE, IOS_PILOT_BASE, issuePilotCode, redeemPilotCode } from './ios-pilot-session';
+import { readPilotSessionView } from './ios-pilot-staff-snapshot';
 import type { Env } from './types';
 
 const exchange = z.object({ code: z.string().max(128), codeVerifier: z.string().max(128), state: z.string().max(128), redirectUri: z.string().max(128) }).strict();
@@ -51,9 +52,7 @@ export async function handleIosPilot(request: Request, env: Env): Promise<Respon
       return new Response(null, { status: 204, headers });
     }
     if (sessionPath) {
-      await recheckPilotSession(env, session);
-      const { id, displayName, email } = session.principal;
-      return json({ schemaVersion: 1, readOnly: true, user: { id, displayName, email }, expiresAt: session.expiresAt });
+      return json(await readPilotSessionView(env, session));
     }
     let id: string | undefined;
     try { id = detail ? decodeURIComponent(detail[1]!) : undefined; } catch { return json({ error: 'Invalid operation', code: 'invalid_request' }, 400); }

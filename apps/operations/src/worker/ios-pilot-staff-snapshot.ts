@@ -1,5 +1,5 @@
 import { prepareStaffLoginSnapshot, snapshotStaffLoginProof } from './staff-login-bindings';
-import type { PilotSession } from './ios-pilot-session';
+import { denied, type PilotSession } from './ios-pilot-session';
 import type { Env } from './types';
 
 /** Build staff and admission reads for a caller-owned D1 batch. Discovery only
@@ -82,4 +82,22 @@ export async function preparePilotStaffSnapshot(env: Env, transaction: D1Databas
     }
     return true;
   } };
+}
+
+/** Return only current identity fields from the same transaction that validates
+ * the session. Discovery outside the batch never grants authority. */
+export async function readPilotSessionView(env: Env, session: PilotSession) {
+  const db = env.OPS_DB.withSession('first-primary');
+  const staff = await preparePilotStaffSnapshot(env, db, session);
+  if (!staff) return denied();
+  const results = await db.batch([...staff.statements, db.prepare(`SELECT id,email,display_name FROM staff_users
+    WHERE id=? AND email=? COLLATE BINARY AND access_subject=? AND status='active'`)
+    .bind(session.proof.staffId, session.proof.canonicalEmail, session.proof.canonicalSubject)]);
+  if (results.length !== staff.statements.length + 1 || !staff.verify(results.slice(0, staff.statements.length), Math.floor(Date.now() / 1000))) return denied();
+  const identity = results[staff.statements.length];
+  if (!identity?.success || !Array.isArray(identity.results) || identity.results.length !== 1) return denied();
+  const row = identity.results[0] as { id?: unknown; email?: unknown; display_name?: unknown };
+  if (row.id !== session.proof.staffId || row.email !== session.proof.canonicalEmail || typeof row.display_name !== 'string'
+    || !row.display_name.trim() || row.display_name.length > 160) return denied();
+  return { schemaVersion: 1, readOnly: true, user: { id: row.id, displayName: row.display_name, email: row.email }, expiresAt: session.expiresAt };
 }

@@ -56,7 +56,7 @@ describe('isolated read-only iOS pilot', { timeout: 120_000 }, () => {
       db.prepare('DELETE FROM ios_pilot_codes'), db.prepare('DELETE FROM ios_pilot_sessions'),
       db.prepare('DELETE FROM pa_operations'), db.prepare('DELETE FROM pa_operation_assignments'), db.prepare('DELETE FROM pa_connectors'),
       db.prepare('DELETE FROM staff_permission_overrides'),
-      db.prepare("UPDATE staff_users SET status='active',project_alpha_user_id='pa-human' WHERE id=?").bind(fixture.owner.id),
+      db.prepare("UPDATE staff_users SET status='active',display_name='Synthetic Owner',project_alpha_user_id='pa-human' WHERE id=?").bind(fixture.owner.id),
       db.prepare("UPDATE staff_role_assignments SET role_id='role-owner' WHERE staff_id=?").bind(fixture.owner.id),
       db.prepare('UPDATE native_staff_admissions SET active=1 WHERE staff_id=?').bind(fixture.owner.id),
       db.prepare('UPDATE native_staff_access_reconciliation SET enabled=1'),
@@ -77,7 +77,7 @@ describe('isolated read-only iOS pilot', { timeout: 120_000 }, () => {
   }
   async function signIn(): Promise<Token> { const response = await exchange(await code()); expect(response.status).toBe(200); return response.json(); }
   function read(path: string, token: Token, method = 'GET') { return route(path, { method, headers: { Authorization: `Bearer ${token.accessToken}` } }); }
-  function raceEnvironment(mutate: () => Promise<unknown>): { env: Env; wasTriggered: () => boolean } {
+  function raceEnvironment(mutate: () => Promise<unknown>, queryPrefix = 'SELECT o.id,o.title'): { env: Env; wasTriggered: () => boolean } {
     let fired = false;
     const originals = new WeakMap<D1PreparedStatement, D1PreparedStatement>();
     const dataStatements = new WeakSet<D1PreparedStatement>();
@@ -89,7 +89,7 @@ describe('isolated read-only iOS pilot', { timeout: 120_000 }, () => {
       },
       });
       originals.set(proxy, statement);
-      if (sql.trimStart().startsWith('SELECT o.id,o.title')) dataStatements.add(proxy);
+      if (sql.trimStart().startsWith(queryPrefix)) dataStatements.add(proxy);
       return proxy;
     };
     const wrapSession = (session: D1DatabaseSession): D1DatabaseSession => new Proxy(session, {
@@ -110,6 +110,30 @@ describe('isolated read-only iOS pilot', { timeout: 120_000 }, () => {
   async function operation(id: string, source = 'project-alpha:primary') {
     await db.prepare(`INSERT INTO pa_operations VALUES(?,?,'project',?,'scheduled','2026-10-29T13:00:00Z',NULL,NULL,1)`).bind(id, source, `Operation ${id}`).run();
   }
+  it.each(['managed', 'legacy'] as const)('returns a fresh name from the %s session snapshot', async kind => {
+    const token = kind === 'legacy' ? await signIn() : null;
+    const raced = raceEnvironment(() => db.prepare('UPDATE staff_users SET display_name=? WHERE id=?')
+      .bind('Updated Synthetic Owner', fixture.owner.id).run(), 'SELECT id,email,display_name');
+    const response = kind === 'legacy'
+      ? await route('/mobile-pilot/v1/session', { headers: { Authorization: `Bearer ${token!.accessToken}` } }, raced.env)
+      : await handleManagedIosPilot(new Request(pilotOrigin + '/mobile-pilot/v1/session',
+        { headers: { Authorization: 'Bearer oauth:synthetic' } }), raced.env, managedConfig);
+    expect(raced.wasTriggered()).toBe(true);
+    expect(response.status).toBe(200);
+    expect((await response.json() as { user: { displayName: string } }).user.displayName).toBe('Updated Synthetic Owner');
+  });
+  it.each(['managed', 'legacy'] as const)('denies a %s session when admission is revoked before its snapshot', async kind => {
+    const token = kind === 'legacy' ? await signIn() : null;
+    const raced = raceEnvironment(() => db.prepare('UPDATE native_staff_admissions SET active=0 WHERE staff_id=?')
+      .bind(fixture.owner.id).run(), 'SELECT id,email,display_name');
+    const response = kind === 'legacy'
+      ? await route('/mobile-pilot/v1/session', { headers: { Authorization: `Bearer ${token!.accessToken}` } }, raced.env)
+      : await handleManagedIosPilot(new Request(pilotOrigin + '/mobile-pilot/v1/session',
+        { headers: { Authorization: 'Bearer oauth:synthetic' } }), raced.env, managedConfig);
+    expect(raced.wasTriggered()).toBe(true);
+    expect(response.status).toBe(401);
+    expect(await response.text()).not.toContain('Synthetic Owner');
+  });
   it('defaults absent before any database or auth work; rejects foreign origin and arbitrary callback', async () => {
     expect((await route('/mobile-pilot/v1/session', undefined, { IOS_PILOT_ENABLED: 'false' } as Env)).status).toBe(404);
     expect((await handleIosPilot(new Request('https://foreign.test/mobile-pilot/v1/session'), env)).status).toBe(404);

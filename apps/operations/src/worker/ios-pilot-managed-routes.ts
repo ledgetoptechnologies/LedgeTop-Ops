@@ -1,7 +1,8 @@
 import { HTTPException } from 'hono/http-exception';
 import { verifyPilotAccessAssertion } from './ios-pilot-access';
 import { readPilotOperations } from './ios-pilot-reads';
-import { IOS_PILOT_BASE, pilotSessionFromAccessClaims, recheckPilotSession } from './ios-pilot-session';
+import { IOS_PILOT_BASE, pilotSessionFromAccessClaims } from './ios-pilot-session';
+import { readPilotSessionView } from './ios-pilot-staff-snapshot';
 import type { Env } from './types';
 
 /** This handler has a separate staging entrypoint but is not deployed. Before
@@ -43,9 +44,7 @@ export async function handleManagedIosPilot(request: Request, env: Env, config: 
       pilotAudience: config.audience, operationsAudience: env.OPERATIONS_AUD });
     const session = await pilotSessionFromAccessClaims(env, claims);
     if (sessionPath) {
-      await recheckPilotSession(env, session);
-      const { id, displayName, email } = session.principal;
-      return json({ schemaVersion: 1, readOnly: true, user: { id, displayName, email }, expiresAt: session.expiresAt });
+      return json(await readPilotSessionView(env, session));
     }
     let id: string | undefined;
     try { id = detail ? decodeURIComponent(detail[1]!) : undefined; }
