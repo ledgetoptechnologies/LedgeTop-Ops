@@ -415,7 +415,7 @@ test("unified portal accepts server metadata boundaries and opaque slash IDs", a
   const calls = await interceptClientApi(page, 200, boundaryResponse);
   await page.goto("/portal");
   await expect(page.getByText(label, { exact: true })).toBeVisible();
-  expect(calls).toEqual([
+  await expect.poll(() => calls, { timeout: 5_000 }).toEqual([
     "/api/client/v2/operations/home",
     "/api/client/session",
     financialPath(boundaryResponse.homes[0]!.authorityId),
@@ -722,4 +722,34 @@ test("combined portal hides native delivery data when Operations-home revalidati
   await expect(page.getByRole("region", { name: "Shared deliveries" })).toHaveCount(0);
   await expect(page.getByText("Private combined delivery", { exact: true })).toHaveCount(0);
   expect(calls.filter(path => path === "/api/client/v2/operations/home").length).toBeGreaterThanOrEqual(2);
+});
+
+for (const timezoneId of ["Pacific/Honolulu", "Asia/Tokyo"]) test.describe(`invoice dates in ${timezoneId}`, () => {
+  test.use({ timezoneId, locale: "en-US" });
+  test("show the issue and due days exactly as recorded, and nothing for an older invoice without dates", async ({ page }) => {
+    const authorityId = response.homes[0]!.authorityId;
+    const invoice = { kind: "invoice", status: "sent", currency: "USD", documentUrl: null, actionUrl: null, amountPaid: "0.00" };
+    await page.route("**/api/client/**", route => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === "/api/client/v2/operations/home") return route.fulfill({ json: response });
+      if (path === financialPath(authorityId)) return route.fulfill({ json: { resourceMode: "operations_financial", collections: [{
+        grantId: "abcdef12-1234-4123-8123-123456789abc", revision: 1, documents: [
+          { ...invoice, publicId: "dated", total: "125.00", balanceDue: "125.00", issueDate: "2026-10-01", dueDate: "2026-10-31" },
+          { ...invoice, publicId: "project", kind: "project_invoice", total: "80.00", balanceDue: "80.00", issueDate: null, dueDate: "2026-11-01" },
+          // An older Project Alpha that sends no dates at all.
+          { ...invoice, publicId: "legacy", total: "40.00", balanceDue: "40.00" },
+        ] }] } });
+      if (path === "/api/client/session") return route.fulfill({ status: 401, json: { error: "Sign in required" } });
+      return route.fulfill({ status: 404, json: { error: "not found" } });
+    });
+    await page.goto("/portal");
+    const rows = page.getByRole("region", { name: "Invoices and contracts" }).locator(".portal-finance-list > li");
+    await expect(rows).toHaveCount(3);
+    await expect(rows.filter({ hasText: "$125.00" }).locator(".portal-finance-dates")).toHaveText("Issued Oct 1, 2026 · Due Oct 31, 2026");
+    // A project invoice has no issue date (its billing period isn't one), so only its due day shows.
+    await expect(rows.filter({ hasText: "$80.00" }).locator(".portal-finance-dates")).toHaveText("Due Nov 1, 2026");
+    await expect(rows.filter({ hasText: "$40.00" }).locator(".portal-finance-dates")).toHaveCount(0);
+    // Overdue status still comes only from Project Alpha's own status, never from the due date.
+    await expect(page.getByRole("region", { name: "Invoices and contracts" })).not.toContainText("Overdue");
+  });
 });

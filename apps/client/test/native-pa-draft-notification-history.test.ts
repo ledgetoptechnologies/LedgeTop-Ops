@@ -10,7 +10,8 @@ import { resolveNativePortalWorkspaceReadContext } from "../src/worker/client-po
 import { resolveNativeFeedbackTarget } from "../src/worker/client-portal/native-feedback-target";
 import { createNativeFeedbackRecord } from "../src/worker/client-portal/native-feedback-store";
 import { reservePrimaryPortalSigningKeys } from "../src/worker/project-alpha-portal-authority";
-import { nativeRequestSchemaReady } from "../src/worker/client-portal/native-request-authority";
+import { nativeRequestSchemaReady, resolveNativeRequestAuthority } from "../src/worker/client-portal/native-request-authority";
+import { listOpsTriageInquiries, submitOpsTriageInquiry } from "../src/worker/client-portal/ops-triage-inquiries";
 import type { Env } from "../src/worker/types";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 
@@ -676,5 +677,36 @@ describe("native PA draft notification history — migrated D1", { timeout: 240_
     })).toBe(false);
     expect(reached).toBe(true);
     expect(await db.prepare('SELECT count(*) n FROM native_delivery_recipient_event_state WHERE event_id=?').bind(mine.event).first('n')).toBe(0);
+  });
+
+  it("joins the real native request.create proof to typed inquiry writes and rechecks revoked membership",async()=>{
+    const principal=syntheticRequestPrincipal("ops-triage-real-proof");
+    const mine=await seed("ops-triage-real-proof",principal);
+    await acceptSyntheticPrincipal(mine,principal);
+    const requestEnv={...env,CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED:"true",
+      CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:"true",CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED:"true"} as Env;
+    const session:ClientPortalSession={accountId:"",identityId:"",workspaceId:mine.workspace,
+      principalIssuer:principal.issuer,principalSubject:principal.subject,principalEmail:principal.email,
+      nativeSourceId:mine.source,displayName:"Native workspace",role:"member",canViewBilling:false};
+    const proof=await resolveNativeRequestAuthority(requestEnv,session,null);
+    expect(proof).not.toBeNull();
+    if(!proof)throw new Error("Expected a real current request.create proof");
+    const before=await requestMutationFootprint(mine);
+    const clientsBefore=await db.prepare("SELECT COUNT(*) n FROM client_accounts").first<number>("n");
+    const input={kind:"website" as const,title:"Website inquiry",details:"Need help with our public site.",
+      location:null,idempotencyKey:"native-real-authority-triage-0001"};
+    const created=await submitOpsTriageInquiry(requestEnv,proof,input);
+    expect(created.kind).toBe("created");
+    if(created.kind!=="created")throw new Error("Expected the first inquiry write to succeed");
+    expect(await listOpsTriageInquiries(requestEnv,proof)).toEqual([created.inquiry]);
+    expect(await requestMutationFootprint(mine)).toEqual(before);
+    expect(await db.prepare("SELECT COUNT(*) n FROM client_accounts").first<number>("n")).toBe(clientsBefore);
+    await db.prepare("UPDATE portal_v2_workspace_memberships SET status='revoked',revoked_at=datetime('now') WHERE workspace_id=? AND identity_id=?")
+      .bind(mine.workspace,mine.identity).run();
+    expect(await submitOpsTriageInquiry(requestEnv,proof,input)).toEqual({kind:"unauthorized"});
+    await expect(listOpsTriageInquiries(requestEnv,proof)).rejects.toMatchObject({status:403});
+    expect(await db.prepare("SELECT COUNT(*) n FROM client_ops_triage_inquiries WHERE portal_identity_id=?").bind(mine.identity).first<number>("n")).toBe(1);
+    expect(await db.prepare("SELECT COUNT(*) n FROM client_ops_triage_notification_outbox WHERE inquiry_id=?")
+      .bind(created.inquiry.id).first<number>("n")).toBe(1);
   });
 });

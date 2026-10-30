@@ -3,6 +3,7 @@ import { Card, Dialog, EmptyState, Loading, StatusPill, Skeleton } from "@ltds/u
 import type { Permission } from "@ltds/shared";
 import { api, ApiError } from "./api";
 import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
+import { ClientInquiryQueue } from "./ClientInquiries";
 import { ClientPortalAccessPanel, type PortalIdentityPage, type PortalRootAccess } from "./ClientPortalAccessPanel";
 import { ClientExternalAccessRoster, type ExternalAccessResult } from "./ClientExternalAccessRoster";
 import { ClientServiceAssignments, type ClientServiceAssignmentResult } from "./ClientServiceAssignments";
@@ -753,6 +754,7 @@ export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invita
   if (route) return canViewDirectory ? <ClientWorkspace key={JSON.stringify([route.sourceId || "", route.rootNamespace || "", route.kind, route.publicId])} route={route} canReviewFeedback={feedbackEnabled} invitationAccess={invitationAccess} nativeDirectoryProfileWrites={nativeDirectoryProfileWrites} nativeDirectorySharedProfiles={nativeDirectorySharedProfiles} reviewedImportEnrollment={reviewedImportEnrollment} nativeDirectoryBindingRefresh={nativeDirectoryBindingRefresh} nativeDirectoryBindingRefreshRecovery={nativeDirectoryBindingRefreshRecovery} /> : <Card><EmptyState title="Client unavailable" detail="Client-directory access is required." /></Card>;
   return <>
     {canReview && <section className="client-hub-queue"><ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" pendingOnly hideWhenEmpty={canViewDirectory} /></section>}
+    {canReview && <ClientInquiryQueue hideWhenEmpty={canViewDirectory} />}
     {canViewDirectory && <section>
       <div className="client-hub-section-heading"><div><h2>Clients</h2><p>Organizations and standalone clients with their contacts, access, and shared work.</p></div>
         <OnboardClientButton /></div>

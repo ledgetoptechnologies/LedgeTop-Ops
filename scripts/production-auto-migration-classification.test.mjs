@@ -1,8 +1,8 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +19,13 @@ import { APPROVED_SOURCE_COMMIT } from './production-auto-migration-profile/appe
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const COMMIT = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+const approvedFixture = mkdtempSync(path.join(os.tmpdir(), 'append-profile-approved-source-'));
+after(() => {
+  const resolved = path.resolve(approvedFixture);
+  assert.equal(path.dirname(resolved), path.resolve(os.tmpdir()));
+  assert.ok(path.basename(resolved).startsWith('append-profile-approved-source-'));
+  rmSync(resolved, { recursive: true, force: true });
+});
 const ACCOUNT = PRODUCTION_MIGRATION_TARGET.accountId;
 const profile = loadPinnedAppendOnlyMigrationProfile();
 const manifestBytes = profile.reconciliationManifestBytes;
@@ -36,9 +43,75 @@ assert.equal(manifest.actualReceipt.sourceCommit, 'c88011f7600e5f04dc96d5ab7ed1e
 assert.equal(plan.actualReceipt.sourceCommit, 'c88011f7600e5f04dc96d5ab7ed1eacfa157c7c8');
 assert.equal(plan.sourceCommit, APPROVED_SOURCE_COMMIT);
 
+let approvedFixtureHead;
+try {
+  const tree = execFileSync('git', ['-C', root, 'ls-tree', '-rz', '--full-tree', COMMIT, '--',
+    'apps/operations/migrations', 'apps/client/migrations']);
+  const trackedBlobs = new Map();
+  for (const entry of tree.toString('utf8').split('\0').filter(Boolean)) {
+    const match = /^(100644|100755) blob ([0-9a-f]{40})\t(.+)$/.exec(entry);
+    assert.ok(match, `invalid Git migration tree row: ${entry}`);
+    trackedBlobs.set(match[3], match[2]);
+  }
+  const rows = Object.entries(manifest.databases).flatMap(([app, db]) =>
+    db.sourceMigrations.map((row) => ({ app, row, relative: `apps/${app}/migrations/${row.name}` })));
+  const oids = rows.map(({ row, relative }) => {
+    const objectId = trackedBlobs.get(relative);
+    assert.equal(objectId, row.gitBlobOid, `pinned Git blob mismatch for ${relative}`);
+    return objectId;
+  });
+  const contents = execFileSync('git', ['-C', root, 'cat-file', '--batch'], {
+    input: `${oids.join('\n')}\n`, maxBuffer: 32 * 1024 * 1024,
+  });
+  let offset = 0;
+  const verifiedBytes = [];
+  for (let index = 0; index < rows.length; index++) {
+    const lineEnd = contents.indexOf(0x0a, offset);
+    assert.ok(lineEnd >= 0, 'truncated Git blob batch header');
+    const [objectId, type, sizeText] = contents.subarray(offset, lineEnd).toString('ascii').split(' ');
+    assert.equal(objectId, oids[index]);
+    assert.equal(type, 'blob');
+    const size = Number(sizeText);
+    assert.ok(Number.isSafeInteger(size) && size > 0 && size <= 8 * 1024 * 1024);
+    const start = lineEnd + 1, end = start + size;
+    assert.ok(end < contents.length && contents[end] === 0x0a, 'truncated Git blob batch content');
+    const bytes = contents.subarray(start, end);
+    const gitOid = createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${size}\0`), bytes])).digest('hex');
+    assert.equal(gitOid, rows[index].row.gitBlobOid, `reconstructed Git blob mismatch for ${rows[index].relative}`);
+    assert.equal(createHash('sha256').update(bytes).digest('hex'), rows[index].row.sha256,
+      `pinned SHA-256 mismatch for ${rows[index].relative}`);
+    verifiedBytes.push(bytes);
+    offset = end + 1;
+  }
+  assert.equal(offset, contents.length, 'unexpected trailing Git blob batch data');
+  rows.forEach(({ app, row }, index) => {
+    const directory = path.join(approvedFixture, 'apps', app, 'migrations');
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(path.join(directory, row.name), verifiedBytes[index]);
+  });
+  execFileSync('git', ['-C', approvedFixture, 'init', '-q']);
+  execFileSync('git', ['-C', approvedFixture, 'config', 'core.autocrlf', 'false']);
+  execFileSync('git', ['-C', approvedFixture, 'config', 'user.email', 'fixture@example.invalid']);
+  execFileSync('git', ['-C', approvedFixture, 'config', 'user.name', 'Pinned blob fixture']);
+  execFileSync('git', ['-C', approvedFixture, 'add', 'apps/operations/migrations', 'apps/client/migrations']);
+  execFileSync('git', ['-C', approvedFixture, 'commit', '-qm', `SQL-only fixture reconstructed from pinned rows for ${APPROVED_SOURCE_COMMIT}`]);
+  approvedFixtureHead = execFileSync('git', ['-C', approvedFixture, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  assert.match(approvedFixtureHead, /^[0-9a-f]{40}$/);
+} catch (error) {
+  const resolved = path.resolve(approvedFixture);
+  assert.equal(path.dirname(resolved), path.resolve(os.tmpdir()));
+  assert.ok(path.basename(resolved).startsWith('append-profile-approved-source-'));
+  rmSync(resolved, { recursive: true, force: true });
+  throw error;
+}
+console.log(`# SQL-only reconstructed fixture HEAD=${approvedFixtureHead}; pinned profile source=${APPROVED_SOURCE_COMMIT}; verified blobs=${Object.values(manifest.databases).reduce((sum, db) => sum + db.sourceMigrations.length, 0)}`);
+
 const strictSourceRows = Object.fromEntries(Object.entries(manifest.databases).map(([app, db]) => [
   app, db.sourceMigrations.map(({ name }, index) => ({ name, id: index + 1 })),
 ]));
+strictSourceRows.client = readdirSync(path.join(root, 'apps/client/migrations'))
+  .filter((name) => name.endsWith('.sql')).sort()
+  .map((name, index) => ({ name, id: index + 1 }));
 
 function fakeProvider(rowsByApp, options = {}) {
   let calls = 0;
@@ -56,8 +129,8 @@ function fakeProvider(rowsByApp, options = {}) {
   return { fetchImpl, get calls() { return calls; } };
 }
 const args = (fetchImpl, extra = {}) => ({
-  sourceCommit: COMMIT,
-  root,
+  sourceCommit: extra.appendOnlyProfile === undefined ? COMMIT : approvedFixtureHead,
+  root: extra.appendOnlyProfile === undefined ? root : approvedFixture,
   token: 'synthetic-token-for-local-test-only',
   env: {},
   fetchImpl,
@@ -80,7 +153,7 @@ test('base inventories are explicitly migration-required and never v1 ready', as
     assert.equal(row.status, 'preserved-base-awaiting-entire-approved-append');
     assert.ok(row.appendEnvelope.length > 0);
   }
-  assert.throws(() => validateProductionMigrationReadiness(result, { sourceCommit: COMMIT }),
+  assert.throws(() => validateProductionMigrationReadiness(result, { sourceCommit: result.sourceCommit }),
     { code: 'migration_readiness_invalid' });
 });
 
@@ -94,7 +167,7 @@ test('fully appended inventories are classified but schema readiness remains sep
   assert.deepEqual(result.databases.map((row) => row.installedRowCount), [231, 162]);
   assert.ok(result.databases.every((row) => row.status === 'fully-appended-source-inventory' && row.appendEnvelope.length === 0));
   assert.deepEqual(validateAppendOnlyMigrationReadiness(result, {
-    sourceCommit: COMMIT, now: Date.parse(result.observedAt), appendOnlyProfile: profile,
+    sourceCommit: result.sourceCommit, now: Date.parse(result.observedAt), appendOnlyProfile: profile,
   }), result);
   const tamperedCases = [
     (copy) => { copy.databases[0].sourceInventorySha256 = '0'.repeat(64); },
@@ -105,7 +178,7 @@ test('fully appended inventories are classified but schema readiness remains sep
     const copy = structuredClone(result);
     tamper(copy);
     assert.throws(() => validateAppendOnlyMigrationReadiness(copy, {
-      sourceCommit: COMMIT, now: Date.parse(result.observedAt), appendOnlyProfile: profile,
+      sourceCommit: result.sourceCommit, now: Date.parse(result.observedAt), appendOnlyProfile: profile,
     }), { code: 'append_readiness_database_profile_mismatch' });
   }
   const baseResult = await readProductionMigrationReadiness(args(fakeProvider(baseRows).fetchImpl, { appendOnlyProfile: profile }));
@@ -116,21 +189,21 @@ test('fully appended inventories are classified but schema readiness remains sep
     const copy = structuredClone(baseResult);
     alter(copy);
     assert.throws(() => validateAppendOnlyMigrationReadiness(copy, {
-      sourceCommit: COMMIT, now: Date.parse(baseResult.observedAt), appendOnlyProfile: profile,
+      sourceCommit: baseResult.sourceCommit, now: Date.parse(baseResult.observedAt), appendOnlyProfile: profile,
     }), { code: 'append_readiness_database_profile_mismatch' });
   }
 });
 
 test('runtime admission keeps both inventory classifications held with distinct reasons', async () => {
   const base = await readProductionMigrationReadiness(args(fakeProvider(baseRows).fetchImpl, { appendOnlyProfile: profile }));
-  assert.throws(() => validateProductionMigrationAdmission(base, { sourceCommit: COMMIT }),
+  assert.throws(() => validateProductionMigrationAdmission(base, { sourceCommit: base.sourceCommit }),
     { code: 'migration_required_pending' });
   const full = await readProductionMigrationReadiness(args(fakeProvider(fullRows).fetchImpl, { appendOnlyProfile: profile }));
-  assert.throws(() => validateProductionMigrationAdmission(full, { sourceCommit: COMMIT }),
+  assert.throws(() => validateProductionMigrationAdmission(full, { sourceCommit: full.sourceCommit }),
     { code: 'migration_application_schema_confirmation_required' });
   const malformed = structuredClone(full);
   malformed.status = 'ready';
-  assert.throws(() => validateProductionMigrationAdmission(malformed, { sourceCommit: COMMIT }),
+  assert.throws(() => validateProductionMigrationAdmission(malformed, { sourceCommit: full.sourceCommit }),
     { code: 'migration_readiness_diagnostic_invalid' });
 });
 
@@ -140,13 +213,13 @@ test('Operations release callsite holds a full inventory before CI or provider w
   let ciCalls = 0;
   const env = { CLOUDFLARE_ACCOUNT_ID: ACCOUNT, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
     GITHUB_RUN_ID: '101', GITHUB_RUN_ATTEMPT: '1' };
-  const runtime = createProductionAutoReleaseAdapter({ workerName: 'ledgetop-clients', sourceCommit: COMMIT, env,
-    triggerRun: { sourceCommit: COMMIT, runId: 101, runAttempt: 1 },
+  const runtime = createProductionAutoReleaseAdapter({ workerName: 'ledgetop-clients', sourceCommit: diagnostic.sourceCommit, env,
+    triggerRun: { sourceCommit: diagnostic.sourceCommit, runId: 101, runAttempt: 1 },
     migrationReader: async ({ appendOnlyProfile }) => {
       assert.equal(appendOnlyProfile.appendPlanBytes.toString('utf8'), appendPlanBytes.toString('utf8'));
       return diagnostic;
     },
-    ciFactory: () => ({ verify: async () => { ciCalls++; return { passed: true, runId: 101, runAttempt: 1 }; }, mainCommit: async () => COMMIT }),
+    ciFactory: () => ({ verify: async () => { ciCalls++; return { passed: true, runId: 101, runAttempt: 1 }; }, mainCommit: async () => diagnostic.sourceCommit }),
     providerFactory: () => { assert.fail('provider work must not start while schema confirmation is required'); },
   });
   await assert.rejects(runtime.adapter.ciGate(), { code: 'migration_application_schema_confirmation_required' });
@@ -160,8 +233,8 @@ test('Ops Sync release callsite preserves the full-inventory hold before readine
   const unexpected = () => { otherCalls++; throw Error('unexpected downstream work'); };
   const env = { CLOUDFLARE_ACCOUNT_ID: ACCOUNT, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
     GITHUB_RUN_ID: '102', GITHUB_RUN_ATTEMPT: '1', NATIVE_STAFF_CUTOVER_REVIEW_JSON: '{"synthetic":true}' };
-  const runtime = createProductionAutoSyncAdapter({ sourceCommit: COMMIT,
-    triggerRun: { sourceCommit: COMMIT, runId: 102, runAttempt: 1 }, env,
+  const runtime = createProductionAutoSyncAdapter({ sourceCommit: diagnostic.sourceCommit,
+    triggerRun: { sourceCommit: diagnostic.sourceCommit, runId: 102, runAttempt: 1 }, env,
     migrationReader: async () => diagnostic,
     ciFactory: () => ({ verify: unexpected }), sourceReader: unexpected, readinessReader: unexpected,
     providerFactory: unexpected, journalFactory: unexpected, recipientLoader: unexpected,
@@ -202,8 +275,23 @@ test('unknown, tampered, or stale append profile refuses before provider request
   assert.equal(provider.calls, 0);
   const fresh = await readProductionMigrationReadiness(args(fakeProvider(fullRows).fetchImpl, { appendOnlyProfile: profile }));
   assert.throws(() => validateAppendOnlyMigrationReadiness(fresh, {
-    sourceCommit: COMMIT, now: Date.parse(fresh.observedAt) + 60_001, appendOnlyProfile: profile,
+    sourceCommit: fresh.sourceCommit, now: Date.parse(fresh.observedAt) + 60_001, appendOnlyProfile: profile,
   }), { code: 'append_readiness_stale' });
+});
+
+test('current 0242 source successor is refused by the unchanged historical profile before provider requests', async () => {
+  const provider = fakeProvider(baseRows);
+  const currentClientNames = readdirSync(path.join(root, 'apps/client/migrations'))
+    .filter((name) => name.endsWith('.sql')).sort();
+  assert.equal(currentClientNames.length, 161);
+  assert.equal(currentClientNames.at(-1), '0242_client_ops_triage_inquiries.sql');
+  const fixtureClientNames = readdirSync(path.join(approvedFixture, 'apps/client/migrations'))
+    .filter((name) => name.endsWith('.sql')).sort();
+  assert.equal(fixtureClientNames.length, 160);
+  await assert.rejects(readProductionMigrationReadiness(args(provider.fetchImpl, {
+    appendOnlyProfile: profile, root, sourceCommit: COMMIT,
+  })), { code: 'source_inventory_count_mismatch' });
+  assert.equal(provider.calls, 0);
 });
 
 test('pinned profile JSON hashes survive a fresh autocrlf Windows checkout', (t) => {

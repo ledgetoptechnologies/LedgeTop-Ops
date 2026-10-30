@@ -15,10 +15,15 @@ export interface RequestServiceChoice {
   geometryRequirement: "none" | "optional" | "required";
 }
 
+export type InquiryKind = "website" | "drone" | "other";
+export const INQUIRY_KINDS: readonly InquiryKind[] = ["website", "drone", "other"];
+
 export interface RequestServices {
   services: RequestServiceChoice[];
   /** Accounts whose services couldn't be listed right now; their names are shown only to say so. */
   unavailable: string[];
+  /** General kinds of work the client may ask about without a listed service; empty when not offered. */
+  inquiryKinds: InquiryKind[];
 }
 
 export interface QuickRequestInput {
@@ -63,9 +68,9 @@ function choice(value: unknown): RequestServiceChoice | null {
  * portal doesn't offer the one-step form yet (404/405), so the caller keeps the per-account path.
  */
 export async function loadRequestServices(signal?: AbortSignal): Promise<RequestServices | null> {
-  let body: { services?: unknown; unavailable?: unknown };
+  let body: { services?: unknown; unavailable?: unknown; inquiryKinds?: unknown };
   try {
-    body = await requestJson<{ services?: unknown; unavailable?: unknown }>("/api/client/request-services", { omitWorkspace: true, cache: "no-store", signal });
+    body = await requestJson<{ services?: unknown; unavailable?: unknown; inquiryKinds?: unknown }>("/api/client/request-services", { omitWorkspace: true, cache: "no-store", signal });
   } catch (caught) {
     if ([404, 405].includes((caught as RequestError).status ?? 0)) return null;
     throw caught;
@@ -76,7 +81,9 @@ export async function loadRequestServices(signal?: AbortSignal): Promise<Request
   const unavailable = Array.isArray(body.unavailable)
     ? [...new Set(body.unavailable.map(item => (item as { clientName?: unknown })?.clientName).filter((name): name is string => text(name, 300)))]
     : [];
-  return { services: services as RequestServiceChoice[], unavailable };
+  // Only kinds this portal knows how to show; anything else is left out rather than guessed at.
+  const inquiryKinds = Array.isArray(body.inquiryKinds) ? INQUIRY_KINDS.filter(kind => (body.inquiryKinds as unknown[]).includes(kind)) : [];
+  return { services: services as RequestServiceChoice[], unavailable, inquiryKinds };
 }
 
 /** Submits one request; the same idempotency key replays the same request instead of creating another. */
@@ -89,4 +96,60 @@ export async function submitQuickRequest(input: QuickRequestInput, idempotencyKe
   if (!body.request || typeof body.request !== "object" || typeof body.request.id !== "string")
     throw Object.assign(new Error("We couldn't confirm your request was received."), { status: 502 });
   return body.request;
+}
+
+/** A general request sent to Ledge Top's team, for work that isn't a listed service. */
+export interface ClientInquiry {
+  id: string;
+  kind: InquiryKind;
+  title: string;
+  details: string;
+  location: string | null;
+  status: string;
+  createdAt: string;
+}
+
+export interface ClientInquiryInput {
+  kind: InquiryKind;
+  title: string | null;
+  details: string;
+  location: string | null;
+}
+
+function inquiry(value: unknown): ClientInquiry | null {
+  const item = value as Record<string, unknown> | null;
+  if (!item || typeof item !== "object" || !text(item.id, 512) || !INQUIRY_KINDS.includes(item.kind as InquiryKind) || !text(item.title, 300)
+    || typeof item.details !== "string" || !text(item.status, 64) || !text(item.createdAt, 64) || Number.isNaN(Date.parse(item.createdAt as string))) return null;
+  return { id: item.id as string, kind: item.kind as InquiryKind, title: item.title as string, details: item.details,
+    location: typeof item.location === "string" && item.location.trim() ? item.location : null, status: item.status as string, createdAt: item.createdAt as string };
+}
+
+/**
+ * Sends a general request. Like a service request it carries no account or workspace: the server records it
+ * for Ledge Top's team. The same idempotency key replays the same inquiry instead of creating another.
+ */
+export async function submitInquiry(input: ClientInquiryInput, idempotencyKey: string, signal?: AbortSignal): Promise<ClientInquiry> {
+  const body = await requestJson<{ inquiry?: unknown }>("/api/client/inquiries", {
+    method: "POST", omitWorkspace: true, signal,
+    headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
+    body: JSON.stringify(input),
+  });
+  const sent = inquiry(body.inquiry);
+  if (!sent) throw Object.assign(new Error("We couldn't confirm your request was received."), { status: 502 });
+  return sent;
+}
+
+/** The client's own general requests, newest first. Resolves null when this portal doesn't offer them (404/405). */
+export async function loadInquiries(signal?: AbortSignal): Promise<ClientInquiry[] | null> {
+  let body: { inquiries?: unknown };
+  try {
+    body = await requestJson<{ inquiries?: unknown }>("/api/client/inquiries", { omitWorkspace: true, cache: "no-store", signal });
+  } catch (caught) {
+    if ([404, 405].includes((caught as RequestError).status ?? 0)) return null;
+    throw caught;
+  }
+  if (!Array.isArray(body.inquiries)) throw Object.assign(new Error("Your requests couldn't be loaded."), { status: 502 });
+  const items = body.inquiries.map(inquiry);
+  if (items.some(item => item === null)) throw Object.assign(new Error("Your requests couldn't be loaded."), { status: 502 });
+  return (items as ClientInquiry[]).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
 }

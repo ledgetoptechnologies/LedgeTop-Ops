@@ -143,6 +143,7 @@ import { processProjectAccessExpiryNotifications } from "./project-access-expiry
 import { maintainAuthenticatedDeliveryChanges } from "./delivery-change-maintenance";
 import {
   enqueueExpiringNotifications,
+  processClientOpsTriageInquiryNotifications,
   processClientPortalRequestNotifications,
   processDeliveryNotifications,
   processProjectAlphaDeliveryPortalNotifications,
@@ -3686,6 +3687,7 @@ async function scheduled(
       await Promise.all([
         ...(notificationMaintenance ? [] : [
           processClientPortalRequestNotifications(env),
+          processClientOpsTriageInquiryNotifications(env),
           processClientFolderGrantNotifications(env),
           processClientFolderChangeNotifications(env),
         ]),

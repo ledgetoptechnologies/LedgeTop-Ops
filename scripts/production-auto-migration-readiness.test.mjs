@@ -115,7 +115,8 @@ async function readRepository(repo, fetchImpl, extra = {}) {
 
 test('reads both actual source inventories against fixed ordered D1 ledgers', async () => {
   assert.equal(names('apps/operations/migrations').length, 231);
-  assert.equal(names('apps/client/migrations').length, 160);
+  assert.equal(names('apps/client/migrations').length, 161);
+  assert.equal(names('apps/client/migrations').at(-1), '0242_client_ops_triage_inquiries.sql');
   const fixture = makeFetch();
   const result = await readProductionMigrationReadiness({
     sourceCommit: COMMIT, root: ROOT, token: TOKEN, fetchImpl: fixture.fetchImpl,
@@ -127,7 +128,7 @@ test('reads both actual source inventories against fixed ordered D1 ledgers', as
   assert.equal(result.databases[0].databaseId, DB_OPS);
   assert.equal(result.databases[0].migrationCount, 231);
   assert.equal(result.databases[1].databaseId, DB_CLIENT);
-  assert.equal(result.databases[1].migrationCount, 160);
+  assert.equal(result.databases[1].migrationCount, 161);
   assert.ok(result.databases.every((row) => /^[a-f0-9]{64}$/.test(row.sourceInventorySha256)
     && /^[a-f0-9]{64}$/.test(row.ledgerNamesSha256)));
   assert.equal(fixture.calls.length, 2);
@@ -299,7 +300,7 @@ test('rejects stale, future, source-drifted and target-swapped readiness receipt
     observedAt: fixedNow.toISOString(),
     databases: [
       { databaseId: DB_OPS, sourceInventorySha256: 'a'.repeat(64), ledgerNamesSha256: 'b'.repeat(64), migrationCount: 231 },
-      { databaseId: DB_CLIENT, sourceInventorySha256: 'c'.repeat(64), ledgerNamesSha256: 'd'.repeat(64), migrationCount: 160 },
+      { databaseId: DB_CLIENT, sourceInventorySha256: 'c'.repeat(64), ledgerNamesSha256: 'd'.repeat(64), migrationCount: 161 },
     ],
   };
   assert.equal(validateProductionMigrationReadiness(value, { sourceCommit: COMMIT, now: fixedNow.getTime() }).sourceCommit, COMMIT);

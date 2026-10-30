@@ -398,7 +398,7 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
     await db.prepare("UPDATE portal_v2_workspace_memberships SET status='revoked',revoked_at=datetime('now') WHERE id='secondary-policy-membership'").run();
     expect((await timed("revoked replay denial", () => submit())).status).toBe(404);
     expect((await timed("revoked fresh-key denial", () => submit(input,"unified-native-after-revocation"))).status).toBe(404);
-    expect(await (await timed("revoked catalog", catalog)).json()).toEqual({services:[],unavailable:[]});
+    expect(await (await timed("revoked catalog", catalog)).json()).toEqual({services:[],inquiryKinds:[],unavailable:[]});
     expect(await db.prepare("SELECT count(*) count FROM client_service_requests").first<number>("count")).toBe(1);
   }, 180_000);
   async function seedNativeRequestProject(readable = false) {
