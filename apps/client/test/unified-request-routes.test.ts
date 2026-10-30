@@ -15,7 +15,8 @@ function fixture(rows = [workspace()]) {
     ? Response.json({ services: [service], nextCursor: null })
     : Response.json({ request: { id: "request-one" } }, { status: 201 }));
   const resolvePrincipal = vi.fn(async () => ({ issuer: "issuer", subject: "subject", email: "client@example.com" }));
-  const router = createUnifiedRequestRouter({ resolvePrincipal, checkConfiguration: false, discover, scopedFetch });
+  const router = createUnifiedRequestRouter({ resolvePrincipal, checkConfiguration: false, discover, scopedFetch,
+    resolveAuthority: async () => null });
   const get = () => router.request(`${origin}/request-services`, {}, env);
   const post = (body: unknown, headers: Record<string, string> = {}) => router.request(`${origin}/requests`, {
     method: "POST", headers: { Origin: origin, "Content-Type": "application/json", "Idempotency-Key": "request-idempotency-one", ...headers },
@@ -74,7 +75,7 @@ describe("workspace-free service requests", () => {
   });
   it("removes a membership revoked during catalog discovery", async () => {
     const f = fixture(); f.discover.mockResolvedValueOnce([workspace()]).mockResolvedValueOnce([]);
-    expect(await (await f.get()).json()).toEqual({ services: [], unavailable: [] });
+    expect(await (await f.get()).json()).toEqual({ services: [], inquiryKinds: [], unavailable: [] });
   });
   it("reports unavailable sources explicitly and keeps other authorized services", async () => {
     const f = fixture([workspace(), workspace("two")]);
@@ -104,7 +105,7 @@ describe("workspace-free service requests", () => {
     expect(capacity.scopedFetch).not.toHaveBeenCalled();
     const pages = fixture();
     pages.scopedFetch.mockImplementation(async () => Response.json({ services: [service], nextCursor: "another-page" }));
-    expect(await (await pages.get()).json()).toEqual({ services: [], unavailable: [
+    expect(await (await pages.get()).json()).toEqual({ services: [], inquiryKinds: [], unavailable: [
       { clientName: "Client one", code: "service_catalog_unavailable" },
     ] });
     expect(pages.scopedFetch).toHaveBeenCalledTimes(10);

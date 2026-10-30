@@ -18,7 +18,7 @@ describe("workspace-free route admission", () => {
       CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true", CLIENT_PORTAL_ORIGIN: "https://client.example",
     } as Env);
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ services: [], unavailable: [] });
+    expect(await response.json()).toEqual({ services: [], inquiryKinds: [], unavailable: [] });
     expect(resolveSession).not.toHaveBeenCalled();
   });
 });
