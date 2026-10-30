@@ -143,9 +143,9 @@ test("the native model shell opens a session only for its exact target", async (
   expect(bodies).toEqual([exact]);
 });
 
-const overview = (failed = 0) => ({ enabled: true, viewerBaseUrl: VIEWER, overview: { generatedAt: date,
+const overview = (failed = 0, observationWarnings?: number) => ({ enabled: true, viewerBaseUrl: VIEWER, overview: { generatedAt: date,
   projects: { active: 1, total: 1 }, models: { published: 1, total: 1, bytes: 0 },
-  jobs: { queued: 0, running: 0, reviewReady: 0, failed }, providers: { enabled: 1, healthy: 1, total: 1 },
+  jobs: { queued: 0, running: 2, reviewReady: 0, failed, ...(observationWarnings === undefined ? {} : { observationWarnings }) }, providers: { enabled: 1, healthy: 1, total: 1 },
   storage: { usedBytes: 0, availableBytes: null }, platform: { ready: true, workerLive: true, lifecycleBlocked: false } } });
 
 for (const width of [320, 390]) test(`the 3D models page and attempt review fit ${width}px without horizontal scrolling`, async ({ page, context }) => {
@@ -192,4 +192,46 @@ test("failed processing totals open the Viewer workspace, which owns processing"
   await page.getByRole("button", { name: "Review in Viewer" }).click();
   await expect.poll(async () => (await popup).url()).toBe(grant.workspaceUrl);
   expect(ops.filter(call => call.path === "/api/viewer/admin-grant" && call.method === "POST")).toHaveLength(1);
+});
+
+test("status checks say unknown on an older Viewer, never zero, and no problems only when the Viewer reports none", async ({ page }) => {
+  let reply = overview();
+  await mockOps(page, ["viewer.view"], (url, method, route) => url.pathname === "/api/viewer/overview"
+    ? route.fulfill({ json: reply }) : processingRoutes(url, method, route));
+  await page.goto("/viewer");
+  const card = page.getByLabel("3D Viewer platform overview").locator("section.ltds-card", { hasText: "Status checks" });
+  await expect(card).toContainText("Not reported");
+  await expect(card).toContainText("This Viewer version doesn't report status checks.");
+  await expect(card).not.toContainText("0");
+  await expect(page.getByText("can't be confirmed right now", { exact: false })).toHaveCount(0);
+  reply = overview(0, 0);
+  await page.reload();
+  await expect(card).toContainText("No problems reported");
+  await expect(page.getByText("can't be confirmed right now", { exact: false })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Check in Viewer" })).toHaveCount(0);
+});
+
+test("jobs whose status can't be checked are a separate warning from failed jobs and open the Viewer", async ({ page, context }) => {
+  let reply = overview(0, 3);
+  const ops = await mockOps(page, ["viewer.view"], (url, method, route) => url.pathname === "/api/viewer/overview"
+    ? route.fulfill({ json: reply }) : processingRoutes(url, method, route));
+  await context.route(`${VIEWER}/**`, route => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Viewer</title>" }));
+  await page.goto("/viewer");
+  const card = page.getByLabel("3D Viewer platform overview").locator("section.ltds-card", { hasText: "Status checks" });
+  await expect(card).toContainText("3 can't be checked");
+  await expect(card).toContainText("They haven't failed.");
+  await expect(page.getByText("The status of 3 active processing jobs can't be confirmed right now. This isn't a failure; the Viewer keeps checking.")).toBeVisible();
+  await expect(page.getByText("need attention", { exact: false })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Review in Viewer" })).toHaveCount(0);
+  const popup = context.waitForEvent("page");
+  await page.getByRole("button", { name: "Check in Viewer" }).click();
+  await expect.poll(async () => (await popup).url()).toBe(grant.workspaceUrl);
+  expect(ops.filter(call => call.path === "/api/viewer/admin-grant" && call.method === "POST")).toHaveLength(1);
+  await (await popup).close();
+  reply = overview(2, 1);
+  await page.reload();
+  await expect(card).toContainText("1 can't be checked");
+  await expect(card).toContainText("It hasn't failed.");
+  await expect(page.getByText("The status of 1 active processing job can't be confirmed right now.", { exact: false })).toBeVisible();
+  await expect(page.getByText("2 processing jobs need attention.", { exact: false })).toBeVisible();
 });
