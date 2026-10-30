@@ -53,6 +53,15 @@ its final verification; it was stopped after waiting. Device inventory still
 listed exactly one pilot app. Whether the new button is present on the device
 requires Beau's confirmation; the task-owned relay was stopped.
 
+Beau confirmed the Back to demo button works. After a successful synthetic
+sign-in, explicit sign-out reported local sign-out but provider revocation
+unconfirmed. A subsequent memory-only diagnostic build categorizes revocation
+failures without exposing credentials; 45 Swift tests and a signed SDK build
+passed. The in-place installer reached 100% without final confirmation, and
+inventory again showed one pilot. The device diagnostic result remains pending.
+Refresh and Keychain persistence code is an unwired candidate; restart
+persistence and provider replay protection remain unverified.
+
 ## Native build and installation — October 29, 2026
 
 Commit `46790bba` was exported to a separate Linux build directory. Swift 6.4,

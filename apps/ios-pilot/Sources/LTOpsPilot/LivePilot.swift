@@ -149,7 +149,10 @@ final class LivePilotModel: ObservableObject {
         Task { [weak self] in
             let result = await task.value
             guard let self, self.generation == ticket, result == .revocationUnconfirmed else { return }
-            self.message = ManagedOAuthDiagnostic.withRevocationWarning(self.message)
+            let detail = await coordinator.lastRevocationFailure()
+            guard self.generation == ticket else { return }
+            let primary = [self.message, ManagedOAuthDiagnostic.revocationDetail(detail)].compactMap { $0 }.joined(separator: " ")
+            self.message = ManagedOAuthDiagnostic.withRevocationWarning(primary)
         }
     }
     private func perform<Value: Sendable>(_ operation: @escaping @Sendable () async throws -> Value) async throws -> Value {

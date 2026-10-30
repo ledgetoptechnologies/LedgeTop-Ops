@@ -19,7 +19,11 @@ public protocol ManagedOAuthExchanging: Sendable {
     func verifyMetadata() async throws
     func register() async throws -> String
     func exchange(code: String, verifier: String, clientID: String) async throws -> ManagedOAuthCredential
+    func refresh(token: String, clientID: String) async throws -> ManagedOAuthCredential
     func revoke(token: String, clientID: String, hint: ManagedOAuthTokenKind) async throws
+}
+public extension ManagedOAuthExchanging {
+    func refresh(token: String, clientID: String) async throws -> ManagedOAuthCredential { throw MobilePilotError.unavailable }
 }
 extension ManagedOAuthTransport: ManagedOAuthExchanging {}
 
@@ -76,6 +80,18 @@ public enum ManagedOAuthDiagnostic {
         guard let message, !message.isEmpty else { return warning }
         return message + " " + warning
     }
+    public static func revocationDetail(_ failure: ManagedOAuthRevocationFailure?) -> String? {
+        switch failure {
+        case .localValidation: return "The sign-out request failed local validation."
+        case .httpUnauthorized: return "The sign-out endpoint returned HTTP 401."
+        case .httpClientError: return "The sign-out endpoint returned an HTTP 4xx error."
+        case .httpServerError: return "The sign-out endpoint returned an HTTP 5xx error."
+        case .redirect: return "The sign-out endpoint redirected the request."
+        case .network: return "The sign-out request failed due to a network error."
+        case .invalidResponse: return "The sign-out endpoint returned an unexpected response."
+        case nil: return nil
+        }
+    }
 }
 public actor ManagedOAuthCoordinator {
     public typealias Browser = @Sendable (URL) async throws -> URL
@@ -89,6 +105,7 @@ public actor ManagedOAuthCoordinator {
     private var credentialClientID: String?
     private var exchangesInFlight = 0
     private var grantStatusUncertain = false
+    private var revocationFailure: ManagedOAuthRevocationFailure?
 
     public init(pins: ManagedOAuthPins, transport: any ManagedOAuthExchanging, browser: @escaping Browser,
                 proofFactory: @escaping ProofFactory) {
@@ -105,12 +122,17 @@ public actor ManagedOAuthCoordinator {
         guard let old, let client else { return uncertain ? .revocationUnconfirmed : .noLocalCredential }
         var failed = false
         if let refresh = old.refreshToken {
-            do { try await transport.revoke(token: refresh, clientID: client, hint: .refresh) } catch { failed = true }
+            do { try await transport.revoke(token: refresh, clientID: client, hint: .refresh) } catch {
+                failed = true; if revocationFailure == nil { revocationFailure = error as? ManagedOAuthRevocationFailure }
+            }
         }
-        do { try await transport.revoke(token: old.accessToken, clientID: client, hint: .access) } catch { failed = true }
+        do { try await transport.revoke(token: old.accessToken, clientID: client, hint: .access) } catch {
+            failed = true; if revocationFailure == nil { revocationFailure = error as? ManagedOAuthRevocationFailure }
+        }
         if failed { grantStatusUncertain = true }
         return failed || uncertain ? .revocationUnconfirmed : .providerAcknowledged
     }
+    public func lastRevocationFailure() -> ManagedOAuthRevocationFailure? { revocationFailure }
     private func check(_ expected: UInt64) throws {
         try Task.checkCancellation()
         guard generation == expected else { throw MobilePilotError.signedOut }

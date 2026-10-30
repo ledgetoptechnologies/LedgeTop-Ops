@@ -39,7 +39,7 @@ private final class OAuthProtocolStub: URLProtocol, @unchecked Sendable {
         } else if url.path == "/token" && request.httpMethod == "POST" {
             guard request.value(forHTTPHeaderField: "Content-Type") == "application/x-www-form-urlencoded",
                   let bytes = request.httpBody, let form = String(data: bytes, encoding: .utf8),
-                  form.contains("code_verifier=") else { client?.urlProtocol(self, didFailWithError: MobilePilotError.invalidResponse); return }
+                  (form.contains("code_verifier=") || (form.contains("grant_type=refresh_token") && form.contains("refresh_token=oauth%3Asynthetic%2Brefresh") && form.contains("client_id=client-id"))) else { client?.urlProtocol(self, didFailWithError: MobilePilotError.invalidResponse); return }
             if form.contains("code=redirect") { status = 302 }
             if form.contains("code=html") { type = "text/html" }
             if form.contains("code=no-response") { client?.urlProtocolDidFinishLoading(self); return }
@@ -63,6 +63,7 @@ private final class OAuthProtocolStub: URLProtocol, @unchecked Sendable {
                   form.contains("token_type_hint=") else { client?.urlProtocol(self, didFailWithError: MobilePilotError.invalidResponse); return }
             type = "text/plain"
             if form.contains("offline") { client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet)); return }
+            if form.contains("unauthorized") { status = 401 }
             if form.contains("reject") { status = 503 }
         } else { status = 404 }
         if request.value(forHTTPHeaderField: "Accept") != "application/json" || request.value(forHTTPHeaderField: "Cache-Control") != "no-store" { status = 500 }
@@ -96,6 +97,12 @@ final class ManagedOAuthTransportTests: XCTestCase, @unchecked Sendable {
         do { try await transport(host: "changed.example.test", resourceHost: "changed-pilot.example.test").verifyMetadata(); XCTFail("Accepted changed endpoint") }
         catch { XCTAssertEqual(error as? MobilePilotError, .invalidResponse) }
     }
+    func testRefreshUsesPinnedEndpointAndEncodesCredential() async throws {
+        let result = try await transport().refresh(token: "oauth:synthetic+refresh", clientID: "client-id")
+        XCTAssertEqual(result.accessToken, "oauth:synthetic-access")
+        XCTAssertEqual(result.refreshToken, "oauth:synthetic-refresh")
+        do { _ = try await transport().refresh(token: "invalid", clientID: "client-id"); XCTFail("Accepted invalid token") } catch {}
+    }
     func testDiscoveryRejectsMetadataWithUnpinnedIssuer() async throws {
         do { try await transport(resourceHost: "wrong-issuer-pilot.example.test").verifyMetadata(); XCTFail("Accepted wrong issuer") }
         catch { XCTAssertEqual(error as? MobilePilotError, .invalidResponse) }
@@ -123,6 +130,17 @@ final class ManagedOAuthTransportTests: XCTestCase, @unchecked Sendable {
         for token in ["oauth:reject", "oauth:offline"] {
             do { try await client.revoke(token: token, clientID: "client-id", hint: .refresh); XCTFail("failure must be reported") }
             catch { }
+        }
+    }
+    func testRevocationFailureCategoriesContainNoCredential() async throws {
+        let client = try transport()
+        let cases: [(String, ManagedOAuthRevocationFailure)] = [
+            ("oauth:unauthorized", .httpUnauthorized), ("oauth:reject", .httpServerError),
+            ("oauth:offline", .network), ("bad", .localValidation)]
+        for (token, expected) in cases {
+            do { try await client.revoke(token: token, clientID: "client-id", hint: .access); XCTFail("must fail") }
+            catch { XCTAssertEqual(error as? ManagedOAuthRevocationFailure, expected) }
+            XCTAssertFalse((ManagedOAuthDiagnostic.revocationDetail(expected) ?? "").contains(token))
         }
     }
 }

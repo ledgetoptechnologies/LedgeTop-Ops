@@ -16,6 +16,7 @@ private final class OAuthResponseCollector: NSObject, URLSessionDataDelegate, UR
     private let expectedURL: URL
     private let successCodes: Set<Int>
     private let requiresJSON: Bool
+    private let diagnoseRevocation: Bool
     private let maxBytes = 65_536
     private var body = Data()
     private var failure: Error?
@@ -23,7 +24,9 @@ private final class OAuthResponseCollector: NSObject, URLSessionDataDelegate, UR
     private var task: URLSessionDataTask?
     private var cancelled = false
     private var validatedResponse = false
-    init(expectedURL: URL, successCodes: Set<Int>, requiresJSON: Bool = true) { self.expectedURL = expectedURL; self.successCodes = successCodes; self.requiresJSON = requiresJSON }
+    init(expectedURL: URL, successCodes: Set<Int>, requiresJSON: Bool = true, diagnoseRevocation: Bool = false) {
+        self.expectedURL = expectedURL; self.successCodes = successCodes; self.requiresJSON = requiresJSON; self.diagnoseRevocation = diagnoseRevocation
+    }
 
     func begin(_ request: URLRequest, protocolClasses: [AnyClass]?) async throws -> Data {
         try await withTaskCancellationHandler {
@@ -55,15 +58,24 @@ private final class OAuthResponseCollector: NSObject, URLSessionDataDelegate, UR
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        if diagnoseRevocation { lock.lock(); failure = ManagedOAuthRevocationFailure.redirect; lock.unlock() }
         completionHandler(nil)
     }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
+        if diagnoseRevocation, let response = response as? HTTPURLResponse, response.url == expectedURL,
+           !successCodes.contains(response.statusCode) {
+            let kind: ManagedOAuthRevocationFailure = response.statusCode == 401 ? .httpUnauthorized
+                : (400...499).contains(response.statusCode) ? .httpClientError
+                : (500...599).contains(response.statusCode) ? .httpServerError : .invalidResponse
+            lock.lock(); if failure == nil { failure = kind }; lock.unlock()
+            completionHandler(.cancel); return
+        }
         guard let response = response as? HTTPURLResponse, response.url == expectedURL,
               successCodes.contains(response.statusCode),
               (!requiresJSON || response.value(forHTTPHeaderField: "Content-Type")?.lowercased().split(separator: ";").first?.trimmingCharacters(in: .whitespaces) == "application/json"),
               response.expectedContentLength < 0 || response.expectedContentLength <= maxBytes else {
-            lock.lock(); failure = MobilePilotError.invalidResponse; lock.unlock()
+            lock.lock(); if failure == nil { failure = diagnoseRevocation ? ManagedOAuthRevocationFailure.invalidResponse : MobilePilotError.invalidResponse }; lock.unlock()
             completionHandler(.cancel); return
         }
         lock.lock(); validatedResponse = true; lock.unlock()
@@ -129,6 +141,15 @@ public struct ManagedOAuthTransport: Sendable {
                                      body: ManagedOAuthWire.exchangeBody(code: code, verifier: verifier, clientID: clientID), successCodes: [200])
         // If a response has arrived, preserve issued tokens for the coordinator
         // to revoke even if cancellation raced the completed HTTP request.
+        return try parseCredential(data, sentAt: sentAt, priorRefresh: nil)
+    }
+    public func refresh(token: String, clientID: String) async throws -> ManagedOAuthCredential {
+        let sentAt = Date()
+        let data = try await request(URL(string: pins.tokenEndpoint)!, method: "POST", contentType: "application/x-www-form-urlencoded",
+            body: ManagedOAuthWire.refreshBody(refreshToken: token, clientID: clientID), successCodes: [200])
+        return try parseCredential(data, sentAt: sentAt, priorRefresh: token)
+    }
+    private func parseCredential(_ data: Data, sentAt: Date, priorRefresh: String?) throws -> ManagedOAuthCredential {
         struct Response: Decodable { let access_token: String; let token_type: String; let expires_in: Int; let resource: String; let refresh_token: String? }
         guard let result = try? JSONDecoder().decode(Response.self, from: data),
               result.token_type.lowercased() == "bearer", (1...900).contains(result.expires_in),
@@ -139,34 +160,42 @@ public struct ManagedOAuthTransport: Sendable {
         let expiry = sentAt.addingTimeInterval(TimeInterval(result.expires_in))
         // Expiry is checked by the coordinator, which still needs the token to
         // attempt revocation when a slow exchange has already expired.
-        return ManagedOAuthCredential(accessToken: result.access_token, refreshToken: result.refresh_token, expiresAt: expiry)
+        return ManagedOAuthCredential(accessToken: result.access_token, refreshToken: result.refresh_token ?? priorRefresh, expiresAt: expiry)
     }
     /// RFC 7009 permits an empty HTTP 200 response even for an invalid token.
     /// A successful return means only that the provider accepted the request.
     public func revoke(token: String, clientID: String, hint: ManagedOAuthTokenKind) async throws {
         guard Self.tokenValid(token), !clientID.isEmpty, clientID.utf8.count <= 512,
               clientID.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95 || $0 == 46 || $0 == 126 }) else {
-            throw MobilePilotError.invalidResponse
+            throw ManagedOAuthRevocationFailure.localValidation
         }
         let safe = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
         let values = [("token", token), ("token_type_hint", hint.rawValue), ("client_id", clientID)]
         let form = values.map { $0.0 + "=" + $0.1.addingPercentEncoding(withAllowedCharacters: safe)! }.joined(separator: "&")
-        _ = try await request(URL(string: pins.revocationEndpoint)!, method: "POST", contentType: "application/x-www-form-urlencoded",
-                              body: Data(form.utf8), successCodes: [200], requiresJSON: false)
+        do {
+            _ = try await request(URL(string: pins.revocationEndpoint)!, method: "POST", contentType: "application/x-www-form-urlencoded",
+                                  body: Data(form.utf8), successCodes: [200], requiresJSON: false, diagnoseRevocation: true)
+        } catch let error as ManagedOAuthRevocationFailure { throw error }
+        catch is CancellationError { throw CancellationError() }
+        catch is URLError { throw ManagedOAuthRevocationFailure.network }
+        catch { throw ManagedOAuthRevocationFailure.invalidResponse }
         try Task.checkCancellation()
     }
     private static func tokenValid(_ value: String) -> Bool {
         value.hasPrefix("oauth:") && (7...4096).contains(value.utf8.count) && value.utf8.allSatisfy { (33...126).contains($0) }
     }
-    private func request(_ url: URL, method: String, contentType: String?, body: Data?, successCodes: Set<Int>, requiresJSON: Bool = true) async throws -> Data {
+    private func request(_ url: URL, method: String, contentType: String?, body: Data?, successCodes: Set<Int>, requiresJSON: Bool = true, diagnoseRevocation: Bool = false) async throws -> Data {
         var value = URLRequest(url: url)
         value.httpMethod = method
         value.httpBody = body
         value.setValue("application/json", forHTTPHeaderField: "Accept")
         value.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         if let contentType { value.setValue(contentType, forHTTPHeaderField: "Content-Type") }
-        return try await OAuthResponseCollector(expectedURL: url, successCodes: successCodes, requiresJSON: requiresJSON).begin(value, protocolClasses: protocolClasses)
+        return try await OAuthResponseCollector(expectedURL: url, successCodes: successCodes, requiresJSON: requiresJSON, diagnoseRevocation: diagnoseRevocation).begin(value, protocolClasses: protocolClasses)
     }
 }
 
 public enum ManagedOAuthTokenKind: String, Sendable { case access = "access_token", refresh = "refresh_token" }
+public enum ManagedOAuthRevocationFailure: Error, Sendable, Equatable {
+    case localValidation, httpUnauthorized, httpClientError, httpServerError, redirect, network, invalidResponse
+}

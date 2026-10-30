@@ -120,6 +120,13 @@ public enum ManagedOAuthWire {
                           ("redirect_uri", callback), ("code_verifier", verifier)]).utf8)
     }
 
+    public static func refreshBody(refreshToken: String, clientID: String) throws -> Data {
+        guard opaque(refreshToken, max: 4096), refreshToken.hasPrefix("oauth:"), clientIDValid(clientID) else {
+            throw MobilePilotError.invalidResponse
+        }
+        return Data(form([("grant_type", "refresh_token"), ("refresh_token", refreshToken), ("client_id", clientID)]).utf8)
+    }
+
     // Only visible ASCII is accepted; never print or persist these values.
     private static func opaque(_ value: String, max: Int) -> Bool {
         !value.isEmpty && value.utf8.count <= max && value.utf8.allSatisfy { (33...126).contains($0) }
