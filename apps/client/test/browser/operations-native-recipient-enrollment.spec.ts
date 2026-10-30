@@ -51,8 +51,9 @@ test("native consent uses only the native API and exact target revision, remaini
   expect(legacyCalls).toBe(0);
   expect(calls).toHaveLength(3);
   expect(calls[2]?.body).toMatchObject({ intentId, opaqueToken, acknowledged: true,
-    acknowledgedTarget: { targetId, targetRevision: 2, clientRecordId: target.clientRecordId },
-    acknowledgedPermissions: ["operations.service_home.read"] });
+    acknowledgedTarget: { targetId, targetRevision: 2, clientRecordId: target.clientRecordId } });
+  // Home-only consent keeps the original body exactly.
+  expect(Object.keys(calls[2]!.body!).sort()).toEqual(["acknowledged", "acknowledgedTarget", "intentId", "opaqueToken", "operationId"]);
 
   expect(calls[2]?.body).not.toHaveProperty("principal");
   for (const call of calls) {
@@ -118,7 +119,9 @@ test("a link that includes service requests says so, and the recipient accepts e
   await page.getByRole("button", { name: "Submit for administrator review" }).click();
   await expect(page.getByRole("heading", { name: "Confirmation submitted" })).toBeVisible();
   expect(redeems).toHaveLength(1);
-  expect(redeems[0]?.acknowledgedPermissions).toEqual(["operations.request.create", "operations.service_home.read"]);
+  expect(redeems[0]).toEqual({ intentId, opaqueToken, operationId: expect.any(String), acknowledged: true,
+    acknowledgedTarget: { targetId, targetRevision: 2, clientRecordId: target.clientRecordId },
+    acknowledgedPermissionSchemaVersion: 4, acknowledgedPermissions: ["operations.request.create", "operations.service_home.read"] });
 });
 
 for (const [name, access] of [

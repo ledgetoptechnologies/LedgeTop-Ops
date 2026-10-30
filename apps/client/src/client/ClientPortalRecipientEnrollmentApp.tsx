@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 type State = "opening" | "ready" | "submitting" | "uncertain" | "submitted" | "retryable" | "unavailable";
 type Protocol = "legacy" | "operations-native";
 type Target = Readonly<{ clientRecordId: string; displayLabel: string }> &
-  (Readonly<{ selectionId: string }> | Readonly<{ targetId: string; targetRevision: number; permissions: readonly string[] }>);
+  (Readonly<{ selectionId: string }> | Readonly<{ targetId: string; targetRevision: number; permissions: readonly string[]; permissionSchemaVersion: number }>);
 // The two access sets an Ops link can pin, each with its schema version. Viewing the service home is always
 // included; submitting service requests only when the administrator chose it. Anything else isn't confirmable.
 const NATIVE_ACCESS = [
@@ -55,7 +55,8 @@ function inspected(value: unknown, intentId: string, protocol: Protocol): Target
       && item.permissions.length === permissions.length && item.permissions.every((name, index) => permissions[index] === name));
     if (!access) return null;
     return { clientRecordId: target.clientRecordId, targetId: target.targetId,
-      targetRevision: target.targetRevision, displayLabel: target.displayLabel, permissions: access.permissions };
+      targetRevision: target.targetRevision, displayLabel: target.displayLabel, permissions: access.permissions,
+      permissionSchemaVersion: access.schemaVersion };
   }
   if (typeof target.selectionId !== "string" || !UUID.test(target.selectionId)) return null;
   return { clientRecordId: target.clientRecordId, selectionId: target.selectionId, displayLabel: target.displayLabel };
@@ -115,7 +116,9 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, prot
         body: JSON.stringify({ intentId, opaqueToken, operationId: operationId.current, acknowledged: true,
           ...("targetId" in target
             ? { acknowledgedTarget: { targetId: target.targetId, targetRevision: target.targetRevision, clientRecordId: target.clientRecordId },
-              acknowledgedPermissions: target.permissions }
+              // Home-only links keep the original body; service requests are accepted only by naming them exactly.
+              ...(target.permissionSchemaVersion === 4
+                ? { acknowledgedPermissionSchemaVersion: 4, acknowledgedPermissions: target.permissions } : {}) }
             : { acknowledgedTarget: { clientRecordId: target.clientRecordId, selectionId: target.selectionId } }) }) });
       setState(redeemed(result, intentId) ? "submitted" : "unavailable");
     } catch (error) {
