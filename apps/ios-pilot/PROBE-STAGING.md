@@ -49,6 +49,11 @@ workers.dev and preview URLs were disabled. Unauthenticated and invalid-bearer
 requests returned 401 both before and after enabling. The protected host's OAuth discovery returned metadata
 with the expected team issuer and endpoints. This does not yet test a real
 authorization, valid bearer/assertion binding, sign-out or iPad callback.
+After enabling, provider readback again confirmed the flag is true, all six
+bindings are plain-text settings, workers.dev and previews are disabled, and
+the Worker has only the intended custom hostname. Cloudflare identifies this
+independent Worker's default environment as `production`; its configured
+application environment is `staging`, and it is not the Operations Worker.
 
 For the prior `ios-pilot-staging.ledgetopdroneservices.com` candidate, after
 Access app creation, a fresh account-wide Worker custom-domain read found
