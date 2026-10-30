@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, it } from 'vitest';
-import { createStaffLoginFixture, staffLoginClaims } from './helpers/staff-login-fixture';
+import { createStaffLoginFixture, seedStaffLoginOwner, staffLoginClaims } from './helpers/staff-login-fixture';
 import { pilotSessionFromAccessClaims, recheckPilotSession } from '../src/worker/ios-pilot-session';
 import { preparePilotStaffSnapshot } from '../src/worker/ios-pilot-staff-snapshot';
 import { claimStaffLoginBindingIntent, createStaffLoginBindingIntent, resolveVerifiedStaffLogin, revokeStaffLoginBinding } from '../src/worker/staff-login-bindings';
@@ -25,6 +25,47 @@ it('matches current staff rechecks and denies changes before the batch', async (
   await db.prepare("UPDATE staff_users SET project_alpha_user_id='changed' WHERE id=?").bind(fixture.owner.id).run();
   expect(await verify()).toBe(false);
   await expect(recheckPilotSession(env, candidate)).rejects.toThrow();
+});
+
+it('denies a legacy snapshot when native admission control appears or is enabled after discovery', async () => {
+  const db = fixture.db;
+  const candidate = await pilotSessionFromAccessClaims(env, staffLoginClaims(fixture.owner.email, fixture.owner.subject));
+  const transaction = db.withSession('first-primary');
+  const absentPlan = await preparePilotStaffSnapshot(env, transaction, candidate);
+  expect(absentPlan).not.toBeNull();
+  const verify = async (plan: NonNullable<typeof absentPlan>) => plan.verify(await transaction.batch(plan.statements), Math.floor(Date.now() / 1000));
+  expect(await verify(absentPlan!)).toBe(true);
+  try {
+    await db.prepare('CREATE TABLE native_staff_access_reconciliation(singleton INTEGER PRIMARY KEY,enabled INTEGER)').run();
+    await db.prepare('INSERT INTO native_staff_access_reconciliation VALUES(1,0)').run();
+    expect(await verify(absentPlan!)).toBe(false);
+    const disabledPlan = await preparePilotStaffSnapshot(env, transaction, candidate);
+    expect(disabledPlan).not.toBeNull();
+    expect(await verify(disabledPlan!)).toBe(true);
+    await db.prepare('UPDATE native_staff_access_reconciliation SET enabled=1 WHERE singleton=1').run();
+    expect(await verify(disabledPlan!)).toBe(false);
+  } finally {
+    await db.prepare('DROP TABLE IF EXISTS native_staff_access_reconciliation').run();
+  }
+});
+
+it('denies a legacy primary snapshot if binding schema appears after discovery', async () => {
+  const local = await createStaffLoginFixture({ includeCompatibilityDatabases: true });
+  try {
+    const db = local.legacy!;
+    const owner = await seedStaffLoginOwner(db, 'legacy-cutover');
+    const legacyEnv = { OPS_DB: db, TEAM_DOMAIN: local.issuer } as Env;
+    const candidate = await pilotSessionFromAccessClaims(legacyEnv, staffLoginClaims(owner.email, owner.subject));
+    const transaction = db.withSession('first-primary');
+    const plan = await preparePilotStaffSnapshot(legacyEnv, transaction, candidate);
+    expect(plan).not.toBeNull();
+    const verify = async () => plan!.verify(await transaction.batch(plan!.statements), Math.floor(Date.now() / 1000));
+    expect(await verify()).toBe(true);
+    await db.prepare('CREATE TABLE staff_login_binding_control(singleton INTEGER PRIMARY KEY,schema_version INTEGER)').run();
+    expect(await verify()).toBe(false);
+  } finally {
+    await local.runtime.dispose();
+  }
 });
 
 it('rechecks native admission and its version in the same batch', async () => {

@@ -183,7 +183,7 @@ against real local D1 (15 other cases skipped). The final check narrows the
 revocation window; it is not an atomic database-version guarantee. A further
 security review found assignment or source visibility can change after the last
 visibility query while subsequent staff/scope checks await, allowing stale rows
-to be returned. This is a release blocker for real data. D1 sessions provide
+to be returned. That defect blocked real-data release. D1 sessions provide
 sequential consistency, not one snapshot across those awaits. A fix must use a
 single authoritative transactional read or a fully covered transactional
 authority epoch, preserving existing staff, ACL, assignment and connector
@@ -196,7 +196,8 @@ connector registry state, and the filtered operation projection in one D1 batch;
 it validates those results before returning the batch's rows. The full local
 pilot API suite passed 20 tests, including revocations immediately before that
 batch for assignments, sources, sessions and roles, and a managed detail-route
-regression. Staff snapshot tests passed three cases; ACL helper and existing ACL
+regression. Staff snapshot tests passed five cases, including admission-control
+and binding-schema changes between discovery and the final batch; ACL helper and existing ACL
 tests passed 11 cases. An independent local review found no concrete data-route
 authorization defect in the candidate. The connector suite passed its 12 other
 cases; its new snapshot case initially attempted a database update forbidden by
@@ -204,8 +205,10 @@ an existing transition trigger, then passed after testing a modified snapshot
 without bypassing the trigger. This is local evidence, not staging or device
 validation: release configuration, actual Cloudflare sign-in and device checks
 still need verification before real-data activation.
+The private read-service integration and staging-entrypoint suites also passed
+five local tests against the updated candidate.
 The separate session-status endpoint does not use the same atomic batch.
-The full final backend suite subsequently passed all 32 tests with a single
+The earlier backend suite subsequently passed all 32 tests with a single
 worker. Swift 6.4 on WSL passed all 17 package tests, including five synthetic
 OAuth wire-format tests. Swift emitted an existing test-stub Sendable warning.
 A native transport now covers pinned discovery, public registration,
