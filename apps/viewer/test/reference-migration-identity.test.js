@@ -11,8 +11,8 @@ test('application database startup registers the catalog parser and leaves readi
 });
 test('coverage scan uses the operation type index and does not run in journal admission',t=>{const db=new DatabaseSync(':memory:');t.after(()=>db.close());applyMigrations(db);const plan=db.prepare("EXPLAIN QUERY PLAN SELECT 1 FROM dataset_operations o LEFT JOIN reference_catalog_projection p ON p.operation_id=o.id WHERE o.operation_type='catalog_map' AND p.operation_id IS NULL").all().map(x=>x.detail).join(' ');assert.match(plan,/viewer_reference_catalog_operation_idx/);const sql=db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='viewer_reference_projection_admission'").get().sql;assert.doesNotMatch(sql,/JOIN\s+dataset_operations/i);assert.doesNotMatch(sql,/FROM\s+dataset_operations/i);});
 
-test('populated version 15, 41, 42, 44, 48 and 49 databases upgrade without losing their task and attempt',t=>{
- for(const version of [15,41,42,44,48,49]){
+test('populated version 15, 41, 42, 44, 48, 49 and 53 databases upgrade without losing their task and attempt',t=>{
+ for(const version of [15,41,42,44,48,49,53]){
   const db=new DatabaseSync(':memory:');try{
    db.exec('PRAGMA foreign_keys=ON; CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');
    for(const m of MIGRATIONS.filter(m=>m.version<=version)){db.exec(m.sql);m.after?.(db);db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(m.version,m.name,'t');}
@@ -42,6 +42,14 @@ test('recorded 50 with altered or unexpected objects fails before WAL or disk mu
  for(const [name,sql] of cases){const file=path.join(dir,`${name}.sqlite`),db=new DatabaseSync(file);db.exec('PRAGMA journal_mode=DELETE');applyMigrations(db);db.exec(sql);db.close();
   const hash=()=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),before=hash();assert.throws(()=>openDatabase(file),{code:'migration_identity_conflict'},name);assert.equal(hash(),before,name);assert.equal(fs.existsSync(`${file}-wal`),false,name);
   const check=new DatabaseSync(file,{readOnly:true});try{assert.equal(check.prepare('PRAGMA journal_mode').get().journal_mode,'delete',name);}finally{check.close();}
+ }
+});
+
+test('initialization snapshot migration rejects tampering before WAL or disk mutation',t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'init-snapshot-schema-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ for(const [name,sql] of [['missing','DROP TRIGGER processing_initialization_snapshot_no_delete'],['extra','CREATE INDEX unexpected_init_snapshot ON processing_initialization_snapshots(created_at)'],['foreign',"UPDATE schema_migrations SET name='foreign' WHERE version=54"]]){
+  const file=path.join(dir,`${name}.sqlite`),db=new DatabaseSync(file);db.exec('PRAGMA journal_mode=DELETE');applyMigrations(db);db.exec(sql);db.close();
+  const hash=()=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),before=hash();assert.throws(()=>openDatabase(file),{code:'migration_identity_conflict'},name);assert.equal(hash(),before,name);assert.equal(fs.existsSync(`${file}-wal`),false,name);
  }
 });
 

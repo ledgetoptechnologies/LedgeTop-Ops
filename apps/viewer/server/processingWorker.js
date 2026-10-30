@@ -101,10 +101,14 @@ async function processSubmit(job,{processing,storage,config,providerCredentials,
   if(known&&attempt.submissionPhase==='committing'){if(['running','completed'].includes(known.status))save('committed',files.length);else await restart();}
   if(!known&&attempt.submissionPhase!=='new')save('new',0);
   if(!known){
-    const initialization=processing.beginAttemptInitialization?.(job.id,job.lease_owner,{freshTaskMissing});
+    const initialization=processing.beginAttemptInitialization?.(job.id,job.lease_owner,{freshTaskMissing,captureRequest:true});
     if(processing.beginAttemptInitialization&&!initialization)throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
+    // Never reconstruct a request for a historical or ambiguous attempt from
+    // mutable task metadata. Replay remains disabled until a coordinator
+    // contract and binding are independently qualified.
+    if(!initialization?.requestSnapshot){deferObservation('unavailable');return;}
     transition(processing,job,'initializing');save('initializing',0);
-    const initialized=await adapter.initialize({uuid:attempt.providerTaskId,name:task.displayName,options:attempt.options},{signal});
+    const initialized=await adapter.initialize(initialization.requestSnapshot.request,{signal});
     if(initialization&&!initialization.historical){const recorded=initialized?.uuid===attempt.providerTaskId?processing.acknowledgeAttemptInitialization(job.id,job.lease_owner,initialization.generation,initialized.uuid):processing.markAttemptInitializationAmbiguous(job.id,job.lease_owner);if(!recorded)throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});}
     save('initialized',0);
   }

@@ -2358,6 +2358,49 @@ const MIGRATIONS = [
     CREATE TRIGGER viewer_source_binding_task_guard_delete BEFORE DELETE ON processing_tasks WHEN EXISTS(SELECT 1 FROM viewer_source_bindings b JOIN processing_attempts a ON a.id=b.attempt_id WHERE a.task_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source binding task identity retained'); END;
     CREATE TRIGGER viewer_source_binding_task_guard_insert BEFORE INSERT ON processing_tasks WHEN EXISTS(SELECT 1 FROM processing_tasks t JOIN processing_attempts a ON a.task_id=t.id JOIN viewer_source_bindings b ON b.attempt_id=a.id WHERE t.id=NEW.id OR t.rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'source binding task identity retained'); END;
   `},
+  {version:54,name:'processing_initialization_snapshots',sql:`
+    CREATE TABLE processing_initialization_snapshots (
+      attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id) ON DELETE CASCADE,
+      snapshot_json TEXT NOT NULL, snapshot_sha256 TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TABLE processing_initialization_purge_authorizations (
+      attempt_id TEXT PRIMARY KEY, trash_id TEXT NOT NULL, audit_id TEXT NOT NULL
+    );
+    CREATE TRIGGER processing_initialization_purge_insert BEFORE INSERT ON processing_initialization_purge_authorizations
+      WHEN NOT EXISTS(SELECT 1 FROM processing_attempts a JOIN processing_tasks t ON t.id=a.task_id
+        JOIN storage_trash tr ON tr.id=NEW.trash_id AND tr.entity_type='task' AND tr.entity_id=t.id
+        JOIN audit_events e ON e.id=NEW.audit_id AND e.action='task.purged' AND e.entity_type='task' AND e.entity_id=t.id
+        WHERE a.id=NEW.attempt_id AND t.status='archived' AND t.purged_at IS NOT NULL AND tr.permanently_deleted_at IS NOT NULL
+        AND json_extract(e.details_json,'$.trashId')=tr.id)
+      BEGIN SELECT RAISE(ABORT,'initialization snapshot purge unauthorized'); END;
+    CREATE TRIGGER processing_initialization_purge_no_replace BEFORE INSERT ON processing_initialization_purge_authorizations
+      WHEN EXISTS(SELECT 1 FROM processing_initialization_purge_authorizations WHERE attempt_id=NEW.attempt_id OR rowid=NEW.rowid)
+      BEGIN SELECT RAISE(ABORT,'initialization snapshot purge replacement'); END;
+    CREATE TRIGGER processing_initialization_purge_no_update BEFORE UPDATE ON processing_initialization_purge_authorizations
+      BEGIN SELECT RAISE(ABORT,'initialization snapshot purge immutable'); END;
+    CREATE TRIGGER processing_initialization_snapshot_no_replace BEFORE INSERT ON processing_initialization_snapshots
+      WHEN EXISTS(SELECT 1 FROM processing_initialization_snapshots WHERE attempt_id=NEW.attempt_id OR rowid=NEW.rowid)
+      BEGIN SELECT RAISE(ABORT,'initialization snapshot replacement'); END;
+    CREATE TRIGGER processing_initialization_snapshot_no_update BEFORE UPDATE ON processing_initialization_snapshots
+      BEGIN SELECT RAISE(ABORT,'initialization snapshot immutable'); END;
+    CREATE TRIGGER processing_initialization_snapshot_no_delete BEFORE DELETE ON processing_initialization_snapshots
+      WHEN EXISTS(SELECT 1 FROM processing_attempts WHERE id=OLD.attempt_id)
+      AND NOT EXISTS(SELECT 1 FROM processing_initialization_purge_authorizations WHERE attempt_id=OLD.attempt_id)
+      BEGIN SELECT RAISE(ABORT,'initialization snapshot retained'); END;
+    CREATE TRIGGER processing_initialization_parent_no_delete BEFORE DELETE ON processing_attempts
+      WHEN EXISTS(SELECT 1 FROM processing_initialization_snapshots WHERE attempt_id=OLD.id)
+      BEGIN SELECT RAISE(ABORT,'initialization snapshot parent retained'); END;
+    CREATE TRIGGER processing_initialization_parent_no_replace BEFORE INSERT ON processing_attempts
+      WHEN EXISTS(SELECT 1 FROM processing_attempts a JOIN processing_initialization_snapshots s ON s.attempt_id=a.id WHERE a.id=NEW.id OR a.rowid=NEW.rowid OR (a.task_id=NEW.task_id AND a.attempt_number=NEW.attempt_number) OR (a.provider_id IS NOT NULL AND a.provider_task_id IS NOT NULL AND a.provider_id=NEW.provider_id AND a.provider_task_id=NEW.provider_task_id))
+      BEGIN SELECT RAISE(ABORT,'initialization snapshot parent replacement'); END;
+    CREATE TRIGGER processing_initialization_parent_conflict_update BEFORE UPDATE ON processing_attempts
+      WHEN EXISTS(SELECT 1 FROM processing_attempts a JOIN processing_initialization_snapshots s ON s.attempt_id=a.id WHERE a.id<>OLD.id AND (a.id=NEW.id OR a.rowid=NEW.rowid OR (a.task_id=NEW.task_id AND a.attempt_number=NEW.attempt_number) OR (a.provider_id IS NOT NULL AND a.provider_task_id IS NOT NULL AND a.provider_id=NEW.provider_id AND a.provider_task_id=NEW.provider_task_id)))
+      BEGIN SELECT RAISE(ABORT,'initialization snapshot parent replacement'); END;
+    CREATE TRIGGER processing_initialization_parent_identity BEFORE UPDATE ON processing_attempts
+      WHEN EXISTS(SELECT 1 FROM processing_initialization_snapshots WHERE attempt_id=OLD.id)
+      AND (NEW.id IS NOT OLD.id OR NEW.rowid IS NOT OLD.rowid OR NEW.task_id IS NOT OLD.task_id OR NEW.attempt_number IS NOT OLD.attempt_number OR NEW.dataset_id IS NOT OLD.dataset_id OR NEW.provider_id IS NOT OLD.provider_id OR NEW.provider_task_id IS NOT OLD.provider_task_id OR NEW.options_json IS NOT OLD.options_json OR NEW.capability_fingerprint IS NOT OLD.capability_fingerprint OR NEW.reservation_required IS NOT OLD.reservation_required)
+      BEGIN SELECT RAISE(ABORT,'initialization snapshot parent identity'); END;
+  `},
 ];
 
 function applyMigrations(database) {
