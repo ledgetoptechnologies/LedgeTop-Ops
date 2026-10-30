@@ -34,6 +34,7 @@ function syntheticPortalVars() {
     PROJECT_ALPHA_PORTAL_APPLICATION_KEY: 'synthetic-safe-id',
     CLIENT_PORTAL_CONTENT_AUDIT_ENABLED: 'false',
     CLIENT_PORTAL_REQUEST_V2_ENABLED: 'false',
+    CLIENT_PORTAL_OPS_INQUIRIES_ENABLED: 'false',
     CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED: 'false',
     PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED: 'false',
     CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED: 'false',
@@ -98,7 +99,8 @@ test('accepted installed profile fixture is hash-only and pins the two retained 
 
 test('ordinary UI preflight is explicit, statically pinned, and only normalizes a private preflight copy', () => {
   const { client, operations } = syntheticPortalVars();
-  const before = { client: clone(client), operations: clone(operations) };
+  const installedClient = { ...client }; delete installedClient.CLIENT_PORTAL_OPS_INQUIRIES_ENABLED;
+  const before = { client: clone(installedClient), operations: clone(operations) };
   const strictErrors = validatePortalReleasePreflight(
     { name: 'ledgetop-clients', keep_vars: true, vars: client },
     { name: 'ledgetop-ops', keep_vars: true, vars: operations },
@@ -112,11 +114,11 @@ test('ordinary UI preflight is explicit, statically pinned, and only normalizes 
     mode: ORDINARY_FRONTEND_PREFLIGHT_MODE,
     profileSHA256: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
   });
-  assert.deepEqual(validateOrdinaryFrontendPreflightPreservation(client, operations, acceptedProfile, ORDINARY_FRONTEND_PREFLIGHT_MODE), {
+  assert.deepEqual(validateOrdinaryFrontendPreflightPreservation(installedClient, operations, acceptedProfile, ORDINARY_FRONTEND_PREFLIGHT_MODE), {
     mode: ORDINARY_FRONTEND_PREFLIGHT_MODE,
     profileSHA256: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
   });
-  assert.deepEqual({ client, operations }, before);
+  assert.deepEqual({ client: installedClient, operations }, before);
   assert.deepEqual(validatePortalReleasePreflight(
     { name: 'ledgetop-clients', keep_vars: true, vars: client },
     { name: 'ledgetop-ops', keep_vars: true, vars: operations },
@@ -126,6 +128,7 @@ test('ordinary UI preflight is explicit, statically pinned, and only normalizes 
 
 test('ordinary UI compatibility rejects missing, unknown, altered-profile, or changed preserved flags', () => {
   const { client, operations } = syntheticPortalVars();
+  const installedClient = { ...client }; delete installedClient.CLIENT_PORTAL_OPS_INQUIRIES_ENABLED;
   assert.deepEqual(ordinaryFrontendPreflightDescriptor(acceptedProfile, undefined), {
     mode: 'strict-default', profileSHA256: null,
   });
@@ -138,11 +141,14 @@ test('ordinary UI compatibility rejects missing, unknown, altered-profile, or ch
   wrongValueProfile.workers.client.plainValueSHA256[viewerFlag] = hash('false');
   assert.throws(() => ordinaryFrontendPreflightDescriptor(wrongValueProfile, ORDINARY_FRONTEND_PREFLIGHT_MODE), /Unreviewed ordinary frontend accepted profile/);
   assert.throws(() => validateOrdinaryFrontendPreflightPreservation(client, operations, acceptedProfile), /Unreviewed ordinary frontend preflight mode/);
-  assert.throws(() => validateOrdinaryFrontendPreflightPreservation({ ...client, [viewerFlag]: false }, operations, acceptedProfile, ORDINARY_FRONTEND_PREFLIGHT_MODE), /Client viewer flag differs/);
-  assert.throws(() => validateOrdinaryFrontendPreflightPreservation({ ...client, [viewerFlag]: 'false' }, operations, acceptedProfile, ORDINARY_FRONTEND_PREFLIGHT_MODE), /Client viewer flag differs/);
-  assert.throws(() => validateOrdinaryFrontendPreflightPreservation(client, { ...operations, [hierarchyFlag]: 'false' }, acceptedProfile, ORDINARY_FRONTEND_PREFLIGHT_MODE), /Operations hierarchy flag differs/);
-  assert.throws(() => validateOrdinaryFrontendPreflightPreservation({ ...client, CLIENT_PORTAL_CONTENT_AUDIT_ENABLED: 'true' }, operations, acceptedProfile, ORDINARY_FRONTEND_PREFLIGHT_MODE), /Effective production release profile rejected/);
-  assert.throws(() => validateOrdinaryFrontendPreflightPreservation(client, { ...operations, AUTHENTICATED_DELIVERY_GRANTS_ENABLED: 'false' }, acceptedProfile, ORDINARY_FRONTEND_PREFLIGHT_MODE), /Effective production release profile rejected/);
+  assert.throws(() => validateOrdinaryFrontendPreflightPreservation({ ...installedClient, [viewerFlag]: false }, operations, acceptedProfile, ORDINARY_FRONTEND_PREFLIGHT_MODE), /Client viewer flag differs/);
+  assert.throws(() => validateOrdinaryFrontendPreflightPreservation({ ...installedClient, [viewerFlag]: 'false' }, operations, acceptedProfile, ORDINARY_FRONTEND_PREFLIGHT_MODE), /Client viewer flag differs/);
+  for (const value of ['false','true']) assert.throws(() => validateOrdinaryFrontendPreflightPreservation(
+    { ...installedClient, CLIENT_PORTAL_OPS_INQUIRIES_ENABLED: value }, operations, acceptedProfile, ORDINARY_FRONTEND_PREFLIGHT_MODE),
+  /default-off inquiries flag to remain absent/u);
+  assert.throws(() => validateOrdinaryFrontendPreflightPreservation(installedClient, { ...operations, [hierarchyFlag]: 'false' }, acceptedProfile, ORDINARY_FRONTEND_PREFLIGHT_MODE), /Operations hierarchy flag differs/);
+  assert.throws(() => validateOrdinaryFrontendPreflightPreservation({ ...installedClient, CLIENT_PORTAL_CONTENT_AUDIT_ENABLED: 'true' }, operations, acceptedProfile, ORDINARY_FRONTEND_PREFLIGHT_MODE), /Effective production release profile rejected/);
+  assert.throws(() => validateOrdinaryFrontendPreflightPreservation(installedClient, { ...operations, AUTHENTICATED_DELIVERY_GRANTS_ENABLED: 'false' }, acceptedProfile, ORDINARY_FRONTEND_PREFLIGHT_MODE), /Effective production release profile rejected/);
 });
 
 test('generic installation/config compilers reject ordinary mode unless the exact accepted profile is supplied', () => {
