@@ -98,6 +98,9 @@ final class LivePilotModel: ObservableObject {
     private var detailGeneration = UUID()
     private var expiry: Task<Void, Never>?
     private var signOutTask: Task<ManagedOAuthSignOutReport, Never>?
+    private var savedTestCleanup: Task<SyntheticAccessSignOut, Never>?
+    private var restartSaveTask: Task<Void, Error>?
+    private var restartTest: SyntheticAccessRestore?
     private var pendingRequests: [UUID: @Sendable () -> Void] = [:]
     private let browser = PilotBrowserLogin()
     private var credential: ManagedOAuthCredential?
@@ -118,12 +121,82 @@ final class LivePilotModel: ObservableObject {
             coordinator = ManagedOAuthCoordinator(pins: pins, transport: ManagedOAuthTransport(pins: pins),
                 browser: { url in try await browser.open(url) }, proofFactory: { try ManagedOAuthProofGenerator.generate() })
             api = ManagedPilotDataAPI(pins: pins)
+            if synthetic, let api {
+                let transport = ManagedOAuthTransport(pins: pins)
+                restartTest = try? SyntheticAccessRestore(pins: pins, store: SyntheticAccessKeychainStore(),
+                    verify: { credential in _ = try await api.verifySyntheticProbe(credential: credential) },
+                    revoke: { token, client in try await transport.revoke(token: token, clientID: client, hint: .access) })
+            }
         }
         // Remove tokens from older pilot builds; managed credentials stay in memory.
         PilotKeychain.clear()
     }
-    func openLive() { active = true }
+    func openLive() {
+        active = true
+        guard isSyntheticProbe, let cleanup = savedTestCleanup else { return }
+        let ticket = generation
+        Task { [weak self] in
+            let result = await cleanup.value
+            guard let self, self.generation == ticket, result == .localRemovalUnconfirmed else { return }
+            self.message = "Could not confirm removal of the saved test on this iPad. Unlock it and try Clear saved test again."
+        }
+    }
     func useDemo() { signOut(); active = false }
+    func saveRestartTest() async {
+        guard isSyntheticProbe, signedIn, !loading, let coordinator, let restartTest else { return }
+        let ticket = generation
+        loading = true; defer { if generation == ticket { loading = false } }
+        let save = Task { try await coordinator.saveSyntheticRestartTest(to: restartTest) }
+        restartSaveTask = save
+        defer { restartSaveTask = nil }
+        do {
+            try await save.value
+            guard generation == ticket else { return }
+            message = "Test access saved on this iPad for up to 15 minutes. Close or restart the app, open Test Cloudflare sign-in and choose Restore saved test before signing in. The Cloudflare refresh grant is not stored and its revocation after a restart cannot be confirmed."
+        } catch {
+            guard generation == ticket else { return }
+            message = "The test could not be saved. Local removal may need to be retried using Clear saved test."
+        }
+    }
+    func restoreRestartTest() async {
+        guard isSyntheticProbe, !signedIn, !loading, let restartTest else { return }
+        let ticket = generation
+        loading = true; defer { if generation == ticket { loading = false } }
+        if let cleanup = savedTestCleanup, await cleanup.value == .localRemovalUnconfirmed {
+            guard generation == ticket else { return }
+            message = "Could not confirm removal of the saved test on this iPad. Unlock it and try Clear saved test again."
+            return
+        }
+        guard generation == ticket else { return }
+        do {
+            if let value = try await restartTest.restore(), value.expiresAt > Date() {
+                guard generation == ticket else { return }
+                message = "Saved test access was verified online. This is a restart test, not a restored business-data session. Use Clear saved test to remove it."
+            } else { message = "No saved test is available. Sign in and save a test first." }
+        } catch {
+            guard generation == ticket else { return }
+            message = "Saved test access could not be verified. Unlock the iPad, check the connection, or clear the saved test and sign in again."
+        }
+    }
+    func clearRestartTest() {
+        guard isSyntheticProbe, let restartTest else { return }
+        let ticket = generation
+        let previous = savedTestCleanup
+        let task = Task { () -> SyntheticAccessSignOut in
+            _ = await previous?.value
+            return await restartTest.signOut()
+        }
+        savedTestCleanup = task
+        Task { [weak self] in
+            let result = await task.value
+            guard let self, self.generation == ticket else { return }
+            switch result {
+            case .noLocalCredential: self.message = "No saved test was found."
+            case .localRemovalUnconfirmed: self.message = "Could not confirm removal of the saved test on this iPad. Unlock it and try Clear saved test again."
+            case .remoteRevocationUnconfirmed: self.message = "Saved test removed from this iPad. Cloudflare grant revocation cannot be confirmed."
+            }
+        }
+    }
     func testSyntheticRefreshReplay() {
         guard isSyntheticProbe, signedIn, !loading, let coordinator else { return }
         generation = UUID()
@@ -134,6 +207,7 @@ final class LivePilotModel: ObservableObject {
             let report = await coordinator.runSyntheticRefreshExperiment()
             // If the experiment could not take ownership, clear any old grant.
             _ = await coordinator.signOutReport()
+            let cleanup = await self?.restartTest?.signOut()
             guard let self, self.generation == ticket else { return }
             self.loading = false
             let finding: String
@@ -146,7 +220,11 @@ final class LivePilotModel: ObservableObject {
             case .notRotated: finding = "A refresh token did not change."
             case .inconclusive: finding = "The refresh test was inconclusive."
             }
-            self.message = finding + (report.cleanupUnconfirmed ? " Test session cleanup could not be confirmed." : " Test sign-out requests were acknowledged.")
+            if cleanup == .localRemovalUnconfirmed {
+                self.message = finding + " Could not confirm removal of the saved test on this iPad. Unlock it and try Clear saved test."
+            } else {
+                self.message = finding + (report.cleanupUnconfirmed || cleanup == .remoteRevocationUnconfirmed ? " Test session cleanup could not be confirmed." : " Test sign-out requests were acknowledged.")
+            }
         }
     }
     func checkExpiry() {
@@ -164,6 +242,26 @@ final class LivePilotModel: ObservableObject {
         credential = nil; user = nil; probeSucceeded = false; probeContext = nil; collection = MobileOperationCollection(); detail = nil
         loading = false; detailLoading = false; message = failureMessage; detailMessage = nil
         PilotKeychain.clear()
+        if isSyntheticProbe, let restartTest {
+            let previousCleanup = savedTestCleanup
+            let pendingSave = restartSaveTask
+            pendingSave?.cancel()
+            let cleanup = Task { () -> SyntheticAccessSignOut in
+                _ = await previousCleanup?.value
+                _ = try? await pendingSave?.value
+                return await restartTest.signOut()
+            }
+            savedTestCleanup = cleanup
+            Task { [weak self] in
+                let result = await cleanup.value
+                guard let self, self.generation == ticket else { return }
+                if result == .localRemovalUnconfirmed {
+                    self.message = "Could not confirm removal of the saved test on this iPad. Unlock it and try Clear saved test again."
+                } else if result == .remoteRevocationUnconfirmed && self.message == nil {
+                    self.message = "Saved test removed from this iPad. Cloudflare grant revocation cannot be confirmed."
+                }
+            }
+        }
         guard let coordinator else { return }
         let previous = signOutTask
         let check: (@Sendable (ManagedOAuthCredential) async -> SyntheticRevocationProbeResult)?
@@ -203,6 +301,14 @@ final class LivePilotModel: ObservableObject {
             guard generation == ticket else { return }
             if result.result == .revocationUnconfirmed {
                 message = "The previous Cloudflare session could not be confirmed revoked. Reopen the app after the session expires."
+                return
+            }
+        }
+        if let cleanup = savedTestCleanup {
+            let result = await cleanup.value
+            guard generation == ticket else { return }
+            if result == .localRemovalUnconfirmed {
+                message = "Could not confirm removal of the saved test on this iPad. Unlock it and try Clear saved test again."
                 return
             }
         }
@@ -345,6 +451,8 @@ struct LivePilotWorkspace: View {
                     } }
                     Section {
                         if model.syntheticProbe {
+                            Button("Save test for restart") { Task { await model.saveRestartTest() } }.disabled(model.loading)
+                            Text("Stores only test access on this iPad for up to 15 minutes. It cannot confirm that the Cloudflare grant is revoked after a restart.").font(.caption)
                             Button("Test refresh protection") { model.testSyntheticRefreshReplay() }
                             Text("Runs a test sign-out and returns to the signed-out screen. No business data is used.").font(.caption)
                         }
@@ -357,6 +465,8 @@ struct LivePilotWorkspace: View {
                             Button("Sign in with Cloudflare Access") { Task { await model.signIn() } }.disabled(model.loading)
                             if model.syntheticProbe {
                                 Text("Checks Cloudflare sign-in against a test endpoint with no business data.").font(.footnote)
+                                Button("Restore saved test") { Task { await model.restoreRestartTest() } }.disabled(model.loading)
+                                Button("Clear saved test") { model.clearRestartTest() }.disabled(model.loading)
                             } else {
                                 Text("Uses your existing LT Ops staff sign-in. The pilot can only read permitted operations; sessions last up to 15 minutes.").font(.footnote)
                             }

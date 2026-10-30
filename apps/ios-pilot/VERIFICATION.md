@@ -125,6 +125,15 @@ device behavior remain unresolved. The identity-check label was made more
 visible and the resulting iPad build installed and verified in place; device
 inventory showed one pilot. The task-owned USB relay was stopped.
 
+An explicitly opt-in synthetic restart experiment is now available on the
+iPad. It stores only short-lived test access in device-only Keychain, requires
+online verification, and does not restore an Operations data session. The
+app discloses the expiry and unconfirmed Cloudflare grant cleanup; ambiguous
+Keychain failures across process death remain unproven. The full 65-test Swift
+suite and Apple SDK build passed. The signed app installed and verified in
+place, and inventory showed one pilot; the relay was stopped. App-restart and
+device-reboot acceptance are pending Beau's tests.
+
 Cloudflare's published agent flow registers a public client with only
 `authorization_code` in the registration grant list, then shows a refresh
 token in the exchange response and a subsequent `refresh_token` grant. The

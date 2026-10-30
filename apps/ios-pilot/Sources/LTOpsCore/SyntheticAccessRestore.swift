@@ -35,6 +35,7 @@ public protocol SyntheticAccessStore: Sendable {
 public enum SyntheticAccessSignOut: Equatable, Sendable {
     case noLocalCredential, localRemovalUnconfirmed, remoteRevocationUnconfirmed
 }
+public enum SyntheticAccessSaveError: Error, Sendable { case writeUnconfirmed }
 
 public actor SyntheticAccessRestore {
     private let pins: ManagedOAuthPins
@@ -66,7 +67,7 @@ public actor SyntheticAccessRestore {
         guard !working, !revoking, !removalUnconfirmed, try store.load() == nil else { throw MobilePilotError.unavailable }
         let item = try SyntheticAccessRecord(pins: pins, credential: credential, clientID: clientID)
         do { try store.save(item) }
-        catch { removalUnconfirmed = true; throw error }
+        catch { removalUnconfirmed = true; throw SyntheticAccessSaveError.writeUnconfirmed }
     }
 
     public func restore() async throws -> ManagedOAuthCredential? {

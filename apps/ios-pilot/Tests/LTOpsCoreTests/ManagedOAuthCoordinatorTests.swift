@@ -31,6 +31,26 @@ private actor ProbeLog {
         return kinds == [.refresh] ? .rejected : .inconclusive
     }
 }
+private final class RestartTestStore: SyntheticAccessStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var record: SyntheticAccessRecord?
+    var failAfterSave = false
+    func load() throws -> SyntheticAccessRecord? { lock.lock(); defer { lock.unlock() }; return record }
+    func save(_ value: SyntheticAccessRecord) throws { lock.lock(); defer { lock.unlock() }; record = value; if failAfterSave { throw ManagedOAuthStoreError.unavailable } }
+    func clear() throws { lock.lock(); defer { lock.unlock() }; record = nil }
+}
+private final class BlockingRestartStore: SyntheticAccessStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var record: SyntheticAccessRecord?
+    let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+    func load() throws -> SyntheticAccessRecord? { lock.lock(); defer { lock.unlock() }; return record }
+    func save(_ value: SyntheticAccessRecord) throws {
+        lock.lock(); record = value; lock.unlock()
+        entered.signal(); release.wait()
+        throw ManagedOAuthStoreError.unavailable
+    }
+    func clear() throws { lock.lock(); defer { lock.unlock() }; record = nil }
+}
 private struct FakeExchange: ManagedOAuthExchanging {
     let gate: ExchangeGate?
     var failRevocation = false
@@ -57,6 +77,52 @@ private struct FakeExchange: ManagedOAuthExchanging {
     }
 }
 final class ManagedOAuthCoordinatorTests: XCTestCase {
+    func testSyntheticRestartSaveStoresOnlyAccessAndRequiresSyntheticPins() async throws {
+        let issuer = "https://ledgetoptechnologies.cloudflareaccess.com"
+        let pins = try ManagedOAuthPins(resource: SyntheticRefreshExperiment.resource, issuer: issuer,
+            authorizationEndpoint: issuer + "/cdn-cgi/access/oauth/authorization", tokenEndpoint: issuer + "/cdn-cgi/access/oauth/token",
+            registrationEndpoint: issuer + "/cdn-cgi/access/oauth/registration", revocationEndpoint: issuer + "/cdn-cgi/access/oauth/revoke")
+        let store = RestartTestStore()
+        let restore = try SyntheticAccessRestore(pins: pins, store: store, verify: { _ in }, revoke: { _, _ in })
+        let pilot = ManagedOAuthCoordinator(pins: pins, transport: FakeExchange(gate: nil), browser: { url in
+            let state = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!.first { $0.name == "state" }!.value!
+            return URL(string: ManagedOAuthWire.callback + "?code=code&state=" + state)!
+        }, proofFactory: { ManagedOAuthProof(state: String(repeating: "s", count: 43), verifier: String(repeating: "v", count: 43), challenge: String(repeating: "A", count: 43)) })
+        do { try await pilot.saveSyntheticRestartTest(to: restore); XCTFail("An unsigned-in session must not save") } catch {}
+        try await pilot.signIn()
+        try await pilot.saveSyntheticRestartTest(to: restore)
+        let record = try XCTUnwrap(store.load())
+        XCTAssertEqual(record.token, "oauth:synthetic")
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(record), as: UTF8.self).contains("oauth:refresh"))
+        do { try await pilot.saveSyntheticRestartTest(to: restore); XCTFail("Existing test overwritten") } catch {}
+        XCTAssertEqual(try store.load(), record, "A rejected duplicate save must not erase the existing test")
+        let foreign = try coordinator(); try await foreign.signIn()
+        do { try await foreign.saveSyntheticRestartTest(to: restore); XCTFail("Foreign session saved") } catch {}
+        _ = await restore.signOut()
+        store.failAfterSave = true
+        do { try await pilot.saveSyntheticRestartTest(to: restore); XCTFail("Ambiguous write succeeded") } catch {}
+        XCTAssertNil(try store.load(), "An ambiguous write must trigger cleanup")
+    }
+    func testAmbiguousSaveRacingSignOutStillRemovesSavedTest() async throws {
+        let issuer = "https://ledgetoptechnologies.cloudflareaccess.com"
+        let pins = try ManagedOAuthPins(resource: SyntheticRefreshExperiment.resource, issuer: issuer,
+            authorizationEndpoint: issuer + "/cdn-cgi/access/oauth/authorization", tokenEndpoint: issuer + "/cdn-cgi/access/oauth/token",
+            registrationEndpoint: issuer + "/cdn-cgi/access/oauth/registration", revocationEndpoint: issuer + "/cdn-cgi/access/oauth/revoke")
+        let store = BlockingRestartStore()
+        let restore = try SyntheticAccessRestore(pins: pins, store: store, verify: { _ in }, revoke: { _, _ in })
+        let pilot = ManagedOAuthCoordinator(pins: pins, transport: FakeExchange(gate: nil), browser: { url in
+            let state = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!.first { $0.name == "state" }!.value!
+            return URL(string: ManagedOAuthWire.callback + "?code=code&state=" + state)!
+        }, proofFactory: { ManagedOAuthProof(state: String(repeating: "s", count: 43), verifier: String(repeating: "v", count: 43), challenge: String(repeating: "A", count: 43)) })
+        try await pilot.signIn()
+        let save = Task { try await pilot.saveSyntheticRestartTest(to: restore) }
+        let started = await Task.detached { store.entered.wait(timeout: .now() + 5) == .success }.value
+        guard started else { store.release.signal(); XCTFail("Save did not start"); return }
+        _ = await pilot.signOut()
+        store.release.signal()
+        do { try await save.value; XCTFail("Ambiguous save should fail") } catch {}
+        XCTAssertNil(try store.load(), "The delayed failing save must not survive sign-out")
+    }
     private func pins() throws -> ManagedOAuthPins {
         try ManagedOAuthPins(resource: "https://pilot.example.test", issuer: "https://team.cloudflareaccess.com",
             authorizationEndpoint: "https://team.cloudflareaccess.com/auth", tokenEndpoint: "https://team.cloudflareaccess.com/token",

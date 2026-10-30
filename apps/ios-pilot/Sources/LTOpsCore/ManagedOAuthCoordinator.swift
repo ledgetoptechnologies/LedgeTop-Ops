@@ -280,4 +280,23 @@ public actor ManagedOAuthCoordinator {
         guard let credential, credential.expiresAt > Date() else { return nil }
         return ManagedOAuthCredential(accessToken: credential.accessToken, refreshToken: nil, expiresAt: credential.expiresAt)
     }
+    /// Explicit test-only transfer: the refresh grant is never passed to the store.
+    /// A racing sign-out is followed by removal of any item this call just saved.
+    public func saveSyntheticRestartTest(to store: SyntheticAccessRestore) async throws {
+        guard SyntheticAccessRestore.reviewed(pins), let credential, let client = credentialClientID,
+              credential.expiresAt > Date(), revocationsInFlight == 0 else { throw MobilePilotError.unavailable }
+        let ticket = generation
+        let access = ManagedOAuthCredential(accessToken: credential.accessToken, refreshToken: nil, expiresAt: credential.expiresAt)
+        do { try await store.retain(access, clientID: client) }
+        catch SyntheticAccessSaveError.writeUnconfirmed {
+            // An error can occur after a Keychain write. Always attempt removal;
+            // a caller must still report that cleanup may be unconfirmed.
+            _ = await store.signOut()
+            throw SyntheticAccessSaveError.writeUnconfirmed
+        }
+        if generation != ticket || Task.isCancelled {
+            _ = await store.signOut()
+            throw MobilePilotError.signedOut
+        }
+    }
 }
