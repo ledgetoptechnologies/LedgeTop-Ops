@@ -70,7 +70,11 @@ final class ManagedOAuthCoordinatorTests: XCTestCase {
     }
     func testWrongStateDoesNotInstallCredential() async throws {
         let coordinator = try coordinator(mismatch: true)
-        do { try await coordinator.signIn(); XCTFail("must reject wrong state") } catch { XCTAssertEqual(error as? MobilePilotError, .invalidCallback) }
+        do { try await coordinator.signIn(); XCTFail("must reject wrong state") } catch {
+            let failure = error as? ManagedOAuthStageFailure
+            XCTAssertEqual(failure?.stage, .callback)
+            XCTAssertEqual(failure?.underlying as? MobilePilotError, .invalidCallback)
+        }
         let token = await coordinator.currentAccessToken()
         XCTAssertNil(token)
     }
@@ -111,9 +115,18 @@ final class ManagedOAuthCoordinatorTests: XCTestCase {
     }
     func testLostExchangeResponseMakesSignOutUnconfirmed() async throws {
         let coordinator = try coordinator(failExchange: true)
-        do { try await coordinator.signIn(); XCTFail("must fail") } catch { }
+        do { try await coordinator.signIn(); XCTFail("must fail") } catch {
+            XCTAssertEqual((error as? ManagedOAuthStageFailure)?.stage, .tokenExchange)
+        }
         let result = await coordinator.signOut()
         XCTAssertEqual(result, .revocationUnconfirmed)
+    }
+    func testDiagnosticPreservesPrimaryFailureAlongsideRevocationWarning() {
+        let primary = ManagedOAuthDiagnostic.message(for: .tokenExchange)
+        let combined = ManagedOAuthDiagnostic.withRevocationWarning(primary)
+        XCTAssertTrue(combined.contains(primary))
+        XCTAssertTrue(combined.contains("Cloudflare could not confirm the session was revoked"))
+        XCTAssertNotEqual(ManagedOAuthDiagnostic.message(for: .probe), primary)
     }
     func testExpiredAccessRequiresSignOutBeforeAnotherSignIn() async throws {
         let log = RevocationLog(), coordinator = try coordinator(log: log, lifetime: 0.1)

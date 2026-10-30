@@ -126,7 +126,7 @@ final class LivePilotModel: ObservableObject {
     func checkExpiry() {
         if let credential, credential.expiresAt <= Date() { signOut(); message = "Your read-only session expired. Sign in again." }
     }
-    func signOut() {
+    func signOut(failureMessage: String? = nil) {
         generation = UUID()
         let ticket = generation
         detailGeneration = UUID()
@@ -136,7 +136,7 @@ final class LivePilotModel: ObservableObject {
         pendingRequests.removeAll()
         cancellations.forEach { $0() }
         credential = nil; user = nil; probeSucceeded = false; collection = MobileOperationCollection(); detail = nil
-        loading = false; detailLoading = false; message = nil; detailMessage = nil
+        loading = false; detailLoading = false; message = failureMessage; detailMessage = nil
         PilotKeychain.clear()
         guard let coordinator else { return }
         let previous = signOutTask
@@ -149,7 +149,7 @@ final class LivePilotModel: ObservableObject {
         Task { [weak self] in
             let result = await task.value
             guard let self, self.generation == ticket, result == .revocationUnconfirmed else { return }
-            self.message = "Signed out on this device. Cloudflare could not confirm the session was revoked."
+            self.message = ManagedOAuthDiagnostic.withRevocationWarning(self.message)
         }
     }
     private func perform<Value: Sendable>(_ operation: @escaping @Sendable () async throws -> Value) async throws -> Value {
@@ -179,7 +179,9 @@ final class LivePilotModel: ObservableObject {
             guard let issued = await coordinator.currentDataCredential() else { throw MobilePilotError.expired }
             guard generation == ticket else { return }
             if isSyntheticProbe {
-                try await perform { try await api.verifySyntheticProbe(credential: issued) }
+                do { try await perform { try await api.verifySyntheticProbe(credential: issued) } }
+                catch is CancellationError { throw CancellationError() }
+                catch { throw ManagedOAuthStageFailure(stage: .probe, underlying: error) }
                 guard generation == ticket, issued.expiresAt > Date() else { return }
                 credential = issued; probeSucceeded = true
                 let remaining = max(0, issued.expiresAt.timeIntervalSinceNow)
@@ -204,8 +206,7 @@ final class LivePilotModel: ObservableObject {
             try collection.append(page, requestedCursor: nil)
         } catch {
             guard generation == ticket else { return }
-            signOut()
-            if !(error is CancellationError) { message = Self.explanation(error) }
+            signOut(failureMessage: error is CancellationError ? nil : Self.explanation(error))
         }
     }
     func refresh() async { await load(reset: true) }
@@ -227,7 +228,7 @@ final class LivePilotModel: ObservableObject {
             try collection.append(page, requestedCursor: cursor)
         } catch {
             guard generation == ticket else { return }
-            signOut(); message = Self.explanation(error)
+            signOut(failureMessage: Self.explanation(error))
         }
     }
     func showDetail(id: String) async {
@@ -243,11 +244,15 @@ final class LivePilotModel: ObservableObject {
         } catch {
             guard generation == ticket, detailGeneration == detailTicket else { return }
             if let failure = error as? MobilePilotError, [.signedOut, .denied, .expired].contains(failure) {
-                signOut(); message = Self.explanation(error)
+                signOut(failureMessage: Self.explanation(error))
             } else { detailMessage = Self.explanation(error) }
         }
     }
     private static func explanation(_ error: Error) -> String {
+        if let failure = error as? ManagedOAuthStageFailure {
+            if let browserError = failure.underlying as? ASWebAuthenticationSessionError, browserError.code == .canceledLogin { return "Sign-in cancelled." }
+            return ManagedOAuthDiagnostic.message(for: failure.stage)
+        }
         if let browserError = error as? ASWebAuthenticationSessionError, browserError.code == .canceledLogin { return "Sign-in cancelled." }
         switch error as? MobilePilotError {
         case .signedOut, .expired: return "Your read-only session ended. Sign in again."

@@ -52,6 +52,31 @@ public enum ManagedOAuthProofGenerator {
 public enum ManagedOAuthSignOutResult: Sendable, Equatable {
     case noLocalCredential, providerAcknowledged, revocationUnconfirmed
 }
+public enum ManagedOAuthStage: Sendable, Equatable {
+    case discovery, registration, browser, callback, tokenExchange, probe
+}
+public struct ManagedOAuthStageFailure: Error {
+    public let stage: ManagedOAuthStage
+    public let underlying: any Error
+    public init(stage: ManagedOAuthStage, underlying: any Error) { self.stage = stage; self.underlying = underlying }
+}
+public enum ManagedOAuthDiagnostic {
+    public static func message(for stage: ManagedOAuthStage) -> String {
+        switch stage {
+        case .discovery: return "Cloudflare sign-in setup could not be verified."
+        case .registration: return "Cloudflare sign-in registration failed."
+        case .browser: return "Cloudflare sign-in could not be completed in the browser."
+        case .callback: return "The return from Cloudflare sign-in could not be verified."
+        case .tokenExchange: return "Cloudflare sign-in could not complete the token exchange."
+        case .probe: return "Cloudflare sign-in completed, but the test connection failed."
+        }
+    }
+    public static func withRevocationWarning(_ message: String?) -> String {
+        let warning = "Signed out on this device. Cloudflare could not confirm the session was revoked."
+        guard let message, !message.isEmpty else { return warning }
+        return message + " " + warning
+    }
+}
 public actor ManagedOAuthCoordinator {
     public typealias Browser = @Sendable (URL) async throws -> URL
     public typealias ProofFactory = @Sendable () throws -> ManagedOAuthProof
@@ -104,11 +129,17 @@ public actor ManagedOAuthCoordinator {
               MobilePilotConfiguration.isBase64URL(proof.state, range: 32...128), proof.state != proof.verifier else {
             throw MobilePilotError.invalidCallback
         }
-        try await transport.verifyMetadata(); try check(expected)
-        let client = try await transport.register(); try check(expected)
+        do { try await transport.verifyMetadata() } catch is CancellationError { throw CancellationError() } catch { throw ManagedOAuthStageFailure(stage: .discovery, underlying: error) }
+        try check(expected)
+        let client: String
+        do { client = try await transport.register() } catch is CancellationError { throw CancellationError() } catch { throw ManagedOAuthStageFailure(stage: .registration, underlying: error) }
+        try check(expected)
         let authorization = try ManagedOAuthWire.authorizationURL(pins: pins, clientID: client, state: proof.state, challenge: proof.challenge)
-        let callback = try await browser(authorization); try check(expected)
-        let code = try ManagedOAuthWire.callbackCode(callback, state: proof.state)
+        let callback: URL
+        do { callback = try await browser(authorization) } catch is CancellationError { throw CancellationError() } catch { throw ManagedOAuthStageFailure(stage: .browser, underlying: error) }
+        try check(expected)
+        let code: String
+        do { code = try ManagedOAuthWire.callbackCode(callback, state: proof.state) } catch { throw ManagedOAuthStageFailure(stage: .callback, underlying: error) }
         exchangesInFlight += 1
         let received: ManagedOAuthCredential
         do {
@@ -119,7 +150,8 @@ public actor ManagedOAuthCoordinator {
             // A network error or cancellation cannot prove whether the server
             // issued a grant before its response was lost.
             grantStatusUncertain = true
-            throw error
+            if error is CancellationError { throw error }
+            throw ManagedOAuthStageFailure(stage: .tokenExchange, underlying: error)
         }
         do {
             try check(expected)

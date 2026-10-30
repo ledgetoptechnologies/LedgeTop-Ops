@@ -12,6 +12,15 @@ discovery and issuer-pin checks; test-stub Sendable warnings remain. Actual
 Cloudflare sign-in, callback, bearer validation and sign-out are still pending
 device testing.
 
+On October 30, Beau completed Cloudflare's authorization screen but the app
+reported that revocation could not be confirmed. The original failure was
+overwritten by the later warning, so the failing step is unknown. A diagnostic
+build preserves the step-specific failure and the separate revocation warning
+without displaying codes or tokens. Swift package tests passed 35 cases, and an
+Apple SDK build and signed in-place iPad installation succeeded. Device inventory
+again showed one pilot app; the task-owned USB relay was stopped and verified
+absent. The underlying sign-in failure remains unresolved pending the new test.
+
 ## Native build and installation — October 29, 2026
 
 Commit `46790bba` was exported to a separate Linux build directory. Swift 6.4,
