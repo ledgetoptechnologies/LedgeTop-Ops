@@ -3,7 +3,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),crypto=requ
 const {openDatabase}=require('../server/database');
 const {ProcessingRepository}=require('../server/processingRepository');
 const {inputInventory}=require('../server/processingProvenance');
-const {processSubmit}=require('../server/processingWorker');
+const {processSubmit,processOne}=require('../server/processingWorker');
 const sha=value=>crypto.createHash('sha256').update(value).digest('hex');
 test('snapshot retention fails closed on direct deletion and parent deletion or replacement',()=>{
  const {DatabaseSync}=require('node:sqlite'),{MIGRATIONS}=require('../server/database'),db=new DatabaseSync(':memory:');
@@ -110,6 +110,29 @@ test('prior initialization intent without a snapshot never sends or reconstructs
  assert.equal(sent,0);assert.equal(f.processing.getInitializationSnapshot(f.attempt.id),null);
  assert.equal(f.db.prepare('SELECT status FROM processing_jobs WHERE id=?').get(f.job.id).status,'pending');
  assert.equal(f.processing.getAttempt(f.attempt.id).errorCode,'provider_submission_observation_unavailable');
+});
+test('changed snapshot binding stays pending across retries without sending or failing the attempt',async t=>{
+ const f=fixture(t);f.processing.beginAttemptInitialization(f.job.id,'owner',{freshTaskMissing:true,captureRequest:true});
+ f.db.prepare('UPDATE processing_providers SET endpoint=? WHERE id=?').run('https://other.example',f.attempt.providerId);
+ f.db.prepare("UPDATE processing_jobs SET status='pending',lease_owner=NULL,lease_expires_at=NULL,available_at='2000' WHERE id=?").run(f.job.id);
+ let sent=0;const adapter={status:async()=>{sent++;throw Object.assign(new Error('missing'),{code:'provider_task_not_found'})},initialize:async()=>{sent++}};
+ for(let i=0;i<7;i++){f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id=? AND status='pending'").run(f.job.id);await processOne({processing:f.processing,storage:f.storage,config:{},adapterFactory:()=>adapter},'retry-owner')}
+ const job=f.db.prepare('SELECT status,error_code FROM processing_jobs WHERE id=?').get(f.job.id);
+ assert.equal(job.status,'pending');assert.equal(job.error_code,'provider_submission_observation_unavailable');assert.notEqual(f.processing.getAttempt(f.attempt.id).status,'failed');assert.equal(sent,0);
+});
+test('changed reservation binding prevents adapter creation and credential use',async t=>{
+ for(const kind of ['origin','key','ciphertext']){
+  const f=fixture(t);f.db.prepare('UPDATE processing_attempts SET reservation_required=1 WHERE id=?').run(f.attempt.id);
+  f.processing.ensureAttemptReservation(f.job.id,'owner',()=>({keyId:'key-a',ciphertext:'sealed-a'}));
+  f.processing.beginAttemptInitialization(f.job.id,'owner',{freshTaskMissing:true,captureRequest:true});
+  if(kind==='origin')f.db.prepare('UPDATE processing_providers SET endpoint=? WHERE id=?').run('https://other.example',f.attempt.providerId);
+  else if(kind==='key')f.db.prepare('UPDATE processing_attempt_reservations SET capability_key_id=? WHERE attempt_id=?').run('key-b',f.attempt.id);
+  else f.db.prepare('UPDATE processing_attempt_reservations SET capability_ciphertext=? WHERE attempt_id=?').run('sealed-b',f.attempt.id);
+  f.db.prepare("UPDATE processing_jobs SET status='pending',lease_owner=NULL,lease_expires_at=NULL,available_at='2000' WHERE id=?").run(f.job.id);
+  let adapters=0,credentials=0;const providerCredentials={sealAttemptCapability(){credentials++;throw new Error('unexpected seal')},unsealAttemptCapability(){credentials++;throw new Error('unexpected unseal')}};
+  await processOne({processing:f.processing,storage:f.storage,config:{},providerCredentials,adapterFactory:()=>{adapters++;throw new Error('unexpected adapter')}},'retry-owner');
+  assert.equal(adapters,0,kind);assert.equal(credentials,0,kind);assert.equal(f.db.prepare('SELECT status FROM processing_jobs WHERE id=?').get(f.job.id).status,'pending',kind);
+ }
 });
 test('inventory freezes source roles and exact ordered upload including generated GCP replacement',()=>{
   const make=(relativePath,processingRole='auto')=>({relativePath,processingRole,byteSize:4,sha256:sha(relativePath)});

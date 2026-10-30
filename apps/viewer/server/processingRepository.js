@@ -651,6 +651,15 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     if(value?.schemaVersion!==1||value.attemptId!==attemptId||JSON.stringify(value)!==row.snapshot_json)throw Object.assign(new Error('Initialization snapshot identity failed'),{code:'initialization_snapshot_invalid'});
     return value;
   }
+  validateInitializationSnapshotForJob(jobId,owner){return this.transactionOrOwned(()=>{
+    const job=this.provenanceJob(jobId,owner,'submit');if(!job)return false;
+    const attempt=this.getAttempt(job.attempt_id),requestSnapshot=this.getInitializationSnapshot(job.attempt_id);
+    if(requestSnapshot){
+      const provider=this.getProvider(attempt.providerId),reservation=this.getAttemptReservation(attempt.id),binding=reservation?{keyId:reservation.keyId,ciphertextSha256:crypto.createHash('sha256').update(reservation.ciphertext).digest('hex')}:null;
+      if(!provider||requestSnapshot.providerId!==provider.id||requestSnapshot.providerOrigin!==provider.endpoint||requestSnapshot.capabilityFingerprint!==(attempt.capabilityFingerprint||null)||JSON.stringify(requestSnapshot.reservationBinding)!==JSON.stringify(binding)||requestSnapshot.request?.uuid!==attempt.providerTaskId||JSON.stringify(requestSnapshot.request?.options)!==JSON.stringify(attempt.options)||requestSnapshot.request?.outputs!==null||typeof requestSnapshot.request?.name!=='string')throw Object.assign(new Error('Initialization snapshot binding changed'),{code:'initialization_snapshot_invalid'});
+    }
+    return true;
+  });}
   beginAttemptInitialization(jobId,owner,{freshTaskMissing=false,captureRequest=false}={}){return this.transaction(()=>{
     const job=this.provenanceJob(jobId,owner,'submit');if(!job)return null;
     const snapshot=this.getAttemptProvenance(job.attempt_id)?.submission;if(!snapshot?.inputFiles)return{historical:true,generation:null};
@@ -665,10 +674,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       this.database.prepare('INSERT INTO processing_initialization_snapshots(attempt_id,snapshot_json,snapshot_sha256,created_at) VALUES(?,?,?,?)').run(attempt.id,encoded,digest,t);
       requestSnapshot=value;
     }
-    if(captureRequest&&requestSnapshot){
-      const provider=this.getProvider(attempt.providerId),reservation=this.getAttemptReservation(attempt.id),binding=reservation?{keyId:reservation.keyId,ciphertextSha256:crypto.createHash('sha256').update(reservation.ciphertext).digest('hex')}:null;
-      if(!provider||requestSnapshot.providerId!==provider.id||requestSnapshot.providerOrigin!==provider.endpoint||requestSnapshot.capabilityFingerprint!==(attempt.capabilityFingerprint||null)||JSON.stringify(requestSnapshot.reservationBinding)!==JSON.stringify(binding)||requestSnapshot.request?.uuid!==attempt.providerTaskId||JSON.stringify(requestSnapshot.request?.options)!==JSON.stringify(attempt.options)||requestSnapshot.request?.outputs!==null||typeof requestSnapshot.request?.name!=='string')throw Object.assign(new Error('Initialization snapshot binding changed'),{code:'initialization_snapshot_invalid'});
-    }
+    if(captureRequest&&!this.validateInitializationSnapshotForJob(jobId,owner))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
     const initialization={schemaVersion:1,attemptId:attempt.id,providerTaskId:attempt.providerTaskId,inputManifestSha256:snapshot.inputManifestSha256,
       generation:(prior?.generation||0)+1,state:'intent',ambiguous:Boolean(prior)||!freshTaskMissing||attempt.submissionPhase!=='new',startedAt:t};
     this.database.prepare(`INSERT INTO processing_attempt_transfer_provenance(attempt_id,initialization_json,created_at,updated_at) VALUES(?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET initialization_json=excluded.initialization_json,updated_at=excluded.updated_at`).run(attempt.id,JSON.stringify(initialization),t,t);
