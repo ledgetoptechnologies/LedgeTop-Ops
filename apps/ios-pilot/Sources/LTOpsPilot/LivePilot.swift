@@ -64,9 +64,16 @@ private enum PilotKeychain {
 /// and the provider endpoint pins. An Info.plist toggle alone cannot enable it.
 private enum ManagedPilotBuildConfiguration {
     static let approvedPins: [ManagedOAuthPins] = []
-    // Synthetic probe pins require separate source review; no production or
-    // user-entered URL can enable this test mode.
-    static let approvedProbePins: [ManagedOAuthPins] = []
+    // This fixed staging resource is synthetic-only and has no business data.
+    // The provider metadata remains subject to exact independent pin checks.
+    static let approvedProbePins: [ManagedOAuthPins] = [try? ManagedOAuthPins(
+        resource: "https://ios-pilot-staging.ledgetop.app",
+        issuer: "https://ledgetoptechnologies.cloudflareaccess.com",
+        authorizationEndpoint: "https://ledgetoptechnologies.cloudflareaccess.com/cdn-cgi/access/oauth/authorization",
+        tokenEndpoint: "https://ledgetoptechnologies.cloudflareaccess.com/cdn-cgi/access/oauth/token",
+        registrationEndpoint: "https://ledgetoptechnologies.cloudflareaccess.com/cdn-cgi/access/oauth/registration",
+        revocationEndpoint: "https://ledgetoptechnologies.cloudflareaccess.com/cdn-cgi/access/oauth/revoke"
+    )].compactMap { $0 }
     static func selected(live: Bool, probe: Bool) -> (ManagedOAuthPins, Bool)? {
         guard live != probe else { return nil }
         let pins = probe ? approvedProbePins : approvedPins

@@ -32,14 +32,23 @@ and real-data access have their own gates in [BACKEND-ROLLOUT.md](BACKEND-ROLLOU
 The [Wrangler example](../operations/wrangler.ios-oauth-probe.example.jsonc)
 has no account, route, variables or bindings. The separate
 [staging candidate](../operations/wrangler.ios-oauth-probe.staging.jsonc)
-records the exact proposed account, hostname, distinct audience and issuer,
-and sets the probe flag to `false`; the source allowlist contains only the
-proposed origin. **Do not deploy it before the route and ownership checks.**
+records the exact account, hostname, distinct audience and issuer,
+and enables the synthetic probe; the source allowlist contains only the
+reviewed origin. Recheck route and ownership before any future deployment.
 Deploying a custom-domain route can change DNS and routing even when the probe
 flag is off. It has no business database, service, connector or secret bindings.
 The `ledgetop.app` candidate passed the focused probe suite (5 tests) and a
 Wrangler 4.118.0 dry run with only its six environment variables. These local
 checks do not prove provider routing or OAuth behavior.
+
+The disabled candidate was first deployed to the exact custom domain as Worker
+`lt-ops-ios-oauth-probe-staging`, version `a57c4a0b-cf8e-41f6-9588-604276250881`,
+then the synthetic marker was enabled as version `f1fad661-f9f3-4985-961e-9ff9b876941d`.
+Provider readback showed only six plain-text variables and no other bindings;
+workers.dev and preview URLs were disabled. Unauthenticated and invalid-bearer
+requests returned 401 both before and after enabling. The protected host's OAuth discovery returned metadata
+with the expected team issuer and endpoints. This does not yet test a real
+authorization, valid bearer/assertion binding, sign-out or iPad callback.
 
 For the prior `ios-pilot-staging.ledgetopdroneservices.com` candidate, after
 Access app creation, a fresh account-wide Worker custom-domain read found
@@ -74,8 +83,8 @@ Repeat these checks immediately before any route assignment.
 3. The new app's audience differs from the production Operations audience in
    `wrangler.jsonc`; verify against all relevant Operations web audiences.
    Review the narrow source-controlled origin allowlist and staging-only Worker configuration with exact account,
-   origin, team issuer, app audience and Operations audience. Keep the flag off
-   until the Access application and effective routing are confirmed. There must
+   origin, team issuer, app audience and Operations audience. The synthetic flag
+   is enabled only on the isolated test Worker. There must
    be no D1, connector, service binding, or secrets in the synthetic probe.
 4. Validate the exact candidate source/config locally, including tests and a
    Wrangler dry run; inspect the deployment plan and any DNS effects. Coordinate

@@ -103,7 +103,10 @@ public struct ManagedOAuthTransport: Sendable {
     init(pins: ManagedOAuthPins, protocolClasses: [AnyClass]) { self.pins = pins; self.protocolClasses = protocolClasses }
 
     public func verifyMetadata() async throws {
-        let url = URL(string: pins.issuer + "/.well-known/oauth-authorization-server")!
+        // Cloudflare serves the resource-specific metadata on the protected
+        // application origin. The metadata issuer and endpoints are still
+        // checked against their independent, source-reviewed pins below.
+        let url = URL(string: pins.resource + "/.well-known/oauth-authorization-server")!
         let data = try await request(url, method: "GET", contentType: nil, body: nil, successCodes: [200])
         try Task.checkCancellation()
         do { try JSONDecoder().decode(ManagedOAuthMetadata.self, from: data).validate(pins: pins) }

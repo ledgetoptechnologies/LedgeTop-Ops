@@ -15,7 +15,7 @@
   ],
   "vars": {
     "ENVIRONMENT": "staging",
-    "IOS_OAUTH_PROBE_ENABLED": "false",
+    "IOS_OAUTH_PROBE_ENABLED": "true",
     "IOS_OAUTH_PROBE_ORIGIN": "https://ios-pilot-staging.ledgetop.app",
     "IOS_OAUTH_PROBE_AUDIENCE": "e982d104616a480315256a577ef5ad5ce089f382c0b5453ce9db4cd9df7cf89d",
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",

@@ -1,5 +1,17 @@
 # Pilot verification record
 
+## Synthetic Cloudflare sign-in build — October 29, 2026
+
+The app was built against the Apple SDK and signed using xtool, with only the
+synthetic OAuth test enabled; real-data access remains disabled. Installation
+and verification succeeded on Beau's iPad. A subsequent UI-label correction was
+rebuilt and installed in place, and the device application inventory showed one
+LT Ops pilot with the same existing effective bundle ID. The task-owned USB
+relay was stopped. The 34 Swift package tests passed, including resource-origin
+discovery and issuer-pin checks; test-stub Sendable warnings remain. Actual
+Cloudflare sign-in, callback, bearer validation and sign-out are still pending
+device testing.
+
 ## Native build and installation — October 29, 2026
 
 Commit `46790bba` was exported to a separate Linux build directory. Swift 6.4,

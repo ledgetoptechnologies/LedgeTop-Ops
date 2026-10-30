@@ -12,15 +12,21 @@ private final class OAuthProtocolStub: URLProtocol, @unchecked Sendable {
     override func startLoading() {
         let url = request.url!
         let host = url.host ?? ""
-        let base = "https://\(host)"
         var status = 200
         var type = "application/json"
         var body = ""
         if url.path == "/.well-known/oauth-authorization-server" && request.httpMethod == "GET" {
+            // This stub accepts only the resource-specific discovery URL, so
+            // the test detects a request sent to the issuer origin instead.
+            guard host == "pilot.example.test" || host == "changed-pilot.example.test" || host == "wrong-issuer-pilot.example.test" else {
+                client?.urlProtocol(self, didFailWithError: MobilePilotError.invalidResponse); return
+            }
+            let issuer = host == "changed-pilot.example.test" ? "https://changed.example.test"
+                : host == "wrong-issuer-pilot.example.test" ? "https://other.example.test" : "https://team.example.test"
             body = """
-            {"issuer":"\(base)","authorization_endpoint":"\(base)/auth","token_endpoint":"\(base)/token","registration_endpoint":"\(base)/register","revocation_endpoint":"\(base)/revoke","response_types_supported":["code"],"grant_types_supported":["authorization_code"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"]}
+            {"issuer":"\(issuer)","authorization_endpoint":"\(issuer)/auth","token_endpoint":"\(issuer)/token","registration_endpoint":"\(issuer)/register","revocation_endpoint":"\(issuer)/revoke","response_types_supported":["code"],"grant_types_supported":["authorization_code"],"token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"]}
             """
-            if host == "changed.example.test" { body = body.replacingOccurrences(of: "/token", with: "/unexpected") }
+            if host == "changed-pilot.example.test" { body = body.replacingOccurrences(of: "/token", with: "/unexpected") }
         } else if url.path == "/register" && request.httpMethod == "POST" {
             status = 201
             guard request.value(forHTTPHeaderField: "Content-Type") == "application/json",
@@ -69,9 +75,9 @@ private final class OAuthProtocolStub: URLProtocol, @unchecked Sendable {
 }
 
 final class ManagedOAuthTransportTests: XCTestCase, @unchecked Sendable {
-    private func transport(host: String = "team.example.test") throws -> ManagedOAuthTransport {
+    private func transport(host: String = "team.example.test", resourceHost: String = "pilot.example.test") throws -> ManagedOAuthTransport {
         let base = "https://\(host)"
-        let pins = try ManagedOAuthPins(resource: "https://pilot.example.test", issuer: base,
+        let pins = try ManagedOAuthPins(resource: "https://\(resourceHost)", issuer: base,
             authorizationEndpoint: base + "/auth", tokenEndpoint: base + "/token",
             registrationEndpoint: base + "/register", revocationEndpoint: base + "/revoke")
         return ManagedOAuthTransport(pins: pins, protocolClasses: [OAuthProtocolStub.self])
@@ -87,7 +93,11 @@ final class ManagedOAuthTransportTests: XCTestCase, @unchecked Sendable {
         XCTAssertLessThanOrEqual(result.expiresAt.timeIntervalSinceNow, 900)
     }
     func testChangedDiscoveryFailsClosed() async throws {
-        do { try await transport(host: "changed.example.test").verifyMetadata(); XCTFail("Accepted changed endpoint") }
+        do { try await transport(host: "changed.example.test", resourceHost: "changed-pilot.example.test").verifyMetadata(); XCTFail("Accepted changed endpoint") }
+        catch { XCTAssertEqual(error as? MobilePilotError, .invalidResponse) }
+    }
+    func testDiscoveryRejectsMetadataWithUnpinnedIssuer() async throws {
+        do { try await transport(resourceHost: "wrong-issuer-pilot.example.test").verifyMetadata(); XCTFail("Accepted wrong issuer") }
         catch { XCTAssertEqual(error as? MobilePilotError, .invalidResponse) }
     }
     func testTokenFailuresRejectUnexpectedResponses() async throws {

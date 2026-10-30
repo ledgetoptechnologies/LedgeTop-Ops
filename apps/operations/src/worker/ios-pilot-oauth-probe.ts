@@ -1,9 +1,9 @@
 import { verifyPilotAccessAssertion } from './ios-pilot-access';
 
 /** Synthetic-only OAuth routing probe. No databases, business APIs, logs,
- * assets, scheduled handlers, or credentials are bound by this module. This
- * entrypoint is not deployed. Only the isolated staging origin is eligible;
- * the separate staging configuration keeps the probe disabled by default. */
+ * assets, scheduled handlers, or credentials are bound by this module. Only
+ * the isolated staging origin is eligible; it returns a fixed marker after
+ * Access validation and never serves business data. */
 const REVIEWED_PROBE_ORIGINS: readonly string[] = ['https://ios-pilot-staging.ledgetop.app'];
 const PROBE_PATH = '/oauth-probe/v1';
 type ProbeEnvironment = {

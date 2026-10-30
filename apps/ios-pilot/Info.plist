@@ -7,6 +7,6 @@
         <key>CFBundleURLSchemes</key><array><string>com.ledgetoptechnologies.ops.pilot</string></array>
     </dict></array>
     <key>LTOpsLiveEnabled</key><false/>
-    <key>LTOpsSyntheticProbeEnabled</key><false/>
+    <key>LTOpsSyntheticProbeEnabled</key><true/>
     <key>LTOpsOrigin</key><string>https://ops-staging.ledgetopdroneservices.com</string>
 </dict></plist>
