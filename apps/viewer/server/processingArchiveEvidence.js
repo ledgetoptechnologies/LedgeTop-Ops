@@ -154,6 +154,11 @@ async function captureProcessingArchive(readable, destination, options = {}) {
     await extractZipDescriptor(fd, archiveByteSize, staged, { ...bounds, maxBytes: expansionBytes, signal, workId: 'capture', onProgress });
     if (!same(initial, fs.fstatSync(fd, { bigint: true }))) throw changed();
     const archiveFiles = await inventoryDirectory(staged, { ...bounds, signal });
+    if (options.beforePromotion) {
+      await options.beforePromotion({ archiveSha256:actualHash, archiveByteSize, archiveFiles });
+      cancelled(signal);
+      if (!same(initial, fs.fstatSync(fd, { bigint: true })) || JSON.stringify(await inventoryDirectory(staged, { ...bounds, signal })) !== JSON.stringify(archiveFiles)) throw changed();
+    }
     cancelled(signal);
     const parentNow = fs.lstatSync(parent.resolved, { bigint: true });
     if (fs.existsSync(target) || fs.realpathSync(parent.resolved) !== parent.resolved || parentNow.ino !== parent.stat.ino || parentNow.dev !== parent.stat.dev) throw changed();

@@ -183,7 +183,6 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   // Recheck in the actual existing-directory branch after source hashing.
   if(!fs.existsSync(destination)){
     if(!processing.beginArchiveCapture(job.id,job.lease_owner))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
-    if(binding)initialCommitment=await readCommitment();
     let adapter;
     try{const capability=attemptCapability(processing,providerCredentials,attempt);adapter=adapterFor(provider,config,providerCredentials,capability);await requireReservationSupport(adapter,capability);}
     catch(error){if(processing.attemptRequiresReservation?.(attempt.id))throw Object.assign(new Error('Provider observation unavailable; ingestion will resume'),{code:'provider_observation_unavailable'});throw error;}
@@ -192,6 +191,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     catch(error){if(processing.attemptRequiresReservation?.(attempt.id))throw Object.assign(new Error('Provider download unavailable; ingestion will resume'),{code:'provider_observation_unavailable'});throw error;}
     let providerExpectation;
     try{providerExpectation=providerArchiveExpectation(response);}catch(error){try{await response.body?.cancel();}catch{}throw error;}
+    if(binding&&!providerExpectation){try{await response.body?.cancel();}catch{}throw Object.assign(new Error('Provider archive identity is unavailable'),{code:'staged_commitment_conflict'});}
     const declared=Number(response.headers.get('content-length')||0);
     if(declared>maximumExpansion)throw Object.assign(new Error('provider result exceeds available storage'),{code:'insufficient_storage'});
     fs.mkdirSync(path.dirname(destination),{recursive:true});
@@ -203,7 +203,10 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     const destroy=readable._destroy;
     readable._destroy=function(error,callback){try{Promise.resolve(reader.cancel()).catch(()=>{});}catch{}destroy.call(this,error,callback);};
     let captured;
-    try{captured=await captureProcessingArchive(readable,destination,{maxEntries:100000,maxBytes:maximumExpansion,maxArchiveBytes:maximumExpansion,maxDiskBytes:maximumExpansion,providerExpectation,signal});}
+    try{captured=await captureProcessingArchive(readable,destination,{maxEntries:100000,maxBytes:maximumExpansion,maxArchiveBytes:maximumExpansion,maxDiskBytes:maximumExpansion,providerExpectation,signal,beforePromotion:binding?async captured=>{
+      initialCommitment=await readCommitment();
+      if(captured.archiveSha256!==initialCommitment.archiveSha256||captured.archiveByteSize!==initialCommitment.archiveBytes)throw Object.assign(new Error('Staged commitment does not match archive'),{code:'staged_commitment_conflict'});
+    }:undefined});}
     catch(error){if(processing.attemptRequiresReservation?.(attempt.id)&&streamErrors.has(error)&&!signal?.aborted)throw Object.assign(new Error('Provider download interrupted; ingestion will resume'),{code:'provider_observation_unavailable'});throw error;}
     if(binding&&(!providerExpectation||captured.archiveSha256!==initialCommitment.archiveSha256||captured.archiveByteSize!==initialCommitment.archiveBytes))throw Object.assign(new Error('Staged commitment does not match archive'),{code:'staged_commitment_conflict'});
     archiveReceipt=processing.recordAttemptArchiveReceipt(job.id,job.lease_owner,{...captured,stagedCommitment:binding?initialCommitment:null});
