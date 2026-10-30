@@ -10,7 +10,8 @@ import {
 import { portalAutomaticEligibilityEnabled } from "./portal-automatic-eligibility";
 import type { Env } from "./types";
 import { sendAdminAlert } from "./alerts";
-import { sendNotificationMail } from "./mailer";
+import { NotificationMailDeliveryUncertain, notificationMailFailureCode, sendNotificationMail,
+  validateNotificationMailTransport } from "./mailer";
 import { d1TablesPresent } from "./schema-readiness";
 import { projectAlphaDeliveryPrincipalGuard, resolveProjectAlphaDeliveryPrincipal } from "./share-recipients";
 import { HTTPException } from "hono/http-exception";
@@ -896,39 +897,42 @@ export async function processClientOpsTriageInquiryNotifications(env: Env): Prom
   if(!await d1TablesPresent(env.DELIVERY_DB,["client_ops_triage_inquiries","client_ops_triage_notification_outbox"]))return 0;
   const db=env.DELIVERY_DB.withSession("first-primary");
   let processed=0;
-  const exhausted=await db.prepare("SELECT id,inquiry_id,attempt_count FROM client_ops_triage_notification_outbox "+
-    "WHERE status='processing' AND attempt_count>=? AND datetime(lease_expires_at)<=datetime('now') "+
-    "ORDER BY created_at LIMIT 25").bind(MAX_ATTEMPTS).all<{id:string;inquiry_id:string;attempt_count:number}>();
-  for(const row of exhausted.results){
-    const results=await db.batch([
-      db.prepare("UPDATE client_ops_triage_notification_outbox SET status='failed',lease_expires_at=NULL,"+
-        "last_error='delivery-attempt-limit-after-expired-lease',updated_at=datetime('now') "+
-        "WHERE id=? AND status='processing' AND attempt_count>=? AND datetime(lease_expires_at)<=datetime('now')")
-        .bind(row.id,MAX_ATTEMPTS),
-      db.prepare("INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json) "+
-        "SELECT 'system','client-request-notifications','client.ops_triage_inquiry_notification.failed',"+
-        "'client_ops_triage_inquiry',?,json_object('notificationId',?,'attempt',?,'reason','delivery-attempt-limit-after-expired-lease') "+
-        "WHERE changes()=1 AND EXISTS(SELECT 1 FROM client_ops_triage_notification_outbox "+
-        "WHERE id=? AND status='failed' AND last_error='delivery-attempt-limit-after-expired-lease')")
-        .bind(row.inquiry_id,row.id,row.attempt_count,row.id),
-    ]);
-    if(results[0]?.meta.changes){
+  try {
+    validateNotificationMailTransport(env);
+  } catch (error) {
+    console.error(JSON.stringify({event:"client.ops_triage_inquiry_notification.transport_unavailable",
+      failureCode:notificationMailFailureCode(error)}));
+    return 0;
+  }
+  const expired=await db.prepare("SELECT id,inquiry_id,attempt_count FROM client_ops_triage_notification_outbox "+
+    "WHERE status='processing' AND datetime(lease_expires_at)<=datetime('now') ORDER BY created_at LIMIT 25")
+    .all<{id:string;inquiry_id:string;attempt_count:number}>();
+  for(const row of expired.results){
+    const held=await db.prepare("UPDATE client_ops_triage_notification_outbox SET status='uncertain',lease_expires_at=NULL,"+
+      "last_error='mail-delivery-outcome-uncertain-after-expired-lease',updated_at=datetime('now') "+
+      "WHERE id=? AND status='processing' AND attempt_count=? AND datetime(lease_expires_at)<=datetime('now')")
+      .bind(row.id,row.attempt_count).run();
+    if(held.meta.changes){
       processed++;
-      await sendAdminAlert(env,"Client request notification failed",
-        "Triage inquiry notification "+row.id+" exhausted delivery attempts after a worker interruption.");
+      await db.prepare("INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json) "+
+        "VALUES('system','client-request-notifications','client.ops_triage_inquiry_notification.uncertain',"+
+        "'client_ops_triage_inquiry',?,?)")
+        .bind(row.inquiry_id,JSON.stringify({notificationId:row.id,attempt:row.attempt_count,
+          reason:"mail-delivery-outcome-uncertain-after-expired-lease"})).run();
+      await sendAdminAlert(env,"Client inquiry notice needs delivery reconciliation",
+        "Triage inquiry notification "+row.id+" has an expired delivery lease; mail acceptance is uncertain and it was held without retry.");
     }
   }
   for(let delivered=0;delivered<25;delivered++){
     const row=await db.prepare("SELECT outbox.id,outbox.inquiry_id,outbox.attempt_count,inquiry.kind,inquiry.title,inquiry.details,inquiry.location " +
       "FROM client_ops_triage_notification_outbox outbox JOIN client_ops_triage_inquiries inquiry ON inquiry.id=outbox.inquiry_id " +
-      "WHERE ((outbox.status='pending' AND datetime(outbox.next_attempt_at)<=datetime('now')) " +
-      "OR (outbox.status='processing' AND datetime(outbox.lease_expires_at)<=datetime('now'))) " +
+      "WHERE outbox.status='pending' AND datetime(outbox.next_attempt_at)<=datetime('now') " +
       "AND outbox.attempt_count<? ORDER BY outbox.created_at LIMIT 1")
       .bind(MAX_ATTEMPTS).first<{id:string;inquiry_id:string;attempt_count:number;kind:"website"|"drone"|"other";title:string;details:string;location:string|null}>();
     if(!row)break;
     const claim=await db.prepare("UPDATE client_ops_triage_notification_outbox SET status='processing',attempt_count=attempt_count+1,"+
-      "lease_expires_at=datetime('now','+15 minutes'),updated_at=datetime('now') WHERE id=? AND attempt_count<? AND "+
-      "((status='pending' AND datetime(next_attempt_at)<=datetime('now')) OR (status='processing' AND datetime(lease_expires_at)<=datetime('now')))")
+      "lease_expires_at=datetime('now','+15 minutes'),updated_at=datetime('now') WHERE id=? AND status='pending' AND attempt_count<? AND "+
+      "datetime(next_attempt_at)<=datetime('now')")
       .bind(row.id,MAX_ATTEMPTS).run();
     if(!claim.meta.changes){delivered--;continue;}
     processed++;
@@ -941,36 +945,48 @@ export async function processClientOpsTriageInquiryNotifications(env: Env): Prom
         "Inquiry notification "+row.id+" could not be routed to staff.");
       continue;
     }
+    const actionUrl=new URL("/operations/inbox?source=inquiries",env.PUBLIC_BASE_URL).toString();
+    const subject=("New "+row.kind+" inquiry: "+row.title).slice(0,240);
+    const text="A new client portal inquiry needs review.\n\nKind: "+row.kind+"\nTitle: "+row.title+
+      (row.location?"\nLocation: "+row.location:"")+"\n\n"+row.details+"\n\nReview in Operations: "+actionUrl;
+    const html="<p>A new client portal inquiry needs review.</p><p><strong>Kind:</strong> "+escapeHtml(row.kind)+
+      "<br><strong>Title:</strong> "+escapeHtml(row.title)+(row.location?"<br><strong>Location:</strong> "+escapeHtml(row.location):"")+
+      "</p><p>"+escapeHtml(row.details).replace(/\n/g,"<br>")+
+      "</p><p><a href='"+escapeHtml(actionUrl)+"'>Review in Operations</a></p>";
     try{
-      const actionUrl=new URL("/operations/inbox?source=inquiries",env.PUBLIC_BASE_URL).toString();
-      const subject=("New "+row.kind+" inquiry: "+row.title).slice(0,240);
-      const text="A new client portal inquiry needs review.\n\nKind: "+row.kind+"\nTitle: "+row.title+
-        (row.location?"\nLocation: "+row.location:"")+"\n\n"+row.details+"\n\nReview in Operations: "+actionUrl;
-      const html="<p>A new client portal inquiry needs review.</p><p><strong>Kind:</strong> "+escapeHtml(row.kind)+
-        "<br><strong>Title:</strong> "+escapeHtml(row.title)+(row.location?"<br><strong>Location:</strong> "+escapeHtml(row.location):"")+
-        "</p><p>"+escapeHtml(row.details).replace(/\n/g,"<br>")+
-        "</p><p><a href='"+escapeHtml(actionUrl)+"'>Review in Operations</a></p>";
       await sendNotificationMail(env,{to:recipient,fromName:"Ledge Top Client Portal",subject,text,html,messageIdKey:row.id});
-      const sent=await db.prepare("UPDATE client_ops_triage_notification_outbox SET status='sent',delivered_at=datetime('now'),"+
-        "lease_expires_at=NULL,updated_at=datetime('now') WHERE id=? AND status='processing' AND attempt_count=? AND datetime(lease_expires_at)>datetime('now')")
-        .bind(row.id,attempt).run();
-      if(sent.meta.changes)await db.prepare("INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json) "+
-        "VALUES('system','client-request-notifications','client.ops_triage_inquiry_notification.sent','client_ops_triage_inquiry',?,?)")
-        .bind(row.inquiry_id,JSON.stringify({notificationId:row.id,attempt})).run();
     }catch(error){
-      const message=(error instanceof Error?error.message:"email-send-failed").slice(0,240),terminal=attempt>=MAX_ATTEMPTS;
+      const failureCode=notificationMailFailureCode(error);
+      const uncertain=error instanceof NotificationMailDeliveryUncertain || failureCode==="mail-transport-unknown";
+      const terminal=attempt>=MAX_ATTEMPTS;
+      const status=uncertain?"uncertain":terminal?"failed":"pending";
+      const safeCode=uncertain?(error instanceof NotificationMailDeliveryUncertain?
+        "mail-delivery-outcome-uncertain":"mail-transport-unknown"):failureCode;
+      const delay=terminal||uncertain?"+0 seconds":"+"+(2**attempt*5)+" minutes";
       const updated=await db.prepare("UPDATE client_ops_triage_notification_outbox SET status=?,next_attempt_at=datetime('now',?),"+
         "lease_expires_at=NULL,last_error=?,updated_at=datetime('now') WHERE id=? AND status='processing' AND attempt_count=?")
-        .bind(terminal?"failed":"pending",terminal?"+0 seconds":"+"+(2**attempt*5)+" minutes",message,row.id,attempt).run();
+        .bind(status,delay,safeCode,row.id,attempt).run();
       if(updated.meta.changes){
+        const action=uncertain?"client.ops_triage_inquiry_notification.uncertain":terminal?
+          "client.ops_triage_inquiry_notification.failed":"client.ops_triage_inquiry_notification.retry_scheduled";
         await db.prepare("INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json) "+
           "VALUES('system','client-request-notifications',?,'client_ops_triage_inquiry',?,?)")
-          .bind(terminal?"client.ops_triage_inquiry_notification.failed":"client.ops_triage_inquiry_notification.retry_scheduled",
-            row.inquiry_id,JSON.stringify({notificationId:row.id,attempt,error:message})).run();
-        if(terminal)await sendAdminAlert(env,"Client request notification failed",
-          "Triage inquiry notification "+row.id+": "+message);
+          .bind(action,row.inquiry_id,JSON.stringify({notificationId:row.id,attempt,failureCode:safeCode})).run();
+        if(uncertain)await sendAdminAlert(env,"Client inquiry notice needs delivery reconciliation",
+          "Triage inquiry notification "+row.id+" has uncertain mail acceptance and was held without retry.");
+        else if(terminal)await sendAdminAlert(env,"Client request notification failed",
+          "Triage inquiry notification "+row.id+" failed with "+safeCode+" after bounded retries.");
       }
+      continue;
     }
+    // Keep receipt/audit failures outside the send-error handler. The lease will
+    // become uncertain later instead of converting an accepted mail to a retry.
+    const sent=await db.prepare("UPDATE client_ops_triage_notification_outbox SET status='sent',delivered_at=datetime('now'),"+
+      "lease_expires_at=NULL,updated_at=datetime('now') WHERE id=? AND status='processing' AND attempt_count=?")
+      .bind(row.id,attempt).run();
+    if(sent.meta.changes)await db.prepare("INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json) "+
+      "VALUES('system','client-request-notifications','client.ops_triage_inquiry_notification.sent','client_ops_triage_inquiry',?,?)")
+      .bind(row.inquiry_id,JSON.stringify({notificationId:row.id,attempt})).run();
   }
   return processed;
 }

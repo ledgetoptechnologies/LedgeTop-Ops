@@ -30,7 +30,7 @@ CREATE TABLE client_ops_triage_notification_outbox (
   recipient_kind TEXT NOT NULL CHECK(recipient_kind='staff_triage'),
   dedupe_key TEXT NOT NULL UNIQUE CHECK(length(dedupe_key) BETWEEN 1 AND 256),
   payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
-  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','sent','failed','suppressed')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','sent','failed','suppressed','uncertain')),
   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count>=0),
   next_attempt_at TEXT NOT NULL DEFAULT (datetime('now')),
   lease_expires_at TEXT,

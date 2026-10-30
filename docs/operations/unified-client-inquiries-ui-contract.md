@@ -56,3 +56,9 @@ GET /api/client/inquiries returns { inquiries: [...] }, newest first, for the au
 - Only Operations staff with current global operations.manage can use these routes. The client UI must not link to or call them.
 
 Owner email is dispatched by the existing scheduled staff-triage outbox using the existing configured recipient. Client submit success does not depend on mail delivery; the durable inquiry remains available in Operations.
+
+## Staff notification delivery lifecycle
+
+The outbox records `pending`, `processing`, `sent`, `failed`, `suppressed`, or `uncertain`. The processor runs the existing non-sending mail transport preflight before it claims any row. A missing or invalid transport leaves pending attempts untouched and logs only the closed mail failure code.
+
+Typed failures known to occur before dispatch keep the existing bounded retry/backoff. An acceptance-ambiguous mail failure moves the row to `uncertain`; it is not sent again automatically. An expired `processing` lease is also `uncertain`, because the worker may have dispatched before it stopped. A successful mail send followed by a D1 receipt/audit failure leaves the lease for that same uncertain reconciliation path. Each hold writes a safe audit reason and raises the existing internal Operations alert. The stable mail Message-ID is for tracing and does not imply provider deduplication. Uncertain rows require owner/operator reconciliation; no automated resend is implied.
