@@ -64,9 +64,14 @@ private enum PilotKeychain {
 /// and the provider endpoint pins. An Info.plist toggle alone cannot enable it.
 private enum ManagedPilotBuildConfiguration {
     static let approvedPins: [ManagedOAuthPins] = []
-    static func selected(enabled: Bool) -> ManagedOAuthPins? {
-        guard enabled, approvedPins.count == 1 else { return nil }
-        return approvedPins.first
+    // Synthetic probe pins require separate source review; no production or
+    // user-entered URL can enable this test mode.
+    static let approvedProbePins: [ManagedOAuthPins] = []
+    static func selected(live: Bool, probe: Bool) -> (ManagedOAuthPins, Bool)? {
+        guard live != probe else { return nil }
+        let pins = probe ? approvedProbePins : approvedPins
+        guard pins.count == 1, let selected = pins.first else { return nil }
+        return (selected, probe)
     }
 }
 
@@ -80,6 +85,7 @@ final class LivePilotModel: ObservableObject {
     @Published private(set) var detailLoading = false
     @Published private(set) var message: String?
     @Published private(set) var detailMessage: String?
+    @Published private(set) var probeSucceeded = false
     private var generation = UUID()
     private var detailGeneration = UUID()
     private var expiry: Task<Void, Never>?
@@ -89,13 +95,17 @@ final class LivePilotModel: ObservableObject {
     private var credential: ManagedOAuthCredential?
     private var coordinator: ManagedOAuthCoordinator?
     private var api: ManagedPilotDataAPI?
+    private var isSyntheticProbe = false
     var configured: Bool { coordinator != nil && api != nil }
-    var environmentName: String { "Staging" }
-    var signedIn: Bool { credential.map { $0.expiresAt > Date() } == true && user != nil }
+    var syntheticProbe: Bool { isSyntheticProbe }
+    var environmentName: String { isSyntheticProbe ? "Sign-in test" : "Staging" }
+    var signedIn: Bool { credential.map { $0.expiresAt > Date() } == true && (user != nil || probeSucceeded) }
 
     init() {
         let enabled = Bundle.main.infoDictionary?["LTOpsLiveEnabled"] as? Bool == true
-        if let pins = ManagedPilotBuildConfiguration.selected(enabled: enabled) {
+        let probe = Bundle.main.infoDictionary?["LTOpsSyntheticProbeEnabled"] as? Bool == true
+        if let (pins, synthetic) = ManagedPilotBuildConfiguration.selected(live: enabled, probe: probe) {
+            isSyntheticProbe = synthetic
             let browser = self.browser
             coordinator = ManagedOAuthCoordinator(pins: pins, transport: ManagedOAuthTransport(pins: pins),
                 browser: { url in try await browser.open(url) }, proofFactory: { try ManagedOAuthProofGenerator.generate() })
@@ -118,7 +128,7 @@ final class LivePilotModel: ObservableObject {
         let cancellations = Array(pendingRequests.values)
         pendingRequests.removeAll()
         cancellations.forEach { $0() }
-        credential = nil; user = nil; collection = MobileOperationCollection(); detail = nil
+        credential = nil; user = nil; probeSucceeded = false; collection = MobileOperationCollection(); detail = nil
         loading = false; detailLoading = false; message = nil; detailMessage = nil
         PilotKeychain.clear()
         guard let coordinator else { return }
@@ -161,6 +171,18 @@ final class LivePilotModel: ObservableObject {
             guard generation == ticket else { return }
             guard let issued = await coordinator.currentDataCredential() else { throw MobilePilotError.expired }
             guard generation == ticket else { return }
+            if isSyntheticProbe {
+                try await perform { try await api.verifySyntheticProbe(credential: issued) }
+                guard generation == ticket, issued.expiresAt > Date() else { return }
+                credential = issued; probeSucceeded = true
+                let remaining = max(0, issued.expiresAt.timeIntervalSinceNow)
+                expiry = Task { [weak self] in
+                    do { try await Task.sleep(for: .seconds(remaining)) } catch { return }
+                    guard let self, self.generation == ticket else { return }
+                    self.signOut(); self.message = "Your sign-in test session expired."
+                }
+                return
+            }
             let identity = try await perform { try await api.identity(credential: issued) }
             guard generation == ticket, issued.expiresAt > Date() else { return }
             credential = issued; user = identity.user
@@ -182,7 +204,7 @@ final class LivePilotModel: ObservableObject {
     func refresh() async { await load(reset: true) }
     func loadMore() async { await load(reset: false) }
     private func load(reset: Bool) async {
-        guard !loading, let credential, let api else { return }
+        guard !isSyntheticProbe, !loading, let credential, let api else { return }
         guard credential.expiresAt > Date() else { signOut(); message = "Your read-only session expired. Sign in again."; return }
         let ticket = generation
         let cursor = reset ? nil : collection.nextCursor
@@ -202,7 +224,7 @@ final class LivePilotModel: ObservableObject {
         }
     }
     func showDetail(id: String) async {
-        guard let credential, let api else { return }
+        guard !isSyntheticProbe, let credential, let api else { return }
         detail = nil; detailMessage = nil; detailLoading = true
         detailGeneration = UUID()
         let ticket = generation, detailTicket = detailGeneration
@@ -241,14 +263,19 @@ struct LivePilotWorkspace: View {
                 Section {
                     Label("\(model.environmentName) workspace · read only", systemImage: "lock.shield").font(.caption.bold())
                     if let user = model.user { Text(user.displayName); Text(user.email).font(.caption).foregroundStyle(.secondary) }
-                    Text("\(model.collection.operations.count) operations loaded").font(.headline)
-                    Text("Counts and search cover loaded records only.").font(.caption).foregroundStyle(.secondary)
+                    if model.syntheticProbe {
+                        if model.probeSucceeded { Text("Cloudflare sign-in test succeeded.").font(.headline) }
+                        Text("This test contains no business data.").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("\(model.collection.operations.count) operations loaded").font(.headline)
+                        Text("Counts and search cover loaded records only.").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 if let message = model.message { Section { Text(message) } }
-                if model.loading { ProgressView("Loading live operations") }
+                if model.loading { ProgressView(model.syntheticProbe ? "Checking Cloudflare sign-in" : "Loading live operations") }
                 if model.signedIn {
                     let matches = model.collection.operations.filter { query.isEmpty || [$0.title, $0.projectName ?? "", $0.location ?? "", $0.status].contains { $0.localizedCaseInsensitiveContains(query) } }
-                    Section("Operations") {
+                    if !model.probeSucceeded { Section("Operations") {
                         if matches.isEmpty && !model.loading { Text("No matching operations in the loaded records.").foregroundStyle(.secondary) }
                         ForEach(matches) { operation in
                             NavigationLink { LiveOperationDetail(model: model, id: operation.id) } label: {
@@ -260,13 +287,17 @@ struct LivePilotWorkspace: View {
                             }
                         }
                         if model.collection.nextCursor != nil { Button("Load more operations") { Task { await model.loadMore() } }.disabled(model.loading) }
-                    }
+                    } }
                     Section { Button("Sign out", role: .destructive) { model.signOut() }; Text("Signing out removes this app's session and loaded data. Your browser sign-in is separate.").font(.caption) }
                 } else {
                     Section {
                         if model.configured {
                             Button("Sign in with Cloudflare Access") { Task { await model.signIn() } }.disabled(model.loading)
-                            Text("Uses your existing LT Ops staff sign-in. The pilot can only read permitted operations; sessions last up to 15 minutes.").font(.footnote)
+                            if model.syntheticProbe {
+                                Text("Checks Cloudflare sign-in against a test endpoint with no business data.").font(.footnote)
+                            } else {
+                                Text("Uses your existing LT Ops staff sign-in. The pilot can only read permitted operations; sessions last up to 15 minutes.").font(.footnote)
+                            }
                         } else {
                             Text("Live access is not ready in this pilot build yet.")
                         }
@@ -275,9 +306,19 @@ struct LivePilotWorkspace: View {
                 Section { Button("Return to demo workspace") { model.useDemo() } }
             }
             .navigationTitle("LT Ops · \(model.environmentName)")
-            .searchable(text: $query, prompt: "Search loaded operations")
-            .refreshable { await model.refresh() }
+            .pilotOperationControls(enabled: !model.syntheticProbe, query: $query) { await model.refresh() }
             .onChange(of: scenePhase) { _, phase in if phase == .active { model.checkExpiry() } }
+        }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func pilotOperationControls(enabled: Bool, query: Binding<String>, refresh: @escaping @Sendable () async -> Void) -> some View {
+        if enabled {
+            searchable(text: query, prompt: "Search loaded operations").refreshable(action: refresh)
+        } else {
+            self
         }
     }
 }

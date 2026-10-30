@@ -22,6 +22,7 @@ private final class ManagedDataStub: URLProtocol, @unchecked Sendable {
         var body = ""
         let operation = #"{"id":"op-1","title":"Test operation","status":"scheduled","scheduledStart":null,"scheduledEnd":null,"location":null,"projectName":null,"divisionName":null}"#
         switch url.path {
+        case "/oauth-probe/v1": body = #"{"ok":true,"kind":"synthetic-oauth-probe"}"#
         case "/mobile-pilot/v1/session":
             body = "{\"schemaVersion\":1,\"readOnly\":true,\"user\":{\"id\":\"staff\",\"displayName\":\"Test\",\"email\":\"staff@example.test\"},\"expiresAt\":\(Int(Date().timeIntervalSince1970) + 600)}"
         case "/mobile-pilot/v1/operations":
@@ -47,13 +48,25 @@ private final class ManagedDataStub: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+private final class InvalidProbeStub: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"ok":true,"kind":"wrong"}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
 final class ManagedPilotDataTests: XCTestCase, @unchecked Sendable {
-    private func api() throws -> ManagedPilotDataAPI {
+    private func api(stub: AnyClass = ManagedDataStub.self) throws -> ManagedPilotDataAPI {
         let issuer = "https://team.example.test"
         let pins = try ManagedOAuthPins(resource: "https://pilot.example.test", issuer: issuer,
             authorizationEndpoint: issuer + "/auth", tokenEndpoint: issuer + "/token",
             registrationEndpoint: issuer + "/register", revocationEndpoint: issuer + "/revoke")
-        return ManagedPilotDataAPI(pins: pins, protocolClasses: [ManagedDataStub.self])
+        return ManagedPilotDataAPI(pins: pins, protocolClasses: [stub])
     }
     private func credential(_ token: String = "oauth:synthetic", expiry: TimeInterval = 300) -> ManagedOAuthCredential {
         ManagedOAuthCredential(accessToken: token, refreshToken: nil, expiresAt: Date().addingTimeInterval(expiry))
@@ -66,6 +79,11 @@ final class ManagedPilotDataTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(page.operations.map(\.id), ["op-1"])
         let operation = try await api.operation(credential: token, id: "op-1")
         XCTAssertEqual(operation.title, "Test operation")
+    }
+    func testSyntheticProbeUsesFixedTestEndpoint() async throws {
+        try await api().verifySyntheticProbe(credential: credential())
+        do { try await api(stub: InvalidProbeStub.self).verifySyntheticProbe(credential: credential()); XCTFail("accepted wrong marker") }
+        catch { XCTAssertEqual(error as? MobilePilotError, .invalidResponse) }
     }
     func testRejectsExpiredAndMalformedCredentialsAndDotSegments() async throws {
         let api = try api()

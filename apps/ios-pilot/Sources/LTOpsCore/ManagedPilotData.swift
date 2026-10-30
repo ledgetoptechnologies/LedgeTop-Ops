@@ -20,6 +20,13 @@ public struct ManagedPilotDataAPI: Sendable {
         self.protocolClasses = protocolClasses
     }
 
+    /// Test-only fixed endpoint. This returns no staff or business information.
+    public func verifySyntheticProbe(credential: ManagedOAuthCredential) async throws {
+        struct Probe: Decodable, Sendable { let ok: Bool; let kind: String }
+        let result: Probe = try await read(path: "", credential: credential, syntheticProbe: true)
+        guard result.ok, result.kind == "synthetic-oauth-probe" else { throw MobilePilotError.invalidResponse }
+    }
+
     public func identity(credential: ManagedOAuthCredential) async throws -> MobilePilotSession {
         let result: MobilePilotSession = try await read(path: "session", credential: credential)
         guard result.schemaVersion == 1, result.readOnly,
@@ -43,7 +50,8 @@ public struct ManagedPilotDataAPI: Sendable {
         return result.operation
     }
 
-    private func read<T: Decodable & Sendable>(path: String, cursor: String? = nil, credential: ManagedOAuthCredential) async throws -> T {
+    private func read<T: Decodable & Sendable>(path: String, cursor: String? = nil, credential: ManagedOAuthCredential,
+                                               syntheticProbe: Bool = false) async throws -> T {
         try Task.checkCancellation()
         guard credential.expiresAt > Date() else { throw MobilePilotError.expired }
         let token = credential.accessToken
@@ -51,7 +59,8 @@ public struct ManagedPilotDataAPI: Sendable {
               token.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) ||
                   (48...57).contains($0) || [45,46,95,126,58,43,47,61].contains($0) })
         else { throw MobilePilotError.invalidResponse }
-        guard var components = URLComponents(string: pins.resource + "/mobile-pilot/v1/" + path) else { throw MobilePilotError.invalidResponse }
+        let endpoint = syntheticProbe ? "/oauth-probe/v1" : "/mobile-pilot/v1/" + path
+        guard var components = URLComponents(string: pins.resource + endpoint) else { throw MobilePilotError.invalidResponse }
         if let cursor {
             guard !cursor.isEmpty, cursor.utf8.count <= 8192 else { throw MobilePilotError.invalidResponse }
             components.queryItems = [URLQueryItem(name: "cursor", value: cursor)]

@@ -112,6 +112,11 @@ using it as evidence, test invalid and mismatched tokens at the protected edge
 and disable alternative Worker URLs/routes. The Operations connector consistency
 check currently reads a credential envelope that can contain unrelated secrets;
 review a least-privilege approach before binding the real staging database.
+The existing native app has a separate synthetic sign-in test mode, disabled
+by a false plist flag and an empty reviewed pin list. It reads only the fixed
+probe endpoint and displays a test-only result, without Operations data. All 33
+Swift package tests passed and an unsigned Apple SDK build succeeded. The test
+mode has not been enabled, signed, installed, or exercised against Cloudflare.
 The current candidate is a named private Service Binding entrypoint in the existing
 Operations Worker that validates the pilot assertion and performs the narrow
 authorized read within the authoritative environment. The public pilot Worker
@@ -128,6 +133,12 @@ passed: they exercised identity and staff denial, assigned versus unassigned
 and foreign-source list/detail reads, and watched nine tables for business or
 authority writes. This does not prove the live edge, service binding target, or
 absence of every possible side effect.
+The checked-in staging release contract still has
+`RELEASE_CONTRACT_FINALIZED=false`, an older Operations candidate and a pending
+Viewer image sentinel. Exporting this entrypoint into the shared staging Worker
+therefore requires the release owner to refresh and review the cross-repository
+pins, generated configuration, migration inventory and source manifest. The
+synthetic probe does not require that business-data deployment.
 The local edge bridge now forwards only the URL and Access assertion to that
 private RPC; it has no database or connector-secret bindings and remains closed
 by an empty source-controlled origin list. The combined edge/RPC tests passed
