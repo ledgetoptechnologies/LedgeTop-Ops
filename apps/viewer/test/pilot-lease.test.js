@@ -22,3 +22,7 @@ test('pilot lease rejects work that blocks the event loop past its deadline',asy
  const processing={database:{prepare:()=>({run:()=>({changes:1})})}},job={id:'job',attempt_id:'attempt',job_type:'submit',attempt_count:1,lease_owner:'owner'};
  await assert.rejects(runWithPilotLease({processing,job,owner:'owner',verifyCompletion:()=>true,heartbeatMs:10,leaseSeconds:1,maxDurationMs:30,work:()=>{Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,60);return 'done';}}),/pilot deadline exceeded/);
 });
+test('pilot lease rejects completion verification that overruns its deadline',async()=>{
+ const processing={database:{prepare:()=>({run:()=>({changes:1})})}},job={id:'job',attempt_id:'attempt',job_type:'submit',attempt_count:1,lease_owner:'owner'};
+ await assert.rejects(runWithPilotLease({processing,job,owner:'owner',heartbeatMs:10,leaseSeconds:1,maxDurationMs:30,work:async()=>42,verifyCompletion:()=>{Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,60);return true;}}),/pilot deadline exceeded/);
+});
