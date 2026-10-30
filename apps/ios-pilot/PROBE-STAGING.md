@@ -44,8 +44,10 @@ no exact or wildcard match among 28 returned domains. The dashboard showed no
 zone Worker routes, no exact DNS record, and an existing DNS-only wildcard A
 record. The authenticated API token could not read the zone route/DNS endpoints
 (403); the dashboard was used instead. An HTTPS HEAD to the candidate hostname
-timed out, so it does not establish whether the wildcard's origin serves any
-existing workload there. Repeat these observations immediately before routing.
+timed out. An HTTP HEAD returned a 301 identifying OPNsense and redirecting the
+same hostname to HTTPS port 8443, so the wildcard currently leads toward an
+existing gateway. This does not establish whether a service uses the specific
+hostname. Repeat these observations and resolve its ownership before routing.
 
 ## Before any provider change
 
