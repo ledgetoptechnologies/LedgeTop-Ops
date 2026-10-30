@@ -49,3 +49,4 @@ docs/operations/native-staff-bootstrap-provisioner.md text eol=lf
 apps/viewer/test/fixtures/source-release-ack-v1.candidate.json text eol=lf
 apps/viewer/test/fixtures/source-release-ack-v1.negative-vectors.candidate.json text eol=lf
 apps/viewer/test/fixtures/source-retention-v1.contract.json text eol=lf
+apps/viewer/third_party/obj2tiles/v1.6.2-imagesharp-3.2.0.patch text eol=lf
