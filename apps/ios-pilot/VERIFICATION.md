@@ -146,8 +146,10 @@ The undeployed real-data client now bounds its displayed session to the earlier
 of the OAuth and server-authorized expirations, rejects a changed staff identity
 on refresh, and checks current expiry before showing an in-flight detail. The
 67 Swift tests and an unsigned Apple SDK build passed; independent review found
-no remaining concrete issue. Actual SwiftUI timer behavior and real-data device
-acceptance still require staging verification.
+no remaining concrete issue. A subsequent unsigned build with icon assets was
+signed during in-place installation and verified on the iPad; device inventory
+showed one pilot. Actual SwiftUI timer behavior and real-data device acceptance
+still require staging verification. The task-owned relay was stopped.
 
 Cloudflare's published agent flow registers a public client with only
 `authorization_code` in the registration grant list, then shows a refresh
