@@ -1,5 +1,15 @@
 # Pilot verification record
 
+## Native build and installation — October 29, 2026
+
+Commit `46790bba` was exported to a separate Linux build directory. Swift 6.4,
+Xcode 27 SDK and xtool built the iOS app successfully using `xtool dev build`.
+`xtool dev build --sign` succeeded and `xtool install` reported successful
+installation and verification on Beau's connected iPad. Live access remains
+disabled in the shipped configuration. The user has been asked to verify launch;
+this receipt does not claim live sign-in, backend activation, or device acceptance.
+The task-owned USB relay was stopped after installation.
+
 ## Read-only client source — October 29, 2026
 
 Worktree: `C:\Projects\Ledge Top Operations\ios-pilot`, branch
