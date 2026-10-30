@@ -36,6 +36,21 @@ test(`cutover ${failure} during ${phase} preserves source and holds without dupl
  assert.equal(fs.readFileSync(file,'utf8'),'x');assert.equal(f.db.prepare('SELECT COUNT(*) n FROM processing_attempts WHERE task_id=?').get(f.task.id).n,1);
 });
 
+for (const blockedAt of ['reservation','status'])
+test(`cutover before initialization resumes safely after ${blockedAt} recovers`, async t => {
+ const f=fixture(t),root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-cutover-preinit-')),file=path.join(root,'photo.jpg');
+ fs.writeFileSync(file,'x');t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ f.db.prepare('UPDATE processing_attempts SET reservation_required=1 WHERE id=?').run(f.attempt.id);
+ const {ProviderCredentials}=require('../server/providerCredentials'),credentials=new ProviderCredentials({activeKeyId:'fixture',keys:{fixture:crypto.randomBytes(32).toString('hex')}});
+ let blocked=true,initializations=0,uploads=0,commits=0,removes=0;
+ const reject=()=>Object.assign(new Error('cutover'),{status:503,code:'provider_unavailable'});
+ const adapter={capabilities:async()=>({capabilities:{reservations:{version:1}}}),request:async()=>{if(blocked&&blockedAt==='reservation')throw reject();return Response.json({state:'reserved'})},status:async()=>{if(blocked&&blockedAt==='status')throw reject();throw Object.assign(new Error('not found'),{code:'provider_task_not_found'})},initialize:async({uuid})=>{initializations++;return{uuid}},upload:async()=>{uploads++},commit:async()=>{commits++},remove:async()=>{removes++}};
+ const deps={processing:f.processing,providerCredentials:credentials,storage:{resolve:()=>file,requireProcessingHeadroom:()=>{}},config:{},adapterFactory:()=>adapter};
+ await processOne(deps,'cutover-worker');assert.equal(f.processing.getAttemptSubmission(f.attempt.id).submissionPhase,'new');assert.equal(initializations,0);
+ blocked=false;f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='submit' AND status='pending'").run(f.attempt.id);await processOne(deps,'cutover-worker');
+ assert.equal(f.processing.getAttemptSubmission(f.attempt.id).submissionPhase,'committed');assert.equal(initializations,1);assert.equal(uploads,1);assert.equal(commits,1);assert.equal(removes,0);assert.equal(fs.readFileSync(file,'utf8'),'x');
+});
+
 test('413 after a partial upload holds the attempt across worker retries',async t=>{
  const f=fixture(t),root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-upload-hold-')),file=path.join(root,'photo.jpg');
  fs.writeFileSync(file,'x');t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
