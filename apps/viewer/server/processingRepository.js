@@ -614,10 +614,11 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     const files=[];for(const file of archiveFiles){if(!file||typeof file.relativePath!=='string'||file.relativePath.includes('\\')||safeRelativePath(file.relativePath)!==file.relativePath||seen.has(file.relativePath.toLowerCase())||!digest(file.sha256)||!Number.isSafeInteger(file.byteSize)||file.byteSize<0)return null;seen.add(file.relativePath.toLowerCase());files.push({relativePath:file.relativePath,byteSize:file.byteSize,sha256:file.sha256});}
     const manifest=crypto.createHash('sha256').update(JSON.stringify(files)).digest('hex');if(manifest!==archiveManifestSha256)return null;
     const receipt={schemaVersion:1,attemptId:attempt.id,providerTaskId:attempt.providerTaskId,archiveSha256,archiveByteSize,archiveManifestSha256:manifest,archiveFiles:files};
+    if(transfer?.archive&&JSON.stringify(transfer.archive)!==JSON.stringify(receipt))return null;
     if(stagedCommitment&&(stagedCommitment.taskId!==attempt.providerTaskId||stagedCommitment.archiveSha256!==archiveSha256||stagedCommitment.archiveBytes!==archiveByteSize))throw Object.assign(new Error('Staged commitment does not match archive'),{code:'staged_commitment_conflict'});
     if(stagedCommitment){const encoded=JSON.stringify(stagedCommitment),existing=this.database.prepare('SELECT commitment_json FROM processing_staged_commitments WHERE attempt_id=?').get(attempt.id);if(existing&&existing.commitment_json!==encoded)throw Object.assign(new Error('Staged commitment changed'),{code:'staged_commitment_conflict'});if(!existing)this.database.prepare('INSERT INTO processing_staged_commitments(attempt_id,commitment_json,created_at) VALUES(?,?,?)').run(attempt.id,encoded,now());}
 
-    if(transfer?.archive)return JSON.stringify(transfer.archive)===JSON.stringify(receipt)?transfer.archive:null;
+    if(transfer?.archive)return transfer.archive;
     const t=now();this.database.prepare(`INSERT INTO processing_attempt_transfer_provenance(attempt_id,initialization_json,archive_json,created_at,updated_at) VALUES(?,'{"state":"unknown"}',?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET archive_json=excluded.archive_json,updated_at=excluded.updated_at WHERE archive_json IS NULL`).run(attempt.id,JSON.stringify(receipt),t,t);return receipt;
   });}
   getStagedCommitment(attemptId){const row=this.database.prepare('SELECT commitment_json FROM processing_staged_commitments WHERE attempt_id=?').get(attemptId);return row?json(row.commitment_json,null):null;}
@@ -789,6 +790,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   enqueueDisabledStagedByteAck(attempt,commitment){
     if(!this.database.isTransaction)throw new Error('staged acknowledgment requires a transaction');
     const receipt=this.getAttemptTransferProvenance(attempt.id)?.archive,output=attempt.resultModelVersionId&&this.getModelOutput(attempt.resultModelVersionId);
+    if(JSON.stringify(this.getStagedCommitment(attempt.id))!==JSON.stringify(commitment))throw Object.assign(new Error('Staged commitment binding is missing or changed'),{code:'staged_commitment_conflict'});
     if(!receipt||!output||output.status!=='staged'||output.attemptId!==attempt.id||output.modelId!==attempt.resultModelId||commitment.taskId!==attempt.providerTaskId||receipt.providerTaskId!==attempt.providerTaskId||receipt.archiveSha256!==commitment.archiveSha256||receipt.archiveByteSize!==commitment.archiveBytes)throw Object.assign(new Error('Staged archive identity changed'),{code:'staged_commitment_conflict'});
     const old=this.database.prepare('SELECT * FROM processing_staged_byte_ack_outbox WHERE attempt_id=?').get(attempt.id);
     const stagingCommitId=old?.staging_commit_id||crypto.randomUUID();

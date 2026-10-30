@@ -67,6 +67,7 @@ test('GCP-marked synthetic attempt retains its snapshot through mock-provider in
   // untrusted commitment data; it does not test authenticated acquisition.
   const staged=processing.getAttempt(attempt.id),receipt=processing.getAttemptTransferProvenance(attempt.id).archive;
   const commitment={schemaVersion:1,taskId:attempt.providerTaskId,generation:1,archiveSha256:receipt.archiveSha256,archiveBytes:receipt.archiveByteSize,coordinatorReceiptSha256:'a'.repeat(64),issuer:'test-viewer',audience:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',environment:'staging',namespace:'ledgetop-viewer-staged-byte-claim-v1'};
+  database.prepare('INSERT INTO processing_staged_commitments(attempt_id,commitment_json,created_at) VALUES(?,?,?)').run(attempt.id,JSON.stringify(commitment),new Date().toISOString());
   assert.throws(()=>processing.enqueueDisabledStagedByteAck(staged,commitment),/requires a transaction/);
   assert.throws(()=>processing.transaction(()=>{processing.enqueueDisabledStagedByteAck(staged,commitment);throw new Error('rollback fixture');}),/rollback fixture/);
   assert.equal(database.prepare('SELECT COUNT(*) n FROM processing_staged_byte_ack_outbox').get().n,0);
