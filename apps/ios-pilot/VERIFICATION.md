@@ -136,8 +136,10 @@ online verification, and does not restore an Operations data session. The
 app discloses the expiry and unconfirmed Cloudflare grant cleanup; ambiguous
 Keychain failures across process death remain unproven. The full 65-test Swift
 suite and Apple SDK build passed. The signed app installed and verified in
-place, and inventory showed one pilot; the relay was stopped. App-restart and
-device-reboot acceptance are pending Beau's tests.
+place, and inventory showed one pilot; the relay was stopped. Beau reported
+“Saved test access was verified online” after the requested app-restart flow.
+This verifies the synthetic test path as reported, not a real Operations
+session. Device-reboot acceptance remains pending.
 
 Cloudflare's published agent flow registers a public client with only
 `authorization_code` in the registration grant list, then shows a refresh
