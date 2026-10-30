@@ -81,6 +81,7 @@ async function fixture(t, { failSecondTaskOnce = false, legacyUnavailable = fals
     }
     if (url.pathname === '/api/v1/admin-sessions/current') return [200, { controllerOrigin: 'https://ops.example.test', session: {
       id: 'synthetic-browser-session', subject: 'ops:synthetic-owner', permissions, displayUnits: 'imperial', expiresAt: new Date(Date.now() + 3_600_000).toISOString() } }];
+    if (url.pathname === '/api/v1/processing/hierarchy') return [200, { schemaVersion: 1, organizations: [], groups: [], nextCursor: null, capabilities: { manageHierarchy: false } }];
     if (url.pathname === '/api/v1/projects') return [200, { projects: [project], nextCursor: null }];
     if (url.pathname === '/api/v1/datasets') return [200, { datasets: tasks.map(task => ({ id: task.datasetId, projectId: PROJECT, displayName: 'Synthetic source', status: 'finalized', fileCount: 3, byteSize: 1024 })), nextCursor: null }];
     if (url.pathname === '/api/v1/tasks') return [200, { tasks, nextCursor: null }];
