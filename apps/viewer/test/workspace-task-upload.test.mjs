@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {inspectTaskPhotos,prepareTaskPhotos,uploadTaskPhotos,TASK_PHOTO_LIMITS} from '../workspace-task-upload.mjs';
+import {inspectTaskPhotos,prepareTaskPhotos,uploadTaskPhotos,TASK_PHOTO_LIMITS,providerPhotoLimitWarning} from '../workspace-task-upload.mjs';
 const file=(path,text='photo')=>{const blob=new Blob([text]);return {name:path.split('/').at(-1),webkitRelativePath:path.includes('/')?path:'',size:blob.size,type:'image/jpeg',arrayBuffer:()=>blob.arrayBuffer(),slice:(...args)=>blob.slice(...args)};};
 const selection=()=>[file('flightB/DJI.jpg'),file('flightA/DJI.jpg'),file('flightA/other.JPG'),file('flightA/notes.txt')];
 test('recursive folders preserve photo paths and deterministically disambiguate flat provider names without modifying originals',()=>{
@@ -85,4 +85,12 @@ test('failed chunk or cancelled upload never finalizes and can be resumed by res
 test('photo selection retains raw survey CSV while ignoring unrelated files',async()=>{
  const prepared=await prepareTaskPhotos([file('photos/a.jpg','photo'),file('photos/survey.csv','raw csv'),file('photos/readme.txt','note')]);
  assert.equal(prepared.items.length,2);assert.deepEqual(prepared.manifest.map(x=>x.processingRole),['image','gcp_source']);assert.deepEqual(prepared.ignored,['photos/readme.txt']);
+});
+
+test('node capacity warnings use photo inputs and never assume missing limits',()=>{
+ const files=[{name:'a.jpg',size:6},{name:'b.jpg',size:6},{name:'survey.csv',size:1000}];
+ assert.match(providerPhotoLimitWarning(files,{capabilities:{maxImages:1,ledgetopMaxInputBytes:10}}),/image count and input size/);
+ assert.match(providerPhotoLimitWarning(files,{capabilities:{maxImages:2,ledgetopMaxInputBytes:10}}),/input size/);
+ assert.equal(providerPhotoLimitWarning(files,{capabilities:{maxImages:2,ledgetopMaxInputBytes:12}}),'');
+ assert.equal(providerPhotoLimitWarning(files,{capabilities:{}}),'');
 });

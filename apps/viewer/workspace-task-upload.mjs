@@ -34,6 +34,21 @@ export function inspectTaskPhotos(files,{limits=TASK_PHOTO_LIMITS}={}) {
   return {items:selected,totalBytes,ignored,renamed:selected.filter(item=>item.relativePath!==item.sourcePath).map(({sourcePath,relativePath})=>({sourcePath,relativePath}))};
 }
 
+// Warn only about a definite overage; CSV source files are retained locally
+// but are not sent as provider input. Final admission remains server-owned.
+export function providerPhotoLimitWarning(files,provider) {
+  const images=(files||[]).filter(file=>photo.test(String(file.webkitRelativePath||file.name||'')));
+  if(!images.length)return '';
+  const capabilities=provider?.capabilities||{},maxImages=capabilities.maxImages,maxBytes=capabilities.ledgetopMaxInputBytes;
+  const countExceeded=Number.isSafeInteger(maxImages)&&maxImages>0&&images.length>maxImages;
+  const total=images.reduce((sum,file)=>sum+file.size,0);
+  const bytesExceeded=Number.isSafeInteger(maxBytes)&&maxBytes>0&&Number.isSafeInteger(total)&&total>maxBytes;
+  if(countExceeded&&bytesExceeded)return 'The selected photos exceed this node’s advertised image count and input size limits. Choose another node or a smaller selection before processing.';
+  if(countExceeded)return 'The selected photos exceed this node’s advertised image count limit. Choose another node or a smaller selection before processing.';
+  if(bytesExceeded)return 'The selected photos exceed this node’s advertised input size limit. Choose another node or a smaller selection before processing.';
+  return '';
+}
+
 export async function prepareTaskPhotos(files,{signal,onProgress=()=>{},limits=TASK_PHOTO_LIMITS}={}) {
   check(signal);const selection=inspectTaskPhotos(files,{limits}),items=[];
   const specFor=(item,sha256)=>({id:item.id,relativePath:item.relativePath,byteSize:item.file.size,sha256,contentType:item.file.type||'application/octet-stream',processingRole:item.processingRole});
