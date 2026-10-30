@@ -4,7 +4,7 @@ import FoundationNetworking
 #endif
 
 /// This experimental transport has no app wiring or deployed endpoint pins.
-/// It does not generate PKCE values, retain credentials or perform refresh/revocation.
+/// It does not generate PKCE values, retain credentials or perform refresh.
 public struct ManagedOAuthCredential: Sendable {
     public let accessToken: String
     public let refreshToken: String?
@@ -15,6 +15,7 @@ private final class OAuthResponseCollector: NSObject, URLSessionDataDelegate, UR
     private let lock = NSLock()
     private let expectedURL: URL
     private let successCodes: Set<Int>
+    private let requiresJSON: Bool
     private let maxBytes = 65_536
     private var body = Data()
     private var failure: Error?
@@ -22,7 +23,7 @@ private final class OAuthResponseCollector: NSObject, URLSessionDataDelegate, UR
     private var task: URLSessionDataTask?
     private var cancelled = false
     private var validatedResponse = false
-    init(expectedURL: URL, successCodes: Set<Int>) { self.expectedURL = expectedURL; self.successCodes = successCodes }
+    init(expectedURL: URL, successCodes: Set<Int>, requiresJSON: Bool = true) { self.expectedURL = expectedURL; self.successCodes = successCodes; self.requiresJSON = requiresJSON }
 
     func begin(_ request: URLRequest, protocolClasses: [AnyClass]?) async throws -> Data {
         try await withTaskCancellationHandler {
@@ -60,7 +61,7 @@ private final class OAuthResponseCollector: NSObject, URLSessionDataDelegate, UR
                     completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
         guard let response = response as? HTTPURLResponse, response.url == expectedURL,
               successCodes.contains(response.statusCode),
-              response.value(forHTTPHeaderField: "Content-Type")?.lowercased().split(separator: ";").first?.trimmingCharacters(in: .whitespaces) == "application/json",
+              (!requiresJSON || response.value(forHTTPHeaderField: "Content-Type")?.lowercased().split(separator: ";").first?.trimmingCharacters(in: .whitespaces) == "application/json"),
               response.expectedContentLength < 0 || response.expectedContentLength <= maxBytes else {
             lock.lock(); failure = MobilePilotError.invalidResponse; lock.unlock()
             completionHandler(.cancel); return
@@ -123,7 +124,8 @@ public struct ManagedOAuthTransport: Sendable {
         let sentAt = Date()
         let data = try await request(URL(string: pins.tokenEndpoint)!, method: "POST", contentType: "application/x-www-form-urlencoded",
                                      body: ManagedOAuthWire.exchangeBody(code: code, verifier: verifier, clientID: clientID), successCodes: [200])
-        try Task.checkCancellation()
+        // If a response has arrived, preserve issued tokens for the coordinator
+        // to revoke even if cancellation raced the completed HTTP request.
         struct Response: Decodable { let access_token: String; let token_type: String; let expires_in: Int; let resource: String; let refresh_token: String? }
         guard let result = try? JSONDecoder().decode(Response.self, from: data),
               result.token_type.lowercased() == "bearer", (1...900).contains(result.expires_in),
@@ -132,20 +134,36 @@ public struct ManagedOAuthTransport: Sendable {
             throw MobilePilotError.invalidResponse
         }
         let expiry = sentAt.addingTimeInterval(TimeInterval(result.expires_in))
-        guard expiry > Date() else { throw MobilePilotError.expired }
-        try Task.checkCancellation()
+        // Expiry is checked by the coordinator, which still needs the token to
+        // attempt revocation when a slow exchange has already expired.
         return ManagedOAuthCredential(accessToken: result.access_token, refreshToken: result.refresh_token, expiresAt: expiry)
+    }
+    /// RFC 7009 permits an empty HTTP 200 response even for an invalid token.
+    /// A successful return means only that the provider accepted the request.
+    public func revoke(token: String, clientID: String, hint: ManagedOAuthTokenKind) async throws {
+        guard Self.tokenValid(token), !clientID.isEmpty, clientID.utf8.count <= 512,
+              clientID.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95 || $0 == 46 || $0 == 126 }) else {
+            throw MobilePilotError.invalidResponse
+        }
+        let safe = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        let values = [("token", token), ("token_type_hint", hint.rawValue), ("client_id", clientID)]
+        let form = values.map { $0.0 + "=" + $0.1.addingPercentEncoding(withAllowedCharacters: safe)! }.joined(separator: "&")
+        _ = try await request(URL(string: pins.revocationEndpoint)!, method: "POST", contentType: "application/x-www-form-urlencoded",
+                              body: Data(form.utf8), successCodes: [200], requiresJSON: false)
+        try Task.checkCancellation()
     }
     private static func tokenValid(_ value: String) -> Bool {
         value.hasPrefix("oauth:") && (7...4096).contains(value.utf8.count) && value.utf8.allSatisfy { (33...126).contains($0) }
     }
-    private func request(_ url: URL, method: String, contentType: String?, body: Data?, successCodes: Set<Int>) async throws -> Data {
+    private func request(_ url: URL, method: String, contentType: String?, body: Data?, successCodes: Set<Int>, requiresJSON: Bool = true) async throws -> Data {
         var value = URLRequest(url: url)
         value.httpMethod = method
         value.httpBody = body
         value.setValue("application/json", forHTTPHeaderField: "Accept")
         value.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         if let contentType { value.setValue(contentType, forHTTPHeaderField: "Content-Type") }
-        return try await OAuthResponseCollector(expectedURL: url, successCodes: successCodes).begin(value, protocolClasses: protocolClasses)
+        return try await OAuthResponseCollector(expectedURL: url, successCodes: successCodes, requiresJSON: requiresJSON).begin(value, protocolClasses: protocolClasses)
     }
 }
+
+public enum ManagedOAuthTokenKind: String, Sendable { case access = "access_token", refresh = "refresh_token" }

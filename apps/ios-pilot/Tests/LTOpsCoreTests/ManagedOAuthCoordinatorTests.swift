@@ -16,14 +16,29 @@ private actor ExchangeGate {
     }
     func release() { held?.resume(); held = nil }
 }
+private actor RevocationLog {
+    private var kinds: [ManagedOAuthTokenKind] = []
+    func add(_ kind: ManagedOAuthTokenKind) { kinds.append(kind) }
+    func snapshot() -> [ManagedOAuthTokenKind] { kinds }
+}
 private struct FakeExchange: ManagedOAuthExchanging {
     let gate: ExchangeGate?
+    var failRevocation = false
+    var log: RevocationLog? = nil
+    var failExchange = false
+    var lifetime: TimeInterval = 300
     func verifyMetadata() async throws {}
     func register() async throws -> String { "client-id" }
     func exchange(code: String, verifier: String, clientID: String) async throws -> ManagedOAuthCredential {
         if let gate { await gate.pause() }
+        if failExchange { throw URLError(.networkConnectionLost) }
         guard code == "code", verifier == String(repeating: "v", count: 43), clientID == "client-id" else { throw MobilePilotError.invalidResponse }
-        return ManagedOAuthCredential(accessToken: "oauth:synthetic", refreshToken: "oauth:refresh", expiresAt: Date().addingTimeInterval(300))
+        return ManagedOAuthCredential(accessToken: "oauth:synthetic", refreshToken: "oauth:refresh", expiresAt: Date().addingTimeInterval(lifetime))
+    }
+    func revoke(token: String, clientID: String, hint: ManagedOAuthTokenKind) async throws {
+        await log?.add(hint)
+        if failRevocation { throw MobilePilotError.unavailable }
+        guard clientID == "client-id", (hint == .refresh && token == "oauth:refresh") || (hint == .access && token == "oauth:synthetic") else { throw MobilePilotError.invalidResponse }
     }
 }
 final class ManagedOAuthCoordinatorTests: XCTestCase {
@@ -32,8 +47,8 @@ final class ManagedOAuthCoordinatorTests: XCTestCase {
             authorizationEndpoint: "https://team.cloudflareaccess.com/auth", tokenEndpoint: "https://team.cloudflareaccess.com/token",
             registrationEndpoint: "https://team.cloudflareaccess.com/register", revocationEndpoint: "https://team.cloudflareaccess.com/revoke")
     }
-    private func coordinator(gate: ExchangeGate? = nil, mismatch: Bool = false) throws -> ManagedOAuthCoordinator {
-        try ManagedOAuthCoordinator(pins: pins(), transport: FakeExchange(gate: gate), browser: { url in
+    private func coordinator(gate: ExchangeGate? = nil, mismatch: Bool = false, failRevocation: Bool = false, log: RevocationLog? = nil, failExchange: Bool = false, lifetime: TimeInterval = 300) throws -> ManagedOAuthCoordinator {
+        try ManagedOAuthCoordinator(pins: pins(), transport: FakeExchange(gate: gate, failRevocation: failRevocation, log: log, failExchange: failExchange, lifetime: lifetime), browser: { url in
             let state = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!.first { $0.name == "state" }!.value!
             return URL(string: ManagedOAuthWire.callback + "?code=code&state=" + (mismatch ? String(repeating: "x", count: 43) : state))!
         }, proofFactory: { ManagedOAuthProof(state: String(repeating: "s", count: 43), verifier: String(repeating: "v", count: 43), challenge: String(repeating: "A", count: 43)) })
@@ -43,7 +58,8 @@ final class ManagedOAuthCoordinatorTests: XCTestCase {
         try await coordinator.signIn()
         let token = await coordinator.currentAccessToken()
         XCTAssertEqual(token, "oauth:synthetic")
-        await coordinator.signOut()
+        let result = await coordinator.signOut()
+        XCTAssertEqual(result, .providerAcknowledged)
         let cleared = await coordinator.currentAccessToken()
         XCTAssertNil(cleared)
     }
@@ -54,14 +70,17 @@ final class ManagedOAuthCoordinatorTests: XCTestCase {
         XCTAssertNil(token)
     }
     func testSignOutWhileExchangeIsPendingDiscardsLateCredential() async throws {
-        let gate = ExchangeGate(), coordinator = try coordinator(gate: gate)
+        let gate = ExchangeGate(), log = RevocationLog(), coordinator = try coordinator(gate: gate, log: log)
         let task = Task { try await coordinator.signIn() }
         await gate.waitUntilHeld()
-        await coordinator.signOut()
+        let result = await coordinator.signOut()
+        XCTAssertEqual(result, .revocationUnconfirmed)
         await gate.release()
         do { try await task.value; XCTFail("must discard late credential") } catch { XCTAssertEqual(error as? MobilePilotError, .signedOut) }
         let token = await coordinator.currentAccessToken()
         XCTAssertNil(token)
+        let revoked = await log.snapshot()
+        XCTAssertEqual(revoked, [.refresh, .access])
     }
     func testCancellationWhileExchangeIsPendingDiscardsLateCredential() async throws {
         let gate = ExchangeGate(), coordinator = try coordinator(gate: gate)
@@ -72,5 +91,35 @@ final class ManagedOAuthCoordinatorTests: XCTestCase {
         do { try await task.value; XCTFail("must discard cancelled credential") } catch { XCTAssertTrue(error is CancellationError) }
         let token = await coordinator.currentAccessToken()
         XCTAssertNil(token)
+        let status = await coordinator.signOut()
+        XCTAssertEqual(status, .revocationUnconfirmed)
+    }
+    func testOfflineSignOutClearsLocalCredentialAndReportsUnconfirmed() async throws {
+        let log = RevocationLog(), coordinator = try coordinator(failRevocation: true, log: log)
+        try await coordinator.signIn()
+        let result = await coordinator.signOut()
+        XCTAssertEqual(result, .revocationUnconfirmed)
+        let token = await coordinator.currentAccessToken()
+        XCTAssertNil(token)
+        let attempted = await log.snapshot()
+        XCTAssertEqual(attempted, [.refresh, .access])
+    }
+    func testLostExchangeResponseMakesSignOutUnconfirmed() async throws {
+        let coordinator = try coordinator(failExchange: true)
+        do { try await coordinator.signIn(); XCTFail("must fail") } catch { }
+        let result = await coordinator.signOut()
+        XCTAssertEqual(result, .revocationUnconfirmed)
+    }
+    func testExpiredAccessRequiresSignOutBeforeAnotherSignIn() async throws {
+        let log = RevocationLog(), coordinator = try coordinator(log: log, lifetime: 0.1)
+        try await coordinator.signIn()
+        try await Task.sleep(nanoseconds: 250_000_000)
+        do { try await coordinator.signIn(); XCTFail("expired grant must be signed out first") }
+        catch { XCTAssertEqual(error as? MobilePilotError, .expired) }
+        let result = await coordinator.signOut()
+        XCTAssertEqual(result, .providerAcknowledged)
+        let attempted = await log.snapshot()
+        XCTAssertEqual(attempted, [.refresh, .access])
+        try await coordinator.signIn()
     }
 }

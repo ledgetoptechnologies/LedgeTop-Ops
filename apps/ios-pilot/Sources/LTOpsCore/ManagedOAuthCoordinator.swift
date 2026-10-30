@@ -19,6 +19,7 @@ public protocol ManagedOAuthExchanging: Sendable {
     func verifyMetadata() async throws
     func register() async throws -> String
     func exchange(code: String, verifier: String, clientID: String) async throws -> ManagedOAuthCredential
+    func revoke(token: String, clientID: String, hint: ManagedOAuthTokenKind) async throws
 }
 extension ManagedOAuthTransport: ManagedOAuthExchanging {}
 
@@ -47,8 +48,10 @@ public enum ManagedOAuthProofGenerator {
 }
 #endif
 
-/// No credential is persisted. This does not revoke Cloudflare grants: activation
-/// requires verified provider revocation and a user-visible sign-out contract.
+/// No credential is persisted. Provider revocation semantics remain unverified.
+public enum ManagedOAuthSignOutResult: Sendable, Equatable {
+    case noLocalCredential, providerAcknowledged, revocationUnconfirmed
+}
 public actor ManagedOAuthCoordinator {
     public typealias Browser = @Sendable (URL) async throws -> URL
     public typealias ProofFactory = @Sendable () throws -> ManagedOAuthProof
@@ -58,20 +61,41 @@ public actor ManagedOAuthCoordinator {
     private let proofFactory: ProofFactory
     private var generation: UInt64 = 0
     private var credential: ManagedOAuthCredential?
+    private var credentialClientID: String?
+    private var exchangesInFlight = 0
+    private var grantStatusUncertain = false
 
     public init(pins: ManagedOAuthPins, transport: any ManagedOAuthExchanging, browser: @escaping Browser,
                 proofFactory: @escaping ProofFactory) {
         self.pins = pins; self.transport = transport; self.browser = browser; self.proofFactory = proofFactory
     }
-    public func signOut() {
+    /// Clear local access immediately; RFC 7009's 200 is an acknowledgement,
+    /// not evidence that a token existed or that dependent access was revoked.
+    public func signOut() async -> ManagedOAuthSignOutResult {
         generation &+= 1
+        let old = credential, client = credentialClientID
         credential = nil
+        credentialClientID = nil
+        let uncertain = grantStatusUncertain || exchangesInFlight > 0
+        guard let old, let client else { return uncertain ? .revocationUnconfirmed : .noLocalCredential }
+        var failed = false
+        if let refresh = old.refreshToken {
+            do { try await transport.revoke(token: refresh, clientID: client, hint: .refresh) } catch { failed = true }
+        }
+        do { try await transport.revoke(token: old.accessToken, clientID: client, hint: .access) } catch { failed = true }
+        if failed { grantStatusUncertain = true }
+        return failed || uncertain ? .revocationUnconfirmed : .providerAcknowledged
     }
     private func check(_ expected: UInt64) throws {
         try Task.checkCancellation()
         guard generation == expected else { throw MobilePilotError.signedOut }
     }
     public func signIn() async throws {
+        // Expired access cannot be reused. The caller must sign out first so
+        // its in-memory refresh grant receives a revocation attempt.
+        if let existing = credential {
+            throw existing.expiresAt <= Date() ? MobilePilotError.expired : MobilePilotError.unavailable
+        }
         generation &+= 1
         let expected = generation
         credential = nil
@@ -85,14 +109,37 @@ public actor ManagedOAuthCoordinator {
         let authorization = try ManagedOAuthWire.authorizationURL(pins: pins, clientID: client, state: proof.state, challenge: proof.challenge)
         let callback = try await browser(authorization); try check(expected)
         let code = try ManagedOAuthWire.callbackCode(callback, state: proof.state)
-        let received = try await transport.exchange(code: code, verifier: proof.verifier, clientID: client)
-        try check(expected)
-        guard received.expiresAt > Date() else { throw MobilePilotError.expired }
-        // Deliberately discard refresh tokens until revocation has been verified.
-        credential = ManagedOAuthCredential(accessToken: received.accessToken, refreshToken: nil, expiresAt: received.expiresAt)
+        exchangesInFlight += 1
+        let received: ManagedOAuthCredential
+        do {
+            received = try await transport.exchange(code: code, verifier: proof.verifier, clientID: client)
+            exchangesInFlight -= 1
+        } catch {
+            exchangesInFlight -= 1
+            // A network error or cancellation cannot prove whether the server
+            // issued a grant before its response was lost.
+            grantStatusUncertain = true
+            throw error
+        }
+        do {
+            try check(expected)
+            guard received.expiresAt > Date() else { throw MobilePilotError.expired }
+        } catch {
+            grantStatusUncertain = true
+            // A code exchange can finish after sign-out. Attempt to revoke the
+            // issued grant without reinstalling it; never claim this succeeded.
+            let transport = self.transport
+            await Task.detached {
+                if let refresh = received.refreshToken { try? await transport.revoke(token: refresh, clientID: client, hint: .refresh) }
+                try? await transport.revoke(token: received.accessToken, clientID: client, hint: .access)
+            }.value
+            throw error
+        }
+        credential = received
+        credentialClientID = client
     }
     public func currentAccessToken() -> String? {
-        guard let credential, credential.expiresAt > Date() else { self.credential = nil; return nil }
+        guard let credential, credential.expiresAt > Date() else { return nil }
         return credential.accessToken
     }
 }

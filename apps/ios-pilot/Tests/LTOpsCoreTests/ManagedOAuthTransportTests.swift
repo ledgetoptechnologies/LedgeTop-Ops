@@ -50,6 +50,14 @@ private final class OAuthProtocolStub: URLProtocol, @unchecked Sendable {
                 let token = form.contains("code=bad-token") ? "not-oauth" : "oauth:synthetic-access"
                 body = "{\"access_token\":\"\(token)\",\"token_type\":\"bearer\",\"expires_in\":\(expiry),\"resource\":\"\(resource)\",\"refresh_token\":\"oauth:synthetic-refresh\"}"
             }
+        } else if url.path == "/revoke" && request.httpMethod == "POST" {
+            guard request.value(forHTTPHeaderField: "Content-Type") == "application/x-www-form-urlencoded",
+                  let bytes = request.httpBody, let form = String(data: bytes, encoding: .utf8),
+                  form.contains("client_id=client-id"), form.contains("token=oauth%3A"),
+                  form.contains("token_type_hint=") else { client?.urlProtocol(self, didFailWithError: MobilePilotError.invalidResponse); return }
+            type = "text/plain"
+            if form.contains("offline") { client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet)); return }
+            if form.contains("reject") { status = 503 }
         } else { status = 404 }
         if request.value(forHTTPHeaderField: "Accept") != "application/json" || request.value(forHTTPHeaderField: "Cache-Control") != "no-store" { status = 500 }
         let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": type])!
@@ -97,5 +105,14 @@ final class ManagedOAuthTransportTests: XCTestCase, @unchecked Sendable {
         pending.cancel()
         do { _ = try await pending.value; XCTFail("Accepted cancelled exchange") }
         catch { XCTAssertTrue(error is CancellationError) }
+    }
+    func testRevocationAcceptsEmptyResponseAndRejectsFailure() async throws {
+        let client = try transport()
+        try await client.revoke(token: "oauth:synthetic+refresh", clientID: "client-id", hint: .refresh)
+        try await client.revoke(token: "oauth:synthetic-access", clientID: "client-id", hint: .access)
+        for token in ["oauth:reject", "oauth:offline"] {
+            do { try await client.revoke(token: token, clientID: "client-id", hint: .refresh); XCTFail("failure must be reported") }
+            catch { }
+        }
     }
 }

@@ -124,12 +124,15 @@ This was not a request for a dedicated OAuth-enabled pilot application and does
 not establish what its resource-scoped discovery will return. Registration and
 callback behavior must be verified after a safely isolated test application is
 prepared; the client currently rejects metadata without a registration endpoint.
-An unmounted coordinator now tests state and generation checks around OAuth
-sign-in and retains its access token in memory. All 25 Swift package tests passed.
-It does not cancel every underlying operation or revoke Cloudflare grants; the
-eventual app integration must handle those cases, use the Apple OS-random S256
-generator, and guard late data responses. The Apple-specific generator has not
-yet been built with an Apple SDK. The native client still uses the original custom-session protocol. End-to-end
+The unmounted coordinator now keeps tokens in memory, clears local access at
+sign-out, and attempts revocation. It reports uncertainty for failed or in-flight
+exchanges; provider acknowledgement does not prove revocation. Its read-only
+data transport remains unmounted. All 32 Swift package tests passed, and an
+unsigned xtool build against the Apple SDK succeeded after the final changes.
+The eventual app integration must cancel underlying work as appropriate, use
+the Apple OS-random S256 generator, and guard late data responses. Provider
+revocation and callback behavior remain unverified on the iPad. The existing
+native client still uses the original custom-session protocol. End-to-end
 sign-in, Access ingress, and iPad behavior remain unverified.
 
 ## Local evidence
