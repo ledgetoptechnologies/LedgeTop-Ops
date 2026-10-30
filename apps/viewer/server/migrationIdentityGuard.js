@@ -9,7 +9,7 @@ const protectedMigrations=[
   {version:42,name:'viewer_workspace_hierarchy',objects:['viewer_organizations','viewer_project_groups','viewer_project_hierarchy','viewer_project_groups_org_idx','viewer_project_hierarchy_org_idx']},
   {version:45,name:'processing_archive_capture_intents',objects:['processing_archive_capture_intents']},
   {version:46,name:'processing_staged_byte_ack_outbox',objects:['processing_staged_commitments','processing_staged_byte_ack_outbox']},
-  {version:47,name:'processing_staged_ack_delivery',objects:['processing_staged_ack_delivery']},
+  {version:47,name:'processing_staged_ack_delivery',objects:['processing_staged_receipt_bindings','processing_staged_ack_delivery']},
 ];
 // Strict comparison intentionally rejects harmless formatting differences as
 // well; normalizing whitespace could alter quoted SQL literals.

@@ -164,6 +164,8 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   const hasBinding=Boolean(bindings&&Object.hasOwn(bindings,provider.id));
   let binding=null;
   if(hasBinding){try{binding=require('./stagedAckDelivery').snapshotBinding(bindings[provider.id]);}catch{throw Object.assign(new Error('Staged commitment configuration is invalid'),{code:'staged_commitment_unavailable'});}}
+  let frozenCapability=null,receiptBinding=null;
+  if(binding){try{frozenCapability=attemptCapability(processing,providerCredentials,attempt);receiptBinding=require('./stagedAckDelivery').expectedBinding(binding,frozenCapability);}catch{throw Object.assign(new Error('Staged commitment credentials are unavailable'),{code:'staged_commitment_unavailable'});}}
   const headroom=storage.space('models'),maximumExpansion=Math.max(0,headroom.available-headroom.reserve);
   if(maximumExpansion<1024*1024*1024)throw Object.assign(new Error('insufficient storage for result ingestion'),{code:'insufficient_storage'});
   const recoveredIngest=await verifyRecoveredIngestSources(processing,storage,job,signal);
@@ -175,7 +177,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   const readCommitment=async(kind='commitment')=>{
     if(!binding||!processing.attemptRequiresReservation?.(attempt.id)||typeof providerCredentials.resolveStagedCommitmentCredential!=='function')throw Object.assign(new Error('Staged commitment is unavailable'),{code:'staged_commitment_unavailable'});
     let capability,bearer;
-    try{capability=attemptCapability(processing,providerCredentials,attempt);bearer=await providerCredentials.resolveStagedCommitmentCredential(binding.credentialRef);}
+    try{capability=frozenCapability;bearer=await providerCredentials.resolveStagedCommitmentCredential(binding.credentialRef);}
     catch(error){if(signal?.aborted||error?.name==='AbortError')throw error;throw Object.assign(new Error('Staged commitment credentials are unavailable'),{code:'staged_commitment_unavailable'});}
     return require('./stagedCommitmentClient')[kind==='preflight'?'getStagedPreflight':'getStagedCommitment']({enabled:true,origin:binding.origin,principalId:binding.principalId,authorityId:binding.authorityId,environment:binding.environment,bearer,capability,taskId:attempt.providerTaskId,signal});
   };
@@ -187,7 +189,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     if(!processing.beginArchiveCapture(job.id,job.lease_owner))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
     if(binding)await readCommitment('preflight');
     let adapter;
-    try{const capability=attemptCapability(processing,providerCredentials,attempt);adapter=adapterFor(provider,config,providerCredentials,capability);await requireReservationSupport(adapter,capability);}
+    try{const capability=binding?frozenCapability:attemptCapability(processing,providerCredentials,attempt);adapter=adapterFor(provider,config,providerCredentials,capability);await requireReservationSupport(adapter,capability);}
     catch(error){if(binding)throw Object.assign(new Error('Staged commitment credentials or provider are unavailable'),{code:'staged_commitment_unavailable'});if(processing.attemptRequiresReservation?.(attempt.id))throw Object.assign(new Error('Provider observation unavailable; ingestion will resume'),{code:'provider_observation_unavailable'});throw error;}
     let response;
     try{response=await adapter.downloadAll(attempt.providerTaskId,{signal});}
@@ -212,7 +214,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     }:undefined});}
     catch(error){if(processing.attemptRequiresReservation?.(attempt.id)&&streamErrors.has(error)&&!signal?.aborted)throw Object.assign(new Error('Provider download interrupted; ingestion will resume'),{code:'provider_observation_unavailable'});throw error;}
     if(binding&&(!providerExpectation||captured.archiveSha256!==initialCommitment.archiveSha256||captured.archiveByteSize!==initialCommitment.archiveBytes))throw Object.assign(new Error('Staged commitment does not match archive'),{code:'staged_commitment_conflict'});
-    archiveReceipt=processing.recordAttemptArchiveReceipt(job.id,job.lease_owner,{...captured,stagedCommitment:binding?initialCommitment:null});
+    archiveReceipt=processing.recordAttemptArchiveReceipt(job.id,job.lease_owner,{...captured,stagedCommitment:binding?initialCommitment:null,stagedReceiptBinding:binding?receiptBinding:null});
     if(!archiveReceipt)throw Object.assign(new Error('processing archive receipt or lease was lost'),{code:'lease_lost'});
     if(binding){
       const fresh=await readCommitment();
@@ -223,6 +225,8 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   }else if(archiveReceipt){
     await verifyProcessingArchive(destination,archiveReceipt,{signal});
     if(binding){
+      const savedBinding=processing.getStagedReceiptBinding(attempt.id);
+      if(!savedBinding||JSON.stringify(savedBinding)!==JSON.stringify(receiptBinding))throw Object.assign(new Error('Staged receipt binding changed'),{code:'staged_commitment_conflict'});
       const stored=processing.getStagedCommitment(attempt.id);
       if(!stored||stored.taskId!==attempt.providerTaskId||stored.archiveSha256!==archiveReceipt.archiveSha256||stored.archiveBytes!==archiveReceipt.archiveByteSize)throw Object.assign(new Error('Existing archive has no verified commitment binding'),{code:'staged_commitment_unavailable'});
       const fresh=await readCommitment();
@@ -280,7 +284,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   });
   const readyEvent={eventId:`processing-ready-${attempt.id}`,schemaVersion:1,type:'processing.ready_for_review',projectId:project.id,projectDisplayName:project.displayName,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'ready_for_review',reviewUrl:`${config.opsBaseUrl}/operations/processing?attemptId=${encodeURIComponent(attempt.id)}`};
   let stagedDeliveryBinding=null;
-  if(stagedCommitment){try{stagedDeliveryBinding=require('./stagedAckDelivery').expectedBinding(binding,attemptCapability(processing,providerCredentials,attempt));}catch{throw Object.assign(new Error('Staged delivery binding is unavailable'),{code:'staged_commitment_unavailable'});}}
+  if(stagedCommitment){stagedDeliveryBinding=processing.getStagedReceiptBinding(attempt.id);if(!stagedDeliveryBinding||JSON.stringify(stagedDeliveryBinding)!==JSON.stringify(receiptBinding))throw Object.assign(new Error('Staged receipt binding changed'),{code:'staged_commitment_conflict'});}
   if(derivatives.length&&derivatives.some((spec)=>!spec.request?.optional)){const activated=processing.completeIngestAndEnqueueDerivatives(job.id,job.lease_owner,attempt.id,derivatives,{ingestedAt:new Date().toISOString(),trustedInputFilesByType,requireTrustedInputs:true,stagedCommitment,stagedDeliveryBinding});if(!activated)throw Object.assign(new Error('processing lease was lost or ingest state changed'),{code:'lease_lost'});}
   else{const ready=processing.completeOutputForReview(attempt.id,{jobId:job.id,owner:job.lease_owner,ingestedAt:new Date().toISOString(),event:readyEvent,stagedCommitment,stagedDeliveryBinding});if(!ready)throw Object.assign(new Error('processing lease was lost or staged output changed'),{code:'lease_lost'});if(derivatives.length&&!processing.enqueueOptionalDerivatives(attempt.id,derivatives))throw Object.assign(new Error('optional derivatives could not be queued'),{code:'derivative_activation_conflict'});}
 }

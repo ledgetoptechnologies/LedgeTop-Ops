@@ -2101,6 +2101,11 @@ const MIGRATIONS = [
     );
   `},
   {version:47,name:'processing_staged_ack_delivery',sql:`
+    CREATE TABLE processing_staged_receipt_bindings (
+      attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id),
+      binding_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
     CREATE TABLE processing_staged_ack_delivery (
       attempt_id TEXT PRIMARY KEY REFERENCES processing_staged_byte_ack_outbox(attempt_id),
       state TEXT NOT NULL CHECK(state IN ('pending','uncertain','accepted','held')),

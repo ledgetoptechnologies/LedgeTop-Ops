@@ -606,7 +606,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     return true;
   });}
   hasArchiveCaptureIntent(attemptId){return Boolean(this.database.prepare('SELECT 1 FROM processing_archive_capture_intents WHERE attempt_id=?').get(attemptId));}
-  recordAttemptArchiveReceipt(jobId,owner,{archiveSha256,archiveFiles,archiveManifestSha256,archiveByteSize=null,stagedCommitment=null}){return this.transaction(()=>{
+  recordAttemptArchiveReceipt(jobId,owner,{archiveSha256,archiveFiles,archiveManifestSha256,archiveByteSize=null,stagedCommitment=null,stagedReceiptBinding=null}){return this.transaction(()=>{
     const job=this.provenanceJob(jobId,owner,'ingest');if(!job)return null;
     const attempt=this.getAttempt(job.attempt_id),transfer=this.getAttemptTransferProvenance(attempt.id);
     const digest=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value),seen=new Set();
@@ -616,11 +616,18 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     const receipt={schemaVersion:1,attemptId:attempt.id,providerTaskId:attempt.providerTaskId,archiveSha256,archiveByteSize,archiveManifestSha256:manifest,archiveFiles:files};
     if(transfer?.archive&&JSON.stringify(transfer.archive)!==JSON.stringify(receipt))return null;
     if(stagedCommitment&&(stagedCommitment.taskId!==attempt.providerTaskId||stagedCommitment.archiveSha256!==archiveSha256||stagedCommitment.archiveBytes!==archiveByteSize))throw Object.assign(new Error('Staged commitment does not match archive'),{code:'staged_commitment_conflict'});
+    if(stagedCommitment){
+      if(!stagedReceiptBinding)throw Object.assign(new Error('Staged receipt binding missing'),{code:'staged_commitment_conflict'});
+      const bindingJson=JSON.stringify(stagedReceiptBinding),priorBinding=this.database.prepare('SELECT binding_json FROM processing_staged_receipt_bindings WHERE attempt_id=?').get(attempt.id);
+      if(priorBinding&&priorBinding.binding_json!==bindingJson)throw Object.assign(new Error('Staged receipt binding changed'),{code:'staged_commitment_conflict'});
+      if(!priorBinding)this.database.prepare('INSERT INTO processing_staged_receipt_bindings(attempt_id,binding_json,created_at) VALUES(?,?,?)').run(attempt.id,bindingJson,now());
+    }
     if(stagedCommitment){const encoded=JSON.stringify(stagedCommitment),existing=this.database.prepare('SELECT commitment_json FROM processing_staged_commitments WHERE attempt_id=?').get(attempt.id);if(existing&&existing.commitment_json!==encoded)throw Object.assign(new Error('Staged commitment changed'),{code:'staged_commitment_conflict'});if(!existing)this.database.prepare('INSERT INTO processing_staged_commitments(attempt_id,commitment_json,created_at) VALUES(?,?,?)').run(attempt.id,encoded,now());}
 
     if(transfer?.archive)return transfer.archive;
     const t=now();this.database.prepare(`INSERT INTO processing_attempt_transfer_provenance(attempt_id,initialization_json,archive_json,created_at,updated_at) VALUES(?,'{"state":"unknown"}',?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET archive_json=excluded.archive_json,updated_at=excluded.updated_at WHERE archive_json IS NULL`).run(attempt.id,JSON.stringify(receipt),t,t);return receipt;
   });}
+  getStagedReceiptBinding(attemptId){const row=this.database.prepare('SELECT binding_json FROM processing_staged_receipt_bindings WHERE attempt_id=?').get(attemptId);return row?json(row.binding_json,null):null;}
   getStagedCommitment(attemptId){const row=this.database.prepare('SELECT commitment_json FROM processing_staged_commitments WHERE attempt_id=?').get(attemptId);return row?json(row.commitment_json,null):null;}
   getVerifiedAttemptProducerReceipt(attemptId){
     const attempt=this.getAttempt(attemptId),provenance=this.getAttemptProvenance(attemptId),transfer=this.getAttemptTransferProvenance(attemptId),init=transfer?.initialization,archive=transfer?.archive,snapshot=provenance?.submission,result=provenance?.providerResult;
