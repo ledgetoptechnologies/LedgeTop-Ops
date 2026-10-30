@@ -393,7 +393,7 @@ function settingsShape(settings) {
   for (const key of ['workers/message', 'workers/triggered_by']) need(annotations[key] === undefined || typeof annotations[key] === 'string', 'Reserved annotation malformed');
   return { ...settings, annotations: without(annotations, ['workers/message', 'workers/triggered_by']) };
 }
-function stableState(snapshot, selected) {
+export function stableState(snapshot, selected) {
   return Object.fromEntries(Object.entries(snapshot).map(([app, value]) => [app, app === selected
     ? { ...without(value, ['modern', 'latestVersion', 'latestModern']), settings: settingsShape(value.settings), assets: value.modern.assets ?? null }
     : { resources: resourcesShape(value.version.resources), settings: settingsShape(value.settings), schedules: value.schedules, assets: value.modern.assets ?? null }]));
@@ -444,12 +444,13 @@ function privateDirectory(directory) {
     need(result.status === 0, 'Private journal ACL preparation failed before upload');
   }
 }
-async function native(cli, args, directory, phase) {
+export function preparePrivateProductionDirectory(directory) { return privateDirectory(directory); }
+export async function runNativeProductionCommand(cli, args, directory, phase, cwd = ROOT) {
   const logPath = path.join(directory, `${phase}.private.log`);
   const log = fs.openSync(logPath, 'wx', 0o600);
   const intent = { argv: [process.execPath, '--no-warnings', cli, ...args], phase, automaticRetry: false };
   fs.writeFileSync(path.join(directory, `${phase}-intent.json`), JSON.stringify(intent), { flag: 'wx', mode: 0o600 });
-  const child = spawn(process.execPath, ['--no-warnings', cli, ...args], { cwd: ROOT, env: nativeEnvironment(process.env), stdio: ['ignore', log, log], windowsHide: true });
+  const child = spawn(process.execPath, ['--no-warnings', cli, ...args], { cwd, env: nativeEnvironment(process.env), stdio: ['ignore', log, log], windowsHide: true });
   fs.writeFileSync(path.join(directory, `${phase}-pid.json`), JSON.stringify({ pid: child.pid, startedAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 });
   const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
   fs.closeSync(log);
@@ -483,7 +484,7 @@ export function deploymentSourceCommit(root = ROOT, env = process.env) {
   need(/^[a-f0-9]{40}$/u.test(commit) && run(['status', '--porcelain', '--untracked-files=all']) === '', 'Deployment requires the exact clean reviewed source commit');
   return commit;
 }
-function staffReadinessReceipt(value, sourceCommit) {
+export function validateStaffReadinessReceipt(value, sourceCommit) {
   const keys = ['schemaVersion','sourceCommit','accountId','databaseId','reviewSha256','cohortSha256','controlPlaneSha256','observedAt','staffCount','generation'];
   need(value && equal(Object.keys(value).sort(), keys.sort()) && value.schemaVersion === 2
     && /^[a-f0-9]{40}$/u.test(sourceCommit ?? '') && value.sourceCommit === sourceCommit
@@ -496,7 +497,7 @@ function staffReadinessReceipt(value, sourceCommit) {
     && Date.now() - Date.parse(value.observedAt) <= 60_000, 'Fresh exact native staff handoff readiness is required');
   return structuredClone(value);
 }
-export async function executeDeployment({ app, mode, cli, main, directory, reader, runNative = native, fingerprint, profile = PROFILE,
+export async function executeDeployment({ app, mode, cli, main, directory, reader, runNative = runNativeProductionCommand, fingerprint, profile = PROFILE,
   staffCutoverReview, sourceCommit, readStaffCutover = readNativeStaffCutoverReadiness }) {
   checkMode(mode, fingerprint); need(Object.hasOwn(PROFILE.workers, app), 'Unknown Worker');
   need(fs.existsSync(main) && fs.existsSync(`${main}.map`), 'Build Worker index.js and genuine sibling source map before deployment');
@@ -508,7 +509,7 @@ export async function executeDeployment({ app, mode, cli, main, directory, reade
   const qualifyStaff = async () => {
     if (app === 'client') return null;
     need(staffCutoverReview && typeof readStaffCutover === 'function', 'Production Ops and Sync require the reviewed native staff handoff packet');
-    const receipt = staffReadinessReceipt(await readStaffCutover({ review: structuredClone(staffCutoverReview), sourceCommit }), sourceCommit);
+    const receipt = validateStaffReadinessReceipt(await readStaffCutover({ review: structuredClone(staffCutoverReview), sourceCommit }), sourceCommit);
     if (firstStaffReadiness) need(equal(without(receipt, ['observedAt']), without(firstStaffReadiness, ['observedAt'])), 'Native staff handoff changed during deployment; reconcile without retry');
     else firstStaffReadiness = receipt;
     return receipt;
