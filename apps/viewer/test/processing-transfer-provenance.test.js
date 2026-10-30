@@ -100,7 +100,7 @@ test('historical attempt without a frozen request holds instead of sending mutab
  await processSubmit(f.job,{processing:f.processing,storage:f.storage,config:{},signal:new AbortController().signal,adapterFactory:()=>adapter});
  assert.equal(sent,0);assert.equal(f.processing.getInitializationSnapshot(f.attempt.id),null);
  assert.equal(f.db.prepare('SELECT status,error_code FROM processing_jobs WHERE id=?').get(f.job.id).status,'pending');
- assert.equal(f.processing.getAttempt(f.attempt.id).errorCode,'provider_submission_observation_unavailable');
+ assert.equal(f.processing.getAttempt(f.attempt.id).errorCode,'provider_initialization_identity_unverified');
 });
 test('prior initialization intent without a snapshot never sends or reconstructs a request',async t=>{
  const f=fixture(t),prior=f.processing.beginAttemptInitialization(f.job.id,'owner',{freshTaskMissing:true});assert.ok(prior);assert.equal(f.processing.getInitializationSnapshot(f.attempt.id),null);
@@ -109,7 +109,7 @@ test('prior initialization intent without a snapshot never sends or reconstructs
  await processSubmit(f.job,{processing:f.processing,storage:f.storage,config:{},signal:new AbortController().signal,adapterFactory:()=>adapter});
  assert.equal(sent,0);assert.equal(f.processing.getInitializationSnapshot(f.attempt.id),null);
  assert.equal(f.db.prepare('SELECT status FROM processing_jobs WHERE id=?').get(f.job.id).status,'pending');
- assert.equal(f.processing.getAttempt(f.attempt.id).errorCode,'provider_submission_observation_unavailable');
+ assert.equal(f.processing.getAttempt(f.attempt.id).errorCode,'provider_initialization_identity_unverified');
 });
 test('changed snapshot binding stays pending across retries without sending or failing the attempt',async t=>{
  const f=fixture(t);f.processing.beginAttemptInitialization(f.job.id,'owner',{freshTaskMissing:true,captureRequest:true});
@@ -118,7 +118,7 @@ test('changed snapshot binding stays pending across retries without sending or f
  let sent=0;const adapter={status:async()=>{sent++;throw Object.assign(new Error('missing'),{code:'provider_task_not_found'})},initialize:async()=>{sent++}};
  for(let i=0;i<7;i++){f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id=? AND status='pending'").run(f.job.id);await processOne({processing:f.processing,storage:f.storage,config:{},adapterFactory:()=>adapter},'retry-owner')}
  const job=f.db.prepare('SELECT status,error_code FROM processing_jobs WHERE id=?').get(f.job.id);
- assert.equal(job.status,'pending');assert.equal(job.error_code,'provider_submission_observation_unavailable');assert.notEqual(f.processing.getAttempt(f.attempt.id).status,'failed');assert.equal(sent,0);
+ assert.equal(job.status,'pending');assert.equal(job.error_code,'provider_initialization_identity_unverified');assert.notEqual(f.processing.getAttempt(f.attempt.id).status,'failed');assert.equal(sent,0);assert.equal(require('../server/processingOverview').processingJobCounts(f.db).observationWarnings,1);assert.throws(()=>f.processing.cancelAttempt(f.attempt.id,'ops:test'),{code:'provider_execution_unresolved'});assert.equal(f.processing.canReplaceAttempt({...f.processing.getAttempt(f.attempt.id),status:'failed'}),false);
 });
 test('changed reservation binding prevents adapter creation and credential use',async t=>{
  for(const kind of ['origin','key','ciphertext']){
