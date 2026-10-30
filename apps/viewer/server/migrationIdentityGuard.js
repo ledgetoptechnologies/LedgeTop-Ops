@@ -8,6 +8,7 @@ const protectedMigrations=[
   {version:41,name:'gcp_odm_crs_confirmations',objects:['gcp_odm_crs_confirmations']},
   {version:42,name:'viewer_workspace_hierarchy',objects:['viewer_organizations','viewer_project_groups','viewer_project_hierarchy','viewer_project_groups_org_idx','viewer_project_hierarchy_org_idx']},
   {version:45,name:'processing_archive_capture_intents',objects:['processing_archive_capture_intents']},
+  {version:46,name:'processing_staged_byte_ack_outbox',objects:['processing_staged_byte_ack_outbox']},
 ];
 // Strict comparison intentionally rejects harmless formatting differences as
 // well; normalizing whitespace could alter quoted SQL literals.

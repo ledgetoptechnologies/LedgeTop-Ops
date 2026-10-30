@@ -63,4 +63,19 @@ test('GCP-marked synthetic attempt retains its snapshot through mock-provider in
   assert.equal(processing.getAttemptTransferProvenance(attempt.id).archive.archiveSha256,crypto.createHash('sha256').update(archive).digest('hex'));
   assert.equal(processing.getVerifiedAttemptProducerReceipt(attempt.id),null,'mock archive must not acquire a verified real-producer attribution');
   const derivative=database.prepare("SELECT status FROM derivative_jobs WHERE attempt_id=? AND derivative_type='mesh_tiles'").get(attempt.id);assert.equal(derivative.status,'pending');
+  // This exercises local transaction semantics with explicitly synthetic,
+  // untrusted commitment data; it does not test authenticated acquisition.
+  const staged=processing.getAttempt(attempt.id),receipt=processing.getAttemptTransferProvenance(attempt.id).archive;
+  const commitment={schemaVersion:1,taskId:attempt.providerTaskId,generation:1,archiveSha256:receipt.archiveSha256,archiveBytes:receipt.archiveByteSize,coordinatorReceiptSha256:'a'.repeat(64),issuer:'test-viewer',audience:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',environment:'staging',namespace:'ledgetop-viewer-staged-byte-claim-v1'};
+  assert.throws(()=>processing.enqueueDisabledStagedByteAck(staged,commitment),/requires a transaction/);
+  assert.throws(()=>processing.transaction(()=>{processing.enqueueDisabledStagedByteAck(staged,commitment);throw new Error('rollback fixture');}),/rollback fixture/);
+  assert.equal(database.prepare('SELECT COUNT(*) n FROM processing_staged_byte_ack_outbox').get().n,0);
+  processing.transaction(()=>processing.enqueueDisabledStagedByteAck(staged,commitment));
+  const first=database.prepare('SELECT * FROM processing_staged_byte_ack_outbox WHERE attempt_id=?').get(attempt.id);
+  assert.equal(first.state,'disabled');const payload=JSON.parse(first.assertion_json);
+  assert.equal(payload.taskId,attempt.providerTaskId);assert.equal(payload.attemptId,attempt.id);assert.equal(payload.modelVersionId,staged.resultModelVersionId);assert.equal(payload.stagingCommitId,first.staging_commit_id);
+  processing.transaction(()=>processing.enqueueDisabledStagedByteAck(staged,commitment));
+  assert.equal(database.prepare('SELECT staging_commit_id FROM processing_staged_byte_ack_outbox WHERE attempt_id=?').get(attempt.id).staging_commit_id,first.staging_commit_id);
+  assert.throws(()=>processing.transaction(()=>processing.enqueueDisabledStagedByteAck(staged,{...commitment,coordinatorReceiptSha256:'b'.repeat(64)})),{code:'staged_commitment_conflict'});
+
 });

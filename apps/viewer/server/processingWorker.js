@@ -163,11 +163,27 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   const recoveredIngest=await verifyRecoveredIngestSources(processing,storage,job,signal);
   const relative=`${task.id}/${attempt.id}`,destination=storage.resolve('models',relative);
   let archiveReceipt=processing.getAttemptTransferProvenance(attempt.id)?.archive||null;
+  // No configuration is wired in production: only an explicit per-provider
+  // binding enables this experimental, read-only point-in-time check.
+  const bindings=config.stagedCommitmentProviders;
+  const hasBinding=Boolean(bindings&&Object.hasOwn(bindings,provider.id));
+  const binding=hasBinding?bindings[provider.id]:null;
+  if(hasBinding&&(!binding||typeof binding!=='object'||Array.isArray(binding)))throw Object.assign(new Error('Staged commitment configuration is invalid'),{code:'staged_commitment_unavailable'});
+  let stagedCommitment=null,initialCommitment=null;
+  const readCommitment=async()=>{
+    if(!binding||!processing.attemptRequiresReservation?.(attempt.id)||typeof providerCredentials.resolveStagedCommitmentCredential!=='function')throw Object.assign(new Error('Staged commitment is unavailable'),{code:'staged_commitment_unavailable'});
+    const capability=attemptCapability(processing,providerCredentials,attempt);
+    const bearer=await providerCredentials.resolveStagedCommitmentCredential(binding.credentialRef);
+    return require('./stagedCommitmentClient').getStagedCommitment({enabled:true,origin:binding.origin,principalId:binding.principalId,authorityId:binding.authorityId,environment:binding.environment,bearer,capability,taskId:attempt.providerTaskId,signal});
+  };
+  if(binding&&fs.existsSync(destination))throw Object.assign(new Error('Existing archive has no verified commitment binding'),{code:'staged_commitment_unavailable'});
+
   // A recovery job must never inherit the historical unreceipted-directory
   // fallback after a crash between filesystem promotion and receipt commit.
   // Recheck in the actual existing-directory branch after source hashing.
   if(!fs.existsSync(destination)){
     if(!processing.beginArchiveCapture(job.id,job.lease_owner))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
+    if(binding)initialCommitment=await readCommitment();
     let adapter;
     try{const capability=attemptCapability(processing,providerCredentials,attempt);adapter=adapterFor(provider,config,providerCredentials,capability);await requireReservationSupport(adapter,capability);}
     catch(error){if(processing.attemptRequiresReservation?.(attempt.id))throw Object.assign(new Error('Provider observation unavailable; ingestion will resume'),{code:'provider_observation_unavailable'});throw error;}
@@ -191,6 +207,13 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     catch(error){if(processing.attemptRequiresReservation?.(attempt.id)&&streamErrors.has(error)&&!signal?.aborted)throw Object.assign(new Error('Provider download interrupted; ingestion will resume'),{code:'provider_observation_unavailable'});throw error;}
     archiveReceipt=processing.recordAttemptArchiveReceipt(job.id,job.lease_owner,captured);
     if(!archiveReceipt)throw Object.assign(new Error('processing archive receipt or lease was lost'),{code:'lease_lost'});
+    if(binding){
+      if(!providerExpectation||archiveReceipt.archiveSha256!==initialCommitment.archiveSha256||archiveReceipt.archiveByteSize!==initialCommitment.archiveBytes)throw Object.assign(new Error('Staged commitment does not match archive'),{code:'staged_commitment_conflict'});
+      const fresh=await readCommitment();
+      if(JSON.stringify(fresh)!==JSON.stringify(initialCommitment))throw Object.assign(new Error('Staged commitment changed'),{code:'staged_commitment_conflict'});
+      stagedCommitment=fresh;
+    }
+
   }else if(archiveReceipt){
     await verifyProcessingArchive(destination,archiveReceipt,{signal});
   }else if(recoveredIngest||processing.hasArchiveCaptureIntent(attempt.id)){
@@ -242,8 +265,8 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     for(const candidate of unitCandidates)evidence.recordVerifiedOdm(candidate.request,candidate.input);
   });
   const readyEvent={eventId:`processing-ready-${attempt.id}`,schemaVersion:1,type:'processing.ready_for_review',projectId:project.id,projectDisplayName:project.displayName,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'ready_for_review',reviewUrl:`${config.opsBaseUrl}/operations/processing?attemptId=${encodeURIComponent(attempt.id)}`};
-  if(derivatives.length&&derivatives.some((spec)=>!spec.request?.optional)){const activated=processing.completeIngestAndEnqueueDerivatives(job.id,job.lease_owner,attempt.id,derivatives,{ingestedAt:new Date().toISOString(),trustedInputFilesByType,requireTrustedInputs:true});if(!activated)throw Object.assign(new Error('processing lease was lost or ingest state changed'),{code:'lease_lost'});}
-  else{const ready=processing.completeOutputForReview(attempt.id,{jobId:job.id,owner:job.lease_owner,ingestedAt:new Date().toISOString(),event:readyEvent});if(!ready)throw Object.assign(new Error('processing lease was lost or staged output changed'),{code:'lease_lost'});if(derivatives.length&&!processing.enqueueOptionalDerivatives(attempt.id,derivatives))throw Object.assign(new Error('optional derivatives could not be queued'),{code:'derivative_activation_conflict'});}
+  if(derivatives.length&&derivatives.some((spec)=>!spec.request?.optional)){const activated=processing.completeIngestAndEnqueueDerivatives(job.id,job.lease_owner,attempt.id,derivatives,{ingestedAt:new Date().toISOString(),trustedInputFilesByType,requireTrustedInputs:true,stagedCommitment});if(!activated)throw Object.assign(new Error('processing lease was lost or ingest state changed'),{code:'lease_lost'});}
+  else{const ready=processing.completeOutputForReview(attempt.id,{jobId:job.id,owner:job.lease_owner,ingestedAt:new Date().toISOString(),event:readyEvent,stagedCommitment});if(!ready)throw Object.assign(new Error('processing lease was lost or staged output changed'),{code:'lease_lost'});if(derivatives.length&&!processing.enqueueOptionalDerivatives(attempt.id,derivatives))throw Object.assign(new Error('optional derivatives could not be queued'),{code:'derivative_activation_conflict'});}
 }
 
 async function processOne(deps,owner=crypto.randomUUID()){

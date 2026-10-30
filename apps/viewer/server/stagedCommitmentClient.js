@@ -30,7 +30,7 @@ async function getStagedCommitment({enabled=false,origin,principalId,authorityId
   if(response.status!==200||response.redirected||!type||!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(type)||(encoding!==null&&encoding.toLowerCase()!=='identity')||(length!==null&&(!/^(0|[1-9][0-9]*)$/.test(length)||Number(length)>4096)))throw fail();
   const body=await readBounded(response);if(length!==null&&body.byteSize!==Number(length))throw fail();const value=parseFlat(body.text);
   if(Object.keys(value).length!==fields.length||fields.some(k=>!Object.hasOwn(value,k))||value.schemaVersion!==1||value.taskId!==taskId||!Number.isSafeInteger(value.generation)||value.generation<1||!Number.isSafeInteger(value.archiveBytes)||value.archiveBytes<22||!hash(value.archiveSha256)||!hash(value.coordinatorReceiptSha256)||value.issuer!==principalId||value.audience!==authorityId||value.environment!==environment||value.namespace!==NAMESPACE)throw fail();
-  return Object.freeze({...value});
+  return Object.freeze(Object.fromEntries(fields.map(key=>[key,value[key]])));
  }catch(error){if(response?.body&&!response.body.locked)try{await response.body.cancel();}catch{}if(error?.code==='staged_commitment_invalid')throw error;throw fail();}
 }
 module.exports={getStagedCommitment};
