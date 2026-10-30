@@ -7,6 +7,7 @@ import type { Env } from '../src/worker/types';
 const key = vi.hoisted(() => ({ publicKey: undefined as unknown }));
 vi.mock('../src/worker/access-jwks', () => ({ accessJwksResolver: () => key.publicKey }));
 import { readPilotRpc } from '../src/worker/ios-pilot-read-rpc';
+import { handlePilotEdge } from '../src/worker/ios-pilot-edge-bridge';
 
 const origin = 'https://pilot-staging.example.test';
 describe('private pilot RPC with signed assertions and local D1', { timeout: 120_000 }, () => {
@@ -87,6 +88,35 @@ describe('private pilot RPC with signed assertions and local D1', { timeout: 120
     expect((await call(jwt, '/mobile-pilot/v1/operations/assigned')).body.operation?.id).toBe('assigned');
     expect((await call(jwt, '/mobile-pilot/v1/operations/unassigned')).status).toBe(404);
     expect((await call(jwt, '/mobile-pilot/v1/operations/foreign')).status).toBe(404);
+    expect(await db.prepare('SELECT count(*) n FROM test_writes').first('n')).toBe(0);
+  });
+  it('passes the edge and private RPC through signed identity and read authorization without business writes', async () => {
+    const db = fixture.db;
+    await db.batch([
+      db.prepare("UPDATE staff_users SET status='active',project_alpha_user_id='pa-human' WHERE id=?").bind(fixture.owner.id),
+      db.prepare("UPDATE staff_role_assignments SET role_id='role-operator' WHERE staff_id=?").bind(fixture.owner.id),
+      db.prepare('DELETE FROM pa_operations'), db.prepare('DELETE FROM pa_operation_assignments'), db.prepare('DELETE FROM pa_connectors'),
+      db.prepare("INSERT INTO pa_connectors VALUES('project-alpha:other',1)"),
+      ...['edge-assigned','edge-unassigned'].map(id => db.prepare("INSERT INTO pa_operations VALUES(?, 'project-alpha:primary','project',?,'scheduled',NULL,NULL,NULL,1)").bind(id, `Operation ${id}`)),
+      db.prepare("INSERT INTO pa_operations VALUES('edge-foreign','project-alpha:other','project','Foreign','scheduled',NULL,NULL,NULL,1)"),
+      db.prepare("INSERT INTO pa_operation_assignments VALUES('edge-assigned','pa-human',1)"),
+      db.prepare("INSERT INTO pa_operation_assignments VALUES('edge-foreign','pa-human',1)"),
+      db.prepare('DELETE FROM test_writes'),
+    ]);
+    const valid = await assertion();
+    const service = { read: (input: string) => readPilotRpc(input, env, [origin]) };
+    const edgeEnv = { ENVIRONMENT: 'staging', IOS_MANAGED_PILOT_ENABLED: 'true', IOS_MANAGED_PILOT_ORIGIN: origin, IOS_PILOT_READ: service };
+    const edgeCall = (path: string, jwt = valid, method = 'GET') => handlePilotEdge(new Request(origin + path,
+      { method, headers: { Authorization: 'Bearer oauth:synthetic', 'Cf-Access-Jwt-Assertion': jwt } }), edgeEnv, [origin]);
+    expect((await edgeCall('/mobile-pilot/v1/session')).status).toBe(200);
+    const list = await edgeCall('/mobile-pilot/v1/operations');
+    expect(list.status).toBe(200);
+    expect((await list.json() as { operations: Array<{ id: string }> }).operations.map(item => item.id)).toEqual(['edge-assigned']);
+    expect((await edgeCall('/mobile-pilot/v1/operations/edge-assigned')).status).toBe(200);
+    expect((await edgeCall('/mobile-pilot/v1/operations/edge-unassigned')).status).toBe(404);
+    expect((await edgeCall('/mobile-pilot/v1/operations/edge-foreign')).status).toBe(404);
+    expect((await edgeCall('/mobile-pilot/v1/session', await assertion('web-audience'))).status).toBe(401);
+    expect((await edgeCall('/mobile-pilot/v1/operations', valid, 'POST')).status).toBe(405);
     expect(await db.prepare('SELECT count(*) n FROM test_writes').first('n')).toBe(0);
   });
 });

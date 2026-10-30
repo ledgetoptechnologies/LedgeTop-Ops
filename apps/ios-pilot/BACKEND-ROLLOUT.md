@@ -121,6 +121,14 @@ passed: they exercised identity and staff denial, assigned versus unassigned
 and foreign-source list/detail reads, and watched nine tables for business or
 authority writes. This does not prove the live edge, service binding target, or
 absence of every possible side effect.
+The local edge bridge now forwards only the URL and Access assertion to that
+private RPC; it has no database or connector-secret bindings and remains closed
+by an empty source-controlled origin list. The combined edge/RPC tests passed
+eight cases, including signed assertions and real local-D1 source/assignment
+checks. Access must validate the bearer and replace any client-supplied assertion
+at the actual protected edge; the bridge's bearer syntax check cannot prove
+that relationship. Disable workers.dev, preview, and alternate routes and verify
+the active binding target and deployment version before any activation.
 
 The separate Cloudflare account named `Staging` is distinct from the `Ledge Top`
 account that currently owns the Operations staging Access application and D1
