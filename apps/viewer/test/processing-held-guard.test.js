@@ -280,6 +280,7 @@ test('cancellation API keeps a conflicting reservation and finalizes a confirmed
  const job=f.db.prepare("SELECT id FROM processing_jobs WHERE attempt_id=? AND job_type='submit'").get(f.attempt.id);
  f.db.prepare("UPDATE processing_jobs SET status='leased',lease_owner='owner',lease_expires_at='2999-01-01T00:00:00.000Z' WHERE id=?").run(job.id);
  f.processing.ensureAttemptReservation(job.id,'owner',credentials.sealAttemptCapability.bind(credentials));
+ f.processing.beginAttemptInitialization(job.id,'owner',{freshTaskMissing:true,captureRequest:true});
  f.db.prepare("UPDATE processing_attempts SET submission_phase='uploading',error_code='provider_upload_acceptance_unknown' WHERE id=?").run(f.attempt.id);
  const token='synthetic-session-token-0000000000000000';
  f.processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:test',permissions:['viewer.processing.write'],displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
@@ -293,6 +294,16 @@ test('cancellation API keeps a conflicting reservation and finalizes a confirmed
  const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
  t.after(()=>new Promise(resolve=>server.close(resolve)));
  const post=key=>fetch(`http://127.0.0.1:${server.address().port}/api/v1/attempts/${f.attempt.id}/cancel`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':key},body:'{}'});
+ const original=f.processing.getAttemptReservation(f.attempt.id),open=credentials.openAttemptCapability.bind(credentials),resolve=credentials.resolve.bind(credentials);let credentialCalls=0;
+ credentials.openAttemptCapability=(...args)=>{credentialCalls++;return open(...args)};credentials.resolve=(...args)=>{credentialCalls++;return resolve(...args)};
+ for(const kind of ['origin','key','ciphertext']){
+  if(kind==='origin')f.db.prepare('UPDATE processing_providers SET endpoint=? WHERE id=?').run('https://changed.test',f.attempt.providerId);
+  else if(kind==='key')f.db.prepare('UPDATE processing_attempt_reservations SET capability_key_id=? WHERE attempt_id=?').run('changed',f.attempt.id);
+  else f.db.prepare('UPDATE processing_attempt_reservations SET capability_ciphertext=? WHERE attempt_id=?').run('changed',f.attempt.id);
+  assert.equal((await post(`cancel-drift-${kind}`)).status,409,kind);assert.equal(credentialCalls,0,kind);assert.deepEqual(seen,[],kind);assert.notEqual(f.processing.getAttempt(f.attempt.id).status,'cancelled',kind);
+  f.db.prepare('UPDATE processing_providers SET endpoint=? WHERE id=?').run('https://example.test',f.attempt.providerId);
+  f.db.prepare('UPDATE processing_attempt_reservations SET capability_key_id=?,capability_ciphertext=? WHERE attempt_id=?').run(original.keyId,original.ciphertext,f.attempt.id);
+ }
  assert.equal((await post('cancel-conflict')).status,409);assert.notEqual(f.processing.getAttempt(f.attempt.id).status,'cancelled');
  conflict=false;assert.equal((await post('cancel-confirm')).status,200);assert.equal(f.processing.getAttempt(f.attempt.id).status,'cancelled');
  assert.deepEqual(seen,['/task/ledgetop/reserve','/task/ledgetop/cancel','/task/ledgetop/reserve','/task/ledgetop/cancel']);

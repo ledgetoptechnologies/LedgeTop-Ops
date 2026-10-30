@@ -653,7 +653,10 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   }
   validateInitializationSnapshotForJob(jobId,owner){return this.transactionOrOwned(()=>{
     const job=this.provenanceJob(jobId,owner,'submit');if(!job)return false;
-    const attempt=this.getAttempt(job.attempt_id),requestSnapshot=this.getInitializationSnapshot(job.attempt_id);
+    return this.validateInitializationSnapshot(job.attempt_id);
+  });}
+  validateInitializationSnapshot(attemptId){return this.transactionOrOwned(()=>{
+    const attempt=this.getAttempt(attemptId);if(!attempt)return false;const requestSnapshot=this.getInitializationSnapshot(attemptId);
     if(!requestSnapshot&&(!this.getAttemptProvenance(attempt.id)?.submission?.inputFiles||this.getAttemptTransferProvenance(attempt.id)?.initialization||attempt.submissionPhase!=='new'))return 'unproven';
     if(requestSnapshot){
       const provider=this.getProvider(attempt.providerId),reservation=this.getAttemptReservation(attempt.id),binding=reservation?{keyId:reservation.keyId,ciphertextSha256:crypto.createHash('sha256').update(reservation.ciphertext).digest('hex')}:null;

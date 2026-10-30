@@ -528,6 +528,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
     const reservation=processing.getAttemptReservation(a.id);
     if(reservation){
       try{
+        if(processing.validateInitializationSnapshot(a.id)!==true)throw new Error('initialization identity unavailable');
         const p=processing.getProvider(a.providerId);
         if(!p||reservation.providerId!==a.providerId||reservation.providerTaskId!==a.providerTaskId)throw new Error('reservation identity unavailable');
         const capability=providerCredentials.openAttemptCapability(a.providerId,a.id,a.providerTaskId,reservation);
