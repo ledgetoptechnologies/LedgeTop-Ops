@@ -11,6 +11,8 @@ test('held and unknown observations explain the current nonterminal state',()=>{
  assert.match(processingObservation({status:'uploading',errorCode:'provider_upload_acceptance_unknown'}).message,/may have accepted some files/);
  assert.match(processingObservation({status:'ingesting',errorCode:'staged_commitment_unavailable'}).message,/inspect provider credentials and configuration/);
  assert.match(processingObservation({status:'ingesting',errorCode:'provider_observation_unavailable'}).message,/result download is unavailable/);
+ assert.match(processingObservation({status:'ingesting',errorCode:'provider_observation_unavailable',errorMessage:'Provider denied access to the result. Inspect the provider credentials and permissions.'}).message,/credentials and permissions/);
+ assert.doesNotMatch(processingObservation({status:'ingesting',errorCode:'provider_observation_unavailable',errorMessage:'untrusted provider text'}).message,/untrusted/);
  assert.equal(processingObservation({status:'failed',errorCode:'provider_execution_held'}),null);
  assert.equal(processingObservation({status:'running',errorCode:'some_other_error'}),null);
 });
