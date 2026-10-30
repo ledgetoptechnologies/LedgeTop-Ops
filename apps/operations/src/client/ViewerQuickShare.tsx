@@ -158,7 +158,7 @@ type PendingDirectShare = {
   body: string; key: string; sentAt: number; clientName: string; client: DirectShareClient; permissions: DirectShareGrant["permissions"];
   neverExpires: boolean; expiryDay: string; expiresAt: string | null; includeFuture: boolean;
 };
-type PendingPublicLink = { body: string; key: string; sentAt: number; label: string; expiryDay: string; neverExpires: boolean; download: boolean; units: "imperial" | "metric" };
+type PendingPublicLink = { body: string; key: string; sentAt: number; label: string; expiryDay: string; neverExpires: boolean; download: boolean; cameras: boolean; units: "imperial" | "metric" };
 
 /** Search Viewer projects, pick a published model (or the whole project), then share it. */
 export function ViewerQuickShare({ canCreatePublic, canRevokePublic }: { canCreatePublic: boolean; canRevokePublic: boolean }) {
@@ -298,7 +298,8 @@ export function ViewerShareDialog({ target, onClose, canCreatePublic, canRevokeP
   </Dialog>;
 }
 
-const DEFAULT_PERMISSIONS = { measure: true, cameras: true, download: false };
+// Camera photos show where each photo was taken, so a new share leaves them off until staff choose to include them.
+const DEFAULT_PERMISSIONS = { measure: true, cameras: false, download: false };
 const sameClient = (grant: DirectShareGrant, client: DirectShareClient) => grant.sourceId === client.sourceId && grant.workspaceId === client.workspaceId;
 
 function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShareTarget; onStateChange: (busy: boolean, unconfirmed: boolean) => void }) {
@@ -503,6 +504,7 @@ export function ViewerPublicLinkPanel({ modelId, canCreate, canRevoke, onStateCh
   const [neverExpires, setNeverExpires] = useState(false);
   const [password, setPassword] = useState("");
   const [download, setDownload] = useState(false);
+  const [cameras, setCameras] = useState(false);
   const [units, setUnits] = useState<"imperial" | "metric">("imperial");
   const [createdUrl, setCreatedUrl] = useState("");
   const [busy, setBusy] = useState(false);
@@ -532,9 +534,9 @@ export function ViewerPublicLinkPanel({ modelId, canCreate, canRevoke, onStateCh
     if (!unconfirmed) {
       if (!neverExpires && !expiresAt) return;
       if (neverExpires && !window.confirm("Create a link that never expires? It stays active until you revoke it.")) return;
-      pending.current = { key: crypto.randomUUID(), sentAt: Date.now(), label, expiryDay, neverExpires, download, units, body: JSON.stringify({
+      pending.current = { key: crypto.randomUUID(), sentAt: Date.now(), label, expiryDay, neverExpires, download, cameras, units, body: JSON.stringify({
         label: label.trim() || null, expiresAt, displayUnits: units,
-        ...(password ? { password } : {}), permissions: { view: true, measure: true, cameras: true, download },
+        ...(password ? { password } : {}), permissions: { view: true, measure: true, cameras, download },
       }) };
     }
     const attempt = pending.current;
@@ -594,6 +596,7 @@ export function ViewerPublicLinkPanel({ modelId, canCreate, canRevoke, onStateCh
       <label className="viewer-share-check"><input type="checkbox" checked={neverExpires} onChange={event => setNeverExpires(event.target.checked)} /> Never expires</label>
       <label>Password (optional)<input type="password" minLength={8} maxLength={128} autoComplete="new-password" value={password} onChange={event => setPassword(event.target.value)} placeholder={unconfirmed ? "Kept from the first attempt" : "At least 8 characters"} /></label>
       <label>Measurement units<select value={units} onChange={event => setUnits(event.target.value as "imperial" | "metric")}><option value="imperial">Imperial</option><option value="metric">Metric</option></select></label>
+      <label className="viewer-share-check"><input type="checkbox" checked={cameras} onChange={event => setCameras(event.target.checked)} /> Show camera photos and where they were taken</label>
       <label className="viewer-share-check"><input type="checkbox" checked={download} onChange={event => setDownload(event.target.checked)} /> Allow model download</label>
       </fieldset>
       {errorNotice && <div className="viewer-share-form-error">{errorNotice}</div>}
