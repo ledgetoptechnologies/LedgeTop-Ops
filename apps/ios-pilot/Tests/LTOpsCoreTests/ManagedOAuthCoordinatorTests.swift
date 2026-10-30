@@ -21,6 +21,16 @@ private actor RevocationLog {
     func add(_ kind: ManagedOAuthTokenKind) { kinds.append(kind) }
     func snapshot() -> [ManagedOAuthTokenKind] { kinds }
 }
+private actor ProbeLog {
+    var count = 0
+    func check(_ value: ManagedOAuthCredential, log: RevocationLog) async -> SyntheticRevocationProbeResult {
+        guard value.refreshToken == nil, value.accessToken == "oauth:synthetic" else { return .inconclusive }
+        let kinds = await log.snapshot()
+        count += 1
+        if count == 1 { return kinds.isEmpty ? .accepted : .inconclusive }
+        return kinds == [.refresh] ? .rejected : .inconclusive
+    }
+}
 private struct FakeExchange: ManagedOAuthExchanging {
     let gate: ExchangeGate?
     var failRevocation = false
@@ -57,6 +67,28 @@ final class ManagedOAuthCoordinatorTests: XCTestCase {
             let state = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!.first { $0.name == "state" }!.value!
             return URL(string: ManagedOAuthWire.callback + "?code=code&state=" + (mismatch ? String(repeating: "x", count: 43) : state))!
         }, proofFactory: { ManagedOAuthProof(state: String(repeating: "s", count: 43), verifier: String(repeating: "v", count: 43), challenge: String(repeating: "A", count: 43)) })
+    }
+    func testSyntheticSignOutChecksBeforeAndAfterRefreshThenRevokesAccess() async throws {
+        let log = RevocationLog(), probe = ProbeLog(), coordinator = try coordinator(log: log, failKind: .access)
+        try await coordinator.signIn()
+        let report = await coordinator.signOutReport(syntheticCheck: { await probe.check($0, log: log) })
+        XCTAssertEqual(report.outcomes?.syntheticProbe, .rejected)
+        XCTAssertEqual(report.result, .revocationUnconfirmed)
+        let kinds = await log.snapshot()
+        XCTAssertEqual(kinds, [.refresh, .access])
+        let message = ManagedOAuthDiagnostic.revocationOutcomes(report.outcomes) ?? ""
+        XCTAssertTrue(message.contains("received a 401"))
+        XCTAssertFalse(message.contains("oauth:"))
+    }
+    func testSyntheticProbeIsInconclusiveIfBaselineOrRefreshFails() async throws {
+        for failRefresh in [false, true] {
+            let log = RevocationLog(), coordinator = try coordinator(log: log, failKind: failRefresh ? .refresh : nil)
+            try await coordinator.signIn()
+            let report = await coordinator.signOutReport(syntheticCheck: { _ in failRefresh ? .accepted : .inconclusive })
+            XCTAssertEqual(report.outcomes?.syntheticProbe, .inconclusive)
+            let kinds = await log.snapshot()
+            XCTAssertEqual(kinds, [.refresh, .access])
+        }
     }
     func testOverlappingSignOutDoesNotAttributeAnotherAttemptsOutcomes() async throws {
         let gate = ExchangeGate(), coordinator = try coordinator(failKind: .refresh, revokeGate: gate)

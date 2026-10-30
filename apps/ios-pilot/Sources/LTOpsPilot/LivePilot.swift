@@ -140,9 +140,12 @@ final class LivePilotModel: ObservableObject {
         PilotKeychain.clear()
         guard let coordinator else { return }
         let previous = signOutTask
+        let check: (@Sendable (ManagedOAuthCredential) async -> SyntheticRevocationProbeResult)?
+        if isSyntheticProbe, let api { check = { await api.checkSyntheticRevocation(credential: $0) } }
+        else { check = nil }
         let task = Task { () -> ManagedOAuthSignOutReport in
             let prior = await previous?.value
-            let report = await coordinator.signOutReport()
+            let report = await coordinator.signOutReport(syntheticCheck: check)
             if prior?.result == .revocationUnconfirmed {
                 return ManagedOAuthSignOutReport(result: .revocationUnconfirmed, outcomes: report.outcomes)
             }

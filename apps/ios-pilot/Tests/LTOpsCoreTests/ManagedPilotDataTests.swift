@@ -59,6 +59,17 @@ private final class InvalidProbeStub: URLProtocol, @unchecked Sendable {
     }
     override func stopLoading() {}
 }
+private final class ValidProbeStub: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"ok":true,"kind":"synthetic-oauth-probe"}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
 
 private class ProbeFailureStub: URLProtocol, @unchecked Sendable {
     class var marker: String? { nil }
@@ -78,6 +89,13 @@ private final class OriginAssertionStub: ProbeFailureStub, @unchecked Sendable {
 private final class UnknownStageStub: ProbeFailureStub, @unchecked Sendable { override class var marker: String? { "untrusted-provider-value" } }
 
 final class ManagedPilotDataTests: XCTestCase, @unchecked Sendable {
+    private func revocationAPI(stub: AnyClass) throws -> ManagedPilotDataAPI {
+        let issuer = "https://team.example.test"
+        let pins = try ManagedOAuthPins(resource: "https://ios-pilot-staging.ledgetop.app", issuer: issuer,
+            authorizationEndpoint: issuer + "/auth", tokenEndpoint: issuer + "/token",
+            registrationEndpoint: issuer + "/register", revocationEndpoint: issuer + "/revoke")
+        return ManagedPilotDataAPI(pins: pins, protocolClasses: [stub])
+    }
     private func api(stub: AnyClass = ManagedDataStub.self) throws -> ManagedPilotDataAPI {
         let issuer = "https://team.example.test"
         let pins = try ManagedOAuthPins(resource: "https://pilot.example.test", issuer: issuer,
@@ -87,6 +105,17 @@ final class ManagedPilotDataTests: XCTestCase, @unchecked Sendable {
     }
     private func credential(_ token: String = "oauth:synthetic", expiry: TimeInterval = 300) -> ManagedOAuthCredential {
         ManagedOAuthCredential(accessToken: token, refreshToken: nil, expiresAt: Date().addingTimeInterval(expiry))
+    }
+    func testRevocationProbeRequiresExactHostAndClassifiesOnlyKnownOutcomes() async throws {
+        let good = await (try revocationAPI(stub: ValidProbeStub.self)).checkSyntheticRevocation(credential: credential())
+        let unauthorized = await (try revocationAPI(stub: ProbeFailureStub.self)).checkSyntheticRevocation(credential: credential())
+        let marker = await (try revocationAPI(stub: OriginAssertionStub.self)).checkSyntheticRevocation(credential: credential())
+        let invalid = await (try revocationAPI(stub: InvalidProbeStub.self)).checkSyntheticRevocation(credential: credential())
+        let expired = await (try revocationAPI(stub: ValidProbeStub.self)).checkSyntheticRevocation(credential: credential(expiry: -1))
+        let wrongHost = await (try api(stub: ValidProbeStub.self)).checkSyntheticRevocation(credential: credential())
+        XCTAssertEqual(good, .accepted); XCTAssertEqual(unauthorized, .rejected)
+        XCTAssertEqual(marker, .inconclusive); XCTAssertEqual(invalid, .inconclusive)
+        XCTAssertEqual(expired, .inconclusive); XCTAssertEqual(wrongHost, .inconclusive)
     }
     func testReadOnlySessionListAndDetail() async throws {
         let api = try api(), token = credential()

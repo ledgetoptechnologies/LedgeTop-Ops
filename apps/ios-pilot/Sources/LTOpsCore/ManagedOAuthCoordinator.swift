@@ -62,7 +62,12 @@ public enum ManagedOAuthRevocationOutcome: Sendable, Equatable {
 public struct ManagedOAuthRevocationOutcomes: Sendable, Equatable {
     public let refresh: ManagedOAuthRevocationOutcome
     public let access: ManagedOAuthRevocationOutcome
+    public let syntheticProbe: SyntheticRevocationProbeResult?
+    public init(refresh: ManagedOAuthRevocationOutcome, access: ManagedOAuthRevocationOutcome, syntheticProbe: SyntheticRevocationProbeResult? = nil) {
+        self.refresh = refresh; self.access = access; self.syntheticProbe = syntheticProbe
+    }
 }
+public enum SyntheticRevocationProbeResult: Sendable, Equatable { case accepted, rejected, inconclusive }
 public struct ManagedOAuthSignOutReport: Sendable, Equatable {
     public let result: ManagedOAuthSignOutResult
     public let outcomes: ManagedOAuthRevocationOutcomes?
@@ -118,7 +123,14 @@ public enum ManagedOAuthDiagnostic {
             case .failed(let failure): return "\(label): \(revocationDetail(failure) ?? "Request failed.")"
             }
         }
-        return describe("Refresh grant", outcomes.refresh) + " " + describe("Access token", outcomes.access)
+        let probe: String
+        switch outcomes.syntheticProbe {
+        case .accepted: probe = " Test access remained usable after refresh sign-out."
+        case .rejected: probe = " Test access received a 401 after refresh sign-out."
+        case .inconclusive: probe = " Test access check was inconclusive."
+        case nil: probe = ""
+        }
+        return describe("Refresh grant", outcomes.refresh) + " " + describe("Access token", outcomes.access) + probe
     }
 }
 public actor ManagedOAuthCoordinator {
@@ -144,7 +156,7 @@ public actor ManagedOAuthCoordinator {
     public func signOut() async -> ManagedOAuthSignOutResult {
         await signOutReport().result
     }
-    public func signOutReport() async -> ManagedOAuthSignOutReport {
+    public func signOutReport(syntheticCheck: (@Sendable (ManagedOAuthCredential) async -> SyntheticRevocationProbeResult)? = nil) async -> ManagedOAuthSignOutReport {
         generation &+= 1
         let old = credential, client = credentialClientID
         credential = nil
@@ -155,15 +167,25 @@ public actor ManagedOAuthCoordinator {
         }
         revocationsInFlight += 1
         defer { revocationsInFlight -= 1 }
+        // Test only, supplied exclusively by the fixed synthetic app mode. A
+        // baseline success is required before a later denial has meaning.
+        let probeCredential = ManagedOAuthCredential(accessToken: old.accessToken, refreshToken: nil, expiresAt: old.expiresAt)
+        let baseline = old.refreshToken != nil ? await syntheticCheck?(probeCredential) : nil
         var refreshOutcome: ManagedOAuthRevocationOutcome = .notIssued
         if let refresh = old.refreshToken {
             do { try await transport.revoke(token: refresh, clientID: client, hint: .refresh); refreshOutcome = .providerAcknowledged }
             catch { refreshOutcome = .failed(error as? ManagedOAuthRevocationFailure ?? .invalidResponse) }
         }
+        var probe: SyntheticRevocationProbeResult?
+        if syntheticCheck != nil && old.refreshToken != nil {
+            if baseline == .accepted, refreshOutcome == .providerAcknowledged, let syntheticCheck {
+                probe = await syntheticCheck(probeCredential)
+            } else { probe = .inconclusive }
+        }
         let accessOutcome: ManagedOAuthRevocationOutcome
         do { try await transport.revoke(token: old.accessToken, clientID: client, hint: .access); accessOutcome = .providerAcknowledged }
         catch { accessOutcome = .failed(error as? ManagedOAuthRevocationFailure ?? .invalidResponse) }
-        let outcomes = ManagedOAuthRevocationOutcomes(refresh: refreshOutcome, access: accessOutcome)
+        let outcomes = ManagedOAuthRevocationOutcomes(refresh: refreshOutcome, access: accessOutcome, syntheticProbe: probe)
         let failed = { if case .failed = refreshOutcome { return true }; if case .failed = accessOutcome { return true }; return false }()
         if failed { grantStatusUncertain = true }
         return ManagedOAuthSignOutReport(result: failed || uncertain ? .revocationUnconfirmed : .providerAcknowledged, outcomes: outcomes)

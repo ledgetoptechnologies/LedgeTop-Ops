@@ -54,6 +54,18 @@ public struct ManagedPilotDataAPI: Sendable {
         } catch { throw SyntheticProbeFailure.network }
     }
 
+    /// Fixed no-data origin only; neither success nor 401 proves why Access
+    /// made its decision, or that a refresh token cannot be replayed.
+    public func checkSyntheticRevocation(credential: ManagedOAuthCredential) async -> SyntheticRevocationProbeResult {
+        guard pins.resource == "https://ios-pilot-staging.ledgetop.app", credential.expiresAt > Date(), !Task.isCancelled else { return .inconclusive }
+        do {
+            try await verifySyntheticProbe(credential: credential)
+            return credential.expiresAt > Date() && !Task.isCancelled ? .accepted : .inconclusive
+        } catch SyntheticProbeFailure.edgeUnauthorized {
+            return credential.expiresAt > Date() && !Task.isCancelled ? .rejected : .inconclusive
+        } catch { return .inconclusive }
+    }
+
     public func identity(credential: ManagedOAuthCredential) async throws -> MobilePilotSession {
         let result: MobilePilotSession = try await read(path: "session", credential: credential)
         guard result.schemaVersion == 1, result.readOnly,

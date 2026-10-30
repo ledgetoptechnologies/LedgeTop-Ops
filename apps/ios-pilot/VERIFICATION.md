@@ -72,6 +72,15 @@ SDK build passed. The installer reached 100% but did not report final success;
 inventory showed one pilot and the USB relay was stopped. Device confirmation
 and provider revocation verification remain pending.
 
+Beau reported that refresh-grant revocation was acknowledged but the subsequent
+access-token revocation returned HTTP 400. A synthetic-only diagnostic now
+checks the access token against the no-data endpoint before and after the
+refresh revocation, without claiming that a single result proves global
+revocation. It still attempts access revocation and never exposes credentials.
+51 Swift tests and a signed Apple SDK build passed. Installation and verification
+completed on the same iPad application, inventory showed one pilot, and the
+task-owned USB relay was stopped. The new device result is pending.
+
 Cloudflare's published agent flow registers a public client with only
 `authorization_code` in the registration grant list, then shows a refresh
 token in the exchange response and a subsequent `refresh_token` grant. The
