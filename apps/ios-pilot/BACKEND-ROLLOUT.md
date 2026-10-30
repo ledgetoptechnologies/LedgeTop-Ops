@@ -42,10 +42,15 @@ the origin. Use a dedicated narrowly scoped application and retain the server-si
 read-only facade; a token valid for the existing general web application could
 otherwise authorize write endpoints. Cloudflare documents HTTPS dynamically
 registered redirects, plus optional localhost/loopback redirects, so the current
-custom-scheme callback is not proven compatible. Confirm account availability,
+custom-scheme callback is not proven compatible. Cloudflare's API reference
+also describes exact custom-scheme registration, which conflicts with the guide;
+verify the actual self-hosted application behavior rather than assuming either
+description applies. Confirm account availability,
 RFC 8707/resource isolation, redirect and PKCE behavior, token expiry and revocation,
 and device compatibility before selecting or enabling it. Do not enable Managed
 OAuth on the shared web application merely for this experiment.
+See the [Access API schema](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/)
+and [Apple authentication session documentation](https://developer.apple.com/documentation/authenticationservices/aswebauthenticationsession).
 
 ## Local evidence
 
