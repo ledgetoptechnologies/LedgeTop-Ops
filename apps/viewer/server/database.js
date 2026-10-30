@@ -2105,6 +2105,7 @@ const MIGRATIONS = [
       attempt_id TEXT PRIMARY KEY REFERENCES processing_staged_byte_ack_outbox(attempt_id),
       state TEXT NOT NULL CHECK(state IN ('pending','uncertain','accepted','held')),
       assertion_sha256 TEXT NOT NULL,
+      binding_version INTEGER NOT NULL DEFAULT 1 CHECK(binding_version=1),
       expected_origin TEXT,
       credential_ref TEXT,
       capability_sha256 TEXT,

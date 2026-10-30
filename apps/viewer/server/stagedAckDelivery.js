@@ -22,13 +22,12 @@ function acquire(db,now){return transaction(db,()=>{
  return {...db.prepare('SELECT o.*,d.state AS delivery_state,d.assertion_sha256,d.attempts FROM processing_staged_byte_ack_outbox o JOIN processing_staged_ack_delivery d USING(attempt_id) WHERE o.attempt_id=?').get(source.attempt_id),token};
 });}
 function transition(db,row,state,now,error=null){const delay=Math.min(3600000,1000*2**Math.min(row.attempts,12));return db.prepare('UPDATE processing_staged_ack_delivery SET state=?,lease_token=NULL,lease_expires_at=NULL,next_attempt_at=?,attempts=attempts+1,error_code=?,updated_at=? WHERE attempt_id=? AND lease_token=? AND lease_expires_at>?').run(state,state==='uncertain'?now+delay:0,error,now,row.attempt_id,row.token,now).changes===1}
-function bindIdentity(db,row,binding,base,capability,now){return transaction(db,()=>{
- const record=db.prepare('SELECT expected_origin,credential_ref,capability_sha256 FROM processing_staged_ack_delivery WHERE attempt_id=? AND lease_token=? AND lease_expires_at>?').get(row.attempt_id,row.token,now);if(!record)return false;
- const origin=base.origin,ref=binding.credentialRef,digest=crypto.createHash('sha256').update(capability).digest('hex');
- if(typeof ref!=='string'||!ref||ref.length>200)throw invalid();
- if(record.expected_origin===null&&record.credential_ref===null&&record.capability_sha256===null){db.prepare('UPDATE processing_staged_ack_delivery SET expected_origin=?,credential_ref=?,capability_sha256=? WHERE attempt_id=? AND lease_token=?').run(origin,ref,digest,row.attempt_id,row.token);return true}
- if(record.expected_origin!==origin||record.credential_ref!==ref||record.capability_sha256!==digest)throw invalid();return true;
-});}
+function expectedBinding(binding,capability){
+ let base;try{base=new URL(binding.origin)}catch{throw invalid()}
+ if(base.protocol!=='https:'||base.username||base.password||base.pathname!=='/'||base.search||base.hash||typeof binding.credentialRef!=='string'||!binding.credentialRef||binding.credentialRef.length>200||!secret(capability))throw invalid();
+ return {origin:base.origin,credentialRef:binding.credentialRef,capabilitySha256:crypto.createHash('sha256').update(capability).digest('hex')};
+}
+function bindIdentity(db,row,binding,base,capability,now){const expected=expectedBinding(binding,capability),record=db.prepare('SELECT binding_version,expected_origin,credential_ref,capability_sha256 FROM processing_staged_ack_delivery WHERE attempt_id=? AND lease_token=? AND lease_expires_at>?').get(row.attempt_id,row.token,now);if(!record)return false;if(record.binding_version!==1||record.expected_origin!==expected.origin||record.credential_ref!==expected.credentialRef||record.capability_sha256!==expected.capabilitySha256)throw invalid();return true;}
 function markUncertain(db,row,now){return db.prepare("UPDATE processing_staged_ack_delivery SET state='uncertain',updated_at=? WHERE attempt_id=? AND lease_token=? AND lease_expires_at>?").run(now,row.attempt_id,row.token,now).changes===1}
 async function bounded(response){const length=response.headers.get('content-length'),type=response.headers.get('content-type'),encoding=response.headers.get('content-encoding');if(response.redirected||!type||!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(type)||(encoding&&encoding.toLowerCase()!=='identity')||(length!==null&&(!/^(0|[1-9][0-9]*)$/.test(length)||Number(length)>4096))||!response.body)throw invalid();const reader=response.body.getReader(),chunks=[];let size=0;try{for(;;){const p=await reader.read();if(p.done)break;size+=p.value.byteLength;if(size>4096){await reader.cancel();throw invalid()}chunks.push(Buffer.from(p.value))}}finally{reader.releaseLock()}if(length!==null&&size!==Number(length))throw invalid();try{return new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks))}catch{throw invalid()}}
 function matchResponse(text,expected,post){const pattern=post?/^\s*\{\s*"assertion"\s*:\s*(\{[^{}]*\})\s*,\s*"created"\s*:\s*(?:true|false)\s*\}\s*$/:/^\s*\{\s*"assertion"\s*:\s*(\{[^{}]*\})\s*\}\s*$/;const match=pattern.exec(text);if(!match)throw invalid();let got;try{got=parseFlat(match[1])}catch{throw invalid()};if(Object.keys(got).length!==fields.length||fields.some(k=>!Object.hasOwn(got,k)||got[k]!==expected[k]))throw invalid();}
@@ -57,4 +56,4 @@ async function deliverOneStagedAck({db,enabled=false,bindings,resolveCredential,
   throw Error('unavailable');
  }catch(e){transition(db,row,e?.code==='staged_ack_invalid'?'held':'uncertain',clock(),e?.code==='staged_ack_invalid'?'staged_ack_invalid':'staged_ack_unavailable');return true}
 }
-module.exports={deliverOneStagedAck};
+module.exports={deliverOneStagedAck,expectedBinding};
