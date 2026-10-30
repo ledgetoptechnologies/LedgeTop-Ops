@@ -16,7 +16,7 @@ const {buildMeshRecoveryManifest}=require('./retainedManifest');
 const {canonicalDerivativeInput}=require('./derivativeInputSnapshot');
 const {verifyRecoveredIngestSources}=require('./processingIngestRecovery');
 const observationPersistenceError=Symbol('observationPersistenceError');
-const transientDownloadError=error=>error?.name==='TimeoutError'||(error?.name==='TypeError'&&error?.message==='fetch failed')||['ECONNRESET','ECONNREFUSED','ETIMEDOUT','EPIPE','ENOTFOUND','EAI_AGAIN','ENETUNREACH','EHOSTUNREACH','UND_ERR_SOCKET','UND_ERR_CONNECT_TIMEOUT','UND_ERR_HEADERS_TIMEOUT','UND_ERR_BODY_TIMEOUT'].includes(error?.code||error?.cause?.code)||(Number.isInteger(error?.status)&&error.status>=400&&error.status<=599);
+const transientDownloadError=error=>error?.name==='TimeoutError'||(error?.name==='TypeError'&&error?.message==='fetch failed')||[error?.code,error?.cause?.code].some(code=>['ECONNRESET','ECONNREFUSED','ECONNABORTED','ETIMEDOUT','EPIPE','ENOTFOUND','EAI_AGAIN','ENETUNREACH','ENETDOWN','ENETRESET','EHOSTUNREACH','EHOSTDOWN','UND_ERR_SOCKET','UND_ERR_CONNECT_TIMEOUT','UND_ERR_HEADERS_TIMEOUT','UND_ERR_BODY_TIMEOUT'].includes(code))||(Number.isInteger(error?.status)&&error.status>=400&&error.status<=599);
 
 function requireNodeOdmProvider(provider){if(!provider||!['nodeodm','clusterodm'].includes(provider.type))throw Object.assign(new Error('processing provider type is unavailable'),{code:'unsupported_provider_type'});}
 function requireNodeOdmAttempt(processing,id){if(processing.hasReferenceAttemptProtocol(id)||processing.hasReferenceAttemptJournal(id))throw Object.assign(new Error('reference processing is unavailable'),{code:'unsupported_provider_type'});}
