@@ -91,15 +91,22 @@ The wildcard affects the candidate hostname until a more-specific record exists;
 this is not approval to create one, and all collision and routing checks must be
 repeated immediately before any deployment or DNS change.
 Read-only inspection of all visible Access application destinations found no
-exact or wildcard match for that candidate. The account-wide Worker custom-domain
-inventory was not established, so a custom-domain collision remains unresolved.
+exact or wildcard match for that candidate. A subsequent authenticated,
+read-only Workers Domains API query returned all 28 account domains on one page
+and found no exact or wildcard custom-domain match for the candidate. This is
+point-in-time evidence and must be repeated immediately before assigning a route.
 The current staging ledger remains at 0225, and a zero-row compilation of the
 operation projection and key joins succeeded; neither establishes that a staff
 identity or connector setup is ready.
 
 An undeployed synthetic-only OAuth probe is available for the first provider
 experiment. Its origin allowlist is empty and it has no business-data bindings.
-Four signed-assertion and routing tests passed locally. It checks the assertion
+Four signed-assertion and routing tests passed locally. An example Wrangler
+configuration also passed a local dry-run bundle with no bindings, routes or
+account configured; workers.dev and preview URLs are disabled in that example.
+Cloudflare's application form describes exact custom-scheme redirect URIs as
+supported, although acceptance and device callback behavior are not yet tested.
+The probe checks the assertion
 and bearer syntax but relies on Access to validate the actual bearer: before
 using it as evidence, test invalid and mismatched tokens at the protected edge
 and disable alternative Worker URLs/routes. The Operations connector consistency
