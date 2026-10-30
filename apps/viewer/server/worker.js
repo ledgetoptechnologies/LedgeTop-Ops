@@ -4,6 +4,7 @@ const {reconcileProviderlessRetries}=require('./providerlessRetryReconciliation'
 const {processReferenceOne}=require('./referenceAppDispatch');
 const {retireSupersededOutputs,purgeSupersededOutputs}=require('./outputSupersession');
 const {processOneMeasurementCalculation}=require('./measurementCalculationWorker');
+const {cleanupExpiredUpload}=require('./uploadCleanup');
 const maintenanceAbort=new AbortController();
 for(const signal of ['SIGINT','SIGTERM'])process.once(signal,()=>maintenanceAbort.abort());
 const workerInstanceId=/^[a-f0-9-]{36}$/i.test(process.env.WORKER_INSTANCE_ID||'')?process.env.WORKER_INSTANCE_ID:crypto.randomUUID();
@@ -25,7 +26,7 @@ async function runMaintenance(){maintenanceActive=true;try{
   const pointCloud=await maintenanceStep('point-cloud-reconciliation',()=>reconcileMissingPointCloudAssets(processing,storage,{limit:5}));if(pointCloud&&(pointCloud.scanned||pointCloud.registered))console.log(`Point-cloud reconciliation: scanned=${pointCloud.scanned} registered=${pointCloud.registered}`);
   const lodStorage=await maintenanceStep('lod-derivative-storage-reconciliation',()=>reconcileLodDerivativeStorage(processing,storage,{limit:100}));if(lodStorage&&(lodStorage.scanned||lodStorage.removed))console.log(`LOD derivative storage reconciliation: scanned=${lodStorage.scanned} removed=${lodStorage.removed}`);
   if(stopped)return;
-  for(const id of processing.expiredUploads().slice(0,20))await maintenanceStep('expired-upload-cleanup',()=>{if(processing.uploadContainsCsv(id)||!processing.expireUpload(id))return;storage.cleanupUpload(id);});
+  for(const id of processing.expiredUploads().slice(0,20))await maintenanceStep('expired-upload-cleanup',()=>cleanupExpiredUpload(processing,storage,id));
   const superseded=await maintenanceStep('superseded-output-retirement',()=>retireSupersededOutputs(processing,storage,{limit:1,signal:maintenanceAbort.signal}));if(superseded?.length)console.log(`Output supersession: inspected=${superseded.length} retired=${superseded.filter(item=>item.status==='retired').length} retained=${superseded.filter(item=>item.status!=='retired').length}`);
   await maintenanceStep('superseded-output-verified-purge',()=>purgeSupersededOutputs(processing,storage,{limit:1,signal:maintenanceAbort.signal}));
   await maintenanceStep('trash-retention-purge',()=>purgeExpiredTrash(processing,storage,{actor:owner,limit:20,onPurged:(item)=>repository.audit({actorType:'system',actorId:owner,action:`${item.entityType}.retention_purged`,entityType:item.entityType,entityId:item.entityId})}));

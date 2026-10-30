@@ -21,3 +21,32 @@ test('dataset trash and upload admission serialize and preserve unfinished CSV s
  assert.equal(b.getUpload(photoUpload.upload.id).status,'cancelled');assert.ok(b.expiredUploads().includes(photoUpload.upload.id),'cancelled cache is eligible for crash-recoverable cleanup');
  assert.equal(b.admitUpload(input(photo,[file('photo.jpg')])),null);
 });
+
+test('completed cleanup receipts prevent older sessions starving the queue',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-cleanup-receipts-')),databasePath=path.join(root,'fixture.sqlite');
+ let db=openDatabase(databasePath);t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
+ let p=new ProcessingRepository(db);const project=p.createProject({displayName:'Synthetic'}),dataset=p.createDataset({projectId:project.id,displayName:'Synthetic',rootKey:'datasets',relativePath:'synthetic',storageMode:'managed'});
+ const files=[{id:'photo',relativePath:'photo.jpg',byteSize:1,sha256:'a'.repeat(64)}];
+ for(let i=0;i<25;i++)p.createUpload({datasetId:dataset.id,subject:'fixture',files,chunkSize:1,expiresAt:'2000-01-01T00:00:00.000Z'});
+ const first=p.expiredUploads().slice(0,20);assert.equal(first.length,20);
+ const {cleanupExpiredUpload}=require('../server/uploadCleanup'),removed=[];
+ for(const id of first)assert.equal(cleanupExpiredUpload(p,{cleanupUpload:id=>removed.push(id)},id),true);
+ assert.equal(removed.length,20);
+ const remaining=p.expiredUploads();assert.equal(remaining.length,5);assert.ok(remaining.every(id=>!first.includes(id)));
+ assert.throws(()=>cleanupExpiredUpload(p,{cleanupUpload:()=>{throw Error('injected interruption');}},remaining[0]),/injected interruption/);
+ assert.equal(p.expiredUploads().length,4,'failed cleanup temporarily yields to later work');
+ assert.ok(p.expiredUploads(Date.now()+61000).includes(remaining[0]),'failed cleanup becomes retryable');
+ assert.equal(p.expireUpload(remaining[1]),true);assert.ok(p.expiredUploads().includes(remaining[1]),'a claim without a cleanup receipt is retried');
+ db.close();db=openDatabase(databasePath);p=new ProcessingRepository(db);
+ assert.equal(p.expiredUploads().length,4,'receipts and retry state survive reopening');
+});
+
+test('twenty persistent cleanup failures do not hide later sessions',t=>{
+ const db=openDatabase(':memory:');t.after(()=>db.close());const p=new ProcessingRepository(db);
+ const project=p.createProject({displayName:'Synthetic'}),dataset=p.createDataset({projectId:project.id,displayName:'Synthetic',rootKey:'datasets',relativePath:'synthetic',storageMode:'managed'});
+ const files=[{id:'photo',relativePath:'photo.jpg',byteSize:1,sha256:'a'.repeat(64)}];
+ for(let i=0;i<25;i++)p.createUpload({datasetId:dataset.id,subject:'fixture',files,chunkSize:1,expiresAt:'2000-01-01T00:00:00.000Z'});
+ const {cleanupExpiredUpload}=require('../server/uploadCleanup'),first=p.expiredUploads().slice(0,20);
+ for(const id of first)assert.throws(()=>cleanupExpiredUpload(p,{cleanupUpload:()=>{throw Error('offline');}},id),/offline/);
+ const next=p.expiredUploads().slice(0,20);assert.equal(next.length,5);assert.ok(next.every(id=>!first.includes(id)));
+});

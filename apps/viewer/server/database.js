@@ -2401,6 +2401,12 @@ const MIGRATIONS = [
       AND (NEW.id IS NOT OLD.id OR NEW.rowid IS NOT OLD.rowid OR NEW.task_id IS NOT OLD.task_id OR NEW.attempt_number IS NOT OLD.attempt_number OR NEW.dataset_id IS NOT OLD.dataset_id OR NEW.provider_id IS NOT OLD.provider_id OR NEW.provider_task_id IS NOT OLD.provider_task_id OR NEW.options_json IS NOT OLD.options_json OR NEW.capability_fingerprint IS NOT OLD.capability_fingerprint OR NEW.reservation_required IS NOT OLD.reservation_required)
       BEGIN SELECT RAISE(ABORT,'initialization snapshot parent identity'); END;
   `},
+  {version:55,name:'upload_cleanup_receipts',sql:`
+    CREATE TABLE upload_cleanup_receipts (
+      upload_id TEXT PRIMARY KEY REFERENCES upload_sessions(id) ON DELETE CASCADE,
+      completed_at TEXT, next_attempt_at TEXT, failure_count INTEGER NOT NULL DEFAULT 0
+    );
+  `},
 ];
 
 function applyMigrations(database) {
