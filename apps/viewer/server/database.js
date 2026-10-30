@@ -2043,6 +2043,18 @@ const MIGRATIONS = [
   }},
   {version:40,name:'direct_client_session_source_authorizations',sql:'SELECT 1;',
     after(database){require('./directClientSourceMigration').migrateDirectClientSources(database);}},
+  {version:44,name:'processing_attempt_reservation_capabilities',sql:`
+    ALTER TABLE processing_attempts ADD COLUMN reservation_required INTEGER NOT NULL DEFAULT 0 CHECK (reservation_required IN (0,1));
+    ALTER TABLE processing_providers ADD COLUMN reservation_required INTEGER NOT NULL DEFAULT 0 CHECK (reservation_required IN (0,1));
+    CREATE TABLE processing_attempt_reservations (
+      attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id),
+      provider_id TEXT NOT NULL REFERENCES processing_providers(id),
+      provider_task_id TEXT NOT NULL,
+      capability_ciphertext TEXT NOT NULL,
+      capability_key_id TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `},
 ];
 
 function applyMigrations(database) {

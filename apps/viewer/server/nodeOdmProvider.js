@@ -50,7 +50,7 @@ function detectProviderType(info) {
 }
 
 class NodeOdmProvider {
-  constructor({ endpoint, token = '', fetchImpl = fetch, timeoutMs = 30000, transferTimeoutMs = 6*3600_000, providerType = null }) {
+  constructor({ endpoint, token = '', fetchImpl = fetch, timeoutMs = 30000, transferTimeoutMs = 6*3600_000, providerType = null, attemptCapability = null }) {
     const url = new URL(endpoint);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('invalid provider endpoint');
     this.endpoint = url.toString().replace(/\/$/, '');
@@ -59,6 +59,9 @@ class NodeOdmProvider {
     this.timeoutMs = timeoutMs;
     this.transferTimeoutMs = transferTimeoutMs;
     this.providerType = providerType;
+    if (attemptCapability !== null && (typeof attemptCapability !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(attemptCapability) || Buffer.from(attemptCapability, 'base64url').toString('base64url') !== attemptCapability)) throw new Error('invalid attempt capability');
+    if (attemptCapability !== null && url.protocol !== 'https:') throw new Error('attempt capability requires HTTPS');
+    this.attemptCapability = attemptCapability;
   }
 
   url(route, query = {}) {
@@ -70,7 +73,13 @@ class NodeOdmProvider {
 
   async request(route, init = {}, query = {}, { timeoutMs=this.timeoutMs, signal=null } = {}) {
     const timeout=AbortSignal.timeout(timeoutMs),combined=signal?AbortSignal.any([timeout,signal]):timeout;
-    const response = await this.fetch(this.url(route, query), { ...init, redirect:'error', signal:combined });
+    let requestInit = init;
+    if (this.attemptCapability && route.startsWith('/task/')) {
+      const headers = new Headers(init.headers || {});
+      headers.set('X-LedgeTop-Capability', this.attemptCapability);
+      requestInit = { ...init, headers };
+    }
+    const response = await this.fetch(this.url(route, query), { ...requestInit, redirect:'error', signal:combined });
     if (!response.ok) {
       try { await response.body?.cancel(); } catch { /* best effort */ }
       const error = new Error(`ODM request failed with HTTP ${response.status}`);
@@ -97,6 +106,14 @@ class NodeOdmProvider {
       testedBaseline: detectedType === 'clusterodm' ? '1.5.x' : '2.2.3',
       compatibilityWarning: null,
     };
+    // This optional extension is an observation, not proof that an existing
+    // attempt may be downgraded to legacy behavior after a restart.
+    if (info.ledgetopReservations !== undefined) {
+      const reservation = info.ledgetopReservations;
+      if (reservation?.version === 1 && reservation.capabilityEncoding === 'base64url-32' && reservation.retention === 'indefinite' && reservation.runningCancellation === 'requires_inspection' && Number.isSafeInteger(reservation.remaining) && reservation.remaining >= 0) {
+        capabilities.reservations = { version: 1, remaining: reservation.remaining };
+      }
+    }
     const compatibilityContract={apiVersion:capabilities.apiVersion,engine:capabilities.engine,engineVersion:capabilities.engineVersion,maxImages:capabilities.maxImages,maxParallelTasks:capabilities.maxParallelTasks,providerType:capabilities.providerType,options:capabilities.options};
     return { capabilities, fingerprint: crypto.createHash('sha256').update(JSON.stringify(compatibilityContract)).digest('hex') };
   }
@@ -133,7 +150,9 @@ class NodeOdmProvider {
       throw error;
     }
     if (!info || info.uuid !== uuid || !info.status || !Number.isFinite(Number(info.status.code))) throw new Error('provider returned an incompatible task response');
+    if(Object.hasOwn(info,'ledgetopHeld')&&(info.ledgetopHeld!==true||Number(info.status.code)!==20))throw new Error('provider returned an incompatible held status');
     return { uuid:info.uuid, status:STATUS[Number(info.status?.code)] || 'unknown', statusCode:Number(info.status?.code),
+      ...(info.ledgetopHeld===true?{held:true}:{}),
       progress:Math.max(0,Math.min(1,Number(info.progress||0)/100)), imagesCount:info.imagesCount,
       ...Object.fromEntries(['engine','engineVersion'].filter(key=>typeof info[key]==='string'&&/^[A-Za-z0-9._+ -]{1,120}$/.test(info[key])).map(key=>[key,info[key]])) };
   }

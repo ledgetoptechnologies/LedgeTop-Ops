@@ -509,13 +509,39 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   router.use('/api/v1/tasks/:id/attempts',(req,res,next)=>req.method==='POST'&&!processing.workerStatus().live?error(res,503,'processing_worker_unavailable'):next());
   router.post('/api/v1/tasks/:id/attempts',authorize('viewer.processing.write'),mutate,(req,res)=>{const checked=validatedAttemptInput(req.params.id,req.body||{});if(checked.error)return error(res,checked.status,checked.error);try{const attempt=processing.createAttempt({taskId:req.params.id,providerId:checked.value.provider.id,presetId:checked.value.preset?.id,options:checked.value.options,capabilityFingerprint:checked.value.provider.capabilityFingerprint,createdBy:req.actorId});return res.status(202).json({attempt});}catch(e){return error(res,409,e.code||'attempt_not_created');}});
   router.get('/api/v1/attempts/:id',authorize('viewer.processing.read'),(req,res)=>{const a=processing.getAttempt(req.params.id);return a?res.json({attempt:a,logs:processing.listLogs(a.id,req.query.logLimit)}):error(res,404,'attempt_not_found');});
-  router.post('/api/v1/attempts/:id/cancel',authorize('viewer.processing.write'),mutate,async(req,res)=>{const a=processing.getAttempt(req.params.id);if(!a)return error(res,404,'attempt_not_found');const cancelled=processing.cancelAttempt(a.id,req.actorId);if(a.providerTaskId&&['queued_upstream','running'].includes(a.status)){try{const p=processing.getProvider(a.providerId);if(p)await new NodeOdmProvider({endpoint:p.endpoint,token:providerCredentials.resolve(p.id),providerType:p.type,...(providerFetch?{fetchImpl:providerFetch}:{})}).cancel(a.providerTaskId);}catch(e){processing.appendLog(a.id,'warning',`Upstream cancellation could not be confirmed: ${sanitizeLogMessage(e.message)}`);}}res.json({attempt:cancelled});});
+  router.post('/api/v1/attempts/:id/cancel',authorize('viewer.processing.write'),mutate,async(req,res)=>{
+    const a=processing.getAttempt(req.params.id);if(!a)return error(res,404,'attempt_not_found');
+    const reservation=processing.getAttemptReservation(a.id);
+    if(reservation){
+      try{
+        const p=processing.getProvider(a.providerId);
+        if(!p||reservation.providerId!==a.providerId||reservation.providerTaskId!==a.providerTaskId)throw new Error('reservation identity unavailable');
+        const capability=providerCredentials.openAttemptCapability(a.providerId,a.id,a.providerTaskId,reservation);
+        const adapter=new NodeOdmProvider({endpoint:p.endpoint,token:providerCredentials.resolve(p.id),providerType:p.type,attemptCapability:capability,...(providerFetch?{fetchImpl:providerFetch}:{})});
+        const protocol=require('./processingReservationProtocol');
+        const reserved=await protocol.action(adapter,'reserve',a.providerTaskId,capability);
+        if(reserved.state!=='cancelled')await protocol.action(adapter,'cancel',a.providerTaskId,capability);
+        const cancelled=processing.cancelAttempt(a.id,req.actorId,{reservationConfirmed:true});
+        return cancelled?res.json({attempt:cancelled}):error(res,409,'cancel_conflict');
+      }catch(e){return error(res,409,'provider_cancellation_unresolved','Coordinator cancellation could not be confirmed; the attempt remains available for inspection.');}
+    }
+    let cancelled;try{cancelled=processing.cancelAttempt(a.id,req.actorId);}catch(e){if(['provider_execution_unresolved','reservation_cancel_required'].includes(e.code))return error(res,409,e.code,e.message);throw e;}
+    if(a.providerTaskId&&['queued_upstream','running'].includes(a.status)){try{const p=processing.getProvider(a.providerId);if(p)await new NodeOdmProvider({endpoint:p.endpoint,token:providerCredentials.resolve(p.id),providerType:p.type,...(providerFetch?{fetchImpl:providerFetch}:{})}).cancel(a.providerTaskId);}catch(e){processing.appendLog(a.id,'warning',`Upstream cancellation could not be confirmed: ${sanitizeLogMessage(e.message)}`);}}
+    return res.json({attempt:cancelled});
+  });
   router.post('/api/v1/attempts/:id/recover-ingest',authorize('viewer.processing.write'),mutate,async(req,res,next)=>{
     if(!onlyKeys(req.body,[]))return error(res,400,'invalid_request');
     try{
       const context=inspectIngestRecovery(processing,req.params.id);
       validateIngestRecoveryStorage(context,storage);
-      const adapter=new NodeOdmProvider({endpoint:context.provider.endpoint,token:providerCredentials.resolve(context.provider.id),providerType:context.provider.type,...(providerFetch?{fetchImpl:providerFetch}:{})});
+      let capability=null;
+      if(processing.attemptRequiresReservation(context.attempt.id)){
+        const reservation=processing.getAttemptReservation(context.attempt.id);
+        if(!reservation||reservation.providerId!==context.attempt.providerId||reservation.providerTaskId!==context.attempt.providerTaskId)return error(res,503,'ingest_recovery_provider_unavailable');
+        capability=providerCredentials.openAttemptCapability(context.attempt.providerId,context.attempt.id,context.attempt.providerTaskId,reservation);
+      }
+      const adapter=new NodeOdmProvider({endpoint:context.provider.endpoint,token:providerCredentials.resolve(context.provider.id),providerType:context.provider.type,attemptCapability:capability,...(providerFetch?{fetchImpl:providerFetch}:{})});
+      if(capability){try{const probe=await adapter.capabilities();if(probe.capabilities?.reservations?.version!==1)return error(res,503,'ingest_recovery_provider_unavailable');}catch{return error(res,503,'ingest_recovery_provider_unavailable');}}
       let status;try{status=await adapter.status(context.attempt.providerTaskId);}catch{ return error(res,503,'ingest_recovery_provider_unavailable'); }
       const fresh=inspectIngestRecovery(processing,req.params.id);
       if(fresh.fingerprint!==context.fingerprint)return error(res,409,'ingest_recovery_state_changed');
