@@ -16,3 +16,6 @@ scripts/native-staff-cutover-approved-executor.mjs text eol=lf
 scripts/native-staff-cutover-distribution-pin.mjs text eol=lf
 scripts/native-staff-cutover-owner-approval-cli.mjs text eol=lf
 scripts/data/production-auto-asset-bootstrap/*.json text eol=lf
+scripts/production-auto-migration-profile/*.json text eol=lf
+apps/viewer/release-assets/viewer-gZcdd1xa.js -text
+scripts/native-staff-cohort-review-bridge-installed-profile.json text eol=lf

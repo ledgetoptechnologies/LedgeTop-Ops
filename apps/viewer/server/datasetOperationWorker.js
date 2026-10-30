@@ -34,7 +34,11 @@ async function finalizeUpload(operation, { processing, storage }, owner, updateP
     const expected = Math.ceil(file.byteSize / upload.chunkSize) || 1;
     if (chunks.length !== expected || chunks.some((chunk, chunkIndex) => chunk.chunk_index !== chunkIndex))
       throw Object.assign(new Error('upload is incomplete'), { code: 'upload_incomplete' });
-    files.push(await storage.assembleFile(upload, file, chunks, existing.relativePath));
+    // Upload file IDs are scoped to the upload session (for chunk lookup and
+    // resume); dataset_files IDs are global. Do not persist the former as the
+    // latter, since browser clients reuse names such as "file-0" in each upload.
+    const { id: uploadFileId, ...assembled } = await storage.assembleFile(upload, file, chunks, existing.relativePath);
+    files.push(assembled);
     await updateProgress(0.05 + 0.9 * (index + 1) / Math.max(1, upload.files.length));
   }
   const dataset = processing.finalizeDataset(existing.id, files, manifestHash(files));

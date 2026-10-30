@@ -2180,4 +2180,6 @@
 .quick-request-actions { display: flex; flex-wrap: wrap; gap: .6rem; }
 .quick-request-actions > button { min-height: 44px; }
 @media (max-width: 560px) { .quick-request-actions > button { flex: 1 1 100%; } }
+.unified-portal-request-unavailable p { margin: 0 0 .75rem; }
+.unified-portal-request-note { margin: .75rem 0 0; color: var(--muted, #5d6873); font-size: .9rem; }
 .portal-finance-dates { display: block; margin-top: .25rem; color: var(--muted, #5d6873); font-size: .85rem; font-variant-numeric: tabular-nums; }

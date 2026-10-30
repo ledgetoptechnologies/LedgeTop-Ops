@@ -82,6 +82,8 @@ test("staff share one published model with a client, with no business project or
   await expect(dialog.getByRole("heading", { name: "Share Seawall orthomosaic" })).toBeVisible();
   await expect(dialog.getByRole("tab", { name: "Client Workspace" })).toHaveAttribute("aria-selected", "true");
   await dialog.getByRole("option", { name: /Harbor Authority/ }).click();
+  await expect(dialog.getByRole("checkbox", { name: "See camera photos" })).not.toBeChecked();
+  await dialog.getByRole("checkbox", { name: "See camera photos" }).check();
   await dialog.getByRole("checkbox", { name: "Download files" }).check();
   await dialog.getByRole("checkbox", { name: /^Never/ }).uncheck();
   await dialog.getByLabel("Last day (Central time)").fill("2026-12-31");
@@ -255,7 +257,7 @@ test("public links are offered only for a single model with a public version", a
   await dialog.getByRole("button", { name: "Create link" }).click();
   await expect(dialog.getByLabel("New link")).toHaveValue(`${VIEWER}/s/abc`);
   const created = calls.find(call => call.method === "POST" && call.path === "/api/viewer/models/model-ortho/shares")!;
-  expect(created.body).toEqual({ label: null, expiresAt: null, displayUnits: "imperial", permissions: { view: true, measure: true, cameras: true, download: false } });
+  expect(created.body).toEqual({ label: null, expiresAt: null, displayUnits: "imperial", permissions: { view: true, measure: true, cameras: false, download: false } });
   expect(posts(calls)).toHaveLength(0);
 });
 
@@ -339,7 +341,7 @@ test("an unconfirmed public link is retried with the identical body and key, nev
   expect(sent[1]!.key).toBe(sent[0]!.key);
   expect(sent[1]!.body).toEqual(sent[0]!.body);
   expect(sent[0]!.body).toEqual({ label: "Board review", expiresAt: null, displayUnits: "metric", password: "correct horse",
-    permissions: { view: true, measure: true, cameras: true, download: false } });
+    permissions: { view: true, measure: true, cameras: false, download: false } });
 });
 
 test("Client Workspace is the first and selected method", async ({ page }) => {
@@ -464,4 +466,50 @@ test("an unconfirmed public link older than the retry window is held and its pas
   await expect.poll(() => calls.filter(call => call.method === "GET" && call.path === "/api/viewer/models/model-ortho/shares").length).toBeGreaterThan(gets);
   expect(calls.filter(call => call.method === "POST")).toHaveLength(1);
   expect(attempts).toBe(1);
+});
+
+test("a new client share leaves camera photos off unless staff turn them on", async ({ page }) => {
+  const calls = await mockOps(page, MANAGER, (url, method, route) =>
+    url.pathname === "/api/viewer/direct-client-grants" && method === "POST" ? route.fulfill({ status: 201, json: { grant: grant(), replayed: false } }) : undefined);
+  const dialog = await openShare(page, "Seawall orthomosaic");
+  await dialog.getByRole("option", { name: /Harbor Authority/ }).click();
+  await expect(dialog.getByRole("checkbox", { name: "See camera photos" })).not.toBeChecked();
+  await dialog.getByRole("button", { name: "Review share" }).click();
+  const review = dialog.getByRole("region", { name: "Review share" });
+  await expect(review).toContainText("They can view the model and take measurements.");
+  await expect(review).not.toContainText("camera photos");
+  await dialog.getByRole("button", { name: "Share", exact: true }).click();
+  await expect(dialog.getByRole("status").filter({ hasText: "Shared with Harbor Authority" })).toBeVisible();
+  expect(posts(calls)[0]!.body).toMatchObject({ permissions: { measure: true, cameras: false, download: false } });
+  // The next share starts from the same defaults, not from what was last chosen.
+  await dialog.getByRole("option", { name: /Harbor Authority/ }).click();
+  await expect(dialog.getByRole("checkbox", { name: "See camera photos" })).not.toBeChecked();
+});
+
+test("a new public link leaves camera photos off, and staff can include them deliberately", async ({ page }) => {
+  let next = 0;
+  const calls = await mockOps(page, MANAGER, (url, method, route) => {
+    if (url.pathname === "/api/viewer/models/model-ortho/shares" && method === "GET") return route.fulfill({ json: { shares: [] } });
+    if (url.pathname === "/api/viewer/models/model-ortho/shares" && method === "POST") {
+      next += 1;
+      return route.fulfill({ status: 201, json: { share: { id: `share-${next}`, label: null, expiresAt: null, hasPassword: false,
+        permissions: { view: true, measure: true, cameras: next === 2, download: false },
+        accessCount: 0, lastAccessedAt: null, revokedAt: null, createdAt: date }, viewUrl: `${VIEWER}/s/link-${next}` } });
+    }
+    return undefined;
+  });
+  const dialog = await openShare(page, "Seawall orthomosaic");
+  await dialog.getByRole("tab", { name: "Public link" }).click();
+  const photos = dialog.getByRole("checkbox", { name: "Show camera photos and where they were taken" });
+  await expect(photos).not.toBeChecked();
+  await dialog.getByRole("checkbox", { name: "Never expires" }).check();
+  page.once("dialog", confirm => void confirm.accept());
+  await dialog.getByRole("button", { name: "Create link" }).click();
+  await expect(dialog.getByLabel("New link")).toHaveValue(`${VIEWER}/s/link-1`);
+  await photos.check();
+  page.once("dialog", confirm => void confirm.accept());
+  await dialog.getByRole("button", { name: "Create link" }).click();
+  await expect(dialog.getByLabel("New link")).toHaveValue(`${VIEWER}/s/link-2`);
+  const sent = calls.filter(call => call.method === "POST" && call.path === "/api/viewer/models/model-ortho/shares");
+  expect(sent.map(call => (call.body as { permissions: { cameras: boolean } }).permissions.cameras)).toEqual([false, true]);
 });

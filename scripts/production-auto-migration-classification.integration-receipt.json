@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "status": "source-only-integration-held",
+  "integrationBaseCommit": "c443ff8063e02a7a9aece4584a356bdb436b2224",
+  "reviewedMigrationSourceCommit": "1e09732cf4c8f863800cde3cc0ebbedd5a72a2ca",
+  "historicalActualReceiptSourceCommit": "c88011f7600e5f04dc96d5ab7ed1eacfa157c7c8",
+  "historicalActualReceiptSha256": "d26d0517dff914668d6cf4b824797dd167803b32c26898dbab7e749792103ab6",
+  "profileFiles": {
+    "scripts/production-auto-migration-profile/reconciliation-manifest.json": {
+      "reviewedBytesSha256": "33f661636025c8432aa862b158703df9053f79ca7532813cea0e23cc3c181faa",
+      "checkoutEol": "LF; runtime restores reviewed CRLF byte sequence before hash validation"
+    },
+    "scripts/production-auto-migration-profile/append-plan.json": {
+      "reviewedBytesSha256": "142ccefd193341dafb0796fa046ecd7f559d9ab6af6f70217f9a52043a16685d",
+      "checkoutEol": "LF; runtime restores reviewed CRLF byte sequence before hash validation"
+    }
+  },
+  "profileCheckoutVerification": "Fresh temporary Git checkout with core.autocrlf=true produced LF files; restored reviewed-byte hashes matched both original profile pins.",
+  "sharedCollector": {
+    "module": "scripts/production-auto-migration-readiness.mjs",
+    "function": "collectProductionMigrationEvidence",
+    "classificationModuleLines": 128,
+    "priorCandidateModuleLines": 452,
+    "duplicateReaderLinesRemoved": 324,
+    "rowsExposedAfter": "fixed target/query and response bounds, protocol/row/write validation, clock deadline, and current source tree verification"
+  },
+  "runtimeClassification": {
+    "preservedBase": "held with migration_required_pending",
+    "fullAppend": "held with migration_application_schema_confirmation_required",
+    "partialReorderedTamperedUnexpectedOrSourceDrift": "fail closed"
+  },
+  "verification": {
+    "command": "node --test scripts/workflow-trigger-policy.test.mjs scripts/production-auto-ci.test.mjs scripts/production-auto-migration-readiness.test.mjs scripts/production-auto-migration-classification.test.mjs scripts/production-auto-runtime.test.mjs scripts/production-auto-sync-runtime.test.mjs",
+    "passed": 89,
+    "failed": 0,
+    "liveProviderRequests": 0,
+    "liveMigrationWrites": 0,
+    "liveDeployments": 0
+  },
+  "remainingPrerequisites": [
+    "A separately reviewed and independently verified physical application-schema confirmation contract is absent.",
+    "No DDL, production schema acceptance, feature activation, or release authorization is included."
+  ]
+}

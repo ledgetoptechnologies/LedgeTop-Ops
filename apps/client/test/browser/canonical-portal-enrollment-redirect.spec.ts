@@ -3,12 +3,13 @@ import { legacyClientRedirectLocation } from "../../src/worker/origin-policy";
 
 const intentId = "00000000-0000-4000-8000-000000000001", opaqueToken = "ab".repeat(32);
 const path = `/portal/operations-recipient-enrollment/${intentId}`;
+const fixtureOrigin = process.env.PLAYWRIGHT_FIXTURE_ORIGIN ?? "http://127.0.0.1:4173";
 
 for (const environment of ["production", "staging"] as const) {
   test(`${environment}: canonical consent consumes the retained historical intent fragment before API requests`, async ({ page }) => {
     const suffix = environment === "staging" ? "-staging" : "";
     const old = `https://client${suffix}.ledgetopdroneservices.com`;
-    const portal = `https://portal${suffix}.ledgetopdroneservices.com`;
+    const portal = environment === "production" ? "https://portal.ledgetop.app" : "https://portal-staging.ledgetopdroneservices.com";
     const publicOrigin = environment === "staging" ? "https://delivery-staging.ledgetopdroneservices.com" : portal;
     const configuration = { ENVIRONMENT: environment, EXPECTED_HOST: new URL(publicOrigin).hostname,
       PUBLIC_BASE_URL: publicOrigin, PUBLIC_SHARE_ORIGIN: publicOrigin, CLIENT_PORTAL_ORIGIN: portal,
@@ -25,7 +26,7 @@ for (const environment of ["production", "staging"] as const) {
           expiresAt: new Date(Date.now() + 60_000).toISOString() } });
         throw new Error("Read-only browser inspection must not redeem enrollment");
       }
-      const response = await route.fetch({ url: `http://127.0.0.1:4173${url.pathname}${url.search}` });
+      const response = await route.fetch({ url: `${fixtureOrigin}${url.pathname}${url.search}` });
       return route.fulfill({ response });
     });
     try {

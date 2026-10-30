@@ -1,6 +1,7 @@
 import type { EvidenceState, FetchStatus, StaffTenantView } from "@ltds/shared/competitor-intel";
 import { ApiError, api } from "./api";
 import { bool, isTenantView, list, num, oneOf, orNull, shape, str, text, type Check } from "./intel-validate";
+import { isGoogleAdsInt63 } from "./intel-format";
 
 /** Ledge Top's own businesses, as the server lets this person see them. Intel is internal: clients never see it. */
 export type IntelBusiness = { key: string; name: string };
@@ -51,6 +52,21 @@ export type WebsiteMonitor = {
   receipt: Receipt;
 };
 
+/**
+ * Google Ads totals for Ledge Top's own advertising over one exact period, as the signed feed reported them. Amounts
+ * are exact decimal strings: cost in micros of `currencyCode`, impressions and clicks as whole numbers, conversions
+ * with up to six decimals. When `totals.state` isn't "observed" every figure is null and `reason` says why: nothing is
+ * shown as zero. `period` and `currencyCode` are null only when no Ads account is connected.
+ */
+export type GoogleAdsState = "observed" | "unknown" | "failed" | "source_stale" | "no_account";
+export type GoogleAdsSummary = {
+  schema: "ops.intel.owner-google-ads.v1"; rangeSelection: IntelRange;
+  period: { start: string; end: string; days: 7 | 28 | 90; timeZone: string } | null; currencyCode: string | null;
+  totals: { costMicros: string | null; impressions: string | null; clicks: string | null; conversions: string | null; state: GoogleAdsState; reason: SourceReason | null };
+  freshness: { collectedAt: string; asOf: string | null; state: GoogleAdsState };
+  receipt: Receipt;
+};
+
 /** A section that has nothing to show yet; `code` is the server's reason (not connected, awaiting first data, no data for this period). */
 export class IntelUnavailable extends Error {
   constructor(readonly code: string) { super(code); }
@@ -96,6 +112,31 @@ const isWebsite = shape({
     dataRange: orNull(span), partial: bool, partialReason: reason, limits: list(text) }),
   receipt,
 });
+const whole: Check = isGoogleAdsInt63;
+const metric: Check = value => typeof value === "string" && /^(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,6})?$/.test(value);
+const zone: Check = value => {
+  if (typeof value !== "string" || !value || value.length > 64) return false;
+  try { return new Intl.DateTimeFormat("en-US", { timeZone: value }).resolvedOptions().timeZone === value; } catch { return false; }
+};
+const adsState = oneOf("observed", "unknown", "failed", "source_stale", "no_account");
+const adsReason = orNull(oneOf("not_checked", "provider_metrics_failed", "provider_error", "source_stale", "consent_missing", "no_account"));
+const isAdsShape = shape({
+  schema: value => value === "ops.intel.owner-google-ads.v1", rangeSelection: oneOf("7d", "28d", "90d"),
+  period: orNull(shape({ start: day, end: day, days: value => value === 7 || value === 28 || value === 90, timeZone: zone })),
+  currencyCode: orNull(value => typeof value === "string" && /^[A-Z]{3}$/.test(value)),
+  totals: shape({ costMicros: orNull(whole), impressions: orNull(whole), clicks: orNull(whole), conversions: orNull(metric), state: adsState, reason: adsReason }),
+  freshness: shape({ collectedAt: instant, asOf: orNull(instant), state: adsState }),
+  receipt,
+});
+/** Figures and their state must agree: observed has every figure and an account, anything else has none. */
+function adsConsistent(value: GoogleAdsSummary) {
+  const t = value.totals, figures = [t.costMicros, t.impressions, t.clicks, t.conversions];
+  if (value.freshness.state !== t.state) return false;
+  if (t.state === "no_account") return value.period === null && value.currencyCode === null && t.reason === "no_account" && figures.every(item => item === null);
+  if (value.period === null || value.currencyCode === null) return false;
+  return t.state === "observed" ? t.reason === null && figures.every(item => item !== null) : t.reason !== null && figures.every(item => item === null);
+}
+
 const isBusinesses = shape({ businesses: list(shape({ key: str, name: str })) });
 
 /** True when a span covers exactly the requested number of days, so a 28-day answer can never be shown as the last 7 days. */
@@ -121,5 +162,12 @@ export async function loadWebsiteMonitor(key: string, range: IntelRange, signal?
 export async function loadSearchStats(key: string, range: IntelRange, signal?: AbortSignal) {
   const value = await read<SearchStats>(`${base(key)}/search-console?range=${range}`, isSearch, signal);
   if (value.coverage.rangeSelection !== range || !covers(value.range, range)) throw new IntelMalformed("Intel answered for a different period.");
+  return value;
+}
+export async function loadGoogleAds(key: string, range: IntelRange, signal?: AbortSignal) {
+  const value = await read<GoogleAdsSummary>(`${base(key)}/google-ads?range=${range}`, isAdsShape, signal);
+  if (!adsConsistent(value)) throw new IntelMalformed("Intel answered in an unexpected shape.");
+  if (value.rangeSelection !== range || value.period && (value.period.days !== Number(range.slice(0, -1)) || !covers(value.period, range)))
+    throw new IntelMalformed("Intel answered for a different period.");
   return value;
 }

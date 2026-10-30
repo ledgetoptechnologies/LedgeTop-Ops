@@ -20,8 +20,8 @@ import { selectedClientUiReleaseShell } from "../src/worker/ui-release-routes";
 import type { Env } from "../src/worker/types";
 
 const context = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
-function fixture() {
-  const portal = "https://portal.example.test", alias = "https://portal-alias.example.test";
+function fixture(portal = "https://portal.example.test") {
+  const alias = "https://portal-alias.example.test";
   const publicOrigin = "https://delivery.example.test", legacy = "https://legacy.example.test", retired = "https://retired.example.test";
   const assets = vi.fn(async () => new Response("retained legacy shell", { headers: { "Content-Type": "text/html" } }));
   const fetchRelease = vi.fn(async (input: RequestInfo | URL) => {
@@ -46,8 +46,66 @@ describe("Client additive UI routing through real Hono admission", () => {
       const response = await f.request(path);
       expect(response.status).toBe(200); expect(await response.text()).toBe("retained legacy shell");
       expect(response.headers.get("Cache-Control")).toBe("no-store"); expect(response.headers.get("X-Robots-Tag")).toBe("noindex, nofollow");
+      expect(response.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin-allow-popups");
     }
     expect(f.assets).toHaveBeenCalledTimes(2); expect(f.fetchRelease).not.toHaveBeenCalled(); expect(f.prepare).not.toHaveBeenCalled();
+  });
+
+  it("allows opener-preserving COOP only on successful private Portal SPA documents", async () => {
+    const f = fixture(); f.env.UI_ACTIVE_RELEASE = "";
+    for (const path of ["/portal", "/portal/", "/portal/dashboard", "/portal/projects", "/portal/projects/project-a", "/portal/deliveries",
+      "/portal/requests", "/portal/requests/new", "/portal/feedback/feedback-a", "/portal/account",
+      "/portal/viewer/native/workspace/project/association/model", "/portal/not-a-private-route"]) {
+      const response = await f.request(path);
+      expect(response.status).toBe(200); expect(response.headers.get("Content-Type")).toContain("text/html");
+      expect(response.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin-allow-popups");
+    }
+    for (const path of ["/portal/invitations/accept", "/portal/recipient-enrollment/intent-a"]) {
+      const response = await f.request(path);
+      expect(response.status).toBe(200); expect(response.headers.get("Content-Type")).toContain("text/html");
+      expect(response.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin");
+    }
+    for (const path of ["/portal/invitations/accept/", "/portal/recipient-enrollment/intent-a/",
+      "/portal/operations-recipient-enrollment/intent-a/", "/portal/operations-recipient-enrollment/intent-a"]) {
+      const response = await f.request(path);
+      expect(response.status).toBe(200); expect(response.headers.get("Content-Type")).toContain("text/html");
+      expect(response.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin-allow-popups");
+    }
+    f.assets.mockResolvedValueOnce(new Response("forbidden", { status: 403, headers: { "Content-Type": "text/html" } }));
+    const deniedHtml = await f.request("/portal/account");
+    expect(deniedHtml.status).toBe(403); expect(deniedHtml.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin");
+    const share = await f.request("/s/public-share");
+    expect(share.status).toBe(404);
+    expect(share.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin");
+    const api = await f.request("/health");
+    expect(api.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin");
+    const deniedApi = await f.request("/api/client/session");
+    expect(deniedApi.status).toBe(401); expect(deniedApi.headers.get("Content-Type")).toContain("application/json");
+    expect(deniedApi.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin");
+    const asset = await f.request("/assets/main.js");
+    expect(asset.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin");
+    const portalHead = await f.request("/portal", { method: "HEAD" });
+    expect(portalHead.status).toBe(200); expect(await portalHead.text()).toBe("");
+    expect(portalHead.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin-allow-popups");
+    expect(f.assets).toHaveBeenCalledTimes(21);
+  });
+
+  it("matches the native enrollment renderer origin boundary before excluding its document from opener-preserving COOP", async () => {
+    const path = "/portal/operations-recipient-enrollment/intent-a";
+    const allowedLegacy = fixture("https://client-staging.ledgetopdroneservices.com");
+    const nativeEntry = await allowedLegacy.request(path);
+    expect(nativeEntry.status).toBe(200);
+    expect(nativeEntry.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin");
+
+    const canonical = fixture("https://portal.ledgetop.app");
+    const canonicalEntry = await canonical.request(path);
+    expect(canonicalEntry.status).toBe(200);
+    expect(canonicalEntry.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin");
+
+    const disallowed = fixture("https://portal.ledgetoptechnologies.com");
+    const portalEntry = await disallowed.request(path);
+    expect(portalEntry.status).toBe(200);
+    expect(portalEntry.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin-allow-popups");
   });
 
   it("selects a registered shell for portal deep links and strips credentials/query upstream", async () => {
@@ -58,6 +116,7 @@ describe("Client additive UI routing through real Hono admission", () => {
     expect(response.status).toBe(200); expect(await response.text()).toBe(release.html);
     expect(response.headers.get("Cache-Control")).toBe("no-store"); expect(response.headers.get("X-Robots-Tag")).toBe("noindex, nofollow");
     expect(response.headers.get("Content-Security-Policy")).toContain("default-src 'self'"); expect(response.headers.get("X-Frame-Options")).toBe("DENY");
+    expect(response.headers.get("Cross-Origin-Opener-Policy")).toBe("same-origin-allow-popups");
     const sent = f.fetchRelease.mock.calls[0]![0] as Request;
     expect(sent.url).toBe(`https://ui-release.invalid${release.prefix}/index.html`);
     expect([...sent.headers]).toEqual([]); expect(f.assets).not.toHaveBeenCalled(); expect(f.prepare).not.toHaveBeenCalled();
