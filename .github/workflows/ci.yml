@@ -41,7 +41,7 @@ jobs:
         run: node --test scripts/native-staff-bootstrap-provisioner.test.mjs scripts/native-staff-bootstrap-provisioner.windows.test.mjs
 
       - name: Verify guarded production deployment tooling without credentials
-        run: node --test scripts/production-deploy.test.mjs scripts/native-staff-cutover-readiness.test.mjs scripts/native-staff-cutover-access-group-observation.test.mjs scripts/access-group-read-capsule.test.mjs
+        run: node --test scripts/production-deploy.test.mjs scripts/ordinary-frontend-release-plan.test.mjs scripts/ordinary-frontend-preserved-preflight.test.mjs scripts/native-staff-cutover-readiness.test.mjs scripts/native-staff-cutover-access-group-observation.test.mjs scripts/access-group-read-capsule.test.mjs
 
       - name: Verify content-free Viewer startup diagnostics
         run: node --test scripts/viewer-startup-diagnostics.test.mjs
