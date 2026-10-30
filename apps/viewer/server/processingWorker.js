@@ -167,6 +167,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   // fallback after a crash between filesystem promotion and receipt commit.
   // Recheck in the actual existing-directory branch after source hashing.
   if(!fs.existsSync(destination)){
+    if(!processing.beginArchiveCapture(job.id,job.lease_owner))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
     let adapter;
     try{const capability=attemptCapability(processing,providerCredentials,attempt);adapter=adapterFor(provider,config,providerCredentials,capability);await requireReservationSupport(adapter,capability);}
     catch(error){if(processing.attemptRequiresReservation?.(attempt.id))throw Object.assign(new Error('Provider observation unavailable; ingestion will resume'),{code:'provider_observation_unavailable'});throw error;}
@@ -192,11 +193,11 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     if(!archiveReceipt)throw Object.assign(new Error('processing archive receipt or lease was lost'),{code:'lease_lost'});
   }else if(archiveReceipt){
     await verifyProcessingArchive(destination,archiveReceipt,{signal});
-  }else if(recoveredIngest){
+  }else if(recoveredIngest||processing.hasArchiveCaptureIntent(attempt.id)){
     throw Object.assign(new Error('recovered archive receipt is unavailable'),{code:'ingest_recovery_state_changed'});
   }
-  // Ordinary historical jobs retain their existing unreceipted-directory
-  // behavior; an audited recovery can never enter that compatibility path.
+  // Only pre-existing unmarked historical directories retain the legacy path.
+  // A newly started capture or audited recovery must have a receipt.
   const found=discoverOutputs(destination);if(!found.some((asset)=>['glb','obj','pointCloud','ortho','ept'].includes(asset.kind)))throw Object.assign(new Error('provider archive has no supported outputs'),{code:'missing_required_output'});
   if(!found.some((asset)=>asset.kind==='ept'))throw Object.assign(new Error('provider did not generate required EPT output'),{code:'missing_required_output'});
   const meshManifest=await verifyProviderMeshClosure(destination,found,{signal});

@@ -2078,6 +2078,13 @@ const MIGRATIONS = [
       created_at TEXT NOT NULL
     );
   `},
+  {version:45,name:'processing_archive_capture_intents',sql:`
+    CREATE TABLE processing_archive_capture_intents (
+      attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id),
+      provider_task_id TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `},
 ];
 
 function applyMigrations(database) {

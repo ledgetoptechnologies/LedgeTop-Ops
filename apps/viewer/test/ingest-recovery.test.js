@@ -178,6 +178,28 @@ test('recovery retry rejects a genuinely promoted archive without its database r
   assert.equal(f.database.prepare("SELECT COUNT(*) n FROM processing_jobs WHERE job_type='submit'").get().n,1);
 });
 
+test('ordinary capture intent blocks an unreceipted promoted tree after a lost receipt',linux,async t=>{
+  const http=require('node:http'),{processIngest}=require('../server/processingWorker'),{makeZip64EndRecord}=require('./helpers/zipFixture');
+  const f=await fixture(t);assert.equal((await f.post()).status,202);
+  const job=f.processing.claimJob('capture-worker'),destination=path.join(f.config.modelsMount,f.task.id,f.attempt.id);
+  // This models the ordinary ingest path, rather than the audited recovery path.
+  f.database.prepare("DELETE FROM audit_events WHERE action=? AND entity_id=?").run(ACTION,f.attempt.id);
+  const archive=makeZip64EndRecord([{path:'proof.txt',data:'preserve'}]);let downloads=0;
+  const upstream=http.createServer((_req,res)=>{downloads++;res.writeHead(200,{'content-length':archive.length});res.end(archive);});
+  await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)));
+  f.database.prepare('UPDATE processing_providers SET endpoint=? WHERE id=?').run(`http://127.0.0.1:${upstream.address().port}`,f.provider.id);
+  const original=f.processing.recordAttemptArchiveReceipt.bind(f.processing);f.processing.recordAttemptArchiveReceipt=()=>null;
+  await assert.rejects(processIngest(job,{...f,providerCredentials:{resolve:()=>''}}),{code:'lease_lost'});
+  f.processing.recordAttemptArchiveReceipt=original;
+  assert.equal(f.processing.hasArchiveCaptureIntent(f.attempt.id),true);assert.equal(downloads,1);
+  assert.equal(fs.readFileSync(path.join(destination,'proof.txt'),'utf8'),'preserve');
+  await assert.rejects(processIngest(job,{...f,providerCredentials:{resolve:()=>''}}),{code:'ingest_recovery_state_changed'});
+  assert.equal(downloads,1);assert.equal(fs.readFileSync(path.join(destination,'proof.txt'),'utf8'),'preserve');
+  assert.equal(f.processing.getAttemptTransferProvenance(f.attempt.id)?.archive||null,null);
+  assert.equal(f.database.prepare('SELECT COUNT(*) n FROM model_outputs').get().n,0);
+  assert.equal(f.database.prepare('SELECT COUNT(*) n FROM derivative_jobs').get().n,0);
+});
+
 test('recovery worker rejects same-size source replacement before any provider download',linux,async t=>{
   const f=await fixture(t),{processIngest}=require('../server/processingWorker');assert.equal((await f.post()).status,202);
   fs.writeFileSync(path.join(f.config.datasetsMount,'source','photo.jpg'),'other');

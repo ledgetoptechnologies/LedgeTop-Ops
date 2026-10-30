@@ -597,6 +597,15 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     const record=this.getAttemptTransferProvenance(job.attempt_id)?.initialization;if(!record)return true;
     record.ambiguous=true;this.database.prepare('UPDATE processing_attempt_transfer_provenance SET initialization_json=?,updated_at=? WHERE attempt_id=?').run(JSON.stringify(record),now(),job.attempt_id);return true;
   });}
+  beginArchiveCapture(jobId,owner){return this.transaction(()=>{
+    const job=this.provenanceJob(jobId,owner,'ingest');if(!job)return null;
+    const attempt=this.getAttempt(job.attempt_id);if(!attempt?.providerTaskId)return null;
+    const existing=this.database.prepare('SELECT provider_task_id FROM processing_archive_capture_intents WHERE attempt_id=?').get(attempt.id);
+    if(existing&&existing.provider_task_id!==attempt.providerTaskId)throw Object.assign(new Error('archive capture identity changed'),{code:'ingest_recovery_state_changed'});
+    if(!existing)this.database.prepare('INSERT INTO processing_archive_capture_intents(attempt_id,provider_task_id,created_at) VALUES(?,?,?)').run(attempt.id,attempt.providerTaskId,now());
+    return true;
+  });}
+  hasArchiveCaptureIntent(attemptId){return Boolean(this.database.prepare('SELECT 1 FROM processing_archive_capture_intents WHERE attempt_id=?').get(attemptId));}
   recordAttemptArchiveReceipt(jobId,owner,{archiveSha256,archiveFiles,archiveManifestSha256,archiveByteSize=null}){return this.transaction(()=>{
     const job=this.provenanceJob(jobId,owner,'ingest');if(!job)return null;
     const attempt=this.getAttempt(job.attempt_id),transfer=this.getAttemptTransferProvenance(attempt.id);
