@@ -107,7 +107,7 @@ COPY . .
 COPY --from=potree /potree ./public/potree
 RUN node scripts/patch-potree-ept.mjs public/potree/build/potree/potree.js
 RUN node scripts/build-potree-ept-worker.mjs
-RUN npx vite build
+RUN npx vite build && node scripts/carry-viewer-asset.cjs
 
 # ---------------------------------------------------------------------------
 # Stage 3: runtime — Node/Express server serves dist/ + the viewer API and

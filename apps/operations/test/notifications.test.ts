@@ -419,7 +419,7 @@ describe("client notifications", () => {
     expect(rendered.text).toContain("Existing project — North Distribution Center");
     expect(rendered.text).toContain("Scope: Progress mapping");
     expect(rendered.text).toContain("Location: Broadway, Green Bay, Wisconsin");
-    expect(rendered.text).toContain("Review in LTDS Operations: https://ops.example/operations/client-requests/request-north");
+    expect(rendered.text).toContain("Review in Ledge Top Operations: https://ops.example/operations/client-requests/request-north");
     const serialized = JSON.stringify(rendered);
     for (const excluded of ["flight", "accepted_pending_pa_linkage", "125000", "USD", "Q-0042", "site-contact@example.com", "billing@example.com"])
       expect(serialized).not.toContain(excluded);
@@ -485,6 +485,7 @@ describe("client notifications", () => {
     });
     const rendered = renderClientRequestNotification(snapshot, "https://client.example/portal/requests");
     expect(rendered.subject).toBe("Service request work area updated: North site mapping");
+    expect(rendered.text).toContain("Ledge Top updated the work area after staff review.");
     expect(rendered.text).toContain("Status: Work area updated");
     expect(rendered.text).toContain("Change: Service-area boundary adjusted; 1 point added");
     expect(rendered.html).toContain("<strong>Change:</strong>");

@@ -324,6 +324,13 @@ function createApiV1(repository) {
     return sendCurrentSession(req, res, current.session, current.token);
   });
 
+  // Recovery destinations are deployment configuration, not session identity
+  // or request-supplied redirect parameters. No model or access data is returned.
+  router.get('/api/v1/session-recovery', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ clientPortalOrigin: config.clientPortalBaseUrl || null });
+  });
+
   router.get('/api/v1/models', serviceOnly, (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.json({ models: repository.listModels().map(serviceCatalogModel) });

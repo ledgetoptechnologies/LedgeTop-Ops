@@ -672,7 +672,7 @@ const lifecyclePresentation: Record<
   work_area_changed: {
     subject: "Service request work area updated",
     status: "Work area updated",
-    introduction: "LTDS updated the work area after staff review.",
+    introduction: "Ledge Top updated the work area after staff review.",
   },
 };
 
@@ -687,7 +687,7 @@ export function renderClientRequestNotification(
       : snapshot.projectContext.label;
   const actionLabel =
     snapshot.action === "review_in_operations"
-      ? "Review in LTDS Operations"
+      ? "Review in Ledge Top Operations"
       : "Open the client portal";
   const subjectPrefix =
     snapshot.lifecycle === "submitted" && snapshot.action === "review_in_operations"

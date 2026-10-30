@@ -3,15 +3,17 @@ import { EmptyState, Skeleton } from "@ltds/ui";
 import { UNKNOWN_REASON_TEXT, type EvidenceState, type FetchStatus, type StaffTenantView, type UnknownReason } from "@ltds/shared/competitor-intel";
 import { ApiError } from "./api";
 import { CompetitorIntelTenant } from "./CompetitorIntel";
+import { formatGoogleAdsConversions, formatGoogleAdsCostMicros, formatGoogleAdsWhole } from "./intel-format";
 import {
-  INTEL_RANGES, IntelUnavailable, loadCompetitors, loadIntelBusinesses, loadSearchStats, loadWebsiteMonitor,
-  type IntelBusiness, type IntelRange, type SearchRow, type SearchStats, type SiteChangeType, type SourceReason, type StatedFact, type WebsiteMonitor,
+  INTEL_RANGES, IntelUnavailable, loadCompetitors, loadGoogleAds, loadIntelBusinesses, loadSearchStats, loadWebsiteMonitor,
+  type GoogleAdsSummary, type IntelBusiness, type IntelRange, type SearchRow, type SearchStats, type SiteChangeType, type SourceReason, type StatedFact, type WebsiteMonitor,
 } from "./intel-api";
 import "./IntelPage.css";
 
-type View = "competitors" | "website" | "search";
+type View = "competitors" | "website" | "search" | "ads";
 const VIEWS: ReadonlyArray<{ value: View; label: string }> = [
   { value: "competitors", label: "Competitor Intel" }, { value: "website", label: "Site monitor" }, { value: "search", label: "Search Console" },
+  { value: "ads", label: "Google Ads" },
 ];
 const isView = (value: string | null): value is View => VIEWS.some(view => view.value === value);
 const isRange = (value: string | null): value is IntelRange => INTEL_RANGES.some(range => range.value === value);
@@ -128,6 +130,7 @@ export function IntelPage() {
       {selection.view === "competitors" && <Competitors key={business.key} business={business} />}
       {selection.view === "website" && <Website key={`${business.key}-${selection.range}`} business={business} range={selection.range} />}
       {selection.view === "search" && <Search key={`${business.key}-${selection.range}`} business={business} range={selection.range} />}
+      {selection.view === "ads" && <GoogleAds key={`${business.key}-${selection.range}`} business={business} range={selection.range} />}
     </section>
   </div>;
 }
@@ -149,6 +152,7 @@ function BusinessSummary({ business, go }: { business: IntelBusiness; go: Go }) 
   const [competitors, retryCompetitors] = useSection<StaffTenantView>(signal => loadCompetitors(business.key, signal), [business.key]);
   const [site, retrySite] = useSection<WebsiteMonitor>(signal => loadWebsiteMonitor(business.key, OVERVIEW_RANGE, signal), [business.key]);
   const [search, retrySearch] = useSection<SearchStats>(signal => loadSearchStats(business.key, OVERVIEW_RANGE, signal), [business.key]);
+  const [ads, retryAds] = useSection<GoogleAdsSummary>(signal => loadGoogleAds(business.key, OVERVIEW_RANGE, signal), [business.key]);
   const row = (view: View) => ({ label: VIEWS.find(item => item.value === view)!.label, href: detailHref(business.key, view, OVERVIEW_RANGE), go });
   return <section className="intel-overview-card" aria-labelledby={headingId}>
     <h2 id={headingId}>{business.name}</h2>
@@ -164,13 +168,16 @@ function BusinessSummary({ business, go }: { business: IntelBusiness; go: Go }) 
         value.totals.clicks === null ? "Clicks not available" : plural(value.totals.clicks, "click", "clicks"),
         value.totals.impressions === null ? "Impressions not available" : plural(value.totals.impressions, "impression", "impressions"),
         value.freshness.stale ? "Out of date" : ""]} />
+      <SummaryRow {...row("ads")} state={ads} retry={retryAds} summary={value => value.totals.state === "observed"
+        ? [`${formatGoogleAdsCostMicros(value.totals.costMicros!, value.currencyCode!)} spent`, adsCountText(value.totals.clicks!, "click", "clicks")]
+        : [unknownText(adsEvidence(value.totals.state), value.totals.reason)]} />
     </ul>
   </section>;
 }
 
 /** What a section says when it has no figures: never a zero. */
-const overviewUnavailable = (code: string) => code === "intel_awaiting_first_data" ? "Waiting for the first data"
-  : code === "intel_range_unavailable" ? `Nothing reported for the last ${rangeLabel(OVERVIEW_RANGE)}` : "Not set up yet";
+const overviewUnavailable = (code: string) => code.endsWith("_awaiting_first_data") ? "Waiting for the first data"
+  : code.endsWith("_range_unavailable") ? `Nothing reported for the last ${rangeLabel(OVERVIEW_RANGE)}` : "Not set up yet";
 
 function SummaryRow<T>({ label, href, go, state, retry, summary }: { label: string; href: string; go: Go; state: Load<T>; retry: () => void; summary: (value: T) => string[] }) {
   return <li className="intel-overview-row">
@@ -338,6 +345,43 @@ function Search({ business, range }: { business: IntelBusiness; range: IntelRang
             columns={[{ label: "Day", cell: row => day(row.date) }, { label: "Clicks", numeric: true, cell: row => count(row.clicks) },
               { label: "Impressions", numeric: true, cell: row => count(row.impressions) }]} />
         </details>}
+      </>;
+    }}
+  </Status>;
+}
+
+/** Exact values from decimal feed strings; currency display rounds once to native minor-unit precision. */
+const adsCountText = (value: string, one: string, many: string) => `${formatGoogleAdsWhole(value)} ${value === "1" ? one : many}`;
+/** The Ads states, in the wording the other sources use. */
+const adsEvidence = (state: GoogleAdsSummary["totals"]["state"]): EvidenceState =>
+  state === "observed" ? "observed" : state === "failed" ? "failed" : state === "no_account" ? "not_connected" : "unknown";
+
+/** Ledge Top's own Google Ads totals for one period: read-only, exactly as Google Ads reported them. */
+function GoogleAds({ business, range }: { business: IntelBusiness; range: IntelRange }) {
+  const [state, retry] = useSection<GoogleAdsSummary>(signal => loadGoogleAds(business.key, range, signal), [business.key, range]);
+  const unavailable = (code: string): [string, string] => code === "intel_google_ads_awaiting_first_data"
+    ? ["Waiting for Google Ads data", `Google Ads is connected for ${business.name}, but no data has arrived yet.`]
+    : code === "intel_google_ads_range_unavailable" ? ["No Google Ads data for this period", `Google Ads hasn't reported the last ${rangeLabel(range)} for ${business.name}. Choose another period.`]
+    : ["Google Ads isn't connected", `Google Ads isn't connected for ${business.name} yet.`];
+  return <Status state={state} retry={retry} unavailable={unavailable}>
+    {ads => {
+      const { totals, period, currencyCode } = ads;
+      if (totals.state === "no_account" || !period || !currencyCode)
+        return <EmptyState title="No Google Ads account" detail={`No Google Ads account is connected for ${business.name}.`} />;
+      const observed = totals.state === "observed";
+      const notes = [observed ? "" : `Google Ads didn't report totals for this period: ${unknownText(adsEvidence(totals.state), totals.reason)}.`,
+        `Days and amounts follow the account's time zone (${period.timeZone}) and currency (${currencyCode}).`,
+        ads.freshness.asOf ? `Google Ads data as of ${stamp(ads.freshness.asOf)}.` : ""].filter(Boolean);
+      const figure = (value: string | null, format: (value: string) => string) => observed && value !== null ? format(value) : NOT_AVAILABLE;
+      return <>
+        <Freshness range={period} fetchedAt={ads.freshness.collectedAt} stale={totals.state === "source_stale"} source="Google Ads" />
+        <Coverage notes={notes} />
+        <div className="intel-metrics" role="list" aria-label="Google Ads totals">
+          <Metric label="Spend" value={figure(totals.costMicros, value => formatGoogleAdsCostMicros(value, currencyCode))} />
+          <Metric label="Impressions" value={figure(totals.impressions, formatGoogleAdsWhole)} />
+          <Metric label="Clicks" value={figure(totals.clicks, formatGoogleAdsWhole)} />
+          <Metric label="Conversions" value={figure(totals.conversions, formatGoogleAdsConversions)} />
+        </div>
       </>;
     }}
   </Status>;

@@ -63,14 +63,19 @@ installation requires a newly reviewed manifest. Cloudflared is pinned
 separately in trust config. This self-check does not defend against malicious
 code replacing the launcher or files before the check runs.
 
-## Provisioning is deliberately absent
+## Trust provisioning remains deliberately absent
 
 The source pin `PINNED_TRUST_CONFIG_SHA256` is an all-zero sentinel. Therefore
 the CLI refuses before token acquisition or network access. No trust config,
 owner pin, signing key, key verifier pin, or owner decision was created here.
-Before an authorized operator can use it, a separate reviewed provisioning
-change must establish, through an independently authenticated owner/governance
-process:
+An offline Windows candidate-preparation utility is documented in
+[`native-staff-bootstrap-trust-candidate.md`](native-staff-bootstrap-trust-candidate.md).
+It validates explicit operator inputs and can place an unapproved configuration
+and DPAPI-protected candidate key in an owner-and-SYSTEM-only directory. It does not change the
+sentinels below or satisfy any trust, consent, or registry provisioning
+requirement. Before an authorized operator can use the issuer, a separate
+reviewed provisioning change must establish, through an independently
+authenticated owner/governance process:
 
 - The exact Operations owner staff ID and Access subject, checked against the
   current native admission/profile and trusted owner record. Email or role is
