@@ -1,4 +1,6 @@
 import type { AuthenticatedNativeStaffWithAdmissionVersion } from "./native-staff-auth";
+import { operationsPortalNativeRecipientPermissionSchema, parseOperationsPortalNativeRecipientCapabilities,
+  OPERATIONS_PORTAL_NATIVE_RECIPIENT_HOME_PERMISSION } from "@ltds/shared/operations-portal-native-recipient-capabilities-v4";
 export { readOperationsPortalNativeWorkspaceCleanupForOwner, reserveOperationsPortalNativeWorkspaceCleanupRecovery,
   revokeOperationsPortalNativeWorkspaceAuthority }
   from "./operations-portal-native-workspace-cleanup";
@@ -15,7 +17,8 @@ type IntentRow = {
   target_relationship_version: number; token_sha256: string; state: IntentState; revision: number;
   access_issuer: string | null; access_subject: string | null; recipient_verified_until: string | null;
   recipient_binding_id: string | null; grant_operation_id: string | null; revoke_operation_id: string | null;
-  expires_at: string; recipient_label: string | null;
+  expires_at: string; recipient_label: string | null; permission_schema_version: 3 | 4;
+  requested_permissions_json: string;
 };
 type OperationRow = { action: string; request_sha256: string; resulting_revision: number; resulting_state: IntentState };
 type TargetContext = { target_id: string; revision: number; client_authority_id: string; workspace_id: string;
@@ -29,13 +32,25 @@ export type OperationsPortalNativeRecipientReview = Readonly<{
   intentId: string; revision: number; state: IntentState;
   target: Readonly<{ targetId: string; targetRevision: number; clientRecordId: string }>;
   principal: Principal | null; recipientBindingId: string | null; expiresAt: string;
+  permissionSchemaVersion: 3 | 4;
+  permissions: readonly [typeof OPERATIONS_PORTAL_NATIVE_RECIPIENT_HOME_PERMISSION]
+    | readonly ["operations.request.create", typeof OPERATIONS_PORTAL_NATIVE_RECIPIENT_HOME_PERMISSION];
+  capabilityStatus: "not_requested" | "pending" | "active" | "revoked" | "unavailable";
+  effectivePermissions: readonly string[];
 }>;
 export type IssueOperationsPortalNativeRecipientInput = Readonly<{
   operationId: string; targetId: string; targetClientRecordId: string; expiresAt: string; owner: Owner;
+  permissions?: readonly [typeof OPERATIONS_PORTAL_NATIVE_RECIPIENT_HOME_PERMISSION]
+    | readonly ["operations.request.create", typeof OPERATIONS_PORTAL_NATIVE_RECIPIENT_HOME_PERMISSION];
+  permissionSchemaVersion?: 3 | 4;
+  legacyShape?: boolean;
 }>;
 export type RedeemOperationsPortalNativeRecipientInput = Readonly<{
   operationId: string; intentId: string; opaqueToken: string; principal: Principal; verifiedUntil: string;
   acknowledgedTarget: TargetAcknowledgement; recipientLabel: string;
+  acknowledgedPermissions?: readonly [typeof OPERATIONS_PORTAL_NATIVE_RECIPIENT_HOME_PERMISSION]
+    | readonly ["operations.request.create", typeof OPERATIONS_PORTAL_NATIVE_RECIPIENT_HOME_PERMISSION];
+  acknowledgedPermissionSchemaVersion?: 3 | 4;
 }>;
 export type OwnerOperationsPortalNativeRecipientInput = Readonly<{
   operationId: string; intentId: string; expectedRevision: number; owner: Owner;
@@ -74,12 +89,24 @@ function actorDocument(owner: Owner, grantGeneration: number) {
     profileVersion: owner.identity.profileVersion, grantGeneration, verifiedUntil: owner.verifiedUntil };
 }
 function review(row: IntentRow, state = row.state, revision = row.revision): OperationsPortalNativeRecipientReview {
+  const permissions = parseOperationsPortalNativeRecipientCapabilities(row.permission_schema_version, "recipient.grant",
+    JSON.parse(row.requested_permissions_json));
+  if (!permissions || permissions.length === 0) denied();
   return Object.freeze({ intentId: row.intent_id, revision, state,
     target: Object.freeze({ targetId: row.target_id, targetRevision: row.target_revision,
       clientRecordId: row.target_client_record_id }),
     principal: row.access_issuer && row.access_subject
       ? Object.freeze({ issuer: row.access_issuer, subject: row.access_subject }) : null,
-    recipientBindingId: row.recipient_binding_id, expiresAt: row.expires_at });
+    recipientBindingId: row.recipient_binding_id, expiresAt: row.expires_at,
+    permissionSchemaVersion: row.permission_schema_version, permissions,
+    capabilityStatus: row.permission_schema_version === 4
+      ? row.state === "revoked" || row.state === "revoking" ? "revoked"
+        : row.state === "cancelled" ? "unavailable" : "pending"
+      : "not_requested",
+    // A request in the intent is not an effective capability. Until the
+    // companion receipt reader is integrated, this path deliberately reports
+    // no effective permissions instead of treating the v3 base grant as v4.
+    effectivePermissions: Object.freeze([]) });
 }
 function denied(): never { throw new Error("operations_portal_native_recipient_denied"); }
 async function generation(database: Pick<D1Database, "prepare">, owner: Owner) {
@@ -186,10 +213,21 @@ export async function issueOperationsPortalNativeRecipientIntent(database: D1Dat
   const session = database.withSession("first-primary"), grantGeneration = await generation(session, input.owner);
   if (!await ownerAuthorized(session, input.targetId, input.owner, grantGeneration)) denied();
   const target = await targetContext(session, input.targetId, input.targetClientRecordId); if (!target) denied();
+  const requestedPermissions = input.permissions ?? [OPERATIONS_PORTAL_NATIVE_RECIPIENT_HOME_PERMISSION] as const;
+  const permissionSchemaVersion = input.permissionSchemaVersion
+    ?? operationsPortalNativeRecipientPermissionSchema(requestedPermissions);
+  const parsedPermissions = parseOperationsPortalNativeRecipientCapabilities(permissionSchemaVersion,
+    "recipient.grant", requestedPermissions);
+  if (!parsedPermissions || parsedPermissions.length === 0
+    || operationsPortalNativeRecipientPermissionSchema(parsedPermissions) !== permissionSchemaVersion) denied();
+  const requestedPermissionsJson = JSON.stringify(parsedPermissions);
   const intentId = crypto.randomUUID(), token = opaqueToken(), tokenSha256 = await sha256(token);
-  const request = { expectedRevision: 0, targetId: target.target_id, targetRevision: target.revision,
+  const baseRequest = { expectedRevision: 0, targetId: target.target_id, targetRevision: target.revision,
     targetClientRecordId: input.targetClientRecordId, targetRelationshipVersion: target.relationship_version,
     expiresAt: input.expiresAt };
+  const legacyShape = input.legacyShape ?? (input.permissions === undefined && input.permissionSchemaVersion === undefined);
+  const request = legacyShape ? baseRequest : { ...baseRequest,
+    permissionSchemaVersion, permissions: parsedPermissions };
   const actor = actorDocument(input.owner, grantGeneration);
   const canonical = operationDocument("issue", input.operationId, intentId, request, actor);
   const digest = await sha256(canonical);
@@ -198,10 +236,12 @@ export async function issueOperationsPortalNativeRecipientIntent(database: D1Dat
       session.prepare(`INSERT INTO operations_portal_native_recipient_intents
         (intent_id,target_id,target_revision,target_client_record_id,target_relationship_version,token_sha256,state,revision,
          issued_by_staff_id,issued_access_subject,issued_email,issued_admission_version,issued_profile_version,
-         issued_grant_generation,expires_at) VALUES(?,?,?,?,?,?,'issued',1,?,?,?,?,?,?,?)`)
+         issued_grant_generation,expires_at,permission_schema_version,requested_permissions_json)
+        VALUES(?,?,?,?,?,?,'issued',1,?,?,?,?,?,?,?,?,?)`)
         .bind(intentId, target.target_id, target.revision, input.targetClientRecordId, target.relationship_version,
           tokenSha256, input.owner.identity.staffId, input.owner.identity.verifiedAccessSubject, input.owner.identity.email,
-          input.owner.admissionVersion, input.owner.identity.profileVersion, grantGeneration, input.expiresAt),
+          input.owner.admissionVersion, input.owner.identity.profileVersion, grantGeneration, input.expiresAt,
+          permissionSchemaVersion, requestedPermissionsJson),
       session.prepare(`INSERT INTO operations_portal_native_recipient_operations
         (operation_id,intent_id,action,expected_revision,resulting_revision,resulting_state,request_sha256,canonical_request_json,
          actor_staff_id,actor_access_subject,actor_email,actor_admission_version,actor_profile_version,
@@ -228,9 +268,18 @@ export async function issueOperationsPortalNativeRecipientIntent(database: D1Dat
     const historicalRequest = { expectedRevision: 0, targetId: row.target_id, targetRevision: row.target_revision,
       targetClientRecordId: row.target_client_record_id, targetRelationshipVersion: row.target_relationship_version,
       expiresAt: row.expires_at };
+    const explicitHistoricalRequest = { ...historicalRequest,
+      permissionSchemaVersion: row.permission_schema_version, permissions: JSON.parse(row.requested_permissions_json) };
     const historical = operationDocument("issue", input.operationId, row.intent_id, historicalRequest, actor);
-    if (operation.request_sha256 !== await sha256(historical) || input.targetId !== row.target_id
-      || input.targetClientRecordId !== row.target_client_record_id || input.expiresAt !== row.expires_at) denied();
+    const explicitHistorical = operationDocument("issue", input.operationId, row.intent_id, explicitHistoricalRequest, actor);
+    const exactRequest = operation.request_sha256 === await sha256(historical)
+      || operation.request_sha256 === await sha256(explicitHistorical)
+      || row.permission_schema_version === 3
+        && row.requested_permissions_json === `["${OPERATIONS_PORTAL_NATIVE_RECIPIENT_HOME_PERMISSION}"]`
+        && operation.request_sha256 === await sha256(historical);
+    if (!exactRequest || input.targetId !== row.target_id
+      || input.targetClientRecordId !== row.target_client_record_id || input.expiresAt !== row.expires_at
+      || permissionSchemaVersion !== row.permission_schema_version || requestedPermissionsJson !== row.requested_permissions_json) denied();
     return Object.freeze({ review: review(row, "issued", 1), opaqueToken: null, replayed: true as const });
   }
 }
@@ -261,13 +310,22 @@ export async function redeemOperationsPortalNativeRecipientIntent(database: D1Da
     || !Number.isSafeInteger(input.acknowledgedTarget.targetRevision) || input.acknowledgedTarget.targetRevision < 1
     || !bounded(input.acknowledgedTarget.clientRecordId, 191)) denied();
   const session = database.withSession("first-primary"), row = await intent(session, input.intentId); if (!row) denied();
+  if (row.permission_schema_version === 4
+    && (input.acknowledgedPermissionSchemaVersion !== row.permission_schema_version
+      || JSON.stringify(input.acknowledgedPermissions) !== row.requested_permissions_json)) denied();
+  if (input.acknowledgedPermissions !== undefined
+    && (input.acknowledgedPermissionSchemaVersion !== row.permission_schema_version
+      || JSON.stringify(input.acknowledgedPermissions) !== row.requested_permissions_json)) denied();
   const tokenSha256 = await sha256(input.opaqueToken);
-  const request = { expectedRevision: 1, targetId: input.acknowledgedTarget.targetId,
+  const baseRequest = { expectedRevision: 1, targetId: input.acknowledgedTarget.targetId,
     targetRevision: input.acknowledgedTarget.targetRevision,
     targetClientRecordId: input.acknowledgedTarget.clientRecordId,
     targetRelationshipVersion: row.target_relationship_version, tokenSha256,
     issuer: input.principal.issuer, subject: input.principal.subject, recipientLabel: input.recipientLabel,
     verifiedUntil: input.verifiedUntil };
+  const request = row.permission_schema_version === 4 ? { ...baseRequest,
+    permissionSchemaVersion: input.acknowledgedPermissionSchemaVersion!,
+    permissions: input.acknowledgedPermissions! } : baseRequest;
   const canonical = operationDocument("redeem", input.operationId, input.intentId, request, null), digest = await sha256(canonical);
   try {
     await session.batch([
