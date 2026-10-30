@@ -1,10 +1,11 @@
 import { HTTPException } from 'hono/http-exception';
-import { hasLocalGlobalAllow, isAdministrator, requirePermission, sqlScope } from './acl';
+import { evaluatePermission, hasLocalGlobalAllow, isAdministrator, prepareAclAdministratorRead, prepareAclGrantRead, prepareAclLocalGlobalAllowRead, requirePermission, scopeFromAclGrantSnapshot, sqlScope } from './acl';
 import { paResourceFilter } from './visibility';
 import { localDivisionJoin } from './local-project-division';
-import { base64url, recheckPilotSession, type PilotSession } from './ios-pilot-session';
-import type { Env } from './types';
-import { assertDeploymentConfiguredProjectAlphaConnectorsForRead } from './project-alpha-connectors';
+import { base64url, type PilotSession } from './ios-pilot-session';
+import type { Env, GrantRow } from './types';
+import { assertProjectAlphaReadSnapshot, prepareProjectAlphaReadSnapshot, projectAlphaReadSnapshotStatements } from './project-alpha-connectors';
+import { preparePilotStaffSnapshot } from './ios-pilot-staff-snapshot';
 
 export type PilotOperation = { id: string; title: string; status: string; scheduledStart: string | null;
   scheduledEnd: string | null; location: string | null; projectName: string | null; divisionName: string | null };
@@ -30,34 +31,39 @@ function cursorValue(cursor: string | null): string | null {
   } catch { throw new HTTPException(400, { message: 'Invalid page cursor' }); }
 }
 export async function readPilotOperations(env: Env, session: PilotSession, options: { cursor?: string | null; id?: string }) {
-  await assertDeploymentConfiguredProjectAlphaConnectorsForRead(env);
+  const connectorPlan = await prepareProjectAlphaReadSnapshot(env);
   const before = await scope(env, session);
   const afterId = cursorValue(options.cursor ?? null);
   if (options.id !== undefined && (!options.id || options.id.length > 512)) throw new HTTPException(404, { message: 'Operation not found' });
   const selector = options.id !== undefined ? 'AND o.id=?' : afterId !== null ? 'AND o.id>?' : '';
   const values = options.id !== undefined ? [options.id] : afterId !== null ? [afterId] : [];
-  const result = await env.OPS_DB.withSession('first-primary').prepare(`${projection} WHERE ${before.sql} ${selector} ORDER BY o.id ASC LIMIT 51`)
-    .bind(...before.values, ...values).all<PilotOperation>();
-  await recheckPilotSession(env, session);
-  if (JSON.stringify(before) !== JSON.stringify(await scope(env, session)))
+  const db = env.OPS_DB.withSession('first-primary');
+  const staff = await preparePilotStaffSnapshot(env, db, session);
+  if (!staff) throw new HTTPException(403, { message: 'Session changed; sign in again' });
+  const connectorStatements = projectAlphaReadSnapshotStatements(db, connectorPlan);
+  const staffCount = staff.statements.length;
+  const batches = await db.batch([...staff.statements,
+    prepareAclGrantRead(db, session.principal.id),
+    prepareAclAdministratorRead(db, session.principal.id),
+    prepareAclLocalGlobalAllowRead(db, session.principal.id, 'operations.view_all'),
+    ...connectorStatements,
+    db.prepare(`${projection} WHERE ${before.sql} ${selector} ORDER BY o.id ASC LIMIT 51`).bind(...before.values, ...values),
+  ]);
+  if (batches.some(batch => !batch.success || !Array.isArray(batch.results)) ||
+      !staff.verify(batches.slice(0, staffCount), Math.floor(Date.now() / 1000)))
+    throw new HTTPException(403, { message: 'Session changed; sign in again' });
+  const grants = batches[staffCount]!.results as GrantRow[];
+  const administrator = batches[staffCount + 1]!.results.length > 0;
+  const all = administrator || batches[staffCount + 2]!.results.length > 0;
+  const finalGrants = scopeFromAclGrantSnapshot(grants, 'operations.view');
+  const finalScope = paResourceFilter(administrator ? finalGrants : { ...finalGrants, divisions: [] }, session.principal, administrator, 'o', 'operation', all);
+  if (!evaluatePermission(grants, session.principal, 'operations.view') || JSON.stringify(before) !== JSON.stringify(finalScope))
     throw new HTTPException(403, { message: 'Permissions changed; reload the pilot' });
-  await assertDeploymentConfiguredProjectAlphaConnectorsForRead(env);
-  // Re-evaluate mutable assignments and connector visibility, not just the
-  // shape of their SQL filter, after all identity/permission checks above.
-  if (result.results.length) {
-    const ids = result.results.map(row => row.id);
-    const stillVisible = await env.OPS_DB.withSession('first-primary').prepare(`SELECT o.id FROM pa_operations o
-      WHERE ${before.sql} AND o.id IN (${ids.map(() => '?').join(',')}) ORDER BY o.id ASC`)
-      .bind(...before.values, ...ids).all<{ id: string }>();
-    if (JSON.stringify(stillVisible.results.map(row => row.id)) !== JSON.stringify(ids))
-      throw new HTTPException(403, { message: 'Operation access changed; reload the pilot' });
-  }
-  await recheckPilotSession(env, session);
-  // The visibility query above can await while a role or permission changes.
-  // Re-evaluate authority after it, rather than returning rows under the old
-  // SQL scope just because the staff identity remains valid.
-  if (JSON.stringify(before) !== JSON.stringify(await scope(env, session)))
-    throw new HTTPException(403, { message: 'Permissions changed; reload the pilot' });
+  const connectorRows = batches.slice(staffCount + 3, staffCount + 3 + connectorStatements.length);
+  assertProjectAlphaReadSnapshot(connectorPlan,
+    (connectorRows[0]?.results ?? []) as Parameters<typeof assertProjectAlphaReadSnapshot>[1],
+    (connectorRows[1]?.results ?? []) as Parameters<typeof assertProjectAlphaReadSnapshot>[2]);
+  const result = batches[batches.length - 1]! as D1Result<PilotOperation>;
   if (options.id !== undefined) {
     if (result.results.length !== 1) throw new HTTPException(404, { message: 'Operation not found' });
     return { schemaVersion: 1, operation: result.results[0] };

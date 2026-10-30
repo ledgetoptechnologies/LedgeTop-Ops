@@ -4,6 +4,7 @@ import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import {
   assertDeploymentConfiguredProjectAlphaConnectorsForRead,
+  prepareProjectAlphaReadSnapshot, projectAlphaReadSnapshotStatements, assertProjectAlphaReadSnapshot,
   ensureDeploymentConfiguredProjectAlphaConnectors, listProjectAlphaConnectors, resolveProjectAlphaConnector,
   type ProjectAlphaConnectorEnvironment,
 } from "../src/worker/project-alpha-connectors";
@@ -42,6 +43,39 @@ beforeEach(async () => {
 afterEach(async () => { await runtime.dispose(); });
 
 describe("deployment-configured Project Alpha sources", () => {
+  it('validates connector rows captured in the caller batch and rejects drift without writes', async () => {
+    const plan = await prepareProjectAlphaReadSnapshot(env);
+    expect(JSON.stringify(plan)).not.toContain('private-api-key');
+    const check = async () => {
+      const [connectors, revisions] = await db.batch(projectAlphaReadSnapshotStatements(db, plan));
+      assertProjectAlphaReadSnapshot(plan,
+        connectors!.results as Parameters<typeof assertProjectAlphaReadSnapshot>[1],
+        revisions!.results as Parameters<typeof assertProjectAlphaReadSnapshot>[2]);
+    };
+    await expect(check()).rejects.toMatchObject({ code: 'changed' });
+    await ensureDeploymentConfiguredProjectAlphaConnectors(env);
+    const audit = await db.prepare('SELECT count(*) total FROM pa_connector_audit').first('total');
+    await expect(check()).resolves.toBeUndefined();
+    const [connectorRows, revisionRows] = await db.batch(projectAlphaReadSnapshotStatements(db, plan));
+    const connectors = connectorRows!.results as Parameters<typeof assertProjectAlphaReadSnapshot>[1];
+    const revisions = revisionRows!.results as Parameters<typeof assertProjectAlphaReadSnapshot>[2];
+    expect(() => assertProjectAlphaReadSnapshot(plan, connectors, revisions.slice(1)))
+      .toThrow();
+    const altered = revisions.map((row, index) => index === 0 ? { ...row, draft_quote_api_key_fingerprint: 'wrong' } : row);
+    expect(() => assertProjectAlphaReadSnapshot(plan, connectors, altered))
+      .toThrow();
+    const hidden = connectors.map(row => row.source_id === secondary ? { ...row, read_visible: 0 } : row);
+    expect(() => assertProjectAlphaReadSnapshot(plan, hidden, revisions)).toThrow();
+    await expect(assertDeploymentConfiguredProjectAlphaConnectorsForRead(env)).resolves.toBeUndefined();
+    expect(await db.prepare('SELECT count(*) total FROM pa_connector_audit').first('total')).toBe(audit);
+    await expect(prepareProjectAlphaReadSnapshot({ ...env, PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS: '{invalid' }))
+      .rejects.toMatchObject({ code: 'credentials_unavailable' });
+    const empty = await prepareProjectAlphaReadSnapshot({ ...env, PROJECT_ALPHA_CONNECTOR_SOURCES: undefined });
+    expect(projectAlphaReadSnapshotStatements(db, empty)).toEqual([]);
+    expect(() => assertProjectAlphaReadSnapshot(empty, [], [])).not.toThrow();
+    await expect(prepareProjectAlphaReadSnapshot({ ...env, PROJECT_ALPHA_CONNECTOR_SOURCES: undefined,
+      PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED: 'true' })).rejects.toMatchObject({ code: 'credentials_unavailable' });
+  }, 120_000);
   it('validates mobile read configuration without enrolling, reconciling, or writing connector state', async () => {
     await expect(assertDeploymentConfiguredProjectAlphaConnectorsForRead(env)).rejects.toMatchObject({ code: 'changed' });
     expect(await db.prepare('SELECT count(*) total FROM pa_connectors').first('total')).toBe(0);

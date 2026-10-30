@@ -191,9 +191,20 @@ semantics; alternating additional rechecks is insufficient. The final database
 snapshot defines the authorization point and cannot retract a response after a
 later revocation. A focused real-D1 diagnostic reproduced the race: an
 assignment was revoked during the final scope check and the stale operation was
-returned. The desired-denial regression is explicitly marked as an expected
-failure; it is not passing remediation evidence. Re-run race and equivalence
-tests after a full fix and before activation.
+returned. The local candidate now puts staff identity and admission, ACL grants,
+connector registry state, and the filtered operation projection in one D1 batch;
+it validates those results before returning the batch's rows. The full local
+pilot API suite passed 20 tests, including revocations immediately before that
+batch for assignments, sources, sessions and roles, and a managed detail-route
+regression. Staff snapshot tests passed three cases; ACL helper and existing ACL
+tests passed 11 cases. An independent local review found no concrete data-route
+authorization defect in the candidate. The connector suite passed its 12 other
+cases; its new snapshot case initially attempted a database update forbidden by
+an existing transition trigger, then passed after testing a modified snapshot
+without bypassing the trigger. This is local evidence, not staging or device
+validation: release configuration, actual Cloudflare sign-in and device checks
+still need verification before real-data activation.
+The separate session-status endpoint does not use the same atomic batch.
 The full final backend suite subsequently passed all 32 tests with a single
 worker. Swift 6.4 on WSL passed all 17 package tests, including five synthetic
 OAuth wire-format tests. Swift emitted an existing test-stub Sendable warning.

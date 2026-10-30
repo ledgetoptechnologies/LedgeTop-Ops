@@ -77,29 +77,35 @@ describe('isolated read-only iOS pilot', { timeout: 120_000 }, () => {
   }
   async function signIn(): Promise<Token> { const response = await exchange(await code()); expect(response.status).toBe(200); return response.json(); }
   function read(path: string, token: Token, method = 'GET') { return route(path, { method, headers: { Authorization: `Bearer ${token.accessToken}` } }); }
-  function raceEnvironment(mutate: () => Promise<unknown>, queryPrefix = 'SELECT o.id,o.title', occurrence = 1): Env {
-    let fired = false, matches = 0;
-    const wrap = (statement: D1PreparedStatement, sql: string): D1PreparedStatement => new Proxy(statement, {
+  function raceEnvironment(mutate: () => Promise<unknown>): { env: Env; wasTriggered: () => boolean } {
+    let fired = false;
+    const originals = new WeakMap<D1PreparedStatement, D1PreparedStatement>();
+    const dataStatements = new WeakSet<D1PreparedStatement>();
+    const wrap = (statement: D1PreparedStatement, sql: string): D1PreparedStatement => {
+      const proxy = new Proxy(statement, {
       get(target, key) {
         if (key === 'bind') return (...values: unknown[]) => wrap(target.bind(...values), sql);
-        if (key === 'all' && sql.trimStart().startsWith(queryPrefix)) return async () => {
-          const result = await target.all();
-          if (!fired && ++matches === occurrence) { fired = true; await mutate(); }
-          return result;
+        const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value;
+      },
+      });
+      originals.set(proxy, statement);
+      if (sql.trimStart().startsWith('SELECT o.id,o.title')) dataStatements.add(proxy);
+      return proxy;
+    };
+    const wrapSession = (session: D1DatabaseSession): D1DatabaseSession => new Proxy(session, {
+      get(target, key) {
+        if (key === 'prepare') return (sql: string) => wrap(target.prepare(sql), sql);
+        if (key === 'batch') return async (statements: D1PreparedStatement[]) => {
+          if (!fired && statements.some(statement => dataStatements.has(statement))) { fired = true; await mutate(); }
+          return target.batch(statements.map(statement => originals.get(statement) ?? statement));
         };
         const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value;
       },
     });
-    const wrapSession = (session: D1DatabaseSession): D1DatabaseSession => new Proxy(session, {
-      get(target, key) {
-        if (key === 'prepare') return (sql: string) => wrap(target.prepare(sql), sql);
-        const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value;
-      },
-    });
-    return { ...env, OPS_DB: new Proxy(db, { get(target, key) {
+    return { wasTriggered: () => fired, env: { ...env, OPS_DB: new Proxy(db, { get(target, key) {
       if (key === 'withSession') return (constraint?: Parameters<D1Database['withSession']>[0]) => wrapSession(target.withSession(constraint));
       const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value;
-    } }) };
+    } }) } };
   }
   async function operation(id: string, source = 'project-alpha:primary') {
     await db.prepare(`INSERT INTO pa_operations VALUES(?,?,'project',?,'scheduled','2026-10-29T13:00:00Z',NULL,NULL,1)`).bind(id, source, `Operation ${id}`).run();
@@ -203,17 +209,19 @@ describe('isolated read-only iOS pilot', { timeout: 120_000 }, () => {
     }
     expect(await db.prepare('SELECT count(*) n FROM pa_connectors').first('n')).toBe(0);
   });
-  it.each(['assignment', 'source', 'logout'] as const)('rejects %s revocation between the first data query and response', async kind => {
+  it.each(['assignment', 'source', 'logout', 'role'] as const)('does not expose rows after %s revocation before the data batch', async kind => {
     await db.prepare("UPDATE staff_role_assignments SET role_id='role-operator' WHERE staff_id=?").bind(fixture.owner.id).run();
     await operation('race'); await db.prepare("INSERT INTO pa_operation_assignments VALUES('race','pa-human',1)").run();
     const token = await signIn();
     const raced = raceEnvironment(async () => {
       if (kind === 'assignment') return db.prepare("UPDATE pa_operation_assignments SET active=0 WHERE operation_id='race'").run();
       if (kind === 'source') return db.prepare("INSERT INTO pa_connectors VALUES('project-alpha:primary',0)").run();
+      if (kind === 'role') return db.prepare("UPDATE staff_role_assignments SET role_id='role-no-permission' WHERE staff_id=?").bind(fixture.owner.id).run();
       return db.prepare('DELETE FROM ios_pilot_sessions').run();
     });
-    const response = await route('/mobile-pilot/v1/operations', { headers: { Authorization: `Bearer ${token.accessToken}` } }, raced);
-    expect(response.status).toBe(kind === 'logout' ? 401 : 403);
+    const response = await route('/mobile-pilot/v1/operations', { headers: { Authorization: `Bearer ${token.accessToken}` } }, raced.env);
+    expect(raced.wasTriggered()).toBe(true);
+    expect(response.status).toBe(kind === 'assignment' || kind === 'source' ? 200 : 403);
     expect(await response.text()).not.toContain('Operation race');
   });
   it('linked alternate login revocation invalidates its mobile session', async () => {
@@ -256,49 +264,33 @@ describe('isolated read-only iOS pilot', { timeout: 120_000 }, () => {
     expect((await call('/mobile-pilot/v1/operations/unassigned')).status).toBe(404);
     expect((await call('/mobile-pilot/v1/operations/foreign')).status).toBe(404);
     const raced = raceEnvironment(() => db.prepare("UPDATE pa_operation_assignments SET active=0 WHERE operation_id='assigned'").run());
-    const race = await call('/mobile-pilot/v1/operations', raced);
-    expect(race.status).toBe(403); expect(await race.text()).not.toContain('Operation assigned');
+    const race = await call('/mobile-pilot/v1/operations', raced.env);
+    expect(raced.wasTriggered()).toBe(true);
+    expect(race.status).toBe(200); expect(await race.text()).not.toContain('Operation assigned');
     await db.prepare('UPDATE native_staff_admissions SET active=0 WHERE staff_id=?').bind(fixture.owner.id).run();
     expect((await call('/mobile-pilot/v1/session')).status).toBe(403);
   });
-  it('managed facade rejects a permission revoked during the visibility recheck', async () => {
+  it('managed facade rejects a permission revoked before the data batch', async () => {
     await operation('late-revocation');
     const raced = raceEnvironment(() => db.prepare(
       "INSERT INTO staff_permission_overrides(staff_id,permission_key,effect,scope) VALUES(?,'operations.view','deny','global')"
-    ).bind(fixture.owner.id).run(), 'SELECT o.id FROM pa_operations o');
+    ).bind(fixture.owner.id).run());
     const response = await handleManagedIosPilot(new Request(pilotOrigin + '/mobile-pilot/v1/operations',
-      { headers: { Authorization: 'Bearer oauth:synthetic' } }), raced, managedConfig);
+      { headers: { Authorization: 'Bearer oauth:synthetic' } }), raced.env, managedConfig);
+    expect(raced.wasTriggered()).toBe(true);
     expect(response.status).toBe(403);
     expect(await response.text()).not.toContain('Operation late-revocation');
   });
-  async function lateAssignmentRevocation(): Promise<{ response: Response; fired: boolean; active: unknown }> {
+  it('does not expose detail when assignment is revoked before the data batch', async () => {
     await db.prepare("UPDATE staff_role_assignments SET role_id='role-operator' WHERE staff_id=?").bind(fixture.owner.id).run();
     await operation('late-assignment');
     await db.prepare("INSERT INTO pa_operation_assignments VALUES('late-assignment','pa-human',1)").run();
-    let fired = false;
-    // Each scope reads grants twice. The fifth read is requirePermission in
-    // the final scope, after the final assignment visibility query has returned.
-    const raced = raceEnvironment(async () => {
-      fired = true;
-      await db.prepare("UPDATE pa_operation_assignments SET active=0 WHERE operation_id='late-assignment'").run();
-    }, 'SELECT rp.permission_key', 5);
-    const response = await handleManagedIosPilot(new Request(pilotOrigin + '/mobile-pilot/v1/operations',
-      { headers: { Authorization: 'Bearer oauth:synthetic' } }), raced, managedConfig);
+    const raced = raceEnvironment(() => db.prepare("UPDATE pa_operation_assignments SET active=0 WHERE operation_id='late-assignment'").run());
+    const response = await handleManagedIosPilot(new Request(pilotOrigin + '/mobile-pilot/v1/operations/late-assignment',
+      { headers: { Authorization: 'Bearer oauth:synthetic' } }), raced.env, managedConfig);
     const active = await db.prepare("SELECT active FROM pa_operation_assignments WHERE operation_id='late-assignment'").first('active');
-    return { response, fired, active };
-  }
-  it('documents the currently observed assignment revocation race', async () => {
-    const { response, fired, active } = await lateAssignmentRevocation();
-    expect(fired).toBe(true); expect(active).toBe(0);
-    expect(response.status).toBe(200);
-    expect(await response.text()).toContain('Operation late-assignment');
-  });
-  // Release blocker: current implementation returns data after the assignment
-  // has been revoked during its final, separately awaited scope check.
-  it.fails('must reject a row when its assignment is revoked during final scope verification', async () => {
-    const { response, fired, active } = await lateAssignmentRevocation();
-    expect(fired).toBe(true); expect(active).toBe(0);
-    expect(response.status).toBe(403);
+    expect(raced.wasTriggered()).toBe(true); expect(active).toBe(0);
+    expect(response.status).toBe(404);
     expect(await response.text()).not.toContain('Operation late-assignment');
   });
 });
