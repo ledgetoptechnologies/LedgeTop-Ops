@@ -185,7 +185,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     if(!processing.beginArchiveCapture(job.id,job.lease_owner))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
     let adapter;
     try{const capability=attemptCapability(processing,providerCredentials,attempt);adapter=adapterFor(provider,config,providerCredentials,capability);await requireReservationSupport(adapter,capability);}
-    catch(error){if(processing.attemptRequiresReservation?.(attempt.id))throw Object.assign(new Error('Provider observation unavailable; ingestion will resume'),{code:'provider_observation_unavailable'});throw error;}
+    catch(error){if(binding)throw Object.assign(new Error('Staged commitment credentials or provider are unavailable'),{code:'staged_commitment_unavailable'});if(processing.attemptRequiresReservation?.(attempt.id))throw Object.assign(new Error('Provider observation unavailable; ingestion will resume'),{code:'provider_observation_unavailable'});throw error;}
     let response;
     try{response=await adapter.downloadAll(attempt.providerTaskId,{signal});}
     catch(error){if(processing.attemptRequiresReservation?.(attempt.id))throw Object.assign(new Error('Provider download unavailable; ingestion will resume'),{code:'provider_observation_unavailable'});throw error;}
