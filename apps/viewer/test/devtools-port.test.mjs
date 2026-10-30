@@ -72,3 +72,36 @@ test('browser port startup preserves caller launch and process-exit checks', asy
   assert.equal(reads, 0);
   assert.equal(sleeps, 0);
 });
+
+test('a Windows lock while Chromium writes the port file is waited out within the same deadline', async () => {
+  for (const code of ['EBUSY', 'EPERM']) {
+    let clock = 0, reads = 0, checks = 0;
+    const port = await waitForDevToolsPort('synthetic-only', {
+      platform: 'win32',
+      now: () => clock,
+      check: () => { checks++; },
+      read: () => { if (reads++ < 2) throw Object.assign(new Error('locked'), { code }); return `4321\n${endpoint}\n`; },
+      sleep: async ms => { clock += ms; },
+    });
+    assert.equal(port, 4321, code);
+    assert.equal(reads, 3);
+    assert.equal(checks, 3, 'the browser-exit check still runs on every attempt');
+  }
+  let clock = 0;
+  await assert.rejects(waitForDevToolsPort('synthetic-only', {
+    platform: 'win32', timeoutMs: 200, now: () => clock,
+    read: () => { throw Object.assign(new Error('locked'), { code: 'EBUSY' }); },
+    sleep: async ms => { clock += ms; },
+  }), /no complete valid DevToolsActivePort within 200 ms/, 'a lock that never clears still ends at the original deadline');
+});
+
+test('other read failures stay immediate, and EBUSY is only tolerated on Windows', async () => {
+  const fails = (platform, code) => waitForDevToolsPort('synthetic-only', {
+    platform,
+    read: () => { throw Object.assign(new Error(code), { code }); },
+    sleep: async () => { throw new Error('must not retry'); },
+  });
+  await assert.rejects(fails('win32', 'EACCES'), { code: 'EACCES' });
+  await assert.rejects(fails('linux', 'EBUSY'), { code: 'EBUSY' });
+  await assert.rejects(fails('linux', 'EPERM'), { code: 'EPERM' });
+});

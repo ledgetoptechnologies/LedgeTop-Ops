@@ -2043,6 +2043,29 @@ const MIGRATIONS = [
   }},
   {version:40,name:'direct_client_session_source_authorizations',sql:'SELECT 1;',
     after(database){require('./directClientSourceMigration').migrateDirectClientSources(database);}},
+  {version:41,name:'gcp_odm_crs_confirmations',sql:`CREATE TABLE gcp_odm_crs_confirmations (set_id TEXT PRIMARY KEY REFERENCES gcp_sets(id) ON DELETE CASCADE, source_sha256 TEXT NOT NULL, epsg_code INTEGER NOT NULL, horizontal_unit TEXT NOT NULL, vertical_datum TEXT NOT NULL, validation_sha256 TEXT NOT NULL, confirmed_by TEXT NOT NULL, confirmed_at TEXT NOT NULL);`},
+  {version:42,name:'viewer_workspace_hierarchy',sql:`
+    CREATE TABLE viewer_organizations (
+      id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')),
+      revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>=1)
+    );
+    CREATE TABLE viewer_project_groups (
+      id TEXT PRIMARY KEY, organization_id TEXT NOT NULL REFERENCES viewer_organizations(id) ON DELETE RESTRICT,
+      display_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')),
+      revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>=1), UNIQUE(id,organization_id)
+    );
+    CREATE TABLE viewer_project_hierarchy (
+      project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+      organization_id TEXT REFERENCES viewer_organizations(id) ON DELETE RESTRICT,
+      group_id TEXT REFERENCES viewer_project_groups(id) ON DELETE RESTRICT,
+      revision INTEGER NOT NULL CHECK(revision>=1),
+      CHECK(group_id IS NULL OR organization_id IS NOT NULL),
+      FOREIGN KEY(group_id,organization_id) REFERENCES viewer_project_groups(id,organization_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX viewer_project_groups_org_idx ON viewer_project_groups(organization_id);
+    CREATE INDEX viewer_project_hierarchy_org_idx ON viewer_project_hierarchy(organization_id,group_id);
+  `},
   {version:44,name:'processing_attempt_reservation_capabilities',sql:`
     ALTER TABLE processing_attempts ADD COLUMN reservation_required INTEGER NOT NULL DEFAULT 0 CHECK (reservation_required IN (0,1));
     ALTER TABLE processing_providers ADD COLUMN reservation_required INTEGER NOT NULL DEFAULT 0 CHECK (reservation_required IN (0,1));
@@ -2058,16 +2081,23 @@ const MIGRATIONS = [
 ];
 
 function applyMigrations(database) {
-  database.exec(`
+  const {assertProtectedMigrationIdentity}=require('./migrationIdentityGuard');
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    assertProtectedMigrationIdentity(database,MIGRATIONS);
+    database.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY,
       name TEXT NOT NULL,
       applied_at TEXT NOT NULL
     )
-  `);
+    `);
+    database.exec('COMMIT');
+  } catch(error) { database.exec('ROLLBACK'); throw error; }
   for (const migration of MIGRATIONS) {
     database.exec('BEGIN IMMEDIATE');
     try {
+      assertProtectedMigrationIdentity(database,MIGRATIONS);
       // Re-check only after holding SQLite's write reservation. The API and
       // worker can start against the same fresh/upgraded volume concurrently;
       // a pre-lock snapshot would let the waiter apply an already-committed
@@ -2082,6 +2112,7 @@ function applyMigrations(database) {
       database.prepare(
         'INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)',
       ).run(migration.version, migration.name, new Date().toISOString());
+      assertProtectedMigrationIdentity(database,MIGRATIONS);
       database.exec('COMMIT');
     } catch (error) {
       database.exec('ROLLBACK');
@@ -2115,9 +2146,16 @@ function openDatabase(databasePath) {
   // SQLite's journal-mode transition may return SQLITE_BUSY without invoking
   // the configured busy handler during simultaneous first boot. Retry only
   // that bounded initialization transition; migration locking remains native.
-  withBusyRetry(() => database.exec('PRAGMA journal_mode=WAL'));
-  database.exec('PRAGMA synchronous=NORMAL');
-  try { applyMigrations(database); }
+  try {
+    // Detect known collisions before changing the existing database's journal
+    // mode or applying any migration. Recheck under every migration lock.
+    database.exec('BEGIN IMMEDIATE');
+    try {require('./migrationIdentityGuard').assertProtectedMigrationIdentity(database,MIGRATIONS);database.exec('ROLLBACK');}
+    catch(error){database.exec('ROLLBACK');throw error;}
+    withBusyRetry(() => database.exec('PRAGMA journal_mode=WAL'));
+    database.exec('PRAGMA synchronous=NORMAL');
+    applyMigrations(database);
+  }
   catch (error) { database.close(); throw error; }
   return database;
 }

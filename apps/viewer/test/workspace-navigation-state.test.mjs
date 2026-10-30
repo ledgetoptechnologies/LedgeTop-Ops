@@ -18,6 +18,7 @@ test('saved GCP seeds and reverted edits are clean; actual changed or new marks 
   assert.equal(hasUnsavedGcpMark({task:{...workspace,editingId:null}},details),false);
   assert.equal(hasUnsavedGcpMark({task:workspace},{task:{gcp:{correspondences:[]}}}),true);
   assert.equal(hasUnsavedGcpMark({task:{...workspace,draftPixel:null}},details),false);
+  assert.equal(hasUnsavedGcpMark({task:{...workspace,draftPixel:null,draftPartial:true}},details),true);
   assert.equal(hasUnsavedGcpMark({task:{...workspace,draftPixel:{pixelX:NaN,pixelY:20}}},details),false);
 });
 test('actual GCP save handler exposes pending only during request, including rejected request finally',async()=>{
@@ -27,7 +28,7 @@ test('actual GCP save handler exposes pending only during request, including rej
     const w=structuredClone(workspace);w.draftPixel.pixelX=11;
     const save=new Function('navigationWork','state','gcpWorkspace','api','toast','refreshGcpWorkspace',handler+';return saveGcpMark;')(
       work,state,()=>w,()=>wait.promise,()=>{},async()=>{throw Error("Refresh unavailable");});
-    const pending=save({preventDefault(){},currentTarget:{dataset:{taskId:'task'},elements:{pixelX:{value:'11'},pixelY:{value:'20'},imageFileId:{value:'image'}}}});
+    const pending=save({preventDefault(){},currentTarget:{dataset:{taskId:'task'},elements:{pixelX:{value:'11'},pixelY:{value:'20'},imageFileId:{value:'image'},*[Symbol.iterator](){yield this.pixelX;yield this.pixelY;yield this.imageFileId}}}});
     assert.equal(work.snapshot().pendingGcpSave,true);assert.equal(state.busy,true);
     if(fail)wait.reject(new Error('denied'));else wait.resolve({correspondence:{...mark,pixelX:11}});
     await pending;

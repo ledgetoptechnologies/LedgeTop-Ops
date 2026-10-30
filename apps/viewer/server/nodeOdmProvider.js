@@ -46,6 +46,10 @@ function detectProviderType(info) {
     && info.cpuCores === 99999999999;
   if (/^1\./.test(info.version) && clusterSentinel) return 'clusterodm';
   if (/^2\./.test(info.version) && !clusterSentinel) return 'nodeodm';
+  // NodeODM's 3.6.2 image reports its package version here. Accept only the
+  // observed release and ODM engine until newer protocol versions are tested.
+  if (info.version === '3.6.2' && info.engine === 'odm' && info.engineVersion === '3.6.2'
+      && ![info.totalMemory,info.availableMemory,info.cpuCores].includes(99999999999)) return 'nodeodm';
   throw providerCapabilityError('provider_probe_ambiguous', 'The endpoint is NodeODM-compatible, but its engine type cannot be identified safely.');
 }
 
@@ -104,7 +108,8 @@ class NodeOdmProvider {
       availableMemory: info.availableMemory ?? null, cpuCores: info.cpuCores ?? null,
       providerType: detectedType, detectionMethod: 'capability-signature', options: normalizedOptions,
       testedBaseline: detectedType === 'clusterodm' ? '1.5.x' : '2.2.3',
-      compatibilityWarning: null,
+      compatibilityWarning: detectedType === 'nodeodm' && info.version === '3.6.2'
+        ? 'NodeODM 3.6.2 was detected; full processing compatibility has not yet been verified.' : null,
     };
     // This optional extension is an observation, not proof that an existing
     // attempt may be downgraded to legacy behavior after a restart.

@@ -30,8 +30,8 @@ const orthophotoFixture = Buffer.from(writeArrayBuffer(new Uint8Array([
 
 const fixtures = {
   projects: [
-    { id: 'project-johnson', displayName: 'Johnson Road Survey', description: 'Road corridor reconstruction', status: 'active' },
-    { id: 'project-quarry', displayName: 'Alpha Quarry', description: 'Quarry progress capture', status: 'active' },
+    { id: 'project-johnson', displayName: 'Johnson Road Survey', description: 'Road corridor reconstruction', status: 'active', organizationId: 'org-adams', groupId: null, hierarchyRevision: 1 },
+    { id: 'project-quarry', displayName: 'Alpha Quarry', description: 'Quarry progress capture', status: 'active', organizationId: 'org-zenith', groupId: null, hierarchyRevision: 1 },
   ],
   datasets: [
     { id: 'dataset-johnson', projectId: 'project-johnson', displayName: 'Johnson imagery', status: 'finalized', fileCount: 48, byteSize: 7340032 },
@@ -165,12 +165,46 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
       },
     });
   }
-  if (pathname === '/api/v1/projects') return json({ projects: fixtures.projects.filter(item=>!runtime.archivedProjects.has(item.id)), nextCursor: null });
+  // Hierarchy follows Codex's contract (apps/viewer/docs/workspace-hierarchy-api.md): revisions, 409 on stale writes,
+  // archived customers refuse new assignments, and a group must belong to the chosen customer.
+  const hierarchy = runtime.hierarchy;
+  const hierarchyError = (code, status = 400) => json({ error: code, code }, status);
+  if (pathname === '/api/v1/processing/hierarchy') return json({ schemaVersion: 1, organizations: hierarchy.organizations, groups: hierarchy.groups, nextCursor: null, capabilities: { manageHierarchy: runtime.manageHierarchy && (runtime.permissions || ['viewer.projects.write']).includes('viewer.projects.write') } });
+  const hierarchyEntity = pathname.match(/^\/api\/v1\/processing\/(organizations|project-groups)(?:\/([^/]+))?$/);
+  if (hierarchyEntity && ['POST', 'PATCH'].includes(method)) {
+    const kind = hierarchyEntity[1] === 'organizations' ? 'organizations' : 'groups';
+    if (method === 'POST') {
+      if (kind === 'groups' && hierarchy.organizations.find(item => item.id === body.organizationId)?.status !== 'active') return hierarchyError('organization_archived', 409);
+      const entity = { id: `${kind === 'groups' ? 'group' : 'org'}-created-${++hierarchy.sequence}`, ...(kind === 'groups' ? { organizationId: body.organizationId } : {}), displayName: String(body.displayName).trim(), status: 'active', revision: 1 };
+      hierarchy[kind].push(entity);
+      return json(kind === 'groups' ? { group: entity } : { organization: entity }, 201);
+    }
+    const entity = hierarchy[kind].find(item => item.id === decodeURIComponent(hierarchyEntity[2]));
+    if (!entity) return hierarchyError(kind === 'groups' ? 'group_not_found' : 'organization_not_found', 404);
+    if (runtime.forceHierarchyConflict || entity.revision !== body.expectedRevision) { runtime.forceHierarchyConflict = false; return hierarchyError('hierarchy_revision_conflict', 409); }
+    if (body.displayName !== undefined) entity.displayName = String(body.displayName).trim();
+    if (body.status !== undefined) entity.status = body.status;
+    entity.revision += 1;
+    return json(kind === 'groups' ? { group: entity } : { organization: entity });
+  }
+  const projectHierarchy = pathname.match(/^\/api\/v1\/projects\/([^/]+)\/hierarchy$/);
+  if (projectHierarchy && method === 'PATCH') {
+    const project = fixtures.projects.find(item => item.id === decodeURIComponent(projectHierarchy[1]));
+    const current = hierarchy.assignments.get(project?.id) || { organizationId: null, groupId: null, hierarchyRevision: 0 };
+    if (!project) return hierarchyError('project_not_found', 404);
+    if (Object.keys(body).sort().join() !== 'expectedRevision,groupId,organizationId') return hierarchyError('invalid_hierarchy_fields');
+    if (runtime.forceHierarchyConflict || current.hierarchyRevision !== body.expectedRevision) { runtime.forceHierarchyConflict = false; return hierarchyError('hierarchy_revision_conflict', 409); }
+    if (body.organizationId !== null && hierarchy.organizations.find(item => item.id === body.organizationId)?.status !== 'active') return hierarchyError('organization_archived', 409);
+    if (body.groupId !== null && hierarchy.groups.find(item => item.id === body.groupId)?.organizationId !== body.organizationId) return hierarchyError('group_organization_mismatch');
+    hierarchy.assignments.set(project.id, { organizationId: body.organizationId, groupId: body.groupId, hierarchyRevision: current.hierarchyRevision + 1 });
+    return json({ project: { ...project, ...hierarchy.assignments.get(project.id) } });
+  }
+  if (pathname === '/api/v1/projects') return json({ projects: fixtures.projects.filter(item=>!runtime.archivedProjects.has(item.id)).map(item => ({ ...item, ...(hierarchy.assignments.get(item.id) || {}) })), nextCursor: null });
   if (pathname === '/api/v1/datasets') return json({ datasets: fixtures.datasets, nextCursor: null });
   if (pathname === '/api/v1/tasks') return json({ tasks: fixtures.tasks.filter(item=>!runtime.archivedTasks.has(item.id)), nextCursor: null });
   if (pathname === '/api/v1/processing/providers' && method === 'GET') return json({ providers: fixtures.providers });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm' && method === 'PATCH') return json({ provider: { ...fixtures.providers[0], ...body } });
-  if (pathname === '/api/v1/processing/providers/provider-nodeodm/credential' && ['PUT', 'DELETE'].includes(method)) return json({ provider: fixtures.providers[0] });
+  if (pathname === '/api/v1/processing/providers/provider-nodeodm/credential' && ['PUT', 'DELETE'].includes(method)) return runtime.rejectProviderCredential ? json({error:'synthetic token failure'},500) : json({ provider: fixtures.providers[0] });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm/capabilities/probe' && method === 'POST') return json({ capabilities: fixtures.providers[0].capabilities, fingerprint: 'browser-fingerprint' });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm/capabilities/refresh' && method === 'POST') return json({ capabilities: fixtures.providers[0].capabilities, fingerprint: 'browser-fingerprint' });
   if (pathname === '/api/v1/processing/presets' && method === 'GET') return json({ presets: fixtures.presets });
@@ -322,10 +356,14 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
     ? json({ attempts: [{ id: 'attempt-johnson-old', attemptNumber: 1, providerId: 'provider-nodeodm', providerTaskId: 'nodeodm-41', status: 'failed', errorCode: 'obj2tiles_exit_nonzero', errorMessage: 'Textured tile conversion failed.', createdAt: '2026-08-17T12:00:00.000Z', startedAt: '2026-08-17T12:01:00.000Z', completedAt: '2026-08-17T12:04:00.000Z' }], nextCursor: null })
     : json({ attempts: [fixtures.tasks[0].latestAttempt], nextCursor: 'older-johnson-runs' });
   if (pathname === '/api/v1/tasks/task-quarry/attempts') return json({ attempts: [fixtures.tasks[1].latestAttempt], nextCursor: null });
-  const gcpSet = { id: 'gcp-set-johnson', displayName: 'Rome Dam control', pointCount: 1, crs: 'EPSG:32616', provenance: { coordinateSystem: 'NAD83 / UTM zone 16N', verticalDatum: 'NAVD88', linearUnit: 'ftUS' } };
+  const gcpSet = { id: 'gcp-set-johnson', displayName: 'Rome Dam control', pointCount: 1, crs: 'EPSG:32616', provenance: { coordinateSystem: 'NAD83 / UTM zone 16N', verticalDatum: 'NAVD88', linearUnit: 'ftUS' }, odmCrsCandidate: runtime.manualGcp ? null : { epsgCode:7541, horizontalUnit:'m', verticalDatum:'NAVD88(GEOID18)', verticalUnit:'m' }, odmCrs: runtime.gcpConfirmedCrs, odmCrsConfirmed: Boolean(runtime.gcpCrsConfirmed) };
   const gcpPoint = { id: 'gcp-point-1', externalId: 'ltds-1', label: 'ltds-1', latitude: 44.1, longitude: -88.2, elevationM: 220 };
-  if (pathname === '/api/v1/datasets/dataset-johnson/gcp-sets') return json({ sets: [gcpSet] });
-  if (pathname === '/api/v1/gcp-sets/gcp-set-johnson') return json({ set: gcpSet, points: [gcpPoint] });
+  const gcpSet2={...gcpSet,id:'gcp-set-second',displayName:'Second control'};
+  const gcpPoint2={...gcpPoint,id:'gcp-point-2',label:'ltds-2'};
+  if (pathname === '/api/v1/datasets/dataset-johnson/gcp-sets') return json({ sets: runtime.gcpMissingSet?[]:[gcpSet,gcpSet2] });
+  if (pathname === '/api/v1/gcp-sets/gcp-set-johnson') return json({ set: gcpSet, points: runtime.gcpMissingPoint?[gcpPoint2]:[gcpPoint,gcpPoint2] });
+  if (pathname === '/api/v1/gcp-sets/gcp-set-second') return json({ set:gcpSet2,points:[gcpPoint2] });
+  if (pathname === '/api/v1/gcp-sets/gcp-set-johnson/odm-crs-confirm' && method === 'POST') { runtime.gcpCrsConfirmed=true; runtime.gcpConfirmedCrs=body.epsgCode?{...body,verticalUnit:'m'}:gcpSet.odmCrsCandidate; return json({ set: {...gcpSet,odmCrs:runtime.gcpConfirmedCrs,odmCrsConfirmed:true} }); }
   if (pathname === '/api/v1/tasks/task-johnson/gcp-correspondences' && method === 'GET') return json({ correspondences: runtime.correspondences });
   if (pathname === '/api/v1/tasks/task-johnson/gcp-correspondences' && method === 'POST') {
     const correspondence = { id: 'gcp-mark-1', ...body };
@@ -340,8 +378,8 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
     runtime.correspondences = [];
     return { status: 204, body: Buffer.alloc(0), type: 'application/json' };
   }
-  if (pathname === '/api/v1/datasets/dataset-johnson/gcp-images') return json({ images: [{ id: 'image-1', relativePath: 'DJI_0001.JPG', distanceM: 4.2, width: 100, height: 80 }], ranking: { mode: 'auto', notice: 'Adaptive camera spacing', warnings: [] } });
-  if (pathname === '/api/v1/datasets/dataset-johnson/gcp-images/image-1/content') return { status: 200, body: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="80"><rect width="100" height="80" fill="#555"/></svg>'), type: 'image/svg+xml' };
+  if (pathname === '/api/v1/datasets/dataset-johnson/gcp-images') { const next = url.searchParams.get('offset') === '1'; return json({ images: [next ? { id:'image-2', relativePath:'DJI_0002.JPG', distanceM:5,latitude:44.10003,longitude:-88.2,width:100,height:80 } : { id: 'image-1', relativePath: 'DJI_0001.JPG', distanceM: 4.2, latitude:44.10002, longitude:-88.2, width: 100, height: 80 }], pagination: {offset:next?1:0,limit:200,total:2,nextOffset:next?null:1}, ranking: { mode: 'radius', notice: 'Nearby photos', warnings: [] } }); }
+  if (['/api/v1/datasets/dataset-johnson/gcp-images/image-1/content','/api/v1/datasets/dataset-johnson/gcp-images/image-2/content'].includes(pathname)) return { status: 200, body: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="80"><rect width="100" height="80" fill="#555"/></svg>'), type: 'image/svg+xml' };
   if (pathname === '/api/v1/attempts/attempt-johnson') {
     const sequence = ++runtime.logSequence;
     return json({
@@ -384,7 +422,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
 }
 
 function startFixtureServer() {
-  const runtime = { logSequence: 0, flakyDiagnosticRequests: 0, correspondences: [], shares: [], requests: [], permissions: null, outputs: structuredClone(fixtures.outputs), archivedProjects: new Set(), archivedTasks: new Set(), failNextStorage: false, operations: structuredClone(fixtures.operations), derivatives: structuredClone(fixtures.derivatives) };
+  const runtime = { manageHierarchy: true, forceHierarchyConflict: false, hierarchy: { sequence: 0, organizations: [{ id: 'org-adams', displayName: 'Adams County', status: 'active', revision: 1 }, { id: 'org-zenith', displayName: 'Zenith Materials', status: 'active', revision: 1 }], groups: [], assignments: new Map(fixtures.projects.filter(item => item.organizationId).map(item => [item.id, { organizationId: item.organizationId, groupId: item.groupId ?? null, hierarchyRevision: item.hierarchyRevision ?? 1 }])) }, logSequence: 0, flakyDiagnosticRequests: 0, correspondences: [], shares: [], requests: [], permissions: null, outputs: structuredClone(fixtures.outputs), archivedProjects: new Set(), archivedTasks: new Set(), failNextStorage: false, operations: structuredClone(fixtures.operations), derivatives: structuredClone(fixtures.derivatives) };
   const builtRoot = path.join(root, 'dist');
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
@@ -415,6 +453,8 @@ function startFixtureServer() {
         if (url.pathname === '/api/v1/tasks/task-johnson' && runtime.taskDetailResponseGate) {
           await runtime.taskDetailResponseGate;
         }
+        if (url.pathname === '/api/v1/tasks/task-johnson/gcp-correspondences' && request.method === 'POST' && runtime.gcpSaveResponseGate) await runtime.gcpSaveResponseGate;
+        if (url.pathname === '/api/v1/processing/providers/provider-nodeodm/credential' && request.method === 'PUT' && runtime.providerCredentialGate) await runtime.providerCredentialGate;
         if (manualFixture && request.method !== 'GET') console.log(`Synthetic mutation: ${request.method} ${url.pathname}`);
         result = url.pathname === '/api/v1/processing/outputs/output-johnson/assets/ortho' && runtime.failOrthophotoResponse
           ? json({ error: 'synthetic_preview_unavailable' }, 503)
@@ -572,6 +612,7 @@ async function confirmAppAction(client, runtime, selector, { title, fields = {},
 }
 
 async function verifyViewport(devTools, origin, viewport, runtime) {
+  runtime.gcpCrsConfirmed = false; runtime.manualGcp = false; runtime.gcpConfirmedCrs = null;
   runtime.archivedProjects.clear();
   runtime.archivedTasks.clear();
   runtime.failNextStorage = false;
@@ -629,12 +670,93 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     const noOverflow = `Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <= window.innerWidth`;
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: dashboard overflows horizontally`);
+    await client.evaluate(`document.querySelector('.nav-link[data-section="processing"]').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('section')==='processing' && document.querySelector('.processing-row [data-action=\"task-runs\"]') !== null", `${viewport.name}: Processing page did not list in-progress tasks`);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: Processing page overflows horizontally`);
+    assert.equal(await client.evaluate(`/deliver/i.test(document.querySelector('#workspace-content').textContent)`), false, `${viewport.name}: Processing page must not claim delivery`);
+    await client.evaluate(`document.querySelector('.nav-link[data-section="dashboard"]').click()`);
+    await waitFor(client, "document.querySelector('#project-filter') !== null", `${viewport.name}: Projects did not return after Processing`);
+
+    // Customers: add a customer and a group, assign a project, see it regroup, hit a stale-revision conflict, then restore.
+    const decide = async (title, values) => {
+      await waitFor(client, `document.querySelector('.workspace-decision[open] h2')?.textContent === ${JSON.stringify(title)}`, `${viewport.name}: dialog "${title}" did not open`);
+      await client.evaluate(`(() => { const form=document.querySelector('.workspace-decision[open] form'); for (const [name,value] of Object.entries(${JSON.stringify(values)})) { const input=form.elements.namedItem(name); input.value=value; input.dispatchEvent(new Event('input',{bubbles:true})); } form.querySelector('button[type="submit"]').click(); })()`);
+    };
+    const hierarchyStart = runtime.requests.length;
+    const sequenceBefore = runtime.hierarchy.sequence;
+    await client.evaluate(`document.querySelector('[data-action="manage-customers"]').click()`);
+    await waitFor(client, "document.querySelector('#workspace-modal[open] .customer-list') !== null && document.querySelector('#workspace-modal-title')?.textContent === 'Customers'", `${viewport.name}: Customers dialog did not open`);
+    const listedCustomers = await client.evaluate(`[...document.querySelectorAll('.customer-row strong')].map(item=>item.textContent)`);
+    assert.ok(['Adams County', 'Zenith Materials'].every(name => listedCustomers.includes(name)), `${viewport.name}: customer list ${listedCustomers}`);
+    await client.evaluate(`document.querySelector('[data-hierarchy="add-organization"]').click()`);
+    await decide('Add customer', { displayName: 'Greenleaf Fire Department' });
+    await waitForRequest(runtime, hierarchyStart, 'POST', '/api/v1/processing/organizations');
+    const greenleaf = `org-created-${sequenceBefore + 1}`;
+    await waitFor(client, `document.querySelector('[data-customer-id="${greenleaf}"]') !== null`, `${viewport.name}: new customer missing from the dialog`);
+    await client.evaluate(`document.querySelector('[data-customer-id="${greenleaf}"] [data-hierarchy="add-group"]').click()`);
+    await decide('Add a group to Greenleaf Fire Department', { displayName: 'New Build' });
+    await waitForRequest(runtime, hierarchyStart, 'POST', '/api/v1/processing/project-groups');
+    const newBuild = `group-created-${sequenceBefore + 2}`;
+    await waitFor(client, `document.querySelector('[data-customer-id="${greenleaf}"] [data-group-id="${newBuild}"]') !== null`, `${viewport.name}: new group missing from the dialog`);
+    assert.equal(await client.evaluate(`(() => { const r=document.querySelector('#workspace-modal').getBoundingClientRect(); return r.left>=0 && r.right<=innerWidth })()`), true, `${viewport.name}: Customers dialog overflows`);
+    await client.evaluate(`document.querySelector('#workspace-modal .modal-close').click()`);
+
+    await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
+    await waitFor(client, "document.querySelector('.project-page') !== null", `${viewport.name}: quarry project page did not open`);
+    const quarryRevision = runtime.hierarchy.assignments.get('project-quarry').hierarchyRevision;
+    await client.evaluate(`document.querySelector('[data-action="set-project-customer"][data-id="project-quarry"]').click()`);
+    await decide('Set customer for Alpha Quarry', { organizationId: greenleaf });
+    await decide('Choose a group', { groupId: newBuild });
+    await waitForRequest(runtime, hierarchyStart, 'PATCH', '/api/v1/projects/project-quarry/hierarchy');
+    assert.deepEqual(runtime.requests.filter(item => item.method === 'PATCH' && item.path === '/api/v1/projects/project-quarry/hierarchy').at(-1).body, { organizationId: greenleaf, groupId: newBuild, expectedRevision: quarryRevision }, `${viewport.name}: assignment body`);
+    await waitFor(client, `[...document.querySelectorAll('.workspace-breadcrumb li')].map(item=>item.textContent).join('|') === 'Projects|Greenleaf Fire Department|Alpha Quarry'`, `${viewport.name}: breadcrumb did not move to the new customer`);
+    await client.evaluate(`document.querySelector('.workspace-breadcrumb [data-section="dashboard"]').click()`);
+    await waitFor(client, "document.querySelector('#project-filter') !== null", `${viewport.name}: Projects did not return`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.project-group')].map(group=>[group.querySelector('h2').textContent,[...group.querySelectorAll('.project-subgroup h3')].map(item=>item.textContent).join(','),[...group.querySelectorAll('.project-row')].map(row=>row.dataset.projectName).join(',')])`), [
+      ['Adams County', '', 'johnson road survey'],
+      ['Greenleaf Fire Department', 'New Build', 'alpha quarry'],
+    ], `${viewport.name}: project did not regroup under its customer and group`);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: grouped Projects overflows`);
+
+    runtime.forceHierarchyConflict = true;
+    await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
+    await waitFor(client, "document.querySelector('.project-page') !== null", `${viewport.name}: quarry project page did not reopen`);
+    await client.evaluate(`document.querySelector('[data-action="set-project-customer"][data-id="project-quarry"]').click()`);
+    await decide('Set customer for Alpha Quarry', { organizationId: 'org-zenith' });
+    await waitFor(client, "document.querySelector('#workspace-toast')?.textContent.includes('changed somewhere else')", `${viewport.name}: stale revision was not explained`);
+    assert.equal(await client.evaluate(`[...document.querySelectorAll('.workspace-breadcrumb li')].map(item=>item.textContent).join('|')`), 'Projects|Greenleaf Fire Department|Alpha Quarry', `${viewport.name}: a refused change must not move the project`);
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: conflict refresh did not settle`);
+    await client.evaluate(`document.querySelector('[data-action="set-project-customer"][data-id="project-quarry"]').click()`);
+    await decide('Set customer for Alpha Quarry', { organizationId: 'org-zenith' });
+    await waitFor(client, `[...document.querySelectorAll('.workspace-breadcrumb li')].map(item=>item.textContent).join('|') === 'Projects|Zenith Materials|Alpha Quarry'`, `${viewport.name}: project did not move back to its customer`);
+    await client.evaluate(`document.querySelector('.workspace-breadcrumb [data-section="dashboard"]').click()`);
+    await waitFor(client, "document.querySelector('#project-filter') !== null", `${viewport.name}: Projects did not return after restoring the customer`);
 
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='Johnson'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('[data-project-name]')].map(row=>({name:row.dataset.projectName,hidden:row.hidden}))`), [
       { name: 'johnson road survey', hidden: false },
       { name: 'alpha quarry', hidden: true },
     ], `${viewport.name}: project search result visibility`);
+    const groupVisibility = `[...document.querySelectorAll('.project-group')].map(group=>({label:group.querySelector('h2').textContent,shown:getComputedStyle(group).display!=='none'}))`;
+    assert.deepEqual(await client.evaluate(groupVisibility), [
+      { label: 'Adams County', shown: true },
+      { label: 'Zenith Materials', shown: false },
+    ], `${viewport.name}: empty customer group heading stayed visible during search`);
+    await client.evaluate(`document.querySelector('[data-project-status="ready"]').click()`);
+    await client.evaluate(`document.querySelector('[data-project-status="all"]').click()`);
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value=''; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.project-row')].map(row=>getComputedStyle(row).display!=='none')`), [true, true],
+      `${viewport.name}: clearing search after a status filter did not restore every project`);
+    assert.deepEqual(await client.evaluate(groupVisibility), [
+      { label: 'Adams County', shown: true },
+      { label: 'Zenith Materials', shown: true },
+    ], `${viewport.name}: customer headings did not return after clearing search`);
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='zenith'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('[data-project-name]')].map(row=>row.hidden)`), [true, false],
+      `${viewport.name}: customer-name search did not find its project`);
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='no such project'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
+    assert.equal(await client.evaluate(`getComputedStyle(document.querySelector('.project-no-matches')).display!=='none'`), true, `${viewport.name}: no-match message missing`);
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='Johnson'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
 
     await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-johnson"]').click()`);
     await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Johnson Road Survey tasks and actions'", `${viewport.name}: project selection failed`);
@@ -654,7 +776,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-johnson"]').click()`);
     await waitFor(client, "document.querySelector('.compact-task-detail .task-facts') !== null", `${viewport.name}: task details did not expand`);
-    assert.match(await client.evaluate(`document.querySelector('.task-authority-note').textContent`), /separate from node connection health/, `${viewport.name}: missing survey statistics must not be presented as a node connection failure`);
+    assert.match(await client.evaluate(`document.querySelector('.task-authority-note').textContent`), /were not recorded for this run/, `${viewport.name}: missing survey statistics must not be presented as a node connection failure`);
     assert.deepEqual(await client.evaluate(`({section:new URL(location.href).searchParams.get('section'),project:new URL(location.href).searchParams.get('project'),task:new URL(location.href).searchParams.get('task')})`),
       { section: 'dashboard', project: 'project-johnson', task: 'task-johnson' }, `${viewport.name}: expanded task route state`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions > button')].map(button=>button.textContent)`),
@@ -663,6 +785,18 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.equal(await client.evaluate(`(() => { const menu=document.querySelector('.task-more-actions[open] .project-more-menu'),r=menu.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&getComputedStyle(menu.closest('.task-panel')).overflow==='visible' })()`),true,`${viewport.name}: task menu must open without horizontal clipping`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>button.textContent)`),['Rename','Download model files','Details & processing','Files & versions','Processing history','Ground control points']);
     await client.evaluate(`document.querySelector('[data-action="task-history"]').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('panel')==='runs' && document.querySelector('.task-page-navigation [aria-current=\"page\"]')?.textContent==='Runs' && document.querySelector('.attempt-history[open] .attempt-run') !== null", `${viewport.name}: Processing history did not open this task's Runs tab`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.workspace-breadcrumb li')].map(item=>item.textContent)`), ['Projects', 'Adams County', 'Johnson Road Survey', 'Johnson reconstruction'], `${viewport.name}: task breadcrumb`);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: task Runs tab overflows horizontally`);
+    assert.equal(await client.evaluate(`Boolean(document.querySelector('.task-runs-note [data-section="diagnostics"]'))`), true, `${viewport.name}: Runs tab has no link to every run in Diagnostics`);
+    await client.evaluate(`history.back()`);
+    await waitFor(client, "document.querySelector('.compact-task-detail') !== null && !new URL(location.href).searchParams.get('panel')", `${viewport.name}: back from the Runs tab did not return to the task`);
+    await client.evaluate(`document.querySelector('.task-open-page [data-action="task-overview"]').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('panel')==='overview' && document.querySelector('.task-page-navigation [aria-current=\"page\"]')?.textContent==='Overview' && document.querySelector('.task-workspace-page .compact-task-detail') !== null && !document.querySelector('.task-open-page')", `${viewport.name}: Open task page did not show the Overview tab`);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: task Overview tab overflows horizontally`);
+    await client.evaluate(`history.back()`);
+    await waitFor(client, "document.querySelector('.compact-task-detail') !== null && !new URL(location.href).searchParams.get('panel')", `${viewport.name}: back from Overview did not return to the task`);
+    await client.evaluate(`document.querySelector('.task-runs-note, .nav-link[data-section="diagnostics"]') && document.querySelector('.nav-link[data-section="diagnostics"]').click()`);
     await waitFor(client, "new URL(location.href).searchParams.get('section')==='diagnostics' && document.querySelector('[data-action=\"load-more-diagnostic-runs\"]') !== null", `${viewport.name}: task history did not route to paginated Diagnostics`);
     assert.equal(await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson"]')?.textContent.includes('Run #2')`), true, `${viewport.name}: current run number was not rendered`);
     await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson-old"] [data-action="open-global-attempt-diagnostics"]').click()`);
@@ -716,15 +850,156 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     await client.evaluate(`document.querySelector('[data-action="task-gcp"]').click()`);
     await waitFor(client, "new URL(location.href).searchParams.get('panel')==='gcp' && document.querySelector('.task-workspace-page') !== null", `${viewport.name}: dedicated GCP page did not open`);
-    await waitFor(client, "document.querySelector('[data-action=\"gcp-open-image\"][data-id=\"image-1\"]') !== null", `${viewport.name}: GCP image candidates did not load`);
-    await client.evaluate(`document.querySelector('[data-action="gcp-open-image"][data-id="image-1"]').click()`);
+    await waitFor(client, "document.querySelector('.gcp-map-camera[data-id=\"image-1\"]') !== null", `${viewport.name}: nearby camera map did not load`);
+    assert.equal(await client.evaluate("document.querySelector('.gcp-candidate-form [name=radiusFeet]').value"), '50');
+    assert.match(await client.evaluate("document.querySelector('.gcp-crs-confirmation').textContent"), /EPSG:7541/);
+    await confirmAppAction(client, runtime, '[data-action="gcp-confirm-crs"]', { title: 'Confirm survey coordinates' });
+    await waitFor(client, "document.querySelector('.gcp-crs-confirmation').textContent.includes('Confirmed')", `${viewport.name}: coordinate confirmation did not persist`);
+    await client.evaluate(`document.querySelector('[data-action="gcp-load-more"]').click()`);
+    await waitFor(client, "document.querySelector('.gcp-map-camera[data-id=\"image-2\"]') !== null", `${viewport.name}: next page of nearby photos did not load`);
+
+    await client.evaluate(`document.querySelector('.gcp-map-camera[data-id="image-1"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
     await waitFor(client, "document.querySelector('.gcp-mark-form') !== null", `${viewport.name}: private GCP image did not open`);
+    // An unsaved pixel must survive selection cancellation, including map, point and set controls.
+    await client.evaluate(`(() => { const form=document.querySelector('.gcp-mark-form'); form.elements.pixelX.value='12'; form.elements.pixelY.value='14'; form.elements.pixelY.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+    for(const selector of ['.gcp-map-camera[data-id="image-2"]','.gcp-point-select','.gcp-set-select']) {
+      if(selector.includes('select')) await client.evaluate(`(() => { const el=document.querySelector(${JSON.stringify(selector)}); el.value=el.options[1].value; el.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+      else await client.evaluate(`document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
+      await waitFor(client, `Boolean(document.querySelector('.workspace-decision[open]'))`, 'Unsaved GCP confirmation missing');
+      await client.evaluate(`document.querySelector('.workspace-decision [aria-label="Cancel and close dialog"]').click()`);
+      await waitFor(client, `!document.querySelector('.workspace-decision')`, 'Unsaved GCP cancel did not close');
+      assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').value`),'12');
+      assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=imageFileId]').value`),'image-1');
+      assert.equal(await client.evaluate(`document.querySelector('.gcp-point-select').value`),'gcp-point-1');
+      assert.equal(await client.evaluate(`document.querySelector('.gcp-set-select').value`),'gcp-set-johnson');
+    }
+    await confirmAppAction(client,runtime,'.gcp-candidate[data-id="image-2"]',{title:'Discard unsaved mark?'});
+    await waitFor(client, `document.querySelector('.gcp-mark-form [name=imageFileId]')?.value==='image-2'`, 'Confirmed discard did not switch photo');
+    await client.evaluate(`document.querySelector('.gcp-candidate[data-id="image-1"]').click()`);
+    await waitFor(client, `document.querySelector('.gcp-mark-form [name=imageFileId]')?.value==='image-1'`, 'Returning to original photo failed');
+    await client.evaluate(`(() => { const form=document.querySelector('.gcp-mark-form'); form.elements.pixelX.value='12'; form.elements.pixelX.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+    await client.evaluate(`document.querySelector('.gcp-candidate-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
+    await waitFor(client, `Boolean(document.querySelector('[data-action="gcp-load-more"]'))`, 'Search did not refresh candidate page');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]')?.value`),'12','Partial coordinate was lost on search rerender');
+    await client.evaluate(`document.querySelector('[data-action="gcp-load-more"]').click()`);
+    await waitFor(client, `Boolean(document.querySelector('.gcp-map-camera[data-id="image-2"]'))`, 'Next photos did not reload');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').value`),'12');
+    await client.evaluate(`document.querySelector('[data-action="task-return"]').click()`);
+    await waitFor(client, `Boolean(document.querySelector('.workspace-decision[open]'))`, 'Task navigation lost a partial mark without confirmation');
+    await client.evaluate(`document.querySelector('.workspace-decision [aria-label="Cancel and close dialog"]').click()`);
+    await waitFor(client, `!document.querySelector('.workspace-decision')`, 'Navigation cancellation did not close');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').value`),'12');
+    await client.evaluate('history.back()');
+    await waitFor(client, `Boolean(document.querySelector('.workspace-decision[open]'))`, 'Browser Back lost a partial mark without confirmation');
+    await client.evaluate('history.back()');
+    await waitFor(client, `new URL(location.href).searchParams.get('panel')==='gcp' && Boolean(document.querySelector('.workspace-decision[open]'))`, 'Repeated Back did not restore GCP while confirmation remained open');
+    await client.evaluate(`document.querySelector('.workspace-decision [aria-label="Cancel and close dialog"]').click()`);
+    await waitFor(client, `!document.querySelector('.workspace-decision') && new URL(location.href).searchParams.get('panel')==='gcp'`, 'Cancelled Back did not restore the current GCP URL');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').value`),'12');
+    await client.evaluate('history.back()');
+    await waitFor(client, `Boolean(document.querySelector('.workspace-decision[open]'))`, 'Accepted Back confirmation missing');
+    await client.evaluate(`document.querySelector('.workspace-decision[open] button[type="submit"]').click()`);
+    await waitFor(client, `!new URL(location.href).searchParams.has('panel') && Boolean(document.querySelector('.task-quick-actions'))`, 'Accepted Back did not leave GCP');
+    const afterAcceptedBack=await client.evaluate('location.href');
+    await client.evaluate('history.back()');
+    await waitFor(client, `location.href!==${JSON.stringify(afterAcceptedBack)}`, 'Repeated Back stayed on a duplicate history entry');
+    await client.evaluate('history.forward()');
+    await waitFor(client, `location.href===${JSON.stringify(afterAcceptedBack)}`, 'Forward failed to restore task route');
+    await client.evaluate('history.forward()');
+    await waitFor(client, `new URL(location.href).searchParams.get('panel')==='gcp' && Boolean(document.querySelector('.gcp-map-camera[data-id="image-1"]'))`, 'Forward failed to restore GCP route');
+    await client.evaluate(`document.querySelector('.gcp-candidate[data-id="image-1"]').click()`);
+    await waitFor(client, `Boolean(document.querySelector('.gcp-mark-form'))`, 'Could not reopen GCP image');
+    await client.evaluate(`(() => {const input=document.querySelector('.gcp-mark-form [name=pixelX]');input.value='12';input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    await client.evaluate(`document.querySelector('[data-action="gcp-load-more"]')?.click()`);
+    await waitFor(client, `Boolean(document.querySelector('.gcp-map-camera[data-id="image-2"]'))`, 'GCP candidates did not reload after Forward');
+    await client.evaluate(`document.querySelector('.gcp-map-camera[data-id="image-2"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
+    await waitFor(client, `Boolean(document.querySelector('.workspace-decision[open]'))`, 'Partial coordinates should not be discarded silently');
+    await client.evaluate(`document.querySelector('.workspace-decision [aria-label="Cancel and close dialog"]').click()`);
+    await waitFor(client, `!document.querySelector('.workspace-decision')`, 'Partial mark cancel did not close');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').value`),'12');
+    await waitFor(client, `document.querySelector('.gcp-mark-image')?.naturalWidth>0`, 'Source image failed to load');
+    const clicked=await client.evaluate(`(() => {const image=document.querySelector('.gcp-mark-image'),rect=image.getBoundingClientRect();image.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:rect.left+rect.width*.35,clientY:rect.top+rect.height*.4}));const form=document.querySelector('.gcp-mark-form');return [form.elements.pixelX.value,form.elements.pixelY.value]})()`);
+    await client.evaluate(`document.querySelector('.gcp-candidate-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
+    await waitFor(client, `Boolean(document.querySelector('[data-action="gcp-load-more"]'))`, 'Image click test search did not finish');
+    assert.deepEqual(await client.evaluate(`(() => {const form=document.querySelector('.gcp-mark-form');return [form.elements.pixelX.value,form.elements.pixelY.value]})()`),clicked,'Clicked coordinates changed on rerender');
+    await client.evaluate(`document.querySelector('[data-action="gcp-load-more"]').click()`);
+    await waitFor(client, `Boolean(document.querySelector('.gcp-map-camera[data-id="image-2"]'))`, 'Image click test candidates did not reload');
+    await client.evaluate(`(() => {const form=document.querySelector('.gcp-mark-form');form.elements.pixelX.value='12';form.elements.pixelY.value='14';form.elements.pixelY.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+
+    let releaseGcpSave;runtime.gcpSaveResponseGate=new Promise(resolve=>{releaseGcpSave=resolve});
+    const saveRequestStart=runtime.requests.length;
     await client.evaluate(`(() => { const form=document.querySelector('.gcp-mark-form'); form.elements.pixelX.value='12'; form.elements.pixelY.value='14'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
+    await waitForRequest(runtime,saveRequestStart,'POST','/api/v1/tasks/task-johnson/gcp-correspondences');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').disabled`),true);
+    await client.evaluate(`document.querySelector('[data-action="task-return"]').click()`);
+    assert.equal(await client.evaluate(`new URL(location.href).searchParams.get('panel')`),'gcp','Pending save allowed task navigation');
+    await client.evaluate(`history.back()`);
+    await waitFor(client, `new URL(location.href).searchParams.get('panel')==='gcp'`, 'Pending save did not restore GCP URL after Back');
+    await client.evaluate(`document.querySelector('.gcp-candidate-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
+    await waitFor(client, `Boolean(document.querySelector('[data-action="gcp-load-more"]'))`, 'Search during save did not rerender');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').disabled`),true,'Rerender re-enabled pending mark editing');
+    await client.evaluate(`document.querySelector('[data-action="gcp-load-more"]').click()`);
+    await waitFor(client, `Boolean(document.querySelector('.gcp-map-camera[data-id="image-2"]'))`, 'Photos did not reload during pending save');
+    await client.evaluate(`document.querySelector('.gcp-map-camera[data-id="image-2"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=imageFileId]').value`),'image-1');
+    releaseGcpSave();runtime.gcpSaveResponseGate=null;
+
     await waitFor(client, "document.querySelector('.gcp-mark-row')?.textContent.includes('x 12, y 14')", `${viewport.name}: GCP correspondence was not created`);
     await client.evaluate(`(() => { const form=document.querySelector('.gcp-mark-form'); form.elements.pixelX.value='13'; form.elements.pixelY.value='15'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
     await waitFor(client, "document.querySelector('.gcp-mark-row')?.textContent.includes('x 13, y 15')", `${viewport.name}: GCP correspondence was not updated`);
     await confirmAppAction(client, runtime, '[data-action="gcp-delete-mark"]', { title: 'Delete image mark', cancelFirst: true });
     await waitFor(client, "document.querySelector('.gcp-mark-row') === null", `${viewport.name}: GCP correspondence was not deleted`);
+    // An unindexed entry must keep the original browser history and preserve the draft in memory.
+    await client.evaluate(`document.querySelector('[data-action="task-return"]').click()`);
+    await waitFor(client, `!new URL(location.href).searchParams.has('panel') && Boolean(document.querySelector('.task-quick-actions'))`, 'Task return for unindexed-history setup failed');
+    await client.evaluate(`history.pushState(null,'',location.href);document.querySelector('[data-action="task-gcp"]').click()`);
+    await waitFor(client, `new URL(location.href).searchParams.get('panel')==='gcp' && Boolean(document.querySelector('.gcp-candidate[data-id="image-1"]'))`, 'GCP route after unindexed setup missing');
+    await client.evaluate(`document.querySelector('.gcp-candidate[data-id="image-1"]').click()`);
+    await waitFor(client, `Boolean(document.querySelector('.gcp-mark-form'))`, 'Image unavailable for unindexed-history test');
+    await client.evaluate(`(() => {const form=document.querySelector('.gcp-mark-form');form.elements.pixelX.value='21';form.elements.pixelY.value='22';form.elements.pixelY.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    await client.evaluate('history.back()');
+    await waitFor(client, `!new URL(location.href).searchParams.has('panel') && Boolean(document.querySelector('.task-quick-actions'))`, 'Unindexed Back did not traverse');
+    await client.evaluate('history.forward()');
+    await waitFor(client, `new URL(location.href).searchParams.get('panel')==='gcp' && document.querySelector('.gcp-mark-form [name=pixelX]')?.value==='21'`, 'Unindexed Forward did not restore draft');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelY]').value`),'22');
+    // An in-flight save may finish offscreen; returning must show the acknowledged coordinates.
+    let releaseDetachedSave;runtime.gcpSaveResponseGate=new Promise(resolve=>{releaseDetachedSave=resolve});
+    const detachedStart=runtime.requests.length;
+    await client.evaluate(`document.querySelector('.gcp-mark-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
+    await waitForRequest(runtime,detachedStart,'POST','/api/v1/tasks/task-johnson/gcp-correspondences');
+    await client.evaluate('history.back()');
+    await waitFor(client, `!new URL(location.href).searchParams.has('panel')`, 'Unindexed pending save did not preserve traversal');
+    releaseDetachedSave();runtime.gcpSaveResponseGate=null;
+    await waitFor(client, `!document.querySelector('#workspace').hasAttribute('aria-busy')`, 'Detached save did not settle');
+    await client.evaluate('history.forward()');
+    await waitFor(client, `new URL(location.href).searchParams.get('panel')==='gcp' && document.querySelector('.gcp-mark-row')?.textContent.includes('x 21, y 22')`, 'Detached save was not acknowledged on return');
+    await waitFor(client, `document.querySelector('.gcp-mark-form [name=pixelX]')?.disabled===false`, 'Detached save did not release the editor');
+    await confirmAppAction(client,runtime,'[data-action="gcp-delete-mark"]',{title:'Delete image mark'});
+    await waitFor(client, `!document.querySelector('.gcp-mark-row')`, 'Detached save cleanup failed');
+    await client.evaluate(`(() => {const form=document.querySelector('.gcp-mark-form');form.elements.pixelX.value='31';form.elements.pixelY.value='32';form.elements.pixelY.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    runtime.gcpMissingPoint=true;
+    await client.evaluate(`document.querySelector('.gcp-candidate-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
+    await waitFor(client, `document.querySelector('.gcp-warning[role=alert]')?.textContent.includes('unsaved mark is retained')`, 'Missing-point conflict did not appear');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').value`),'31');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').disabled`),true);
+    runtime.gcpMissingSet=true;
+    await client.evaluate(`document.querySelector('[data-action="gcp-retry-conflict"]').click()`);
+    await waitFor(client, `document.querySelector('.gcp-set-select')?.options.length===0 && document.querySelector('.gcp-warning[role=alert]')`, 'Missing set did not produce conflict');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]')?.value`),'31','Missing set hid the draft coordinates');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]')?.disabled`),true);
+    runtime.gcpMissingSet=false;runtime.gcpMissingPoint=false;
+    await client.evaluate(`document.querySelector('[data-action="gcp-retry-conflict"]').click()`);
+    await waitFor(client, `!document.querySelector('.gcp-warning[role=alert]') && document.querySelector('.gcp-mark-form [name=pixelX]')?.disabled===false`, 'Restored point did not clear conflict');
+    assert.equal(await client.evaluate(`document.querySelector('.gcp-mark-form [name=pixelX]').value`),'31');
+    await client.evaluate(`(() => {const form=document.querySelector('.gcp-mark-form');form.elements.pixelX.value='';form.elements.pixelY.value='';form.elements.pixelY.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    runtime.manualGcp=true; runtime.gcpCrsConfirmed=false; runtime.gcpConfirmedCrs=null;
+    await client.evaluate('location.reload()');
+    await waitFor(client, "document.querySelector('.gcp-crs-form') !== null", `${viewport.name}: manual CRS mapping form missing`);
+    await client.evaluate(`(() => { const form=document.querySelector('.gcp-crs-form'); form.elements.epsgCode.value='7600'; form.elements.horizontalUnit.value='ftUS'; form.elements.verticalDatum.value='NAVD88'; form.querySelector('button').click(); })()`);
+    await waitFor(client, "document.querySelector('.workspace-decision[open]') !== null", `${viewport.name}: CRS confirmation dialog missing`);
+    await client.evaluate(`document.querySelector('.workspace-decision[open] button[type="submit"]').click()`);
+    await waitFor(client, "document.querySelector('.gcp-crs-confirmation').textContent.includes('EPSG:7600') && document.querySelector('.gcp-crs-confirmation').textContent.includes('Confirmed')", `${viewport.name}: manual coordinates not retained`);
+
 
     await client.evaluate(`document.querySelector('[data-action="task-return"]').click()`);
     await waitFor(client, "!new URL(location.href).searchParams.has('panel') && document.querySelector('.task-quick-actions') !== null", `${viewport.name}: GCP Back to task did not restore shortcuts`);
@@ -767,6 +1042,10 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: dataset trash did not settle`);
 
     await client.evaluate(`document.querySelector('[data-action="task-return"]').click()`);
+    await waitFor(client, "document.querySelector('.project-page') !== null && document.querySelectorAll('.project-row').length === 1 && !document.querySelector('#project-filter')", `${viewport.name}: project page did not show only the open project`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.workspace-breadcrumb li')].map(item=>item.textContent)`), ['Projects', 'Adams County', 'Johnson Road Survey'], `${viewport.name}: project breadcrumb`);
+    await client.evaluate(`document.querySelector('.workspace-breadcrumb [data-section="dashboard"]').click()`);
+    await waitFor(client, "!new URL(location.href).searchParams.get('project') && document.querySelector('#project-filter') !== null", `${viewport.name}: breadcrumb did not return to Projects`);
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value=''; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
     await waitFor(client, "document.querySelector('[data-action=\"open-project\"][data-id=\"project-quarry\"]') !== null", `${viewport.name}: project filter did not clear`);
     await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
@@ -826,7 +1105,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.equal(await client.evaluate(`document.querySelector('.provider-detail h3')?.textContent`), 'TrueNAS NodeODM', `${viewport.name}: provider inline selection`);
     assert.match(await client.evaluate(`document.querySelector('.provider-detail').textContent`), /Cluster-managed capacity/);
     assert.equal(await client.evaluate(`document.querySelector('.provider-detail').textContent.includes('99999999999')`), false, `${viewport.name}: cluster sentinel must not imply real upstream slots`);
-    assert.match(await client.evaluate(`document.querySelector('.provider-detail').textContent`), /Viewer admission2 concurrent jobs/, `${viewport.name}: Viewer admission stays separate from cluster-managed capacity`);
+    assert.match(await client.evaluate(`document.querySelector('.provider-detail').textContent`), /Queue handoff limit2 jobs at a time/, `${viewport.name}: Viewer admission stays separate from cluster-managed capacity`);
     assert.equal(await client.evaluate(`document.querySelector('[data-action="select-provider"][data-id="provider-nodeodm"]').getAttribute('aria-pressed')`), 'true');
     assert.equal(await client.evaluate(`getComputedStyle(document.querySelector('.provider-workspace .provider-list')).overflowY`), 'auto', `${viewport.name}: node list must scroll independently`);
     assert.equal(await client.evaluate(`(()=>{const left=document.querySelector('.provider-workspace>aside').getBoundingClientRect(),right=document.querySelector('#provider-inline-detail').getBoundingClientRect();return innerWidth>720?left.right<right.left:right.top>=left.bottom;})()`),true,`${viewport.name}: node list/detail must be side-by-side on desktop and stacked on mobile`);
@@ -839,11 +1118,15 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "document.querySelector('#provider-edit-form') !== null", `${viewport.name}: provider edit form did not open`);
     await client.evaluate(`window.__providerBeforeChange=document.querySelector('#provider-inline-detail')`);
     await client.evaluate(`(() => { const form=document.querySelector('#provider-edit-form'); form.elements.admissionLimit.value='3'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
+    await waitForRequest(runtime, requestStart, 'PATCH', '/api/v1/processing/providers/provider-nodeodm');
     await waitFor(client, "!window.__providerBeforeChange.isConnected && document.querySelector('#workspace-modal')?.open === false && document.querySelector('[data-action=\"replace-provider-token\"]') !== null", `${viewport.name}: provider edit did not return to refreshed node detail`);
     await client.evaluate(`document.querySelector('[data-action="replace-provider-token"]').click()`);
     await waitFor(client, "document.querySelector('#provider-token-form') !== null", `${viewport.name}: provider token form did not open`);
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: previous provider update remained busy`);
+    const tokenRequestStart=runtime.requests.length;
     await client.evaluate(`window.__providerBeforeChange=document.querySelector('#provider-inline-detail')`);
     await client.evaluate(`(() => { const form=document.querySelector('#provider-token-form'); form.elements.token.value='browser-secret-token'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
+    await waitForRequest(runtime,tokenRequestStart,'PUT','/api/v1/processing/providers/provider-nodeodm/credential');
     await waitFor(client, "!window.__providerBeforeChange.isConnected && document.querySelector('#workspace-modal')?.open === false && document.querySelector('[data-action=\"new-preset\"]') !== null", `${viewport.name}: provider token update did not return to refreshed node detail`);
     await client.evaluate(`document.querySelector('[data-action="new-preset"]').click()`);
     await waitFor(client, "document.querySelector('#preset-form') !== null", `${viewport.name}: preset form did not open`);
@@ -1094,7 +1377,7 @@ test('companion product restore is explicit, immutable-version scoped, and permi
         await waitFor(client, `new URL(location.href).searchParams.get('panel')==='settings' && Boolean(document.querySelector('.task-workspace-page'))`, 'Task settings route did not load');
         if (scenario.reject) {
           await waitForRequest(runtime, 0, 'GET', '/api/v1/tasks/task-johnson');
-          assert.equal(await client.evaluate(`document.querySelector('.task-workspace-page')?.textContent.includes('Loading authoritative task details')`), true, 'Settings must expose the pending detail state');
+          assert.equal(await client.evaluate(`document.querySelector('.task-workspace-page')?.textContent.includes('Loading task details')`), true, 'Settings must expose the pending detail state');
           assert.equal(await client.evaluate(`document.querySelectorAll('.task-workspace-page button').length`), 0, 'The loading placeholder is not the settled action list');
           releaseTaskDetail();
         }
@@ -1166,4 +1449,67 @@ test('companion product restore is explicit, immutable-version scoped, and permi
     if (server) await new Promise(resolve => server.close(resolve));
     await removeBrowserProfile(profile, t);
   }
+});
+
+test('mobile project creation follows project write permission', { timeout: 60000 }, async t => {
+  const executable = browserPath(); if (!executable) { t.skip('Edge unavailable'); return; }
+  const release = await acquireBrowserHarnessLock({root}); let server, runtime, origin, profile, browser;
+  try {
+    ({server,runtime,origin} = await startFixtureServer());
+    profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
+    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    const devTools=await waitForDevTools(profile);
+    for (const allowed of [false,true]) {
+      runtime.permissions=allowed ? ['viewer.projects.read','viewer.projects.write'] : ['viewer.projects.read'];
+      const target=await (await fetch(`${devTools}/json/new?about:blank`,{method:'PUT'})).json();
+      const client=await CdpClient.connect(target.webSocketDebuggerUrl);
+      try {
+        await client.command('Page.enable'); await client.command('Runtime.enable');
+        await client.command('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
+        await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token', ${JSON.stringify(token)});`});
+        await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard`});
+        await waitFor(client,`Boolean(document.querySelector('#project-filter'))`,'Dashboard failed to load');
+        assert.equal(await client.evaluate(`Boolean(document.querySelector('[data-new-project]'))`),allowed,`Project creation for write=${allowed}`);
+      } finally { await client.command('Page.close').catch(()=>{}); client.close(); }
+    }
+  } finally { if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);} release(); if(server)await new Promise(resolve=>server.close(resolve)); await removeBrowserProfile(profile,t); }
+});
+
+test('archived customer and group assignments survive default choices and change only deliberately', { timeout: 90_000, skip: manualFixture }, async t => {
+  const executable = browserPath(); if (!executable) { t.skip('Chrome or Edge required'); return; }
+  const release = await acquireBrowserHarnessLock({root}); let server, runtime, origin, profile, browser;
+  try {
+    ({server,runtime,origin}=await startFixtureServer());
+    profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
+    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    const devTools=await waitForDevTools(profile);
+    for (const scenario of ['archived-customer-keep','archived-customer-clear','archived-customer-move','archived-group-keep','archived-group-clear','archived-group-move','archived-group-conflict','missing-customer-keep','missing-customer-clear','missing-group-keep','missing-group-clear']) await t.test(scenario,async()=>{
+      const archivedCustomer=scenario.startsWith('archived-customer')||scenario.startsWith('missing-customer');
+      runtime.hierarchy.organizations=[{id:'org-adams',displayName:'Adams County',status:'active',revision:1},...(scenario.startsWith('missing-customer')?[]:[{id:'org-zenith',displayName:'Zenith Materials',status:archivedCustomer?'archived':'active',revision:1}])];
+      runtime.hierarchy.groups=[...(scenario.startsWith('missing-group')?[]:[{id:'group-old',organizationId:'org-zenith',displayName:'Old group',status:'archived',revision:1}]),{id:'group-new',organizationId:'org-zenith',displayName:'New group',status:'active',revision:1}];
+      runtime.hierarchy.assignments.set('project-quarry',{organizationId:'org-zenith',groupId:'group-old',hierarchyRevision:7});runtime.forceHierarchyConflict=scenario.endsWith('conflict');runtime.requests=[];
+      const target=await (await fetch(`${devTools}/json/new?about:blank`,{method:'PUT'})).json(),client=await CdpClient.connect(target.webSocketDebuggerUrl);
+      try {
+        await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
+        await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-quarry`});
+        await waitFor(client,`Boolean(document.querySelector('[data-action="set-project-customer"]'))`,'Assignment action missing');
+        await client.evaluate(`document.querySelector('[data-action="set-project-customer"]').click()`);
+        await waitFor(client,`Boolean(document.querySelector('.workspace-decision[open] select[name=organizationId]'))`,'Customer dialog missing');
+        assert.equal(await client.evaluate(`document.querySelector('.workspace-decision select[name=organizationId]').value`),'org-zenith');
+        if(scenario==='archived-customer-clear'||scenario==='missing-customer-clear')await client.evaluate(`document.querySelector('.workspace-decision select[name=organizationId]').value=''`);if(scenario==='archived-customer-move')await client.evaluate(`document.querySelector('.workspace-decision select[name=organizationId]').value='org-adams'`);
+        await client.evaluate(`document.querySelector('.workspace-decision button[type=submit]').click()`);
+        if(!archivedCustomer){await waitFor(client,`Boolean(document.querySelector('.workspace-decision[open] select[name=groupId]'))`,'Group dialog missing');assert.equal(await client.evaluate(`document.querySelector('.workspace-decision select[name=groupId]').value`),'group-old');if(scenario.endsWith('clear'))await client.evaluate(`document.querySelector('.workspace-decision select[name=groupId]').value=''`);if(scenario.endsWith('move')||scenario.endsWith('conflict'))await client.evaluate(`document.querySelector('.workspace-decision select[name=groupId]').value='group-new'`);await client.evaluate(`document.querySelector('.workspace-decision button[type=submit]').click()`)}
+        if(scenario.endsWith('keep')){await new Promise(resolve=>setTimeout(resolve,100));assert.equal(runtime.requests.filter(x=>x.method==='PATCH').length,0)}else{await waitForRequest(runtime,0,'PATCH','/api/v1/projects/project-quarry/hierarchy');const req=runtime.requests.filter(x=>x.method==='PATCH').at(-1);assert.equal(req.body.expectedRevision,7);const assignment=runtime.hierarchy.assignments.get('project-quarry');if(scenario.endsWith('conflict'))assert.deepEqual(assignment,{organizationId:'org-zenith',groupId:'group-old',hierarchyRevision:7});else if(archivedCustomer)assert.equal(assignment.organizationId,scenario.endsWith('move')?'org-adams':null);else assert.equal(assignment.groupId,scenario.endsWith('move')?'group-new':null)}
+      } finally {await client.command('Page.close').catch(()=>{});client.close()}
+    });
+  } finally {if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);}release();if(server)await new Promise(resolve=>server.close(resolve));await removeBrowserProfile(profile,t)}
+});
+
+test('provider token failure and busy submission keep the form available for retry', {timeout:60000,skip:manualFixture}, async t=>{
+ const executable=browserPath();if(!executable){t.skip('Chrome or Edge required');return}const release=await acquireBrowserHarnessLock({root});let server,runtime,origin,profile,browser,unblock;
+ try{({server,runtime,origin}=await startFixtureServer());profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});const devTools=await waitForDevTools(profile),target=await(await fetch(`${devTools}/json/new?about:blank`,{method:'PUT'})).json(),client=await CdpClient.connect(target.webSocketDebuggerUrl);
+ try{await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});await client.command('Page.navigate',{url:`${origin}/workspace?section=providers`});await waitFor(client,`Boolean(document.querySelector('[data-action="select-provider"]'))`,'Provider list missing');await client.evaluate(`document.querySelector('[data-action="select-provider"]').click()`);await waitFor(client,`Boolean(document.querySelector('[data-action="replace-provider-token"]'))`,'Provider actions missing');await client.evaluate(`document.querySelector('[data-action="replace-provider-token"]').click()`);await waitFor(client,`Boolean(document.querySelector('#provider-token-form'))`,'Token form missing');
+ runtime.rejectProviderCredential=true;runtime.providerCredentialGate=new Promise(resolve=>{unblock=resolve});await client.evaluate(`(()=>{const f=document.querySelector('#provider-token-form');f.elements.token.value='synthetic-token';f.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))})()`);await waitForRequest(runtime,0,'PUT','/api/v1/processing/providers/provider-nodeodm/credential');assert.equal(await client.evaluate(`document.querySelector('#provider-token-form').elements.token.disabled`),true);await client.evaluate(`document.querySelector('#provider-token-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);assert.equal(await client.evaluate(`document.querySelector('#provider-token-form').elements.token.value`),'synthetic-token');assert.equal(await client.evaluate(`document.querySelector('#workspace-toast').textContent.includes('Wait for the current action')`),true);assert.equal(runtime.requests.filter(x=>x.method==='PUT'&&x.path.endsWith('/credential')).length,1);unblock();runtime.providerCredentialGate=null;await waitFor(client,`document.querySelector('#workspace-toast').textContent.includes('synthetic token failure')`,'Failure not shown');assert.equal(await client.evaluate(`document.querySelector('#provider-token-form').elements.token.value`),'synthetic-token');runtime.rejectProviderCredential=false;await client.evaluate(`document.querySelector('#provider-token-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);await waitFor(client,`document.querySelector('#workspace-modal').open===false`,'Successful retry did not close form');assert.equal(runtime.requests.filter(x=>x.method==='PUT'&&x.path.endsWith('/credential')).length,2);
+ }finally{await client.command('Page.close').catch(()=>{});client.close()}
+ }finally{unblock?.();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);}release();if(server)await new Promise(resolve=>server.close(resolve));await removeBrowserProfile(profile,t)}
 });
