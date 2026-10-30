@@ -41,7 +41,7 @@ jobs:
         run: node --test scripts/native-staff-bootstrap-provisioner.test.mjs scripts/native-staff-bootstrap-provisioner.windows.test.mjs
 
       - name: Verify guarded production deployment tooling without credentials
-        run: node --test scripts/production-deploy.test.mjs scripts/ordinary-frontend-release-plan.test.mjs scripts/ordinary-frontend-preserved-preflight.test.mjs scripts/native-staff-cutover-readiness.test.mjs scripts/native-staff-cutover-access-group-observation.test.mjs scripts/access-group-read-capsule.test.mjs
+        run: node --test scripts/production-deploy.test.mjs scripts/ordinary-frontend-release-plan.test.mjs scripts/ordinary-frontend-preserved-preflight.test.mjs scripts/ordinary-frontend-candidate-verifier.test.mjs scripts/native-staff-cutover-readiness.test.mjs scripts/native-staff-cutover-access-group-observation.test.mjs scripts/access-group-read-capsule.test.mjs
 
       - name: Verify source38 inventory and targeted inquiry packet without provider access
         run: node --test scripts/production-auto-migration-profile/source38-inventory-v2/gate.test.mjs scripts/production-auto-migration-profile/client-0242-targeted-v1/packet.test.mjs
@@ -66,7 +66,7 @@ jobs:
       - name: Verify canonical delivery host compatibility
         run: node --test scripts/canonical-delivery-compatibility.test.mjs scripts/production-delivery-domain-transition.test.mjs
 
-      - name: Verify main and PR workflow trigger policy
+      - name: Verify main-only workflow trigger policy
         run: node --test scripts/workflow-trigger-policy.test.mjs
 
       - name: Verify offline retained UI asset planning
