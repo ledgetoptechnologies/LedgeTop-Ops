@@ -79,3 +79,21 @@ the shared Operations Worker and verify its exact account, target name, active
 version and exported entrypoint, service binding, approved hostname and Access
 policy. The real configuration needs separate review of every binding, route,
 assets setting, environment flag, workers.dev and preview exposure.
+
+## Migration exclusion is a release gate
+
+The managed OAuth read path does not use `0232_ios_pilot_sessions.sql`, which
+belongs to the earlier custom-session candidate. That file remains in this
+branch's canonical Operations migration directory. The generic Operations
+`db:migrate:remote` command applies pending migrations from that directory;
+the empty pilot origin lists, disabled feature flag, and local example config
+do **not** protect against it. Do not run a blanket migration apply from this
+branch or include the file in a managed-pilot release's migration artifact.
+
+The Operations release owner must review and enforce an exact migration
+inventory at the actual release executor and verify the applied ledger; a
+pilot-only documentation or preflight check cannot constrain another migration
+runner. Resolve the old custom-session migration's future ownership and number
+before merging or including it in a shared release. Do not mark 0232 applied,
+rename or delete it, or skip other ordered migrations merely to satisfy the
+managed pilot. No migration or staff change is authorized by this note.
