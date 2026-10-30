@@ -14,6 +14,8 @@ import { executeOrdinaryFrontendRetainedRelease } from './ordinary-frontend-reta
 import { mergeAssetLedger, ledgerBytes } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { prepareOpsLegacyLedgerBootstrap, completeOpsLegacyLedgerBootstrap } from './ordinary-frontend-ops-ledger-bootstrap.mjs';
+import { ORDINARY_FRONTEND_AUTHORITY_CONTRACT } from './ordinary-frontend-authority.mjs';
+import { ORDINARY_FRONTEND_AUTHORITY_TABLES } from './ordinary-frontend-authority-reader.mjs';
 
 const fixturePath = process.env.LEDGETOP_ORDINARY_FRONTEND_EXECUTOR_PRIVATE_FIXTURE;
 const opsBytePathsPath = process.env.LEDGETOP_ORDINARY_FRONTEND_EXECUTOR_OPS_BYTE_PATHS;
@@ -91,7 +93,29 @@ function staffReadiness(sourceCommit) {
     controlPlaneSha256: '3'.repeat(64), observedAt: new Date().toISOString(), staffCount: 1, generation: 1 };
 }
 
-function harness(t, fixture, app, { failCandidateAssets = false, failStaff = false } = {}) {
+function syntheticFrontendAuthority(sourceCommit) {
+  const tables = Object.fromEntries(Object.keys(ORDINARY_FRONTEND_AUTHORITY_TABLES).map(name => [name, []]));
+  tables.staff_users = [{ id: 'staff:legacy', email: 'legacy@example.test', display_name: 'Legacy', access_subject: null, status: 'active' }];
+  tables.staff_role_assignments = [{ id: 'assignment:legacy', staff_id: 'staff:legacy', role_id: 'role-owner',
+    scope: 'global', division_id: null, scope_key: 'global', created_by: 'staff:legacy', created_at: '2026-10-01 00:00:00' }];
+  tables.native_staff_access_reconciliation = [{ singleton: 1, enabled: 0, generation: 0, applied_generation: 0,
+    lease_id: null, lease_until: null, attempt_generation: null, attempts: 0, last_attempt_at: null,
+    last_success_at: null, last_error: null }];
+  const snapshot = { schemaSha256: 'b'.repeat(64), bridgeMismatchCount: 1,
+    nativeStaffCohort: [{ staffId: 'staff:legacy', email: 'legacy@example.test', accessSubject: null, displayName: 'Legacy',
+      legacyStatus: 'active', bridgeStatus: 'not_admitted', nativeActive: null, admissionVersion: null, profileVersion: null }],
+    controlPlane: [], nativeControlCandidates: [], tables };
+  const reviewedAt = Date.now();
+  const review = { schemaVersion: 1, contract: ORDINARY_FRONTEND_AUTHORITY_CONTRACT, application: 'operations',
+    sourceCommit, accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId, databaseId: NATIVE_STAFF_PRODUCTION_TARGET.databaseId,
+    reviewedAt: new Date(reviewedAt).toISOString(), expiresAt: new Date(reviewedAt + 15 * 60_000).toISOString(),
+    snapshotObservedAt: new Date(reviewedAt - 5_000).toISOString(), snapshotSha256: hash(canonical(snapshot)), snapshot };
+  return { review, observation: () => ({ schemaVersion: 1, accountId: review.accountId, databaseId: review.databaseId,
+    observedAt: new Date().toISOString(), snapshot: clone(snapshot) }) };
+}
+
+function harness(t, fixture, app, { failCandidateAssets = false, failStaff = false,
+  frontendAuthority = false, driftFrontendAuthorityAt = 0 } = {}) {
   const before = clone(fixture.snapshot), artifact = assetFiles(t, app), sourceCommit = fixture.artifactSourceCommit;
   assert.ok(HEX40.test(sourceCommit)); artifact.release.sourceCommit = sourceCommit;
   const operationsExpected = { operations: clone(FIXED_OPS_WEIGHTS) };
@@ -177,13 +201,23 @@ function harness(t, fixture, app, { failCandidateAssets = false, failStaff = fal
   const executorSourceRoot = root;
   const sourceReader = sourceRoot => path.resolve(sourceRoot).toLowerCase() === path.resolve(fixture.artifactSourceRoot).toLowerCase()
     ? fixture.artifactSourceCommit : fixture.executorSourceCommit;
-  const options = { app, plan: retainedPlan, profile: fixture.profile, expectedDeploymentVersions,
-    assetVerifierProvider, staffCutoverReview: { synthetic: true }, reader, cli: fixture.cliPath,
+  const frontendPacket = frontendAuthority ? syntheticFrontendAuthority(sourceCommit) : null;
+  const frontendAuthorityPhases = [], options = { app, plan: retainedPlan, profile: fixture.profile, expectedDeploymentVersions,
+    assetVerifierProvider, ...(frontendAuthority ? { staffAuthorityContract: ORDINARY_FRONTEND_AUTHORITY_CONTRACT,
+      frontendAuthorityReview: frontendPacket.review } : { staffCutoverReview: { synthetic: true } }), reader, cli: fixture.cliPath,
     journalDirectory, artifactSourceRoot: fixture.artifactSourceRoot, executorSourceRoot, sourceReader,
     captureFn, runNative, now: () => Date.now(),
+    readFrontendAuthority: async () => {
+      frontendAuthorityPhases.push(frontendAuthorityPhases.length + 1);
+      const observation = frontendPacket?.observation();
+      if (driftFrontendAuthorityAt === frontendAuthorityPhases.length) observation.snapshot.tables.staff_role_assignments.push({
+        id: 'assignment:unexpected', staff_id: 'staff:legacy', role_id: 'role-admin', scope: 'global',
+        division_id: null, scope_key: 'global', created_by: 'staff:legacy', created_at: '2026-10-30 00:00:00' });
+      return observation;
+    },
     readStaffCutover: async () => { staffPhases.push(staffPhases.length + 1); if (failStaff) throw new Error('synthetic held staff readiness'); return staffReadiness(sourceCommit); } };
   return { options, before, active, ordinaryPlan, retainedPlan, previousLedger, previousAssetBytes,
-    candidateAssets, candidateId, nativeCalls, providerEvents, staffPhases, journalDirectory };
+    candidateAssets, candidateId, nativeCalls, providerEvents, staffPhases, frontendAuthorityPhases, journalDirectory };
 }
 
 test('private sanitized fixture: full Client state machine preserves exact Ops 0/100 weights', { skip: !fixturePath }, async t => {
@@ -216,6 +250,30 @@ test('private sanitized fixture: full Ops state machine qualifies staff around e
   assert.ok(Date.parse(activeReceipt.earliestPermittedPruningAt) >= Date.parse(activeReceipt.namespaceObservedAt) + 48 * 60 * 60_000);
   assert.equal(h.providerEvents.filter(row => row[0] === 'create').length, 3);
   assert.equal(h.providerEvents.filter(row => row[0] === 'remove').length, 3);
+});
+
+test('private sanitized fixture: explicit frontend-only contract checks every Ops phase without native cutover reads', { skip: !fixturePath || !opsBytePathsPath }, async t => {
+  const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+  const h = harness(t, fixture, 'operations', { frontendAuthority: true });
+  const result = await executeOrdinaryFrontendRetainedRelease(h.options);
+  assert.equal(result.activated, true);
+  assert.deepEqual(h.nativeCalls.map(row => row.phase), ['upload','namespace-stage','activate']);
+  assert.equal(h.frontendAuthorityPhases.length, 8);
+  assert.deepEqual(h.staffPhases, [], 'frontend-only authority never reads native cutover readiness');
+  assert.equal(h.providerEvents.filter(row => row[0] === 'create').length, 3);
+  assert.equal(h.providerEvents.filter(row => row[0] === 'remove').length, 3);
+});
+
+test('private sanitized fixture: reviewed authority drift holds before the next native version mutation', { skip: !fixturePath || !opsBytePathsPath }, async t => {
+  const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+  const h = harness(t, fixture, 'operations', { frontendAuthority: true, driftFrontendAuthorityAt: 2 });
+  await assert.rejects(executeOrdinaryFrontendRetainedRelease(h.options), /reviewed_staff_or_control_state_changed/u);
+  assert.equal(h.frontendAuthorityPhases.length, 2);
+  assert.deepEqual(h.staffPhases, [], 'frontend-only drift does not fall back to native cutover readiness');
+  assert.deepEqual(h.nativeCalls, [], 'no Worker version upload/deploy is dispatched after authority drift');
+  assert.equal(h.providerEvents.filter(row => row[0] === 'create').length, 1);
+  assert.equal(h.providerEvents.filter(row => row[0] === 'remove').length, 1);
+  assert.equal(fs.readFileSync(path.join(h.journalDirectory, 'journal.jsonl'), 'utf8').includes('native-version-upload'), false);
 });
 
 test('private sanitized fixture: ambiguous Client asset failure after one upload and namespace stage does not activate or retry', { skip: !fixturePath }, async t => {

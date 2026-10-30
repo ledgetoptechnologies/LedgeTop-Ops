@@ -225,6 +225,28 @@ inactive candidate readback and byte checks before and after activation. A
 failed or ambiguous write stops mutations and permits read-only reconciliation.
 None of these components supplies or bypasses the native staff review gate.
 
+The explicit retained Operations executor supports a separate
+`ordinary-frontend-preserve-native-staff-v1` authority packet for a frontend-only
+release while native staff control remains disabled. The externally reviewed
+packet must pin the current Operations bridge, staff cohort, both native
+control-plane candidate sets, disabled control generation, and a schema
+fingerprint. Its snapshot includes legacy role/permission/division
+assignments, unbound and inactive staff rows, and any native admissions and
+profiles already present. Every executor checkpoint takes a fresh read-only
+snapshot and requires an exact match; it refuses enabled or in-flight native
+control, and any change to the reviewed bridge mismatch/cohort/control-plane
+state. The v1 reader pins the pre-0226 schema and fails closed if any
+`staff_login_*` table, trigger, or index appears; alias/login binding authority
+requires a separately reviewed contract before migration 0226 or its objects
+are introduced. This contract
+does not authorize staff admission, onboarding, cutover, or native control
+activation. The existing full native-staff cutover contract remains strict and
+still requires enabled, reconciled native control. Packet creation and owner
+review remain external inputs; the executor does not create an approval receipt.
+The separate authority contract does not
+change the retained asset union, live namespace byte verification, rollback,
+deployment-weight, or 48-hour retention gates.
+
 Cloudflare Builds has a20-minute limit. The complete GitHub CI can take longer,
 so production deployment must be initiated after successful main CI through a
 qualified completion-event path. A successful build or restored toggle is not

@@ -9,6 +9,8 @@ import { capture, CloudflareReader, deploymentSourceCommit, hash, canonical, nee
   stableState, validateBuildEnvironment, validateInstallation, validateStaffReadinessReceipt,
   ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256, ORDINARY_FRONTEND_PREFLIGHT_MODE } from './production-deploy.mjs';
 import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+import { ORDINARY_FRONTEND_AUTHORITY_CONTRACT, validateOrdinaryFrontendAuthorityObservation } from './ordinary-frontend-authority.mjs';
+import { readOrdinaryFrontendAuthorityObservation } from './ordinary-frontend-authority-reader.mjs';
 import { createAssetVerificationNonce, executeAssetVerification } from './production-auto-verify.mjs';
 import { readCandidateVersionWithVisibilityRetry } from './production-deploy.mjs';
 import { ProductionCloudflareProvider, newTemporaryVerifierName } from './production-auto-provider.mjs';
@@ -153,15 +155,18 @@ function writePrivateJson(directory, name, value) {
  * use native Wrangler versions upload/deploy. Temporary verifier create/delete
  * calls use the separate journaled provider adapter and happen only after exact source,
  * installed v3 profile, retained old bytes, current controls and (for Ops)
- * freshly read native staff consent have passed. No automatic replay or rollback.
+ * the explicitly selected reviewed staff authority contract have passed. No automatic replay or rollback.
  *
  * Tests can inject bounded low-level adapters. An adapter returns observations
  * or native CLI text/exit status, never a `ready` authorization boolean.
  */
 export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinnedPlan, profile, expectedDeploymentVersions, assetVerifierProvider,
-  staffCutoverReview, staffReviewPath, reader, cli, journalDirectory, artifactSourceRoot, executorSourceRoot = ROOT, fetchImpl = fetch,
+  staffAuthorityContract = 'native-staff-cutover-v1', staffCutoverReview, staffReviewPath,
+  frontendAuthorityReview, readFrontendAuthority = readOrdinaryFrontendAuthorityObservation,
+  reader, cli, journalDirectory, artifactSourceRoot, executorSourceRoot = ROOT, fetchImpl = fetch,
   runNative = runNativeProductionCommand, captureFn = capture, readStaffCutover = readNativeStaffCutoverReadiness,
   sourceReader = deploymentSourceCommit, now = () => Date.now() } = {}) {
+  frontendAuthorityReview = frontendAuthorityReview ? structuredClone(frontendAuthorityReview) : undefined;
   const ordinaryPlan = pinnedPlan?.ordinaryPlan;
   needFn(['operations', 'client'].includes(app) && pinnedPlan?.schemaVersion === 2
     && pinnedPlan.contract === 'ordinary-frontend-retained-native-module-v2'
@@ -213,10 +218,33 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   needFn(Number.isFinite(observedAt) && observedAt <= now() && now() - observedAt <= 5 * 60_000,
     'Pinned retained plan ledger observation is stale');
 
+  needFn(['native-staff-cutover-v1', ORDINARY_FRONTEND_AUTHORITY_CONTRACT].includes(staffAuthorityContract),
+    'Explicit supported Operations staff authority contract required');
+  if (app !== 'operations') needFn(staffAuthorityContract === 'native-staff-cutover-v1' && !frontendAuthorityReview,
+    'Client release cannot select an Operations-only authority contract');
+  if (app === 'operations' && staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT) {
+    needFn(frontendAuthorityReview && typeof readFrontendAuthority === 'function'
+      && !staffCutoverReview && !staffReviewPath,
+    'Frontend-only release requires its exact reviewed authority packet and separate snapshot reader');
+  }
+  if (app === 'operations' && staffAuthorityContract === 'native-staff-cutover-v1') {
+    needFn(!frontendAuthorityReview, 'Frontend-only authority packet requires its explicit contract discriminator');
+  }
   const observations = { beforeReadiness: null };
-  const review = app === 'operations' ? (staffCutoverReview ?? (staffReviewPath ? readStaffCutoverReview(staffReviewPath) : undefined)) : undefined;
+  const review = app === 'operations' && staffAuthorityContract === 'native-staff-cutover-v1'
+    ? (staffCutoverReview ?? (staffReviewPath ? readStaffCutoverReview(staffReviewPath) : undefined)) : undefined;
   const qualifyStaff = async phase => {
     if (app !== 'operations') return null;
+    if (staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT) {
+      const observed = await readFrontendAuthority({ review: structuredClone(frontendAuthorityReview), sourceCommit });
+      const receipt = validateOrdinaryFrontendAuthorityObservation(frontendAuthorityReview, observed, { sourceCommit, application: app, now: now() });
+      if (observations.beforeReadiness) needFn(equal(
+        Object.fromEntries(Object.entries(receipt).filter(([key]) => key !== 'observedAt')),
+        Object.fromEntries(Object.entries(observations.beforeReadiness).filter(([key]) => key !== 'observedAt'))),
+      'Reviewed frontend-only staff authority changed during release; reconcile without retry');
+      else observations.beforeReadiness = receipt;
+      return receipt;
+    }
     needFn(review && typeof readStaffCutover === 'function', 'Operations requires the exact reviewed native staff cutover packet');
     const observed = await readStaffCutover({ review: structuredClone(review), sourceCommit });
     const receipt = validateStaffReadinessReceipt(observed, sourceCommit);
@@ -383,9 +411,11 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
 }
 
 /** Production entry point. Nothing invokes this automatically; callers must
- * supply a reviewed offline plan, the original accepted profile, and Ops packet. */
+ * supply a reviewed offline plan, the original accepted profile, and exactly
+ * one Operations authority packet matching its explicit contract. */
 export async function executeOrdinaryFrontendRetainedProduction({ app, plan, profile, expectedDeploymentVersions,
-  artifactSourceRoot, staffReviewPath, journalDirectory, env = process.env, fetchImpl = fetch } = {}) {
+  staffAuthorityContract = 'native-staff-cutover-v1', artifactSourceRoot, staffReviewPath,
+  frontendAuthorityReviewPath, journalDirectory, env = process.env, fetchImpl = fetch } = {}) {
   needFn(env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
     && typeof env.CLOUDFLARE_API_TOKEN === 'string' && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN),
   'Cloudflare account and API token are required by the explicitly invoked production executor');
@@ -396,11 +426,24 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
     && plan.application === app && planSourceCommit === plan.sourceCommit && HEX40.test(planSourceCommit ?? ''),
   'Pinned ordinary retained plan source identity is invalid');
   const reader = new CloudflareReader(env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_API_TOKEN);
-  const review = app === 'operations' ? readStaffCutoverReview(staffReviewPath) : undefined;
+  needFn(staffAuthorityContract === 'native-staff-cutover-v1' || staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT,
+    'Explicit supported Operations staff authority contract required');
+  const review = app === 'operations' && staffAuthorityContract === 'native-staff-cutover-v1'
+    ? readStaffCutoverReview(staffReviewPath) : undefined;
+  const frontendReview = app === 'operations' && staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT
+    ? readStaffCutoverReview(frontendAuthorityReviewPath) : undefined;
+  if (app !== 'operations') needFn(!staffReviewPath && !frontendAuthorityReviewPath,
+    'Operations authority packets cannot be supplied for a Client release');
+  if (staffAuthorityContract === 'native-staff-cutover-v1') needFn(!frontendAuthorityReviewPath,
+    'Frontend-only review packet requires its explicit authority contract');
+  if (staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT) needFn(!staffReviewPath,
+    'Native cutover packet cannot be combined with frontend-only authority');
+  needFn(!(review && frontendReview), 'Select exactly one Operations staff authority packet');
   const assetVerifierProvider = createJournaledAssetVerifierProvider({ accountId: env.CLOUDFLARE_ACCOUNT_ID,
     token: env.CLOUDFLARE_API_TOKEN, fetchImpl, profile: PROFILE, journalDirectory, sourceCommit: planSourceCommit });
   return executeOrdinaryFrontendRetainedRelease({ app, plan, profile, expectedDeploymentVersions,
-    assetVerifierProvider, staffCutoverReview: review, reader, cli: path.join(ROOT, `apps/${app}/node_modules/wrangler/wrangler-dist/cli.js`),
+    assetVerifierProvider, staffAuthorityContract, staffCutoverReview: review, frontendAuthorityReview: frontendReview,
+    reader, cli: path.join(ROOT, `apps/${app}/node_modules/wrangler/wrangler-dist/cli.js`),
     journalDirectory, artifactSourceRoot, executorSourceRoot: ROOT, fetchImpl,
     runNative: (cli, args, directory, phase, cwd) => runNativeProductionCommand(cli, args, directory, phase, cwd, env),
     sourceReader: root => deploymentSourceCommit(root, env),
