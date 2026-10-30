@@ -10,6 +10,12 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const PROFILE = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts/production-deploy-profile.json')));
 const DECLARATION = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts/client-portal-release-profile.json')));
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+export const ORDINARY_FRONTEND_PREFLIGHT_MODE = 'ordinary-frontend-preserve-installed-v3';
+export const ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 = '6073b977db48843d9eaecba74cb3863815b92dff87afd4c6f144b5e1dbad48fe';
+const ORDINARY_FRONTEND_PRESERVED_FLAGS = Object.freeze({
+  operations: 'CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED',
+  client: 'CLIENT_VIEWER_ENABLED',
+});
 export function need(ok, message) { if (!ok) throw new Error(message); }
 export const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 export function canonical(value) {
@@ -37,6 +43,51 @@ export function varsOf(state) {
   return Object.fromEntries(rows.filter(x => x.type === 'plain_text').map(x => {
     need(typeof x.text === 'string', 'Plain binding value missing'); return [x.name, x.text];
   }));
+}
+export function ordinaryFrontendPreflightDescriptor(profile, mode) {
+  if (mode === undefined) return { mode: 'strict-default', profileSHA256: null };
+  need(mode === ORDINARY_FRONTEND_PREFLIGHT_MODE, 'Unreviewed ordinary frontend preflight mode');
+  need(hash(canonical(profile)) === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
+    'Unreviewed ordinary frontend accepted profile');
+  const trueHash = hash('true');
+  for (const [app, name] of Object.entries(ORDINARY_FRONTEND_PRESERVED_FLAGS)) {
+    const worker = profile.workers?.[app];
+    need(Array.isArray(worker?.plainNames) && worker.plainNames.includes(name)
+      && worker.plainValueSHA256?.[name] === trueHash,
+    'Ordinary frontend accepted profile does not pin preserved flags');
+  }
+  return { mode, profileSHA256: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 };
+}
+/**
+ * Apply the legacy Project Alpha profile checks to a preflight-only copy for
+ * the exact accepted installed UI profile. The two actual values are checked
+ * as string "true" against the pinned profile before the copy is normalized
+ * to satisfy the older receiver/release declaration. The checked snapshot is
+ * never changed; no runtime/config value is enabled or written here.
+ */
+export function validateOrdinaryFrontendPreflightPreservation(clientVars, operationsVars, profile, mode) {
+  need(mode === ORDINARY_FRONTEND_PREFLIGHT_MODE, 'Unreviewed ordinary frontend preflight mode');
+  ordinaryFrontendPreflightDescriptor(profile, mode);
+  const trueHash = hash('true');
+  need(clientVars && Object.getPrototypeOf(clientVars) === Object.prototype
+    && typeof clientVars[ORDINARY_FRONTEND_PRESERVED_FLAGS.client] === 'string'
+    && clientVars[ORDINARY_FRONTEND_PRESERVED_FLAGS.client] === 'true'
+    && hash(clientVars[ORDINARY_FRONTEND_PRESERVED_FLAGS.client]) === trueHash,
+  'Ordinary frontend Client viewer flag differs from pinned installed profile');
+  need(operationsVars && Object.getPrototypeOf(operationsVars) === Object.prototype
+    && typeof operationsVars[ORDINARY_FRONTEND_PRESERVED_FLAGS.operations] === 'string'
+    && operationsVars[ORDINARY_FRONTEND_PRESERVED_FLAGS.operations] === 'true'
+    && hash(operationsVars[ORDINARY_FRONTEND_PRESERVED_FLAGS.operations]) === trueHash,
+  'Ordinary frontend Operations hierarchy flag differs from pinned installed profile');
+  const legacyClientVars = { ...clientVars, [ORDINARY_FRONTEND_PRESERVED_FLAGS.client]: 'false' };
+  const legacyOperationsVars = { ...operationsVars, [ORDINARY_FRONTEND_PRESERVED_FLAGS.operations]: 'false' };
+  const errors = validatePortalReleasePreflight(
+    { name: 'ledgetop-clients', keep_vars: true, vars: legacyClientVars },
+    { name: 'ledgetop-ops', keep_vars: true, vars: legacyOperationsVars },
+    DECLARATION,
+  );
+  need(errors.length === 0, `Effective production release profile rejected: ${errors.join('; ')}`);
+  return { mode, profileSHA256: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 };
 }
 function activeId(state, expectedVersions) {
   const rows = state.deployment.versions;
@@ -94,7 +145,11 @@ export function validateReviewedExpectedDeploymentVersions(value) {
   'Unreviewed expected deployment weights');
   return structuredClone(value);
 }
-export function validateInstallation(snapshot, { allowLatest = {}, profile = PROFILE, selectedApp, expectedDeploymentVersions = {} } = {}) {
+export function validateInstallation(snapshot, { allowLatest = {}, profile = PROFILE, selectedApp, expectedDeploymentVersions = {},
+  ordinaryFrontendPreflightMode, ordinaryFrontendApp } = {}) {
+  const preflightDescriptor = ordinaryFrontendPreflightDescriptor(profile, ordinaryFrontendPreflightMode);
+  if (ordinaryFrontendPreflightMode !== undefined)
+    need(['operations', 'client'].includes(ordinaryFrontendApp), 'Ordinary frontend preflight is limited to Operations or Client UI plans');
   need(profile.onboardingAdminOrigin === undefined || profile.onboardingAdminOrigin === 'https://ops.ledgetop.app', 'Unreviewed canonical admin origin profile');
   need(snapshot && equal(Object.keys(snapshot).sort(), Object.keys(profile.workers).sort()), 'Existing complete production installation required');
   for (const [app, spec] of Object.entries(profile.workers)) {
@@ -129,15 +184,22 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
   const recipients = JSON.parse(ops.CLIENT_ONBOARDING_NOTIFICATION_STAFF_IDS);
   need(Array.isArray(recipients) && recipients.length >= 1 && recipients.length <= 16 && new Set(recipients).size === recipients.length && recipients.every(x => typeof x === 'string' && /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/.test(x)), 'Notification recipient profile malformed');
   need(typeof ops.CLIENT_ONBOARDING_NOTIFICATIONS_NOT_BEFORE === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(ops.CLIENT_ONBOARDING_NOTIFICATIONS_NOT_BEFORE) && Number.isFinite(Date.parse(ops.CLIENT_ONBOARDING_NOTIFICATIONS_NOT_BEFORE)), 'Existing notification cutoff required');
-  const config = (name, vars) => ({ name, vars, keep_vars: true });
-  const errors = validatePortalReleasePreflight(config('ledgetop-clients', client), config('ledgetop-ops', ops), DECLARATION);
-  need(errors.length === 0, `Effective production release profile rejected: ${errors.join('; ')}`);
+  if (ordinaryFrontendPreflightMode === undefined) {
+    const config = (name, vars) => ({ name, vars, keep_vars: true });
+    const errors = validatePortalReleasePreflight(config('ledgetop-clients', client), config('ledgetop-ops', ops), DECLARATION);
+    need(errors.length === 0, `Effective production release profile rejected: ${errors.join('; ')}`);
+  } else {
+    need(preflightDescriptor.profileSHA256 === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
+      'Ordinary frontend profile pin changed');
+    validateOrdinaryFrontendPreflightPreservation(client, ops, profile, ordinaryFrontendPreflightMode);
+  }
   return snapshot;
 }
 
-export function compileConfig(snapshot, app, main, profile = PROFILE, expectedDeploymentVersions) {
+export function compileConfig(snapshot, app, main, profile = PROFILE, expectedDeploymentVersions, ordinaryFrontendPreflightMode) {
   const reviewedExpectedDeploymentVersions = validateReviewedExpectedDeploymentVersions(expectedDeploymentVersions);
-  validateInstallation(snapshot, { profile, selectedApp: app, expectedDeploymentVersions: reviewedExpectedDeploymentVersions }); need(Object.hasOwn(profile.workers, app), 'Unknown Worker');
+  validateInstallation(snapshot, { profile, selectedApp: app, expectedDeploymentVersions: reviewedExpectedDeploymentVersions,
+    ...(ordinaryFrontendPreflightMode === undefined ? {} : { ordinaryFrontendPreflightMode, ordinaryFrontendApp: app }) }); need(Object.hasOwn(profile.workers, app), 'Unknown Worker');
   const s = snapshot[app], spec = profile.workers[app];
   const annotations = clone(s.settings.annotations ?? {});
   delete annotations['workers/triggered_by']; // API-owned, rejected by native versions upload.

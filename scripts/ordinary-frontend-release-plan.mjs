@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { canonical, hash, need, compileConfig, validateInstallation, validateReviewedExpectedDeploymentVersions } from './production-deploy.mjs';
+import { canonical, hash, need, compileConfig, validateInstallation, validateReviewedExpectedDeploymentVersions,
+  ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256, ordinaryFrontendPreflightDescriptor } from './production-deploy.mjs';
 import { domainRecognitionProfile } from './production-domain-recognition.mjs';
 
 const equal = (a, b) => canonical(a) === canonical(b);
@@ -91,11 +92,13 @@ export function verifyOrdinaryFrontendArtifacts(release) {
 /** OFFLINE compiler only. The caller pins the source, complete capture and
  * resulting packet before a separately reviewed native versioned execution. */
 export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
-  profile = domainRecognitionProfile('portal-entry-canonical'), expectedDeploymentVersions } = {}) {
+  profile = domainRecognitionProfile('portal-entry-canonical'), expectedDeploymentVersions, ordinaryFrontendPreflightMode } = {}) {
   need(['operations', 'client'].includes(app) && release?.application === app, 'Exact frontend application required');
   const reviewedExpectedDeploymentVersions = validateReviewedExpectedDeploymentVersions(expectedDeploymentVersions);
   const before = clone(snapshot), beforeProfile = clone(profile);
-  validateInstallation(before, { profile: beforeProfile, expectedDeploymentVersions: reviewedExpectedDeploymentVersions });
+  const installationPreflight = ordinaryFrontendPreflightDescriptor(beforeProfile, ordinaryFrontendPreflightMode);
+  validateInstallation(before, { profile: beforeProfile, expectedDeploymentVersions: reviewedExpectedDeploymentVersions,
+    ...(ordinaryFrontendPreflightMode === undefined ? {} : { ordinaryFrontendPreflightMode, ordinaryFrontendApp: app }) });
   const browserProof = verifyOrdinaryFrontendArtifacts(release);
   const state = before[app], bindings = state.version.resources.bindings;
   need(bindings.filter(row => row.name === 'ASSETS').length === 1
@@ -104,7 +107,7 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
   const assets = clone(state.modern.assets);
   need(assets && equal(Object.keys(assets), ['config']) && assets.config.base_path === '/'
     && Object.keys(assets.config).every(key => ['base_path', 'html_handling', 'not_found_handling', 'run_worker_first'].includes(key)), 'Unsupported installed asset configuration');
-  const config = compileConfig(before, app, release.main.path, beforeProfile, reviewedExpectedDeploymentVersions);
+  const config = compileConfig(before, app, release.main.path, beforeProfile, reviewedExpectedDeploymentVersions, ordinaryFrontendPreflightMode);
   config.find_additional_modules = false;
   config.keep_vars = false;
   config.unsafe.metadata.keep_bindings = [];
@@ -124,6 +127,7 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
       expectedProfile.workers[name].plainValueSHA256[row.name] = hash(row.text);
     }
   return freeze({ schemaVersion: 1, application: app, sourceCommit: release.sourceCommit,
+    installationPreflight,
     ...(reviewedExpectedDeploymentVersions ? { expectedDeploymentVersions: clone(reviewedExpectedDeploymentVersions) } : {}),
     offlineOnly: true, deploymentEnabled: false, assetsUpload: true, historicalOrphanAssetsRetained: false,
     liveNamespaceVerified: false, nativeCompletionJwtMustRemainUnmodified: true,
@@ -135,6 +139,11 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
       'Complete new frontend manifest bytes through the active native asset namespace',
       'Exact previous version rollback and previous version asset-byte checks'],
     retentionPolicy: { minimumHours: 48, automaticPruning: false, satisfiedByThisOfflinePlan: false },
+    nativeExecutionQualification: { ready: false,
+      reason: ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_PREFLIGHT_MODE
+        && installationPreflight.profileSHA256 === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256
+        ? 'ordinary-frontend-mode-is-precompile-only; executor-candidate-and-post-upload-verifiers-remain-strict'
+        : 'offline-plan-does-not-authorize-execution' },
     oldTabBehavior: 'Activation requires a retained asset union and byte verification in the active namespace for releases served within the previous48hours. This offline plan alone is insufficient.' });
 }
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PROFILE, canonical, hash, compileConfig } from './production-deploy.mjs';
+import { PROFILE, canonical, hash, compileConfig, ORDINARY_FRONTEND_PREFLIGHT_MODE } from './production-deploy.mjs';
 import { domainPhaseValues } from './production-domain-recognition.mjs';
 import { compileOrdinaryFrontendReleasePlan, verifyOrdinaryFrontendArtifacts, validateOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
 const clone = value => structuredClone(value);
@@ -80,6 +80,9 @@ test('offline compiler accepts and records only the exact reviewed Ops 0/100 dep
   const {snapshot,options}=fixture(),{release}=artifacts(t,app),staged=stagedOperations(snapshot),before=clone(staged),weights=clone(reviewedDeploymentVersions);
   const args={app,release,profile:options.profile,expectedDeploymentVersions:weights};
   const plan=compileOrdinaryFrontendReleasePlan(staged,args);
+  assert.deepEqual(plan.installationPreflight,{mode:'strict-default',profileSHA256:null});
+  assert.equal(plan.nativeExecutionQualification.ready,false);
+  assert.equal(plan.nativeExecutionQualification.reason,'offline-plan-does-not-authorize-execution');
   assert.deepEqual(staged,before);assert.deepEqual(weights,reviewedDeploymentVersions);
   assert.deepEqual(plan.expectedDeploymentVersions,reviewedDeploymentVersions);
   assert.deepEqual(plan.expectedDeploymentVersions.operations,[
@@ -91,6 +94,8 @@ test('offline compiler accepts and records only the exact reviewed Ops 0/100 dep
   assert.equal(nativeConfig.name,PROFILE.workers[app].name);assert.equal(nativeConfig.main,release.main.path);
   assert.deepEqual(nativeConfig.triggers.crons,options.profile.workers[app].crons);
   assert.equal(validateOrdinaryFrontendReleasePlan(staged,plan,args),plan);
+  const changedPreflight=clone(plan);changedPreflight.installationPreflight.mode=ORDINARY_FRONTEND_PREFLIGHT_MODE;
+  assert.throws(()=>validateOrdinaryFrontendReleasePlan(staged,changedPreflight,args),/Ordinary frontend release plan changed/);
   assert.throws(()=>compileOrdinaryFrontendReleasePlan(staged,{app,release,profile:options.profile}),/Production must have one100% active version/);
   assert.throws(()=>compileConfig(staged,app,release.main.path,options.profile),/Production must have one100% active version/);
  }
@@ -109,6 +114,7 @@ test('reviewed weight option rejects swapped, wrong, malformed and unknown deplo
  assert.throws(()=>compile({operations:reviewedDeploymentVersions.operations,client:[{versionId:'11111111-1111-4111-8111-111111111111',percentage:100}]}),/Unreviewed expected deployment weights/);
  assert.throws(()=>compile({unknown:reviewedDeploymentVersions.operations}),/Unreviewed expected deployment weights/);
  assert.throws(()=>compileOrdinaryFrontendReleasePlan(staged,{app:'ops-sync',release,profile:options.profile,expectedDeploymentVersions:reviewedDeploymentVersions}),/Exact frontend application required/);
+ assert.throws(()=>compileOrdinaryFrontendReleasePlan(staged,{app:'operations',release,profile:options.profile,expectedDeploymentVersions:reviewedDeploymentVersions,ordinaryFrontendPreflightMode:ORDINARY_FRONTEND_PREFLIGHT_MODE}),/Unreviewed ordinary frontend accepted profile/);
  const wrongObserved=clone(staged);wrongObserved.operations.deployment.versions=[
   {version_id:'0b1ab5a8-9db0-42ab-b718-8569fae2382e',percentage:100},
   {version_id:'a45943f4-e5c5-4142-9057-fb9adb5cf739',percentage:0},
