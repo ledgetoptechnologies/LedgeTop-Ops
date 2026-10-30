@@ -62,6 +62,13 @@ inventory again showed one pilot. The device diagnostic result remains pending.
 Refresh and Keychain persistence code is an unwired candidate; restart
 persistence and provider replay protection remain unverified.
 
+The revised read-only bridge passed all three cases in its local D1 integration
+file, including signed identity, staff denial, assignment and source visibility,
+the composed edge-to-private-RPC path, and checks for unintended writes. The
+complete run took about 49 seconds; earlier short observations had not waited
+long enough. Task-owned test processes exited. This local result does not
+establish live Cloudflare identity mapping or staging release readiness.
+
 ## Native build and installation — October 29, 2026
 
 Commit `46790bba` was exported to a separate Linux build directory. Swift 6.4,
