@@ -39,7 +39,7 @@ async function deliverOneStagedAck({db,enabled=false,bindings,resolveCredential,
   binding=bindings?.[row.provider_id];if(!binding||typeof resolveCredential!=='function'||typeof resolveCapability!=='function')throw invalid();
   base=new URL(binding.origin);if(base.protocol!=='https:'||base.username||base.password||base.pathname!=='/'||base.search||base.hash||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(binding.principalId)||!uuid(binding.authorityId)||!['production','staging'].includes(binding.environment))throw invalid();
   if(crypto.createHash('sha256').update(row.assertion_json).digest('hex')!==row.assertion_sha256)throw invalid();
-  value=validate(parseFlat(row.assertion_json),binding);if(value.attemptId!==row.attempt_id||value.stagingCommitId!==row.staging_commit_id)throw invalid();
+  let parsed;try{parsed=parseFlat(row.assertion_json)}catch{throw invalid()}value=validate(parsed,binding);if(value.attemptId!==row.attempt_id||value.stagingCommitId!==row.staging_commit_id)throw invalid();
   bearer=await resolveCredential(binding.credentialRef);capability=await resolveCapability(row.attempt_id);if(!secret(bearer)||!secret(capability))throw invalid();if(!bindIdentity(db,row,binding,base,capability,clock()))return true;
  }catch(e){transition(db,row,e?.code==='staged_ack_invalid'?'held':'uncertain',clock(),e?.code==='staged_ack_invalid'?'staged_ack_invalid':'staged_ack_unavailable');return true}
  const headers={Authorization:`Bearer ${bearer}`,'X-LedgeTop-Capability':capability,Accept:'application/json'};
