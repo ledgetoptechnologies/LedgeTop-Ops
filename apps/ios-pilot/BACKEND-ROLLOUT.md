@@ -97,7 +97,12 @@ revocation window; it is not an atomic database-version guarantee.
 The full final backend suite subsequently passed all 32 tests with a single
 worker. Swift 6.4 on WSL passed all 17 package tests, including five synthetic
 OAuth wire-format tests. Swift emitted an existing test-stub Sendable warning.
-The OAuth helpers are unmounted and have not been verified against Cloudflare.
+An unmounted native transport now covers pinned discovery, public registration,
+and code exchange with bounded responses and cancellation handling. After its
+addition, all 21 Swift package tests passed; its synthetic tests do not prove
+Cloudflare compatibility. The eventual app coordinator must still guard against
+late results after sign-out. Provider metadata examples and the API guide differ
+on issuer formatting and custom redirect support, which require staging evidence.
 The native client still uses the original custom-session protocol. End-to-end
 sign-in, Access ingress, and iPad behavior remain unverified.
 
