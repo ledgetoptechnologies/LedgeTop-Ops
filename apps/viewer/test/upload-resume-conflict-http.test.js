@@ -30,12 +30,19 @@ test('an already authorized chunk cannot be acknowledged after cleanup claims it
  processing.createAdminSession({tokenHash:auth.hashToken(token),subject,permissions:['viewer.datasets.write'],displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
  const project=processing.createProject({displayName:'Synthetic'}),dataset=processing.createDataset({projectId:project.id,displayName:'Synthetic',storageMode:'managed',rootKey:'datasets',relativePath:'synthetic'});
  const files=[{id:'photo',relativePath:'photo.jpg',byteSize:body.length,sha256:sha}],created=processing.createUpload({datasetId:dataset.id,subject,files,chunkSize:body.length,expiresAt:'2999-01-01T00:00:00.000Z'});
- const write=storage.writeChunk.bind(storage);storage.writeChunk=(...args)=>{otherDb.prepare("UPDATE upload_sessions SET expires_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(created.upload.id);assert.equal(cleaner.expireUpload(created.upload.id),true);storage.cleanupUpload(created.upload.id);return write(...args);};
+ const transaction=processing.transaction.bind(processing);let claimed=false;processing.transaction=fn=>{if(!claimed){claimed=true;otherDb.prepare("UPDATE upload_sessions SET expires_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(created.upload.id);assert.equal(cleaner.expireUpload(created.upload.id),true);storage.cleanupUpload(created.upload.id);}return transaction(fn);};
  const app=express();app.use(createProcessingApi({repository,processing,storage}));
  const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});t.after(async()=>{await new Promise(resolve=>server.close(resolve));otherDb.close();db.close();fs.rmSync(root,{recursive:true,force:true});});
  const response=await fetch(`http://127.0.0.1:${server.address().port}/api/v1/admin/uploads/${created.upload.id}/files/photo/chunks/0`,{method:'PUT',headers:{authorization:`Bearer ${token}`,'content-type':'application/octet-stream','x-upload-token':created.token,'x-chunk-sha256':sha},body});
  assert.equal(response.ok,false,`cleanup has claimed the upload; the stale writer must not be acknowledged (HTTP ${response.status})`);
  assert.equal(processing.listChunks(created.upload.id,'photo').length,0);
+ processing.transaction=transaction;
+ const second=processing.createUpload({datasetId:dataset.id,subject,files,chunkSize:body.length,expiresAt:'2999-01-01T00:00:00.000Z'});
+ otherDb.exec('PRAGMA busy_timeout=0');let blocked=false;
+ const write=storage.writeChunk.bind(storage);storage.writeChunk=(...args)=>{try{cleaner.expireUpload(second.upload.id);}catch(error){assert.match(error.message,/locked|busy/i);blocked=true;}return write(...args);};
+ const accepted=await fetch(`http://127.0.0.1:${server.address().port}/api/v1/admin/uploads/${second.upload.id}/files/photo/chunks/0`,{method:'PUT',headers:{authorization:`Bearer ${token}`,'content-type':'application/octet-stream','x-upload-token':second.token,'x-chunk-sha256':sha},body});
+ assert.equal(accepted.status,201);assert.equal(blocked,true,'a second database connection cannot claim cleanup during publication');
+ assert.equal(processing.listChunks(second.upload.id,'photo').length,1);
 });
 
 test('a rotated upload token cannot enqueue finalization',{skip:process.env.LTDS_UPLOAD_CHUNK_FENCING_REGRESSION!=='1'},async t=>{

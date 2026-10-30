@@ -30,7 +30,7 @@ Old API and worker builds can bypass this proposed protocol, including the exist
 
 ## Current concrete failure and transaction experiment
 
-The opt-in `LTDS_UPLOAD_CHUNK_FENCING_REGRESSION=1` HTTP test pauses after the chunk route's initial authorization and lets a second SQLite connection claim the expired session and clean its cache. The original request then writes a chunk and responds HTTP 201. The test deliberately fails until the write is fenced; its two database connections interleave in one process, so it does not establish separate-process or power-loss behavior.
+The original opt-in `LTDS_UPLOAD_CHUNK_FENCING_REGRESSION=1` HTTP regression reproduced a stale chunk request receiving HTTP 201 after a second SQLite connection claimed the session and cleaned its cache. The local transaction prototype now rechecks state after cleanup and rejects that request. The updated test also verifies that a second connection cannot claim cleanup while the write transaction is active. Its connections interleave in one process, so it does not establish separate-process or power-loss behavior.
 
 A possible bounded experiment is to receive the request body first, acquire SQLite `BEGIN IMMEDIATE`, and then revalidate the upload status, expiry, subject, current token, dataset state and lifecycle intent before synchronous chunk publication and receipt insertion. Commit before responding. Compatible cleanup, resume and finalization updates on the same database serialize with this transaction, but it holds the database's single writer and blocks the API event loop while hashing and writing each chunk. Measure contention and slow-storage behavior before deciding whether this is viable. This experiment alone does not authorize activation.
 
