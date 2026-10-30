@@ -4,7 +4,8 @@ import { collectProductionMigrationEvidence, PRODUCTION_MIGRATION_TARGET,
   readProductionMigrationReadiness as readStrictProductionMigrationReadiness,
   validateProductionMigrationReadiness } from './production-auto-migration-readiness.mjs';
 import { evaluateApprovedAppendOnlyLedger, expectedApprovedAppendOnlyClassification,
-  RECONCILIATION_MANIFEST_SHA256, APPEND_PLAN_SHA256 } from './production-auto-migration-profile/append-only-inventory-gate.mjs';
+  validateApprovedAppendOnlySourceInventory, RECONCILIATION_MANIFEST_SHA256, APPEND_PLAN_SHA256 }
+  from './production-auto-migration-profile/append-only-inventory-gate.mjs';
 
 export { PRODUCTION_MIGRATION_TARGET, validateProductionMigrationReadiness };
 
@@ -97,6 +98,14 @@ export async function readProductionMigrationReadiness({
   }
   const checkedProfile = validateAppendOnlyProfile(appendOnlyProfile, sourceCommit);
   const evidence = await collectProductionMigrationEvidence({ sourceCommit, root, token, env, fetchImpl, now, monotonicNow }, {
+    processSourceInventory: ({ sourceRows, sourceFiles, names }, index) => validateApprovedAppendOnlySourceInventory({
+      ...checkedProfile,
+      sourceCommit,
+      app: PRODUCTION_MIGRATION_TARGET.databases[index].name,
+      sourceRows,
+      sourceFiles,
+      localMigrationNames: names,
+    }),
     processLedgerEvidence: ({ databaseId, inventory, ledgerRows, statementMeta }, index) => evaluateApprovedAppendOnlyLedger({
       ...checkedProfile,
       sourceCommit,

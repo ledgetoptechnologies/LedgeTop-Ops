@@ -85,6 +85,8 @@ const clientSuccessors = Object.freeze({
   // Reviewed reenrollment receipts preserve revoked identity history and fence
   // secondary membership changes; this never expands the frozen Client149 prefix.
   "0234_pa_principal_reenrollment.sql": "40d6e811b19ade969ecfd68a6ea223e80cf67e8adadf818e7b1f885befa1a49b",
+  // Exact application successor admission; it does not change the frozen Client149 inventory.
+  "0242_client_ops_triage_inquiries.sql": "8f25db33d95c77425a52031d0e4255b133e2a2b91025d427c0d118ee305a4b66",
 });
 
 function sha256(value: string | Uint8Array): string {

@@ -344,7 +344,10 @@ export function validateProductionMigrationAdmission(value, { sourceCommit, now 
 export async function collectProductionMigrationEvidence({
   sourceCommit, root, token, env = process.env, fetchImpl = globalThis.fetch,
   now = () => new Date(), monotonicNow = () => performance.now(),
-} = {}, { processLedgerEvidence } = {}) {
+} = {}, { processSourceInventory, processLedgerEvidence } = {}) {
+  if (processSourceInventory !== undefined && typeof processSourceInventory !== 'function') {
+    fail('migration_evidence_processor_invalid');
+  }
   if (processLedgerEvidence !== undefined && typeof processLedgerEvidence !== 'function') {
     fail('migration_evidence_processor_invalid');
   }
@@ -367,6 +370,10 @@ export async function collectProductionMigrationEvidence({
   const deadlineAt = startMono + OPERATION_TIMEOUT_MS;
   const deadline = { deadlineAt, monotonicNow: checkedMonotonicNow };
   const inventories = PRODUCTION_MIGRATION_TARGET.databases.map((db) => buildSourceInventory(root, sourceCommit, db, deadline));
+  for (let index = 0; index < inventories.length; index++) {
+    processSourceInventory?.(Object.freeze({ ...inventories[index] }), index);
+    checkedMonotonicNow();
+  }
   const databases = [];
   for (let index = 0; index < PRODUCTION_MIGRATION_TARGET.databases.length; index++) {
     if (checkedMonotonicNow() > deadlineAt) fail('readiness_deadline_exceeded');
