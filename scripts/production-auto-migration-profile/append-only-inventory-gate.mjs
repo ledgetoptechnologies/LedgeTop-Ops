@@ -157,10 +157,9 @@ export function evaluateApprovedAppendOnlyLedger({ reconciliationManifestBytes, 
   app, databaseId, sourceRows, sourceFiles, localMigrationNames, ledgerRows, statementMeta } = {}) {
   const profile = validateProfile(reconciliationManifestBytes, appendPlanBytes, sourceCommit, app);
   if (databaseId !== profile.databaseId) fail('migration_database_target_mismatch');
-  const checkedSourceRows = validateSourceRows(sourceRows, profile.sourceRows, app);
-  if (!Array.isArray(localMigrationNames) || localMigrationNames.length !== checkedSourceRows.length
-    || localMigrationNames.some((name, index) => name !== checkedSourceRows[index].name)) fail('local_source_inventory_changed');
-  validateSourceBytes(checkedSourceRows, sourceFiles);
+  const checkedSourceRows = validateApprovedAppendOnlySourceInventory({
+    reconciliationManifestBytes, appendPlanBytes, sourceCommit, app, sourceRows, sourceFiles, localMigrationNames,
+  });
   validateStatementMeta(statementMeta);
   const rows = Array.isArray(ledgerRows) ? ledgerRows : null;
   const expectedFull = [...profile.baseRows, ...profile.appendRows.map(row => ({ name: row.name, id: row.ledgerId }))];
@@ -197,6 +196,17 @@ export function evaluateApprovedAppendOnlyLedger({ reconciliationManifestBytes, 
     executesDdl: false,
     authorizesFeatureActivation: false,
   });
+}
+
+/** Validates local source files against the frozen candidate profile without reading or classifying a ledger. */
+export function validateApprovedAppendOnlySourceInventory({ reconciliationManifestBytes, appendPlanBytes,
+  sourceCommit, app, sourceRows, sourceFiles, localMigrationNames } = {}) {
+  const profile = validateProfile(reconciliationManifestBytes, appendPlanBytes, sourceCommit, app);
+  const checkedSourceRows = validateSourceRows(sourceRows, profile.sourceRows, app);
+  if (!Array.isArray(localMigrationNames) || localMigrationNames.length !== checkedSourceRows.length
+    || localMigrationNames.some((name, index) => name !== checkedSourceRows[index].name)) fail('local_source_inventory_changed');
+  validateSourceBytes(checkedSourceRows, sourceFiles);
+  return checkedSourceRows;
 }
 
 /** Recompute a serialized classification from the exact approved profile. */
