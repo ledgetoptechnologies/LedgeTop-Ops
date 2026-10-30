@@ -67,8 +67,15 @@ test('an existing trash intent does not override a retained CSV upload',t=>{
  const db=openDatabase(':memory:');t.after(()=>db.close());const p=new ProcessingRepository(db);
  const project=p.createProject({displayName:'Synthetic'}),dataset=p.createDataset({projectId:project.id,displayName:'Synthetic',rootKey:'datasets',relativePath:'synthetic',storageMode:'managed'});
  const mutation=p.beginTrashMutation(dataset.id,'fixture');assert.ok(mutation);
- p.createUpload({datasetId:dataset.id,subject:'legacy',files:[{id:'csv',relativePath:'control.csv',byteSize:1,sha256:'a'.repeat(64)}],chunkSize:1,expiresAt:'2999-01-01T00:00:00.000Z'});
+ const legacy=p.createUpload({datasetId:dataset.id,subject:'legacy',files:[{id:'csv',relativePath:'control.csv',byteSize:1,sha256:'a'.repeat(64)}],chunkSize:1,expiresAt:'2999-01-01T00:00:00.000Z'});
  assert.equal(p.beginTrashMutation(dataset.id,'fixture'),null);
  const {applyStorageMutation}=require('../server/storageLifecycle');
  assert.throws(()=>applyStorageMutation(p,{pathExistsStrict:()=>{throw Error('filesystem must not be touched');}},mutation),error=>error.code==='retained_csv_upload');
+ const held=p.getStorageMutation(mutation.id);assert.equal(held.status,'failed');assert.equal(held.errorCode,'retained_csv_upload');
+ assert.equal(p.pendingStorageMutations().some(item=>item.id===mutation.id),false,'a held intent does not starve unrelated recovery');
+ assert.equal(p.retryStorageMutation(mutation.id,'fixture'),null,'the retained upload still blocks retry');
+ const input={datasetId:dataset.id,subject:'legacy',files:legacy.upload.files,chunkSize:1,expiresAt:'2999-12-31T00:00:00.000Z'};
+ assert.equal(p.admitUpload(input),null,'an ambiguous lifecycle hold does not admit uploads');
+ db.prepare("UPDATE upload_sessions SET status='complete' WHERE id=?").run(legacy.upload.id);
+ assert.equal(p.retryStorageMutation(mutation.id,'fixture').status,'intent');assert.ok(p.pendingStorageMutations().some(item=>item.id===mutation.id));
 });
