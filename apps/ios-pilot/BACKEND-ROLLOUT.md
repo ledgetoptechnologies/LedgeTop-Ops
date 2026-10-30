@@ -21,10 +21,11 @@ The current worktree preflight reports missing generated staging configs and an
 outdated ordered migration inventory: 11 Delivery and 32 Operations filenames
 are newer than the checked-in contract; none named in that contract are missing.
 This is not evidence of the remote staging ledger. Migration 0232 itself creates
-only pilot credential tables and indexes, but the running authentication code also
-depends on the staff login binding schema introduced in 0226. Applying 0232 in
-isolation would therefore not prove that the pilot can safely authenticate. Review
-the actual staging ledger and the complete dependency chain with the release owner.
+only pilot credential tables and indexes. The staff login binding code introduced
+in 0226 also has an explicit compatibility path for an already-bound primary
+identity when all of its tables are absent; alternate identities fail closed.
+Applying 0232 in isolation would not prove safe authentication. Review the
+actual staging ledger and complete dependency chain with the release owner.
 
 Cloudflare's current documentation says path-specific Access rules override the
 broader path and cautions that Bypass disables Access controls and request logging;
@@ -58,6 +59,10 @@ Read-only inspection of the Operations staging D1 database (ID ending `c6b8`)
 found migration 0225 as the latest recorded migration. The `staff_login_bindings`
 and pilot credential tables were absent. No migration was applied. This confirms
 that the existing custom-session implementation cannot simply be enabled there.
+The Managed OAuth facade does not use the 0232 session tables and can use the
+legacy primary-identity path when all 0226 tables are absent. That observation
+does not establish a valid staff binding, permissions, complete schema or connector
+configuration, and does not authorize enabling data access.
 
 The existing staging Access application protects the entire Operations hostname
 with the staff allow policy. Its Managed OAuth setting is available but off. Do
@@ -85,6 +90,31 @@ DNS-only wildcard A record. The zone's Workers Routes page showed no routes.
 The wildcard affects the candidate hostname until a more-specific record exists;
 this is not approval to create one, and all collision and routing checks must be
 repeated immediately before any deployment or DNS change.
+Read-only inspection of all visible Access application destinations found no
+exact or wildcard match for that candidate. The account-wide Worker custom-domain
+inventory was not established, so a custom-domain collision remains unresolved.
+The current staging ledger remains at 0225, and a zero-row compilation of the
+operation projection and key joins succeeded; neither establishes that a staff
+identity or connector setup is ready.
+
+An undeployed synthetic-only OAuth probe is available for the first provider
+experiment. Its origin allowlist is empty and it has no business-data bindings.
+Four signed-assertion and routing tests passed locally. It checks the assertion
+and bearer syntax but relies on Access to validate the actual bearer: before
+using it as evidence, test invalid and mismatched tokens at the protected edge
+and disable alternative Worker URLs/routes. The Operations connector consistency
+check currently reads a credential envelope that can contain unrelated secrets;
+review a least-privilege approach before binding the real staging database.
+One candidate is a named private Service Binding entrypoint in the existing
+Operations Worker that validates the pilot assertion and performs the narrow
+authorized read within the authoritative environment. The public pilot Worker
+would then need neither the Operations database nor connector secrets. This is
+not implemented or approved: it requires changes to the shared service, release
+coordination, exact target/version checks, independent issuer/audience and
+staff/source authorization, and negative tests. Gradual deployments and D1 state
+must be checked at activation; a binding name alone does not prove the active
+version or data state. A readiness-only RPC would additionally leave a gap
+between readiness and the pilot's separate database read.
 
 The separate Cloudflare account named `Staging` is distinct from the `Ledge Top`
 account that currently owns the Operations staging Access application and D1
