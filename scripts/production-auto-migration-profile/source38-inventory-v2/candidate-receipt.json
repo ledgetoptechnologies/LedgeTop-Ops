@@ -1,0 +1,49 @@
+{
+  "at": "2026-10-30T13:12:06.219Z",
+  "sourceCommit": "38ad7ebcfc09e4334de846d5307e7dac5a0ff327",
+  "sourceTree": "47baeb281c5b370b935b86e6586c3d74d720681f",
+  "manifestSha256": "20722fd99f78dbb5052a4914fd5ba308afb6b0213be61aa4a04c9321e012ede6",
+  "appendPlanSha256": "ecdd9d0673a075e94b3dd3005103a8d898bd85fd5ba5af988cbbae612ecbeaa1",
+  "readEvidence": [
+    {
+      "app": "operations",
+      "worker": "ledgetop-ops",
+      "binding": "OPS_DB",
+      "databaseId": "6ebf7514-d306-4615-ae56-ad869c874dbd",
+      "settingsResponseSha256": "e00b70251fe6e584cf9481a4a818a10871fc9ee389e4b5e0fb3029a3ea0893c7",
+      "ledgerResponseSha256": "4ea3d37d5aeffc516d5da09f9fbed26f2295358126aa238ee74d6a753d084ac0",
+      "rowsRead": 225
+    },
+    {
+      "app": "client",
+      "worker": "ledgetop-clients",
+      "binding": "DELIVERY_DB",
+      "databaseId": "7f40a7b7-c3ec-470e-a626-e798867f71f8",
+      "settingsResponseSha256": "403ecab630c5c6b312bc66149f1e3878731ab7210afdbf7636d04c548aac4181",
+      "ledgerResponseSha256": "e4e3687d17321b084183c08e578b54a8534ddfb3e2ec8713ba63994fb14fbf21",
+      "rowsRead": 158
+    }
+  ],
+  "counts": [
+    {
+      "app": "operations",
+      "base": 225,
+      "append": 6,
+      "source": 231
+    },
+    {
+      "app": "client",
+      "base": 158,
+      "append": 5,
+      "source": 161
+    }
+  ],
+  "frozenProfileModified": false,
+  "reviewedSuccessorAdmitted": false,
+  "productionMigrationApproved": false,
+  "productionDdlApplied": false,
+  "featureFlagsChanged": false,
+  "providerWrites": 0,
+  "staffOrClientRecordsRead": false,
+  "scope": "fresh read-only candidate data for a future separately reviewed named inventory profile, never automatic execution or authority"
+}
