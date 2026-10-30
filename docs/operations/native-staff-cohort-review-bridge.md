@@ -106,3 +106,19 @@ module content types, use strict binding inheritance, record its intent before
 dispatch, reconcile an ambiguous result without replaying the upload, and
 prove that the active deployment did not change. That executor is not part of
 this planner. A successful upload alone is not a request-time behavior test.
+
+The separately reviewed `native-staff-cohort-review-bridge-inactive-upload.mjs`
+library implements that one-shot protocol. Its production path always captures
+the fixed Operations endpoints and checks the pinned package. A test-only plan
+substitution exercises protocol failures with a fake API; a live caller must
+not supply test hooks. Intent persistence failure blocks dispatch, and an
+uncertain response never causes another POST. Accepted candidate IDs are
+recorded before readback; a journal failure requires GET-only reconciliation.
+The executor exposes no activation, migration, permission, or settings writer.
+
+Uploading an inactive version advances the Worker’s latest-version head. This
+does not change active traffic, but it can block generic deployment tools until
+the known candidate is reconciled. Preserve its journal and do not describe the
+installation as having a clean release head after upload. This retained-code
+bootstrap path adds only the owner read-only review prerequisite; it cannot
+replace the native staff handoff required by a full Operations or Sync release.
