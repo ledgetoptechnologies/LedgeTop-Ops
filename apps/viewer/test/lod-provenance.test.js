@@ -176,6 +176,13 @@ test('server verifies controlled Obj2Tiles v4 evidence, retains v3 compatibility
   const checked=await verifyLodProvenance(outputPath,source);
   assert.equal(checked.verified,true,checked.errors.join('\n'));
   assert.equal(checked.provenance.schemaVersion,4);
+  const historical=structuredClone(generated);
+  historical.converter.binarySha256='3577688939806dabdf1f4620cc05debe6e178180a99bf0308f4b8483b8a36725';
+  rebindV4Digest(historical);
+  fs.writeFileSync(outputPath,JSON.stringify(historical));
+  const prior=await verifyLodProvenance(outputPath,source);
+  assert.equal(prior.verified,true,prior.errors.join('\n'));
+  fs.writeFileSync(outputPath,JSON.stringify(generated));
   assert.equal(checked.provenance.audit.algorithm,'ltds-obj2tiles-surface-equivalence-v4');
   assert.equal(checked.provenance.audit.policyRevision,'ltds-controlled-surface-policy-v4');
   assert.equal(checked.provenance.audit.accumulationMethod,'neumaier-compensated-f64-forward-reverse');

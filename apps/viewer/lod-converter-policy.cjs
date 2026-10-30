@@ -103,6 +103,13 @@ const CONTROLLED_CONVERTER_BINARY_SHA256 = Object.freeze([
   ...(runtimeForkInfo ? [runtimeForkInfo.binarySha256] : []),
 ]);
 
+// Preserve verification of derivatives produced by the previous released Viewer.
+// This historical digest is not used to authorize new converter executions.
+const HISTORICAL_VIEWER_CONVERTER_SHA256 = '3577688939806dabdf1f4620cc05debe6e178180a99bf0308f4b8483b8a36725';
+const ACCEPTED_PERSISTED_CONVERTER_BINARY_SHA256 = Object.freeze([
+  ...CONTROLLED_CONVERTER_BINARY_SHA256, HISTORICAL_VIEWER_CONVERTER_SHA256,
+]);
+
 function stable(value) {
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
   if (value && typeof value === 'object') {
@@ -155,6 +162,7 @@ function obj2TilesArguments(source, output, { serialRetry = false } = {}) {
 
 module.exports = {
   ACCEPTED_CONTROLLED_CONVERTER_COMMAND_SHA256,
+  ACCEPTED_PERSISTED_CONVERTER_BINARY_SHA256,
   ACCEPTED_CONTROLLED_CONVERTER_CONTRACTS,
   CONTROLLED_CONVERTER,
   CONTROLLED_CONVERTER_BINARY_SHA256,
