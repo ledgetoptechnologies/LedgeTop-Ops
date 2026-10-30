@@ -13,6 +13,18 @@ function safeRelativePath(value) {
   return normalized;
 }
 
+function validUploadManifest(files, chunkSize) {
+  if (!Array.isArray(files) || !files.length || !Number.isSafeInteger(chunkSize) || chunkSize < 1) return false;
+  const ids = new Set(), paths = new Set(), names = new Set();
+  for (const file of files) {
+    if (!file || typeof file !== 'object' || Array.isArray(file) || typeof file.id !== 'string' || !/^[A-Za-z0-9._-]{1,80}$/.test(file.id) || !Number.isSafeInteger(file.byteSize) || file.byteSize < 0 || typeof file.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(file.sha256) || typeof file.relativePath !== 'string' || safeRelativePath(file.relativePath) !== file.relativePath) return false;
+    const name = file.relativePath.split('/').at(-1).toLowerCase();
+    if (ids.has(file.id) || paths.has(file.relativePath) || names.has(name)) return false;
+    ids.add(file.id); paths.add(file.relativePath); names.add(name);
+  }
+  return true;
+}
+
 function sanitizeLogMessage(value) {
   return String(value || '')
     .replace(/([?&](?:token|secret|signature|key|password)=)[^&\s]+/gi, '$1[REDACTED]')
@@ -38,4 +50,4 @@ function adminOutputAssetKind(kind) {
   return publicDerivativeKind(kind) || kind === 'report';
 }
 
-module.exports = { adminOutputAssetKind, compareUtf8, publicDerivativeKind, safeRelativePath, sanitizeLogMessage };
+module.exports = { adminOutputAssetKind, compareUtf8, publicDerivativeKind, safeRelativePath, sanitizeLogMessage, validUploadManifest };

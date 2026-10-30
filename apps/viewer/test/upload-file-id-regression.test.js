@@ -27,7 +27,7 @@ test('upload-local IDs do not collide across datasets, including a retained fail
     const { upload } = processing.createUpload({ datasetId: dataset.id, files: [file], subject: 'ops:test', chunkSize: body.length, expiresAt: new Date(Date.now() + 3600000).toISOString() });
     const written = storage.writeChunk(upload.id, file.id, 0, body, sha256);
     processing.recordChunk({ uploadId: upload.id, fileId: file.id, chunkIndex: 0, relativePath: file.relativePath, ...written });
-    const operation = processing.createUploadFinalizeOperation(upload.id, 'ops:test');
+    const operation = processing.createUploadFinalizeOperation(upload.id, 'ops:test',null,null,upload.tokenHash);
     return { dataset, upload, operation };
   };
   const first = makeUpload('First');

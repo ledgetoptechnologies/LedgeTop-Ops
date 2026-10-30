@@ -71,3 +71,30 @@ test('cleanup refuses CSV or uncertain manifests at the atomic claim', {skip:pro
  db.prepare('UPDATE upload_sessions SET expected_manifest_json=? WHERE id=?').run(JSON.stringify(files),upload.id);
  assert.equal(p.uploadContainsCsv(upload.id),false);assert.equal(p.hasUnfinishedCsvUploads(dataset.id),false);
 });
+
+test('finalize transaction requires a live matching token, complete manifest and valid replay state',t=>{
+ const db=openDatabase(':memory:');t.after(()=>db.close());const p=new ProcessingRepository(db);
+ const project=p.createProject({displayName:'Synthetic'}),dataset=p.createDataset({projectId:project.id,displayName:'Synthetic',rootKey:'datasets',relativePath:'synthetic'});
+ const files=[{id:'photo',relativePath:'photo.jpg',byteSize:1,sha256:'a'.repeat(64)}];
+ const created=p.createUpload({datasetId:dataset.id,subject:'fixture',files,chunkSize:1,expiresAt:'2999-01-01T00:00:00.000Z'}),id=created.upload.id,hash=created.upload.tokenHash;
+ assert.equal(p.createUploadFinalizeOperation(id,'fixture'),null);
+ assert.equal(p.createUploadFinalizeOperation(id,'other',null,null,hash),null);
+ assert.equal(p.createUploadFinalizeOperation(id,'fixture',null,null,'b'.repeat(64)),null);
+ assert.equal(p.createUploadFinalizeOperation(id,'fixture',null,null,hash),null,'missing chunk');
+ p.recordChunk({uploadId:id,fileId:'photo',chunkIndex:0,relativePath:'photo.jpg',byteSize:1,sha256:'a'.repeat(64)});
+ db.prepare('UPDATE upload_sessions SET expected_manifest_json=? WHERE id=?').run('[null]',id);
+ assert.equal(p.createUploadFinalizeOperation(id,'fixture',null,null,hash),null,'invalid manifest');
+ for(const invalid of [[files[0],files[0]],[{...files[0],id:''}],[{...files[0],relativePath:'../photo.jpg'}],[{...files[0],sha256:'invalid'}]]){
+  db.prepare('UPDATE upload_sessions SET expected_manifest_json=? WHERE id=?').run(JSON.stringify(invalid),id);
+  assert.equal(p.createUploadFinalizeOperation(id,'fixture',null,null,hash),null,'invalid persisted manifest');
+ }
+ db.prepare('UPDATE upload_sessions SET expected_manifest_json=?,expires_at=? WHERE id=?').run(JSON.stringify(files),'2000-01-01T00:00:00.000Z',id);
+ assert.equal(p.createUploadFinalizeOperation(id,'fixture',null,null,hash),null,'expired');
+ db.prepare('UPDATE upload_sessions SET expires_at=? WHERE id=?').run('2999-01-01T00:00:00.000Z',id);
+ const operation=p.createUploadFinalizeOperation(id,'fixture',null,null,hash);assert.ok(operation);
+ assert.equal(p.createUploadFinalizeOperation(id,'fixture',null,null,hash).id,operation.id);
+ assert.equal(p.createUploadFinalizeOperation(id,'other',null,null,hash),null);
+ assert.equal(p.createUploadFinalizeOperation(id,'fixture',null,null,'b'.repeat(64)),null);
+ db.prepare("UPDATE upload_sessions SET status='cancelled' WHERE id=?").run(id);
+ assert.equal(p.createUploadFinalizeOperation(id,'fixture',null,null,hash),null,'cancelled replay');
+});

@@ -92,8 +92,9 @@ test('browser finalization is classified after transfer and duplicate finalize r
     files: [{ id: 'source', relativePath: 'source.jpg', byteSize: 0, sha256: crypto.createHash('sha256').digest('hex') }],
     subject: context.subject, chunkSize: 8, expiresAt: new Date(Date.now() + 60_000).toISOString(),
   });
-  const first = context.processing.createUploadFinalizeOperation(created.upload.id, context.subject);
-  const replay = context.processing.createUploadFinalizeOperation(created.upload.id, context.subject);
+  context.processing.recordChunk({uploadId:created.upload.id,fileId:'source',chunkIndex:0,relativePath:'source.jpg',byteSize:0,sha256:crypto.createHash('sha256').digest('hex')});
+  const first = context.processing.createUploadFinalizeOperation(created.upload.id, context.subject,null,null,created.upload.tokenHash);
+  const replay = context.processing.createUploadFinalizeOperation(created.upload.id, context.subject,null,null,created.upload.tokenHash);
   assert.equal(replay.id, first.id);
   assert.equal(context.database.prepare('SELECT COUNT(*) AS n FROM dataset_operations WHERE upload_id=?').get(created.upload.id).n, 1);
   assert.deepEqual(first.source, { kind: 'browser_upload', browserTransferRequired: true, transferComplete: true });
