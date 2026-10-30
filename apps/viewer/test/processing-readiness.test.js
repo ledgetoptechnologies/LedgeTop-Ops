@@ -37,4 +37,10 @@ test('processing readiness fails closed when API and worker mesh generation sett
   const matched=await fetch(url,{headers});
   assert.equal(matched.status,200);
   assert.equal((await matched.json()).configuration.mismatch,false);
+  const project=processing.createProject({displayName:'Synthetic lifecycle hold'}),trash=processing.trashProject(project.id,'ops:readiness');
+  assert.equal(processing.finishContainerTrashPlan(trash.id),true);
+  const action=processing.acquireContainerAction(trash.id,'restore');assert.ok(action);
+  const held=await fetch(url,{headers});assert.equal(held.status,503);assert.deepEqual((await held.json()).containerActions,{active:1});
+  assert.ok(processing.restoreMetadataEntity(trash.id,'ops:readiness',{containerId:action}));
+  const resolved=await fetch(url,{headers});assert.equal(resolved.status,200);assert.deepEqual((await resolved.json()).containerActions,{active:0});
 });

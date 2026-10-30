@@ -2421,6 +2421,7 @@ const MIGRATIONS = [
       reserved_trash_id TEXT NOT NULL UNIQUE,
       ownership_basis TEXT NOT NULL CHECK(ownership_basis IN ('project','exclusive_task')),
       owner_id TEXT NOT NULL,
+      original_status TEXT,
       PRIMARY KEY(container_trash_id,entity_type,entity_id)
     );
     CREATE TABLE container_trash_plan_claims (
@@ -2429,6 +2430,61 @@ const MIGRATIONS = [
       container_trash_id TEXT NOT NULL REFERENCES container_trash_plans(container_trash_id) ON DELETE RESTRICT,
       PRIMARY KEY(entity_type,entity_id)
     );
+    CREATE TABLE container_trash_actions (
+      container_trash_id TEXT PRIMARY KEY REFERENCES storage_trash(id) ON DELETE RESTRICT,
+      action_id TEXT NOT NULL UNIQUE,
+      direction TEXT NOT NULL CHECK(direction IN ('restore','purge')),
+      status TEXT NOT NULL CHECK(status IN ('preparing','active','complete')),
+      created_at TEXT NOT NULL,
+      completed_at TEXT
+    );
+    CREATE TABLE container_trash_action_items (
+      action_id TEXT NOT NULL REFERENCES container_trash_actions(action_id) ON DELETE RESTRICT,
+      member_trash_id TEXT NOT NULL REFERENCES storage_trash(id) ON DELETE RESTRICT,
+      mutation_id TEXT UNIQUE REFERENCES storage_mutations(id) ON DELETE RESTRICT,
+      status TEXT NOT NULL CHECK(status IN ('pending','complete')),
+      completed_at TEXT,
+      PRIMARY KEY(action_id,member_trash_id)
+    );
+    CREATE TABLE container_action_lock_identity (
+      action_id TEXT PRIMARY KEY REFERENCES container_trash_actions(action_id) ON DELETE RESTRICT,
+      device TEXT NOT NULL,
+      inode TEXT NOT NULL,
+      nonce_sha256 TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TRIGGER container_action_lock_no_replace BEFORE INSERT ON container_action_lock_identity
+      WHEN EXISTS(SELECT 1 FROM container_action_lock_identity x WHERE x.action_id=NEW.action_id OR x.rowid=NEW.rowid)
+      BEGIN SELECT RAISE(ABORT,'container action lock identity replacement'); END;
+    CREATE TRIGGER container_action_lock_no_update BEFORE UPDATE ON container_action_lock_identity
+      BEGIN SELECT RAISE(ABORT,'container action lock identity immutable'); END;
+    CREATE TRIGGER container_action_lock_no_delete BEFORE DELETE ON container_action_lock_identity
+      BEGIN SELECT RAISE(ABORT,'container action lock identity retained'); END;
+    CREATE TRIGGER container_action_item_no_delete BEFORE DELETE ON container_trash_action_items
+      BEGIN SELECT RAISE(ABORT,'container action item retained'); END;
+    CREATE TRIGGER container_action_item_guard BEFORE UPDATE ON container_trash_action_items
+      WHEN NEW.action_id IS NOT OLD.action_id OR NEW.member_trash_id IS NOT OLD.member_trash_id OR NEW.rowid IS NOT OLD.rowid OR OLD.status='complete' OR (OLD.mutation_id IS NOT NULL AND NEW.mutation_id IS NOT OLD.mutation_id) OR (NEW.status='complete' AND NEW.completed_at IS NULL) OR (NEW.status='pending' AND NEW.completed_at IS NOT NULL)
+      BEGIN SELECT RAISE(ABORT,'container action item transition invalid'); END;
+    CREATE TRIGGER container_action_item_no_replace BEFORE INSERT ON container_trash_action_items
+      WHEN NEW.status<>'pending' OR NEW.completed_at IS NOT NULL OR NEW.mutation_id IS NOT NULL OR NOT EXISTS(SELECT 1 FROM container_trash_actions a JOIN container_trash_members m ON m.container_trash_id=a.container_trash_id WHERE a.action_id=NEW.action_id AND a.status='preparing' AND m.member_trash_id=NEW.member_trash_id) OR EXISTS(SELECT 1 FROM container_trash_action_items i WHERE (i.action_id=NEW.action_id AND i.member_trash_id=NEW.member_trash_id) OR i.rowid=NEW.rowid)
+      BEGIN SELECT RAISE(ABORT,'container action item replacement'); END;
+    CREATE TRIGGER container_action_membership_sealed BEFORE INSERT ON container_trash_members
+      WHEN EXISTS(SELECT 1 FROM container_trash_actions a WHERE a.container_trash_id=NEW.container_trash_id AND a.status IN ('preparing','active'))
+      BEGIN SELECT RAISE(ABORT,'container action membership sealed'); END;
+    CREATE TRIGGER container_action_membership_no_update BEFORE UPDATE ON container_trash_members
+      WHEN EXISTS(SELECT 1 FROM container_trash_actions a WHERE a.container_trash_id=OLD.container_trash_id AND a.status IN ('preparing','active')) OR EXISTS(SELECT 1 FROM container_trash_actions a WHERE a.container_trash_id=NEW.container_trash_id AND a.status IN ('preparing','active'))
+      BEGIN SELECT RAISE(ABORT,'container action membership sealed'); END;
+    CREATE TRIGGER container_action_membership_no_delete BEFORE DELETE ON container_trash_members
+      WHEN EXISTS(SELECT 1 FROM container_trash_actions a WHERE a.container_trash_id=OLD.container_trash_id AND a.status IN ('preparing','active'))
+      BEGIN SELECT RAISE(ABORT,'container action membership sealed'); END;
+    CREATE TRIGGER container_trash_action_no_replace BEFORE INSERT ON container_trash_actions
+      WHEN NEW.status<>'preparing' OR NEW.completed_at IS NOT NULL OR EXISTS(SELECT 1 FROM container_trash_actions a WHERE a.container_trash_id=NEW.container_trash_id OR a.action_id=NEW.action_id OR a.rowid=NEW.rowid)
+      BEGIN SELECT RAISE(ABORT,'container action already claimed'); END;
+    CREATE TRIGGER container_trash_action_guard BEFORE UPDATE ON container_trash_actions
+      WHEN NOT ((OLD.status='preparing' AND NEW.status='active' AND NEW.completed_at IS NULL) OR (OLD.status='active' AND NEW.status='complete' AND NEW.completed_at IS NOT NULL)) OR NEW.container_trash_id IS NOT OLD.container_trash_id OR NEW.action_id IS NOT OLD.action_id OR NEW.direction IS NOT OLD.direction OR NEW.created_at IS NOT OLD.created_at OR NEW.rowid IS NOT OLD.rowid
+      BEGIN SELECT RAISE(ABORT,'container action transition invalid'); END;
+    CREATE TRIGGER container_trash_action_no_delete BEFORE DELETE ON container_trash_actions
+      BEGIN SELECT RAISE(ABORT,'container action retained'); END;
     CREATE TRIGGER container_trash_plan_claim_no_replace BEFORE INSERT ON container_trash_plan_claims
       WHEN NOT EXISTS(SELECT 1 FROM container_trash_plans p WHERE p.container_trash_id=NEW.container_trash_id AND p.status='planned') OR EXISTS(SELECT 1 FROM container_trash_plan_claims c WHERE (c.entity_type=NEW.entity_type AND c.entity_id=NEW.entity_id) OR c.rowid=NEW.rowid)
       BEGIN SELECT RAISE(ABORT,'container entity already claimed'); END;

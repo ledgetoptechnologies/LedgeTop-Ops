@@ -14,10 +14,11 @@ function markApplied(processing,mutation,options){
   throw conflict('lifecycle journal changed while applying filesystem effect');
 }
 
-function applyStorageMutation(processing,storage,input,{faultAt=null,supersessionProof=null}={}){
-  const mutation=typeof input==='string'?processing.getStorageMutation(input):input;
+function applyStorageMutation(processing,storage,input,{faultAt=null,supersessionProof=null,containerAction=null}={}){
+  const mutation=processing.getStorageMutation(typeof input==='string'?input:input?.id);
   if(!mutation)return null;
   if(mutation.status==='complete'||mutation.status==='failed')return mutation;
+  if(!processing.containerMutationAllowed(mutation,containerAction))throw Object.assign(new Error('container lifecycle action held'),{code:'lifecycle_conflict'});
   // Defense-in-depth for the disabled indexed-binding experiment. This check
   // does not fence filesystem writers or make source custody available.
   if(mutation.entityType==='dataset'&&processing.hasSourceBinding(mutation.entityId))throw Object.assign(new Error('dataset source binding retained'),{code:'source_binding_retained'});

@@ -148,11 +148,19 @@ test('project Delete cascades owned storage into 30-day trash and restore/purge 
   assert.equal(context.processing.getProject(project.id).status, 'archived'); assert.equal(context.processing.getTask(task.id).status, 'archived'); assert.equal(context.processing.getDataset(dataset.id).status, 'trashed'); assert.equal(context.processing.getModelOutput(output.versionId).status, 'trashed');
   assert.equal(fs.existsSync(datasetDirectory), false); assert.equal(fs.existsSync(output.directory), false);
   response = await context.request('GET', '/api/v1/storage?limit=100'); const visibleTrash = (await response.json()).trash.items; assert.deepEqual(visibleTrash.map(item => item.id), [trash.id], 'owned member trash is grouped beneath the project');
+  const child=context.processing.listContainerTrashMembers(trash.id).find(item=>item.entityType==='dataset');assert.ok(child);
+  assert.equal(context.processing.trashHeldByPlan(child,'unrelated-container'),true);
+  assert.equal(context.processing.trashHeldByPlan(child,trash.id,'restore'),true,'a parent ID alone is not an action credential');
+  assert.equal((await context.request('POST',`/api/v1/storage/trash/${child.id}/restore`,{})).status,409,'a child cannot be restored outside its active container');
+  assert.equal((await context.request('DELETE',`/api/v1/storage/trash/${child.id}`,{typedId:child.entityId})).status,409,'a child cannot be purged outside its active container');
   response = await context.request('POST', `/api/v1/storage/trash/${trash.id}/restore`, {}); assert.equal(response.status, 200); assert.equal((await response.json()).project.status, 'active');
+  assert.equal(context.database.prepare('SELECT status FROM container_trash_actions WHERE container_trash_id=?').get(trash.id).status,'complete');
+  assert.equal(context.database.prepare("SELECT COUNT(*) n FROM container_trash_action_items i JOIN container_trash_actions a ON a.action_id=i.action_id WHERE a.container_trash_id=? AND i.status<>'complete'").get(trash.id).n,0);
   assert.equal(fs.existsSync(datasetDirectory), true); assert.equal(fs.existsSync(output.directory), true); assert.equal(context.processing.getDataset(dataset.id).status, 'finalized'); assert.equal(context.processing.getModelOutput(output.versionId).status, 'ready'); assert.equal(context.processing.getTask(task.id).status, 'ready_for_review');
   response = await context.request('DELETE', `/api/v1/projects/${project.id}`, {}); assert.equal(response.status, 200); trash = (await response.json()).trash;
   assert.equal((await context.request('DELETE', `/api/v1/storage/trash/${trash.id}`, { typedId: 'wrong' })).status, 400);
   assert.equal((await context.request('DELETE', `/api/v1/storage/trash/${trash.id}`, { typedId: project.id })).status, 204); assert.equal(fs.existsSync(datasetDirectory), false); assert.equal(fs.existsSync(output.directory), false);
+  assert.equal(context.database.prepare('SELECT status FROM container_trash_actions WHERE container_trash_id=?').get(trash.id).status,'complete');
   assert.equal(context.processing.getProject(project.id), null, 'purged projects are no longer retrievable'); assert.equal(context.processing.getTask(task.id), null, 'purged tasks are no longer retrievable');
   assert.match(context.database.prepare('SELECT display_name FROM projects WHERE id=?').get(project.id).display_name, /^deleted-project-/); assert.match(context.database.prepare('SELECT display_name FROM processing_tasks WHERE id=?').get(task.id).display_name, /^deleted-task-/);
   const { purgeContainerTrash } = require('../server/containerLifecycle'); assert.equal(purgeContainerTrash(context.processing, context.storage, trash.id, 'ops:lifecycle').permanentlyDeletedAt !== null, true, 'repeat purge is idempotent');
@@ -163,9 +171,79 @@ test('project trash retry retains a child moved before membership was recorded',
   const add=context.processing.addContainerTrashMember.bind(context.processing);let interrupted=false;
   context.processing.addContainerTrashMember=(containerId,memberId)=>{if(!interrupted){interrupted=true;throw Object.assign(new Error('injected membership failure'),{code:'fault_injected'});}return add(containerId,memberId);};
   const first=await context.request('DELETE',`/api/v1/projects/${project.id}`,{});assert.equal(first.status,409);assert.equal(interrupted,true);assert.equal(context.processing.getDataset(dataset.id).status,'trashed');
+  const rootBefore=context.processing.activeTrashForEntity('project',project.id),childBefore=context.processing.activeTrashForEntity('dataset',dataset.id);
+  assert.equal((await context.request('POST',`/api/v1/storage/trash/${rootBefore.id}/restore`,{})).status,409);
+  assert.equal((await context.request('POST',`/api/v1/storage/trash/${childBefore.id}/restore`,{})).status,409);
+  assert.equal((await context.request('DELETE',`/api/v1/storage/trash/${childBefore.id}`,{typedId:dataset.id})).status,409);
   context.processing.addContainerTrashMember=add;
   const retry=await context.request('DELETE',`/api/v1/projects/${project.id}`,{});assert.equal(retry.status,200);const root=(await retry.json()).trash;
   assert.ok(context.processing.listContainerTrashMembers(root.id).some(item=>item.entityType==='dataset'&&item.entityId===dataset.id),'retry must retain the moved child under its original container');
+});
+
+test('external-reference child cannot be restored outside its active project trash',async t=>{
+  const context=await fixture(t),project=context.processing.createProject({displayName:'Synthetic external parent'});
+  const dataset=context.processing.createDataset({projectId:project.id,displayName:'Synthetic external child',storageMode:'external_reference',rootKey:'dataset_import',relativePath:'synthetic'});
+  const deleted=await context.request('DELETE',`/api/v1/projects/${project.id}`,{});assert.equal(deleted.status,200);const root=(await deleted.json()).trash;
+  const child=context.processing.listContainerTrashMembers(root.id).find(item=>item.entityType==='dataset');assert.equal(child.entityId,dataset.id);
+  assert.equal((await context.request('POST',`/api/v1/storage/trash/${child.id}/restore`,{})).status,409);
+  assert.equal(context.processing.getDataset(dataset.id).status,'trashed');
+  assert.equal((await context.request('POST',`/api/v1/storage/trash/${root.id}/restore`,{})).status,200);
+  assert.equal(context.processing.getDataset(dataset.id).status,'draft');
+});
+
+test('output archive and trash intent roll back together on interruption',async t=>{
+  const context=await fixture(t),project=context.processing.createProject({displayName:'Synthetic atomic output'}),dataset=finalizedDataset(context,project,'Synthetic output source');
+  const task=context.processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Synthetic task'}),provider=context.processing.upsertProvider({type:'nodeodm',displayName:'Fixture ODM',endpoint:'http://127.0.0.1:3003',enabled:true});
+  const output=readyManagedOutput(context,project,dataset,task,provider,'Synthetic output'),original=context.processing.getModelOutput(output.versionId).status;
+  const begin=context.processing.beginOutputTrashMutation.bind(context.processing);context.processing.beginOutputTrashMutation=()=>{throw Error('injected intent failure');};
+  assert.throws(()=>context.processing.prepareOutputTrash(output.versionId,'ops:lifecycle'),/injected intent failure/);
+  assert.equal(context.processing.getModelOutput(output.versionId).status,original);
+  context.processing.beginOutputTrashMutation=begin;
+  const prepared=context.processing.prepareOutputTrash(output.versionId,'ops:lifecycle');assert.ok(prepared.mutation);assert.equal(prepared.mutation.originalStatus,original);
+});
+
+test('planned output refuses an unjournaled status change',async t=>{
+  const context=await fixture(t),project=context.processing.createProject({displayName:'Synthetic output plan'}),dataset=finalizedDataset(context,project,'Synthetic planned source');
+  const task=context.processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Synthetic task'}),provider=context.processing.upsertProvider({type:'nodeodm',displayName:'Fixture ODM',endpoint:'http://127.0.0.1:3004',enabled:true});
+  const output=readyManagedOutput(context,project,dataset,task,provider,'Synthetic output');
+  const root=context.processing.trashProject(project.id,'ops:lifecycle');assert.ok(root);
+  const prior=context.processing.getModelOutput(output.versionId).status,changed=prior==='failed'?'ready':'failed';
+  context.database.prepare('UPDATE model_outputs SET status=? WHERE id=?').run(changed,output.versionId);
+  assert.equal(context.processing.prepareOutputTrash(output.versionId,'ops:lifecycle',root.id),null);
+  assert.equal(context.processing.getModelOutput(output.versionId).status,changed);
+});
+
+test('container purge cannot overlap an in-progress restore',{skip:process.env.LTDS_CONTAINER_RECOVERY_REGRESSION!=='1'},async t=>{
+  const context=await fixture(t),project=context.processing.createProject({displayName:'Synthetic opposing actions'});
+  finalizedDataset(context,project,'First synthetic child');finalizedDataset(context,project,'Second synthetic child');
+  const deleted=await context.request('DELETE',`/api/v1/projects/${project.id}`,{});assert.equal(deleted.status,200);const root=(await deleted.json()).trash;
+  const complete=context.processing.completeStorageMutation.bind(context.processing),{purgeContainerTrash}=require('../server/containerLifecycle');let attempted=false,purgeResult;
+  context.processing.completeStorageMutation=id=>{const result=complete(id);if(!attempted&&result?.type==='restore'&&result.entityType==='dataset'){attempted=true;const active=context.database.prepare('SELECT action_id,direction FROM container_trash_actions WHERE container_trash_id=?').get(root.id),remaining=context.processing.listContainerTrashMembers(root.id).find(item=>item.entityType==='dataset'&&!item.permanentlyDeletedAt),claim={containerId:root.id,actionId:active.action_id,direction:active.direction};assert.ok(remaining);assert.equal(context.processing.trashHeldByPlan(remaining,claim,'restore'),false);assert.equal(context.processing.trashHeldByPlan(remaining,{...claim,actionId:'wrong'},'restore'),true);assert.equal(context.processing.trashHeldByPlan(remaining,claim,'purge'),true);assert.equal(context.processing.finishContainerAction(claim),false,'action cannot complete with pending children');assert.throws(()=>context.database.prepare('DELETE FROM container_trash_members WHERE container_trash_id=?').run(root.id),/membership sealed/);assert.throws(()=>context.database.prepare('UPDATE container_trash_members SET entity_id=entity_id WHERE container_trash_id=?').run(root.id),/membership sealed/);purgeResult=purgeContainerTrash(context.processing,context.storage,root.id,'ops:lifecycle');}return result;};
+  const restored=await context.request('POST',`/api/v1/storage/trash/${root.id}/restore`,{});
+  assert.equal(attempted,true);assert.equal(purgeResult,null,'opposing purge must be refused until restore is safely complete');assert.equal(restored.status,200);
+});
+
+test('root completion rolls back if its container action cannot complete',async t=>{
+  const context=await fixture(t),project=context.processing.createProject({displayName:'Synthetic action completion'});
+  const deleted=await context.request('DELETE',`/api/v1/projects/${project.id}`,{});assert.equal(deleted.status,200);const root=(await deleted.json()).trash;
+  context.processing.finishContainerAction=()=>false;
+  const restored=await context.request('POST',`/api/v1/storage/trash/${root.id}/restore`,{});assert.ok(restored.status>=400);
+  assert.equal(context.processing.getTrash(root.id).permanentlyDeletedAt,null);
+  assert.equal(context.database.prepare('SELECT status FROM container_trash_actions WHERE container_trash_id=?').get(root.id).status,'active');
+});
+
+test('an interrupted container filesystem effect remains held across a database reopen',async t=>{
+  const context=await fixture(t),project=context.processing.createProject({displayName:'Synthetic interrupted action'}),dataset=finalizedDataset(context,project,'Synthetic retained child');
+  const deleted=await context.request('DELETE',`/api/v1/projects/${project.id}`,{});assert.equal(deleted.status,200);const root=(await deleted.json()).trash;
+  const move=context.storage.moveExact.bind(context.storage);context.storage.moveExact=()=>{throw Error('injected filesystem interruption');};
+  const restored=await context.request('POST',`/api/v1/storage/trash/${root.id}/restore`,{});assert.ok(restored.status>=400);context.storage.moveExact=move;
+  const action=context.database.prepare('SELECT action_id,direction,status FROM container_trash_actions WHERE container_trash_id=?').get(root.id);assert.equal(action.status,'active');assert.equal(action.direction,'restore');
+  const child=context.processing.listContainerTrashMembers(root.id).find(item=>item.entityType==='dataset');assert.equal(child.entityId,dataset.id);
+  assert.equal((await context.request('DELETE',`/api/v1/storage/trash/${root.id}`,{typedId:project.id})).status,409);
+  const heldMutation=context.database.prepare('SELECT mutation_id FROM container_trash_action_items WHERE action_id=? AND status=?').get(action.action_id,'pending').mutation_id;
+  const otherProject=context.processing.createProject({displayName:'Independent recovery'}),otherDataset=context.processing.createDataset({projectId:otherProject.id,displayName:'Independent draft',rootKey:'datasets',relativePath:'independent',storageMode:'managed'}),otherMutation=context.processing.beginTrashMutation(otherDataset.id,'ops:lifecycle');assert.ok(otherMutation);
+  const pending=context.processing.pendingStorageMutations();assert.ok(pending.some(item=>item.id===otherMutation.id));assert.equal(pending.some(item=>item.id===heldMutation),false,'action-owned mutations wait for their dedicated executor');
+  const independent=openDatabase(path.join(context.root,'viewer.sqlite'));try{const current=independent.prepare('SELECT action_id,direction,status FROM container_trash_actions WHERE container_trash_id=?').get(root.id);assert.deepEqual({...current},{...action});assert.equal(independent.prepare("SELECT COUNT(*) n FROM container_trash_action_items WHERE action_id=? AND status='pending' AND mutation_id IS NOT NULL").get(action.action_id).n,1);}finally{independent.close();}
 });
 
 test('container restore preflights every member before changing files or metadata', async t => {

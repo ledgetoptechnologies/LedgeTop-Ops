@@ -1,6 +1,9 @@
 'use strict';
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const test = require('node:test');
 const { openDatabase } = require('../server/database');
 const { ProcessingRepository } = require('../server/processingRepository');
@@ -10,22 +13,29 @@ const { ViewerRepository } = require('../server/repository');
 const { createProcessingApi } = require('../server/processingApi');
 const { signServiceRequest } = require('../server/serviceAuth');
 const { config } = require('../server/config');
+const { StorageManager } = require('../server/storageManager');
+const { trashProjectTree, restoreContainerTrash } = require('../server/containerLifecycle');
 
 function fixture(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-overview-'));
+  const storageConfig = { datasetsMount: path.join(root, 'datasets'), modelsMount: path.join(root, 'models'), cacheMount: path.join(root, 'cache'), trashMount: path.join(root, 'trash'), datasetImportMount: path.join(root, 'imports'), storageReserveBytes: 0, storageReservePercent: 0 };
+  for (const value of Object.values(storageConfig).filter(value => typeof value === 'string')) fs.mkdirSync(value, { recursive: true });
+  const storage = new StorageManager(storageConfig); storage.initialize();
   const db = openDatabase(':memory:');
-  t.after(() => db.close());
+  t.after(() => { db.close(); fs.rmSync(root, { recursive: true, force: true }); });
   const processing = new ProcessingRepository(db);
   const provider = processing.upsertProvider({ type: 'nodeodm', displayName: 'Test provider', endpoint: 'http://127.0.0.1:3000', enabled: true });
   function task(status = 'failed') {
     const project = processing.createProject({ displayName: crypto.randomUUID() });
     const dataset = processing.createDataset({ projectId: project.id, displayName: 'Input', storageMode: 'managed', rootKey: 'datasets', relativePath: crypto.randomUUID() });
+    fs.mkdirSync(path.join(storageConfig.datasetsMount, dataset.relativePath), { recursive: true });
     processing.finalizeDataset(dataset.id, [], crypto.createHash('sha256').digest('hex'));
     const task = processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Test task' });
     const attempt = processing.createAttempt({ taskId: task.id, providerId: provider.id });
     processing.transitionAttempt(attempt.id, status);
     return { project, task, attempt };
   }
-  return { db, processing, provider, task, counts: () => ({ ...processingJobCounts(db) }) };
+  return { db, processing, provider, task, storage, counts: () => ({ ...processingJobCounts(db) }) };
 }
 
 test('overview counts only current attempts and drops resolved failures after retry', t => {
@@ -45,14 +55,38 @@ test('overview counts only current attempts and drops resolved failures after re
 test('recycled projects and tasks stop alerting and restored work becomes visible again', t => {
   const f = fixture(t), project = f.task(), task = f.task(), current = f.task();
   assert.equal(f.counts().failed, 3);
-  const projectTrash = f.processing.trashProject(project.project.id, 'ops:test');
+  const projectTrash = trashProjectTree(f.processing, f.storage, project.project.id, 'ops:test');
   assert.ok(projectTrash);
   assert.ok(f.processing.archiveTask(task.task.id));
   assert.equal(f.counts().failed, 1);
-  assert.ok(f.processing.restoreMetadataEntity(projectTrash.id, 'ops:test'));
+  assert.ok(restoreContainerTrash(f.processing, f.storage, projectTrash.id, 'ops:test'));
   assert.equal(f.counts().failed, 2);
   f.db.prepare('UPDATE processing_tasks SET purged_at=? WHERE id=?').run(new Date().toISOString(), current.task.id);
   assert.equal(f.counts().failed, 1);
+});
+
+test('authenticated overview reflects failure, project recycling, restore and retry', async t => {
+  const f = fixture(t), keyId = 'overview-lifecycle-test', secret = 'synthetic-overview-lifecycle-secret-32-characters';
+  const oldKeys = config.serviceAuthKeys, oldKeyId = config.serviceAuthKeyId, oldSecret = config.serviceAuthSecret;
+  config.serviceAuthKeys = { [keyId]: secret }; config.serviceAuthKeyId = keyId; config.serviceAuthSecret = secret;
+  t.after(() => { config.serviceAuthKeys = oldKeys; config.serviceAuthKeyId = oldKeyId; config.serviceAuthSecret = oldSecret; });
+  const app = express();
+  app.use(createProcessingApi({ repository: new ViewerRepository(f.db), processing: f.processing,
+    storage: { space: () => ({ available: 1024 }) }, providerCredentials: {} }));
+  const server = await new Promise(resolve => { const listener = app.listen(0, '127.0.0.1', () => resolve(listener)); });
+  t.after(() => new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  const url = `http://127.0.0.1:${server.address().port}/api/v1/overview`;
+  async function jobs() {
+    const headers = signServiceRequest({ secret, keyId, method: 'GET', path: '/api/v1/overview' });
+    const response = await fetch(url, { headers }); assert.equal(response.status, 200); return (await response.json()).jobs;
+  }
+  assert.equal((await jobs()).failed, 0);
+  const work = f.task(); assert.equal((await jobs()).failed, 1);
+  const trash = trashProjectTree(f.processing, f.storage, work.project.id, 'ops:test'); assert.ok(trash);
+  assert.equal((await jobs()).failed, 0);
+  assert.ok(restoreContainerTrash(f.processing, f.storage, trash.id, 'ops:test')); assert.equal((await jobs()).failed, 1);
+  assert.ok(f.processing.retryAttempt(work.attempt.id, 'ops:test'));
+  assert.deepEqual(await jobs(), { queued: 1, running: 0, reviewReady: 0, failed: 0, observationWarnings: 0 });
 });
 
 test('authenticated overview route serializes observation warnings separately from failures', async t => {

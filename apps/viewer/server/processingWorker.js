@@ -94,11 +94,6 @@ async function processSubmit(job,{processing,storage,config,providerCredentials,
   const restart=async()=>{if(known){let latest;try{latest=await adapter.status(attempt.providerTaskId,{signal});}catch(error){if(signal?.aborted||error?.name==='AbortError'||['ABORT_ERR','lease_lost'].includes(error?.code))throw error;deferObservation('unavailable');throw Object.assign(new Error('submission observation deferred'),{code:'submission_observation_deferred'});}deferObservation(latest?.held===true?(latest.heldReason==='option_evidence_invalid'?'option_evidence_invalid':'held'):'unavailable');throw Object.assign(new Error('submission observation deferred'),{code:'submission_observation_deferred'});}save('new',0);};
   if(known&&attempt.submissionPhase==='new')await restart();
   if(known&&attempt.submissionPhase==='initializing'){if(processing.markAttemptInitializationAmbiguous&&!processing.markAttemptInitializationAmbiguous(job.id,job.lease_owner))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});save('initialized',0);}
-  if(known&&attempt.submissionPhase==='uploading'){
-    const providerCount=Number(known.imagesCount);
-    if(!Number.isSafeInteger(providerCount)||providerCount<attempt.uploadedFileCount||providerCount>photoFiles.length)await restart();else save('uploading',providerCount);
-  }
-  if(known&&attempt.submissionPhase==='uploading_auxiliary')await restart();
   if(known&&attempt.submissionPhase==='committing'){if(['running','completed'].includes(known.status))save('committed',files.length);else await restart();}
   if(!known&&attempt.submissionPhase!=='new')save('new',0);
   if(!known){

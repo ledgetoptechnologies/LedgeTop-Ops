@@ -19,4 +19,5 @@ test('local archive enters Viewer staged ingest',{skip:process.platform!=='linux
  }
  const job=processing.claimJob('fixture');await processIngest(job,{...deps,signal:new AbortController().signal});
  const receipt=processing.getAttemptTransferProvenance(attempt.id).archive;assert.equal(receipt.archiveSha256,archiveHash);assert.equal(receipt.archiveByteSize,fs.statSync(archivePath).size);assert.equal(downloads,1);assert.equal(processing.getAttempt(attempt.id).status,'derivatives');assert.equal(db.prepare("SELECT status FROM derivative_jobs WHERE attempt_id=? AND derivative_type='mesh_tiles'").get(attempt.id).status,'pending');assert.equal(processing.getVerifiedAttemptProducerReceipt(attempt.id),null);assert.equal(await sha(input),sourceHash);assert.equal(await sha(archivePath),archiveHash);
+ const {verifyPilotCompletion}=require('./helpers/pilot-completion.cjs');assert.equal(verifyPilotCompletion({processing,job,identity:{attemptId:attempt.id,taskId:task.id,providerId:provider.id,providerTaskId:attempt.providerTaskId,expectedArchive:{sha256:archiveHash,byteSize:fs.statSync(archivePath).size}}}),true);
 });
