@@ -150,6 +150,16 @@ public struct ManagedOAuthTransport: Sendable {
             body: ManagedOAuthWire.refreshBody(refreshToken: token, clientID: clientID), successCodes: [200])
         return try parseCredential(data, sentAt: sentAt, priorRefresh: token)
     }
+    /// Synthetic experiment only: do not fill in an omitted refresh token.
+    public func strictRefresh(token: String, clientID: String) async throws -> ManagedOAuthCredential {
+        guard pins.resource == SyntheticRefreshExperiment.resource,
+              pins.issuer == "https://ledgetoptechnologies.cloudflareaccess.com",
+              pins.tokenEndpoint == pins.issuer + "/cdn-cgi/access/oauth/token" else { throw MobilePilotError.unavailable }
+        let sentAt = Date()
+        let data = try await request(URL(string: pins.tokenEndpoint)!, method: "POST", contentType: "application/x-www-form-urlencoded",
+            body: ManagedOAuthWire.refreshBody(refreshToken: token, clientID: clientID), successCodes: [200], diagnoseRevocation: true)
+        return try parseCredential(data, sentAt: sentAt, priorRefresh: nil)
+    }
     private func parseCredential(_ data: Data, sentAt: Date, priorRefresh: String?) throws -> ManagedOAuthCredential {
         struct Response: Decodable { let access_token: String; let token_type: String; let expires_in: Int; let resource: String; let refresh_token: String? }
         guard let result = try? JSONDecoder().decode(Response.self, from: data),
@@ -197,6 +207,7 @@ public struct ManagedOAuthTransport: Sendable {
 }
 
 public enum ManagedOAuthTokenKind: String, Sendable { case access = "access_token", refresh = "refresh_token" }
+extension ManagedOAuthTransport: SyntheticRefreshTransport {}
 public enum ManagedOAuthRevocationFailure: Error, Sendable, Equatable {
     case localValidation, httpUnauthorized, httpClientError, httpServerError, redirect, network, invalidResponse
     case httpStatus(Int)

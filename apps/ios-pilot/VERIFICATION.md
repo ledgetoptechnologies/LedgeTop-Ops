@@ -81,6 +81,17 @@ revocation. It still attempts access revocation and never exposes credentials.
 completed on the same iPad application, inventory showed one pilot, and the
 task-owned USB relay was stopped. The new device result is pending.
 
+Beau reported refresh revocation acknowledged, access revocation HTTP 400,
+and a 401 from the synthetic service after refresh sign-out. This is a
+point-in-time denial, not proof of global revocation. A new explicit synthetic
+refresh experiment checks token changes and replay behavior, reports fixed
+outcomes, keeps credentials in memory and attempts cleanup of every known
+credential. Cleanup failure or ambiguous responses remain unconfirmed. The
+experiment does not enable persistent sessions or business data. Its 53 Swift
+tests and signed Apple SDK build passed; in-place iPad installation and
+verification succeeded, inventory showed one pilot, and the relay was stopped.
+The provider experiment remains pending device participation.
+
 Cloudflare's published agent flow registers a public client with only
 `authorization_code` in the registration grant list, then shows a refresh
 token in the exchange response and a subsequent `refresh_token` grant. The

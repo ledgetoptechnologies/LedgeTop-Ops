@@ -116,6 +116,10 @@ public enum ManagedOAuthDiagnostic {
     }
     public static func revocationOutcomes(_ outcomes: ManagedOAuthRevocationOutcomes?) -> String? {
         guard let outcomes else { return nil }
+        if outcomes.refresh == .providerAcknowledged,
+           outcomes.access == .failed(.httpStatus(400)), outcomes.syntheticProbe == .rejected {
+            return "Cloudflare acknowledged the refresh sign-out request, and the test connection received a 401 afterward. The separate access-token sign-out request returned HTTP 400."
+        }
         func describe(_ label: String, _ outcome: ManagedOAuthRevocationOutcome) -> String {
             switch outcome {
             case .notIssued: return "\(label): not issued."
@@ -155,6 +159,24 @@ public actor ManagedOAuthCoordinator {
     /// not evidence that a token existed or that dependent access was revoked.
     public func signOut() async -> ManagedOAuthSignOutResult {
         await signOutReport().result
+    }
+    /// Explicit destructive experiment for the isolated synthetic resource.
+    /// Transfers the in-memory grant out of the active session before testing.
+    public func runSyntheticRefreshExperiment() async -> SyntheticRefreshReport {
+        guard pins.resource == SyntheticRefreshExperiment.resource,
+              let experimental = transport as? any SyntheticRefreshTransport,
+              exchangesInFlight == 0, revocationsInFlight == 0,
+              let old = credential, let client = credentialClientID else {
+            return SyntheticRefreshReport(observation: .inconclusive, cleanupUnconfirmed: true)
+        }
+        generation &+= 1
+        credential = nil; credentialClientID = nil
+        revocationsInFlight += 1
+        defer { revocationsInFlight -= 1 }
+        // An experiment intentionally replays a token. Never silently reuse
+        // this grant or interpret a cleanup acknowledgement as global logout.
+        grantStatusUncertain = true
+        return await SyntheticRefreshExperiment.run(pins: pins, credential: old, clientID: client, transport: experimental)
     }
     public func signOutReport(syntheticCheck: (@Sendable (ManagedOAuthCredential) async -> SyntheticRevocationProbeResult)? = nil) async -> ManagedOAuthSignOutReport {
         generation &+= 1

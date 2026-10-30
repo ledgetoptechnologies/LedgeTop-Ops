@@ -123,6 +123,31 @@ final class LivePilotModel: ObservableObject {
     }
     func openLive() { active = true }
     func useDemo() { signOut(); active = false }
+    func testSyntheticRefreshReplay() {
+        guard isSyntheticProbe, signedIn, !loading, let coordinator else { return }
+        generation = UUID()
+        let ticket = generation
+        expiry?.cancel(); expiry = nil
+        credential = nil; probeSucceeded = false; loading = true; message = nil
+        Task { [weak self] in
+            let report = await coordinator.runSyntheticRefreshExperiment()
+            // If the experiment could not take ownership, clear any old grant.
+            _ = await coordinator.signOutReport()
+            guard let self, self.generation == ticket else { return }
+            self.loading = false
+            let finding: String
+            switch report.observation {
+            case .rotatedReplayRejectedCurrentRejected:
+                finding = "Refresh tokens changed. A reused token and the latest token both received HTTP 400."
+            case .rotatedReplayRejectedCurrentAccepted:
+                finding = "Refresh tokens changed. A reused token received HTTP 400, but the latest token was accepted."
+            case .replayAccepted: finding = "A reused refresh token was accepted."
+            case .notRotated: finding = "A refresh token did not change."
+            case .inconclusive: finding = "The refresh test was inconclusive."
+            }
+            self.message = finding + (report.cleanupUnconfirmed ? " Test session cleanup could not be confirmed." : " Test sign-out requests were acknowledged.")
+        }
+    }
     func checkExpiry() {
         if let credential, credential.expiresAt <= Date() { signOut(); message = "Your read-only session expired. Sign in again." }
     }
@@ -310,7 +335,14 @@ struct LivePilotWorkspace: View {
                         }
                         if model.collection.nextCursor != nil { Button("Load more operations") { Task { await model.loadMore() } }.disabled(model.loading) }
                     } }
-                    Section { Button("Sign out", role: .destructive) { model.signOut() }; Text("Signing out removes this app's session and loaded data. Your browser sign-in is separate.").font(.caption) }
+                    Section {
+                        if model.syntheticProbe {
+                            Button("Test refresh protection") { model.testSyntheticRefreshReplay() }
+                            Text("Runs a test sign-out and returns to the signed-out screen. No business data is used.").font(.caption)
+                        }
+                        Button("Sign out", role: .destructive) { model.signOut() }
+                        Text("Signing out removes this app's session and loaded data. Your browser sign-in is separate.").font(.caption)
+                    }
                 } else {
                     Section {
                         if model.configured {

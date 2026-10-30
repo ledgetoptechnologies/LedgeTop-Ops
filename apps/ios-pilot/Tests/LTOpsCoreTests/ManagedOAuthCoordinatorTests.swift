@@ -78,6 +78,9 @@ final class ManagedOAuthCoordinatorTests: XCTestCase {
         XCTAssertEqual(kinds, [.refresh, .access])
         let message = ManagedOAuthDiagnostic.revocationOutcomes(report.outcomes) ?? ""
         XCTAssertTrue(message.contains("received a 401"))
+        XCTAssertTrue(message.contains("acknowledged the refresh sign-out request"))
+        XCTAssertTrue(message.contains("HTTP 400"))
+        XCTAssertTrue(ManagedOAuthDiagnostic.withRevocationWarning(message).contains("could not confirm the session was revoked"))
         XCTAssertFalse(message.contains("oauth:"))
     }
     func testSyntheticProbeIsInconclusiveIfBaselineOrRefreshFails() async throws {
