@@ -92,6 +92,8 @@ export interface Env {
   /** Dedicated HMAC key for content/version fingerprints; never reused for IP or sessions. */
   CLIENT_PORTAL_CONTENT_AUDIT_HMAC_SECRET?: string;
   CLIENT_PORTAL_REQUEST_V2_ENABLED?: string;
+  /** Default-off independent gate for root-scoped simple Ops inquiries. */
+  CLIENT_PORTAL_OPS_INQUIRIES_ENABLED?: string;
   /** Source-qualified requests from native PA workspaces. Independent and default-off. */
   CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED?: string;
   /**

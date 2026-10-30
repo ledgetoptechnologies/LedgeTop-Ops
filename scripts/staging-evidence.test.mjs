@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { historicalDefaultOffProduction } from "./test-fixtures/historical-default-off-production.mjs";
-import { validateEvidence as validateEvidenceContract } from "./staging-evidence.mjs";
+import { validateActivationPlan, validateEvidence as validateEvidenceContract } from "./staging-evidence.mjs";
 import { validateFiles as validateStagingFiles } from "./staging-preflight.mjs";
 import { renderConfigs, writeRenderedConfigs } from "./staging-config-scaffold.mjs";
 import { BOOTSTRAP_APPS, CLIENT_CURRENT_SOURCE_MIGRATION_CHAIN, OPERATIONS_LATEST_SOURCE_MIGRATION_CHAIN } from "./staging-bootstrap.mjs";
@@ -997,6 +997,57 @@ test("activation dependencies cover every default-off flag and reject prohibited
   viewer.evidence.activationPlan.phase = "post-evidence-validation";
   errors = validateEvidence(viewer.evidence, { base: viewerBase, head: viewer.evidence.releaseCommit, configs: viewer.configs, configHashes: viewer.configHashes, now, sourceControlVerified: true });
   assert(errors.some((error) => error.includes("viewerProcessing")), errors.join(" | "));
+});
+
+test("Ops inquiry activation separates selected-staging qualification from later live acceptance", () => {
+  const flag = "delivery.CLIENT_PORTAL_OPS_INQUIRIES_ENABLED";
+  const qualification = "opsTriageInquiryQualification";
+  const liveAcceptance = "opsTriageInquiryLiveAcceptance";
+  assert.deepEqual(FEATURE_FLAG_ACTIVATION_POLICIES.delivery.CLIENT_PORTAL_OPS_INQUIRIES_ENABLED, {
+    gates: ["projectAlphaPortalProjection", qualification, liveAcceptance],
+    stagingGates: ["projectAlphaPortalProjection", qualification],
+  });
+  assert.equal(REQUIRED_EXTERNAL_GATES.includes(qualification), false);
+  assert.equal(REQUIRED_EXTERNAL_GATES.includes(liveAcceptance), false);
+  assert.equal(FEATURE_FLAG_ACTIVATION_POLICIES.delivery.CLIENT_PORTAL_OPS_INQUIRIES_ENABLED.gates.includes("projectAlphaCatalogProjection"), false);
+  assert.equal(FEATURE_FLAG_ACTIVATION_POLICIES.delivery.CLIENT_PORTAL_OPS_INQUIRIES_ENABLED.gates.includes("nativePortalRequests"), false);
+
+  const makeGate = (gate, ready) => ({
+    ready,
+    verifiedAt: "2026-07-30T12:00:00Z",
+    evidenceRef: `ticket:gate:${gate}`,
+    ...Object.fromEntries((REQUIRED_EXTERNAL_GATE_PROOFS[gate] ?? []).map(proof => [proof, true])),
+  });
+  const evidence = { externalGates: {
+    projectAlphaPortalProjection: makeGate("projectAlphaPortalProjection", true),
+    [qualification]: makeGate(qualification, true),
+    [liveAcceptance]: makeGate(liveAcceptance, false),
+  } };
+  const plan = {
+    requestedFlags: [flag],
+    phase: "evidence-collection",
+    collectingGate: liveAcceptance,
+    environment: "staging",
+    productionFlagsRemainOff: true,
+    oneGateAtATime: true,
+    rollbackRef: "ticket:inquiry:rollback",
+    approvalGranted: true,
+    approvedAt: "2026-07-30T12:00:00Z",
+    approvalRef: "ticket:inquiry:controlled-pilot-approval",
+  };
+  assert.deepEqual(validateActivationPlan(plan, evidence, { now }), []);
+
+  evidence.externalGates[qualification].syntheticNativeMutationGuardVerified = false;
+  assert(validateActivationPlan(plan, evidence, { now }).some(error => error.includes(
+    `requires gate ${qualification} proof syntheticNativeMutationGuardVerified`)));
+  evidence.externalGates[qualification].syntheticNativeMutationGuardVerified = true;
+
+  const postPilot = { ...plan, phase: "post-evidence-validation" };
+  delete postPilot.collectingGate;
+  const awaitingLiveAcceptance = validateActivationPlan(postPilot, evidence, { now });
+  assert(awaitingLiveAcceptance.some(error => error.includes(`requires current ready gate ${liveAcceptance}`)));
+  evidence.externalGates[liveAcceptance].ready = true;
+  assert.deepEqual(validateActivationPlan(postPilot, evidence, { now }), []);
 });
 
 test("checked-in evidence example stays complete as migrations, flags, gates, and proofs evolve", () => {
