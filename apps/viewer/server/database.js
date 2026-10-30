@@ -2423,10 +2423,24 @@ const MIGRATIONS = [
       owner_id TEXT NOT NULL,
       PRIMARY KEY(container_trash_id,entity_type,entity_id)
     );
+    CREATE TABLE container_trash_plan_claims (
+      entity_type TEXT NOT NULL CHECK(entity_type IN ('task','dataset','output')),
+      entity_id TEXT NOT NULL,
+      container_trash_id TEXT NOT NULL REFERENCES container_trash_plans(container_trash_id) ON DELETE RESTRICT,
+      PRIMARY KEY(entity_type,entity_id)
+    );
+    CREATE TRIGGER container_trash_plan_claim_no_replace BEFORE INSERT ON container_trash_plan_claims
+      WHEN NOT EXISTS(SELECT 1 FROM container_trash_plans p WHERE p.container_trash_id=NEW.container_trash_id AND p.status='planned') OR EXISTS(SELECT 1 FROM container_trash_plan_claims c WHERE (c.entity_type=NEW.entity_type AND c.entity_id=NEW.entity_id) OR c.rowid=NEW.rowid)
+      BEGIN SELECT RAISE(ABORT,'container entity already claimed'); END;
+    CREATE TRIGGER container_trash_plan_claim_no_update BEFORE UPDATE ON container_trash_plan_claims
+      BEGIN SELECT RAISE(ABORT,'container entity claim immutable'); END;
+    CREATE TRIGGER container_trash_plan_claim_no_early_delete BEFORE DELETE ON container_trash_plan_claims
+      WHEN NOT EXISTS(SELECT 1 FROM container_trash_plans p WHERE p.container_trash_id=OLD.container_trash_id AND p.status='complete')
+      BEGIN SELECT RAISE(ABORT,'container entity claim retained'); END;
     CREATE TRIGGER container_trash_plan_member_identity BEFORE UPDATE ON container_trash_plan_members
       BEGIN SELECT RAISE(ABORT,'container plan membership immutable'); END;
     CREATE TRIGGER container_trash_plan_member_no_replace BEFORE INSERT ON container_trash_plan_members
-      WHEN NOT EXISTS(SELECT 1 FROM container_trash_plans p WHERE p.container_trash_id=NEW.container_trash_id AND p.status='planned') OR EXISTS(SELECT 1 FROM container_trash_plan_members m WHERE (m.container_trash_id=NEW.container_trash_id AND m.entity_type=NEW.entity_type AND m.entity_id=NEW.entity_id) OR m.reserved_trash_id=NEW.reserved_trash_id OR m.rowid=NEW.rowid)
+      WHEN NOT EXISTS(SELECT 1 FROM container_trash_plans p WHERE p.container_trash_id=NEW.container_trash_id AND p.status='planned') OR NOT EXISTS(SELECT 1 FROM container_trash_plan_claims c WHERE c.container_trash_id=NEW.container_trash_id AND c.entity_type=NEW.entity_type AND c.entity_id=NEW.entity_id) OR EXISTS(SELECT 1 FROM container_trash_plan_members m WHERE (m.container_trash_id=NEW.container_trash_id AND m.entity_type=NEW.entity_type AND m.entity_id=NEW.entity_id) OR m.reserved_trash_id=NEW.reserved_trash_id OR m.rowid=NEW.rowid)
       BEGIN SELECT RAISE(ABORT,'container plan membership replacement'); END;
     CREATE TRIGGER container_trash_plan_member_no_delete BEFORE DELETE ON container_trash_plan_members
       BEGIN SELECT RAISE(ABORT,'container plan membership retained'); END;
@@ -2440,6 +2454,10 @@ const MIGRATIONS = [
       BEGIN SELECT RAISE(ABORT,'container plan identity immutable'); END;
     CREATE TRIGGER container_trash_plan_state_guard BEFORE UPDATE ON container_trash_plans
       WHEN OLD.status='complete' OR (NEW.status='complete' AND (NEW.completed_at IS NULL OR EXISTS(
+        SELECT 1 FROM container_trash_plan_claims c WHERE c.container_trash_id=OLD.container_trash_id AND NOT EXISTS(
+          SELECT 1 FROM container_trash_plan_members p WHERE p.container_trash_id=c.container_trash_id AND p.entity_type=c.entity_type AND p.entity_id=c.entity_id
+        )
+      ) OR EXISTS(
         SELECT 1 FROM container_trash_plan_members p WHERE p.container_trash_id=OLD.container_trash_id AND NOT EXISTS(
           SELECT 1 FROM container_trash_members m JOIN storage_trash t ON t.id=m.member_trash_id
           WHERE m.container_trash_id=p.container_trash_id AND m.member_trash_id=p.reserved_trash_id
