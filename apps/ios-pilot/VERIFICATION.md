@@ -138,8 +138,9 @@ Keychain failures across process death remain unproven. The full 65-test Swift
 suite and Apple SDK build passed. The signed app installed and verified in
 place, and inventory showed one pilot; the relay was stopped. Beau reported
 “Saved test access was verified online” after the requested app-restart flow.
-This verifies the synthetic test path as reported, not a real Operations
-session. Device-reboot acceptance remains pending.
+Beau then reported the same successful result after a full iPad restart and
+unlock. These observations verify the synthetic test path as reported, not a
+real Operations session or confirmed Cloudflare grant revocation.
 
 Cloudflare's published agent flow registers a public client with only
 `authorization_code` in the registration grant list, then shows a refresh
