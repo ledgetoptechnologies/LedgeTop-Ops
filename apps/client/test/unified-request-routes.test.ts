@@ -4,7 +4,8 @@ import type { Env } from "../src/worker/types";
 import type { PortalWorkspaceSummary } from "../src/worker/client-portal/workspace-v2";
 
 const origin = "https://client.example";
-const env = { CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true", CLIENT_PORTAL_ORIGIN: origin } as Env;
+const env = { CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true", CLIENT_PORTAL_ORIGIN: origin,
+  CLIENT_PORTAL_REQUEST_V2_ENABLED: "true", CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED: "true" } as Env;
 const workspace = (id = "one", sourceId = "project-alpha:primary"): PortalWorkspaceSummary => ({ id, sourceId,
   resourceMode: "native", rootType: "standalone_client", rootPublicId: id, displayName: `Client ${id}` });
 const service = { publicId: "service-one", sourceVersion: "version-one", name: "Survey", summary: null,
@@ -16,7 +17,7 @@ function fixture(rows = [workspace()]) {
     : Response.json({ request: { id: "request-one" } }, { status: 201 }));
   const resolvePrincipal = vi.fn(async () => ({ issuer: "issuer", subject: "subject", email: "client@example.com" }));
   const router = createUnifiedRequestRouter({ resolvePrincipal, checkConfiguration: false, discover, scopedFetch,
-    resolveAuthority: async () => null });
+    resolveInquiryAuthority: async () => null });
   const get = () => router.request(`${origin}/request-services`, {}, env);
   const post = (body: unknown, headers: Record<string, string> = {}) => router.request(`${origin}/requests`, {
     method: "POST", headers: { Origin: origin, "Content-Type": "application/json", "Idempotency-Key": "request-idempotency-one", ...headers },

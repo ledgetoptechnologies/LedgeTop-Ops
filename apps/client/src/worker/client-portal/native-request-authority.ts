@@ -119,6 +119,13 @@ export function nativeServiceRequestsEnabled(env: Env): boolean {
     && portalHierarchyV2Enabled(env);
 }
 
+/** Simple Ops inquiries have their own default-off rollout gate. They share
+ * native request authorization and write proofs, but do not enable catalog or
+ * project request routes. */
+export function opsInquiriesEnabled(env: Env): boolean {
+  return env.CLIENT_PORTAL_OPS_INQUIRIES_ENABLED === "true" && portalHierarchyV2Enabled(env);
+}
+
 function principalFromSession(session: ClientPortalSession): VerifiedClientPrincipal | null {
   return session.workspaceId && session.principalIssuer && session.principalSubject
     ? { issuer: session.principalIssuer, subject: session.principalSubject, email: session.principalEmail ?? "" }
@@ -130,7 +137,25 @@ export async function resolveNativeRequestAuthority(
   session: ClientPortalSession,
   projectPublicId: string | null,
 ): Promise<NativeRequestAuthorityProof | null> {
-  if (!nativeServiceRequestsEnabled(env) || !await nativeRequestSchemaReady(env)
+  return resolveAuthorityWithGate(env, session, projectPublicId, nativeServiceRequestsEnabled(env));
+}
+
+/** Inquiry authority is deliberately root-only; callers cannot supply a
+ * project and the independent flag never changes the native request gate. */
+export async function resolveOpsInquiryAuthority(
+  env: Env,
+  session: ClientPortalSession,
+): Promise<NativeRequestAuthorityProof | null> {
+  return resolveAuthorityWithGate(env, session, null, opsInquiriesEnabled(env));
+}
+
+async function resolveAuthorityWithGate(
+  env: Env,
+  session: ClientPortalSession,
+  projectPublicId: string | null,
+  enabled: boolean,
+): Promise<NativeRequestAuthorityProof | null> {
+  if (!enabled || !await nativeRequestSchemaReady(env)
     || (projectPublicId !== null && !PUBLIC_ID.test(projectPublicId))) return null;
   const principal = principalFromSession(session);
   if (!principal || !session.workspaceId) return null;
