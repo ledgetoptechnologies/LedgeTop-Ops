@@ -144,3 +144,13 @@ successful Cloudflare sign-in, or device acceptance. The read-only code has not
 been installed over the working demo. GitHub Actions must remain main-only;
 feature-branch validation is local. See [backend pilot release notes](BACKEND-ROLLOUT.md) for
 the separate Access-routing, schema, and deployment prerequisites.
+
+## App icon for xtool device builds
+
+The icon uses the LT Ops mark from `apps/operations/public/favicon.svg`. Xcode
+compiles `Resources/Assets.xcassets` automatically. For the Linux xtool device
+build, copy the catalog and `prepare-ipad-icon.sh` to the Linux build copy, run
+`xtool dev build` (without `--sign`), then run `bash prepare-ipad-icon.sh` from
+that copy before `xtool install`. The installer signs the completed bundle.
+Adding assets after signing would invalidate the signature. Build and install
+using the existing app identifier so this updates the existing pilot.
