@@ -10,6 +10,7 @@ import { collectFrontendAssets, mergeAssetLedger, validateAssetLedger } from './
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
+export const MAX_NATIVE_MODULE_BYTES = 64 * 1024 * 1024;
 const equal = (a, b) => canonical(a) === canonical(b);
 const workerFor = app => app === 'operations' ? 'ledgetop-ops' : 'ledgetop-clients';
 const receiptKeys = ['schemaVersion','workerName','accountId','sourceCommit','activeVersionId','observedAt',
@@ -26,13 +27,21 @@ function timestamp(value) {
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) && Math.abs(parsed) <= 8.64e15 && new Date(parsed).toISOString() === value;
 }
-function strictModuleBytes(module, expectedName) {
-  need(module && module.name === expectedName && typeof module.content_base64 === 'string'
-    && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(module.content_base64),
-  `Candidate ${expectedName} module missing or malformed`);
-  const bytes = Buffer.from(module.content_base64, 'base64');
-  need(bytes.toString('base64') === module.content_base64, `Candidate ${expectedName} base64 is noncanonical`);
+export function decodeNativeModuleBytes(encoded, maxBytes = MAX_NATIVE_MODULE_BYTES) {
+  need(typeof encoded === 'string' && Number.isSafeInteger(maxBytes) && maxBytes > 0
+    && maxBytes <= MAX_NATIVE_MODULE_BYTES, 'Candidate module byte limit invalid');
+  const encodedLimit = Math.ceil(maxBytes / 3) * 4;
+  need(encoded.length > 0 && encoded.length <= encodedLimit && encoded.length % 4 === 0,
+    'Candidate module base64 size invalid');
+  const bytes = Buffer.from(encoded, 'base64');
+  need(bytes.length > 0 && bytes.length <= maxBytes && bytes.toString('base64') === encoded,
+    'Candidate module base64 malformed, noncanonical, or oversized');
   return bytes;
+}
+function strictModuleBytes(module, expectedName) {
+  need(module && module.name === expectedName && typeof module.content_base64 === 'string',
+    `Candidate ${expectedName} module missing or malformed`);
+  return decodeNativeModuleBytes(module.content_base64);
 }
 function planProfile(before, plan, profile, expectedDeploymentVersions) {
   need(plan?.schemaVersion === 1 && ['operations','client'].includes(plan.application)

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { hash, ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 } from './production-deploy.mjs';
 import { verifyOrdinaryFrontendCandidate, verifyOrdinaryFrontendCandidateModules, verifyOrdinaryFrontendAssetNamespace,
-  ordinaryFrontendExecutionQualification } from './ordinary-frontend-candidate-verifier.mjs';
+  ordinaryFrontendExecutionQualification, decodeNativeModuleBytes, MAX_NATIVE_MODULE_BYTES } from './ordinary-frontend-candidate-verifier.mjs';
 import { mergeAssetLedger } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 
@@ -16,7 +16,8 @@ const ACCOUNT = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
 const mainBytes = Buffer.from('export default {fetch(){return new Response("reviewed")}};');
 const mapBytes = Buffer.from(JSON.stringify({ version: 3, sources: ['worker.ts'], sourcesContent: ['source'], names: [], mappings: '' }));
 
-function runtimeFixture(t, app = 'operations') {
+function runtimeFixture(t, app = 'operations', mainBytes = Buffer.from('export default {fetch(){return new Response("reviewed")}};'),
+  mapBytes = Buffer.from(JSON.stringify({ version: 3, sources: ['worker.ts'], sourcesContent: ['source'], names: [], mappings: '' }))) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ordinary-frontend-modules-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const mainPath = path.join(root, 'index.js'), mapPath = `${mainPath}.map`;
@@ -69,6 +70,21 @@ test('candidate modules require exact pinned main bytes, map semantics, bindings
     const wrongBindings = structuredClone(f); wrongBindings.candidate.resources.bindings.pop();
     assert.throws(() => verifyOrdinaryFrontendCandidateModules(wrongBindings), /resources\/bindings\/exports differ/);
   }
+});
+
+test('large native module base64 decodes within the bounded module limit', t => {
+  const largeMain = Buffer.alloc(2.2 * 1024 * 1024, 0x61);
+  const largeMap = Buffer.from(JSON.stringify({ version: 3, sources: ['worker.ts'],
+    sourcesContent: ['m'.repeat(4.2 * 1024 * 1024)], names: [], mappings: '' }));
+  const f = runtimeFixture(t, 'client', largeMain, largeMap);
+  const result = verifyOrdinaryFrontendCandidateModules(f);
+  assert.equal(result.pinnedMainSHA256, hash(largeMain));
+  assert.equal(result.pinnedSourceMapSHA256, hash(largeMap));
+  assert.equal(decodeNativeModuleBytes(Buffer.from('ok').toString('base64')).toString(), 'ok');
+  assert.throws(() => decodeNativeModuleBytes('!!!!'), /malformed, noncanonical, or oversized/);
+  assert.throws(() => decodeNativeModuleBytes('AB=='), /malformed, noncanonical, or oversized/);
+  assert.throws(() => decodeNativeModuleBytes('AAAAAA==', 3), /base64 size invalid/);
+  assert.throws(() => decodeNativeModuleBytes('AAAA', MAX_NATIVE_MODULE_BYTES + 1), /byte limit invalid/);
 });
 
 test('top-level verifier refuses a forged ready flag on the offline plan', () => {
