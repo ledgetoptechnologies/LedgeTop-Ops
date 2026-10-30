@@ -33,7 +33,7 @@ const api=async(url,opts={})=>{if(opts.signal?.aborted)throw new DOMException('C
  if(url==='/api/v1/processing/presets'){if(!opts.method||opts.method==='GET')return{presets:currentPresets};if(window.fixture.failPreset){window.fixture.failPreset=false;throw new Error('Preset connection interrupted');}const preset={...opts.body,id:'saved-preset',providerType:'nodeodm',capabilityFingerprint:'fp'};currentPresets=[...currentPresets.filter(item=>item.id!==preset.id),preset];return{preset};}
  if(url.startsWith('/api/v1/dataset-imports/browse')){if(window.fixture?.holdBrowse)await new Promise(resolve=>window.fixture.releaseBrowse=resolve);return{path:'raw',parentPath:'',entries:[{name:'flight',relativePath:'raw/flight',kind:'folder'}],nextOffset:null};}
  if(url==='/api/v1/dataset-imports/survey-preview')return{candidates:[]};
- if(url==='/api/v1/dataset-imports/photo-preview'){if(window.fixture?.holdPreview){window.fixture.previewSignal=opts.signal;await new Promise(resolve=>window.fixture.releasePreview=resolve);}return{points:[{latitude:45.5,longitude:-90.25,name:'Server photo'}],missingGpsCount:0,unscannedCount:0};}
+ if(url==='/api/v1/dataset-imports/photo-preview'){if(window.fixture?.holdPreview){window.fixture.previewSignal=opts.signal;await new Promise(resolve=>window.fixture.releasePreview=resolve);}return{photoCount:2,photoByteSize:12,points:[{latitude:45.5,longitude:-90.25,name:'Server photo'}],missingGpsCount:0,unscannedCount:0};}
  if(url==='/api/v1/dataset-imports/copy'){datasetStatus='finalizing';return{dataset:{id:'dataset'},operation:{id:'copy',status:'queued'}};}
  if(url==='/api/v1/datasets'){datasetStatus='draft';return{dataset:{id:'dataset'}};}
  if(url.endsWith('/uploads'))return{uploadToken:'scoped',upload:{id:'upload',datasetId:'dataset',status:'open',chunkSize:2,files:opts.body.files.map(file=>({...file,chunkCount:Math.ceil(file.byteSize/2),missingChunks:Array.from({length:Math.ceil(file.byteSize/2)},(_,i)=>i)}))}};
@@ -97,6 +97,13 @@ test('New task uses real form controls with isolated upload/copy APIs, retry and
       assert.match(await client.eval("document.querySelector('[data-provider-capacity]').textContent"),/image count and input size/);
       await client.eval("document.querySelector('[data-source=server]').click()");
       assert.equal(await client.eval("document.querySelector('[data-provider-capacity]').textContent"),'');
+      await client.eval("fixture.setLimits({maxImages:null,ledgetopMaxInputBytes:null});fixture.mount()");
+    });
+    await t.test('server preview warns for node limits and clears when selection changes',async()=>{
+      await client.eval("fixture.setLimits({maxImages:1,ledgetopMaxInputBytes:8});fixture.mount('server');document.querySelector('[data-source=server]').click()");
+      await until(()=>client.eval("!!document.querySelector('[data-pick]')"));await client.eval("document.querySelector('[data-pick]').click()");
+      await until(()=>client.eval("document.querySelector('[data-provider-capacity]').textContent.includes('image count and input size')"));
+      await client.eval("document.querySelector('[data-pick]').click()");assert.equal(await client.eval("document.querySelector('[data-provider-capacity]').textContent"),'');
       await client.eval("fixture.setLimits({maxImages:null,ledgetopMaxInputBytes:null});fixture.mount()");
     });
     await t.test('a separately selected CSV preserves folder photos and replaces the prior explicit CSV',async()=>{
@@ -165,7 +172,7 @@ test('New task uses real form controls with isolated upload/copy APIs, retry and
       await client.eval("const pick=document.querySelector('[data-pick]');pick.click();pick.click();pick.click()");await until(()=>client.eval('!!fixture.releasePreview'));
       assert.equal(await client.eval("fixture.calls.filter(x=>x.url.endsWith('/photo-preview')).length"),1);
       await client.eval("document.querySelector('[data-source=pc]').click();fixture.releasePreview();fixture.holdPreview=false");await delay(80);
-      assert.equal(await client.eval('fixture.previewSignal.aborted'),true);assert.equal(await client.eval("document.querySelector('[data-photo-map]').hidden"),true);assert.equal(await client.eval("document.querySelector('[data-photo-map]').children.length"),0);
+      assert.equal(await client.eval('fixture.previewSignal.aborted'),true);assert.equal(await client.eval("document.querySelector('[data-photo-map]').hidden"),true);assert.equal(await client.eval("document.querySelector('[data-photo-map]').children.length"),0);assert.equal(await client.eval("document.querySelector('[data-provider-capacity]').textContent"),'');
       await client.eval("document.querySelector('[data-source=server]').click()");await until(()=>client.eval("!!document.querySelector('[data-pick]')"));await client.eval("document.querySelector('[data-pick]').click();fixture.close()");await delay(300);
       assert.equal(await client.eval("fixture.calls.filter(x=>x.url.endsWith('/photo-preview')).length"),1,'close cancels queued scan before network');
     });

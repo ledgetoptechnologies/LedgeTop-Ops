@@ -39,9 +39,9 @@ test('browse same import mount and recursive selection preserve folders, ignore 
 });
 
 test('photo location preview reports absent GPS without guessing and performs no dataset writes', async t => {
-  const { storage, photo } = fixture(t); photo('raw/a.jpg'); photo('raw/b.png');
+  const { storage, photo } = fixture(t); photo('raw/a.jpg'); photo('raw/b.png'); photo('raw/survey.csv','csv');
   const result = await previewPhotos(storage, ['raw']);
-  assert.deepEqual(result, { photoCount: 2, scannedCount: 2, locatedCount: 0, missingGpsCount: 2, unscannedCount: 0, points: [], truncated: false });
+  assert.deepEqual(result, { photoCount: 2, photoByteSize: 22, scannedCount: 2, locatedCount: 0, missingGpsCount: 2, unscannedCount: 0, points: [], truncated: false });
   assert.deepEqual(fs.readdirSync(storage.roots.datasets), []);
 });
 

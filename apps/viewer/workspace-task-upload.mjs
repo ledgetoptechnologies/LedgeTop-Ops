@@ -38,11 +38,14 @@ export function inspectTaskPhotos(files,{limits=TASK_PHOTO_LIMITS}={}) {
 // but are not sent as provider input. Final admission remains server-owned.
 export function providerPhotoLimitWarning(files,provider) {
   const images=(files||[]).filter(file=>photo.test(String(file.webkitRelativePath||file.name||'')));
-  if(!images.length)return '';
+  return providerPhotoSummaryWarning({photoCount:images.length,photoByteSize:images.reduce((sum,file)=>sum+file.size,0)},provider);
+}
+export function providerPhotoSummaryWarning(summary,provider) {
+  const count=summary?.photoCount,total=summary?.photoByteSize;
+  if(!Number.isSafeInteger(count)||count<=0)return '';
   const capabilities=provider?.capabilities||{},maxImages=capabilities.maxImages,maxBytes=capabilities.ledgetopMaxInputBytes;
-  const countExceeded=Number.isSafeInteger(maxImages)&&maxImages>0&&images.length>maxImages;
-  const total=images.reduce((sum,file)=>sum+file.size,0);
-  const bytesExceeded=Number.isSafeInteger(maxBytes)&&maxBytes>0&&Number.isSafeInteger(total)&&total>maxBytes;
+  const countExceeded=Number.isSafeInteger(maxImages)&&maxImages>0&&count>maxImages;
+  const bytesExceeded=Number.isSafeInteger(maxBytes)&&maxBytes>0&&Number.isSafeInteger(total)&&total>=0&&total>maxBytes;
   if(countExceeded&&bytesExceeded)return 'The selected photos exceed this node’s advertised image count and input size limits. Choose another node or a smaller selection before processing.';
   if(countExceeded)return 'The selected photos exceed this node’s advertised image count limit. Choose another node or a smaller selection before processing.';
   if(bytesExceeded)return 'The selected photos exceed this node’s advertised input size limit. Choose another node or a smaller selection before processing.';
