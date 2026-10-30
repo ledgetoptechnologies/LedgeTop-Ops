@@ -25,6 +25,14 @@ describe('synthetic OAuth probe', () => {
     expect(response.status).toBe(404);
     expect(Object.keys(probe)).toEqual(['fetch']);
   });
+  it('keeps the reviewed staging origin disabled until explicitly enabled', async () => {
+    const stagingOrigin = 'https://ios-pilot-staging.ledgetopdroneservices.com';
+    const stagingEnv = { ...env, IOS_OAUTH_PROBE_ORIGIN: stagingOrigin, IOS_OAUTH_PROBE_ENABLED: 'false' };
+    const headers = { Authorization: 'Bearer oauth:synthetic', 'Cf-Access-Jwt-Assertion': await signed() };
+    expect((await probe.fetch(req('/oauth-probe/v1', headers, 'GET', stagingOrigin), stagingEnv)).status).toBe(404);
+    expect((await probe.fetch(req('/oauth-probe/v1', headers, 'GET', stagingOrigin), { ...stagingEnv, IOS_OAUTH_PROBE_ENABLED: 'true' })).status).toBe(200);
+    expect((await probe.fetch(req('/oauth-probe/v1', headers, 'GET', origin), { ...env, IOS_OAUTH_PROBE_ENABLED: 'true' })).status).toBe(404);
+  });
   it('returns only a static marker after a verified dedicated human assertion', async () => {
     const token = 'oauth:synthetic-token', assertion = await signed();
     const response = await handleOAuthProbe(req('/oauth-probe/v1', {

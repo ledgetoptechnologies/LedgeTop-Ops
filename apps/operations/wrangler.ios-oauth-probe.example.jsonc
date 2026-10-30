@@ -1,6 +1,6 @@
 {
   // Local bundle-validation example only. Do not deploy this file; the probe's
-  // source-reviewed origin list is empty and no account or route is configured.
+  // no account, route or variables are configured.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "lt-ops-ios-oauth-probe-example",
   "main": "src/worker/ios-pilot-oauth-probe.ts",
