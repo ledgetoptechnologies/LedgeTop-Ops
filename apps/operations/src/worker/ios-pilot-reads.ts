@@ -53,6 +53,11 @@ export async function readPilotOperations(env: Env, session: PilotSession, optio
       throw new HTTPException(403, { message: 'Operation access changed; reload the pilot' });
   }
   await recheckPilotSession(env, session);
+  // The visibility query above can await while a role or permission changes.
+  // Re-evaluate authority after it, rather than returning rows under the old
+  // SQL scope just because the staff identity remains valid.
+  if (JSON.stringify(before) !== JSON.stringify(await scope(env, session)))
+    throw new HTTPException(403, { message: 'Permissions changed; reload the pilot' });
   if (options.id !== undefined) {
     if (result.results.length !== 1) throw new HTTPException(404, { message: 'Operation not found' });
     return { schemaVersion: 1, operation: result.results[0] };

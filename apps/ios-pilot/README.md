@@ -21,6 +21,12 @@ app starts in Demo. No flight clearance is inferred from a checklist.
 
 ## Read-only connection (implemented, disabled pending activation)
 
+The current client and backend use a custom pilot session. Their ingress has not
+been approved for activation, and they do not yet implement Cloudflare Managed
+OAuth. See [BACKEND-ROLLOUT.md](BACKEND-ROLLOUT.md) for the current isolation and
+device-validation gates. The description below documents the existing prototype,
+not a verified live sign-in flow.
+
 The Pilot tab opens a separate read-only workspace. The default `Info.plist`
 sets `LTOpsLiveEnabled` to false, so this build cannot initiate live sign-in.
 Its proposed origin is `https://ops-staging.ledgetopdroneservices.com`.

@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { createStaffLoginFixture, staffLoginClaims } from './helpers/staff-login-fixture';
 import { splitD1MigrationStatements } from '../../client/test/helpers/d1-migrations';
 import { handleIosPilot } from '../src/worker/ios-pilot-routes';
+import { handleManagedIosPilot } from '../src/worker/ios-pilot-managed-routes';
 import { authenticateStaff } from '../src/worker/auth';
 import { authenticatePilotSession, IOS_PILOT_CALLBACK, pkceChallenge, recheckPilotSession, sha256 } from '../src/worker/ios-pilot-session';
 import { claimStaffLoginBindingIntent, createStaffLoginBindingIntent, resolveVerifiedStaffLogin, revokeStaffLoginBinding, type VerifiedStaffLoginClaims } from '../src/worker/staff-login-bindings';
@@ -13,7 +14,10 @@ import type { Env } from '../src/worker/types';
 const access = vi.hoisted(() => ({ claims: {} as VerifiedStaffLoginClaims }));
 vi.mock('../src/worker/auth', async original => ({ ...await original<typeof import('../src/worker/auth')>(),
   verifyStaffLoginClaims: vi.fn(async () => access.claims) }));
+vi.mock('../src/worker/ios-pilot-access', () => ({ verifyPilotAccessAssertion: vi.fn(async () => access.claims) }));
 const origin = 'https://ops-staging.ledgetopdroneservices.com';
+const pilotOrigin = 'https://ios-staging.example.test';
+const managedConfig = { enabled: 'true', origin: pilotOrigin, audience: 'pilot-audience' };
 const verifier = 'v'.repeat(64), state = 's'.repeat(43);
 type Token = { accessToken: string; tokenType: string; expiresAt: number };
 describe('isolated read-only iOS pilot', { timeout: 120_000 }, () => {
@@ -73,12 +77,12 @@ describe('isolated read-only iOS pilot', { timeout: 120_000 }, () => {
   }
   async function signIn(): Promise<Token> { const response = await exchange(await code()); expect(response.status).toBe(200); return response.json(); }
   function read(path: string, token: Token, method = 'GET') { return route(path, { method, headers: { Authorization: `Bearer ${token.accessToken}` } }); }
-  function raceEnvironment(mutate: () => Promise<unknown>): Env {
+  function raceEnvironment(mutate: () => Promise<unknown>, queryPrefix = 'SELECT o.id,o.title'): Env {
     let fired = false;
     const wrap = (statement: D1PreparedStatement, sql: string): D1PreparedStatement => new Proxy(statement, {
       get(target, key) {
         if (key === 'bind') return (...values: unknown[]) => wrap(target.bind(...values), sql);
-        if (key === 'all' && sql.startsWith('SELECT o.id,o.title')) return async () => {
+        if (key === 'all' && sql.startsWith(queryPrefix)) return async () => {
           const result = await target.all();
           if (!fired) { fired = true; await mutate(); }
           return result;
@@ -221,5 +225,50 @@ describe('isolated read-only iOS pilot', { timeout: 120_000 }, () => {
     const owner = await resolveVerifiedStaffLogin(db, staffLoginClaims(fixture.owner.email, fixture.owner.subject));
     await revokeStaffLoginBinding(db, owner!.proof, { bindingId: linked.bindingId, expectedVersion: 1 });
     expect((await read('/mobile-pilot/v1/session', token)).status).toBe(401);
+  });
+  it('managed facade is restricted to its own host, read-only paths and explicit bearer', async () => {
+    const call = (target: string, init?: RequestInit, config = managedConfig) =>
+      handleManagedIosPilot(new Request(target, init), env, config);
+    const auth = { Authorization: 'Bearer oauth:synthetic' };
+    expect((await call(pilotOrigin + '/mobile-pilot/v1/session', { headers: auth }, { ...managedConfig, enabled: 'false' })).status).toBe(404);
+    expect((await call(origin + '/mobile-pilot/v1/session', { headers: auth })).status).toBe(404);
+    expect((await call(origin + '/mobile-pilot/v1/session', { headers: auth }, { ...managedConfig, origin })).status).toBe(404);
+    expect((await call(pilotOrigin + '/api/operations', { method: 'POST', headers: auth })).status).toBe(404);
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE'])
+      expect((await call(pilotOrigin + '/mobile-pilot/v1/operations', { method, headers: auth })).status).toBe(405);
+    expect((await call(pilotOrigin + '/mobile-pilot/v1/session')).status).toBe(401);
+    expect((await call(pilotOrigin + '/mobile-pilot/v1/session', { headers: { ...auth, Cookie: 'CF_Authorization=ambient' } })).status).toBe(403);
+    expect((await call(pilotOrigin + '/mobile-pilot/v1/session?unexpected=1', { headers: auth })).status).toBe(400);
+    const response = await call(pilotOrigin + '/mobile-pilot/v1/session', { headers: auth });
+    expect(response.status).toBe(200); expect(response.headers.get('Cache-Control')).toBe('no-store');
+    expect(await response.json()).toMatchObject({ readOnly: true, user: { id: fixture.owner.id } });
+    expect(await db.prepare('SELECT count(*) n FROM ios_pilot_sessions').first('n')).toBe(0);
+  });
+  it('managed facade reapplies assignment, source and current staff authorization', async () => {
+    await db.prepare("UPDATE staff_role_assignments SET role_id='role-operator' WHERE staff_id=?").bind(fixture.owner.id).run();
+    await operation('assigned'); await operation('unassigned'); await operation('foreign', 'project-alpha:other');
+    await db.batch([db.prepare("INSERT INTO pa_connectors VALUES('project-alpha:other',1)"),
+      db.prepare("INSERT INTO pa_operation_assignments VALUES('assigned','pa-human',1)"), db.prepare("INSERT INTO pa_operation_assignments VALUES('foreign','pa-human',1)")]);
+    const call = (path: string, override = env) => handleManagedIosPilot(new Request(pilotOrigin + path,
+      { headers: { Authorization: 'Bearer oauth:synthetic' } }), override, managedConfig);
+    const list = await (await call('/mobile-pilot/v1/operations')).json() as { operations: Array<{ id: string }> };
+    expect(list.operations.map(item => item.id)).toEqual(['assigned']);
+    expect((await call('/mobile-pilot/v1/operations/unassigned')).status).toBe(404);
+    expect((await call('/mobile-pilot/v1/operations/foreign')).status).toBe(404);
+    const raced = raceEnvironment(() => db.prepare("UPDATE pa_operation_assignments SET active=0 WHERE operation_id='assigned'").run());
+    const race = await call('/mobile-pilot/v1/operations', raced);
+    expect(race.status).toBe(403); expect(await race.text()).not.toContain('Operation assigned');
+    await db.prepare('UPDATE native_staff_admissions SET active=0 WHERE staff_id=?').bind(fixture.owner.id).run();
+    expect((await call('/mobile-pilot/v1/session')).status).toBe(403);
+  });
+  it('managed facade rejects a permission revoked during the visibility recheck', async () => {
+    await operation('late-revocation');
+    const raced = raceEnvironment(() => db.prepare(
+      "INSERT INTO staff_permission_overrides(staff_id,permission_key,effect,scope) VALUES(?,'operations.view','deny','global')"
+    ).bind(fixture.owner.id).run(), 'SELECT o.id FROM pa_operations o');
+    const response = await handleManagedIosPilot(new Request(pilotOrigin + '/mobile-pilot/v1/operations',
+      { headers: { Authorization: 'Bearer oauth:synthetic' } }), raced, managedConfig);
+    expect(response.status).toBe(403);
+    expect(await response.text()).not.toContain('Operation late-revocation');
   });
 });

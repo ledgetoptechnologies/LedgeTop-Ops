@@ -1,6 +1,6 @@
 import { HTTPException } from 'hono/http-exception';
 import { requireNativeAdmissionAfterCutover, verifyStaffLoginClaims } from './auth';
-import { assertCurrentStaffLogin, resolveVerifiedStaffLogin, snapshotStaffLoginProof, type StaffLoginProof } from './staff-login-bindings';
+import { assertCurrentStaffLogin, resolveVerifiedStaffLogin, snapshotStaffLoginProof, type StaffLoginProof, type VerifiedStaffLoginClaims } from './staff-login-bindings';
 import type { Env, StaffPrincipal } from './types';
 
 export const IOS_PILOT_CALLBACK = 'com.ledgetoptechnologies.ops.pilot://auth/callback';
@@ -69,6 +69,19 @@ export async function recheckPilotSession(env: Env, session: PilotSession): Prom
   if (current.principal.projectAlphaUserId !== session.principal.projectAlphaUserId) return denied();
   if (session.tokenHash && !await env.OPS_DB.withSession('first-primary').prepare('SELECT 1 ok FROM ios_pilot_sessions WHERE token_hash=? AND expires_at>?')
     .bind(session.tokenHash, now()).first('ok')) return denied();
+}
+
+/** Resolve a freshly verified Access identity without issuing a local token or
+ * modifying staff records. Rechecks use the same proof and admission snapshot
+ * as the existing pilot; the originating Access assertion bounds its lifetime. */
+export async function pilotSessionFromAccessClaims(env: Env, claims: VerifiedStaffLoginClaims): Promise<PilotSession> {
+  const resolved = await resolveVerifiedStaffLogin(env.OPS_DB, claims);
+  if (!resolved) return denied();
+  const principal = await currentPrincipal(env, resolved.proof);
+  const admission = await admissionSnapshot(env, resolved.proof);
+  const session = { proof: resolved.proof, admission, principal, expiresAt: claims.expiresAt };
+  await recheckPilotSession(env, session);
+  return session;
 }
 export async function issuePilotCode(request: Request, env: Env, origin: string): Promise<string> {
   const query = new URL(request.url).searchParams;
