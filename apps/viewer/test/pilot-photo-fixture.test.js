@@ -10,3 +10,9 @@ test('pilot photo copies are bounded, verified and reject symlinks',{skip:proces
  const link=path.join(input,'photo-0.jpg');fs.unlinkSync(link);fs.symlinkSync(path.join(input,'photo-1.jpg'),link);assert.throws(()=>copyPilotPhotos({input,destination:other}));assert.deepEqual(fs.readdirSync(other),[]);
  fs.unlinkSync(link);assert.throws(()=>copyPilotPhotos({input,destination:other}),/count/);
 });
+test('pilot photo copy detects a source mutation during copy',{skip:process.platform!=='linux'},t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-pilot-photo-mutation-')),input=path.join(root,'in'),out=path.join(root,'out');t.after(()=>fs.rmSync(root,{recursive:true,force:true}));fs.mkdirSync(input);fs.mkdirSync(out);
+ for(let i=0;i<40;i++)fs.writeFileSync(path.join(input,`photo-${i}.jpg`),`photo-${i}`);
+ const copy=fs.copyFileSync;let injected=false;try{fs.copyFileSync=(source,target,flags)=>{copy(source,target,flags);if(!injected){injected=true;fs.writeFileSync(path.join(input,'photo-0.jpg'),'changed');}};assert.throws(()=>copyPilotPhotos({input,destination:out,maxTotalBytes:1000}),/source changed/);}finally{fs.copyFileSync=copy;}
+ assert.equal(injected,true);assert.equal(fs.readdirSync(out).length,1,'fixture is held with its partial copy for inspection');
+});

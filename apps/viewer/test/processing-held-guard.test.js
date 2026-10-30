@@ -22,7 +22,7 @@ for (const phase of ['initialize', 'upload', 'commit']) for (const failure of ['
 test(`cutover ${failure} during ${phase} preserves source and holds without duplicate mutation (reservation=${reservation})`, async t => {
  const f=fixture(t),root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-cutover-hold-')),file=path.join(root,'photo.jpg');
  fs.writeFileSync(file,'x');t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
- const calls={initialize:0,upload:0,commit:0,remove:0},remote={exists:false};
+ const calls={initialize:0,upload:0,commit:0,remove:0},remote={exists:false,acceptedParts:0};
  if(reservation)f.db.prepare('UPDATE processing_attempts SET reservation_required=1 WHERE id=?').run(f.attempt.id);
  const {ProviderCredentials}=require('../server/providerCredentials'),credentials=new ProviderCredentials({activeKeyId:'fixture',keys:{fixture:crypto.randomBytes(32).toString('hex')}});
  const rejected=()=>Object.assign(new Error('simulated cutover interruption'),failure==='503'?{status:503,code:'provider_unavailable'}:{code:'ECONNRESET'});
@@ -30,7 +30,7 @@ test(`cutover ${failure} during ${phase} preserves source and holds without dupl
   capabilities:async()=>({capabilities:{reservations:{version:1}}}),request:async()=>Response.json({state:'reserved'}),
   status:async()=>{if(!remote.exists)throw Object.assign(new Error('not found'),{code:'provider_task_not_found'});return{status:'queued_upstream',progress:0,imagesCount:1}},
   initialize:async({uuid})=>{calls.initialize++;if(phase==='initialize')throw rejected();remote.exists=true;return{uuid}},
-  upload:async()=>{calls.upload++;if(phase==='upload')throw rejected()},
+  upload:async()=>{calls.upload++;if(phase==='upload'){remote.acceptedParts++;throw rejected()}},
   commit:async()=>{calls.commit++;if(phase==='commit')throw rejected()},
   remove:async()=>{calls.remove++},
  };
@@ -41,6 +41,7 @@ test(`cutover ${failure} during ${phase} preserves source and holds without dupl
  const job=f.db.prepare("SELECT status,error_code FROM processing_jobs WHERE attempt_id=? AND job_type='submit'").get(f.attempt.id);
  assert.equal(job.status,'pending');assert.equal(job.error_code,phase==='upload'?'provider_upload_acceptance_unknown':'provider_submission_observation_unavailable');
  assert.equal(calls.initialize,1);assert.equal(calls.upload,phase==='initialize'?0:1);assert.equal(calls.commit,phase==='commit'?1:0);assert.equal(calls.remove,0);
+ assert.equal(remote.acceptedParts,phase==='upload'?1:0,'partially accepted upstream data is not re-uploaded or removed');
  assert.equal(fs.readFileSync(file,'utf8'),'x');assert.equal(f.db.prepare('SELECT COUNT(*) n FROM processing_attempts WHERE task_id=?').get(f.task.id).n,1);
 });
 
