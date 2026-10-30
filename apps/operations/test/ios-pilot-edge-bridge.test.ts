@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import edge, { handlePilotEdge } from '../src/worker/ios-pilot-edge-bridge';
+vi.mock('../src/worker/ios-pilot-access', () => ({
+  verifyPilotAccessAssertion: async () => ({ subject: 'staff-subject', email: 'staff@example.test' }),
+}));
+import edge, { handlePilotEdge as actualHandlePilotEdge } from '../src/worker/ios-pilot-edge-bridge';
 
 const origin = 'https://pilot-staging.example.test';
 const auth = { Authorization: 'Bearer oauth:synthetic', 'Cf-Access-Jwt-Assertion': 'aaa.bbb.ccc' };
@@ -9,8 +12,12 @@ const op = { id: 'one', title: 'Example', status: 'scheduled', scheduledStart: n
   location: null, projectName: null, divisionName: null };
 const binding = () => ({ read: vi.fn(async (_input: string) => envelope(session)) });
 const env = (read = binding()) => ({ ENVIRONMENT: 'staging', IOS_MANAGED_PILOT_ENABLED: 'true',
-  IOS_MANAGED_PILOT_ORIGIN: origin, IOS_PILOT_READ: read });
+  IOS_MANAGED_PILOT_ORIGIN: origin, IOS_MANAGED_PILOT_AUDIENCE: 'pilot-audience',
+  TEAM_DOMAIN: 'https://synthetic.cloudflareaccess.com', OPERATIONS_AUD: 'web-audience', IOS_PILOT_READ: read });
 const req = (path: string, init: RequestInit = { headers: auth }) => new Request(origin + path, init);
+const access = { aud: 'pilot-audience', getIdentity: async () => ({ user_uuid: 'staff-subject', email: 'staff@example.test' }) };
+const handlePilotEdge = (request: Request, environment: Parameters<typeof actualHandlePilotEdge>[1], reviewed: readonly string[]) =>
+  actualHandlePilotEdge(request, environment, reviewed, access);
 
 describe('isolated pilot edge bridge', () => {
   it('is closed by default and for unknown origins, settings, and paths', async () => {
@@ -21,15 +28,40 @@ describe('isolated pilot edge bridge', () => {
     expect((await handlePilotEdge(req('/api/operations'), e, [origin])).status).toBe(404);
     expect(e.IOS_PILOT_READ.read).not.toHaveBeenCalled();
   });
-  it('rejects writes, unwanted queries, browser credentials, missing bearer and malformed assertion', async () => {
+  it('rejects writes, unwanted queries, browser headers and malformed assertion', async () => {
     const e = env();
     for (const method of ['POST','PUT','PATCH','DELETE','HEAD','OPTIONS'])
       expect((await handlePilotEdge(req('/mobile-pilot/v1/operations', { method, headers: auth }), e, [origin])).status).toBe(405);
     expect((await handlePilotEdge(req('/mobile-pilot/v1/session?x=1'), e, [origin])).status).toBe(400);
     for (const h of [{ ...auth, Cookie: 'other=x' }, { ...auth, Origin: 'https://other.test' },
-      { 'Cf-Access-Jwt-Assertion': 'aaa.bbb.ccc' }, { ...auth, 'Cf-Access-Jwt-Assertion': 'bad' }])
+      { ...auth, 'Cf-Access-Jwt-Assertion': 'bad' }])
       expect((await handlePilotEdge(req('/mobile-pilot/v1/session', { headers: h }), e, [origin])).status).toBe(401);
     expect(e.IOS_PILOT_READ.read).not.toHaveBeenCalled();
+  });
+  it('requires matching runtime Access context even if a client supplies an assertion', async () => {
+    const e = env();
+    const request = req('/mobile-pilot/v1/session');
+    expect((await actualHandlePilotEdge(request, e, [origin])).status).toBe(401);
+    expect((await actualHandlePilotEdge(request, e, [origin], { aud: 'wrong-audience' })).status).toBe(401);
+    expect((await actualHandlePilotEdge(request, { ...e, IOS_MANAGED_PILOT_AUDIENCE: '' }, [origin], { aud: '' })).status).toBe(401);
+    expect(e.IOS_PILOT_READ.read).not.toHaveBeenCalled();
+  });
+  it('rejects missing or mismatched runtime identity without consulting the private service', async () => {
+    const e = env(), request = req('/mobile-pilot/v1/session');
+    for (const identity of [null, {}, { user_uuid: 'someone-else', email: 'staff@example.test' },
+      { user_uuid: 'staff-subject', email: 'someone-else@example.test' }]) {
+      expect((await actualHandlePilotEdge(request, e, [origin], { aud: 'pilot-audience', getIdentity: async () => identity })).status).toBe(401);
+    }
+    expect((await actualHandlePilotEdge(request, e, [origin], { aud: 'pilot-audience', getIdentity: async () => { throw Error('private'); } })).status).toBe(401);
+    expect(e.IOS_PILOT_READ.read).not.toHaveBeenCalled();
+  });
+  it('forwards a signed assertion without requiring the original bearer header', async () => {
+    const e = env();
+    const response = await handlePilotEdge(req('/mobile-pilot/v1/session', {
+      headers: { 'Cf-Access-Jwt-Assertion': auth['Cf-Access-Jwt-Assertion'] },
+    }), e, [origin]);
+    expect(response.status).toBe(200);
+    expect(e.IOS_PILOT_READ.read).toHaveBeenCalledOnce();
   });
   it('forwards only the URL and assertion, never the bearer, and validates each success shape', async () => {
     const service = binding(), e = env(service);

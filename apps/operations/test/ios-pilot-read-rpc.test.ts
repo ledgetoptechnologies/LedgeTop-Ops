@@ -31,7 +31,7 @@ describe('private pilot read RPC boundary', () => {
     const handler = vi.fn(async (request: Request) => {
       expect(request.method).toBe('GET');
       expect(request.headers.get('Cf-Access-Jwt-Assertion')).toBe(assertion);
-      expect(request.headers.get('Authorization')).toBe('Bearer rpc-internal');
+      expect(request.headers.get('Authorization')).toBeNull();
       return Response.json({ schemaVersion: 1, readOnly: true });
     });
     expect(parse(await readPilotRpc(message(), env, [origin], handler))).toEqual({ status: 200, version: 1,

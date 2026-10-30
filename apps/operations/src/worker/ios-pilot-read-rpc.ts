@@ -34,9 +34,9 @@ export async function readPilotRpc(input: unknown, env: PilotEnv, reviewedOrigin
     if (url.origin !== env.IOS_MANAGED_PILOT_ORIGIN || url.username || url.password || url.hash) return denied;
     // The original bearer is deliberately not forwarded across the binding.
     // The signed assertion is independently checked by the facade. The public
-    // edge must validate its OAuth bearer before forwarding that assertion.
+    // edge requires its own matching direct Access context before forwarding.
     const request = new Request(url, { method: 'GET', headers: {
-      Authorization: 'Bearer rpc-internal', 'Cf-Access-Jwt-Assertion': object.assertion,
+      'Cf-Access-Jwt-Assertion': object.assertion,
     } });
     const response = await handler(request, env, { enabled: env.IOS_MANAGED_PILOT_ENABLED,
       origin: env.IOS_MANAGED_PILOT_ORIGIN, audience: env.IOS_MANAGED_PILOT_AUDIENCE });

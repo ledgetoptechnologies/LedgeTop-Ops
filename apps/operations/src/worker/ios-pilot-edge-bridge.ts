@@ -1,7 +1,10 @@
+import { verifyPilotAccessAssertion } from './ios-pilot-access';
+
 /** A staging-only ingress for the private pilot read service. It carries no D1,
  * connector credentials, or business implementation. This module is not
- * configured or deployed; its source-reviewed hostname list is empty. Access
- * must validate the bearer and inject the assertion at the edge. */
+ * configured or deployed; its source-reviewed hostname list is empty. The
+ * direct invocation must have the dedicated Access context and the private
+ * service independently verifies its signed assertion and staff permissions. */
 const REVIEWED_ORIGINS: readonly string[] = [];
 const RESERVED_ORIGINS = new Set(['https://ops.ledgetop.app', 'https://ops.ledgetopdroneservices.com',
   'https://ops.ledgetoptechnologies.com', 'https://ops-staging.ledgetopdroneservices.com']);
@@ -10,7 +13,9 @@ const headers = { 'Cache-Control': 'no-store', 'Cloudflare-CDN-Cache-Control': '
   'Pragma': 'no-cache', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff' };
 type ReadBinding = { read(input: string): Promise<string> };
 type EdgeEnvironment = { ENVIRONMENT?: string; IOS_MANAGED_PILOT_ENABLED?: string;
-  IOS_MANAGED_PILOT_ORIGIN?: string; IOS_PILOT_READ?: ReadBinding };
+  IOS_MANAGED_PILOT_ORIGIN?: string; IOS_MANAGED_PILOT_AUDIENCE?: string;
+  TEAM_DOMAIN?: string; OPERATIONS_AUD?: string; IOS_PILOT_READ?: ReadBinding };
+type AccessContext = { aud?: string; getIdentity?: () => Promise<unknown> };
 const reply = (status: number, body: object) => Response.json(body, { status, headers });
 const denied = () => reply(404, { error: 'Not found', code: 'not_found' });
 const unavailable = () => reply(503, { error: 'Pilot temporarily unavailable', code: 'unavailable' });
@@ -37,7 +42,8 @@ function validSuccess(body: unknown, kind: 'session' | 'list' | 'detail', detail
 
 /** The injectable list is only for local tests. The exported Worker uses the
  * empty source-controlled list, never an allowlist supplied through env. */
-export async function handlePilotEdge(request: Request, env: EdgeEnvironment, reviewed: readonly string[]): Promise<Response> {
+export async function handlePilotEdge(request: Request, env: EdgeEnvironment, reviewed: readonly string[],
+  access?: AccessContext): Promise<Response> {
   const origin = env.IOS_MANAGED_PILOT_ORIGIN;
   if (env.ENVIRONMENT !== 'staging' || env.IOS_MANAGED_PILOT_ENABLED !== 'true' || !origin
     || RESERVED_ORIGINS.has(origin) || !reviewed.includes(origin)) return denied();
@@ -63,12 +69,29 @@ export async function handlePilotEdge(request: Request, env: EdgeEnvironment, re
   }
   if (kind === 'list' ? [...url.searchParams.keys()].some(k => k !== 'cursor') || url.searchParams.getAll('cursor').length > 1
     : !!url.search) return reply(400, { error: 'Invalid query', code: 'invalid_request' });
-  const bearer = request.headers.get('Authorization') ?? '';
+  // This context is supplied by the Workers runtime for a direct invocation
+  // authenticated by Access. It is not propagated through service bindings.
+  if (!env.IOS_MANAGED_PILOT_AUDIENCE || access?.aud !== env.IOS_MANAGED_PILOT_AUDIENCE)
+    return reply(401, { error: 'Authentication required', code: 'sign_in_required' });
   const assertion = request.headers.get('Cf-Access-Jwt-Assertion') ?? '';
-  if (request.headers.has('Cookie') || request.headers.has('Origin') || bearer.length > 4096
-    || !/^Bearer oauth:[A-Za-z0-9._~+\/-]+=*$/.test(bearer)
+  if (request.headers.has('Cookie') || request.headers.has('Origin')
     || assertion.length > 16_384 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(assertion))
     return reply(401, { error: 'Authentication required', code: 'sign_in_required' });
+  try {
+    if (!env.TEAM_DOMAIN || !env.OPERATIONS_AUD || typeof access?.getIdentity !== 'function')
+      return reply(401, { error: 'Authentication required', code: 'sign_in_required' });
+    const identity: unknown = await access.getIdentity();
+    const claims = await verifyPilotAccessAssertion(request, { teamDomain: env.TEAM_DOMAIN,
+      pilotAudience: env.IOS_MANAGED_PILOT_AUDIENCE, operationsAudience: env.OPERATIONS_AUD });
+    // Cloudflare documents user_uuid and JWT sub as user IDs. Treat any
+    // missing or unequal values as denial; their exact equivalence in the
+    // deployed OAuth path still requires a provider-backed acceptance test.
+    if (!record(identity) || typeof identity.user_uuid !== 'string' || identity.user_uuid !== claims.subject
+      || typeof identity.email !== 'string' || identity.email.trim().toLowerCase() !== claims.email)
+      return reply(401, { error: 'Authentication required', code: 'sign_in_required' });
+  } catch {
+    return reply(401, { error: 'Authentication required', code: 'sign_in_required' });
+  }
   if (!env.IOS_PILOT_READ || typeof env.IOS_PILOT_READ.read !== 'function') return unavailable();
   try {
     // Do not forward the opaque bearer; the private service independently
@@ -89,6 +112,6 @@ export async function handlePilotEdge(request: Request, env: EdgeEnvironment, re
   } catch { return unavailable(); }
 }
 
-export default { fetch(request: Request, env: EdgeEnvironment): Promise<Response> {
-  return handlePilotEdge(request, env, REVIEWED_ORIGINS);
+export default { fetch(request: Request, env: EdgeEnvironment, ctx?: { access?: AccessContext }): Promise<Response> {
+  return handlePilotEdge(request, env, REVIEWED_ORIGINS, ctx?.access);
 } };

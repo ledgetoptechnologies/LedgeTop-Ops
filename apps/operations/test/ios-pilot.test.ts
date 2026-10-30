@@ -258,7 +258,7 @@ describe('isolated read-only iOS pilot', { timeout: 120_000 }, () => {
     await revokeStaffLoginBinding(db, owner!.proof, { bindingId: linked.bindingId, expectedVersion: 1 });
     expect((await read('/mobile-pilot/v1/session', token)).status).toBe(401);
   });
-  it('managed facade is restricted to its own host, read-only paths and explicit bearer', async () => {
+  it('managed facade is restricted to its own host and read-only paths', async () => {
     const call = (target: string, init?: RequestInit, config = managedConfig) =>
       handleManagedIosPilot(new Request(target, init), env, config);
     const auth = { Authorization: 'Bearer oauth:synthetic' };
@@ -268,7 +268,6 @@ describe('isolated read-only iOS pilot', { timeout: 120_000 }, () => {
     expect((await call(pilotOrigin + '/api/operations', { method: 'POST', headers: auth })).status).toBe(404);
     for (const method of ['POST', 'PUT', 'PATCH', 'DELETE'])
       expect((await call(pilotOrigin + '/mobile-pilot/v1/operations', { method, headers: auth })).status).toBe(405);
-    expect((await call(pilotOrigin + '/mobile-pilot/v1/session')).status).toBe(401);
     expect((await call(pilotOrigin + '/mobile-pilot/v1/session', { headers: { ...auth, Cookie: 'CF_Authorization=ambient' } })).status).toBe(403);
     expect((await call(pilotOrigin + '/mobile-pilot/v1/session?unexpected=1', { headers: auth })).status).toBe(400);
     const response = await call(pilotOrigin + '/mobile-pilot/v1/session', { headers: auth });

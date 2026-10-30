@@ -105,9 +105,14 @@ describe('private pilot RPC with signed assertions and local D1', { timeout: 120
     ]);
     const valid = await assertion();
     const service = { read: (input: string) => readPilotRpc(input, env, [origin]) };
-    const edgeEnv = { ENVIRONMENT: 'staging', IOS_MANAGED_PILOT_ENABLED: 'true', IOS_MANAGED_PILOT_ORIGIN: origin, IOS_PILOT_READ: service };
+    const edgeEnv = { ENVIRONMENT: 'staging', IOS_MANAGED_PILOT_ENABLED: 'true', IOS_MANAGED_PILOT_ORIGIN: origin,
+      IOS_MANAGED_PILOT_AUDIENCE: 'pilot-audience', TEAM_DOMAIN: fixture.issuer, OPERATIONS_AUD: 'web-audience', IOS_PILOT_READ: service };
+    const context = { aud: 'pilot-audience', getIdentity: async () => ({ user_uuid: fixture.owner.subject, email: fixture.owner.email }) };
     const edgeCall = (path: string, jwt = valid, method = 'GET') => handlePilotEdge(new Request(origin + path,
-      { method, headers: { Authorization: 'Bearer oauth:synthetic', 'Cf-Access-Jwt-Assertion': jwt } }), edgeEnv, [origin]);
+      { method, headers: { 'Cf-Access-Jwt-Assertion': jwt } }), edgeEnv, [origin], context);
+    expect((await handlePilotEdge(new Request(origin + '/mobile-pilot/v1/session', {
+      headers: { 'Cf-Access-Jwt-Assertion': valid },
+    }), edgeEnv, [origin])).status).toBe(401);
     expect((await edgeCall('/mobile-pilot/v1/session')).status).toBe(200);
     const list = await edgeCall('/mobile-pilot/v1/operations');
     expect(list.status).toBe(200);

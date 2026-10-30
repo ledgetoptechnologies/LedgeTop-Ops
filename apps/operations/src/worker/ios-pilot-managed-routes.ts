@@ -5,9 +5,9 @@ import { IOS_PILOT_BASE, pilotSessionFromAccessClaims } from './ios-pilot-sessio
 import { readPilotSessionView } from './ios-pilot-staff-snapshot';
 import type { Env } from './types';
 
-/** This handler has a separate staging entrypoint but is not deployed. Before
- * deployment, route only its dedicated hostname to it and keep the flag disabled until
- * Access, OAuth redirects and cross-host token isolation have been validated. */
+/** Private read-service handler. The public edge must first require its direct
+ * Access context. This handler independently validates the signed assertion
+ * and staff permissions and must not be exposed as a public HTTP entrypoint. */
 export type ManagedPilotConfig = {
   enabled: string | undefined;
   origin: string;
@@ -33,13 +33,9 @@ export async function handleManagedIosPilot(request: Request, env: Env, config: 
     if (request.method !== 'GET') return json({ error: 'Read-only pilot', code: 'read_only' }, 405);
     if (listPath ? [...url.searchParams.keys()].some(k => k !== 'cursor') || url.searchParams.getAll('cursor').length > 1 : !!url.search)
       return json({ error: 'Invalid query', code: 'invalid_request' }, 400);
-    // Do not accept ambient browser sessions. Access must verify a presented
-    // bearer and inject a signed assertion for the pilot application.
+    // These headers are defense in depth, not proof of an OAuth-only request.
     if (request.headers.has('Cookie') || request.headers.has('Origin'))
       return json({ error: 'Native pilot request required', code: 'native_request_required' }, 403);
-    if (!/^Bearer [A-Za-z0-9:._~+\/-]+=*$/.test(request.headers.get('Authorization') ?? '')
-      || (request.headers.get('Authorization')?.length ?? 0) > 4096)
-      return json({ error: 'Sign in to the read-only pilot', code: 'sign_in_required' }, 401);
     const claims = await verifyPilotAccessAssertion(request, { teamDomain: env.TEAM_DOMAIN,
       pilotAudience: config.audience, operationsAudience: env.OPERATIONS_AUD });
     const session = await pilotSessionFromAccessClaims(env, claims);
