@@ -72,6 +72,13 @@ SDK build passed. The installer reached 100% but did not report final success;
 inventory showed one pilot and the USB relay was stopped. Device confirmation
 and provider revocation verification remain pending.
 
+Cloudflare's published agent flow registers a public client with only
+`authorization_code` in the registration grant list, then shows a refresh
+token in the exchange response and a subsequent `refresh_token` grant. The
+pilot's registration matches that example. This documentation is not evidence
+that refresh works for this specific device or that replay protection is in
+place; those remain provider and device acceptance gates.
+
 The revised read-only bridge passed all three cases in its local D1 integration
 file, including signed identity, staff denial, assignment and source visibility,
 the composed edge-to-private-RPC path, and checks for unintended writes. The
