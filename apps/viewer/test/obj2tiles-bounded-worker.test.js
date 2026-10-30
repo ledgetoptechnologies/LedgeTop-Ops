@@ -43,6 +43,8 @@ test('Obj2Tiles source and fork patch are pinned fail-closed at image build and 
   assert.doesNotMatch(runtime, /curl|wget|dotnet publish/);
   assert.match(workflow, new RegExp(`EXPECTED_OBJ2TILES_SOURCE_SHA256: "${OBJ2TILES_SOURCE_SHA256}"`));
   assert.match(workflow, new RegExp(`EXPECTED_OBJ2TILES_PATCH_SHA256: "${OBJ2TILES_PATCH_SHA256}"`));
+  assert.match(workflow, new RegExp(`EXPECTED_OBJ2TILES_SECURITY_PATCH_SHA256: "${OBJ2TILES_SECURITY_PATCH_SHA256}"`));
+  assert.match(workflow, /info\.securityPatchSha256!==process\.env\.EXPECTED_OBJ2TILES_SECURITY_PATCH_SHA256/);
   assert.match(workflow, /build-info\.json[\s\S]*binarySha256!==binary/);
 });
 
