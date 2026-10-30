@@ -1,6 +1,23 @@
 # Read-only pilot rollout
 
-October 29, 2026. This is a source and local-test checkpoint, not deployment approval or evidence of live sign-in.
+## Current status — October 30, 2026
+
+The sections below are historical checkpoints and describe earlier candidate
+designs. For the current managed OAuth read-service contract and release gates,
+use [READ-BRIDGE.md](READ-BRIDGE.md), [PROBE-STAGING.md](PROBE-STAGING.md) and
+[VERIFICATION.md](VERIFICATION.md). They supersede earlier statements below
+about untested callbacks, the original bearer-header check, the direct managed
+HTTP entrypoint, the unconfigured probe, and its previous hostname.
+
+Beau successfully tested Cloudflare sign-in against the isolated synthetic
+service on the iPad. The current test app also has an explicit synthetic
+refresh experiment; provider results and restart persistence remain unverified.
+The managed real-data edge is undeployed and source-disabled. The separate
+staging release owner must complete staff and backend release gates before a
+real-data deployment. Neither this document nor local test success is release
+approval.
+
+## Historical checkpoint — October 29, 2026
 
 ## Scope
 
