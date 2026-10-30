@@ -2100,6 +2100,19 @@ const MIGRATIONS = [
       created_at TEXT NOT NULL
     );
   `},
+  {version:47,name:'processing_staged_ack_delivery',sql:`
+    CREATE TABLE processing_staged_ack_delivery (
+      attempt_id TEXT PRIMARY KEY REFERENCES processing_staged_byte_ack_outbox(attempt_id),
+      state TEXT NOT NULL CHECK(state IN ('pending','uncertain','accepted','held')),
+      assertion_sha256 TEXT NOT NULL,
+      lease_token TEXT,
+      lease_expires_at INTEGER,
+      next_attempt_at INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+      error_code TEXT,
+      updated_at INTEGER NOT NULL
+    );
+  `},
 ];
 
 function applyMigrations(database) {

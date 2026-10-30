@@ -39,4 +39,4 @@ async function readStagedIdentity(kind,{enabled=false,origin,principalId,authori
 }
 const getStagedCommitment=options=>readStagedIdentity('commitment',options);
 const getStagedPreflight=options=>readStagedIdentity('preflight',options);
-module.exports={getStagedCommitment,getStagedPreflight};
+module.exports={getStagedCommitment,getStagedPreflight,parseFlat};
