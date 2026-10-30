@@ -96,7 +96,7 @@ final class LivePilotModel: ObservableObject {
     private var generation = UUID()
     private var detailGeneration = UUID()
     private var expiry: Task<Void, Never>?
-    private var signOutTask: Task<ManagedOAuthSignOutResult, Never>?
+    private var signOutTask: Task<ManagedOAuthSignOutReport, Never>?
     private var pendingRequests: [UUID: @Sendable () -> Void] = [:]
     private let browser = PilotBrowserLogin()
     private var credential: ManagedOAuthCredential?
@@ -140,18 +140,19 @@ final class LivePilotModel: ObservableObject {
         PilotKeychain.clear()
         guard let coordinator else { return }
         let previous = signOutTask
-        let task = Task { () -> ManagedOAuthSignOutResult in
+        let task = Task { () -> ManagedOAuthSignOutReport in
             let prior = await previous?.value
-            let result = await coordinator.signOut()
-            return prior == .revocationUnconfirmed ? .revocationUnconfirmed : result
+            let report = await coordinator.signOutReport()
+            if prior?.result == .revocationUnconfirmed {
+                return ManagedOAuthSignOutReport(result: .revocationUnconfirmed, outcomes: report.outcomes)
+            }
+            return report
         }
         signOutTask = task
         Task { [weak self] in
-            let result = await task.value
-            guard let self, self.generation == ticket, result == .revocationUnconfirmed else { return }
-            let detail = await coordinator.lastRevocationFailure()
-            guard self.generation == ticket else { return }
-            let primary = [self.message, ManagedOAuthDiagnostic.revocationDetail(detail)].compactMap { $0 }.joined(separator: " ")
+            let report = await task.value
+            guard let self, self.generation == ticket, report.result == .revocationUnconfirmed else { return }
+            let primary = [self.message, ManagedOAuthDiagnostic.revocationOutcomes(report.outcomes)].compactMap { $0 }.joined(separator: " ")
             self.message = ManagedOAuthDiagnostic.withRevocationWarning(primary)
         }
     }
@@ -171,7 +172,7 @@ final class LivePilotModel: ObservableObject {
         if let previous = signOutTask {
             let result = await previous.value
             guard generation == ticket else { return }
-            if result == .revocationUnconfirmed {
+            if result.result == .revocationUnconfirmed {
                 message = "The previous Cloudflare session could not be confirmed revoked. Reopen the app after the session expires."
                 return
             }

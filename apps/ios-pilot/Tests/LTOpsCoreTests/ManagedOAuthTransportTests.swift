@@ -64,6 +64,9 @@ private final class OAuthProtocolStub: URLProtocol, @unchecked Sendable {
             type = "text/plain"
             if form.contains("offline") { client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet)); return }
             if form.contains("unauthorized") { status = 401 }
+            if form.contains("badrequest") { status = 400 }
+            if form.contains("forbidden") { status = 403 }
+            if form.contains("unexpectedstatus") { status = 418 }
             if form.contains("reject") { status = 503 }
         } else { status = 404 }
         if request.value(forHTTPHeaderField: "Accept") != "application/json" || request.value(forHTTPHeaderField: "Cache-Control") != "no-store" { status = 500 }
@@ -136,6 +139,8 @@ final class ManagedOAuthTransportTests: XCTestCase, @unchecked Sendable {
         let client = try transport()
         let cases: [(String, ManagedOAuthRevocationFailure)] = [
             ("oauth:unauthorized", .httpUnauthorized), ("oauth:reject", .httpServerError),
+            ("oauth:badrequest", .httpStatus(400)), ("oauth:forbidden", .httpStatus(403)),
+            ("oauth:unexpectedstatus", .httpClientError),
             ("oauth:offline", .network), ("bad", .localValidation)]
         for (token, expected) in cases {
             do { try await client.revoke(token: token, clientID: "client-id", hint: .access); XCTFail("must fail") }

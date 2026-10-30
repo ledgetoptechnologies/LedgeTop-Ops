@@ -66,6 +66,7 @@ private final class OAuthResponseCollector: NSObject, URLSessionDataDelegate, UR
         if diagnoseRevocation, let response = response as? HTTPURLResponse, response.url == expectedURL,
            !successCodes.contains(response.statusCode) {
             let kind: ManagedOAuthRevocationFailure = response.statusCode == 401 ? .httpUnauthorized
+                : [400, 403, 404, 405, 409, 415, 422, 429].contains(response.statusCode) ? .httpStatus(response.statusCode)
                 : (400...499).contains(response.statusCode) ? .httpClientError
                 : (500...599).contains(response.statusCode) ? .httpServerError : .invalidResponse
             lock.lock(); if failure == nil { failure = kind }; lock.unlock()
@@ -198,4 +199,5 @@ public struct ManagedOAuthTransport: Sendable {
 public enum ManagedOAuthTokenKind: String, Sendable { case access = "access_token", refresh = "refresh_token" }
 public enum ManagedOAuthRevocationFailure: Error, Sendable, Equatable {
     case localValidation, httpUnauthorized, httpClientError, httpServerError, redirect, network, invalidResponse
+    case httpStatus(Int)
 }

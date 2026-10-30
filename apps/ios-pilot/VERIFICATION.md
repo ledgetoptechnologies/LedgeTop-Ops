@@ -62,6 +62,16 @@ inventory again showed one pilot. The device diagnostic result remains pending.
 Refresh and Keychain persistence code is an unwired candidate; restart
 persistence and provider replay protection remain unverified.
 
+Beau reported the prior diagnostic displayed an HTTP 4xx error after successful
+synthetic sign-in and explicit sign-out; it did not identify the token or exact
+status. A separate fabricated-token request from a newly registered public
+client returned HTTP 400 invalid_grant, which does not establish the cause for
+the real grant. The app now reports fixed, per-attempt refresh and access
+revocation outcomes and allowlisted status codes; 48 Swift tests and a signed
+SDK build passed. The installer reached 100% but did not report final success;
+inventory showed one pilot and the USB relay was stopped. Device confirmation
+and provider revocation verification remain pending.
+
 The revised read-only bridge passed all three cases in its local D1 integration
 file, including signed identity, staff denial, assignment and source visibility,
 the composed edge-to-private-RPC path, and checks for unintended writes. The

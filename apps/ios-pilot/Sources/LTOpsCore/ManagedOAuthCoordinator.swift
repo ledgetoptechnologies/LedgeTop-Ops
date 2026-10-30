@@ -56,6 +56,20 @@ public enum ManagedOAuthProofGenerator {
 public enum ManagedOAuthSignOutResult: Sendable, Equatable {
     case noLocalCredential, providerAcknowledged, revocationUnconfirmed
 }
+public enum ManagedOAuthRevocationOutcome: Sendable, Equatable {
+    case notIssued, providerAcknowledged, failed(ManagedOAuthRevocationFailure)
+}
+public struct ManagedOAuthRevocationOutcomes: Sendable, Equatable {
+    public let refresh: ManagedOAuthRevocationOutcome
+    public let access: ManagedOAuthRevocationOutcome
+}
+public struct ManagedOAuthSignOutReport: Sendable, Equatable {
+    public let result: ManagedOAuthSignOutResult
+    public let outcomes: ManagedOAuthRevocationOutcomes?
+    public init(result: ManagedOAuthSignOutResult, outcomes: ManagedOAuthRevocationOutcomes?) {
+        self.result = result; self.outcomes = outcomes
+    }
+}
 public enum ManagedOAuthStage: Sendable, Equatable {
     case discovery, registration, browser, callback, tokenExchange, probe
 }
@@ -84,6 +98,9 @@ public enum ManagedOAuthDiagnostic {
         switch failure {
         case .localValidation: return "The sign-out request failed local validation."
         case .httpUnauthorized: return "The sign-out endpoint returned HTTP 401."
+        case .httpStatus(let status):
+            guard [400, 403, 404, 405, 409, 415, 422, 429].contains(status) else { return "The sign-out endpoint returned an HTTP 4xx error." }
+            return "The sign-out endpoint returned HTTP \(status)."
         case .httpClientError: return "The sign-out endpoint returned an HTTP 4xx error."
         case .httpServerError: return "The sign-out endpoint returned an HTTP 5xx error."
         case .redirect: return "The sign-out endpoint redirected the request."
@@ -91,6 +108,17 @@ public enum ManagedOAuthDiagnostic {
         case .invalidResponse: return "The sign-out endpoint returned an unexpected response."
         case nil: return nil
         }
+    }
+    public static func revocationOutcomes(_ outcomes: ManagedOAuthRevocationOutcomes?) -> String? {
+        guard let outcomes else { return nil }
+        func describe(_ label: String, _ outcome: ManagedOAuthRevocationOutcome) -> String {
+            switch outcome {
+            case .notIssued: return "\(label): not issued."
+            case .providerAcknowledged: return "\(label): request acknowledged."
+            case .failed(let failure): return "\(label): \(revocationDetail(failure) ?? "Request failed.")"
+            }
+        }
+        return describe("Refresh grant", outcomes.refresh) + " " + describe("Access token", outcomes.access)
     }
 }
 public actor ManagedOAuthCoordinator {
@@ -104,8 +132,8 @@ public actor ManagedOAuthCoordinator {
     private var credential: ManagedOAuthCredential?
     private var credentialClientID: String?
     private var exchangesInFlight = 0
+    private var revocationsInFlight = 0
     private var grantStatusUncertain = false
-    private var revocationFailure: ManagedOAuthRevocationFailure?
 
     public init(pins: ManagedOAuthPins, transport: any ManagedOAuthExchanging, browser: @escaping Browser,
                 proofFactory: @escaping ProofFactory) {
@@ -114,25 +142,32 @@ public actor ManagedOAuthCoordinator {
     /// Clear local access immediately; RFC 7009's 200 is an acknowledgement,
     /// not evidence that a token existed or that dependent access was revoked.
     public func signOut() async -> ManagedOAuthSignOutResult {
+        await signOutReport().result
+    }
+    public func signOutReport() async -> ManagedOAuthSignOutReport {
         generation &+= 1
         let old = credential, client = credentialClientID
         credential = nil
         credentialClientID = nil
-        let uncertain = grantStatusUncertain || exchangesInFlight > 0
-        guard let old, let client else { return uncertain ? .revocationUnconfirmed : .noLocalCredential }
-        var failed = false
+        let uncertain = grantStatusUncertain || exchangesInFlight > 0 || revocationsInFlight > 0
+        guard let old, let client else {
+            return ManagedOAuthSignOutReport(result: uncertain ? .revocationUnconfirmed : .noLocalCredential, outcomes: nil)
+        }
+        revocationsInFlight += 1
+        defer { revocationsInFlight -= 1 }
+        var refreshOutcome: ManagedOAuthRevocationOutcome = .notIssued
         if let refresh = old.refreshToken {
-            do { try await transport.revoke(token: refresh, clientID: client, hint: .refresh) } catch {
-                failed = true; if revocationFailure == nil { revocationFailure = error as? ManagedOAuthRevocationFailure }
-            }
+            do { try await transport.revoke(token: refresh, clientID: client, hint: .refresh); refreshOutcome = .providerAcknowledged }
+            catch { refreshOutcome = .failed(error as? ManagedOAuthRevocationFailure ?? .invalidResponse) }
         }
-        do { try await transport.revoke(token: old.accessToken, clientID: client, hint: .access) } catch {
-            failed = true; if revocationFailure == nil { revocationFailure = error as? ManagedOAuthRevocationFailure }
-        }
+        let accessOutcome: ManagedOAuthRevocationOutcome
+        do { try await transport.revoke(token: old.accessToken, clientID: client, hint: .access); accessOutcome = .providerAcknowledged }
+        catch { accessOutcome = .failed(error as? ManagedOAuthRevocationFailure ?? .invalidResponse) }
+        let outcomes = ManagedOAuthRevocationOutcomes(refresh: refreshOutcome, access: accessOutcome)
+        let failed = { if case .failed = refreshOutcome { return true }; if case .failed = accessOutcome { return true }; return false }()
         if failed { grantStatusUncertain = true }
-        return failed || uncertain ? .revocationUnconfirmed : .providerAcknowledged
+        return ManagedOAuthSignOutReport(result: failed || uncertain ? .revocationUnconfirmed : .providerAcknowledged, outcomes: outcomes)
     }
-    public func lastRevocationFailure() -> ManagedOAuthRevocationFailure? { revocationFailure }
     private func check(_ expected: UInt64) throws {
         try Task.checkCancellation()
         guard generation == expected else { throw MobilePilotError.signedOut }

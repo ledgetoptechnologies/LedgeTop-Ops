@@ -27,17 +27,22 @@ private struct FakeExchange: ManagedOAuthExchanging {
     var log: RevocationLog? = nil
     var failExchange = false
     var lifetime: TimeInterval = 300
+    var failKind: ManagedOAuthTokenKind? = nil
+    var noRefresh = false
+    var revokeGate: ExchangeGate? = nil
     func verifyMetadata() async throws {}
     func register() async throws -> String { "client-id" }
     func exchange(code: String, verifier: String, clientID: String) async throws -> ManagedOAuthCredential {
         if let gate { await gate.pause() }
         if failExchange { throw URLError(.networkConnectionLost) }
         guard code == "code", verifier == String(repeating: "v", count: 43), clientID == "client-id" else { throw MobilePilotError.invalidResponse }
-        return ManagedOAuthCredential(accessToken: "oauth:synthetic", refreshToken: "oauth:refresh", expiresAt: Date().addingTimeInterval(lifetime))
+        return ManagedOAuthCredential(accessToken: "oauth:synthetic", refreshToken: noRefresh ? nil : "oauth:refresh", expiresAt: Date().addingTimeInterval(lifetime))
     }
     func revoke(token: String, clientID: String, hint: ManagedOAuthTokenKind) async throws {
         await log?.add(hint)
+        if hint == .refresh, let revokeGate { await revokeGate.pause() }
         if failRevocation { throw MobilePilotError.unavailable }
+        if hint == failKind { throw ManagedOAuthRevocationFailure.httpStatus(400) }
         guard clientID == "client-id", (hint == .refresh && token == "oauth:refresh") || (hint == .access && token == "oauth:synthetic") else { throw MobilePilotError.invalidResponse }
     }
 }
@@ -47,11 +52,50 @@ final class ManagedOAuthCoordinatorTests: XCTestCase {
             authorizationEndpoint: "https://team.cloudflareaccess.com/auth", tokenEndpoint: "https://team.cloudflareaccess.com/token",
             registrationEndpoint: "https://team.cloudflareaccess.com/register", revocationEndpoint: "https://team.cloudflareaccess.com/revoke")
     }
-    private func coordinator(gate: ExchangeGate? = nil, mismatch: Bool = false, failRevocation: Bool = false, log: RevocationLog? = nil, failExchange: Bool = false, lifetime: TimeInterval = 300) throws -> ManagedOAuthCoordinator {
-        try ManagedOAuthCoordinator(pins: pins(), transport: FakeExchange(gate: gate, failRevocation: failRevocation, log: log, failExchange: failExchange, lifetime: lifetime), browser: { url in
+    private func coordinator(gate: ExchangeGate? = nil, mismatch: Bool = false, failRevocation: Bool = false, log: RevocationLog? = nil, failExchange: Bool = false, lifetime: TimeInterval = 300, failKind: ManagedOAuthTokenKind? = nil, noRefresh: Bool = false, revokeGate: ExchangeGate? = nil) throws -> ManagedOAuthCoordinator {
+        try ManagedOAuthCoordinator(pins: pins(), transport: FakeExchange(gate: gate, failRevocation: failRevocation, log: log, failExchange: failExchange, lifetime: lifetime, failKind: failKind, noRefresh: noRefresh, revokeGate: revokeGate), browser: { url in
             let state = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!.first { $0.name == "state" }!.value!
             return URL(string: ManagedOAuthWire.callback + "?code=code&state=" + (mismatch ? String(repeating: "x", count: 43) : state))!
         }, proofFactory: { ManagedOAuthProof(state: String(repeating: "s", count: 43), verifier: String(repeating: "v", count: 43), challenge: String(repeating: "A", count: 43)) })
+    }
+    func testOverlappingSignOutDoesNotAttributeAnotherAttemptsOutcomes() async throws {
+        let gate = ExchangeGate(), coordinator = try coordinator(failKind: .refresh, revokeGate: gate)
+        try await coordinator.signIn()
+        let first = Task { await coordinator.signOutReport() }
+        await gate.waitUntilHeld()
+        let second = await coordinator.signOutReport()
+        XCTAssertEqual(second.result, .revocationUnconfirmed)
+        XCTAssertNil(second.outcomes)
+        await gate.release()
+        let firstReport = await first.value
+        XCTAssertEqual(firstReport.outcomes?.refresh, .failed(.httpStatus(400)))
+        XCTAssertEqual(firstReport.outcomes?.access, .providerAcknowledged)
+    }
+    func testRevocationReportHasNoRefreshWhenNotIssued() async throws {
+        let coordinator = try coordinator(failKind: .access, noRefresh: true)
+        try await coordinator.signIn()
+        let report = await coordinator.signOutReport()
+        XCTAssertEqual(report.result, .revocationUnconfirmed)
+        XCTAssertEqual(report.outcomes?.refresh, .notIssued)
+        XCTAssertEqual(report.outcomes?.access, .failed(.httpStatus(400)))
+    }
+    func testRevocationReportsEachTokenOutcomeSeparately() async throws {
+        for kind in [ManagedOAuthTokenKind.refresh, .access] {
+            let coordinator = try coordinator(failKind: kind)
+            try await coordinator.signIn()
+            let report = await coordinator.signOutReport()
+            XCTAssertEqual(report.result, .revocationUnconfirmed)
+            let outcomes = report.outcomes
+            XCTAssertEqual(outcomes?.refresh, kind == .refresh ? .failed(.httpStatus(400)) : .providerAcknowledged)
+            XCTAssertEqual(outcomes?.access, kind == .access ? .failed(.httpStatus(400)) : .providerAcknowledged)
+            let message = ManagedOAuthDiagnostic.revocationOutcomes(outcomes) ?? ""
+            XCTAssertTrue(message.contains("HTTP 400"))
+            XCTAssertFalse(message.contains("oauth:"))
+            XCTAssertFalse(message.contains("client-id"))
+            let later = await coordinator.signOutReport()
+            XCTAssertEqual(later.result, .revocationUnconfirmed)
+            XCTAssertNil(later.outcomes)
+        }
     }
     func testSignInAndSignOutAreMemoryOnly() async throws {
         let coordinator = try coordinator()
