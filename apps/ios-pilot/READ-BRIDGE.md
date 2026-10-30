@@ -39,6 +39,26 @@ alternative routes, valid pilot token isolation from the web API, and sign-out
 and expiry. Verify the endpoint returns only approved staging data. Successful
 synthetic sign-in or local mocks do not prove these live properties.
 
+## Transitional legacy staff path
+
+On October 30, a read-only staging schema check found native reconciliation
+disabled and all five alternate-login binding tables absent. The pilot source
+supports the pre-bound primary human identity in this exact legacy mode; it
+does not create or bind staff. A current signed assertion, exact canonical
+subject and email, active staff, role/division, source and record checks remain
+required. Partial alternate-login schema and enabled native admission without
+matching authority fail closed. Schema compilation and connector-revision
+metadata succeeded with zero writes; this does not prove Beau's live staff
+binding, permissions, connector configuration or an approved release.
+
+An isolated synthetic edge-to-private-RPC-to-D1 integration test exercised
+the disabled control and absent tables, assigned-only data, wrong subject,
+alternate identity, inactive staff, enabled native control without admission,
+partial schema and watched writes. No staging records were used. Existing edge
+assertion tests cover expired, forged, foreign issuer and wrong audience tokens.
+The shared Operations owner must review and include the named RPC in an approved
+release; the pilot branch does not authorize deployment or changes to staff.
+
 References: [Managed OAuth](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/),
 [Workers Access context](https://developers.cloudflare.com/workers/configuration/cloudflare-access/),
 and [Access application tokens](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/application-token/).
