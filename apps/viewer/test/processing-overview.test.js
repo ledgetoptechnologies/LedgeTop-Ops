@@ -55,6 +55,30 @@ test('recycled projects and tasks stop alerting and restored work becomes visibl
   assert.equal(f.counts().failed, 1);
 });
 
+test('authenticated overview reflects failure, project recycling, restore and retry', async t => {
+  const f = fixture(t), keyId = 'overview-lifecycle-test', secret = 'synthetic-overview-lifecycle-secret-32-characters';
+  const oldKeys = config.serviceAuthKeys, oldKeyId = config.serviceAuthKeyId, oldSecret = config.serviceAuthSecret;
+  config.serviceAuthKeys = { [keyId]: secret }; config.serviceAuthKeyId = keyId; config.serviceAuthSecret = secret;
+  t.after(() => { config.serviceAuthKeys = oldKeys; config.serviceAuthKeyId = oldKeyId; config.serviceAuthSecret = oldSecret; });
+  const app = express();
+  app.use(createProcessingApi({ repository: new ViewerRepository(f.db), processing: f.processing,
+    storage: { space: () => ({ available: 1024 }) }, providerCredentials: {} }));
+  const server = await new Promise(resolve => { const listener = app.listen(0, '127.0.0.1', () => resolve(listener)); });
+  t.after(() => new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  const url = `http://127.0.0.1:${server.address().port}/api/v1/overview`;
+  async function jobs() {
+    const headers = signServiceRequest({ secret, keyId, method: 'GET', path: '/api/v1/overview' });
+    const response = await fetch(url, { headers }); assert.equal(response.status, 200); return (await response.json()).jobs;
+  }
+  assert.equal((await jobs()).failed, 0);
+  const work = f.task(); assert.equal((await jobs()).failed, 1);
+  const trash = f.processing.trashProject(work.project.id, 'ops:test'); assert.ok(trash);
+  assert.equal((await jobs()).failed, 0);
+  assert.ok(f.processing.restoreMetadataEntity(trash.id, 'ops:test')); assert.equal((await jobs()).failed, 1);
+  assert.ok(f.processing.retryAttempt(work.attempt.id, 'ops:test'));
+  assert.deepEqual(await jobs(), { queued: 1, running: 0, reviewReady: 0, failed: 0, observationWarnings: 0 });
+});
+
 test('authenticated overview route serializes observation warnings separately from failures', async t => {
   const f = fixture(t), keyId = 'overview-test', secret = 'synthetic-overview-service-secret-32-characters';
   const oldKeys = config.serviceAuthKeys, oldKeyId = config.serviceAuthKeyId, oldSecret = config.serviceAuthSecret;
