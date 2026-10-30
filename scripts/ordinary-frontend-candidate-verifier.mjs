@@ -12,6 +12,7 @@ import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
 export const MAX_NATIVE_MODULE_BYTES = 64 * 1024 * 1024;
 const equal = (a, b) => canonical(a) === canonical(b);
+const compareAssetPath = (a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
 const workerFor = app => app === 'operations' ? 'ledgetop-ops' : 'ledgetop-clients';
 const receiptKeys = ['schemaVersion','workerName','accountId','sourceCommit','activeVersionId','observedAt',
   'cutoverAt','earliestPermittedPruningAt','minimumRetentionHours','automaticPruning','oldServedWithin48hPaths','assets'];
@@ -148,8 +149,10 @@ export function verifyOrdinaryFrontendAssetNamespace({ plan, candidateId, baseli
   need(Number.isSafeInteger(now) && now >= 0 && now <= 8.64e15, 'Verification clock invalid');
   need(accountId === NATIVE_STAFF_PRODUCTION_TARGET.accountId, 'Production account identity mismatch');
   const app = plan.application, collected = collectFrontendAssets(plan.release.assets.directory);
-  const planned = plan.browserProof.files.map(row => ({ path: row.path, size: row.size, sha256: row.sha256 }));
-  const actual = collected.entries.map(({ path, size, sha256 }) => ({ path, size, sha256 }));
+  const planned = plan.browserProof.files.map(row => ({ path: row.path, size: row.size, sha256: row.sha256 }))
+    .sort(compareAssetPath);
+  const actual = collected.entries.map(({ path, size, sha256 }) => ({ path, size, sha256 }))
+    .sort(compareAssetPath);
   need(equal(actual, planned), 'Browser upload tree differs from pinned plan inventory');
   need(previousLedger !== undefined, 'Previously verified active asset ledger is required for production frontend release');
   const prior = validateAssetLedger(previousLedger, { workerName: workerFor(app), accountId });

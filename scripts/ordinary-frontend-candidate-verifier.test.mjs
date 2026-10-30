@@ -6,7 +6,7 @@ import path from 'node:path';
 import { hash, ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 } from './production-deploy.mjs';
 import { verifyOrdinaryFrontendCandidate, verifyOrdinaryFrontendCandidateModules, verifyOrdinaryFrontendAssetNamespace,
   ordinaryFrontendExecutionQualification, decodeNativeModuleBytes, MAX_NATIVE_MODULE_BYTES } from './ordinary-frontend-candidate-verifier.mjs';
-import { mergeAssetLedger } from './production-auto-assets.mjs';
+import { collectFrontendAssets, mergeAssetLedger } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 
 const COMMIT = '8e8554667c7de62cf3be44b5a650697c10f7c9bf';
@@ -41,7 +41,9 @@ function assetFixture(t, app = 'operations') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ordinary-frontend-namespace-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const dir = path.join(root, 'new'); fs.mkdirSync(path.join(dir, 'assets'), { recursive: true });
-  const files = { 'index.html': '<script src="/assets/new.js"></script>', 'assets/new.js': 'new bundle', 'favicon.svg': '<svg/>' };
+  const files = { 'index.html': '<script src="/assets/new.js"></script>', 'assets/new.js': 'new bundle', 'favicon.svg': '<svg/>',
+    'assets/A-1.reviewed.js': 'upper hyphen', 'assets/a_1.reviewed.js': 'lower underscore',
+    'assets/B_1.reviewed.js': 'upper second underscore' };
   for (const [name, body] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), body);
   fs.writeFileSync(path.join(dir, '.assetsignore'), 'wrangler.json\n.dev.vars\n');
   const sourceCommit = COMMIT;
@@ -113,6 +115,15 @@ test('candidate and namespace evidence alone never qualifies the native executor
 test('asset gate holds without namespace evidence and verifies complete retained old/new byte union', t => {
  for (const app of ['operations', 'client']) {
   const f = assetFixture(t, app), now = Date.parse('2026-10-30T12:00:00.000Z');
+  const orderProbe = ['/assets/A-1.reviewed.js', '/assets/a_1.reviewed.js', '/assets/B_1.reviewed.js'];
+  assert.notDeepEqual(orderProbe.slice().sort((a, b) => a.localeCompare(b)),
+    orderProbe.slice().sort((a, b) => a < b ? -1 : a > b ? 1 : 0));
+  const collectedRows = collectFrontendAssets(f.plan.release.assets.directory).entries
+    .map(({ path: assetPath, size, sha256 }) => ({ path: assetPath, size, sha256 }))
+    .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const pinnedRows = f.plan.browserProof.files.map(({ path: assetPath, size, sha256 }) => ({ path: assetPath, size, sha256 }))
+    .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  assert.deepEqual(collectedRows, pinnedRows);
   const worker = app === 'operations' ? 'ledgetop-ops' : 'ledgetop-clients';
   const held = verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE, baselineVersionId: BASELINE,
     previousLedger: f.previousLedger, previousAssetBytes: f.oldFiles, now });
@@ -128,7 +139,7 @@ test('asset gate holds without namespace evidence and verifies complete retained
   const qualified = verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE, baselineVersionId: BASELINE,
     previousLedger: f.previousLedger, previousAssetBytes: f.oldFiles, namespaceEvidence: evidence, now });
   assert.equal(qualified.assetNamespaceQualification.ready, true);
-  assert.equal(qualified.assetNamespaceQualification.assetCount, 5);
+  assert.equal(qualified.assetNamespaceQualification.assetCount, 8);
   assert.equal(qualified.assetNamespaceQualification.namespaceByteEvidenceVerified, true);
   assert.equal(qualified.assetNamespaceQualification.earliestPermittedPruningAt, evidence.receipt.earliestPermittedPruningAt);
   const shortRetention = structuredClone(evidence);
