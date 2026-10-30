@@ -1224,6 +1224,76 @@ test.describe("unified home without business switching", () => {
     await expect(page).toHaveURL(/\/portal$/);
   });
 
+  type Inquiry = {body: Record<string, unknown>; key: string | undefined; workspace: string | null};
+  /** General requests: POST answers from `answer`; GET lists what was accepted so far, newest first. */
+  async function mockInquiries(page: Page, answer: (count: number) => number = () => 201) {
+    const sent: Inquiry[] = [], accepted: Record<string, unknown>[] = [];
+    await page.route("**/api/client/inquiries*", route => {
+      const url = new URL(route.request().url());
+      if (route.request().method() === "GET") return route.fulfill({json: {inquiries: accepted}});
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      sent.push({body, key: route.request().headers()["idempotency-key"], workspace: url.searchParams.get("workspace")});
+      const status = answer(sent.length);
+      if (status !== 201) return route.fulfill({status, json: {error: "Unavailable"}});
+      const inquiry = {id: `inq-${sent.length}`, kind: body.kind, title: body.title ?? "Something else", details: body.details, location: body.location,
+        status: "received", createdAt: "2026-10-30T12:00:00.000Z"};
+      accepted.unshift(inquiry);
+      return route.fulfill({status: 201, json: {inquiry}});
+    });
+    return sent;
+  }
+
+  test("work that isn't a listed service goes to Ledge Top through a general choice, with no business or account chosen", async ({page}) => {
+    const {posted} = await mockQuick(page, undefined, {json: {services: quickServices, unavailable: [], inquiryKinds: ["website", "drone", "other", "payroll"]}});
+    const sent = await mockInquiries(page, count => count === 1 ? 503 : 201);
+    await page.goto("/portal/requests");
+    await expect(page.getByRole("heading", {name: "General requests"})).toHaveCount(0);
+    await page.getByRole("button", {name: "New request"}).click();
+    const form = page.locator(".quick-request");
+    // Listed services come first; the general choices say "other" where a service of that kind is already listed.
+    await expect(form.getByRole("radio")).toHaveCount(6);
+    await expect(form.locator(".quick-request-general strong")).toHaveText(["Other website work", "Other drone work", "Something else"]);
+    await form.getByRole("radio", {name: /^Something else/}).check();
+    await expect(form.getByLabel(/How many stories/)).toHaveCount(0);
+    const send = form.getByRole("button", {name: "Send request"});
+    await expect(send).toBeDisabled();
+    await form.getByLabel("Tell us what you need").fill("Help planning signage for the new office.");
+    await form.getByLabel("Location (optional)").fill("Harbor office");
+    await send.click();
+    await expect(form.getByRole("alert")).toContainText("We couldn't confirm your request was received.");
+    await send.click();
+    await expect(page.locator(".portal-success-notice")).toHaveText("Request sent. Ledge Top will review it shortly.");
+    expect(posted).toHaveLength(0);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.key).toBe(sent[0]!.key);
+    expect(sent[0]!.key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(sent.every(item => item.workspace === null)).toBe(true);
+    expect(sent[1]!.body).toEqual({kind: "other", title: null, details: "Help planning signage for the new office.", location: "Harbor office"});
+    const history = page.locator(".ltds-card").filter({has: page.getByRole("heading", {name: "General requests"})});
+    await expect(history.locator("li strong")).toHaveText(["Something else"]);
+    await expect(history.locator(".status-pill")).toHaveText("Received");
+    await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies/);
+  });
+
+  test("a client with no listed services still gets general choices, and loses them only if the server stops offering them", async ({page}) => {
+    await mockQuick(page, undefined, {json: {services: [], unavailable: [], inquiryKinds: ["website", "drone", "other"]}});
+    const sent = await mockInquiries(page, () => 404);
+    await page.goto("/portal/requests");
+    await page.getByRole("button", {name: "New request"}).click();
+    const form = page.locator(".quick-request");
+    await expect(form.getByText("No services are available to request right now.")).toHaveCount(0);
+    await expect(form.locator(".quick-request-general strong")).toHaveText(["Website work", "Drone work", "Something else"]);
+    await form.getByRole("radio", {name: /^Website work/}).check();
+    await expect(form.getByLabel("Short title (optional)")).toHaveAttribute("placeholder", "Website work");
+    await form.getByLabel("Short title (optional)").fill("Booking page");
+    await form.getByLabel("Tell us what you need").fill("Add online booking to our site.");
+    await form.getByRole("button", {name: "Send request"}).click();
+    expect(sent.map(item => item.body)).toEqual([{kind: "website", title: "Booking page", details: "Add online booking to our site.", location: null}]);
+    // With nothing left to offer, the form gives way to the usual "contact us" message, never a dead form.
+    await expect(form.locator(".quick-request-general")).toHaveCount(0);
+    await expect(form.getByText("No services are available to request right now.", {exact: false})).toBeVisible();
+  });
+
   test("deliveries are one flat list and feedback one neutral card, with no business or division", async ({page}) => {
     const calls = await mockBoth(page); await page.goto("/portal/deliveries");
     const folders = page.locator(".unified-deliveries");

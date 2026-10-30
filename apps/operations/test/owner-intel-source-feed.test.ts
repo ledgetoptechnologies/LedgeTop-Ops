@@ -19,6 +19,7 @@ const encoder=new TextEncoder(),page='https://ltds.example/';
 let runtime:Miniflare,db:D1Database,privateKey:CryptoKey,serial=0,bindingId='binding-one',businessId='business-one',routeKey='synthetic';
 const id=()=>`00000000-0000-4000-8000-${(++serial).toString(16).padStart(12,'0')}`;
 const unknown={value:null,state:'unknown',reason:'not_checked'};
+const journalVectors=JSON.parse(readFileSync(new URL('./fixtures/hermes-journal-v4-staged-vectors.json',import.meta.url),'utf8')) as {sourceArtifactSha256:string;cases:Array<{id:string;body:string;context:Record<string,unknown>;receiverExpected:boolean;bodySha256:string}>};
 function context(bindingId:string,kind:'search_console_summary'|'own_site',subjectKey:string):Record<string,unknown>{
  const gsc=kind==='search_console_summary';return {producerId:PRODUCER,monitoringBindingId:bindingId,configurationRevision:1,observationKind:kind,subjectKey,
   source:gsc?'google_search_console':'hermes_site_monitor',sourceAccountRef:gsc?'source-account':null,collectedBy:gsc?'hermes-competitor-intel':'hermes-site-monitor',
@@ -38,8 +39,8 @@ function observation(kind:'search_console_summary'|'own_site'='search_console_su
 async function signed(value:unknown){
  return signedBody(JSON.stringify(value));
 }
-async function signedBody(body:string){
- const digest=await intelDigest(encoder.encode(body)),headers={producer:PRODUCER,keyId:key.key_id,timestamp:TS,digest};
+async function signedBody(body:string,timestamp=TS){
+ const digest=await intelDigest(encoder.encode(body)),headers={producer:PRODUCER,keyId:key.key_id,timestamp,digest};
  const signature=base64url(new Uint8Array(await crypto.subtle.sign('Ed25519',privateKey,intelSigningBytes(headers) as BufferSource)));
  return new Request(`${ORIGIN}${INTEL_INGEST_PATH}`,{method:'POST',headers:{'Content-Type':'application/json','X-CI-Producer':headers.producer,'X-CI-Key-Id':headers.keyId,'X-CI-Timestamp':headers.timestamp,'X-CI-Content-SHA256':digest,'X-CI-Signature':signature},body});
 }
@@ -144,6 +145,32 @@ describe('source-only Hermes feed, immutable history and authorized reads',()=>{
   const v1={...v2,semantics:{observation:'ci.obs.v1',scoring:'concern_0_10.v1'}};
   const fallsThrough=dispatchOwnerIntelSourceIngest(await signed(v1),env(),NOW);expect(fallsThrough).not.toBeNull();expect(await fallsThrough!).toBeNull();
   expect(await count('owner_intel_source_inbox')).toBe(0);
+ });
+ it('accepts exact persisted Hermes GSC 7d and 28d journal bodies, replays exact receipts, and keeps range heads separate',async()=>{
+  const selected=journalVectors.cases.filter(item=>item.id==='persisted-7df434234106'||item.id==='persisted-d4d7474b3d5c');
+  expect(journalVectors.sourceArtifactSha256).toBe('9309157056727e83f801546867cfe596a3a500cb288c1e930ec4f8d875a4843f');
+  expect(selected).toHaveLength(2);expect(selected.every(item=>item.receiverExpected)).toBe(true);
+  const vectorBinding='binding-input-journal',vectorBusiness='business-input-journal';
+  await db.batch([
+   db.prepare("INSERT INTO owner_intel_businesses VALUES(?,'Synthetic Journal Fixture',1,'reviewed')").bind(vectorBusiness),
+   db.prepare("INSERT INTO owner_intel_business_aliases VALUES('journal-fixture',?,'active')").bind(vectorBusiness),
+   db.prepare("INSERT INTO owner_intel_bindings VALUES(?,?,7,'reviewed')").bind(vectorBinding,vectorBusiness),
+   db.prepare('INSERT INTO ci_ingest_producer_bindings VALUES(?,?,7,1)').bind(PRODUCER,vectorBinding),
+   ...selected.map(item=>db.prepare('INSERT OR IGNORE INTO owner_intel_source_bindings VALUES(?,?,7,?,?,?,?,?,?,1)')
+    .bind(PRODUCER,vectorBinding,item.context.observationKind,item.context.subjectKey,item.context.source,item.context.sourceAccountRef,item.context.collectedBy,JSON.stringify(item.context)))
+  ]);
+  for(const item of selected){
+   const digest=await intelDigest(encoder.encode(item.body));expect(digest).toBe(Buffer.from(item.bodySha256,'hex').toString('base64url'));
+   const dispatched=await dispatchIntelIngest(await signedBody(item.body,'2026-10-25T18:00:00Z'),{...env(),OPS_DB:db} as Env,Date.parse('2026-10-25T18:00:00Z'));
+   expect(dispatched?.status,dispatched?await dispatched.clone().text():'no response').toBe(200);
+   const first=await dispatched!.json() as {delivery:string;receipt:unknown};expect(first.delivery).toBe('first');
+   const replay=await dispatchIntelIngest(await signedBody(item.body,'2026-10-25T18:00:00Z'),{...env(),OPS_DB:db} as Env,Date.parse('2026-10-25T18:00:00Z'));
+   expect(replay?.status).toBe(200);expect(await replay?.json()).toEqual({delivery:'duplicate',receipt:first.receipt});
+   const stored=await db.prepare('SELECT raw_body,payload_sha256 FROM owner_intel_source_inbox WHERE operation_id=?').bind(JSON.parse(item.body).operationId).first<{raw_body:string;payload_sha256:string}>();
+   expect(stored?.raw_body).toBe(item.body);expect(stored?.payload_sha256).toBe(digest);
+  }
+  const heads=await db.prepare('SELECT period_days,operation_id FROM owner_intel_source_range_heads WHERE binding_id=? AND configuration_revision=7 AND subject_key=? ORDER BY period_days').bind(vectorBinding,'gsc:ltds-fixture').all<{period_days:number;operation_id:string}>();
+  expect(heads.results).toEqual([{period_days:7,operation_id:'11111111-1111-4111-8111-111111119108'},{period_days:28,operation_id:'11111111-1111-4111-8111-111111119109'}]);
  });
  it('authenticates, projects and reads GSC with stale and unknown metrics preserved',async()=>{
   const staff=`staff-${serial}`,email=`owner-${serial}@example.test`,access=`access-${serial}`,expires=Math.floor(Date.now()/1000)+3600;
