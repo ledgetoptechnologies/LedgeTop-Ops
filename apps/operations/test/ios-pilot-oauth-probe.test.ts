@@ -11,10 +11,10 @@ const env = { ENVIRONMENT: 'staging', IOS_OAUTH_PROBE_ENABLED: 'true', IOS_OAUTH
   IOS_OAUTH_PROBE_AUDIENCE: 'pilot-audience', TEAM_DOMAIN: issuer, OPERATIONS_AUD: 'web-audience' };
 let privateKey: CryptoKey;
 beforeAll(async () => { const pair = await generateKeyPair('RS256'); privateKey = pair.privateKey; key.publicKey = pair.publicKey; });
-async function signed(audience = env.IOS_OAUTH_PROBE_AUDIENCE) {
+async function signed(audience = env.IOS_OAUTH_PROBE_AUDIENCE, expiresIn = 300) {
   const now = Math.floor(Date.now() / 1000);
   return new SignJWT({ type: 'app', email: 'synthetic@example.test' }).setProtectedHeader({ alg: 'RS256' })
-    .setIssuer(issuer).setAudience(audience).setSubject('synthetic-subject').setIssuedAt(now - 1).setExpirationTime(now + 300).sign(privateKey);
+    .setIssuer(issuer).setAudience(audience).setSubject('synthetic-subject').setIssuedAt(now - 1).setExpirationTime(now + expiresIn).sign(privateKey);
 }
 const req = (path: string, headers: HeadersInit = {}, method = 'GET', host = origin) =>
   new Request(host + path, { method, headers });
@@ -45,6 +45,13 @@ describe('synthetic OAuth probe', () => {
     expect(JSON.parse(text)).toEqual({ ok: true, kind: 'synthetic-oauth-probe' });
     for (const value of [token, assertion, 'synthetic-subject', 'synthetic@example.test']) expect(text).not.toContain(value);
   });
+  it('accepts a verified assertion even when Access does not forward the original bearer header', async () => {
+    const response = await handleOAuthProbe(req('/oauth-probe/v1', {
+      'Cf-Access-Jwt-Assertion': await signed(),
+    }), env, [origin]);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, kind: 'synthetic-oauth-probe' });
+  });
   it('denies unsupported paths, methods, queries, foreign host, and disabled configuration', async () => {
     const headers = { Authorization: 'Bearer oauth:synthetic', 'Cf-Access-Jwt-Assertion': await signed() };
     for (const value of [req('/api/operations', headers), req('/oauth-probe/v1?x=1', headers),
@@ -57,13 +64,14 @@ describe('synthetic OAuth probe', () => {
   it('rejects missing, foreign-audience, ambient-cookie and unsigned credentials', async () => {
     const requests = [req('/oauth-probe/v1'), req('/oauth-probe/v1', { Authorization: 'Bearer oauth:synthetic' }),
       req('/oauth-probe/v1', { Authorization: 'Bearer oauth:synthetic', 'Cf-Access-Jwt-Assertion': await signed('web-audience') }),
+      req('/oauth-probe/v1', { 'Cf-Access-Jwt-Assertion': await signed(env.IOS_OAUTH_PROBE_AUDIENCE, -60) }),
       req('/oauth-probe/v1', { Authorization: 'Bearer oauth:synthetic', 'Cf-Access-Jwt-Assertion': await signed(), Cookie: 'CF_Authorization=bad' }),
       req('/oauth-probe/v1', { Authorization: 'Bearer oauth:synthetic', 'Cf-Access-Jwt-Assertion': 'forged' })];
     for (const value of requests) expect((await handleOAuthProbe(value, env, [origin])).status).toBe(401);
   });
   it('returns only fixed diagnostic stages for failed synthetic requests', async () => {
     const cases: Array<[Request, string]> = [
-      [req('/oauth-probe/v1'), 'bearer-rejected'],
+      [req('/oauth-probe/v1'), 'assertion-missing'],
       [req('/oauth-probe/v1', { Authorization: 'Bearer oauth:synthetic' }), 'assertion-missing'],
       [req('/oauth-probe/v1', { Authorization: 'Bearer oauth:synthetic', 'Cf-Access-Jwt-Assertion': 'forged' }), 'assertion-invalid'],
       [req('/oauth-probe/v1', { Authorization: 'Bearer oauth:synthetic', Cookie: 'secret-test' }), 'request-rejected'],

@@ -114,9 +114,10 @@ pilot is installed.
 Test that missing, invalid and mismatched bearer tokens fail at Cloudflare and
 that a client-supplied assertion is not trusted. Verify the exact protected host,
 the Worker version and audience, and that workers.dev, preview and other routes
-cannot reach the probe. The probe itself validates assertion signatures and
-audience but only checks bearer syntax; a successful response alone does not
-prove Cloudflare bound the bearer to the assertion. Also test that the pilot
+cannot reach the probe. The probe validates assertion signatures and audience
+without requiring the original bearer header at the origin. A successful
+response alone does not prove Cloudflare bound the bearer to the assertion or
+that the request used OAuth. Also test that the pilot
 token cannot access the general Operations API or its write endpoints.
 
 If a check fails, disable the probe and remove or roll back only resources

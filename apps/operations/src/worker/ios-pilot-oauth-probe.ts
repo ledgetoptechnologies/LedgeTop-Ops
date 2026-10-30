@@ -17,7 +17,7 @@ type ProbeEnvironment = {
 type VerifyAssertion = typeof verifyPilotAccessAssertion;
 const headers = { 'Cache-Control': 'no-store', 'Cloudflare-CDN-Cache-Control': 'no-store',
   'Pragma': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' };
-const marker = (stage: 'unavailable' | 'request-rejected' | 'bearer-rejected' | 'assertion-missing' | 'assertion-invalid' | 'ok') =>
+const marker = (stage: 'unavailable' | 'request-rejected' | 'assertion-missing' | 'assertion-invalid' | 'ok') =>
   ({ ...headers, 'X-LT-Ops-Probe-Stage': stage });
 const missing = () => Response.json({ error: 'Not found' }, { status: 404, headers: marker('unavailable') });
 
@@ -40,10 +40,9 @@ export async function handleOAuthProbe(request: Request, env: ProbeEnvironment,
   if (request.headers.has('Cookie') || request.headers.has('Origin')) {
     return Response.json({ error: 'Authentication required' }, { status: 401, headers: marker('request-rejected') });
   }
-  if (!/^Bearer oauth:[A-Za-z0-9._~+\/-]+=*$/.test(request.headers.get('Authorization') ?? '')
-    || (request.headers.get('Authorization')?.length ?? 0) > 4096) {
-    return Response.json({ error: 'Authentication required' }, { status: 401, headers: marker('bearer-rejected') });
-  }
+  // Access resolves the OAuth credential to an application assertion. The
+  // original Authorization header is not a documented origin requirement.
+  // This synthetic endpoint is not evidence of bearer-only authentication.
   if (!request.headers.get('Cf-Access-Jwt-Assertion')) {
     return Response.json({ error: 'Authentication required' }, { status: 401, headers: marker('assertion-missing') });
   }

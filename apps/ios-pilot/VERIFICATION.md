@@ -30,6 +30,16 @@ synthetic Worker was updated to version `035577b4-7b4e-44a8-a5b7-2694584d6569`;
 The updated app was installed in place, with one pilot app in the device
 inventory. These checks do not establish the cause or successful sign-in.
 
+Beau's next test reported the probe's bearer-header rejection. That check
+assumed Cloudflare forwarded the original OAuth header; the observed result
+does not distinguish a missing header from one with a different format. The
+synthetic-only service now validates the signed Access assertion without that
+assumption. Seven local probe tests passed, including absent, forged, expired,
+and wrong-audience assertions. Version `22a57f6f-8792-4327-9456-086c711c94d6`
+was deployed to the dedicated staging Worker; unauthenticated and fabricated
+bearer requests both returned 401 at the edge. A new iPad test and revocation
+verification remain pending. This result does not authorize real-data access.
+
 ## Native build and installation — October 29, 2026
 
 Commit `46790bba` was exported to a separate Linux build directory. Swift 6.4,
