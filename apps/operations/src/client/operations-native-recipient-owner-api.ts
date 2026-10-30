@@ -3,6 +3,50 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 const CSRF = /^\d{1,12}\.[0-9a-f]{64}$/u;
 const TOKEN = /^[0-9a-f]{64}$/u;
 
+/**
+ * The client portal access an intent pins. Viewing the service home is always included; submitting service
+ * requests is only ever an explicit owner choice. Each maps to exactly one canonical permission set and schema.
+ */
+export type OperationsNativeRecipientAccess = "service_home" | "service_requests";
+const ACCESS: Record<OperationsNativeRecipientAccess, Readonly<{ permissions: readonly string[]; schemaVersion: number }>> = {
+  service_home: { permissions: ["operations.service_home.read"], schemaVersion: 3 },
+  service_requests: { permissions: ["operations.request.create", "operations.service_home.read"], schemaVersion: 4 },
+};
+export function operationsNativeRecipientPermissions(access: OperationsNativeRecipientAccess): string[] {
+  return [...ACCESS[access].permissions];
+}
+function samePermissions(actual: unknown[], expected: readonly string[]) {
+  return actual.length === expected.length && actual.every((item, index) => item === expected[index]);
+}
+function accessFor(permissions: unknown, schemaVersion?: unknown): OperationsNativeRecipientAccess | null {
+  if (!Array.isArray(permissions)) return null;
+  return (Object.keys(ACCESS) as OperationsNativeRecipientAccess[]).find(access =>
+    (schemaVersion === undefined || schemaVersion === ACCESS[access].schemaVersion)
+      && samePermissions(permissions, ACCESS[access].permissions)) ?? null;
+}
+/** Where the service-request capability stands, apart from what was requested. */
+export type OperationsNativeRecipientCapabilityStatus = "not_requested" | "pending" | "active" | "revoked" | "unavailable";
+const CAPABILITY_STATUS: readonly string[] = ["not_requested", "pending", "active", "revoked", "unavailable"];
+export type OperationsNativeRecipientAccessReview = Readonly<{
+  /** What the owner requested and the recipient consented to, as the server pinned it. Never what's in effect. */
+  requested: OperationsNativeRecipientAccess;
+  capabilityStatus: OperationsNativeRecipientCapabilityStatus;
+  /** What works right now: the current base grant plus any delivered request capability. */
+  effective: OperationsNativeRecipientAccess | "none";
+}>;
+function accessReview(row: Record<string, unknown>): OperationsNativeRecipientAccessReview | null {
+  const requested = accessFor(row.permissions, row.permissionSchemaVersion ?? null);
+  const status = row.capabilityStatus;
+  const effective = Array.isArray(row.effectivePermissions)
+    ? row.effectivePermissions.length === 0 ? "none" as const : accessFor(row.effectivePermissions) : null;
+  if (!requested || typeof status !== "string" || !CAPABILITY_STATUS.includes(status) || !effective
+    // Home-only access never has a request capability; a requested one always has a status of its own.
+    || (requested === "service_home") !== (status === "not_requested")
+    // Requests only count as in effect once the capability itself is active.
+    || effective === "service_requests" && status !== "active") return null;
+  return Object.freeze({ requested, capabilityStatus: status as OperationsNativeRecipientCapabilityStatus, effective });
+}
+
 export type OperationsNativeRecipientState =
   | "issued" | "pending" | "confirming" | "active" | "revoking" | "revoked" | "cancelled";
 export type OperationsNativeRecipientReview = Readonly<{
@@ -17,6 +61,8 @@ export type OperationsNativeRecipientReview = Readonly<{
   expiresAt: string;
   /** Present only after an owner-authorized read exposes a recoverable durable operation. */
   recoveryOperationId: string | null;
+  /** null: missing, unrecognized or inconsistent, so it's listed but never confirmable. */
+  access: OperationsNativeRecipientAccessReview | null;
 }>;
 export type OperationsNativeRecipientOwnerSession = Readonly<{
   csrfToken: string;
@@ -28,6 +74,7 @@ export type OperationsNativeRecipientIssueInput = Readonly<{
   targetId: string;
   targetClientRecordId: string;
   expiresAt: string;
+  permissions: readonly string[];
 }>;
 export type OperationsNativeRecipientMutationAction = "confirm" | "revoke" | "cancel" | "recover";
 export type OperationsNativeRecipientMutationInput = Readonly<{
@@ -58,7 +105,7 @@ export type OperationsNativeWorkspaceCleanupResult = Readonly<{
 }>;
 
 export class OperationsNativeRecipientApiError extends Error {
-  constructor(readonly status: number, readonly uncertain: boolean) {
+  constructor(readonly status: number, readonly uncertain: boolean, readonly code: string | null = null) {
     super(uncertain ? "uncertain" : "denied");
   }
 }
@@ -90,7 +137,7 @@ function accessIssuer(value: unknown): value is string {
 function parseReview(value: unknown): OperationsNativeRecipientReview | null {
   const row = exactRecord(value,
     ["intentId", "revision", "state", "target", "principal", "recipientBindingId", "expiresAt"],
-    ["recipientLabel", "recoveryOperationId"]);
+    ["recipientLabel", "recoveryOperationId", "permissions", "permissionSchemaVersion", "capabilityStatus", "effectivePermissions"]);
   const target = row && exactRecord(row.target, ["targetId", "targetRevision", "clientRecordId"]);
   if (!row || typeof row.intentId !== "string" || !UUID.test(row.intentId)
     || typeof row.revision !== "number" || !Number.isSafeInteger(row.revision) || row.revision < 1
@@ -119,7 +166,7 @@ function parseReview(value: unknown): OperationsNativeRecipientReview | null {
     target: Object.freeze({ targetId: target.targetId as string, targetRevision: target.targetRevision as number,
       clientRecordId: target.clientRecordId as string }), principal: principal ? Object.freeze(principal) : null,
     recipientLabel, recipientBindingId: row.recipientBindingId as string | null, expiresAt: row.expiresAt,
-    recoveryOperationId: recovery });
+    recoveryOperationId: recovery, access: accessReview(row) });
 }
 function sameReviewIdentity(actual: OperationsNativeRecipientReview, expected: OperationsNativeRecipientReview,
   allowInitialBindingAllocation = false) {
@@ -131,7 +178,7 @@ function sameReviewIdentity(actual: OperationsNativeRecipientReview, expected: O
     && (allowInitialBindingAllocation
       ? expected.recipientBindingId === null && actual.recipientBindingId !== null
       : actual.recipientBindingId === expected.recipientBindingId)
-    && actual.expiresAt === expected.expiresAt;
+    && actual.expiresAt === expected.expiresAt && actual.access?.requested === expected.access?.requested;
 }
 function parseWorkspaceCleanup(value: unknown): OperationsNativeWorkspaceCleanupReview | null {
   const row = exactRecord(value, ["targetId", "state", "ownershipEpoch", "recoveryOperationId"]);
@@ -154,7 +201,9 @@ async function request(path: string, init: RequestInit = {}): Promise<unknown> {
   }
   const payload: unknown = await response.json().catch(() => null);
   if (!response.ok) throw new OperationsNativeRecipientApiError(response.status,
-    response.status >= 500 || response.status === 429);
+    response.status >= 500 || response.status === 429,
+    payload && typeof payload === "object" && typeof (payload as { error?: unknown }).error === "string"
+      ? (payload as { error: string }).error : null);
   if (payload === null) throw new OperationsNativeRecipientApiError(503, true);
   return payload;
 }
@@ -176,7 +225,7 @@ export async function openOperationsNativeRecipientOwnerSession(): Promise<Opera
 
 export async function issueOperationsNativeRecipientIntent(csrfToken: string, input: OperationsNativeRecipientIssueInput) {
   if (!CSRF.test(csrfToken) || !UUID.test(input.operationId) || !UUID.test(input.targetId)
-    || !bounded(input.targetClientRecordId, 191) || !canonicalInstant(input.expiresAt))
+    || !bounded(input.targetClientRecordId, 191) || !canonicalInstant(input.expiresAt) || !accessFor(input.permissions))
     throw new OperationsNativeRecipientApiError(400, false);
   const value = exactRecord(await request("/intents", { method: "POST",
     headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken }, body: JSON.stringify(input) }),
@@ -184,7 +233,7 @@ export async function issueOperationsNativeRecipientIntent(csrfToken: string, in
   const review = value && parseReview(value.review);
   if (!value || !review || typeof value.replayed !== "boolean" || review.revision !== 1 || review.state !== "issued"
     || review.target.targetId !== input.targetId || review.target.clientRecordId !== input.targetClientRecordId
-    || review.expiresAt !== input.expiresAt
+    || review.expiresAt !== input.expiresAt || review.access?.requested !== accessFor(input.permissions)
     || value.replayed === false && (typeof value.opaqueToken !== "string" || !TOKEN.test(value.opaqueToken))
     || value.replayed === true && value.opaqueToken !== undefined) throw new OperationsNativeRecipientApiError(503, true);
   return Object.freeze({ review, opaqueToken: typeof value.opaqueToken === "string" ? value.opaqueToken : null,
