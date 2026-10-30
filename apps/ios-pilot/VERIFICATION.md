@@ -97,6 +97,11 @@ accepted” and cleanup could not be confirmed. This is evidence of replay
 acceptance in this test; it is not evidence of safe refresh replay protection.
 Persistent refresh grants remain disabled. Investigate a safer bounded session
 design and keep provider cleanup uncertainty explicit before any activation.
+The replay result is limited to this client and test: it does not establish all
+Cloudflare configurations lack sender-constraining or replay protection. The
+pilot's current refresh request has no demonstrated DPoP or client-certificate
+binding. Long-lived mobile refresh credentials remain disabled pending evidence
+of an appropriate protection and an independently reviewed lifecycle.
 
 The existing LT Ops logo was added as an iPad icon. A signed installation was
 verified using the unsigned xtool build plus compiled icon assets, then xtool
