@@ -66,6 +66,8 @@ test('cleanup refuses CSV or uncertain manifests at the atomic claim', {skip:pro
  const upload=p.createUpload({datasetId:dataset.id,subject:'fixture',files,chunkSize:1,expiresAt:'2000-01-01T00:00:00.000Z'}).upload;
  for(const manifest of ['{','{}','[]','[null]','[{}]','[{"relativePath":""}]','[{"relativePath":"../photo.jpg"}]','[{"relativePath":"/photo.jpg"}]','[{"relativePath":"CONTROL.CSV"}]']){
   db.prepare('UPDATE upload_sessions SET expected_manifest_json=? WHERE id=?').run(manifest,upload.id);
-  assert.equal(p.expireUpload(upload.id),false,manifest);assert.equal(p.getUpload(upload.id).status,'open');
+  assert.equal(p.uploadContainsCsv(upload.id),true,manifest);assert.equal(p.hasUnfinishedCsvUploads(dataset.id),true,manifest);assert.equal(p.expireUpload(upload.id),false,manifest);assert.equal(p.getUpload(upload.id).status,'open');
  }
+ db.prepare('UPDATE upload_sessions SET expected_manifest_json=? WHERE id=?').run(JSON.stringify(files),upload.id);
+ assert.equal(p.uploadContainsCsv(upload.id),false);assert.equal(p.hasUnfinishedCsvUploads(dataset.id),false);
 });
