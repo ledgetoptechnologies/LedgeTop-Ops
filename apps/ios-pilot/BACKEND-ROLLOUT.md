@@ -26,6 +26,16 @@ depends on the staff login binding schema introduced in 0226. Applying 0232 in
 isolation would therefore not prove that the pilot can safely authenticate. Review
 the actual staging ledger and the complete dependency chain with the release owner.
 
+Cloudflare's current documentation says path-specific Access rules override the
+broader path and cautions that Bypass disables Access controls and request logging;
+it advises against using Bypass as a persistent access mechanism. Consequently,
+the proposed native facade ingress is not yet an approved production design. Review
+alternatives that preserve edge authentication and logging, and validate whichever
+approach is chosen against mobile credential handling before any activation. A
+shared service token embedded in a distributed app is not an acceptable substitute.
+See [application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/)
+and [Cloudflare's Bypass caution](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/common-policies/).
+
 ## Local evidence
 
 - 15 real-D1 mobile integration tests passed, including atomic redemption, scope and revocation races.
