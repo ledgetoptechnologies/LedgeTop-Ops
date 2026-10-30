@@ -415,7 +415,7 @@ test("unified portal accepts server metadata boundaries and opaque slash IDs", a
   const calls = await interceptClientApi(page, 200, boundaryResponse);
   await page.goto("/portal");
   await expect(page.getByText(label, { exact: true })).toBeVisible();
-  expect(calls).toEqual([
+  await expect.poll(() => calls, { timeout: 5_000 }).toEqual([
     "/api/client/v2/operations/home",
     "/api/client/session",
     financialPath(boundaryResponse.homes[0]!.authorityId),
