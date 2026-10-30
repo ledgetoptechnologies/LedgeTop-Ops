@@ -112,8 +112,18 @@ The synthetic Worker was updated to version
 diagnostics following assertion verification. No business-data bindings were
 added; unauthenticated and fabricated-bearer requests returned 401. The app
 shows only allowlisted categories on the successful synthetic test screen.
-Live identity mapping remains pending device testing; it cannot prove a
-universal or native-only authentication property.
+Beau reported that the app displayed “Access context and signed identity
+matched in the test” after successful sign-in. This establishes a match for
+that synthetic request, not a universal or native-only authentication property,
+and does not validate the undeployed real-data service.
+
+A separate, unwired synthetic access-token-only restart candidate passed six
+focused tests and an independent review; it stores neither refresh tokens nor
+business data and requires online validation. Persistence remains disabled:
+ambiguous Keychain deletion across restart, remote grant cleanup and physical
+device behavior remain unresolved. The identity-check label was made more
+visible and the resulting iPad build installed and verified in place; device
+inventory showed one pilot. The task-owned USB relay was stopped.
 
 Cloudflare's published agent flow registers a public client with only
 `authorization_code` in the registration grant list, then shows a refresh

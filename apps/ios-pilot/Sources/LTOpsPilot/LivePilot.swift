@@ -314,7 +314,12 @@ struct LivePilotWorkspace: View {
                     if let user = model.user { Text(user.displayName); Text(user.email).font(.caption).foregroundStyle(.secondary) }
                     if model.syntheticProbe {
                         if model.probeSucceeded { Text("Cloudflare sign-in test succeeded.").font(.headline) }
-                        if let context = model.probeContext { Text(context.message).font(.caption).foregroundStyle(.secondary) }
+                        if let context = model.probeContext {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Identity check").font(.subheadline.bold())
+                                Text(context.message).font(.subheadline)
+                            }
+                        }
                         Text("This test contains no business data.").font(.caption).foregroundStyle(.secondary)
                     } else {
                         Text("\(model.collection.operations.count) operations loaded").font(.headline)
