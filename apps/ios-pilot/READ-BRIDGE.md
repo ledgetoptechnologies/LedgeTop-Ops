@@ -42,3 +42,20 @@ synthetic sign-in or local mocks do not prove these live properties.
 References: [Managed OAuth](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/),
 [Workers Access context](https://developers.cloudflare.com/workers/configuration/cloudflare-access/),
 and [Access application tokens](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/application-token/).
+
+## Local binding example
+
+`apps/operations/wrangler.ios-read-edge.example.jsonc` is a disabled,
+local-only bundling example. It has no account or route and its service name is
+an intentionally fictitious placeholder. The named `IosPilotReadService`
+entrypoint is required: omitting it would select the target Worker's default
+HTTP entrypoint rather than the narrow read RPC. The source-reviewed edge and
+RPC origin lists remain empty. A Wrangler dry run validated the example's
+bundling and service-binding syntax; it did not contact a target, verify a
+binding, or authorize a release. Do not deploy the example.
+
+Before creating an actual staging configuration, coordinate with the owner of
+the shared Operations Worker and verify its exact account, target name, active
+version and exported entrypoint, service binding, approved hostname and Access
+policy. The real configuration needs separate review of every binding, route,
+assets setting, environment flag, workers.dev and preview exposure.

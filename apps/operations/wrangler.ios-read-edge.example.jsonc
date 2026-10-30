@@ -1,0 +1,23 @@
+{
+  // Local bundle-validation example only. Do not deploy this file. The target
+  // service is a placeholder; it does not identify the staging release Worker.
+  // No account, route, production host, or business-data binding is configured.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "lt-ops-ios-read-edge-example",
+  "main": "src/worker/ios-pilot-edge-bridge.ts",
+  "compatibility_date": "2026-10-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    "ENVIRONMENT": "staging",
+    "IOS_MANAGED_PILOT_ENABLED": "false"
+  },
+  "services": [
+    {
+      "binding": "IOS_PILOT_READ",
+      "service": "placeholder-do-not-deploy-pilot-read-target",
+      "entrypoint": "IosPilotReadService"
+    }
+  ]
+}
