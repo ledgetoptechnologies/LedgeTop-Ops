@@ -54,6 +54,10 @@ bindings are plain-text settings, workers.dev and previews are disabled, and
 the Worker has only the intended custom hostname. Cloudflare identifies this
 independent Worker's default environment as `production`; its configured
 application environment is `staging`, and it is not the Operations Worker.
+As a limited negative check, GET and POST requests to the existing Operations
+API with a fabricated pilot-style bearer redirected to Cloudflare Access rather
+than returning API data. This does not establish what happens with a real valid
+pilot token; that cross-audience test remains required.
 
 For the prior `ios-pilot-staging.ledgetopdroneservices.com` candidate, after
 Access app creation, a fresh account-wide Worker custom-domain read found
