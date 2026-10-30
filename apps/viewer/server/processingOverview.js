@@ -9,7 +9,7 @@ function processingJobCounts(database) {
       COALESCE(SUM(CASE WHEN a.status IN ('running','ingesting','derivatives','cancelling') THEN 1 ELSE 0 END),0) AS running,
       COALESCE(SUM(CASE WHEN a.status='ready_for_review' THEN 1 ELSE 0 END),0) AS reviewReady,
       COALESCE(SUM(CASE WHEN a.status='failed' THEN 1 ELSE 0 END),0) AS failed,
-      COALESCE(SUM(CASE WHEN a.status IN ('pending','admitted','initializing','uploading','committed','queued_upstream','running','ingesting') AND (a.error_code IN ('provider_execution_held','provider_submission_observation_unavailable','staged_commitment_unavailable') OR EXISTS (
+      COALESCE(SUM(CASE WHEN a.status IN ('pending','admitted','initializing','uploading','committed','queued_upstream','running','ingesting') AND (a.error_code IN ('provider_execution_held','provider_submission_observation_unavailable','staged_commitment_unavailable','provider_observation_unavailable') OR EXISTS (
         SELECT 1 FROM processing_jobs j WHERE j.attempt_id=a.id AND j.job_type='reconcile'
           AND j.status IN ('pending','leased') AND j.error_code IN (
             'provider_observation_unavailable','provider_status_unknown','provider_status_not_found',
