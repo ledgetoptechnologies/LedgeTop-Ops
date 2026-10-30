@@ -29,6 +29,12 @@ async function get(q:string,cursor?:string,environment=env,identity?:string){
   return app.request(url.href,{headers:identity?{"x-test-actor":identity}:{}},environment);
 }
 async function page(q:string,cursor?:string){const response=await get(q,cursor);expect(response.status).toBe(200);return response.json() as Promise<Page>;}
+async function inquiryPage(q="",cursor?:string,identity?:string){
+  const url=new URL("https://ops.example.test/api/operations/inbox/inquiries");
+  if(q)url.searchParams.set("q",q);if(cursor)url.searchParams.set("cursor",cursor);
+  const response=await app.request(url.href,{headers:identity?{"x-test-actor":identity}:{}},env);
+  return response;
+}
 async function owner(name:string,source:string|null=null,projectName:string|null=null){
   const key=crypto.randomUUID(),identity="identity-"+key,project=projectName===null?null:"project-"+key;
   await delivery.batch([
@@ -59,6 +65,27 @@ function afterFirstPage(database:D1Database,action:()=>Promise<void>):D1Database
     if(key==="all")return async <T>():Promise<D1Result<T>>=>{
       const result=await target.all<T>();
       if(!fired&&sql.includes("FROM client_service_requests")){fired=true;await action();}
+      return result;
+    };
+    const value=Reflect.get(target,key,target);return typeof value==="function"?value.bind(target):value;
+  }});
+  return new Proxy(database,{get(target,key){
+    if(key==="withSession")return(constraint:D1SessionConstraint)=>new Proxy(target.withSession(constraint),{get(session,property){
+      if(property==="prepare")return(sql:string)=>wrapStatement(session.prepare(sql),sql);
+      const value=Reflect.get(session,property,session);return typeof value==="function"?value.bind(session):value;
+    }});
+    const value=Reflect.get(target,key,target);return typeof value==="function"?value.bind(target):value;
+  }});
+}
+function alignInquiryStatusReads(database:D1Database):D1Database{
+  let arrivals=0,release!:()=>void;
+  const barrier=new Promise<void>(resolve=>{release=resolve;});
+  const sqlRead="SELECT id,kind,title,details,location,status,created_at FROM client_ops_triage_inquiries WHERE id=?";
+  const wrapStatement=(raw:D1PreparedStatement,sql:string):D1PreparedStatement=>new Proxy(raw,{get(target,key){
+    if(key==="bind")return(...values:unknown[])=>wrapStatement(target.bind(...values),sql);
+    if(key==="first")return async <T>(column?:string):Promise<T|null>=>{
+      const result=column?await target.first<T>(column):await target.first<T>();
+      if(sql===sqlRead){arrivals++;if(arrivals===2)release();await barrier;}
       return result;
     };
     const value=Reflect.get(target,key,target);return typeof value==="function"?value.bind(target):value;
@@ -147,6 +174,51 @@ describe("staff request inbox on migrated D1 with real current ACL",{timeout:30_
     await ops.prepare("UPDATE staff_users SET access_subject='changed-subject' WHERE id=?").bind(second.id).run();
     expect((await get("Bulk Inbox",undefined,env,"second")).status).toBe(403);
     await ops.prepare("UPDATE staff_users SET access_subject=? WHERE id=?").bind(second.accessSubject,second.id).run();
+  });
+  it("pages typed inquiries, rechecks global staff authority, and applies the review lifecycle",async()=>{
+    await delivery.prepare("INSERT INTO portal_v2_identities(id,issuer,subject,status) VALUES('triage-test-identity','https://issuer.test','triage-test','active')").run();
+    const ids=Array.from({length:27},()=>crypto.randomUUID());
+    await delivery.batch(ids.map((id,index)=>delivery.prepare("INSERT INTO client_ops_triage_inquiries "+
+      "(id,portal_identity_id,authorizing_workspace_id,authorizing_source_id,kind,title,details,location,idempotency_key,request_fingerprint,created_at) "+
+      "VALUES(?,'triage-test-identity','workspace-drone','project-alpha:primary',?,?,?,?,?,?,datetime('now',?))")
+      .bind(id,index%2?"website":"drone","Website/Drone triage "+index,"Private inquiry details","North field",
+        "triage-inbox-key-"+String(index).padStart(4,"0"),"a".repeat(64),"+"+String(index)+" seconds")));
+    const first=await inquiryPage();
+    expect(first.status).toBe(200);
+    const page1=await first.json() as {items:Array<Record<string,unknown>>;nextCursor:string|null};
+    expect(page1.items).toHaveLength(25);expect(page1.nextCursor).toBeTruthy();
+    expect(page1.items.every(row=>["website","drone"].includes(String(row.kind))&&row.location==="North field")).toBe(true);
+    expect(JSON.stringify(page1.items)).not.toMatch(/workspace-drone|project-alpha|portal_identity_id/);
+    const secondPage=await (await inquiryPage("",page1.nextCursor!)).json() as {items:Array<Record<string,unknown>>;nextCursor:string|null};
+    expect([...page1.items,...secondPage.items]).toHaveLength(27);
+    expect((await inquiryPage("Private inquiry details")).status).toBe(200);
+    const inquiryCursor=(await (await inquiryPage("Private inquiry details")).json() as {nextCursor:string|null}).nextCursor!;
+    expect((await get("Private inquiry details",inquiryCursor)).status).toBe(400);
+    const crossCursorOwner=await owner("Cross cursor account");
+    await delivery.batch(Array.from({length:26},(_,index)=>requestStatement(crossCursorOwner,
+      "cross-cursor-"+String(index).padStart(3,"0"),"Cross Inbox Request "+index)));
+    const requestCursor=(await page("Cross Inbox")).nextCursor!;
+    expect(requestCursor).toBeTruthy();
+    expect((await inquiryPage("Cross Inbox",requestCursor!)).status).toBe(400);
+    expect((await inquiryPage("",undefined,"scoped")).status).toBe(403);
+    const id=String(page1.items[0]!.id);
+    const update=await app.request("https://ops.example.test/api/operations/inbox/inquiries/"+id,{
+      method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({status:"under_review"}),
+    },env);
+    expect(update.status).toBe(200);
+    expect((await update.json() as any).inquiry.status).toBe("under_review");
+    const raceId=String(page1.items[2]!.id),racingEnv={...env,DELIVERY_DB:alignInquiryStatusReads(delivery)};
+    const racing=await Promise.all(["under_review","under_review"].map(status=>app.request(
+      "https://ops.example.test/api/operations/inbox/inquiries/"+raceId,
+      {method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({status})},racingEnv)));
+    expect(racing.map(response=>response.status).sort()).toEqual([200,409]);
+    expect(await delivery.prepare("SELECT COUNT(*) n FROM audit_log WHERE entity_id=? AND action='client.ops_triage_inquiry.status_changed'")
+      .bind(raceId).first("n")).toBe(1);
+    expect((await app.request("https://ops.example.test/api/operations/inbox/inquiries/"+id,{
+      method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({status:"received"}),
+    },env)).status).toBe(400);
+    expect(await delivery.prepare("SELECT action FROM audit_log WHERE entity_id=? AND action='client.ops_triage_inquiry.status_changed'")
+      .bind(id).first("action")).toBe("client.ops_triage_inquiry.status_changed");
   });
   it("honors explicit global denial despite administrator role",async()=>{
     await ops.prepare(`INSERT INTO staff_permission_overrides(id,staff_id,permission_key,effect,scope,scope_key,created_by)

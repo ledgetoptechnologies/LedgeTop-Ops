@@ -3,10 +3,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PROFILE, canonical, hash } from './production-deploy.mjs';
+import { PROFILE, canonical, hash, compileConfig, ORDINARY_FRONTEND_PREFLIGHT_MODE } from './production-deploy.mjs';
 import { domainPhaseValues } from './production-domain-recognition.mjs';
 import { compileOrdinaryFrontendReleasePlan, verifyOrdinaryFrontendArtifacts, validateOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
 const clone = value => structuredClone(value);
+const reviewedDeploymentVersions = { operations: [
+  { versionId: '0b1ab5a8-9db0-42ab-b718-8569fae2382e', percentage: 0 },
+  { versionId: 'a45943f4-e5c5-4142-9057-fb9adb5cf739', percentage: 100 },
+] };
 function fixture() {
   const profile = clone(PROFILE), snapshot = {}, phase = domainPhaseValues('portal-entry-canonical');
   let index = 1;
@@ -50,6 +54,15 @@ function artifacts(t, app='operations') {
  const release={schemaVersion:1,application:app,sourceCommit:'8e8554667c7de62cf3be44b5a650697c10f7c9bf',frontendSHA256:'3e745973ad87e592304188819ec0f4fbc692697bb6350c636b94f7d21d7f33c9',main:pin(main),sourceMap:pin(map),assets:{directory:assets,files:Object.keys(files).map(name=>({path:'/'+name,size:Buffer.byteLength(files[name]),sha256:hash(files[name])}))}};
  return{release,assets,repin(name,text){fs.writeFileSync(path.join(assets,name),text);Object.assign(release.assets.files.find(f=>f.path==='/'+name),{size:Buffer.byteLength(text),sha256:hash(text)});}};
 }
+function stagedOperations(snapshot) {
+ const value=clone(snapshot),active='a45943f4-e5c5-4142-9057-fb9adb5cf739';
+ value.operations.deployment.versions=[
+  {version_id:'0b1ab5a8-9db0-42ab-b718-8569fae2382e',percentage:0},
+  {version_id:active,percentage:100},
+ ];
+ value.operations.latest=active;value.operations.version.id=active;value.operations.modern.id=active;
+ return value;
+}
 for(const app of ['operations','client'])test(app+' native full frontend config preserves complete controls and every scalar/secret',t=>{
  const {snapshot,options}=fixture(),{release}=artifacts(t,app),input=clone(snapshot),profile=clone(options.profile);
  const plan=compileOrdinaryFrontendReleasePlan(snapshot,{app,release,profile:options.profile}),c=plan.config;
@@ -61,6 +74,57 @@ for(const app of ['operations','client'])test(app+' native full frontend config 
  assert.deepEqual(plan.expectedProfile.workers,plan.beforeProfile.workers);assert.equal(plan.browserProof.files.length,4);assert.ok(plan.browserProof.files.some(f=>f.path==='/apple-touch-icon.png'));assert.equal(plan.deploymentEnabled,false);assert.equal(plan.historicalOrphanAssetsRetained,false);assert.ok(Object.isFrozen(c.assets));
  if(app==='operations')assert.equal(snapshot[app].version.resources.bindings.filter(r=>['plain_text','json','secret_text','secret_key'].includes(r.type)).length,128);
  assert.equal(validateOrdinaryFrontendReleasePlan(snapshot,plan,{app,release,profile:options.profile}),plan);
+});
+test('offline compiler accepts and records only the exact reviewed Ops 0/100 deployment weights',t=>{
+ for(const app of ['operations','client']){
+  const {snapshot,options}=fixture(),{release}=artifacts(t,app),staged=stagedOperations(snapshot),before=clone(staged),weights=clone(reviewedDeploymentVersions);
+  const args={app,release,profile:options.profile,expectedDeploymentVersions:weights};
+  const plan=compileOrdinaryFrontendReleasePlan(staged,args);
+  assert.deepEqual(plan.installationPreflight,{mode:'strict-default',profileSHA256:null});
+  assert.equal(plan.nativeExecutionQualification.ready,false);
+  assert.equal(plan.nativeExecutionQualification.reason,'offline-plan-does-not-authorize-execution');
+  assert.deepEqual(staged,before);assert.deepEqual(weights,reviewedDeploymentVersions);
+  assert.deepEqual(plan.expectedDeploymentVersions,reviewedDeploymentVersions);
+  assert.deepEqual(plan.expectedDeploymentVersions.operations,[
+   {versionId:'0b1ab5a8-9db0-42ab-b718-8569fae2382e',percentage:0},
+   {versionId:'a45943f4-e5c5-4142-9057-fb9adb5cf739',percentage:100},
+  ]);
+  assert.ok(Object.isFrozen(plan.expectedDeploymentVersions.operations[0]));
+  const nativeConfig=compileConfig(staged,app,release.main.path,options.profile,weights);
+  assert.equal(nativeConfig.name,PROFILE.workers[app].name);assert.equal(nativeConfig.main,release.main.path);
+  assert.deepEqual(nativeConfig.triggers.crons,options.profile.workers[app].crons);
+  assert.equal(validateOrdinaryFrontendReleasePlan(staged,plan,args),plan);
+  const changedPreflight=clone(plan);changedPreflight.installationPreflight.mode=ORDINARY_FRONTEND_PREFLIGHT_MODE;
+  assert.throws(()=>validateOrdinaryFrontendReleasePlan(staged,changedPreflight,args),/Ordinary frontend release plan changed/);
+  assert.throws(()=>compileOrdinaryFrontendReleasePlan(staged,{app,release,profile:options.profile}),/Production must have one100% active version/);
+  assert.throws(()=>compileConfig(staged,app,release.main.path,options.profile),/Production must have one100% active version/);
+ }
+});
+test('reviewed weight option rejects swapped, wrong, malformed and unknown deployment expectations',t=>{
+ const {snapshot,options}=fixture(),{release}=artifacts(t),staged=stagedOperations(snapshot);
+ const compile=expectedDeploymentVersions=>compileOrdinaryFrontendReleasePlan(staged,{app:'operations',release,profile:options.profile,expectedDeploymentVersions});
+ assert.throws(()=>compile({operations:[{versionId:'11111111-1111-4111-8111-111111111111',percentage:0},reviewedDeploymentVersions.operations[1]]}),/Unreviewed expected deployment weights/);
+ assert.throws(()=>compile({operations:[reviewedDeploymentVersions.operations[1],reviewedDeploymentVersions.operations[0]]}),/Unreviewed expected deployment weights/);
+ assert.throws(()=>compile({operations:[reviewedDeploymentVersions.operations[0]]}),/Unreviewed expected deployment weights/);
+ const sparse=new Array(2);sparse[1]=reviewedDeploymentVersions.operations[1];sparse.unreviewed=reviewedDeploymentVersions.operations[0];
+ assert.throws(()=>compile({operations:sparse}),/Unreviewed expected deployment weights/);
+ let accessorRead=false;const accessor=[reviewedDeploymentVersions.operations[0],reviewedDeploymentVersions.operations[1]];
+ Object.defineProperty(accessor,'0',{get(){accessorRead=true;return reviewedDeploymentVersions.operations[0];},enumerable:true,configurable:true});
+ assert.throws(()=>compile({operations:accessor}),/Unreviewed expected deployment weights/);assert.equal(accessorRead,false);
+ assert.throws(()=>compile({operations:reviewedDeploymentVersions.operations,client:[{versionId:'11111111-1111-4111-8111-111111111111',percentage:100}]}),/Unreviewed expected deployment weights/);
+ assert.throws(()=>compile({unknown:reviewedDeploymentVersions.operations}),/Unreviewed expected deployment weights/);
+ assert.throws(()=>compileOrdinaryFrontendReleasePlan(staged,{app:'ops-sync',release,profile:options.profile,expectedDeploymentVersions:reviewedDeploymentVersions}),/Exact frontend application required/);
+ assert.throws(()=>compileOrdinaryFrontendReleasePlan(staged,{app:'operations',release,profile:options.profile,expectedDeploymentVersions:reviewedDeploymentVersions,ordinaryFrontendPreflightMode:ORDINARY_FRONTEND_PREFLIGHT_MODE}),/Unreviewed ordinary frontend accepted profile/);
+ const wrongObserved=clone(staged);wrongObserved.operations.deployment.versions=[
+  {version_id:'0b1ab5a8-9db0-42ab-b718-8569fae2382e',percentage:100},
+  {version_id:'a45943f4-e5c5-4142-9057-fb9adb5cf739',percentage:0},
+ ];
+ assert.throws(()=>compileOrdinaryFrontendReleasePlan(wrongObserved,{app:'operations',release,profile:options.profile,expectedDeploymentVersions:reviewedDeploymentVersions}),/Provider deployment does not match exact expected staged weights/);
+});
+test('reviewed weight recognition keeps the existing scalar and asset drift guards',t=>{
+ const {snapshot,options}=fixture(),{release}=artifacts(t),staged=stagedOperations(snapshot);
+ for(const rows of [staged.operations.version.resources.bindings,staged.operations.settings.bindings])rows.find(r=>r.name==='PUBLIC_BASE_URL').text='https://unreviewed.invalid';
+ assert.throws(()=>compileOrdinaryFrontendReleasePlan(staged,{app:'operations',release,profile:options.profile,expectedDeploymentVersions:reviewedDeploymentVersions}),/scalar configuration changed/);
 });
 test('complete tree rejects unlisted, absent and mutated bytes',t=>{const {release,assets}=artifacts(t);fs.writeFileSync(path.join(assets,'surprise.txt'),'unreviewed');assert.throws(()=>verifyOrdinaryFrontendArtifacts(release),/unreviewed file/);fs.unlinkSync(path.join(assets,'surprise.txt'));fs.unlinkSync(path.join(assets,'favicon.svg'));assert.throws(()=>verifyOrdinaryFrontendArtifacts(release),/inventory/);fs.writeFileSync(path.join(assets,'favicon.svg'),'changed');assert.throws(()=>verifyOrdinaryFrontendArtifacts(release),/differs/);});
 test('root index rejects prefixed build even when inventory matches those bytes',t=>{const a=artifacts(t);a.repin('index.html','<script src="/_ui/operations/release/assets/index.js"></script>');assert.throws(()=>verifyOrdinaryFrontendArtifacts(a.release),/root-base/);});

@@ -1,7 +1,7 @@
 import {createElement} from "react";
 import {describe,expect,it} from "vitest";
 import {renderToStaticMarkup} from "react-dom/server";
-import {OperationsFinancialSummary} from "../src/client/OperationsHomeApp";
+import {OperationsFinancialSummary,financialDay} from "../src/client/OperationsHomeApp";
 const document={scopeKey:"authority:grant:1",publicId:"doc-1",kind:"invoice" as const,status:"unpaid",currency:"USD",total:"10.00",
   issueDate:null as string|null,dueDate:null as string|null,
   amountPaid:"0.00",balanceDue:"10.00",documentUrl:"https://pa.example.test/?page=public-doc&token=abcdefghijklmnop",
@@ -11,6 +11,17 @@ const render=(state:"loading"|"ready"|"unavailable",documents:Document[]=[])=>re
   createElement(OperationsFinancialSummary,{state,documents}));
 const money=(value:number)=>new Intl.NumberFormat(undefined,{style:"currency",currency:"USD"}).format(value);
 describe("financial portal presentation",()=>{
+  it("shows only the invoice dates that exist, and none for older records without them",()=>{
+    expect(render("ready",[document])).not.toContain("portal-finance-dates");
+    const dated=render("ready",[{...document,issueDate:"2026-10-01",dueDate:"2026-10-31"}]);
+    expect(dated).toContain("portal-finance-dates");expect(dated).toMatch(/Issued .*2026 · Due .*2026/);
+    const dueOnly=render("ready",[{...document,kind:"project_invoice",dueDate:"2026-11-01"}]);
+    expect(dueOnly).not.toContain("Issued");expect(dueOnly).toMatch(/Due .*2026/);
+  });
+  it("keeps a calendar day's own year, even a two-digit one",()=>{
+    expect(financialDay("0042-03-05")).toBe(new Date("0042-03-05T00:00:00Z").toLocaleDateString(undefined,{timeZone:"UTC",year:"numeric",month:"short",day:"numeric"}));
+    expect(financialDay("0042-03-05")).not.toMatch(/19\d\d/);
+  });
   it("renders loading, unavailable, and empty states without stale documents",()=>{
     expect(render("loading")).toContain("Loading financial documents");
     expect(render("unavailable")).toContain("temporarily unavailable");

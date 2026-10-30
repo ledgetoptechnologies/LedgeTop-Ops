@@ -6,7 +6,9 @@ import { configuredClientPortalOrigins, clientPortalRequestOriginAllowed } from 
 import { readBoundedClientJson } from "../bounded-json";
 import { clientAccessConfiguration } from "./access-identity";
 import { listPortalWorkspaces, PORTAL_WORKSPACE_HEADER, type PortalWorkspaceSummary } from "./workspace-v2";
-import type { ClientServiceCatalogItem, ResolveClientPrincipal, VerifiedClientPrincipal } from "./types";
+import { resolveNativeRequestAuthority, type NativeRequestAuthorityProof } from "./native-request-authority";
+import { listOpsTriageInquiries, opsTriageInquirySchemaReady, submitOpsTriageInquiry, type OpsTriageInquiryKind } from "./ops-triage-inquiries";
+import type { ClientPortalSession, ClientServiceCatalogItem, ResolveClientPrincipal, VerifiedClientPrincipal } from "./types";
 
 const coordinate = z.string().min(1).max(200);
 const choiceSchema = z.object({ v: z.literal(1), workspaceId: coordinate, sourceId: coordinate,
@@ -24,7 +26,11 @@ type Choice = z.infer<typeof choiceSchema>;
 type Ctx = Context<{ Bindings: Env }>;
 type ScopedFetch = (request: Request, env: Env) => Promise<Response>;
 type Dependencies = { resolvePrincipal: ResolveClientPrincipal; checkConfiguration: boolean; scopedFetch: ScopedFetch;
-  discover?: typeof listPortalWorkspaces };
+  discover?: typeof listPortalWorkspaces;
+  resolveAuthority?: typeof resolveNativeRequestAuthority;
+  submitInquiry?: typeof submitOpsTriageInquiry;
+  listInquiries?: typeof listOpsTriageInquiries;
+  inquirySchemaReady?: typeof opsTriageInquirySchemaReady };
 const MAX_WORKSPACES = 32, MAX_PAGES = 10, MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_SERVICES = 1000;
 const encoder = new TextEncoder();
@@ -35,7 +41,7 @@ class DiscoveryCapacityError extends HTTPException {
  * before retaining them and output DTOs before appending any catalog items. */
 class DiscoveryBudget {
   wireBytes = 0;
-  outputBytes = encoder.encode(JSON.stringify({ services: [], unavailable: [] })).byteLength;
+  outputBytes = encoder.encode(JSON.stringify({ services: [], inquiryKinds: [], unavailable: [] })).byteLength;
   items = 0;
   failed = false;
   controller = new AbortController();
@@ -128,6 +134,10 @@ function serviceDto(workspace: PortalWorkspaceSummary, service: ClientServiceCat
 export function createUnifiedRequestRouter(dependencies: Dependencies) {
   const router = new Hono<{ Bindings: Env }>();
   const discover = dependencies.discover ?? listPortalWorkspaces;
+  const resolveAuthority = dependencies.resolveAuthority ?? resolveNativeRequestAuthority;
+  const submitInquiry = dependencies.submitInquiry ?? submitOpsTriageInquiry;
+  const listInquiries = dependencies.listInquiries ?? listOpsTriageInquiries;
+  const inquirySchemaReady = dependencies.inquirySchemaReady ?? opsTriageInquirySchemaReady;
   async function actor(c: Ctx): Promise<VerifiedClientPrincipal> {
     c.header("Cache-Control", "private, no-store");
     c.header("Cloudflare-CDN-Cache-Control", "no-store");
@@ -145,6 +155,23 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
     const workspaces = (await discover(c.env, principal, { strictCapacity: true })).filter(w => w.resourceMode === "native" && w.sourceId);
     if (workspaces.length > MAX_WORKSPACES) throw new HTTPException(503, { message: "Service discovery is temporarily unavailable" });
     return workspaces;
+  }
+  async function eligibleAuthorities(c: Ctx, principal: VerifiedClientPrincipal) {
+    if (!await inquirySchemaReady(c.env)) return [];
+    const workspaces = await memberships(c, principal);
+    const candidates = workspaces.slice().sort((a, b) => a.id.localeCompare(b.id));
+    const proofs: { workspace: PortalWorkspaceSummary; proof: NativeRequestAuthorityProof }[] = [];
+    for (const workspace of candidates) {
+      const session: ClientPortalSession = {
+        accountId: "", identityId: "", workspaceId: workspace.id, principalIssuer: principal.issuer,
+        principalSubject: principal.subject, principalEmail: principal.email, nativeSourceId: workspace.sourceId!,
+        displayName: workspace.displayName, role: "member", canViewBilling: false,
+      };
+      const proof = await resolveAuthority(c.env, session, null);
+      if (proof && proof.sourceId === workspace.sourceId && proof.workspaceId === workspace.id)
+        return [{ workspace, proof }];
+    }
+    return proofs;
   }
   async function catalog(c: Ctx, workspace: PortalWorkspaceSummary, projectId?: string | null, budget = new DiscoveryBudget()) {
     const services: ClientServiceCatalogItem[] = [];
@@ -191,12 +218,57 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
     const after = await memberships(c, principal);
     const current = results.filter(result => after.some(w => w.id === result.workspace.id && w.sourceId === result.workspace.sourceId));
     current.sort((a, b) => a.workspace.id.localeCompare(b.workspace.id));
+    const inquiryKinds = (await eligibleAuthorities(c, principal)).length
+      ? ["website", "drone", "other"] as const : [] as const;
     const payload = { services: current.flatMap(({ workspace, services }) => (services ?? []).map(service => serviceDto(workspace, service))),
+      inquiryKinds,
       unavailable: current.filter(row => row.services === null).map(({ workspace }) => ({ clientName: workspace.displayName,
       code: "service_catalog_unavailable" as const })) };
     if (new TextEncoder().encode(JSON.stringify(payload)).byteLength > MAX_RESPONSE_BYTES)
       throw new HTTPException(503, { message: "Service discovery exceeds the response limit" });
     return c.json(payload);
+  });
+  router.get("/inquiries", async c => {
+    const principal = await actor(c);
+    if (!await inquirySchemaReady(c.env)) throw new HTTPException(503, { message: "Inquiry history is unavailable" });
+    const proofs = await eligibleAuthorities(c, principal);
+    if (!proofs.length) throw new HTTPException(403, { message: "Service request access is unavailable" });
+    // History belongs to the authenticated global portal identity. A currently
+    // eligible context is still required before releasing any prior inquiry.
+    const current = await eligibleAuthorities(c, principal);
+    const currentProof=current.find(item=>item.proof.identityId===proofs[0]!.proof.identityId);
+    if (!currentProof)
+      throw new HTTPException(409, { message: "Inquiry access changed. Refresh and try again." });
+    return c.json({ inquiries: await listInquiries(c.env, currentProof.proof, 50) });
+  });
+  router.post("/inquiries", async c => {
+    const principal = await actor(c);
+    if (!await inquirySchemaReady(c.env)) throw new HTTPException(503, { message: "Inquiry submission is unavailable" });
+    if (!clientPortalRequestOriginAllowed(c.req.raw, c.env)) throw new HTTPException(403);
+    const parsed = z.object({
+      kind: z.enum(["website", "drone", "other"]),
+      title: z.string().trim().min(1).max(160).nullable().optional(),
+      details: z.string().trim().min(1).max(4000),
+      location: z.string().trim().max(300).nullable().optional(),
+    }).strict().safeParse(await readBoundedClientJson(c.req.raw, 16 * 1024));
+    const key = c.req.header("Idempotency-Key");
+    if (!parsed.success || !key || !/^[A-Za-z0-9._:-]{16,128}$/.test(key))
+      throw new HTTPException(400, { message: "The inquiry is invalid" });
+    const proofs = await eligibleAuthorities(c, principal);
+    const selected = proofs[0];
+    if (!selected) throw new HTTPException(403, { message: "Service request access is unavailable" });
+    const current = await eligibleAuthorities(c, principal);
+    if (!current.some(item => item.proof.identityId === selected.proof.identityId
+      && item.proof.workspaceId === selected.proof.workspaceId && item.proof.sourceId === selected.proof.sourceId))
+      throw new HTTPException(409, { message: "Inquiry access changed. Refresh and try again." });
+    const result = await submitInquiry(c.env, selected.proof, {
+      kind: parsed.data.kind as OpsTriageInquiryKind, title: parsed.data.title ?? (parsed.data.kind + " inquiry"),
+      details: parsed.data.details, location: parsed.data.location ?? null, idempotencyKey: key,
+    });
+    if (result.kind === "unauthorized") throw new HTTPException(403, { message: "Service request access is unavailable" });
+    if (result.kind === "conflict") throw new HTTPException(409, { message: "Idempotency key was used for a different inquiry" });
+    if (result.kind === "unavailable") throw new HTTPException(503, { message: "Inquiry could not be stored; retry with the same idempotency key" });
+    return c.json({ inquiry: result.inquiry }, result.kind === "created" ? 201 : 200);
   });
   router.post("/requests", async c => {
     const principal = await actor(c);
