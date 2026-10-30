@@ -93,6 +93,10 @@ test('New task uses real form controls with isolated upload/copy APIs, retry and
       await client.eval("{const dt=new DataTransfer();dt.items.add(new File(['abcdef'],'a.jpg',{type:'image/jpeg'}));dt.items.add(new File(['abcdef'],'b.jpg',{type:'image/jpeg'}));const i=document.querySelector('[data-files]');i.files=dt.files;i.dispatchEvent(new Event('change'))}");
       assert.match(await client.eval("document.querySelector('[data-provider-capacity]').textContent"),/image count and input size/);
       assert.match(await client.eval("document.querySelector('[data-selection]').textContent"),/2 photos/);
+      await client.eval("document.querySelector('[data-source=pc]').click()");
+      assert.match(await client.eval("document.querySelector('[data-provider-capacity]').textContent"),/image count and input size/);
+      await client.eval("document.querySelector('[data-source=server]').click()");
+      assert.equal(await client.eval("document.querySelector('[data-provider-capacity]').textContent"),'');
       await client.eval("fixture.setLimits({maxImages:null,ledgetopMaxInputBytes:null});fixture.mount()");
     });
     await t.test('a separately selected CSV preserves folder photos and replaces the prior explicit CSV',async()=>{
