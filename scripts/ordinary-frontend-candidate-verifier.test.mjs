@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { hash } from './production-deploy.mjs';
-import { verifyOrdinaryFrontendCandidate, verifyOrdinaryFrontendCandidateModules, verifyOrdinaryFrontendAssetNamespace } from './ordinary-frontend-candidate-verifier.mjs';
+import { hash, ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 } from './production-deploy.mjs';
+import { verifyOrdinaryFrontendCandidate, verifyOrdinaryFrontendCandidateModules, verifyOrdinaryFrontendAssetNamespace,
+  ordinaryFrontendExecutionQualification } from './ordinary-frontend-candidate-verifier.mjs';
 import { mergeAssetLedger } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 
@@ -47,7 +48,8 @@ function assetFixture(t, app = 'operations') {
     .sort((a, b) => a.path.localeCompare(b.path));
   const worker = app === 'operations' ? 'ledgetop-ops' : 'ledgetop-clients';
   const plan = { application: app, sourceCommit, release: { assets: { directory: dir } }, browserProof: { files: expected } };
-  const oldFiles = new Map([['/index.html', Buffer.from('prior index')], ['/assets/old.js', Buffer.from('old bundle')]]);
+  const oldFiles = new Map([['/index.html', Buffer.from('prior index')], ['/assets/old.js', Buffer.from('old bundle')],
+    ['/assets/prior.css', Buffer.from('prior css')]]);
   const priorEntries = [...oldFiles].map(([assetPath, bytes]) => ({ path: assetPath, size: bytes.length, sha256: hash(bytes),
     mime: assetPath.endsWith('.html') ? 'text/html' : 'text/javascript', providerHash: hash(bytes).slice(0, 32) }))
     .sort((a, b) => a.path.localeCompare(b.path));
@@ -75,6 +77,23 @@ test('top-level verifier refuses a forged ready flag on the offline plan', () =>
   /pinned offline ordinary frontend plan/);
 });
 
+test('top-level verifier requires the original pinned profile explicitly, not mutated plan.beforeProfile', () => {
+  const plan = { schemaVersion: 1, application: 'operations', offlineOnly: true, deploymentEnabled: false,
+    nativeExecutionQualification: { ready: false }, installationPreflight: {
+      mode: ORDINARY_FRONTEND_PREFLIGHT_MODE, profileSHA256: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
+    }, beforeProfile: { untrusted: 'dynamic plan profile' } };
+  assert.throws(() => verifyOrdinaryFrontendCandidate({ before: {}, plan }), /Exact installed frontend profile v3/);
+});
+
+test('candidate and namespace evidence alone never qualifies the native executor or authority', () => {
+  assert.deepEqual(ordinaryFrontendExecutionQualification({ ready: true }), {
+    ready: false, reason: 'executor-and-authority-qualification-required', offlinePlanRemainsNonAuthorizing: true,
+  });
+  assert.deepEqual(ordinaryFrontendExecutionQualification({ ready: false, reason: 'active-namespace-byte-receipt-required' }), {
+    ready: false, reason: 'active-namespace-byte-receipt-required', offlinePlanRemainsNonAuthorizing: true,
+  });
+});
+
 test('asset gate holds without namespace evidence and verifies complete retained old/new byte union', t => {
  for (const app of ['operations', 'client']) {
   const f = assetFixture(t, app), now = Date.parse('2026-10-30T12:00:00.000Z');
@@ -89,11 +108,12 @@ test('asset gate holds without namespace evidence and verifies complete retained
   const evidence = { receipt: { schemaVersion: 1, workerName: worker, accountId: ACCOUNT, sourceCommit: COMMIT,
     activeVersionId: CANDIDATE, observedAt: new Date(now).toISOString(), cutoverAt: new Date(now - 1000).toISOString(),
     earliestPermittedPruningAt: new Date(now + 48 * 60 * 60_000).toISOString(), minimumRetentionHours: 48,
-    automaticPruning: false, oldServedWithin48hPaths: ['/assets/old.js'], assets: union }, bytesByPath };
+    automaticPruning: false, oldServedWithin48hPaths: ['/assets/old.js', '/assets/prior.css'], assets: union }, bytesByPath };
   const qualified = verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE, baselineVersionId: BASELINE,
     previousLedger: f.previousLedger, previousAssetBytes: f.oldFiles, namespaceEvidence: evidence, now });
   assert.equal(qualified.assetNamespaceQualification.ready, true);
-  assert.equal(qualified.assetNamespaceQualification.assetCount, 4);
+  assert.equal(qualified.assetNamespaceQualification.assetCount, 5);
+  assert.equal(qualified.assetNamespaceQualification.namespaceByteEvidenceVerified, true);
   assert.equal(qualified.assetNamespaceQualification.earliestPermittedPruningAt, evidence.receipt.earliestPermittedPruningAt);
   const shortRetention = structuredClone(evidence);
   shortRetention.receipt.earliestPermittedPruningAt = new Date(now + 47 * 60 * 60_000).toISOString();
@@ -104,6 +124,26 @@ test('asset gate holds without namespace evidence and verifies complete retained
   assert.throws(() => verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE,
     baselineVersionId: BASELINE, previousLedger: f.previousLedger, previousAssetBytes: f.oldFiles,
     namespaceEvidence: missingBytes, now }), /every retained old\/new asset path/);
+  const emptyOldPaths = { receipt: structuredClone(evidence.receipt), bytesByPath: evidence.bytesByPath };
+  emptyOldPaths.receipt.oldServedWithin48hPaths = [];
+  assert.throws(() => verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE,
+    baselineVersionId: BASELINE, previousLedger: f.previousLedger, previousAssetBytes: f.oldFiles,
+    namespaceEvidence: emptyOldPaths, now }), /omits, invents, or duplicates/);
+  const omitOneOldPath = { receipt: structuredClone(evidence.receipt), bytesByPath: evidence.bytesByPath };
+  omitOneOldPath.receipt.oldServedWithin48hPaths = ['/assets/old.js'];
+  assert.throws(() => verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE,
+    baselineVersionId: BASELINE, previousLedger: f.previousLedger, previousAssetBytes: f.oldFiles,
+    namespaceEvidence: omitOneOldPath, now }), /omits, invents, or duplicates/);
+  assert.throws(() => verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE,
+    baselineVersionId: BASELINE, previousAssetBytes: f.oldFiles, namespaceEvidence: evidence, now }), /active asset ledger is required/);
+  assert.throws(() => verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE,
+    baselineVersionId: BASELINE, previousLedger: f.previousLedger, previousAssetBytes: f.oldFiles, now: Number.NaN }), /Verification clock invalid/);
+  assert.throws(() => verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE,
+    baselineVersionId: BASELINE, previousLedger: f.previousLedger, previousAssetBytes: f.oldFiles,
+    now: 8_640_000_000_000_001 }), /Verification clock invalid/);
+  assert.throws(() => verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE,
+    baselineVersionId: BASELINE, previousLedger: f.previousLedger, previousAssetBytes: f.oldFiles,
+    accountId: '00000000000000000000000000000000', now }), /Production account identity mismatch/);
   const badMime = { receipt: structuredClone(evidence.receipt), bytesByPath: evidence.bytesByPath };
   badMime.receipt.assets.find(row => row.path === '/assets/old.js').mime = 'text/plain';
   assert.throws(() => verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE,
@@ -113,6 +153,16 @@ test('asset gate holds without namespace evidence and verifies complete retained
   missingOldPath.receipt.oldServedWithin48hPaths = ['/assets/unverified.js'];
   assert.throws(() => verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE,
     baselineVersionId: BASELINE, previousLedger: f.previousLedger, previousAssetBytes: f.oldFiles,
-    namespaceEvidence: missingOldPath, now }), /invents or duplicates browser asset paths/);
+    namespaceEvidence: missingOldPath, now }), /omits, invents, or duplicates previously retained browser asset paths/);
+  const staleCutover = { receipt: structuredClone(evidence.receipt), bytesByPath: evidence.bytesByPath };
+  staleCutover.receipt.cutoverAt = '2026-10-30T11:54:59.000Z';
+  assert.throws(() => verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE,
+    baselineVersionId: BASELINE, previousLedger: f.previousLedger, previousAssetBytes: f.oldFiles,
+    namespaceEvidence: staleCutover, now }), /stale, mismatched, or shorter than 48 hours/);
+  const invalidTime = { receipt: structuredClone(evidence.receipt), bytesByPath: evidence.bytesByPath };
+  invalidTime.receipt.observedAt = 'not-a-time';
+  assert.throws(() => verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE,
+    baselineVersionId: BASELINE, previousLedger: f.previousLedger, previousAssetBytes: f.oldFiles,
+    namespaceEvidence: invalidTime, now }), /stale, mismatched, or shorter than 48 hours/);
  }
 });

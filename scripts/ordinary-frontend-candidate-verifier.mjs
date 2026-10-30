@@ -22,7 +22,9 @@ function exactObject(value, keys) {
       && Object.getOwnPropertyDescriptor(value, key)?.set === undefined);
 }
 function timestamp(value) {
-  return typeof value === 'string' && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+  if (typeof value !== 'string') return false;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && Math.abs(parsed) <= 8.64e15 && new Date(parsed).toISOString() === value;
 }
 function strictModuleBytes(module, expectedName) {
   need(module && module.name === expectedName && typeof module.content_base64 === 'string'
@@ -39,6 +41,7 @@ function planProfile(before, plan, profile, expectedDeploymentVersions) {
   'A pinned offline ordinary frontend plan is required');
   need(plan.installationPreflight?.mode === ORDINARY_FRONTEND_PREFLIGHT_MODE
     && plan.installationPreflight.profileSHA256 === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256
+    && profile && Object.getPrototypeOf(profile) === Object.prototype
     && hash(canonical(profile)) === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
   'Exact installed frontend profile v3 is required');
   const expected = expectedDeploymentVersions ?? plan.expectedDeploymentVersions;
@@ -61,6 +64,8 @@ function verifyNamespaceReceipt({ evidence, plan, candidate, unionLedger, previo
     && receipt.sourceCommit === plan.sourceCommit && receipt.activeVersionId === candidate.id
     && timestamp(receipt.observedAt) && timestamp(receipt.cutoverAt) && timestamp(receipt.earliestPermittedPruningAt)
     && Date.parse(receipt.cutoverAt) <= Date.parse(receipt.observedAt)
+    && Date.parse(receipt.cutoverAt) <= 8.64e15 - 48 * 60 * 60_000
+    && Date.parse(receipt.observedAt) - Date.parse(receipt.cutoverAt) <= 5 * 60_000
     && Date.parse(receipt.observedAt) <= now && now - Date.parse(receipt.observedAt) <= 5 * 60_000
     && receipt.earliestPermittedPruningAt >= new Date(Date.parse(receipt.cutoverAt) + 48 * 60 * 60_000).toISOString()
     && receipt.minimumRetentionHours === 48 && receipt.automaticPruning === false,
@@ -75,12 +80,24 @@ function verifyNamespaceReceipt({ evidence, plan, candidate, unionLedger, previo
   }), 'Active namespace bytes do not match every retained old/new asset path');
   const priorPaths = new Set((previousLedger?.assets ?? []).filter(row => row.path !== '/index.html').map(row => row.path));
   const oldPaths = receipt.oldServedWithin48hPaths;
-  need(Array.isArray(oldPaths) && oldPaths.every((value, index) => typeof value === 'string'
-    && (index === 0 || oldPaths[index - 1] < value) && priorPaths.has(value)),
-  'Receipt invents or duplicates browser asset paths served before cutover');
+  const allPriorPaths = [...priorPaths].sort();
+  need(Array.isArray(oldPaths) && equal(oldPaths, allPriorPaths),
+    'Receipt omits, invents, or duplicates previously retained browser asset paths');
   return { ready: true, reason: null, cutoverAt: receipt.cutoverAt,
     earliestPermittedPruningAt: receipt.earliestPermittedPruningAt,
-    assetCount: expected.length, totalBytes: expected.reduce((sum, row) => sum + row.size, 0) };
+    assetCount: expected.length, totalBytes: expected.reduce((sum, row) => sum + row.size, 0),
+    namespaceByteEvidenceVerified: true };
+}
+
+/** Evidence cannot qualify the eventual native executor or grant release authority. */
+export function ordinaryFrontendExecutionQualification(namespaceQualification) {
+  need(namespaceQualification && typeof namespaceQualification.ready === 'boolean'
+    && (namespaceQualification.ready || typeof namespaceQualification.reason === 'string'
+      && namespaceQualification.reason.length > 0 && namespaceQualification.reason.length <= 160),
+  'Namespace qualification result required');
+  return Object.freeze({ ready: false,
+    reason: namespaceQualification.ready ? 'executor-and-authority-qualification-required' : namespaceQualification.reason,
+    offlinePlanRemainsNonAuthorizing: true });
 }
 
 /** Verify candidate runtime modules and native resource/config invariants. */
@@ -117,13 +134,17 @@ export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate
 /** Build the old/new retained union and require complete post-cutover byte evidence. */
 export function verifyOrdinaryFrontendAssetNamespace({ plan, candidateId, baselineVersionId, previousLedger, previousAssetBytes = new Map(),
   namespaceEvidence, now = Date.now(), accountId = NATIVE_STAFF_PRODUCTION_TARGET.accountId } = {}) {
-  need(['operations','client'].includes(plan?.application) && UUID.test(candidateId ?? ''), 'Pinned candidate identity required');
+  need(['operations','client'].includes(plan?.application) && UUID.test(candidateId ?? '')
+    && /^[a-f0-9]{40}$/u.test(plan?.sourceCommit ?? ''), 'Pinned candidate identity required');
+  need(Number.isSafeInteger(now) && now >= 0 && now <= 8.64e15, 'Verification clock invalid');
+  need(accountId === NATIVE_STAFF_PRODUCTION_TARGET.accountId, 'Production account identity mismatch');
   const app = plan.application, collected = collectFrontendAssets(plan.release.assets.directory);
   const planned = plan.browserProof.files.map(row => ({ path: row.path, size: row.size, sha256: row.sha256 }));
   const actual = collected.entries.map(({ path, size, sha256 }) => ({ path, size, sha256 }));
   need(equal(actual, planned), 'Browser upload tree differs from pinned plan inventory');
-  const prior = previousLedger === undefined ? null : validateAssetLedger(previousLedger, { workerName: workerFor(app), accountId });
-  if (prior) need(UUID.test(baselineVersionId ?? '') && prior.parentVersionId === baselineVersionId,
+  need(previousLedger !== undefined, 'Previously verified active asset ledger is required for production frontend release');
+  const prior = validateAssetLedger(previousLedger, { workerName: workerFor(app), accountId });
+  need(UUID.test(baselineVersionId ?? '') && prior.parentVersionId === baselineVersionId,
     'Previous asset ledger is not tied to captured active version');
   need(previousAssetBytes instanceof Map, 'Previous verified asset bytes must be a Map');
   const payloads = new Map(previousAssetBytes);
@@ -140,16 +161,17 @@ export function verifyOrdinaryFrontendAssetNamespace({ plan, candidateId, baseli
 /**
  * Verify a native candidate and, when supplied, post-activation namespace
  * evidence. `before` is the complete captured installation used to compile
- * the plan. `previousLedger` and its payload map must come from the separately
- * verified active namespace inventory. Namespace evidence is exact byte data
- * from the active namespace, not Worker version asset-association metadata.
+ * the plan. `profile` must be the original v3 profile, not the plan's derived
+ * beforeProfile. `previousLedger` and its payload map must come from the separately
+ * verified active namespace inventory. Namespace evidence must be gathered
+ * from active namespace byte reads; Worker asset-association metadata alone
+ * does not satisfy this evidence contract.
  */
 export function verifyOrdinaryFrontendCandidate({ before, plan, candidate, modern, profile,
   expectedDeploymentVersions, previousLedger, previousAssetBytes = new Map(), namespaceEvidence, now = Date.now(), accountId = NATIVE_STAFF_PRODUCTION_TARGET.accountId } = {}) {
-  need(Number.isSafeInteger(now) && now >= 0, 'Verification clock invalid');
-  const acceptedProfile = profile ?? plan?.beforeProfile;
-  const expected = planProfile(before, plan, acceptedProfile, expectedDeploymentVersions);
-  validateInstallation(before, { profile: acceptedProfile, selectedApp: plan.application,
+  need(Number.isSafeInteger(now) && now >= 0 && now <= 8.64e15, 'Verification clock invalid');
+  const expected = planProfile(before, plan, profile, expectedDeploymentVersions);
+  validateInstallation(before, { profile, selectedApp: plan.application,
     ...(expected === undefined ? {} : { expectedDeploymentVersions: expected }),
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: plan.application });
   const app = plan.application;
@@ -157,10 +179,9 @@ export function verifyOrdinaryFrontendCandidate({ before, plan, candidate, moder
   const assetProof = verifyOrdinaryFrontendAssetNamespace({ plan, candidateId: candidate.id, baselineVersionId: before[app].version.id, previousLedger,
     previousAssetBytes, namespaceEvidence, now, accountId });
   return Object.freeze({ candidateId: candidate.id, application: app, sourceCommit: plan.sourceCommit,
-    ...moduleProof, ...assetProof, nativeExecutionQualification: {
-      ready: assetProof.assetNamespaceQualification.ready,
-      reason: assetProof.assetNamespaceQualification.ready ? null : assetProof.assetNamespaceQualification.reason,
-      offlinePlanRemainsNonAuthorizing: true,
-    },
+    ...moduleProof, ...assetProof,
+    nativeExecutionQualification: ordinaryFrontendExecutionQualification(assetProof.assetNamespaceQualification),
+    candidateEvidenceVerified: true,
+    namespaceEvidenceVerified: assetProof.assetNamespaceQualification.ready,
   });
 }
