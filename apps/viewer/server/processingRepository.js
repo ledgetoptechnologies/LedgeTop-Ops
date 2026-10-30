@@ -606,7 +606,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     return true;
   });}
   hasArchiveCaptureIntent(attemptId){return Boolean(this.database.prepare('SELECT 1 FROM processing_archive_capture_intents WHERE attempt_id=?').get(attemptId));}
-  recordAttemptArchiveReceipt(jobId,owner,{archiveSha256,archiveFiles,archiveManifestSha256,archiveByteSize=null}){return this.transaction(()=>{
+  recordAttemptArchiveReceipt(jobId,owner,{archiveSha256,archiveFiles,archiveManifestSha256,archiveByteSize=null,stagedCommitment=null}){return this.transaction(()=>{
     const job=this.provenanceJob(jobId,owner,'ingest');if(!job)return null;
     const attempt=this.getAttempt(job.attempt_id),transfer=this.getAttemptTransferProvenance(attempt.id);
     const digest=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value),seen=new Set();
@@ -614,9 +614,13 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     const files=[];for(const file of archiveFiles){if(!file||typeof file.relativePath!=='string'||file.relativePath.includes('\\')||safeRelativePath(file.relativePath)!==file.relativePath||seen.has(file.relativePath.toLowerCase())||!digest(file.sha256)||!Number.isSafeInteger(file.byteSize)||file.byteSize<0)return null;seen.add(file.relativePath.toLowerCase());files.push({relativePath:file.relativePath,byteSize:file.byteSize,sha256:file.sha256});}
     const manifest=crypto.createHash('sha256').update(JSON.stringify(files)).digest('hex');if(manifest!==archiveManifestSha256)return null;
     const receipt={schemaVersion:1,attemptId:attempt.id,providerTaskId:attempt.providerTaskId,archiveSha256,archiveByteSize,archiveManifestSha256:manifest,archiveFiles:files};
+    if(stagedCommitment&&(stagedCommitment.taskId!==attempt.providerTaskId||stagedCommitment.archiveSha256!==archiveSha256||stagedCommitment.archiveBytes!==archiveByteSize))throw Object.assign(new Error('Staged commitment does not match archive'),{code:'staged_commitment_conflict'});
+    if(stagedCommitment){const encoded=JSON.stringify(stagedCommitment),existing=this.database.prepare('SELECT commitment_json FROM processing_staged_commitments WHERE attempt_id=?').get(attempt.id);if(existing&&existing.commitment_json!==encoded)throw Object.assign(new Error('Staged commitment changed'),{code:'staged_commitment_conflict'});if(!existing)this.database.prepare('INSERT INTO processing_staged_commitments(attempt_id,commitment_json,created_at) VALUES(?,?,?)').run(attempt.id,encoded,now());}
+
     if(transfer?.archive)return JSON.stringify(transfer.archive)===JSON.stringify(receipt)?transfer.archive:null;
     const t=now();this.database.prepare(`INSERT INTO processing_attempt_transfer_provenance(attempt_id,initialization_json,archive_json,created_at,updated_at) VALUES(?,'{"state":"unknown"}',?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET archive_json=excluded.archive_json,updated_at=excluded.updated_at WHERE archive_json IS NULL`).run(attempt.id,JSON.stringify(receipt),t,t);return receipt;
   });}
+  getStagedCommitment(attemptId){const row=this.database.prepare('SELECT commitment_json FROM processing_staged_commitments WHERE attempt_id=?').get(attemptId);return row?json(row.commitment_json,null):null;}
   getVerifiedAttemptProducerReceipt(attemptId){
     const attempt=this.getAttempt(attemptId),provenance=this.getAttemptProvenance(attemptId),transfer=this.getAttemptTransferProvenance(attemptId),init=transfer?.initialization,archive=transfer?.archive,snapshot=provenance?.submission,result=provenance?.providerResult;
     if(!attempt||!snapshot?.inputFiles||!init||init.state!=='acknowledged'||init.ambiguous||init.generation!==1||init.attemptId!==attempt.id||init.providerTaskId!==attempt.providerTaskId||init.inputManifestSha256!==snapshot.inputManifestSha256||result?.status!=='completed'||result.providerTaskId!==attempt.providerTaskId||archive?.attemptId!==attempt.id||archive.providerTaskId!==attempt.providerTaskId||attempt.submissionPhase!=='committed'||attempt.uploadedFileCount!==snapshot.inputFiles.length)return null;

@@ -2086,6 +2086,11 @@ const MIGRATIONS = [
     );
   `},
   {version:46,name:'processing_staged_byte_ack_outbox',sql:`
+    CREATE TABLE processing_staged_commitments (
+      attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id),
+      commitment_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
     CREATE TABLE processing_staged_byte_ack_outbox (
       attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id),
       provider_id TEXT NOT NULL REFERENCES processing_providers(id),
