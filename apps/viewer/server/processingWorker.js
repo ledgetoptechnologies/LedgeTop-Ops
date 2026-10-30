@@ -170,12 +170,12 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   const binding=hasBinding?bindings[provider.id]:null;
   if(hasBinding&&(!binding||typeof binding!=='object'||Array.isArray(binding)))throw Object.assign(new Error('Staged commitment configuration is invalid'),{code:'staged_commitment_unavailable'});
   let stagedCommitment=null,initialCommitment=null;
-  const readCommitment=async()=>{
+  const readCommitment=async(kind='commitment')=>{
     if(!binding||!processing.attemptRequiresReservation?.(attempt.id)||typeof providerCredentials.resolveStagedCommitmentCredential!=='function')throw Object.assign(new Error('Staged commitment is unavailable'),{code:'staged_commitment_unavailable'});
     let capability,bearer;
     try{capability=attemptCapability(processing,providerCredentials,attempt);bearer=await providerCredentials.resolveStagedCommitmentCredential(binding.credentialRef);}
     catch(error){if(signal?.aborted||error?.name==='AbortError')throw error;throw Object.assign(new Error('Staged commitment credentials are unavailable'),{code:'staged_commitment_unavailable'});}
-    return require('./stagedCommitmentClient').getStagedCommitment({enabled:true,origin:binding.origin,principalId:binding.principalId,authorityId:binding.authorityId,environment:binding.environment,bearer,capability,taskId:attempt.providerTaskId,signal});
+    return require('./stagedCommitmentClient')[kind==='preflight'?'getStagedPreflight':'getStagedCommitment']({enabled:true,origin:binding.origin,principalId:binding.principalId,authorityId:binding.authorityId,environment:binding.environment,bearer,capability,taskId:attempt.providerTaskId,signal});
   };
 
   // A recovery job must never inherit the historical unreceipted-directory
@@ -183,6 +183,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   // Recheck in the actual existing-directory branch after source hashing.
   if(!fs.existsSync(destination)){
     if(!processing.beginArchiveCapture(job.id,job.lease_owner))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
+    if(binding)await readCommitment('preflight');
     let adapter;
     try{const capability=attemptCapability(processing,providerCredentials,attempt);adapter=adapterFor(provider,config,providerCredentials,capability);await requireReservationSupport(adapter,capability);}
     catch(error){if(binding)throw Object.assign(new Error('Staged commitment credentials or provider are unavailable'),{code:'staged_commitment_unavailable'});if(processing.attemptRequiresReservation?.(attempt.id))throw Object.assign(new Error('Provider observation unavailable; ingestion will resume'),{code:'provider_observation_unavailable'});throw error;}

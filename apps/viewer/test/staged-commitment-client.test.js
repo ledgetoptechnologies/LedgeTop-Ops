@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
-const {getStagedCommitment}=require('../server/stagedCommitmentClient');
+const {getStagedCommitment,getStagedPreflight}=require('../server/stagedCommitmentClient');
 const uuid='12345678-1234-4234-8234-123456789abc',authority='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',secret=Buffer.alloc(32,7).toString('base64url');
 const commitment={schemaVersion:1,taskId:uuid,generation:2,archiveSha256:'a'.repeat(64),archiveBytes:123,coordinatorReceiptSha256:'b'.repeat(64),issuer:'viewer-1',audience:authority,environment:'staging',namespace:'ledgetop-viewer-staged-byte-claim-v1'};
 const opts={enabled:true,origin:'https://coordinator.test',principalId:'viewer-1',authorityId:authority,environment:'staging',bearer:secret,capability:secret,taskId:uuid};
@@ -18,4 +18,12 @@ test('rejects ambiguous identities, malformed responses, and mismatched length',
  for(const body of invalid)await assert.rejects(getStagedCommitment({...opts,fetchImpl:async()=>reply(body)}),{code:'staged_commitment_invalid'});
  for(const headers of [{'content-type':'application/json, application/json'},{'content-encoding':'gzip'},{'content-length':'1, 1'},{'content-length':'1'}])await assert.rejects(getStagedCommitment({...opts,fetchImpl:async()=>reply(JSON.stringify(commitment),headers)}),{code:'staged_commitment_invalid'});
  await assert.rejects(getStagedCommitment({...opts,fetchImpl:async()=>new Response('',{status:409})}),{code:'staged_commitment_invalid'});
+});
+
+test('preflight validates routing identity without requiring a receipt',async()=>{
+ const preflight={schemaVersion:1,taskId:uuid,generation:null,issuer:'viewer-1',audience:authority,environment:'staging',namespace:commitment.namespace};
+ const value=await getStagedPreflight({...opts,fetchImpl:async(url,init)=>{assert.equal(url.pathname,`/ltds/v1/viewer-staged-acks/${uuid}/preflight`);assert.equal(init.headers.Authorization,`Bearer ${secret}`);assert.equal(init.headers['X-LedgeTop-Capability'],secret);return reply(JSON.stringify(preflight));}});
+ assert.deepEqual(value,preflight);
+ for(const invalid of [{...preflight,issuer:'other'},{...preflight,generation:0},{...preflight,extra:1}])await assert.rejects(getStagedPreflight({...opts,fetchImpl:async()=>reply(JSON.stringify(invalid))}),{code:'staged_commitment_invalid'});
+ assert.equal((await getStagedPreflight({...opts,fetchImpl:async()=>reply(JSON.stringify({...preflight,generation:2}))})).generation,2);
 });
