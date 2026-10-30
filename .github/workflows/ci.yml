@@ -31,6 +31,9 @@ jobs:
           npm ci --prefix apps/operations
           npm ci --prefix apps/client
 
+      - name: Verify dormant retained-runtime cohort bridge
+        run: node --test scripts/native-staff-cohort-review-bridge.test.mjs scripts/native-staff-cohort-review-bridge-upload-plan.test.mjs scripts/native-staff-cohort-review-bridge-inactive-upload.test.mjs
+
       - name: Verify native staff bootstrap artifact composition
         run: node --test scripts/native-staff-bootstrap-artifact-composer.test.mjs
 
