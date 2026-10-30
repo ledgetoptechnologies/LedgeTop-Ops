@@ -29,7 +29,7 @@ test('known expiry pauses without disposing uploads; unknown authorization loss 
   for(const reason of ['expired','revoked','unauthorized']){
     let uploadDisposals=0;
     const calls=[],state={token:'existing',adminSession:{expiresAt:new Date(Date.now()+(reason==='unauthorized'?60000:-1000)).toISOString()}};
-    const context=vm.createContext({workspaceAuthorizationClearing:false,state,reviewSessionController:{suspend:options=>calls.push(['suspend',options.preserve])},storageUsagePoll:{stop(){}},workspaceRenewal:{dispose(){}},releaseAllGcpImages(){},sessionStorage:{removeItem(){}},TOKEN_KEY:'token',clearInterval(){},clearTimeout(){},beginWorkspaceReauthorization:()=>{calls.push(['pause']);return true;},renderNav(){},access(){}});
+    const context=vm.createContext({workspaceAuthorizationClearing:false,state,reviewSessionController:{suspend:options=>calls.push(['suspend',options.preserve])},storageUsagePoll:{stop(){}},taskPoll:{pause(){}},workspaceRenewal:{dispose(){}},releaseAllGcpImages(){},sessionStorage:{removeItem(){}},TOKEN_KEY:'token',clearInterval(){},clearTimeout(){},beginWorkspaceReauthorization:()=>{calls.push(['pause']);return true;},renderNav(){},access(){}});
     context.activeNewTask={dispose(){uploadDisposals++;}};
     vm.runInContext(`${clear};clearWorkspaceAuthorization(${JSON.stringify(reason)});clearWorkspaceAuthorization('unauthorized');`,context);
     assert.equal(uploadDisposals,reason==='expired'?0:1);
