@@ -37,6 +37,9 @@ jobs:
       - name: Verify native staff bootstrap artifact composition
         run: node --test scripts/native-staff-bootstrap-artifact-composer.test.mjs
 
+      - name: Verify dormant native staff bootstrap provisioner without credentials
+        run: node --test scripts/native-staff-bootstrap-provisioner.test.mjs scripts/native-staff-bootstrap-provisioner.windows.test.mjs
+
       - name: Verify guarded production deployment tooling without credentials
         run: node --test scripts/production-deploy.test.mjs scripts/native-staff-cutover-readiness.test.mjs scripts/native-staff-cutover-access-group-observation.test.mjs scripts/access-group-read-capsule.test.mjs
 
