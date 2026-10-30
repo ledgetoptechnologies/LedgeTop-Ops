@@ -1,6 +1,6 @@
 import { createHash, createPublicKey, constants, randomBytes, randomUUID, verify as verifySignature } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, lstatSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { nativeStaffBootstrapD1InsertColumns } from './native-staff-bootstrap-d1.mjs';
@@ -509,20 +509,25 @@ function signedRegistryEnvelope(payload, config, protectedSign) {
   return { schemaVersion: 1, kind: BOOTSTRAP_APPROVAL_STATE_KIND, keyId: config.signer.keyId, payload, signature };
 }
 
-function persistRegistryState(config, payload, protectedSign) {
+function persistRegistryState(config, payload, protectedSign, { publish = renameSync, preserveFailureArtifacts = false } = {}) {
   const { state } = registryPaths(config), envelope = signedRegistryEnvelope(payload, config, protectedSign);
+  // Validate before touching the published path. A signer that returns a
+  // syntactically valid but incorrect signature must not replace good state.
+  const validated = validateRegistryState(envelope, config);
   const temporary = `${state}.${randomUUID()}.tmp`, bytes = `${canonicalJson(envelope)}\n`;
   let fd;
   try {
     fd = openSync(temporary, 'wx', 0o600);
-    writeFileSync(fd, bytes, { encoding: 'utf8' }); closeSync(fd); fd = undefined;
-    renameSync(temporary, state);
+    writeFileSync(fd, bytes, { encoding: 'utf8' });
+    fsyncSync(fd);
+    closeSync(fd); fd = undefined;
+    publish(temporary, state);
   } catch {
     if (fd !== undefined) closeSync(fd);
-    try { unlinkSync(temporary); } catch {}
+    if (!preserveFailureArtifacts) { try { unlinkSync(temporary); } catch {} }
     fail('approval_registry_write_failed');
   }
-  return validateRegistryState(envelope, config);
+  return validated;
 }
 
 function acquireRegistryLock(config) {
@@ -530,7 +535,10 @@ function acquireRegistryLock(config) {
   let fd;
   try { fd = openSync(lock, 'wx', 0o600); writeFileSync(fd, randomUUID(), { encoding: 'utf8' }); }
   catch { if (fd !== undefined) closeSync(fd); fail('approval_registry_locked'); }
-  return () => { closeSync(fd); try { unlinkSync(lock); } catch { fail('approval_registry_lock_release_failed'); } };
+  return ({ retain = false } = {}) => {
+    closeSync(fd);
+    if (!retain) { try { unlinkSync(lock); } catch { fail('approval_registry_lock_release_failed'); } }
+  };
 }
 
 function nextRegistryPayload(current, entries) {
@@ -539,15 +547,20 @@ function nextRegistryPayload(current, entries) {
 }
 
 /** Separate provisioning-only operation; normal issuance refuses a missing registry. */
-export function initializeNativeStaffBootstrapApprovalRegistry(config, protectedSign) {
+export function initializeNativeStaffBootstrapApprovalRegistry(config, protectedSign,
+  { publishNoReplace = renameSync, preserveFailureArtifacts = false } = {}) {
   if (typeof protectedSign !== 'function') fail('approval_registry_signer_required');
   const release = acquireRegistryLock(config);
+  let initialized = false;
   try {
-    const { state } = registryPaths(config);
-    try { lstatSync(state); fail('approval_registry_already_initialized'); }
-    catch (error) { if (error?.code !== 'ENOENT') throw error; }
-    return persistRegistryState(config, { schemaVersion: 1, sequence: 0, previousStateSha256: null, entries: [] }, protectedSign);
-  } finally { release(); }
+    const { state, lock } = registryPaths(config);
+    const lockName = path.basename(lock);
+    if (readdirSync(path.dirname(state)).some(name => name !== lockName)) fail('approval_registry_already_initialized');
+    const result = persistRegistryState(config, { schemaVersion: 1, sequence: 0, previousStateSha256: null, entries: [] },
+      protectedSign, { publish: publishNoReplace, preserveFailureArtifacts });
+    initialized = true;
+    return result;
+  } finally { release({ retain: preserveFailureArtifacts && !initialized }); }
 }
 
 function receiptRegistryIdentity(receipt, config) {
