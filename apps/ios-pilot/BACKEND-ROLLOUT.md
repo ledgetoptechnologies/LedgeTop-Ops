@@ -36,6 +36,17 @@ shared service token embedded in a distributed app is not an acceptable substitu
 See [application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/)
 and [Cloudflare's Bypass caution](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/common-policies/).
 
+Candidate to investigate: [Access Managed OAuth](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/)
+can authenticate non-browser clients as users and forward an Access assertion to
+the origin. Use a dedicated narrowly scoped application and retain the server-side
+read-only facade; a token valid for the existing general web application could
+otherwise authorize write endpoints. Cloudflare documents HTTPS dynamically
+registered redirects, plus optional localhost/loopback redirects, so the current
+custom-scheme callback is not proven compatible. Confirm account availability,
+RFC 8707/resource isolation, redirect and PKCE behavior, token expiry and revocation,
+and device compatibility before selecting or enabling it. Do not enable Managed
+OAuth on the shared web application merely for this experiment.
+
 ## Local evidence
 
 - 15 real-D1 mobile integration tests passed, including atomic redemption, scope and revocation races.
