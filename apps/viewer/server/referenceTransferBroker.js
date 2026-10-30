@@ -7,6 +7,8 @@ const { randomBytes, randomUUID, timingSafeEqual } = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const { Readable } = require('node:stream');
 const p = require('./referenceProtocol');
+const STORED_METADATA_LIMIT=p.LIMITS.metadataBytes, STORED_FILES_LIMIT=p.LIMITS.metadataBytes, STORED_IDENTITY_LIMIT=2*p.LIMITS.metadataBytes, STORED_AGGREGATE_LIMIT=4*p.LIMITS.metadataBytes;
+function validateStoredSizes(metadata,files,identity){const sizes=[metadata,files,identity].map(x=>typeof x==='string'?Buffer.byteLength(x,'utf8'):Infinity);if(sizes[0]>STORED_METADATA_LIMIT||sizes[1]>STORED_FILES_LIMIT||sizes[2]>STORED_IDENTITY_LIMIT||sizes.reduce((a,b)=>a+b,0)>STORED_AGGREGATE_LIMIT)fail('GRANT_METADATA_LIMIT');}
 class ReferenceTransferError extends Error {
   constructor(code) { super(code); this.name = 'ReferenceTransferError'; this.code = code; }
 }
@@ -14,7 +16,7 @@ const fail = code => { throw new ReferenceTransferError(code); };
 // readObject returns a paused Readable in body. Consume or destroy it; destroy/EOF/error
 // releases the unconsumed reservation. Bytes pushed into the stream count as spent,
 // including buffered bytes on cancellation. No plaintext token is recoverable on retry.
-const ERROR_CODES = Object.freeze(['INVALID_INTEGER','INVALID_ID','EXTRA_FIELDS','INVALID_ENVIRONMENT','INVALID_LIMIT','DURABLE_DATABASE_REQUIRED','UNSAFE_SOURCE','SYMLINK_SOURCE','SOURCE_UNAVAILABLE','RESERVATION_REQUIRED','CAPABILITY_BINDING','INVALID_EXPIRY','RESERVATION_BINDING','OBJECT_SET_BINDING','STALE_RESERVATION','INVALID_REQUEST','UNAUTHORIZED','OBJECT_NOT_GRANTED','INVALID_RANGE','TRANSFER_LIMIT','SOURCE_CHANGED','TRANSFER_ACCOUNTING_UNAVAILABLE']);
+const ERROR_CODES = Object.freeze(['INVALID_INTEGER','INVALID_ID','EXTRA_FIELDS','INVALID_ENVIRONMENT','INVALID_LIMIT','DURABLE_DATABASE_REQUIRED','UNSAFE_SOURCE','SYMLINK_SOURCE','SOURCE_UNAVAILABLE','RESERVATION_REQUIRED','CAPABILITY_BINDING','INVALID_EXPIRY','RESERVATION_BINDING','OBJECT_SET_BINDING','STALE_RESERVATION','INVALID_REQUEST','UNAUTHORIZED','OBJECT_NOT_GRANTED','INVALID_RANGE','TRANSFER_LIMIT','SOURCE_CHANGED','TRANSFER_ACCOUNTING_UNAVAILABLE','GRANT_METADATA_LIMIT']);
 function safeInt(n) { if (!Number.isSafeInteger(n) || n < 0) fail('INVALID_INTEGER'); return n; }
 function slug(s) { if (typeof s !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(s)) fail('INVALID_ID'); }
 function exact(o, fields) { if (!o || typeof o !== 'object' || Array.isArray(o) || ![Object.prototype,null].includes(Object.getPrototypeOf(o)) || Object.keys(o).some(k => !fields.includes(k))) fail('EXTRA_FIELDS'); }
@@ -37,7 +39,7 @@ class ReferenceTransferBroker {
       if(rows.some((x,i)=>x.length!==1||x[0].name!==names[i]||x[0].type!==expected[i][0]||x[0].sql!==expected[i][1]))fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
       const extra=db.prepare("SELECT name FROM sqlite_master WHERE type IN ('trigger','index') AND sql IS NOT NULL AND tbl_name COLLATE NOCASE IN ('reference_grants','reference_job_usage') AND name<>'reference_grants_job' LIMIT 1").get();
       if(extra)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
-      const grants=db.prepare('SELECT job_id,CASE WHEN length(CAST(metadata AS BLOB))<=65536 THEN metadata END AS metadata,used_bytes,reserved_bytes,requests,in_flight FROM reference_grants LIMIT 10001').iterate(),jobs=db.prepare('SELECT * FROM reference_job_usage LIMIT 10001').all(),jobMap=new Map(jobs.map(job=>[job.job_id,job])),sums=new Map();
+      const grants=db.prepare(`SELECT job_id,CASE WHEN length(CAST(metadata AS BLOB))<=${STORED_METADATA_LIMIT} AND length(CAST(files AS BLOB))<=${STORED_FILES_LIMIT} AND length(CAST(identity AS BLOB))<=${STORED_IDENTITY_LIMIT} AND length(CAST(metadata AS BLOB))+length(CAST(files AS BLOB))+length(CAST(identity AS BLOB))<=${STORED_AGGREGATE_LIMIT} THEN metadata END AS metadata,used_bytes,reserved_bytes,requests,in_flight FROM reference_grants LIMIT 10001`).iterate(),jobs=db.prepare('SELECT * FROM reference_job_usage LIMIT 10001').all(),jobMap=new Map(jobs.map(job=>[job.job_id,job])),sums=new Map();
       if(jobs.length>10000)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');let grantCount=0;
       for(const grant of grants){if(++grantCount>10000)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');let metadata;try{metadata=JSON.parse(grant.metadata)}catch{fail('TRANSFER_ACCOUNTING_UNAVAILABLE')};const usage=jobMap.get(grant.job_id);if(!metadata||!usage||metadata.manifestSha256!==usage.manifest_sha256||metadata.environment!==usage.environment||![grant.used_bytes,grant.reserved_bytes,grant.requests,grant.in_flight].every(x=>Number.isSafeInteger(x)&&x>=0)||grant.in_flight>grant.requests)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');const total=sums.get(grant.job_id)||{bytes:0,requests:0};total.bytes+=grant.used_bytes+grant.reserved_bytes;total.requests+=grant.requests;if(!Number.isSafeInteger(total.bytes)||!Number.isSafeInteger(total.requests))fail('TRANSFER_ACCOUNTING_UNAVAILABLE');sums.set(grant.job_id,total);}
       for(const job of jobs){const sum=sums.get(job.job_id)||{bytes:0,requests:0};if(!['staging','production'].includes(job.environment)||!/^([a-f0-9]{64})$/.test(job.manifest_sha256)||![job.byte_limit,job.request_limit,job.charged_bytes,job.requests].every(x=>Number.isSafeInteger(x)&&x>=0)||job.charged_bytes>job.byte_limit||job.requests>job.request_limit||sum.bytes>job.charged_bytes||sum.requests!==job.requests)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');}
@@ -84,7 +86,8 @@ class ReferenceTransferBroker {
     const files = {};
     for (const o of manifest.objects) { if (!Object.hasOwn(objectFiles, o.id)) fail('OBJECT_SET_BINDING'); files[o.id] = { path: this.source(objectFiles[o.id]), byteSize: o.byteSize, sha256: o.sha256 }; }
     const metadata = { jobId, generation, reservationId: reservation.reservationId, manifestSha256: manifest.sha256, environment: this.environment, objectIds: manifest.objects.map(o => o.id), nonce: reservation.nonce, byteBudget: reservation.byteBudget, expiresAt: reservation.expiresAt };
-    const identity = JSON.stringify({ metadata, files, capabilityFingerprint: input.capabilityFingerprint });
+    const metadataJson=JSON.stringify(metadata),filesJson=JSON.stringify(files),identity=JSON.stringify({ metadata, files, capabilityFingerprint: input.capabilityFingerprint });
+    validateStoredSizes(metadataJson,filesJson,identity);
     return this.tx(() => {
       const usage=this.db.prepare('SELECT * FROM reference_job_usage WHERE job_id=?').get(jobId);
       const legacy=this.db.prepare('SELECT 1 FROM reference_grants WHERE job_id=? LIMIT 1').get(jobId);
@@ -98,14 +101,14 @@ class ReferenceTransferBroker {
       const latest = this.db.prepare('SELECT * FROM reference_grants WHERE job_id=? ORDER BY rowid DESC LIMIT 1').get(jobId);
       if (latest) {
         const latestMeta = JSON.parse(latest.metadata);
-        if (latestMeta.manifestSha256 !== metadata.manifestSha256 || latest.files !== JSON.stringify(files)) fail('RESERVATION_BINDING');
-        const seen = this.db.prepare('SELECT metadata FROM reference_grants WHERE job_id=?').all(jobId).some(row => JSON.parse(row.metadata).nonce === reservation.nonce);
+        if (latestMeta.manifestSha256 !== metadata.manifestSha256 || latest.files !== filesJson) fail('RESERVATION_BINDING');
+        let seen=false;for(const row of this.db.prepare(`SELECT CASE WHEN length(CAST(metadata AS BLOB))<=${STORED_METADATA_LIMIT} THEN metadata END AS metadata FROM reference_grants WHERE job_id=?`).iterate(jobId)){if(!row.metadata)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');if(JSON.parse(row.metadata).nonce===reservation.nonce){seen=true;break;}}
         if (generation < latestMeta.generation || (seen && (latestMeta.nonce !== reservation.nonce || latest.revoked || latest.expires_ms <= now))) fail('STALE_RESERVATION');
       }
       if(this.db.prepare('SELECT COUNT(*) AS n FROM reference_grants').get().n>=10000)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
       this.db.prepare('UPDATE reference_grants SET revoked=1 WHERE job_id=?').run(jobId);
       const grantId = randomUUID(), token = randomBytes(32).toString('base64url');
-      this.db.prepare('INSERT INTO reference_grants(id,job_id,reservation_id,identity,token_hash,metadata,files,expires_ms) VALUES(?,?,?,?,?,?,?,?)').run(grantId, jobId, reservation.reservationId, identity, p.sha256(Buffer.from(token)), JSON.stringify(metadata), JSON.stringify(files), expires);
+      this.db.prepare('INSERT INTO reference_grants(id,job_id,reservation_id,identity,token_hash,metadata,files,expires_ms) VALUES(?,?,?,?,?,?,?,?)').run(grantId, jobId, reservation.reservationId, identity, p.sha256(Buffer.from(token)), metadataJson, filesJson, expires);
       return { grantId, grant: { ...metadata, token }, reused: false, tokenRecoverable: true };
     });
   }
@@ -222,4 +225,4 @@ class ReferenceTransferBroker {
   }
   close() { for (const stream of this.streams) stream.destroy(); this.db.close(); }
 }
-module.exports = { ReferenceTransferBroker, ReferenceTransferError, ERROR_CODES };
+module.exports = { ReferenceTransferBroker, ReferenceTransferError, ERROR_CODES, validateStoredSizes, STORED_METADATA_LIMIT, STORED_FILES_LIMIT, STORED_IDENTITY_LIMIT, STORED_AGGREGATE_LIMIT };
