@@ -123,14 +123,17 @@ The current candidate is a named private Service Binding entrypoint in the exist
 Operations Worker that validates the pilot assertion and performs the narrow
 authorized read within the authoritative environment. The public pilot Worker
 would then need neither the Operations database nor connector secrets. This is
-not exported, deployed, or approved: the local implementation requires changes to the shared service, release
+not deployed or approved: the local implementation requires a staging wrapper, release
 coordination, exact target/version checks, independent issuer/audience and
 staff/source authorization, and negative tests. Gradual deployments and D1 state
 must be checked at activation; a binding name alone does not prove the active
 version or data state. A readiness-only RPC would additionally leave a gap
 between readiness and the pilot's separate database read.
-The local RPC implementation is default-closed and not exported by the shared
-Worker. Four boundary tests and two signed-assertion, real-D1 integration cases
+The local RPC implementation is default-closed and exported only by a separate
+staging wrapper that no deployment configuration selects. Two local Miniflare
+tests verified the closed service binding and existing HTTP route, and compared
+its runtime exports with the canonical staging inventory. The Operations type
+check passed. Four boundary tests and two signed-assertion, real-D1 integration cases
 passed: they exercised identity and staff denial, assigned versus unassigned
 and foreign-source list/detail reads, and watched nine tables for business or
 authority writes. This does not prove the live edge, service binding target, or
