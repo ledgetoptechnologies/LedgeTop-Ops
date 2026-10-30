@@ -17,6 +17,15 @@ The Access-protected `/api/mobile-pilot/authorize` issues a short-lived, single-
 5. Build against a real Apple SDK and install on the iPad. Complete the device checklist in README.md: browser callback, cancellation, logout races, expiry/revocation, scope filtering, pagination, and network errors. Local syntax parsing is insufficient.
 6. For rollback, disable the pilot flag and revoke pilot sessions as appropriate. Preserve existing web assets under the established retention policy; do not prune shared release resources.
 
+The current worktree preflight reports missing generated staging configs and an
+outdated ordered migration inventory: 11 Delivery and 32 Operations filenames
+are newer than the checked-in contract; none named in that contract are missing.
+This is not evidence of the remote staging ledger. Migration 0232 itself creates
+only pilot credential tables and indexes, but the running authentication code also
+depends on the staff login binding schema introduced in 0226. Applying 0232 in
+isolation would therefore not prove that the pilot can safely authenticate. Review
+the actual staging ledger and the complete dependency chain with the release owner.
+
 ## Local evidence
 
 - 15 real-D1 mobile integration tests passed, including atomic redemption, scope and revocation races.
