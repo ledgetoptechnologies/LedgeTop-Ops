@@ -1,0 +1,32 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict');
+const p=require('../server/referenceProtocol');
+const {handleReferenceResult}=require('../server/referenceResultBridge');
+test('unmounted bridge rejects fabricated provider, journal and ledger',async()=>{await assert.rejects(handleReferenceResult({provider:{},journal:{},ledger:{},ingestRetained:async()=>{},verifyIngest:async()=>true,assertAuthority:()=>true}),{code:'REFERENCE_RESULT_RUNTIME_UNAVAILABLE'});});
+test('Linux actual spool, archive extraction and ledger reopen in same process after lost ACK', {skip:process.platform!=='linux' && 'requires Linux descriptor and directory barriers'}, async t=>{
+  const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),{Readable}=require('node:stream');
+  const {ReferenceResultJournal,validateResultBinding}=require('../server/referenceResultJournal'),{ReferenceAcceptanceLedger}=require('../server/referenceAcceptance'),{ReferenceProvider}=require('../server/referenceProvider');
+  const {captureProcessingArchive,verifyProcessingArchive}=require('../server/processingArchiveEvidence'),{makeZip}=require('./helpers/zipFixture');
+  const parent=fs.mkdtempSync(path.join(os.tmpdir(),'ref-bridge-test-')),root=path.join(parent,'retained'),destination=path.join(parent,'extracted');fs.mkdirSync(root);
+  const fd=fs.openSync(root,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY),st=fs.fstatSync(fd,{bigint:true});
+  const authority={rootFd:fd,device:st.dev,inode:st.ino,assertCurrent:()=>true};
+  let journal,ledger;t.after(()=>{journal?.close();ledger?.close();fs.closeSync(fd);fs.rmSync(parent,{recursive:true,force:true});});
+  const zip=makeZip([{path:'odm_orthophoto/odm_orthophoto.tif',data:'synthetic'}]),m={schemaVersion:1,jobId:'job-1',generation:1,environment:'staging',pipelineDigest:'a'.repeat(64),engineVersions:{odm:'synthetic'},objects:[{id:'archive-1',role:'odm_archive',byteSize:zip.length,sha256:p.sha256(zip)}]};m.resultManifestSha256=p.resultManifestSha256(m);
+  const expected={jobId:'job-1',generation:1,environment:'staging',inputManifestSha256:'b'.repeat(64),pipelineDigest:m.pipelineDigest,resultManifestSha256:m.resultManifestSha256,requestedEngines:['odm']},acceptance={schemaVersion:1,receiptId:'receipt-1',storageReceiptId:'placeholder',jobId:'job-1',generation:1,environment:'staging',inputManifestSha256:expected.inputManifestSha256,pipelineDigest:expected.pipelineDigest,resultManifestSha256:expected.resultManifestSha256,acceptedObjectIds:['archive-1'],acceptedAt:'2026-10-29T12:00:00.000Z',validationVersion:'ltds-reference-v1'};
+  let lost=true,downloads=0,ingests=0,archiveReceipt;
+  const completed={jobId:'job-1',generation:1,environment:'staging',phase:'completed',manifestSha256:expected.inputManifestSha256,pipelineDigest:expected.pipelineDigest,status:'succeeded',nodeId:null,transferRequest:null,transferGrantAcknowledgement:null,error:null,resultManifestSha256:expected.resultManifestSha256};
+  const provider=new ReferenceProvider({endpoint:'https://example.test',token:'synthetic-token-only',environment:'staging',enabled:true,maxObjectBytes:1024*1024,fetchImpl:async (url,init)=>{
+    if(url.endsWith('/results'))return new Response(JSON.stringify(m),{headers:{'content-type':'application/json'}});
+    if(url.endsWith('/results/archive-1')){downloads++;return new Response(zip,{headers:{'content-type':'application/zip','content-length':String(zip.length),'x-result-sha256':m.objects[0].sha256,'x-result-manifest-sha256':m.resultManifestSha256}});}
+    if(url.endsWith('/acceptance')){assert.deepEqual(JSON.parse(init.body),acceptance);if(lost){lost=false;throw new Error('lost');}return new Response(JSON.stringify({job:completed,created:false,fullyAccepted:true,acceptedObjectIds:['archive-1']}),{headers:{'content-type':'application/json'}});}
+    throw new Error('unexpected route');
+  }});
+  const options={maxBytes:1024*1024,maxArchiveBytes:1024*1024,maxDiskBytes:2*1024*1024,maxEntries:100};
+  function open(){journal=new ReferenceResultJournal({authority,maxBytes:1024*1024});ledger=new ReferenceAcceptanceLedger({databasePath:path.join(parent,'acceptance.sqlite'),managedRoot:root});}
+  const args={provider,expected,acceptance,assertAuthority:()=>true,ingestRetained:async ({retained})=>{ingests++;archiveReceipt=await captureProcessingArchive(Readable.from(fs.createReadStream(path.join(root,retained.receipt.relativePath))),destination,options);},verifyIngest:async()=>await verifyProcessingArchive(destination,archiveReceipt,options)};
+  open();acceptance.storageReceiptId=p.sha256(p.canonicalBytes(validateResultBinding(expected,m,'archive-1')));
+  const other=path.join(parent,'other');fs.mkdirSync(other);const wrong=new ReferenceAcceptanceLedger({databasePath:path.join(parent,'wrong.sqlite'),managedRoot:other});try{await assert.rejects(handleReferenceResult({...args,journal,ledger:wrong}),{code:'REFERENCE_RESULT_ROOT_MISMATCH'});}finally{wrong.close();}
+  const correct=acceptance.storageReceiptId;acceptance.storageReceiptId='wrong-storage';await assert.rejects(handleReferenceResult({...args,journal,ledger}),{code:'REFERENCE_RESULT_BINDING'});assert.equal(journal.db.prepare('SELECT count(*) AS n FROM result_journal').get().n,0);assert.equal(downloads,0);assert.equal(ingests,0);acceptance.storageReceiptId=correct;
+  await assert.rejects(handleReferenceResult({...args,journal,ledger}),{code:'UNCERTAIN'});assert.equal(ledger.pendingOutbox().length,1);journal.close();journal=null;ledger.close();ledger=null;
+  open();await handleReferenceResult({...args,journal,ledger});assert.equal(downloads,1);assert.equal(ingests,1);assert.equal(ledger.pendingOutbox().length,0);assert.equal(fs.readFileSync(path.join(destination,'odm_orthophoto','odm_orthophoto.tif'),'utf8'),'synthetic');
+});

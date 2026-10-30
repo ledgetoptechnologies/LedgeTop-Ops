@@ -147,3 +147,21 @@ test('verified survey mapping rejects geographic or wrong-unit EPSG',t=>{
  assert.equal(gcp.confirmOdmCrs(set.id,'ops:1',{}).odmCrs.epsgCode,7600);
  const db=gcp.database;db.prepare('UPDATE gcp_points SET latitude=latitude+1 WHERE set_id=?').run(set.id);assert.equal(gcp.getSet(set.id).odmCrsConfirmed,false);
 });
+
+test('large photo dataset returns every nearby image across bounded pages', t => {
+  const { processing, gcp } = fixture(t);
+  const project = processing.createProject({ displayName: 'Large synthetic survey' });
+  const dataset = processing.createDataset({ projectId: project.id, displayName: 'Flight', storageMode: 'managed', rootKey: 'datasets', relativePath: crypto.randomUUID() });
+  const empty = crypto.createHash('sha256').digest('hex');
+  const files = Array.from({ length: 16832 }, (_, i) => ({ id: `photo-${i}`, relativePath: `${i}.jpg`, byteSize: 0, sha256: empty, contentType: 'image/jpeg', metadata: { gps: { latitude: 44.5 + (i < 1001 ? 0.00001 : 0.01), longitude: -88.1 } } }));
+  files.push({ id: 'control', relativePath: 'control.csv', byteSize: Buffer.byteLength(GCP_SOURCE), sha256: GCP_SOURCE_SHA, contentType: 'text/csv' });
+  processing.finalizeDataset(dataset.id, files, empty);
+  const set = gcp.importSet({ datasetId: dataset.id, displayName: 'Control', sourceFormat: 'generic-csv-v1', sourceFileId: 'control', sourceFilename: 'control.csv', sourceSha256: GCP_SOURCE_SHA, sourceContent: GCP_SOURCE, crs: 'EPSG:4326', elevationUnits: 'm', points: [{ externalId: 'GCP-01', label: 'Target', latitude: 44.5, longitude: -88.1, elevationM: 243.84, description: null }] });
+  const seen = new Set();
+  for (let offset = 0; offset < 1001; offset += 200) {
+    const page = gcp.listRadiusImages(dataset.id, set.points[0].id, 15.24, 200, offset);
+    assert.equal(page.total, 1001);
+    for (const image of page.images) { assert.ok(!seen.has(image.id), 'photo must not appear on multiple pages'); seen.add(image.id); }
+  }
+  assert.equal(seen.size, 1001);
+});

@@ -1,0 +1,33 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+const {openDatabase}=require('../server/database');
+const {ProcessingRepository}=require('../server/processingRepository');
+const {prepareGcpRawJournal:prepareWithPolicy,inspectPendingGcpRawJournal}=require('../server/gcpRawJournal');
+const {parseRawGcpSource}=require('../server/gcpRawSource');
+const testPolicy={maxJournalBytes:1000000,maxJournalEntries:100};
+const prepareGcpRawJournal=(db,args)=>prepareWithPolicy(db,args,{capacityPolicy:testPolicy});
+
+function fixture(t){const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-journal-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});const p=new ProcessingRepository(db),project=p.createProject({displayName:'Synthetic'}),dataset=p.createDataset({projectId:project.id,displayName:'Flight',storageMode:'managed',rootKey:'datasets',relativePath:'flight'});p.finalizeDataset(dataset.id,[],'a'.repeat(64));const bytes=Buffer.from('\ufeffpoint_id,label,latitude,longitude,elevation_m\r\nA,A,1,2,3\r\n'),encoded=bytes.toString('base64'),format='generic-csv-v1',confirmation=parseRawGcpSource({encoded,format}).confirmationToken;return{db,p,dataset,bytes,args:{datasetId:dataset.id,encoded,format,confirmation,displayName:'Control',fileName:'survey.csv',actorId:'synthetic',requestKey:'synthetic-1'}};}
+
+test('journal commits exact bytes with FULL sync and fences purge',t=>{const {db,p,dataset,bytes,args}=fixture(t),before=db.prepare('PRAGMA synchronous').get().synchronous,entry=prepareGcpRawJournal(db,args),row=db.prepare('SELECT * FROM viewer_gcp_raw_sources WHERE id=?').get(entry.id);assert.equal(entry.status,'pending');assert.deepEqual(Buffer.from(row.source_bytes),bytes);assert.equal(db.prepare('PRAGMA synchronous').get().synchronous,before);assert.equal(p.datasetHasRetainedCsv(dataset.id),true);assert.deepEqual(prepareGcpRawJournal(db,args),{id:entry.id,status:'pending',replayed:true});assert.throws(()=>db.prepare('DELETE FROM viewer_gcp_raw_sources WHERE id=?').run(entry.id));assert.throws(()=>db.prepare("UPDATE viewer_gcp_raw_sources SET source_bytes=X'00' WHERE id=?").run(entry.id));assert.throws(()=>db.prepare('INSERT OR REPLACE INTO viewer_gcp_raw_sources SELECT * FROM viewer_gcp_raw_sources WHERE id=?').run(entry.id));});
+
+test('preview mismatch, invalid identity and failed lifecycle state never create a journal',t=>{const {db,p,dataset,args}=fixture(t);assert.throws(()=>prepareGcpRawJournal(db,{...args,confirmation:'x'}),{code:'gcp_preview_confirmation_required'});assert.throws(()=>prepareGcpRawJournal(db,{...args,datasetId:'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA'}),{code:'invalid_gcp_input'});assert.throws(()=>prepareGcpRawJournal(db,{...args,datasetId:[dataset.id]}),{code:'invalid_gcp_input'});const mutation=p.beginTrashMutation(dataset.id,'synthetic');assert.ok(mutation);db.prepare("UPDATE storage_mutations SET status='failed' WHERE entity_type='dataset' AND entity_id=?").run(dataset.id);assert.throws(()=>prepareGcpRawJournal(db,args),{code:'dataset_not_available'});assert.equal(db.prepare('SELECT count(*) n FROM viewer_gcp_raw_sources').get().n,0);});
+
+test('idempotency is request-scoped and does not reject legitimate repeat imports',t=>{const {db,args}=fixture(t),first=prepareGcpRawJournal(db,args);assert.throws(()=>prepareGcpRawJournal(db,{...args,fileName:'different.csv'}),{code:'gcp_source_conflict'});const second=prepareGcpRawJournal(db,{...args,requestKey:'synthetic-2',fileName:'different.csv'}),third=prepareGcpRawJournal(db,{...args,actorId:'other-operator'});assert.notEqual(first.id,second.id);assert.notEqual(first.id,third.id);const rows=db.prepare('SELECT archive_relative_path FROM viewer_gcp_raw_sources ORDER BY id').all();assert.equal(new Set(rows.map(r=>r.archive_relative_path)).size,1);});
+
+test('recovery inspection is read-only and fails closed on conflicting set identity',t=>{const {db,p,dataset,bytes,args}=fixture(t),entry=prepareGcpRawJournal(db,args),row=db.prepare('SELECT * FROM viewer_gcp_raw_sources WHERE id=?').get(entry.id);assert.equal(inspectPendingGcpRawJournal(db,entry.id).action,'archive_and_create_set');db.prepare(`INSERT INTO gcp_sets(id,dataset_id,display_name,created_by,source_format,source_filename,source_sha256,source_content,source_byte_size,crs,elevation_units,created_at,updated_at) VALUES(?,?,?,?,'generic-csv-v1',?,?,?,?,'EPSG:4326','m','t','t')`).run(entry.id,dataset.id,'Control','synthetic','survey.csv',row.source_sha256,bytes.toString('utf8'),bytes.length);assert.equal(inspectPendingGcpRawJournal(db,entry.id).action,'blocked_unverified_set');assert.equal(db.prepare('SELECT status FROM viewer_gcp_raw_sources WHERE id=?').get(entry.id).status,'pending');db.prepare("UPDATE gcp_sets SET source_sha256=? WHERE id=?").run('b'.repeat(64),entry.id);assert.throws(()=>inspectPendingGcpRawJournal(db,entry.id),{code:'gcp_journal_conflict'});});
+
+test('recovery inspection and replay hold a pending entry while dataset mutation is active',t=>{const {db,p,dataset,args}=fixture(t),entry=prepareGcpRawJournal(db,args);assert.ok(p.beginTrashMutation(dataset.id,'synthetic'));assert.equal(inspectPendingGcpRawJournal(db,entry.id).action,'blocked_dataset');assert.throws(()=>prepareGcpRawJournal(db,args),{code:'dataset_not_available'});});
+
+test('new journal insert requires configured capacity, preserves existing data, and replays without another reservation',t=>{
+  const {db,bytes,args}=fixture(t);
+  assert.throws(()=>prepareWithPolicy(db,args),{code:'gcp_capacity_unavailable'});
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM viewer_gcp_raw_sources').get().n,0);
+  const policy={maxJournalBytes:bytes.length,maxJournalEntries:1};
+  const entry=prepareWithPolicy(db,args,{capacityPolicy:policy});
+  assert.throws(()=>prepareWithPolicy(db,args),{code:'gcp_capacity_unavailable'});
+  assert.deepEqual(prepareWithPolicy(db,args,{capacityPolicy:policy}),{id:entry.id,status:'pending',replayed:true});
+  assert.throws(()=>prepareWithPolicy(db,{...args,requestKey:'synthetic-2'},{capacityPolicy:policy}),{code:'gcp_capacity_exceeded'});
+  const rows=db.prepare('SELECT source_bytes FROM viewer_gcp_raw_sources').all();
+  assert.equal(rows.length,1);assert.deepEqual(Buffer.from(rows[0].source_bytes),bytes);
+});

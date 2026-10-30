@@ -7,6 +7,22 @@ const {assertProtectedMigrationIdentity}=require('../server/migrationIdentityGua
 function legacy(){const db=new DatabaseSync(':memory:');db.exec('PRAGMA foreign_keys=ON');for(const m of MIGRATIONS.filter(x=>x.version<=40)){db.exec(m.sql);m.after?.(db);db.prepare('INSERT INTO schema_migrations VALUES (?,?,?)').run(m.version,m.name,'2000-01-01T00:00:00Z');}return db;}
 const schema=db=>JSON.stringify(db.prepare("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all());
 
+test('effect-claim missing, tampered and unrecorded identities fail before WAL',()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'effect-guard-test-'));
+ try{
+  for(const kind of ['missing','tampered','unrecorded']){
+   const file=path.join(dir,`${kind}.sqlite`);let db=new DatabaseSync(file);db.exec('PRAGMA journal_mode=DELETE');
+   if(kind==='unrecorded')db.exec('CREATE TABLE viewer_source_effect_claims(id TEXT)');
+   else{db.exec('PRAGMA foreign_keys=ON');applyMigrations(db);db.exec('DROP TRIGGER viewer_source_effect_no_delete');if(kind==='tampered')db.exec("CREATE TRIGGER viewer_source_effect_no_delete BEFORE DELETE ON viewer_source_effect_claims BEGIN SELECT 1; END");}
+   db.close();const before=crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+   assert.throws(()=>openDatabase(file),{code:'migration_identity_conflict'},kind);
+   assert.equal(crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),before,kind);
+   db=new DatabaseSync(file,{readOnly:true});try{assert.equal(db.prepare('PRAGMA journal_mode').get().journal_mode,'delete');}finally{db.close();}
+   assert.equal(fs.existsSync(`${file}-wal`),false);
+  }
+ }finally{for(const kind of ['missing','tampered','unrecorded'])for(const suffix of ['','-journal','-wal','-shm']){try{fs.unlinkSync(path.join(dir,`${kind}.sqlite${suffix}`));}catch(e){if(e.code!=='ENOENT')throw e;}}fs.rmdirSync(dir);}
+});
+
 test('v40 upgrades to canonical 41 and detects a modified or unrecorded protected table',t=>{
  const db=legacy();t.after(()=>db.close());applyMigrations(db);assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=41').get().name,'gcp_odm_crs_confirmations');assertProtectedMigrationIdentity(db,MIGRATIONS);
  db.exec('DROP TABLE gcp_odm_crs_confirmations');const before=schema(db);assert.throws(()=>applyMigrations(db),{code:'migration_identity_conflict'});assert.equal(schema(db),before);
@@ -92,3 +108,35 @@ test('unexpected hierarchy indexes and triggers refuse before any migration',()=
 });
 
 test('competing reference migration identities are rejected before any upgrade',t=>{const foreign=new Map([[45,'viewer_reference_attempt_journal'],[46,'viewer_reference_protocol_identity'],[47,'viewer_gcp_raw_source_journal']]);for(const [version,name] of foreign){const db=legacy();try{db.prepare('INSERT INTO schema_migrations VALUES (?,?,?)').run(version,name,'t');const before=schema(db),ledger=JSON.stringify(db.prepare('SELECT * FROM schema_migrations ORDER BY version').all());assert.throws(()=>applyMigrations(db),{code:'migration_identity_conflict'});assert.equal(schema(db),before);assert.equal(JSON.stringify(db.prepare('SELECT * FROM schema_migrations ORDER BY version').all()),ledger);assert.equal(db.prepare('SELECT 1 FROM schema_migrations WHERE version=41').get(),undefined)}finally{db.close()}}});
+
+test('capacity ledger collisions fail before changing existing schema or ledger',()=>{
+ for(const kind of ['foreign-name','unrecorded-table','case-table','foreign-trigger']){
+  const db=legacy();try {
+   for(const m of MIGRATIONS.filter(x=>x.version===41||x.version===42)){db.exec(m.sql);m.after?.(db);db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(m.version,m.name,'t');}
+   const m=MIGRATIONS.find(x=>x.version===48);
+   if(kind==='foreign-name')db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(48,'other_feature','t');
+   if(kind==='unrecorded-table')db.exec('CREATE TABLE viewer_capacity_control(singleton INTEGER)');
+   if(kind==='case-table'){db.exec(m.sql.replaceAll('viewer_capacity_control','VIEWER_CAPACITY_CONTROL'));db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(48,m.name,'t');}
+   if(kind==='foreign-trigger'){db.exec(m.sql);db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(48,m.name,'t');db.exec("CREATE TRIGGER other_capacity_trigger BEFORE DELETE ON viewer_capacity_reservations BEGIN SELECT RAISE(ABORT,'blocked'); END");}
+   const before=schema(db), ledger=JSON.stringify(db.prepare('SELECT * FROM schema_migrations ORDER BY version').all());
+   assert.throws(()=>applyMigrations(db),{code:'migration_identity_conflict'},kind);assert.equal(schema(db),before,kind);assert.equal(JSON.stringify(db.prepare('SELECT * FROM schema_migrations ORDER BY version').all()),ledger,kind);
+  }finally{db.close();}
+ }
+});
+
+
+test('file-backed v48 collision refuses before WAL or any database mutation',t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'capacity-file-guard-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ for(const kind of ['foreign-name','unrecorded-table','case-table','foreign-trigger']){
+  const file=path.join(dir,kind+'.sqlite'),db=new DatabaseSync(file);db.exec('PRAGMA journal_mode=DELETE');
+  for(const m of MIGRATIONS.filter(x=>x.version<=42)){db.exec(m.sql);m.after?.(db);db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(m.version,m.name,'t');}
+  const m=MIGRATIONS.find(x=>x.version===48);
+  if(kind==='foreign-name')db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(48,'foreign','t');
+  if(kind==='unrecorded-table')db.exec('CREATE TABLE viewer_capacity_control(singleton INTEGER)');
+  if(kind==='case-table'){db.exec(m.sql.replaceAll('viewer_capacity_control','VIEWER_CAPACITY_CONTROL'));db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(48,m.name,'t');}
+  if(kind==='foreign-trigger'){db.exec(m.sql);db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(48,m.name,'t');db.exec("CREATE TRIGGER foreign_capacity_trigger BEFORE DELETE ON viewer_capacity_reservations BEGIN SELECT RAISE(ABORT,'blocked'); END");}
+  db.close();const hash=()=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),before=hash();
+  assert.throws(()=>openDatabase(file),{code:'migration_identity_conflict'},kind);assert.equal(hash(),before,kind);
+  const check=new DatabaseSync(file,{readOnly:true});try{assert.equal(check.prepare('PRAGMA journal_mode').get().journal_mode,'delete');}finally{check.close();}assert.equal(fs.existsSync(file+'-wal'),false);
+ }
+});

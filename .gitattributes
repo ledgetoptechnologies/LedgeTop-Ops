@@ -43,3 +43,8 @@ scripts/native-staff-bootstrap-provisioner.test.mjs text eol=lf
 scripts/native-staff-bootstrap-provisioner.windows.test.mjs text eol=lf
 scripts/native-staff-bootstrap-owner-approval.d.mts text eol=lf
 docs/operations/native-staff-bootstrap-provisioner.md text eol=lf
+
+# Preserve exact shared contract fixture bytes across platforms.
+apps/viewer/test/fixtures/source-release-ack-v1.candidate.json text eol=lf
+apps/viewer/test/fixtures/source-release-ack-v1.negative-vectors.candidate.json text eol=lf
+apps/viewer/test/fixtures/source-retention-v1.contract.json text eol=lf

@@ -18,7 +18,9 @@ const {verifyRecoveredIngestSources}=require('./processingIngestRecovery');
 const observationPersistenceError=Symbol('observationPersistenceError');
 const transientDownloadError=error=>error?.name==='TimeoutError'||['ECONNRESET','ECONNREFUSED','ETIMEDOUT','EPIPE','ENOTFOUND','EAI_AGAIN','ENETUNREACH','EHOSTUNREACH','UND_ERR_SOCKET','UND_ERR_CONNECT_TIMEOUT','UND_ERR_HEADERS_TIMEOUT','UND_ERR_BODY_TIMEOUT'].includes(error?.code||error?.cause?.code)||error?.status===408||error?.status===429||(Number.isInteger(error?.status)&&error.status>=500&&error.status<=599);
 
-function adapterFor(provider,config,providerCredentials,attemptCapability=null){return new NodeOdmProvider({endpoint:provider.endpoint,token:providerCredentials.resolve(provider.id),providerType:provider.type,transferTimeoutMs:config.processingProviderTransferTimeoutMs,attemptCapability});}
+function requireNodeOdmProvider(provider){if(!provider||!['nodeodm','clusterodm'].includes(provider.type))throw Object.assign(new Error('processing provider type is unavailable'),{code:'unsupported_provider_type'});}
+function requireNodeOdmAttempt(processing,id){if(processing.hasReferenceAttemptProtocol(id)||processing.hasReferenceAttemptJournal(id))throw Object.assign(new Error('reference processing is unavailable'),{code:'unsupported_provider_type'});}
+function adapterFor(provider,config,providerCredentials,attemptCapability=null){requireNodeOdmProvider(provider);return new NodeOdmProvider({endpoint:provider.endpoint,token:providerCredentials.resolve(provider.id),providerType:provider.type,transferTimeoutMs:config.processingProviderTransferTimeoutMs,attemptCapability});}
 function attemptCapability(processing,credentials,attempt){
   if(!processing.attemptRequiresReservation?.(attempt.id))return null;
   const record=processing.getAttemptReservation(attempt.id);
@@ -46,6 +48,7 @@ async function verifyProviderMeshClosure(root,outputs=discoverOutputs(root),{sig
 }
 
 async function processSubmit(job,{processing,storage,config,providerCredentials,signal,adapterFactory=adapterFor}){
+  requireNodeOdmAttempt(processing,job.attempt_id);
   let attempt={...processing.getAttempt(job.attempt_id),...processing.getAttemptSubmission(job.attempt_id)};const task=processing.getTask(attempt.taskId),dataset=processing.getDataset(attempt.datasetId||task.datasetId,true),provider=processing.getProvider(attempt.providerId);let adapter=adapterFactory(provider,config,providerCredentials);
   const deferObservation=reason=>{signal?.throwIfAborted();if(!processing.deferHeldSubmit(job.id,job.lease_owner,30_000,reason))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});};
   // A rejected upload may have committed a subset of the batch. Image counts
@@ -113,6 +116,7 @@ async function processSubmit(job,{processing,storage,config,providerCredentials,
 }
 
 async function processReconcile(job,{processing,config,providerCredentials,signal,adapterFactory=adapterFor}){
+  requireNodeOdmAttempt(processing,job.attempt_id);
   let attempt,provider;
   try{
     if(processing.settleStaleReconcileJob(job.id,job.lease_owner))return;
@@ -171,10 +175,12 @@ async function processReconcile(job,{processing,config,providerCredentials,signa
 
 async function processIngest(job,{processing,repository,storage,config,providerCredentials,signal}){
   const attempt=processing.getAttempt(job.attempt_id),task=processing.getTask(attempt.taskId),project=processing.getProject(task.projectId),provider=processing.getProvider(attempt.providerId);
+  requireNodeOdmAttempt(processing,job.attempt_id);
+  if(provider)requireNodeOdmProvider(provider);
   // Capture one validated provider binding before any asynchronous work so the
   // checked coordinator and the later durable claim always have the same identity.
   const bindings=config.stagedCommitmentProviders;
-  const hasBinding=Boolean(bindings&&Object.hasOwn(bindings,provider.id));
+  const hasBinding=Boolean(bindings&&provider&&Object.hasOwn(bindings,provider.id));
   let binding=null;
   if(hasBinding){try{binding=require('./stagedAckDelivery').snapshotBinding(bindings[provider.id]);}catch{throw Object.assign(new Error('Staged commitment configuration is invalid'),{code:'staged_commitment_unavailable'});}}
   let frozenCapability=null,receiptBinding=null;

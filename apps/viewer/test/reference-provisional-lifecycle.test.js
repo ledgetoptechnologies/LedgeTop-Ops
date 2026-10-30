@@ -1,0 +1,45 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+const {DatabaseSync}=require('node:sqlite');
+const {applyMigrations}=require('../server/database');
+const {ProcessingRepository}=require('../server/processingRepository');
+const {ReferenceCatalogProjection}=require('../server/referenceCatalogProjection');
+const {reconcileCatalogAdoptionRecoveries}=require('../server/datasetOperationWorker');
+
+function fixture(t){
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'reference-provisional-')),file=path.join(dir,'materialized.bin');fs.writeFileSync(file,'retain');
+ const db=new DatabaseSync(':memory:');db.exec('PRAGMA foreign_keys=ON');applyMigrations(db);
+ db.exec("INSERT INTO projects(id,display_name,status,created_at,updated_at) VALUES('p','Project','active','t','t'); INSERT INTO datasets(id,project_id,display_name,storage_mode,root_key,relative_path,status,created_at,updated_at) VALUES('d','p','Data','managed','datasets','d','finalized','t','t'); INSERT INTO processing_tasks(id,project_id,dataset_id,display_name,status,created_at,updated_at) VALUES('t','p','d','Task','draft','t','t'); INSERT INTO processing_attempts(id,task_id,dataset_id,attempt_number,options_json,status,created_at,updated_at) VALUES('a','t','d',1,'{}','failed','t','t')");
+ t.after(()=>{db.close();fs.rmSync(dir,{recursive:true,force:true});});return{db,file,repo:new ProcessingRepository(db)};
+}
+function journal(db){db.exec("INSERT INTO viewer_reference_attempt_journal(attempt_id,submission_id,environment,request_json,request_sha256,input_manifest_sha256) VALUES('a','s','staging','{}','h','m')");}
+function scan(db){const p=new ReferenceCatalogProjection(db);p.begin();while(!p.state().scan_complete)p.backfill();}
+function seedOrTryJournal(db){const sql=db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='viewer_reference_attempt_admission_unavailable'").get().sql;db.exec('DROP TRIGGER viewer_reference_attempt_admission_unavailable');try{journal(db);}finally{db.exec(sql);}}
+function operation(db,payload,status='failed',attemptId=null){db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,processing_attempt_id,available_at,created_at,updated_at) VALUES('o','catalog_map','test',?,?,?,?, 't','t')").run(payload,status,attemptId,'t');}
+
+test('provisional and journal bindings exclude each other in either order',t=>{
+ for(const order of ['operation-first','journal-first']){const {db}=fixture(t),payload=JSON.stringify({ids:{attemptId:'a'}});if(order==='operation-first'){operation(db,payload);scan(db);assert.throws(()=>seedOrTryJournal(db),/reference catalog (?:identity|replacement) conflict/);}else{scan(db);seedOrTryJournal(db);assert.throws(()=>operation(db,payload),/reference catalog (?:identity|replacement) conflict/);}}
+});
+
+test('ambiguous provisional identity is rejected while reference custody exists',t=>{
+ for(const payload of ['not json','{}',JSON.stringify({ids:{attemptId:42}}),'{"ids":{"attemptId":"unrelated","attemptId":"a"}}','{"ids":{"attemptId":""}}']){const {db}=fixture(t);scan(db);seedOrTryJournal(db);assert.throws(()=>operation(db,payload),/reference catalog (?:identity|replacement) conflict/);}
+});
+
+test('both operation attempt identifiers are checked on insert and update',t=>{
+ for(const mode of ['column','payload','update']){const {db}=fixture(t);scan(db);seedOrTryJournal(db);
+  if(mode==='column')assert.throws(()=>operation(db,JSON.stringify({ids:{attemptId:'different'}}),'failed','a'));
+  else if(mode==='payload')assert.throws(()=>operation(db,JSON.stringify({ids:{attemptId:'a'}}),'failed',null));
+  else {operation(db,JSON.stringify({ids:{attemptId:'different'}}));assert.throws(()=>db.prepare("UPDATE dataset_operations SET processing_attempt_id='a' WHERE id='o'").run());}
+ }
+});
+test('reference journal admission remains unavailable even with a valid task',t=>{const {db}=fixture(t);scan(db);assert.throws(()=>journal(db),/reference admission unavailable/);});
+test('unresolved legacy payload blocks journal admission and a required projection cannot be deleted',t=>{const {db}=fixture(t);operation(db,'{bad');scan(db);assert.throws(()=>db.exec("DELETE FROM reference_catalog_projection WHERE operation_id='o'"),/projection still required/);assert.throws(()=>seedOrTryJournal(db),/reference catalog identity conflict/);});
+test('journal blocks replacement, type changes and deletion of a conflicting legacy operation',t=>{const {db}=fixture(t);operation(db,'{"ids":{"attemptId":"a"}}');db.exec('DROP TRIGGER viewer_reference_attempt_admission_unavailable; DROP TRIGGER viewer_reference_projection_admission');journal(db);assert.throws(()=>db.exec("INSERT OR REPLACE INTO dataset_operations(id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES('o','catalog_map','test','{}','failed','t','t','t')"),/reference catalog (?:identity|replacement) conflict/);assert.throws(()=>db.exec("UPDATE dataset_operations SET operation_type='catalog_scan' WHERE id='o'"),/reference catalog (?:identity|replacement) conflict/);assert.throws(()=>db.exec("DELETE FROM dataset_operations WHERE id='o'"),/reference catalog (?:identity|replacement) conflict/);assert.equal(db.prepare("SELECT count(*) n FROM dataset_operations WHERE id='o'").get().n,1);});
+test('secondary unique-key replacements cannot remove legacy catalog rows on the real schema',t=>{for(const key of ['upload_id','import_preview_id','processing_attempt_id']){const {db}=fixture(t);db.exec('PRAGMA foreign_keys=OFF; PRAGMA recursive_triggers=OFF');operation(db,'{"ids":{"attemptId":"a"}}');const value=key==='processing_attempt_id'?'b':'shared',status=key==='processing_attempt_id'?'awaiting_derivatives':'queued';db.prepare(`UPDATE dataset_operations SET ${key}=?,status=? WHERE id='o'`).run(value,status);db.exec('DROP TRIGGER viewer_reference_attempt_admission_unavailable; DROP TRIGGER viewer_reference_projection_admission');journal(db);db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES('other','catalog_map','test',?,'queued','t','t','t')").run('{"ids":{"attemptId":"b"}}');const payload='{"ids":{"attemptId":"b"}}';assert.throws(()=>db.prepare(`INSERT OR REPLACE INTO dataset_operations(id,operation_type,subject,payload_json,status,${key},available_at,created_at,updated_at) VALUES('new','catalog_map','test',?,?,?,'t','t','t')`).run(payload,status,value),/reference catalog replacement conflict/,key);assert.throws(()=>db.prepare(`UPDATE OR REPLACE dataset_operations SET ${key}=?,status=? WHERE id='other'`).run(value,status),/reference catalog replacement conflict/,key);assert.equal(db.prepare("SELECT count(*) n FROM dataset_operations WHERE id IN ('o','other')").get().n,2,key);}});
+test('rowid aliases cannot replace a legacy catalog row with recursive triggers off',t=>{for(const key of ['rowid','_rowid_','oid']){const {db}=fixture(t);db.exec('PRAGMA foreign_keys=OFF; PRAGMA recursive_triggers=OFF');operation(db,'{"ids":{"attemptId":"a"}}');const value=db.prepare("SELECT rowid AS n FROM dataset_operations WHERE id='o'").get().n;db.exec('DROP TRIGGER viewer_reference_attempt_admission_unavailable; DROP TRIGGER viewer_reference_projection_admission');journal(db);db.prepare("INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES('other','catalog_map','test',?,'queued','t','t','t')").run('{"ids":{"attemptId":"b"}}');assert.throws(()=>db.prepare(`INSERT OR REPLACE INTO dataset_operations(${key},id,operation_type,subject,payload_json,status,available_at,created_at,updated_at) VALUES(?,'new','catalog_map','test',?,'queued','t','t','t')`).run(value,'{"ids":{"attemptId":"b"}}'),/reference catalog replacement conflict/,key);assert.throws(()=>db.prepare(`UPDATE OR REPLACE dataset_operations SET ${key}=? WHERE id='other'`).run(value),/reference catalog replacement conflict/,key);assert.equal(db.prepare("SELECT count(*) n FROM dataset_operations WHERE id IN ('o','other')").get().n,2,key);}});
+
+test('independent maintenance preserves a protected existing operation and its file',t=>{
+ const {db,repo,file}=fixture(t);operation(db,JSON.stringify({ids:{attemptId:'a'},adoptionIntent:{rootKey:'datasets',relativePath:'src',datasetRelative:'dest'}}));db.exec('DROP TRIGGER viewer_reference_attempt_admission_unavailable; DROP TRIGGER viewer_reference_projection_admission');journal(db); // Deliberate corrupt overlap; never a valid guarded admission.
+ let effects=0;const storage={reconcileAdoptionIntent(){effects++;fs.unlinkSync(file);}};
+ assert.equal(reconcileCatalogAdoptionRecoveries(repo,storage),0);assert.equal(effects,0);assert.equal(fs.readFileSync(file,'utf8'),'retain');assert.ok(db.prepare("SELECT payload_json FROM dataset_operations WHERE id='o'").get().payload_json.includes('adoptionIntent'));
+});

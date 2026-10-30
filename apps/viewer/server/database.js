@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
+const {TEST_SCHEMA:REFERENCE_CATALOG_PROJECTION_SCHEMA,installFunction:installReferenceCatalogIdentity}=require('./referenceCatalogProjection');
 
 const MIGRATIONS = [
   {
@@ -2122,9 +2123,245 @@ const MIGRATIONS = [
       updated_at INTEGER NOT NULL
     );
   `},
+  {version:48,name:'viewer_cooperative_capacity_ledger',sql:`
+    CREATE TABLE viewer_capacity_control (
+      singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+      mode TEXT NOT NULL CHECK(mode IN ('disabled','cooperative')),
+      legacy_state TEXT NOT NULL CHECK(legacy_state IN ('unassessed','reconciling','verified'))
+    );
+    INSERT INTO viewer_capacity_control(singleton,mode,legacy_state)
+      VALUES(1,'disabled','unassessed');
+    CREATE TRIGGER viewer_capacity_control_no_replace BEFORE INSERT ON viewer_capacity_control WHEN EXISTS(SELECT 1 FROM viewer_capacity_control WHERE singleton=NEW.singleton OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'capacity control replacement is forbidden'); END;
+    CREATE TABLE viewer_capacity_reservations (
+      id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
+      domain_id TEXT NOT NULL CHECK(length(domain_id) BETWEEN 1 AND 128),
+      domain_revision TEXT NOT NULL CHECK(length(domain_revision) BETWEEN 1 AND 128),
+      writer_kind TEXT NOT NULL CHECK(length(writer_kind) BETWEEN 1 AND 64),
+      writer_id TEXT NOT NULL CHECK(length(writer_id) BETWEEN 1 AND 128),
+      writer_namespace TEXT NOT NULL CHECK(length(writer_namespace) BETWEEN 1 AND 256),
+      owner_id TEXT NOT NULL CHECK(length(owner_id) BETWEEN 1 AND 128),
+      fence_token TEXT NOT NULL CHECK(length(fence_token) BETWEEN 1 AND 128),
+      owner_generation INTEGER NOT NULL CHECK(typeof(owner_generation)='integer' AND owner_generation BETWEEN 1 AND 9007199254740991),
+      peak_bytes INTEGER NOT NULL CHECK(typeof(peak_bytes)='integer' AND peak_bytes BETWEEN 0 AND 9007199254740991),
+      materialized_bytes INTEGER NOT NULL DEFAULT 0 CHECK(typeof(materialized_bytes)='integer' AND materialized_bytes BETWEEN 0 AND peak_bytes),
+      remaining_bytes INTEGER NOT NULL CHECK(typeof(remaining_bytes)='integer' AND remaining_bytes=peak_bytes-materialized_bytes),
+      peak_inodes INTEGER NOT NULL CHECK(typeof(peak_inodes)='integer' AND peak_inodes BETWEEN 0 AND 9007199254740991),
+      materialized_inodes INTEGER NOT NULL DEFAULT 0 CHECK(typeof(materialized_inodes)='integer' AND materialized_inodes BETWEEN 0 AND peak_inodes),
+      remaining_inodes INTEGER NOT NULL CHECK(typeof(remaining_inodes)='integer' AND remaining_inodes=peak_inodes-materialized_inodes),
+      state TEXT NOT NULL CHECK(state IN ('requested','held','writing','quiescing','retained','complete','cancelled')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(domain_id,writer_kind,writer_id)
+    );
+    CREATE INDEX viewer_capacity_reservations_domain_idx ON viewer_capacity_reservations(domain_id,state);
+    CREATE TRIGGER viewer_capacity_state_transition
+      BEFORE UPDATE OF state ON viewer_capacity_reservations
+      WHEN NEW.state <> OLD.state AND NOT (
+        (OLD.state IN ('held','writing') AND NEW.state='quiescing') OR
+        (OLD.state='quiescing' AND NEW.state='retained')
+      )
+      BEGIN SELECT RAISE(ABORT,'capacity state transition forbidden'); END;
+    CREATE TRIGGER viewer_capacity_no_delete
+      BEFORE DELETE ON viewer_capacity_reservations
+      BEGIN SELECT RAISE(ABORT,'capacity reservation deletion is forbidden'); END;
+    CREATE TRIGGER viewer_capacity_identity_immutable
+      BEFORE UPDATE ON viewer_capacity_reservations
+      WHEN NEW.rowid IS NOT OLD.rowid OR NEW.id IS NOT OLD.id OR NEW.domain_id IS NOT OLD.domain_id OR NEW.writer_kind IS NOT OLD.writer_kind OR NEW.writer_id IS NOT OLD.writer_id OR NEW.owner_id IS NOT OLD.owner_id OR NEW.fence_token IS NOT OLD.fence_token OR NEW.owner_generation IS NOT OLD.owner_generation
+      BEGIN SELECT RAISE(ABORT,'capacity reservation identity is immutable'); END;
+    CREATE TRIGGER viewer_capacity_no_replacement
+      BEFORE INSERT ON viewer_capacity_reservations
+      WHEN EXISTS (SELECT 1 FROM viewer_capacity_reservations
+        WHERE rowid=NEW.rowid OR id=NEW.id OR (domain_id=NEW.domain_id AND writer_kind=NEW.writer_kind AND writer_id=NEW.writer_id))
+      BEGIN SELECT RAISE(ABORT,'capacity reservation replacement is forbidden'); END;
+    CREATE TRIGGER viewer_capacity_materialized_monotonic
+      BEFORE UPDATE OF materialized_bytes,materialized_inodes ON viewer_capacity_reservations
+      WHEN NEW.materialized_bytes < OLD.materialized_bytes OR NEW.materialized_inodes < OLD.materialized_inodes
+      BEGIN SELECT RAISE(ABORT,'capacity materialization cannot decrease'); END;
+  `},
+
+
+  {version:49,name:'viewer_source_custody_dormant',sql:`
+    CREATE TABLE viewer_custody_intents (
+      id TEXT PRIMARY KEY NOT NULL, job_id TEXT NOT NULL, generation INTEGER NOT NULL, environment TEXT NOT NULL, binding_sha256 TEXT NOT NULL,
+      canonical_binding TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('building','prepared')),
+      created_at TEXT NOT NULL, UNIQUE(job_id,generation,environment)
+    );
+    CREATE TABLE viewer_custody_pins (
+      intent_id TEXT NOT NULL REFERENCES viewer_custody_intents(id) ON DELETE RESTRICT,
+      object_id TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size>=0),
+      sha256 TEXT NOT NULL, kind TEXT NOT NULL,
+      permanent_csv INTEGER NOT NULL CHECK(permanent_csv IN (0,1)),
+      PRIMARY KEY(intent_id,object_id)
+    );
+    CREATE TRIGGER viewer_custody_intents_immutable BEFORE UPDATE ON viewer_custody_intents WHEN NOT (OLD.state='building' AND NEW.state='prepared' AND NEW.rowid=OLD.rowid AND NEW.id=OLD.id AND NEW.job_id=OLD.job_id AND NEW.generation=OLD.generation AND NEW.environment=OLD.environment AND NEW.binding_sha256=OLD.binding_sha256 AND NEW.canonical_binding=OLD.canonical_binding AND NEW.created_at=OLD.created_at) BEGIN SELECT RAISE(ABORT,'custody intent immutable'); END;
+    CREATE TRIGGER viewer_custody_intents_no_replace BEFORE INSERT ON viewer_custody_intents WHEN EXISTS (SELECT 1 FROM viewer_custody_intents WHERE rowid=NEW.rowid OR id=NEW.id OR (job_id=NEW.job_id AND generation=NEW.generation AND environment=NEW.environment)) BEGIN SELECT RAISE(ABORT,'custody intent replacement'); END;
+    CREATE TRIGGER viewer_custody_pins_no_late_insert BEFORE INSERT ON viewer_custody_pins WHEN COALESCE((SELECT state FROM viewer_custody_intents WHERE id=NEW.intent_id),'')<>'building' OR EXISTS (SELECT 1 FROM viewer_custody_pins WHERE rowid=NEW.rowid OR (intent_id=NEW.intent_id AND object_id=NEW.object_id)) BEGIN SELECT RAISE(ABORT,'custody pin insertion forbidden'); END;
+    CREATE TRIGGER viewer_custody_intents_no_delete BEFORE DELETE ON viewer_custody_intents BEGIN SELECT RAISE(ABORT,'custody intent retention'); END;
+    CREATE TRIGGER viewer_custody_pins_immutable BEFORE UPDATE ON viewer_custody_pins BEGIN SELECT RAISE(ABORT,'custody pin immutable'); END;
+    CREATE TRIGGER viewer_custody_pins_no_delete BEFORE DELETE ON viewer_custody_pins BEGIN SELECT RAISE(ABORT,'custody pin retention'); END;
+  `},
+
+  // Reserved source-only reference journal. No provider route, scheduler or
+  // custody authority is enabled by this schema; old writers still require a
+  // separate owner-verified drain/fence before any real submission.
+  {version:50,name:'viewer_reference_attempt_journal',sql:`
+    CREATE TABLE viewer_reference_attempt_journal (
+      attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+      submission_id TEXT NOT NULL UNIQUE,
+      environment TEXT NOT NULL CHECK(environment IN ('staging','production')),
+      request_json TEXT NOT NULL, request_sha256 TEXT NOT NULL,
+      input_manifest_sha256 TEXT NOT NULL,
+      lease_generation INTEGER NOT NULL DEFAULT 0 CHECK(typeof(lease_generation)='integer' AND lease_generation>=0 AND lease_generation<=9007199254740991),
+      lease_owner TEXT, lease_expires_ms INTEGER CHECK(lease_expires_ms IS NULL OR (typeof(lease_expires_ms)='integer' AND lease_expires_ms>=0 AND lease_expires_ms<=9007199254740991)),
+      job_id TEXT UNIQUE, job_json TEXT, job_sha256 TEXT,
+      CHECK((lease_owner IS NULL)=(lease_expires_ms IS NULL)),
+      CHECK((job_id IS NULL)=(job_json IS NULL)), CHECK((job_json IS NULL)=(job_sha256 IS NULL))
+    );
+    CREATE TRIGGER viewer_reference_attempt_identity_immutable BEFORE UPDATE ON viewer_reference_attempt_journal WHEN NEW.rowid IS NOT OLD.rowid OR NEW.lease_generation<OLD.lease_generation OR NEW.attempt_id<>OLD.attempt_id OR NEW.submission_id<>OLD.submission_id OR NEW.environment<>OLD.environment OR NEW.request_json<>OLD.request_json OR NEW.request_sha256<>OLD.request_sha256 OR NEW.input_manifest_sha256<>OLD.input_manifest_sha256 OR (OLD.job_json IS NOT NULL AND (NEW.job_id IS NOT OLD.job_id OR NEW.job_json IS NOT OLD.job_json OR NEW.job_sha256 IS NOT OLD.job_sha256)) BEGIN SELECT RAISE(ABORT,'reference attempt immutable'); END;
+    CREATE TRIGGER viewer_reference_attempt_no_insert_replace BEFORE INSERT ON viewer_reference_attempt_journal WHEN EXISTS(SELECT 1 FROM viewer_reference_attempt_journal WHERE rowid=NEW.rowid OR attempt_id=NEW.attempt_id OR submission_id=NEW.submission_id OR (NEW.job_id IS NOT NULL AND job_id=NEW.job_id)) BEGIN SELECT RAISE(ABORT,'reference attempt replacement'); END;
+    CREATE TRIGGER viewer_reference_attempt_no_update_replace BEFORE UPDATE OF job_id ON viewer_reference_attempt_journal WHEN NEW.job_id IS NOT NULL AND EXISTS(SELECT 1 FROM viewer_reference_attempt_journal WHERE job_id=NEW.job_id AND attempt_id<>OLD.attempt_id) BEGIN SELECT RAISE(ABORT,'reference job replacement'); END;
+    CREATE TRIGGER viewer_reference_attempt_no_delete BEFORE DELETE ON viewer_reference_attempt_journal BEGIN SELECT RAISE(ABORT,'reference attempt retention'); END;
+    ${REFERENCE_CATALOG_PROJECTION_SCHEMA}
+    CREATE INDEX viewer_reference_catalog_operation_idx ON dataset_operations(operation_type,id);
+    CREATE TRIGGER viewer_reference_attempt_admission_unavailable BEFORE INSERT ON viewer_reference_attempt_journal WHEN COALESCE((SELECT authority_ready FROM reference_catalog_projection_state WHERE id=1),0)<>1 BEGIN SELECT RAISE(ABORT,'reference admission unavailable'); END;
+    -- Additional identity exclusion only; disabled admission above remains
+    -- mandatory until storage authority and old-writer quiescence exist.
+    CREATE TRIGGER viewer_reference_projection_admission BEFORE INSERT ON viewer_reference_attempt_journal WHEN COALESCE((SELECT scan_complete FROM reference_catalog_projection_state WHERE id=1),0)<>1 OR EXISTS(SELECT 1 FROM reference_catalog_projection WHERE status='unresolved') OR EXISTS(SELECT 1 FROM reference_catalog_projection WHERE payload_attempt_id=NEW.attempt_id OR column_attempt_id=NEW.attempt_id) BEGIN SELECT RAISE(ABORT,'reference catalog identity conflict'); END;
+    CREATE TRIGGER viewer_reference_catalog_exclusion_insert BEFORE INSERT ON dataset_operations WHEN EXISTS(SELECT 1 FROM viewer_reference_attempt_journal) AND (EXISTS(SELECT 1 FROM dataset_operations WHERE id=NEW.id AND operation_type='catalog_map') OR (NEW.operation_type='catalog_map' AND (json_extract(ltds_catalog_identity(NEW.payload_json,NEW.processing_attempt_id),'$.status')<>'resolved' OR EXISTS(SELECT 1 FROM viewer_reference_attempt_journal WHERE attempt_id=json_extract(ltds_catalog_identity(NEW.payload_json,NEW.processing_attempt_id),'$.payloadAttemptId') OR attempt_id=NEW.processing_attempt_id)))) BEGIN SELECT RAISE(ABORT,'reference catalog identity conflict'); END;
+    CREATE TRIGGER viewer_reference_catalog_exclusion_update BEFORE UPDATE OF id,operation_type,payload_json,processing_attempt_id ON dataset_operations WHEN EXISTS(SELECT 1 FROM viewer_reference_attempt_journal) AND ((OLD.operation_type='catalog_map' AND (NOT EXISTS(SELECT 1 FROM reference_catalog_projection WHERE operation_id=OLD.id AND status='resolved') OR EXISTS(SELECT 1 FROM reference_catalog_projection p JOIN viewer_reference_attempt_journal j ON j.attempt_id=p.payload_attempt_id OR j.attempt_id=p.column_attempt_id WHERE p.operation_id=OLD.id))) OR (NEW.operation_type='catalog_map' AND (json_extract(ltds_catalog_identity(NEW.payload_json,NEW.processing_attempt_id),'$.status')<>'resolved' OR EXISTS(SELECT 1 FROM viewer_reference_attempt_journal WHERE attempt_id=json_extract(ltds_catalog_identity(NEW.payload_json,NEW.processing_attempt_id),'$.payloadAttemptId') OR attempt_id=NEW.processing_attempt_id)))) BEGIN SELECT RAISE(ABORT,'reference catalog identity conflict'); END;
+    CREATE TRIGGER viewer_reference_catalog_exclusion_delete BEFORE DELETE ON dataset_operations WHEN OLD.operation_type='catalog_map' AND EXISTS(SELECT 1 FROM viewer_reference_attempt_journal) AND (NOT EXISTS(SELECT 1 FROM reference_catalog_projection WHERE operation_id=OLD.id AND status='resolved') OR EXISTS(SELECT 1 FROM reference_catalog_projection p JOIN viewer_reference_attempt_journal j ON j.attempt_id=p.payload_attempt_id OR j.attempt_id=p.column_attempt_id WHERE p.operation_id=OLD.id)) BEGIN SELECT RAISE(ABORT,'reference catalog identity conflict'); END;
+    -- OR REPLACE may silently delete another row through a secondary unique
+    -- key with recursive_triggers disabled; protect catalog rows for all keys.
+    CREATE TRIGGER viewer_reference_catalog_replace_insert BEFORE INSERT ON dataset_operations WHEN EXISTS(SELECT 1 FROM viewer_reference_attempt_journal) AND EXISTS(SELECT 1 FROM dataset_operations o WHERE o.operation_type='catalog_map' AND (o.id=NEW.id OR o.rowid=NEW.rowid OR (NEW.upload_id IS NOT NULL AND o.upload_id=NEW.upload_id AND NEW.status IN ('queued','leased','awaiting_derivatives','succeeded') AND o.status IN ('queued','leased','awaiting_derivatives','succeeded')) OR (NEW.import_preview_id IS NOT NULL AND o.import_preview_id=NEW.import_preview_id AND NEW.status IN ('queued','leased','awaiting_derivatives','succeeded') AND o.status IN ('queued','leased','awaiting_derivatives','succeeded')) OR (NEW.processing_attempt_id IS NOT NULL AND o.processing_attempt_id=NEW.processing_attempt_id AND NEW.status='awaiting_derivatives' AND o.status='awaiting_derivatives'))) BEGIN SELECT RAISE(ABORT,'reference catalog replacement conflict'); END;
+    CREATE TRIGGER viewer_reference_catalog_replace_update BEFORE UPDATE ON dataset_operations WHEN EXISTS(SELECT 1 FROM viewer_reference_attempt_journal) AND EXISTS(SELECT 1 FROM dataset_operations o WHERE o.operation_type='catalog_map' AND o.id IS NOT OLD.id AND (o.id=NEW.id OR o.rowid=NEW.rowid OR (NEW.upload_id IS NOT NULL AND o.upload_id=NEW.upload_id AND NEW.status IN ('queued','leased','awaiting_derivatives','succeeded') AND o.status IN ('queued','leased','awaiting_derivatives','succeeded')) OR (NEW.import_preview_id IS NOT NULL AND o.import_preview_id=NEW.import_preview_id AND NEW.status IN ('queued','leased','awaiting_derivatives','succeeded') AND o.status IN ('queued','leased','awaiting_derivatives','succeeded')) OR (NEW.processing_attempt_id IS NOT NULL AND o.processing_attempt_id=NEW.processing_attempt_id AND NEW.status='awaiting_derivatives' AND o.status='awaiting_derivatives'))) BEGIN SELECT RAISE(ABORT,'reference catalog replacement conflict'); END;
+  `},
+
+  // Source-stage identity only. No API, scheduler or custody authority is
+  // enabled. Admission cannot be enabled by updating configuration or rows.
+  {version:51,name:'viewer_reference_protocol_identity',sql:`
+    CREATE TRIGGER viewer_gcp_snapshot_no_replace BEFORE INSERT ON processing_attempt_gcp_snapshots WHEN typeof(NEW.attempt_id)<>'text' OR length(NEW.attempt_id)=0 OR EXISTS(SELECT 1 FROM processing_attempt_gcp_snapshots WHERE attempt_id=NEW.attempt_id OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'gcp snapshot replacement'); END;
+    CREATE TABLE viewer_reference_providers(id TEXT PRIMARY KEY NOT NULL,display_name TEXT NOT NULL,origin TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled=0));
+    CREATE TABLE viewer_reference_attempt_genesis(attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES processing_attempts(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,reference_provider_id TEXT NOT NULL REFERENCES viewer_reference_providers(id) ON DELETE RESTRICT,FOREIGN KEY(attempt_id) REFERENCES viewer_reference_attempt_protocols(attempt_id) DEFERRABLE INITIALLY DEFERRED,FOREIGN KEY(attempt_id) REFERENCES viewer_reference_attempt_journal(attempt_id) DEFERRABLE INITIALLY DEFERRED);
+    CREATE TABLE viewer_reference_attempt_protocols(attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES processing_attempts(id) ON DELETE RESTRICT,reference_provider_id TEXT NOT NULL REFERENCES viewer_reference_providers(id) ON DELETE RESTRICT,protocol TEXT NOT NULL CHECK(protocol='reference-v1'));
+    CREATE TABLE viewer_reference_gcp_artifacts(attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES processing_attempt_gcp_snapshots(attempt_id) ON DELETE RESTRICT,object_id TEXT NOT NULL UNIQUE,relative_path TEXT NOT NULL UNIQUE,sha256 TEXT NOT NULL CHECK(length(sha256)=64),byte_size INTEGER NOT NULL CHECK(typeof(byte_size)='integer' AND byte_size>0));
+    CREATE TRIGGER viewer_reference_gcp_artifact_validate BEFORE INSERT ON viewer_reference_gcp_artifacts WHEN NOT EXISTS(SELECT 1 FROM viewer_reference_attempt_protocols WHERE attempt_id=NEW.attempt_id) OR NOT EXISTS(SELECT 1 FROM processing_attempt_gcp_snapshots s WHERE s.attempt_id=NEW.attempt_id AND s.sha256=NEW.sha256 AND length(CAST(s.content_text AS BLOB))=NEW.byte_size) OR EXISTS(SELECT 1 FROM viewer_reference_gcp_artifacts WHERE attempt_id=NEW.attempt_id OR object_id=NEW.object_id OR relative_path=NEW.relative_path OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'reference GCP artifact conflict'); END;
+    CREATE TRIGGER viewer_reference_gcp_artifact_immutable BEFORE UPDATE ON viewer_reference_gcp_artifacts BEGIN SELECT RAISE(ABORT,'reference GCP artifact immutable'); END;
+    CREATE TRIGGER viewer_reference_gcp_artifact_no_delete BEFORE DELETE ON viewer_reference_gcp_artifacts BEGIN SELECT RAISE(ABORT,'reference GCP artifact retained'); END;
+    CREATE TRIGGER viewer_reference_provider_unavailable BEFORE INSERT ON viewer_reference_providers BEGIN SELECT RAISE(ABORT,'reference provider unavailable'); END;
+    CREATE TRIGGER viewer_reference_provider_immutable BEFORE UPDATE ON viewer_reference_providers BEGIN SELECT RAISE(ABORT,'reference provider immutable'); END;
+    CREATE TRIGGER viewer_reference_provider_no_delete BEFORE DELETE ON viewer_reference_providers BEGIN SELECT RAISE(ABORT,'reference provider retained'); END;
+    CREATE TRIGGER viewer_reference_provider_no_replace BEFORE INSERT ON viewer_reference_providers WHEN EXISTS(SELECT 1 FROM viewer_reference_providers WHERE id=NEW.id OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'reference provider replacement'); END;
+    CREATE TRIGGER viewer_reference_genesis_unavailable BEFORE INSERT ON viewer_reference_attempt_genesis BEGIN SELECT RAISE(ABORT,'reference genesis unavailable'); END;
+    CREATE TRIGGER viewer_reference_genesis_no_existing BEFORE INSERT ON viewer_reference_attempt_genesis WHEN EXISTS(SELECT 1 FROM processing_attempts WHERE id=NEW.attempt_id) OR EXISTS(SELECT 1 FROM viewer_reference_attempt_genesis WHERE attempt_id=NEW.attempt_id OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'reference genesis conflict'); END;
+    CREATE TRIGGER viewer_reference_genesis_immutable BEFORE UPDATE ON viewer_reference_attempt_genesis BEGIN SELECT RAISE(ABORT,'reference genesis immutable'); END;
+    CREATE TRIGGER viewer_reference_genesis_no_delete BEFORE DELETE ON viewer_reference_attempt_genesis BEGIN SELECT RAISE(ABORT,'reference genesis retained'); END;
+    CREATE TRIGGER viewer_reference_genesis_attempt_insert BEFORE INSERT ON processing_attempts WHEN EXISTS(SELECT 1 FROM viewer_reference_attempt_genesis WHERE attempt_id=NEW.id) AND (NEW.provider_id IS NOT NULL OR NEW.provider_task_id IS NOT NULL) BEGIN SELECT RAISE(ABORT,'reference attempt provider conflict'); END;
+    CREATE TRIGGER viewer_reference_genesis_attempt_update BEFORE UPDATE ON processing_attempts WHEN EXISTS(SELECT 1 FROM viewer_reference_attempt_genesis WHERE attempt_id=OLD.id) AND (NEW.id IS NOT OLD.id OR NEW.rowid IS NOT OLD.rowid OR NEW.task_id IS NOT OLD.task_id OR NEW.dataset_id IS NOT OLD.dataset_id OR NEW.attempt_number IS NOT OLD.attempt_number OR NEW.provider_id IS NOT OLD.provider_id OR NEW.provider_task_id IS NOT OLD.provider_task_id OR NEW.options_json IS NOT OLD.options_json OR NEW.capability_fingerprint IS NOT OLD.capability_fingerprint OR NEW.created_by IS NOT OLD.created_by OR NEW.created_at IS NOT OLD.created_at) BEGIN SELECT RAISE(ABORT,'reference attempt identity immutable'); END;
+    CREATE TRIGGER viewer_reference_genesis_attempt_replace_insert BEFORE INSERT ON processing_attempts WHEN EXISTS(SELECT 1 FROM processing_attempts a JOIN viewer_reference_attempt_genesis g ON g.attempt_id=a.id WHERE a.id=NEW.id OR a.rowid=NEW.rowid OR (a.task_id=NEW.task_id AND a.attempt_number=NEW.attempt_number) OR (NEW.provider_id IS NOT NULL AND NEW.provider_task_id IS NOT NULL AND a.provider_id=NEW.provider_id AND a.provider_task_id=NEW.provider_task_id)) BEGIN SELECT RAISE(ABORT,'reference attempt replacement'); END;
+    CREATE TRIGGER viewer_reference_genesis_attempt_replace_update BEFORE UPDATE ON processing_attempts WHEN EXISTS(SELECT 1 FROM processing_attempts a JOIN viewer_reference_attempt_genesis g ON g.attempt_id=a.id WHERE a.id IS NOT OLD.id AND (a.id=NEW.id OR a.rowid=NEW.rowid OR (a.task_id=NEW.task_id AND a.attempt_number=NEW.attempt_number) OR (NEW.provider_id IS NOT NULL AND NEW.provider_task_id IS NOT NULL AND a.provider_id=NEW.provider_id AND a.provider_task_id=NEW.provider_task_id))) BEGIN SELECT RAISE(ABORT,'reference attempt replacement'); END;
+    CREATE TRIGGER viewer_reference_protocol_unavailable BEFORE INSERT ON viewer_reference_attempt_protocols BEGIN SELECT RAISE(ABORT,'reference protocol unavailable'); END;
+    CREATE TRIGGER viewer_reference_protocol_requires_genesis BEFORE INSERT ON viewer_reference_attempt_protocols WHEN NOT EXISTS(SELECT 1 FROM viewer_reference_attempt_genesis g JOIN processing_attempts a ON a.id=g.attempt_id WHERE g.attempt_id=NEW.attempt_id AND g.reference_provider_id=NEW.reference_provider_id AND a.provider_id IS NULL AND a.provider_task_id IS NULL) BEGIN SELECT RAISE(ABORT,'reference protocol genesis required'); END;
+    CREATE TRIGGER viewer_reference_protocol_immutable BEFORE UPDATE ON viewer_reference_attempt_protocols BEGIN SELECT RAISE(ABORT,'reference protocol immutable'); END;
+    CREATE TRIGGER viewer_reference_protocol_no_delete BEFORE DELETE ON viewer_reference_attempt_protocols BEGIN SELECT RAISE(ABORT,'reference protocol retained'); END;
+    CREATE TRIGGER viewer_reference_protocol_no_replace BEFORE INSERT ON viewer_reference_attempt_protocols WHEN EXISTS(SELECT 1 FROM viewer_reference_attempt_protocols WHERE attempt_id=NEW.attempt_id OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'reference protocol replacement'); END;
+  `},
+  // Provisional reference integration allocation. Never apply
+  // to an existing deployment until its actual migration ledger is verified.
+  {version:52,name:'viewer_gcp_raw_source_journal',sql:`
+    CREATE TABLE viewer_gcp_raw_sources (
+      id TEXT PRIMARY KEY NOT NULL,
+      dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+      source_sha256 TEXT NOT NULL CHECK(length(source_sha256)=64 AND source_sha256 NOT GLOB '*[^0-9a-f]*'),
+      source_bytes BLOB NOT NULL CHECK(typeof(source_bytes)='blob' AND length(source_bytes)>0 AND length(source_bytes)<=2097152),
+      source_filename TEXT NOT NULL CHECK(length(source_filename) BETWEEN 1 AND 240),
+      source_format TEXT NOT NULL CHECK(source_format IN ('generic-csv-v1','emlid-all-columns-v1')),
+      display_name TEXT NOT NULL CHECK(length(display_name) BETWEEN 1 AND 160),
+      declarations_json TEXT NOT NULL CHECK(json_valid(declarations_json)),
+      confirmation_token TEXT NOT NULL CHECK(length(confirmation_token)=64),
+      created_by TEXT NOT NULL,
+      request_key TEXT NOT NULL,
+      archive_relative_path TEXT NOT NULL,
+      set_id TEXT UNIQUE REFERENCES gcp_sets(id) ON DELETE RESTRICT,
+      status TEXT NOT NULL CHECK(status IN ('pending','ready')),
+      created_at TEXT NOT NULL,
+      ready_at TEXT,
+      UNIQUE(created_by,request_key),
+      CHECK((status='pending' AND ready_at IS NULL AND set_id IS NULL) OR (status='ready' AND ready_at IS NOT NULL AND set_id IS NOT NULL))
+    );
+    CREATE INDEX viewer_gcp_raw_sources_dataset_idx ON viewer_gcp_raw_sources(dataset_id,status,source_sha256);
+    CREATE TRIGGER viewer_gcp_raw_sources_no_replace BEFORE INSERT ON viewer_gcp_raw_sources
+      WHEN NEW.status!='pending' OR EXISTS(SELECT 1 FROM viewer_gcp_raw_sources WHERE id=NEW.id OR rowid=NEW.rowid OR (created_by=NEW.created_by AND request_key=NEW.request_key) OR (NEW.set_id IS NOT NULL AND set_id=NEW.set_id))
+      BEGIN SELECT RAISE(ABORT,'raw GCP source replacement prohibited'); END;
+    CREATE TRIGGER viewer_gcp_raw_sources_immutable BEFORE UPDATE ON viewer_gcp_raw_sources
+      WHEN NEW.id IS NOT OLD.id OR NEW.dataset_id IS NOT OLD.dataset_id OR NEW.source_sha256 IS NOT OLD.source_sha256 OR NEW.source_bytes IS NOT OLD.source_bytes OR NEW.source_filename IS NOT OLD.source_filename OR NEW.source_format IS NOT OLD.source_format OR NEW.display_name IS NOT OLD.display_name OR NEW.declarations_json IS NOT OLD.declarations_json OR NEW.confirmation_token IS NOT OLD.confirmation_token OR NEW.created_by IS NOT OLD.created_by OR NEW.request_key IS NOT OLD.request_key OR NEW.archive_relative_path IS NOT OLD.archive_relative_path OR NEW.created_at IS NOT OLD.created_at OR OLD.status!='pending' OR NEW.status!='ready' OR NEW.set_id!=OLD.id OR NOT EXISTS(SELECT 1 FROM gcp_sets WHERE id=NEW.set_id AND dataset_id=NEW.dataset_id AND source_sha256=NEW.source_sha256)
+      BEGIN SELECT RAISE(ABORT,'raw GCP source immutable'); END;
+    CREATE TRIGGER viewer_gcp_raw_sources_no_delete BEFORE DELETE ON viewer_gcp_raw_sources
+      BEGIN SELECT RAISE(ABORT,'raw GCP source retained'); END;
+  `},
+
+  // Isolated prototype only. Admission is unconditionally disabled. This is
+  // an indexed-data binding, not filesystem custody or a retention receipt.
+  {version:53,name:'viewer_source_binding_draft',sql:`
+    CREATE TABLE viewer_source_bindings (
+      id TEXT PRIMARY KEY NOT NULL,
+      attempt_id TEXT NOT NULL UNIQUE REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+      dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+      root_key TEXT NOT NULL, relative_path TEXT NOT NULL,
+      dataset_manifest_sha256 TEXT NOT NULL CHECK(length(dataset_manifest_sha256)=64 AND dataset_manifest_sha256 NOT GLOB '*[^0-9a-f]*'),
+      object_count INTEGER NOT NULL CHECK(object_count>0),
+      state TEXT NOT NULL CHECK(state IN ('building','prepared')), created_at TEXT NOT NULL
+    );
+    CREATE INDEX viewer_source_bindings_dataset_idx ON viewer_source_bindings(dataset_id);
+    CREATE TABLE viewer_source_effect_claims (
+      id TEXT PRIMARY KEY NOT NULL, operation_id TEXT NOT NULL,
+      effect_type TEXT NOT NULL CHECK(effect_type IN ('catalog_adoption_recovery','import_cleanup')),
+      root_key TEXT NOT NULL, relative_path TEXT NOT NULL, dataset_relative TEXT NOT NULL,
+      lease_owner TEXT, lease_token TEXT, lease_generation INTEGER,
+      state TEXT NOT NULL CHECK(state IN ('in_flight','completed')),
+      created_at TEXT NOT NULL, completed_at TEXT,
+      CHECK((state='in_flight' AND completed_at IS NULL) OR (state='completed' AND completed_at IS NOT NULL))
+    );
+    CREATE UNIQUE INDEX viewer_source_effect_one_inflight ON viewer_source_effect_claims(operation_id) WHERE state='in_flight';
+    CREATE TRIGGER viewer_source_effect_block_bound BEFORE INSERT ON viewer_source_effect_claims WHEN EXISTS(SELECT 1 FROM viewer_source_bindings) BEGIN SELECT RAISE(ABORT,'source binding retained'); END;
+    CREATE TRIGGER viewer_source_effect_no_replace BEFORE INSERT ON viewer_source_effect_claims WHEN EXISTS(SELECT 1 FROM viewer_source_effect_claims WHERE id=NEW.id OR rowid=NEW.rowid OR (operation_id=NEW.operation_id AND state='in_flight' AND NEW.state='in_flight')) BEGIN SELECT RAISE(ABORT,'source effect claim retained'); END;
+    CREATE TRIGGER viewer_source_effect_no_delete BEFORE DELETE ON viewer_source_effect_claims BEGIN SELECT RAISE(ABORT,'source effect claim retained'); END;
+    CREATE TRIGGER viewer_source_effect_immutable BEFORE UPDATE ON viewer_source_effect_claims WHEN NOT (OLD.state='in_flight' AND NEW.state='completed' AND NEW.id IS OLD.id AND NEW.rowid IS OLD.rowid AND NEW.operation_id IS OLD.operation_id AND NEW.effect_type IS OLD.effect_type AND NEW.root_key IS OLD.root_key AND NEW.relative_path IS OLD.relative_path AND NEW.dataset_relative IS OLD.dataset_relative AND NEW.lease_owner IS OLD.lease_owner AND NEW.lease_token IS OLD.lease_token AND NEW.lease_generation IS OLD.lease_generation AND NEW.created_at IS OLD.created_at AND OLD.completed_at IS NULL AND NEW.completed_at IS NOT NULL) BEGIN SELECT RAISE(ABORT,'source effect claim immutable'); END;
+    CREATE TRIGGER viewer_source_import_effect_guard_update BEFORE UPDATE ON import_cleanup_jobs WHEN EXISTS(SELECT 1 FROM viewer_source_effect_claims c WHERE c.effect_type='import_cleanup' AND c.operation_id=OLD.id AND c.state='in_flight') AND (NEW.id IS NOT OLD.id OR NEW.rowid IS NOT OLD.rowid OR NEW.root_key IS NOT OLD.root_key OR NEW.relative_path IS NOT OLD.relative_path OR NEW.cleanup_type IS NOT OLD.cleanup_type OR NEW.retained_import_id IS NOT OLD.retained_import_id OR ((NEW.lease_owner IS NOT OLD.lease_owner OR NEW.lease_token IS NOT OLD.lease_token) AND NOT (NEW.lease_owner IS NULL AND NEW.lease_token IS NULL AND NEW.status NOT IN ('leased','quarantined'))) OR NEW.lease_generation IS NOT OLD.lease_generation OR NEW.expected_byte_size IS NOT OLD.expected_byte_size OR NEW.expected_sha256 IS NOT OLD.expected_sha256 OR NEW.expected_dev IS NOT OLD.expected_dev OR NEW.expected_ino IS NOT OLD.expected_ino OR NEW.expected_ctime_ns IS NOT OLD.expected_ctime_ns OR NEW.expected_mtime_ns IS NOT OLD.expected_mtime_ns OR (OLD.quarantine_relative_path IS NOT NULL AND NEW.quarantine_relative_path IS NOT OLD.quarantine_relative_path)) BEGIN SELECT RAISE(ABORT,'source import effect in flight'); END;
+    CREATE TRIGGER viewer_source_import_effect_guard_insert BEFORE INSERT ON import_cleanup_jobs WHEN EXISTS(SELECT 1 FROM import_cleanup_jobs j JOIN viewer_source_effect_claims c ON c.operation_id=j.id AND c.effect_type='import_cleanup' AND c.state='in_flight' WHERE j.id=NEW.id OR j.rowid=NEW.rowid OR (j.retained_import_id=NEW.retained_import_id AND j.cleanup_type=NEW.cleanup_type)) BEGIN SELECT RAISE(ABORT,'source import effect in flight'); END;
+    CREATE TRIGGER viewer_source_import_effect_guard_update_replace BEFORE UPDATE ON import_cleanup_jobs WHEN EXISTS(SELECT 1 FROM import_cleanup_jobs j JOIN viewer_source_effect_claims c ON c.operation_id=j.id AND c.effect_type='import_cleanup' AND c.state='in_flight' WHERE j.id<>OLD.id AND (j.id=NEW.id OR j.rowid=NEW.rowid OR (j.retained_import_id=NEW.retained_import_id AND j.cleanup_type=NEW.cleanup_type))) BEGIN SELECT RAISE(ABORT,'source import effect in flight'); END;
+    CREATE TRIGGER viewer_source_import_effect_guard_delete BEFORE DELETE ON import_cleanup_jobs WHEN EXISTS(SELECT 1 FROM viewer_source_effect_claims c WHERE c.effect_type='import_cleanup' AND c.operation_id=OLD.id AND c.state='in_flight') BEGIN SELECT RAISE(ABORT,'source import effect in flight'); END;
+    CREATE TABLE viewer_source_binding_objects (
+      binding_id TEXT NOT NULL REFERENCES viewer_source_bindings(id) ON DELETE RESTRICT,
+      file_id TEXT NOT NULL REFERENCES dataset_files(id) ON DELETE RESTRICT,
+      relative_path TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size>=0),
+      sha256 TEXT NOT NULL CHECK(length(sha256)=64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+      PRIMARY KEY(binding_id,file_id)
+    );
+    CREATE TRIGGER viewer_source_binding_unavailable BEFORE INSERT ON viewer_source_bindings BEGIN SELECT RAISE(ABORT,'source binding admission unavailable'); END;
+    CREATE TRIGGER viewer_source_binding_no_replace BEFORE INSERT ON viewer_source_bindings WHEN EXISTS(SELECT 1 FROM viewer_source_bindings WHERE id=NEW.id OR rowid=NEW.rowid OR attempt_id=NEW.attempt_id) BEGIN SELECT RAISE(ABORT,'source binding replacement'); END;
+    CREATE TRIGGER viewer_source_binding_no_update BEFORE UPDATE ON viewer_source_bindings WHEN NOT (OLD.state='building' AND NEW.state='prepared' AND NEW.id IS OLD.id AND NEW.rowid IS OLD.rowid AND NEW.attempt_id IS OLD.attempt_id AND NEW.dataset_id IS OLD.dataset_id AND NEW.project_id IS OLD.project_id AND NEW.root_key IS OLD.root_key AND NEW.relative_path IS OLD.relative_path AND NEW.dataset_manifest_sha256 IS OLD.dataset_manifest_sha256 AND NEW.object_count IS OLD.object_count AND NEW.created_at IS OLD.created_at AND (SELECT count(*) FROM viewer_source_binding_objects WHERE binding_id=OLD.id)=OLD.object_count) BEGIN SELECT RAISE(ABORT,'source binding immutable'); END;
+    CREATE TRIGGER viewer_source_binding_no_delete BEFORE DELETE ON viewer_source_bindings BEGIN SELECT RAISE(ABORT,'source binding retained'); END;
+    CREATE TRIGGER viewer_source_binding_object_insert BEFORE INSERT ON viewer_source_binding_objects WHEN COALESCE((SELECT state FROM viewer_source_bindings WHERE id=NEW.binding_id),'')<>'building' OR NOT EXISTS(SELECT 1 FROM viewer_source_bindings b JOIN dataset_files f ON f.id=NEW.file_id AND f.dataset_id=b.dataset_id WHERE b.id=NEW.binding_id AND f.relative_path=NEW.relative_path AND f.byte_size=NEW.byte_size AND f.sha256=NEW.sha256) OR EXISTS(SELECT 1 FROM viewer_source_binding_objects WHERE rowid=NEW.rowid OR (binding_id=NEW.binding_id AND file_id=NEW.file_id)) BEGIN SELECT RAISE(ABORT,'source binding object conflict'); END;
+    CREATE TRIGGER viewer_source_binding_object_no_update BEFORE UPDATE ON viewer_source_binding_objects BEGIN SELECT RAISE(ABORT,'source binding object immutable'); END;
+    CREATE TRIGGER viewer_source_binding_object_no_delete BEFORE DELETE ON viewer_source_binding_objects BEGIN SELECT RAISE(ABORT,'source binding object retained'); END;
+    CREATE TRIGGER viewer_source_binding_dataset_guard_update BEFORE UPDATE ON datasets WHEN EXISTS(SELECT 1 FROM viewer_source_bindings WHERE dataset_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source binding dataset retained'); END;
+    CREATE TRIGGER viewer_source_binding_dataset_guard_delete BEFORE DELETE ON datasets WHEN EXISTS(SELECT 1 FROM viewer_source_bindings WHERE dataset_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source binding dataset retained'); END;
+    CREATE TRIGGER viewer_source_binding_dataset_guard_insert BEFORE INSERT ON datasets WHEN EXISTS(SELECT 1 FROM datasets d JOIN viewer_source_bindings b ON b.dataset_id=d.id WHERE d.id=NEW.id OR d.rowid=NEW.rowid OR (d.root_key=NEW.root_key AND d.relative_path=NEW.relative_path)) BEGIN SELECT RAISE(ABORT,'source binding dataset retained'); END;
+    CREATE TRIGGER viewer_source_binding_file_guard_insert BEFORE INSERT ON dataset_files WHEN EXISTS(SELECT 1 FROM viewer_source_bindings WHERE dataset_id=NEW.dataset_id) OR EXISTS(SELECT 1 FROM dataset_files f JOIN viewer_source_binding_objects b ON b.file_id=f.id WHERE f.id=NEW.id OR f.rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'source binding dataset files retained'); END;
+    CREATE TRIGGER viewer_source_binding_file_guard_update BEFORE UPDATE ON dataset_files WHEN EXISTS(SELECT 1 FROM viewer_source_bindings WHERE dataset_id=OLD.dataset_id OR dataset_id=NEW.dataset_id) BEGIN SELECT RAISE(ABORT,'source binding dataset files retained'); END;
+    CREATE TRIGGER viewer_source_binding_file_guard_delete BEFORE DELETE ON dataset_files WHEN EXISTS(SELECT 1 FROM viewer_source_bindings WHERE dataset_id=OLD.dataset_id) BEGIN SELECT RAISE(ABORT,'source binding dataset files retained'); END;
+    CREATE TRIGGER viewer_source_binding_attempt_guard_update BEFORE UPDATE ON processing_attempts WHEN EXISTS(SELECT 1 FROM viewer_source_bindings WHERE attempt_id=OLD.id) AND (NEW.id IS NOT OLD.id OR NEW.rowid IS NOT OLD.rowid OR NEW.dataset_id IS NOT OLD.dataset_id OR NEW.task_id IS NOT OLD.task_id OR NEW.attempt_number IS NOT OLD.attempt_number OR NEW.provider_id IS NOT OLD.provider_id OR NEW.provider_task_id IS NOT OLD.provider_task_id) BEGIN SELECT RAISE(ABORT,'source binding attempt identity retained'); END;
+    CREATE TRIGGER viewer_source_binding_attempt_guard_delete BEFORE DELETE ON processing_attempts WHEN EXISTS(SELECT 1 FROM viewer_source_bindings WHERE attempt_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source binding attempt identity retained'); END;
+    CREATE TRIGGER viewer_source_binding_attempt_guard_insert BEFORE INSERT ON processing_attempts WHEN EXISTS(SELECT 1 FROM processing_attempts a JOIN viewer_source_bindings b ON b.attempt_id=a.id WHERE a.id=NEW.id OR a.rowid=NEW.rowid OR (a.task_id=NEW.task_id AND a.attempt_number=NEW.attempt_number) OR (NEW.provider_id IS NOT NULL AND NEW.provider_task_id IS NOT NULL AND a.provider_id=NEW.provider_id AND a.provider_task_id=NEW.provider_task_id)) BEGIN SELECT RAISE(ABORT,'source binding attempt identity retained'); END;
+    CREATE TRIGGER viewer_source_binding_task_guard_update BEFORE UPDATE ON processing_tasks WHEN EXISTS(SELECT 1 FROM viewer_source_bindings b JOIN processing_attempts a ON a.id=b.attempt_id WHERE a.task_id=OLD.id) AND (NEW.id IS NOT OLD.id OR NEW.rowid IS NOT OLD.rowid OR NEW.dataset_id IS NOT OLD.dataset_id OR NEW.project_id IS NOT OLD.project_id) BEGIN SELECT RAISE(ABORT,'source binding task identity retained'); END;
+    CREATE TRIGGER viewer_source_binding_task_guard_delete BEFORE DELETE ON processing_tasks WHEN EXISTS(SELECT 1 FROM viewer_source_bindings b JOIN processing_attempts a ON a.id=b.attempt_id WHERE a.task_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source binding task identity retained'); END;
+    CREATE TRIGGER viewer_source_binding_task_guard_insert BEFORE INSERT ON processing_tasks WHEN EXISTS(SELECT 1 FROM processing_tasks t JOIN processing_attempts a ON a.task_id=t.id JOIN viewer_source_bindings b ON b.attempt_id=a.id WHERE t.id=NEW.id OR t.rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'source binding task identity retained'); END;
+  `},
 ];
 
 function applyMigrations(database) {
+  installReferenceCatalogIdentity(database);
   const {assertProtectedMigrationIdentity}=require('./migrationIdentityGuard');
   database.exec('BEGIN IMMEDIATE');
   try {

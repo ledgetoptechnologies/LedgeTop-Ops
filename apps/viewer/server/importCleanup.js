@@ -604,6 +604,7 @@ async function processOneImportCleanup(deps, owner, { now = Date.now, leaseSecon
     if (job.cleanup_type === 'staging_tree') await executeStagingCleanup(deps, job, owner, { now, hooks, signal: controller.signal });
     else if (job.cleanup_type === 'source_zip') await executeZipCleanup(deps, job, owner, { now, hooks, signal: controller.signal });
     else throw cleanupError('invalid_cleanup_target', 'cleanup type is not implemented');
+    if (!deps.processing.settleImportCleanupEffect(job.id, job.source_effect_claim_id, owner, job.lease_token, job.lease_generation)) throw cleanupError('lease_lost', 'cleanup effect remains uncertain');
     return true;
   } catch (error) {
     if (job && error?.code !== 'lease_lost') {
