@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { canonical, hash, need, compileConfig, validateInstallation } from './production-deploy.mjs';
+import { canonical, hash, need, compileConfig, validateInstallation, validateReviewedExpectedDeploymentVersions } from './production-deploy.mjs';
 import { domainRecognitionProfile } from './production-domain-recognition.mjs';
 
 const equal = (a, b) => canonical(a) === canonical(b);
@@ -91,10 +91,11 @@ export function verifyOrdinaryFrontendArtifacts(release) {
 /** OFFLINE compiler only. The caller pins the source, complete capture and
  * resulting packet before a separately reviewed native versioned execution. */
 export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
-  profile = domainRecognitionProfile('portal-entry-canonical') } = {}) {
+  profile = domainRecognitionProfile('portal-entry-canonical'), expectedDeploymentVersions } = {}) {
   need(['operations', 'client'].includes(app) && release?.application === app, 'Exact frontend application required');
+  const reviewedExpectedDeploymentVersions = validateReviewedExpectedDeploymentVersions(expectedDeploymentVersions);
   const before = clone(snapshot), beforeProfile = clone(profile);
-  validateInstallation(before, { profile: beforeProfile });
+  validateInstallation(before, { profile: beforeProfile, expectedDeploymentVersions: reviewedExpectedDeploymentVersions });
   const browserProof = verifyOrdinaryFrontendArtifacts(release);
   const state = before[app], bindings = state.version.resources.bindings;
   need(bindings.filter(row => row.name === 'ASSETS').length === 1
@@ -103,7 +104,7 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
   const assets = clone(state.modern.assets);
   need(assets && equal(Object.keys(assets), ['config']) && assets.config.base_path === '/'
     && Object.keys(assets.config).every(key => ['base_path', 'html_handling', 'not_found_handling', 'run_worker_first'].includes(key)), 'Unsupported installed asset configuration');
-  const config = compileConfig(before, app, release.main.path, beforeProfile);
+  const config = compileConfig(before, app, release.main.path, beforeProfile, reviewedExpectedDeploymentVersions);
   config.find_additional_modules = false;
   config.keep_vars = false;
   config.unsafe.metadata.keep_bindings = [];
@@ -123,6 +124,7 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
       expectedProfile.workers[name].plainValueSHA256[row.name] = hash(row.text);
     }
   return freeze({ schemaVersion: 1, application: app, sourceCommit: release.sourceCommit,
+    ...(reviewedExpectedDeploymentVersions ? { expectedDeploymentVersions: clone(reviewedExpectedDeploymentVersions) } : {}),
     offlineOnly: true, deploymentEnabled: false, assetsUpload: true, historicalOrphanAssetsRetained: false,
     liveNamespaceVerified: false, nativeCompletionJwtMustRemainUnmodified: true,
     baselineSHA256: hash(canonical(before)), release: clone(release), browserProof, config,

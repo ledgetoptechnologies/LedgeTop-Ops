@@ -62,6 +62,38 @@ function activeId(state, expectedVersions) {
   need(Array.isArray(rows) && rows.length === 1 && rows[0].percentage === 100 && UUID.test(rows[0].version_id), 'Production must have one100% active version');
   return rows[0].version_id;
 }
+
+// Exact, reviewed production promotion recognized by the offline UI planner.
+// Omission remains the original single-100%-row rule. This narrow exception
+// does not infer a deployment expectation from the provider snapshot.
+const REVIEWED_EXPECTED_DEPLOYMENT_VERSIONS = Object.freeze({
+  operations: Object.freeze([
+    Object.freeze({ versionId: '0b1ab5a8-9db0-42ab-b718-8569fae2382e', percentage: 0 }),
+    Object.freeze({ versionId: 'a45943f4-e5c5-4142-9057-fb9adb5cf739', percentage: 100 }),
+  ]),
+});
+function exactDataObject(value, keys) {
+  if (!value || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).length !== keys.length) return false;
+  return keys.every(key => Object.hasOwn(value, key)
+    && Object.getOwnPropertyDescriptor(value, key)?.get === undefined
+    && Object.getOwnPropertyDescriptor(value, key)?.set === undefined);
+}
+export function validateReviewedExpectedDeploymentVersions(value) {
+  if (value === undefined) return undefined;
+  need(exactDataObject(value, ['operations']), 'Unreviewed expected deployment weights');
+  const rows = value.operations, reviewed = REVIEWED_EXPECTED_DEPLOYMENT_VERSIONS.operations;
+  need(Array.isArray(rows) && Object.getPrototypeOf(rows) === Array.prototype && rows.length === reviewed.length,
+    'Unreviewed expected deployment weights');
+  const arrayKeys = Reflect.ownKeys(rows);
+  need(arrayKeys.length === 3 && ['0', '1', 'length'].every(key => arrayKeys.includes(key)), 'Unreviewed expected deployment weights');
+  const entries = ['0', '1'].map(key => Object.getOwnPropertyDescriptor(rows, key));
+  need(entries.every(entry => entry && Object.hasOwn(entry, 'value') && entry.get === undefined && entry.set === undefined),
+    'Unreviewed expected deployment weights');
+  need(entries.every((entry, index) => exactDataObject(entry.value, ['versionId', 'percentage'])
+    && entry.value.versionId === reviewed[index].versionId && entry.value.percentage === reviewed[index].percentage),
+  'Unreviewed expected deployment weights');
+  return structuredClone(value);
+}
 export function validateInstallation(snapshot, { allowLatest = {}, profile = PROFILE, selectedApp, expectedDeploymentVersions = {} } = {}) {
   need(profile.onboardingAdminOrigin === undefined || profile.onboardingAdminOrigin === 'https://ops.ledgetop.app', 'Unreviewed canonical admin origin profile');
   need(snapshot && equal(Object.keys(snapshot).sort(), Object.keys(profile.workers).sort()), 'Existing complete production installation required');
@@ -103,8 +135,9 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
   return snapshot;
 }
 
-export function compileConfig(snapshot, app, main, profile = PROFILE) {
-  validateInstallation(snapshot, { profile, selectedApp: app }); need(Object.hasOwn(profile.workers, app), 'Unknown Worker');
+export function compileConfig(snapshot, app, main, profile = PROFILE, expectedDeploymentVersions) {
+  const reviewedExpectedDeploymentVersions = validateReviewedExpectedDeploymentVersions(expectedDeploymentVersions);
+  validateInstallation(snapshot, { profile, selectedApp: app, expectedDeploymentVersions: reviewedExpectedDeploymentVersions }); need(Object.hasOwn(profile.workers, app), 'Unknown Worker');
   const s = snapshot[app], spec = profile.workers[app];
   const annotations = clone(s.settings.annotations ?? {});
   delete annotations['workers/triggered_by']; // API-owned, rejected by native versions upload.
