@@ -3,7 +3,17 @@ import { useEffect, useRef, useState } from "react";
 type State = "opening" | "ready" | "submitting" | "uncertain" | "submitted" | "retryable" | "unavailable";
 type Protocol = "legacy" | "operations-native";
 type Target = Readonly<{ clientRecordId: string; displayLabel: string }> &
-  (Readonly<{ selectionId: string }> | Readonly<{ targetId: string; targetRevision: number }>);
+  (Readonly<{ selectionId: string }> | Readonly<{ targetId: string; targetRevision: number; permissions: readonly string[] }>);
+// The two access sets an Ops link can pin, each with its schema version. Viewing the service home is always
+// included; submitting service requests only when the administrator chose it. Anything else isn't confirmable.
+const NATIVE_ACCESS = [
+  { schemaVersion: 3, permissions: ["operations.service_home.read"] },
+  { schemaVersion: 4, permissions: ["operations.request.create", "operations.service_home.read"] },
+] as const;
+const ACCESS_LABEL: Record<string, string> = {
+  "operations.service_home.read": "View your service home",
+  "operations.request.create": "Send service requests to Ledge Top",
+};
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CSRF = /^\d{1,12}\.[0-9a-f]{64}$/;
 
@@ -28,7 +38,9 @@ function session(value: unknown): string | null {
   return parsed && typeof parsed.csrfToken === "string" && CSRF.test(parsed.csrfToken) ? parsed.csrfToken : null;
 }
 function inspected(value: unknown, intentId: string, protocol: Protocol): Target | null {
-  const parsed = ownRecord(value, ["intentId", "revision", "state", "target", "expiresAt"]);
+  const parsed = ownRecord(value, protocol === "operations-native"
+    ? ["intentId", "revision", "state", "target", "expiresAt", "permissions", "permissionSchemaVersion"]
+    : ["intentId", "revision", "state", "target", "expiresAt"]);
   const target = parsed && ownRecord(parsed.target, protocol === "operations-native"
     ? ["clientRecordId", "targetId", "targetRevision", "displayLabel"] : ["clientRecordId", "selectionId", "displayLabel"]);
   if (!parsed || parsed.intentId !== intentId || parsed.revision !== 1 || parsed.state !== "issued"
@@ -38,8 +50,12 @@ function inspected(value: unknown, intentId: string, protocol: Protocol): Target
   if (protocol === "operations-native") {
     if (typeof target.targetId !== "string" || !UUID.test(target.targetId) || typeof target.targetRevision !== "number"
       || !Number.isSafeInteger(target.targetRevision) || target.targetRevision < 1) return null;
+    const permissions = parsed.permissions;
+    const access = Array.isArray(permissions) && NATIVE_ACCESS.find(item => item.schemaVersion === parsed.permissionSchemaVersion
+      && item.permissions.length === permissions.length && item.permissions.every((name, index) => permissions[index] === name));
+    if (!access) return null;
     return { clientRecordId: target.clientRecordId, targetId: target.targetId,
-      targetRevision: target.targetRevision, displayLabel: target.displayLabel };
+      targetRevision: target.targetRevision, displayLabel: target.displayLabel, permissions: access.permissions };
   }
   if (typeof target.selectionId !== "string" || !UUID.test(target.selectionId)) return null;
   return { clientRecordId: target.clientRecordId, selectionId: target.selectionId, displayLabel: target.displayLabel };
@@ -97,9 +113,10 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, prot
       const result = await request(protocol, "/redeem", { method: "POST",
         headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf.current },
         body: JSON.stringify({ intentId, opaqueToken, operationId: operationId.current, acknowledged: true,
-          acknowledgedTarget: "targetId" in target
-            ? { targetId: target.targetId, targetRevision: target.targetRevision, clientRecordId: target.clientRecordId }
-            : { clientRecordId: target.clientRecordId, selectionId: target.selectionId } }) });
+          ...("targetId" in target
+            ? { acknowledgedTarget: { targetId: target.targetId, targetRevision: target.targetRevision, clientRecordId: target.clientRecordId },
+              acknowledgedPermissions: target.permissions }
+            : { acknowledgedTarget: { clientRecordId: target.clientRecordId, selectionId: target.selectionId } }) }) });
       setState(redeemed(result, intentId) ? "submitted" : "unavailable");
     } catch (error) {
       setState(error instanceof RequestFailure && error.uncertain ? "uncertain" : "unavailable");
@@ -128,9 +145,12 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, prot
     <form className="client-profile-onboarding-form" onSubmit={event => { event.preventDefault(); void confirm(); }}>
       <fieldset className="client-profile-onboarding-type"><legend>Selected client account</legend>
         <p><strong>{target?.displayLabel}</strong></p>
+        {target && "permissions" in target && <div className="client-recipient-access"><p>With this account you’ll be able to:</p>
+          <ul>{[...target.permissions].reverse().map(name => <li key={name}>{ACCESS_LABEL[name]}</li>)}</ul></div>}
         <div><label><input type="checkbox" checked={acknowledged} disabled={state === "submitting"}
           onChange={event => setAcknowledged(event.currentTarget.checked)} />
-          I confirm this is the client account I intend to connect to my signed-in portal identity.</label></div>
+          I confirm this is the client account I intend to connect to my signed-in portal identity
+          {target && "permissions" in target ? ", with the access listed above" : ""}.</label></div>
       </fieldset>
       <button type="submit" className="button-orange" disabled={!acknowledged || state === "submitting"}>
         {state === "submitting" ? "Submitting confirmation…" : "Submit for administrator review"}
