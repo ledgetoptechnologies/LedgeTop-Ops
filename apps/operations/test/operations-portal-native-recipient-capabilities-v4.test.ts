@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  canonicalOperationsPortalNativeInquiryCapabilityCommandV4,
   encodeOperationsPortalNativeRecipientCapabilities,
   OPERATIONS_PORTAL_NATIVE_RECIPIENT_HOME_PERMISSION as HOME,
   OPERATIONS_PORTAL_NATIVE_RECIPIENT_INQUIRY_PERMISSION as INQUIRY,
@@ -7,6 +8,7 @@ import {
   parseOperationsPortalNativeRecipientCapabilities,
   parseOperationsPortalNativeRecipientCapabilitiesJson,
   parseOperationsPortalNativeRecipientIssueRequest,
+  parseOperationsPortalNativeInquiryCapabilityCommandV4,
 } from "../../../packages/shared/src/operations-portal-native-recipient-capabilities-v4";
 
 const issue = {
@@ -15,24 +17,45 @@ const issue = {
   targetClientRecordId: "client-17",
   expiresAt: "2026-10-31T12:00:00.000Z",
 };
+const now = Date.parse("2026-10-30T12:00:00.000Z");
+const capability = {
+  protocol: "operations-portal-native-inquiry-capability", protocolVersion: 1, permissionSchemaVersion: 4,
+  action: "grant", operationId: "a0000000-0000-4000-8000-000000000003",
+  target: { targetId: "a0000000-0000-4000-8000-000000000002", targetRevision: "1",
+    clientAuthorityId: "a0000000-0000-4000-8000-000000000004", workspaceId: "ops-workspace",
+    targetClientRecordId: "client-17" },
+  recipient: { recipientBindingId: "a0000000-0000-4000-8000-000000000005",
+    enrollmentIntentId: "a0000000-0000-4000-8000-000000000006",
+    issuer: "https://tenant.cloudflareaccess.com", subject: "access|user-17" },
+  baseAuthority: { operationId: "a0000000-0000-4000-8000-000000000007", ownershipEpoch: "1", grantRevision: "1" },
+  publication: { operationId: "a0000000-0000-4000-8000-000000000008", revision: "1", sourceSequence: "1",
+    snapshotId: "a0000000-0000-4000-8000-000000000009", snapshotSha256: "a".repeat(64) },
+  transition: { expectedRevision: "0", resultingRevision: "1" }, permission: INQUIRY,
+  expiresAt: "2026-10-31T12:00:00.000Z",
+  actorProof: { staffId: "staff-17", verifiedAccessSubject: "staff|17", admissionVersion: "1",
+    profileVersion: "1", grantGeneration: "1", verifiedUntil: "2026-10-30T13:00:00.000Z" },
+  observedAt: "2026-10-30T12:00:00.000Z",
+};
 
 describe("unactivated Operations recipient capability schema v4", () => {
   it("keeps the exact legacy issue body home-only and labels it v3", () => {
-    expect(parseOperationsPortalNativeRecipientIssueRequest(issue)).toEqual({
+    expect(parseOperationsPortalNativeRecipientIssueRequest(issue, now)).toEqual({
       ...issue, permissions: [HOME], permissionSchemaVersion: 3, legacyShape: true,
     });
-    expect(parseOperationsPortalNativeRecipientIssueRequest({ ...issue, ignored: true })).toBeNull();
+    expect(parseOperationsPortalNativeRecipientIssueRequest({ ...issue, ignored: true }, now)).toBeNull();
   });
 
   it("requires an explicit canonical permission set in the new issue body", () => {
-    expect(parseOperationsPortalNativeRecipientIssueRequest({ ...issue, permissions: [HOME] })).toEqual({
+    expect(parseOperationsPortalNativeRecipientIssueRequest({ ...issue, permissions: [HOME] }, now)).toEqual({
       ...issue, permissions: [HOME], permissionSchemaVersion: 3, legacyShape: false,
     });
     expect(parseOperationsPortalNativeRecipientIssueRequest({ ...issue,
-      permissions: [INQUIRY, HOME] })).toEqual({ ...issue, permissions: [INQUIRY, HOME],
+      permissions: [INQUIRY, HOME] }, now)).toEqual({ ...issue, permissions: [INQUIRY, HOME],
       permissionSchemaVersion: 4, legacyShape: false });
-    expect(parseOperationsPortalNativeRecipientIssueRequest({ ...issue, permissions: [] })).toBeNull();
-    expect(parseOperationsPortalNativeRecipientIssueRequest({ ...issue, permissions: [INQUIRY] })).toBeNull();
+    expect(parseOperationsPortalNativeRecipientIssueRequest({ ...issue, permissions: [] }, now)).toBeNull();
+    expect(parseOperationsPortalNativeRecipientIssueRequest({ ...issue, permissions: [INQUIRY] }, now)).toBeNull();
+    expect(parseOperationsPortalNativeRecipientIssueRequest({ ...issue, expiresAt: "2026-10-30T11:59:59.999Z" }, now)).toBeNull();
+    expect(parseOperationsPortalNativeRecipientIssueRequest({ ...issue, expiresAt: "2026-11-06T12:00:00.001Z" }, now)).toBeNull();
   });
 
   it("enforces exact version, action, ordering and duplicate-free capability sets", () => {
@@ -86,5 +109,28 @@ describe("unactivated Operations recipient capability schema v4", () => {
     expect(parseOperationsPortalNativeRecipientCapabilitiesJson(4, "recipient.grant",
       '["operations.service_home.read","operations.request.create"]')).toBeNull();
     expect(parseOperationsPortalNativeRecipientCapabilitiesJson(4, "recipient.grant", "x".repeat(257))).toBeNull();
+  });
+
+  it("canonicalizes companion request.create commands with exact parent and publication pins", () => {
+    const parsed = parseOperationsPortalNativeInquiryCapabilityCommandV4(capability);
+    expect(parsed).toMatchObject(capability);
+    expect(canonicalOperationsPortalNativeInquiryCapabilityCommandV4(capability)).toBe(JSON.stringify(parsed));
+    expect(parseOperationsPortalNativeInquiryCapabilityCommandV4({ ...capability, permission: HOME })).toBeNull();
+    expect(parseOperationsPortalNativeInquiryCapabilityCommandV4({ ...capability, permissionSchemaVersion: 3 })).toBeNull();
+    expect(parseOperationsPortalNativeInquiryCapabilityCommandV4({ ...capability,
+      baseAuthority: { ...capability.baseAuthority, ownershipEpoch: "0" } })).toBeNull();
+    expect(parseOperationsPortalNativeInquiryCapabilityCommandV4({ ...capability,
+      transition: { expectedRevision: "1", resultingRevision: "3" } })).toBeNull();
+    expect(parseOperationsPortalNativeInquiryCapabilityCommandV4({ ...capability, expiresAt: capability.observedAt })).toBeNull();
+    expect(parseOperationsPortalNativeInquiryCapabilityCommandV4({ ...capability, unreviewed: true })).toBeNull();
+    let getterCalled = false;
+    const getterCommand = { ...capability };
+    Object.defineProperty(getterCommand, "action", { enumerable: true, get: () => {
+      getterCalled = true; return "grant";
+    } });
+    const revoked = Proxy.revocable({ ...capability }, {}); revoked.revoke();
+    expect(parseOperationsPortalNativeInquiryCapabilityCommandV4(getterCommand)).toBeNull();
+    expect(parseOperationsPortalNativeInquiryCapabilityCommandV4(revoked.proxy)).toBeNull();
+    expect(getterCalled).toBe(false);
   });
 });

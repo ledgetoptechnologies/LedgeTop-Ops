@@ -151,6 +151,9 @@ describe("Operations-native recipient authority end-to-end D1", () => {
     const labelMigration = readFileSync(new URL("../migrations/0160_operations_portal_native_recipient_labels.sql",
       import.meta.url), "utf8");
     await ops.batch(splitD1MigrationStatements(labelMigration).map(statement => ops.prepare(statement)));
+    const capabilityIntentMigration = readFileSync(new URL("../migrations/0233_operations_portal_native_recipient_capability_intents.sql",
+      import.meta.url), "utf8");
+    await ops.batch(splitD1MigrationStatements(capabilityIntentMigration).map(statement => ops.prepare(statement)));
     const directoryRecords = [
       { recordId: rootId, kind: "organization", version: "1", parentRecordId: null, relationshipVersion: null,
         displayName: "Exact Organization", externalFences: [] },
@@ -262,6 +265,50 @@ describe("Operations-native recipient authority end-to-end D1", () => {
     ]);
   });
   afterEach(async () => runtime.dispose());
+
+  it("pins an explicit request-create selection in the immutable issue review without changing the v3 home grant", async () => {
+    const issued = await issueOperationsPortalNativeRecipientIntent(ops, { operationId: id(70), targetId,
+      targetClientRecordId: clientId, expiresAt: future(), owner, legacyShape: false, permissionSchemaVersion: 4,
+      permissions: ["operations.request.create", "operations.service_home.read"] });
+    expect(issued.review).toMatchObject({ permissionSchemaVersion: 4,
+      permissions: ["operations.request.create", "operations.service_home.read"] });
+    const pinned = await ops.prepare(`SELECT permission_schema_version,requested_permissions_json
+      FROM operations_portal_native_recipient_intents WHERE intent_id=?`).bind(issued.review.intentId)
+      .first<{ permission_schema_version: number; requested_permissions_json: string }>();
+    expect(pinned).toEqual({ permission_schema_version: 4,
+      requested_permissions_json: '["operations.request.create","operations.service_home.read"]' });
+    const issue = await ops.prepare(`SELECT canonical_request_json FROM operations_portal_native_recipient_operations
+      WHERE operation_id=? AND action='issue'`).bind(id(70)).first<{ canonical_request_json: string }>();
+    expect(JSON.parse(issue!.canonical_request_json).request).toMatchObject({ permissionSchemaVersion: 4,
+      permissions: ["operations.request.create", "operations.service_home.read"] });
+    await expect(ops.prepare(`UPDATE operations_portal_native_recipient_intents
+      SET requested_permissions_json='["operations.service_home.read"]' WHERE intent_id=?`)
+      .bind(issued.review.intentId).run()).rejects.toThrow();
+    expect((await ops.prepare(`SELECT requested_permissions_json FROM operations_portal_native_recipient_intents WHERE intent_id=?`)
+      .bind(issued.review.intentId).first<{ requested_permissions_json: string }>())?.requested_permissions_json)
+      .toBe('["operations.request.create","operations.service_home.read"]');
+  });
+
+  it("requires recipient acknowledgement of the exact v4 capability set before redeem", async () => {
+    const permissions = ["operations.request.create", "operations.service_home.read"] as const;
+    const issued = await issueOperationsPortalNativeRecipientIntent(ops, { operationId: id(71), targetId,
+      targetClientRecordId: clientId, expiresAt: future(), owner, legacyShape: false,
+      permissionSchemaVersion: 4, permissions });
+    const redeem = { operationId: id(72), intentId: issued.review.intentId, opaqueToken: issued.opaqueToken!,
+      principal: { issuer, subject }, recipientLabel: "recipient@example.test", verifiedUntil: future(),
+      acknowledgedTarget: { targetId, targetRevision: 1, clientRecordId: clientId } };
+    await expect(redeemOperationsPortalNativeRecipientIntent(ops, redeem))
+      .rejects.toThrow("operations_portal_native_recipient_denied");
+    expect(await ops.prepare("SELECT state FROM operations_portal_native_recipient_intents WHERE intent_id=?")
+      .bind(issued.review.intentId).first("state")).toBe("issued");
+    await expect(redeemOperationsPortalNativeRecipientIntent(ops, { ...redeem,
+      acknowledgedPermissions: ["operations.service_home.read", "operations.request.create"] as never,
+      acknowledgedPermissionSchemaVersion: 4 }))
+      .rejects.toThrow("operations_portal_native_recipient_denied");
+    const redeemed = await redeemOperationsPortalNativeRecipientIntent(ops, { ...redeem,
+      acknowledgedPermissions: permissions, acknowledgedPermissionSchemaVersion: 4 });
+    expect(redeemed.review).toMatchObject({ state: "pending", permissionSchemaVersion: 4, permissions });
+  });
 
   it("issues, redeems, reviews, confirms, recovers transport, authorizes metadata, and revokes", async () => {
     const issued = await issueOperationsPortalNativeRecipientIntent(ops, { operationId: id(10), targetId,

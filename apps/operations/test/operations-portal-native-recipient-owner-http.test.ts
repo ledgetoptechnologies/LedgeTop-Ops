@@ -38,7 +38,8 @@ function request(path: string, body?: unknown, token?: string) { return new Requ
 }); }
 async function token(d: Dependencies) { const result = await handle(request("session"), d); expect(result.status).toBe(200);
   return (await result.json() as { csrfToken: string }).csrfToken; }
-const issue = () => ({ operationId, targetId, targetClientRecordId: "client:one", expiresAt: "2099-01-01T00:00:00.000Z" });
+const issue = () => ({ operationId, targetId, targetClientRecordId: "client:one",
+  expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() });
 const mutation = () => ({ operationId, expectedRevision: 2 });
 
 describe("Ops-native recipient owner HTTP boundary", () => {
@@ -98,7 +99,19 @@ describe("Ops-native recipient owner HTTP boundary", () => {
     const d = deps(), csrf = await token(d), result = await handle(request("intents", issue(), csrf), d);
     expect(result.status).toBe(201); expect(result.headers.get("Cache-Control")).toBe("no-store");
     expect(result.headers.get("Referrer-Policy")).toBe("no-referrer");
-    expect(calls.issue).toHaveBeenCalledWith(d.database, { ...issue(), owner: actor });
+    expect(calls.issue).toHaveBeenCalledOnce();
+    expect(calls.issue.mock.calls[0]![1]).toMatchObject({ operationId, targetId, targetClientRecordId: "client:one",
+      permissions: ["operations.service_home.read"], permissionSchemaVersion: 3, legacyShape: true, owner: actor });
+  });
+  it("pins an explicit request-create selection into the authorized issue call", async () => {
+    const d = deps(), csrf = await token(d), body = { ...issue(),
+      permissions: ["operations.request.create", "operations.service_home.read"] };
+    const result = await handle(request("intents", body, csrf), d);
+    expect(result.status).toBe(201);
+    expect(calls.issue).toHaveBeenCalledOnce();
+    expect(calls.issue.mock.calls[0]![1]).toMatchObject({ operationId, targetId,
+      targetClientRecordId: "client:one", permissions: body.permissions, permissionSchemaVersion: 4,
+      legacyShape: false, owner: actor });
   });
   it("reads only through the currently authorized manager ledger method", async () => {
     const d = deps(); expect((await handle(request(`intents/${intentId}`), d)).status).toBe(200);
@@ -110,6 +123,15 @@ describe("Ops-native recipient owner HTTP boundary", () => {
     expect(result.status).toBe(200); expect(calls.materialize).toHaveBeenCalledWith(d.database, operationId);
     expect(calls.dispatch).toHaveBeenCalledWith(d.dispatch, operationId);
     expect(await result.json()).toMatchObject({ operationId, status: "acknowledged", intent: { state: "active" } });
+  });
+  it("does not apply a v3 home-only grant for a v4 request intent", async () => {
+    calls.read.mockResolvedValue({ intentId, state: "pending", permissionSchemaVersion: 4,
+      permissions: ["operations.request.create", "operations.service_home.read"] });
+    const d = deps(), csrf = await token(d), result = await handle(request(`intents/${intentId}/confirm`, mutation(), csrf), d);
+    expect(result.status).toBe(409);
+    expect(await result.json()).toEqual({ error: "request_capability_unavailable" });
+    expect(calls.confirm).not.toHaveBeenCalled(); expect(calls.materialize).not.toHaveBeenCalled();
+    expect(calls.dispatch).not.toHaveBeenCalled();
   });
   it("keeps ambiguous transport pending rather than claiming active access", async () => {
     calls.dispatch.mockResolvedValue({ status: "retry", operationId }); calls.read.mockResolvedValue({ intentId, state: "confirming" });

@@ -11,6 +11,7 @@ import { materializeOperationsPortalNativeRecipientAuthority, dispatchOperations
 import { reserveOperationsPortalNativeWorkspaceCleanupRecovery } from "./operations-portal-native-workspace-cleanup";
 import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
 import { admittedOperationsRequestOrigin } from "./host-admission";
+import { parseOperationsPortalNativeRecipientIssueRequest } from "@ltds/shared/operations-portal-native-recipient-capabilities-v4";
 
 const BASE = "/api/native-client-portal/operations-recipient-enrollment";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -182,13 +183,17 @@ export async function handleOperationsNativeRecipientOwnerHttp(request: Request,
         ...(replayed === undefined ? {} : { replayed }) });
     }
     if (issue) {
-      const value = await body(request, ["operationId", "targetId", "targetClientRecordId", "expiresAt"]);
-      if (!uuid(value.operationId) || !uuid(value.targetId) || typeof value.targetClientRecordId !== "string"
-        || value.targetClientRecordId.length < 1 || value.targetClientRecordId.length > 191
-        || /\p{C}/u.test(value.targetClientRecordId) || value.targetClientRecordId.trim() !== value.targetClientRecordId
-        || typeof value.expiresAt !== "string") throw new Failure(400, "invalid_request");
+      if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/iu.test(request.headers.get("Content-Type") ?? ""))
+        throw new Failure(400, "invalid_request");
+      let raw: unknown;
+      try { raw = await readBoundedJson(request, 4096, "native recipient owner"); }
+      catch { throw new Failure(400, "invalid_request"); }
+      const value = parseOperationsPortalNativeRecipientIssueRequest(raw);
+      if (!value) throw new Failure(400, "invalid_request");
       const result = await issueOperationsPortalNativeRecipientIntent(d.database, { operationId: value.operationId,
-        targetId: value.targetId, targetClientRecordId: value.targetClientRecordId, expiresAt: value.expiresAt, owner: actor });
+        targetId: value.targetId, targetClientRecordId: value.targetClientRecordId, expiresAt: value.expiresAt,
+        permissions: value.permissions, permissionSchemaVersion: value.permissionSchemaVersion,
+        legacyShape: value.legacyShape, owner: actor });
       alive(actor); return response(result.replayed ? 200 : 201, result);
     }
     const value = await body(request, ["operationId", "expectedRevision"]);
@@ -219,6 +224,10 @@ export async function handleOperationsNativeRecipientOwnerHttp(request: Request,
     if (action === "cancel") {
       const result = await cancelOperationsPortalNativeRecipientIntent(d.database, input); alive(actor);
       return response(200, result);
+    }
+    if (action === "confirm") {
+      const current = await readOperationsPortalNativeRecipientIntentForOwner(d.database, intentId!, actor); alive(actor);
+      if (current.permissionSchemaVersion === 4) throw new Failure(409, "request_capability_unavailable");
     }
     const result = action === "confirm" ? await confirmOperationsPortalNativeRecipientIntent(d.database, input)
       : await revokeOperationsPortalNativeRecipient(d.database, input);
