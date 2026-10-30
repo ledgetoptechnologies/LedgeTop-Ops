@@ -7,6 +7,7 @@ import {
 } from "./unified-portal";
 import { UnifiedDeliveries } from "./UnifiedDeliveries";
 import { QuickRequest } from "./QuickRequest";
+import { loadInquiries, type ClientInquiry } from "./request-services-api";
 
 export type UnifiedPage = "dashboard" | "projects" | "requests" | "deliveries" | "feedback" | "account";
 export const UNIFIED_PAGES: ReadonlySet<string> = new Set<UnifiedPage>(["dashboard", "projects", "requests", "deliveries", "feedback", "account"]);
@@ -15,6 +16,11 @@ export const UNIFIED_PAGES: ReadonlySet<string> = new Set<UnifiedPage>(["dashboa
 export type OpenInAccount = (workspaceId: string, path: string) => void;
 
 const CLOSED_REQUEST = new Set(["completed", "cancelled", "declined"]);
+const INQUIRY_STATUS: Record<string, { label: string; tone: "neutral" | "success" | "warning" | "danger" }> = {
+  received: { label: "Received", tone: "neutral" }, under_review: { label: "Under review", tone: "warning" },
+  declined: { label: "Declined", tone: "danger" }, closed: { label: "Closed", tone: "success" },
+};
+const inquiryStatus = (status: string) => INQUIRY_STATUS[status] ?? { label: status.replace(/_/g, " ").replace(/^./, letter => letter.toUpperCase()), tone: "neutral" as const };
 
 function byName(left: UnifiedProject, right: UnifiedProject) {
   return left.projectName.localeCompare(right.projectName) || left.account.business.localeCompare(right.account.business);
@@ -42,7 +48,18 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   // opens its own form; several accounts get a retry, never a choice of business or account.
   const [quickRequest, setQuickRequest] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
+  // General requests aren't tied to an account, so they're read once for the client, not per account.
+  // null: not offered here (or not loaded yet); "error": offered but couldn't be read.
+  const [inquiries, setInquiries] = useState<ClientInquiry[] | null | "error">(null);
   const generation = useRef(0);
+
+  useEffect(() => {
+    if (page !== "requests") return;
+    const controller = new AbortController();
+    loadInquiries(controller.signal).then(value => { if (!controller.signal.aborted) setInquiries(value); },
+      () => { if (!controller.signal.aborted) setInquiries("error"); });
+    return () => controller.abort();
+  }, [page, retry]);
 
   useEffect(() => {
     let active = true, controller: AbortController | null = null, lastStartedAt = -Infinity;
@@ -193,11 +210,20 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     {requestChooser}{problems}{loadingNote}
     {requests.length > 0 && <RequestProgress requests={requests} />}
     <Card title="Request history">{!loading && requests.length === 0
-      ? historyComplete ? <EmptyState title="No requests yet" detail="Requests you submit will appear here." />
+      ? historyComplete ? Array.isArray(inquiries) && inquiries.length > 0
+        ? <EmptyState title="No service requests yet" detail="Service requests you submit will appear here." />
+        : <EmptyState title="No requests yet" detail="Requests you submit will appear here." />
         : failed.length > 0 ? <EmptyState title="Request history couldn’t be loaded" detail="Some of your work didn’t load, so requests may be missing. Try again above." />
         : <EmptyState title="Request history isn’t shown here yet" detail="Past requests for your account aren’t listed here yet." />
       : <>{requestRows(requests)}{!loading && !historyComplete && <p className="unified-portal-request-note">{failed.length > 0
         ? "Some request history couldn’t be loaded, so this list may be incomplete." : "Requests for some of your work aren’t listed here yet."}</p>}</>}</Card>
+    {Array.isArray(inquiries) && inquiries.length > 0 && <Card title="General requests">
+      <ul className="unified-portal-requests">{inquiries.map(item => <li key={item.id}>
+        <div><strong>{item.title}</strong><small>{`Sent ${new Date(item.createdAt).toLocaleDateString()}`}</small></div>
+        <div className="unified-portal-request-actions"><StatusPill tone={inquiryStatus(item.status).tone}>{inquiryStatus(item.status).label}</StatusPill></div>
+      </li>)}</ul>
+    </Card>}
+    {inquiries === "error" && <p className="unified-portal-request-note" role="status">General requests you’ve sent couldn’t be loaded right now. Try again in a moment.</p>}
   </>;
 
   const openRequests = requests.filter(item => !CLOSED_REQUEST.has(item.request.status));
