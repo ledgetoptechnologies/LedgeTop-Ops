@@ -179,7 +179,10 @@ test('synthetic workflow provisions with exact signer callback contract; failed 
       copyFileSync(temporary, destination, fsConstants.COPYFILE_EXCL); unlinkSync(temporary);
       events.push('registry-published');
     },
-    verifyPublishedRegistry(destination) { return { registryRawSha256: hash(readFileSync(destination)) }; },
+    verifyPublishedRegistry(destination) {
+      const syntheticStatePath = path.join(receiptDirectory, path.win32.basename(destination));
+      return { registryRawSha256: hash(readFileSync(syntheticStatePath)) };
+    },
     finish(result) { events.push('complete'); return { complete: true, ...result }; },
     failClosed(reason) { events.push(`failed:${reason}`); },
   };
