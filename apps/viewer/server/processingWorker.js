@@ -158,6 +158,12 @@ async function processReconcile(job,{processing,config,providerCredentials,signa
 
 async function processIngest(job,{processing,repository,storage,config,providerCredentials,signal}){
   const attempt=processing.getAttempt(job.attempt_id),task=processing.getTask(attempt.taskId),project=processing.getProject(task.projectId),provider=processing.getProvider(attempt.providerId);
+  // Capture one validated provider binding before any asynchronous work so the
+  // checked coordinator and the later durable claim always have the same identity.
+  const bindings=config.stagedCommitmentProviders;
+  const hasBinding=Boolean(bindings&&Object.hasOwn(bindings,provider.id));
+  let binding=null;
+  if(hasBinding){try{binding=require('./stagedAckDelivery').snapshotBinding(bindings[provider.id]);}catch{throw Object.assign(new Error('Staged commitment configuration is invalid'),{code:'staged_commitment_unavailable'});}}
   const headroom=storage.space('models'),maximumExpansion=Math.max(0,headroom.available-headroom.reserve);
   if(maximumExpansion<1024*1024*1024)throw Object.assign(new Error('insufficient storage for result ingestion'),{code:'insufficient_storage'});
   const recoveredIngest=await verifyRecoveredIngestSources(processing,storage,job,signal);
@@ -165,10 +171,6 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   let archiveReceipt=processing.getAttemptTransferProvenance(attempt.id)?.archive||null;
   // No configuration is wired in production: only an explicit per-provider
   // binding enables this experimental, read-only point-in-time check.
-  const bindings=config.stagedCommitmentProviders;
-  const hasBinding=Boolean(bindings&&Object.hasOwn(bindings,provider.id));
-  const binding=hasBinding?bindings[provider.id]:null;
-  if(hasBinding&&(!binding||typeof binding!=='object'||Array.isArray(binding)))throw Object.assign(new Error('Staged commitment configuration is invalid'),{code:'staged_commitment_unavailable'});
   let stagedCommitment=null,initialCommitment=null;
   const readCommitment=async(kind='commitment')=>{
     if(!binding||!processing.attemptRequiresReservation?.(attempt.id)||typeof providerCredentials.resolveStagedCommitmentCredential!=='function')throw Object.assign(new Error('Staged commitment is unavailable'),{code:'staged_commitment_unavailable'});

@@ -22,6 +22,13 @@ function acquire(db,now){return transaction(db,()=>{
  return {...db.prepare('SELECT o.*,d.state AS delivery_state,d.assertion_sha256,d.attempts FROM processing_staged_byte_ack_outbox o JOIN processing_staged_ack_delivery d USING(attempt_id) WHERE o.attempt_id=?').get(source.attempt_id),token};
 });}
 function transition(db,row,state,now,error=null){const delay=Math.min(3600000,1000*2**Math.min(row.attempts,12));return db.prepare('UPDATE processing_staged_ack_delivery SET state=?,lease_token=NULL,lease_expires_at=NULL,next_attempt_at=?,attempts=attempts+1,error_code=?,updated_at=? WHERE attempt_id=? AND lease_token=? AND lease_expires_at>?').run(state,state==='uncertain'?now+delay:0,error,now,row.attempt_id,row.token,now).changes===1}
+function snapshotBinding(source){
+ if(!source||typeof source!=='object'||Array.isArray(source))throw invalid();
+ const value=Object.freeze({origin:source.origin,principalId:source.principalId,authorityId:source.authorityId,environment:source.environment,credentialRef:source.credentialRef});
+ let base;try{base=new URL(value.origin)}catch{throw invalid()}
+ if(base.protocol!=='https:'||base.username||base.password||base.pathname!=='/'||base.search||base.hash||typeof value.principalId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value.principalId)||!uuid(value.authorityId)||!['production','staging'].includes(value.environment)||typeof value.credentialRef!=='string'||!value.credentialRef||value.credentialRef.length>200)throw invalid();
+ return value;
+}
 function expectedBinding(binding,capability){
  let base;try{base=new URL(binding.origin)}catch{throw invalid()}
  if(base.protocol!=='https:'||base.username||base.password||base.pathname!=='/'||base.search||base.hash||typeof binding.credentialRef!=='string'||!binding.credentialRef||binding.credentialRef.length>200||!secret(capability))throw invalid();
@@ -36,7 +43,7 @@ async function deliverOneStagedAck({db,enabled=false,bindings,resolveCredential,
  const row=acquire(db,clock());if(!row)return false;
  let binding,value,base,bearer,capability;
  try{
-  binding=bindings?.[row.provider_id];if(!binding||typeof resolveCredential!=='function'||typeof resolveCapability!=='function')throw invalid();
+  binding=snapshotBinding(bindings?.[row.provider_id]);if(typeof resolveCredential!=='function'||typeof resolveCapability!=='function')throw invalid();
   base=new URL(binding.origin);if(base.protocol!=='https:'||base.username||base.password||base.pathname!=='/'||base.search||base.hash||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(binding.principalId)||!uuid(binding.authorityId)||!['production','staging'].includes(binding.environment))throw invalid();
   if(crypto.createHash('sha256').update(row.assertion_json).digest('hex')!==row.assertion_sha256)throw invalid();
   let parsed;try{parsed=parseFlat(row.assertion_json)}catch{throw invalid()}value=validate(parsed,binding);if(value.attemptId!==row.attempt_id||value.stagingCommitId!==row.staging_commit_id)throw invalid();
@@ -56,4 +63,4 @@ async function deliverOneStagedAck({db,enabled=false,bindings,resolveCredential,
   throw Error('unavailable');
  }catch(e){transition(db,row,e?.code==='staged_ack_invalid'?'held':'uncertain',clock(),e?.code==='staged_ack_invalid'?'staged_ack_invalid':'staged_ack_unavailable');return true}
 }
-module.exports={deliverOneStagedAck,expectedBinding};
+module.exports={deliverOneStagedAck,expectedBinding,snapshotBinding};
