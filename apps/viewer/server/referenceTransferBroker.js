@@ -70,7 +70,7 @@ class ReferenceTransferBroker {
       const latest = this.db.prepare('SELECT * FROM reference_grants WHERE job_id=? ORDER BY rowid DESC LIMIT 1').get(jobId);
       if (latest) {
         const latestMeta = JSON.parse(latest.metadata);
-        if (latestMeta.manifestSha256 !== metadata.manifestSha256 || (generation === latestMeta.generation && latest.files !== JSON.stringify(files))) fail('RESERVATION_BINDING');
+        if (latestMeta.manifestSha256 !== metadata.manifestSha256 || latest.files !== JSON.stringify(files)) fail('RESERVATION_BINDING');
         const seen = this.db.prepare('SELECT metadata FROM reference_grants WHERE job_id=?').all(jobId).some(row => JSON.parse(row.metadata).nonce === reservation.nonce);
         if (generation < latestMeta.generation || (seen && (latestMeta.nonce !== reservation.nonce || latest.revoked || latest.expires_ms <= now))) fail('STALE_RESERVATION');
       }
