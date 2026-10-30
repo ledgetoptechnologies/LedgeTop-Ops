@@ -12,6 +12,12 @@ function fixture(t){
  return{db,processing,task,attempt};
 }
 
+test('ambiguous submit phases cannot be replaced even before a warning is recorded', t => {
+ const f=fixture(t);
+ for(const submissionPhase of ['initializing','uploading','uploading_auxiliary','committing'])
+  assert.equal(f.processing.canReplaceAttempt({...f.attempt,status:'failed',submissionPhase,errorCode:null}),false,submissionPhase);
+});
+
 for (const phase of ['initialize', 'upload', 'commit']) for (const failure of ['503', 'reset']) for (const reservation of [false,true])
 test(`cutover ${failure} during ${phase} preserves source and holds without duplicate mutation (reservation=${reservation})`, async t => {
  const f=fixture(t),root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-cutover-hold-')),file=path.join(root,'photo.jpg');
@@ -29,7 +35,9 @@ test(`cutover ${failure} during ${phase} preserves source and holds without dupl
   remove:async()=>{calls.remove++},
  };
  const deps={processing:f.processing,providerCredentials:credentials,storage:{resolve:()=>file,requireProcessingHeadroom:()=>{}},config:{},adapterFactory:()=>adapter};
- for(let i=0;i<7;i++){f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='submit' AND status='pending'").run(f.attempt.id);await processOne(deps,'cutover-worker')}
+ await processOne(deps,'cutover-worker');
+ assert.throws(()=>f.processing.cancelAttempt(f.attempt.id,'ops:test'),{code:reservation?'reservation_cancel_required':'provider_execution_unresolved'});
+ for(let i=1;i<7;i++){f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='submit' AND status='pending'").run(f.attempt.id);await processOne(deps,'cutover-worker')}
  const job=f.db.prepare("SELECT status,error_code FROM processing_jobs WHERE attempt_id=? AND job_type='submit'").get(f.attempt.id);
  assert.equal(job.status,'pending');assert.equal(job.error_code,phase==='upload'?'provider_upload_acceptance_unknown':'provider_submission_observation_unavailable');
  assert.equal(calls.initialize,1);assert.equal(calls.upload,phase==='initialize'?0:1);assert.equal(calls.commit,phase==='commit'?1:0);assert.equal(calls.remove,0);
