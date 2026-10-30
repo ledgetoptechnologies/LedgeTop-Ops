@@ -37,3 +37,17 @@ test('an already authorized chunk cannot be acknowledged after cleanup claims it
  assert.equal(response.ok,false,`cleanup has claimed the upload; the stale writer must not be acknowledged (HTTP ${response.status})`);
  assert.equal(processing.listChunks(created.upload.id,'photo').length,0);
 });
+
+test('a rotated upload token cannot enqueue finalization',{skip:process.env.LTDS_UPLOAD_CHUNK_FENCING_REGRESSION!=='1'},async t=>{
+ const db=openDatabase(':memory:'),processing=new ProcessingRepository(db),repository=new ViewerRepository(db);
+ const token='synthetic-finalize-fence-token-00000000',subject='ops:synthetic';
+ processing.createAdminSession({tokenHash:auth.hashToken(token),subject,permissions:['viewer.datasets.write'],displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
+ const project=processing.createProject({displayName:'Synthetic'}),dataset=processing.createDataset({projectId:project.id,displayName:'Synthetic',storageMode:'managed',rootKey:'datasets',relativePath:'synthetic'});
+ const files=[{id:'photo',relativePath:'photo.jpg',byteSize:1,sha256:'a'.repeat(64)}],created=processing.createUpload({datasetId:dataset.id,subject,files,chunkSize:1,expiresAt:'2999-01-01T00:00:00.000Z'});
+ processing.recordChunk({uploadId:created.upload.id,fileId:'photo',chunkIndex:0,relativePath:'photo.jpg',byteSize:1,sha256:'a'.repeat(64)});
+ const enqueue=processing.createUploadFinalizeOperation.bind(processing);processing.createUploadFinalizeOperation=(...args)=>{const resumed=processing.resumeUpload(dataset.id,subject,files,'2999-12-31T00:00:00.000Z');assert.ok(resumed.token);return enqueue(...args);};
+ const app=express();app.use(express.json({verify(req,_res,body){req.rawBody=body;}}));app.use(createProcessingApi({repository,processing,storage:{}}));
+ const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});t.after(async()=>{await new Promise(resolve=>server.close(resolve));db.close();});
+ const response=await fetch(`http://127.0.0.1:${server.address().port}/api/v1/admin/uploads/${created.upload.id}/finalize`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':crypto.randomUUID()},body:JSON.stringify({uploadToken:created.token})});
+ assert.equal(response.ok,false,`a stale token must not enqueue finalization (HTTP ${response.status})`);
+});
