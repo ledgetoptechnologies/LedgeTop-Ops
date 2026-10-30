@@ -31,6 +31,7 @@ test('Obj2Tiles source and fork patch are pinned fail-closed at image build and 
   assert.match(docker, /RUN --mount=type=secret,id=sixlabors_license,required=true/);
   assert.match(docker, /-p:SixLaborsLicenseFile=\/run\/secrets\/sixlabors_license/);
   assert.match(workflow, /sixlabors_license=\$\{\{ secrets\.SIXLABORS_LICENSE \}\}/);
+  assert.match(workflow, /no-cache-filters: obj2tiles/);
   assert.match(docker, /git apply --check \/tmp\/obj2tiles-security\.patch[\s\S]*git apply \/tmp\/obj2tiles-security\.patch/);
   assert.match(docker, new RegExp(`OBJ2TILES_SOURCE_SHA256=${OBJ2TILES_SOURCE_SHA256}`));
   assert.match(docker, new RegExp(`OBJ2TILES_PATCH_SHA256=${OBJ2TILES_PATCH_SHA256}`));

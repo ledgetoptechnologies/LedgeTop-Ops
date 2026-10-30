@@ -99,6 +99,8 @@ jobs:
           load: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
           tags: ${{ steps.candidate.outputs.ref }}
           labels: ${{ steps.meta.outputs.labels }}
+          # License contents do not invalidate BuildKit cache; revalidate at each release.
+          no-cache-filters: obj2tiles
           cache-from: type=gha,scope=viewer
           cache-to: type=gha,scope=viewer,mode=max,ignore-error=true
           # Docker's local image store cannot retain attestation manifests. Push
