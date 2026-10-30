@@ -3928,6 +3928,8 @@ function ViewerDataOverview({session}:{session:Session}) {
   if (!data?.enabled || !data.overview) return <><Card><EmptyState title="3D Viewer overview is off" detail="The Viewer integration remains unavailable until its reviewed runtime flags are enabled." /></Card>
     {allowed(session.user, "viewer.manage") && <ViewerConnectionDetails />}</>;
   const value = data.overview;
+  // Older Viewers don't report status checks; that is unknown, never zero.
+  const unchecked = value.jobs.observationWarnings;
   return <div className="viewer-overview">
     {popupBlocked
       ? <div className="notice warning viewer-popup-fallback" role="alert"><span>{actionError}</span><button type="button" className="button-orange button-small" disabled={opening} onClick={() => void openWorkspace(true)}>Open Viewer in this tab</button></div>
@@ -3950,8 +3952,14 @@ function ViewerDataOverview({session}:{session:Session}) {
           !value.platform.workerLive && "Background processing isn't running.",
           value.platform.lifecycleBlocked && "File storage changes are on hold until a storage problem is fixed in the Viewer.",
         ].filter(Boolean).join(" ")}</small></>}</Card>
+      <Card title="Status checks">{unchecked === undefined
+        ? <><strong>Not reported</strong><small>This Viewer version doesn't report status checks.</small></>
+        : unchecked === 0
+          ? <><strong>No problems reported</strong><small>The Viewer reported no trouble checking active jobs.</small></>
+          : <><strong>{unchecked} can't be checked</strong><small>The Viewer can't confirm {unchecked === 1 ? "this job's" : "these jobs'"} status with the processing service. A status-check problem does not mean {unchecked === 1 ? "the processing job" : "the processing jobs"} failed.</small></>}</Card>
     </div>
     {value.jobs.failed > 0 && <p className="notice warning">{value.jobs.failed} processing job{value.jobs.failed === 1 ? " needs" : "s need"} attention. <button type="button" className="button-ghost button-small" disabled={opening} onClick={() => void openWorkspace()}>Review in Viewer</button></p>}
+    {unchecked !== undefined && unchecked > 0 && <p className="notice warning">The status of {unchecked} active processing job{unchecked === 1 ? "" : "s"} can't be confirmed right now. A status-check problem does not mean {unchecked === 1 ? "the processing job" : "the processing jobs"} failed. <button type="button" className="button-ghost button-small" disabled={opening} onClick={() => void openWorkspace()}>Check in Viewer</button></p>}
     <small>Updated {date(value.generatedAt)}</small>
     {allowed(session.user, "viewer.manage") && <ViewerQuickShare canCreatePublic={allowed(session.user, "viewer.share.create")} canRevokePublic={allowed(session.user, "viewer.share.revoke")} />}
     {allowed(session.user, "viewer.manage") && <ViewerConnectionDetails />}
