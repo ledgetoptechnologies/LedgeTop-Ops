@@ -246,7 +246,15 @@ function compileNativeConfig(worker, app, artifact) {
     compatibility_date: worker.settings.compatibility_date,
     compatibility_flags: clone(worker.settings.compatibility_flags),
   };
-  for (const key of ['placement','usage_model','limits'])
+  // The provider represents default placement as {}, which is not a valid
+  // Wrangler placement config (mode is required). Keep that exact metadata
+  // through capturedMetadata instead of emitting an invalid config object.
+  // usage_model is provider upload metadata, not a Wrangler config field.
+  if (worker.settings.placement && Object.keys(worker.settings.placement).length > 0) {
+    need(typeof worker.settings.placement.mode === 'string', 'Nondefault placement must include its native mode');
+    config.placement = clone(worker.settings.placement);
+  }
+  for (const key of ['limits'])
     if (Object.hasOwn(worker.settings, key)) config[key] = clone(worker.settings[key]);
   config.unsafe = { bindings: bindingRows(worker, app), metadata: capturedMetadata(worker) };
   return config;

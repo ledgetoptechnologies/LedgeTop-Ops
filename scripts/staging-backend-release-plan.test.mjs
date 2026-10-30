@@ -118,6 +118,18 @@ test('Client baseline plan is allowed after Ops baseline; Sync and all default-o
   assert.equal(plan.expectedUnchangedSettings.bindings.length, capture.workers.client.settings.bindings.length);
 });
 
+test('provider default placement and usage model remain metadata without invalid native config fields', t => {
+  const f = fixture(t), capture = controls();
+  capture.workers.operations.settings.placement = {};
+  capture.workers.operations.settings.usage_model = 'bundled';
+  const plan = compileStagingBackendReleasePlan({ controlsFile: f.writeJson('default-placement.json', capture),
+    application: 'operations', artifact: f.artifact(), sourceCommit: SOURCE });
+  assert.equal(Object.hasOwn(plan.config, 'placement'), false);
+  assert.equal(Object.hasOwn(plan.config, 'usage_model'), false);
+  assert.deepEqual(plan.config.unsafe.metadata.placement, {});
+  assert.equal(plan.config.unsafe.metadata.usage_model, 'bundled');
+});
+
 test('Client planning after Ops successor requires an exact hash-pinned readback observation', t => {
   const f = fixture(t), opsPlan = compileStagingBackendReleasePlan({ controlsFile: f.writeJson('before.json', controls()),
     application: 'operations', artifact: f.artifact(), sourceCommit: SOURCE });
