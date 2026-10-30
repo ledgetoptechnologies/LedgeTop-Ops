@@ -244,6 +244,20 @@ test('reserved ingestion survives repeated coordinator outages without terminal 
  assert.equal(job.status,'pending');assert.equal(job.error_code,'provider_observation_unavailable');assert.notEqual(f.processing.getAttempt(f.attempt.id).status,'failed');
 });
 
+test('legacy completed results remain pending through download outages',async t=>{
+ for(const status of [401,403,404,503,'ENOTFOUND','ETIMEDOUT','fetch failed']){
+  const f=fixture(t),{ProviderCredentials}=require('../server/providerCredentials'),credentials=new ProviderCredentials({activeKeyId:'fixture',keys:{fixture:crypto.randomBytes(32).toString('hex')}});credentials.resolve=()=>'';
+  f.db.prepare("UPDATE processing_providers SET endpoint='https://example.test' WHERE id=?").run(f.attempt.providerId);
+  const submit=f.processing.claimJob('owner');f.processing.completeJob(submit.id,'owner');f.processing.transitionAttempt(f.attempt.id,'ingesting');f.processing.enqueueJob(f.attempt.id,'ingest');
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-legacy-download-')),originalFetch=global.fetch;t.after(()=>fs.rmSync(root,{recursive:true,force:true}));let downloads=0;
+  try{global.fetch=async()=>{downloads++;if(typeof status==='string')throw status==='fetch failed'?new TypeError('fetch failed'):Object.assign(new Error('network unavailable'),{code:status});return new Response('',{status})};const deps={processing:f.processing,repository:{},providerCredentials:credentials,storage:{space:()=>({available:4*1024**3,reserve:0}),resolve:(_root,rel)=>path.join(root,rel)},config:{}};
+   for(let i=0;i<7;i++){f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='ingest'").run(f.attempt.id);await processOne(deps,'owner');}
+  }finally{global.fetch=originalFetch}
+  const job=f.db.prepare("SELECT status,error_code FROM processing_jobs WHERE attempt_id=? AND job_type='ingest'").get(f.attempt.id);
+  assert.equal(downloads,7,status);assert.equal(job.status,'pending',status);assert.equal(job.error_code,'provider_observation_unavailable',status);assert.notEqual(f.processing.getAttempt(f.attempt.id).status,'failed',status);
+ }
+});
+
 test('interrupted reserved archive streams remain retryable and remove partial files',async t=>{
  const f=fixture(t),{ProviderCredentials}=require('../server/providerCredentials');
  const credentials=new ProviderCredentials({activeKeyId:'fixture',keys:{fixture:crypto.randomBytes(32).toString('hex')}});credentials.resolve=()=>'';
