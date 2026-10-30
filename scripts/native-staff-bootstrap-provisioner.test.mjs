@@ -22,17 +22,18 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 function fixture() {
   const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 3072 });
   const publicDer = publicKey.export({ type: 'spki', format: 'der' });
+  const syntheticRoot = path.join(path.parse(os.tmpdir()).root, 'synthetic');
   const config = {
     schemaVersion: 1, kind: 'operations-native-staff-bootstrap-trust-config-v1',
     target: { accountId: 'a'.repeat(32), databaseId: '11111111-1111-4111-8111-111111111111' },
     source: { commit: 'b'.repeat(40), migrationNamesSha256: 'c'.repeat(64) },
     access: { origin: 'https://ops.example.test', issuer: 'https://synthetic.cloudflareaccess.com',
       audience: 'syntheticAudience01', owner: { staffId: 'synthetic-owner', accessSubject: 'synthetic-subject' },
-      cloudflaredExecutablePath: 'C:\\synthetic\\cloudflared.exe', cloudflaredExecutableSha256: 'd'.repeat(64) },
+      cloudflaredExecutablePath: path.join(syntheticRoot, 'cloudflared.exe'), cloudflaredExecutableSha256: 'd'.repeat(64) },
     signer: { algorithm: 'RSA-PSS-SHA256', keyId: hash(publicDer), publicKeyPem: publicKey.export({ type: 'spki', format: 'pem' }),
-      protectedPrivateKeyPath: 'C:\\synthetic\\candidate\\signer-key.dpapi',
+      protectedPrivateKeyPath: path.join(syntheticRoot, 'candidate', 'signer-key.dpapi'),
       dpapiEntropy: 'synthetic-only-entropy-for-provisioner-tests-32-bytes' },
-    receiptDirectory: 'C:\\Synthetic\\AppData\\Local\\LedgeTop\\native-staff-bootstrap\\receipts',
+    receiptDirectory: path.join(syntheticRoot, 'AppData', 'Local', 'native-staff-bootstrap-receipts-synthetic'),
   };
   const bytes = Buffer.from(`${JSON.stringify(config, null, 2)}\n`, 'utf8');
   const payloadJson = canonicalJson({ schemaVersion: 1, sequence: 0, previousStateSha256: null, entries: [] });
@@ -79,6 +80,11 @@ test('package manifest verifier requires its separate pin before reading and che
 
 test('pinned config decoding rejects duplicate keys, invalid UTF-8, hash changes and an alternate receipt path', () => {
   const { config, bytes } = fixture();
+  for (const candidatePath of [config.access.cloudflaredExecutablePath,
+    config.signer.protectedPrivateKeyPath, config.receiptDirectory]) {
+    assert.equal(path.isAbsolute(candidatePath), true);
+    assert.equal(path.win32.isAbsolute(candidatePath), true);
+  }
   const configSha256 = hash(bytes);
   assert.equal(decodePinnedNativeStaffBootstrapConfig(bytes, configSha256, config.receiptDirectory).config.signer.keyId,
     config.signer.keyId);
