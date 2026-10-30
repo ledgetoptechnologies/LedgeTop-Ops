@@ -1226,11 +1226,12 @@ test.describe("unified home without business switching", () => {
 
   type Inquiry = {body: Record<string, unknown>; key: string | undefined; workspace: string | null};
   /** General requests: POST answers from `answer`; GET lists what was accepted so far, newest first. */
-  async function mockInquiries(page: Page, answer: (count: number) => number = () => 201) {
+  async function mockInquiries(page: Page, answer: (count: number) => number = () => 201, list = 200) {
     const sent: Inquiry[] = [], accepted: Record<string, unknown>[] = [];
     await page.route("**/api/client/inquiries*", route => {
       const url = new URL(route.request().url());
-      if (route.request().method() === "GET") return route.fulfill({json: {inquiries: accepted}});
+      if (route.request().method() === "GET")
+        return list === 200 ? route.fulfill({json: {inquiries: accepted}}) : route.fulfill({status: list, json: {error: "Unavailable"}});
       const body = route.request().postDataJSON() as Record<string, unknown>;
       sent.push({body, key: route.request().headers()["idempotency-key"], workspace: url.searchParams.get("workspace")});
       const status = answer(sent.length);
@@ -1292,6 +1293,24 @@ test.describe("unified home without business switching", () => {
     // With nothing left to offer, the form gives way to the usual "contact us" message, never a dead form.
     await expect(form.locator(".quick-request-general")).toHaveCount(0);
     await expect(form.getByText("No services are available to request right now.", {exact: false})).toBeVisible();
+  });
+
+  test("general request history stays out of sight for a client it isn't offered to", async ({page}) => {
+    await mockQuick(page, undefined, {json: {services: quickServices, unavailable: [], inquiryKinds: []}});
+    await mockInquiries(page, undefined, 403);
+    const listed = page.waitForResponse(response => new URL(response.url()).pathname === "/api/client/inquiries");
+    await page.goto("/portal/requests");
+    expect((await listed).status()).toBe(403);
+    await expect(page.getByRole("button", {name: "New request"})).toBeVisible();
+    await expect(page.getByRole("heading", {name: "General requests"})).toHaveCount(0);
+    await expect(page.getByText("General requests you’ve sent couldn’t be loaded")).toHaveCount(0);
+  });
+
+  test("general request history that can't be loaded says so plainly", async ({page}) => {
+    await mockQuick(page, undefined, {json: {services: quickServices, unavailable: [], inquiryKinds: ["website"]}});
+    await mockInquiries(page, undefined, 503);
+    await page.goto("/portal/requests");
+    await expect(page.getByText("General requests you’ve sent couldn’t be loaded right now. Try again in a moment.")).toBeVisible();
   });
 
   test("deliveries are one flat list and feedback one neutral card, with no business or division", async ({page}) => {

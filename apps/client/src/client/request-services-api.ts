@@ -139,13 +139,16 @@ export async function submitInquiry(input: ClientInquiryInput, idempotencyKey: s
   return sent;
 }
 
-/** The client's own general requests, newest first. Resolves null when this portal doesn't offer them (404/405). */
+/**
+ * The client's own general requests, newest first. Resolves null when they aren't offered here (404/405) or not to
+ * this client (403: switched off, or no account they can request for), so the page shows nothing instead of an error.
+ */
 export async function loadInquiries(signal?: AbortSignal): Promise<ClientInquiry[] | null> {
   let body: { inquiries?: unknown };
   try {
     body = await requestJson<{ inquiries?: unknown }>("/api/client/inquiries", { omitWorkspace: true, cache: "no-store", signal });
   } catch (caught) {
-    if ([404, 405].includes((caught as RequestError).status ?? 0)) return null;
+    if ([403, 404, 405].includes((caught as RequestError).status ?? 0)) return null;
     throw caught;
   }
   if (!Array.isArray(body.inquiries)) throw Object.assign(new Error("Your requests couldn't be loaded."), { status: 502 });
