@@ -254,7 +254,7 @@ test('legacy completed results remain pending through download outages',async t=
    for(let i=0;i<7;i++){f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='ingest'").run(f.attempt.id);await processOne(deps,'owner');}
   }finally{global.fetch=originalFetch}
   const job=f.db.prepare("SELECT status,error_code FROM processing_jobs WHERE attempt_id=? AND job_type='ingest'").get(f.attempt.id);
-  assert.equal(downloads,7,status);assert.equal(job.status,'pending',status);assert.equal(job.error_code,'provider_observation_unavailable',status);assert.notEqual(f.processing.getAttempt(f.attempt.id).status,'failed',status);
+  assert.equal(downloads,7,status);assert.equal(job.status,'pending',status);assert.equal(job.error_code,'provider_observation_unavailable',status);const attempt=f.processing.getAttempt(f.attempt.id);assert.notEqual(attempt.status,'failed',status);if([401,403].includes(status))assert.match(attempt.errorMessage,/credentials and permissions/);if(status===404)assert.match(attempt.errorMessage,/result was not found/);
  }
 });
 
