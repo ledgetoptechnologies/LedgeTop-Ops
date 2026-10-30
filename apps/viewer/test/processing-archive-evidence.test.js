@@ -7,7 +7,7 @@ const crypto = require('node:crypto');
 const { Readable } = require('node:stream');
 const test = require('node:test');
 const { makeZip } = require('./helpers/zipFixture');
-const { captureProcessingArchive: capture, verifyProcessingArchive: verify } = require('../server/processingArchiveEvidence');
+const { captureProcessingArchive: capture, verifyProcessingArchive: verify, providerArchiveExpectation: expectation } = require('../server/processingArchiveEvidence');
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const linux = { skip: process.platform !== 'linux' && 'descriptor extraction requires Linux /proc/self/fd' };
 function setup(t) {
@@ -30,6 +30,31 @@ test('captures entire ZIP response digest and exact sorted byte inventory; verif
   assert.equal(receipt.archiveManifestSha256, hash(JSON.stringify(receipt.archiveFiles)));
   assert.deepEqual(fs.readdirSync(parent), ['output']);
   assert.equal(await verify(destination, receipt, options), true);
+});
+test('optional provider archive evidence is bounded and unambiguous', () => {
+  const zip = bytes(), good = { 'x-ledgetop-archive-sha256': hash(zip), 'content-length': String(zip.length) };
+  assert.deepEqual(expectation(new Response(null, { status: 200, headers: good })), { sha256: hash(zip), byteSize: zip.length });
+  assert.equal(expectation(new Response(null, { status: 200 })), null);
+  for (const headers of [
+    { ...good, 'x-ledgetop-archive-sha256': `${hash(zip)}, ${hash(zip)}` },
+    { ...good, 'x-ledgetop-archive-sha256': hash(zip).toUpperCase() },
+    { ...good, 'content-length': '001' }, { ...good, 'content-length': '22, 22' },
+    { ...good, 'content-length': '9007199254740992' }, { ...good, 'content-length': '0' },
+    { ...good, 'content-encoding': 'gzip' }, { 'x-ledgetop-archive-sha256': hash(zip) },
+  ]) assert.throws(() => expectation(new Response(null, { status: 200, headers })), { code: 'provider_archive_evidence_invalid' });
+  assert.throws(() => expectation(new Response(null, { status: 206, headers: good })), { code: 'provider_archive_evidence_invalid' });
+  assert.throws(() => expectation({ status: 200, redirected: true, headers: new Headers(good) }), { code: 'provider_archive_evidence_invalid' });
+});
+test('provider digest and size mismatch never promotes or leaves private files', linux, async t => {
+  const zip = bytes();
+  for (const providerExpectation of [{ sha256: hash('wrong'), byteSize: zip.length }, { sha256: hash(zip), byteSize: zip.length + 1 }]) {
+    const { parent, destination } = setup(t);
+    await assert.rejects(() => capture(Readable.from([zip]), destination, { ...options, providerExpectation }), { code: 'provider_archive_evidence_mismatch' });
+    assert.deepEqual(fs.readdirSync(parent), []);
+  }
+  const { destination } = setup(t);
+  const receipt = await capture(Readable.from([zip]), destination, { ...options, providerExpectation: { sha256: hash(zip), byteSize: zip.length } });
+  assert.equal(receipt.archiveSha256, hash(zip));
 });
 test('same-size source/companion changes and added/missing files fail retry verification', linux, async t => {
   for (const mutation of [destination => fs.writeFileSync(path.join(destination, 'b.txt'), 'CHANGE'), destination => fs.writeFileSync(path.join(destination, 'extra'), 'x'), destination => fs.unlinkSync(path.join(destination, 'nested/a.txt'))]) {

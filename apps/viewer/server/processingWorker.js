@@ -4,7 +4,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const {Readable}=require('node:stream');
 const {NodeOdmProvider}=require('./nodeOdmProvider');
-const {captureProcessingArchive,verifyProcessingArchive}=require('./processingArchiveEvidence');
+const {captureProcessingArchive,verifyProcessingArchive,providerArchiveExpectation}=require('./processingArchiveEvidence');
 const {prepareProcessingUnitEvidence}=require('./processingUnitEvidence');
 const {MeasurementSourceUnitEvidence}=require('./measurementSourceUnitEvidence');
 const {inspectRegisteredSourceUnits}=require('./importSourceUnitEvidence');
@@ -173,6 +173,8 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     let response;
     try{response=await adapter.downloadAll(attempt.providerTaskId,{signal});}
     catch(error){if(processing.attemptRequiresReservation?.(attempt.id))throw Object.assign(new Error('Provider download unavailable; ingestion will resume'),{code:'provider_observation_unavailable'});throw error;}
+    let providerExpectation;
+    try{providerExpectation=providerArchiveExpectation(response);}catch(error){try{await response.body?.cancel();}catch{}throw error;}
     const declared=Number(response.headers.get('content-length')||0);
     if(declared>maximumExpansion)throw Object.assign(new Error('provider result exceeds available storage'),{code:'insufficient_storage'});
     fs.mkdirSync(path.dirname(destination),{recursive:true});
@@ -184,7 +186,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     const destroy=readable._destroy;
     readable._destroy=function(error,callback){try{Promise.resolve(reader.cancel()).catch(()=>{});}catch{}destroy.call(this,error,callback);};
     let captured;
-    try{captured=await captureProcessingArchive(readable,destination,{maxEntries:100000,maxBytes:maximumExpansion,maxArchiveBytes:maximumExpansion,maxDiskBytes:maximumExpansion,signal});}
+    try{captured=await captureProcessingArchive(readable,destination,{maxEntries:100000,maxBytes:maximumExpansion,maxArchiveBytes:maximumExpansion,maxDiskBytes:maximumExpansion,providerExpectation,signal});}
     catch(error){if(processing.attemptRequiresReservation?.(attempt.id)&&streamErrors.has(error)&&!signal?.aborted)throw Object.assign(new Error('Provider download interrupted; ingestion will resume'),{code:'provider_observation_unavailable'});throw error;}
     archiveReceipt=processing.recordAttemptArchiveReceipt(job.id,job.lease_owner,captured);
     if(!archiveReceipt)throw Object.assign(new Error('processing archive receipt or lease was lost'),{code:'lease_lost'});
