@@ -3,6 +3,7 @@
  * candidate routing, workers.dev lifecycle or production qualification. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -67,4 +68,33 @@ test('native generated verifier uses manual redirects for GET/HEAD and forwards 
     assert.equal(await response.text(),'');
   }
   const denied=await fetch(new URL('/assets/good.js',endpoint));assert.equal(denied.status,404);
+});
+
+test('native generated verifier accepts the pinned Client favicon legacy MIME against the native icon MIME',async t=>{
+  const favicon=fs.readFileSync(fileURLToPath(new URL('../apps/client/public/favicon.ico',import.meta.url)));
+  const faviconHash=createHash('sha256').update(favicon).digest('hex');
+  assert.equal(favicon.length,1889);
+  assert.equal(faviconHash,'4475e1abc388373b2e6c77b91e229e55e65b4efa1435e5aa816056873ad30e36');
+  const nonce=createAssetVerificationNonce(),icon={path:'/favicon.ico',size:favicon.length,sha256:faviconHash,contentType:'image/x-icon'};
+  const generated=createAssetVerifierSource({workerName:'ledgetop-clients',origin:'https://portal.ledgetop.app',entries:[icon],nonceHash:nonce.nonceHash,versionId});
+  const source=`export default {fetch(request){
+    const url=new URL(request.url);
+    if(url.origin!=='https://portal.ledgetop.app'||url.pathname!=='/favicon.ico'||request.redirect!=='manual'
+      ||request.headers.get('Cloudflare-Workers-Version-Overrides')!==${JSON.stringify(`ledgetop-clients="${versionId}"`)})return new Response(null,{status:500});
+    const body=request.method==='HEAD'?null:new Uint8Array(${JSON.stringify([...favicon])});
+    return new Response(body,{headers:{'Content-Type':'image/vnd.microsoft.icon','Content-Length':'1889'}});
+  }};`;
+  const runtime=new Miniflare({workers:[
+    {name:'verifier',modules:true,script:generated,compatibilityDate:'2026-07-22',serviceBindings:{SOURCE_ASSETS:'synthetic-static-source'}},
+    {name:'synthetic-static-source',modules:true,script:source,compatibilityDate:'2026-07-22'},
+  ]});
+  t.after(()=>runtime.dispose());
+  const endpoint=await runtime.ready,headers={Authorization:'Bearer '+nonce.bearer,'Accept-Encoding':'identity'};
+  for(const method of ['GET','HEAD']){
+    const response=await fetch(new URL('/favicon.ico',endpoint),{method,headers});
+    assert.equal(response.status,200,`${method} native favicon alias`);
+    assert.equal(response.headers.get('Content-Type'),'image/x-icon');
+    assert.equal(response.headers.get('Content-Length'),'1889');
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()),method==='HEAD'?Buffer.alloc(0):favicon);
+  }
 });

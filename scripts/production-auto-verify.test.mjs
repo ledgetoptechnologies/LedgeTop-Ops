@@ -1,10 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { ASSET_VERIFICATION_LIMITS, createAssetVerificationNonce, createAssetVerifierSource, collectVerifiedAssets, executeAssetVerification } from "./production-auto-verify.mjs";
 
 const bytes = Buffer.from([0, 255, 13, 10, 65, 0]);
 const sha = value => createHash("sha256").update(value).digest("hex");
+const faviconBytes = fs.readFileSync(fileURLToPath(new URL('../apps/operations/public/favicon.ico', import.meta.url)));
 const entry = { path: "/assets/old-build.js", size: bytes.length, sha256: sha(bytes), contentType: "application/javascript" };
 const versionId = "00000000-0000-4000-8000-000000000001";
 const options = nonce => ({ workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [entry], nonceHash: nonce.nonceHash, versionId });
@@ -103,6 +106,39 @@ test("collector checks HEAD and GET and returns byte-exact copies without input 
   const entries = [entry], before = structuredClone(entries), methods = [];
   const assets = await collectVerifiedAssets({ entries, fetchAsset: async (row, { method }) => { assert.deepEqual(row, entry); methods.push(method); return response(method); } });
   assert.deepEqual(methods, ["HEAD", "GET"]); assert.deepEqual(assets.get(entry.path), bytes); assert.deepEqual(entries, before);
+});
+
+test("native verifier accepts only the pinned favicon MIME alias while retaining exact byte checks", async () => {
+  assert.equal(faviconBytes.length, 1889);
+  assert.equal(sha(faviconBytes), '4475e1abc388373b2e6c77b91e229e55e65b4efa1435e5aa816056873ad30e36');
+  const nonce = createAssetVerificationNonce();
+  for (const [contentType, upstreamType] of [['image/x-icon', 'image/vnd.microsoft.icon'],
+    ['image/vnd.microsoft.icon', 'image/x-icon']]) {
+    const icon = { path: '/favicon.ico', size: faviconBytes.length, sha256: sha(faviconBytes), contentType };
+    const app = await worker(nonce, { entries: [icon] });
+    const env = { SOURCE_ASSETS: { fetch: async req => new Response(req.method === 'HEAD' ? null : faviconBytes,
+      { headers: { 'Content-Type': upstreamType, 'Content-Length': String(faviconBytes.length) } }) } };
+    const result = await app.fetch(request(nonce, icon.path), env);
+    assert.equal(result.status, 200);
+    assert.deepEqual(Buffer.from(await result.arrayBuffer()), faviconBytes);
+    const checked = await collectVerifiedAssets({ entries: [icon], fetchAsset: async (_row, { method }) =>
+      new Response(method === 'HEAD' ? null : faviconBytes,
+        { headers: { 'Content-Type': upstreamType, 'Content-Length': String(faviconBytes.length) } }) });
+    assert.deepEqual(checked.get(icon.path), faviconBytes);
+  }
+
+  const wrongBytes = Buffer.from('wrong icon bytes');
+  const legacyIcon = { path: '/favicon.ico', size: faviconBytes.length, sha256: sha(faviconBytes), contentType: 'image/x-icon' };
+  const legacyApp = await worker(nonce, { entries: [legacyIcon] });
+  const wrongBody = await legacyApp.fetch(request(nonce, legacyIcon.path), { SOURCE_ASSETS: { fetch: async () =>
+    new Response(wrongBytes, { headers: { 'Content-Type': 'image/vnd.microsoft.icon' } }) } });
+  assert.equal(wrongBody.status, 502);
+
+  const otherPath = { ...legacyIcon, path: '/assets/favicon.ico' };
+  const otherPathApp = await worker(nonce, { entries: [otherPath] });
+  const wrongMime = await otherPathApp.fetch(request(nonce, otherPath.path), { SOURCE_ASSETS: { fetch: async () =>
+    new Response(faviconBytes, { headers: { 'Content-Type': 'image/vnd.microsoft.icon' } }) } });
+  assert.equal(wrongMime.status, 502);
 });
 
 test('collector accepts optional outer length while still verifying actual bytes and hash',async()=>{

@@ -18,12 +18,20 @@ const IGNORE = 'wrangler.json\n.dev.vars\n';
 const MIMES = Object.freeze({ '.html':'text/html', '.htm':'text/html', '.js':'text/javascript', '.mjs':'text/javascript',
   '.css':'text/css', '.json':'application/json', '.map':'application/json', '.webmanifest':'application/manifest+json',
   '.svg':'image/svg+xml', '.png':'image/png', '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.gif':'image/gif',
-  '.webp':'image/webp', '.avif':'image/avif', '.ico':'image/x-icon', '.woff':'font/woff', '.woff2':'font/woff2',
+  '.webp':'image/webp', '.avif':'image/avif', '.ico':'image/vnd.microsoft.icon', '.woff':'font/woff', '.woff2':'font/woff2',
   '.ttf':'font/ttf', '.otf':'font/otf', '.wasm':'application/wasm', '.txt':'text/plain', '.xml':'application/xml',
   '.pdf':'application/pdf', '.mp4':'video/mp4', '.webm':'video/webm', '.mp3':'audio/mpeg', '.wav':'audio/wav' });
 const need = (ok, code) => { if (!ok) throw new Error(code); };
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const sort = (a,b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+const KNOWN_FAVICON = Object.freeze({ path:'/favicon.ico', size:1889,
+  sha256:'4475e1abc388373b2e6c77b91e229e55e65b4efa1435e5aa816056873ad30e36' });
+const FAVICON_MIMES = new Set(['image/x-icon','image/vnd.microsoft.icon']);
+export function compatibleAssetMime(path, size, sha256, left, right) {
+  if (left === right) return true;
+  return path === KNOWN_FAVICON.path && size === KNOWN_FAVICON.size && sha256 === KNOWN_FAVICON.sha256
+    && FAVICON_MIMES.has(left) && FAVICON_MIMES.has(right) && left !== right;
+}
 function exact(value, keys) {
   return value && Object.getPrototypeOf(value) === Object.prototype && Reflect.ownKeys(value).length === keys.length
     && keys.every(k => Object.hasOwn(value,k)) && keys.every(k => Object.getOwnPropertyDescriptor(value,k)?.get === undefined
@@ -117,8 +125,12 @@ export function mergeAssetLedger({previous,current,workerName,accountId,sourceCo
     const bytes=verifiedBytes(v,current.payloads),old=union.get(v.path),collision=casePaths.get(v.path.toLowerCase());
     need(!collision||collision===v.path,'asset_path_case_collision');
     need(v.providerHash===sha(bytes).slice(0,32),'asset_new_provider_hash_invalid');
-    need(!old||v.path==='/index.html'||old.size===v.size&&old.sha256===v.sha256&&old.mime===v.mime,'asset_historical_path_changed');
-    union.set(v.path,old&&old.size===v.size&&old.sha256===v.sha256&&old.mime===v.mime?old:v);casePaths.set(v.path.toLowerCase(),v.path);
+    const sameHistoricalBytes = old && old.size === v.size && old.sha256 === v.sha256;
+    const sameHistoricalMetadata = sameHistoricalBytes && compatibleAssetMime(v.path,v.size,v.sha256,old.mime,v.mime);
+    need(!old||v.path==='/index.html'||sameHistoricalMetadata,'asset_historical_path_changed');
+    const retained = old && sameHistoricalMetadata
+      ? (old.mime === v.mime ? old : { ...v, providerHash: old.providerHash }) : v;
+    union.set(v.path,retained);casePaths.set(v.path.toLowerCase(),v.path);
   }
   const merged=[...union.values()].sort(sort);entries(merged);
   need(current.payloads.size===merged.length,'asset_payload_inventory_not_exact');
