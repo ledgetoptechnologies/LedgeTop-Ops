@@ -17,6 +17,27 @@ test('wrong protected ledger names fail before journal mode or migration changes
  for(const version of [41,42]){const file=path.join(dir,`${version}.sqlite`),db=new DatabaseSync(file);db.exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL); INSERT INTO schema_migrations VALUES(${version},'other_feature','t'); CREATE TABLE untouched(value TEXT); INSERT INTO untouched VALUES('keep')`);db.close();const hash=()=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),before=hash();assert.throws(()=>openDatabase(file),{code:'migration_identity_conflict'});assert.equal(hash(),before);}
 });
 
+test('reservation migration rejects foreign ledger identity and unrecorded columns',t=>{
+ const db=legacy();t.after(()=>db.close());
+ db.prepare('INSERT INTO schema_migrations VALUES (?,?,?)').run(44,'other_feature','t');
+ let before=schema(db);assert.throws(()=>applyMigrations(db),{code:'migration_identity_conflict'});assert.equal(schema(db),before);
+ db.prepare('DELETE FROM schema_migrations WHERE version=44').run();
+ db.exec('ALTER TABLE processing_attempts ADD COLUMN reservation_required INTEGER');
+ before=schema(db);assert.throws(()=>applyMigrations(db),{code:'migration_identity_conflict'});assert.equal(schema(db),before);
+});
+
+test('reservation migration rejects missing or incompatible recorded schema',t=>{
+ const db=legacy();t.after(()=>db.close());applyMigrations(db);
+ db.exec('DROP TABLE processing_attempt_reservations');const before=schema(db);
+ assert.throws(()=>applyMigrations(db),{code:'migration_identity_conflict'});assert.equal(schema(db),before);
+});
+
+test('reservation migration rejects unexpected modifying triggers',t=>{
+ const db=legacy();t.after(()=>db.close());applyMigrations(db);
+ db.exec("CREATE TRIGGER reservation_unexpected AFTER INSERT ON processing_attempt_reservations BEGIN DELETE FROM processing_attempt_reservations; END");
+ const before=schema(db);assert.throws(()=>applyMigrations(db),{code:'migration_identity_conflict'});assert.equal(schema(db),before);
+});
+
 test('case-variant ledger, table and index collisions leave database bytes and journal mode unchanged',t=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'migration-case-guard-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
  const hierarchy=MIGRATIONS.find(x=>x.version===42),cases=['ledger','gcp-table','hierarchy-table','hierarchy-index'];
