@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { compatibleAssetMime } from "./production-auto-assets.mjs";
 
 // Temporary static-byte verification only. Provider creation/deletion, exact
 // service-binding readback, and before/after production snapshots belong to the
@@ -65,7 +66,10 @@ try{
  const response=await env.SOURCE_ASSETS.fetch(new Request(origin+sourcePath,{method:request.method,headers,redirect:'manual',signal:request.signal}));
  if(response.status!==200)return deny(502,'upstream-status',response.status);
  if(response.redirected||response.headers.has('Location')||response.headers.has('Content-Range')||response.headers.get('Content-Encoding'))return deny(502,'upstream-transfer',response.status);
- if((response.headers.get('Content-Type')||'').split(';',1)[0].trim().toLowerCase()!==entry.contentType)return deny(502,'upstream-mime',response.status);
+ const upstreamMime=(response.headers.get('Content-Type')||'').split(';',1)[0].trim().toLowerCase();
+ const faviconMimeAlias=entry.path==='/favicon.ico'&&entry.size===1889&&entry.sha256==='4475e1abc388373b2e6c77b91e229e55e65b4efa1435e5aa816056873ad30e36'
+  &&['image/x-icon','image/vnd.microsoft.icon'].includes(entry.contentType)&&['image/x-icon','image/vnd.microsoft.icon'].includes(upstreamMime)&&entry.contentType!==upstreamMime;
+ if(upstreamMime!==entry.contentType&&!faviconMimeAlias)return deny(502,'upstream-mime',response.status);
  // Content-Length is optional on native asset/service responses. A declared
  // mismatch is rejected; GET still verifies every byte, length and SHA below.
  const declaredLength=response.headers.get('Content-Length');
@@ -81,9 +85,11 @@ try{
 }
 
 function responseMetadata(response, entry) {
-  need(response instanceof Response && response.status === 200 && !response.redirected
+  need(response instanceof Response);
+  const actualMime = mime(response.headers.get("Content-Type"));
+  need(response.status === 200 && !response.redirected
     && !response.headers.has("Location") && !response.headers.has("Content-Range") && !response.headers.get("Content-Encoding")
-    && mime(response.headers.get("Content-Type")) === entry.contentType
+    && compatibleAssetMime(entry.path, entry.size, entry.sha256, entry.contentType, actualMime)
     && (response.headers.get("Content-Length") === null || response.headers.get("Content-Length") === String(entry.size)));
 }
 function notCancelled(signal) { if (signal?.aborted) fail(); }

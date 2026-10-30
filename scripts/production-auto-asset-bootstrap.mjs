@@ -8,7 +8,7 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { validateAssetLedger } from './production-auto-assets.mjs';
+import { compatibleAssetMime, validateAssetLedger } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 
 const SHA = /^[a-f0-9]{64}$/u;
@@ -133,7 +133,8 @@ export function prepareAssetInventoryBootstrap({ bootstrap, previous, activeVers
   const packet = new Map(rows.map(row => [row.path, row]));
   for (const row of ledger.assets) {
     const match = packet.get(row.path);
-    const sameBytes = match && match.size === row.size && match.sha256 === row.sha256 && match.mime === row.mime;
+    const sameBytes = match && match.size === row.size && match.sha256 === row.sha256
+      && compatibleAssetMime(row.path,row.size,row.sha256,match.mime,row.mime);
     // The current active index is deliberately replaceable and is excluded
     // from retained packet history. A stale ledger's index hash is not the
     // current active index's provider identity.
