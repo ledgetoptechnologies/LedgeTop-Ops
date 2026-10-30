@@ -48,6 +48,20 @@ private final class ManagedDataStub: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+private final class DelayedIdentityStub: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        Thread.sleep(forTimeInterval: 0.2)
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+        let body = "{\"schemaVersion\":1,\"readOnly\":true,\"user\":{\"id\":\"staff\",\"displayName\":\"Test\",\"email\":\"staff@example.test\"},\"expiresAt\":\(Int(Date().timeIntervalSince1970) + 60)}"
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
 private final class InvalidProbeStub: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -150,6 +164,30 @@ final class ManagedPilotDataTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(page.operations.map(\.id), ["op-1"])
         let operation = try await api.operation(credential: token, id: "op-1")
         XCTAssertEqual(operation.title, "Test operation")
+    }
+    func testSessionBoundsAccessAndRejectsExpiryDuringIdentityRequest() throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        func session(expiry: Int, readOnly: Bool = true) throws -> MobilePilotSession {
+            let json = "{\"schemaVersion\":1,\"readOnly\":\(readOnly),\"user\":{\"id\":\"staff\",\"displayName\":\"Test\",\"email\":\"staff@example.test\"},\"expiresAt\":\(expiry)}"
+            return try JSONDecoder().decode(MobilePilotSession.self, from: Data(json.utf8))
+        }
+        let token = ManagedOAuthCredential(accessToken: "oauth:synthetic", refreshToken: "oauth:must-not-leak", expiresAt: now.addingTimeInterval(300))
+        let short = try ManagedPilotDataAPI.credential(token, boundedBy: session(expiry: 1_060), now: now)
+        XCTAssertEqual(short.expiresAt, now.addingTimeInterval(60))
+        XCTAssertNil(short.refreshToken)
+        let long = try ManagedPilotDataAPI.credential(token, boundedBy: session(expiry: 1_600), now: now)
+        XCTAssertEqual(long.expiresAt, token.expiresAt)
+        // Both authorities must still be current after the identity response.
+        XCTAssertThrowsError(try ManagedPilotDataAPI.credential(token, boundedBy: session(expiry: 1_060), now: now.addingTimeInterval(60)))
+        XCTAssertThrowsError(try ManagedPilotDataAPI.credential(token, boundedBy: session(expiry: 1_600), now: now.addingTimeInterval(300)))
+        XCTAssertThrowsError(try ManagedPilotDataAPI.credential(token, boundedBy: session(expiry: 1_060, readOnly: false), now: now))
+    }
+    func testIdentityRequestFailsIfAccessExpiresWhileResponseIsInFlight() async throws {
+        let client = try api(stub: DelayedIdentityStub.self)
+        do {
+            _ = try await client.identity(credential: credential(expiry: 0.1))
+            XCTFail("accepted an expired credential after the response")
+        } catch { XCTAssertEqual(error as? MobilePilotError, .expired) }
     }
     func testSyntheticProbeUsesFixedTestEndpoint() async throws {
         try await revocationAPI(stub: ManagedDataStub.self).verifySyntheticProbe(credential: credential())

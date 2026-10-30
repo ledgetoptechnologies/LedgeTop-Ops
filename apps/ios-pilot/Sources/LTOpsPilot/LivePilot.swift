@@ -333,16 +333,12 @@ final class LivePilotModel: ObservableObject {
                 return
             }
             let identity = try await perform { try await api.identity(credential: issued) }
-            guard generation == ticket, issued.expiresAt > Date() else { return }
-            credential = issued; user = identity.user
-            let remaining = max(0, issued.expiresAt.timeIntervalSinceNow)
-            expiry = Task { [weak self] in
-                do { try await Task.sleep(for: .seconds(remaining)) } catch { return }
-                guard let self, self.generation == ticket else { return }
-                self.signOut(); self.message = "Your read-only session expired. Sign in again."
-            }
-            let page = try await perform { try await api.operations(credential: issued) }
-            guard generation == ticket, issued.expiresAt > Date() else { return }
+            guard generation == ticket else { return }
+            let authorized = try ManagedPilotDataAPI.credential(issued, boundedBy: identity)
+            credential = authorized; user = identity.user
+            scheduleReadExpiry(authorized, ticket: ticket)
+            let page = try await perform { try await api.operations(credential: authorized) }
+            guard generation == ticket, authorized.expiresAt > Date() else { return }
             try collection.append(page, requestedCursor: nil)
         } catch {
             guard generation == ticket else { return }
@@ -351,6 +347,15 @@ final class LivePilotModel: ObservableObject {
     }
     func refresh() async { await load(reset: true) }
     func loadMore() async { await load(reset: false) }
+    private func scheduleReadExpiry(_ credential: ManagedOAuthCredential, ticket: UUID) {
+        expiry?.cancel()
+        let remaining = max(0, credential.expiresAt.timeIntervalSinceNow)
+        expiry = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(remaining)) } catch { return }
+            guard let self, self.generation == ticket else { return }
+            self.signOut(); self.message = "Your read-only session expired. Sign in again."
+        }
+    }
     private func load(reset: Bool) async {
         guard !isSyntheticProbe, !loading, let credential, let api else { return }
         guard credential.expiresAt > Date() else { signOut(); message = "Your read-only session expired. Sign in again."; return }
@@ -361,10 +366,15 @@ final class LivePilotModel: ObservableObject {
         if reset { collection = MobileOperationCollection(); detail = nil; detailGeneration = UUID() }
         defer { if generation == ticket { loading = false } }
         do {
-            _ = try await perform { try await api.identity(credential: credential) }
-            guard generation == ticket, credential.expiresAt > Date() else { return }
-            let page = try await perform { try await api.operations(credential: credential, cursor: cursor) }
-            guard generation == ticket, credential.expiresAt > Date() else { return }
+            let identity = try await perform { try await api.identity(credential: credential) }
+            guard generation == ticket else { return }
+            guard let existing = self.user, existing.id == identity.user.id,
+                  existing.email == identity.user.email else { throw MobilePilotError.signedOut }
+            let authorized = try ManagedPilotDataAPI.credential(credential, boundedBy: identity)
+            self.credential = authorized; self.user = identity.user
+            scheduleReadExpiry(authorized, ticket: ticket)
+            let page = try await perform { try await api.operations(credential: authorized, cursor: cursor) }
+            guard generation == ticket, authorized.expiresAt > Date() else { return }
             try collection.append(page, requestedCursor: cursor)
         } catch {
             guard generation == ticket else { return }
@@ -379,7 +389,8 @@ final class LivePilotModel: ObservableObject {
         defer { if generation == ticket && detailGeneration == detailTicket { detailLoading = false } }
         do {
             let result = try await perform { try await api.operation(credential: credential, id: id) }
-            guard generation == ticket, detailGeneration == detailTicket, credential.expiresAt > Date() else { return }
+            guard generation == ticket, detailGeneration == detailTicket, credential.expiresAt > Date(),
+                  (self.credential?.expiresAt ?? .distantPast) > Date() else { return }
             detail = result
         } catch {
             guard generation == ticket, detailGeneration == detailTicket else { return }

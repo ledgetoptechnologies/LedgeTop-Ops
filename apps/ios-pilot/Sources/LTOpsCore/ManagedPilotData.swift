@@ -110,6 +110,17 @@ public struct ManagedPilotDataAPI: Sendable {
         return result
     }
 
+    /// Limit client-visible access to both the OAuth credential and the
+    /// server-authorized session. A short server session must never leave a
+    /// longer-lived credential displaying previously loaded data.
+    public static func credential(_ credential: ManagedOAuthCredential, boundedBy session: MobilePilotSession,
+                                  now: Date = Date()) throws -> ManagedOAuthCredential {
+        guard session.schemaVersion == 1, session.readOnly, !session.user.id.isEmpty else { throw MobilePilotError.invalidResponse }
+        let effectiveExpiry = min(credential.expiresAt, Date(timeIntervalSince1970: TimeInterval(session.expiresAt)))
+        guard effectiveExpiry > now else { throw MobilePilotError.expired }
+        return ManagedOAuthCredential(accessToken: credential.accessToken, refreshToken: nil, expiresAt: effectiveExpiry)
+    }
+
     public func operations(credential: ManagedOAuthCredential, cursor: String? = nil) async throws -> MobileOperationsPage {
         let result: MobileOperationsPage = try await read(path: "operations", cursor: cursor, credential: credential)
         guard result.schemaVersion == 1 else { throw MobilePilotError.invalidResponse }
