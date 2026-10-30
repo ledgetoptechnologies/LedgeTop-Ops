@@ -50,3 +50,25 @@ test('twenty persistent cleanup failures do not hide later sessions',t=>{
  for(const id of first)assert.throws(()=>cleanupExpiredUpload(p,{cleanupUpload:()=>{throw Error('offline');}},id),/offline/);
  const next=p.expiredUploads().slice(0,20);assert.equal(next.length,5);assert.ok(next.every(id=>!first.includes(id)));
 });
+
+test('project and task trash fail before changing metadata when an owned CSV upload is retained',t=>{
+ const db=openDatabase(':memory:');t.after(()=>db.close());const p=new ProcessingRepository(db);
+ const project=p.createProject({displayName:'Synthetic'}),dataset=p.createDataset({projectId:project.id,displayName:'Synthetic',rootKey:'datasets',relativePath:'synthetic',storageMode:'managed'});
+ const files=[{id:'control',relativePath:'control.csv',byteSize:1,sha256:'a'.repeat(64)}];
+ const upload=p.admitUpload({datasetId:dataset.id,subject:'fixture',files,chunkSize:1,expiresAt:'2999-01-01T00:00:00.000Z'});assert.ok(upload);
+ assert.equal(p.trashProject(project.id,'fixture'),null);assert.equal(p.getProject(project.id).status,'active');
+ // Model a legacy inconsistent dataset with an unfinished raw upload and task.
+ p.finalizeDataset(dataset.id,[{id:'image',relativePath:'photo.jpg',byteSize:1,sha256:'b'.repeat(64)}],'c'.repeat(64));
+ const task=p.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Synthetic'});
+ assert.equal(p.trashTask(task.id,'fixture'),null);assert.equal(p.getTask(task.id).status,'draft');
+});
+
+test('an existing trash intent does not override a retained CSV upload',t=>{
+ const db=openDatabase(':memory:');t.after(()=>db.close());const p=new ProcessingRepository(db);
+ const project=p.createProject({displayName:'Synthetic'}),dataset=p.createDataset({projectId:project.id,displayName:'Synthetic',rootKey:'datasets',relativePath:'synthetic',storageMode:'managed'});
+ const mutation=p.beginTrashMutation(dataset.id,'fixture');assert.ok(mutation);
+ p.createUpload({datasetId:dataset.id,subject:'legacy',files:[{id:'csv',relativePath:'control.csv',byteSize:1,sha256:'a'.repeat(64)}],chunkSize:1,expiresAt:'2999-01-01T00:00:00.000Z'});
+ assert.equal(p.beginTrashMutation(dataset.id,'fixture'),null);
+ const {applyStorageMutation}=require('../server/storageLifecycle');
+ assert.throws(()=>applyStorageMutation(p,{pathExistsStrict:()=>{throw Error('filesystem must not be touched');}},mutation),error=>error.code==='retained_csv_upload');
+});

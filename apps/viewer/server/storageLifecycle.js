@@ -21,6 +21,7 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
   // Defense-in-depth for the disabled indexed-binding experiment. This check
   // does not fence filesystem writers or make source custody available.
   if(mutation.entityType==='dataset'&&processing.hasSourceBinding(mutation.entityId))throw Object.assign(new Error('dataset source binding retained'),{code:'source_binding_retained'});
+  if(mutation.entityType==='dataset'&&mutation.type==='trash'&&processing.hasUnfinishedCsvUploads(mutation.entityId))throw Object.assign(new Error('unfinished CSV upload retained'),{code:'retained_csv_upload'});
   if(faultAt==='after_intent')throw Object.assign(new Error('injected failure after lifecycle intent'),{code:'fault_injected'});
   try{
     if(mutation.status==='intent'){
