@@ -87,6 +87,15 @@ beforeEach(async()=>{
 });
 
 describe('proposed owner Google Ads source lane',()=>{
+
+ it('migrates append-only storage without widening v1 or 0229, and starts disabled with no key, binding, or grant',async()=>{
+  expect(await db.prepare('SELECT enabled,storage_accepted FROM owner_intel_google_ads_control').first()).toEqual({enabled:0,storage_accepted:0});
+  for(const table of ['owner_intel_google_ads_bindings','owner_intel_google_ads_inbox','owner_intel_google_ads_projections','owner_intel_read_grants'])expect(await db.prepare(`SELECT COUNT(*) count FROM ${table}`).first<number>('count')).toBe(0);
+  await expect(db.prepare("INSERT INTO owner_intel_source_bindings VALUES('p','b',1,'google_ads_summary','own:google-ads','google_ads_api','1234567890','c','{}',1)").run()).rejects.toThrow();
+  await expect(db.prepare("INSERT INTO ci_ingest_inbox(operation_id,producer_id,key_id,key_revision,binding_id,configuration_revision,subject_key,observation_kind,epoch,counter,payload_sha256,raw_body,observation_json,receipt_json,accepted_at,outcome) VALUES('00000000-0000-4000-8000-000000000001','p','k',1,'b',1,'own:google-ads','google_ads_summary','1','1',?,'{}','{}','{}','2026-10-25T12:00:00Z','accepted_head')").bind('A'.repeat(43)).run()).rejects.toThrow();
+  expect((await db.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
+ });
+
  it('accepts the exact persisted stale Hermes Ads journal body, replays its receipt, and retains unknown metrics as null',async()=>{
   const item=journalVectors.cases.find(entry=>entry.id==='persisted-d7e3bdf00d29');
   expect(journalVectors.sourceArtifactSha256).toBe('9309157056727e83f801546867cfe596a3a500cb288c1e930ec4f8d875a4843f');
@@ -114,14 +123,6 @@ describe('proposed owner Google Ads source lane',()=>{
    .bind(JSON.parse(item!.body).operationId).first<{period_key:string;period_days:number|null;dto_json:string}>();
   expect(projection?.period_key).toBe('7d');expect(projection?.period_days).toBe(7);
   expect(JSON.parse(projection!.dto_json).observation.payload.totals).toEqual({clicks:null,conversions:null,costMicros:null,impressions:null,reason:'source_stale',state:'source_stale'});
- });
-
- it('migrates append-only storage without widening v1 or 0229, and starts disabled with no key, binding, or grant',async()=>{
-  expect(await db.prepare('SELECT enabled,storage_accepted FROM owner_intel_google_ads_control').first()).toEqual({enabled:0,storage_accepted:0});
-  for(const table of ['owner_intel_google_ads_bindings','owner_intel_google_ads_inbox','owner_intel_google_ads_projections','owner_intel_read_grants'])expect(await db.prepare(`SELECT COUNT(*) count FROM ${table}`).first<number>('count')).toBe(0);
-  await expect(db.prepare("INSERT INTO owner_intel_source_bindings VALUES('p','b',1,'google_ads_summary','own:google-ads','google_ads_api','1234567890','c','{}',1)").run()).rejects.toThrow();
-  await expect(db.prepare("INSERT INTO ci_ingest_inbox(operation_id,producer_id,key_id,key_revision,binding_id,configuration_revision,subject_key,observation_kind,epoch,counter,payload_sha256,raw_body,observation_json,receipt_json,accepted_at,outcome) VALUES('00000000-0000-4000-8000-000000000001','p','k',1,'b',1,'own:google-ads','google_ads_summary','1','1',?,'{}','{}','{}','2026-10-25T12:00:00Z','accepted_head')").bind('A'.repeat(43)).run()).rejects.toThrow();
-  expect((await db.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
  });
 
  it('keeps the Ads receiver default-off and returns no account/schema details before gates',async()=>{
