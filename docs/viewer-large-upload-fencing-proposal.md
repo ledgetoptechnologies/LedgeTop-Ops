@@ -1,0 +1,36 @@
+# Large upload fencing proposal (draft, disabled)
+
+This proposal addresses uploads that need longer than the current fixed 24-hour session. It does not authorize production activation, change existing session semantics, or promise reference-v2 processing. The 142.18 GiB example can exceed the current session window; its CSV and all accepted source chunks must survive any uncertainty.
+
+## Required invariants
+
+- A chunk request is admitted only for the authenticated staff subject, current upload identity and generation, current token hash, unexpired OPEN session, exact file/index/length, and valid content digest. Never store a plaintext token or log source data.
+- Token rotation fences old requests. A chunk that acquired authority under an old generation cannot publish a receipt or extend the new session. Duplicate identical chunks are idempotent; conflicting bytes are rejected.
+- Accepted progress may extend an inactivity deadline; it must not resurrect an expired, cancelled, finalizing, cleanup-claimed, or superseded session. The extension is bounded and server-owned. A retry of an already accepted chunk must not extend the deadline without a valid current generation and authentication.
+- Cleanup may claim an expired session only by an atomic comparison of the observed identity, generation, expiry, and current status. Once claimed, no new writers or resume may be admitted. Never unlink while a previously admitted writer could still publish or be writing into the directory. An unproved owner, stale process, inaccessible storage, or inconsistent journal is a hold for inspection, not permission to delete.
+- Resume returns the same authoritative manifest and missing-chunk state only when subject, dataset, manifest identity, and storage custody match. Its token generation update must be atomic with validation. A cleanup claim wins over resume; resume must not reactivate claimed storage. CSV-bearing sessions retain the raw CSV and partial data under the existing retention rules.
+- A process crash at any step must not fabricate an accepted chunk, lose a previously committed receipt, or make incomplete source data look finalized. Recovery verifies actual bytes against the receipt, hash, and size before reuse. No cleanup of a path based only on process elapsed time or a stale lease.
+- Capacity admission reserves the worst-case simultaneously occupied bytes for the relevant physical filesystems, including chunks and assembly when colocated. Concurrent sessions must not each consume the same free-space headroom. An unproved filesystem identity or reservation state fails closed; release a reservation only after verified finalization or verified cleanup. Preserve unrelated uploads and existing reserve policy.
+
+## Proposed state and transitions
+
+Introduce a new versioned upload contract and durable ledger rather than reinterpreting existing upload rows. Persist a generation, manifest digest, inactivity expiry, subject/dataset binding, storage identity, capacity reservations, cleanup state, and scoped write ownership. Define idempotent operation IDs for accepted chunks and cleanup claims. Implement current-token hash checks and generation changes in SQLite transactions.
+
+A writer acquires a generation-bound durable claim before touching a chunk. The claim is scoped to a single upload/file/index and includes a unique owner and fence. Any publication checks the same live generation and claim. For recovery after a writer disappears, reconcile its filesystem and receipt state with verified process/lease ownership; expiry alone is not evidence that a stalled process can no longer write. Publish staged bytes atomically and verify durable receipt ordering. Reuse of a partially written staging file requires a complete identity and integrity check.
+
+A cleaner atomically transitions only a matching expired OPEN generation to CLEANUP_CLAIMED. A claimed upload is unavailable to resume or finalization. The cleaner must drain/fence every prior writer and verify ownership before deleting only the claimed upload tree. The cleanup journal remains durable until deletion is verified and accounting released. Concurrent cleanup attempts are idempotent and cannot delete a new generation.
+
+Finalization atomically blocks new writers, waits for existing writers to settle, and verifies the complete manifest and chunks. A finalized dataset is committed before cleanup or reservation release. If file promotion or the database transaction is interrupted, reconcile from journal and hashes rather than assuming success or deleting source.
+
+## Compatibility and rollout gate
+
+Old API and worker builds can bypass this proposed protocol, including the existing expiry scan and chunk writer. A schema alone does not fence them. Activation requires a verified stop/drain of all old API and worker instances, an enforceable startup/version gate for every writer and cleanup worker, compatible migration and rollback procedures, and explicit handling of pre-existing OPEN, FINALIZING, EXPIRED, and CSV-retained sessions. Ambiguous old sessions stay retained and require inspection. A rollback must not restart code that can delete or mutate new-generation state. Keep this feature disabled until those conditions and storage reservations are independently verified.
+
+## Required validation
+
+1. Same-process and separate-process races: expiry scan vs resume, old-token in-flight chunk vs rotation, two writers to one index, finalization vs writer, cleanup vs finalization, and two cleaners. Prove no acknowledged chunk is lost, no stale writer publishes, and no renewed generation is deleted.
+2. Fault injection and subprocess termination at claim, write, rename, receipt commit, expiry update, cleanup claim, unlink, verification, and reservation release. Repeat after database reopen. Distinguish process termination from actual power-loss testing.
+3. A test-clock simulation of an upload active for longer than 24 hours, a prolonged interruption, token refresh, and resume without reuploading acknowledged chunks. Test the full accepted-byte boundary without transferring hundreds of GiB.
+4. Multiple simultaneous uploads on shared and separate filesystems: reservations, admission failure, disk pressure, rollback, reconciliation and release after cleanup. Test CSV retention and unknown/unavailable filesystem identity.
+5. Upgrade and rollback from populated legacy databases with representative old API/worker instances. Prove old writers/cleaners cannot access v2 state before enabling. Verify no client data or credentials enter logs, fixtures or receipts.
+6. Full exact-image integration with the actual large-dataset processing protocol, real approved staging data, resource measurements, review, and a user-visible diagnostic when a session is held. Browser selection alone is not transfer or processing qualification.
