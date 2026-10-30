@@ -219,8 +219,8 @@ test("jobs whose status can't be checked are a separate warning from failed jobs
   await page.goto("/viewer");
   const card = page.getByLabel("3D Viewer platform overview").locator("section.ltds-card", { hasText: "Status checks" });
   await expect(card).toContainText("3 can't be checked");
-  await expect(card).toContainText("They haven't failed.");
-  await expect(page.getByText("The status of 3 active processing jobs can't be confirmed right now. This isn't a failure; the Viewer keeps checking.")).toBeVisible();
+  await expect(card).toContainText("A status-check problem does not mean the processing jobs failed.");
+  await expect(page.getByText("The status of 3 active processing jobs can't be confirmed right now. A status-check problem does not mean the processing jobs failed.")).toBeVisible();
   await expect(page.getByText("need attention", { exact: false })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Review in Viewer" })).toHaveCount(0);
   const popup = context.waitForEvent("page");
@@ -231,7 +231,7 @@ test("jobs whose status can't be checked are a separate warning from failed jobs
   reply = overview(2, 1);
   await page.reload();
   await expect(card).toContainText("1 can't be checked");
-  await expect(card).toContainText("It hasn't failed.");
+  await expect(card).toContainText("A status-check problem does not mean the processing job failed.");
   await expect(page.getByText("The status of 1 active processing job can't be confirmed right now.", { exact: false })).toBeVisible();
   await expect(page.getByText("2 processing jobs need attention.", { exact: false })).toBeVisible();
 });
