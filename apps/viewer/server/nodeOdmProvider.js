@@ -155,9 +155,9 @@ class NodeOdmProvider {
       throw error;
     }
     if (!info || info.uuid !== uuid || !info.status || !Number.isFinite(Number(info.status.code))) throw new Error('provider returned an incompatible task response');
-    if(Object.hasOwn(info,'ledgetopHeld')&&(info.ledgetopHeld!==true||Number(info.status.code)!==20))throw new Error('provider returned an incompatible held status');
+    if(Object.hasOwn(info,'ledgetopHeld')&&(info.ledgetopHeld!==true||![10,20].includes(Number(info.status.code))))throw new Error('provider returned an incompatible held status');
     return { uuid:info.uuid, status:STATUS[Number(info.status?.code)] || 'unknown', statusCode:Number(info.status?.code),
-      ...(info.ledgetopHeld===true?{held:true}:{}),
+      ...(info.ledgetopHeld===true?{held:true,...(info.ledgetopHoldReason==='option_evidence_invalid'?{heldReason:'option_evidence_invalid'}:{})}:{}),
       progress:Math.max(0,Math.min(1,Number(info.progress||0)/100)), imagesCount:info.imagesCount,
       ...Object.fromEntries(['engine','engineVersion'].filter(key=>typeof info[key]==='string'&&/^[A-Za-z0-9._+ -]{1,120}$/.test(info[key])).map(key=>[key,info[key]])) };
   }
