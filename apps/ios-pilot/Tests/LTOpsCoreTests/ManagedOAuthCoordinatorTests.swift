@@ -58,10 +58,15 @@ final class ManagedOAuthCoordinatorTests: XCTestCase {
         try await coordinator.signIn()
         let token = await coordinator.currentAccessToken()
         XCTAssertEqual(token, "oauth:synthetic")
+        let dataCredential = await coordinator.currentDataCredential()
+        XCTAssertEqual(dataCredential?.accessToken, "oauth:synthetic")
+        XCTAssertNil(dataCredential?.refreshToken)
         let result = await coordinator.signOut()
         XCTAssertEqual(result, .providerAcknowledged)
         let cleared = await coordinator.currentAccessToken()
         XCTAssertNil(cleared)
+        let clearedDataCredential = await coordinator.currentDataCredential()
+        XCTAssertNil(clearedDataCredential)
     }
     func testWrongStateDoesNotInstallCredential() async throws {
         let coordinator = try coordinator(mismatch: true)

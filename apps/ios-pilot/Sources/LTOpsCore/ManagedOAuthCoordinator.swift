@@ -142,4 +142,9 @@ public actor ManagedOAuthCoordinator {
         guard let credential, credential.expiresAt > Date() else { return nil }
         return credential.accessToken
     }
+    /// Only the access token is exposed to the read-only data transport.
+    public func currentDataCredential() -> ManagedOAuthCredential? {
+        guard let credential, credential.expiresAt > Date() else { return nil }
+        return ManagedOAuthCredential(accessToken: credential.accessToken, refreshToken: nil, expiresAt: credential.expiresAt)
+    }
 }

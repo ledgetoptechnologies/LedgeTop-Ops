@@ -58,12 +58,15 @@ private enum PilotKeychain {
         kSecAttrService as String: "com.ledgetoptechnologies.ops.pilot.readonly",
         kSecAttrAccount as String: origin] }
     static func clear() { for origin in MobilePilotConfiguration.approvedOrigins { SecItemDelete(query(origin: origin) as CFDictionary) } }
-    static func save(_ token: MobilePilotToken, origin: String) throws {
-        clear()
-        var item = query(origin: origin)
-        item[kSecValueData as String] = try JSONEncoder().encode(token)
-        item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw MobilePilotError.unavailable }
+}
+
+/// Activation requires a reviewed source change to add one exact pilot resource
+/// and the provider endpoint pins. An Info.plist toggle alone cannot enable it.
+private enum ManagedPilotBuildConfiguration {
+    static let approvedPins: [ManagedOAuthPins] = []
+    static func selected(enabled: Bool) -> ManagedOAuthPins? {
+        guard enabled, approvedPins.count == 1 else { return nil }
+        return approvedPins.first
     }
 }
 
@@ -77,84 +80,98 @@ final class LivePilotModel: ObservableObject {
     @Published private(set) var detailLoading = false
     @Published private(set) var message: String?
     @Published private(set) var detailMessage: String?
-    private var token: MobilePilotToken?
     private var generation = UUID()
     private var detailGeneration = UUID()
     private var expiry: Task<Void, Never>?
+    private var signOutTask: Task<ManagedOAuthSignOutResult, Never>?
+    private var pendingRequests: [UUID: @Sendable () -> Void] = [:]
     private let browser = PilotBrowserLogin()
-    let configuration: MobilePilotConfiguration?
-    private let api: MobilePilotAPI?
-    var configured: Bool { configuration != nil }
-    var environmentName: String { configuration?.origin.host == "ops.ledgetop.app" ? "Live" : "Staging" }
-    var signedIn: Bool { token?.isCurrent == true && user != nil }
+    private var credential: ManagedOAuthCredential?
+    private var coordinator: ManagedOAuthCoordinator?
+    private var api: ManagedPilotDataAPI?
+    var configured: Bool { coordinator != nil && api != nil }
+    var environmentName: String { "Staging" }
+    var signedIn: Bool { credential.map { $0.expiresAt > Date() } == true && user != nil }
 
     init() {
-        let info = Bundle.main.infoDictionary ?? [:]
-        let enabled = info["LTOpsLiveEnabled"] as? Bool == true
-        let config = try? MobilePilotConfiguration(enabled: enabled, origin: info["LTOpsOrigin"] as? String ?? "")
-        configuration = config
-        api = config.map(MobilePilotAPI.init(configuration:))
-        // First pilot requires interactive authentication after every process start.
+        let enabled = Bundle.main.infoDictionary?["LTOpsLiveEnabled"] as? Bool == true
+        if let pins = ManagedPilotBuildConfiguration.selected(enabled: enabled) {
+            let browser = self.browser
+            coordinator = ManagedOAuthCoordinator(pins: pins, transport: ManagedOAuthTransport(pins: pins),
+                browser: { url in try await browser.open(url) }, proofFactory: { try ManagedOAuthProofGenerator.generate() })
+            api = ManagedPilotDataAPI(pins: pins)
+        }
+        // Remove tokens from older pilot builds; managed credentials stay in memory.
         PilotKeychain.clear()
     }
     func openLive() { active = true }
     func useDemo() { signOut(); active = false }
     func checkExpiry() {
-        if let token, !token.isCurrent { signOut(); message = "Your read-only session expired. Sign in again." }
+        if let credential, credential.expiresAt <= Date() { signOut(); message = "Your read-only session expired. Sign in again." }
     }
     func signOut() {
-        // Revoke the narrow server session when reachable; local clearing never waits.
-        if let token, let api { Task { try? await api.revoke(token: token) } }
         generation = UUID()
+        let ticket = generation
         detailGeneration = UUID()
         expiry?.cancel(); expiry = nil
         browser.cancel()
-        token = nil; user = nil; collection = MobileOperationCollection(); detail = nil
+        let cancellations = Array(pendingRequests.values)
+        pendingRequests.removeAll()
+        cancellations.forEach { $0() }
+        credential = nil; user = nil; collection = MobileOperationCollection(); detail = nil
         loading = false; detailLoading = false; message = nil; detailMessage = nil
         PilotKeychain.clear()
+        guard let coordinator else { return }
+        let previous = signOutTask
+        let task = Task { () -> ManagedOAuthSignOutResult in
+            let prior = await previous?.value
+            let result = await coordinator.signOut()
+            return prior == .revocationUnconfirmed ? .revocationUnconfirmed : result
+        }
+        signOutTask = task
+        Task { [weak self] in
+            let result = await task.value
+            guard let self, self.generation == ticket, result == .revocationUnconfirmed else { return }
+            self.message = "Signed out on this device. Cloudflare could not confirm the session was revoked."
+        }
     }
-    private func randomValue() throws -> String {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else { throw MobilePilotError.unavailable }
-        return base64URL(Data(bytes))
-    }
-    private func base64URL(_ data: Data) -> String {
-        data.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+    private func perform<Value: Sendable>(_ operation: @escaping @Sendable () async throws -> Value) async throws -> Value {
+        let id = UUID()
+        let task = Task { try await operation() }
+        pendingRequests[id] = { task.cancel() }
+        defer { pendingRequests[id] = nil }
+        return try await task.value
     }
     func signIn() async {
-        guard !loading, let configuration, let api else { return }
+        guard !loading, let coordinator, let api else { return }
         signOut()
         let ticket = generation
         loading = true
-        var issuedSession: MobilePilotToken?
-        defer {
-            if generation == ticket { loading = false }
-            // A cancelled login can finish issuing a session after local sign-out.
-            if let issuedSession, token?.accessToken != issuedSession.accessToken {
-                Task { try? await api.revoke(token: issuedSession) }
+        defer { if generation == ticket { loading = false } }
+        if let previous = signOutTask {
+            let result = await previous.value
+            guard generation == ticket else { return }
+            if result == .revocationUnconfirmed {
+                message = "The previous Cloudflare session could not be confirmed revoked. Reopen the app after the session expires."
+                return
             }
         }
         do {
-            let verifier = try randomValue(), state = try randomValue()
-            let challenge = base64URL(Data(SHA256.hash(data: Data(verifier.utf8))))
-            let callback = try await browser.open(configuration.authorizeURL(state: state, challenge: challenge))
+            try await perform { try await coordinator.signIn() }
             guard generation == ticket else { return }
-            let code = try MobilePilotConfiguration.callbackCode(callback, expectedState: state)
-            let issued = try await api.redeem(code: code, verifier: verifier, state: state)
-            issuedSession = issued
+            guard let issued = await coordinator.currentDataCredential() else { throw MobilePilotError.expired }
             guard generation == ticket else { return }
-            let identity = try await api.identity(token: issued)
-            guard generation == ticket else { return }
-            try PilotKeychain.save(issued, origin: configuration.origin.absoluteString)
-            token = issued; user = identity.user
-            let remaining = max(0, Double(issued.expiresAt) - Date().timeIntervalSince1970)
+            let identity = try await perform { try await api.identity(credential: issued) }
+            guard generation == ticket, issued.expiresAt > Date() else { return }
+            credential = issued; user = identity.user
+            let remaining = max(0, issued.expiresAt.timeIntervalSinceNow)
             expiry = Task { [weak self] in
                 do { try await Task.sleep(for: .seconds(remaining)) } catch { return }
                 guard let self, self.generation == ticket else { return }
                 self.signOut(); self.message = "Your read-only session expired. Sign in again."
             }
-            let page = try await api.operations(token: issued)
-            guard generation == ticket, issued.isCurrent else { return }
+            let page = try await perform { try await api.operations(credential: issued) }
+            guard generation == ticket, issued.expiresAt > Date() else { return }
             try collection.append(page, requestedCursor: nil)
         } catch {
             guard generation == ticket else { return }
@@ -165,19 +182,19 @@ final class LivePilotModel: ObservableObject {
     func refresh() async { await load(reset: true) }
     func loadMore() async { await load(reset: false) }
     private func load(reset: Bool) async {
-        guard !loading, let token, let api else { return }
-        guard token.isCurrent else { signOut(); message = "Your read-only session expired. Sign in again."; return }
+        guard !loading, let credential, let api else { return }
+        guard credential.expiresAt > Date() else { signOut(); message = "Your read-only session expired. Sign in again."; return }
         let ticket = generation
         let cursor = reset ? nil : collection.nextCursor
         if !reset && cursor == nil { return }
         loading = true; message = nil
-        // Remove old rows on a refresh failure instead of silently showing revoked data.
         if reset { collection = MobileOperationCollection(); detail = nil; detailGeneration = UUID() }
         defer { if generation == ticket { loading = false } }
         do {
-            _ = try await api.identity(token: token)
-            let page = try await api.operations(token: token, cursor: cursor)
-            guard generation == ticket, token.isCurrent else { return }
+            _ = try await perform { try await api.identity(credential: credential) }
+            guard generation == ticket, credential.expiresAt > Date() else { return }
+            let page = try await perform { try await api.operations(credential: credential, cursor: cursor) }
+            guard generation == ticket, credential.expiresAt > Date() else { return }
             try collection.append(page, requestedCursor: cursor)
         } catch {
             guard generation == ticket else { return }
@@ -185,14 +202,14 @@ final class LivePilotModel: ObservableObject {
         }
     }
     func showDetail(id: String) async {
-        guard let token, let api else { return }
+        guard let credential, let api else { return }
         detail = nil; detailMessage = nil; detailLoading = true
         detailGeneration = UUID()
         let ticket = generation, detailTicket = detailGeneration
         defer { if generation == ticket && detailGeneration == detailTicket { detailLoading = false } }
         do {
-            let result = try await api.operation(token: token, id: id)
-            guard generation == ticket, detailGeneration == detailTicket, token.isCurrent else { return }
+            let result = try await perform { try await api.operation(credential: credential, id: id) }
+            guard generation == ticket, detailGeneration == detailTicket, credential.expiresAt > Date() else { return }
             detail = result
         } catch {
             guard generation == ticket, detailGeneration == detailTicket else { return }

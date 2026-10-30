@@ -21,39 +21,21 @@ app starts in Demo. No flight clearance is inferred from a checklist.
 
 ## Read-only connection (implemented, disabled pending activation)
 
-The current client and backend use a custom pilot session. Their ingress has not
-been approved for activation, and they do not yet implement Cloudflare Managed
-OAuth. See [BACKEND-ROLLOUT.md](BACKEND-ROLLOUT.md) for the current isolation and
-device-validation gates. The description below documents the existing prototype,
-not a verified live sign-in flow.
+The Pilot tab opens a separate staging read-only workspace. It now uses the
+Managed OAuth client and dedicated read-only facade; this flow is not deployed or
+verified against Cloudflare. `LTOpsLiveEnabled` defaults to false and the
+source-controlled list of approved OAuth endpoint pins is empty, so enabling the
+plist flag alone cannot start sign-in. See [BACKEND-ROLLOUT.md](BACKEND-ROLLOUT.md)
+for the remaining configuration, security, and device-validation gates.
 
-The Pilot tab opens a separate read-only workspace. The default `Info.plist`
-sets `LTOpsLiveEnabled` to false, so this build cannot initiate live sign-in.
-Its proposed origin is `https://ops-staging.ledgetopdroneservices.com`.
-The only other source-allowlisted origin is `https://ops.ledgetop.app`; there is
-no user-entered URL or arbitrary API client. Staging is labeled separately.
-These hostnames come from the existing application configuration; their presence
-does not establish that the mobile endpoints or Access policies are deployed.
-
-After the backend is reviewed, staged, and enabled, an explicitly approved build
-can set `LTOpsLiveEnabled` to true. Both Xcode and xtool use the same `Info.plist`.
-Switching environments requires a new build; each launch removes prior pilot
-sessions and requires a new interactive sign-in.
-
-The sign-in implementation opens Cloudflare Access with `ASWebAuthenticationSession`,
-using a secure random state and PKCE S256 challenge. The fixed custom callback is
-`com.ledgetoptechnologies.ops.pilot://auth/callback`, registered in `Info.plist`.
-It requires neither Associated Domains nor a paid Apple entitlement. The actual
-callback, Personal Team signing, and device behavior remain acceptance gates.
-
-The client redeems a single-use code at `/mobile-pilot/v1/token`, then uses the
-short-lived opaque session only for `/mobile-pilot/v1/session` and operation
-list/detail reads. It never forwards an Access cookie or staff JWT into a general
-web API. Sessions are stored using a device-only, unlocked-only Keychain item
-keyed by origin; business records remain in memory. API requests use an ephemeral
-URLSession with no cookies, disk cache, or redirects. Explicit sign-out attempts
-server session revocation and clears the app immediately even if offline.
-The browser's SSO session is independent and may remain signed in.
+The proposed flow uses `ASWebAuthenticationSession`, OS-generated state and
+PKCE S256, and the registered custom callback
+`com.ledgetoptechnologies.ops.pilot://auth/callback`. Cloudflare's acceptance of
+that callback and the complete device flow still need verification. There is no
+user-entered origin. Tokens and business records stay in memory; requests use
+ephemeral sessions without cookies, disk cache, or redirects. Sign-out clears
+local access immediately and attempts grant revocation, reporting when that
+cannot be confirmed. The browser's separate SSO session may remain signed in.
 
 The live screen has no checklist toggles, edits, delivery controls, or files.
 It preserves server statuses and displays only supplied fields. Counts and

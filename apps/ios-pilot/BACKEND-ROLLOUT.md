@@ -79,6 +79,12 @@ defaults closed outside staging. Two local entrypoint tests and the Operations
 TypeScript check passed. Before deployment, add a reviewed exact-host allowlist
 and check Cloudflare DNS and Worker route collisions: merely requiring the pilot
 host to differ from the web hostname does not exclude another production alias.
+Read-only dashboard inspection on October 29 found no explicit DNS record
+matching `ios-pilot-staging.ledgetopdroneservices.com`, but the zone has a
+DNS-only wildcard A record. The zone's Workers Routes page showed no routes.
+The wildcard affects the candidate hostname until a more-specific record exists;
+this is not approval to create one, and all collision and routing checks must be
+repeated immediately before any deployment or DNS change.
 
 The separate Cloudflare account named `Staging` is distinct from the `Ledge Top`
 account that currently owns the Operations staging Access application and D1
@@ -96,7 +102,7 @@ registration, refresh and revocation remain unverified on a real device. The
 required database dependencies may change with the final design; do not assume
 the existing pilot-session migration remains necessary.
 
-Local work now includes an unmounted Managed OAuth facade and a dedicated
+Local work now includes an undeployed Managed OAuth facade and a dedicated
 assertion validator. Neither is connected to deployment configuration. Fourteen
 signed-assertion unit tests passed and the Operations TypeScript check passed.
 The initial combined real-D1 test run produced no result within 120 seconds and
@@ -111,7 +117,7 @@ revocation window; it is not an atomic database-version guarantee.
 The full final backend suite subsequently passed all 32 tests with a single
 worker. Swift 6.4 on WSL passed all 17 package tests, including five synthetic
 OAuth wire-format tests. Swift emitted an existing test-stub Sendable warning.
-An unmounted native transport now covers pinned discovery, public registration,
+A native transport now covers pinned discovery, public registration,
 and code exchange with bounded responses and cancellation handling. After its
 addition, all 21 Swift package tests passed; its synthetic tests do not prove
 Cloudflare compatibility. The eventual app coordinator must still guard against
@@ -124,15 +130,16 @@ This was not a request for a dedicated OAuth-enabled pilot application and does
 not establish what its resource-scoped discovery will return. Registration and
 callback behavior must be verified after a safely isolated test application is
 prepared; the client currently rejects metadata without a registration endpoint.
-The unmounted coordinator now keeps tokens in memory, clears local access at
+The managed coordinator now keeps tokens in memory, clears local access at
 sign-out, and attempts revocation. It reports uncertainty for failed or in-flight
 exchanges; provider acknowledgement does not prove revocation. Its read-only
-data transport remains unmounted. All 32 Swift package tests passed, and an
-unsigned xtool build against the Apple SDK succeeded after the final changes.
-The eventual app integration must cancel underlying work as appropriate, use
-the Apple OS-random S256 generator, and guard late data responses. Provider
-revocation and callback behavior remain unverified on the iPad. The existing
-native client still uses the original custom-session protocol. End-to-end
+data transport is connected to the live-workspace model, but an empty reviewed
+pin list and the disabled plist flag prevent activation. All 32 Swift package
+tests and three Worker entrypoint tests passed, and an unsigned xtool build
+against the Apple SDK succeeded after integration. The model cancels tracked
+requests on sign-out and guards late responses; device lifecycle behavior still
+needs validation. Provider revocation and callback behavior remain unverified on
+the iPad. End-to-end
 sign-in, Access ingress, and iPad behavior remain unverified.
 
 ## Local evidence
