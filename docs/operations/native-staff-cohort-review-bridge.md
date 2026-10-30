@@ -54,3 +54,55 @@ does not establish a wrapper regression or production behavior. Do not remove
 exports or invent Workflow bindings to make the harness start. Production's
 declarative export metadata and its actual named handlers are distinct from
 the full JavaScript export inventory and must be preserved during qualification.
+
+## Inactive upload preparation
+
+`createNativeStaffCohortReviewBridgeUploadPlan` in
+`scripts/native-staff-cohort-review-bridge-upload-plan.mjs` accepts an already
+captured, in-memory Operations snapshot and the absolute candidate directory.
+It does not read credentials, contact a provider, upload a version, or activate
+one. Persist only its `safeSummary`; its metadata draft and module descriptors
+are review data, not an executable uploader or Wrangler configuration.
+
+The finite installed profile recognizes version
+`0b1ab5a8-9db0-42ab-b718-8569fae2382e`, including the two already-installed
+direct Viewer session methods. It preserves the existing production profile
+and has its own provenance and hash pin. The asset profile explicitly records
+the observed root path and automatic trailing-slash handling, rather than
+accepting arbitrary default normalization. Its Git attributes fix LF endings
+so its byte pin works across operating systems.
+
+The planner requires matching active/latest/modern versions and a single
+100-percent deployment. It verifies the installed settings, scalar digests,
+resource bindings, handlers, runtime, schedules, asset configuration, and all
+three original module bodies and types. Candidate receipt and wrapper pins are
+independent of the candidate's own claims. The ledger modules retain
+`text/plain`, despite their `.json` filenames; an uploader must not infer JSON
+module types from their extensions. Upload preparation keeps the complete
+reviewed metadata and inherits existing bindings, with no migrations.
+
+On October 30 at 01:50 UTC, a fresh GET-only capture passed these checks against
+the installed Worker and the candidate package. This establishes preparation
+compatibility, not provider acceptance, request execution, or live readiness.
+The readback receipt is
+`release-records/unification-20261024/root-cohort-upload-plan-live-read-20261030.json`
+in the local release records. No raw settings or secret values were saved.
+
+Run the artifact-independent checks with:
+
+```powershell
+node --test scripts/native-staff-cohort-review-bridge-upload-plan.test.mjs
+```
+
+Two tests require the separately captured package. Set
+`COHORT_BRIDGE_CANDIDATE_DIR` to the reviewed candidate directory to include
+them. Without that path those cases are explicitly skipped; the ordinary
+source check is not evidence of package qualification.
+
+Cloudflare does not provide Version URLs for this Durable Object Worker. An
+inactive upload and complete metadata readback can still establish provider
+acceptance without activation. A later reviewed executor must preserve exact
+module content types, use strict binding inheritance, record its intent before
+dispatch, reconcile an ambiguous result without replaying the upload, and
+prove that the active deployment did not change. That executor is not part of
+this planner. A successful upload alone is not a request-time behavior test.
