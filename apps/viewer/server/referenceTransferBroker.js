@@ -28,6 +28,11 @@ class ReferenceTransferBroker {
     if (typeof databasePath !== 'string' || databasePath === ':memory:') fail('DURABLE_DATABASE_REQUIRED');
     this.db = new DatabaseSync(databasePath);
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS reference_grants (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, reservation_id TEXT NOT NULL, identity TEXT NOT NULL, token_hash TEXT NOT NULL, metadata TEXT NOT NULL, files TEXT NOT NULL, expires_ms INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, used_bytes INTEGER NOT NULL DEFAULT 0, reserved_bytes INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0, in_flight INTEGER NOT NULL DEFAULT 0); CREATE INDEX IF NOT EXISTS reference_grants_job ON reference_grants(job_id); CREATE TABLE IF NOT EXISTS reference_job_usage (job_id TEXT PRIMARY KEY, environment TEXT NOT NULL, manifest_sha256 TEXT NOT NULL, byte_limit INTEGER NOT NULL, request_limit INTEGER NOT NULL, charged_bytes INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0);');
+    // A similarly named table is not proof of a compatible cumulative ledger.
+    const expectedLedger='CREATE TABLE reference_job_usage (job_id TEXT PRIMARY KEY, environment TEXT NOT NULL, manifest_sha256 TEXT NOT NULL, byte_limit INTEGER NOT NULL, request_limit INTEGER NOT NULL, charged_bytes INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0)';
+    const ledger=this.db.prepare("SELECT type,name,sql FROM sqlite_master WHERE name=? COLLATE NOCASE").all('reference_job_usage');
+    const extras=this.db.prepare("SELECT 1 FROM sqlite_master WHERE type IN ('trigger','index') AND sql IS NOT NULL AND tbl_name=? COLLATE NOCASE LIMIT 1").get('reference_job_usage');
+    if(ledger.length!==1||ledger[0].type!=='table'||ledger[0].name!=='reference_job_usage'||ledger[0].sql!==expectedLedger||extras){this.db.close();fail('TRANSFER_ACCOUNTING_UNAVAILABLE');}
     try { fs.chmodSync(databasePath, 0o600); } catch (e) { this.db.close(); throw e; }
   }
   tx(fn) { this.db.exec('BEGIN IMMEDIATE'); try { const out = fn(); this.db.exec('COMMIT'); return out; } catch (e) { this.db.exec('ROLLBACK'); throw e; } }
@@ -111,7 +116,7 @@ class ReferenceTransferBroker {
         safeInt(start); safeInt(end); if (start > end || end >= file.byteSize) fail('INVALID_RANGE');
       }
       const length = file.byteSize === 0 && range === undefined ? 0 : end - start + 1;
-      const totals = this.db.prepare('SELECT COALESCE(SUM(in_flight),0) requests, COALESCE(SUM(reserved_bytes),0) bytes FROM reference_grants WHERE expires_ms>?').get(this.now());
+      const totals = this.db.prepare('SELECT COALESCE(SUM(in_flight),0) requests, COALESCE(SUM(reserved_bytes),0) bytes FROM reference_grants').get();
       const usage=this.db.prepare('SELECT * FROM reference_job_usage WHERE job_id=?').get(row.job_id);
       if(!usage||usage.environment!==this.environment||usage.manifest_sha256!==metadata.manifestSha256)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
       if (length > this.settings.maxResponseBytes || totals.requests >= this.settings.maxConcurrentRequests || totals.bytes + length > this.settings.maxConcurrentBytes || row.used_bytes + row.reserved_bytes + length > metadata.byteBudget || row.requests >= this.settings.maxRequests || usage.requests>=usage.request_limit || length>usage.byte_limit-usage.charged_bytes) fail('TRANSFER_LIMIT');
