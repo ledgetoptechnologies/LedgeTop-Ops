@@ -31,7 +31,13 @@ const { processingJobCounts } = require('./processingOverview');
 
 const PERMISSIONS = new Set(['viewer.projects.read','viewer.projects.write','viewer.datasets.read','viewer.datasets.write','viewer.datasets.import','viewer.processing.read','viewer.processing.write','viewer.processing.publish','viewer.providers.read','viewer.providers.write','viewer.storage.purge','viewer.gcp.read','viewer.gcp.write','viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.client_grants.manage']);
 function validUnits(value) { return value === 'imperial' || value === 'metric'; }
-function error(res,status,code,message=code,details) { return res.status(status).json({error:message,code,...(details?{details}:{})}); }
+function error(res,status,code,message=code,details) {
+  const friendly={
+    provider_input_limit_exceeded:'The selected processing inputs exceed this provider’s advertised total size limit. Choose a smaller dataset or update the provider limit.',
+    provider_upload_file_too_large:'A selected file is too large for one upload request to this provider. The provider does not support splitting a file across requests.',
+  };
+  return res.status(status).json({error:message===code?(friendly[code]||message):message,code,...(details?{details}:{})});
+}
 function pageQuery(req) { const raw=String(req.query.limit||'50');if(!/^\d{1,3}$/.test(raw))return null;const limit=Number(raw);if(limit<1||limit>100)return null;const cursor=req.query.cursor?String(req.query.cursor):null;if(cursor&&!/^[A-Za-z0-9_-]{8,2048}$/.test(cursor))return null;return{limit,cursor}; }
   function uploadView(processing,upload) { return {id:upload.id,datasetId:upload.datasetId,status:upload.status,chunkSize:upload.chunkSize,expiresAt:upload.expiresAt,files:upload.files.map((file)=>{const chunkCount=Math.ceil(file.byteSize/upload.chunkSize)||1,completedChunks=processing.listChunks(upload.id,file.id).map((c)=>c.chunk_index),done=new Set(completedChunks);return{id:file.id,relativePath:file.relativePath,byteSize:file.byteSize,sha256:file.sha256,processingRole:file.processingRole||'auto',chunkCount,completedChunks,missingChunks:Array.from({length:chunkCount},(_,i)=>i).filter((i)=>!done.has(i))};})}; }
 function publicStorageSpace(value) { return {availableBytes:Number(value.available),totalBytes:Number(value.total),reserveBytes:Number(value.reserve),requiredBytes:Number(value.required),sufficient:Boolean(value.ok)}; }

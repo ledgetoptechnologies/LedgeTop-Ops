@@ -12,6 +12,82 @@ function fixture(t){
  return{db,processing,task,attempt};
 }
 
+test('413 after a partial upload holds the attempt across worker retries',async t=>{
+ const f=fixture(t),root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-upload-hold-')),file=path.join(root,'photo.jpg');
+ fs.writeFileSync(file,'x');t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ let uploads=0,statusCalls=0;
+ const adapter={status:async()=>{statusCalls++;throw Object.assign(new Error('not found'),{code:'provider_task_not_found'});},initialize:async({uuid})=>({uuid}),upload:async()=>{uploads++;throw Object.assign(new Error('request rejected'),{status:413,code:'body_too_large'});}};
+ const deps={processing:f.processing,storage:{resolve:()=>file,requireProcessingHeadroom:()=>{}},config:{},adapterFactory:()=>adapter};
+ await processOne(deps,'owner');
+ assert.equal(f.processing.getAttempt(f.attempt.id).errorCode,'provider_upload_acceptance_unknown');
+ assert.equal(processingJobCounts(f.db).observationWarnings,1);
+ assert.throws(()=>f.processing.cancelAttempt(f.attempt.id,'ops:test'),{code:'provider_execution_unresolved'});
+ assert.equal(f.processing.retryAttempt(f.attempt.id,'ops:test'),null);
+ f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='submit'").run(f.attempt.id);
+ await processOne(deps,'owner');
+ assert.equal(uploads,1);assert.equal(statusCalls,1);
+ assert.equal(f.processing.getAttempt(f.attempt.id).errorCode,'provider_upload_acceptance_unknown');
+ assert.throws(()=>f.processing.cancelAttempt(f.attempt.id,'ops:test'),{code:'provider_execution_unresolved'});
+ f.db.prepare("UPDATE processing_attempts SET status='failed' WHERE id=?").run(f.attempt.id);
+ assert.equal(f.processing.retryAttempt(f.attempt.id,'ops:test'),null);
+ assert.throws(()=>f.processing.createAttempt({taskId:f.task.id,providerId:f.attempt.providerId,options:{}}),{code:'provider_execution_unresolved'});
+});
+
+test('concurrent direct attempt requests cannot replace an unresolved upload',async t=>{
+ const f=fixture(t),express=require('express'),auth=require('../server/auth'),{createProcessingApi}=require('../server/processingApi');
+ f.processing.updateProviderCapabilities(f.attempt.providerId,{capabilities:{options:[{name:'pc-ept',type:'bool'},{name:'gltf',type:'bool'},{name:'3d-tiles',type:'bool'}]},fingerprint:'d'.repeat(64),health:'healthy'});
+ f.db.prepare("UPDATE processing_attempts SET status='failed',submission_phase='uploading',error_code='provider_upload_acceptance_unknown' WHERE id=?").run(f.attempt.id);
+ f.processing.workerStatus=()=>({live:true});
+ const token='direct-attempt-guard-token-000000000000';f.processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:test',permissions:['viewer.processing.write'],displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
+ const app=express();app.use(express.json());app.use(createProcessingApi({repository:{},processing:f.processing,storage:{}}));
+ const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});t.after(()=>new Promise(resolve=>server.close(resolve)));
+ const post=key=>fetch(`http://127.0.0.1:${server.address().port}/api/v1/tasks/${f.task.id}/attempts`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':key},body:JSON.stringify({providerId:f.attempt.providerId,options:{}})});
+ const responses=await Promise.all([post('direct-one'),post('direct-two')]);
+ for(const response of responses){assert.equal(response.status,409);assert.equal((await response.json()).code,'provider_execution_unresolved');}
+ assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM processing_attempts WHERE task_id=?').get(f.task.id).n,1);
+});
+
+test('separate processes cannot replace an unresolved upload',async t=>{
+ const {spawn}=require('node:child_process'),root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-replace-race-')),dbPath=path.join(root,'viewer.sqlite');
+ t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const db=new DatabaseSync(dbPath);db.exec('PRAGMA foreign_keys=ON');applyMigrations(db);
+ const processing=new ProcessingRepository(db),project=processing.createProject({displayName:'Synthetic'}),dataset=processing.createDataset({projectId:project.id,displayName:'Input',storageMode:'managed',rootKey:'datasets',relativePath:'synthetic'});
+ processing.finalizeDataset(dataset.id,[{relativePath:'photo.jpg',byteSize:1,sha256:crypto.createHash('sha256').update('x').digest('hex')}],'b'.repeat(64));
+ const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Synthetic'}),provider=processing.upsertProvider({type:'nodeodm',displayName:'Node',endpoint:'http://127.0.0.1:3000',enabled:true}),attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}});
+ db.prepare("UPDATE processing_attempts SET status='failed',submission_phase='uploading',error_code='provider_upload_acceptance_unknown' WHERE id=?").run(attempt.id);db.close();
+ const script=`const {DatabaseSync}=require('node:sqlite'),{ProcessingRepository}=require('./server/processingRepository');const db=new DatabaseSync(process.argv[1]);db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000');try{new ProcessingRepository(db).createAttempt({taskId:process.argv[2],providerId:process.argv[3],options:{}});process.stdout.write('unexpected-success')}catch(e){process.stdout.write(e.code||'unknown')}finally{db.close()}`;
+ const children=[];t.after(()=>{for(const child of children)if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');});
+ const run=()=>new Promise((resolve,reject)=>{const child=spawn(process.execPath,['-e',script,dbPath,task.id,provider.id],{cwd:path.join(__dirname,'..'),stdio:['ignore','pipe','pipe']});children.push(child);let output='',errors='';child.stdout.on('data',data=>{output+=data});child.stderr.on('data',data=>{errors+=data});const timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error('replacement child timed out'));},10000);child.on('error',reject);child.on('close',code=>{clearTimeout(timer);code===0?resolve(output):reject(new Error(`replacement child failed: ${errors}`));});});
+ assert.deepEqual(await Promise.all([run(),run()]),['provider_execution_unresolved','provider_execution_unresolved']);
+ const check=new DatabaseSync(dbPath);try{assert.equal(check.prepare('SELECT COUNT(*) AS n FROM processing_attempts WHERE task_id=?').get(task.id).n,1);}finally{check.close();}
+});
+
+test('worker death during upload is held before provider access on restart',async t=>{
+ const {spawn}=require('node:child_process');
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-upload-kill-')),dbPath=path.join(root,'viewer.sqlite'),file=path.join(root,'photo.jpg');
+ fs.writeFileSync(file,'x');t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ let db=new DatabaseSync(dbPath);db.exec('PRAGMA foreign_keys=ON');applyMigrations(db);
+ let processing=new ProcessingRepository(db),project=processing.createProject({displayName:'Synthetic'}),dataset=processing.createDataset({projectId:project.id,displayName:'Input',storageMode:'managed',rootKey:'datasets',relativePath:'synthetic'});
+ processing.finalizeDataset(dataset.id,[{relativePath:'photo.jpg',byteSize:1,sha256:crypto.createHash('sha256').update('x').digest('hex')}],'b'.repeat(64));
+ const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Synthetic'}),provider=processing.upsertProvider({type:'nodeodm',displayName:'Node',endpoint:'http://127.0.0.1:3000',enabled:true}),attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}});
+ db.close();
+ const script=`const {DatabaseSync}=require('node:sqlite');const {ProcessingRepository}=require('./server/processingRepository');const {processOne}=require('./server/processingWorker');const db=new DatabaseSync(process.argv[1]);db.exec('PRAGMA foreign_keys=ON');const processing=new ProcessingRepository(db);const adapter={status:async()=>{throw Object.assign(new Error('missing'),{code:'provider_task_not_found'})},initialize:async({uuid})=>({uuid}),upload:async()=>{process.send('upload');await new Promise(()=>{});}};processOne({processing,storage:{resolve:()=>process.argv[2],requireProcessingHeadroom:()=>{}},config:{},adapterFactory:()=>adapter},'killed-owner').catch(()=>process.exit(2));`;
+ const child=spawn(process.execPath,['-e',script,dbPath,file],{cwd:path.join(__dirname,'..'),stdio:['ignore','ignore','pipe','ipc']});
+ t.after(()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');});
+ await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('child did not reach upload')),10000);child.once('message',value=>{clearTimeout(timer);value==='upload'?resolve():reject(new Error('unexpected child message'));});child.once('exit',()=>{clearTimeout(timer);reject(new Error('child exited before upload'));});});
+ const exited=new Promise(resolve=>child.once('exit',resolve));child.kill('SIGKILL');await exited;
+ db=new DatabaseSync(dbPath);t.after(()=>db.close());db.exec('PRAGMA foreign_keys=ON');processing=new ProcessingRepository(db);
+ assert.equal(processing.getAttempt(attempt.id).submissionPhase,'uploading');
+ assert.throws(()=>processing.cancelAttempt(attempt.id,'ops:test'),{code:'provider_execution_unresolved'});
+ assert.equal(processing.retryAttempt(attempt.id,'ops:test'),null);
+ assert.equal(processingJobCounts(db).observationWarnings,0);
+ // Advance only the disposable fixture lease, as if it had naturally expired.
+ db.prepare("UPDATE processing_jobs SET lease_expires_at='2000-01-01T00:00:00.000Z' WHERE attempt_id=? AND job_type='submit'").run(attempt.id);
+ assert.equal(processingJobCounts(db).observationWarnings,1);
+ let calls=0;await processOne({processing,storage:{resolve(){throw new Error('unexpected source access');}},config:{},adapterFactory:()=>({status:async()=>{calls++;},upload:async()=>{calls++;}})},'restarted-owner');
+ assert.equal(calls,0);assert.equal(processing.getAttempt(attempt.id).errorCode,'provider_upload_acceptance_unknown');
+});
+
 test('attempt capability is persisted once under the live worker lease',t=>{
  const f=fixture(t),{ProviderCredentials}=require('../server/providerCredentials');
  const credentials=new ProviderCredentials({activeKeyId:'fixture',keys:{fixture:crypto.randomBytes(32).toString('hex')}});
@@ -157,6 +233,7 @@ test('cancellation API keeps a conflicting reservation and finalizes a confirmed
  const job=f.db.prepare("SELECT id FROM processing_jobs WHERE attempt_id=? AND job_type='submit'").get(f.attempt.id);
  f.db.prepare("UPDATE processing_jobs SET status='leased',lease_owner='owner',lease_expires_at='2999-01-01T00:00:00.000Z' WHERE id=?").run(job.id);
  f.processing.ensureAttemptReservation(job.id,'owner',credentials.sealAttemptCapability.bind(credentials));
+ f.db.prepare("UPDATE processing_attempts SET submission_phase='uploading',error_code='provider_upload_acceptance_unknown' WHERE id=?").run(f.attempt.id);
  const token='synthetic-session-token-0000000000000000';
  f.processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:test',permissions:['viewer.processing.write'],displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
  let conflict=true,seen=[];
@@ -172,6 +249,12 @@ test('cancellation API keeps a conflicting reservation and finalizes a confirmed
  assert.equal((await post('cancel-conflict')).status,409);assert.notEqual(f.processing.getAttempt(f.attempt.id).status,'cancelled');
  conflict=false;assert.equal((await post('cancel-confirm')).status,200);assert.equal(f.processing.getAttempt(f.attempt.id).status,'cancelled');
  assert.deepEqual(seen,['/task/ledgetop/reserve','/task/ledgetop/cancel','/task/ledgetop/reserve','/task/ledgetop/cancel']);
+ const receipt=f.db.prepare("SELECT id,details_json FROM audit_events WHERE action='processing_attempt.cancelled' AND entity_id=?").get(f.attempt.id),details=JSON.parse(receipt.details_json);
+ f.db.prepare('UPDATE audit_events SET details_json=? WHERE id=?').run(JSON.stringify({...details,providerTaskId:crypto.randomUUID()}),receipt.id);
+ assert.equal(f.processing.retryAttempt(f.attempt.id,'ops:test'),null);
+ f.db.prepare('UPDATE audit_events SET details_json=? WHERE id=?').run(receipt.details_json,receipt.id);
+ const retry=await fetch(`http://127.0.0.1:${server.address().port}/api/v1/attempts/${f.attempt.id}/retry`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':'retry-after-confirm'},body:'{}'});
+ assert.equal(retry.status,202);assert.notEqual((await retry.json()).attempt.id,f.attempt.id);
 });
 
 test('provider accepts only the agreed held marker on nonterminal status',async()=>{
@@ -182,7 +265,7 @@ test('provider accepts only the agreed held marker on nonterminal status',async(
 });
 
 test('held submit defers the original job without touching source or provider mutations',async t=>{
- const f=fixture(t),calls=[];f.db.prepare("UPDATE processing_attempts SET submission_phase='uploading_auxiliary' WHERE id=?").run(f.attempt.id);
+ const f=fixture(t),calls=[];f.db.prepare("UPDATE processing_attempts SET submission_phase='initialized' WHERE id=?").run(f.attempt.id);
  const adapter={status:async()=>({status:'queued_upstream',held:true,heldReason:'option_evidence_invalid'}),remove:async()=>calls.push('remove'),initialize:async()=>calls.push('initialize'),upload:async()=>calls.push('upload'),commit:async()=>calls.push('commit')};
  const deps={processing:f.processing,storage:{resolve(){assert.fail('held task must not touch source')}},config:{},adapterFactory:()=>adapter};
  for(let i=0;i<7;i++){f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='submit'").run(f.attempt.id);assert.equal(await processOne(deps,'held-worker'),true);}
@@ -201,8 +284,8 @@ test('unavailable submit status never becomes terminal after repeated polls',asy
 
 test('a task becoming held during source validation is not removed or restarted',async t=>{const f=fixture(t),root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-held-race-')),file=path.join(root,'photo.jpg');fs.writeFileSync(file,'x');t.after(()=>fs.rmSync(root,{recursive:true,force:true}));let reads=0,mutations=0;const adapter={status:async()=>++reads===1?{status:'queued_upstream',progress:0,imagesCount:0}:{status:'running',held:true},remove:async()=>mutations++,initialize:async()=>mutations++,upload:async()=>mutations++,commit:async()=>mutations++};const deps={processing:f.processing,storage:{resolve:()=>file,requireProcessingHeadroom:()=>{}},config:{},adapterFactory:()=>adapter};await processOne(deps,'held-worker');const job=f.db.prepare("SELECT status,error_code FROM processing_jobs WHERE attempt_id=? AND job_type='submit'").get(f.attempt.id);assert.equal(reads,2);assert.equal(mutations,0);assert.equal(job.status,'pending');assert.equal(job.error_code,'provider_execution_held');});
 
-test('known held or unobservable execution cannot be locally cancelled or retried',t=>{const f=fixture(t);for(const code of ['provider_execution_held','provider_submission_observation_unavailable']){f.db.prepare("UPDATE processing_attempts SET status='running',error_code=? WHERE id=?").run(code,f.attempt.id);assert.throws(()=>f.processing.cancelAttempt(f.attempt.id,'ops:test'),{code:'provider_execution_unresolved'});assert.equal(f.processing.getAttempt(f.attempt.id).status,'running');f.db.prepare("UPDATE processing_attempts SET status='cancelled' WHERE id=?").run(f.attempt.id);assert.equal(f.processing.retryAttempt(f.attempt.id,'ops:test'),null);}});
+test('known held or unobservable execution cannot be locally cancelled or retried',t=>{const f=fixture(t);for(const code of ['provider_execution_held','provider_submission_observation_unavailable','staged_commitment_unavailable']){f.db.prepare("UPDATE processing_attempts SET status='running',error_code=? WHERE id=?").run(code,f.attempt.id);assert.throws(()=>f.processing.cancelAttempt(f.attempt.id,'ops:test'),{code:'provider_execution_unresolved'});assert.equal(f.processing.getAttempt(f.attempt.id).status,'running');f.db.prepare("UPDATE processing_attempts SET status='cancelled' WHERE id=?").run(f.attempt.id);assert.equal(f.processing.retryAttempt(f.attempt.id,'ops:test'),null);assert.throws(()=>f.processing.createAttempt({taskId:f.task.id,providerId:f.attempt.providerId,options:{}}),{code:'provider_execution_unresolved'});}});
 
 test('ambiguous queued provider task is never removed or recreated',async t=>{const f=fixture(t),root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-held-remove-')),file=path.join(root,'photo.jpg');fs.writeFileSync(file,'x');t.after(()=>fs.rmSync(root,{recursive:true,force:true}));let removes=0,initializations=0;const adapter={status:async()=>({status:'queued_upstream',progress:0,imagesCount:0}),remove:async()=>{removes++;throw Object.assign(Error('held'),{status:409})},initialize:async()=>initializations++};const deps={processing:f.processing,storage:{resolve:()=>file,requireProcessingHeadroom:()=>{}},config:{},adapterFactory:()=>adapter};for(let i=0;i<7;i++){f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='submit'").run(f.attempt.id);await processOne(deps,'held-worker');}const job=f.db.prepare("SELECT status,attempt_count,error_code FROM processing_jobs WHERE attempt_id=? AND job_type='submit'").get(f.attempt.id);assert.equal(removes,0);assert.equal(initializations,0);assert.equal(job.status,'pending');assert.equal(job.attempt_count,0);assert.equal(job.error_code,'provider_submission_observation_unavailable');assert.notEqual(f.processing.getAttempt(f.attempt.id).status,'failed');});
 
-test('missing upstream task after initialization stays unresolved and is never recreated',async t=>{for(const phase of ['initializing','initialized','uploading','uploading_auxiliary','uploaded','committing','committed']){const f=fixture(t);f.db.prepare('UPDATE processing_attempts SET submission_phase=? WHERE id=?').run(phase,f.attempt.id);let mutations=0;const adapter={status:async()=>{throw Object.assign(Error('missing'),{code:'provider_task_not_found'})},remove:async()=>mutations++,initialize:async()=>mutations++,upload:async()=>mutations++,commit:async()=>mutations++};await processOne({processing:f.processing,storage:{resolve(){assert.fail('source touched')}},config:{},adapterFactory:()=>adapter},'held-worker');const job=f.db.prepare("SELECT status,attempt_count,error_code FROM processing_jobs WHERE attempt_id=? AND job_type='submit'").get(f.attempt.id);assert.equal(mutations,0,phase);assert.equal(job.status,'pending',phase);assert.equal(job.attempt_count,0,phase);assert.equal(job.error_code,'provider_submission_observation_unavailable',phase);}});
+test('missing upstream task after initialization stays unresolved and is never recreated',async t=>{for(const phase of ['initializing','initialized','uploading','uploading_auxiliary','uploaded','committing','committed']){const f=fixture(t);f.db.prepare('UPDATE processing_attempts SET submission_phase=? WHERE id=?').run(phase,f.attempt.id);let mutations=0;const adapter={status:async()=>{throw Object.assign(Error('missing'),{code:'provider_task_not_found'})},remove:async()=>mutations++,initialize:async()=>mutations++,upload:async()=>mutations++,commit:async()=>mutations++};await processOne({processing:f.processing,storage:{resolve(){assert.fail('source touched')}},config:{},adapterFactory:()=>adapter},'held-worker');const job=f.db.prepare("SELECT status,attempt_count,error_code FROM processing_jobs WHERE attempt_id=? AND job_type='submit'").get(f.attempt.id);assert.equal(mutations,0,phase);assert.equal(job.status,'pending',phase);assert.equal(job.attempt_count,0,phase);assert.equal(job.error_code,['uploading','uploading_auxiliary'].includes(phase)?'provider_upload_acceptance_unknown':'provider_submission_observation_unavailable',phase);}});

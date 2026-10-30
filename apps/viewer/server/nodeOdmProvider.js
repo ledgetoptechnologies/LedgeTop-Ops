@@ -85,6 +85,18 @@ class NodeOdmProvider {
     }
     const response = await this.fetch(this.url(route, query), { ...requestInit, redirect:'error', signal:combined });
     if (!response.ok) {
+      // A rejected multipart request may already have stored some files. The
+      // specific error is diagnostic only; it is not an upload receipt.
+      if (response.status === 413 && route.startsWith('/task/new/upload/')) {
+        let reason;
+        try { reason = (await boundedJson(response, 4096))?.error; } catch { /* unknown 413 */ }
+        if (reason === 'task_input_limit_exceeded' || reason === 'body_too_large') {
+          const error = new Error(reason === 'body_too_large'
+            ? 'The provider rejected an upload request because its body exceeded the limit; some files may have been accepted.'
+            : 'The provider rejected the task input size; some files may have been accepted.');
+          error.code = reason; error.status = 413; throw error;
+        }
+      }
       try { await response.body?.cancel(); } catch { /* best effort */ }
       const error = new Error(`ODM request failed with HTTP ${response.status}`);
       error.code = response.status === 404 ? 'provider_task_not_found' : 'provider_request_failed';
@@ -111,6 +123,12 @@ class NodeOdmProvider {
       compatibilityWarning: detectedType === 'nodeodm' && info.version === '3.6.2'
         ? 'NodeODM 3.6.2 was detected; full processing compatibility has not yet been verified.' : null,
     };
+    // Older coordinators do not advertise this limit. Do not interpret a
+    // missing or malformed value as an unlimited allowance.
+    if (Number.isSafeInteger(info.ledgetopMaxInputBytes) && info.ledgetopMaxInputBytes > 0)
+      capabilities.ledgetopMaxInputBytes = info.ledgetopMaxInputBytes;
+    if (Number.isSafeInteger(info.ledgetopMaxUploadRequestBytes) && info.ledgetopMaxUploadRequestBytes > 0)
+      capabilities.ledgetopMaxUploadRequestBytes = info.ledgetopMaxUploadRequestBytes;
     // This optional extension is an observation, not proof that an existing
     // attempt may be downgraded to legacy behavior after a restart.
     if (info.ledgetopReservations !== undefined) {
