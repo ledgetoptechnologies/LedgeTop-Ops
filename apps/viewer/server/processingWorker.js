@@ -173,6 +173,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   let archiveReceipt=processing.getAttemptTransferProvenance(attempt.id)?.archive||null;
   // No configuration is wired in production: only an explicit per-provider
   // binding enables this experimental, read-only point-in-time check.
+  if(!binding&&archiveReceipt&&processing.getStagedCommitment(attempt.id))throw Object.assign(new Error('Staged receipt binding is unavailable'),{code:'staged_commitment_conflict'});
   let stagedCommitment=null,initialCommitment=null;
   const readCommitment=async(kind='commitment')=>{
     if(!binding||!processing.attemptRequiresReservation?.(attempt.id)||typeof providerCredentials.resolveStagedCommitmentCredential!=='function')throw Object.assign(new Error('Staged commitment is unavailable'),{code:'staged_commitment_unavailable'});
