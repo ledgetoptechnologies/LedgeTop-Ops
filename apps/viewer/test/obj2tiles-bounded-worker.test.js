@@ -8,6 +8,7 @@ const os = require('node:os');
 const test = require('node:test');
 const {
   OBJ2TILES_PATCH_SHA256,
+  OBJ2TILES_SECURITY_PATCH_SHA256,
   OBJ2TILES_SOURCE_SHA256,
   runtimeForkBuildInfo,
 } = require('../lod-converter-policy.cjs');
@@ -24,6 +25,10 @@ test('Obj2Tiles source and fork patch are pinned fail-closed at image build and 
   const workflow = fs.readFileSync(path.resolve(root, '../../.github/workflows/publish-viewer.yml'), 'utf8');
   const patchBytes = fs.readFileSync(path.join(root, 'third_party', 'obj2tiles', 'v1.6.2-bounded-concurrency.patch'));
   assert.equal(crypto.createHash('sha256').update(patchBytes).digest('hex'), OBJ2TILES_PATCH_SHA256);
+  const securityPatch = fs.readFileSync(path.join(root, 'third_party', 'obj2tiles', 'v1.6.2-imagesharp-3.2.0.patch'));
+  assert.equal(crypto.createHash('sha256').update(securityPatch).digest('hex'), OBJ2TILES_SECURITY_PATCH_SHA256);
+  assert.match(docker, new RegExp(`OBJ2TILES_SECURITY_PATCH_SHA256=${OBJ2TILES_SECURITY_PATCH_SHA256}`));
+  assert.match(docker, /git apply --check \/tmp\/obj2tiles-security\.patch[\s\S]*git apply \/tmp\/obj2tiles-security\.patch/);
   assert.match(docker, new RegExp(`OBJ2TILES_SOURCE_SHA256=${OBJ2TILES_SOURCE_SHA256}`));
   assert.match(docker, new RegExp(`OBJ2TILES_PATCH_SHA256=${OBJ2TILES_PATCH_SHA256}`));
   assert.match(docker, /FROM mcr\.microsoft\.com\/dotnet\/sdk:10\.0\.203-noble@sha256:8a90a473da5205a16979de99d2fc20975e922c68304f5c79d564e666dc3982fc AS obj2tiles/);
@@ -46,11 +51,14 @@ test('runtime fork trust rejects build metadata that is not bound to the pinned 
     sourceVersion: 'v1.6.2',
     sourceSha256: OBJ2TILES_SOURCE_SHA256,
     patchSha256: OBJ2TILES_PATCH_SHA256,
+    securityPatchSha256: OBJ2TILES_SECURITY_PATCH_SHA256,
     binarySha256: 'a'.repeat(64),
   };
   fs.writeFileSync(file, JSON.stringify(valid));
   assert.deepEqual(runtimeForkBuildInfo(file), valid);
   fs.writeFileSync(file, JSON.stringify({ ...valid, patchSha256: 'b'.repeat(64) }));
+  assert.throws(() => runtimeForkBuildInfo(file), /does not match the pinned source and patch contract/);
+  fs.writeFileSync(file, JSON.stringify({ ...valid, securityPatchSha256: 'b'.repeat(64) }));
   assert.throws(() => runtimeForkBuildInfo(file), /does not match the pinned source and patch contract/);
   fs.writeFileSync(file, '{');
   assert.throws(() => runtimeForkBuildInfo(file), /malformed/);

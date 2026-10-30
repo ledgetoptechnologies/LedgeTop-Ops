@@ -1,0 +1,22 @@
+--- a/Obj2Gltf/Obj2Gltf.csproj
++++ b/Obj2Gltf/Obj2Gltf.csproj
+@@ -33,7 +33,7 @@
+ 
+   <ItemGroup>
+     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+-    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
++    <PackageReference Include="SixLabors.ImageSharp" Version="3.2.0" />
+   </ItemGroup>
+ 
+   <ItemGroup Condition="'$(Configuration)'=='Source'">
+--- a/Obj2Tiles.Library/Obj2Tiles.Library.csproj
++++ b/Obj2Tiles.Library/Obj2Tiles.Library.csproj
+@@ -7,7 +7,7 @@
+     </PropertyGroup>
+ 
+     <ItemGroup>
+-      <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
++      <PackageReference Include="SixLabors.ImageSharp" Version="3.2.0" />
+     </ItemGroup>
+ 
+ </Project>

@@ -31,6 +31,7 @@ const LEGACY_KTX2_CONVERTER_COMMAND_SHA256 = '8d0931aa44aae76b48832212cd6c649b73
 
 const OBJ2TILES_SOURCE_SHA256 = '79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5';
 const OBJ2TILES_PATCH_SHA256 = '6d5d99ea1d1e36208e44d0456d35cb0d8c68092dfd4a6ad01288bf85bb67322b';
+const OBJ2TILES_SECURITY_PATCH_SHA256 = '13a9fdc4638dbaa8e19be017f52b2fdd66f17e8b536c893140022341f44efd9b';
 
 const CONTROLLED_CONVERTER = Object.freeze({
   name: 'OpenDroneMap/Obj2Tiles',
@@ -89,6 +90,7 @@ function runtimeForkBuildInfo(infoFile = '/opt/obj2tiles/build-info.json') {
     || info.sourceVersion !== 'v1.6.2'
     || info.sourceSha256 !== OBJ2TILES_SOURCE_SHA256
     || info.patchSha256 !== OBJ2TILES_PATCH_SHA256
+    || info.securityPatchSha256 !== OBJ2TILES_SECURITY_PATCH_SHA256
     || !/^[a-f0-9]{64}$/.test(String(info.binarySha256 || ''))) {
     throw new Error('Obj2Tiles build information does not match the pinned source and patch contract');
   }
@@ -163,6 +165,7 @@ module.exports = {
   LEGACY_KTX2_CONVERTER,
   LEGACY_KTX2_CONVERTER_COMMAND_SHA256,
   OBJ2TILES_PATCH_SHA256,
+  OBJ2TILES_SECURITY_PATCH_SHA256,
   OBJ2TILES_SOURCE_SHA256,
   OFFICIAL_CONVERTER_BINARY_SHA256,
   SERIAL_RETRY_CONVERTER,
