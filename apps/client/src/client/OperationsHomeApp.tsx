@@ -103,7 +103,10 @@ const STATE_TONE: Record<InvoiceState, string> = { overdue: "danger", due: "warn
  */
 export function financialDay(value: string): string {
   const [year, month, day] = value.split("-").map(Number);
-  return new Date(Date.UTC(year!, month! - 1, day!)).toLocaleDateString(undefined, { timeZone: "UTC", year: "numeric", month: "short", day: "numeric" });
+  // setUTCFullYear, not Date.UTC: Date.UTC reads years 0-99 as 1900-1999.
+  const date = new Date(0);
+  date.setUTCFullYear(year!, month! - 1, day!);
+  return date.toLocaleDateString(undefined, { timeZone: "UTC", year: "numeric", month: "short", day: "numeric" });
 }
 /** Only the dates the invoice actually carries; older records without dates show none rather than a guess. */
 function invoiceDates(document: PortalFinancialDocument): string {
