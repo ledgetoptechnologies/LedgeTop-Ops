@@ -7,12 +7,16 @@ private final class MemoryGrantStore: ManagedOAuthGrantStore, @unchecked Sendabl
     private var item: ManagedOAuthStoredGrant?
     var failLoad = false
     var failClear = false
+    var failSaveAfterWrite = false
     func load() throws -> ManagedOAuthStoredGrant? {
         lock.lock(); defer { lock.unlock() }
         if failLoad { throw ManagedOAuthStoreError.unavailable }
         return item
     }
-    func save(_ value: ManagedOAuthStoredGrant) throws { lock.lock(); defer { lock.unlock() }; item = value }
+    func save(_ value: ManagedOAuthStoredGrant) throws {
+        lock.lock(); defer { lock.unlock() }; item = value
+        if failSaveAfterWrite { throw ManagedOAuthStoreError.unavailable }
+    }
     func clear() throws {
         lock.lock(); defer { lock.unlock() }
         if failClear { throw ManagedOAuthStoreError.unavailable }
@@ -35,6 +39,7 @@ private actor RefreshLog {
 private struct RefreshTransport: ManagedOAuthExchanging {
     let log: RefreshLog
     var gate: RefreshGate?
+    var revokeGate: RefreshGate?
     var failRefresh = false
     func verifyMetadata() async throws {}
     func register() async throws -> String { "client-id" }
@@ -46,7 +51,10 @@ private struct RefreshTransport: ManagedOAuthExchanging {
         guard token == "oauth:old", clientID == "client-id" else { throw MobilePilotError.invalidResponse }
         return ManagedOAuthCredential(accessToken: "oauth:access", refreshToken: "oauth:rotated", expiresAt: Date().addingTimeInterval(300))
     }
-    func revoke(token: String, clientID: String, hint: ManagedOAuthTokenKind) async throws { await log.didRevoke(hint) }
+    func revoke(token: String, clientID: String, hint: ManagedOAuthTokenKind) async throws {
+        await log.didRevoke(hint)
+        if hint == .refresh, let revokeGate { await revokeGate.hold() }
+    }
 }
 final class ManagedOAuthPersistenceTests: XCTestCase, @unchecked Sendable {
     private func pins(_ host: String = "pilot.example.test") throws -> ManagedOAuthPins {
@@ -117,5 +125,43 @@ final class ManagedOAuthPersistenceTests: XCTestCase, @unchecked Sendable {
         let new = ManagedOAuthCredential(accessToken: "oauth:new-access", refreshToken: "oauth:new-refresh", expiresAt: Date().addingTimeInterval(300))
         do { try await session.retain(credential: new, clientID: "client-id"); XCTFail("Must not overwrite old grant") } catch {}
         XCTAssertEqual(try store.load()?.refreshToken, "oauth:old")
+    }
+    func testFailedLocalRemovalCannotRestoreGrantUntilSignOutRetriesDeletion() async throws {
+        let store = MemoryGrantStore(), log = RefreshLog(); try seed(store)
+        let session = try ManagedOAuthPersistence(pins: pins(), transport: RefreshTransport(log: log), store: store)
+        store.failClear = true
+        let failure = await session.signOut()
+        XCTAssertEqual(failure, .localRemovalUnconfirmed)
+        store.failClear = false
+        do { _ = try await session.restore(); XCTFail("A failed local sign-out must not restore the grant") } catch {}
+        let callsBeforeRetry = await log.calls; XCTAssertEqual(callsBeforeRetry, 0)
+        let retry = await session.signOut(); XCTAssertEqual(retry, .revocationUnconfirmed)
+        XCTAssertNil(try store.load())
+        let absent = try await session.restore(); XCTAssertNil(absent)
+    }
+    func testOverlappingSignOutCannotClaimNoCredentialWhileRevocationIsPending() async throws {
+        let store = MemoryGrantStore(), log = RefreshLog(), gate = RefreshGate(); try seed(store)
+        let session = try ManagedOAuthPersistence(pins: pins(), transport: RefreshTransport(log: log, revokeGate: gate), store: store)
+        let first = Task { await session.signOut() }
+        await gate.wait()
+        let second = await session.signOut(); XCTAssertEqual(second, .revocationUnconfirmed)
+        do { _ = try await session.restore(); XCTFail("Must not restore while revocation is pending") } catch {}
+        let new = ManagedOAuthCredential(accessToken: "oauth:new-access", refreshToken: "oauth:new-refresh", expiresAt: Date().addingTimeInterval(300))
+        do { try await session.retain(credential: new, clientID: "client-id"); XCTFail("Must not retain while revocation is pending") } catch {}
+        await gate.release()
+        let firstResult = await first.value; XCTAssertEqual(firstResult, .providerAcknowledged)
+    }
+    func testAmbiguousSaveDoesNotRestoreUntilExplicitCleanup() async throws {
+        let store = MemoryGrantStore(), log = RefreshLog()
+        let session = try ManagedOAuthPersistence(pins: pins(), transport: RefreshTransport(log: log), store: store)
+        let new = ManagedOAuthCredential(accessToken: "oauth:new-access", refreshToken: "oauth:new-refresh", expiresAt: Date().addingTimeInterval(300))
+        store.failSaveAfterWrite = true
+        do { try await session.retain(credential: new, clientID: "client-id"); XCTFail("Write should fail") } catch {}
+        store.failSaveAfterWrite = false
+        XCTAssertNotNil(try store.load())
+        do { _ = try await session.restore(); XCTFail("An ambiguous write cannot be restored") } catch {}
+        let calls = await log.calls; XCTAssertEqual(calls, 0)
+        let status = await session.signOut(); XCTAssertEqual(status, .revocationUnconfirmed)
+        XCTAssertNil(try store.load())
     }
 }

@@ -10,6 +10,10 @@ public actor ManagedOAuthPersistence {
     private let store: any ManagedOAuthGrantStore
     private var generation: UInt64 = 0
     private var refreshing = false
+    private var revoking = false
+    // A failed deletion can leave a grant on disk. Do not restore or replace
+    // it in this process until a subsequent sign-out confirms local removal.
+    private var localRemovalUnconfirmed = false
     private var grant: ManagedOAuthStoredGrant?
     private var access: ManagedOAuthCredential?
     private var uncertain = false
@@ -21,20 +25,26 @@ public actor ManagedOAuthPersistence {
     /// Called only after successful interactive sign-in; the store is a single
     /// scoped item so a refresh-token replacement does not leave two versions.
     public func retain(credential: ManagedOAuthCredential, clientID: String) throws {
-        guard !refreshing, access == nil, grant == nil, credential.expiresAt > Date(), let refresh = credential.refreshToken else {
+        guard !refreshing, !revoking, !localRemovalUnconfirmed, access == nil, grant == nil, credential.expiresAt > Date(), let refresh = credential.refreshToken else {
             throw MobilePilotError.invalidResponse
         }
         // Never overwrite an older grant whose revocation has not been attempted.
         guard try store.load() == nil else { throw MobilePilotError.unavailable }
         let next = try ManagedOAuthStoredGrant(pins: pins, clientID: clientID, refreshToken: refresh)
-        try store.save(next)
+        do { try store.save(next) }
+        catch {
+            // A failed write may still have changed Keychain state. Require
+            // explicit local cleanup before this process can restore a grant.
+            localRemovalUnconfirmed = true; uncertain = true
+            throw error
+        }
         grant = next; access = credential
     }
 
     /// Always renew on restore, including after process/device restart. No
     /// cached business data or stale access token is trusted on startup.
     public func restore() async throws -> ManagedOAuthCredential? {
-        guard !refreshing else { throw MobilePilotError.unavailable }
+        guard !refreshing, !revoking, !localRemovalUnconfirmed else { throw MobilePilotError.unavailable }
         let saved: ManagedOAuthStoredGrant
         if let grant { saved = grant }
         else if let loaded = try store.load() { saved = loaded }
@@ -65,7 +75,8 @@ public actor ManagedOAuthPersistence {
             uncertain = true
             if ticket == generation {
                 grant = nil; access = nil
-                try store.clear()
+                do { try store.clear() }
+                catch { localRemovalUnconfirmed = true; throw error }
             }
             throw error
         }
@@ -79,7 +90,10 @@ public actor ManagedOAuthPersistence {
             return ManagedOAuthCredential(accessToken: received.accessToken, refreshToken: nil, expiresAt: received.expiresAt)
         } catch {
             uncertain = true
-            if ticket == generation { grant = nil; access = nil; try? store.clear() }
+            if ticket == generation {
+                grant = nil; access = nil
+                do { try store.clear() } catch { localRemovalUnconfirmed = true }
+            }
             // A returned token cannot be retained after cancellation, sign-out,
             // failed validation, or a Keychain failure. Best-effort revocation.
             let transport = self.transport
@@ -94,14 +108,17 @@ public actor ManagedOAuthPersistence {
     /// Local deletion is synchronous and precedes network revocation. A Keychain
     /// error is surfaced separately; do not claim local sign-out in that case.
     public func signOut() async -> PersistentSignOutResult {
+        guard !revoking else { return .revocationUnconfirmed }
         generation &+= 1
         let wasRefreshing = refreshing
         let oldAccess = access
         access = nil
         let old: ManagedOAuthStoredGrant?
-        do { old = try grant ?? store.load(); try store.clear(); grant = nil }
-        catch { grant = nil; uncertain = true; return .localRemovalUnconfirmed }
+        do { old = try grant ?? store.load(); try store.clear(); grant = nil; localRemovalUnconfirmed = false }
+        catch { grant = nil; uncertain = true; localRemovalUnconfirmed = true; return .localRemovalUnconfirmed }
         guard let old else { return uncertain || wasRefreshing ? .revocationUnconfirmed : .noLocalCredential }
+        revoking = true
+        defer { revoking = false }
         var failed = false
         do { try await transport.revoke(token: old.refreshToken, clientID: old.clientID, hint: .refresh) } catch { failed = true }
         if let oldAccess {
