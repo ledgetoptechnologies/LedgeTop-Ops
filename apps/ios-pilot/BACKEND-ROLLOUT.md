@@ -105,16 +105,22 @@ using it as evidence, test invalid and mismatched tokens at the protected edge
 and disable alternative Worker URLs/routes. The Operations connector consistency
 check currently reads a credential envelope that can contain unrelated secrets;
 review a least-privilege approach before binding the real staging database.
-One candidate is a named private Service Binding entrypoint in the existing
+The current candidate is a named private Service Binding entrypoint in the existing
 Operations Worker that validates the pilot assertion and performs the narrow
 authorized read within the authoritative environment. The public pilot Worker
 would then need neither the Operations database nor connector secrets. This is
-not implemented or approved: it requires changes to the shared service, release
+not exported, deployed, or approved: the local implementation requires changes to the shared service, release
 coordination, exact target/version checks, independent issuer/audience and
 staff/source authorization, and negative tests. Gradual deployments and D1 state
 must be checked at activation; a binding name alone does not prove the active
 version or data state. A readiness-only RPC would additionally leave a gap
 between readiness and the pilot's separate database read.
+The local RPC implementation is default-closed and not exported by the shared
+Worker. Four boundary tests and two signed-assertion, real-D1 integration cases
+passed: they exercised identity and staff denial, assigned versus unassigned
+and foreign-source list/detail reads, and watched nine tables for business or
+authority writes. This does not prove the live edge, service binding target, or
+absence of every possible side effect.
 
 The separate Cloudflare account named `Staging` is distinct from the `Ledge Top`
 account that currently owns the Operations staging Access application and D1
