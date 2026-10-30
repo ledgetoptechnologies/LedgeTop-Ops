@@ -321,6 +321,13 @@ struct LivePilotWorkspace: View {
                 Section { Button("Return to demo workspace") { model.useDemo() } }
             }
             .navigationTitle("LT Ops · \(model.environmentName)")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button { model.useDemo() } label: {
+                        Label("Back to demo", systemImage: "chevron.left")
+                    }
+                }
+            }
             .pilotOperationControls(enabled: !model.syntheticProbe, query: $query) { await model.refresh() }
             .onChange(of: scenePhase) { _, phase in if phase == .active { model.checkExpiry() } }
         }

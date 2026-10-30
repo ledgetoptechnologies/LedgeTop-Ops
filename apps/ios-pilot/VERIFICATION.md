@@ -40,6 +40,19 @@ was deployed to the dedicated staging Worker; unauthenticated and fabricated
 bearer requests both returned 401 at the edge. A new iPad test and revocation
 verification remain pending. This result does not authorize real-data access.
 
+Beau subsequently reported that Cloudflare sign-in and the synthetic test
+succeeded. He also reported that returning to the demo was not discoverable;
+the workspace now has a leading navigation button in addition to its list
+action. Device verification of that navigation change remains pending. Success
+on this synthetic endpoint does not establish business-data authorization or
+successful provider revocation.
+
+The navigation change passed 36 Swift package tests and a signed Apple SDK
+build. The in-place iPad installer reported installing 100% but did not finish
+its final verification; it was stopped after waiting. Device inventory still
+listed exactly one pilot app. Whether the new button is present on the device
+requires Beau's confirmation; the task-owned relay was stopped.
+
 ## Native build and installation — October 29, 2026
 
 Commit `46790bba` was exported to a separate Linux build directory. Swift 6.4,
