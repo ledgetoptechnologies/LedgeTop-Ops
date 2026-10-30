@@ -16,7 +16,8 @@ export function protectedSign(payloadJson: string, config: any): string;
 export function buildOwnerApprovalReceipt(input: { config: any; artifact: any; liveReview: any; ownerClaims: any;
   now?: number; authorizationChallenge: string }): { payload: any; payloadJson: string; keyId: string; algorithm: string };
 export function verifyNativeStaffBootstrapOwnerApprovalReceipt(receipt: any, options: { config: any; now?: number; expected?: any }): any;
-export function initializeNativeStaffBootstrapApprovalRegistry(config: any, protectedSign: (payload: string, config: any) => string): any;
+export function initializeNativeStaffBootstrapApprovalRegistry(config: any, protectedSign: (payload: string, config: any) => string,
+  options?: { publishNoReplace?: (temporaryPath: string, statePath: string) => void; preserveFailureArtifacts?: boolean }): any;
 export function readNativeStaffBootstrapApprovalRegistry(config: any): { envelope: any; stateSha256: string };
 export function issueNativeStaffBootstrapApproval(config: any, receipt: any, protectedSign: (payload: string, config: any) => string): any;
 export function revokeNativeStaffBootstrapApproval(config: any, receipt: any, protectedSign: (payload: string, config: any) => string,

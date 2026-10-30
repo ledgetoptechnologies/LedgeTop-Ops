@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "kind": "operations-native-staff-bootstrap-provisioner-package-v1",
+  "files": [
+    {
+      "path": "scripts/native-staff-bootstrap-d1.mjs",
+      "sha256": "057cb9d709066dafcecbfbd97945ba244b34493d8c0abfbd2d9752fada528ee0"
+    },
+    {
+      "path": "scripts/native-staff-bootstrap-owner-approval-distribution-pin-value.mjs",
+      "sha256": "03a0c3e0dc1e006094c671f0dff3079caaee3e036cf1046287ce9f3e72018d2e"
+    },
+    {
+      "path": "scripts/native-staff-bootstrap-owner-approval-distribution-pin.mjs",
+      "sha256": "1318a580103853dba89c48938af82ca4cbdf35ab957283c9fcd6267cad3e7cae"
+    },
+    {
+      "path": "scripts/native-staff-bootstrap-owner-approval.mjs",
+      "sha256": "d941f925eb464faadd0da79745186a249ba0af18b960c509954d333317b099d8"
+    },
+    {
+      "path": "scripts/native-staff-bootstrap-provisioner-core.mjs",
+      "sha256": "83cff371775ce114043cf0d1653d3e837dc076ed6d77200adc872bb275007150"
+    },
+    {
+      "path": "scripts/native-staff-bootstrap-provisioner-package.mjs",
+      "sha256": "8a154cbf3f09701b4b4825864bbdadd5709a14e892bf50fac48ad92928dc79c1"
+    },
+    {
+      "path": "scripts/native-staff-bootstrap-provisioner-windows-adapter.mjs",
+      "sha256": "e20589b42300adff9021a5acf6c58da19134bf905c7f83f7a2f754d8475b55ad"
+    },
+    {
+      "path": "scripts/native-staff-bootstrap-provisioner-windows.ps1",
+      "sha256": "c0b2f9d3904c21e950137ed5251b21ea866397aaac37e84cfe5987fee8ab1840"
+    },
+    {
+      "path": "scripts/native-staff-bootstrap-provisioner.mjs",
+      "sha256": "f2cf0aa112137d2a46158cefe2556d597c93500edfaaf144baf7b5566fb0ee25"
+    },
+    {
+      "path": "scripts/native-staff-bootstrap-sign-dpapi.ps1",
+      "sha256": "5611abc7898dcf4faf61934cf358679cc69c2017f2d97721115412a7a965901a"
+    }
+  ]
+}
