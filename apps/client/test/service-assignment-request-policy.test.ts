@@ -45,6 +45,7 @@ import {
 import {
   ensureNativeRequestStorage,
   nativeRequestMutationGuardSql,
+  resolveOpsInquiryAuthority,
   resolveNativeRequestAuthority,
 } from "../src/worker/client-portal/native-request-authority";
 import { readClientRequestReadiness } from "../src/worker/client-portal/request-readiness";
@@ -328,6 +329,26 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
       VALUES (?,1,'native-request-policy-review','enabled','staff','test-operator','TEST-NATIVE-REQUEST',
         'Explicit native request policy test',datetime('now'))`).bind(secondarySourceId).run();
   }
+
+  it("enables root-only Ops inquiry authority independently and rejects denied or revoked access", async () => {
+    await seedSecondaryPolicyContext();
+    await enableSecondaryRequestPolicy();
+    const inquiryEnv = { ...env, CLIENT_PORTAL_OPS_INQUIRIES_ENABLED: "true",
+      CLIENT_PORTAL_REQUEST_V2_ENABLED: "false", CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED: "false" } as Env;
+    expect(await resolveNativeRequestAuthority(inquiryEnv, secondarySession, null)).toBeNull();
+    const proof = await resolveOpsInquiryAuthority(inquiryEnv, secondarySession);
+    expect(proof).toMatchObject({ workspaceId: secondarySession.workspaceId, sourceId: secondarySourceId, projectPublicId: null });
+
+    expect(await resolveOpsInquiryAuthority({ ...inquiryEnv, CLIENT_PORTAL_OPS_INQUIRIES_ENABLED: "false" }, secondarySession)).toBeNull();
+    await db.prepare(`INSERT INTO portal_v2_entitlements
+      (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,source_version,status)
+      VALUES ('secondary-inquiry-root-deny',?,'portal-policy-identity','request.create','deny','organization',
+        'pa-org-policy','project_alpha','deny-v1','active')`).bind(secondarySession.workspaceId).run();
+    expect(await resolveOpsInquiryAuthority(inquiryEnv, secondarySession)).toBeNull();
+    await db.prepare("DELETE FROM portal_v2_entitlements WHERE id='secondary-inquiry-root-deny'").run();
+    await db.prepare("UPDATE portal_v2_workspace_memberships SET status='revoked',revoked_at=datetime('now') WHERE id='secondary-policy-membership'").run();
+    expect(await resolveOpsInquiryAuthority(inquiryEnv, secondarySession)).toBeNull();
+  });
 
   it("joins unified catalog and submission to real native D1 authority with exact-source replay and revocation", async () => {
     const timed = async <T>(label:string, operation:()=>T|Promise<T>):Promise<T> => {

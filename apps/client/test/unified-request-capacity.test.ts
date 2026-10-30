@@ -41,7 +41,7 @@ describe("authoritative workspace discovery capacity", () => {
     await expect(listPortalWorkspaces(env, principal, { strictCapacity: true })).rejects.toMatchObject({ status: 503 });
     const scopedFetch = vi.fn();
     const router = createUnifiedRequestRouter({ resolvePrincipal: async () => principal, checkConfiguration: false, scopedFetch,
-      resolveAuthority: async () => null });
+      resolveInquiryAuthority: async () => null });
     const response = await router.request("https://client.example/request-services", {}, env);
     expect(response.status).toBe(503);
     expect(scopedFetch).not.toHaveBeenCalled();

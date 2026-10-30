@@ -6,7 +6,7 @@ import { configuredClientPortalOrigins, clientPortalRequestOriginAllowed } from 
 import { readBoundedClientJson } from "../bounded-json";
 import { clientAccessConfiguration } from "./access-identity";
 import { listPortalWorkspaces, PORTAL_WORKSPACE_HEADER, type PortalWorkspaceSummary } from "./workspace-v2";
-import { resolveNativeRequestAuthority, type NativeRequestAuthorityProof } from "./native-request-authority";
+import { opsInquiriesEnabled, resolveOpsInquiryAuthority, type NativeRequestAuthorityProof } from "./native-request-authority";
 import { listOpsTriageInquiries, opsTriageInquirySchemaReady, submitOpsTriageInquiry, type OpsTriageInquiryKind } from "./ops-triage-inquiries";
 import type { ClientPortalSession, ClientServiceCatalogItem, ResolveClientPrincipal, VerifiedClientPrincipal } from "./types";
 
@@ -27,7 +27,7 @@ type Ctx = Context<{ Bindings: Env }>;
 type ScopedFetch = (request: Request, env: Env) => Promise<Response>;
 type Dependencies = { resolvePrincipal: ResolveClientPrincipal; checkConfiguration: boolean; scopedFetch: ScopedFetch;
   discover?: typeof listPortalWorkspaces;
-  resolveAuthority?: typeof resolveNativeRequestAuthority;
+  resolveInquiryAuthority?: typeof resolveOpsInquiryAuthority;
   submitInquiry?: typeof submitOpsTriageInquiry;
   listInquiries?: typeof listOpsTriageInquiries;
   inquirySchemaReady?: typeof opsTriageInquirySchemaReady };
@@ -134,7 +134,7 @@ function serviceDto(workspace: PortalWorkspaceSummary, service: ClientServiceCat
 export function createUnifiedRequestRouter(dependencies: Dependencies) {
   const router = new Hono<{ Bindings: Env }>();
   const discover = dependencies.discover ?? listPortalWorkspaces;
-  const resolveAuthority = dependencies.resolveAuthority ?? resolveNativeRequestAuthority;
+  const resolveInquiryAuthority = dependencies.resolveInquiryAuthority ?? resolveOpsInquiryAuthority;
   const submitInquiry = dependencies.submitInquiry ?? submitOpsTriageInquiry;
   const listInquiries = dependencies.listInquiries ?? listOpsTriageInquiries;
   const inquirySchemaReady = dependencies.inquirySchemaReady ?? opsTriageInquirySchemaReady;
@@ -157,7 +157,7 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
     return workspaces;
   }
   async function eligibleAuthorities(c: Ctx, principal: VerifiedClientPrincipal) {
-    if (!await inquirySchemaReady(c.env)) return [];
+    if (!opsInquiriesEnabled(c.env) || !await inquirySchemaReady(c.env)) return [];
     const workspaces = await memberships(c, principal);
     const candidates = workspaces.slice().sort((a, b) => a.id.localeCompare(b.id));
     const proofs: { workspace: PortalWorkspaceSummary; proof: NativeRequestAuthorityProof }[] = [];
@@ -167,7 +167,7 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
         principalSubject: principal.subject, principalEmail: principal.email, nativeSourceId: workspace.sourceId!,
         displayName: workspace.displayName, role: "member", canViewBilling: false,
       };
-      const proof = await resolveAuthority(c.env, session, null);
+      const proof = await resolveInquiryAuthority(c.env, session);
       if (proof && proof.sourceId === workspace.sourceId && proof.workspaceId === workspace.id)
         return [{ workspace, proof }];
     }
@@ -200,19 +200,21 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
   router.get("/request-services", async c => {
     const principal = await actor(c), before = await memberships(c, principal);
     const results: { workspace: PortalWorkspaceSummary; services: ClientServiceCatalogItem[] | null }[] = [];
-    const budget = new DiscoveryBudget();
-    const queue = [...before];
-    await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
-      for (let workspace = queue.shift(); workspace; workspace = queue.shift()) {
-        budget.check();
-        try { results.push({ workspace, services: await catalog(c, workspace, undefined, budget) }); }
-        catch (error) {
-          if (error instanceof DiscoveryCapacityError || budget.failed) throw new DiscoveryCapacityError();
-          budget.row({ clientName: workspace.displayName, code: "service_catalog_unavailable" });
-          results.push({ workspace, services: null });
+    if (c.env.CLIENT_PORTAL_REQUEST_V2_ENABLED === "true") {
+      const budget = new DiscoveryBudget();
+      const queue = [...before];
+      await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
+        for (let workspace = queue.shift(); workspace; workspace = queue.shift()) {
+          budget.check();
+          try { results.push({ workspace, services: await catalog(c, workspace, undefined, budget) }); }
+          catch (error) {
+            if (error instanceof DiscoveryCapacityError || budget.failed) throw new DiscoveryCapacityError();
+            budget.row({ clientName: workspace.displayName, code: "service_catalog_unavailable" });
+            results.push({ workspace, services: null });
+          }
         }
-      }
-    }));
+      }));
+    }
     // Do not return an earlier account's catalog after its membership was
     // revoked while another catalog was loading.
     const after = await memberships(c, principal);
@@ -230,6 +232,7 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
   });
   router.get("/inquiries", async c => {
     const principal = await actor(c);
+    if (!opsInquiriesEnabled(c.env)) throw new HTTPException(403, { message: "Service request access is unavailable" });
     if (!await inquirySchemaReady(c.env)) throw new HTTPException(503, { message: "Inquiry history is unavailable" });
     const proofs = await eligibleAuthorities(c, principal);
     if (!proofs.length) throw new HTTPException(403, { message: "Service request access is unavailable" });
@@ -243,6 +246,7 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
   });
   router.post("/inquiries", async c => {
     const principal = await actor(c);
+    if (!opsInquiriesEnabled(c.env)) throw new HTTPException(403, { message: "Service request access is unavailable" });
     if (!await inquirySchemaReady(c.env)) throw new HTTPException(503, { message: "Inquiry submission is unavailable" });
     if (!clientPortalRequestOriginAllowed(c.req.raw, c.env)) throw new HTTPException(403);
     const parsed = z.object({
