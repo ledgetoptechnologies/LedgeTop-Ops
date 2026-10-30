@@ -56,6 +56,11 @@ test('provider digest and size mismatch never promotes or leaves private files',
   const receipt = await capture(Readable.from([zip]), destination, { ...options, providerExpectation: { sha256: hash(zip), byteSize: zip.length } });
   assert.equal(receipt.archiveSha256, hash(zip));
 });
+test('before-promotion commitment outage removes private capture without promotion',linux,async t=>{
+ const {parent,destination}=setup(t),zip=bytes();let checks=0;
+ await assert.rejects(()=>capture(Readable.from([zip]),destination,{...options,beforePromotion:async evidence=>{checks++;assert.equal(evidence.archiveSha256,hash(zip));assert.equal(evidence.archiveByteSize,zip.length);throw Object.assign(new Error('offline'),{code:'staged_commitment_unavailable'});}}),{code:'staged_commitment_unavailable'});
+ assert.equal(checks,1);assert.deepEqual(fs.readdirSync(parent),[]);
+});
 test('same-size source/companion changes and added/missing files fail retry verification', linux, async t => {
   for (const mutation of [destination => fs.writeFileSync(path.join(destination, 'b.txt'), 'CHANGE'), destination => fs.writeFileSync(path.join(destination, 'extra'), 'x'), destination => fs.unlinkSync(path.join(destination, 'nested/a.txt'))]) {
     const { destination } = setup(t), receipt = await capture(Readable.from([bytes()]), destination, options);
