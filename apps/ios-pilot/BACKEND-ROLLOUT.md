@@ -112,6 +112,8 @@ using it as evidence, test invalid and mismatched tokens at the protected edge
 and disable alternative Worker URLs/routes. The Operations connector consistency
 check currently reads a credential envelope that can contain unrelated secrets;
 review a least-privilege approach before binding the real staging database.
+The exact synthetic test boundary and remaining provider checks are recorded in
+[PROBE-STAGING.md](PROBE-STAGING.md).
 The existing native app has a separate synthetic sign-in test mode, disabled
 by a false plist flag and an empty reviewed pin list. It reads only the fixed
 probe endpoint and displays a test-only result, without Operations data. All 33
