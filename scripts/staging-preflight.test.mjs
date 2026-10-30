@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { validateApp, validateCrossApp, validateFiles, validateMigrationInventory, validateRequestAttachmentCors, validateSecretManifest } from "./staging-preflight.mjs";
-import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_MIGRATION_SHA256, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_PROJECT_ALPHA_ORIGIN, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_MIGRATION_SHA256, REQUIRED_STAGING_SECRETS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_PROJECT_ALPHA_ORIGIN, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 import { STAGING_OPTIONAL_DEFAULT_OFF_FLAGS, normalizedStagingVars } from "./staging-default-off-vars.mjs";
 import { inspectWindowsStagingOpsBindingBudget } from "./staging-windows-ops-binding-budget.mjs";
 import { WINDOWS_STAGING_SECRET_SLOTS } from "./windows-files-staging-entry-renderer.mjs";
@@ -515,6 +515,19 @@ test("requires explicit false except the eight reviewed Ops default-off omission
       assert.equal(errors.some((error) => error.includes(flag)), !optional, `${app}.${flag}: ${errors.join(" | ")}`);
     }
   }
+});
+
+test("keeps independent Ops inquiries allowlisted and explicitly off in the staging baseline", () => {
+  const flag = "CLIENT_PORTAL_OPS_INQUIRIES_ENABLED";
+  assert(STAGING_ALLOWED_VAR_NAMES.delivery.includes(flag));
+  assert(REQUIRED_DISABLED_FEATURE_FLAGS.delivery.includes(flag));
+  assert.equal(STAGING_STATIC_VARS.delivery[flag], "false");
+  const staging = stagingConfig("delivery");
+  assert.deepEqual(validateApp("delivery", staging, productionFrom(staging)), []);
+  staging.vars[flag] = "true";
+  assert(validateApp("delivery", staging, productionFrom(staging)).some(error => error.includes(`${flag}=false`)));
+  assert.equal(REQUIRED_EXTERNAL_GATES.includes("opsTriageInquiryQualification"), false);
+  assert.equal(REQUIRED_EXTERNAL_GATES.includes("opsTriageInquiryLiveAcceptance"), false);
 });
 
 test("optional Ops gates accept only absence or literal false and never hide explicit activation", () => {

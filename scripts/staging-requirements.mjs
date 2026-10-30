@@ -561,6 +561,7 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
     "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED",
     "CLIENT_PORTAL_REQUEST_V2_ENABLED",
     "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED",
+    "CLIENT_PORTAL_OPS_INQUIRIES_ENABLED",
     "OPS_INVENTORY_CATALOG_PROMOTION_ENABLED",
     "PROJECT_ALPHA_CATALOG_SYNC_ENABLED",
     "PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED",
@@ -718,6 +719,32 @@ export const REQUIRED_EXTERNAL_GATE_PROOFS = Object.freeze({
     "attachmentsSourceBound", "exactDraftQuoteDestinationVerified",
     "storageAccountsHiddenFromLegacyAdministration",
   ]),
+  // These two gates are conditional on inquiry activation; they are not
+  // globally required for unrelated Delivery releases. Qualification covers
+  // synthetic checks plus selected-staging readbacks. Live mail acceptance is
+  // collected during the separately reviewed one-flag pilot, never inferred
+  // from local tests or inbox/outbox fixtures.
+  opsTriageInquiryQualification: Object.freeze([
+    "syntheticAuthorityIndependentOfCatalogRequestFlags",
+    "syntheticIdempotentReplayAndConflictVerified",
+    "syntheticMembershipRevocationAndDenyFencingVerified",
+    "syntheticNativeMutationGuardVerified",
+    "stagingClient0242SchemaReadyReadback",
+    "stagingOperationsInboxAuthorizationAndRedactionReadback",
+    "stagingNotificationBindingAndTransportReadback",
+    "stagingMailSenderAndTriageRecipientMatchReadback",
+    "stagingSmtpFallbackAbsentReadback",
+    "stagingInquiryReadinessConfigurationIndependentOfCatalogRequestFlagsReadback",
+  ]),
+  opsTriageInquiryLiveAcceptance: Object.freeze([
+    "clientSubmissionThroughVerifiedStagingPortal",
+    "exactInquiryOutboxEventVisibleToAuthorizedOperationsStaff",
+    "historyAndWriteDeniedAfterAuthorityRevocation",
+    "mailDeliveredToConfiguredStagingTriageRecipient",
+    "deliveryCorrelatedToExactInquiryOutboxRecord",
+    "approvedStagingTriageRecipientOnly",
+    "stagingServiceEndpointsOnly",
+  ]),
   nativePortalFeedback: Object.freeze([
     "exactSourceWorkspaceIdentityTargetVerified", "collidingPublicIdsIsolated",
     "principalRevisionRaceDenied", "revocationAndReplayVerified",
@@ -800,6 +827,10 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
     CLIENT_PORTAL_CONTENT_AUDIT_ENABLED: Object.freeze({ prohibitedReason: "Authenticated content auditing requires migration 0187, the dedicated HMAC secret, immutable collection-start verification, retention readiness, and explicit live acceptance before first activation" }),
     CLIENT_PORTAL_REQUEST_V2_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaCatalogProjection", "projectAlphaPortalProjection"]) }),
     CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaCatalogProjection", "projectAlphaPortalProjection", "nativePortalRequests"]) }),
+    CLIENT_PORTAL_OPS_INQUIRIES_ENABLED: Object.freeze({
+      gates: Object.freeze(["projectAlphaPortalProjection", "opsTriageInquiryQualification", "opsTriageInquiryLiveAcceptance"]),
+      stagingGates: Object.freeze(["projectAlphaPortalProjection", "opsTriageInquiryQualification"]),
+    }),
     OPS_INVENTORY_CATALOG_PROMOTION_ENABLED: Object.freeze({ prohibitedReason: "Ops inventory catalog promotion requires separately approved source-of-truth, reconciliation, and staging acceptance evidence" }),
     PROJECT_ALPHA_CATALOG_SYNC_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaCatalogProjection", "projectionParityAndAlerts"]) }),
     PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED: Object.freeze({ prohibitedReason: "Direct Project Alpha portal HTTP ingress is removed; portal projections must traverse Ops Sync and its private Client service binding" }),
@@ -989,6 +1020,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     R2_BUCKET_NAME: "client-data-staging",
     CLIENT_PORTAL_REQUEST_V2_ENABLED: "false",
     CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED: "false",
+    CLIENT_PORTAL_OPS_INQUIRIES_ENABLED: "false",
     OPS_INVENTORY_CATALOG_PROMOTION_ENABLED: "false",
     CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS: "",
     PROJECT_ALPHA_CATALOG_SYNC_ENABLED: "false",
@@ -1158,7 +1190,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
     "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED", "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED",
-    "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED", "CLIENT_PORTAL_REQUEST_V2_ENABLED", "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED", "OPS_INVENTORY_CATALOG_PROMOTION_ENABLED",
+    "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED", "CLIENT_PORTAL_REQUEST_V2_ENABLED", "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED", "CLIENT_PORTAL_OPS_INQUIRIES_ENABLED", "OPS_INVENTORY_CATALOG_PROMOTION_ENABLED",
     "CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS",
     "PROJECT_ALPHA_CATALOG_SYNC_ENABLED", "PROJECT_ALPHA_CATALOG_APPLICATION_KEY",
     "PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN", "PROJECT_ALPHA_CATALOG_ACCESS_AUD",
