@@ -26,7 +26,7 @@ describe('synthetic OAuth probe', () => {
     expect(Object.keys(probe)).toEqual(['fetch']);
   });
   it('keeps the reviewed staging origin disabled until explicitly enabled', async () => {
-    const stagingOrigin = 'https://ios-pilot-staging.ledgetopdroneservices.com';
+    const stagingOrigin = 'https://ios-pilot-staging.ledgetop.app';
     const stagingEnv = { ...env, IOS_OAUTH_PROBE_ORIGIN: stagingOrigin, IOS_OAUTH_PROBE_ENABLED: 'false' };
     const headers = { Authorization: 'Bearer oauth:synthetic', 'Cf-Access-Jwt-Assertion': await signed() };
     expect((await probe.fetch(req('/oauth-probe/v1', headers, 'GET', stagingOrigin), stagingEnv)).status).toBe(404);

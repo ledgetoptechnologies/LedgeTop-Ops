@@ -11,12 +11,12 @@
   "workers_dev": false,
   "preview_urls": false,
   "routes": [
-    { "pattern": "ios-pilot-staging.ledgetopdroneservices.com", "custom_domain": true }
+    { "pattern": "ios-pilot-staging.ledgetop.app", "custom_domain": true }
   ],
   "vars": {
     "ENVIRONMENT": "staging",
     "IOS_OAUTH_PROBE_ENABLED": "false",
-    "IOS_OAUTH_PROBE_ORIGIN": "https://ios-pilot-staging.ledgetopdroneservices.com",
+    "IOS_OAUTH_PROBE_ORIGIN": "https://ios-pilot-staging.ledgetop.app",
     "IOS_OAUTH_PROBE_AUDIENCE": "e982d104616a480315256a577ef5ad5ce089f382c0b5453ce9db4cd9df7cf89d",
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "OPERATIONS_AUD": "d09e298c864b9c8f4491b4b42a4dbe2ecbf558b5868d18258443740e56032407"

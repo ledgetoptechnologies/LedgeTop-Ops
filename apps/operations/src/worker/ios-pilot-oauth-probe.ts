@@ -4,7 +4,7 @@ import { verifyPilotAccessAssertion } from './ios-pilot-access';
  * assets, scheduled handlers, or credentials are bound by this module. This
  * entrypoint is not deployed. Only the isolated staging origin is eligible;
  * the separate staging configuration keeps the probe disabled by default. */
-const REVIEWED_PROBE_ORIGINS: readonly string[] = ['https://ios-pilot-staging.ledgetopdroneservices.com'];
+const REVIEWED_PROBE_ORIGINS: readonly string[] = ['https://ios-pilot-staging.ledgetop.app'];
 const PROBE_PATH = '/oauth-probe/v1';
 type ProbeEnvironment = {
   ENVIRONMENT?: string;
