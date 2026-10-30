@@ -218,7 +218,7 @@ test('private sanitized fixture: full Ops state machine qualifies staff around e
   assert.equal(h.providerEvents.filter(row => row[0] === 'remove').length, 3);
 });
 
-test('private sanitized fixture: ambiguous asset failure after one Client upload never stages or retries', { skip: !fixturePath }, async t => {
+test('private sanitized fixture: ambiguous Client asset failure after one upload and namespace stage does not activate or retry', { skip: !fixturePath }, async t => {
   const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8')), h = harness(t, fixture, 'client', { failCandidateAssets: true });
   await assert.rejects(executeOrdinaryFrontendRetainedRelease(h.options), /static_asset_verification_refused/);
   assert.deepEqual(h.nativeCalls.map(row => row.phase), ['upload', 'namespace-stage']);

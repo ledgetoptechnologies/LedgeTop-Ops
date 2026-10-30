@@ -10,7 +10,7 @@ import { mergeAssetLedger, ledgerBytes } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { retainedNativeConfig, stageOrdinaryFrontendRetainedModules,
   verifyOrdinaryFrontendRetainedCandidateModules } from './ordinary-frontend-retained-plan.mjs';
-import { readInstalledRetainedAssetLedger } from './ordinary-frontend-retained-executor.mjs';
+import { createJournaledAssetVerifierProvider, readInstalledRetainedAssetLedger } from './ordinary-frontend-retained-executor.mjs';
 import { OPS_LEGACY_LEDGER_BOOTSTRAP, prepareOpsLegacyLedgerBootstrap } from './ordinary-frontend-ops-ledger-bootstrap.mjs';
 
 const BASELINE = '11111111-1111-4111-8111-111111111111';
@@ -144,4 +144,27 @@ test('executor separately pins artifact source and clean executor checkout befor
     captureFn: async () => { calls.capture++; return {}; }, runNative: async () => { calls.native++; return ''; } }),
   /artifacts and clean executor checkout provenance/);
   assert.deepEqual(calls, { capture: 0, native: 0 });
+});
+
+test('production verifier adapter binds mutation journal to validated source and stores response digest only', t => {
+  const journalDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'ordinary-retained-provider-journal-'));
+  t.after(() => fs.rmSync(journalDirectory, { recursive: true, force: true }));
+  let options;
+  class InjectedProvider { constructor(value) { options = value; Object.assign(this, value); } }
+  const provider = createJournaledAssetVerifierProvider({ accountId: ACCOUNT, token: 'x'.repeat(40), fetchImpl: async () => ({}),
+    journalDirectory, sourceCommit: COMMIT, Provider: InjectedProvider });
+  provider.recordIntent({ requestId: 'synthetic-request', method: 'PUT', path: '/accounts/test/workers/scripts/verifier',
+    phase: 'create', name: 'synthetic-verifier', workerName: 'ledgetop-ops', sourceSHA256: 'b'.repeat(64), automaticRetry: false });
+  const body = Buffer.from('synthetic private provider response body');
+  provider.persistResponse({ requestId: 'synthetic-request', method: 'PUT', path: '/accounts/test/workers/scripts/verifier',
+    status: 200, rawResponse: body, errorCodes: [], incomplete: false });
+  const intent = JSON.parse(fs.readFileSync(path.join(journalDirectory, 'journal.jsonl'), 'utf8').trim());
+  const response = JSON.parse(fs.readFileSync(path.join(journalDirectory, 'provider-responses.private.jsonl'), 'utf8').trim());
+  assert.equal(options.accountId, ACCOUNT);
+  assert.equal(intent.sourceCommit, COMMIT);
+  assert.equal(response.responseSHA256, hash(body));
+  assert.equal(response.responseBytes, body.length);
+  assert.equal(JSON.stringify(response).includes(body.toString()), false);
+  assert.throws(() => createJournaledAssetVerifierProvider({ accountId: 'f'.repeat(32), token: 'x'.repeat(40),
+    journalDirectory, sourceCommit: COMMIT, Provider: InjectedProvider }), /provider identity invalid/);
 });

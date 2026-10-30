@@ -23,6 +23,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WORKERS = Object.freeze({ operations: { name: 'ledgetop-ops', origin: 'https://ops.ledgetop.app' },
   client: { name: 'ledgetop-clients', origin: 'https://portal.ledgetop.app' } });
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
+const HEX40 = /^[a-f0-9]{40}$/u;
 const equal = (a, b) => canonical(a) === canonical(b);
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const needFn = (ok, message) => need(ok, message);
@@ -57,9 +58,9 @@ function appendIntent(directory, phase, detail) {
 
 function appendProviderIntent(directory, intent) {
   needFn(intent && typeof intent.requestId === 'string' && ['PUT', 'POST', 'DELETE'].includes(intent.method)
-    && typeof intent.path === 'string' && intent.automaticRetry === false,
+    && typeof intent.path === 'string' && HEX40.test(intent.sourceCommit ?? '') && intent.automaticRetry === false,
   'Temporary verifier mutation intent invalid');
-  const detail = Object.fromEntries(['requestId','method','path','phase','name','workerName','sourceSHA256','automaticRetry']
+  const detail = Object.fromEntries(['requestId','method','path','phase','name','workerName','sourceSHA256','sourceCommit','automaticRetry']
     .filter(key => Object.hasOwn(intent, key)).map(key => [key, intent[key]]));
   appendIntent(directory, 'temporary-asset-verifier-mutation', detail);
 }
@@ -148,8 +149,9 @@ function writePrivateJson(directory, name, value) {
 }
 
 /**
- * Callable ordinary frontend release state machine. All provider writes are
- * native Wrangler versions upload/deploy and happen only after exact source,
+ * Callable ordinary frontend release state machine. Worker release mutations
+ * use native Wrangler versions upload/deploy. Temporary verifier create/delete
+ * calls use the separate journaled provider adapter and happen only after exact source,
  * installed v3 profile, retained old bytes, current controls and (for Ops)
  * freshly read native staff consent have passed. No automatic replay or rollback.
  *
@@ -387,17 +389,32 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
   needFn(env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
     && typeof env.CLOUDFLARE_API_TOKEN === 'string' && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN),
   'Cloudflare account and API token are required by the explicitly invoked production executor');
+  validateBuildEnvironment(env);
   needFn(path.isAbsolute(artifactSourceRoot ?? ''), 'Pinned frontend artifact source checkout is required separately from executor source');
+  const planSourceCommit = plan?.ordinaryPlan?.sourceCommit;
+  needFn(plan?.schemaVersion === 2 && plan.contract === 'ordinary-frontend-retained-native-module-v2'
+    && plan.application === app && planSourceCommit === plan.sourceCommit && HEX40.test(planSourceCommit ?? ''),
+  'Pinned ordinary retained plan source identity is invalid');
   const reader = new CloudflareReader(env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_API_TOKEN);
   const review = app === 'operations' ? readStaffCutoverReview(staffReviewPath) : undefined;
-  const assetVerifierProvider = new ProductionCloudflareProvider({ accountId: env.CLOUDFLARE_ACCOUNT_ID,
-    token: env.CLOUDFLARE_API_TOKEN, fetchImpl, profile: PROFILE,
-    recordIntent: intent => appendProviderIntent(journalDirectory, { ...intent, sourceCommit }),
-    persistResponse: response => appendProviderResponseDigest(journalDirectory, response) });
+  const assetVerifierProvider = createJournaledAssetVerifierProvider({ accountId: env.CLOUDFLARE_ACCOUNT_ID,
+    token: env.CLOUDFLARE_API_TOKEN, fetchImpl, profile: PROFILE, journalDirectory, sourceCommit: planSourceCommit });
   return executeOrdinaryFrontendRetainedRelease({ app, plan, profile, expectedDeploymentVersions,
     assetVerifierProvider, staffCutoverReview: review, reader, cli: path.join(ROOT, `apps/${app}/node_modules/wrangler/wrangler-dist/cli.js`),
     journalDirectory, artifactSourceRoot, executorSourceRoot: ROOT, fetchImpl,
     runNative: (cli, args, directory, phase, cwd) => runNativeProductionCommand(cli, args, directory, phase, cwd, env),
     sourceReader: root => deploymentSourceCommit(root, env),
     readStaffCutover: args => readNativeStaffCutoverReadiness(args) });
+}
+
+/** Bind every temporary verifier mutation intent to the already validated plan. */
+export function createJournaledAssetVerifierProvider({ accountId, token, fetchImpl = fetch, profile = PROFILE,
+  journalDirectory, sourceCommit, Provider = ProductionCloudflareProvider } = {}) {
+  needFn(accountId === NATIVE_STAFF_PRODUCTION_TARGET.accountId && typeof token === 'string'
+    && /^[A-Za-z0-9_-]{20,1024}$/u.test(token) && typeof fetchImpl === 'function'
+    && path.isAbsolute(journalDirectory ?? '') && HEX40.test(sourceCommit ?? '') && typeof Provider === 'function',
+  'Temporary asset verifier provider identity invalid');
+  return new Provider({ accountId, token, fetchImpl, profile,
+    recordIntent: intent => appendProviderIntent(journalDirectory, { ...intent, sourceCommit }),
+    persistResponse: response => appendProviderResponseDigest(journalDirectory, response) });
 }
