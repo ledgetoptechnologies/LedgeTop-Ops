@@ -60,6 +60,23 @@ private final class InvalidProbeStub: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+private class ProbeFailureStub: URLProtocol, @unchecked Sendable {
+    class var marker: String? { nil }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        var headers = ["Content-Type": "application/json"]
+        if let marker = type(of: self).marker { headers["X-LT-Ops-Probe-Stage"] = marker }
+        let response = HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: "HTTP/1.1", headerFields: headers)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+private final class OriginBearerStub: ProbeFailureStub, @unchecked Sendable { override class var marker: String? { "bearer-rejected" } }
+private final class OriginAssertionStub: ProbeFailureStub, @unchecked Sendable { override class var marker: String? { "assertion-invalid" } }
+private final class UnknownStageStub: ProbeFailureStub, @unchecked Sendable { override class var marker: String? { "untrusted-provider-value" } }
+
 final class ManagedPilotDataTests: XCTestCase, @unchecked Sendable {
     private func api(stub: AnyClass = ManagedDataStub.self) throws -> ManagedPilotDataAPI {
         let issuer = "https://team.example.test"
@@ -83,7 +100,18 @@ final class ManagedPilotDataTests: XCTestCase, @unchecked Sendable {
     func testSyntheticProbeUsesFixedTestEndpoint() async throws {
         try await api().verifySyntheticProbe(credential: credential())
         do { try await api(stub: InvalidProbeStub.self).verifySyntheticProbe(credential: credential()); XCTFail("accepted wrong marker") }
-        catch { XCTAssertEqual(error as? MobilePilotError, .invalidResponse) }
+        catch { XCTAssertEqual(error as? SyntheticProbeFailure, .unexpectedResponse) }
+    }
+    func testProbeFailureCategoriesUseOnlyFixedStages() async throws {
+        let cases: [(AnyClass, SyntheticProbeFailure)] = [(ProbeFailureStub.self, .edgeUnauthorized),
+            (OriginBearerStub.self, .originBearer), (OriginAssertionStub.self, .originAssertionInvalid),
+            (UnknownStageStub.self, .unexpectedResponse)]
+        for (stub, expected) in cases {
+            do { try await api(stub: stub).verifySyntheticProbe(credential: credential()); XCTFail("accepted rejected probe") }
+            catch { XCTAssertEqual(error as? SyntheticProbeFailure, expected) }
+        }
+        do { try await api().verifySyntheticProbe(credential: credential("invalid-secret-value")); XCTFail("accepted invalid token") }
+        catch { XCTAssertEqual(error as? SyntheticProbeFailure, .credential) }
     }
     func testRejectsExpiredAndMalformedCredentialsAndDotSegments() async throws {
         let api = try api()

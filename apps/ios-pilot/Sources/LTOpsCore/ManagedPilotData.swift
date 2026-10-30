@@ -3,6 +3,27 @@ import Foundation
 import FoundationNetworking
 #endif
 
+/// Fixed diagnostic categories for the synthetic probe only. These never
+/// contain a token, identity, server response body, or raw network error.
+public enum SyntheticProbeFailure: Error, Sendable, Equatable {
+    case credential, expired, network, unexpectedResponse, edgeUnauthorized
+    case originUnavailable, originRequest, originBearer, originAssertionMissing, originAssertionInvalid
+    public var message: String {
+        switch self {
+        case .credential: return "The test credential format was not accepted by the app."
+        case .expired: return "The test credential expired before the connection completed."
+        case .network: return "The test connection could not reach Cloudflare."
+        case .unexpectedResponse: return "The test connection received an unexpected response."
+        case .edgeUnauthorized: return "The test connection returned an authorization error without a diagnostic marker."
+        case .originUnavailable: return "The test service is unavailable or the request path was rejected."
+        case .originRequest: return "The test service rejected request headers."
+        case .originBearer: return "The test service did not receive a valid bearer header."
+        case .originAssertionMissing: return "The test service did not receive an Access assertion."
+        case .originAssertionInvalid: return "The test service could not verify the Access assertion."
+        }
+    }
+}
+
 /// Unmounted pilot-only data transport. A caller must supply independently reviewed
 /// pins, guard session generations around results, and verify ingress in staging.
 /// This API cannot construct arbitrary methods, hosts, or business-write paths.
@@ -23,8 +44,14 @@ public struct ManagedPilotDataAPI: Sendable {
     /// Test-only fixed endpoint. This returns no staff or business information.
     public func verifySyntheticProbe(credential: ManagedOAuthCredential) async throws {
         struct Probe: Decodable, Sendable { let ok: Bool; let kind: String }
-        let result: Probe = try await read(path: "", credential: credential, syntheticProbe: true)
-        guard result.ok, result.kind == "synthetic-oauth-probe" else { throw MobilePilotError.invalidResponse }
+        do {
+            let result: Probe = try await read(path: "", credential: credential, syntheticProbe: true)
+            guard result.ok, result.kind == "synthetic-oauth-probe" else { throw SyntheticProbeFailure.unexpectedResponse }
+        } catch is CancellationError { throw CancellationError() }
+        catch let failure as SyntheticProbeFailure { throw failure }
+        catch let failure as MobilePilotError {
+            throw failure == .expired ? SyntheticProbeFailure.expired : SyntheticProbeFailure.unexpectedResponse
+        } catch { throw SyntheticProbeFailure.network }
     }
 
     public func identity(credential: ManagedOAuthCredential) async throws -> MobilePilotSession {
@@ -58,7 +85,10 @@ public struct ManagedPilotDataAPI: Sendable {
         guard token.hasPrefix("oauth:"), (7...4096).contains(token.utf8.count),
               token.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) ||
                   (48...57).contains($0) || [45,46,95,126,58,43,47,61].contains($0) })
-        else { throw MobilePilotError.invalidResponse }
+        else {
+            if syntheticProbe { throw SyntheticProbeFailure.credential }
+            throw MobilePilotError.invalidResponse
+        }
         let endpoint = syntheticProbe ? "/oauth-probe/v1" : "/mobile-pilot/v1/" + path
         guard var components = URLComponents(string: pins.resource + endpoint) else { throw MobilePilotError.invalidResponse }
         if let cursor {
@@ -71,7 +101,7 @@ public struct ManagedPilotDataAPI: Sendable {
         request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
-        let data = try await PilotDataCollector(url: url).begin(request, protocolClasses: protocolClasses)
+        let data = try await PilotDataCollector(url: url, syntheticProbe: syntheticProbe).begin(request, protocolClasses: protocolClasses)
         try Task.checkCancellation()
         guard credential.expiresAt > Date() else { throw MobilePilotError.expired }
         do { return try JSONDecoder().decode(T.self, from: data) }
@@ -84,6 +114,7 @@ public struct ManagedPilotDataAPI: Sendable {
 private final class PilotDataCollector: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private let url: URL
+    private let syntheticProbe: Bool
     private let limit = 1_048_576
     private var data = Data()
     private var task: URLSessionDataTask?
@@ -92,7 +123,7 @@ private final class PilotDataCollector: NSObject, URLSessionDataDelegate, URLSes
     private var validated = false
     private var cancelled = false
 
-    init(url: URL) { self.url = url }
+    init(url: URL, syntheticProbe: Bool) { self.url = url; self.syntheticProbe = syntheticProbe }
     func begin(_ request: URLRequest, protocolClasses: [AnyClass]?) async throws -> Data {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -122,6 +153,20 @@ private final class PilotDataCollector: NSObject, URLSessionDataDelegate, URLSes
                     completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
         guard let response = response as? HTTPURLResponse, response.url == url else {
             lock.lock(); failure = MobilePilotError.invalidResponse; lock.unlock(); completionHandler(.cancel); return
+        }
+        if syntheticProbe && response.statusCode != 200 {
+            let stage = response.value(forHTTPHeaderField: "X-LT-Ops-Probe-Stage")
+            let diagnosis: SyntheticProbeFailure
+            switch (response.statusCode, stage) {
+            case (404, "unavailable"): diagnosis = .originUnavailable
+            case (401, "request-rejected"): diagnosis = .originRequest
+            case (401, "bearer-rejected"): diagnosis = .originBearer
+            case (401, "assertion-missing"): diagnosis = .originAssertionMissing
+            case (401, "assertion-invalid"): diagnosis = .originAssertionInvalid
+            case (401, nil): diagnosis = .edgeUnauthorized
+            default: diagnosis = .unexpectedResponse
+            }
+            lock.lock(); failure = diagnosis; lock.unlock(); completionHandler(.cancel); return
         }
         let statusError: MobilePilotError?
         switch response.statusCode {

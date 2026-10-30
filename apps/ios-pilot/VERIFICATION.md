@@ -21,6 +21,15 @@ Apple SDK build and signed in-place iPad installation succeeded. Device inventor
 again showed one pilot app; the task-owned USB relay was stopped and verified
 absent. The underlying sign-in failure remains unresolved pending the new test.
 
+Beau's next test reached token exchange and then reported that the synthetic
+connection failed with revocation unconfirmed. It did not identify the source of
+the connection error. A second diagnostic update reports only fixed request and
+response categories, without tokens, claims, response bodies or raw errors. The
+synthetic Worker was updated to version `035577b4-7b4e-44a8-a5b7-2694584d6569`;
+36 Swift package tests, 6 Worker tests and an Apple SDK signed build passed.
+The updated app was installed in place, with one pilot app in the device
+inventory. These checks do not establish the cause or successful sign-in.
+
 ## Native build and installation — October 29, 2026
 
 Commit `46790bba` was exported to a separate Linux build directory. Swift 6.4,

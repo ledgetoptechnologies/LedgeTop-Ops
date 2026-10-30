@@ -17,7 +17,9 @@ type ProbeEnvironment = {
 type VerifyAssertion = typeof verifyPilotAccessAssertion;
 const headers = { 'Cache-Control': 'no-store', 'Cloudflare-CDN-Cache-Control': 'no-store',
   'Pragma': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' };
-const missing = () => Response.json({ error: 'Not found' }, { status: 404, headers });
+const marker = (stage: 'unavailable' | 'request-rejected' | 'bearer-rejected' | 'assertion-missing' | 'assertion-invalid' | 'ok') =>
+  ({ ...headers, 'X-LT-Ops-Probe-Stage': stage });
+const missing = () => Response.json({ error: 'Not found' }, { status: 404, headers: marker('unavailable') });
 
 /** Separate pure routing surface permits tests without granting the deployed
  * entrypoint a runtime-controlled origin allowlist or bypassing verification. */
@@ -35,19 +37,24 @@ export async function handleOAuthProbe(request: Request, env: ProbeEnvironment,
       || expected.search || expected.hash || url.origin !== expected.origin
       || url.pathname !== PROBE_PATH || url.search || url.hash || request.method !== 'GET') return missing();
   } catch { return missing(); }
-  if (request.headers.has('Cookie') || request.headers.has('Origin')
-    || !/^Bearer oauth:[A-Za-z0-9._~+\/-]+=*$/.test(request.headers.get('Authorization') ?? '')
+  if (request.headers.has('Cookie') || request.headers.has('Origin')) {
+    return Response.json({ error: 'Authentication required' }, { status: 401, headers: marker('request-rejected') });
+  }
+  if (!/^Bearer oauth:[A-Za-z0-9._~+\/-]+=*$/.test(request.headers.get('Authorization') ?? '')
     || (request.headers.get('Authorization')?.length ?? 0) > 4096) {
-    return Response.json({ error: 'Authentication required' }, { status: 401, headers });
+    return Response.json({ error: 'Authentication required' }, { status: 401, headers: marker('bearer-rejected') });
+  }
+  if (!request.headers.get('Cf-Access-Jwt-Assertion')) {
+    return Response.json({ error: 'Authentication required' }, { status: 401, headers: marker('assertion-missing') });
   }
   try {
     await verify(request, { teamDomain: env.TEAM_DOMAIN, pilotAudience: env.IOS_OAUTH_PROBE_AUDIENCE,
       operationsAudience: env.OPERATIONS_AUD });
   } catch {
-    return Response.json({ error: 'Authentication required' }, { status: 401, headers });
+    return Response.json({ error: 'Authentication required' }, { status: 401, headers: marker('assertion-invalid') });
   }
   // Never reflect the bearer, assertion, identity, or any request input.
-  return Response.json({ ok: true, kind: 'synthetic-oauth-probe' }, { status: 200, headers });
+  return Response.json({ ok: true, kind: 'synthetic-oauth-probe' }, { status: 200, headers: marker('ok') });
 }
 
 export default {

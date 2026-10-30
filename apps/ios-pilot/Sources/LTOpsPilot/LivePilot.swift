@@ -251,6 +251,9 @@ final class LivePilotModel: ObservableObject {
     private static func explanation(_ error: Error) -> String {
         if let failure = error as? ManagedOAuthStageFailure {
             if let browserError = failure.underlying as? ASWebAuthenticationSessionError, browserError.code == .canceledLogin { return "Sign-in cancelled." }
+            if failure.stage == .probe, let diagnostic = failure.underlying as? SyntheticProbeFailure {
+                return diagnostic.message
+            }
             return ManagedOAuthDiagnostic.message(for: failure.stage)
         }
         if let browserError = error as? ASWebAuthenticationSessionError, browserError.code == .canceledLogin { return "Sign-in cancelled." }

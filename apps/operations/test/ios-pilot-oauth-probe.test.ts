@@ -39,6 +39,7 @@ describe('synthetic OAuth probe', () => {
       Authorization: `Bearer ${token}`, 'Cf-Access-Jwt-Assertion': assertion,
     }), env, [origin]);
     expect(response.status).toBe(200);
+    expect(response.headers.get('X-LT-Ops-Probe-Stage')).toBe('ok');
     expect(response.headers.get('Cache-Control')).toBe('no-store');
     const text = await response.text();
     expect(JSON.parse(text)).toEqual({ ok: true, kind: 'synthetic-oauth-probe' });
@@ -59,5 +60,19 @@ describe('synthetic OAuth probe', () => {
       req('/oauth-probe/v1', { Authorization: 'Bearer oauth:synthetic', 'Cf-Access-Jwt-Assertion': await signed(), Cookie: 'CF_Authorization=bad' }),
       req('/oauth-probe/v1', { Authorization: 'Bearer oauth:synthetic', 'Cf-Access-Jwt-Assertion': 'forged' })];
     for (const value of requests) expect((await handleOAuthProbe(value, env, [origin])).status).toBe(401);
+  });
+  it('returns only fixed diagnostic stages for failed synthetic requests', async () => {
+    const cases: Array<[Request, string]> = [
+      [req('/oauth-probe/v1'), 'bearer-rejected'],
+      [req('/oauth-probe/v1', { Authorization: 'Bearer oauth:synthetic' }), 'assertion-missing'],
+      [req('/oauth-probe/v1', { Authorization: 'Bearer oauth:synthetic', 'Cf-Access-Jwt-Assertion': 'forged' }), 'assertion-invalid'],
+      [req('/oauth-probe/v1', { Authorization: 'Bearer oauth:synthetic', Cookie: 'secret-test' }), 'request-rejected'],
+    ];
+    for (const [request, expected] of cases) {
+      const response = await handleOAuthProbe(request, env, [origin]);
+      expect(response.status).toBe(401);
+      expect(response.headers.get('X-LT-Ops-Probe-Stage')).toBe(expected);
+      expect(JSON.stringify([...response.headers])).not.toContain('secret-test');
+    }
   });
 });
