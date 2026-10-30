@@ -12,6 +12,7 @@ import type { Env,StaffPrincipal } from '../src/worker/types';
 const TS=new Date().toISOString().replace(/\.\d{3}Z$/,'Z'),NOW=Date.parse(TS),ORIGIN='https://incoming.ledgetopdroneservices.com',PRODUCER='hermes-competitor-intel';
 const key:ProducerKey={producer_id:PRODUCER,key_id:'test-key-1',public_key:'A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg',key_revision:1,state:'active'};
 const encoder=new TextEncoder();
+const journalVectors=JSON.parse(readFileSync(new URL('./fixtures/hermes-journal-v4-staged-vectors.json',import.meta.url),'utf8')) as {sourceArtifactSha256:string;cases:Array<{id:string;body:string;context:Record<string,unknown>;receiverExpected:boolean;bodySha256:string}>};
 let runtime:Miniflare,db:D1Database,privateKey:CryptoKey,serial=0,bindingId='binding-one',businessId='business-one',routeKey='synthetic';
 const id=()=>`00000000-0000-4000-8000-${(++serial).toString(16).padStart(12,'0')}`;
 const account={managerCustomerRef:'1234567890',advertiserCustomerRef:'0987654321',currencyCode:'USD',timeZone:'America/Chicago'};
@@ -40,9 +41,12 @@ function gscObservation(operationId=id()){
    provenance:{source:'google_search_console',sourceAccountRef:'source-account',collectedBy:PRODUCER,collectedAt:TS,asOf:'2026-10-24T11:00:00Z',lastDataDate:'2026-10-24',dataRange:{start:'2026-10-24',end:'2026-10-24'},partial:false,partialReason:null,limits:[]}}};
 }
 async function signed(value:unknown,producer=PRODUCER){
- const body=JSON.stringify(value),digest=await intelDigest(encoder.encode(body)),headers={producer,keyId:key.key_id,timestamp:TS,digest};
+ return signedBody(JSON.stringify(value),TS,producer);
+}
+async function signedBody(body:string,timestamp:string,producer=PRODUCER){
+ const digest=await intelDigest(encoder.encode(body)),headers={producer,keyId:key.key_id,timestamp,digest};
  const signature=base64url(new Uint8Array(await crypto.subtle.sign('Ed25519',privateKey,intelSigningBytes(headers) as BufferSource)));
- return new Request(`${ORIGIN}${INTEL_INGEST_PATH}`,{method:'POST',headers:{'Content-Type':'application/json','X-CI-Producer':producer,'X-CI-Key-Id':key.key_id,'X-CI-Timestamp':TS,'X-CI-Content-SHA256':digest,'X-CI-Signature':signature},body});
+ return new Request(`${ORIGIN}${INTEL_INGEST_PATH}`,{method:'POST',headers:{'Content-Type':'application/json','X-CI-Producer':producer,'X-CI-Key-Id':key.key_id,'X-CI-Timestamp':timestamp,'X-CI-Content-SHA256':digest,'X-CI-Signature':signature},body});
 }
 function env():Env{return {OPS_DB:db,ENVIRONMENT:'production',INCOMING_BASE_URL:ORIGIN,INCOMING_EXPECTED_HOST:'incoming.ledgetopdroneservices.com',COMPETITOR_INTEL_INGEST_ENABLED:'true'} as Env;}
 async function post(value:unknown){return dispatchIntelIngest(await signed(value),env(),NOW);}
@@ -83,6 +87,35 @@ beforeEach(async()=>{
 });
 
 describe('proposed owner Google Ads source lane',()=>{
+ it('accepts the exact persisted stale Hermes Ads journal body, replays its receipt, and retains unknown metrics as null',async()=>{
+  const item=journalVectors.cases.find(entry=>entry.id==='persisted-d7e3bdf00d29');
+  expect(journalVectors.sourceArtifactSha256).toBe('9309157056727e83f801546867cfe596a3a500cb288c1e930ec4f8d875a4843f');
+  expect(item?.receiverExpected).toBe(true);expect(item?.context).toMatchObject({configurationRevision:3,accountState:'connected',subjectKey:'own:google-ads'});
+  const binding='binding-ads-window-heads',business='business-ads-window-heads',alias='journal-ads-fixture',context=item!.context;
+  await db.batch([
+   db.prepare("INSERT INTO owner_intel_businesses VALUES(?,'Synthetic Ads Journal Fixture',1,'reviewed')").bind(business),
+   db.prepare("INSERT INTO owner_intel_business_aliases VALUES(?,?,'active')").bind(alias,business),
+   db.prepare("INSERT INTO owner_intel_bindings VALUES(?,?,3,'reviewed')").bind(binding,business),
+   db.prepare('INSERT INTO ci_ingest_producer_bindings VALUES(?,?,3,1)').bind(PRODUCER,binding),
+   db.prepare('INSERT INTO owner_intel_google_ads_bindings(producer_id,binding_id,configuration_revision,subject_key,observation_kind,account_state,manager_customer_ref,advertiser_customer_ref,source_account_ref,currency_code,time_zone,collected_by,active) VALUES(?,?,3,?,?,?,?,?,?,?,?,?,1)')
+    .bind(PRODUCER,binding,context.subjectKey,context.observationKind,context.accountState,context.managerCustomerRef,context.advertiserCustomerRef,context.sourceAccountRef,context.currencyCode,context.timeZone,context.collectedBy),
+   db.prepare('UPDATE owner_intel_google_ads_control SET enabled=1,storage_accepted=1')
+  ]);
+  const signatureTime='2026-10-26T07:15:00Z',now=Date.parse(signatureTime),digest=await intelDigest(encoder.encode(item!.body));
+  expect(digest).toBe(Buffer.from(item!.bodySha256,'hex').toString('base64url'));
+  const firstResponse=await dispatchIntelIngest(await signedBody(item!.body,signatureTime),env(),now);
+  expect(firstResponse?.status,firstResponse?await firstResponse.clone().text():'no response').toBe(200);
+  const first=await firstResponse!.json() as {delivery:string;receipt:unknown};expect(first.delivery).toBe('first');
+  const replay=await dispatchIntelIngest(await signedBody(item!.body,signatureTime),env(),now);
+  expect(replay?.status).toBe(200);expect(await replay?.json()).toEqual({delivery:'duplicate',receipt:first.receipt});
+  const stored=await db.prepare('SELECT raw_body,payload_sha256 FROM owner_intel_google_ads_inbox WHERE operation_id=?').bind(JSON.parse(item!.body).operationId).first<{raw_body:string;payload_sha256:string}>();
+  expect(stored?.raw_body).toBe(item!.body);expect(stored?.payload_sha256).toBe(digest);
+  const projection=await db.prepare('SELECT period_key,period_days,dto_json FROM owner_intel_google_ads_projections WHERE source_operation_id=?')
+   .bind(JSON.parse(item!.body).operationId).first<{period_key:string;period_days:number|null;dto_json:string}>();
+  expect(projection?.period_key).toBe('7d');expect(projection?.period_days).toBe(7);
+  expect(JSON.parse(projection!.dto_json).observation.payload.totals).toEqual({clicks:null,conversions:null,costMicros:null,impressions:null,reason:'source_stale',state:'source_stale'});
+ });
+
  it('migrates append-only storage without widening v1 or 0229, and starts disabled with no key, binding, or grant',async()=>{
   expect(await db.prepare('SELECT enabled,storage_accepted FROM owner_intel_google_ads_control').first()).toEqual({enabled:0,storage_accepted:0});
   for(const table of ['owner_intel_google_ads_bindings','owner_intel_google_ads_inbox','owner_intel_google_ads_projections','owner_intel_read_grants'])expect(await db.prepare(`SELECT COUNT(*) count FROM ${table}`).first<number>('count')).toBe(0);
