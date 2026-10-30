@@ -7,7 +7,8 @@ import {
 } from "./unified-portal";
 import { UnifiedDeliveries } from "./UnifiedDeliveries";
 import { QuickRequest } from "./QuickRequest";
-import { loadInquiries, type ClientInquiry } from "./request-services-api";
+import { loadInquiries, loadRequestServices, type ClientInquiry, type RequestServices } from "./request-services-api";
+import type { RequestError } from "./bulk-download";
 
 export type UnifiedPage = "dashboard" | "projects" | "requests" | "deliveries" | "feedback" | "account";
 export const UNIFIED_PAGES: ReadonlySet<string> = new Set<UnifiedPage>(["dashboard", "projects", "requests", "deliveries", "feedback", "account"]);
@@ -51,6 +52,10 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   // General requests aren't tied to an account, so they're read once for the client, not per account.
   // null: not offered here (or not loaded yet); "error": offered but couldn't be read.
   const [inquiries, setInquiries] = useState<ClientInquiry[] | null | "error">(null);
+  // What the one-step form offers this client, read once like general requests: a client can have services or
+  // general choices even when none of their accounts takes requests online. null: not offered here (an older
+  // portal, or no access); "error": couldn't be checked.
+  const [offered, setOffered] = useState<RequestServices | null | "loading" | "error">("loading");
   const generation = useRef(0);
 
   useEffect(() => {
@@ -58,6 +63,15 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     const controller = new AbortController();
     loadInquiries(controller.signal).then(value => { if (!controller.signal.aborted) setInquiries(value); },
       () => { if (!controller.signal.aborted) setInquiries("error"); });
+    return () => controller.abort();
+  }, [page, retry]);
+
+  useEffect(() => {
+    if (page !== "requests") return;
+    const controller = new AbortController();
+    setOffered("loading");
+    loadRequestServices(controller.signal).then(value => { if (!controller.signal.aborted) setOffered(value); },
+      (caught: RequestError) => { if (!controller.signal.aborted) setOffered(caught.status === 403 ? null : "error"); });
     return () => controller.abort();
   }, [page, retry]);
 
@@ -118,8 +132,12 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   const historyHidden = ready.some(result => !result.historyLoaded);
   // "No requests yet" only when every account answered and every account's history was actually read.
   const historyComplete = !loading && failed.length === 0 && !historyHidden;
-  const requestAvailability: "available" | "checking" | "unchecked" | "unavailable" = requestAccounts.length > 0 ? "available"
-    : loading ? "checking" : failed.length > 0 ? "unchecked" : "unavailable";
+  const offers = typeof offered === "object" && offered !== null;
+  const offersRequests = offers && (offered.services.length > 0 || offered.inquiryKinds.length > 0);
+  // Nothing offered but some accounts couldn't list their services: that's "couldn't check", not "not available".
+  const offerUnchecked = offered === "error" || (offers && !offersRequests && offered.unavailable.length > 0);
+  const requestAvailability: "available" | "checking" | "unchecked" | "unavailable" = requestAccounts.length > 0 || offersRequests ? "available"
+    : loading || offered === "loading" ? "checking" : failed.length > 0 || offerUnchecked ? "unchecked" : "unavailable";
 
   const startRequest = () => {
     setNotice(null);
@@ -206,6 +224,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     </Card>}
     {requestAvailability === "unchecked" && <Card className="unified-portal-request-unavailable" title="We couldn’t check new requests">
       <p>We couldn’t confirm whether new requests are available right now. Try again in a moment.</p>
+      {failed.length === 0 && <button type="button" className="button-ghost" onClick={() => setRetry(value => value + 1)}>Try again</button>}
     </Card>}
     {requestChooser}{problems}{loadingNote}
     {requests.length > 0 && <RequestProgress requests={requests} />}
