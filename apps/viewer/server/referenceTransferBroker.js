@@ -26,14 +26,33 @@ class ReferenceTransferBroker {
     this.settings = { maxGrantTtlMs, maxConcurrentRequests, maxConcurrentBytes, maxResponseBytes, maxRequests };
     for (const v of Object.values(this.settings)) if (!safeInt(v)) fail('INVALID_LIMIT');
     if (typeof databasePath !== 'string' || databasePath === ':memory:') fail('DURABLE_DATABASE_REQUIRED');
+    const grantsSql='CREATE TABLE reference_grants (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, reservation_id TEXT NOT NULL, identity TEXT NOT NULL, token_hash TEXT NOT NULL, metadata TEXT NOT NULL, files TEXT NOT NULL, expires_ms INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, used_bytes INTEGER NOT NULL DEFAULT 0, reserved_bytes INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0, in_flight INTEGER NOT NULL DEFAULT 0)';
+    const indexSql='CREATE INDEX reference_grants_job ON reference_grants(job_id)';
+    const usageSql='CREATE TABLE reference_job_usage (job_id TEXT PRIMARY KEY, environment TEXT NOT NULL, manifest_sha256 TEXT NOT NULL, byte_limit INTEGER NOT NULL, request_limit INTEGER NOT NULL, charged_bytes INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0)';
+    const inspect=db=>{
+      const names=['reference_grants','reference_grants_job','reference_job_usage'];
+      const rows=names.map(name=>db.prepare('SELECT type,name,sql FROM sqlite_master WHERE name=? COLLATE NOCASE').all(name));
+      if(rows.every(x=>x.length===0))return false;
+      const expected=[['table',grantsSql],['index',indexSql],['table',usageSql]];
+      if(rows.some((x,i)=>x.length!==1||x[0].name!==names[i]||x[0].type!==expected[i][0]||x[0].sql!==expected[i][1]))fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+      const extra=db.prepare("SELECT name FROM sqlite_master WHERE type IN ('trigger','index') AND sql IS NOT NULL AND tbl_name COLLATE NOCASE IN ('reference_grants','reference_job_usage') AND name<>'reference_grants_job' LIMIT 1").get();
+      if(extra)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+      const grants=db.prepare('SELECT job_id,metadata,used_bytes,reserved_bytes,requests,in_flight FROM reference_grants').all(),jobs=db.prepare('SELECT * FROM reference_job_usage').all(),jobMap=new Map(jobs.map(job=>[job.job_id,job])),sums=new Map();
+      for(const grant of grants){let metadata;try{metadata=JSON.parse(grant.metadata)}catch{fail('TRANSFER_ACCOUNTING_UNAVAILABLE')};const usage=jobMap.get(grant.job_id);if(!usage||metadata.manifestSha256!==usage.manifest_sha256||metadata.environment!==usage.environment||![grant.used_bytes,grant.reserved_bytes,grant.requests,grant.in_flight].every(x=>Number.isSafeInteger(x)&&x>=0)||grant.in_flight>grant.requests)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');const total=sums.get(grant.job_id)||{bytes:0,requests:0};total.bytes+=grant.used_bytes+grant.reserved_bytes;total.requests+=grant.requests;if(!Number.isSafeInteger(total.bytes)||!Number.isSafeInteger(total.requests))fail('TRANSFER_ACCOUNTING_UNAVAILABLE');sums.set(grant.job_id,total);}
+      for(const job of jobs){const sum=sums.get(job.job_id)||{bytes:0,requests:0};if(!['staging','production'].includes(job.environment)||!/^([a-f0-9]{64})$/.test(job.manifest_sha256)||![job.byte_limit,job.request_limit,job.charged_bytes,job.requests].every(x=>Number.isSafeInteger(x)&&x>=0)||job.charged_bytes>job.byte_limit||job.requests>job.request_limit||sum.bytes>job.charged_bytes||sum.requests!==job.requests)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');}
+      return true;
+    };
+    // Validate existing files in a read-only connection before journal-mode,
+    // chmod or schema changes; inspect again while holding the SQLite lock.
+    if(fs.existsSync(databasePath)){let probe;try{probe=new DatabaseSync(databasePath,{readOnly:true});inspect(probe)}catch(error){if(error instanceof ReferenceTransferError)throw error;fail('TRANSFER_ACCOUNTING_UNAVAILABLE')}finally{probe?.close()}}
     this.db = new DatabaseSync(databasePath);
-    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS reference_grants (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, reservation_id TEXT NOT NULL, identity TEXT NOT NULL, token_hash TEXT NOT NULL, metadata TEXT NOT NULL, files TEXT NOT NULL, expires_ms INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, used_bytes INTEGER NOT NULL DEFAULT 0, reserved_bytes INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0, in_flight INTEGER NOT NULL DEFAULT 0); CREATE INDEX IF NOT EXISTS reference_grants_job ON reference_grants(job_id); CREATE TABLE IF NOT EXISTS reference_job_usage (job_id TEXT PRIMARY KEY, environment TEXT NOT NULL, manifest_sha256 TEXT NOT NULL, byte_limit INTEGER NOT NULL, request_limit INTEGER NOT NULL, charged_bytes INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0);');
-    // A similarly named table is not proof of a compatible cumulative ledger.
-    const expectedLedger='CREATE TABLE reference_job_usage (job_id TEXT PRIMARY KEY, environment TEXT NOT NULL, manifest_sha256 TEXT NOT NULL, byte_limit INTEGER NOT NULL, request_limit INTEGER NOT NULL, charged_bytes INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0)';
-    const ledger=this.db.prepare("SELECT type,name,sql FROM sqlite_master WHERE name=? COLLATE NOCASE").all('reference_job_usage');
-    const extras=this.db.prepare("SELECT 1 FROM sqlite_master WHERE type IN ('trigger','index') AND sql IS NOT NULL AND tbl_name=? COLLATE NOCASE LIMIT 1").get('reference_job_usage');
-    if(ledger.length!==1||ledger[0].type!=='table'||ledger[0].name!=='reference_job_usage'||ledger[0].sql!==expectedLedger||extras){this.db.close();fail('TRANSFER_ACCOUNTING_UNAVAILABLE');}
-    try { fs.chmodSync(databasePath, 0o600); } catch (e) { this.db.close(); throw e; }
+    try{
+      this.db.exec('BEGIN IMMEDIATE');
+      if(!inspect(this.db))this.db.exec(`${grantsSql}; ${indexSql}; ${usageSql};`);
+      this.db.exec('COMMIT');
+      this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000');
+      fs.chmodSync(databasePath,0o600);
+    }catch(error){try{this.db.exec('ROLLBACK')}catch{}this.db.close();if(error instanceof ReferenceTransferError)throw error;fail('TRANSFER_ACCOUNTING_UNAVAILABLE');}
   }
   tx(fn) { this.db.exec('BEGIN IMMEDIATE'); try { const out = fn(); this.db.exec('COMMIT'); return out; } catch (e) { this.db.exec('ROLLBACK'); throw e; } }
   source(file) {
