@@ -312,7 +312,7 @@ test('provider accepts only the agreed held marker on nonterminal status',async(
 });
 
 test('held submit defers the original job without touching source or provider mutations',async t=>{
- const f=fixture(t),calls=[];f.db.prepare("UPDATE processing_attempts SET submission_phase='initialized' WHERE id=?").run(f.attempt.id);
+ const f=fixture(t),calls=[],captureJob=f.processing.claimJob('capture-owner');f.processing.beginAttemptInitialization(captureJob.id,'capture-owner',{freshTaskMissing:true,captureRequest:true});f.db.prepare("UPDATE processing_jobs SET status='pending',lease_owner=NULL,lease_expires_at=NULL,attempt_count=0,available_at='2000' WHERE id=?").run(captureJob.id);f.db.prepare("UPDATE processing_attempts SET submission_phase='initialized' WHERE id=?").run(f.attempt.id);
  const adapter={status:async()=>({status:'queued_upstream',held:true,heldReason:'option_evidence_invalid'}),remove:async()=>calls.push('remove'),initialize:async()=>calls.push('initialize'),upload:async()=>calls.push('upload'),commit:async()=>calls.push('commit')};
  const deps={processing:f.processing,storage:{resolve(){assert.fail('held task must not touch source')}},config:{},adapterFactory:()=>adapter};
  for(let i=0;i<7;i++){f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='submit'").run(f.attempt.id);assert.equal(await processOne(deps,'held-worker'),true);}
