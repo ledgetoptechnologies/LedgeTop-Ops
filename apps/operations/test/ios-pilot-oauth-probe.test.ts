@@ -52,6 +52,30 @@ describe('synthetic OAuth probe', () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true, kind: 'synthetic-oauth-probe' });
   });
+  it('reports fixed Access context categories only after verifying the assertion', async () => {
+    const assertion = await signed();
+    const cases: Array<[unknown, string]> = [
+      [undefined, 'missing'],
+      [{ aud: 'foreign', getIdentity: async () => ({}) }, 'audience-mismatch'],
+      [{ aud: 'pilot-audience' }, 'identity-unavailable'],
+      [{ aud: 'pilot-audience', getIdentity: async () => { throw Error('private failure'); } }, 'identity-unavailable'],
+      [{ aud: 'pilot-audience', getIdentity: async () => ({ user_uuid: 'other', email: 'synthetic@example.test' }) }, 'identity-mismatch'],
+      [{ aud: 'pilot-audience', getIdentity: async () => ({ user_uuid: 'synthetic-subject', email: ' SYNTHETIC@EXAMPLE.TEST ' }) }, 'match'],
+    ];
+    for (const [access, expected] of cases) {
+      const response = await handleOAuthProbe(req('/oauth-probe/v1', { 'Cf-Access-Jwt-Assertion': assertion }),
+        env, [origin], undefined, access as Parameters<typeof handleOAuthProbe>[4]);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('X-LT-Ops-Access-Context')).toBe(expected);
+      expect(JSON.stringify([...response.headers])).not.toContain('synthetic-subject');
+      expect(JSON.stringify([...response.headers])).not.toContain('synthetic@example.test');
+      expect(JSON.stringify([...response.headers])).not.toContain('private failure');
+    }
+    const invalid = await handleOAuthProbe(req('/oauth-probe/v1', { 'Cf-Access-Jwt-Assertion': 'forged' }), env,
+      [origin], undefined, { aud: 'pilot-audience', getIdentity: async () => ({ user_uuid: 'synthetic-subject', email: 'synthetic@example.test' }) });
+    expect(invalid.status).toBe(401);
+    expect(invalid.headers.get('X-LT-Ops-Access-Context')).toBeNull();
+  });
   it('denies unsupported paths, methods, queries, foreign host, and disabled configuration', async () => {
     const headers = { Authorization: 'Bearer oauth:synthetic', 'Cf-Access-Jwt-Assertion': await signed() };
     for (const value of [req('/api/operations', headers), req('/oauth-probe/v1?x=1', headers),

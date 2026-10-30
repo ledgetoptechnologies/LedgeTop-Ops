@@ -93,6 +93,7 @@ final class LivePilotModel: ObservableObject {
     @Published private(set) var message: String?
     @Published private(set) var detailMessage: String?
     @Published private(set) var probeSucceeded = false
+    @Published private(set) var probeContext: SyntheticAccessContext?
     private var generation = UUID()
     private var detailGeneration = UUID()
     private var expiry: Task<Void, Never>?
@@ -128,7 +129,7 @@ final class LivePilotModel: ObservableObject {
         generation = UUID()
         let ticket = generation
         expiry?.cancel(); expiry = nil
-        credential = nil; probeSucceeded = false; loading = true; message = nil
+        credential = nil; probeSucceeded = false; probeContext = nil; loading = true; message = nil
         Task { [weak self] in
             let report = await coordinator.runSyntheticRefreshExperiment()
             // If the experiment could not take ownership, clear any old grant.
@@ -160,7 +161,7 @@ final class LivePilotModel: ObservableObject {
         let cancellations = Array(pendingRequests.values)
         pendingRequests.removeAll()
         cancellations.forEach { $0() }
-        credential = nil; user = nil; probeSucceeded = false; collection = MobileOperationCollection(); detail = nil
+        credential = nil; user = nil; probeSucceeded = false; probeContext = nil; collection = MobileOperationCollection(); detail = nil
         loading = false; detailLoading = false; message = failureMessage; detailMessage = nil
         PilotKeychain.clear()
         guard let coordinator else { return }
@@ -211,11 +212,12 @@ final class LivePilotModel: ObservableObject {
             guard let issued = await coordinator.currentDataCredential() else { throw MobilePilotError.expired }
             guard generation == ticket else { return }
             if isSyntheticProbe {
-                do { try await perform { try await api.verifySyntheticProbe(credential: issued) } }
+                let context: SyntheticAccessContext
+                do { context = try await perform { try await api.verifySyntheticProbe(credential: issued) } }
                 catch is CancellationError { throw CancellationError() }
                 catch { throw ManagedOAuthStageFailure(stage: .probe, underlying: error) }
                 guard generation == ticket, issued.expiresAt > Date() else { return }
-                credential = issued; probeSucceeded = true
+                credential = issued; probeSucceeded = true; probeContext = context
                 let remaining = max(0, issued.expiresAt.timeIntervalSinceNow)
                 expiry = Task { [weak self] in
                     do { try await Task.sleep(for: .seconds(remaining)) } catch { return }
@@ -312,6 +314,7 @@ struct LivePilotWorkspace: View {
                     if let user = model.user { Text(user.displayName); Text(user.email).font(.caption).foregroundStyle(.secondary) }
                     if model.syntheticProbe {
                         if model.probeSucceeded { Text("Cloudflare sign-in test succeeded.").font(.headline) }
+                        if let context = model.probeContext { Text(context.message).font(.caption).foregroundStyle(.secondary) }
                         Text("This test contains no business data.").font(.caption).foregroundStyle(.secondary)
                     } else {
                         Text("\(model.collection.operations.count) operations loaded").font(.headline)

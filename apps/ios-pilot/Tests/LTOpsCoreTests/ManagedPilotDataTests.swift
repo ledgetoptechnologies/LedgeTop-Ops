@@ -10,7 +10,7 @@ private final class ManagedDataStub: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         let url = request.url!
-        guard url.host == "pilot.example.test", request.httpMethod == "GET", request.httpBody == nil,
+        guard ["pilot.example.test", "ios-pilot-staging.ledgetop.app"].contains(url.host ?? ""), request.httpMethod == "GET", request.httpBody == nil,
               request.value(forHTTPHeaderField: "Authorization") == "Bearer oauth:synthetic",
               request.value(forHTTPHeaderField: "Accept") == "application/json",
               request.value(forHTTPHeaderField: "Cache-Control") == "no-store",
@@ -71,6 +71,31 @@ private final class ValidProbeStub: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+private class ContextProbeStub: URLProtocol, @unchecked Sendable {
+    class var context: String { "untrusted-private-header-value" }
+    class var stage: String { "ok" }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: [
+            "Content-Type": "application/json", "X-LT-Ops-Probe-Stage": type(of: self).stage,
+            "X-LT-Ops-Access-Context": type(of: self).context])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"ok":true,"kind":"synthetic-oauth-probe"}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+private final class ContextMatchStub: ContextProbeStub, @unchecked Sendable { override class var context: String { "match" } }
+private final class ContextMissingStub: ContextProbeStub, @unchecked Sendable { override class var context: String { "missing" } }
+private final class ContextAudienceStub: ContextProbeStub, @unchecked Sendable { override class var context: String { "audience-mismatch" } }
+private final class ContextUnavailableStub: ContextProbeStub, @unchecked Sendable { override class var context: String { "identity-unavailable" } }
+private final class ContextMismatchStub: ContextProbeStub, @unchecked Sendable { override class var context: String { "identity-mismatch" } }
+private final class ContextWrongStageStub: ContextProbeStub, @unchecked Sendable {
+    override class var context: String { "match" }
+    override class var stage: String { "unrecognized" }
+}
+
 private class ProbeFailureStub: URLProtocol, @unchecked Sendable {
     class var marker: String? { nil }
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -127,19 +152,33 @@ final class ManagedPilotDataTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(operation.title, "Test operation")
     }
     func testSyntheticProbeUsesFixedTestEndpoint() async throws {
-        try await api().verifySyntheticProbe(credential: credential())
-        do { try await api(stub: InvalidProbeStub.self).verifySyntheticProbe(credential: credential()); XCTFail("accepted wrong marker") }
+        try await revocationAPI(stub: ManagedDataStub.self).verifySyntheticProbe(credential: credential())
+        do { try await revocationAPI(stub: InvalidProbeStub.self).verifySyntheticProbe(credential: credential()); XCTFail("accepted wrong marker") }
         catch { XCTAssertEqual(error as? SyntheticProbeFailure, .unexpectedResponse) }
+        do { try await api().verifySyntheticProbe(credential: credential()); XCTFail("accepted unreviewed origin") }
+        catch { XCTAssertEqual(error as? SyntheticProbeFailure, .unexpectedResponse) }
+    }
+    func testSyntheticContextIsAllowlistedAndRequiresSuccessStage() async throws {
+        let cases: [(AnyClass, SyntheticAccessContext)] = [
+            (ContextMatchStub.self, .match), (ContextMissingStub.self, .missing),
+            (ContextAudienceStub.self, .audienceMismatch), (ContextUnavailableStub.self, .identityUnavailable),
+            (ContextMismatchStub.self, .identityMismatch), (ContextProbeStub.self, .unknown),
+            (ContextWrongStageStub.self, .unknown), (ValidProbeStub.self, .unknown)]
+        for (stub, expected) in cases {
+            let observed = try await revocationAPI(stub: stub).verifySyntheticProbe(credential: credential())
+            XCTAssertEqual(observed, expected)
+            XCTAssertFalse(observed.message.contains("untrusted-private-header-value"))
+        }
     }
     func testProbeFailureCategoriesUseOnlyFixedStages() async throws {
         let cases: [(AnyClass, SyntheticProbeFailure)] = [(ProbeFailureStub.self, .edgeUnauthorized),
             (OriginBearerStub.self, .originBearer), (OriginAssertionStub.self, .originAssertionInvalid),
             (UnknownStageStub.self, .unexpectedResponse)]
         for (stub, expected) in cases {
-            do { try await api(stub: stub).verifySyntheticProbe(credential: credential()); XCTFail("accepted rejected probe") }
+            do { try await revocationAPI(stub: stub).verifySyntheticProbe(credential: credential()); XCTFail("accepted rejected probe") }
             catch { XCTAssertEqual(error as? SyntheticProbeFailure, expected) }
         }
-        do { try await api().verifySyntheticProbe(credential: credential("invalid-secret-value")); XCTFail("accepted invalid token") }
+        do { try await revocationAPI(stub: ManagedDataStub.self).verifySyntheticProbe(credential: credential("invalid-secret-value")); XCTFail("accepted invalid token") }
         catch { XCTAssertEqual(error as? SyntheticProbeFailure, .credential) }
     }
     func testRejectsExpiredAndMalformedCredentialsAndDotSegments() async throws {

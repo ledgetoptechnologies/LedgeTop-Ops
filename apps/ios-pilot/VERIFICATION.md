@@ -92,6 +92,29 @@ tests and signed Apple SDK build passed; in-place iPad installation and
 verification succeeded, inventory showed one pilot, and the relay was stopped.
 The provider experiment remains pending device participation.
 
+Beau reported the synthetic experiment returned “a reused refresh token was
+accepted” and cleanup could not be confirmed. This is evidence of replay
+acceptance in this test; it is not evidence of safe refresh replay protection.
+Persistent refresh grants remain disabled. Investigate a safer bounded session
+design and keep provider cleanup uncertainty explicit before any activation.
+
+The existing LT Ops logo was added as an iPad icon. A signed installation was
+verified using the unsigned xtool build plus compiled icon assets, then xtool
+install. This produced a single-prefixed bundle ID alongside the earlier
+double-prefixed ID. Following Beau's existing instruction to avoid duplicate
+pilots, the older double-prefixed app was removed after successful installation;
+the device inventory then showed one pilot with the single-prefixed ID. Future
+updates should reuse this unsigned-build/icon/xtool-install process to preserve
+that identifier. Beau confirmed the LT Ops logo appears on the iPad.
+
+The synthetic Worker was updated to version
+`8734b328-9671-4b75-ae38-9aacc7693346` with fixed-only runtime Access context
+diagnostics following assertion verification. No business-data bindings were
+added; unauthenticated and fabricated-bearer requests returned 401. The app
+shows only allowlisted categories on the successful synthetic test screen.
+Live identity mapping remains pending device testing; it cannot prove a
+universal or native-only authentication property.
+
 Cloudflare's published agent flow registers a public client with only
 `authorization_code` in the registration grant list, then shows a refresh
 token in the exchange response and a subsequent `refresh_token` grant. The

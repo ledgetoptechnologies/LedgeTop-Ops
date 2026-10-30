@@ -24,6 +24,37 @@ public enum SyntheticProbeFailure: Error, Sendable, Equatable {
     }
 }
 
+/// Fixed, synthetic-only observations. Unknown or missing provider headers
+/// never appear verbatim and do not change the authentication result.
+public enum SyntheticAccessContext: Sendable, Equatable {
+    case match, missing, audienceMismatch, identityUnavailable, identityMismatch, unknown
+    public var message: String {
+        switch self {
+        case .match: return "Access context and signed identity matched in the test."
+        case .missing: return "The test service did not receive an Access context."
+        case .audienceMismatch: return "The test Access context had a different audience."
+        case .identityUnavailable: return "The test Access identity was unavailable."
+        case .identityMismatch: return "The test Access identity did not match the signed assertion."
+        case .unknown: return "The Access context check is unavailable or unrecognized."
+        }
+    }
+    fileprivate static func from(_ value: String?) -> Self {
+        switch value {
+        case "match": return .match
+        case "missing": return .missing
+        case "audience-mismatch": return .audienceMismatch
+        case "identity-unavailable": return .identityUnavailable
+        case "identity-mismatch": return .identityMismatch
+        default: return .unknown
+        }
+    }
+}
+
+private struct PilotDataResponse: Sendable {
+    let data: Data
+    let context: SyntheticAccessContext
+}
+
 /// Unmounted pilot-only data transport. A caller must supply independently reviewed
 /// pins, guard session generations around results, and verify ingress in staging.
 /// This API cannot construct arbitrary methods, hosts, or business-write paths.
@@ -42,11 +73,16 @@ public struct ManagedPilotDataAPI: Sendable {
     }
 
     /// Test-only fixed endpoint. This returns no staff or business information.
-    public func verifySyntheticProbe(credential: ManagedOAuthCredential) async throws {
+    @discardableResult public func verifySyntheticProbe(credential: ManagedOAuthCredential) async throws -> SyntheticAccessContext {
+        // Never send a synthetic probe credential to an arbitrary resource.
+        // The app's reviewed probe configuration and revocation check use the
+        // same exact, no-business-data origin.
+        guard pins.resource == SyntheticRefreshExperiment.resource else { throw SyntheticProbeFailure.unexpectedResponse }
         struct Probe: Decodable, Sendable { let ok: Bool; let kind: String }
         do {
-            let result: Probe = try await read(path: "", credential: credential, syntheticProbe: true)
+            let (result, context): (Probe, SyntheticAccessContext) = try await readResponse(path: "", credential: credential, syntheticProbe: true)
             guard result.ok, result.kind == "synthetic-oauth-probe" else { throw SyntheticProbeFailure.unexpectedResponse }
+            return context
         } catch is CancellationError { throw CancellationError() }
         catch let failure as SyntheticProbeFailure { throw failure }
         catch let failure as MobilePilotError {
@@ -91,6 +127,11 @@ public struct ManagedPilotDataAPI: Sendable {
 
     private func read<T: Decodable & Sendable>(path: String, cursor: String? = nil, credential: ManagedOAuthCredential,
                                                syntheticProbe: Bool = false) async throws -> T {
+        let (result, _): (T, SyntheticAccessContext) = try await readResponse(path: path, cursor: cursor, credential: credential, syntheticProbe: syntheticProbe)
+        return result
+    }
+    private func readResponse<T: Decodable & Sendable>(path: String, cursor: String? = nil, credential: ManagedOAuthCredential,
+                                                       syntheticProbe: Bool = false) async throws -> (T, SyntheticAccessContext) {
         try Task.checkCancellation()
         guard credential.expiresAt > Date() else { throw MobilePilotError.expired }
         let token = credential.accessToken
@@ -113,10 +154,10 @@ public struct ManagedPilotDataAPI: Sendable {
         request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
-        let data = try await PilotDataCollector(url: url, syntheticProbe: syntheticProbe).begin(request, protocolClasses: protocolClasses)
+        let response = try await PilotDataCollector(url: url, syntheticProbe: syntheticProbe).begin(request, protocolClasses: protocolClasses)
         try Task.checkCancellation()
         guard credential.expiresAt > Date() else { throw MobilePilotError.expired }
-        do { return try JSONDecoder().decode(T.self, from: data) }
+        do { return (try JSONDecoder().decode(T.self, from: response.data), response.context) }
         catch { throw MobilePilotError.invalidResponse }
     }
 }
@@ -130,13 +171,14 @@ private final class PilotDataCollector: NSObject, URLSessionDataDelegate, URLSes
     private let limit = 1_048_576
     private var data = Data()
     private var task: URLSessionDataTask?
-    private var continuation: CheckedContinuation<Data, Error>?
+    private var continuation: CheckedContinuation<PilotDataResponse, Error>?
     private var failure: Error?
     private var validated = false
     private var cancelled = false
+    private var context: SyntheticAccessContext = .unknown
 
     init(url: URL, syntheticProbe: Bool) { self.url = url; self.syntheticProbe = syntheticProbe }
-    func begin(_ request: URLRequest, protocolClasses: [AnyClass]?) async throws -> Data {
+    func begin(_ request: URLRequest, protocolClasses: [AnyClass]?) async throws -> PilotDataResponse {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let options = URLSessionConfiguration.ephemeral
@@ -194,7 +236,11 @@ private final class PilotDataCollector: NSObject, URLSessionDataDelegate, URLSes
               response.expectedContentLength < 0 || response.expectedContentLength <= limit else {
             lock.lock(); failure = statusError ?? MobilePilotError.invalidResponse; lock.unlock(); completionHandler(.cancel); return
         }
-        lock.lock(); validated = true; lock.unlock(); completionHandler(.allow)
+        lock.lock()
+        if syntheticProbe && response.value(forHTTPHeaderField: "X-LT-Ops-Probe-Stage") == "ok" {
+            context = .from(response.value(forHTTPHeaderField: "X-LT-Ops-Access-Context"))
+        }
+        validated = true; lock.unlock(); completionHandler(.allow)
     }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive incoming: Data) {
         lock.lock()
@@ -206,7 +252,7 @@ private final class PilotDataCollector: NSObject, URLSessionDataDelegate, URLSes
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         lock.lock()
         let continuation = self.continuation; self.continuation = nil
-        let result = data
+        let result = PilotDataResponse(data: data, context: context)
         let failure: Error? = cancelled ? CancellationError() : (self.failure ?? error ?? (validated ? nil : MobilePilotError.invalidResponse))
         lock.unlock()
         session.finishTasksAndInvalidate()
