@@ -4,9 +4,10 @@
  */
 import fs from 'node:fs';
 import { canonical, hash, need, validateInstallation, verifyCandidate,
-  ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 } from './production-deploy.mjs';
+  OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, ORDINARY_FRONTEND_PREFLIGHT_MODE,
+  ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 } from './production-deploy.mjs';
 import { validateOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
-import { collectFrontendAssets, mergeAssetLedger, validateAssetLedger } from './production-auto-assets.mjs';
+import { collectFrontendAssets, mergeAssetLedger, preserveRootHtmlArchive, validateAssetLedger } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
@@ -59,15 +60,16 @@ function planProfile(before, plan, profile, expectedDeploymentVersions) {
     app: plan.application, release: plan.release, profile,
     ...(expected === undefined ? {} : { expectedDeploymentVersions: expected }),
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE,
+    installedOpsSuccessorReaderContract: plan.installedOpsSuccessorReaderContract,
   });
   return expected;
 }
 
-function verifyNamespaceReceipt({ evidence, plan, candidate, unionLedger, previousLedger, accountId, now }) {
+function verifyNamespaceReceipt({ evidence, plan, candidate, unionLedger, previousLedger, rootHtmlArchive, accountId, now }) {
   if (evidence === undefined) return { ready: false, reason: 'active-namespace-byte-receipt-required' };
   need(exactObject(evidence, ['receipt','bytesByPath']), 'Active namespace evidence shape invalid');
   const { receipt, bytesByPath } = evidence;
-  need(exactObject(receipt, receiptKeys) && bytesByPath instanceof Map,
+  need(exactObject(receipt, rootHtmlArchive ? [...receiptKeys, 'rootHtmlArchive'] : receiptKeys) && bytesByPath instanceof Map,
     'Active namespace evidence shape invalid');
   const app = plan.application, workerName = workerFor(app);
   need(receipt.schemaVersion === 1 && receipt.workerName === workerName && receipt.accountId === accountId
@@ -93,7 +95,15 @@ function verifyNamespaceReceipt({ evidence, plan, candidate, unionLedger, previo
   const allPriorPaths = [...priorPaths].sort();
   need(Array.isArray(oldPaths) && equal(oldPaths, allPriorPaths),
     'Receipt omits, invents, or duplicates previously retained browser asset paths');
-  return { ready: true, reason: null, cutoverAt: receipt.cutoverAt,
+  const archive = rootHtmlArchive ?? null;
+  if (archive) {
+    need(equal(receipt.rootHtmlArchive, archive), 'Receipt does not identify the exact retained root HTML archive transport');
+    const bytes = bytesByPath.get(archive.path);
+    need(Buffer.isBuffer(bytes) && bytes.length === archive.size && hash(bytes) === archive.sha256,
+      'Archived root HTML bytes do not match the prior root document');
+  } else need(receipt.rootHtmlArchive === undefined || receipt.rootHtmlArchive === null,
+    'Unexpected root HTML archive receipt');
+  return { ready: true, reason: null, cutoverAt: receipt.cutoverAt, rootHtmlArchive: archive,
     earliestPermittedPruningAt: receipt.earliestPermittedPruningAt,
     assetCount: expected.length, totalBytes: expected.reduce((sum, row) => sum + row.size, 0),
     namespaceByteEvidenceVerified: true };
@@ -111,7 +121,8 @@ export function ordinaryFrontendExecutionQualification(namespaceQualification) {
 }
 
 /** Verify candidate runtime modules and native resource/config invariants. */
-export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate, modern, allowProviderOmittedMap = false } = {}) {
+export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate, modern, allowProviderOmittedMap = false,
+  opsSuccessorReaderContract } = {}) {
   need(plan?.schemaVersion === 1 && ['operations','client'].includes(plan.application)
     && plan.offlineOnly === true && plan.deploymentEnabled === false,
   'Pinned offline ordinary frontend plan is required');
@@ -140,7 +151,14 @@ export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate
     const map = strictModuleBytes(mapModule, 'index.js.map');
     try { JSON.parse(map.toString('utf8')); } catch { throw new Error('Candidate source map JSON invalid'); }
   }
-  const runtimeProof = verifyCandidate(before, app, candidate, modern, pinnedMain, sourceMap);
+  if (opsSuccessorReaderContract !== undefined) {
+    need(opsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT && app === 'operations'
+      && plan.sourceCommit === 'a0c8fd230d46690a7090c79190e125f5a02f0f35'
+      && plan.release.main.sha256 === 'f4cdefd633441df8db18cc5c0b192fc8faa72ebd7b1db730122bd77318164e68'
+      && plan.release.sourceMap.sha256 === '375962dbe22ed0038009d0790c1c12a33b0668010f99916b8addade0a489d08b',
+    'Ops successor reader candidate plan differs from exact reviewed source bundle and source map');
+  }
+  const runtimeProof = verifyCandidate(before, app, candidate, modern, pinnedMain, sourceMap, { opsSuccessorReaderContract });
   need(equal(candidate.resources.bindings, plan.expectedBindings)
     && equal(modern.assets ?? null, plan.expectedAssetsConfiguration),
   'Candidate bindings or asset routing config changed');
@@ -167,14 +185,13 @@ export function verifyOrdinaryFrontendAssetNamespace({ plan, candidateId, baseli
   need(UUID.test(baselineVersionId ?? '') && prior.parentVersionId === baselineVersionId,
     'Previous asset ledger is not tied to captured active version');
   need(previousAssetBytes instanceof Map, 'Previous verified asset bytes must be a Map');
-  const payloads = new Map(previousAssetBytes);
-  for (const [assetPath, bytes] of collected.payloads) payloads.set(assetPath, bytes);
-  const unionLedger = mergeAssetLedger({ previous: prior, current: { entries: collected.entries, payloads },
+  const retained = preserveRootHtmlArchive({ application: app, previous: prior, previousAssetBytes, current: collected });
+  const unionLedger = mergeAssetLedger({ previous: prior, current: retained.current,
     workerName: workerFor(app), accountId, sourceCommit: plan.sourceCommit, parentVersionId: candidateId,
     observedAt: new Date(now).toISOString() });
   const namespace = verifyNamespaceReceipt({ evidence: namespaceEvidence, plan, candidate: { id: candidateId },
-    unionLedger, previousLedger: prior, accountId, now });
-  return Object.freeze({ browserAssetInventoryVerified: true, assetNamespaceQualification: namespace,
+    unionLedger, previousLedger: prior, rootHtmlArchive: retained.archive, accountId, now });
+  return Object.freeze({ browserAssetInventoryVerified: true, rootHtmlArchive: retained.archive, assetNamespaceQualification: namespace,
     retainedAssetLedger: unionLedger });
 }
 
@@ -193,7 +210,8 @@ export function verifyOrdinaryFrontendCandidate({ before, plan, candidate, moder
   const expected = planProfile(before, plan, profile, expectedDeploymentVersions);
   validateInstallation(before, { profile, selectedApp: plan.application,
     ...(expected === undefined ? {} : { expectedDeploymentVersions: expected }),
-    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: plan.application });
+    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: plan.application,
+    opsSuccessorReaderContract: plan.installedOpsSuccessorReaderContract });
   const app = plan.application;
   const moduleProof = verifyOrdinaryFrontendCandidateModules({ before, plan, candidate, modern });
   const assetProof = verifyOrdinaryFrontendAssetNamespace({ plan, candidateId: candidate.id, baselineVersionId: before[app].version.id, previousLedger,

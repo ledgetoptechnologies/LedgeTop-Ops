@@ -148,6 +148,11 @@ function harness(t, fixture, app, { failCandidateAssets = false, failStaff = fal
   ] };
   const candidateAssets = new Map(previousAssetBytes);
   for (const [name, body] of Object.entries(artifact.texts)) candidateAssets.set(`/${name}`, Buffer.from(body));
+  if (retainedPlan.rootHtmlArchive) {
+    const archivedRoot = previousAssetBytes.get(retainedPlan.rootHtmlArchive.sourcePath);
+    assert.ok(Buffer.isBuffer(archivedRoot));
+    candidateAssets.set(retainedPlan.rootHtmlArchive.path, Buffer.from(archivedRoot));
+  }
   const active = clone(before), nativeCalls = [], providerEvents = [], staffPhases = [], verifierVersions = new Map();
   const reader = {
     async getCandidateVersion(workerName, versionId) {
@@ -231,6 +236,15 @@ test('private sanitized fixture: full Client state machine preserves exact Ops 0
     .sort((a, b) => a.versionId.localeCompare(b.versionId)), [...FIXED_OPS_WEIGHTS].sort((a, b) => a.versionId.localeCompare(b.versionId)));
   assert.equal(h.providerEvents.filter(row => row[0] === 'create').length, 3);
   assert.equal(h.providerEvents.filter(row => row[0] === 'remove').length, 3);
+  const archive = h.retainedPlan.rootHtmlArchive;
+  assert.ok(archive && archive.path.startsWith('/_ui/client/'));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(h.journalDirectory, 'verified-candidate-root-html-archive.private.json'), 'utf8')),
+    { candidateId: h.candidateId, path: archive.path, transportPath: archive.transportPath, size: archive.size,
+      sha256: archive.sha256, mime: archive.mime, verified: true });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(h.journalDirectory, 'verified-active-root-html-archive.private.json'), 'utf8')),
+    { candidateId: h.candidateId, path: archive.path, transportPath: archive.transportPath, size: archive.size,
+      sha256: archive.sha256, mime: archive.mime, verified: true });
+  assert.equal(JSON.parse(fs.readFileSync(path.join(h.journalDirectory, 'verified-active.private.json'), 'utf8')).rootHtmlArchive.path, archive.path);
   assert.equal(h.nativeCalls.some(row => row.phase === 'rollback'), false);
 });
 
@@ -244,6 +258,7 @@ test('private sanitized fixture: full Ops state machine qualifies staff around e
     'only the pinned old zero-percent row is deliberately dropped during exact namespace staging');
   assert.equal(h.staffPhases.length >= 5, true);
   const activeReceipt = JSON.parse(fs.readFileSync(path.join(h.journalDirectory, 'verified-active.private.json'), 'utf8'));
+  assert.equal(activeReceipt.rootHtmlArchive.path, h.retainedPlan.rootHtmlArchive.path);
   assert.equal(activeReceipt.providerCutoverAt.endsWith('601424Z'), true);
   assert.equal(activeReceipt.cutoverAt.endsWith('Z') && activeReceipt.cutoverAt.length === 24, true);
   assert.ok(Date.parse(activeReceipt.earliestPermittedPruningAt) >= Date.parse(activeReceipt.cutoverAt) + 48 * 60 * 60_000);

@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { compatibleAssetMime } from "./production-auto-assets.mjs";
 
 // Temporary static-byte verification only. Provider creation/deletion, exact
 // service-binding readback, and before/after production snapshots belong to the
@@ -19,7 +20,7 @@ function manifest(entries) {
   return entries.map(entry => {
     need(entry && Object.getPrototypeOf(entry) === Object.prototype && Object.keys(entry).sort().join() === "contentType,path,sha256,size");
     const { path, size, sha256, contentType } = entry;
-    need(typeof path === "string" && path.length <= 1024 && /^\/(?:assets\/[A-Za-z0-9_./-]+|_ui\/(?:operations|client)\/[a-f0-9]{40}\/assets\/[A-Za-z0-9_./-]+|_ui\/[A-Za-z0-9_-]+\/assets\/[A-Za-z0-9_./-]+|[A-Za-z0-9_-]+\.(?:html|js|mjs|css|json|webmanifest|ico|png|svg|webp|txt))$/u.test(path));
+    need(typeof path === "string" && path.length <= 1024 && /^\/(?:assets\/[A-Za-z0-9_./-]+|_ui\/(?:operations|client)\/[a-f0-9]{40}\/(?:assets\/[A-Za-z0-9_./-]+|index\.html)|_ui\/[A-Za-z0-9_-]+\/assets\/[A-Za-z0-9_./-]+|[A-Za-z0-9_-]+\.(?:html|js|mjs|css|json|webmanifest|ico|png|svg|webp|txt))$/u.test(path));
     need(!path.includes("..") && !path.includes("//") && !path.split("/").includes(".") && !paths.has(path));
     need(Number.isSafeInteger(size) && size >= 0 && size <= MAX_FILE && HASH.test(sha256));
     need(typeof contentType === "string" && /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/u.test(contentType));
@@ -42,12 +43,21 @@ export function createAssetVerifierSource({ workerName, origin, entries, nonceHa
   need(Object.hasOwn(TARGETS, workerName) && TARGETS[workerName] === origin && HASH.test(nonceHash));
   need(typeof versionId === "string" && UUID.test(versionId));
   const rows = manifest(entries);
+  const app = workerName === 'ledgetop-ops' ? 'operations' : 'client';
+  const archiveTransportPaths = {};
+  for (const row of rows) {
+    const match = /^\/_ui\/(operations|client)\/([a-f0-9]{40})\/index\.html$/u.exec(row.path);
+    if (!match) continue;
+    need(match[1] === app && match[2] === row.sha256.slice(0, 40) && row.contentType === 'text/html',
+      'static_asset_verification_refused');
+    archiveTransportPaths[row.path] = `/_ui/${app}/${match[2]}/`;
+  }
   // These are fixed known app entry transports, not redirect destinations.
   // The manifest key remains /index.html. Every response still must be 200.
   const indexTransportPath = workerName === "ledgetop-clients" ? "/portal" : "/";
   const override = `${workerName}="${versionId}"`;
   return `const entries=new Map(${JSON.stringify(rows)}.map(x=>[x.path,x]));
-const origin=${JSON.stringify(origin)}, nonceHash=${JSON.stringify(nonceHash)}, override=${JSON.stringify(override)}, indexTransportPath=${JSON.stringify(indexTransportPath)};
+const origin=${JSON.stringify(origin)}, nonceHash=${JSON.stringify(nonceHash)}, override=${JSON.stringify(override)}, indexTransportPath=${JSON.stringify(indexTransportPath)}, archiveTransportPaths=${JSON.stringify(archiveTransportPaths)};
 const hex=b=>Array.from(new Uint8Array(b),x=>x.toString(16).padStart(2,'0')).join('');
 const deny=(status,stage='',upstreamStatus=0)=>new Response(null,{status,headers:{'Cache-Control':'no-store',...(stage?{'X-Ops-Static-Check':stage}:{}),...(upstreamStatus?{'X-Ops-Upstream-Status':String(upstreamStatus)}:{})}});
 export default {async fetch(request,env){
@@ -59,13 +69,16 @@ try{
  const entry=entries.get(url.pathname);if(!entry)return deny(404);
  const headers=new Headers({'Accept':entry.contentType,'Accept-Encoding':'identity'});
  if(override)headers.set('Cloudflare-Workers-Version-Overrides',override);
- const sourcePath=entry.path==='/index.html'?indexTransportPath:entry.path;
+ const sourcePath=archiveTransportPaths[entry.path]||(entry.path==='/index.html'?indexTransportPath:entry.path);
  // Workers rejects redirect:'error' at Request construction. Manual mode
  // returns redirects without following them; the strict200 check below holds.
  const response=await env.SOURCE_ASSETS.fetch(new Request(origin+sourcePath,{method:request.method,headers,redirect:'manual',signal:request.signal}));
  if(response.status!==200)return deny(502,'upstream-status',response.status);
  if(response.redirected||response.headers.has('Location')||response.headers.has('Content-Range')||response.headers.get('Content-Encoding'))return deny(502,'upstream-transfer',response.status);
- if((response.headers.get('Content-Type')||'').split(';',1)[0].trim().toLowerCase()!==entry.contentType)return deny(502,'upstream-mime',response.status);
+ const upstreamMime=(response.headers.get('Content-Type')||'').split(';',1)[0].trim().toLowerCase();
+ const faviconMimeAlias=entry.path==='/favicon.ico'&&entry.size===1889&&entry.sha256==='4475e1abc388373b2e6c77b91e229e55e65b4efa1435e5aa816056873ad30e36'
+  &&['image/x-icon','image/vnd.microsoft.icon'].includes(entry.contentType)&&['image/x-icon','image/vnd.microsoft.icon'].includes(upstreamMime)&&entry.contentType!==upstreamMime;
+ if(upstreamMime!==entry.contentType&&!faviconMimeAlias)return deny(502,'upstream-mime',response.status);
  // Content-Length is optional on native asset/service responses. A declared
  // mismatch is rejected; GET still verifies every byte, length and SHA below.
  const declaredLength=response.headers.get('Content-Length');
@@ -81,9 +94,11 @@ try{
 }
 
 function responseMetadata(response, entry) {
-  need(response instanceof Response && response.status === 200 && !response.redirected
+  need(response instanceof Response);
+  const actualMime = mime(response.headers.get("Content-Type"));
+  need(response.status === 200 && !response.redirected
     && !response.headers.has("Location") && !response.headers.has("Content-Range") && !response.headers.get("Content-Encoding")
-    && mime(response.headers.get("Content-Type")) === entry.contentType
+    && compatibleAssetMime(entry.path, entry.size, entry.sha256, entry.contentType, actualMime)
     && (response.headers.get("Content-Length") === null || response.headers.get("Content-Length") === String(entry.size)));
 }
 function notCancelled(signal) { if (signal?.aborted) fail(); }

@@ -1,10 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { ASSET_VERIFICATION_LIMITS, createAssetVerificationNonce, createAssetVerifierSource, collectVerifiedAssets, executeAssetVerification } from "./production-auto-verify.mjs";
 
 const bytes = Buffer.from([0, 255, 13, 10, 65, 0]);
 const sha = value => createHash("sha256").update(value).digest("hex");
+const faviconBytes = fs.readFileSync(fileURLToPath(new URL('../apps/operations/public/favicon.ico', import.meta.url)));
 const entry = { path: "/assets/old-build.js", size: bytes.length, sha256: sha(bytes), contentType: "application/javascript" };
 const versionId = "00000000-0000-4000-8000-000000000001";
 const options = nonce => ({ workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [entry], nonceHash: nonce.nonceHash, versionId });
@@ -105,6 +108,39 @@ test("collector checks HEAD and GET and returns byte-exact copies without input 
   assert.deepEqual(methods, ["HEAD", "GET"]); assert.deepEqual(assets.get(entry.path), bytes); assert.deepEqual(entries, before);
 });
 
+test("native verifier accepts only the pinned favicon MIME alias while retaining exact byte checks", async () => {
+  assert.equal(faviconBytes.length, 1889);
+  assert.equal(sha(faviconBytes), '4475e1abc388373b2e6c77b91e229e55e65b4efa1435e5aa816056873ad30e36');
+  const nonce = createAssetVerificationNonce();
+  for (const [contentType, upstreamType] of [['image/x-icon', 'image/vnd.microsoft.icon'],
+    ['image/vnd.microsoft.icon', 'image/x-icon']]) {
+    const icon = { path: '/favicon.ico', size: faviconBytes.length, sha256: sha(faviconBytes), contentType };
+    const app = await worker(nonce, { entries: [icon] });
+    const env = { SOURCE_ASSETS: { fetch: async req => new Response(req.method === 'HEAD' ? null : faviconBytes,
+      { headers: { 'Content-Type': upstreamType, 'Content-Length': String(faviconBytes.length) } }) } };
+    const result = await app.fetch(request(nonce, icon.path), env);
+    assert.equal(result.status, 200);
+    assert.deepEqual(Buffer.from(await result.arrayBuffer()), faviconBytes);
+    const checked = await collectVerifiedAssets({ entries: [icon], fetchAsset: async (_row, { method }) =>
+      new Response(method === 'HEAD' ? null : faviconBytes,
+        { headers: { 'Content-Type': upstreamType, 'Content-Length': String(faviconBytes.length) } }) });
+    assert.deepEqual(checked.get(icon.path), faviconBytes);
+  }
+
+  const wrongBytes = Buffer.from('wrong icon bytes');
+  const legacyIcon = { path: '/favicon.ico', size: faviconBytes.length, sha256: sha(faviconBytes), contentType: 'image/x-icon' };
+  const legacyApp = await worker(nonce, { entries: [legacyIcon] });
+  const wrongBody = await legacyApp.fetch(request(nonce, legacyIcon.path), { SOURCE_ASSETS: { fetch: async () =>
+    new Response(wrongBytes, { headers: { 'Content-Type': 'image/vnd.microsoft.icon' } }) } });
+  assert.equal(wrongBody.status, 502);
+
+  const otherPath = { ...legacyIcon, path: '/assets/favicon.ico' };
+  const otherPathApp = await worker(nonce, { entries: [otherPath] });
+  const wrongMime = await otherPathApp.fetch(request(nonce, otherPath.path), { SOURCE_ASSETS: { fetch: async () =>
+    new Response(faviconBytes, { headers: { 'Content-Type': 'image/vnd.microsoft.icon' } }) } });
+  assert.equal(wrongMime.status, 502);
+});
+
 test('collector accepts optional outer length while still verifying actual bytes and hash',async()=>{
  const fetchAsset=async(_entry,{method})=>new Response(method==='HEAD'?null:bytes,{headers:{'Content-Type':entry.contentType}});
  const result=await collectVerifiedAssets({entries:[entry],fetchAsset});assert.deepEqual(result.get(entry.path),bytes);
@@ -180,6 +216,27 @@ test("known app and SHA prefixed historical assets are checked at the exact orig
   }
   for(const p of [`/_ui/other/${'a'.repeat(40)}/assets/old.js`,`/_ui/client/${'a'.repeat(39)}/assets/old.js`,`/_ui/client/${'A'.repeat(40)}/assets/old.js`,`/_ui/client/${'a'.repeat(40)}/api/private.js`])
     assert.throws(()=>createAssetVerifierSource({...options(nonce),entries:[{...entry,path:p}]}),/static_asset_verification_refused/);
+});
+
+test('root HTML archive keeps its physical manifest key and fetches only the fixed directory transport for GET and HEAD',async()=>{
+  const nonce=createAssetVerificationNonce(),oldHtml=Buffer.from('<html>previous release</html>'),sha256=sha(oldHtml);
+  const archived={path:`/_ui/operations/${sha256.slice(0,40)}/index.html`,size:oldHtml.length,sha256,contentType:'text/html'};
+  const app=await worker(nonce,{entries:[archived]}),calls=[];
+  const env={SOURCE_ASSETS:{fetch:async req=>{calls.push(req);return new Response(req.method==='HEAD'?null:oldHtml,
+    {headers:{'Content-Type':'text/html; charset=utf-8','Content-Length':String(oldHtml.length)}});}}};
+  for(const method of ['HEAD','GET']) {
+    const result=await app.fetch(request(nonce,archived.path,method),env);
+    assert.equal(result.status,200);
+    if(method==='HEAD')assert.equal(result.body,null);else assert.deepEqual(Buffer.from(await result.arrayBuffer()),oldHtml);
+  }
+  assert.deepEqual(calls.map(req=>req.url),[`https://ops.ledgetop.app/_ui/operations/${sha256.slice(0,40)}/`,
+    `https://ops.ledgetop.app/_ui/operations/${sha256.slice(0,40)}/`]);
+  assert.ok(calls.every(req=>req.redirect==='manual'&&!req.headers.has('Cookie')&&!req.headers.has('Authorization')));
+  for(const p of [`/_ui/client/${sha256.slice(0,40)}/index.html`,`/_ui/operations/${sha256.slice(0,39)}/index.html`,
+    `/_ui/operations/${sha256.slice(0,40)}/index.html/extra`])
+    assert.throws(()=>createAssetVerifierSource({...options(nonce),entries:[{...archived,path:p}]}),/static_asset_verification_refused/);
+  assert.throws(()=>createAssetVerifierSource({...options(nonce),workerName:'ledgetop-clients',origin:'https://portal.ledgetop.app',entries:[archived]}),
+    /static_asset_verification_refused/);
 });
 
 test('collector deadline bounds an uncooperative HEAD or GET and sends no request after expiry',async()=>{

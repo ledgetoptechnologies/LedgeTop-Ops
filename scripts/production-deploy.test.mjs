@@ -108,15 +108,27 @@ function fixture() {
   const profile = clone(PROFILE), snapshot = {};
   for (const [app, spec] of Object.entries(profile.workers)) {
     const defaults = JSON.parse(fs.readFileSync(path.join(ROOT, 'apps', app, 'wrangler.jsonc'))).vars;
+    if (app === 'client' && !spec.plainNames.includes('CLIENT_PORTAL_OPS_INQUIRIES_ENABLED')) {
+      // The current production preflight explicitly requires this Client
+      // rollout flag to be false. Include only its synthetic false value in
+      // this test profile; never relax the preflight or expose production data.
+      spec.plainNames = [...spec.plainNames, 'CLIENT_PORTAL_OPS_INQUIRIES_ENABLED'].sort();
+      spec.plainValueSHA256.CLIENT_PORTAL_OPS_INQUIRIES_ENABLED = hash('false');
+    }
     const vars = Object.fromEntries(spec.plainNames.map(name => [name, defaults[name] ?? 'synthetic-fixture']));
     if (app === 'operations') Object.assign(vars, {
+      // These are production controls, not the Wrangler local-development
+      // defaults. Keep the production preflight guard unchanged and make this
+      // synthetic install reflect its current false-valued rollout gates.
+      CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: 'false',
       DELIVERY_BASE_URL: 'https://portal.ledgetopdroneservices.com',
       CLIENT_ONBOARDING_ADMIN_ENABLED: 'true', CLIENT_ONBOARDING_ADMIN_ORIGIN: 'https://ops.ledgetopdroneservices.com',
       CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED: 'true', CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED: 'true',
       CLIENT_ONBOARDING_NOTIFICATION_STAFF_IDS: '["synthetic-owner"]', CLIENT_ONBOARDING_NOTIFICATIONS_NOT_BEFORE: '2026-10-20T00:00:00.000Z',
       PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED: 'true',
     });
-    if (app === 'client') vars.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED = 'true';
+    if (app === 'client') Object.assign(vars, { CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED: 'true',
+      CLIENT_PORTAL_OPS_INQUIRIES_ENABLED: 'false', CLIENT_VIEWER_ENABLED: 'false' });
     // Fixture has no private production values. Bind the test policy to its
     // synthetic values; the CLI always uses the committed production policy.
     for (const key of Object.keys(spec.plainValueSHA256)) spec.plainValueSHA256[key] = hash(vars[key]);

@@ -16,15 +16,24 @@ function fixture() {
   let index = 1;
   for (const [app, spec] of Object.entries(profile.workers)) {
     const defaults = JSON.parse(fs.readFileSync(new URL(`../apps/${app}/wrangler.jsonc`, import.meta.url))).vars;
+    if (app === 'client' && !spec.plainNames.includes('CLIENT_PORTAL_OPS_INQUIRIES_ENABLED')) {
+      // The live release preflight requires this default-off gate to be false.
+      // Model that current state in this synthetic fixture without changing the
+      // production guard or the committed accepted profile.
+      spec.plainNames = [...spec.plainNames, 'CLIENT_PORTAL_OPS_INQUIRIES_ENABLED'].sort();
+      spec.plainValueSHA256.CLIENT_PORTAL_OPS_INQUIRIES_ENABLED = hash('false');
+    }
     const vars = Object.fromEntries(spec.plainNames.map(name => [name, defaults[name] ?? 'synthetic-fixture']));
     if (app === 'operations') Object.assign(vars, {
+      CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: 'false',
       CLIENT_ONBOARDING_ADMIN_ENABLED: 'true', CLIENT_ONBOARDING_ADMIN_ORIGIN: 'https://ops.ledgetopdroneservices.com',
       PUBLIC_BASE_URL: 'https://ops.ledgetopdroneservices.com', EXPECTED_HOST: 'ops.ledgetopdroneservices.com',
       CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED: 'true', CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED: 'true',
       CLIENT_ONBOARDING_NOTIFICATION_STAFF_IDS: '["synthetic-owner"]', CLIENT_ONBOARDING_NOTIFICATIONS_NOT_BEFORE: '2026-10-20T00:00:00.000Z',
       PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED: 'true',
     });
-    if (app === 'client') vars.CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED = 'true';
+    if (app === 'client') Object.assign(vars, { CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED: 'true',
+      CLIENT_PORTAL_OPS_INQUIRIES_ENABLED: 'false', CLIENT_VIEWER_ENABLED: 'false' });
     Object.assign(vars, phase[app]);
     for (const name of spec.plainNames) spec.plainValueSHA256[name] = hash(vars[name]);
     const bindings = [...clone(spec.bindings), ...Object.entries(vars).map(([name, text]) => ({ name, type: 'plain_text', text }))];

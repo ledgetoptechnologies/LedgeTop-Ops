@@ -7,14 +7,15 @@ import { fileURLToPath } from 'node:url';
 import { capture, CloudflareReader, deploymentSourceCommit, hash, canonical, need, PROFILE,
   preparePrivateProductionDirectory, readStaffCutoverReview, runNativeProductionCommand,
   stableState, validateBuildEnvironment, validateInstallation, validateStaffReadinessReceipt,
-  ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256, ORDINARY_FRONTEND_PREFLIGHT_MODE } from './production-deploy.mjs';
+  OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
+  ORDINARY_FRONTEND_PREFLIGHT_MODE, resourcesShape } from './production-deploy.mjs';
 import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { ORDINARY_FRONTEND_AUTHORITY_CONTRACT, validateOrdinaryFrontendAuthorityObservation } from './ordinary-frontend-authority.mjs';
 import { readOrdinaryFrontendAuthorityObservation } from './ordinary-frontend-authority-reader.mjs';
 import { createAssetVerificationNonce, executeAssetVerification } from './production-auto-verify.mjs';
 import { readCandidateVersionWithVisibilityRetry } from './production-deploy.mjs';
 import { ProductionCloudflareProvider, newTemporaryVerifierName } from './production-auto-provider.mjs';
-import { collectFrontendAssets } from './production-auto-assets.mjs';
+import { collectFrontendAssets, preserveRootHtmlArchive } from './production-auto-assets.mjs';
 import { minimumRetainedUntil, parseProviderUtcTimestamp } from './production-auto-time.mjs';
 import { retainedNativeConfig, stageOrdinaryFrontendRetainedModules,
   validateInstalledRetainedLedger, validateOrdinaryFrontendRetainedPlan, verifyOrdinaryFrontendRetainedCandidateModules } from './ordinary-frontend-retained-plan.mjs';
@@ -29,6 +30,52 @@ const HEX40 = /^[a-f0-9]{40}$/u;
 const equal = (a, b) => canonical(a) === canonical(b);
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const needFn = (ok, message) => need(ok, message);
+const SUCCESSOR_READER_CLASS = 'OperationsPortalNativeDeliveryAuthorizationReader';
+const REVIEWED_SUCCESSOR_SOURCE_COMMIT = 'a0c8fd230d46690a7090c79190e125f5a02f0f35';
+const REVIEWED_SUCCESSOR_MAIN_SHA256 = 'f4cdefd633441df8db18cc5c0b192fc8faa72ebd7b1db730122bd77318164e68';
+const REVIEWED_SUCCESSOR_MAP_SHA256 = '375962dbe22ed0038009d0790c1c12a33b0668010f99916b8addade0a489d08b';
+const REVIEWED_SUCCESSOR_CANDIDATE_ID = 'fc9bc572-0b87-4857-8b8a-b0e0f7582c68';
+const REVIEWED_PRIOR_VERIFIER_SOURCE_SHA256 = 'f9ff69620e2e001e53a852387323e6308f1a3063fc1c1cb2a1f7c28d938ad861';
+const SUCCESSOR_READER_ADDITIONS = Object.freeze([
+  'readWindowsCatalogSuccessorAuthorization',
+  'readWindowsDeliverySuccessorAuthorization',
+].sort());
+
+/** The reviewed inactive a0 candidate adds exactly two read-only successor RPC methods
+ * to the existing Ops reader class. All other exports, handlers, runtime,
+ * bindings and named-handler records stay byte-for-byte equivalent. */
+export function verifyExactOpsSuccessorNamedHandlerAddition(before, candidate, { sourceCommit, mainSHA256, sourceMapSHA256 } = {}) {
+  needFn(before?.operations?.version?.resources && candidate?.resources
+    && candidate.resources.script?.named_handlers && before.operations.version.resources.script?.named_handlers,
+  'Ops successor reader resource evidence is incomplete');
+  needFn(candidate.id === REVIEWED_SUCCESSOR_CANDIDATE_ID && sourceCommit === REVIEWED_SUCCESSOR_SOURCE_COMMIT
+    && mainSHA256 === REVIEWED_SUCCESSOR_MAIN_SHA256
+    && sourceMapSHA256 === REVIEWED_SUCCESSOR_MAP_SHA256,
+  'Ops successor reader exception is pinned to the reviewed a0 source, main bundle and source map');
+  const baseline = resourcesShape(before.operations.version.resources);
+  const actual = resourcesShape(candidate.resources);
+  needFn(equal(actual.script.handlers, baseline.script.handlers)
+    && equal(actual.script.named_handlers.map(({ name }) => name), baseline.script.named_handlers.map(({ name }) => name)),
+  'Ops candidate changed script exports or named-handler classes');
+  const baseByName = new Map(baseline.script.named_handlers.map(row => [row.name, row]));
+  const actualByName = new Map(actual.script.named_handlers.map(row => [row.name, row]));
+  const baseReader = baseByName.get(SUCCESSOR_READER_CLASS), actualReader = actualByName.get(SUCCESSOR_READER_CLASS);
+  needFn(baseReader && actualReader, 'Ops candidate omitted the pinned successor reader class');
+  const added = actualReader.handlers.filter(name => !baseReader.handlers.includes(name)).sort();
+  needFn(equal(added, SUCCESSOR_READER_ADDITIONS)
+    && actualReader.handlers.length === baseReader.handlers.length + SUCCESSOR_READER_ADDITIONS.length
+    && SUCCESSOR_READER_ADDITIONS.every(name => !baseReader.handlers.includes(name)),
+  'Ops candidate named-handler delta differs from the exact reviewed read-only successor RPC pair');
+  const normalizedActual = structuredClone(actual);
+  const normalizedReader = normalizedActual.script.named_handlers.find(row => row.name === SUCCESSOR_READER_CLASS);
+  normalizedReader.handlers = [...baseReader.handlers];
+  needFn(equal(normalizedActual, baseline),
+    'Ops candidate changed resources beyond the two reviewed successor RPC methods');
+  return Object.freeze({ schemaVersion: 1, contract: 'ops-successor-reader-additive-rpc-v1',
+    sourceCommit, mainSHA256, sourceMapSHA256,
+    className: SUCCESSOR_READER_CLASS, addedMethods: [...SUCCESSOR_READER_ADDITIONS],
+    allOtherResourcesUnchanged: true });
+}
 
 function activeVersion(state) {
   const rows = state?.deployment?.versions;
@@ -122,9 +169,125 @@ function sameExceptSelectedDeployment(before, after, app) {
   return equal(withoutSelectedDeployment(before, app), withoutSelectedDeployment(after, app));
 }
 
-function stageRetainedAssets(directory, plan, previousAssetBytes) {
-  const current = collectFrontendAssets(plan.ordinaryPlan.release.assets.directory), payloads = new Map(previousAssetBytes);
-  for (const [assetPath, bytes] of current.payloads) payloads.set(assetPath, bytes);
+export function qualifyPriorCandidateResumeJournal(resumeCandidate, { app, baselineVersionId, pinnedPlan, oldAssetCount, oldAssetBytes, cliPath } = {}) {
+  needFn(app === 'operations' && resumeCandidate && path.isAbsolute(resumeCandidate.priorJournalDirectory ?? '')
+    && UUID.test(resumeCandidate.candidateId ?? '') && resumeCandidate.originalSnapshot,
+  'Resume is limited to an explicitly identified inactive Operations candidate and original snapshot');
+  const directory = path.resolve(resumeCandidate.priorJournalDirectory);
+  needFn(!fs.lstatSync(directory).isSymbolicLink() && fs.statSync(directory).isDirectory(), 'Prior candidate journal directory must be a real directory');
+  const readJson = name => {
+    const file = path.join(directory, name), stat = fs.lstatSync(file);
+    needFn(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && stat.size > 0 && stat.size <= 8 * 1024 * 1024,
+      `Prior candidate journal ${name} is missing or outside its bound`);
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  };
+  const journalPath = path.join(directory, 'journal.jsonl'), journalStat = fs.lstatSync(journalPath);
+  needFn(journalStat.isFile() && !journalStat.isSymbolicLink() && journalStat.nlink === 1
+    && journalStat.size > 0 && journalStat.size <= 8 * 1024 * 1024, 'Prior journal is missing or outside its bound');
+  const journalBytes = fs.readFileSync(journalPath);
+  const rows = journalBytes.toString('utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
+  const uploadIndex = rows.findIndex(row => row.phase === 'native-version-upload');
+  const verifierName = rows[0]?.verifierName, verifierPath = `/workers/scripts/${verifierName}`;
+  const expectedKeys = [
+    ['sequence','at','phase','workerName','verifiedVersionId','verifierName','assetCount','receiptName','automaticRetry'],
+    ['sequence','at','phase','requestId','method','path','name','workerName','sourceSHA256','sourceCommit','automaticRetry'],
+    ['sequence','at','phase','requestId','method','path','name','sourceCommit','automaticRetry'],
+    ['sequence','at','phase','requestId','method','path','name','sourceCommit','automaticRetry'],
+    ['sequence','at','phase','sourceCommit','workerName','parentVersionId','mainSHA256','mapSHA256','ledgerSHA256','assetInventorySHA256','automaticRetry'],
+  ];
+  const exactPhases = ['temporary-asset-verifier-create','temporary-verifier-create','temporary-verifier-enable',
+    'temporary-verifier-delete','native-version-upload'];
+  needFn(equal(rows.map(row => row.phase), exactPhases)
+    && rows.every((row, index) => row.sequence === index + 1 && row.automaticRetry === false
+      && equal(Object.keys(row).sort(), expectedKeys[index].sort()))
+    && rows[0].workerName === 'ledgetop-ops' && rows[0].verifiedVersionId === baselineVersionId
+    && rows[0].assetCount === oldAssetCount && rows[0].receiptName === 'verified-prior-active-assets'
+    && typeof verifierName === 'string' && /^ops-ui-verify-[a-f0-9]{24}$/u.test(verifierName)
+    && rows[1].method === 'PUT' && rows[1].path === verifierPath && rows[1].name === verifierName
+    && rows[1].workerName === 'ledgetop-ops' && rows[1].sourceSHA256 === REVIEWED_PRIOR_VERIFIER_SOURCE_SHA256
+    && rows[1].sourceCommit === pinnedPlan.sourceCommit
+    && rows[2].method === 'POST' && rows[2].path === `${verifierPath}/subdomain` && rows[2].name === verifierName
+    && rows[2].sourceCommit === pinnedPlan.sourceCommit
+    && rows[3].method === 'DELETE' && rows[3].path === verifierPath && rows[3].name === verifierName
+    && rows[3].sourceCommit === pinnedPlan.sourceCommit && uploadIndex === rows.length - 1,
+  'Prior journal differs from the exact completed baseline verifier and single upload sequence');
+  needFn(!fs.existsSync(path.join(directory, 'namespace-stage-intent.json'))
+    && !fs.existsSync(path.join(directory, 'activate-intent.json'))
+    && !fs.existsSync(path.join(directory, 'namespace-stage-pid.json'))
+    && !fs.existsSync(path.join(directory, 'activate-pid.json')),
+  'Prior journal contains a consumed namespace-stage or activation intent');
+  const uploadIntent = rows.find(row => row.phase === 'native-version-upload');
+  const uploadExit = readJson('upload-exit.json'), candidate = readJson('candidate.private.json'), plan = readJson('release-plan.private.json');
+  const uploadCommand = readJson('upload-intent.json');
+  const priorAssetReceipt = readJson('verified-prior-active-assets.private.json');
+  const uploadLogPath = path.join(directory, 'upload.private.log'), uploadLogStat = fs.lstatSync(uploadLogPath);
+  needFn(uploadLogStat.isFile() && !uploadLogStat.isSymbolicLink() && uploadLogStat.nlink === 1 && uploadLogStat.size <= 8 * 1024 * 1024,
+    'Prior upload result log is missing or outside its bound');
+  const priorCandidate = parseCandidateId(fs.readFileSync(uploadLogPath, 'utf8'));
+  const expectedPlanKeys = ['schemaVersion','contract','application','sourceCommit','baselineVersionId','ordinaryPlanSHA256',
+    'ledgerSHA256','rollbackVersionId','assetProviderIdentifierProvenance','oldAssetCount','retainedAssetCount'];
+  const expectedCandidateKeys = ['candidateId','parentVersionId'];
+  const expectedUploadKeys = ['sequence','at','phase','sourceCommit','workerName','parentVersionId','mainSHA256','mapSHA256',
+    'ledgerSHA256','assetInventorySHA256','automaticRetry'];
+  const expectedCommandKeys = ['argv','phase','automaticRetry'];
+  const argv = uploadCommand.argv;
+  needFn(uploadExit.code === 0 && candidate.candidateId === resumeCandidate.candidateId && priorCandidate === candidate.candidateId
+    && candidate.parentVersionId === baselineVersionId && uploadIntent.workerName === 'ledgetop-ops'
+    && equal(Object.keys(candidate).sort(), expectedCandidateKeys.sort())
+    && equal(Object.keys(plan).sort(), expectedPlanKeys.sort())
+    && equal(Object.keys(uploadIntent).sort(), expectedUploadKeys.sort())
+    && equal(Object.keys(uploadCommand).sort(), expectedCommandKeys.sort())
+    && uploadCommand.phase === 'upload' && uploadCommand.automaticRetry === false
+    && Array.isArray(argv) && argv.length === 7 && argv[0] === process.execPath && argv[1] === '--no-warnings'
+    && path.resolve(argv[2]) === path.resolve(cliPath ?? '') && argv[3] === 'versions' && argv[4] === 'upload'
+    && argv[5] === '--config' && path.resolve(argv[6]) === path.join(directory, 'wrangler.retained.private.json')
+    && uploadIntent.parentVersionId === baselineVersionId && uploadIntent.sourceCommit === pinnedPlan.sourceCommit
+    && uploadIntent.mainSHA256 === pinnedPlan.ordinaryPlan.release.main.sha256
+    && uploadIntent.mapSHA256 === pinnedPlan.ordinaryPlan.release.sourceMap.sha256
+    && uploadIntent.ledgerSHA256 === pinnedPlan.retentionLedgerSHA256
+    && uploadIntent.assetInventorySHA256 === pinnedPlan.ordinaryPlan.browserProof.inventorySHA256
+    && plan.schemaVersion === 2 && plan.contract === pinnedPlan.contract && plan.application === app
+    && plan.sourceCommit === pinnedPlan.sourceCommit && plan.baselineVersionId === baselineVersionId
+    && plan.ordinaryPlanSHA256 === pinnedPlan.ordinaryPlanSHA256
+    && plan.ledgerSHA256 === pinnedPlan.retentionLedgerSHA256 && plan.rollbackVersionId === baselineVersionId
+    && plan.oldAssetCount === oldAssetCount
+    && plan.retainedAssetCount === pinnedPlan.retentionLedger.assets.length
+    && equal(plan.assetProviderIdentifierProvenance, pinnedPlan.assetProviderIdentifierProvenance)
+    && priorAssetReceipt.versionId === baselineVersionId && priorAssetReceipt.assetCount === oldAssetCount
+    && priorAssetReceipt.totalBytes === oldAssetBytes
+    && priorAssetReceipt.temporaryVerifierRemoved === true && priorAssetReceipt.absenceVerified === true
+    && priorAssetReceipt.automaticRetry === false,
+  'Prior upload journal, candidate, source or retained plan pins do not match the supplied candidate');
+  return Object.freeze({ candidateId: candidate.candidateId, priorJournalSHA256: sha(journalBytes),
+    priorUploadLogSHA256: sha(fs.readFileSync(uploadLogPath)), priorPlanSHA256: sha(fs.readFileSync(path.join(directory, 'release-plan.private.json'))) });
+}
+
+export function assertResumeControls(original, current, { app, candidateId, profile, expectedDeploymentVersions, opsSuccessorReaderContract }) {
+  needFn(current?.[app]?.latest === candidateId
+    && (current[app].latestVersion == null || current[app].latestVersion.id === candidateId)
+    && (current[app].latestModern == null || current[app].latestModern.id === candidateId),
+  'Resume requires the exact supplied inactive candidate to remain the latest version');
+  validateInstallation(current, { allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions,
+    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app, opsSuccessorReaderContract });
+  const rows = deploymentRows(current, app);
+  needFn(equal(rows, deploymentRows(original, app)), 'Resume refuses any candidate already staged or any changed deployment weights');
+  const normalized = structuredClone(current); normalized[app].latest = original[app].latest;
+  needFn(equal(stableState(normalized, app), stableState(original, app)),
+    'Resume current controls differ from the exact original baseline beyond the latest candidate pointer');
+  needFn(equal(current[app].version, original[app].version) && equal(current[app].modern, original[app].modern),
+    'Resume active baseline version metadata or modules differ from the original snapshot');
+  for (const other of Object.keys(original).filter(name => name !== app)) needFn(
+    equal(current[other].version, original[other].version) && equal(current[other].modern, original[other].modern)
+      && equal(current[other].settings, original[other].settings) && equal(current[other].schedules, original[other].schedules),
+    'Resume another Worker version, module, setting, or schedule changed');
+}
+
+export function stageRetainedAssets(directory, plan, previousLedger, previousAssetBytes) {
+  const current = collectFrontendAssets(plan.ordinaryPlan.release.assets.directory);
+  const retained = preserveRootHtmlArchive({ application: plan.application, previous: previousLedger,
+    previousAssetBytes, current });
+  needFn(equal(retained.archive, plan.rootHtmlArchive ?? null), 'Retained root HTML archive differs from compiled plan');
+  const payloads = retained.current.payloads;
   const target = path.join(directory, 'retained-assets'); fs.mkdirSync(target, { recursive: false, mode: 0o700 });
   for (const row of plan.retentionLedger.assets) {
     const bytes = payloads.get(row.path);
@@ -162,7 +325,8 @@ function writePrivateJson(directory, name, value) {
  */
 export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinnedPlan, profile, expectedDeploymentVersions, assetVerifierProvider,
   staffAuthorityContract = 'native-staff-cutover-v1', staffCutoverReview, staffReviewPath,
-  frontendAuthorityReview, readFrontendAuthority = readOrdinaryFrontendAuthorityObservation,
+  frontendAuthorityReview, resumeCandidate, installedOpsSuccessorReaderContract,
+  readFrontendAuthority = readOrdinaryFrontendAuthorityObservation,
   reader, cli, journalDirectory, artifactSourceRoot, executorSourceRoot = ROOT, fetchImpl = fetch,
   runNative = runNativeProductionCommand, captureFn = capture, readStaffCutover = readNativeStaffCutoverReadiness,
   sourceReader = deploymentSourceCommit, now = () => Date.now() } = {}) {
@@ -175,8 +339,24 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     && typeof sourceReader === 'function' && typeof now === 'function' && path.isAbsolute(journalDirectory ?? '')
     && path.isAbsolute(artifactSourceRoot ?? '') && path.isAbsolute(executorSourceRoot ?? ''),
   'Ordinary retained executor inputs invalid');
+  const isReviewedSuccessorPlan = app === 'operations' && ordinaryPlan.sourceCommit === REVIEWED_SUCCESSOR_SOURCE_COMMIT
+    && ordinaryPlan.release.main.sha256 === REVIEWED_SUCCESSOR_MAIN_SHA256
+    && ordinaryPlan.release.sourceMap.sha256 === REVIEWED_SUCCESSOR_MAP_SHA256;
+  needFn(!isReviewedSuccessorPlan || (resumeCandidate?.candidateId === REVIEWED_SUCCESSOR_CANDIDATE_ID),
+    'The reviewed a0 Ops candidate can only continue through its exact existing-candidate resume path');
+  needFn(!resumeCandidate || (app === 'operations' && isReviewedSuccessorPlan
+    && resumeCandidate.candidateId === REVIEWED_SUCCESSOR_CANDIDATE_ID),
+  'Resume is limited to the exact reviewed inactive a0 Operations candidate');
   needFn(typeof profile === 'object' && profile !== null && hash(canonical(profile)) === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
     'Original exact installed profile v3 is required');
+  needFn(installedOpsSuccessorReaderContract === undefined
+    || installedOpsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT,
+  'Unreviewed installed Ops successor reader contract');
+  needFn(installedOpsSuccessorReaderContract === undefined || app === 'client',
+    'Installed Ops successor reader recognition is read-only and cannot authorize an Operations release');
+  needFn(ordinaryPlan.installedOpsSuccessorReaderContract === installedOpsSuccessorReaderContract
+    && pinnedPlan.installedOpsSuccessorReaderContract === installedOpsSuccessorReaderContract,
+  'Executor selector must exactly match the read-only Ops contract pinned in both release plans');
   needFn(assetVerifierProvider && ['createVerifier','fetchVerifierAsset','removeVerifier','verifierAbsent']
     .every(name => typeof assetVerifierProvider[name] === 'function'), 'Bounded candidate namespace verifier is required before upload');
   expectedDeploymentVersions ??= ordinaryPlan.expectedDeploymentVersions;
@@ -203,19 +383,26 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
       && rows.filter(row => row.percentage === 0).length === 1,
     'Operations requires the exact reviewed 0/100 baseline distribution in its pinned plan');
   }
-  const before = validateInstallation(await captureFn(reader, { selectedApp: app, expectedDeploymentVersions }), {
-    profile, selectedApp: app, expectedDeploymentVersions,
-    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app });
+  const liveAtStart = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions });
+  const before = resumeCandidate
+    ? validateInstallation(structuredClone(resumeCandidate.originalSnapshot), { profile, selectedApp: app, expectedDeploymentVersions,
+      ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app })
+    : validateInstallation(liveAtStart, { profile, selectedApp: app, expectedDeploymentVersions,
+      ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app, opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
   const baselineVersionId = before[app].version.id;
   const operationsBaselineRows = expectedDeploymentVersions?.operations
     ?? before.operations.deployment.versions.map(row => ({ versionId: row.version_id, percentage: row.percentage }));
   if (app === 'operations') needFn(expectedDeploymentVersions.operations.some(row => row.versionId === baselineVersionId && row.percentage === 100),
     'Reviewed Ops 100% baseline differs from captured active version');
+  if (resumeCandidate) assertResumeControls(before, liveAtStart, { app, candidateId: resumeCandidate.candidateId, profile,
+    expectedDeploymentVersions, opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
   const bootstrap = app === 'operations' ? prepareOpsLegacyLedgerBootstrap(before) : null;
   const installedLedger = bootstrap ? null : readInstalledRetainedAssetLedger(before, { app, workerName });
   const priorBytesRows = bootstrap ? bootstrap.previousAssetRows : installedLedger.assets;
+  const priorResumeProof = resumeCandidate ? qualifyPriorCandidateResumeJournal(resumeCandidate, { app, baselineVersionId, pinnedPlan,
+    oldAssetCount: priorBytesRows.length, oldAssetBytes: priorBytesRows.reduce((sum, row) => sum + row.size, 0), cliPath }) : null;
   const observedAt = Date.parse(pinnedPlan.retentionLedger?.observedAt);
-  needFn(Number.isFinite(observedAt) && observedAt <= now() && now() - observedAt <= 5 * 60_000,
+  needFn(Number.isFinite(observedAt) && observedAt <= now() && (resumeCandidate || now() - observedAt <= 5 * 60_000),
     'Pinned retained plan ledger observation is stale');
 
   needFn(['native-staff-cutover-v1', ORDINARY_FRONTEND_AUTHORITY_CONTRACT].includes(staffAuthorityContract),
@@ -257,6 +444,13 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   };
   await qualifyStaff('before-prior-asset-verification');
   preparePrivateProductionDirectory(journalDirectory);
+  if (resumeCandidate) writePrivateJson(journalDirectory, 'resume-candidate.private.json', {
+    schemaVersion: 1, candidateId: priorResumeProof.candidateId, baselineVersionId,
+    originalSnapshotSHA256: hash(canonical(before)), pinnedPlanSHA256: hash(canonical(pinnedPlan)),
+    sourceCommit, executorCommit, priorJournalSHA256: priorResumeProof.priorJournalSHA256,
+    priorUploadLogSHA256: priorResumeProof.priorUploadLogSHA256,
+    priorReleasePlanSHA256: priorResumeProof.priorPlanSHA256, uploadReplayed: false,
+  });
   const priorAssetBytes = await verifyVersionAssets({ provider: assetVerifierProvider, application: app, workerName,
     entries: priorBytesRows, versionId: baselineVersionId, journalDirectory, receiptName: 'verified-prior-active-assets' });
   const previousLedger = bootstrap
@@ -265,7 +459,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before upload');
   needFn(hash(canonical(before)) === ordinaryPlan.baselineSHA256, 'Captured installation differs from exact pinned offline plan baseline');
   validateOrdinaryFrontendRetainedPlan(before, pinnedPlan, { ordinaryPlan, profile, previousLedger,
-    previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt });
+    previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt,
+    installedOpsSuccessorReaderContract });
   writePrivateJson(journalDirectory, 'release-plan.private.json', { schemaVersion: 2, contract: pinnedPlan.contract,
     application: app, sourceCommit, baselineVersionId, ordinaryPlanSHA256: pinnedPlan.ordinaryPlanSHA256,
     ledgerSHA256: pinnedPlan.retentionLedgerSHA256, rollbackVersionId: baselineVersionId,
@@ -273,46 +468,78 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     oldAssetCount: previousLedger.assets.length, retainedAssetCount: pinnedPlan.retentionLedger.assets.length });
   if (observations.beforeReadiness) writePrivateJson(journalDirectory, 'staff-before-upload.private.json', observations.beforeReadiness);
   const moduleStage = stageOrdinaryFrontendRetainedModules(pinnedPlan, path.join(journalDirectory, 'native-modules'));
-  const assetDirectory = stageRetainedAssets(journalDirectory, pinnedPlan, priorAssetBytes);
+  const assetDirectory = stageRetainedAssets(journalDirectory, pinnedPlan, previousLedger, priorAssetBytes);
   const config = retainedNativeConfig(pinnedPlan, moduleStage); config.assets.directory = assetDirectory;
   const configPath = path.join(journalDirectory, 'wrangler.retained.private.json'); writePrivateJson(journalDirectory, path.basename(configPath), config);
 
-  const preupload = validateInstallation(await captureFn(reader, { selectedApp: app, expectedDeploymentVersions }), {
-    profile, selectedApp: app, expectedDeploymentVersions,
-    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app });
-  needFn(equal(stableState(before, app), stableState(preupload, app)), 'Production controls changed before native asset/module upload');
-  validateOrdinaryFrontendRetainedPlan(preupload, pinnedPlan, { ordinaryPlan, profile, previousLedger,
-    previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt });
-  needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before upload');
-  await qualifyStaff('before-upload-dispatch');
-  appendIntent(journalDirectory, 'native-version-upload', { sourceCommit, workerName, parentVersionId: baselineVersionId,
-    mainSHA256: ordinaryPlan.release.main.sha256, mapSHA256: ordinaryPlan.release.sourceMap.sha256,
-    ledgerSHA256: pinnedPlan.retentionLedgerSHA256, assetInventorySHA256: ordinaryPlan.browserProof.inventorySHA256 });
-  const uploadOutput = await runNative(cliPath, ['versions', 'upload', '--config', configPath], journalDirectory, 'upload', journalDirectory);
-  const candidateId = parseCandidateId(uploadOutput);
-  writePrivateJson(journalDirectory, 'candidate.private.json', { candidateId, parentVersionId: baselineVersionId });
+  const preuploadRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions });
+  if (resumeCandidate) assertResumeControls(before, preuploadRaw, { app, candidateId: resumeCandidate.candidateId, profile, expectedDeploymentVersions });
+  else {
+    validateInstallation(preuploadRaw, { profile, selectedApp: app, expectedDeploymentVersions,
+      ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
+      opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
+    needFn(equal(stableState(before, app), stableState(preuploadRaw, app)), 'Production controls changed before native asset/module upload');
+  }
+  validateOrdinaryFrontendRetainedPlan(before, pinnedPlan, { ordinaryPlan, profile, previousLedger,
+    previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt,
+    installedOpsSuccessorReaderContract });
+  needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before candidate qualification');
+  let candidateId;
+  if (resumeCandidate) {
+    candidateId = resumeCandidate.candidateId;
+    writePrivateJson(journalDirectory, 'candidate.private.json', { candidateId, parentVersionId: baselineVersionId,
+      resumedFromPriorUpload: true, uploadReplayed: false });
+  } else {
+    await qualifyStaff('before-upload-dispatch');
+    appendIntent(journalDirectory, 'native-version-upload', { sourceCommit, workerName, parentVersionId: baselineVersionId,
+      mainSHA256: ordinaryPlan.release.main.sha256, mapSHA256: ordinaryPlan.release.sourceMap.sha256,
+      ledgerSHA256: pinnedPlan.retentionLedgerSHA256, assetInventorySHA256: ordinaryPlan.browserProof.inventorySHA256 });
+    const uploadOutput = await runNative(cliPath, ['versions', 'upload', '--config', configPath], journalDirectory, 'upload', journalDirectory);
+    candidateId = parseCandidateId(uploadOutput);
+    writePrivateJson(journalDirectory, 'candidate.private.json', { candidateId, parentVersionId: baselineVersionId });
+  }
 
   const candidate = await readCandidateVersionWithVisibilityRetry(reader, workerName, candidateId);
   const modern = await reader.get(`/workers/workers/${workerName}/versions/${candidateId}?include=modules`);
-  const moduleProof = verifyOrdinaryFrontendRetainedCandidateModules({ before, plan: pinnedPlan, candidate, modern });
+  const candidateResourceShape = resourcesShape(candidate.resources);
+  const baselineResourceShape = resourcesShape(before[app].version.resources);
+  const namedHandlerProof = app === 'operations' && !equal(candidateResourceShape, baselineResourceShape)
+    ? verifyExactOpsSuccessorNamedHandlerAddition(before, candidate, { sourceCommit,
+      mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256 }) : null;
+  const candidateContract = namedHandlerProof ? OPS_SUCCESSOR_READER_INSTALLED_CONTRACT : undefined;
+  const moduleProof = verifyOrdinaryFrontendRetainedCandidateModules({ before, plan: pinnedPlan, candidate, modern,
+    opsSuccessorReaderContract: candidateContract });
+  writePrivateJson(journalDirectory, 'verified-inactive-candidate.private.json', { candidateId,
+    sourceCommit, mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256,
+    candidateResourcesSHA256: hash(canonical(resourcesShape(candidate.resources))),
+    baselineResourcesSHA256: hash(canonical(resourcesShape(before[app].version.resources))),
+    namedHandlerProof, moduleProof, ...(resumeCandidate ? { resumedPriorUpload: true, uploadReplayed: false } : {}) });
   const candidateExpected = expectedDeploymentVersions;
   const inactive = validateInstallation(await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: candidateExpected }), {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions,
-    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app });
+    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
+    opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
   const expectedInactive = structuredClone(before); expectedInactive[app].latest = candidateId;
   needFn(equal(stableState(inactive, app), stableState(expectedInactive, app)), 'Production controls changed after inactive candidate upload');
+  if (resumeCandidate) needFn(equal(inactive[app].latestVersion, candidate)
+    && equal(inactive[app].latestModern, modern), 'Current latest candidate metadata differs from the exact candidate GET');
   const stageRows = [{ versionId: baselineVersionId, percentage: 100 }, { versionId: candidateId, percentage: 0 }];
   const stageExpectations = expectedForPhase(expectedDeploymentVersions, app, stageRows);
   await qualifyStaff('before-candidate-namespace-stage');
+  if (resumeCandidate) assertResumeControls(before, await captureFn(reader, { selectedApp: app, expectedDeploymentVersions }), {
+    app, candidateId, profile, expectedDeploymentVersions });
   needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before candidate namespace stage');
-  appendIntent(journalDirectory, 'native-candidate-namespace-stage', { sourceCommit, workerName,
-    baselineVersionId, candidateVersionId: candidateId, exactWeights: stageRows, droppedPreviousZeroPercentRow: app === 'operations'
+  appendIntent(journalDirectory, 'native-candidate-namespace-stage', { sourceCommit, executorCommit, workerName,
+    baselineVersionId, candidateVersionId: candidateId, exactWeights: stageRows,
+    ...(resumeCandidate ? { resumedPriorUpload: true, priorJournalSHA256: priorResumeProof.priorJournalSHA256 } : {}),
+    droppedPreviousZeroPercentRow: app === 'operations'
       ? (operationsBaselineRows.find(row => row.percentage === 0)?.versionId ?? null) : null });
   await runNative(cliPath, ['versions', 'deploy', `${baselineVersionId}@100%`, `${candidateId}@0%`, '--yes', '--config', configPath],
     journalDirectory, 'namespace-stage', journalDirectory);
   const staged = validateInstallation(await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: stageExpectations }), {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions: stageExpectations,
-    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app });
+    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
+    opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
   needFn(equal(deploymentRows(staged, app), [...stageRows].sort((a, b) => a.versionId.localeCompare(b.versionId)))
     && sameExceptSelectedDeployment(inactive, staged, app), 'Candidate namespace stage did not produce exact baseline100/candidate0 with unchanged controls');
   await qualifyStaff('before-candidate-asset-verification');
@@ -321,9 +548,18 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   needFn(candidateAssetBytes.size === pinnedPlan.retentionLedger.assets.length && pinnedPlan.retentionLedger.assets.every(row => {
     const bytes = candidateAssetBytes.get(row.path); return Buffer.isBuffer(bytes) && bytes.length === row.size && sha(bytes) === row.sha256;
   }), 'Inactive candidate static asset bytes differ from retained ledger');
+  if (pinnedPlan.rootHtmlArchive) {
+    const archive = pinnedPlan.rootHtmlArchive, bytes = candidateAssetBytes.get(archive.path);
+    needFn(Buffer.isBuffer(bytes) && bytes.length === archive.size && sha(bytes) === archive.sha256,
+      'Inactive candidate root HTML archive bytes differ from prior root document');
+    writePrivateJson(journalDirectory, 'verified-candidate-root-html-archive.private.json', {
+      candidateId, path: archive.path, transportPath: archive.transportPath, size: archive.size,
+      sha256: archive.sha256, mime: archive.mime, verified: true });
+  }
   const preactivation = validateInstallation(await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: stageExpectations }), {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions: stageExpectations,
-    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app });
+    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
+    opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
   needFn(equal(deploymentRows(preactivation, app), deploymentRows(staged, app))
     && equal(stableState(staged, app), stableState(preactivation, app)), 'Staged deployment or controls changed immediately before activation');
   needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before activation');
@@ -337,9 +573,13 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     ? structuredClone(expectedDeploymentVersions)
     : expectedDeploymentVersions;
   if (app === 'operations') delete activationExpectations.operations;
-  const after = validateInstallation(await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: activationExpectations }), { profile, selectedApp: app,
+  const afterRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: activationExpectations });
+  if (namedHandlerProof) verifyExactOpsSuccessorNamedHandlerAddition(before, afterRaw.operations.version, {
+    sourceCommit, mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256 });
+  const after = validateInstallation(afterRaw, { profile, selectedApp: app,
     expectedDeploymentVersions: activationExpectations,
-    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app });
+    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
+    opsSuccessorReaderContract: namedHandlerProof ? OPS_SUCCESSOR_READER_INSTALLED_CONTRACT : installedOpsSuccessorReaderContract });
   needFn(activeVersion(after[app]) === candidateId, 'Activation is uncertain; keep candidate and journal for GET-only reconciliation');
   needFn(deploymentRows(after, app)?.length === 1 && deploymentRows(after, app)[0].versionId === candidateId
     && deploymentRows(after, app)[0].percentage === 100, 'Postactivation distribution is not exactly candidate100');
@@ -348,7 +588,10 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   if (postactivationReadiness) writePrivateJson(journalDirectory, 'staff-after-activation.private.json', postactivationReadiness);
   const activeCandidate = await readCandidateVersionWithVisibilityRetry(reader, workerName, candidateId);
   const activeModern = await reader.get(`/workers/workers/${workerName}/versions/${candidateId}?include=modules`);
-  const activeModulesProof = verifyOrdinaryFrontendRetainedCandidateModules({ before, plan: pinnedPlan, candidate: activeCandidate, modern: activeModern });
+  if (namedHandlerProof) verifyExactOpsSuccessorNamedHandlerAddition(before, activeCandidate, {
+    sourceCommit, mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256 });
+  const activeModulesProof = verifyOrdinaryFrontendRetainedCandidateModules({ before, plan: pinnedPlan,
+    candidate: activeCandidate, modern: activeModern, opsSuccessorReaderContract: candidateContract });
   const rollbackVersion = await readCandidateVersionWithVisibilityRetry(reader, workerName, baselineVersionId);
   const rollbackModern = await reader.get(`/workers/workers/${workerName}/versions/${baselineVersionId}?include=modules`);
   needFn(equal(rollbackVersion, before[app].version) && equal(rollbackModern, before[app].modern),
@@ -356,9 +599,13 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   await qualifyStaff('before-active-namespace-verification');
   const activeAssets = await verifyVersionAssets({ provider: assetVerifierProvider, application: app, workerName,
     entries: pinnedPlan.retentionLedger.assets, versionId: candidateId, journalDirectory, receiptName: 'verified-active-assets' });
-  const postNamespace = validateInstallation(await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: activationExpectations }), {
+  const postNamespaceRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: activationExpectations });
+  if (namedHandlerProof) verifyExactOpsSuccessorNamedHandlerAddition(before, postNamespaceRaw.operations.version, {
+    sourceCommit, mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256 });
+  const postNamespace = validateInstallation(postNamespaceRaw, {
     profile, selectedApp: app, expectedDeploymentVersions: activationExpectations,
-    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app });
+    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
+    opsSuccessorReaderContract: namedHandlerProof ? OPS_SUCCESSOR_READER_INSTALLED_CONTRACT : installedOpsSuccessorReaderContract });
   needFn(activeVersion(postNamespace[app]) === candidateId
     && deploymentRows(postNamespace, app)?.length === 1
     && deploymentRows(postNamespace, app)[0].versionId === candidateId
@@ -379,7 +626,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     earliestPermittedPruningAt,
     minimumRetentionHours: 48, automaticPruning: false,
     oldServedWithin48hPaths: previousLedger.assets.filter(row => row.path !== '/index.html').map(row => row.path).sort(),
-    assets: pinnedPlan.retentionLedger.assets.map(({ path: assetPath, size, sha256, mime }) => ({ path: assetPath, size, sha256, mime })) },
+    assets: pinnedPlan.retentionLedger.assets.map(({ path: assetPath, size, sha256, mime }) => ({ path: assetPath, size, sha256, mime })),
+    ...(pinnedPlan.rootHtmlArchive ? { rootHtmlArchive: pinnedPlan.rootHtmlArchive } : {}) },
     bytesByPath: activeAssets };
   const namespaceProof = verifyOrdinaryFrontendAssetNamespace({ plan: ordinaryPlan, candidateId,
     // v1 helper checks ledger ancestry; v2 separately binds that ledger to the
@@ -391,18 +639,29 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   needFn(equal(namespaceProof.retainedAssetLedger.assets.map(({ path: p, size, sha256, mime }) => ({ path: p, size, sha256, mime })),
     pinnedPlan.retentionLedger.assets.map(({ path: p, size, sha256, mime }) => ({ path: p, size, sha256, mime }))),
   'Post-cutover namespace union differs from native candidate ledger');
+  if (pinnedPlan.rootHtmlArchive) {
+    const archive = pinnedPlan.rootHtmlArchive, bytes = activeAssets.get(archive.path);
+    needFn(Buffer.isBuffer(bytes) && bytes.length === archive.size && sha(bytes) === archive.sha256,
+      'Active root HTML archive bytes differ from prior root document');
+    writePrivateJson(journalDirectory, 'verified-active-root-html-archive.private.json', {
+      candidateId, path: archive.path, transportPath: archive.transportPath, size: archive.size,
+      sha256: archive.sha256, mime: archive.mime, verified: true });
+  }
   writePrivateJson(journalDirectory, 'verified-active.private.json', { candidateId, sourceCommit, executorCommit,
     rollbackVersionId: baselineVersionId, moduleProof: activeModulesProof,
+    ...(resumeCandidate ? { resumedPriorUpload: true, uploadReplayed: false } : {}),
     assetProviderIdentifierProvenance: pinnedPlan.assetProviderIdentifierProvenance,
     assetCount: namespaceProof.assetNamespaceQualification.assetCount,
     totalAssetBytes: namespaceProof.assetNamespaceQualification.totalBytes,
     assets: pinnedPlan.retentionLedger.assets.map(({ path: assetPath, size, sha256, mime }) => ({ path: assetPath, size, sha256, mime })),
+    rootHtmlArchive: pinnedPlan.rootHtmlArchive ?? null,
     oldServedWithin48hPaths: namespaceEvidence.receipt.oldServedWithin48hPaths,
     providerCutoverAt, cutoverAt, namespaceObservedAt,
     earliestPermittedPruningAt: namespaceProof.assetNamespaceQualification.earliestPermittedPruningAt,
     automaticPruning: false, nativeExecutionQualification: { ready: false,
       reason: 'separate-executor-and-authority-qualification-required' } });
-  return Object.freeze({ candidateId, rollbackVersionId: baselineVersionId, uploaded: true, activated: true,
+  return Object.freeze({ candidateId, rollbackVersionId: baselineVersionId, uploaded: !resumeCandidate,
+    resumedPriorUpload: !!resumeCandidate, activated: true,
     candidateModulesVerified: true, activeNamespaceBytesVerified: true,
     assetProviderIdentifierProvenance: pinnedPlan.assetProviderIdentifierProvenance,
     earliestPermittedPruningAt: namespaceProof.assetNamespaceQualification.earliestPermittedPruningAt,

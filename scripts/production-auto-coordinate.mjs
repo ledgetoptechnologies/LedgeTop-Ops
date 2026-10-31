@@ -5,7 +5,7 @@
  * Durable recordIntent must reject replay and survive the build process.
  */
 import { createHash } from 'node:crypto';
-import { mergeAssetLedger, providerManifest, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
+import { mergeAssetLedger, preserveRootHtmlArchive, providerManifest, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
 import { ASSET_VERIFICATION_LIMITS } from './production-auto-verify.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { isProviderUtcTimestamp, minimumRetainedUntil } from './production-auto-time.mjs';
@@ -175,13 +175,15 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
       const bytes = old.get(row.path);
       return Buffer.isBuffer(bytes) && bytes.length === row.size && hash(bytes) === row.sha256;
     }), 'Complete active asset inventory was not byte verified');
-    const payloads = new Map(old);
-    for (const [name, bytes] of built.assets.payloads) payloads.set(name, bytes);
-    const ledger = mergeAssetLedger({ previous, current: { entries: built.assets.entries, payloads },
+    const retained = preserveRootHtmlArchive({ application: workerName === 'ledgetop-ops' ? 'operations' : 'client',
+      previous, previousAssetBytes: old, current: built.assets });
+    const payloads = retained.current.payloads;
+    const ledger = mergeAssetLedger({ previous, current: retained.current,
       workerName, accountId, sourceCommit, parentVersionId: baseline.activeVersionId, observedAt: new Date().toISOString() });
     verifierBounds(ledger.assets);
     ledgerSHA256 = hash(ledgerBytes(ledger));
-    await record('prepared', { ledgerSHA256, files: ledger.assets.length, automaticPruning: false, minimumRetentionHours: 48 });
+    await record('prepared', { ledgerSHA256, files: ledger.assets.length, rootHtmlArchive: retained.archive,
+      automaticPruning: false, minimumRetentionHours: 48 });
     phase = 'upload';
     let versionIntents = 0;
     const upload = await adapter.upload({ sourceCommit, workerName, baseline: copy(baseline), build: built,
@@ -228,7 +230,7 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
       deploymentId: active.deploymentId, cutoverObservedAt: active.deployedAt,
       earliestPermittedPruningAt: minimumRetainedUntil(active.deployedAt, 48),
       minimumRetentionHours: 48, automaticPruning: false, allHistoricalAssetsCarried: true,
-      files: ledger.assets.length, verifiedActive: true };
+      files: ledger.assets.length, rootHtmlArchive: retained.archive, verifiedActive: true };
     phase = 'complete'; await record('verified', receipt); return receipt;
   } catch {
     // A write, verification or durable-receipt exception is not permission for

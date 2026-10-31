@@ -132,14 +132,17 @@ test('asset gate holds without namespace evidence and verifies complete retained
   const union = held.retainedAssetLedger.assets.map(({ path: assetPath, size, sha256, mime }) => ({ path: assetPath, size, sha256, mime }));
   const bytesByPath = new Map(f.oldFiles);
   for (const [name, body] of Object.entries(f.files)) bytesByPath.set(`/${name}`, Buffer.from(body));
+  bytesByPath.set(held.rootHtmlArchive.path, Buffer.from(f.oldFiles.get('/index.html')));
   const evidence = { receipt: { schemaVersion: 1, workerName: worker, accountId: ACCOUNT, sourceCommit: COMMIT,
     activeVersionId: CANDIDATE, observedAt: new Date(now).toISOString(), cutoverAt: new Date(now - 1000).toISOString(),
     earliestPermittedPruningAt: new Date(now + 48 * 60 * 60_000).toISOString(), minimumRetentionHours: 48,
-    automaticPruning: false, oldServedWithin48hPaths: ['/assets/old.js', '/assets/prior.css'], assets: union }, bytesByPath };
+    automaticPruning: false, oldServedWithin48hPaths: ['/assets/old.js', '/assets/prior.css'], assets: union,
+    rootHtmlArchive: held.rootHtmlArchive }, bytesByPath };
   const qualified = verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE, baselineVersionId: BASELINE,
     previousLedger: f.previousLedger, previousAssetBytes: f.oldFiles, namespaceEvidence: evidence, now });
   assert.equal(qualified.assetNamespaceQualification.ready, true);
-  assert.equal(qualified.assetNamespaceQualification.assetCount, 8);
+  assert.equal(qualified.assetNamespaceQualification.assetCount, 9);
+  assert.equal(qualified.rootHtmlArchive.path, held.rootHtmlArchive.path);
   assert.equal(qualified.assetNamespaceQualification.namespaceByteEvidenceVerified, true);
   assert.equal(qualified.assetNamespaceQualification.earliestPermittedPruningAt, evidence.receipt.earliestPermittedPruningAt);
   const shortRetention = structuredClone(evidence);
@@ -151,6 +154,10 @@ test('asset gate holds without namespace evidence and verifies complete retained
   assert.throws(() => verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE,
     baselineVersionId: BASELINE, previousLedger: f.previousLedger, previousAssetBytes: f.oldFiles,
     namespaceEvidence: missingBytes, now }), /every retained old\/new asset path/);
+  const wrongArchive = { receipt: { ...evidence.receipt, rootHtmlArchive: { ...held.rootHtmlArchive, transportPath: '/' } }, bytesByPath };
+  assert.throws(() => verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE,
+    baselineVersionId: BASELINE, previousLedger: f.previousLedger, previousAssetBytes: f.oldFiles,
+    namespaceEvidence: wrongArchive, now }), /exact retained root HTML archive transport/);
   const emptyOldPaths = { receipt: structuredClone(evidence.receipt), bytesByPath: evidence.bytesByPath };
   emptyOldPaths.receipt.oldServedWithin48hPaths = [];
   assert.throws(() => verifyOrdinaryFrontendAssetNamespace({ plan: f.plan, candidateId: CANDIDATE,
