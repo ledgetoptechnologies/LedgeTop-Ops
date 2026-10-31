@@ -1,16 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { canonical, hash } from './production-deploy.mjs';
 import { compileStagingNativeInquiryPilotV2PlanFromEvidence as compile,
   compileStagingNativeInquiryPilotV2PlanFromFiles as compileFiles,
   hashStagingNativeInquiryPilotV2PlanFile as planFileHash,
   stagingNativeInquiryPilotV2PlanConstants as C } from './staging-native-inquiry-pilot-v2-plan.mjs';
-import { STAGING_ACCOUNT_ID } from './staging-requirements.mjs';
 
 const clone=value=>structuredClone(value);
 const candidate='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-const receiptSha=receipt=>hash(Buffer.from(JSON.stringify(receipt),'utf8'));
 function readPinned(pin) {
   const bytes=fs.readFileSync(pin.path);
   assert.equal(hash(bytes),pin.sha256,`test fixture pin changed: ${pin.path}`);
@@ -18,6 +18,15 @@ function readPinned(pin) {
 }
 const referenceControls=readPinned(C.baselineControls);
 const basePlans={operations:readPinned(C.basePlans.operations),client:readPinned(C.basePlans.client)};
+const historicalClientBaselineBytes=fs.readFileSync(C.clientPilotBaselineControls.path);
+const historicalClientBaseline=JSON.parse(historicalClientBaselineBytes.toString('utf8'));
+const historicalClientBaselineSHA256=hash(historicalClientBaselineBytes);
+const clientActivationControlsBytes=fs.readFileSync(C.clientPilotActivationControls.path);
+const clientActivationControls=JSON.parse(clientActivationControlsBytes.toString('utf8'));
+const clientActivationControlsSHA256=hash(clientActivationControlsBytes);
+const clientActivationReceiptBytes=fs.readFileSync(C.clientPilotActivationReceipt.path);
+const clientActivationReceipt=JSON.parse(clientActivationReceiptBytes.toString('utf8'));
+const clientActivationReceiptSHA256=hash(clientActivationReceiptBytes);
 
 function fixture() {
   // Synthetic test time over the immutable real profile capture. The actual
@@ -48,19 +57,25 @@ function clientPilotState(f) {
   }
   return current;
 }
-function clientReceipt(f,plan,current,controlsSHA256=hash(canonical(current))) {
-  return {schemaVersion:2,purpose:C.CLIENT_RECEIPT_PURPOSE,accountId:STAGING_ACCOUNT_ID,
-    workerName:C.current.client.workerName,baselineVersionId:C.current.client.activeVersionId,
-    candidateVersionId:current.workers.client.activeVersionId,deploymentId:current.workers.client.deployment.id,
-    sourceCommit:C.sourceCommits.client,planSHA256:planFileHash(plan),baselineControlsSHA256:f.baselineControlsSHA256,
-    controlsSHA256,observedAt:current.observedAt,readbackVerified:true,exactClientDeltaVerified:true,
-    activeRuntimeUnchanged:true,otherControlsUnchanged:true,schemaUnchanged:true,resourceWrites:0,applicationRowsRead:0};
-}
 function compileOps(f,current,receipt) {
   return compile({application:'operations',referenceControls:f.referenceControls,baselineControls:f.baselineControls,
     currentControls:current,basePlan:basePlans.operations,clientBasePlan:basePlans.client,now:f.now,
     baselineControlsSHA256:f.baselineControlsSHA256,currentControlsSHA256:hash(canonical(current)),
-    clientPilotReceipt:receipt,clientPilotReceiptSHA256:receiptSha(receipt)});
+    clientPilotControls:f.clientPilotControls,clientPilotControlsSHA256:f.clientPilotControlsSHA256,
+    clientPilotReceipt:receipt,clientPilotReceiptSHA256:clientActivationReceiptSHA256});
+}
+function opsFixture() {
+  const baselineControls=clone(historicalClientBaseline),baselineAt=Date.parse(historicalClientBaseline.observedAt);
+  const now=Date.now(),f={now,referenceControls,baselineControls,baselineControlsSHA256:historicalClientBaselineSHA256,
+    clientPilotControls:clientActivationControls,clientPilotControlsSHA256:clientActivationControlsSHA256};
+  // Recompute the original Client plan at its genuine baseline-time context for
+  // receipt comparison. This does not qualify or refresh the live current view.
+  const clientPlan=compile({application:'client',referenceControls:f.referenceControls,baselineControls,
+    currentControls:baselineControls,basePlan:basePlans.client,now:baselineAt+20_000,
+    baselineControlsSHA256:historicalClientBaselineSHA256,currentControlsSHA256:historicalClientBaselineSHA256});
+  const current=clone(clientActivationControls);current.observedAt=new Date(now-5_000).toISOString();
+  const receipt=clientActivationReceipt;
+  return {f,clientPlan,current,receipt};
 }
 
 test('Client v2 plan uses the actual b22 base while pinning Ops49, Client2e and unchanged Sync',()=>{
@@ -142,8 +157,9 @@ test('rejects wrong mixed-source base, schema digest, module bytes, and existing
 });
 
 test('Ops plan requires independent Client v2 receipt, exact two-gate delta, and target deployment identity',()=>{
-  const f=fixture(),clientPlan=clientPlanFor(f),current=clientPilotState(f),receipt=clientReceipt(f,clientPlan,current);
+  const {f,clientPlan,current,receipt}=opsFixture();
   const ops=compileOps(f,current,receipt);
+  assert.equal(planFileHash(clientPlan),C.clientPilotHeldPlanSHA256);
   assert.equal(ops.step,2);assert.equal(ops.application,'operations');assert.equal(ops.sourceCommit,C.sourceCommits.operations);
   assert.equal(ops.basePlanSchemaVersion,5);assert.equal(ops.basePlanContract,C.basePlans.operations.contract);
   assert.equal(ops.baselineVersionId,C.current.operations.activeVersionId);
@@ -157,26 +173,114 @@ test('Ops plan requires independent Client v2 receipt, exact two-gate delta, and
   assert.equal(ops.clientPilotContext.candidateVersionId,current.workers.client.activeVersionId);
   assert.equal(ops.clientPilotContext.deploymentId,receipt.deploymentId);
   assert.equal(ops.clientPilotContext.planSHA256,receipt.planSHA256);
+  assert.equal(ops.clientPilotContext.controlsSHA256,C.clientPilotActivationControls.sha256);
+  assert.equal(ops.clientPilotContext.controlsObservedAt,clientActivationControls.observedAt);
   const forged={...receipt,candidateVersionId:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'};
   assert.throws(()=>compileOps(f,current,forged),/independent Client-pilot receipt/u);
   const extra={...receipt,unreviewed:true};
   assert.throws(()=>compileOps(f,current,extra),/independent Client-pilot receipt/u);
   const changedDeployment=clone(current);changedDeployment.workers.client.deployment.id='dddddddd-dddd-4ddd-8ddd-dddddddddddd';
-  const staleDeploymentProof={...receipt,controlsSHA256:hash(canonical(changedDeployment))};
-  assert.throws(()=>compileOps(f,changedDeployment,staleDeploymentProof),/independent Client-pilot receipt/u);
+  assert.throws(()=>compileOps(f,changedDeployment,receipt),/Client activation proof/u);
 });
 
 test('Ops sequencing preserves provider strategy and runtime while allowing measured startup variance',()=>{
-  const f=fixture(),clientPlan=clientPlanFor(f),current=clientPilotState(f),receipt=clientReceipt(f,clientPlan,current);
+  const {f,current,receipt}=opsFixture();
   const startupVariance=clone(current);startupVariance.workers.client.modern.startup_time_ms+=19;
-  const updatedReceipt={...receipt,controlsSHA256:hash(canonical(startupVariance))};
-  assert.equal(compileOps(f,startupVariance,updatedReceipt).step,2);
+  startupVariance.workers.client.rawControlSHA256='c'.repeat(64);
+  assert.equal(compileOps(f,startupVariance,receipt).step,2);
   const strategy=clone(current);strategy.workers.client.deployment.strategy='unreviewed';
-  assert.throws(()=>compileOps(f,strategy,{...receipt,controlsSHA256:hash(canonical(strategy))}),/runtime or non-gate controls/u);
+  assert.throws(()=>compileOps(f,strategy,receipt),/Client activation proof/u);
   const runtime=clone(current);runtime.workers.client.modern.compatibility_date='2027-01-01';
-  assert.throws(()=>compileOps(f,runtime,{...receipt,controlsSHA256:hash(canonical(runtime))}),/runtime or non-gate controls/u);
+  assert.throws(()=>compileOps(f,runtime,receipt),/Client activation proof/u);
   const broad=clone(current);broad.workers.client.selectedFlags.CLIENT_PORTAL_REQUEST_V2_ENABLED='true';
-  assert.throws(()=>compileOps(f,broad,{...receipt,controlsSHA256:hash(canonical(broad))}),/non-pilot flags/u);
+  assert.throws(()=>compileOps(f,broad,receipt),/Client activation proof/u);
+});
+
+test('Ops accepts only the pinned historical C82 anchor and fresh receipt-bound Client controls',()=>{
+  const {f,clientPlan,current,receipt}=opsFixture();
+  assert.equal(f.baselineControls.observedAt,'2026-10-31T12:50:09.336Z');
+  assert.equal(f.baselineControlsSHA256,C.clientPilotBaselineControls.sha256);
+  assert.equal(planFileHash(clientPlan),C.clientPilotHeldPlanSHA256);
+  const plan=compileOps(f,current,receipt);
+  assert.equal(plan.baselineControlsSHA256,C.clientPilotBaselineControls.sha256);
+  assert.equal(plan.baselineControlsObservedAt,f.baselineControls.observedAt);
+  assert.equal(plan.controlsObservedAt,current.observedAt);
+  assert.equal(plan.clientPilotContext.controlsSHA256,C.clientPilotActivationControls.sha256);
+
+  assert.throws(()=>compile({application:'operations',referenceControls:f.referenceControls,
+    baselineControls:f.baselineControls,currentControls:current,basePlan:basePlans.operations,
+    clientBasePlan:basePlans.client,now:f.now,baselineControlsSHA256:'a'.repeat(64),
+    currentControlsSHA256:hash(canonical(current)),clientPilotControls:f.clientPilotControls,
+    clientPilotControlsSHA256:f.clientPilotControlsSHA256,clientPilotReceipt:receipt,
+    clientPilotReceiptSHA256:clientActivationReceiptSHA256}),/historical baseline.*exact original/u);
+  assert.throws(()=>compileFiles({application:'operations',baselineControlsFile:C.baselineControls}),
+    /must use the byte-pinned historical C82/u);
+
+  const staleCurrent=clone(current);staleCurrent.observedAt=new Date(f.now-30*60_000-1).toISOString();
+  const staleReceipt={...receipt,observedAt:staleCurrent.observedAt,controlsSHA256:hash(canonical(staleCurrent))};
+  assert.throws(()=>compileOps(f,staleCurrent,staleReceipt),/stale|fresh/u);
+
+  assert.throws(()=>compileOps(f,current,{...receipt,planSHA256:'b'.repeat(64)}),/independent Client-pilot receipt/u);
+});
+
+test('Ops rechecks fresh captures against immutable Client activation proof without changing plan context',()=>{
+  const {f,current,receipt}=opsFixture();
+  const first=compileOps(f,current,receipt);
+  const rechecked=clone(current);rechecked.observedAt=new Date(f.now-1_000).toISOString();
+  rechecked.workers.client.modern.startup_time_ms+=4;
+  rechecked.workers.client.rawControlSHA256='d'.repeat(64);
+  const next=compileOps(f,rechecked,receipt);
+  assert.notEqual(first.controlsSHA256,next.controlsSHA256);
+  assert.notEqual(first.controlsObservedAt,next.controlsObservedAt);
+  assert.deepEqual(first.clientPilotContext,next.clientPilotContext);
+  assert.equal(next.clientPilotContext.controlsSHA256,C.clientPilotActivationControls.sha256);
+
+  const preActivation=clone(current);
+  const activationAt=Date.parse(f.clientPilotControls.observedAt);
+  preActivation.observedAt=new Date(activationAt-1_000).toISOString();
+  const testClock={...f,now:activationAt+60_000};
+  assert.throws(()=>compileOps(testClock,preActivation,receipt),/fresh current controls predate/u);
+
+  const changedGate=clone(rechecked);changedGate.workers.client.selectedFlags[C.gates.client[0]]='false';
+  assert.throws(()=>compileOps(f,changedGate,receipt),/Client activation proof/u);
+  const changedSchema=clone(rechecked);changedSchema.schema.OPS_DB.tableDigest='f'.repeat(64);
+  assert.throws(()=>compileOps(f,changedSchema,receipt),/Client activation proof|schema/u);
+  const changedOps=clone(rechecked);changedOps.workers.operations.latestVersionId='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  assert.throws(()=>compileOps(f,changedOps,receipt),/Client activation proof|pinned active\/latest/u);
+});
+
+test('file-backed Ops recompiles fresh controls against the actual pinned activation proof',()=>{
+  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'native-inquiry-ops-recheck-'));
+  const tempFiles=[];
+  try {
+    const makeCurrent=(suffix,ageMs=10_000,startupDelta=0)=>{
+      const current=clone(clientActivationControls);
+      current.observedAt=new Date(Date.now()-ageMs).toISOString();
+      if(startupDelta){current.workers.client.modern.startup_time_ms+=startupDelta;current.workers.client.rawControlSHA256='e'.repeat(64);}
+      const bytes=Buffer.from(`${JSON.stringify(current,null,2)}\n`,'utf8');
+      const file=path.join(temp,`${suffix}.json`);fs.writeFileSync(file,bytes,{flag:'wx'});tempFiles.push(file);
+      return {current,file,sha256:hash(bytes)};
+    };
+    const options=current=>({application:'operations',baselineControlsFile:C.clientPilotBaselineControls,
+      currentControlsFile:{path:current.file,sha256:current.sha256},clientPilotControlsFile:C.clientPilotActivationControls,
+      clientPilotReceiptFile:C.clientPilotActivationReceipt.path,
+      clientPilotReceiptSHA256:C.clientPilotActivationReceipt.sha256});
+    const first=compileFiles(options(makeCurrent('capture-1',20_000)));
+    const secondCurrent=makeCurrent('capture-2',5_000,7);
+    const second=compileFiles(options(secondCurrent));
+    assert.notEqual(first.controlsSHA256,second.controlsSHA256);
+    assert.notEqual(first.controlsObservedAt,second.controlsObservedAt);
+    assert.deepEqual(first.clientPilotContext,second.clientPilotContext);
+    assert.equal(second.clientPilotContext.controlsSHA256,C.clientPilotActivationControls.sha256);
+
+    const changed=clone(secondCurrent.current);changed.workers.client.selectedFlags[C.gates.client[0]]='false';
+    const changedBytes=Buffer.from(`${JSON.stringify(changed,null,2)}\n`,'utf8');
+    const changedFile=path.join(temp,'changed-gate.json');fs.writeFileSync(changedFile,changedBytes,{flag:'wx'});tempFiles.push(changedFile);
+    assert.throws(()=>compileFiles(options({file:changedFile,sha256:hash(changedBytes)})),/Client activation proof/u);
+  } finally {
+    for(const file of tempFiles) if(fs.existsSync(file)) fs.rmSync(file);
+    fs.rmdirSync(temp);
+  }
 });
 
 test('actual file-backed Client v2 compile requires a supplied fresh pinned capture', {
