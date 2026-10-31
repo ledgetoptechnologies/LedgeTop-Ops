@@ -74,6 +74,7 @@ const canonicalSorted = value => Array.isArray(value) ? `[${value.map(canonicalS
 const safeError = code => Object.assign(new Error(code), { code });
 const compiledSteps = new WeakSet();
 const verifiedCapsules = new WeakSet();
+export function isCompiledStagingV4Step(step) { return Boolean(step && compiledSteps.has(step)); }
 export function stagingV4JournalPaths(intentId) {
   if (typeof intentId !== 'string' || !/^[a-f0-9]{32}$/u.test(intentId)) throw safeError('intent_id_invalid');
   return Object.freeze({ root: STAGING_V4_JOURNAL_ROOT,
