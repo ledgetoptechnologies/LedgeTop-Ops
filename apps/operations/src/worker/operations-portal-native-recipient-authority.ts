@@ -640,8 +640,6 @@ export async function readOperationsPortalNativeRecipientIntentForOwner(
         AND intent.requested_permissions_json='["operations.service_home.read"]'
         AND intent.recipient_binding_id=base.recipient_binding_id AND intent.access_issuer=base.issuer
         AND intent.access_subject=base.subject AND intent.grant_operation_id=base.latest_operation_id
-        AND intent.recipient_verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        AND intent.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')
         AND base.enrollment_intent_id=intent.intent_id AND base.target_id=intent.target_id
         AND base.target_client_record_id=intent.target_client_record_id AND base.state='active'
         AND base.permission_schema_version=3 AND base.permissions_json='["operations.service_home.read"]'
@@ -667,6 +665,8 @@ export async function readOperationsPortalNativeRecipientIntentForOwner(
     recipientLabel: presentationLabel(row.recipient_label, row.intent_id), recoveryOperationId });
   }
   const current = await session.prepare(`SELECT
+      -- The recipient Access JWT exp proves enrollment only. Durable home access
+      -- follows the active base head and binding; inquiry capability expiry is checked below.
       EXISTS(SELECT 1 FROM operations_portal_native_recipient_authority_heads base
         JOIN operations_portal_native_authority_receipts base_receipt ON base_receipt.operation_id=base.latest_operation_id
           AND base_receipt.target_id=base.target_id AND base_receipt.recipient_binding_id=base.recipient_binding_id
@@ -681,9 +681,7 @@ export async function readOperationsPortalNativeRecipientIntentForOwner(
         WHERE base.enrollment_intent_id=intent.intent_id AND base.recipient_binding_id=intent.recipient_binding_id
           AND base.latest_operation_id=intent.grant_operation_id AND base.state='active'
           AND base.permission_schema_version=3 AND base.permissions_json='["operations.service_home.read"]'
-          AND (base.expires_at IS NULL OR base.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-          AND intent.recipient_verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')
-          AND intent.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) home_current,
+          AND (base.expires_at IS NULL OR base.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now'))) home_current,
       EXISTS(SELECT 1 FROM operations_portal_native_inquiry_capability_heads cap_head
         JOIN operations_portal_native_inquiry_capability_commands cap ON cap.operation_id=cap_head.latest_operation_id
           AND cap.intent_id=cap_head.intent_id AND cap.action='grant' AND cap.resulting_revision=cap_head.revision
@@ -716,8 +714,6 @@ export async function readOperationsPortalNativeRecipientIntentForOwner(
           AND publication.publication_revision=cap.publication_revision AND publication.source_sequence=cap.publication_source_sequence
           AND publication.snapshot_id=cap.publication_snapshot_id AND publication.snapshot_sha256=cap.publication_snapshot_sha256
         WHERE cap_head.intent_id=intent.intent_id AND cap_head.state='active' AND cap.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')
-          AND intent.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')
-          AND intent.recipient_verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')
           AND base.enrollment_intent_id=intent.intent_id AND base.latest_operation_id=intent.grant_operation_id
           AND cap.base_operation_id=intent.grant_operation_id AND cap.recipient_binding_id=intent.recipient_binding_id
           AND cap.target_id=intent.target_id AND cap.target_client_record_id=intent.target_client_record_id
