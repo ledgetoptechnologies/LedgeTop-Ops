@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import { canonical, hash, need, validateInstallation, verifyCandidate,
   ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 } from './production-deploy.mjs';
 import { validateOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
-import { collectFrontendAssets, mergeAssetLedger, validateAssetLedger } from './production-auto-assets.mjs';
+import { collectFrontendAssets, mergeAssetLedger, preserveRootHtmlArchive, validateAssetLedger } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
@@ -63,11 +63,11 @@ function planProfile(before, plan, profile, expectedDeploymentVersions) {
   return expected;
 }
 
-function verifyNamespaceReceipt({ evidence, plan, candidate, unionLedger, previousLedger, accountId, now }) {
+function verifyNamespaceReceipt({ evidence, plan, candidate, unionLedger, previousLedger, rootHtmlArchive, accountId, now }) {
   if (evidence === undefined) return { ready: false, reason: 'active-namespace-byte-receipt-required' };
   need(exactObject(evidence, ['receipt','bytesByPath']), 'Active namespace evidence shape invalid');
   const { receipt, bytesByPath } = evidence;
-  need(exactObject(receipt, receiptKeys) && bytesByPath instanceof Map,
+  need(exactObject(receipt, rootHtmlArchive ? [...receiptKeys, 'rootHtmlArchive'] : receiptKeys) && bytesByPath instanceof Map,
     'Active namespace evidence shape invalid');
   const app = plan.application, workerName = workerFor(app);
   need(receipt.schemaVersion === 1 && receipt.workerName === workerName && receipt.accountId === accountId
@@ -93,7 +93,15 @@ function verifyNamespaceReceipt({ evidence, plan, candidate, unionLedger, previo
   const allPriorPaths = [...priorPaths].sort();
   need(Array.isArray(oldPaths) && equal(oldPaths, allPriorPaths),
     'Receipt omits, invents, or duplicates previously retained browser asset paths');
-  return { ready: true, reason: null, cutoverAt: receipt.cutoverAt,
+  const archive = rootHtmlArchive ?? null;
+  if (archive) {
+    need(equal(receipt.rootHtmlArchive, archive), 'Receipt does not identify the exact retained root HTML archive transport');
+    const bytes = bytesByPath.get(archive.path);
+    need(Buffer.isBuffer(bytes) && bytes.length === archive.size && hash(bytes) === archive.sha256,
+      'Archived root HTML bytes do not match the prior root document');
+  } else need(receipt.rootHtmlArchive === undefined || receipt.rootHtmlArchive === null,
+    'Unexpected root HTML archive receipt');
+  return { ready: true, reason: null, cutoverAt: receipt.cutoverAt, rootHtmlArchive: archive,
     earliestPermittedPruningAt: receipt.earliestPermittedPruningAt,
     assetCount: expected.length, totalBytes: expected.reduce((sum, row) => sum + row.size, 0),
     namespaceByteEvidenceVerified: true };
@@ -167,14 +175,13 @@ export function verifyOrdinaryFrontendAssetNamespace({ plan, candidateId, baseli
   need(UUID.test(baselineVersionId ?? '') && prior.parentVersionId === baselineVersionId,
     'Previous asset ledger is not tied to captured active version');
   need(previousAssetBytes instanceof Map, 'Previous verified asset bytes must be a Map');
-  const payloads = new Map(previousAssetBytes);
-  for (const [assetPath, bytes] of collected.payloads) payloads.set(assetPath, bytes);
-  const unionLedger = mergeAssetLedger({ previous: prior, current: { entries: collected.entries, payloads },
+  const retained = preserveRootHtmlArchive({ application: app, previous: prior, previousAssetBytes, current: collected });
+  const unionLedger = mergeAssetLedger({ previous: prior, current: retained.current,
     workerName: workerFor(app), accountId, sourceCommit: plan.sourceCommit, parentVersionId: candidateId,
     observedAt: new Date(now).toISOString() });
   const namespace = verifyNamespaceReceipt({ evidence: namespaceEvidence, plan, candidate: { id: candidateId },
-    unionLedger, previousLedger: prior, accountId, now });
-  return Object.freeze({ browserAssetInventoryVerified: true, assetNamespaceQualification: namespace,
+    unionLedger, previousLedger: prior, rootHtmlArchive: retained.archive, accountId, now });
+  return Object.freeze({ browserAssetInventoryVerified: true, rootHtmlArchive: retained.archive, assetNamespaceQualification: namespace,
     retainedAssetLedger: unionLedger });
 }
 

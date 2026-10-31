@@ -218,6 +218,27 @@ test("known app and SHA prefixed historical assets are checked at the exact orig
     assert.throws(()=>createAssetVerifierSource({...options(nonce),entries:[{...entry,path:p}]}),/static_asset_verification_refused/);
 });
 
+test('root HTML archive keeps its physical manifest key and fetches only the fixed directory transport for GET and HEAD',async()=>{
+  const nonce=createAssetVerificationNonce(),oldHtml=Buffer.from('<html>previous release</html>'),sha256=sha(oldHtml);
+  const archived={path:`/_ui/operations/${sha256.slice(0,40)}/index.html`,size:oldHtml.length,sha256,contentType:'text/html'};
+  const app=await worker(nonce,{entries:[archived]}),calls=[];
+  const env={SOURCE_ASSETS:{fetch:async req=>{calls.push(req);return new Response(req.method==='HEAD'?null:oldHtml,
+    {headers:{'Content-Type':'text/html; charset=utf-8','Content-Length':String(oldHtml.length)}});}}};
+  for(const method of ['HEAD','GET']) {
+    const result=await app.fetch(request(nonce,archived.path,method),env);
+    assert.equal(result.status,200);
+    if(method==='HEAD')assert.equal(result.body,null);else assert.deepEqual(Buffer.from(await result.arrayBuffer()),oldHtml);
+  }
+  assert.deepEqual(calls.map(req=>req.url),[`https://ops.ledgetop.app/_ui/operations/${sha256.slice(0,40)}/`,
+    `https://ops.ledgetop.app/_ui/operations/${sha256.slice(0,40)}/`]);
+  assert.ok(calls.every(req=>req.redirect==='manual'&&!req.headers.has('Cookie')&&!req.headers.has('Authorization')));
+  for(const p of [`/_ui/client/${sha256.slice(0,40)}/index.html`,`/_ui/operations/${sha256.slice(0,39)}/index.html`,
+    `/_ui/operations/${sha256.slice(0,40)}/index.html/extra`])
+    assert.throws(()=>createAssetVerifierSource({...options(nonce),entries:[{...archived,path:p}]}),/static_asset_verification_refused/);
+  assert.throws(()=>createAssetVerifierSource({...options(nonce),workerName:'ledgetop-clients',origin:'https://portal.ledgetop.app',entries:[archived]}),
+    /static_asset_verification_refused/);
+});
+
 test('collector deadline bounds an uncooperative HEAD or GET and sends no request after expiry',async()=>{
   for(const stalledMethod of ['HEAD','GET']) {
     const calls=[];let release,passedSignal;

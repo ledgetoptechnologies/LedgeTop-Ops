@@ -14,7 +14,7 @@ import { readOrdinaryFrontendAuthorityObservation } from './ordinary-frontend-au
 import { createAssetVerificationNonce, executeAssetVerification } from './production-auto-verify.mjs';
 import { readCandidateVersionWithVisibilityRetry } from './production-deploy.mjs';
 import { ProductionCloudflareProvider, newTemporaryVerifierName } from './production-auto-provider.mjs';
-import { collectFrontendAssets } from './production-auto-assets.mjs';
+import { collectFrontendAssets, preserveRootHtmlArchive } from './production-auto-assets.mjs';
 import { minimumRetainedUntil, parseProviderUtcTimestamp } from './production-auto-time.mjs';
 import { retainedNativeConfig, stageOrdinaryFrontendRetainedModules,
   validateInstalledRetainedLedger, validateOrdinaryFrontendRetainedPlan, verifyOrdinaryFrontendRetainedCandidateModules } from './ordinary-frontend-retained-plan.mjs';
@@ -122,9 +122,12 @@ function sameExceptSelectedDeployment(before, after, app) {
   return equal(withoutSelectedDeployment(before, app), withoutSelectedDeployment(after, app));
 }
 
-function stageRetainedAssets(directory, plan, previousAssetBytes) {
-  const current = collectFrontendAssets(plan.ordinaryPlan.release.assets.directory), payloads = new Map(previousAssetBytes);
-  for (const [assetPath, bytes] of current.payloads) payloads.set(assetPath, bytes);
+export function stageRetainedAssets(directory, plan, previousLedger, previousAssetBytes) {
+  const current = collectFrontendAssets(plan.ordinaryPlan.release.assets.directory);
+  const retained = preserveRootHtmlArchive({ application: plan.application, previous: previousLedger,
+    previousAssetBytes, current });
+  needFn(equal(retained.archive, plan.rootHtmlArchive ?? null), 'Retained root HTML archive differs from compiled plan');
+  const payloads = retained.current.payloads;
   const target = path.join(directory, 'retained-assets'); fs.mkdirSync(target, { recursive: false, mode: 0o700 });
   for (const row of plan.retentionLedger.assets) {
     const bytes = payloads.get(row.path);
@@ -273,7 +276,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     oldAssetCount: previousLedger.assets.length, retainedAssetCount: pinnedPlan.retentionLedger.assets.length });
   if (observations.beforeReadiness) writePrivateJson(journalDirectory, 'staff-before-upload.private.json', observations.beforeReadiness);
   const moduleStage = stageOrdinaryFrontendRetainedModules(pinnedPlan, path.join(journalDirectory, 'native-modules'));
-  const assetDirectory = stageRetainedAssets(journalDirectory, pinnedPlan, priorAssetBytes);
+  const assetDirectory = stageRetainedAssets(journalDirectory, pinnedPlan, previousLedger, priorAssetBytes);
   const config = retainedNativeConfig(pinnedPlan, moduleStage); config.assets.directory = assetDirectory;
   const configPath = path.join(journalDirectory, 'wrangler.retained.private.json'); writePrivateJson(journalDirectory, path.basename(configPath), config);
 
@@ -321,6 +324,14 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   needFn(candidateAssetBytes.size === pinnedPlan.retentionLedger.assets.length && pinnedPlan.retentionLedger.assets.every(row => {
     const bytes = candidateAssetBytes.get(row.path); return Buffer.isBuffer(bytes) && bytes.length === row.size && sha(bytes) === row.sha256;
   }), 'Inactive candidate static asset bytes differ from retained ledger');
+  if (pinnedPlan.rootHtmlArchive) {
+    const archive = pinnedPlan.rootHtmlArchive, bytes = candidateAssetBytes.get(archive.path);
+    needFn(Buffer.isBuffer(bytes) && bytes.length === archive.size && sha(bytes) === archive.sha256,
+      'Inactive candidate root HTML archive bytes differ from prior root document');
+    writePrivateJson(journalDirectory, 'verified-candidate-root-html-archive.private.json', {
+      candidateId, path: archive.path, transportPath: archive.transportPath, size: archive.size,
+      sha256: archive.sha256, mime: archive.mime, verified: true });
+  }
   const preactivation = validateInstallation(await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: stageExpectations }), {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions: stageExpectations,
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app });
@@ -379,7 +390,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     earliestPermittedPruningAt,
     minimumRetentionHours: 48, automaticPruning: false,
     oldServedWithin48hPaths: previousLedger.assets.filter(row => row.path !== '/index.html').map(row => row.path).sort(),
-    assets: pinnedPlan.retentionLedger.assets.map(({ path: assetPath, size, sha256, mime }) => ({ path: assetPath, size, sha256, mime })) },
+    assets: pinnedPlan.retentionLedger.assets.map(({ path: assetPath, size, sha256, mime }) => ({ path: assetPath, size, sha256, mime })),
+    ...(pinnedPlan.rootHtmlArchive ? { rootHtmlArchive: pinnedPlan.rootHtmlArchive } : {}) },
     bytesByPath: activeAssets };
   const namespaceProof = verifyOrdinaryFrontendAssetNamespace({ plan: ordinaryPlan, candidateId,
     // v1 helper checks ledger ancestry; v2 separately binds that ledger to the
@@ -391,12 +403,21 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   needFn(equal(namespaceProof.retainedAssetLedger.assets.map(({ path: p, size, sha256, mime }) => ({ path: p, size, sha256, mime })),
     pinnedPlan.retentionLedger.assets.map(({ path: p, size, sha256, mime }) => ({ path: p, size, sha256, mime }))),
   'Post-cutover namespace union differs from native candidate ledger');
+  if (pinnedPlan.rootHtmlArchive) {
+    const archive = pinnedPlan.rootHtmlArchive, bytes = activeAssets.get(archive.path);
+    needFn(Buffer.isBuffer(bytes) && bytes.length === archive.size && sha(bytes) === archive.sha256,
+      'Active root HTML archive bytes differ from prior root document');
+    writePrivateJson(journalDirectory, 'verified-active-root-html-archive.private.json', {
+      candidateId, path: archive.path, transportPath: archive.transportPath, size: archive.size,
+      sha256: archive.sha256, mime: archive.mime, verified: true });
+  }
   writePrivateJson(journalDirectory, 'verified-active.private.json', { candidateId, sourceCommit, executorCommit,
     rollbackVersionId: baselineVersionId, moduleProof: activeModulesProof,
     assetProviderIdentifierProvenance: pinnedPlan.assetProviderIdentifierProvenance,
     assetCount: namespaceProof.assetNamespaceQualification.assetCount,
     totalAssetBytes: namespaceProof.assetNamespaceQualification.totalBytes,
     assets: pinnedPlan.retentionLedger.assets.map(({ path: assetPath, size, sha256, mime }) => ({ path: assetPath, size, sha256, mime })),
+    rootHtmlArchive: pinnedPlan.rootHtmlArchive ?? null,
     oldServedWithin48hPaths: namespaceEvidence.receipt.oldServedWithin48hPaths,
     providerCutoverAt, cutoverAt, namespaceObservedAt,
     earliestPermittedPruningAt: namespaceProof.assetNamespaceQualification.earliestPermittedPruningAt,

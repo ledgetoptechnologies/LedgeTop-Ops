@@ -5,7 +5,7 @@ import path from 'node:path';
 import { canonical, hash, need, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
   ORDINARY_FRONTEND_PREFLIGHT_MODE } from './production-deploy.mjs';
 import { validateOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
-import { collectFrontendAssets, ledgerBytes, mergeAssetLedger, validateAssetLedger } from './production-auto-assets.mjs';
+import { collectFrontendAssets, ledgerBytes, mergeAssetLedger, preserveRootHtmlArchive, validateAssetLedger } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { verifyOrdinaryFrontendCandidateModules } from './ordinary-frontend-candidate-verifier.mjs';
 import { validateOpsLegacyLedgerBootstrap } from './ordinary-frontend-ops-ledger-bootstrap.mjs';
@@ -71,9 +71,8 @@ function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, 
   const expected = ordinaryPlan.browserProof.files.map(({ path: assetPath, size, sha256 }) => ({ path: assetPath, size, sha256 })).sort(codepoint);
   const actual = collected.entries.map(({ path: assetPath, size, sha256 }) => ({ path: assetPath, size, sha256 })).sort(codepoint);
   need(equal(actual, expected), 'Current browser asset bytes differ from pinned ordinary plan');
-  const payloads = new Map(previousAssetBytes);
-  for (const [assetPath, bytes] of collected.payloads) payloads.set(assetPath, bytes);
-  const ledger = mergeAssetLedger({ previous: prior, current: { entries: collected.entries, payloads }, workerName, accountId,
+  const retained = preserveRootHtmlArchive({ application: app, previous: prior, previousAssetBytes, current: collected });
+  const ledger = mergeAssetLedger({ previous: prior, current: retained.current, workerName, accountId,
     sourceCommit: ordinaryPlan.sourceCommit, parentVersionId, observedAt });
   const bytes = ledgerBytes(ledger);
   const modulePin = Object.freeze({ name: '__ops_release_ledger.json', type: 'Text', mime: 'text/plain',
@@ -82,6 +81,7 @@ function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, 
   const pinnedOrdinaryPlan = deepFreeze(structuredClone(ordinaryPlan));
   return deepFreeze({ schemaVersion: 2, contract: 'ordinary-frontend-retained-native-module-v2',
     application: app, workerName, accountId, sourceCommit: ordinaryPlan.sourceCommit, parentVersionId,
+    rootHtmlArchive: retained.archive,
     ordinaryPlan: pinnedOrdinaryPlan, ordinaryPlanSHA256: planHash, retentionLedger: ledger, retentionLedgerSHA256: hash(bytes),
     nativeAdditionalModule: modulePin,
     additionalModuleRule: Object.freeze({ type: 'Text', globs: Object.freeze(['__ops_release_ledger.json']), fallthrough: false }),

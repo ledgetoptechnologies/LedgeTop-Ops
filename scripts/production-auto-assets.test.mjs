@@ -1,6 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
-import {ASSET_LIMITS,collectFrontendAssets,validateAssetLedger,mergeAssetLedger,providerManifest,ledgerBytes} from './production-auto-assets.mjs';
+import {ASSET_LIMITS,collectFrontendAssets,validateAssetLedger,mergeAssetLedger,preserveRootHtmlArchive,providerManifest,ledgerBytes} from './production-auto-assets.mjs';
 const workerName='ledgetop-ops',accountId='a'.repeat(32),sourceCommit='b'.repeat(40),parentVersionId='11111111-2222-4333-8444-555555555555',observedAt='2026-10-23T12:00:00.000Z';
 const identity={workerName,accountId};const meta={...identity,sourceCommit,parentVersionId,observedAt};
 const hash=b=>createHash('sha256').update(b).digest('hex');
@@ -27,6 +27,34 @@ test('rejects malformed asset paths including encoded traversal and provider con
 test('rejects duplicate, case-colliding, unsorted and prototype-bearing entry records',()=>{for(const mutate of[l=>l.assets.push(clone(l.assets[0])),l=>l.assets.reverse(),l=>l.assets.unshift({...l.assets[0],path:'/assets/OLD.js'}),l=>l.assets[0]={...l.assets[0],extra:true},l=>Object.setPrototypeOf(l.assets[0],{extra:true}),l=>Object.defineProperty(l.assets,'extra',{value:true})]){const l=ledger();mutate(l);assert.throws(()=>validateAssetLedger(l,identity));}});
 test('requires bounded counts, byte totals, MIME and index',()=>{for(const mutate of[l=>l.assets=[],l=>l.assets=l.assets.filter(a=>a.path!='/index.html'),l=>l.assets[0].size=-1,l=>l.assets[0].size=ASSET_LIMITS.fileBytes+1,l=>l.assets[0].mime='text/html\r\nX: y',l=>l.assets[0].providerHash='x',l=>l.assets[0].sha256='x']){const l=ledger();mutate(l);assert.throws(()=>validateAssetLedger(l,identity));}const l=ledger();l.assets=Array.from({length:17},(_,i)=>({...l.assets[0],path:'/assets/'+String(i).padStart(2,'0')+'.js',size:ASSET_LIMITS.fileBytes}));l.assets.push({...ledger().assets[1]});assert.throws(()=>validateAssetLedger(l,identity),/total_bytes/);});
 test('carries ALL historical bytes and opaque provider hashes, replacing only index',()=>{const prior=ledger();prior.assets[0].providerHash='c'.repeat(32);const current=inventory({'/index.html':'new html','/assets/new.js':'new'});current.payloads.set('/assets/old.js',Buffer.from('old'));const next=mergeAssetLedger({...meta,observedAt:'2026-10-26T12:00:00.000Z',previous:prior,current});assert.deepEqual(next.assets.map(a=>a.path),['/assets/new.js','/assets/old.js','/index.html']);assert.equal(next.assets[1].providerHash,'c'.repeat(32));assert.equal(next.minimumRetentionHours,48);assert.equal(next.automaticPruning,false);assert.equal(next.assets[2].sha256,hash(Buffer.from('new html')));});
+test('archives changed prior root HTML immutably and carries it through subsequent roll-forward',()=>{
+  const priorCurrent=inventory({'/index.html':'old raw index','/assets/old.js':'old bundle'});
+  const prior=mergeAssetLedger({...meta,previous:null,current:priorCurrent});prior.assets.find(row=>row.path==='/index.html').providerHash='c'.repeat(32);
+  const current=inventory({'/index.html':'new root','/assets/new.js':'new bundle'});current.payloads.set('/assets/old.js',Buffer.from('old bundle'));
+  const preserved=preserveRootHtmlArchive({application:'operations',previous:prior,previousAssetBytes:priorCurrent.payloads,current});
+  assert.deepEqual(preserved.archive,{sourcePath:'/index.html',path:`/_ui/operations/${hash(Buffer.from('old raw index')).slice(0,40)}/index.html`,size:13,
+    sha256:hash(Buffer.from('old raw index')),mime:'text/html',transportPath:`/_ui/operations/${hash(Buffer.from('old raw index')).slice(0,40)}/`});
+  const first=mergeAssetLedger({...meta,observedAt:'2026-10-26T12:00:00.000Z',previous:prior,current:preserved.current});
+  assert.equal(first.assets.find(row=>row.path==='/index.html').providerHash,hash(Buffer.from('new root')).slice(0,32));
+  assert.equal(first.assets.find(row=>row.path===preserved.archive.path).providerHash,hash(Buffer.from('old raw index')).slice(0,32));
+  assert.equal(preserved.current.payloads.get(preserved.archive.path).toString(),'old raw index');
+  const nextPriorBytes=new Map(preserved.current.payloads);
+  const nextBuild=inventory({'/index.html':'third root','/assets/new.js':'new bundle'});
+  const secondPreserved=preserveRootHtmlArchive({application:'operations',previous:first,previousAssetBytes:nextPriorBytes,current:nextBuild});
+  const second=mergeAssetLedger({...meta,observedAt:'2026-10-27T12:00:00.000Z',previous:first,current:secondPreserved.current});
+  assert.equal(nextPriorBytes.get(preserved.archive.path).toString(),'old raw index');
+  assert.equal(second.assets.find(row=>row.path===preserved.archive.path).sha256,hash(Buffer.from('old raw index')));
+  assert.equal(second.assets.find(row=>row.path===secondPreserved.archive.path).sha256,hash(Buffer.from('new root')));
+  assert.equal(second.assets.find(row=>row.path==='/index.html').sha256,hash(Buffer.from('third root')));
+});
+test('does not create a redundant archive for unchanged root and refuses archive namespace collisions',()=>{
+  const current=inventory(),prior=mergeAssetLedger({...meta,previous:null,current});
+  const unchanged=preserveRootHtmlArchive({application:'operations',previous:prior,previousAssetBytes:current.payloads,current:inventory()});
+  assert.equal(unchanged.archive,null);
+  const digest=hash(Buffer.from('html'));
+  const collision=inventory({'/index.html':'new',[`/_ui/operations/${digest.slice(0,40)}/index.html`]:'attacker'});
+  assert.throws(()=>preserveRootHtmlArchive({application:'operations',previous:prior,previousAssetBytes:current.payloads,current:collision}),/archive_collision/);
+});
 test('holds when an old byte payload is missing instead of dropping its path',()=>assert.throws(()=>mergeAssetLedger({...meta,previous:ledger(),current:inventory({'/index.html':'new'})}),/payload_inventory|payload_missing/));
 test('holds on historical changed bytes, metadata or case collisions',()=>{for(const files of[{'/index.html':'new','/assets/old.js':'CHANGED'},{'/index.html':'new','/assets/OLD.js':'old'}])assert.throws(()=>mergeAssetLedger({...meta,previous:ledger(),current:inventory(files)}),/historical_path_changed|case_collision/);const current=inventory();current.entries[0].mime='text/plain';assert.throws(()=>mergeAssetLedger({...meta,previous:ledger(),current}),/historical_path_changed/);});
 test('migrates only the exact retained favicon MIME alias and preserves its old provider identifier',()=>{const previous=mergeAssetLedger({...meta,previous:null,current:faviconInventory('image/x-icon')});const priorIcon=previous.assets.find(row=>row.path==='/favicon.ico');priorIcon.providerHash='c'.repeat(32);const current=faviconInventory('image/vnd.microsoft.icon');const next=mergeAssetLedger({...meta,observedAt:'2026-10-26T12:00:00.000Z',previous,current});const nextIcon=next.assets.find(row=>row.path==='/favicon.ico');assert.equal(nextIcon.mime,'image/vnd.microsoft.icon');assert.equal(nextIcon.providerHash,'c'.repeat(32));});
