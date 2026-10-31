@@ -15,6 +15,7 @@ const sourceCommit = 'dc8cedfe953ce75eb2f65de846de74d076b820f8';
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const safeTarget = structuredClone(STAGING_OPS_0226_TARGET);
 const nowIso = () => new Date().toISOString();
+const wireFixture = JSON.parse(fs.readFileSync(new URL('./fixtures/staging-ops-0226-wrangler-wire-statements.json', import.meta.url), 'utf8'));
 
 function fixture() {
   const db = new DatabaseSync(':memory:');
@@ -92,7 +93,8 @@ function providerFor(db, { mutateAfterApply = false } = {}) {
       assert.equal(name, '0226_staff_login_bindings.sql');
       assert.equal(migrationSha, 'c25b03f4499c6de80d586a583c0e59b8c39b264248645c59733304ebe751d0c5');
       assert.equal(appendLedger, true);
-      db.exec(sql);
+      db.exec('PRAGMA foreign_keys = ON');
+      for (const statement of wireFixture.statements) db.exec(statement);
       db.prepare('INSERT INTO d1_migrations(name) VALUES(?)').run(name);
       if (typeof mutateAfterApply === 'function') mutateAfterApply(db);
       else if (mutateAfterApply) db.prepare(`UPDATE staff_role_assignments SET created_at='changed' WHERE id='role-assignment-history'`).run();
@@ -116,6 +118,21 @@ test('pinned baseline comes from actual staging capsule metadata and exact table
       assert.deepEqual(db.prepare(`PRAGMA table_info("${table}")`).all().map(column => column.name), columns);
     }
   } finally { db.close(); }
+});
+
+test('pinned Wrangler wire statements reproduce the actual two-comment SQLite definition', () => {
+  const rawDb = fixture(), wireDb = fixture();
+  try {
+    const source = fs.readFileSync(new URL('../apps/operations/migrations/0226_staff_login_bindings.sql', import.meta.url), 'utf8');
+    rawDb.exec(source);
+    for (const statement of wireFixture.statements) wireDb.exec(statement);
+    const raw = rawDb.prepare("SELECT sql FROM sqlite_master WHERE name='staff_login_binding_linked'").get().sql;
+    const wire = wireDb.prepare("SELECT sql FROM sqlite_master WHERE name='staff_login_binding_linked'").get().sql;
+    assert.match(raw, /Invalidate ephemeral native contexts/u);
+    assert.doesNotMatch(wire, /Invalidate ephemeral native contexts/u);
+    assert.notEqual(raw, wire);
+    assert.equal(hash(JSON.stringify(wireFixture.statements)), wireFixture.statementsSha256);
+  } finally { rawDb.close(); wireDb.close(); }
 });
 
 test('compiles and executes only the pinned 0226 migration, preserving complete staff/role/admission history', async t => {
@@ -193,6 +210,17 @@ test('postwrite row drift is held with one attempt and no retry', async t => {
   assert.match(fs.readFileSync(local.journalPath, 'utf8'), /migration-0226-postread-unverified/u);
   await assert.rejects(operator.executeOnce({ plan, provider, journalPath:local.journalPath }), /journal_exists_no_replay/u);
   assert.equal(calls.mutations, 1);
+});
+
+test('a corrupted wire trigger is rejected by exact schema verification', async t => {
+  const db = fixture(), local = journalLocation(); t.after(() => { db.close(); local.cleanup(); });
+  const before = capture(db,'preflight'), operator = createStagingOps0226Operator({ baseline:baselineFrom(before) });
+  const plan = operator.compile(before,{sourceCommit,now:Date.now()});
+  const { provider, calls } = providerFor(db,{mutateAfterApply: database => {
+    database.exec("DROP TRIGGER staff_login_binding_linked; CREATE TRIGGER staff_login_binding_linked AFTER INSERT ON staff_login_bindings BEGIN SELECT 1; END;");
+  }});
+  await assert.rejects(operator.executeOnce({plan,provider,journalPath:local.journalPath}), /schema_delta_not_exact/u);
+  assert.equal(calls.mutations,1);
 });
 
 test('ambiguous apply response is journaled and never retried', async t => {

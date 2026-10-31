@@ -7,6 +7,10 @@ import { DatabaseSync } from 'node:sqlite';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MIGRATION_NAME = '0226_staff_login_bindings.sql';
 const MIGRATION_SHA256 = 'c25b03f4499c6de80d586a583c0e59b8c39b264248645c59733304ebe751d0c5';
+const WIRE_FIXTURE_PATH = path.join(ROOT, 'scripts','fixtures','staging-ops-0226-wrangler-wire-statements.json');
+const WIRE_FIXTURE_SHA256 = 'fd02f7220e2afaeb1105a19da0dc14b3c9329c084ac6500b8d0b5e32b440edb3';
+const WIRE_STATEMENTS_SHA256 = '29c324b1daa438c532ae050cb4f0d0e1db10b24eb4e876cef7682a9c98e03474';
+const WIRE_SCHEMA_SHA256 = '2ec57a1391b2f63a042ff0e85b358e3666b74f4cc366eff7651c7cd4fbe4c729';
 const COMMIT = /^[a-f0-9]{40}$/u;
 const SHA = /^[a-f0-9]{64}$/u;
 const MAX_ROWS = 20_000;
@@ -161,15 +165,40 @@ function validateBaseline(snapshot, baseline, now) {
   return { namesSha256, ledgerSha256, schemaSha256, state };
 }
 
-function expectedLoginObjects(sql) {
+function readPinnedWireStatements(sourceSql) {
+  if (hash(Buffer.from(sourceSql, 'utf8')) !== MIGRATION_SHA256) fail('migration_pin_mismatch');
+  let bytes, fixture;
+  try {
+    bytes = fs.readFileSync(WIRE_FIXTURE_PATH);
+    if (hash(bytes) !== WIRE_FIXTURE_SHA256) fail('wire_fixture_pin_mismatch');
+    fixture = JSON.parse(bytes.toString('utf8'));
+  } catch (error) {
+    if (error?.message?.startsWith('staging_ops_0226:')) throw error;
+    fail('wire_fixture_unavailable');
+  }
+  if (!exactKeys(fixture, ['schemaVersion','sourceMigrationSha256','wranglerCliSha256','splitterOutputStatementCount',
+    'setupStatements','statementCount','statementsSha256','expectedAddedSchemaSha256','expectedAddedObjectCount','statements'])
+    || fixture.schemaVersion !== 1 || fixture.sourceMigrationSha256 !== MIGRATION_SHA256
+    || fixture.wranglerCliSha256 !== 'a1a7a98e0b073d39dc3229b1b89f66accb51ae557fb34552250f914f12a81efd'
+    || fixture.splitterOutputStatementCount !== 25 || canonical(fixture.setupStatements) !== canonical(['PRAGMA foreign_keys = ON'])
+    || fixture.statementCount !== 24 || !Array.isArray(fixture.statements) || fixture.statements.length !== 24
+    || fixture.statements.some(statement => typeof statement !== 'string' || statement.length === 0)
+    || hash(JSON.stringify(fixture.statements)) !== WIRE_STATEMENTS_SHA256 || fixture.statementsSha256 !== WIRE_STATEMENTS_SHA256
+    || fixture.expectedAddedSchemaSha256 !== WIRE_SCHEMA_SHA256 || fixture.expectedAddedObjectCount !== 23)
+    fail('wire_fixture_invalid');
+  return fixture;
+}
+
+function expectedLoginObjects(statements) {
   const db = new DatabaseSync(':memory:');
   try {
+    db.exec('PRAGMA foreign_keys = ON');
     db.exec(`PRAGMA foreign_keys=ON;
       CREATE TABLE staff_users(id TEXT PRIMARY KEY,email TEXT NOT NULL,display_name TEXT NOT NULL,access_subject TEXT,status TEXT NOT NULL);
       CREATE TABLE staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT);
       CREATE TABLE staff_permission_overrides(staff_id TEXT,permission_key TEXT,effect TEXT,scope TEXT);
       CREATE TABLE native_staff_profiles(staff_id TEXT PRIMARY KEY,version INTEGER NOT NULL,updated_at TEXT);`);
-    db.exec(sql);
+    for (const statement of statements) db.exec(statement);
     const all = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE sql IS NOT NULL AND substr(name,1,12)='staff_login_' ORDER BY type,name")
       .all();
     const named = all.filter(row => row.name.startsWith('staff_login_'));
@@ -213,10 +242,12 @@ function planHash(plan) { return hash(canonical(unsignedPlan(plan))); }
 function compileWithBaseline(snapshot, { baseline, sourceCommit, root = ROOT, now = Date.now() } = {}) {
   if (!commitValid(sourceCommit)) fail('source_commit_invalid');
   const sql = migrationSql(root), pre = receiptProjection(snapshot, baseline, now);
-  const expectedObjects = expectedLoginObjects(sql);
+  const wire = readPinnedWireStatements(sql), expectedObjects = expectedLoginObjects(wire.statements);
+  if (schemaFingerprint(expectedObjects) !== WIRE_SCHEMA_SHA256) fail('wire_expected_schema_mismatch');
   const plan = { schemaVersion: 1, contract: 'staging-ops-staff-login-0226-one-shot-v1', sourceCommit,
     target: STAGING_OPS_0226_TARGET, compiledAt: new Date(now).toISOString(), expiresAt: new Date(now + PLAN_TTL_MS).toISOString(),
     migration: { name: MIGRATION_NAME, sha256: MIGRATION_SHA256, sql, ledgerAppend: true },
+    wireFixtureSha256: WIRE_FIXTURE_SHA256, wireStatementsSha256: WIRE_STATEMENTS_SHA256,
     expectedAddedObjectsSha256: schemaFingerprint(expectedObjects), expectedAddedObjectCount: expectedObjects.length,
     expectedNamedObjectCount: 23, preflight: pre };
   plan.planSha256 = planHash(plan);
@@ -235,7 +266,7 @@ export function createStagingOps0226Operator({ baseline = STAGING_OPS_0226_BASEL
       if (!path.isAbsolute(journalPath ?? '')) fail('journal_path_invalid');
       if (fs.existsSync(journalPath)) fail('journal_exists_no_replay');
       if (!exactKeys(plan, ['schemaVersion','contract','sourceCommit','target','compiledAt','expiresAt','migration',
-        'expectedAddedObjectsSha256','expectedAddedObjectCount','expectedNamedObjectCount','preflight','planSha256'])
+        'wireFixtureSha256','wireStatementsSha256','expectedAddedObjectsSha256','expectedAddedObjectCount','expectedNamedObjectCount','preflight','planSha256'])
         || plan.schemaVersion !== 1 || plan.contract !== 'staging-ops-staff-login-0226-one-shot-v1'
         || plan.planSha256 !== planHash(plan) || !commitValid(plan.sourceCommit)) fail('plan_invalid');
       if (!exactKeys(plan.migration, ['name','sha256','sql','ledgerAppend'])
@@ -247,7 +278,9 @@ export function createStagingOps0226Operator({ baseline = STAGING_OPS_0226_BASEL
       validateTarget(plan.target);
       if (plan.migration.name !== MIGRATION_NAME || plan.migration.sha256 !== MIGRATION_SHA256
         || plan.migration.ledgerAppend !== true || hash(Buffer.from(plan.migration.sql, 'utf8')) !== MIGRATION_SHA256
+        || plan.wireFixtureSha256 !== WIRE_FIXTURE_SHA256 || plan.wireStatementsSha256 !== WIRE_STATEMENTS_SHA256
         || Date.parse(plan.expiresAt) <= now() || Date.parse(plan.compiledAt) > now()) fail('plan_expired_or_migration_pin_mismatch');
+      const wire = readPinnedWireStatements(plan.migration.sql);
 
       const beforeSnapshot = await provider.readSnapshot({ target: STAGING_OPS_0226_TARGET, phase: 'immediate-prewrite',
         query: STAGING_OPS_0226_PRE_READ_QUERY });
@@ -347,7 +380,8 @@ function validatePostSnapshot(beforeSnapshot, afterSnapshot, plan, baseline, now
     || beforeLedger.some((row,index) => row.id !== afterSnapshot.ledger[index]?.id || row.name !== afterSnapshot.ledger[index]?.name)
     || afterSnapshot.ledger.at(-1)?.id !== beforeLedger.at(-1)?.id + 1
     || afterSnapshot.ledger.at(-1)?.name !== MIGRATION_NAME) fail('ledger_append_not_exact');
-  const newObjects = expectedLoginObjects(plan.migration.sql), preKeys = new Set(beforeSnapshot.schema.map(objectKey));
+  const wire = readPinnedWireStatements(plan.migration.sql);
+  const newObjects = expectedLoginObjects(wire.statements), preKeys = new Set(beforeSnapshot.schema.map(objectKey));
   const oldAfter = afterSnapshot.schema.filter(row => preKeys.has(objectKey(row)));
   const addedAfter = afterSnapshot.schema.filter(row => !preKeys.has(objectKey(row)));
   if (canonical(oldAfter) !== canonical(beforeSnapshot.schema) || canonical(addedAfter) !== canonical(newObjects)
