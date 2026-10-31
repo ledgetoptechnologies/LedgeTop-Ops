@@ -6,7 +6,8 @@ import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { compileStagingV4MigrationPlan, executePreparedStagingV4Step,
   assertFreshStagingV4Controls, buildCurrentStagingV4ControlSnapshot, readCapturedStagingV4Capsule, STAGING_V4_CAPSULE_SHA256,
-  STAGING_V4_JOURNAL_ROOT, STAGING_V4_MAX_PARAM_BYTES, STAGING_V4_MAX_SQL_BYTES,
+  STAGING_V4_JOURNAL_PARENT, STAGING_V4_JOURNAL_ROOT, STAGING_V4_LEGACY_JOURNAL_ROOT,
+  isStagingV4LegacyJournalMarker, STAGING_V4_MAX_PARAM_BYTES, STAGING_V4_MAX_SQL_BYTES,
   splitMigrationSql, stagingV4JournalPaths, stagingV4MigrationOperatorProfiles,
   validatePreparedStagingV4Plan } from './staging-v4-migration-operator.mjs';
 
@@ -225,6 +226,13 @@ test('each Worker requires its own exact default-off gates and accepts the pinne
 });
 
 test('intent identity and journal path remain stable across recompile; callers cannot select a directory', fixtureTest, async () => {
+  assert.equal(STAGING_V4_JOURNAL_ROOT, path.join(STAGING_V4_JOURNAL_PARENT, 'staging-v4-migrations'));
+  assert.equal(path.dirname(STAGING_V4_JOURNAL_ROOT), STAGING_V4_JOURNAL_PARENT);
+  assert.notEqual(STAGING_V4_JOURNAL_ROOT, STAGING_V4_LEGACY_JOURNAL_ROOT);
+  assert.equal(isStagingV4LegacyJournalMarker(`${'a'.repeat(32)}.attempt.json`), true);
+  assert.equal(isStagingV4LegacyJournalMarker(`${'b'.repeat(32)}.postcheck.json`), true);
+  assert.equal(isStagingV4LegacyJournalMarker('notes.json'), false);
+  assert.equal(isStagingV4LegacyJournalMarker(`${'a'.repeat(32)}.other.json`), false);
   const capsule = readCapturedStagingV4Capsule(capsulePath);
   const originalPlan = compileStagingV4MigrationPlan({ capsule, application: 'client',
     runId: '77b33374-8164-4e89-88b9-4a2a0ef12004' });

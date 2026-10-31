@@ -27,7 +27,9 @@ export const STAGING_V4_MAX_PARAMS = 100;
 export const STAGING_V4_MAX_BATCH_STATEMENTS = 100;
 export const STAGING_V4_CONTROL_MAX_AGE_MS = 5 * 60 * 1000;
 export const STAGING_V4_CONTROL_FUTURE_SKEW_MS = 30 * 1000;
-export const STAGING_V4_JOURNAL_ROOT = path.resolve('C:/Users/fstor/.codex/artifacts/staging-v4-migration-journal');
+export const STAGING_V4_JOURNAL_PARENT = path.resolve('C:/Users/fstor/.codex/artifacts/production-ops-retained-resume-execution-20261031');
+export const STAGING_V4_JOURNAL_ROOT = path.join(STAGING_V4_JOURNAL_PARENT, 'staging-v4-migrations');
+export const STAGING_V4_LEGACY_JOURNAL_ROOT = path.resolve('C:/Users/fstor/.codex/artifacts/staging-v4-migration-journal');
 const MAX_BATCH_BYTES = 8 * 1024 * 1024;
 const INTERNAL_SCHEMA_SQL = `SELECT type,name,tbl_name,sql FROM sqlite_schema
   WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*'
@@ -77,6 +79,9 @@ export function stagingV4JournalPaths(intentId) {
   return Object.freeze({ root: STAGING_V4_JOURNAL_ROOT,
     attempt: path.join(STAGING_V4_JOURNAL_ROOT, `${intentId}.attempt.json`),
     completion: path.join(STAGING_V4_JOURNAL_ROOT, `${intentId}.postcheck.json`) });
+}
+export function isStagingV4LegacyJournalMarker(name) {
+  return typeof name === 'string' && /^[a-f0-9]{32}\.(?:attempt|postcheck)\.json$/u.test(name);
 }
 function deepFreeze(value, seen = new WeakSet()) {
   if (!value || typeof value !== 'object' || seen.has(value)) return value;
@@ -380,40 +385,68 @@ export function validatePreparedStagingV4Plan(plan, capsule, { root = ROOT } = {
   return rebuilt;
 }
 
-function ensureFixedJournalRoot() {
-  if (process.platform !== 'win32' || path.resolve(STAGING_V4_JOURNAL_ROOT) !== STAGING_V4_JOURNAL_ROOT) {
-    throw safeError('fixed_private_journal_unavailable');
-  }
-  const root = path.parse(STAGING_V4_JOURNAL_ROOT).root;
+function assertRegularPathChain(targetPath, allowMissingLeaf = false) {
+  const absolute = path.resolve(targetPath);
+  const root = path.parse(absolute).root;
   let current = root;
-  const remainder = STAGING_V4_JOURNAL_ROOT.slice(root.length).split(path.sep).filter(Boolean);
-  for (const part of remainder) {
-    current = path.join(current, part);
-    try { fs.mkdirSync(current); } catch (error) { if (error?.code !== 'EEXIST') throw error; }
-    const stat = fs.lstatSync(current);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) throw safeError('fixed_private_journal_path_invalid');
+  const parts = absolute.slice(root.length).split(path.sep).filter(Boolean);
+  for (let index = 0; index < parts.length; index++) {
+    current = path.join(current, parts[index]);
+    let stat;
+    try { stat = fs.lstatSync(current); }
+    catch (error) {
+      if (allowMissingLeaf && index === parts.length - 1 && error?.code === 'ENOENT') return false;
+      throw safeError('fixed_private_journal_path_invalid');
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw safeError('fixed_private_journal_path_invalid');
+    }
   }
-  const helper = path.join(ROOT, 'scripts/restrict-staging-v4-journal-directory.ps1');
-  const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', helper,
-    '-LiteralDirectory', STAGING_V4_JOURNAL_ROOT], { windowsHide: true, encoding: 'utf8', timeout: 30000,
-    stdio: ['ignore', 'ignore', 'ignore'] });
-  if (result.error || result.status !== 0) throw safeError('private_journal_directory_acl_failed');
+  return true;
 }
 
-function restrictPrivateArtifactFile(file) {
-  const helper = path.join(ROOT, 'scripts/restrict-private-authority-file.ps1');
-  const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', helper,
-    '-LiteralFile', file], { windowsHide: true, encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'ignore', 'ignore'] });
-  if (result.error || result.status !== 0) throw safeError('private_journal_acl_failed');
+function verifyJournalAcl({ child = false, file } = {}) {
+  const helper = path.join(ROOT, 'scripts/verify-staging-v4-journal-acl.ps1');
+  const args = ['-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', helper,
+    '-LiteralParent', STAGING_V4_JOURNAL_PARENT];
+  if (child) args.push('-LiteralChild', STAGING_V4_JOURNAL_ROOT);
+  if (file) args.push('-LiteralFile', file);
+  const result = spawnSync('powershell.exe', args, { windowsHide: true, encoding: 'utf8', timeout: 30000,
+    stdio: ['ignore', 'ignore', 'ignore'] });
+  if (result.error || result.status !== 0) throw safeError('private_journal_acl_verification_failed');
+}
+
+function rejectLegacyJournalMarkers() {
+  if (!assertRegularPathChain(STAGING_V4_LEGACY_JOURNAL_ROOT, true)) return;
+  const stat = fs.lstatSync(STAGING_V4_LEGACY_JOURNAL_ROOT);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw safeError('legacy_journal_path_invalid');
+  const names = fs.readdirSync(STAGING_V4_LEGACY_JOURNAL_ROOT);
+  if (names.some(isStagingV4LegacyJournalMarker)) throw safeError('legacy_journal_contains_markers');
+}
+
+function ensureFixedJournalRoot() {
+  if (process.platform !== 'win32' || path.resolve(STAGING_V4_JOURNAL_PARENT) !== STAGING_V4_JOURNAL_PARENT
+    || path.resolve(STAGING_V4_JOURNAL_ROOT) !== STAGING_V4_JOURNAL_ROOT
+    || path.dirname(STAGING_V4_JOURNAL_ROOT) !== STAGING_V4_JOURNAL_PARENT) throw safeError('fixed_private_journal_unavailable');
+  if (!assertRegularPathChain(STAGING_V4_JOURNAL_PARENT)) throw safeError('fixed_private_journal_parent_missing');
+  verifyJournalAcl();
+  rejectLegacyJournalMarkers();
+  if (!assertRegularPathChain(STAGING_V4_JOURNAL_ROOT, true)) {
+    // This dedicated directory inherits the already-reviewed private parent ACL.
+    // Never create parents recursively or change permissions here.
+    fs.mkdirSync(STAGING_V4_JOURNAL_ROOT);
+  }
+  assertRegularPathChain(STAGING_V4_JOURNAL_ROOT);
+  verifyJournalAcl({ child: true });
 }
 
 function writeOnce(file, value) {
   ensureFixedJournalRoot();
   if (path.dirname(path.resolve(file)) !== STAGING_V4_JOURNAL_ROOT) throw safeError('fixed_private_journal_path_invalid');
   const bytes = Buffer.from(`${canonical(value)}\n`, 'utf8');
-  const createFd = fs.openSync(file, 'wx', 0o600);
+  const createFd = fs.openSync(file, 'wx');
   fs.closeSync(createFd);
-  restrictPrivateArtifactFile(file);
+  verifyJournalAcl({ child: true, file });
   const stat = fs.lstatSync(file);
   if (!stat.isFile() || stat.isSymbolicLink()) throw safeError('private_journal_file_invalid');
   const fd = fs.openSync(file, 'r+');
