@@ -37,10 +37,12 @@ function session(value: unknown): string | null {
   const parsed = ownRecord(value, ["csrfToken"]);
   return parsed && typeof parsed.csrfToken === "string" && CSRF.test(parsed.csrfToken) ? parsed.csrfToken : null;
 }
+const INSPECT_KEYS = ["intentId", "revision", "state", "target", "expiresAt"];
 function inspected(value: unknown, intentId: string, protocol: Protocol): Target | null {
-  const parsed = ownRecord(value, protocol === "operations-native"
-    ? ["intentId", "revision", "state", "target", "expiresAt", "permissions", "permissionSchemaVersion"]
-    : ["intentId", "revision", "state", "target", "expiresAt"]);
+  // An Ops link states its access, except a home-only one from a backend that predates access metadata:
+  // exactly the original five keys, read as schema 3 home-only. Requests are never inferred from missing fields.
+  const native = protocol === "operations-native" && ownRecord(value, [...INSPECT_KEYS, "permissions", "permissionSchemaVersion"]);
+  const parsed = native || ownRecord(value, INSPECT_KEYS);
   const target = parsed && ownRecord(parsed.target, protocol === "operations-native"
     ? ["clientRecordId", "targetId", "targetRevision", "displayLabel"] : ["clientRecordId", "selectionId", "displayLabel"]);
   if (!parsed || parsed.intentId !== intentId || parsed.revision !== 1 || parsed.state !== "issued"
@@ -51,8 +53,9 @@ function inspected(value: unknown, intentId: string, protocol: Protocol): Target
     if (typeof target.targetId !== "string" || !UUID.test(target.targetId) || typeof target.targetRevision !== "number"
       || !Number.isSafeInteger(target.targetRevision) || target.targetRevision < 1) return null;
     const permissions = parsed.permissions;
-    const access = Array.isArray(permissions) && NATIVE_ACCESS.find(item => item.schemaVersion === parsed.permissionSchemaVersion
-      && item.permissions.length === permissions.length && item.permissions.every((name, index) => permissions[index] === name));
+    const access = !native ? NATIVE_ACCESS[0] : Array.isArray(permissions) && NATIVE_ACCESS.find(item =>
+      item.schemaVersion === parsed.permissionSchemaVersion
+        && item.permissions.length === permissions.length && item.permissions.every((name, index) => permissions[index] === name));
     if (!access) return null;
     return { clientRecordId: target.clientRecordId, targetId: target.targetId,
       targetRevision: target.targetRevision, displayLabel: target.displayLabel, permissions: access.permissions,
