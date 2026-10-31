@@ -38,6 +38,79 @@ function deferred<T>() { let resolve!: (value: T) => void; const promise = new P
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("employee private read transport", () => {
+  it("exposes exact gateway busy only to the authorized queue manifest flow", async () => {
+    for (const allowed of [false, true]) {
+      const h = harness(Response.json({ schemaVersion: 1, error: "gateway-busy" }, { status: 503 }));
+      const result = await readEmployeeGateway(proof(), selection("manifest"), config(), { ...h.dependencies, allowQueueResolveBusy: allowed });
+      expect(result.status).toBe(503);
+      expect(await result.json()).toEqual({ error: allowed ? "employee_gateway_busy" : "employee_read_unavailable" });
+      expect(result.headers.get("Cache-Control")).toContain("no-store");
+      expect(h.auditContentStart).not.toHaveBeenCalled();
+    }
+  });
+  it.each([
+    ['{"schemaVersion":1,"error":"gateway-busy","extra":"private"}', "application/json"],
+    ['{"schemaVersion":1,"error":"gateway-busy","error":"gateway-busy"}', "application/json"],
+    ['{"schemaVersion":1,"error":"other-private-detail"}', "application/json"],
+    ['{invalid', "application/json"],
+    ['x'.repeat(129), "application/json"],
+    ['{"schemaVersion":1,"error":"gateway-busy"}', "text/plain"],
+  ])("keeps malformed or untrusted gateway errors generic", async (body, type) => {
+    const h = harness(new Response(body, { status: 503, headers: { "Content-Type": type } }));
+    const result = await readEmployeeGateway(proof(), selection("manifest"), config(), { ...h.dependencies, allowQueueResolveBusy: true });
+    expect(result.status).toBe(503); expect(await result.text()).toBe('{"error":"employee_read_unavailable"}');
+    expect(h.auditContentStart).not.toHaveBeenCalled();
+  });
+  it("cancels an oversized busy body and a body with a rejected media type", async () => {
+    for (const oversized of [false, true]) {
+      const cancel = vi.fn(); let sent = false;
+      const body = new ReadableStream<Uint8Array>({ pull(c) { if (oversized && !sent) { sent = true; c.enqueue(new Uint8Array(129)); } }, cancel }, { highWaterMark: 0 });
+      const h = harness(new Response(body, { status: 503, headers: { "Content-Type": oversized ? "application/json" : "text/plain" } }));
+      const result = await readEmployeeGateway(proof(), selection("manifest"), config(), { ...h.dependencies, allowQueueResolveBusy: true });
+      expect(result.status).toBe(503); expect(await result.json()).toEqual({ error: "employee_read_unavailable" });
+      expect(cancel).toHaveBeenCalledOnce();
+    }
+  });
+  it("rechecks authority after reading a busy body", async () => {
+    const h = harness(new Response(new ReadableStream({ pull(c) {
+      h.recheck.mockResolvedValue(false); c.enqueue(new TextEncoder().encode('{"schemaVersion":1,"error":"gateway-busy"}')); c.close();
+    } }, { highWaterMark: 0 }), { status: 503, headers: { "Content-Type": "application/json" } }));
+    const result = await readEmployeeGateway(proof(), selection("manifest"), config(), { ...h.dependencies, allowQueueResolveBusy: true });
+    expect(result.status).toBe(403); expect(await result.json()).toEqual({ error: "employee_read_denied" });
+  });
+  it("refuses a busy response when the proof expires while its body is read", async () => {
+    const now = Date.now(), p = proof();
+    const h = harness(new Response(new ReadableStream({ pull(c) {
+      vi.spyOn(Date, "now").mockReturnValue(now + 3_700_000);
+      c.enqueue(new TextEncoder().encode('{"schemaVersion":1,"error":"gateway-busy"}')); c.close();
+    } }, { highWaterMark: 0 }), { status: 503, headers: { "Content-Type": "application/json" } }));
+    const result = await readEmployeeGateway(p, selection("manifest"), config(), { ...h.dependencies, allowQueueResolveBusy: true });
+    expect(result.status).toBe(403); expect(await result.json()).toEqual({ error: "employee_read_denied" });
+  });
+  it("does not interpret encoded errors as a busy signal", async () => {
+    const cancel = vi.fn();
+    const h = harness(new Response(new ReadableStream({ cancel }), { status: 503, headers: { "Content-Type": "application/json", "Content-Encoding": "gzip" } }));
+    const result = await readEmployeeGateway(proof(), selection("manifest"), config(), { ...h.dependencies, allowQueueResolveBusy: true });
+    expect(result.status).toBe(503); expect(await result.json()).toEqual({ error: "employee_read_unavailable" }); expect(cancel).toHaveBeenCalledOnce();
+  });
+  it("cancels a stalled busy body on caller abort without exposing its response", async () => {
+    const entered = deferred<void>(), cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({ pull() { entered.resolve(); }, cancel }, { highWaterMark: 0 });
+    const h = harness(new Response(body, { status: 503, headers: { "Content-Type": "application/json" } }));
+    const controller = new AbortController();
+    const pending = readEmployeeGateway(proof(), selection("manifest"), config(), { ...h.dependencies, allowQueueResolveBusy: true }, controller.signal);
+    await entered.promise; controller.abort();
+    const result = await pending; expect(result.status).toBe(403); expect(cancel).toHaveBeenCalledOnce();
+    expect(await result.json()).toEqual({ error: "employee_read_denied" });
+  });
+  it("times out a stalled busy body without awaiting a stuck cancellation", async () => {
+    const cancel = vi.fn(() => new Promise<void>(() => {}));
+    const body = new ReadableStream<Uint8Array>({ pull() {}, cancel }, { highWaterMark: 0 });
+    const h = harness(new Response(body, { status: 503, headers: { "Content-Type": "application/json" } }));
+    const result = await readEmployeeGateway(proof(), selection("manifest"), config(), { ...h.dependencies, allowQueueResolveBusy: true });
+    expect(result.status).toBe(503); expect(await result.json()).toEqual({ error: "employee_read_unavailable" });
+    expect(cancel).toHaveBeenCalledOnce();
+  }, 5_000);
   it("matches the shared independently generated Python/TypeScript protocol fixture", async () => {
     const vector = JSON.parse(readFileSync(new URL("../../employee-read-gateway/testdata/protocol-vector.json", import.meta.url), "utf8"));
     const claims = JSON.parse(vector.body);
