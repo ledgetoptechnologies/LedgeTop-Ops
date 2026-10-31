@@ -128,7 +128,11 @@ function checkedHeldPlan(planOptions, heldPlan) {
   const serviceRows = template.bindings.filter(row => row.type === 'service');
   need(inheritRows.length === template.bindings.length - serviceRows.length
     && inheritRows.every(row => row.version_id === heldPlan.selectedActiveVersionId)
-    && serviceRows.length === (app === 'client' ? 1 : 0),
+    && serviceRows.length === (app === 'client' ? 1 : 0)
+    && (app !== 'client' || equal(serviceRows, [
+      { name: 'OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES', type: 'service', service: 'ledgetop-ops-staging',
+        entrypoint: 'OperationsNativePrincipalInquiryIngress' },
+    ])),
   'Existing non-service bindings must inherit from the reviewed active version');
   return heldPlan;
 }
@@ -350,12 +354,13 @@ function safeVersionCreateTemplate(plan, completionJwt) {
   params.assets = { config: clone(plan.assetUploadRecipe.assetsConfig), jwt: completionJwt };
   params.deploy = false;
   params.bindings_inherit = 'strict';
+  const nonAssetBindings = params.bindings.filter(row => row.name !== 'ASSETS');
   need(params.bindings.filter(row => row.name === 'ASSETS').length === 1
     && params.bindings.find(row => row.name === 'ASSETS')?.type === 'assets'
-    && params.bindings.filter(row => row.name !== 'ASSETS').every(row => row.type === 'inherit'
-      && row.version_id === plan.selectedActiveVersionId)
+    && equal(nonAssetBindings, plan.versionCreateTemplate.bindings)
+    && nonAssetBindings.filter(row => row.type === 'inherit').every(row => row.version_id === plan.selectedActiveVersionId)
     && params.deploy === false && params.assets.config && params.assets.jwt === completionJwt,
-  'Final candidate must use exact uploaded assets and explicit baseline inheritance without deployment');
+  'Final candidate must use exact uploaded assets and only the plan-pinned inheritance and service bindings');
   return params;
 }
 
@@ -367,9 +372,10 @@ function checkReadback(readback, candidateVersionId, plan, candidateParams) {
     && readback.latestVersionId === candidateVersionId,
   'Fresh candidate readback did not preserve the baseline 100% deployment and identify the candidate as latest');
   const candidate = readback.candidate;
-  need(ownKeysAre(candidate, ['id','mainModule','modules','bindings','assetsConfig','compatibilityDate','compatibilityFlags','exports'])
+  need(ownKeysAre(candidate, ['id','mainModule','modules','resolvedBindings','assetsConfig','compatibilityDate','compatibilityFlags','exports'])
     && candidate.id === candidateVersionId && candidate.mainModule === candidateParams.main_module
-    && Array.isArray(candidate.modules) && candidate.modules.length === candidateParams.modules.length,
+    && Array.isArray(candidate.modules) && candidate.modules.length === candidateParams.modules.length
+    && Array.isArray(candidate.resolvedBindings),
   'Candidate readback does not match its source and pinned metadata');
   const expectedModules = candidateParams.modules.map((module, index) => {
     const pin = index === 0 ? plan.artifact.main : plan.artifact.sourceMap;
@@ -380,14 +386,32 @@ function checkReadback(readback, candidateVersionId, plan, candidateParams) {
       'Candidate module readback requires exact name, size and hash fields');
     return row;
   });
-  need(equal(actualModules, expectedModules)
-    && equal(candidate.bindings, candidateParams.bindings)
+  const expectedResolvedBindings = [
+    ...plan.expectedUnchangedResources.bindings.filter(row => row.name !== 'ASSETS'),
+    ...candidateParams.bindings.filter(row => row.type === 'service'),
+  ].sort((a, b) => a.name.localeCompare(b.name));
+  const actualResolvedBindings = candidate.resolvedBindings;
+  need(actualResolvedBindings.every(row => row && typeof row === 'object' && row.type !== 'inherit')
+    && new Set(actualResolvedBindings.map(row => row?.name)).size === actualResolvedBindings.length
+    && equal(actualModules, expectedModules)
+    && equal(actualResolvedBindings, expectedResolvedBindings)
     && equal(candidate.assetsConfig, candidateParams.assets.config)
     && candidate.compatibilityDate === candidateParams.compatibility_date
     && equal(candidate.compatibilityFlags, candidateParams.compatibility_flags)
     && equal(candidate.exports, candidateParams.exports),
   'Candidate readback differs from its reviewed source, bindings, assets or runtime metadata');
   return true;
+}
+
+/** Validate the adapter's hash-only, resolved binding projection against the
+ * pinned active capsule. `resolvedBindings` must contain installed value rows,
+ * not the request's `{type:'inherit'}` instructions or raw secret values. */
+export function validateStagingBackendAssetCandidateReadback({ readback, candidateVersionId, heldPlan, candidateParams } = {}) {
+  need(heldPlan?.schemaVersion === 3 && heldPlan.contract === 'staging-backend-only-v3'
+    && heldPlan.held === true && heldPlan.executionAllowed === false
+    && UUID.test(candidateVersionId ?? '') && candidateParams && typeof candidateParams === 'object',
+  'A held v3 plan, candidate ID and exact request are required for readback validation');
+  return checkReadback(readback, candidateVersionId, heldPlan, candidateParams);
 }
 
 /** Create a single held staging candidate. All mutations are one-shot and
@@ -465,8 +489,6 @@ export function createStagingBackendAssetCandidateUploader({ sdk, uploadBucket, 
           seenHashes.add(contentHash);
         }
       }
-      if (session.buckets.length > 0) need(seenHashes.size === files.uploads.size,
-        'Asset upload session omitted one or more reviewed assets');
       let completionJwt;
       if (session.buckets.length === 0) {
         completionJwt = token;
@@ -507,7 +529,8 @@ export function createStagingBackendAssetCandidateUploader({ sdk, uploadBucket, 
       try { readback = await readCandidateState(current.selectedWorker, candidateVersionId); }
       catch { return { candidateVersionId, readbackVerified: false }; }
       let readbackVerified = false;
-      try { readbackVerified = checkReadback(readback, candidateVersionId, current, versionRequest); } catch { /* return the candidate ID with a false readback status */ }
+      try { readbackVerified = validateStagingBackendAssetCandidateReadback({ readback, candidateVersionId,
+        heldPlan: current, candidateParams: versionRequest }); } catch { /* return the candidate ID with a false readback status */ }
       return { candidateVersionId, readbackVerified };
     } finally {
       token = undefined;

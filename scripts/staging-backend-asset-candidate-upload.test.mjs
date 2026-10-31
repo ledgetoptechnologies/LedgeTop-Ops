@@ -9,7 +9,7 @@ import { canonical, hash } from './production-deploy.mjs';
 import { STAGING_ACCOUNT_ID } from './staging-requirements.mjs';
 import { compileStagingBackendReleasePlan } from './staging-backend-release-plan.mjs';
 import { createStagingBackendAssetCandidateUploader, validateStagingBackendAssetCoverageEvidence,
-  validateStagingBackendAssetMaterialization } from './staging-backend-asset-candidate-upload.mjs';
+  validateStagingBackendAssetMaterialization, validateStagingBackendAssetCandidateReadback } from './staging-backend-asset-candidate-upload.mjs';
 
 const OPS = '1ffe4525-7e29-4ea2-a407-726abf7f10c6';
 const CLIENT = '3ba4c8c9-70b4-4696-810f-0503f512e728';
@@ -68,7 +68,7 @@ function controlWorker(app, versionId, latestVersionId = versionId) {
     selectedFlags: app === 'sync' ? {} : { ...disabled }, rawBindingsSHA256: hash(canonical(rows)), rawControlSHA256: hash(`${app}-control`) };
 }
 
-function fixture(t) {
+function fixture(t, application = 'operations') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'staging-backend-candidate-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const fixedNow = Date.now();
@@ -80,9 +80,10 @@ function fixture(t) {
   const writeBytes = (name, bytes) => { const file = path.join(root, name); fs.writeFileSync(file, bytes); return file; };
   const writeJson = (name, value) => { const bytes = Buffer.from(JSON.stringify(value)); const file = writeBytes(name, bytes); return { path: file, sha256: hash(bytes) }; };
   const controlsFile = writeJson('controls.json', capture);
-  const app = 'operations';
-  const main = writeBytes('staging-native-authority-entrypoint.js', Buffer.from('export default { fetch(){ return new Response("candidate") } };'));
-  const map = writeBytes('staging-native-authority-entrypoint.js.map', Buffer.from(JSON.stringify({ version: 3, file: 'staging-native-authority-entrypoint.js', sources: ['worker.ts'], sourcesContent: ['synthetic'], names: [], mappings: '' })));
+  const app = application, baselineVersionId = app === 'operations' ? OPS : CLIENT;
+  const mainName = app === 'operations' ? 'staging-native-authority-entrypoint.js' : 'index.js';
+  const main = writeBytes(mainName, Buffer.from('export default { fetch(){ return new Response("candidate") } };'));
+  const map = writeBytes(`${mainName}.map`, Buffer.from(JSON.stringify({ version: 3, file: mainName, sources: ['worker.ts'], sourcesContent: ['synthetic'], names: [], mappings: '' })));
   const pin = file => { const bytes = fs.readFileSync(file); return { path: file, size: bytes.length, sha256: hash(bytes) }; };
   const artifact = { sourceCommit: SOURCE, main: pin(main), sourceMap: pin(map) };
   const filesRoot = path.join(root, 'assets'); fs.mkdirSync(filesRoot);
@@ -91,7 +92,7 @@ function fixture(t) {
     const abs = path.join(filesRoot, relative); fs.mkdirSync(path.dirname(abs), { recursive: true }); fs.writeFileSync(abs, bytes);
     return { path: `/${relative}`, size: bytes.length, sha256: hash(bytes) };
   }).sort((a, b) => a.path.localeCompare(b.path));
-  const archivedIndex = `/_ui/operations/${hash(rawAssets['index.html']).slice(0, 40)}/index.html`;
+  const archivedIndex = `/_ui/${app}/${hash(rawAssets['index.html']).slice(0, 40)}/index.html`;
   const archivedRelative = archivedIndex.slice(1), archivedAbsolute = path.join(filesRoot, ...archivedRelative.split('/'));
   fs.mkdirSync(path.dirname(archivedAbsolute), { recursive: true }); fs.writeFileSync(archivedAbsolute, rawAssets['index.html']);
   rawAssets[archivedRelative] = rawAssets['index.html'];
@@ -99,8 +100,8 @@ function fixture(t) {
   assetRows.sort((a, b) => a.path.localeCompare(b.path));
   const ignore = Buffer.from('synthetic inventory marker\n'); fs.writeFileSync(path.join(filesRoot, '.assetsignore'), ignore);
   const assetsManifest = { schemaVersion: 1, purpose: 'staging-retained-assets-materialization-v1', environment: 'staging',
-    accountId: STAGING_ACCOUNT_ID, workerName: workers.operations.workerName, sourceVersionId: OPS,
-    observedAt: capture.observedAt, scope: 'local-file-materialization-only', assetsConfig: clone(workers.operations.modern.assets.config),
+    accountId: STAGING_ACCOUNT_ID, workerName: workers[app].workerName, sourceVersionId: baselineVersionId,
+    observedAt: capture.observedAt, scope: 'local-file-materialization-only', assetsConfig: clone(workers[app].modern.assets.config),
     files: assetRows, excludedFiles: [{ path: '/.assetsignore', size: ignore.length, sha256: hash(ignore) }] };
   const assetsFile = writeJson('assets.json', assetsManifest);
   const planOptions = { controlsFile, application: app, artifact, sourceCommit: SOURCE,
@@ -118,16 +119,29 @@ function fixture(t) {
   const closurePin = sourceReceipts.find(row => row.kind === 'served-path-byte-closures').sha256;
   const releases = [{ deploymentId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
     from: new Date(fixedNow - 48 * 60 * 60_000 - 2_000).toISOString(), to: new Date(fixedNow - 2_000).toISOString(),
-    versionId: OPS, percentage: 100, assetLineageEvidenceSHA256: lineage, closureEvidenceSHA256: closurePin,
+    versionId: baselineVersionId, percentage: 100, assetLineageEvidenceSHA256: lineage, closureEvidenceSHA256: closurePin,
     servedAssetClosure: assetRows }];
   const coverageBody = { schemaVersion: 1, purpose: 'staging-served-release-coverage-v1', environment: 'staging', accountId: STAGING_ACCOUNT_ID,
-    application: app, workerName: workers.operations.workerName, baselineVersionId: OPS,
+    application: app, workerName: workers[app].workerName, baselineVersionId,
     observedAt: new Date(fixedNow - 2_000).toISOString(), window: { from: new Date(fixedNow - 48 * 60 * 60_000 - 2_000).toISOString(), to: new Date(fixedNow - 2_000).toISOString() },
     sourceReceipts, releases };
   const coverageFile = writeJson('coverage.json', coverageBody);
-  return { root, fixedNow, capture, controlsFile, planOptions, heldPlan, assetsFile, coverageFile, coverageBody, assetRows, rawAssets, archivedIndex,
+  return { root, fixedNow, capture, controlsFile, planOptions, heldPlan, assetsFile, coverageFile, coverageBody, assetRows, rawAssets, archivedIndex, baselineVersionId,
     runtimeProofFile: { path: RUNTIME_PROOF, sha256: '0d4c66619a4393594008be2261c865a4b631ad0204de4d5f3e5b21d579b18d84' },
     hashBlake3: bytes => blake3(bytes).toString('hex'), writeJson };
+}
+
+function readbackFor(f, request, candidateVersionId = CANDIDATE) {
+  const serviceBindings = request.bindings.filter(row => row.type === 'service');
+  const resolvedBindings = [...f.heldPlan.expectedUnchangedResources.bindings.filter(row => row.name !== 'ASSETS'),
+    ...serviceBindings].sort((a, b) => a.name.localeCompare(b.name));
+  return { latestVersionId: candidateVersionId, deployment: [{ versionId: f.baselineVersionId, percentage: 100 }], candidate: {
+    id: candidateVersionId, mainModule: request.main_module,
+    modules: request.modules.map(module => { const pin = module.name === f.heldPlan.artifact.main.path.split(/[\\/]/u).at(-1) ? f.heldPlan.artifact.main : f.heldPlan.artifact.sourceMap;
+      return { name: module.name, bytes: pin.size, sha256: pin.sha256 }; }),
+    resolvedBindings, assetsConfig: request.assets.config, compatibilityDate: request.compatibility_date,
+    compatibilityFlags: request.compatibility_flags, exports: request.exports,
+  } };
 }
 
 function harness(f, { session, bucketResponses = [], createVersion = async () => ({ id: CANDIDATE }), readback = undefined,
@@ -151,7 +165,7 @@ function harness(f, { session, bucketResponses = [], createVersion = async () =>
   return { calls, adapter, journal };
 }
 
-test('empty asset bucket uses session completion token and creates only an inactive verified candidate', async t => {
+test('Ops empty asset bucket uses session completion token and verifies the inactive candidate', async t => {
   const f = fixture(t), coverage = validateStagingBackendAssetCoverageEvidence({ coverageEvidenceFile: f.coverageFile,
     heldPlan: f.heldPlan, now: () => f.fixedNow });
   assert.equal(coverage.requiredAssetCount, f.assetRows.length);
@@ -159,15 +173,7 @@ test('empty asset bucket uses session completion token and creates only an inact
   assert.deepEqual(validateStagingBackendAssetMaterialization({ heldPlan: f.heldPlan, hashBlake3: f.hashBlake3 }),
     { application: 'operations', fileCount: 3, uniqueUploadCount: 2, duplicateContentPathCount: 1,
       totalBytes: f.assetRows.reduce((sum, row) => sum + row.size, 0) });
-  const state = harness(f, { session: { buckets: [], jwt: 'x'.repeat(24) }, readback: request => ({
-    latestVersionId: CANDIDATE, deployment: [{ versionId: OPS, percentage: 100 }], candidate: {
-      id: CANDIDATE, mainModule: request.main_module,
-      modules: request.modules.map(module => { const pin = module.name === f.heldPlan.artifact.main.path.split(/[\\/]/u).at(-1) ? f.heldPlan.artifact.main : f.heldPlan.artifact.sourceMap;
-        return { name: module.name, bytes: pin.size, sha256: pin.sha256 }; }),
-      bindings: request.bindings, assetsConfig: request.assets.config, compatibilityDate: request.compatibility_date,
-      compatibilityFlags: request.compatibility_flags, exports: request.exports,
-    },
-  }) });
+  const state = harness(f, { session: { buckets: [], jwt: 'x'.repeat(24) }, readback: request => readbackFor(f, request) });
   const originalCreate = state.calls;
   const resultPromise = state.adapter({ planOptions: f.planOptions, heldPlan: f.heldPlan,
     runtimeProofFile: f.runtimeProofFile, coverageEvidenceFile: f.coverageFile });
@@ -178,8 +184,58 @@ test('empty asset bucket uses session completion token and creates only an inact
   assert.equal(create.request.deploy, false); assert.equal(create.options.maxRetries, 0);
   assert.equal(create.request.assets.jwt, 'x'.repeat(24));
   assert.ok(create.request.bindings.some(row => row.name === 'ASSETS' && row.type === 'assets'));
-  assert.ok(create.request.bindings.filter(row => row.name !== 'ASSETS').every(row => row.type === 'inherit' && row.version_id === OPS));
+  assert.ok(create.request.bindings.filter(row => row.name !== 'ASSETS').every(row => row.type === 'inherit' || row.type === 'service'));
   assert.equal(originalCreate, state.calls);
+});
+
+test('Client candidate retains its exact reviewed Ops service binding and resolves inherited rows', async t => {
+  const f = fixture(t, 'client'), state = harness(f, { session: { buckets: [], jwt: 'x'.repeat(24) }, readback: request => readbackFor(f, request) });
+  const result = await state.adapter({ planOptions: f.planOptions, heldPlan: f.heldPlan,
+    runtimeProofFile: f.runtimeProofFile, coverageEvidenceFile: f.coverageFile });
+  assert.deepEqual(result, { candidateVersionId: CANDIDATE, readbackVerified: true });
+  const request = state.calls.find(row => row.type === 'version').request;
+  assert.deepEqual(request.bindings.filter(row => row.type === 'service'), [{ name: 'OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES',
+    type: 'service', service: 'ledgetop-ops-staging', entrypoint: 'OperationsNativePrincipalInquiryIngress' }]);
+  assert.ok(request.bindings.filter(row => row.type === 'inherit').every(row => row.version_id === CLIENT));
+});
+
+test('readback cannot pass by echoing inherit instructions as if they were resolved bindings', async t => {
+  const f = fixture(t), state = harness(f, { session: { buckets: [], jwt: 'x'.repeat(24) },
+    readback: request => ({ ...readbackFor(f, request), candidate: {
+      ...readbackFor(f, request).candidate, resolvedBindings: request.bindings.filter(row => row.name !== 'ASSETS'),
+    } }) });
+  const result = await state.adapter({ planOptions: f.planOptions, heldPlan: f.heldPlan,
+    runtimeProofFile: f.runtimeProofFile, coverageEvidenceFile: f.coverageFile });
+  assert.deepEqual(result, { candidateVersionId: CANDIDATE, readbackVerified: false });
+});
+
+test('actual sanitized Ops capsule binding inventory validates a hash-only resolved readback', {
+  skip: !process.env.LEDGETOP_STAGING_BACKEND_HELD_PLAN_FIXTURE,
+}, () => {
+  const heldPlan = JSON.parse(fs.readFileSync(process.env.LEDGETOP_STAGING_BACKEND_HELD_PLAN_FIXTURE, 'utf8'));
+  assert.equal(heldPlan.application, 'operations');
+  const baselineBindings = heldPlan.expectedUnchangedResources.bindings;
+  assert.equal(baselineBindings.length, 152);
+  assert.deepEqual([...new Set(baselineBindings.map(row => row.type))].sort(),
+    ['assets','d1','durable_object_namespace','plain_text','queue','r2_bucket','secret_text','send_email','service','stream','workflow']);
+  const candidateParams = clone(heldPlan.versionCreateTemplate);
+  candidateParams.bindings = [...candidateParams.bindings, { name: 'ASSETS', type: 'assets' }].sort((a, b) => a.name.localeCompare(b.name));
+  candidateParams.assets = { config: clone(heldPlan.assetUploadRecipe.assetsConfig), jwt: 'synthetic-completion-token-0001' };
+  const resolvedBindings = baselineBindings.filter(row => row.name !== 'ASSETS').sort((a, b) => a.name.localeCompare(b.name));
+  const readback = { latestVersionId: CANDIDATE, deployment: [{ versionId: heldPlan.selectedActiveVersionId, percentage: 100 }], candidate: {
+    id: CANDIDATE, mainModule: candidateParams.main_module,
+    modules: candidateParams.modules.map((row, index) => {
+      const pin = index === 0 ? heldPlan.artifact.main : heldPlan.artifact.sourceMap;
+      return { name: row.name, bytes: pin.size, sha256: pin.sha256 };
+    }), resolvedBindings, assetsConfig: candidateParams.assets.config,
+    compatibilityDate: candidateParams.compatibility_date, compatibilityFlags: candidateParams.compatibility_flags,
+    exports: candidateParams.exports,
+  } };
+  assert.equal(validateStagingBackendAssetCandidateReadback({ readback, candidateVersionId: CANDIDATE, heldPlan, candidateParams }), true);
+  const echoedRequest = structuredClone(readback);
+  echoedRequest.candidate.resolvedBindings = candidateParams.bindings.filter(row => row.name !== 'ASSETS');
+  assert.throws(() => validateStagingBackendAssetCandidateReadback({ readback: echoedRequest,
+    candidateVersionId: CANDIDATE, heldPlan, candidateParams }));
 });
 
 test('two upload buckets require 200 then final 201 completion JWT and all reviewed asset hashes', async t => {
@@ -200,6 +256,21 @@ test('two upload buckets require 200 then final 201 completion JWT and all revie
   assert.equal(state.calls.find(row => row.type === 'version').request.assets.jwt, 'c'.repeat(24));
 });
 
+test('a bucket may upload only the missing cached hashes and must use its final completion JWT', async t => {
+  const f = fixture(t), assetFiles = f.heldPlan.assetReconstitution.files;
+  const uniqueHashes = [...new Set(assetFiles.map(row => {
+    const bytes = f.rawAssets[row.path.slice(1)], extension = path.posix.extname(row.path).slice(1);
+    return f.hashBlake3(Buffer.from(`${bytes.toString('base64')}${extension}`, 'utf8')).slice(0, 32);
+  }))];
+  const state = harness(f, { session: { buckets: [[uniqueHashes[0]]], jwt: 'initial-session-token-0001' },
+    bucketResponses: [{ status: 201, completionJwt: 'final-completion-token-0001' }], readback: request => readbackFor(f, request) });
+  const result = await state.adapter({ planOptions: f.planOptions, heldPlan: f.heldPlan, runtimeProofFile: f.runtimeProofFile, coverageEvidenceFile: f.coverageFile });
+  assert.deepEqual(result, { candidateVersionId: CANDIDATE, readbackVerified: true });
+  assert.equal(state.calls.filter(row => row.type === 'bucket').length, 1);
+  assert.equal(state.calls.find(row => row.type === 'bucket').request.files.length, 1);
+  assert.equal(state.calls.find(row => row.type === 'version').request.assets.jwt, 'final-completion-token-0001');
+});
+
 test('conflicting local files that collide to one provider hash are rejected before upload', async t => {
   const f = fixture(t), state = harness(f, { session: { buckets: [], jwt: 'u'.repeat(24) } });
   const collisionHasher = bytes => bytes.toString('utf8') === 'QQ==txt'
@@ -218,7 +289,7 @@ test('duplicate or unknown upload hashes fail closed before a bucket or version 
   const f = fixture(t), first = f.heldPlan.assetReconstitution.files[0];
   const firstBytes = f.rawAssets[first.path.slice(1)], extension = path.posix.extname(first.path).slice(1);
   const knownHash = f.hashBlake3(Buffer.from(`${firstBytes.toString('base64')}${extension}`, 'utf8')).slice(0, 32);
-  for (const buckets of [[['0'.repeat(32)]], [[knownHash, knownHash]], [[knownHash]]]) {
+  for (const buckets of [[['0'.repeat(32)]], [[knownHash, knownHash]]]) {
     const state = harness(f, { session: { buckets, jwt: 'u'.repeat(24) } });
     await assert.rejects(state.adapter({ planOptions: f.planOptions, heldPlan: f.heldPlan, runtimeProofFile: f.runtimeProofFile, coverageEvidenceFile: f.coverageFile }));
     assert.deepEqual(state.calls.map(row => row.type), ['session']);
