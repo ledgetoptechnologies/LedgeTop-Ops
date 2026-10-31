@@ -4,7 +4,7 @@
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 
 function checkPilotBoundary({root,input,endpoint,ownerId,phase,parent='/fixture-state',source='/fixture-input',expectedEndpoint='https://127.0.0.1:28443'}){
- if(process.platform!=='linux'||!['prepare','submit','status','finish','resume-ingest'].includes(phase))throw new Error('unsupported pilot context');
+ if(process.platform!=='linux'||!['prepare','submit','status','prime-archive','finish','resume-ingest'].includes(phase))throw new Error('unsupported pilot context');
  if(typeof ownerId!=='string'||!/^pilot-[a-f0-9]{32}$/.test(ownerId))throw new Error('invalid fixture owner');
  if(root!==path.join(parent,'viewer')||input!==source||endpoint!==expectedEndpoint)throw new Error('pilot boundary mismatch');
  const parentReal=fs.realpathSync.native(parent),inputReal=fs.realpathSync.native(input);

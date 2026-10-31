@@ -26,6 +26,7 @@ run_phase(){
 run_phase prepare
 run_phase submit
 run_phase status
+run_phase prime-archive
 SYNTHETIC_ARCHIVE_HASH=$(sha256sum /fixture-archive/result.zip | cut -d ' ' -f1)
 SYNTHETIC_ARCHIVE_SIZE=$(stat -c %s /fixture-archive/result.zip)
 export SYNTHETIC_ARCHIVE_HASH SYNTHETIC_ARCHIVE_SIZE

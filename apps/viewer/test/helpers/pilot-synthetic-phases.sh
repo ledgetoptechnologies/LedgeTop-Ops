@@ -17,6 +17,7 @@ export VIEWER_FIXTURE_ROOT=/fixture-state/viewer VIEWER_FIXTURE_PHOTOS=/fixture-
 node test/helpers/real-coordinator-chain.cjs prepare
 node test/helpers/real-coordinator-chain.cjs submit
 node test/helpers/real-coordinator-chain.cjs status
+node test/helpers/real-coordinator-chain.cjs prime-archive
 SYNTHETIC_ARCHIVE_HASH=$(sha256sum /fixture-archive/result.zip | cut -d ' ' -f1)
 SYNTHETIC_ARCHIVE_SIZE=$(stat -c %s /fixture-archive/result.zip)
 export SYNTHETIC_ARCHIVE_HASH SYNTHETIC_ARCHIVE_SIZE
