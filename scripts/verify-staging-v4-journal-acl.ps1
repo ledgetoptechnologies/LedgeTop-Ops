@@ -4,6 +4,7 @@ param(
   [string]$LiteralFile
 )
 $ErrorActionPreference = 'Stop'
+Import-Module -Name "$PSHOME\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1" -ErrorAction Stop
 $expectedParent = [IO.Path]::GetFullPath('C:/Users/fstor/.codex/artifacts/production-ops-retained-resume-execution-20261031')
 $expectedChild = [IO.Path]::Combine($expectedParent, 'staging-v4-migrations')
 $script:ExpectedJournalSids = $null
