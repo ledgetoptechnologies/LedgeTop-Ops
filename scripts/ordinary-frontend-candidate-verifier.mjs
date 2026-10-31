@@ -4,7 +4,8 @@
  */
 import fs from 'node:fs';
 import { canonical, hash, need, validateInstallation, verifyCandidate,
-  ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 } from './production-deploy.mjs';
+  OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, ORDINARY_FRONTEND_PREFLIGHT_MODE,
+  ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 } from './production-deploy.mjs';
 import { validateOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
 import { collectFrontendAssets, mergeAssetLedger, preserveRootHtmlArchive, validateAssetLedger } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
@@ -119,7 +120,8 @@ export function ordinaryFrontendExecutionQualification(namespaceQualification) {
 }
 
 /** Verify candidate runtime modules and native resource/config invariants. */
-export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate, modern, allowProviderOmittedMap = false } = {}) {
+export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate, modern, allowProviderOmittedMap = false,
+  opsSuccessorReaderContract } = {}) {
   need(plan?.schemaVersion === 1 && ['operations','client'].includes(plan.application)
     && plan.offlineOnly === true && plan.deploymentEnabled === false,
   'Pinned offline ordinary frontend plan is required');
@@ -148,7 +150,14 @@ export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate
     const map = strictModuleBytes(mapModule, 'index.js.map');
     try { JSON.parse(map.toString('utf8')); } catch { throw new Error('Candidate source map JSON invalid'); }
   }
-  const runtimeProof = verifyCandidate(before, app, candidate, modern, pinnedMain, sourceMap);
+  if (opsSuccessorReaderContract !== undefined) {
+    need(opsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT && app === 'operations'
+      && plan.sourceCommit === 'a0c8fd230d46690a7090c79190e125f5a02f0f35'
+      && plan.release.main.sha256 === 'f4cdefd633441df8db18cc5c0b192fc8faa72ebd7b1db730122bd77318164e68'
+      && plan.release.sourceMap.sha256 === '375962dbe22ed0038009d0790c1c12a33b0668010f99916b8addade0a489d08b',
+    'Ops successor reader candidate plan differs from exact reviewed source bundle and source map');
+  }
+  const runtimeProof = verifyCandidate(before, app, candidate, modern, pinnedMain, sourceMap, { opsSuccessorReaderContract });
   need(equal(candidate.resources.bindings, plan.expectedBindings)
     && equal(modern.assets ?? null, plan.expectedAssetsConfiguration),
   'Candidate bindings or asset routing config changed');

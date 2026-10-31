@@ -160,7 +160,7 @@ export function retainedNativeConfig(plan, staged) {
 
 /** Verify the v2 ledger plus exact main and provider-optional map while
  * delegating runtime, returned-map, binding and assets-config checks. */
-export function verifyOrdinaryFrontendRetainedCandidateModules({ before, plan, candidate, modern } = {}) {
+export function verifyOrdinaryFrontendRetainedCandidateModules({ before, plan, candidate, modern, opsSuccessorReaderContract } = {}) {
   need(plan?.schemaVersion === 2 && plan.contract === 'ordinary-frontend-retained-native-module-v2'
     && Array.isArray(modern?.modules) && modern.modules.length >= 2 && modern.modules.length <= 3
     && new Set(modern.modules.map(row => row?.name)).size === modern.modules.length,
@@ -178,7 +178,7 @@ export function verifyOrdinaryFrontendRetainedCandidateModules({ before, plan, c
     && ledger.sourceCommit === plan.sourceCommit, 'Candidate ledger lineage or identity mismatch');
   const nativeModules = modern.modules.filter(row => row.name !== module.name);
   const runtimeProof = verifyOrdinaryFrontendCandidateModules({ before, plan: plan.ordinaryPlan, candidate,
-    modern: { ...modern, modules: nativeModules }, allowProviderOmittedMap: true });
+    modern: { ...modern, modules: nativeModules }, allowProviderOmittedMap: true, opsSuccessorReaderContract });
   return Object.freeze({ ...runtimeProof, retainedLedgerModuleVerified: true,
     retainedLedgerSHA256: plan.retentionLedgerSHA256, retainedAssetCount: ledger.assets.length,
     retainedAssetBytes: ledger.assets.reduce((sum, row) => sum + row.size, 0) });
