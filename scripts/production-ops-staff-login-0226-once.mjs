@@ -58,8 +58,9 @@ const LOGIN_PREFIX_OBJECTS = Object.freeze([
 ]);
 
 export const PRODUCTION_OPS_0226_BASELINE = Object.freeze({
-  sourceMetadataSha256: 'b05b702f4e81ec75962e5f13b084518ea1aded4eebbbb4819832fa3451078303',
-  observedAt: '2026-10-31T11:11:59.354Z',
+  sourceMetadataSha256: '6c1d0d2d298982a54b6e0d7671399f297e024134e8a28348ce78ac787cf9d46f',
+  observedAt: '2026-10-31T11:31:50.816Z',
+  authorityDigestExcludedColumns: Object.freeze({ staff_users: Object.freeze(['last_seen_at']) }),
   ledgerCount: 225,
   ledgerNamesSha256: 'e9ca08f7e051a7581da54ba585b740d0cbf033c91f69470649750ae2fdabd8a7',
   ledgerSha256: '9fbe33d12e27fd5e20af45ba05db02711a623f19a0b298ef4b3eb7b526ece1bb',
@@ -70,8 +71,8 @@ export const PRODUCTION_OPS_0226_BASELINE = Object.freeze({
     staff_permission_overrides:18,staff_divisions:0,roles:5,permissions:49,role_permissions:112,divisions:3,
     native_staff_admissions:1,native_staff_profiles:1,native_staff_admin_delegations:0,
     native_staff_management_delegations:0,native_staff_access_reconciliation:1}),
-  protectedTableDigests: Object.freeze({
-    staff_users:'2909632219a24361eafdd0521f5ec6a1e21e5e21130a6ea0a3a22cd2bc6c30ff',
+  protectedAuthorityTableDigests: Object.freeze({
+    staff_users:'278d7e3447eed0ae624337346b69472a42d1ba1dfd184e88aa6488a84ba205e1',
     staff_role_assignments:'f88c328487d5ae44a5d5862f49ebaad3bcd929b2240375bc72e0dc717ef73579',
     local_staff_role_assignments:'4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
     staff_permission_overrides:'feb2439d192e91099566a2f4691ca0c2b6876ecef64a531c192cc92d5ac5a5bd',
@@ -86,7 +87,7 @@ export const PRODUCTION_OPS_0226_BASELINE = Object.freeze({
     native_staff_management_delegations:'4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
     native_staff_access_reconciliation:'b33f860c6e6a1b24a477bb8ebc2a154cb374496e158a2245c89414f8a2a4a2cd',
   }),
-  protectedStateSha256:'b8775e83c0544b0aef82c1c3bc3b736b756648d30576b2f63c309f64f97b9e0f',
+  protectedAuthorityStateSHA256:'693160bfaf22aedd0c2a4386667ad6f003f15f2038deaac9eca7214cbad47dbf',
   nativeStaffControlEnabled:0,
 });
 
@@ -133,18 +134,66 @@ function fullLedgerFingerprint(ledger) {
   return hash(JSON.stringify(ledger.map(row => [row.id,row.name])));
 }
 function objectKey(row) { return `${row.type}\u0000${row.name}\u0000${row.tbl_name}`; }
+const AUTHORITY_DIGEST_EXCLUDED_COLUMNS = Object.freeze({ staff_users: Object.freeze(['last_seen_at']) });
+function parseLastSeen(value) {
+  if (value === null) return null;
+  if (typeof value !== 'string') fail('last_seen_timestamp_invalid');
+  const sql = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/u.exec(value);
+  const isoUtc = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?Z$/u.exec(value);
+  if (!sql && !isoUtc) fail('last_seen_timestamp_invalid');
+  const millis = Date.parse(sql ? `${sql[1]}T${sql[2]}Z` : value);
+  if (!Number.isFinite(millis)) fail('last_seen_timestamp_invalid');
+  const normalized = new Date(millis).toISOString();
+  if (sql && normalized.slice(0, 19) !== value.replace(' ', 'T')) fail('last_seen_timestamp_invalid');
+  if (isoUtc) {
+    const expected = `${isoUtc[1]}.${(isoUtc[2] ?? '').padEnd(3, '0')}Z`;
+    if (normalized !== expected) fail('last_seen_timestamp_invalid');
+  }
+  return millis;
+}
+
+function staffTelemetry(rows) {
+  const ids = new Set(); let nonNull = 0;
+  const normalized = rows.map(row => {
+    if (typeof row.id !== 'string' || row.id.length === 0 || ids.has(row.id)) fail('staff_identity_set_invalid');
+    ids.add(row.id);
+    const millis = parseLastSeen(row.last_seen_at);
+    if (millis !== null) nonNull++;
+    return { id: row.id, last_seen_at: row.last_seen_at, millis };
+  }).sort((a,b) => a.id.localeCompare(b.id));
+  return { rows: rows.length, nonNullRows: nonNull,
+    sha256: hash(canonical(normalized.map(({id,last_seen_at}) => ({id,last_seen_at})))) , normalized };
+}
+export function validateProductionOps0226LastSeenTransition(beforeRows, afterRows) {
+  if (!Array.isArray(beforeRows) || !Array.isArray(afterRows)) fail('staff_identity_set_invalid');
+  const before = staffTelemetry(beforeRows), after = staffTelemetry(afterRows);
+  if (before.rows !== after.rows || before.normalized.some((row,index) => row.id !== after.normalized[index]?.id))
+    fail('staff_identity_set_changed');
+  let changedCount = 0;
+  for (let i=0; i<before.rows; i++) {
+    const prior=before.normalized[i], next=after.normalized[i];
+    if (prior.last_seen_at !== next.last_seen_at) changedCount++;
+    if (prior.millis !== null && (next.millis === null || next.millis < prior.millis)) fail('last_seen_timestamp_regressed');
+  }
+  return { beforeRows: before.rows, afterRows: after.rows, beforeNonNullRows: before.nonNullRows,
+    afterNonNullRows: after.nonNullRows, beforeSha256: before.sha256, afterSha256: after.sha256, changedCount };
+}
 function protectedState(snapshot) {
   if (!exactKeys(snapshot.protectedRows, Object.keys(PRODUCTION_OPS_0226_PROTECTED_TABLES))) fail('protected_rows_invalid');
+  if (!exactKeys(snapshot.authorityDigestExcludedColumns, ['staff_users'])
+    || canonical(snapshot.authorityDigestExcludedColumns) !== canonical(AUTHORITY_DIGEST_EXCLUDED_COLUMNS)) fail('authority_exclusions_invalid');
   const counts = {}, digests = {};
   for (const [table, columns] of Object.entries(PRODUCTION_OPS_0226_PROTECTED_TABLES)) {
     const rows = snapshot.protectedRows[table];
     if (!Array.isArray(rows) || rows.length > MAX_ROWS || rows.some(row => !exactKeys(row, columns))) fail('protected_rows_invalid');
     counts[table] = rows.length;
-    digests[table] = hash(canonical([...rows].sort((a,b) => canonical(a).localeCompare(canonical(b)))));
+    const stableRows = table === 'staff_users' ? rows.map(({last_seen_at, ...row}) => row) : rows;
+    digests[table] = hash(canonical([...stableRows].sort((a,b) => canonical(a).localeCompare(canonical(b)))));
   }
+  const telemetry = staffTelemetry(snapshot.protectedRows.staff_users);
   const control = snapshot.protectedRows.native_staff_access_reconciliation;
   if (control.length !== 1 || control[0].singleton !== 1 || control[0].enabled !== 0) fail('native_staff_control_not_zero');
-  return { counts, digests, stateSha256: hash(canonical({ counts, digests })) };
+  return { counts, digests, stateSha256: hash(canonical({ counts, digests })), telemetry };
 }
 
 function validateTarget(target) {
@@ -156,9 +205,10 @@ function validateBaseline(snapshot, baseline, now) {
     || !SHA.test(baseline.ledgerSha256)
     || !Number.isSafeInteger(baseline.schemaObjectCount) || baseline.schemaObjectCount < 1 || !SHA.test(baseline.schemaSha256)
     || !exactKeys(baseline.protectedTableCounts, Object.keys(PRODUCTION_OPS_0226_PROTECTED_TABLES))
-    || !exactKeys(baseline.protectedTableDigests, Object.keys(PRODUCTION_OPS_0226_PROTECTED_TABLES))
-    || baseline.nativeStaffControlEnabled !== 0 || !SHA.test(baseline.protectedStateSha256 ?? '')) fail('baseline_profile_invalid');
-  if (!exactKeys(snapshot, ['target','observedAt','ledger','schema','schemaColumns','protectedRows'])
+    || !exactKeys(baseline.protectedAuthorityTableDigests, Object.keys(PRODUCTION_OPS_0226_PROTECTED_TABLES))
+    || canonical(baseline.authorityDigestExcludedColumns) !== canonical(AUTHORITY_DIGEST_EXCLUDED_COLUMNS)
+    || baseline.nativeStaffControlEnabled !== 0 || !SHA.test(baseline.protectedAuthorityStateSHA256 ?? '')) fail('baseline_profile_invalid');
+  if (!exactKeys(snapshot, ['target','observedAt','ledger','schema','schemaColumns','protectedRows','authorityDigestExcludedColumns'])
     || !iso(snapshot.observedAt, now)) fail('snapshot_stale_or_invalid');
   validateTarget(snapshot.target);
   const namesSha256 = ledgerFingerprint(snapshot.ledger), ledgerSha256 = fullLedgerFingerprint(snapshot.ledger), schemaSha256 = schemaFingerprint(snapshot.schema);
@@ -177,8 +227,8 @@ function validateBaseline(snapshot, baseline, now) {
   }
   const state = protectedState(snapshot);
   if (canonical(state.counts) !== canonical(baseline.protectedTableCounts)
-    || canonical(state.digests) !== canonical(baseline.protectedTableDigests)
-    || state.stateSha256 !== baseline.protectedStateSha256) fail('protected_state_pin_mismatch');
+    || canonical(state.digests) !== canonical(baseline.protectedAuthorityTableDigests)
+    || state.stateSha256 !== baseline.protectedAuthorityStateSHA256) fail('protected_state_pin_mismatch');
   return { namesSha256, ledgerSha256, schemaSha256, state };
 }
 
@@ -240,9 +290,11 @@ function receiptProjection(snapshot, baseline, now) {
   return { observedAt: snapshot.observedAt, target: PRODUCTION_OPS_0226_TARGET,
     ledgerCount: snapshot.ledger.length, ledgerNamesSha256: validated.namesSha256, ledgerSha256: validated.ledgerSha256,
     schemaObjectCount: snapshot.schema.length, schemaSha256: validated.schemaSha256,
-    protectedTableCounts: validated.state.counts, protectedTableDigests: validated.state.digests,
-    protectedStateSha256: validated.state.stateSha256,
-    nativeStaffControlEnabled: 0 };
+    protectedTableCounts: validated.state.counts, protectedAuthorityTableDigests: validated.state.digests,
+    protectedAuthorityStateSHA256: validated.state.stateSha256,
+    authorityDigestExcludedColumns: AUTHORITY_DIGEST_EXCLUDED_COLUMNS,
+    staffLastSeenAtSha256: validated.state.telemetry.sha256, staffLastSeenAtRows: validated.state.telemetry.rows,
+    staffLastSeenAtNonNullRows: validated.state.telemetry.nonNullRows, nativeStaffControlEnabled: 0 };
 }
 
 function postReceiptProjection(snapshot, now) {
@@ -251,8 +303,10 @@ function postReceiptProjection(snapshot, now) {
   validateTarget(snapshot.target);
   const state = protectedState(snapshot);
   return { observedAt: snapshot.observedAt, target: PRODUCTION_OPS_0226_TARGET,
-    protectedTableCounts: state.counts, protectedTableDigests: state.digests,
-    protectedStateSha256: state.stateSha256, nativeStaffControlEnabled: 0 };
+    protectedTableCounts: state.counts, protectedAuthorityTableDigests: state.digests,
+    protectedAuthorityStateSHA256: state.stateSha256, authorityDigestExcludedColumns: AUTHORITY_DIGEST_EXCLUDED_COLUMNS,
+    staffLastSeenAtSha256: state.telemetry.sha256, staffLastSeenAtRows: state.telemetry.rows,
+    staffLastSeenAtNonNullRows: state.telemetry.nonNullRows, nativeStaffControlEnabled: 0 };
 }
 
 function unsignedPlan(plan) { const { planSha256, ...value } = plan; return value; }
@@ -263,7 +317,7 @@ function compileProduction(snapshot, { sourceCommit, root = ROOT, now = Date.now
   const sql = migrationSql(root), pre = receiptProjection(snapshot, PRODUCTION_OPS_0226_BASELINE, now);
   const wire = readPinnedWireStatements(sql), expectedObjects = expectedLoginObjects(wire.statements);
   if (schemaFingerprint(expectedObjects) !== WIRE_SCHEMA_SHA256) fail('wire_expected_schema_mismatch');
-  const plan = { schemaVersion: 1, contract: 'production-ops-staff-login-0226-one-shot-v1', sourceCommit,
+  const plan = { schemaVersion: 2, contract: 'production-ops-staff-login-0226-one-shot-v2', sourceCommit,
     target: PRODUCTION_OPS_0226_TARGET, compiledAt: new Date(now).toISOString(), expiresAt: new Date(now + PLAN_TTL_MS).toISOString(),
     profileSourceMetadataSha256: PRODUCTION_OPS_0226_BASELINE.sourceMetadataSha256,
     migration: { name: MIGRATION_NAME, sha256: MIGRATION_SHA256, sql, ledgerAppend: true },
@@ -286,12 +340,21 @@ export function createProductionOps0226Operator(options = {}) {
       if (fs.existsSync(journalPath)) fail('journal_exists_no_replay');
       if (!exactKeys(plan, ['schemaVersion','contract','sourceCommit','target','compiledAt','expiresAt','profileSourceMetadataSha256','migration',
         'wireFixtureSha256','wireStatementsSha256','expectedAddedObjectsSha256','expectedAddedObjectCount','expectedNamedObjectCount','preflight','planSha256'])
-        || plan.schemaVersion !== 1 || plan.contract !== 'production-ops-staff-login-0226-one-shot-v1'
+        || plan.schemaVersion !== 2 || plan.contract !== 'production-ops-staff-login-0226-one-shot-v2'
         || plan.planSha256 !== planHash(plan) || !commitValid(plan.sourceCommit)
         || plan.profileSourceMetadataSha256 !== PRODUCTION_OPS_0226_BASELINE.sourceMetadataSha256) fail('plan_invalid');
       if (!exactKeys(plan.migration, ['name','sha256','sql','ledgerAppend'])
         || !exactKeys(plan.preflight, ['observedAt','target','ledgerCount','ledgerNamesSha256','ledgerSha256','schemaObjectCount','schemaSha256',
-          'protectedTableCounts','protectedTableDigests','protectedStateSha256','nativeStaffControlEnabled'])
+          'protectedTableCounts','protectedAuthorityTableDigests','protectedAuthorityStateSHA256','authorityDigestExcludedColumns',
+          'staffLastSeenAtSha256','staffLastSeenAtRows','staffLastSeenAtNonNullRows','nativeStaffControlEnabled'])
+        || canonical(plan.preflight.protectedTableCounts) !== canonical(PRODUCTION_OPS_0226_BASELINE.protectedTableCounts)
+        || canonical(plan.preflight.protectedAuthorityTableDigests) !== canonical(PRODUCTION_OPS_0226_BASELINE.protectedAuthorityTableDigests)
+        || plan.preflight.protectedAuthorityStateSHA256 !== PRODUCTION_OPS_0226_BASELINE.protectedAuthorityStateSHA256
+        || canonical(plan.preflight.authorityDigestExcludedColumns) !== canonical(AUTHORITY_DIGEST_EXCLUDED_COLUMNS)
+        || !SHA.test(plan.preflight.staffLastSeenAtSha256 ?? '')
+        || plan.preflight.staffLastSeenAtRows !== PRODUCTION_OPS_0226_BASELINE.protectedTableCounts.staff_users
+        || !Number.isSafeInteger(plan.preflight.staffLastSeenAtNonNullRows)
+        || plan.preflight.staffLastSeenAtNonNullRows < 0 || plan.preflight.staffLastSeenAtNonNullRows > plan.preflight.staffLastSeenAtRows
         || !validIso(plan.compiledAt) || !validIso(plan.expiresAt)
         || Date.parse(plan.compiledAt) > now() || Date.parse(plan.expiresAt) <= now()
         || Date.parse(plan.expiresAt) - Date.parse(plan.compiledAt) > PLAN_TTL_MS) fail('plan_invalid');
@@ -311,9 +374,10 @@ export function createProductionOps0226Operator(options = {}) {
         || before.schemaObjectCount !== plan.preflight.schemaObjectCount
         || before.schemaSha256 !== plan.preflight.schemaSha256
         || before.nativeStaffControlEnabled !== plan.preflight.nativeStaffControlEnabled
-        || before.protectedStateSha256 !== plan.preflight.protectedStateSha256
+        || before.protectedAuthorityStateSHA256 !== plan.preflight.protectedAuthorityStateSHA256
+        || canonical(before.authorityDigestExcludedColumns) !== canonical(plan.preflight.authorityDigestExcludedColumns)
         || canonical(before.protectedTableCounts) !== canonical(plan.preflight.protectedTableCounts)
-        || canonical(before.protectedTableDigests) !== canonical(plan.preflight.protectedTableDigests)) fail('prewrite_drift');
+        || canonical(before.protectedAuthorityTableDigests) !== canonical(plan.preflight.protectedAuthorityTableDigests)) fail('prewrite_drift');
 
       const journal = await openOneShotJournal(journalPath);
       try {
@@ -337,7 +401,7 @@ export function createProductionOps0226Operator(options = {}) {
             query: PRODUCTION_OPS_0226_POST_READ_QUERY });
           const after = validatePostSnapshot(beforeSnapshot, afterSnapshot, plan, PRODUCTION_OPS_0226_BASELINE, now());
           await journal.append({ phase: 'migration-0226-postread-verified', planSha256: plan.planSha256, postflight: after });
-          return { schemaVersion: 1, contract: plan.contract, sourceCommit: plan.sourceCommit,
+          return { schemaVersion: 2, contract: plan.contract, sourceCommit: plan.sourceCommit,
             planSha256: plan.planSha256, migrationSha256: MIGRATION_SHA256, target: PRODUCTION_OPS_0226_TARGET,
             before, after, mutationCalls: 1 };
         } catch (error) {
@@ -369,6 +433,7 @@ const commonSnapshotSql = `SELECT json_object(
     FROM (SELECT type,name,tbl_name,sql FROM sqlite_master WHERE sql IS NOT NULL
       AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' ORDER BY type,name))),
   'schemaColumns',json_object(${schemaColumnsSql}),
+  'authorityDigestExcludedColumns',json_object('staff_users',json_array('last_seen_at')),
   'protectedRows',json_object(${protectedRowsSql})`;
 export const PRODUCTION_OPS_0226_PRE_READ_QUERY = `${commonSnapshotSql}) AS production_ops_0226_snapshot`;
 export const PRODUCTION_OPS_0226_POST_READ_QUERY = `${commonSnapshotSql},
@@ -392,15 +457,16 @@ export function parseProductionOps0226SnapshotResult(value, { observedAt } = {})
 }
 
 function validatePostSnapshot(beforeSnapshot, afterSnapshot, plan, baseline, now) {
-  if (!exactKeys(afterSnapshot, ['target','observedAt','ledger','schema','schemaColumns','protectedRows','loginState'])
+  if (!exactKeys(afterSnapshot, ['target','observedAt','ledger','schema','schemaColumns','protectedRows','authorityDigestExcludedColumns','loginState'])
     || !iso(afterSnapshot.observedAt, now)) fail('post_snapshot_stale_or_invalid');
   orderedSchema(afterSnapshot.schema);
   const afterReceipt = postReceiptProjection(afterSnapshot, now);
-  const afterProtected = { stateSha256: afterReceipt.protectedStateSha256, counts: afterReceipt.protectedTableCounts,
-    digests: afterReceipt.protectedTableDigests };
-  if (afterProtected.stateSha256 !== plan.preflight.protectedStateSha256
+  const afterProtected = { stateSha256: afterReceipt.protectedAuthorityStateSHA256, counts: afterReceipt.protectedTableCounts,
+    digests: afterReceipt.protectedAuthorityTableDigests };
+  const telemetry = validateProductionOps0226LastSeenTransition(beforeSnapshot.protectedRows.staff_users, afterSnapshot.protectedRows.staff_users);
+  if (afterProtected.stateSha256 !== plan.preflight.protectedAuthorityStateSHA256
     || canonical(afterProtected.counts) !== canonical(plan.preflight.protectedTableCounts)
-    || canonical(afterProtected.digests) !== canonical(plan.preflight.protectedTableDigests)) fail('protected_rows_changed');
+    || canonical(afterProtected.digests) !== canonical(plan.preflight.protectedAuthorityTableDigests)) fail('protected_rows_changed');
   if (canonical(afterSnapshot.schemaColumns) !== canonical(beforeSnapshot.schemaColumns)) fail('precondition_columns_changed');
   const beforeLedger = beforeSnapshot.ledger;
   if (!Array.isArray(afterSnapshot.ledger) || afterSnapshot.ledger.length !== beforeLedger.length + 1
@@ -424,8 +490,10 @@ function validatePostSnapshot(beforeSnapshot, afterSnapshot, plan, baseline, now
     ledgerNamesSha256: ledgerFingerprint(afterSnapshot.ledger), ledgerSha256: fullLedgerFingerprint(afterSnapshot.ledger),
     schemaObjectCount: afterSnapshot.schema.length,
     schemaSha256: schemaFingerprint(afterSnapshot.schema), protectedTableCounts: afterReceipt.protectedTableCounts,
-    protectedTableDigests: afterReceipt.protectedTableDigests,
-    protectedStateSha256: afterReceipt.protectedStateSha256, nativeStaffControlEnabled: 0,
+    protectedAuthorityTableDigests: afterReceipt.protectedAuthorityTableDigests,
+    protectedAuthorityStateSHA256: afterReceipt.protectedAuthorityStateSHA256, authorityDigestExcludedColumns: AUTHORITY_DIGEST_EXCLUDED_COLUMNS,
+    staffLastSeenAtBeforeSha256: telemetry.beforeSha256, staffLastSeenAtAfterSha256: telemetry.afterSha256,
+    staffLastSeenAtChangedCount: telemetry.changedCount, nativeStaffControlEnabled: 0,
     migrationRecordAdded: MIGRATION_NAME, loginObjectsAdded: 23, seededLoginRows: 1, aliasRowsAdded: 0 };
 }
 

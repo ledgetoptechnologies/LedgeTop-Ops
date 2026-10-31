@@ -9,6 +9,7 @@ import {
   createProductionOps0226Operator, PRODUCTION_OPS_0226_BASELINE, PRODUCTION_OPS_0226_TARGET,
   PRODUCTION_OPS_0226_POST_READ_QUERY, PRODUCTION_OPS_0226_PRE_READ_QUERY,
   PRODUCTION_OPS_0226_PROTECTED_TABLES, parseProductionOps0226SnapshotResult,
+  validateProductionOps0226LastSeenTransition,
 } from './production-ops-staff-login-0226-once.mjs';
 
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -24,17 +25,17 @@ test('production profile pins the verified target, ledger, schema, and all prote
     environment:'production', accountId:'846c924bf17bf4f3dd15c97a4c5d1d51', workerName:'ledgetop-ops', binding:'OPS_DB',
     databaseName:'ltds-ops', databaseId:'6ebf7514-d306-4615-ae56-ad869c874dbd',
   });
-  assert.equal(PRODUCTION_OPS_0226_BASELINE.sourceMetadataSha256, 'b05b702f4e81ec75962e5f13b084518ea1aded4eebbbb4819832fa3451078303');
+  assert.equal(PRODUCTION_OPS_0226_BASELINE.sourceMetadataSha256, '6c1d0d2d298982a54b6e0d7671399f297e024134e8a28348ce78ac787cf9d46f');
   assert.equal(PRODUCTION_OPS_0226_BASELINE.ledgerCount, 225);
   assert.equal(PRODUCTION_OPS_0226_BASELINE.lastMigration, '0225_native_staff_lifecycle_bridge.sql');
   assert.equal(PRODUCTION_OPS_0226_BASELINE.schemaObjectCount, 2449);
   assert.equal(Object.keys(PRODUCTION_OPS_0226_PROTECTED_TABLES).length, 14);
   assert.deepEqual(Object.keys(PRODUCTION_OPS_0226_BASELINE.protectedTableCounts).sort(),
     Object.keys(PRODUCTION_OPS_0226_PROTECTED_TABLES).sort());
-  assert.deepEqual(Object.keys(PRODUCTION_OPS_0226_BASELINE.protectedTableDigests).sort(),
+  assert.deepEqual(Object.keys(PRODUCTION_OPS_0226_BASELINE.protectedAuthorityTableDigests).sort(),
     Object.keys(PRODUCTION_OPS_0226_PROTECTED_TABLES).sort());
   assert.equal(hash(canonical({ counts:PRODUCTION_OPS_0226_BASELINE.protectedTableCounts,
-    digests:PRODUCTION_OPS_0226_BASELINE.protectedTableDigests })), PRODUCTION_OPS_0226_BASELINE.protectedStateSha256);
+    digests:PRODUCTION_OPS_0226_BASELINE.protectedAuthorityTableDigests })), PRODUCTION_OPS_0226_BASELINE.protectedAuthorityStateSHA256);
   assert.equal(PRODUCTION_OPS_0226_BASELINE.nativeStaffControlEnabled, 0);
   assert.equal(Object.hasOwn(PRODUCTION_OPS_0226_BASELINE, 'requiredMigrations'), false);
 });
@@ -83,7 +84,8 @@ test('wrong production identity and non-production ledger fail closed before pla
   assert.throws(() => createProductionOps0226Operator({ baseline:{ ledgerCount:228 } }), /operator_options_invalid/u);
   assert.throws(() => createProductionOps0226Operator({ target:{ environment:'staging' } }), /operator_options_invalid/u);
   const operator = createProductionOps0226Operator();
-  const snapshot = { target:productionTarget, observedAt:new Date().toISOString(), ledger:[], schema:[], schemaColumns:{}, protectedRows:{} };
+  const snapshot = { target:productionTarget, observedAt:new Date().toISOString(), ledger:[], schema:[], schemaColumns:{}, protectedRows:{},
+    authorityDigestExcludedColumns:{staff_users:['last_seen_at']} };
   for (const target of [
     { ...productionTarget, accountId:'wrong' },
     { ...productionTarget, workerName:'ledgetop-ops-staging' },
@@ -102,7 +104,8 @@ test('migration source bytes are pinned before a production plan can be compiled
     const migrationDirectory = path.join(directory, 'apps','operations','migrations');
     fs.mkdirSync(migrationDirectory, { recursive:true });
     fs.writeFileSync(path.join(migrationDirectory, '0226_staff_login_bindings.sql'), 'SELECT 1;\n');
-    const snapshot = { target:productionTarget, observedAt:new Date().toISOString(), ledger:[], schema:[], schemaColumns:{}, protectedRows:{} };
+    const snapshot = { target:productionTarget, observedAt:new Date().toISOString(), ledger:[], schema:[], schemaColumns:{}, protectedRows:{},
+    authorityDigestExcludedColumns:{staff_users:['last_seen_at']} };
     assert.throws(() => createProductionOps0226Operator().compile(snapshot, {
       sourceCommit:'dc8cedfe953ce75eb2f65de846de74d076b820f8', root:directory,
     }), /migration_pin_mismatch/u);
@@ -117,4 +120,38 @@ test('an existing journal blocks replay before provider reads or writes', async 
   const provider = { async readSnapshot() { calls.reads++; }, async applyExactMigration() { calls.mutations++; } };
   await assert.rejects(createProductionOps0226Operator().executeOnce({ plan:{}, provider, journalPath }), /journal_exists_no_replay/u);
   assert.deepEqual(calls, { reads:0, mutations:0 });
+});
+
+
+test('V2 last_seen guard permits monotonic SQLite UTC advances and null-to-valid transitions', () => {
+  assert.equal(validateProductionOps0226LastSeenTransition(
+    [{id:'staff-a',last_seen_at:'2026-10-31 11:00:00'},{id:'staff-b',last_seen_at:null}],
+    [{id:'staff-a',last_seen_at:'2026-10-31T11:00:00.500Z'},{id:'staff-b',last_seen_at:'2026-10-31T11:00:01Z'}]).changedCount, 2);
+  assert.equal(validateProductionOps0226LastSeenTransition(
+    [{id:'staff-a',last_seen_at:'2026-10-31 11:00:00'}],
+    [{id:'staff-a',last_seen_at:'2026-10-31 11:00:00'}]).changedCount, 0);
+  assert.equal(validateProductionOps0226LastSeenTransition(
+    [{id:'staff-a',last_seen_at:null}], [{id:'staff-a',last_seen_at:null}]).afterNonNullRows, 0);
+});
+
+test('V2 last_seen guard refuses backwards, nulling, identity-set, duplicate-ID, and malformed telemetry', () => {
+  const before=[{id:'staff-a',last_seen_at:'2026-10-31 11:00:00'}];
+  assert.throws(() => validateProductionOps0226LastSeenTransition(before,[{id:'staff-a',last_seen_at:'2026-10-31 10:59:59'}]), /last_seen_timestamp_regressed/u);
+  assert.throws(() => validateProductionOps0226LastSeenTransition(before,[{id:'staff-a',last_seen_at:null}]), /last_seen_timestamp_regressed/u);
+  assert.throws(() => validateProductionOps0226LastSeenTransition(before,[{id:'staff-b',last_seen_at:'2026-10-31 11:00:00'}]), /staff_identity_set_changed/u);
+  assert.throws(() => validateProductionOps0226LastSeenTransition(before,[{id:'staff-a',last_seen_at:'not-a-date'}]), /last_seen_timestamp_invalid/u);
+  assert.throws(() => validateProductionOps0226LastSeenTransition([{id:'staff-a',last_seen_at:null},{id:'staff-a',last_seen_at:null}],
+    [{id:'staff-a',last_seen_at:null},{id:'staff-a',last_seen_at:null}]), /staff_identity_set_invalid/u);
+});
+
+test('new named V2 plan contract rejects the previous V1 contract before provider activity', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'production-ops-0226-v1-refusal-'));
+  t.after(() => fs.rmSync(directory, { recursive:true, force:true }));
+  const calls={reads:0,writes:0};
+  const provider={async readSnapshot(){calls.reads++;},async applyExactMigration(){calls.writes++;}};
+  await assert.rejects(createProductionOps0226Operator().executeOnce({
+    plan:{schemaVersion:1,contract:'production-ops-staff-login-0226-one-shot-v1'}, provider,
+    journalPath:path.join(directory,'journal.jsonl'),
+  }), /plan_invalid/u);
+  assert.deepEqual(calls,{reads:0,writes:0});
 });
