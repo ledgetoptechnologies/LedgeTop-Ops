@@ -455,7 +455,8 @@ export function createStagingNativeInquiryPilotV2Uploader({ sdk, uploadBucket, r
     fail(inputFiles && inputFiles.application === held.application, 'pinned compiler inputs are required');
     projectStagingNativeInquiryPilotV2MaterializationEvidence(assetEvidence);
     const compileOptions = { application: held.application, baselineControlsFile: inputFiles.baselineControlsFile,
-      currentControlsFile: inputFiles.currentControlsFile, clientPilotReceiptFile: inputFiles.clientPilotReceiptFile,
+      currentControlsFile: inputFiles.currentControlsFile, clientPilotControlsFile: inputFiles.clientPilotControlsFile,
+      clientPilotReceiptFile: inputFiles.clientPilotReceiptFile,
       clientPilotReceiptSHA256: inputFiles.clientPilotReceiptSHA256 };
     const first = compileStagingNativeInquiryPilotV2PlanFromFiles(compileOptions);
     checkPlan(first, { sha256: hashStagingNativeInquiryPilotV2PlanFile(first) });

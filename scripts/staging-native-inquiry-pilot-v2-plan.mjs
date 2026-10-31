@@ -16,6 +16,21 @@ const BASE_CONTROLS = Object.freeze({
   path: `${ARTIFACT_ROOT}/owner-review-v5-activation-20261031/after-controls.private.json`,
   sha256: '3d05ff11937a3dd0829cab5f3649ae3b2366ed0f5772de402fe858dc7a5a8e21',
 });
+// The Ops step must compare against the exact historical baseline used to
+// compile the original Client-first held plan. Current controls remain fresh.
+const CLIENT_PILOT_BASELINE = Object.freeze({
+  path: `${ARTIFACT_ROOT}/native-inquiry-pilot-v2-baseline-controls-20261031/controls.private.json`,
+  sha256: 'c82f325e6c068c434f292597f2e4b8fed154ec01c9c026a6bb1f1f821562e1d6',
+});
+const CLIENT_PILOT_HELD_PLAN_SHA256 = 'd511657e9c053625096056dbbaa05f8cd8fe67903777e3ce93fa6f2ffa3323f9';
+const CLIENT_PILOT_ACTIVATION_CONTROLS = Object.freeze({
+  path: `${ARTIFACT_ROOT}/native-inquiry-client-v2-activation-20261031/after-controls.private.json`,
+  sha256: '05cc774472eb335606e54c411a8f69be0ddb88d19c96c2a096406393e3d4eb51',
+});
+const CLIENT_PILOT_ACTIVATION_RECEIPT = Object.freeze({
+  path: `${ARTIFACT_ROOT}/native-inquiry-client-v2-activation-20261031/client-pilot-readback-v2.private.json`,
+  sha256: '20996902522e012190645cb75793b2b7df14df9b81deb10c0360ae970cd31d51',
+});
 const BASE_PLANS = Object.freeze({
   operations: Object.freeze({
     path: `${ARTIFACT_ROOT}/recipient-owner-review-backend-release-plan-20261031/successor.held.json`,
@@ -275,6 +290,25 @@ function validateClientDelta(baseline, current) {
   fail(equal(bp, cp), 'Client runtime or non-gate controls changed with pilot flags');
 }
 
+function controlsContinuityProjection(controls) {
+  const projection = clone(controls);
+  delete projection.observedAt;
+  for (const worker of Object.values(projection.workers ?? {})) {
+    // startup_time_ms is a measured runtime value already reviewed during the
+    // activation readback, not a configuration or deployment identity field.
+    if (worker.modern) delete worker.modern.startup_time_ms;
+    // This digest covers the raw Worker responses, including startup_time_ms;
+    // all other captured fields remain compared directly in the projection.
+    delete worker.rawControlSHA256;
+  }
+  return projection;
+}
+
+function validateClientActivationContinuity(activationControls, currentControls) {
+  fail(equal(controlsContinuityProjection(activationControls), controlsContinuityProjection(currentControls)),
+    'fresh controls differ from the hash-pinned Client activation proof beyond observation time or startup metrics');
+}
+
 function makeClientReceipt(clientPlan, baselineControlsSHA256, currentControlsSHA256, currentControls) {
   return { schemaVersion: 2, purpose: CLIENT_RECEIPT_PURPOSE, accountId: STAGING_ACCOUNT_ID,
     workerName: CURRENT.client.workerName, baselineVersionId: CURRENT.client.activeVersionId,
@@ -304,14 +338,21 @@ function validateClientReceipt(receipt, receiptSHA256, expected, controls) {
 export function compileStagingNativeInquiryPilotV2PlanFromEvidence({ application, baselineControls,
   referenceControls = baselineControls, currentControls = baselineControls, basePlan, clientBasePlan, now = Date.now(),
   baselineControlsSHA256 = hash(canonical(baselineControls)), currentControlsSHA256 = hash(canonical(currentControls)),
-  clientPilotReceipt, clientPilotReceiptSHA256 } = {}) {
+  clientPilotControls, clientPilotControlsSHA256, clientPilotReceipt, clientPilotReceiptSHA256 } = {}) {
   fail(application === 'client' || application === 'operations', 'only fixed Client-first pilot targets are allowed');
   validateFreshControls(referenceControls, Date.parse(referenceControls.observedAt) + 1);
-  validateFreshControls(baselineControls, now);
+  if (application === 'operations') {
+    fail(baselineControlsSHA256 === CLIENT_PILOT_BASELINE.sha256,
+      'Operations historical baseline is not the exact original C82 Client-plan input');
+    // This is an immutable comparison anchor only. Its fixed byte hash plus
+    // pinned-reference equality below preserve identity; the current capture
+    // and Client receipt are independently required to be fresh.
+    validateFreshControls(baselineControls, Date.parse(baselineControls.observedAt) + 1);
+  } else validateFreshControls(baselineControls, now);
   validateFreshControls(currentControls, now, { allowClientPilotVersion: application === 'operations' });
   const withoutObservedAt = value => Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'observedAt'));
   fail(equal(withoutObservedAt(referenceControls), withoutObservedAt(baselineControls)),
-    'fresh pre-pilot controls differ from the pinned after-both-active reference');
+    'historical C82 controls differ from the pinned after-both-active reference');
   fail(SHA.test(baselineControlsSHA256) && SHA.test(currentControlsSHA256), 'controls file hashes are missing');
   fail(hash(canonical(baselineControls.schema)) === basePlan.databaseSchemaSHA256,
     'current staging schema differs from the held base plan');
@@ -321,27 +362,41 @@ export function compileStagingNativeInquiryPilotV2PlanFromEvidence({ application
   const checked = validateBasePlan(basePlan, application, baselineControls);
   gateRows(baseline, application);
   if (application === 'operations') {
-    fail(!equal(currentControls, baselineControls) && currentControlsSHA256 !== baselineControlsSHA256
-      && Date.parse(currentControls.observedAt) > Date.parse(baselineControls.observedAt),
-      'Operations pilot must follow a separate fresh Client-pilot capture');
-    validateClientDelta(baselineControls, currentControls);
+    fail(clientPilotControls && clientPilotControlsSHA256 === CLIENT_PILOT_ACTIVATION_CONTROLS.sha256
+      && SHA.test(clientPilotControlsSHA256), 'Operations step requires the pinned Client activation controls capture');
+    fail(clientPilotReceiptSHA256 === CLIENT_PILOT_ACTIVATION_RECEIPT.sha256,
+      'Operations step requires the pinned Client activation readback receipt');
+    validateFreshControls(clientPilotControls, Date.parse(clientPilotControls.observedAt) + 1,
+      { allowClientPilotVersion: true });
+    fail(Date.parse(clientPilotControls.observedAt) > Date.parse(baselineControls.observedAt),
+      'Client activation proof does not follow the historical C82 baseline');
+    fail(Date.parse(currentControls.observedAt) >= Date.parse(clientPilotControls.observedAt),
+      'fresh current controls predate the pinned Client activation proof');
+    validateClientDelta(baselineControls, clientPilotControls);
+    validateClientActivationContinuity(clientPilotControls, currentControls);
     fail(clientBasePlan, 'Ops plan requires the independently pinned Client base plan');
     const clientChecked = validateBasePlan(clientBasePlan, 'client', baselineControls);
     gateRows(baselineControls.workers.client, 'client');
     const clientPlan = makePlan('client', baselineControls, baselineControls, clientBasePlan, clientChecked,
       BASE_PLANS.client.sha256, baselineControlsSHA256, baselineControlsSHA256, null);
-    const expected = { planSHA256: hashStagingNativeInquiryPilotV2PlanFile(clientPlan), baselineControlsSHA256,
-      controlsSHA256: currentControlsSHA256 };
-    validateClientReceipt(clientPilotReceipt, clientPilotReceiptSHA256, expected, currentControls);
+    const clientPlanSHA256 = hashStagingNativeInquiryPilotV2PlanFile(clientPlan);
+    fail(clientPlanSHA256 === CLIENT_PILOT_HELD_PLAN_SHA256,
+      'historical C82 no longer reproduces the original Client held-plan hash');
+    const expected = { planSHA256: clientPlanSHA256, baselineControlsSHA256,
+      controlsSHA256: clientPilotControlsSHA256 };
+    validateClientReceipt(clientPilotReceipt, clientPilotReceiptSHA256, expected, clientPilotControls);
   } else {
+    fail(!clientPilotControls && !clientPilotControlsSHA256,
+      'Client step cannot consume an Operations Client-activation proof');
     fail(equal(currentControls, baselineControls), 'Client config-only plan must start from the unchanged after-both-active capture');
   }
   return makePlan(application, baselineControls, currentControls, basePlan, checked,
     BASE_PLANS[application].sha256, baselineControlsSHA256, currentControlsSHA256,
     application === 'operations' ? { receiptSHA256: clientPilotReceiptSHA256,
-      candidateVersionId: currentControls.workers.client.activeVersionId,
-      deploymentId: currentControls.workers.client.deployment.id,
-      planSHA256: clientPilotReceipt.planSHA256, baselineControlsSHA256, controlsSHA256: currentControlsSHA256 } : null);
+      candidateVersionId: clientPilotControls.workers.client.activeVersionId,
+      deploymentId: clientPilotControls.workers.client.deployment.id,
+      planSHA256: clientPilotReceipt.planSHA256, baselineControlsSHA256,
+      controlsSHA256: clientPilotControlsSHA256, controlsObservedAt: clientPilotControls.observedAt } : null);
 }
 
 function makePlan(application, baselineControls, currentControls, basePlan, checked,
@@ -402,24 +457,34 @@ function readPinnedJson(pin, maxBytes, label) {
   } finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
 }
 
-/** Fixed-input file wrapper for offline preparation; the reference and both base
- * plans are immutable pins. The live baseline must be supplied with its own fresh
- * content hash; this wrapper uses the real wall clock and offers no time override. */
+/** Fixed-input file wrapper for offline preparation. The original C82 baseline,
+ * Client activation capture/receipt, reference, and base plans are immutable pins;
+ * only the current controls input must be fresh at the real wall clock. */
 export function compileStagingNativeInquiryPilotV2PlanFromFiles({ application, baselineControlsFile,
-  currentControlsFile = baselineControlsFile, clientPilotReceiptFile, clientPilotReceiptSHA256 } = {}) {
-  const baselineControl = readPinnedJson(baselineControlsFile, 16 * 1024 * 1024, 'fresh pre-pilot controls');
+  currentControlsFile = baselineControlsFile, clientPilotControlsFile, clientPilotReceiptFile,
+  clientPilotReceiptSHA256 } = {}) {
+  if (application === 'operations') fail(baselineControlsFile?.path === CLIENT_PILOT_BASELINE.path
+    && baselineControlsFile?.sha256 === CLIENT_PILOT_BASELINE.sha256,
+  'Operations step must use the byte-pinned historical C82 Client-plan baseline');
+  const baselineControl = readPinnedJson(baselineControlsFile, 16 * 1024 * 1024,
+    application === 'operations' ? 'historical C82 Client-plan baseline' : 'fresh pre-pilot controls');
   const currentControl = readPinnedJson(currentControlsFile, 16 * 1024 * 1024, 'current controls');
   const planPin = BASE_PLANS[application];
   fail(planPin, 'unsupported application');
   const basePlan = readPinnedJson(planPin, 128 * 1024 * 1024, `${application} held base plan`);
-  let clientReceipt;
+  let clientActivationControl, clientReceipt;
   if (application === 'operations') {
-    fail(clientPilotReceiptFile && SHA.test(clientPilotReceiptSHA256 ?? ''),
-      'Operations step requires the independently hash-pinned Client readback receipt');
-    clientReceipt = readPinnedJson({ path: clientPilotReceiptFile, sha256: clientPilotReceiptSHA256 },
-      1024 * 1024, 'Client pilot readback receipt');
-  } else fail(!clientPilotReceiptFile && clientPilotReceiptSHA256 === undefined,
-    'Client step cannot consume an Operations receipt');
+    fail(clientPilotControlsFile?.path === CLIENT_PILOT_ACTIVATION_CONTROLS.path
+      && clientPilotControlsFile?.sha256 === CLIENT_PILOT_ACTIVATION_CONTROLS.sha256,
+    'Operations step requires the exact hash-pinned Client activation controls capture');
+    fail(clientPilotReceiptFile === CLIENT_PILOT_ACTIVATION_RECEIPT.path
+      && clientPilotReceiptSHA256 === CLIENT_PILOT_ACTIVATION_RECEIPT.sha256,
+    'Operations step requires the exact hash-pinned Client activation readback receipt');
+    clientActivationControl = readPinnedJson(CLIENT_PILOT_ACTIVATION_CONTROLS, 16 * 1024 * 1024,
+      'Client activation controls');
+    clientReceipt = readPinnedJson(CLIENT_PILOT_ACTIVATION_RECEIPT, 1024 * 1024, 'Client activation readback receipt');
+  } else fail(!clientPilotControlsFile && !clientPilotReceiptFile && clientPilotReceiptSHA256 === undefined,
+    'Client step cannot consume an Operations Client-activation proof');
   const clientPlanPin = BASE_PLANS.client;
   const clientBasePlan = application === 'operations'
     ? readPinnedJson(clientPlanPin, 128 * 1024 * 1024, 'Client held base plan') : null;
@@ -428,9 +493,13 @@ export function compileStagingNativeInquiryPilotV2PlanFromFiles({ application, b
     referenceControls: referenceControl.value, baselineControls: baselineControl.value,
     currentControls: currentControl.value, baselineControlsSHA256: baselineControl.sha256,
     currentControlsSHA256: currentControl.sha256, basePlan: basePlan.value, clientBasePlan: clientBasePlan?.value,
+    clientPilotControls: clientActivationControl?.value, clientPilotControlsSHA256: clientActivationControl?.sha256,
     clientPilotReceipt: clientReceipt?.value, clientPilotReceiptSHA256: clientReceipt?.sha256 });
 }
 
 export const stagingNativeInquiryPilotV2PlanConstants = Object.freeze({ CONTRACT, CLIENT_RECEIPT_PURPOSE,
   accountId: STAGING_ACCOUNT_ID, sourceCommits: SOURCE_COMMITS, baselineControls: BASE_CONTROLS,
+  clientPilotBaselineControls: CLIENT_PILOT_BASELINE, clientPilotHeldPlanSHA256: CLIENT_PILOT_HELD_PLAN_SHA256,
+  clientPilotActivationControls: CLIENT_PILOT_ACTIVATION_CONTROLS,
+  clientPilotActivationReceipt: CLIENT_PILOT_ACTIVATION_RECEIPT,
   basePlans: BASE_PLANS, current: CURRENT, gates: GATES });
