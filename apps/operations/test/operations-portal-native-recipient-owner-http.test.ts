@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const calls = vi.hoisted(() => ({ auth: vi.fn(), issue: vi.fn(), read: vi.fn(), cancel: vi.fn(), confirm: vi.fn(),
-  revoke: vi.fn(), workspaceRead: vi.fn(), workspaceRevoke: vi.fn(), workspaceInvocation: vi.fn(), command: vi.fn(), materialize: vi.fn(), dispatch: vi.fn() }));
+  revoke: vi.fn(), capability: vi.fn(), workspaceRead: vi.fn(), workspaceRevoke: vi.fn(), workspaceInvocation: vi.fn(), command: vi.fn(), materialize: vi.fn(), dispatch: vi.fn() }));
 vi.mock("../src/worker/operations-portal-native-workspace-cleanup", () => ({
   reserveOperationsPortalNativeWorkspaceCleanupRecovery: calls.workspaceInvocation,
 }));
@@ -16,6 +16,9 @@ vi.mock("../src/worker/operations-portal-native-recipient-authority", () => ({
 vi.mock("../src/worker/operations-portal-native-recipient-authority-dispatch", () => ({
   materializeOperationsPortalNativeRecipientAuthority: calls.materialize, dispatchOperationsPortalNativeRecipientAuthority: calls.dispatch,
 }));
+vi.mock("../src/worker/operations-portal-native-recipient-inquiry-owner", () => ({
+  ensureOperationsNativeRecipientInquiryCapability: calls.capability,
+}));
 import { handleOperationsNativeRecipientOwnerHttp as handle, type OperationsNativeRecipientOwnerHttpDependencies as Dependencies }
   from "../src/worker/operations-portal-native-recipient-owner-http";
 
@@ -30,7 +33,9 @@ function deps(): Dependencies { return { environment: "staging", expectedHost: "
     recipientOrigin: "https://client-staging.example.test", csrfSecret: "native-owner-test-csrf-secret-long-enough" },
   database: {} as D1Database, dispatch: { OPS_DB: {} as D1Database,
     OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED: "true",
-    OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: { applyNativeAuthority: vi.fn(), getNativeAuthorityStatus: vi.fn() } } }; }
+    OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED: "true",
+    OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: { applyNativeAuthority: vi.fn(), getNativeAuthorityStatus: vi.fn(),
+      applyNativeInquiryCapability: vi.fn(), closeNativeInquiryCapability: vi.fn(), getNativeInquiryCapabilityStatus: vi.fn() } } }; }
 function request(path: string, body?: unknown, token?: string) { return new Request(`${base}/${path}`, {
   method: body === undefined ? "GET" : "POST", headers: { Origin: origin, "Sec-Fetch-Site": "same-origin",
     "X-Native-Staff-Request": "1", "Content-Type": "application/json", ...(token ? { "X-CSRF-Token": token } : {}) },
@@ -51,6 +56,7 @@ describe("Ops-native recipient owner HTTP boundary", () => {
     calls.workspaceRead.mockResolvedValue({ targetId, state: "revoking", ownershipEpoch: 2, recoveryOperationId: operationId });
     calls.workspaceRevoke.mockResolvedValue({ operationId, targetId, state: "revoking", ownershipEpoch: 2, replayed: false });
     calls.workspaceInvocation.mockResolvedValue({ operationId, state: "authorized" });
+    calls.capability.mockResolvedValue({ ok: true, action: "grant", state: "active" });
     calls.materialize.mockResolvedValue({ operationId }); calls.dispatch.mockResolvedValue({ status: "acknowledged", operationId });
   });
   it("is absent when disabled without authentication or writes", async () => {
@@ -124,14 +130,58 @@ describe("Ops-native recipient owner HTTP boundary", () => {
     expect(calls.dispatch).toHaveBeenCalledWith(d.dispatch, operationId);
     expect(await result.json()).toMatchObject({ operationId, status: "acknowledged", intent: { state: "active" } });
   });
-  it("does not apply a v3 home-only grant for a v4 request intent", async () => {
+  it("does not dispatch a v4 grant unless the explicit companion writer is ready", async () => {
     calls.read.mockResolvedValue({ intentId, state: "pending", permissionSchemaVersion: 4,
       permissions: ["operations.request.create", "operations.service_home.read"] });
-    const d = deps(), csrf = await token(d), result = await handle(request(`intents/${intentId}/confirm`, mutation(), csrf), d);
+    const original = deps(), d = { ...original, dispatch: { ...original.dispatch,
+      OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED: "false" } };
+    const csrf = await token(d), result = await handle(request(`intents/${intentId}/confirm`, mutation(), csrf), d);
     expect(result.status).toBe(409);
     expect(await result.json()).toEqual({ error: "request_capability_unavailable" });
     expect(calls.confirm).not.toHaveBeenCalled(); expect(calls.materialize).not.toHaveBeenCalled();
     expect(calls.dispatch).not.toHaveBeenCalled();
+  });
+  it("closes explicit v4 permission only after the base grant acknowledgement and companion closure", async () => {
+    calls.read.mockResolvedValue({ intentId, state: "pending", permissionSchemaVersion: 4,
+      permissions: ["operations.request.create", "operations.service_home.read"] });
+    const d = deps(), csrf = await token(d), result = await handle(request(`intents/${intentId}/confirm`, mutation(), csrf), d);
+    expect(result.status).toBe(200);
+    expect(calls.dispatch.mock.invocationCallOrder[0]!).toBeLessThan(calls.capability.mock.invocationCallOrder[0]!);
+    expect(calls.capability).toHaveBeenCalledWith(d.dispatch, intentId, operationId, "grant", actor);
+    expect(await result.json()).toMatchObject({ status: "acknowledged", intent: { permissionSchemaVersion: 4 } });
+  });
+  it("keeps v4 confirmation pending when companion closure has not completed", async () => {
+    calls.read.mockResolvedValue({ intentId, state: "pending", permissionSchemaVersion: 4,
+      permissions: ["operations.request.create", "operations.service_home.read"] });
+    calls.capability.mockResolvedValue({ ok: false, code: "client_closure_pending", retryable: true });
+    const d = deps(), csrf = await token(d), result = await handle(request(`intents/${intentId}/confirm`, mutation(), csrf), d);
+    expect(result.status).toBe(202); expect(await result.json()).toMatchObject({ status: "pending" });
+  });
+  it("reconciles a confirmed v4 base grant through the same companion closure on recovery", async () => {
+    calls.read.mockResolvedValue({ intentId, revision: 4, state: "active", permissionSchemaVersion: 4,
+      target: { targetId, targetRevision: 1, clientRecordId: "client:one" },
+      principal: { issuer: "https://team.cloudflareaccess.com", subject: "opaque-subject" },
+      recipientBindingId: id(4), recoveryOperationId: operationId });
+    calls.command.mockResolvedValue({ operation_id: operationId, action: "recipient.grant", enrollment_intent_id: intentId,
+      target_id: targetId, target_revision: 1, target_client_record_id: "client:one", recipient_binding_id: id(4),
+      issuer: "https://team.cloudflareaccess.com", subject: "opaque-subject" });
+    const d = deps(), csrf = await token(d), result = await handle(request(`intents/${intentId}/recover`,
+      { operationId, expectedRevision: 4 }, csrf), d);
+    expect(result.status).toBe(200);
+    expect(calls.dispatch.mock.invocationCallOrder[0]!).toBeLessThan(calls.capability.mock.invocationCallOrder[0]!);
+    expect(calls.capability).toHaveBeenCalledWith(d.dispatch, intentId, operationId, "grant", actor);
+    expect(await result.json()).toMatchObject({ status: "acknowledged", intent: { permissionSchemaVersion: 4 } });
+  });
+  it("persists and dispatches the v3 parent revoke before companion cleanup", async () => {
+    calls.read.mockResolvedValue({ intentId, state: "active", permissionSchemaVersion: 4,
+      permissions: ["operations.request.create", "operations.service_home.read"] });
+    calls.capability.mockResolvedValue({ ok: true, action: "revoke", state: "revoked" });
+    const d = deps(), csrf = await token(d), result = await handle(request(`intents/${intentId}/revoke`, mutation(), csrf), d);
+    expect(result.status).toBe(200);
+    expect(calls.revoke.mock.invocationCallOrder[0]!).toBeLessThan(calls.dispatch.mock.invocationCallOrder[0]!);
+    expect(calls.dispatch.mock.invocationCallOrder[0]!).toBeLessThan(calls.capability.mock.invocationCallOrder[0]!);
+    expect(calls.capability).toHaveBeenCalledWith(d.dispatch, intentId, operationId, "revoke", actor);
+    expect(calls.revoke).toHaveBeenCalledOnce();
   });
   it("keeps ambiguous transport pending rather than claiming active access", async () => {
     calls.dispatch.mockResolvedValue({ status: "retry", operationId }); calls.read.mockResolvedValue({ intentId, state: "confirming" });

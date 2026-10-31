@@ -99,7 +99,7 @@ CREATE TABLE operations_portal_native_inquiry_capability_history (
 
 CREATE TRIGGER operations_portal_native_inquiry_capability_command_guard
 BEFORE INSERT ON operations_portal_native_inquiry_capability_commands
-WHEN NOT EXISTS(
+WHEN NEW.action='grant' AND NOT EXISTS(
   SELECT 1 FROM operations_portal_native_recipient_intents intent
   JOIN operations_portal_native_recipient_authority_heads base ON base.recipient_binding_id=intent.recipient_binding_id
     AND base.enrollment_intent_id=intent.intent_id AND base.target_id=intent.target_id
@@ -196,6 +196,104 @@ WHEN NOT EXISTS(
           AND original.expires_at=NEW.expires_at)))
 )
 BEGIN SELECT RAISE(ABORT,'Operations inquiry capability parent or owner pins are stale'); END;
+
+-- Revocation is cleanup-only: it remains bound to the immutable grant, current
+-- owner and exact v3 lineage. It accepts a durable parent revoke (including the
+-- locally revoked head while its remote receipt is pending) or the exact
+-- completed parent revoke, while intentionally ignoring publication drift.
+CREATE TRIGGER operations_portal_native_inquiry_capability_revoke_guard
+BEFORE INSERT ON operations_portal_native_inquiry_capability_commands
+WHEN NEW.action='revoke' AND NOT EXISTS(
+  SELECT 1 FROM operations_portal_native_recipient_intents intent
+  JOIN operations_portal_native_recipient_authority_heads base ON base.recipient_binding_id=intent.recipient_binding_id
+    AND base.enrollment_intent_id=intent.intent_id AND base.target_id=intent.target_id
+    AND base.target_client_record_id=intent.target_client_record_id AND base.issuer=intent.access_issuer
+    AND base.subject=intent.access_subject AND base.permission_schema_version=3 AND base.state IN ('active','revoked')
+  JOIN operations_portal_native_authority_receipts base_receipt ON base_receipt.operation_id=NEW.base_operation_id
+    AND base_receipt.resulting_state='active'
+    AND base_receipt.recipient_binding_id=base.recipient_binding_id AND base_receipt.ownership_epoch=base.ownership_epoch
+    AND base_receipt.grant_revision=NEW.base_grant_revision
+  JOIN operations_portal_native_workspace_authority_heads workspace ON workspace.target_id=base.target_id
+    AND workspace.state='active' AND workspace.ownership_epoch=base.ownership_epoch
+  JOIN operations_portal_native_inquiry_capability_heads existing ON existing.intent_id=intent.intent_id
+    AND existing.state IN ('prepared','active') AND existing.revision=NEW.expected_revision
+    AND existing.base_operation_id=NEW.base_operation_id AND existing.base_ownership_epoch=NEW.base_ownership_epoch
+    AND existing.base_grant_revision=NEW.base_grant_revision
+  JOIN operations_portal_native_inquiry_capability_commands original ON original.operation_id=existing.latest_operation_id
+    AND original.action='grant' AND original.resulting_revision=existing.revision
+  WHERE intent.intent_id=NEW.intent_id AND intent.permission_schema_version=4
+    AND intent.requested_permissions_json='["operations.request.create","operations.service_home.read"]'
+    AND intent.state IN ('revoking','revoked') AND intent.recipient_binding_id=NEW.recipient_binding_id
+    AND intent.grant_operation_id=NEW.base_operation_id
+    AND base.target_id=NEW.target_id
+    AND ((base.state='active' AND base.permissions_json='["operations.service_home.read"]')
+      OR (base.state='revoked' AND base.permissions_json='[]' AND EXISTS(
+        SELECT 1 FROM operations_portal_native_authority_commands original_base
+        WHERE original_base.operation_id=NEW.base_operation_id AND original_base.action='recipient.grant'
+          AND original_base.permission_schema_version=3
+          AND original_base.permissions_json='["operations.service_home.read"]'
+          AND original_base.enrollment_intent_id=intent.intent_id AND original_base.target_id=base.target_id
+          AND original_base.recipient_binding_id=base.recipient_binding_id
+          AND original_base.target_client_record_id=base.target_client_record_id
+          AND original_base.issuer=base.issuer AND original_base.subject=base.subject)))
+    AND ((intent.state='revoking' AND base.state='active' AND base.latest_operation_id=NEW.base_operation_id
+        AND base.ownership_epoch=NEW.base_ownership_epoch AND base.grant_revision=NEW.base_grant_revision)
+      OR (intent.state='revoking' AND base.state='revoked' AND intent.revoke_operation_id IS NOT NULL
+        AND base.latest_operation_id=intent.revoke_operation_id AND EXISTS(
+          SELECT 1 FROM operations_portal_native_authority_commands revoke_command
+          WHERE revoke_command.operation_id=intent.revoke_operation_id
+            AND revoke_command.action='recipient.revoke' AND revoke_command.enrollment_intent_id=intent.intent_id
+            AND revoke_command.target_id=base.target_id AND revoke_command.recipient_binding_id=base.recipient_binding_id))
+      OR (intent.state='revoked' AND base.state='revoked' AND intent.revoke_operation_id IS NOT NULL
+        AND base.latest_operation_id=intent.revoke_operation_id AND EXISTS(
+          SELECT 1 FROM operations_portal_native_authority_receipts revoke_receipt
+          JOIN operations_portal_native_authority_commands revoke_command
+            ON revoke_command.operation_id=revoke_receipt.operation_id
+          WHERE revoke_receipt.operation_id=intent.revoke_operation_id AND revoke_receipt.resulting_state='revoked'
+            AND revoke_receipt.target_id=base.target_id AND revoke_receipt.recipient_binding_id=base.recipient_binding_id
+            AND revoke_command.action='recipient.revoke' AND revoke_command.enrollment_intent_id=intent.intent_id
+            AND revoke_command.target_id=base.target_id AND revoke_command.recipient_binding_id=base.recipient_binding_id)))
+    AND base_receipt.target_id=NEW.target_id
+    AND workspace.target_revision=NEW.target_revision AND workspace.client_authority_id=NEW.client_authority_id
+    AND workspace.workspace_id=NEW.workspace_id
+    AND NEW.expected_revision=1 AND NEW.resulting_revision=2
+    AND json_array(original.target_id,original.target_revision,original.client_authority_id,original.workspace_id,
+      original.target_client_record_id,original.recipient_binding_id,original.issuer,original.subject,
+      original.base_operation_id,original.base_ownership_epoch,original.base_grant_revision,
+      original.publication_operation_id,original.publication_revision,original.publication_source_sequence,
+      original.publication_snapshot_id,original.publication_snapshot_sha256,original.expires_at)=
+      json_array(NEW.target_id,NEW.target_revision,NEW.client_authority_id,NEW.workspace_id,
+      NEW.target_client_record_id,NEW.recipient_binding_id,NEW.issuer,NEW.subject,NEW.base_operation_id,
+      NEW.base_ownership_epoch,NEW.base_grant_revision,NEW.publication_operation_id,NEW.publication_revision,
+      NEW.publication_source_sequence,NEW.publication_snapshot_id,NEW.publication_snapshot_sha256,NEW.expires_at)
+)
+BEGIN SELECT RAISE(ABORT,'Operations inquiry capability revoke must match its active parent'); END;
+
+CREATE TRIGGER operations_portal_native_inquiry_capability_revoke_owner_guard
+BEFORE INSERT ON operations_portal_native_inquiry_capability_commands
+WHEN NEW.action='revoke' AND NOT EXISTS(
+  SELECT 1 FROM native_staff_admissions actor
+  JOIN native_staff_profiles profile ON profile.staff_id=actor.staff_id AND profile.version=NEW.actor_profile_version
+  JOIN native_directory_grant_generations generation ON generation.staff_id=actor.staff_id
+    AND generation.generation=NEW.actor_grant_generation
+  JOIN operations_portal_native_workspace_authority_heads workspace ON workspace.target_id=NEW.target_id
+    AND workspace.state='active' AND workspace.target_revision=NEW.target_revision
+    AND workspace.client_authority_id=NEW.client_authority_id AND workspace.workspace_id=NEW.workspace_id
+  WHERE actor.staff_id=NEW.actor_staff_id AND actor.active=1 AND actor.bound_access_subject=NEW.actor_access_subject
+    AND actor.version=NEW.actor_admission_version AND NEW.actor_verified_until>NEW.observed_at
+    AND NEW.actor_verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    AND (EXISTS(SELECT 1 FROM staff_role_assignments role WHERE role.staff_id=actor.staff_id
+        AND role.role_id IN ('role-owner','role-admin') AND role.scope='global')
+      OR EXISTS(SELECT 1 FROM staff_role_assignments role
+        JOIN native_directory_resource_scopes scope ON scope.division_id=role.division_id
+          AND scope.record_id=workspace.root_record_id AND scope.active=1
+        WHERE role.staff_id=actor.staff_id AND role.role_id='role-division-manager' AND role.scope='division'))
+    AND EXISTS(SELECT 1 FROM operations_portal_workspace_effective_portal_permissions allowed
+      WHERE allowed.staff_id=actor.staff_id AND allowed.effect='allow' AND allowed.record_id=workspace.root_record_id)
+    AND NOT EXISTS(SELECT 1 FROM operations_portal_workspace_effective_portal_permissions denied
+      WHERE denied.staff_id=actor.staff_id AND denied.effect='deny' AND denied.record_id=workspace.root_record_id)
+)
+BEGIN SELECT RAISE(ABORT,'Operations inquiry capability revoke owner is not current'); END;
 
 CREATE TRIGGER operations_portal_native_inquiry_capability_command_json_guard
 BEFORE INSERT ON operations_portal_native_inquiry_capability_commands

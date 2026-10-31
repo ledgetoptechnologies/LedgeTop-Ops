@@ -619,8 +619,82 @@ export async function readOperationsPortalNativeRecipientIntentForOwner(
     || !await ownerAuthorized(session, row.target_id, owner, grantGeneration)) denied();
   const recoveryOperationId = row.state === "confirming" || row.state === "active" ? row.grant_operation_id
     : row.state === "revoking" || row.state === "revoked" ? row.revoke_operation_id : null;
-  return Object.freeze({ ...review(row), recipientLabel: presentationLabel(row.recipient_label, row.intent_id),
-    recoveryOperationId });
+  const result = review(row);
+  if (row.permission_schema_version !== 4 || row.state !== "active") {
+    const capabilityTable = row.permission_schema_version === 4 && (row.state === "revoked" || row.state === "revoking")
+      ? await session.prepare(`SELECT 1 FROM sqlite_master WHERE type='table'
+          AND name='operations_portal_native_inquiry_capability_heads'`).first<number>() : null;
+    const companionState = capabilityTable ? await session.prepare(`SELECT state
+      FROM operations_portal_native_inquiry_capability_heads WHERE intent_id=?`).bind(intentId).first<string>("state") : null;
+    return Object.freeze({ ...result,
+    ...(row.permission_schema_version === 4 ? { capabilityStatus: row.state === "cancelled" ? "unavailable" as const
+      : row.state === "issued" || row.state === "pending" ? "not_requested" as const
+        : row.state === "revoked" && (!companionState || companionState === "revoked") ? "revoked" as const : "pending" as const,
+      effectivePermissions: Object.freeze([] as string[]) } : {}),
+    recipientLabel: presentationLabel(row.recipient_label, row.intent_id), recoveryOperationId });
+  }
+  const current = await session.prepare(`SELECT
+      EXISTS(SELECT 1 FROM operations_portal_native_recipient_authority_heads base
+        JOIN operations_portal_native_authority_receipts base_receipt ON base_receipt.operation_id=base.latest_operation_id
+          AND base_receipt.target_id=base.target_id AND base_receipt.recipient_binding_id=base.recipient_binding_id
+          AND base_receipt.ownership_epoch=base.ownership_epoch AND base_receipt.grant_revision=base.grant_revision
+          AND base_receipt.resulting_state='active' AND base_receipt.permission_schema_version=3
+          AND base_receipt.permissions_json='["operations.service_home.read"]'
+        JOIN operations_portal_native_workspace_authority_heads workspace ON workspace.target_id=base.target_id
+          AND workspace.ownership_epoch=base.ownership_epoch AND workspace.state='active'
+        JOIN client_onboarding_recipient_identity_bindings binding ON binding.binding_id=base.recipient_binding_id
+          AND binding.status='active' AND binding.access_issuer=base.issuer AND binding.access_subject=base.subject
+        WHERE base.enrollment_intent_id=intent.intent_id AND base.recipient_binding_id=intent.recipient_binding_id
+          AND base.latest_operation_id=intent.grant_operation_id AND base.state='active'
+          AND base.permission_schema_version=3 AND base.permissions_json='["operations.service_home.read"]'
+          AND (base.expires_at IS NULL OR base.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+          AND intent.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) home_current,
+      EXISTS(SELECT 1 FROM operations_portal_native_inquiry_capability_heads cap_head
+        JOIN operations_portal_native_inquiry_capability_commands cap ON cap.operation_id=cap_head.latest_operation_id
+          AND cap.intent_id=cap_head.intent_id AND cap.action='grant' AND cap.resulting_revision=cap_head.revision
+          AND cap.permission='operations.request.create'
+        JOIN operations_portal_native_inquiry_capability_receipts cap_receipt ON cap_receipt.operation_id=cap.operation_id
+          AND cap_receipt.request_fingerprint=cap.request_fingerprint AND cap_receipt.state='prepared'
+        JOIN operations_portal_native_inquiry_capability_closures closure ON closure.operation_id=cap.operation_id
+          AND closure.request_fingerprint=cap.request_fingerprint
+          AND closure.client_receipt_fingerprint=cap_receipt.client_receipt_fingerprint
+          AND closure.operations_receipt_fingerprint=cap_receipt.operations_receipt_fingerprint
+          AND closure.resulting_state='active'
+        JOIN operations_portal_native_recipient_authority_heads base ON base.recipient_binding_id=cap_head.recipient_binding_id
+          AND base.target_id=cap_head.target_id AND base.latest_operation_id=cap_head.base_operation_id
+          AND base.ownership_epoch=cap_head.base_ownership_epoch AND base.grant_revision=cap_head.base_grant_revision
+          AND base.state='active' AND base.permission_schema_version=3
+          AND base.permissions_json='["operations.service_home.read"]'
+        JOIN operations_portal_native_authority_receipts base_receipt ON base_receipt.operation_id=base.latest_operation_id
+          AND base_receipt.target_id=base.target_id AND base_receipt.recipient_binding_id=base.recipient_binding_id
+          AND base_receipt.ownership_epoch=base.ownership_epoch AND base_receipt.grant_revision=base.grant_revision
+          AND base_receipt.resulting_state='active'
+        JOIN operations_portal_native_workspace_authority_heads workspace ON workspace.target_id=base.target_id
+          AND workspace.ownership_epoch=base.ownership_epoch AND workspace.state='active'
+        JOIN operations_portal_workspace_publication_heads publication ON publication.target_id=workspace.target_id
+          AND publication.target_revision=cap.target_revision AND publication.client_authority_id=cap.client_authority_id
+          AND publication.workspace_id=cap.workspace_id AND publication.latest_operation_id=cap.publication_operation_id
+          AND publication.publication_revision=cap.publication_revision AND publication.source_sequence=cap.publication_source_sequence
+          AND publication.snapshot_id=cap.publication_snapshot_id AND publication.snapshot_sha256=cap.publication_snapshot_sha256
+        WHERE cap_head.intent_id=intent.intent_id AND cap_head.state='active' AND cap.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')
+          AND intent.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')
+          AND base.enrollment_intent_id=intent.intent_id AND base.latest_operation_id=intent.grant_operation_id
+          AND cap.base_operation_id=intent.grant_operation_id AND cap.recipient_binding_id=intent.recipient_binding_id
+          AND cap.target_id=intent.target_id AND cap.target_client_record_id=intent.target_client_record_id
+          AND cap.issuer=intent.access_issuer AND cap.subject=intent.access_subject
+          AND cap.expires_at=intent.expires_at) capability_current,
+      EXISTS(SELECT 1 FROM operations_portal_native_inquiry_capability_heads cap_head
+        WHERE cap_head.intent_id=intent.intent_id AND cap_head.state='revoked') capability_revoked
+    FROM operations_portal_native_recipient_intents intent WHERE intent.intent_id=?`)
+    .bind(intentId).first<{ home_current: number; capability_current: number; capability_revoked: number }>();
+  const effectivePermissions: string[] = [];
+  if (current?.capability_current === 1) effectivePermissions.push("operations.request.create");
+  if (current?.home_current === 1) effectivePermissions.push("operations.service_home.read");
+  const capabilityStatus = current?.capability_current === 1 ? "active" as const
+    : current?.capability_revoked === 1 ? "revoked" as const
+      : current?.home_current === 1 ? "pending" as const : "unavailable" as const;
+  return Object.freeze({ ...result, capabilityStatus, effectivePermissions: Object.freeze(effectivePermissions),
+    recipientLabel: presentationLabel(row.recipient_label, row.intent_id), recoveryOperationId });
 }
 
 export async function readOperationsPortalNativeAuthorityCommand(database: D1Database, operationId: string) {

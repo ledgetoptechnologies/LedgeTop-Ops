@@ -206,11 +206,12 @@ async function updateStaffInboxInquiryStatus(env:Env,principal:StaffPrincipal,id
     if(!((row.status==="received"&&(next==="under_review"||next==="declined"))||(row.status==="under_review"&&(next==="declined"||next==="closed"))||(row.status==="declined"&&next==="closed")))
       throw new HTTPException(409,{message:"Inquiry status changed. Refresh before continuing."});
     if(await policy(env,principal)!==before)changed();
+    const auditEventId=crypto.randomUUID();
     const results=await db.batch([
       db.prepare("UPDATE operations_native_principal_inquiries SET status=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE inquiry_id=? AND status=?")
         .bind(next,nativeId,row.status),
-      db.prepare("INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json) SELECT 'staff',?,'client.ops_principal_inquiry.status_changed','operations_native_principal_inquiry',?,json_object('from',?,'to',?) WHERE changes()=1 AND EXISTS(SELECT 1 FROM operations_native_principal_inquiries WHERE inquiry_id=? AND status=?)")
-        .bind(principal.id,nativeId,row.status,next,nativeId,next),
+      db.prepare("INSERT INTO operations_native_principal_inquiry_audit(event_id,inquiry_id,actor_type,actor_id,action,details_json) SELECT ?,?,'staff',?,'status_changed',json_object('from',?,'to',?) WHERE changes()=1 AND EXISTS(SELECT 1 FROM operations_native_principal_inquiries WHERE inquiry_id=? AND status=?)")
+        .bind(auditEventId,nativeId,principal.id,row.status,next,nativeId,next),
     ]);
     if(!results[0]?.meta.changes||!results[1]?.meta.changes||await policy(env,principal)!==before)changed();
     return{id:`ops:${row.id}`,kind:row.kind,title:display(row.title),details:display(row.details),location:row.location===null?null:display(row.location),status:next,createdAt:timestamp(row.created_at)};

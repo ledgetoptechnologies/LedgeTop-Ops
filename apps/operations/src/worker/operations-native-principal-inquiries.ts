@@ -51,23 +51,34 @@ const witnessOneSql=()=>`EXISTS(
  JOIN operations_portal_native_inquiry_capability_closures cc ON cc.operation_id=cap.operation_id
   AND cc.request_fingerprint=cap.request_fingerprint AND cc.client_receipt_fingerprint=cr.request_fingerprint
   AND cc.resulting_state='active' AND length(cc.operations_receipt_fingerprint)=64
+ JOIN operations_portal_native_recipient_intents intent ON intent.intent_id=ch.intent_id
+  AND intent.permission_schema_version=4 AND intent.state='active'
  JOIN operations_portal_native_recipient_authority_heads bh ON bh.recipient_binding_id=cap.recipient_binding_id
   AND bh.target_id=cap.target_id AND bh.latest_operation_id=cap.base_operation_id
   AND bh.ownership_epoch=cap.base_ownership_epoch AND bh.grant_revision=cap.base_grant_revision AND bh.state='active'
  JOIN operations_portal_native_authority_receipts br ON br.operation_id=bh.latest_operation_id
-  AND br.ownership_epoch=bh.ownership_epoch AND br.grant_revision=bh.grant_revision AND br.state='active'
+  AND br.ownership_epoch=bh.ownership_epoch AND br.grant_revision=bh.grant_revision AND br.resulting_state='active'
+ JOIN operations_portal_native_authority_outbox bo ON bo.operation_id=br.operation_id
+  AND bo.request_fingerprint=br.request_fingerprint
  JOIN operations_portal_native_authority_commands bc ON bc.operation_id=br.operation_id
-  AND bc.request_fingerprint=br.request_fingerprint AND bc.action='recipient.grant'
+  AND bc.action='recipient.grant'
   AND bc.permissions_json='["operations.service_home.read"]'
  JOIN operations_portal_native_workspace_authority_heads wh ON wh.target_id=bh.target_id
   AND wh.ownership_epoch=bh.ownership_epoch AND wh.state='active'
  JOIN operations_portal_workspace_publication_heads ph ON ph.target_id=wh.target_id
   AND ph.target_revision=cap.target_revision AND ph.client_authority_id=cap.client_authority_id
   AND ph.workspace_id=cap.workspace_id AND ph.latest_operation_id=cap.publication_operation_id
-  AND ph.revision=cap.publication_revision AND ph.source_sequence=cap.publication_source_sequence
+  AND ph.publication_revision=cap.publication_revision AND ph.source_sequence=cap.publication_source_sequence
   AND ph.snapshot_id=cap.publication_snapshot_id AND ph.snapshot_sha256=cap.publication_snapshot_sha256
+ JOIN operations_portal_workspace_publication_receipts pr ON pr.operation_id=ph.latest_operation_id
+  AND pr.target_id=ph.target_id AND pr.resulting_revision=ph.publication_revision
+  AND pr.source_sequence=ph.source_sequence AND pr.snapshot_id=ph.snapshot_id AND pr.snapshot_sha256=ph.snapshot_sha256
+ JOIN operations_portal_workspace_publication_commands pc ON pc.operation_id=pr.operation_id
+  AND pc.target_id=pr.target_id AND pc.resulting_revision=pr.resulting_revision AND pc.source_sequence=pr.source_sequence
+  AND pc.snapshot_id=pr.snapshot_id AND pc.snapshot_sha256=pr.snapshot_sha256
  JOIN operations_portal_workspace_publication_snapshots ps ON ps.snapshot_id=ph.snapshot_id
-  AND ps.operation_id=ph.latest_operation_id AND ps.snapshot_sha256=ph.snapshot_sha256
+  AND ps.checkpoint_id=pc.checkpoint_id AND ps.target_id=ph.target_id
+  AND ps.source_sequence=ph.source_sequence AND ps.snapshot_sha256=ph.snapshot_sha256
  JOIN json_each(ps.snapshot_json,'$.directoryRecords') member
  WHERE ch.target_id=? AND ch.recipient_binding_id=? AND ch.state='active'
   AND cap.permission='operations.request.create' AND cap.target_id=? AND cap.target_revision=?
@@ -132,10 +143,10 @@ export async function submitOpsPrincipalInquiry(env:Env,raw:string):Promise<stri
   d.prepare(`INSERT INTO operations_native_principal_inquiry_outbox(outbox_id,inquiry_id,event_type,dedupe_key,payload_json)
    SELECT ?,inquiry_id,'inquiry_submitted',?,json_object('kind',kind,'title',title) FROM operations_native_principal_inquiries WHERE inquiry_id=? AND issuer=? AND subject=? ON CONFLICT(dedupe_key) DO NOTHING`)
    .bind(outbox,id+":submitted",id,issuer,subject),
-  d.prepare(`INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json)
-   SELECT 'client',authority_set_sha256,'client.ops_principal_inquiry.submitted','operations_native_principal_inquiry',?,json_object('kind',?)
+  d.prepare(`INSERT INTO operations_native_principal_inquiry_audit(event_id,inquiry_id,actor_type,actor_id,action,details_json)
+   SELECT ?,inquiry_id,'principal',authority_set_sha256,'submitted',json_object('kind',?)
    FROM operations_native_principal_inquiries WHERE inquiry_id=? AND issuer=? AND subject=?`)
-   .bind(id,i.kind,id,issuer,subject),
+   .bind(crypto.randomUUID(),i.kind,id,issuer,subject),
   d.prepare("DELETE FROM operations_native_principal_inquiry_authority_guard WHERE guard_id=?").bind(guardId),
  ]);}catch{/* Resolve exact idempotency below. */}
  const row=await d.prepare("SELECT * FROM operations_native_principal_inquiries WHERE issuer=? AND subject=? AND idempotency_key=?").bind(issuer,subject,i.idempotencyKey).first<any>();

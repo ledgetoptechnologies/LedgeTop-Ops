@@ -17,16 +17,19 @@ beforeAll(async()=>{
  CREATE TABLE operations_portal_workspace_reservation_heads(target_id TEXT PRIMARY KEY);
  CREATE TABLE operations_directory_records(record_id TEXT PRIMARY KEY);
  CREATE TABLE operations_portal_native_authority_commands(operation_id TEXT PRIMARY KEY,request_fingerprint TEXT,action TEXT,permissions_json TEXT,target_id TEXT,recipient_binding_id TEXT,enrollment_intent_id TEXT,target_client_record_id TEXT,issuer TEXT,subject TEXT);
- CREATE TABLE operations_portal_native_authority_receipts(operation_id TEXT PRIMARY KEY,ownership_epoch INTEGER,grant_revision INTEGER,state TEXT,request_fingerprint TEXT);
+ CREATE TABLE operations_portal_native_authority_receipts(operation_id TEXT PRIMARY KEY,ownership_epoch INTEGER,grant_revision INTEGER,resulting_state TEXT,request_fingerprint TEXT);
+ CREATE TABLE operations_portal_native_authority_outbox(operation_id TEXT PRIMARY KEY,request_fingerprint TEXT);
  CREATE TABLE operations_portal_native_recipient_authority_heads(recipient_binding_id TEXT,target_id TEXT,latest_operation_id TEXT,ownership_epoch INTEGER,grant_revision INTEGER,state TEXT,expires_at TEXT);
+ CREATE TABLE operations_portal_native_recipient_intents(intent_id TEXT PRIMARY KEY,permission_schema_version INTEGER,state TEXT);
  CREATE TABLE operations_portal_native_workspace_authority_heads(target_id TEXT,ownership_epoch INTEGER,state TEXT,root_kind TEXT,root_record_id TEXT);
  CREATE TABLE operations_portal_native_inquiry_capability_heads(intent_id TEXT,target_id TEXT,recipient_binding_id TEXT,state TEXT,latest_operation_id TEXT,revision INTEGER);
  CREATE TABLE operations_portal_native_inquiry_capability_commands(operation_id TEXT PRIMARY KEY,intent_id TEXT,action TEXT,resulting_revision INTEGER,target_id TEXT,target_revision INTEGER,client_authority_id TEXT,workspace_id TEXT,target_client_record_id TEXT,recipient_binding_id TEXT,issuer TEXT,subject TEXT,base_operation_id TEXT,base_ownership_epoch INTEGER,base_grant_revision INTEGER,permission TEXT,publication_operation_id TEXT,publication_revision INTEGER,publication_source_sequence INTEGER,publication_snapshot_id TEXT,publication_snapshot_sha256 TEXT,expires_at TEXT,request_fingerprint TEXT);
  CREATE TABLE operations_portal_native_inquiry_capability_receipts(operation_id TEXT,request_fingerprint TEXT,state TEXT);
  CREATE TABLE operations_portal_native_inquiry_capability_closures(operation_id TEXT,request_fingerprint TEXT,client_receipt_fingerprint TEXT,resulting_state TEXT,operations_receipt_fingerprint TEXT);
- CREATE TABLE operations_portal_workspace_publication_commands(operation_id TEXT PRIMARY KEY);
- CREATE TABLE operations_portal_workspace_publication_heads(target_id TEXT,target_revision INTEGER,client_authority_id TEXT,workspace_id TEXT,latest_operation_id TEXT,revision INTEGER,source_sequence INTEGER,snapshot_id TEXT,snapshot_sha256 TEXT);
- CREATE TABLE operations_portal_workspace_publication_snapshots(snapshot_id TEXT PRIMARY KEY,operation_id TEXT,snapshot_sha256 TEXT,snapshot_json TEXT);
+ CREATE TABLE operations_portal_workspace_publication_commands(operation_id TEXT PRIMARY KEY,target_id TEXT,resulting_revision INTEGER,source_sequence INTEGER,snapshot_id TEXT,snapshot_sha256 TEXT,checkpoint_id TEXT);
+ CREATE TABLE operations_portal_workspace_publication_receipts(operation_id TEXT PRIMARY KEY,target_id TEXT,resulting_revision INTEGER,source_sequence INTEGER,snapshot_id TEXT,snapshot_sha256 TEXT);
+ CREATE TABLE operations_portal_workspace_publication_heads(target_id TEXT,target_revision INTEGER,client_authority_id TEXT,workspace_id TEXT,latest_operation_id TEXT,publication_revision INTEGER,source_sequence INTEGER,snapshot_id TEXT,snapshot_sha256 TEXT);
+ CREATE TABLE operations_portal_workspace_publication_snapshots(snapshot_id TEXT PRIMARY KEY,checkpoint_id TEXT,target_id TEXT,source_sequence INTEGER,snapshot_sha256 TEXT,snapshot_json TEXT);
  CREATE TABLE audit_log(actor_type TEXT,actor_id TEXT,action TEXT,entity_type TEXT,entity_id TEXT,details_json TEXT);
  CREATE TABLE staff_users(id TEXT PRIMARY KEY,email TEXT,access_subject TEXT,project_alpha_user_id TEXT,status TEXT);
  CREATE TABLE staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT,division_id TEXT);
@@ -47,14 +50,17 @@ describe("Operations principal inquiry migration",()=>{
   const ids={binding:"10000000-0000-4000-8000-000000000001",target:"10000000-0000-4000-8000-000000000002",
    client:"client-record",base:"10000000-0000-4000-8000-000000000003",cap:"10000000-0000-4000-8000-000000000004",
    pub:"10000000-0000-4000-8000-000000000005",snapshot:"10000000-0000-4000-8000-000000000006",id:"10000000-0000-4000-8000-000000000007"};
+  const hash="b".repeat(64),snapshot=JSON.stringify({directoryRecords:[{recordId:ids.client,kind:"client",parentRecordId:null}]});
   await db.batch([
    db.prepare("INSERT INTO client_onboarding_recipient_identity_bindings VALUES(?)").bind(ids.binding),
    db.prepare("INSERT INTO operations_portal_workspace_reservation_heads VALUES(?)").bind(ids.target),
    db.prepare("INSERT INTO operations_directory_records VALUES(?)").bind(ids.client),
+   db.prepare("INSERT INTO operations_portal_native_recipient_intents VALUES(?,4,'active')").bind("10000000-0000-4000-8000-000000000008"),
    db.prepare("INSERT INTO operations_portal_native_authority_commands(operation_id) VALUES(?)").bind(ids.base),
    db.prepare("INSERT INTO operations_portal_native_inquiry_capability_commands(operation_id) VALUES(?)").bind(ids.cap),
-   db.prepare("INSERT INTO operations_portal_workspace_publication_commands VALUES(?)").bind(ids.pub),
-   db.prepare("INSERT INTO operations_portal_workspace_publication_snapshots(snapshot_id) VALUES(?)").bind(ids.snapshot),
+   db.prepare("INSERT INTO operations_portal_workspace_publication_commands VALUES(?,?,1,1,?,?,?)").bind(ids.pub,ids.target,ids.snapshot,hash,"checkpoint"),
+   db.prepare("INSERT INTO operations_portal_workspace_publication_receipts VALUES(?,?,1,1,?,?)").bind(ids.pub,ids.target,ids.snapshot,hash),
+   db.prepare("INSERT INTO operations_portal_workspace_publication_snapshots(snapshot_id,checkpoint_id,target_id,source_sequence,snapshot_sha256,snapshot_json) VALUES(?,?,?,?,?,?)").bind(ids.snapshot,"checkpoint",ids.target,1,hash,snapshot),
   ]);
   await db.prepare(`INSERT INTO operations_native_principal_inquiries(inquiry_id,issuer,subject,authority_set_json,authority_set_sha256,
    idempotency_key,request_fingerprint,kind,title,details,location) VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
@@ -77,14 +83,17 @@ describe("Operations principal inquiry migration",()=>{
    db.prepare("INSERT INTO client_onboarding_recipient_identity_bindings(binding_id) VALUES(?)").bind(ids.binding),
    db.prepare("INSERT INTO operations_portal_workspace_reservation_heads(target_id) VALUES(?)").bind(ids.target),
    db.prepare("INSERT INTO operations_directory_records(record_id) VALUES('client-record-ops')"),
+   db.prepare("INSERT INTO operations_portal_native_recipient_intents VALUES(?,4,'active')").bind(ids.intent),
    db.prepare("INSERT INTO operations_portal_native_authority_commands(operation_id,request_fingerprint,action,permissions_json,target_id,recipient_binding_id,enrollment_intent_id,target_client_record_id,issuer,subject) VALUES(?,?,'recipient.grant','[\"operations.service_home.read\"]',?,?,?,?,?,?)")
     .bind(ids.base,baseFp,ids.target,ids.binding,ids.intent,"client-record-ops","issuer","subject"),
-   db.prepare("INSERT INTO operations_portal_native_authority_receipts(operation_id,ownership_epoch,grant_revision,state,request_fingerprint) VALUES(?,1,1,'active',?)").bind(ids.base,baseFp),
+   db.prepare("INSERT INTO operations_portal_native_authority_receipts(operation_id,ownership_epoch,grant_revision,resulting_state,request_fingerprint) VALUES(?,1,1,'active',?)").bind(ids.base,baseFp),
+   db.prepare("INSERT INTO operations_portal_native_authority_outbox(operation_id,request_fingerprint) VALUES(?,?)").bind(ids.base,baseFp),
    db.prepare("INSERT INTO operations_portal_native_recipient_authority_heads(recipient_binding_id,target_id,latest_operation_id,ownership_epoch,grant_revision,state,expires_at) VALUES(?,?,?,1,1,'active',NULL)").bind(ids.binding,ids.target,ids.base),
    db.prepare("INSERT INTO operations_portal_native_workspace_authority_heads(target_id,ownership_epoch,state,root_kind,root_record_id) VALUES(?,1,'active','standalone_client','client-record-ops')").bind(ids.target),
-   db.prepare("INSERT INTO operations_portal_workspace_publication_commands(operation_id) VALUES(?)").bind(ids.pub),
-   db.prepare("INSERT INTO operations_portal_workspace_publication_snapshots(snapshot_id,operation_id,snapshot_sha256,snapshot_json) VALUES(?,?,?,?)").bind(ids.snapshot,ids.pub,hash,snapshot),
-   db.prepare("INSERT INTO operations_portal_workspace_publication_heads(target_id,target_revision,client_authority_id,workspace_id,latest_operation_id,revision,source_sequence,snapshot_id,snapshot_sha256) VALUES(?,1,?,'workspace-ops',?,1,1,?,?)").bind(ids.target,ids.authority,ids.pub,ids.snapshot,hash),
+   db.prepare("INSERT INTO operations_portal_workspace_publication_commands VALUES(?,?,1,1,?,?,?)").bind(ids.pub,ids.target,ids.snapshot,hash,"checkpoint"),
+   db.prepare("INSERT INTO operations_portal_workspace_publication_receipts VALUES(?,?,1,1,?,?)").bind(ids.pub,ids.target,ids.snapshot,hash),
+   db.prepare("INSERT INTO operations_portal_workspace_publication_snapshots(snapshot_id,checkpoint_id,target_id,source_sequence,snapshot_sha256,snapshot_json) VALUES(?,?,?,?,?,?)").bind(ids.snapshot,"checkpoint",ids.target,1,hash,snapshot),
+   db.prepare("INSERT INTO operations_portal_workspace_publication_heads(target_id,target_revision,client_authority_id,workspace_id,latest_operation_id,publication_revision,source_sequence,snapshot_id,snapshot_sha256) VALUES(?,1,?,'workspace-ops',?,1,1,?,?)").bind(ids.target,ids.authority,ids.pub,ids.snapshot,hash),
    db.prepare("INSERT INTO operations_portal_native_inquiry_capability_heads(intent_id,target_id,recipient_binding_id,state,latest_operation_id,revision) VALUES(?,?,?,'active',?,1)").bind(ids.intent,ids.target,ids.binding,ids.cap),
    db.prepare(`INSERT INTO operations_portal_native_inquiry_capability_commands(operation_id,intent_id,action,resulting_revision,target_id,target_revision,client_authority_id,workspace_id,target_client_record_id,recipient_binding_id,issuer,subject,base_operation_id,base_ownership_epoch,base_grant_revision,permission,publication_operation_id,publication_revision,publication_source_sequence,publication_snapshot_id,publication_snapshot_sha256,expires_at,request_fingerprint)
     VALUES(?,?,'grant',1,?,1,?,'workspace-ops','client-record-ops',?,'issuer','subject',?,1,1,'operations.request.create',?,1,1,?,?,?,?)`)
@@ -110,13 +119,16 @@ describe("Operations principal inquiry migration",()=>{
    db.prepare("INSERT INTO client_onboarding_recipient_identity_bindings(binding_id) VALUES(?)").bind(b.binding),
    db.prepare("INSERT INTO operations_portal_workspace_reservation_heads(target_id) VALUES(?)").bind(b.target),
    db.prepare("INSERT INTO operations_directory_records(record_id) VALUES('client-record-b')"),
+   db.prepare("INSERT INTO operations_portal_native_recipient_intents VALUES(?,4,'active')").bind(b.intent),
    db.prepare("INSERT INTO operations_portal_native_authority_commands(operation_id,request_fingerprint,action,permissions_json,target_id,recipient_binding_id,enrollment_intent_id,target_client_record_id,issuer,subject) VALUES(?,?,'recipient.grant','[\"operations.service_home.read\"]',?,?,?,?,?,?)").bind(b.base,bBaseFp,b.target,b.binding,b.intent,"client-record-b","issuer","subject"),
-   db.prepare("INSERT INTO operations_portal_native_authority_receipts(operation_id,ownership_epoch,grant_revision,state,request_fingerprint) VALUES(?,1,1,'active',?)").bind(b.base,bBaseFp),
+   db.prepare("INSERT INTO operations_portal_native_authority_receipts(operation_id,ownership_epoch,grant_revision,resulting_state,request_fingerprint) VALUES(?,1,1,'active',?)").bind(b.base,bBaseFp),
+   db.prepare("INSERT INTO operations_portal_native_authority_outbox(operation_id,request_fingerprint) VALUES(?,?)").bind(b.base,bBaseFp),
    db.prepare("INSERT INTO operations_portal_native_recipient_authority_heads(recipient_binding_id,target_id,latest_operation_id,ownership_epoch,grant_revision,state,expires_at) VALUES(?,?,?,1,1,'active',NULL)").bind(b.binding,b.target,b.base),
    db.prepare("INSERT INTO operations_portal_native_workspace_authority_heads(target_id,ownership_epoch,state,root_kind,root_record_id) VALUES(?,1,'active','standalone_client','client-record-b')").bind(b.target),
-   db.prepare("INSERT INTO operations_portal_workspace_publication_commands(operation_id) VALUES(?)").bind(b.pub),
-   db.prepare("INSERT INTO operations_portal_workspace_publication_snapshots(snapshot_id,operation_id,snapshot_sha256,snapshot_json) VALUES(?,?,?,?)").bind(b.snapshot,b.pub,bHash,bSnapshot),
-   db.prepare("INSERT INTO operations_portal_workspace_publication_heads(target_id,target_revision,client_authority_id,workspace_id,latest_operation_id,revision,source_sequence,snapshot_id,snapshot_sha256) VALUES(?,1,?,'workspace-b',?,1,1,?,?)").bind(b.target,b.authority,b.pub,b.snapshot,bHash),
+   db.prepare("INSERT INTO operations_portal_workspace_publication_commands VALUES(?,?,1,1,?,?,?)").bind(b.pub,b.target,b.snapshot,bHash,"checkpoint-b"),
+   db.prepare("INSERT INTO operations_portal_workspace_publication_receipts VALUES(?,?,1,1,?,?)").bind(b.pub,b.target,b.snapshot,bHash),
+   db.prepare("INSERT INTO operations_portal_workspace_publication_snapshots(snapshot_id,checkpoint_id,target_id,source_sequence,snapshot_sha256,snapshot_json) VALUES(?,?,?,?,?,?)").bind(b.snapshot,"checkpoint-b",b.target,1,bHash,bSnapshot),
+   db.prepare("INSERT INTO operations_portal_workspace_publication_heads(target_id,target_revision,client_authority_id,workspace_id,latest_operation_id,publication_revision,source_sequence,snapshot_id,snapshot_sha256) VALUES(?,1,?,'workspace-b',?,1,1,?,?)").bind(b.target,b.authority,b.pub,b.snapshot,bHash),
    db.prepare("INSERT INTO operations_portal_native_inquiry_capability_heads(intent_id,target_id,recipient_binding_id,state,latest_operation_id,revision) VALUES(?,?,?,'active',?,1)").bind(b.intent,b.target,b.binding,b.cap),
    db.prepare(`INSERT INTO operations_portal_native_inquiry_capability_commands(operation_id,intent_id,action,resulting_revision,target_id,target_revision,client_authority_id,workspace_id,target_client_record_id,recipient_binding_id,issuer,subject,base_operation_id,base_ownership_epoch,base_grant_revision,permission,publication_operation_id,publication_revision,publication_source_sequence,publication_snapshot_id,publication_snapshot_sha256,expires_at,request_fingerprint)
     VALUES(?,?,'grant',1,?,1,?,'workspace-b','client-record-b',?,'issuer','subject',?,1,1,'operations.request.create',?,1,1,?,?,?,?)`).bind(b.cap,b.intent,b.target,b.authority,b.binding,b.base,b.pub,b.snapshot,bHash,expiresAt,bCapFp),
@@ -151,9 +163,9 @@ describe("Operations principal inquiry migration",()=>{
    {method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({status:"under_review"})},staffEnv);
   expect(changed.status).toBe(200);expect((await changed.json() as any).inquiry.status).toBe("under_review");
   expect(await db.prepare("SELECT COUNT(*) n FROM operations_native_principal_inquiry_outbox WHERE event_type='inquiry_status_changed'").first("n")).toBe(0);
-  await db.prepare("UPDATE operations_portal_workspace_publication_heads SET revision=2 WHERE target_id=?").bind(ids.target).run();
+  await db.prepare("UPDATE operations_portal_workspace_publication_heads SET publication_revision=2 WHERE target_id=?").bind(ids.target).run();
   expect(JSON.parse(await listOpsPrincipalInquiries(env,JSON.stringify({protocolVersion:1,proofs:[proof,proofB]})))).toEqual({ok:false,code:"unavailable"});
-  await db.prepare("UPDATE operations_portal_workspace_publication_heads SET revision=1 WHERE target_id=?").bind(ids.target).run();
+  await db.prepare("UPDATE operations_portal_workspace_publication_heads SET publication_revision=1 WHERE target_id=?").bind(ids.target).run();
   await db.prepare("UPDATE operations_portal_native_inquiry_capability_commands SET expires_at='2000-01-01T00:00:00.000Z' WHERE operation_id=?").bind(ids.cap).run();
   expect(JSON.parse(await listOpsPrincipalInquiries(env,JSON.stringify({protocolVersion:1,proofs:[proof,proofB]})))).toEqual({ok:false,code:"unavailable"});
   await db.prepare("UPDATE operations_portal_native_inquiry_capability_commands SET expires_at=? WHERE operation_id=?").bind(expiresAt,ids.cap).run();

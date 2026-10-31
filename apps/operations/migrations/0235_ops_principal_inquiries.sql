@@ -47,6 +47,36 @@ CREATE TABLE operations_native_principal_inquiry_outbox (
   CHECK((lease_token IS NULL AND lease_expires_at IS NULL) OR (state='claimed' AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))
 );
 
+-- These entries live in the Operations ledger, not the Client audit_log
+-- schema. Principal identifiers are represented only by the authority-set hash.
+CREATE TABLE operations_native_principal_inquiry_audit (
+  event_id TEXT PRIMARY KEY CHECK(length(event_id)=36),
+  inquiry_id TEXT NOT NULL REFERENCES operations_native_principal_inquiries(inquiry_id) ON DELETE RESTRICT,
+  actor_type TEXT NOT NULL CHECK(actor_type IN ('principal','staff')),
+  actor_id TEXT NOT NULL CHECK(length(actor_id) BETWEEN 1 AND 191),
+  action TEXT NOT NULL CHECK(action IN ('submitted','status_changed')),
+  details_json TEXT NOT NULL CHECK(json_valid(details_json) AND json_type(details_json)='object' AND length(CAST(details_json AS BLOB))<=2048),
+  created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  CHECK((actor_type='principal' AND action='submitted') OR (actor_type='staff' AND action='status_changed'))
+);
+CREATE INDEX operations_native_principal_inquiry_audit_history
+  ON operations_native_principal_inquiry_audit(inquiry_id,created_at,event_id);
+
+CREATE TRIGGER operations_native_principal_inquiry_audit_insert_guard
+BEFORE INSERT ON operations_native_principal_inquiry_audit
+WHEN NOT EXISTS(SELECT 1 FROM operations_native_principal_inquiries inquiry
+  WHERE inquiry.inquiry_id=NEW.inquiry_id
+    AND (NEW.actor_type='principal' AND NEW.actor_id=inquiry.authority_set_sha256
+      OR NEW.actor_type='staff' AND EXISTS(SELECT 1 FROM staff_users user
+        WHERE user.id=NEW.actor_id AND user.status='active')))
+BEGIN SELECT RAISE(ABORT,'Operations principal inquiry audit identity is invalid'); END;
+CREATE TRIGGER operations_native_principal_inquiry_audit_no_update
+BEFORE UPDATE ON operations_native_principal_inquiry_audit
+BEGIN SELECT RAISE(ABORT,'Operations principal inquiry audit is immutable'); END;
+CREATE TRIGGER operations_native_principal_inquiry_audit_no_delete
+BEFORE DELETE ON operations_native_principal_inquiry_audit
+BEGIN SELECT RAISE(ABORT,'Operations principal inquiry audit is durable'); END;
+
 CREATE TRIGGER operations_native_principal_inquiries_immutable_scope
 BEFORE UPDATE OF issuer,subject,authority_set_json,authority_set_sha256,idempotency_key,request_fingerprint,kind,title,details,location,created_at
 ON operations_native_principal_inquiries

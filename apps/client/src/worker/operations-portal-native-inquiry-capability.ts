@@ -26,8 +26,7 @@ async function sha256(value: string): Promise<string> {
     .map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
 function configured(env: Config): boolean {
-  return env.CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED === "true"
-    && configuredDeploymentOrigin({ environment: env.ENVIRONMENT, origin: env.CLIENT_PORTAL_ORIGIN,
+  return configuredDeploymentOrigin({ environment: env.ENVIRONMENT, origin: env.CLIENT_PORTAL_ORIGIN,
       expectedHost: env.CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST ?? env.EXPECTED_HOST }) !== null;
 }
 async function baseIsCurrent(database: Pick<D1Database, "prepare">, command: NonNullable<ReturnType<
@@ -95,6 +94,10 @@ export async function applyOperationsPortalNativeInquiryCapability(env: Config, 
   if (typeof raw === "string") { try { document = JSON.parse(raw); } catch { document = null; } }
   const command = parseOperationsPortalNativeInquiryCapabilityCommandV4(document);
   if (!command) return response({ ok: false, protocolVersion: 1, code: "invalid", retryable: false });
+  // The switch gates new capability creation; a v4 revoke is a non-granting
+  // safety operation and must still reconcile after issuance is disabled.
+  if (command.action === "grant" && env.CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED !== "true")
+    return response({ ok: false, protocolVersion: 1, code: "disabled", retryable: true });
   const canonical = canonicalOperationsPortalNativeInquiryCapabilityCommandV4(command);
   if (typeof raw !== "string" || raw !== canonical) return response({ ok: false, protocolVersion: 1, code: "invalid", retryable: false });
   const database = env.DELIVERY_DB.withSession("first-primary"), fingerprint = await sha256(canonical);
@@ -140,7 +143,7 @@ export async function applyOperationsPortalNativeInquiryCapability(env: Config, 
     return response({ ok: false, protocolVersion: 1, code: "conflict", retryable: false });
   }
   if (Date.parse(command.actorProof.verifiedUntil) <= Date.now()
-    || Date.parse(command.expiresAt) <= Date.now())
+    || command.action === "grant" && Date.parse(command.expiresAt) <= Date.now())
     return response({ ok: false, protocolVersion: 1, code: "stale", retryable: false });
 
   const values = [command.operationId, fingerprint, command.action, canonical, command.recipient.enrollmentIntentId,
@@ -190,6 +193,8 @@ export async function applyOperationsPortalNativeInquiryCapability(env: Config, 
 
 export async function closeOperationsPortalNativeInquiryCapability(env: Config, raw: unknown): Promise<string> {
   if (!configured(env)) return response({ ok: false, protocolVersion: 1, code: "disabled", retryable: true });
+  if (env.CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED !== "true")
+    return response({ ok: false, protocolVersion: 1, code: "disabled", retryable: true });
   const value = exact(raw, ["protocolVersion", "operationId", "requestFingerprint", "clientReceiptFingerprint",
     "operationsReceiptFingerprint", "closedAt"]);
   if (!value || value.protocolVersion !== 1 || typeof value.operationId !== "string" || !UUID4.test(value.operationId)
