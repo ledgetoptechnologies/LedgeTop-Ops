@@ -1469,6 +1469,59 @@ test("the unified requests page says it couldn't check when every account fails,
   await expect(page.getByText("Request history couldn’t be loaded")).toBeVisible();
 });
 
+test("general requests alone open New request on the requests page, even when no account takes requests online", async ({page}) => {
+  // The default contexts have requestV2 = false; only the client-wide list offers anything, and only general choices.
+  await mock(page, (route, call) => call.path === "/api/client/request-services"
+    ? route.fulfill({json: {services: [], inquiryKinds: ["website", "drone", "other"], unavailable: []}}) : undefined);
+  await page.goto("/portal/requests");
+  await expect(page.locator(".unified-portal-request-unavailable")).toHaveCount(0);
+  await page.getByRole("button", {name: "New request"}).click();
+  const form = page.locator(".quick-request");
+  await expect(form.locator(".quick-request-general strong")).toHaveText(["Website work", "Drone work", "Something else"]);
+  await expect(form.getByRole("radio")).toHaveCount(3);
+  await expect(page.getByRole("combobox", {name: "Client account"})).toHaveCount(0);
+  await expect(page).toHaveURL(/\/portal\/requests$/);
+  await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies|Primary customer/);
+});
+
+for (const [name, answer] of [
+  ["nothing is offered", {json: {services: [], inquiryKinds: [], unavailable: []}}],
+  ["the portal doesn't offer the one-step form", {status: 404, json: {error: "Not found"}}],
+  ["the client has no access to it", {status: 403, json: {error: "Forbidden"}}],
+] as const)
+  test(`the requests page keeps New request hidden when ${name} and no account takes requests online`, async ({page}) => {
+    await mock(page, (route, call) => call.path === "/api/client/request-services" ? route.fulfill(answer) : undefined);
+    await page.goto("/portal/requests");
+    await expect(page.locator(".unified-portal-request-unavailable").getByRole("heading", {name: "New requests aren’t available online yet"})).toBeVisible();
+    await expect(page.getByRole("button", {name: "New request"})).toHaveCount(0);
+    await expect(page.getByRole("button", {name: "Checking…"})).toHaveCount(0);
+  });
+
+test("the requests page says it couldn't check when the offered services can't be read, and Try again recovers", async ({page}) => {
+  let fail = true;
+  await mock(page, (route, call) => call.path === "/api/client/request-services"
+    ? route.fulfill(fail ? {status: 503, json: {error: "Unavailable"}} : {json: {services: [], inquiryKinds: ["other"], unavailable: []}}) : undefined);
+  await page.goto("/portal/requests");
+  const unchecked = page.locator(".unified-portal-request-unavailable");
+  await expect(unchecked.getByRole("heading", {name: "We couldn’t check new requests"})).toBeVisible();
+  await expect(page.getByRole("button", {name: "New request"})).toHaveCount(0);
+  fail = false;
+  await unchecked.getByRole("button", {name: "Try again"}).click();
+  await expect(page.getByRole("button", {name: "New request"})).toBeVisible();
+  await expect(unchecked).toHaveCount(0);
+});
+
+test("the requests page holds New request at Checking… until the offered services answer", async ({page}) => {
+  const held: Route[] = [];
+  await mock(page, (route, call) => { if (call.path === "/api/client/request-services") { held.push(route); return Promise.resolve(); } return undefined; });
+  await page.goto("/portal/requests");
+  await expect.poll(() => held.length).toBeGreaterThan(0);
+  await expect(page.getByRole("button", {name: "Checking…"})).toBeDisabled();
+  await expect(page.locator(".unified-portal-request-unavailable")).toHaveCount(0);
+  await held.at(-1)!.fulfill({json: {services: [], inquiryKinds: ["drone"], unavailable: []}});
+  await expect(page.getByRole("button", {name: "New request"})).toBeEnabled();
+});
+
 test("with one account ready and another failed, an empty history is not reported as no requests", async ({page}) => {
   const calls = await mock(page, (route, call) => call.path === "/api/client/v2/workspaces/workspace-c/context"
     ? route.fulfill({status: 503, json: {error: "Unavailable"}})

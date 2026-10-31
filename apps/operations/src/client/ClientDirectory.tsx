@@ -53,10 +53,14 @@ const FILTERS: Array<{ kind: DirectoryQuery["kind"]; label: string }> = [
   { kind: "standalone_client", label: "Individual Clients" },
 ];
 
+// Notification links use ?source=inquiries to land on the general-request queue. It's that queue's marker, not a
+// client source, so the directory lists every source for it.
+const INQUIRIES_MARKER = "inquiries";
+
 function readQuery(search = location.search): DirectoryQuery {
-  const parameters = new URLSearchParams(search), kind = parameters.get("kind");
+  const parameters = new URLSearchParams(search), kind = parameters.get("kind"), source = parameters.get("source");
   return { q: (parameters.get("q") || "").trim(),
-    kind: kind === "organization" || kind === "standalone_client" ? kind : "all", source: parameters.get("source") || "",
+    kind: kind === "organization" || kind === "standalone_client" ? kind : "all", source: source && source !== INQUIRIES_MARKER ? source : "",
     sort: parameters.get("sort") === "name" ? "name" : "recent" };
 }
 

@@ -11,6 +11,12 @@ export const PROFILE = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts/produ
 const DECLARATION = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts/client-portal-release-profile.json')));
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 export const ORDINARY_FRONTEND_PREFLIGHT_MODE = 'ordinary-frontend-preserve-installed-v3';
+export const OPS_SUCCESSOR_READER_INSTALLED_CONTRACT = 'ops-successor-reader-a0-f4cdefd6';
+const OPS_SUCCESSOR_READER_VERSION_ID = 'fc9bc572-0b87-4857-8b8a-b0e0f7582c68';
+const OPS_SUCCESSOR_READER_SOURCE_COMMIT = 'a0c8fd230d46690a7090c79190e125f5a02f0f35';
+const OPS_SUCCESSOR_READER_MAIN_SHA256 = 'f4cdefd633441df8db18cc5c0b192fc8faa72ebd7b1db730122bd77318164e68';
+const OPS_SUCCESSOR_READER_ADDITIONS = Object.freeze(['readWindowsCatalogSuccessorAuthorization',
+  'readWindowsDeliverySuccessorAuthorization'].sort());
 export const ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 = '6073b977db48843d9eaecba74cb3863815b92dff87afd4c6f144b5e1dbad48fe';
 const ORDINARY_FRONTEND_PRESERVED_FLAGS = Object.freeze({
   operations: 'CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED',
@@ -33,6 +39,15 @@ function named(rows) {
 function exactSet(rows) { need(Array.isArray(rows) && new Set(rows).size === rows.length, 'Duplicate array item'); return [...rows].sort(); }
 function scriptShape(script) {
   return { handlers: exactSet(script.handlers), named_handlers: named(script.named_handlers).map(x => ({ ...x, handlers: exactSet(x.handlers) })) };
+}
+function expectedOpsSuccessorReaderScript(script) {
+  const expected = scriptShape(script);
+  const reader = expected.named_handlers.find(row => row.name === 'OperationsPortalNativeDeliveryAuthorizationReader');
+  need(reader && equal(reader.handlers, ['readNativeDeliveryAuthorization'])
+    && OPS_SUCCESSOR_READER_ADDITIONS.every(name => !reader.handlers.includes(name)),
+    'Installed Ops successor reader contract baseline is invalid');
+  reader.handlers = [...reader.handlers, ...OPS_SUCCESSOR_READER_ADDITIONS].sort();
+  return expected;
 }
 export function resourcesShape(resources) {
   return { script: scriptShape(resources.script), script_runtime: resources.script_runtime, bindings: named(resources.bindings) };
@@ -62,8 +77,10 @@ export function ordinaryFrontendPreflightDescriptor(profile, mode) {
  * Apply the legacy Project Alpha profile checks to a preflight-only copy for
  * the exact accepted installed UI profile. The two actual values are checked
  * as string "true" against the pinned profile before the copy is normalized
- * to satisfy the older receiver/release declaration. The checked snapshot is
- * never changed; no runtime/config value is enabled or written here.
+ * to satisfy the older receiver/release declaration. The accepted installed
+ * profile also requires the inquiries flag to stay absent, so the default-off
+ * value is added only to this preflight copy. The checked snapshot is never
+ * changed; no runtime/config value is enabled or written here.
  */
 export function validateOrdinaryFrontendPreflightPreservation(clientVars, operationsVars, profile, mode) {
   need(mode === ORDINARY_FRONTEND_PREFLIGHT_MODE, 'Unreviewed ordinary frontend preflight mode');
@@ -74,12 +91,18 @@ export function validateOrdinaryFrontendPreflightPreservation(clientVars, operat
     && clientVars[ORDINARY_FRONTEND_PRESERVED_FLAGS.client] === 'true'
     && hash(clientVars[ORDINARY_FRONTEND_PRESERVED_FLAGS.client]) === trueHash,
   'Ordinary frontend Client viewer flag differs from pinned installed profile');
+  const ordinaryPreflightOnlyFalseFlag = 'CLIENT_PORTAL_OPS_INQUIRIES_ENABLED';
+  need(!Object.hasOwn(clientVars, ordinaryPreflightOnlyFalseFlag),
+    'Ordinary frontend profile requires the default-off inquiries flag to remain absent');
   need(operationsVars && Object.getPrototypeOf(operationsVars) === Object.prototype
     && typeof operationsVars[ORDINARY_FRONTEND_PRESERVED_FLAGS.operations] === 'string'
     && operationsVars[ORDINARY_FRONTEND_PRESERVED_FLAGS.operations] === 'true'
     && hash(operationsVars[ORDINARY_FRONTEND_PRESERVED_FLAGS.operations]) === trueHash,
   'Ordinary frontend Operations hierarchy flag differs from pinned installed profile');
   const legacyClientVars = { ...clientVars, [ORDINARY_FRONTEND_PRESERVED_FLAGS.client]: 'false' };
+  // The accepted installed profile omits this default-off flag. Add `false`
+  // only to the legacy preflight copy; never bind or write it into production.
+  legacyClientVars[ordinaryPreflightOnlyFalseFlag] = 'false';
   const legacyOperationsVars = { ...operationsVars, [ORDINARY_FRONTEND_PRESERVED_FLAGS.operations]: 'false' };
   const errors = validatePortalReleasePreflight(
     { name: 'ledgetop-clients', keep_vars: true, vars: legacyClientVars },
@@ -146,8 +169,12 @@ export function validateReviewedExpectedDeploymentVersions(value) {
   return structuredClone(value);
 }
 export function validateInstallation(snapshot, { allowLatest = {}, profile = PROFILE, selectedApp, expectedDeploymentVersions = {},
-  ordinaryFrontendPreflightMode, ordinaryFrontendApp } = {}) {
+  ordinaryFrontendPreflightMode, ordinaryFrontendApp, opsSuccessorReaderContract } = {}) {
   const preflightDescriptor = ordinaryFrontendPreflightDescriptor(profile, ordinaryFrontendPreflightMode);
+  need(opsSuccessorReaderContract === undefined || opsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT,
+    'Unreviewed Ops successor reader installed-profile contract');
+  if (opsSuccessorReaderContract !== undefined) need(selectedApp === undefined || Object.hasOwn(profile.workers, selectedApp),
+    'Ops successor reader installed-state recognition is limited to a known profile capture');
   if (ordinaryFrontendPreflightMode !== undefined)
     need(['operations', 'client'].includes(ordinaryFrontendApp), 'Ordinary frontend preflight is limited to Operations or Client UI plans');
   need(profile.onboardingAdminOrigin === undefined || profile.onboardingAdminOrigin === 'https://ops.ledgetop.app', 'Unreviewed canonical admin origin profile');
@@ -162,7 +189,21 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
     }
     need(equal(without(s.settings, ['bindings', 'annotations']), spec.settings), `${app}: unrecognized production settings`);
     need(equal(named(s.settings.bindings), named(s.version.resources.bindings)), `${app}: settings/version bindings differ`);
-    need(equal(scriptShape(s.version.resources.script), scriptShape(spec.script)) && equal(s.version.resources.script_runtime, spec.runtime), `${app}: unrecognized exports/runtime/resources`);
+    const expectedScript = opsSuccessorReaderContract !== undefined && app === 'operations'
+      ? expectedOpsSuccessorReaderScript(spec.script) : scriptShape(spec.script);
+    if (opsSuccessorReaderContract !== undefined && app === 'operations') {
+      need(spec.name === 'ledgetop-ops' && s.version.id === OPS_SUCCESSOR_READER_VERSION_ID
+        && s.modern.id === OPS_SUCCESSOR_READER_VERSION_ID,
+      'Ops successor reader contract is limited to the reviewed candidate version');
+      const mainModules = s.modern.modules?.filter(module => module?.name === 'index.js') ?? [];
+      need(mainModules.length === 1 && typeof mainModules[0].content_base64 === 'string',
+        'Ops successor reader active runtime module is missing or ambiguous');
+      const mainBytes = Buffer.from(mainModules[0].content_base64, 'base64');
+      need(mainBytes.length > 0 && mainBytes.toString('base64') === mainModules[0].content_base64
+        && hash(mainBytes) === OPS_SUCCESSOR_READER_MAIN_SHA256,
+      'Ops successor reader contract active runtime bytes differ from reviewed a0 source');
+    }
+    need(equal(scriptShape(s.version.resources.script), expectedScript) && equal(s.version.resources.script_runtime, spec.runtime), `${app}: unrecognized exports/runtime/resources`);
     const rows = named(s.version.resources.bindings);
     need(equal(rows.filter(x => !['plain_text', 'json'].includes(x.type)), named(spec.bindings)), `${app}: unrecognized production resource or secret binding; no bootstrap allowed`);
     need(rows.filter(x => ['plain_text', 'json', 'secret_text', 'secret_key'].includes(x.type)).length <= 128, `${app}: effective text/secret budget exceeds128`);
@@ -196,10 +237,12 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
   return snapshot;
 }
 
-export function compileConfig(snapshot, app, main, profile = PROFILE, expectedDeploymentVersions, ordinaryFrontendPreflightMode) {
+export function compileConfig(snapshot, app, main, profile = PROFILE, expectedDeploymentVersions, ordinaryFrontendPreflightMode,
+  opsSuccessorReaderContract) {
   const reviewedExpectedDeploymentVersions = validateReviewedExpectedDeploymentVersions(expectedDeploymentVersions);
   validateInstallation(snapshot, { profile, selectedApp: app, expectedDeploymentVersions: reviewedExpectedDeploymentVersions,
-    ...(ordinaryFrontendPreflightMode === undefined ? {} : { ordinaryFrontendPreflightMode, ordinaryFrontendApp: app }) }); need(Object.hasOwn(profile.workers, app), 'Unknown Worker');
+    ...(ordinaryFrontendPreflightMode === undefined ? {} : { ordinaryFrontendPreflightMode, ordinaryFrontendApp: app }),
+    opsSuccessorReaderContract }); need(Object.hasOwn(profile.workers, app), 'Unknown Worker');
   const s = snapshot[app], spec = profile.workers[app];
   const annotations = clone(s.settings.annotations ?? {});
   delete annotations['workers/triggered_by']; // API-owned, rejected by native versions upload.
@@ -413,9 +456,20 @@ export function verifySourceMap(actual, original) {
   };
   need(equal(normalize(actual), normalize(original)), 'Returned native source map differs from genuine input map');
 }
-export function verifyCandidate(before, app, candidate, modern, js, sourceMap) {
+export function verifyCandidate(before, app, candidate, modern, js, sourceMap, { opsSuccessorReaderContract } = {}) {
   need(UUID.test(candidate.id) && candidate.resources.script.last_deployed_from === 'wrangler', 'Native candidate provenance missing');
-  need(equal(resourcesShape(candidate.resources), resourcesShape(before[app].version.resources)), 'Candidate resources/bindings/exports differ');
+  if (opsSuccessorReaderContract === undefined) {
+    need(equal(resourcesShape(candidate.resources), resourcesShape(before[app].version.resources)), 'Candidate resources/bindings/exports differ');
+  } else {
+    need(opsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT && app === 'operations'
+      && candidate.id === OPS_SUCCESSOR_READER_VERSION_ID && hash(js) === OPS_SUCCESSOR_READER_MAIN_SHA256,
+    'Ops successor reader candidate contract is not the pinned reviewed version/runtime');
+    const expectedScript = expectedOpsSuccessorReaderScript(before.operations.version.resources.script);
+    need(equal(scriptShape(candidate.resources.script), expectedScript)
+      && equal(candidate.resources.script_runtime, before.operations.version.resources.script_runtime)
+      && equal(named(candidate.resources.bindings), named(before.operations.version.resources.bindings)),
+    'Ops successor reader candidate changed resources beyond the exact reviewed two-method addition');
+  }
   need(modern.id === candidate.id && equal(modern.assets ?? null, before[app].modern.assets ?? null), 'Opaque assets changed');
   need(Array.isArray(modern.modules) && new Set(modern.modules.map(x => x.name)).size === modern.modules.length && modern.modules.every(x => ['index.js', 'index.js.map'].includes(x.name)), 'Unexpected candidate modules');
   const main = modern.modules.find(x => x.name === 'index.js');
@@ -498,13 +552,16 @@ export function validateStaffReadinessReceipt(value, sourceCommit) {
   return structuredClone(value);
 }
 export async function executeDeployment({ app, mode, cli, main, directory, reader, runNative = runNativeProductionCommand, fingerprint, profile = PROFILE,
-  staffCutoverReview, sourceCommit, readStaffCutover = readNativeStaffCutoverReadiness }) {
+  staffCutoverReview, sourceCommit, readStaffCutover = readNativeStaffCutoverReadiness, opsSuccessorReaderContract }) {
   checkMode(mode, fingerprint); need(Object.hasOwn(PROFILE.workers, app), 'Unknown Worker');
+  need(opsSuccessorReaderContract === undefined || (opsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT
+    && app !== 'operations'), 'Ops successor reader installed-state recognition is read-only for Client/Sync releases');
   need(fs.existsSync(main) && fs.existsSync(`${main}.map`), 'Build Worker index.js and genuine sibling source map before deployment');
   const js = fs.readFileSync(main);
   let sourceMap;try { sourceMap = JSON.parse(fs.readFileSync(`${main}.map`)); } catch { throw new Error('Genuine input source map invalid'); }
   verifySourceMap(sourceMap, sourceMap);
-  const before = validateInstallation(await capture(reader, { selectedApp: app }), { profile, selectedApp: app });
+  const validateOptions = extra => ({ profile, selectedApp: app, ...(opsSuccessorReaderContract ? { opsSuccessorReaderContract } : {}), ...extra });
+  const before = validateInstallation(await capture(reader, { selectedApp: app }), validateOptions());
   let firstStaffReadiness;
   const qualifyStaff = async () => {
     if (app === 'client') return null;
@@ -521,9 +578,9 @@ export async function executeDeployment({ app, mode, cli, main, directory, reade
   const save = (name, value) => fs.writeFileSync(path.join(directory, name), JSON.stringify(value, null, 2), { flag: 'wx', mode: 0o600 });
   save('before.private.json', before);
   if (firstStaffReadiness) save('native-staff-before-upload.json', firstStaffReadiness);
-  const config = compileConfig(before, app, path.resolve(main), profile);
+  const config = compileConfig(before, app, path.resolve(main), profile, undefined, undefined, opsSuccessorReaderContract);
   const configPath = path.join(directory, 'wrangler.production.private.json');save('wrangler.production.private.json', config);
-  const preupload = validateInstallation(await capture(reader, { selectedApp: app }), { profile, selectedApp: app });
+  const preupload = validateInstallation(await capture(reader, { selectedApp: app }), validateOptions());
   need(equal(stableState(before, app), stableState(preupload, app)), 'Production changed before upload');
   const text = await runNative(cli, ['versions', 'upload', '--config', configPath], directory, 'upload');
   const matches = [...text.matchAll(/Worker Version ID:\s*([a-f0-9-]{36})/g)].map(x => x[1]);
@@ -533,18 +590,18 @@ export async function executeDeployment({ app, mode, cli, main, directory, reade
   const candidate = await readCandidateVersionWithVisibilityRetry(reader, name, cid);
   const modern = await reader.get(`/workers/workers/${name}/versions/${cid}?include=modules`);
   const mapsProof = verifyCandidate(before, app, candidate, modern, js, sourceMap);
-  const inactive = await capture(reader, { selectedApp: app });validateInstallation(inactive, { allowLatest: { [app]: cid }, profile, selectedApp: app });
+  const inactive = await capture(reader, { selectedApp: app });validateInstallation(inactive, validateOptions({ allowLatest: { [app]: cid } }));
   const expectedInactive = clone(before);expectedInactive[app].latest = cid;
   need(equal(stableState(inactive, app), stableState(expectedInactive, app)), 'Current controls changed after inactive upload');
   save('verified-inactive.private.json', { candidate: cid, runtimeSHA256: hash(js), assetsPreserved: true, resourcesPreserved: true, ...mapsProof });
   // Recheck immediately before the separate native100% activation. No trigger
   // publication or provider POST is implemented in this adapter itself.
-  const preactivation = await capture(reader, { selectedApp: app });validateInstallation(preactivation, { allowLatest: { [app]: cid }, profile, selectedApp: app });
+  const preactivation = await capture(reader, { selectedApp: app });validateInstallation(preactivation, validateOptions({ allowLatest: { [app]: cid } }));
   need(equal(stableState(preactivation, app), stableState(inactive, app)), 'Current controls changed before activation');
   const readyToActivate = await qualifyStaff();
   if (readyToActivate) save('native-staff-before-activate.json', readyToActivate);
   await runNative(cli, ['versions', 'deploy', `${cid}@100%`, '--yes', '--config', configPath], directory, 'activate');
-  const after = validateInstallation(await capture(reader, { selectedApp: app }), { profile, selectedApp: app });
+  const after = validateInstallation(await capture(reader, { selectedApp: app }), validateOptions());
   need(activeId(after[app]) === cid, 'Activation uncertain; GET-only reconciliation required');
   const readyAfterActivation = await qualifyStaff();
   if (readyAfterActivation) save('native-staff-after-activate.json', readyAfterActivation);

@@ -18,12 +18,20 @@ const IGNORE = 'wrangler.json\n.dev.vars\n';
 const MIMES = Object.freeze({ '.html':'text/html', '.htm':'text/html', '.js':'text/javascript', '.mjs':'text/javascript',
   '.css':'text/css', '.json':'application/json', '.map':'application/json', '.webmanifest':'application/manifest+json',
   '.svg':'image/svg+xml', '.png':'image/png', '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.gif':'image/gif',
-  '.webp':'image/webp', '.avif':'image/avif', '.ico':'image/x-icon', '.woff':'font/woff', '.woff2':'font/woff2',
+  '.webp':'image/webp', '.avif':'image/avif', '.ico':'image/vnd.microsoft.icon', '.woff':'font/woff', '.woff2':'font/woff2',
   '.ttf':'font/ttf', '.otf':'font/otf', '.wasm':'application/wasm', '.txt':'text/plain', '.xml':'application/xml',
   '.pdf':'application/pdf', '.mp4':'video/mp4', '.webm':'video/webm', '.mp3':'audio/mpeg', '.wav':'audio/wav' });
 const need = (ok, code) => { if (!ok) throw new Error(code); };
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const sort = (a,b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+const KNOWN_FAVICON = Object.freeze({ path:'/favicon.ico', size:1889,
+  sha256:'4475e1abc388373b2e6c77b91e229e55e65b4efa1435e5aa816056873ad30e36' });
+const FAVICON_MIMES = new Set(['image/x-icon','image/vnd.microsoft.icon']);
+export function compatibleAssetMime(path, size, sha256, left, right) {
+  if (left === right) return true;
+  return path === KNOWN_FAVICON.path && size === KNOWN_FAVICON.size && sha256 === KNOWN_FAVICON.sha256
+    && FAVICON_MIMES.has(left) && FAVICON_MIMES.has(right) && left !== right;
+}
 function exact(value, keys) {
   return value && Object.getPrototypeOf(value) === Object.prototype && Reflect.ownKeys(value).length === keys.length
     && keys.every(k => Object.hasOwn(value,k)) && keys.every(k => Object.getOwnPropertyDescriptor(value,k)?.get === undefined
@@ -104,6 +112,59 @@ export function collectFrontendAssets(directory) {
   }}walk(root);result.sort(sort);entries(result);return {entries:result,payloads};
 }
 function verifiedBytes(v,payloads) {const bytes=payloads.get(v.path);need(Buffer.isBuffer(bytes)&&bytes.length===v.size&&sha(bytes)===v.sha256,'asset_payload_missing_or_changed');return bytes;}
+const ROOT_HTML_ARCHIVE = /^\/_ui\/(operations|client)\/([a-f0-9]{40})\/index\.html$/u;
+/** Preserve the exact prior root document under a content-addressed immutable
+ * path whenever a new build replaces it. Archive rows are separate assets;
+ * /index.html remains the current entry document and its replacement rule is
+ * unchanged. The prior byte map must be independently verified by the caller. */
+export function preserveRootHtmlArchive({application,previous,previousAssetBytes,current}) {
+  need(['operations','client'].includes(application),'asset_root_html_application_invalid');
+  need(previous&&Array.isArray(previous.assets)&&previousAssetBytes instanceof Map
+    &&current&&Array.isArray(current.entries)&&current.payloads instanceof Map,'asset_root_html_archive_input_invalid');
+  const workerName=application==='operations'?'ledgetop-ops':'ledgetop-clients';
+  need(previous.workerName===workerName,'asset_root_html_worker_mismatch');
+  const priorIndex=previous.assets.find(row=>row.path==='/index.html');
+  const currentIndex=current.entries.find(row=>row.path==='/index.html');
+  need(priorIndex&&priorIndex.mime==='text/html'&&currentIndex&&currentIndex.mime==='text/html',
+    'asset_root_html_entry_missing');
+  const priorBytes=previousAssetBytes.get('/index.html'),currentBytes=current.payloads.get('/index.html');
+  need(Buffer.isBuffer(priorBytes)&&priorBytes.length===priorIndex.size&&sha(priorBytes)===priorIndex.sha256
+    &&Buffer.isBuffer(currentBytes)&&currentBytes.length===currentIndex.size&&sha(currentBytes)===currentIndex.sha256,
+  'asset_root_html_bytes_unverified');
+
+  const payloads=new Map(previousAssetBytes);
+  for(const [assetPath,bytes] of current.payloads)payloads.set(assetPath,bytes);
+  const archiveRows=previous.assets.filter(row=>ROOT_HTML_ARCHIVE.test(row.path));
+  for(const row of archiveRows){
+    const match=ROOT_HTML_ARCHIVE.exec(row.path),bytes=previousAssetBytes.get(row.path);
+    need(match&&match[1]===application&&row.mime==='text/html'&&row.sha256.startsWith(match[2])
+      &&Buffer.isBuffer(bytes)&&bytes.length===row.size&&sha(bytes)===row.sha256,
+    'asset_root_html_archive_collision');
+  }
+  need(!current.entries.some(row=>ROOT_HTML_ARCHIVE.test(row.path)),'asset_root_html_archive_collision');
+  const unchanged=priorIndex.size===currentIndex.size&&priorIndex.sha256===currentIndex.sha256;
+  if(unchanged)return {current:{entries:entries([...current.entries]),payloads},archive:null};
+
+  const digest=priorIndex.sha256,archivePath=`/_ui/${application}/${digest.slice(0,40)}/index.html`;
+  const existing=previous.assets.find(row=>row.path===archivePath);
+  if(existing){
+    const bytes=previousAssetBytes.get(archivePath);
+    need(existing.size===priorIndex.size&&existing.sha256===digest&&existing.mime==='text/html'
+      &&Buffer.isBuffer(bytes)&&bytes.length===priorIndex.size&&sha(bytes)===digest,
+    'asset_root_html_archive_collision');
+  }else{
+    const bytes=Buffer.from(priorBytes);
+    const row={path:archivePath,size:bytes.length,sha256:digest,mime:'text/html',providerHash:digest.slice(0,32)};
+    need(!current.entries.some(entry=>entry.path===archivePath),'asset_root_html_archive_collision');
+    const rows=entries([...current.entries,row].sort(sort));
+    payloads.set(archivePath,bytes);
+    return {current:{entries:rows,payloads},archive:{sourcePath:'/index.html',path:archivePath,size:bytes.length,
+      sha256:digest,mime:'text/html',transportPath:`/_ui/${application}/${digest.slice(0,40)}/`}};
+  }
+  need(!current.entries.some(entry=>entry.path===archivePath),'asset_root_html_archive_collision');
+  return {current:{entries:entries([...current.entries]),payloads},archive:{sourcePath:'/index.html',path:archivePath,
+    size:priorIndex.size,sha256:digest,mime:'text/html',transportPath:`/_ui/${application}/${digest.slice(0,40)}/`}};
+}
 /** Previous JSON must be externally tied to a verified complete live inventory.
  * This pure builder cannot prove that bootstrap or any remote association.
  * current.entries lists the new build; current.payloads must also contain every
@@ -117,8 +178,12 @@ export function mergeAssetLedger({previous,current,workerName,accountId,sourceCo
     const bytes=verifiedBytes(v,current.payloads),old=union.get(v.path),collision=casePaths.get(v.path.toLowerCase());
     need(!collision||collision===v.path,'asset_path_case_collision');
     need(v.providerHash===sha(bytes).slice(0,32),'asset_new_provider_hash_invalid');
-    need(!old||v.path==='/index.html'||old.size===v.size&&old.sha256===v.sha256&&old.mime===v.mime,'asset_historical_path_changed');
-    union.set(v.path,old&&old.size===v.size&&old.sha256===v.sha256&&old.mime===v.mime?old:v);casePaths.set(v.path.toLowerCase(),v.path);
+    const sameHistoricalBytes = old && old.size === v.size && old.sha256 === v.sha256;
+    const sameHistoricalMetadata = sameHistoricalBytes && compatibleAssetMime(v.path,v.size,v.sha256,old.mime,v.mime);
+    need(!old||v.path==='/index.html'||sameHistoricalMetadata,'asset_historical_path_changed');
+    const retained = old && sameHistoricalMetadata
+      ? (old.mime === v.mime ? old : { ...v, providerHash: old.providerHash }) : v;
+    union.set(v.path,retained);casePaths.set(v.path.toLowerCase(),v.path);
   }
   const merged=[...union.values()].sort(sort);entries(merged);
   need(current.payloads.size===merged.length,'asset_payload_inventory_not_exact');

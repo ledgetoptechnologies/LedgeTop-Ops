@@ -7,7 +7,7 @@ type Patch = { id: string; body: unknown; csrf: string | undefined };
 
 async function mock(page: Page, { permissions = ["team.view", "operations.manage"], inquiries = [] as Array<Record<string, unknown>>,
   list = 200, patch = (_call: Patch) => 200 }: { permissions?: string[]; inquiries?: Array<Record<string, unknown>>; list?: number; patch?: (call: Patch) => number } = {}) {
-  const listed: URL[] = [], patches: Patch[] = [];
+  const listed: URL[] = [], patches: Patch[] = [], directory: URL[] = [];
   await page.route("**/api/**", route => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/session") return route.fulfill({ json: {
@@ -16,7 +16,11 @@ async function mock(page: Page, { permissions = ["team.view", "operations.manage
       csrfToken: "csrf-test", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {},
     } });
     if (url.pathname === "/api/client-service-requests") return route.fulfill({ json: { requests: [] } });
-    if (url.pathname === "/api/client-hub") return route.fulfill({ json: { clients: [], nextCursor: null, capabilities } });
+    if (url.pathname === "/api/client-hub") {
+      directory.push(url);
+      return route.fulfill({ json: { clients: [], nextCursor: null, capabilities,
+        sources: [{ source_id: "project-alpha:staging", display_name: "Project Alpha" }] } });
+    }
     if (url.pathname === "/api/operations/inbox/inquiries" && route.request().method() === "GET") {
       listed.push(url);
       return list === 200 ? route.fulfill({ json: { items: inquiries, nextCursor: null } }) : route.fulfill({ status: list, json: { error: "Unavailable" } });
@@ -30,7 +34,7 @@ async function mock(page: Page, { permissions = ["team.view", "operations.manage
     }
     return route.fulfill({ status: 404, json: { error: "Not found" } });
   });
-  return { listed, patches };
+  return { listed, patches, directory };
 }
 
 test("staff review a general request in a popup and move it through review without leaving the Client Hub", async ({ page }) => {
@@ -102,6 +106,26 @@ test("an empty queue stays out of the way, but a notification link still lands o
   await expect(page).toHaveURL(/\/clients\?source=inquiries$/);
   const queue = page.getByRole("region", { name: "General requests" });
   await expect(queue.getByText("No open general requests")).toBeVisible();
+});
+
+test("a notification link's queue marker never filters the client directory, while real filters still do", async ({ page }) => {
+  const { directory } = await mock(page, { inquiries: [inquiry("inq-1", "received")] });
+  await page.goto("/operations/inbox?source=inquiries");
+  await expect(page).toHaveURL(/\/clients\?source=inquiries$/);
+  await expect(page.getByRole("region", { name: "General requests" }).getByText("Request inq-1")).toBeVisible();
+  const select = page.getByLabel("Client source");
+  await expect(select).toHaveValue("");
+  await expect(select.locator("option", { hasText: "Unavailable source" })).toHaveCount(0);
+  await expect.poll(() => directory.length).toBeGreaterThan(0);
+  expect(directory.every(url => !url.searchParams.has("source"))).toBe(true);
+
+  directory.length = 0;
+  await page.goto("/clients?q=harbor&kind=organization&source=project-alpha%3Astaging&sort=name");
+  await expect(page.getByLabel("Client source")).toHaveValue("project-alpha:staging");
+  await expect.poll(() => directory.length).toBeGreaterThan(0);
+  const filtered = directory.at(-1)!.searchParams;
+  expect([filtered.get("q"), filtered.get("kind"), filtered.get("source"), filtered.get("sort")])
+    .toEqual(["harbor", "organization", "project-alpha:staging", "name"]);
 });
 
 test("staff without request review never load general requests", async ({ page }) => {

@@ -142,3 +142,36 @@ test('every packet row must be returned and byte verified before any new identif
     assert.throws(() => completeAssetInventoryBootstrap({ ...binding, verifiedAssets }), /active_bytes_mismatch/);
   }
 });
+
+test('pinned Ops and Client packets preserve their actual retained favicon MIME and bytes', () => {
+  const favicon = { path: '/favicon.ico', size: 1889,
+    sha256: '4475e1abc388373b2e6c77b91e229e55e65b4efa1435e5aa816056873ad30e36' };
+  const staleIndex = Buffer.from('retired index');
+  const previousFor = (worker, iconMime) => ({ schemaVersion: 1, workerName: worker,
+    accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId, sourceCommit: 'c'.repeat(40),
+    parentVersionId: '22222222-2222-4222-8222-222222222222', observedAt: '2026-10-27T12:00:00.000Z',
+    minimumRetentionHours: 48, automaticPruning: false, assets: [
+      { ...favicon, mime: iconMime, providerHash: 'a'.repeat(32) },
+      { path: '/index.html', size: staleIndex.length, sha256: hash(staleIndex), mime: 'text/html',
+        providerHash: hash(staleIndex).slice(0, 32) },
+    ].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0) });
+
+  for (const [worker, version, previousMime, packetMime] of [
+    ['ledgetop-ops', '0b1ab5a8-9db0-42ab-b718-8569fae2382e', 'image/vnd.microsoft.icon', 'image/vnd.microsoft.icon'],
+    ['ledgetop-clients', '1c606164-9a98-495a-87c9-3be251658d00', 'image/x-icon', 'image/x-icon'],
+  ]) {
+    const bootstrap = readPinnedAssetInventoryBootstrap({ workerName: worker, activeVersionId: version });
+    const packet = JSON.parse(bootstrap.packetManifestBytes.toString('utf8'));
+    const packetIcon = packet.union.files.find(row => row.path === favicon.path);
+    assert.equal(packetIcon.size, favicon.size);
+    assert.equal(packetIcon.sha256, favicon.sha256);
+    assert.equal(packetIcon.mime, packetMime);
+    const prepared = prepareAssetInventoryBootstrap({ bootstrap, previous: previousFor(worker, previousMime),
+      activeVersionId: version, workerName: worker, accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId });
+    assert.equal(prepared.rows.find(row => row.path === favicon.path).mime, packetMime);
+    const oppositeMime = packetMime === 'image/x-icon' ? 'image/vnd.microsoft.icon' : 'image/x-icon';
+    const aliasPrepared = prepareAssetInventoryBootstrap({ bootstrap, previous: previousFor(worker, oppositeMime),
+      activeVersionId: version, workerName: worker, accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId });
+    assert.equal(aliasPrepared.rows.find(row => row.path === favicon.path).mime, packetMime);
+  }
+});
