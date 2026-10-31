@@ -85,8 +85,9 @@ function readPinnedJson(pin, label, { maxBytes = 16 * 1024 * 1024, outside = tru
 }
 
 const ASSET_MANIFEST_PURPOSE = 'staging-retained-assets-materialization-v1';
-const MAX_ASSET_FILES = 20_000;
-const MAX_ASSET_BYTES = 512 * 1024 * 1024;
+const MAX_ASSET_FILES = 1_024;
+const MAX_ASSET_FILE_BYTES = 16 * 1024 * 1024;
+const MAX_ASSET_BYTES = 256 * 1024 * 1024;
 const MATERIALIZATION_ONLY_PATHS = new Set(['/.assetsignore']);
 
 function checkedAssetPath(value) {
@@ -117,12 +118,16 @@ function inspectAssetTree(root) {
       need(!stat.isSymbolicLink() && !entry.isSymbolicLink(), 'Retained asset tree cannot contain links');
       if (stat.isDirectory()) { visit(absolute, relative, depth + 1); continue; }
       need(stat.isFile() && stat.nlink === 1, 'Retained asset files must be single-link regular files');
+      need(stat.size <= MAX_ASSET_FILE_BYTES, 'Retained asset file exceeds the 16 MiB per-file bound');
+      need(found.length < MAX_ASSET_FILES && totalBytes + stat.size <= MAX_ASSET_BYTES,
+        'Retained asset inventory exceeds the bounded file-count or total-byte limits');
       const urlPath = checkedAssetPath(`/${relative.replaceAll('\\', '/')}`);
       const descriptor = fs.openSync(absolute, 'r');
       let bytes;
       try {
         const before = fs.fstatSync(descriptor);
         need(before.isFile() && before.nlink === 1 && before.size === stat.size
+          && before.size <= MAX_ASSET_FILE_BYTES && totalBytes + before.size <= MAX_ASSET_BYTES
           && before.dev === stat.dev && before.ino === stat.ino, 'Retained asset changed while opening');
         bytes = fs.readFileSync(descriptor);
         const after = fs.fstatSync(descriptor), current = fs.lstatSync(absolute);
@@ -131,9 +136,7 @@ function inspectAssetTree(root) {
           && current.dev === before.dev && current.nlink === 1,
         'Retained asset changed while being hashed');
       } finally { fs.closeSync(descriptor); }
-      need(bytes.length <= MAX_ASSET_BYTES, 'Retained asset file exceeds the bounded inventory size');
       totalBytes += bytes.length;
-      need(totalBytes <= MAX_ASSET_BYTES && found.length < MAX_ASSET_FILES, 'Retained asset inventory exceeds bounded limits');
       found.push({ path: urlPath, size: bytes.length, sha256: hash(bytes) });
     }
   }
@@ -169,7 +172,7 @@ function checkedRetainedAssets(input, controls, application) {
   need(equal(manifest.assetsConfig, selected.modern.assets?.config),
     'Retained asset manifest ASSETS configuration differs from the active profile');
   need(Array.isArray(manifest.files) && manifest.files.length > 0 && manifest.files.length <= MAX_ASSET_FILES,
-    'Retained asset manifest must include the complete nonempty file inventory');
+    'Retained asset manifest must include the bounded nonempty local upload-file inventory');
   const expected = manifest.files.map(row => {
     need(ownKeysAre(row, ['path','size','sha256']), 'Retained asset file descriptors must have exact fields');
     return { path: checkedAssetPath(row.path), size: row.size, sha256: row.sha256 };
@@ -509,9 +512,9 @@ export function compileStagingBackendReleasePlan({ controlsFile, application, ar
       requiredRetainedCoverageHours: 48,
       reconstitutionPermitted: false, namespaceReconstituted: false, namespaceInherited: false,
       runtimeProofRequired: true, automaticPruning: false },
-    assetUploadRecipe: { protocol: 'workers-static-assets-upload-v1', uploadLocalManifest: true,
-      uploadAssetSetAllowed: false, requiresReviewedCompleteNamespaceEvidence: true,
-      providerContentHash: 'BLAKE3(base64(asset bytes) + file extension)',
+    assetUploadRecipe: { protocol: 'workers-static-assets-upload-v1', manifestInput: 'validated-local-file-materialization',
+      uploadAssetSetAllowed: false, requiresReviewedRetainedReleaseCoverageEvidence: true,
+      providerContentHash: 'BLAKE3(base64(asset bytes) + extension without dot), lowercase hex first 32 chars',
       providerManifestBytesPersisted: false,
       completionJwtRequired: true, completionJwtSource: 'successful asset upload-session completion',
       completionJwtMemoryOnly: true, completionJwtPersisted: false, assetsConfig,

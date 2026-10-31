@@ -236,7 +236,8 @@ test('local asset materialization pins exact config, files, bytes, and baseline 
   assert.equal(valid.assetReconstitution.localFileInventoryMatched, true);
   assert.equal(valid.assetReconstitution.remoteNamespaceCompleteness, 'unproven');
   assert.equal(valid.assetUploadRecipe.uploadAssetSetAllowed, false);
-  assert.equal(valid.assetUploadRecipe.providerContentHash, 'BLAKE3(base64(asset bytes) + file extension)');
+  assert.equal(valid.assetUploadRecipe.providerContentHash,
+    'BLAKE3(base64(asset bytes) + extension without dot), lowercase hex first 32 chars');
   assert.deepEqual(valid.assetReconstitution.localOnlyFiles.map(row => row.path), ['/.assetsignore']);
   assert.ok(valid.assetReconstitution.files.every(row => !Object.hasOwn(row, 'contentBase64')));
   assert.equal(JSON.stringify(valid).includes('completionJwt":"'), false);
@@ -266,6 +267,10 @@ test('local asset materialization pins exact config, files, bytes, and baseline 
   fs.unlinkSync(path.join(assetPin.filesRoot, 'extra-unlisted.bin'));
   fs.appendFileSync(path.join(assetPin.filesRoot, 'index.html'), 'changed');
   assert.throws(() => compileStagingBackendReleasePlan(baseOptions), /whole-file inventory/);
+  const oversized = path.join(assetPin.filesRoot, 'oversized-sparse.bin'), sparseFd = fs.openSync(oversized, 'w');
+  try { fs.ftruncateSync(sparseFd, 16 * 1024 * 1024 + 1); } finally { fs.closeSync(sparseFd); }
+  assert.throws(() => compileStagingBackendReleasePlan(baseOptions), /16 MiB per-file bound/);
+  fs.unlinkSync(oversized);
   assert.throws(() => compileStagingBackendReleasePlan({ ...baseOptions, retainedAssets: undefined }), /pinned complete retained-asset manifest/);
 });
 
@@ -327,7 +332,7 @@ test('compiler rejects profile, implicit latest inheritance, gate, binding, sour
 
 const privateControlsPath = process.env.LEDGETOP_STAGING_BACKEND_CONTROLS_FILE;
 const privateControlsSha = process.env.LEDGETOP_STAGING_BACKEND_CONTROLS_SHA256;
-test('private actual controls capsule with synthetic module pins: both targets compose as held plans', {
+test('private actual controls capsule with synthetic module and asset pins composes only held plans', {
   skip: !(privateControlsPath && privateControlsSha),
 }, t => {
   const f = fixture(t), capturePin = { path: privateControlsPath, sha256: privateControlsSha };
