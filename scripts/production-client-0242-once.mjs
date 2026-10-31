@@ -13,6 +13,7 @@ import { SOURCE_COMMIT } from './production-auto-migration-profile/source38-inve
 
 export const TARGET = Object.freeze({ accountId: ACCOUNT_ID, databaseId: DATABASE_ID,
   workerName: 'ledgetop-clients', environment: 'production', binding: 'DELIVERY_DB' });
+export const INQUIRY_FLAG = 'CLIENT_PORTAL_OPS_INQUIRIES_ENABLED';
 export const PROFILE = 'production-client-0242-one-shot-v1';
 export const BASE_LEDGER_COUNT = 158;
 export const MAX_RESPONSE_BYTES = 12 * 1024 * 1024;
@@ -24,7 +25,12 @@ const OWNER_ADAPTER = 'C:/Users/fstor/.codex/artifacts/ops-cloudflare-oauth-refr
 const OWNER_ADAPTER_SHA256 = '0ecaff11d5faddaf66c6121546915438af58c3bc2c01c7ee4a896c3895a3b6e7';
 const SHA256 = /^[0-9a-f]{64}$/u;
 const hash = value => createHash('sha256').update(value).digest('hex');
-const canonical = value => JSON.stringify(value);
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort()
+    .map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+}
 const need = (condition, code) => { if (!condition) throw new Error(code); };
 
 export const READ_SQL = Object.freeze([
@@ -39,16 +45,28 @@ export function snapshotStateSha256(snapshot) {
     schema: snapshot.schema, parent: snapshot.parent })));
 }
 
+export function bindingsMetadataSha256(settings) {
+  need(settings && typeof settings === 'object' && Array.isArray(settings.bindings), 'client_settings_shape_invalid');
+  const sorted = [...settings.bindings].sort((left, right) => canonical(left).localeCompare(canonical(right)));
+  return hash(Buffer.from(canonical(sorted)));
+}
+
 export function selectProductionClientBindings(settings) {
   need(settings && typeof settings === 'object' && Array.isArray(settings.bindings), 'client_settings_shape_invalid');
   const env = settings.bindings.filter(row => row?.name === 'ENVIRONMENT' && row?.type === 'plain_text');
   const db = settings.bindings.filter(row => row?.name === TARGET.binding && row?.type === 'd1');
   const allD1 = settings.bindings.filter(row => row?.type === 'd1');
+  const inquiryGate = settings.bindings.filter(row => row?.name === INQUIRY_FLAG);
   need(env.length === 1 && env[0].text === 'production', 'client_worker_not_production');
   need(db.length === 1 && db[0].id === TARGET.databaseId && allD1.length === 1,
     'client_database_binding_mismatch');
+  need(inquiryGate.length === 0 || inquiryGate.length === 1
+    && inquiryGate[0].type === 'plain_text' && inquiryGate[0].text === 'false',
+  'client_inquiry_flag_must_remain_disabled');
+  const bindingsHash = bindingsMetadataSha256(settings);
   return Object.freeze({ environment: env[0].text, worker: TARGET.workerName,
-    binding: TARGET.binding, databaseId: db[0].id });
+    binding: TARGET.binding, databaseId: db[0].id,
+    inquiryFlag: inquiryGate.length === 0 ? 'absent' : 'false', bindingsMetadataSha256: bindingsHash });
 }
 
 function verifyQueryResult(value, count) {
@@ -179,6 +197,13 @@ function ensurePrivateDirectory(directory) {
     need(!acl.error && acl.status === 0, 'private_journal_acl_failed');
   }
 }
+export function validateReleaseCheckout({ head, originHead, branch, dirty, sourceAncestor }) {
+  need(typeof head === 'string' && /^[0-9a-f]{40}$/u.test(head), 'release_head_invalid');
+  need(head === originHead && (branch === 'main' || branch === '') && dirty === ''
+    && sourceAncestor === true, 'release_checkout_not_clean_current_main');
+  return true;
+}
+
 function assertReleaseCheckout() {
   const head = execFileSync('git', ['-C', ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const originHead = execFileSync('git', ['-C', ROOT, 'rev-parse', 'origin/main'], { encoding: 'utf8' }).trim();
@@ -186,9 +211,7 @@ function assertReleaseCheckout() {
   const dirty = execFileSync('git', ['-C', ROOT, 'status', '--porcelain'], { encoding: 'utf8' }).trim();
   const ancestry = spawnSync('git', ['-C', ROOT, 'merge-base', '--is-ancestor', SOURCE_COMMIT, head],
     { windowsHide: true, stdio: 'ignore' });
-  need(head && head === originHead && branch === 'main' && dirty === ''
-    && !ancestry.error && ancestry.status === 0,
-    'release_checkout_not_clean_current_main');
+  validateReleaseCheckout({ head, originHead, branch, dirty, sourceAncestor: !ancestry.error && ancestry.status === 0 });
 }
 
 function createBoundedApi(request, record) {
@@ -330,14 +353,18 @@ export async function runOneShot({ mode, request, artifactDir, preparedSha256, n
 
   // A single GET-only reconciliation path. An unchanged baseline does not
   // authorize replay; ambiguous outcomes remain terminally held.
-  let afterControls = null, after = null, exactApplied = null, reconciliationFailed = false;
+  let afterControls = null, afterBindingsMetadataSha256 = null, after = null,
+    exactApplied = null, reconciliationFailed = false;
   try {
-    afterControls = selectProductionClientBindings(await api.getSettings());
+    const afterSettings = await api.getSettings();
+    afterBindingsMetadataSha256 = bindingsMetadataSha256(afterSettings);
+    afterControls = selectProductionClientBindings(afterSettings);
     assertTargetDatabase(await api.getDatabase());
     after = (await api.readMetadata()).snapshot;
     try { exactApplied = verifyPostSnapshot(baseline, after, packet); } catch { exactApplied = null; }
   } catch { reconciliationFailed = true; }
-  const bindingsUnchanged = Boolean(afterControls && canonical(afterControls) === canonical(controls));
+  const bindingsUnchanged = Boolean(afterControls && afterBindingsMetadataSha256 === controls.bindingsMetadataSha256
+    && canonical(afterControls) === canonical(controls));
   let status = reconciliationFailed ? 'held_postwrite_reconciliation_incomplete_no_retry'
     : exactApplied && bindingsUnchanged
       ? (writeResponse ? 'applied_and_verified' : 'applied_reconciled_after_uncertain_response')
@@ -362,6 +389,9 @@ export async function runOneShot({ mode, request, artifactDir, preparedSha256, n
     exactSchemaLedgerDelta: Boolean(exactApplied), newTablesEmpty: emptyNewTables,
     parentIdentityUnchanged: Boolean(after && canonical(after.parent) === canonical(baseline.parent)),
     productionBindingsUnchanged: bindingsUnchanged,
+    bindingsMetadataSha256: controls.bindingsMetadataSha256,
+    postBindingsMetadataSha256: afterBindingsMetadataSha256,
+    secretVisibility: 'Only API-returned binding metadata is hashed; provider-hidden secret values are not observable or compared.',
     optionalMigrationsApplied: 0, featureFlagsChanged: false, workersChanged: false,
     reads, providerWrites: api.writeCount, automaticRetry: false };
   writeJsonExclusive(terminalPath, terminal);

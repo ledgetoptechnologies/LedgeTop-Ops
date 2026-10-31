@@ -14,9 +14,19 @@ unchanged and are asserted by the operator.
   `7f40a7b7-c3ec-470e-a626-e798867f71f8` (`client-data`). The live settings and
   D1 identity are reread during each phase; an environment or binding mismatch
   stops before the migration request.
+- The source migration commit must be an ancestor, the checkout must be clean,
+  and `HEAD` must equal locally fetched `origin/main`. Either the `main` branch
+  or a detached checkout at that exact commit is accepted; feature branches
+  are refused. The operator does not fetch; refresh and verify `origin/main`
+  before invoking it.
+- The full API-returned `settings.bindings` metadata is normalized and hashed
+  at preparation, before execution, and after the migration. The inquiry gate
+  must be absent or literal `false` at preparation and execution. Cloudflare
+  withholds secret values, so only returned binding metadata can be hashed and
+  compared.
 - Prepare and execute are separate. Prepare makes read-only calls and writes a
   short-lived private snapshot, exact body and receipt. Execute requires the
-  exact prepared receipt SHA, an unexpired packet, a clean `main` checkout and
+  exact prepared receipt SHA, an unexpired packet, a clean current-main checkout and
   a fresh exact metadata/binding match.
 - The only mutating call is one Cloudflare D1 REST `/query` batch containing
   the transaction guard, pinned 0242 DDL and ledger ID 159. A durable intent is

@@ -6,7 +6,8 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { TARGET, READ_SQL, EMPTY_TARGET_SQL, runOneShot,
-  selectProductionClientBindings, verifyPostSnapshot } from './production-client-0242-once.mjs';
+  bindingsMetadataSha256, selectProductionClientBindings,
+  validateReleaseCheckout, verifyPostSnapshot } from './production-client-0242-once.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PROFILE_DIR = path.join(ROOT, 'scripts/production-auto-migration-profile/source38-inventory-v2');
@@ -30,8 +31,9 @@ function queryMetadata(db) {
   ];
 }
 
-function createMockRequest(db, { beforeWrite, loseWriteResponse = false } = {}) {
+function createMockRequest(db, { beforeWrite, loseWriteResponse = false, settingsFactory } = {}) {
   const calls = [];
+  let settingsReads = 0;
   const request = async (url, init = {}) => {
     const u = new URL(url);
     assert.equal(u.origin, 'https://api.cloudflare.com');
@@ -40,7 +42,8 @@ function createMockRequest(db, { beforeWrite, loseWriteResponse = false } = {}) 
     const method = init.method ?? 'GET';
     let result;
     if (route === '/workers/scripts/ledgetop-clients/settings' && method === 'GET') {
-      result = { bindings: [ { name: 'ENVIRONMENT', type: 'plain_text', text: 'production' },
+      result = settingsFactory ? settingsFactory(settingsReads++) : { bindings: [
+        { name: 'ENVIRONMENT', type: 'plain_text', text: 'production' },
         { name: 'DELIVERY_DB', type: 'd1', id: TARGET.databaseId } ] };
     } else if (route === `/d1/database/${TARGET.databaseId}` && method === 'GET') {
       result = { uuid: TARGET.databaseId, name: 'client-data' };
@@ -86,14 +89,41 @@ test.afterEach(() => {
 test('only exact production Client binding is accepted', () => {
   const valid = { bindings: [ { name: 'ENVIRONMENT', type: 'plain_text', text: 'production' },
     { name: 'DELIVERY_DB', type: 'd1', id: TARGET.databaseId } ] };
-  assert.deepEqual(selectProductionClientBindings(valid), { environment: 'production',
-    worker: 'ledgetop-clients', binding: 'DELIVERY_DB', databaseId: TARGET.databaseId });
+  const validProjection = selectProductionClientBindings(valid);
+  assert.equal(validProjection.environment, 'production');
+  assert.equal(validProjection.worker, 'ledgetop-clients');
+  assert.equal(validProjection.binding, 'DELIVERY_DB');
+  assert.equal(validProjection.databaseId, TARGET.databaseId);
+  assert.equal(validProjection.inquiryFlag, 'absent');
+  assert.match(validProjection.bindingsMetadataSha256, /^[a-f0-9]{64}$/u);
   assert.throws(() => selectProductionClientBindings({ bindings: [
     { name: 'ENVIRONMENT', type: 'plain_text', text: 'staging' },
     { name: 'DELIVERY_DB', type: 'd1', id: TARGET.databaseId } ] }), /client_worker_not_production/);
   assert.throws(() => selectProductionClientBindings({ bindings: [
     { name: 'ENVIRONMENT', type: 'plain_text', text: 'production' },
     { name: 'DELIVERY_DB', type: 'd1', id: 'b6f653ab-9acd-4421-9ad0-207754b59aeb' } ] }), /client_database_binding_mismatch/);
+  assert.throws(() => selectProductionClientBindings({ bindings: [ ...valid.bindings,
+    { name: 'CLIENT_PORTAL_OPS_INQUIRIES_ENABLED', type: 'plain_text', text: 'true' } ] }),
+  /client_inquiry_flag_must_remain_disabled/);
+  assert.equal(selectProductionClientBindings({ bindings: [ ...valid.bindings,
+    { name: 'CLIENT_PORTAL_OPS_INQUIRIES_ENABLED', type: 'plain_text', text: 'false' } ] }).inquiryFlag, 'false');
+  const extra = { name: 'PUBLIC_BUCKET', type: 'r2', bucket_name: 'client-data' };
+  const original = selectProductionClientBindings({ bindings: [ ...valid.bindings, extra ] });
+  const changed = selectProductionClientBindings({ bindings: [ ...valid.bindings,
+    { ...extra, bucket_name: 'other-bucket' } ] });
+  assert.notEqual(original.bindingsMetadataSha256, changed.bindingsMetadataSha256,
+    'hash covers unrelated returned bindings too');
+  assert.equal(original.bindingsMetadataSha256, bindingsMetadataSha256({ bindings: [ ...valid.bindings, extra ] }));
+});
+
+test('release checkout accepts clean main or detached exact origin/main only', () => {
+  const head = 'da0b6375decf6c0d8a0b251d1b760accffc28ce3';
+  assert.equal(validateReleaseCheckout({ head, originHead: head, branch: 'main', dirty: '', sourceAncestor: true }), true);
+  assert.equal(validateReleaseCheckout({ head, originHead: head, branch: '', dirty: '', sourceAncestor: true }), true);
+  assert.throws(() => validateReleaseCheckout({ head, originHead: head, branch: 'codex/topic', dirty: '', sourceAncestor: true }), /release_checkout_not_clean_current_main/);
+  assert.throws(() => validateReleaseCheckout({ head, originHead: 'f'.repeat(40), branch: '', dirty: '', sourceAncestor: true }), /release_checkout_not_clean_current_main/);
+  assert.throws(() => validateReleaseCheckout({ head, originHead: head, branch: '', dirty: ' M source.mjs', sourceAncestor: true }), /release_checkout_not_clean_current_main/);
+  assert.throws(() => validateReleaseCheckout({ head, originHead: head, branch: '', dirty: '', sourceAncestor: false }), /release_checkout_not_clean_current_main/);
 });
 
 test('prepare stays held; exact packet executes once and preserves pending migrations', async () => {
@@ -165,6 +195,52 @@ test('changed metadata after prepare refuses before the migration write', async 
     await assert.rejects(runOneShot({ mode: 'execute', request: mock.request,
       artifactDir: dir, preparedSha256: prepared.preparedSha256 }), /production_metadata_changed/);
     assert.equal(mock.calls.filter(call => call.body.batch?.length === 9).length, 0);
+  } finally { db.close(); }
+});
+
+test('enabled inquiry flag and unrelated binding drift both refuse migration', async () => {
+  const db = makeDb(), dir = tempDir(), dbGate = makeDb(), dirGate = tempDir();
+  try {
+    const gateMock = createMockRequest(dbGate, { settingsFactory: n => ({ bindings: [
+      { name: 'ENVIRONMENT', type: 'plain_text', text: 'production' },
+      { name: 'DELIVERY_DB', type: 'd1', id: TARGET.databaseId },
+      { name: 'CLIENT_PORTAL_OPS_INQUIRIES_ENABLED', type: 'plain_text', text: n === 0 ? 'false' : 'true' },
+    ] }) });
+    const gatePrepared = await runOneShot({ mode: 'prepare', request: gateMock.request, artifactDir: dirGate });
+    await assert.rejects(runOneShot({ mode: 'execute', request: gateMock.request,
+      artifactDir: dirGate, preparedSha256: gatePrepared.preparedSha256 }), /client_inquiry_flag_must_remain_disabled/);
+    assert.equal(gateMock.calls.filter(call => call.body.batch?.length === 9).length, 0);
+    // Start without the inquiry gate, then introduce a non-target binding after
+    // preparation; the full metadata digest must catch that drift.
+    const baselineMock = createMockRequest(db, { settingsFactory: n => ({ bindings: [
+      { name: 'ENVIRONMENT', type: 'plain_text', text: 'production' },
+      { name: 'DELIVERY_DB', type: 'd1', id: TARGET.databaseId },
+      ...(n > 0 ? [{ name: 'PUBLIC_BUCKET', type: 'r2', bucket_name: 'changed' }] : []),
+    ] }) });
+    const prepared = await runOneShot({ mode: 'prepare', request: baselineMock.request, artifactDir: dir });
+    await assert.rejects(runOneShot({ mode: 'execute', request: baselineMock.request,
+      artifactDir: dir, preparedSha256: prepared.preparedSha256 }), /production_binding_changed/);
+    assert.equal(baselineMock.calls.filter(call => call.body.batch?.length === 9).length, 0);
+  } finally { db.close(); dbGate.close(); }
+});
+
+test('postflight records changed full bindings metadata and refuses a false unchanged claim', async () => {
+  const db = makeDb(), dir = tempDir();
+  try {
+    const mock = createMockRequest(db, { settingsFactory: n => ({ bindings: [
+      { name: 'ENVIRONMENT', type: 'plain_text', text: 'production' },
+      { name: 'DELIVERY_DB', type: 'd1', id: TARGET.databaseId },
+      { name: 'CLIENT_PORTAL_OPS_INQUIRIES_ENABLED', type: 'plain_text', text: n >= 2 ? 'true' : 'false' },
+    ] }) });
+    const prepared = await runOneShot({ mode: 'prepare', request: mock.request, artifactDir: dir });
+    const result = await runOneShot({ mode: 'execute', request: mock.request,
+      artifactDir: dir, preparedSha256: prepared.preparedSha256 });
+    assert.equal(result.status, 'held_postwrite_reconciliation_incomplete_no_retry');
+    assert.equal(result.providerWrites, 1);
+    const terminal = JSON.parse(readFileSync(path.join(dir, 'terminal.private.json'), 'utf8'));
+    assert.equal(terminal.productionBindingsUnchanged, false);
+    assert.notEqual(terminal.bindingsMetadataSha256, terminal.postBindingsMetadataSha256);
+    assert.equal(terminal.secretVisibility.includes('not observable or compared'), true);
   } finally { db.close(); }
 });
 
