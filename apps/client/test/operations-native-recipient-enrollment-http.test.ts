@@ -39,6 +39,19 @@ describe("Ops-native individual consent HTTP boundary", () => {
       acknowledged: true, acknowledgedTarget: target, principal: { issuer: proof.principal.issuer, subject: proof.principal.subject },
       recipientLabel: proof.principal.email, verifiedUntil: proof.verifiedUntil });
   });
+  it.each([
+    ["legacy RPC v3", { intentId, revision: 1, state: "issued", target: { ...target, displayLabel: "Example Customer" },
+      expiresAt: "2099-01-01T00:00:00.000Z" }],
+    ["versioned RPC v3", { intentId, revision: 1, state: "issued", target: { ...target, displayLabel: "Example Customer" },
+      expiresAt: "2099-01-01T00:00:00.000Z", permissionSchemaVersion: 3, permissions: ["operations.service_home.read"] }],
+  ])("keeps %s home-only inspect on the exact legacy HTTP response shape", async (_label, review) => {
+    const d = deps(), token = await session(d);
+    d.binding!.inspectNativeEnrollment = vi.fn().mockResolvedValue(JSON.stringify(review));
+    const inspected = await handle(request("inspect", { intentId, opaqueToken }, token), d);
+    expect(inspected.status).toBe(200);
+    expect(await inspected.json()).toEqual({ intentId, revision: 1, state: "issued",
+      target: { ...target, displayLabel: "Example Customer" }, expiresAt: "2099-01-01T00:00:00.000Z" });
+  });
   it("preserves the reviewed v4 permission selection through the client HTTP to Operations RPC hop", async () => {
     const d = deps(), token = await session(d), permissions = ["operations.request.create", "operations.service_home.read"] as const;
     d.binding!.inspectNativeEnrollment = vi.fn().mockResolvedValue(JSON.stringify({ intentId, revision: 1, state: "issued",
@@ -46,7 +59,9 @@ describe("Ops-native individual consent HTTP boundary", () => {
       permissionSchemaVersion: 4, permissions }));
     const inspected = await handle(request("inspect", { intentId, opaqueToken }, token), d);
     expect(inspected.status).toBe(200);
-    expect(await inspected.json()).toMatchObject({ permissionSchemaVersion: 4, permissions });
+    expect(await inspected.json()).toEqual({ intentId, revision: 1, state: "issued",
+      target: { ...target, displayLabel: "Example Customer" }, expiresAt: "2099-01-01T00:00:00.000Z",
+      permissionSchemaVersion: 4, permissions });
     const consentV4 = { ...consent(), acknowledgedPermissionSchemaVersion: 4, acknowledgedPermissions: permissions };
     const redeemed = await handle(request("redeem", consentV4, token), d);
     expect(redeemed.status).toBe(200);
@@ -72,6 +87,33 @@ describe("Ops-native individual consent HTTP boundary", () => {
       target: { ...target, displayLabel: "Example Customer" }, expiresAt: "2099-01-01T00:00:00.000Z",
       permissionSchemaVersion: 4, permissions: ["operations.request.create"] }));
     expect((await handle(request("inspect", { intentId, opaqueToken }, token), d)).status).toBe(403);
+  });
+  it("rejects malformed schema3 capability metadata instead of downgrading it to legacy v3", async () => {
+    const d = deps(), token = await session(d);
+    for (const malformed of [
+      { permissionSchemaVersion: 3, permissions: ["operations.request.create"] },
+      { permissionSchemaVersion: 5, permissions: ["operations.service_home.read"] },
+      { permissionSchemaVersion: 3, permissions: ["operations.service_home.read"], extra: true },
+    ]) {
+      d.binding!.inspectNativeEnrollment = vi.fn().mockResolvedValue(JSON.stringify({ intentId, revision: 1, state: "issued",
+        target: { ...target, displayLabel: "Example Customer" }, expiresAt: "2099-01-01T00:00:00.000Z", ...malformed }));
+      expect((await handle(request("inspect", { intentId, opaqueToken }, token), d)).status).toBe(403);
+    }
+  });
+  it("never infers v4 consent fields from the old home-only redeem body", async () => {
+    const d = deps(), token = await session(d), permissions = ["operations.request.create", "operations.service_home.read"] as const;
+    d.binding!.inspectNativeEnrollment = vi.fn().mockResolvedValue(JSON.stringify({ intentId, revision: 1, state: "issued",
+      target: { ...target, displayLabel: "Example Customer" }, expiresAt: "2099-01-01T00:00:00.000Z",
+      permissionSchemaVersion: 4, permissions }));
+    expect((await handle(request("inspect", { intentId, opaqueToken }, token), d)).status).toBe(200);
+    d.binding!.redeemNativeEnrollment = vi.fn().mockImplementation(async input => {
+      expect(input).not.toHaveProperty("acknowledgedPermissionSchemaVersion");
+      expect(input).not.toHaveProperty("acknowledgedPermissions");
+      // The Operations v4 authority rejects missing exact acknowledgement; mirror its closed RPC response.
+      return JSON.stringify({ error: "unavailable" });
+    });
+    expect((await handle(request("redeem", consent(), token), d)).status).toBe(403);
+    expect(d.binding!.redeemNativeEnrollment).toHaveBeenCalledOnce();
   });
   it("is absent when disabled", async () => {
     const d = deps(); d.enabled = false;

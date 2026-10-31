@@ -172,15 +172,17 @@ export async function handleOperationsNativeRecipientEnrollmentHttp(request: Req
       const selectedTarget = selected && target({ targetId: selected.targetId, targetRevision: selected.targetRevision, clientRecordId: selected.clientRecordId });
       const version = result?.permissionSchemaVersion ?? 3;
       const permissions = result?.permissions ?? ["operations.service_home.read"];
+      const parsedPermissions = parseOperationsPortalNativeRecipientCapabilities(version, "recipient.grant", permissions);
       if (!result || result.intentId !== input.intentId || result.revision !== 1 || result.state !== "issued"
         || !selectedTarget || typeof selected?.displayLabel !== "string" || !selected.displayLabel.trim()
         || selected.displayLabel.length > 300 || /\p{C}/u.test(selected.displayLabel)
-        || !parseOperationsPortalNativeRecipientCapabilities(version, "recipient.grant", permissions)
-        || parseOperationsPortalNativeRecipientCapabilities(version, "recipient.grant", permissions)!.length === 0
+        || !parsedPermissions || parsedPermissions.length === 0
         || !instant(result.expiresAt) || Date.parse(result.expiresAt) <= Date.now()) return response({ error: "Enrollment is unavailable" }, 403);
+      const legacyHomeOnly = version === 3 && parsedPermissions.length === 1
+        && parsedPermissions[0] === "operations.service_home.read";
       return response({ intentId: result.intentId, revision: 1, state: "issued",
         target: { ...selectedTarget, displayLabel: selected.displayLabel }, expiresAt: result.expiresAt,
-        permissionSchemaVersion: version, permissions });
+        ...(legacyHomeOnly ? {} : { permissionSchemaVersion: version, permissions: parsedPermissions }) });
     }
     const selected = target(input.acknowledgedTarget);
     const hasPermissionAcknowledgement = Object.hasOwn(input, "acknowledgedPermissionSchemaVersion")
