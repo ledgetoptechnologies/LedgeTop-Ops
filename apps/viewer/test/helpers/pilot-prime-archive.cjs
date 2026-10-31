@@ -2,8 +2,9 @@
 // Requests the coordinator archive without saving or extracting it. This is
 // not independent Processing proof; the supervisor must hold on ambiguity.
 const crypto=require('node:crypto');
+const {validCapability}=require('../../server/processingReservationProtocol');
 async function primePilotArchive({adapter,providerTaskId,maxBytes=4*1024*1024*1024,timeoutMs=240000}){
- if(!adapter||typeof adapter.status!=='function'||typeof adapter.downloadAll!=='function'||typeof providerTaskId!=='string'||!providerTaskId||!Number.isSafeInteger(maxBytes)||maxBytes<1||maxBytes>4*1024*1024*1024||!Number.isSafeInteger(timeoutMs)||timeoutMs<1||timeoutMs>240000)throw Error('invalid archive prime configuration');
+ if(!adapter||!validCapability(adapter.attemptCapability)||typeof adapter.status!=='function'||typeof adapter.downloadAll!=='function'||typeof providerTaskId!=='string'||!providerTaskId||!Number.isSafeInteger(maxBytes)||maxBytes<1||maxBytes>4*1024*1024*1024||!Number.isSafeInteger(timeoutMs)||timeoutMs<1||timeoutMs>240000)throw Error('invalid archive prime configuration');
  const signal=AbortSignal.timeout(timeoutMs),status=await adapter.status(providerTaskId,{signal});
  if(status?.uuid!==providerTaskId||status.status!=='completed')throw Error('coordinator task not completed');
  const response=await adapter.downloadAll(providerTaskId,{signal});if(!response?.body||!response.ok)throw Error('archive prime response unavailable');
