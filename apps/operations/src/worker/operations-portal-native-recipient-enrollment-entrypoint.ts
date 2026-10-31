@@ -46,9 +46,15 @@ export async function inspectOperationsPortalNativeRecipientEnrollmentRpc(
       JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
       WHERE intent.intent_id=? AND record.record_kind='client'`).bind(value.intentId).first<string>("display_label");
     if (!displayLabel || displayLabel.length > 300 || /[\u0000-\u001f\u007f]/u.test(displayLabel)) return unavailable();
-    return JSON.stringify({ intentId: review.intentId, revision: review.revision, state: review.state,
-      target: { ...review.target, displayLabel }, expiresAt: review.expiresAt,
-      permissionSchemaVersion: review.permissionSchemaVersion, permissions: review.permissions });
+    const permissions = parseOperationsPortalNativeRecipientCapabilities(review.permissionSchemaVersion,
+      "recipient.grant", review.permissions);
+    if (!permissions || permissions.length === 0) return unavailable();
+    const legacyHomeOnly = review.permissionSchemaVersion === 3 && permissions.length === 1
+      && permissions[0] === "operations.service_home.read";
+    const response = { intentId: review.intentId, revision: review.revision, state: review.state,
+      target: { ...review.target, displayLabel }, expiresAt: review.expiresAt };
+    return JSON.stringify(legacyHomeOnly ? response : { ...response,
+      permissionSchemaVersion: review.permissionSchemaVersion, permissions });
   } catch { return unavailable(); }
 }
 
