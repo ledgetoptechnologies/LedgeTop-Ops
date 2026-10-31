@@ -26,6 +26,16 @@ assertion and compared its subject and email with runtime Access identity;
 Beau reported the iPad showed a match. That is evidence for the observed
 request only, not for every identity or for the proposed new read-only host.
 
+Later on October 30, the Operations staging migration ledger advanced to 228;
+do not rely on the older ledger-225 baseline. A fresh read-only structural
+preflight against the verified staging database found native reconciliation
+disabled, all five alternate-login tables absent, and both connectors with
+matching active revision rows. The required staff, operation, project and
+division query shapes compiled with zero reported writes. This does not prove
+the human identity binding, current permissions, connector-manifest alignment,
+or deployed pilot RPC; no identity or record values were returned. Recheck the
+ledger and actual active deployment immediately before release.
+
 ## Gates before activation
 
 1. Confirm all Access destination patterns, account custom domains, DNS and Worker names are collision-free, verify exact account and target ownership again, and inspect the actual Operations deployment and staging database binding. Coordinate the change with the shared Operations release owner; do not replace the shared staging deployment independently.
