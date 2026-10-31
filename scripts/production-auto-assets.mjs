@@ -112,6 +112,59 @@ export function collectFrontendAssets(directory) {
   }}walk(root);result.sort(sort);entries(result);return {entries:result,payloads};
 }
 function verifiedBytes(v,payloads) {const bytes=payloads.get(v.path);need(Buffer.isBuffer(bytes)&&bytes.length===v.size&&sha(bytes)===v.sha256,'asset_payload_missing_or_changed');return bytes;}
+const ROOT_HTML_ARCHIVE = /^\/_ui\/(operations|client)\/([a-f0-9]{40})\/index\.html$/u;
+/** Preserve the exact prior root document under a content-addressed immutable
+ * path whenever a new build replaces it. Archive rows are separate assets;
+ * /index.html remains the current entry document and its replacement rule is
+ * unchanged. The prior byte map must be independently verified by the caller. */
+export function preserveRootHtmlArchive({application,previous,previousAssetBytes,current}) {
+  need(['operations','client'].includes(application),'asset_root_html_application_invalid');
+  need(previous&&Array.isArray(previous.assets)&&previousAssetBytes instanceof Map
+    &&current&&Array.isArray(current.entries)&&current.payloads instanceof Map,'asset_root_html_archive_input_invalid');
+  const workerName=application==='operations'?'ledgetop-ops':'ledgetop-clients';
+  need(previous.workerName===workerName,'asset_root_html_worker_mismatch');
+  const priorIndex=previous.assets.find(row=>row.path==='/index.html');
+  const currentIndex=current.entries.find(row=>row.path==='/index.html');
+  need(priorIndex&&priorIndex.mime==='text/html'&&currentIndex&&currentIndex.mime==='text/html',
+    'asset_root_html_entry_missing');
+  const priorBytes=previousAssetBytes.get('/index.html'),currentBytes=current.payloads.get('/index.html');
+  need(Buffer.isBuffer(priorBytes)&&priorBytes.length===priorIndex.size&&sha(priorBytes)===priorIndex.sha256
+    &&Buffer.isBuffer(currentBytes)&&currentBytes.length===currentIndex.size&&sha(currentBytes)===currentIndex.sha256,
+  'asset_root_html_bytes_unverified');
+
+  const payloads=new Map(previousAssetBytes);
+  for(const [assetPath,bytes] of current.payloads)payloads.set(assetPath,bytes);
+  const archiveRows=previous.assets.filter(row=>ROOT_HTML_ARCHIVE.test(row.path));
+  for(const row of archiveRows){
+    const match=ROOT_HTML_ARCHIVE.exec(row.path),bytes=previousAssetBytes.get(row.path);
+    need(match&&match[1]===application&&row.mime==='text/html'&&row.sha256.startsWith(match[2])
+      &&Buffer.isBuffer(bytes)&&bytes.length===row.size&&sha(bytes)===row.sha256,
+    'asset_root_html_archive_collision');
+  }
+  need(!current.entries.some(row=>ROOT_HTML_ARCHIVE.test(row.path)),'asset_root_html_archive_collision');
+  const unchanged=priorIndex.size===currentIndex.size&&priorIndex.sha256===currentIndex.sha256;
+  if(unchanged)return {current:{entries:entries([...current.entries]),payloads},archive:null};
+
+  const digest=priorIndex.sha256,archivePath=`/_ui/${application}/${digest.slice(0,40)}/index.html`;
+  const existing=previous.assets.find(row=>row.path===archivePath);
+  if(existing){
+    const bytes=previousAssetBytes.get(archivePath);
+    need(existing.size===priorIndex.size&&existing.sha256===digest&&existing.mime==='text/html'
+      &&Buffer.isBuffer(bytes)&&bytes.length===priorIndex.size&&sha(bytes)===digest,
+    'asset_root_html_archive_collision');
+  }else{
+    const bytes=Buffer.from(priorBytes);
+    const row={path:archivePath,size:bytes.length,sha256:digest,mime:'text/html',providerHash:digest.slice(0,32)};
+    need(!current.entries.some(entry=>entry.path===archivePath),'asset_root_html_archive_collision');
+    const rows=entries([...current.entries,row].sort(sort));
+    payloads.set(archivePath,bytes);
+    return {current:{entries:rows,payloads},archive:{sourcePath:'/index.html',path:archivePath,size:bytes.length,
+      sha256:digest,mime:'text/html',transportPath:`/_ui/${application}/${digest.slice(0,40)}/`}};
+  }
+  need(!current.entries.some(entry=>entry.path===archivePath),'asset_root_html_archive_collision');
+  return {current:{entries:entries([...current.entries]),payloads},archive:{sourcePath:'/index.html',path:archivePath,
+    size:priorIndex.size,sha256:digest,mime:'text/html',transportPath:`/_ui/${application}/${digest.slice(0,40)}/`}};
+}
 /** Previous JSON must be externally tied to a verified complete live inventory.
  * This pure builder cannot prove that bootstrap or any remote association.
  * current.entries lists the new build; current.payloads must also contain every

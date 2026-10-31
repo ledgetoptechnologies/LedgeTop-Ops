@@ -6,11 +6,11 @@ import path from 'node:path';
 import { hash } from './production-deploy.mjs';
 import { PROFILE, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256, ORDINARY_FRONTEND_PREFLIGHT_MODE,
   ordinaryFrontendPreflightDescriptor } from './production-deploy.mjs';
-import { mergeAssetLedger, ledgerBytes } from './production-auto-assets.mjs';
+import { mergeAssetLedger, ledgerBytes, collectFrontendAssets, preserveRootHtmlArchive } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { retainedNativeConfig, stageOrdinaryFrontendRetainedModules,
   verifyOrdinaryFrontendRetainedCandidateModules } from './ordinary-frontend-retained-plan.mjs';
-import { createJournaledAssetVerifierProvider, readInstalledRetainedAssetLedger } from './ordinary-frontend-retained-executor.mjs';
+import { createJournaledAssetVerifierProvider, readInstalledRetainedAssetLedger, stageRetainedAssets } from './ordinary-frontend-retained-executor.mjs';
 import { OPS_LEGACY_LEDGER_BOOTSTRAP, prepareOpsLegacyLedgerBootstrap } from './ordinary-frontend-ops-ledger-bootstrap.mjs';
 
 const BASELINE = '11111111-1111-4111-8111-111111111111';
@@ -42,8 +42,10 @@ function testPlan(t) {
   const currentEntries = Object.entries({ 'index.html': '<script src="/app.js"></script>', 'app.js': 'current', 'favicon.svg': '<svg/>' })
     .map(([name, text]) => ({ path: `/${name}`, size: Buffer.byteLength(text), sha256: hash(text), mime: name.endsWith('.html') ? 'text/html' : name.endsWith('.js') ? 'text/javascript' : 'image/svg+xml', providerHash: hash(text).slice(0, 32) }));
   currentEntries.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
-  const all = new Map(old); for (const [name, text] of Object.entries({ 'index.html': '<script src="/app.js"></script>', 'app.js': 'current', 'favicon.svg': '<svg/>' })) all.set(`/${name}`, Buffer.from(text));
-  const retentionLedger = mergeAssetLedger({ previous: previousLedger, current: { entries: currentEntries, payloads: all }, workerName,
+  const current = collectFrontendAssets(assets);
+  const retained = preserveRootHtmlArchive({ application: 'operations', previous: previousLedger,
+    previousAssetBytes: old, current });
+  const retentionLedger = mergeAssetLedger({ previous: previousLedger, current: retained.current, workerName,
     accountId: ACCOUNT, sourceCommit, parentVersionId: BASELINE, observedAt: '2026-10-30T12:00:00.000Z' });
   const bytes = ledgerBytes(retentionLedger);
   const ordinaryPlan = { schemaVersion: 1, application: 'operations', sourceCommit, offlineOnly: true, deploymentEnabled: false,
@@ -52,11 +54,11 @@ function testPlan(t) {
     expectedBindings: resources.bindings, expectedAssetsConfiguration: before.operations.modern.assets,
   };
   const plan = { schemaVersion: 2, contract: 'ordinary-frontend-retained-native-module-v2', application: 'operations', workerName, accountId: ACCOUNT,
-    sourceCommit, parentVersionId: BASELINE, ordinaryPlan, ordinaryPlanSHA256: 'a'.repeat(64), retentionLedger,
+    sourceCommit, parentVersionId: BASELINE, ordinaryPlan, ordinaryPlanSHA256: 'a'.repeat(64), rootHtmlArchive: retained.archive, retentionLedger,
     retentionLedgerSHA256: hash(bytes), nativeAdditionalModule: { name: '__ops_release_ledger.json', type: 'Text', mime: 'text/plain',
       size: bytes.length, sha256: hash(bytes), contentBase64: bytes.toString('base64') },
     additionalModuleRule: { type: 'Text', globs: ['__ops_release_ledger.json'], fallthrough: false } };
-  return { root, mainBytes, mapBytes, before, ordinaryPlan, plan, bytes };
+  return { root, mainBytes, mapBytes, before, ordinaryPlan, plan, bytes, previousLedger, previousAssetBytes: old };
 }
 
 test('Wrangler v2 config narrowly discovers only the pinned retained ledger module', t => {
@@ -70,6 +72,20 @@ test('Wrangler v2 config narrowly discovers only the pinned retained ledger modu
   assert.throws(() => retainedNativeConfig(wrongAccount, staged), /Native account selection/);
   assert.deepEqual(fs.readdirSync(staged.directory).sort(), ['__ops_release_ledger.json', 'index.js', 'index.js.map']);
   assert.deepEqual(fs.readFileSync(staged.ledger), f.bytes);
+});
+
+test('executor stages exact prior root bytes at its immutable archive path alongside every retained old and current asset', t => {
+  const f = testPlan(t), journal = path.join(f.root, 'assets-journal'); fs.mkdirSync(journal);
+  const directory = stageRetainedAssets(journal, f.plan,
+    f.previousLedger, f.previousAssetBytes);
+  const archive = f.plan.rootHtmlArchive;
+  assert.ok(archive);
+  assert.equal(fs.readFileSync(path.join(directory, archive.path.slice(1))).toString(), 'old index');
+  assert.equal(fs.readFileSync(path.join(directory, 'index.html')).toString(), '<script src="/app.js"></script>');
+  assert.equal(fs.readFileSync(path.join(directory, 'assets', 'previous.js')).toString(), 'old bundle');
+  assert.equal(fs.readFileSync(path.join(directory, 'app.js')).toString(), 'current');
+  assert.equal(fs.readFileSync(path.join(directory, 'favicon.svg')).toString(), '<svg/>');
+  assert.equal(fs.readFileSync(path.join(directory, archive.path.slice(1))).length, archive.size);
 });
 
 test('retained candidate verifier accepts exact runtime pair plus canonical ledger and rejects drift', t => {

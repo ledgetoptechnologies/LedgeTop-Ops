@@ -13,13 +13,13 @@ const clone = value => structuredClone(value);
 function readiness() { return { schemaVersion: 2, sourceCommit: COMMIT, accountId: ACCOUNT,
   databaseId: NATIVE_STAFF_PRODUCTION_TARGET.databaseId, reviewSha256: '1'.repeat(64), cohortSha256: '2'.repeat(64),
   controlPlaneSha256: '3'.repeat(64), observedAt: new Date().toISOString(), staffCount: 2, generation: 0 }; }
-function fixture(workerName = 'ledgetop-ops') {
+function fixture(workerName = 'ledgetop-ops', { unchangedRoot = false } = {}) {
   const events = [], receipts = [], intents = [];
   const initial = { activeVersionId: PARENT, latestVersionId: PARENT, controlsSHA256: CONTROL,
     deploymentId: DEPLOY, deployedAt: '2026-10-27T06:20:51.000000Z', versions: [{ versionId: PARENT, percentage: 100 }] };
-  let current = clone(initial), ledger;
+  let current = clone(initial), ledger, uploadedPayloads;
   const oldPayloads = new Map([['/index.html', Buffer.from('old index')], ['/assets/old.js', Buffer.from('old js')]]);
-  const newPayloads = new Map([['/index.html', Buffer.from('new index')], ['/assets/new.js', Buffer.from('new js')]]);
+  const newPayloads = new Map([['/index.html', Buffer.from(unchangedRoot ? 'old index' : 'new index')], ['/assets/new.js', Buffer.from('new js')]]);
   const entries = payloads => [...payloads].map(([path, bytes]) => ({ path, size: bytes.length,
     sha256: hash(bytes), mime: path.endsWith('.html') ? 'text/html' : 'application/javascript', providerHash: hash(bytes).slice(0, 32) }))
     .sort((a, b) => a.path < b.path ? -1 : 1);
@@ -36,7 +36,7 @@ function fixture(workerName = 'ledgetop-ops') {
     readLedger: async () => { events.push('ledger'); return clone(previous); },
     readOldAssets: async () => { events.push('old-bytes'); return new Map([...oldPayloads].map(([name, bytes]) => [name, Buffer.from(bytes)])); },
     upload: async input => {
-      events.push('upload-enter'); ledger = input.ledger;
+      events.push('upload-enter'); ledger = input.ledger; uploadedPayloads = input.payloads;
       await input.recordIntent({ phase: 'asset-session', hashes: Object.values(input.manifest).map(row => row.hash) });
       events.push('asset-session-post');
       await input.recordIntent({ phase: 'asset-bucket', hashes: Object.values(input.manifest).map(row => row.hash) });
@@ -60,17 +60,23 @@ function fixture(workerName = 'ledgetop-ops') {
     receipt: async entry => { events.push(`receipt-${entry.status}`); receipts.push(clone(entry)); },
   };
   return { adapter, events, receipts, intents, previous, oldPayloads, newPayloads,
-    current: () => current, ledger: () => ledger, setState: value => { current = value; },
+    current: () => current, ledger: () => ledger, uploadedPayloads: () => uploadedPayloads, setState: value => { current = value; },
     run: () => coordinateProductionAutoRelease({ accountId: ACCOUNT, workerName, sourceCommit: COMMIT, adapter }) };
 }
 
 test('happy path fences every POST, verifies parent100/candidate0 then candidate100 and both byte sets', async () => {
   const f = fixture(), result = await f.run();
-  assert.equal(result.verifiedActive, true); assert.equal(result.files, 3);
+  assert.equal(result.verifiedActive, true); assert.equal(result.files, 4);
   assert.equal(result.cutoverObservedAt, '2026-10-27T07:20:51.938465Z');
   assert.equal(result.earliestPermittedPruningAt, '2026-10-29T07:20:51.939Z');
   assert.equal(result.automaticPruning, false); assert.equal(result.allHistoricalAssetsCarried, true);
-  assert.deepEqual(f.ledger().assets.map(row => row.path), ['/assets/new.js', '/assets/old.js', '/index.html']);
+  const archivedRootPath = `/_ui/operations/${hash(Buffer.from('old index')).slice(0, 40)}/index.html`;
+  assert.deepEqual(f.ledger().assets.map(row => row.path).sort(), ['/assets/new.js', '/assets/old.js', archivedRootPath, '/index.html'].sort());
+  assert.equal(f.uploadedPayloads().get(archivedRootPath).toString(), 'old index');
+  assert.deepEqual(f.receipts.find(row => row.status === 'prepared').rootHtmlArchive,
+    { sourcePath: '/index.html', path: archivedRootPath, size: 9, sha256: hash(Buffer.from('old index')),
+      mime: 'text/html', transportPath: archivedRootPath.replace(/index\.html$/u, '') });
+  assert.deepEqual(result.rootHtmlArchive, f.receipts.at(-1).rootHtmlArchive);
   for (const [post, phase] of [['asset-session-post', 'asset-session'], ['asset-bucket-post', 'asset-bucket'],
     ['version-post', 'worker-version-upload'], ['zero-post', 'stage-zero'], ['activate-post', 'activate']]) {
     const at = f.events.indexOf(post);
@@ -83,6 +89,15 @@ test('happy path fences every POST, verifies parent100/candidate0 then candidate
   assert.deepEqual(f.receipts.map(row => row.status), ['started', 'prepared', 'inactive-verified',
     'zero-percent-verified', 'candidate-assets-verified', 'verified']);
   assert.equal(f.intents.length, 5);
+});
+
+test('coordinator emits no root HTML archive when root bytes are unchanged', async () => {
+  const f = fixture('ledgetop-clients', { unchangedRoot: true }), result = await f.run();
+  assert.equal(result.files, 3);
+  assert.equal(result.rootHtmlArchive, null);
+  assert.equal(f.receipts.find(row => row.status === 'prepared').rootHtmlArchive, null);
+  assert.deepEqual(f.ledger().assets.map(row => row.path), ['/assets/new.js', '/assets/old.js', '/index.html']);
+  assert.equal(f.uploadedPayloads().has('/_ui/client'), false);
 });
 
 for (const kind of ['dirty', 'superseded', 'wrong-ci-sha', 'ci-failed', 'split', 'inactive-latest']) {
