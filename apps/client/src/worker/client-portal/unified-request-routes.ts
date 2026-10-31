@@ -8,6 +8,8 @@ import { clientAccessConfiguration } from "./access-identity";
 import { listPortalWorkspaces, PORTAL_WORKSPACE_HEADER, type PortalWorkspaceSummary } from "./workspace-v2";
 import { opsInquiriesEnabled, resolveOpsInquiryAuthority, type NativeRequestAuthorityProof } from "./native-request-authority";
 import { listOpsTriageInquiries, opsTriageInquirySchemaReady, submitOpsTriageInquiry, type OpsTriageInquiryKind } from "./ops-triage-inquiries";
+import { readNativeOperationsRequestCapabilities, type NativeOperationsRequestCapability } from "./operations-native-request-capability-read";
+import { listNativePrincipalInquiries, submitNativePrincipalInquiry } from "./operations-native-principal-inquiries";
 import type { ClientPortalSession, ClientServiceCatalogItem, ResolveClientPrincipal, VerifiedClientPrincipal } from "./types";
 
 const coordinate = z.string().min(1).max(200);
@@ -30,7 +32,10 @@ type Dependencies = { resolvePrincipal: ResolveClientPrincipal; checkConfigurati
   resolveInquiryAuthority?: typeof resolveOpsInquiryAuthority;
   submitInquiry?: typeof submitOpsTriageInquiry;
   listInquiries?: typeof listOpsTriageInquiries;
-  inquirySchemaReady?: typeof opsTriageInquirySchemaReady };
+  inquirySchemaReady?: typeof opsTriageInquirySchemaReady;
+  resolveOperationsCapability?: (env: Env, principal: VerifiedClientPrincipal) => Promise<readonly NativeOperationsRequestCapability[] | null>;
+  listOperationsInquiries?: typeof listNativePrincipalInquiries;
+  submitOperationsInquiry?: typeof submitNativePrincipalInquiry };
 const MAX_WORKSPACES = 32, MAX_PAGES = 10, MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_SERVICES = 1000;
 const encoder = new TextEncoder();
@@ -138,6 +143,8 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
   const submitInquiry = dependencies.submitInquiry ?? submitOpsTriageInquiry;
   const listInquiries = dependencies.listInquiries ?? listOpsTriageInquiries;
   const inquirySchemaReady = dependencies.inquirySchemaReady ?? opsTriageInquirySchemaReady;
+  const listOperationsInquiries = dependencies.listOperationsInquiries ?? listNativePrincipalInquiries;
+  const submitOperationsInquiry = dependencies.submitOperationsInquiry ?? submitNativePrincipalInquiry;
   async function actor(c: Ctx): Promise<VerifiedClientPrincipal> {
     c.header("Cache-Control", "private, no-store");
     c.header("Cloudflare-CDN-Cache-Control", "no-store");
@@ -172,6 +179,13 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
         return [{ workspace, proof }];
     }
     return proofs;
+  }
+  async function eligibleOperationsPrincipal(c: Ctx, principal: VerifiedClientPrincipal) {
+    if (!opsInquiriesEnabled(c.env) || c.env.CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED !== "true") return undefined;
+    const capabilities = dependencies.resolveOperationsCapability
+      ? await dependencies.resolveOperationsCapability(c.env, principal)
+      : await readNativeOperationsRequestCapabilities(c.env.DELIVERY_DB, principal, true);
+    return capabilities === null ? null : capabilities.length > 0 ? capabilities : undefined;
   }
   async function catalog(c: Ctx, workspace: PortalWorkspaceSummary, projectId?: string | null, budget = new DiscoveryBudget()) {
     const services: ClientServiceCatalogItem[] = [];
@@ -220,7 +234,7 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
     const after = await memberships(c, principal);
     const current = results.filter(result => after.some(w => w.id === result.workspace.id && w.sourceId === result.workspace.sourceId));
     current.sort((a, b) => a.workspace.id.localeCompare(b.workspace.id));
-    const inquiryKinds = (await eligibleAuthorities(c, principal)).length
+    const inquiryKinds = ((await eligibleAuthorities(c, principal)).length || await eligibleOperationsPrincipal(c, principal))
       ? ["website", "drone", "other"] as const : [] as const;
     const payload = { services: current.flatMap(({ workspace, services }) => (services ?? []).map(service => serviceDto(workspace, service))),
       inquiryKinds,
@@ -233,9 +247,19 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
   router.get("/inquiries", async c => {
     const principal = await actor(c);
     if (!opsInquiriesEnabled(c.env)) throw new HTTPException(403, { message: "Service request access is unavailable" });
-    if (!await inquirySchemaReady(c.env)) throw new HTTPException(503, { message: "Inquiry history is unavailable" });
     const proofs = await eligibleAuthorities(c, principal);
-    if (!proofs.length) throw new HTTPException(403, { message: "Service request access is unavailable" });
+    if (!proofs.length) {
+      const capability = await eligibleOperationsPrincipal(c, principal);
+      if (capability === null) throw new HTTPException(503, { message: "Inquiry history is unavailable" });
+      if (!capability) throw new HTTPException(403, { message: "Service request access is unavailable" });
+      const currentCapabilities = await eligibleOperationsPrincipal(c, principal);
+      if (!currentCapabilities || JSON.stringify(currentCapabilities) !== JSON.stringify(capability))
+        throw new HTTPException(409, { message: "Inquiry access changed. Refresh and try again." });
+      const inquiries = await listOperationsInquiries(c.env.OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES, principal, currentCapabilities);
+      if (!inquiries) throw new HTTPException(503, { message: "Inquiry history is unavailable" });
+      return c.json({ inquiries });
+    }
+    if (!await inquirySchemaReady(c.env)) throw new HTTPException(503, { message: "Inquiry history is unavailable" });
     // History belongs to the authenticated global portal identity. A currently
     // eligible context is still required before releasing any prior inquiry.
     const current = await eligibleAuthorities(c, principal);
@@ -247,7 +271,6 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
   router.post("/inquiries", async c => {
     const principal = await actor(c);
     if (!opsInquiriesEnabled(c.env)) throw new HTTPException(403, { message: "Service request access is unavailable" });
-    if (!await inquirySchemaReady(c.env)) throw new HTTPException(503, { message: "Inquiry submission is unavailable" });
     if (!clientPortalRequestOriginAllowed(c.req.raw, c.env)) throw new HTTPException(403);
     const parsed = z.object({
       kind: z.enum(["website", "drone", "other"]),
@@ -260,7 +283,22 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
       throw new HTTPException(400, { message: "The inquiry is invalid" });
     const proofs = await eligibleAuthorities(c, principal);
     const selected = proofs[0];
-    if (!selected) throw new HTTPException(403, { message: "Service request access is unavailable" });
+    if (!selected) {
+      const capability = await eligibleOperationsPrincipal(c, principal);
+      if (capability === null) throw new HTTPException(503, { message: "Inquiry submission is unavailable" });
+      if (!capability) throw new HTTPException(403, { message: "Service request access is unavailable" });
+      const currentCapabilities = await eligibleOperationsPrincipal(c, principal);
+      if (!currentCapabilities || JSON.stringify(currentCapabilities) !== JSON.stringify(capability))
+        throw new HTTPException(409, { message: "Inquiry access changed. Refresh and try again." });
+      const result = await submitOperationsInquiry(c.env.OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES, principal, currentCapabilities, {
+        kind: parsed.data.kind, title: parsed.data.title ?? (parsed.data.kind + " inquiry"), details: parsed.data.details,
+        location: parsed.data.location ?? null, idempotencyKey: key,
+      });
+      if (!result || result.kind === "unavailable") throw new HTTPException(503, { message: "Inquiry could not be stored; retry with the same idempotency key" });
+      if (result.kind === "conflict") throw new HTTPException(409, { message: "Idempotency key was used for a different inquiry" });
+      return c.json({ inquiry: result.inquiry }, result.kind === "created" ? 201 : 200);
+    }
+    if (!await inquirySchemaReady(c.env)) throw new HTTPException(503, { message: "Inquiry submission is unavailable" });
     const current = await eligibleAuthorities(c, principal);
     if (!current.some(item => item.proof.identityId === selected.proof.identityId
       && item.proof.workspaceId === selected.proof.workspaceId && item.proof.sourceId === selected.proof.sourceId))
