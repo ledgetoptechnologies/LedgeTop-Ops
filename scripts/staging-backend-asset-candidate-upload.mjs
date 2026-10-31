@@ -15,6 +15,8 @@ import {
   STAGING_BACKEND_RELEASE_TARGETS,
   compileCurrentStagingBackendReleasePlan,
   validateCurrentStagingBackendReleasePlan,
+  compileOwnerReviewStagingBackendReleasePlan,
+  validateOwnerReviewStagingBackendReleasePlan,
 } from './staging-backend-release-plan.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -23,6 +25,9 @@ const HASH32 = /^[a-f0-9]{32}$/u;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
 const SOURCE_COMMIT = 'c2ce0b6feaa3f410dd6284bd5ce5763818958ec8';
 const CURRENT_SOURCE_COMMIT = 'b22abeccd1889ed2f745db98c6123bafa5820b97';
+const OWNER_REVIEW_SOURCE_COMMIT = '4ee6cbe84265d07e2998b795f2a130763e95d4db';
+const OWNER_REVIEW_WORKER = 'ledgetop-ops-staging';
+const OWNER_REVIEW_VERSION = 'e299b7af-f9ed-424b-ae8f-3fdff4f0614e';
 const CURRENT_WORKERS = Object.freeze({ operations: 'ledgetop-ops-staging', client: 'ledgetop-clients-staging' });
 const V7_RUNTIME_PROOF_SHA256 = '0d4c66619a4393594008be2261c865a4b631ad0204de4d5f3e5b21d579b18d84';
 const COVERAGE_PURPOSE = 'staging-served-release-coverage-v1';
@@ -167,6 +172,53 @@ function checkedCurrentHeldPlan(planOptions, heldPlan) {
   need(baseline.length === template.bindings.length
     && baseline.every(row => template.bindings.some(item => item.name === row.name)),
   'Current v4 template binding inventory must match the full captured baseline');
+  return heldPlan;
+}
+
+function checkedOwnerReviewHeldPlan(planOptions, heldPlan) {
+  need(heldPlan?.schemaVersion === 5 && heldPlan.contract === 'staging-backend-only-owner-review-profile-v5'
+    && heldPlan.sourceCommit === OWNER_REVIEW_SOURCE_COMMIT && heldPlan.application === 'operations'
+    && heldPlan.selectedWorker === OWNER_REVIEW_WORKER && heldPlan.selectedActiveVersionId === OWNER_REVIEW_VERSION
+    && heldPlan.selectedLatestVersionId === OWNER_REVIEW_VERSION && heldPlan.accountId === STAGING_ACCOUNT_ID
+    && heldPlan.held === true && heldPlan.offlineOnly === true && heldPlan.executionAllowed === false
+    && heldPlan.deploymentEnabled === false && heldPlan.assetsUploadRequired === true && heldPlan.assetJwtIncluded === false
+    && heldPlan.liveNamespaceVerified === false && heldPlan.assetReconstitution?.namespaceReconstituted === false
+    && heldPlan.assetReconstitution?.namespaceInherited === false && heldPlan.assetUploadRecipe?.uploadAssetSetAllowed === false,
+  'Only the exact held Owner Review v5 Operations plan is accepted');
+  validateOwnerReviewStagingBackendReleasePlan(planOptions, heldPlan);
+  need(planOptions?.application === 'operations' && planOptions?.sourceCommit === OWNER_REVIEW_SOURCE_COMMIT
+    && heldPlan.versionCreateTemplate?.account_id === STAGING_ACCOUNT_ID
+    && heldPlan.versionCreateTemplate.deploy === false
+    && Array.isArray(heldPlan.versionCreateTemplate.modules) && heldPlan.versionCreateTemplate.modules.length === 2
+    && heldPlan.versionCreateTemplate.modules[0].name === heldPlan.versionCreateTemplate.main_module
+    && heldPlan.versionCreateTemplate.modules[1].name === `${heldPlan.versionCreateTemplate.main_module}.map`
+    && !Object.hasOwn(heldPlan.versionCreateTemplate, 'assets')
+    && Array.isArray(heldPlan.versionCreateTemplate.bindings)
+    && heldPlan.versionCreateTemplate.bindings.length === 151
+    && heldPlan.versionCreateTemplate.bindings.every(row => row.type === 'inherit' && row.version_id === OWNER_REVIEW_VERSION)
+    && equal(heldPlan.versionCreateTemplate.exports, heldPlan.expectedUnchangedExports),
+  'Owner Review v5 must preserve the exact 151 active bindings and exports without adding assets or deployment');
+  const expectedBindings = heldPlan.expectedUnchangedResources.bindings;
+  need(Array.isArray(expectedBindings) && expectedBindings.length === 152
+    && expectedBindings.filter(row => row.name === 'ASSETS').length === 1
+    && heldPlan.versionCreateTemplate.bindings.length === expectedBindings.length - 1
+    && expectedBindings.filter(row => row.name !== 'ASSETS').every(row =>
+      heldPlan.versionCreateTemplate.bindings.some(item => item.name === row.name)),
+  'Owner Review v5 binding inventory must match the active Operations baseline');
+  return heldPlan;
+}
+
+function checkedOwnerReviewPlanOnly(heldPlan) {
+  need(heldPlan?.schemaVersion === 5 && heldPlan.contract === 'staging-backend-only-owner-review-profile-v5'
+    && heldPlan.sourceCommit === OWNER_REVIEW_SOURCE_COMMIT && heldPlan.application === 'operations'
+    && heldPlan.selectedWorker === OWNER_REVIEW_WORKER && heldPlan.selectedActiveVersionId === OWNER_REVIEW_VERSION
+    && heldPlan.selectedLatestVersionId === OWNER_REVIEW_VERSION && heldPlan.accountId === STAGING_ACCOUNT_ID
+    && heldPlan.held === true && heldPlan.offlineOnly === true && heldPlan.executionAllowed === false
+    && heldPlan.deploymentEnabled === false && heldPlan.assetsUploadRequired === true && heldPlan.assetJwtIncluded === false
+    && heldPlan.liveNamespaceVerified === false && heldPlan.assetReconstitution?.namespaceReconstituted === false
+    && heldPlan.assetReconstitution?.namespaceInherited === false && heldPlan.assetUploadRecipe?.uploadAssetSetAllowed === false
+    && heldPlan.automaticPruning === false && heldPlan.noMigrationConfig === true && heldPlan.noOpsSyncUpdate === true,
+  'A held fixed Owner Review v5 Operations plan is required');
   return heldPlan;
 }
 
@@ -397,6 +449,23 @@ function safeVersionCreateTemplate(plan, completionJwt) {
   return params;
 }
 
+function checkedAssetUploadBucketResponse(response, final, allow202Intermediate) {
+  const statusAccepted = final ? response?.status === 201
+    : allow202Intermediate ? [200, 202].includes(response?.status) : response?.status === 200;
+  const jwtAccepted = final ? typeof response?.completionJwt === 'string'
+    && response.completionJwt.length >= 16 && response.completionJwt.length <= 8_192
+    : response?.completionJwt === undefined;
+  need(response && statusAccepted && jwtAccepted,
+    'Asset upload bucket response did not meet the one-response status/JWT contract');
+  return final ? response.completionJwt : undefined;
+}
+
+export function validateOwnerReviewStagingBackendAssetBucketResponse({ response, final } = {}) {
+  need(typeof final === 'boolean', 'Owner Review v5 bucket response phase must be explicit');
+  checkedAssetUploadBucketResponse(response, final, true);
+  return true;
+}
+
 function checkReadback(readback, candidateVersionId, plan, candidateParams, currentProfile = false) {
   const keys = ['latestVersionId','deployment','candidate'];
   const deployments = readback?.deployment;
@@ -477,6 +546,29 @@ export function validateStagingBackendAssetCandidateReadback({ readback, candida
   return checkReadback(readback, candidateVersionId, heldPlan, candidateParams);
 }
 
+export function validateOwnerReviewStagingBackendAssetCoverageEvidence({ coverageEvidenceFile, heldPlan, now = () => Date.now() } = {}) {
+  checkedOwnerReviewPlanOnly(heldPlan);
+  need(typeof now === 'function', 'Owner Review v5 coverage clock is required');
+  const checked = checkedCoverageEvidence(coverageEvidenceFile, heldPlan, now());
+  return { evidenceSHA256: checked.fileSHA256, observedAt: checked.observedAt,
+    window: checked.window, releaseCount: checked.releaseCount, requiredAssetCount: checked.requiredAssetCount };
+}
+
+export function validateOwnerReviewStagingBackendAssetMaterialization({ heldPlan, hashBlake3 } = {}) {
+  checkedOwnerReviewPlanOnly(heldPlan);
+  const verified = verifyAssetFiles(heldPlan, hashBlake3);
+  const totalBytes = [...verified.files.values()].reduce((sum, file) => sum + file.size, 0);
+  return { application: heldPlan.application, fileCount: verified.files.size, uniqueUploadCount: verified.uploads.size,
+    duplicateContentPathCount: verified.files.size - verified.uploads.size, totalBytes };
+}
+
+export function validateOwnerReviewStagingBackendAssetCandidateReadback({ readback, candidateVersionId, heldPlan, candidateParams } = {}) {
+  checkedOwnerReviewPlanOnly(heldPlan);
+  need(UUID.test(candidateVersionId ?? '') && candidateParams && typeof candidateParams === 'object',
+    'An Owner Review v5 candidate ID and exact request are required');
+  return checkReadback(readback, candidateVersionId, heldPlan, candidateParams, true);
+}
+
 export function validateCurrentStagingBackendAssetCoverageEvidence({ coverageEvidenceFile, heldPlan, now = () => Date.now() } = {}) {
   need(heldPlan?.schemaVersion === 4 && heldPlan.contract === 'staging-backend-only-current-profile-v4'
     && heldPlan.sourceCommit === CURRENT_SOURCE_COMMIT && heldPlan.held === true && heldPlan.executionAllowed === false
@@ -510,7 +602,7 @@ export function validateCurrentStagingBackendAssetCandidateReadback({ readback, 
 /** Create a single held staging candidate. All mutations are one-shot and
  * journaled before submission; a failed/uncertain step is never retried. */
 function createAssetCandidateUploader({ sdk, uploadBucket, readFreshControls,
-  readCandidateState, journal, hashBlake3, now = () => Date.now(), currentProfile = false } = {}) {
+  readCandidateState, journal, hashBlake3, now = () => Date.now(), currentProfile = false, ownerReviewProfile = false } = {}) {
   need(sdk && typeof sdk.createAssetUploadSession === 'function' && typeof sdk.createVersion === 'function'
     && typeof uploadBucket === 'function' && typeof readFreshControls === 'function'
     && typeof readCandidateState === 'function' && typeof now === 'function',
@@ -518,20 +610,24 @@ function createAssetCandidateUploader({ sdk, uploadBucket, readFreshControls,
   const oneAttemptJournal = checkedJournal(journal);
 
   return async function createCandidate({ planOptions, heldPlan, runtimeProofFile, coverageEvidenceFile } = {}) {
-    currentProfile ? checkedCurrentHeldPlan(planOptions, heldPlan) : checkedHeldPlan(planOptions, heldPlan);
+    ownerReviewProfile ? checkedOwnerReviewHeldPlan({ ...planOptions, now }, heldPlan)
+      : currentProfile ? checkedCurrentHeldPlan({ ...planOptions, now }, heldPlan)
+        : checkedHeldPlan({ ...planOptions, now }, heldPlan);
     verifyRuntimeProof(runtimeProofFile);
     let lastObservedAt = isoMs(heldPlan.controlsCapture.observedAt);
     let token;
-    const sourceCommit = currentProfile ? CURRENT_SOURCE_COMMIT : SOURCE_COMMIT;
+    const sourceCommit = ownerReviewProfile ? OWNER_REVIEW_SOURCE_COMMIT
+      : currentProfile ? CURRENT_SOURCE_COMMIT : SOURCE_COMMIT;
     // Preserve consumed v3 journal keys exactly; only the new contract gets a
     // namespace prefix. Renaming old keys could make a prior action replayable.
-    const planKey = `${currentProfile ? 'v4/' : ''}${heldPlan.application}/${heldPlan.selectedWorker}/${heldPlan.selectedActiveVersionId}/${sourceCommit}`;
+    const planKey = `${ownerReviewProfile ? 'v5/' : currentProfile ? 'v4/' : ''}${heldPlan.application}/${heldPlan.selectedWorker}/${heldPlan.selectedActiveVersionId}/${sourceCommit}`;
 
     async function recheckBaseline(step) {
       let controlFile;
       try { controlFile = await readFreshControls(heldPlan.application, heldPlan.selectedWorker); }
       catch { throw new Error(`Fresh staging controls unavailable before ${step}; candidate held`); }
-      const compile = currentProfile ? compileCurrentStagingBackendReleasePlan : compileStagingBackendReleasePlan;
+      const compile = ownerReviewProfile ? compileOwnerReviewStagingBackendReleasePlan
+        : currentProfile ? compileCurrentStagingBackendReleasePlan : compileStagingBackendReleasePlan;
       const fresh = compile({ ...planOptions, controlsFile: controlFile, now });
       const freshAt = isoMs(fresh.controlsCapture.observedAt);
       need(freshAt >= lastObservedAt && now() - freshAt <= 30 * 60_000,
@@ -603,12 +699,7 @@ function createAssetCandidateUploader({ sdk, uploadBucket, readFreshControls,
             uploadJwt: token, files: rows, maxRetries: 0, timeoutMs: 25_000,
           }));
           const final = index === session.buckets.length - 1;
-          const acceptedIntermediateStatus = currentProfile ? [200, 202].includes(response?.status) : response?.status === 200;
-          need(response && (final ? response.status === 201 : acceptedIntermediateStatus)
-            && (final ? typeof response.completionJwt === 'string' && response.completionJwt.length >= 16
-              && response.completionJwt.length <= 8_192 : response.completionJwt === undefined),
-          'Asset upload bucket response did not meet the one-response status/JWT contract');
-          if (final) completionJwt = response.completionJwt;
+          completionJwt = checkedAssetUploadBucketResponse(response, final, currentProfile || ownerReviewProfile) ?? completionJwt;
         }
         need(completionJwt, 'Asset bucket uploads ended without the final completion JWT');
         token = completionJwt;
@@ -628,7 +719,9 @@ function createAssetCandidateUploader({ sdk, uploadBucket, readFreshControls,
       catch { return { candidateVersionId, readbackVerified: false }; }
       let readbackVerified = false;
       try {
-        readbackVerified = currentProfile
+        readbackVerified = ownerReviewProfile
+          ? validateOwnerReviewStagingBackendAssetCandidateReadback({ readback, candidateVersionId, heldPlan: current, candidateParams: versionRequest })
+          : currentProfile
           ? validateCurrentStagingBackendAssetCandidateReadback({ readback, candidateVersionId, heldPlan: current, candidateParams: versionRequest })
           : validateStagingBackendAssetCandidateReadback({ readback, candidateVersionId, heldPlan: current, candidateParams: versionRequest });
       } catch { /* return the candidate ID with a false readback status */ }
@@ -640,11 +733,16 @@ function createAssetCandidateUploader({ sdk, uploadBucket, readFreshControls,
 }
 
 export function createStagingBackendAssetCandidateUploader(options = {}) {
-  return createAssetCandidateUploader({ ...options, currentProfile: false });
+  return createAssetCandidateUploader({ ...options, currentProfile: false, ownerReviewProfile: false });
 }
 
 /** Current-profile v4 successor: separate schema and journal namespace, with
  * the same one-shot inactive candidate mechanics and no added Client binding. */
 export function createCurrentStagingBackendAssetCandidateUploader(options = {}) {
-  return createAssetCandidateUploader({ ...options, currentProfile: true });
+  return createAssetCandidateUploader({ ...options, currentProfile: true, ownerReviewProfile: false });
+}
+
+/** Fixed held Owner Review v5 successor uploader; candidate creation only, deployment remains off. */
+export function createOwnerReviewStagingBackendAssetCandidateUploader(options = {}) {
+  return createAssetCandidateUploader({ ...options, currentProfile: false, ownerReviewProfile: true });
 }
