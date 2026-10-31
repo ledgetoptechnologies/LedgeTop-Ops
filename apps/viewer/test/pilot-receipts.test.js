@@ -10,6 +10,6 @@ test('terminal receipt requires matching run, task, completion and bounded diges
 });
 test('completion receipt carries matching identities and archive evidence only for ingest',()=>{
  const identity={projectId:'p',datasetId:'d',taskId:'t',attemptId:'a',providerId:'v',providerTaskId:'remote',manifestSha256:'b'.repeat(64),expectedArchive:{sha256:'c'.repeat(64),byteSize:5}},job={id:'j',job_type:'ingest',lease_owner:'worker',attempt_count:2};
- const output=completionReceipt({runId:'run',identity,job,attemptStatus:'derivatives'});assert.deepEqual(output,{schemaVersion:1,runId:'run',...identity,jobId:'j',jobType:'ingest',claimOwner:'worker',claimCount:2,attemptStatus:'derivatives'});
+ const observedArchive={sha256:'c'.repeat(64),byteSize:5},output=completionReceipt({runId:'run',identity,job,attemptStatus:'derivatives',observedArchive});assert.deepEqual(output,{schemaVersion:1,runId:'run',...identity,jobId:'j',jobType:'ingest',claimOwner:'worker',claimCount:2,attemptStatus:'derivatives',observedArchive});
  assert.equal(Object.hasOwn(completionReceipt({runId:'run',identity,job:{...job,job_type:'submit'},attemptStatus:'queued_upstream'}),'expectedArchive'),false);
 });
