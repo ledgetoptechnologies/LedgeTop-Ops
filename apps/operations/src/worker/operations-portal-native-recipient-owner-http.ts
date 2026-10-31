@@ -88,6 +88,14 @@ async function body(request: Request, names: readonly string[]): Promise<Record<
 }
 function uuid(value: unknown): value is string { return typeof value === "string" && UUID.test(value); }
 
+function requireInquiryCapability(d: OperationsNativeRecipientOwnerHttpDependencies) {
+  if (d.dispatch.OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED !== "true"
+    || typeof d.dispatch.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?.applyNativeInquiryCapability !== "function"
+    || typeof d.dispatch.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?.closeNativeInquiryCapability !== "function"
+    || typeof d.dispatch.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?.getNativeInquiryCapabilityStatus !== "function")
+    throw new Failure(409, "request_capability_unavailable");
+}
+
 /** Independent native manager boundary. It never infers client identity, PA roles or file access. */
 export async function handleOperationsNativeRecipientOwnerHttp(request: Request, d: OperationsNativeRecipientOwnerHttpDependencies): Promise<Response> {
   try {
@@ -192,6 +200,9 @@ export async function handleOperationsNativeRecipientOwnerHttp(request: Request,
       catch { throw new Failure(400, "invalid_request"); }
       const value = parseOperationsPortalNativeRecipientIssueRequest(raw);
       if (!value) throw new Failure(400, "invalid_request");
+      // Refuse an unavailable scope before creating a consent link. Recheck at
+      // confirmation because configuration may change while consent is pending.
+      if (value.permissionSchemaVersion === 4) requireInquiryCapability(d);
       const result = await issueOperationsPortalNativeRecipientIntent(d.database, { operationId: value.operationId,
         targetId: value.targetId, targetClientRecordId: value.targetClientRecordId, expiresAt: value.expiresAt,
         permissions: value.permissions, permissionSchemaVersion: value.permissionSchemaVersion,
@@ -242,11 +253,7 @@ export async function handleOperationsNativeRecipientOwnerHttp(request: Request,
     }
     if (action === "confirm") {
       const current = await readOperationsPortalNativeRecipientIntentForOwner(d.database, intentId!, actor); alive(actor);
-      if (current.permissionSchemaVersion === 4 && (d.dispatch.OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED !== "true"
-        || typeof d.dispatch.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?.applyNativeInquiryCapability !== "function"
-        || typeof d.dispatch.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?.closeNativeInquiryCapability !== "function"
-        || typeof d.dispatch.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?.getNativeInquiryCapabilityStatus !== "function"))
-        throw new Failure(409, "request_capability_unavailable");
+      if (current.permissionSchemaVersion === 4) requireInquiryCapability(d);
     }
     if (action === "revoke") {
       const current = await readOperationsPortalNativeRecipientIntentForOwner(d.database, intentId!, actor); alive(actor);

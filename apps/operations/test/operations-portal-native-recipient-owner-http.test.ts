@@ -119,6 +119,31 @@ describe("Ops-native recipient owner HTTP boundary", () => {
       targetClientRecordId: "client:one", permissions: body.permissions, permissionSchemaVersion: 4,
       legacyShape: false, owner: actor });
   });
+  it.each([undefined, "false", "TRUE"])("refuses request-enabled links before issuance when the capability gate is %s", async gate => {
+    const original = deps(), d = { ...original, dispatch: { ...original.dispatch,
+      OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED: gate } };
+    const csrf = await token(d), result = await handle(request("intents", { ...issue(),
+      permissions: ["operations.request.create", "operations.service_home.read"] }, csrf), d);
+    expect(result.status).toBe(409);
+    expect(await result.json()).toEqual({ error: "request_capability_unavailable" });
+    expect(calls.issue).not.toHaveBeenCalled(); expect(calls.materialize).not.toHaveBeenCalled();
+    expect(calls.dispatch).not.toHaveBeenCalled();
+    // A fresh, explicitly home-only request remains available; no silent downgrade.
+    expect((await handle(request("intents", { ...issue(), permissions: ["operations.service_home.read"] }, csrf), d)).status).toBe(201);
+    expect(calls.issue).toHaveBeenCalledOnce();
+  });
+  it.each(["applyNativeInquiryCapability", "closeNativeInquiryCapability", "getNativeInquiryCapabilityStatus"] as const)
+    ("refuses request-enabled links before issuance when %s is missing", async missing => {
+      const original = deps(), authority = { ...original.dispatch.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY!,
+        [missing]: undefined }, d = { ...original, dispatch: { ...original.dispatch,
+          OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: authority } };
+      const csrf = await token(d), result = await handle(request("intents", { ...issue(),
+        permissions: ["operations.request.create", "operations.service_home.read"] }, csrf), d);
+      expect(result.status).toBe(409);
+      expect(await result.json()).toEqual({ error: "request_capability_unavailable" });
+      expect(calls.issue).not.toHaveBeenCalled(); expect(calls.materialize).not.toHaveBeenCalled();
+      expect(calls.dispatch).not.toHaveBeenCalled();
+    });
   it("reads only through the currently authorized manager ledger method", async () => {
     const d = deps(); expect((await handle(request(`intents/${intentId}`), d)).status).toBe(200);
     expect(calls.read).toHaveBeenCalledWith(d.database, intentId, actor);
