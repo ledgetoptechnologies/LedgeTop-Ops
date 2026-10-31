@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
@@ -24,9 +25,12 @@ export const STAGING_V4_MAX_SQL_BYTES = 100_000;
 export const STAGING_V4_MAX_PARAM_BYTES = 1_500_000;
 export const STAGING_V4_MAX_PARAMS = 100;
 export const STAGING_V4_MAX_BATCH_STATEMENTS = 100;
+export const STAGING_V4_CONTROL_MAX_AGE_MS = 5 * 60 * 1000;
+export const STAGING_V4_CONTROL_FUTURE_SKEW_MS = 30 * 1000;
+export const STAGING_V4_JOURNAL_ROOT = path.resolve('C:/Users/fstor/.codex/artifacts/staging-v4-migration-journal');
 const MAX_BATCH_BYTES = 8 * 1024 * 1024;
 const INTERNAL_SCHEMA_SQL = `SELECT type,name,tbl_name,sql FROM sqlite_schema
-  WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ('_cf_KV','_cf_METADATA')
+  WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*'
     AND type IN ('table','view','index','trigger') ORDER BY type,name`;
 const MIGRATIONS = Object.freeze({
   operations: Object.freeze([
@@ -62,9 +66,24 @@ const TARGETS = Object.freeze({
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const gitBlobOid = bytes => createHash('sha1').update(Buffer.from(`blob ${bytes.length}\0`, 'ascii')).update(bytes).digest('hex');
 const canonical = value => JSON.stringify(value);
+const canonicalSorted = value => Array.isArray(value) ? `[${value.map(canonicalSorted).join(',')}]`
+  : value && typeof value === 'object' ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalSorted(value[key])}`).join(',')}}`
+    : JSON.stringify(value);
 const safeError = code => Object.assign(new Error(code), { code });
 const compiledSteps = new WeakSet();
 const verifiedCapsules = new WeakSet();
+export function stagingV4JournalPaths(intentId) {
+  if (typeof intentId !== 'string' || !/^[a-f0-9]{32}$/u.test(intentId)) throw safeError('intent_id_invalid');
+  return Object.freeze({ root: STAGING_V4_JOURNAL_ROOT,
+    attempt: path.join(STAGING_V4_JOURNAL_ROOT, `${intentId}.attempt.json`),
+    completion: path.join(STAGING_V4_JOURNAL_ROOT, `${intentId}.postcheck.json`) });
+}
+function deepFreeze(value, seen = new WeakSet()) {
+  if (!value || typeof value !== 'object' || seen.has(value)) return value;
+  seen.add(value);
+  for (const child of Object.values(value)) deepFreeze(child, seen);
+  return Object.freeze(value);
+}
 
 export function splitMigrationSql(sql, application = 'operations') {
   if (typeof sql !== 'string' || !Object.hasOwn(splitters, application)) throw safeError('migration_sql_invalid');
@@ -93,41 +112,105 @@ function validateSnapshotRows(application, ledger, schema, parent) {
     || sha256(canonical(parent)) !== target.parentJsonSha256) throw safeError('baseline_parent_shape_mismatch');
 }
 
+function selectedD1Binding(bindings, bindingName, databaseId) {
+  const found = Array.isArray(bindings) ? bindings.find(item => item?.name === bindingName) : bindings?.[bindingName];
+  if (!found || found.name !== bindingName || found.type !== 'd1'
+    || (found.database_id ?? found.id) !== databaseId || (found.id ?? found.database_id) !== databaseId) {
+    throw safeError('worker_d1_binding_identity_mismatch');
+  }
+  return Object.freeze({ name: bindingName, type: 'd1', databaseId });
+}
+
+function controlPinFromCapsule(capsule, application) {
+  const worker = capsule.workers?.[application], target = TARGETS[application];
+  const requiredOffFlags = application === 'operations'
+    ? ['OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED']
+    : ['CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED', 'CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED'];
+  if (!worker || worker.workerName !== target.worker || !worker.activeVersionId || !worker.latestVersionId
+    || !worker.deployment?.id || !worker.modern?.id || !Number.isSafeInteger(worker.modern.number)
+    || typeof worker.modern.main_module !== 'string' || typeof worker.modern.compatibility_date !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(worker.rawBindingsSHA256 ?? '')
+    || !/^[a-f0-9]{64}$/u.test(worker.rawControlSHA256 ?? '')
+    || !worker.selectedFlags || !worker.schedules || !Array.isArray(worker.schedules.schedules)
+    || requiredOffFlags.some(name => !Object.hasOwn(worker.selectedFlags, name)
+      || ![null, 'false'].includes(worker.selectedFlags[name]))) throw safeError('worker_controls_capsule_invalid');
+  return deepFreeze({
+    workerName: worker.workerName,
+    activeVersionId: worker.activeVersionId,
+    latestVersionId: worker.latestVersionId,
+    deploymentId: worker.deployment.id,
+    runtimeVersionId: worker.modern.id,
+    runtimeNumber: worker.modern.number,
+    runtimeMainModule: worker.modern.main_module,
+    runtimeCompatibilityDate: worker.modern.compatibility_date,
+    runtimeCompatibilityFlagsSha256: sha256(canonicalSorted(worker.modern.compatibility_flags ?? [])),
+    runtimeExportsSha256: sha256(canonicalSorted(worker.modern.exports ?? [])),
+    settingsD1Binding: selectedD1Binding(worker.settings?.bindings, target.binding, target.databaseId),
+    runtimeD1Binding: selectedD1Binding(worker.modern.bindings, target.binding, target.databaseId),
+    rawBindingsSha256: worker.rawBindingsSHA256,
+    rawControlSha256: worker.rawControlSHA256,
+    selectedFlagsSha256: sha256(canonicalSorted(worker.selectedFlags)),
+    schedulesSha256: sha256(canonicalSorted(worker.schedules)),
+  });
+}
+
+export function buildCurrentStagingV4ControlSnapshot(readResult, application) {
+  const target = TARGETS[application];
+  if (!target || !readResult || readResult.accountId !== '846c924bf17bf4f3dd15c97a4c5d1d51'
+    || readResult.environment !== 'staging' || !Number.isFinite(Date.parse(readResult.observedAt))
+    || new Date(readResult.observedAt).toISOString() !== readResult.observedAt) throw safeError('current_controls_read_result_invalid');
+  const controls = controlPinFromCapsule(readResult, application);
+  return deepFreeze({ schemaVersion: 1, observedAt: readResult.observedAt,
+    accountId: readResult.accountId, environment: readResult.environment, databaseId: target.databaseId,
+    workerName: target.worker, binding: target.binding, controls });
+}
+
+const CONTROL_KEYS = Object.freeze(['schemaVersion', 'observedAt', 'accountId', 'environment', 'databaseId', 'workerName', 'binding', 'controls']);
+
+export function assertFreshStagingV4Controls(snapshot, target, expectedControls, now = Date.now()) {
+  if (!snapshot || Object.getPrototypeOf(snapshot) !== Object.prototype || Object.keys(snapshot).sort().join(',')
+    !== [...CONTROL_KEYS].sort().join(',') || snapshot.schemaVersion !== 1
+    || !Number.isFinite(Date.parse(snapshot.observedAt)) || new Date(snapshot.observedAt).toISOString() !== snapshot.observedAt) {
+    throw safeError('current_controls_snapshot_invalid');
+  }
+  const observed = Date.parse(snapshot.observedAt);
+  if (observed > now + STAGING_V4_CONTROL_FUTURE_SKEW_MS || now - observed > STAGING_V4_CONTROL_MAX_AGE_MS) {
+    throw safeError('current_controls_snapshot_stale');
+  }
+  if (snapshot.accountId !== target.accountId || snapshot.environment !== 'staging'
+    || snapshot.databaseId !== target.databaseId || snapshot.workerName !== target.worker
+    || snapshot.binding !== target.binding || canonicalSorted(snapshot.controls) !== canonicalSorted(expectedControls)) {
+    throw safeError('current_controls_drift');
+  }
+  return true;
+}
+
 export function readCapturedStagingV4Capsule(file) {
   const bytes = fs.readFileSync(file);
   if (sha256(bytes) !== STAGING_V4_CAPSULE_SHA256) throw safeError('controls_capsule_sha256_mismatch');
   let capsule;
   try { capsule = JSON.parse(bytes.toString('utf8')); } catch { throw safeError('controls_capsule_invalid_json'); }
-  if (capsule.schemaVersion !== 1 || capsule.accountId !== '846c924bf17bf4f3dd15c97a4c5d1d51'
+  if (capsule.schemaVersion !== 1 || capsule.environment !== 'staging'
+    || capsule.accountId !== '846c924bf17bf4f3dd15c97a4c5d1d51'
     || capsule.secretValuesPersisted !== false || capsule.applicationRowsRead !== 0 || capsule.resourceWrites !== 0
     || !capsule.schema || typeof capsule.schema !== 'object') throw safeError('controls_capsule_scope_invalid');
   const byApp = {};
+  const controls = {};
   for (const application of ['operations', 'client']) {
     const key = application === 'operations' ? 'OPS_DB' : 'DELIVERY_DB';
     const target = TARGETS[application], source = capsule.schema[key];
-    const worker = capsule.workers?.[application];
-    const boundIdentity = bindings => {
-      if (Array.isArray(bindings)) return bindings.find(item => item?.name === target.binding);
-      if (bindings && typeof bindings === 'object') return bindings[target.binding];
-      return null;
-    };
-    const settingsBinding = boundIdentity(worker?.settings?.bindings);
-    const modernBinding = boundIdentity(worker?.modern?.bindings);
-    for (const binding of [settingsBinding, modernBinding]) {
-      if (worker?.workerName !== target.worker || !binding || binding.name !== target.binding || binding.type !== 'd1'
-        || (binding.database_id ?? binding.id) !== target.databaseId || (binding.id ?? binding.database_id) !== target.databaseId) {
-        throw safeError(`${application}_worker_binding_identity_mismatch`);
-      }
-    }
+    const pin = controlPinFromCapsule(capsule, application);
     if (!source || source.id !== target.databaseId || !Array.isArray(source.results) || source.results.length !== 3
       || !Array.isArray(source.results[0]) || !Array.isArray(source.results[1]) || !Array.isArray(source.results[2])) {
       throw safeError(`${application}_capsule_shape_invalid`);
     }
     validateSnapshotRows(application, source.results[0], source.results[1], source.results[2]);
-    byApp[application] = Object.freeze({ ledger: source.results[0], schema: source.results[1], parent: source.results[2] });
+    byApp[application] = { ledger: source.results[0], schema: source.results[1], parent: source.results[2] };
+    controls[application] = pin;
   }
-  const verified = Object.freeze({ capsuleSha256: STAGING_V4_CAPSULE_SHA256,
-    accountId: capsule.accountId, byApplication: Object.freeze(byApp) });
+  const verified = deepFreeze({ capsuleSha256: STAGING_V4_CAPSULE_SHA256,
+    accountId: capsule.accountId, environment: capsule.environment,
+    observedAt: capsule.observedAt, byApplication: byApp, controls });
   verifiedCapsules.add(verified);
   return verified;
 }
@@ -168,7 +251,7 @@ function guardBatch({ application, migration, schema, ledgerRows, runId, stepInd
   const chunks = chunkSchema(schema);
   const batch = [{ sql: `CREATE TABLE "${guard}"(chunk_index INTEGER PRIMARY KEY,ok INTEGER NOT NULL CHECK(ok=1))`, params: [] }];
   const schemaGuardSql = `INSERT INTO "${guard}"(chunk_index,ok) SELECT ?,CASE WHEN
-    (SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ('_cf_KV','_cf_METADATA')
+    (SELECT COUNT(*) FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*'
       AND type IN ('table','view','index','trigger'))=?
     AND NOT EXISTS(SELECT 1 FROM json_each(?) expected LEFT JOIN sqlite_schema current
       ON current.type=json_extract(expected.value,'$.type') AND current.name=json_extract(expected.value,'$.name')
@@ -267,6 +350,7 @@ export function compileStagingV4MigrationPlan({ capsule, application, runId = ra
         intentId: sha256(`${target.databaseId}\0${migration.name}\0${pre.schemaSha256}\0${pre.ledgerRowsSha256}`).slice(0, 32),
         target: Object.freeze({ accountId: '846c924bf17bf4f3dd15c97a4c5d1d51', worker: target.worker,
           binding: target.binding, databaseName: target.databaseName, databaseId: target.databaseId }),
+        controls: capsule.controls[application],
         pre, post: Object.freeze({ schemaObjects: postSchema.length, schemaSha256: schemaDigest(postSchema),
           ledgerRows: postLedger.length, ledgerNamesSha256: ledgerDigest(postLedger), ledgerRowsSha256: sha256(canonical(postLedger)) }),
         guardChunks: batch.chunks, requestBody: Object.freeze({ batch: batch.batch }),
@@ -278,7 +362,7 @@ export function compileStagingV4MigrationPlan({ capsule, application, runId = ra
       steps.push(step);
     }
   } finally { db.close(); }
-  return Object.freeze({ schemaVersion: 1, profile: 'staging-v4-inquiries-narrow-migrations', runId,
+  return deepFreeze({ schemaVersion: 1, profile: 'staging-v4-inquiries-narrow-migrations', runId,
     environment: 'staging', capsuleSha256: capsule.capsuleSha256, targetApplication: application, steps: Object.freeze(steps),
     providerAccessed: false, providerWrites: 0, executed: false, deployed: false,
     featureFlagsChanged: false, grantsChanged: false, retriesAllowed: false });
@@ -294,17 +378,52 @@ export function validatePreparedStagingV4Plan(plan, capsule, { root = ROOT } = {
   return rebuilt;
 }
 
+function ensureFixedJournalRoot() {
+  if (process.platform !== 'win32' || path.resolve(STAGING_V4_JOURNAL_ROOT) !== STAGING_V4_JOURNAL_ROOT) {
+    throw safeError('fixed_private_journal_unavailable');
+  }
+  const root = path.parse(STAGING_V4_JOURNAL_ROOT).root;
+  let current = root;
+  const remainder = STAGING_V4_JOURNAL_ROOT.slice(root.length).split(path.sep).filter(Boolean);
+  for (const part of remainder) {
+    current = path.join(current, part);
+    try { fs.mkdirSync(current); } catch (error) { if (error?.code !== 'EEXIST') throw error; }
+    const stat = fs.lstatSync(current);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw safeError('fixed_private_journal_path_invalid');
+  }
+  const helper = path.join(ROOT, 'scripts/restrict-staging-v4-journal-directory.ps1');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', helper,
+    '-LiteralDirectory', STAGING_V4_JOURNAL_ROOT], { windowsHide: true, encoding: 'utf8', timeout: 30000,
+    stdio: ['ignore', 'ignore', 'ignore'] });
+  if (result.error || result.status !== 0) throw safeError('private_journal_directory_acl_failed');
+}
+
+function restrictPrivateArtifactFile(file) {
+  const helper = path.join(ROOT, 'scripts/restrict-private-authority-file.ps1');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', helper,
+    '-LiteralFile', file], { windowsHide: true, encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'ignore', 'ignore'] });
+  if (result.error || result.status !== 0) throw safeError('private_journal_acl_failed');
+}
+
 function writeOnce(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const directory = fs.lstatSync(path.dirname(file));
-  if (!directory.isDirectory() || directory.isSymbolicLink()) throw safeError('attempt_directory_invalid');
+  ensureFixedJournalRoot();
+  if (path.dirname(path.resolve(file)) !== STAGING_V4_JOURNAL_ROOT) throw safeError('fixed_private_journal_path_invalid');
   const bytes = Buffer.from(`${canonical(value)}\n`, 'utf8');
-  const fd = fs.openSync(file, 'wx', 0o600);
+  const createFd = fs.openSync(file, 'wx', 0o600);
+  fs.closeSync(createFd);
+  restrictPrivateArtifactFile(file);
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw safeError('private_journal_file_invalid');
+  const fd = fs.openSync(file, 'r+');
   try { fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
-function snapshotMatches(snapshot, expected) {
+function snapshotMatches(snapshot, expected, target) {
   if (!snapshot) return false;
+  if (snapshot.accountId !== target.accountId || snapshot.environment !== 'staging'
+    || snapshot.databaseId !== target.databaseId || snapshot.workerName !== target.worker || snapshot.binding !== target.binding
+    || snapshot.readOnly !== true || snapshot.servedByPrimary !== true
+    || !Number.isFinite(Date.parse(snapshot.observedAt)) || new Date(snapshot.observedAt).toISOString() !== snapshot.observedAt) return false;
   if (Array.isArray(snapshot.schema) && Array.isArray(snapshot.ledger)) {
     return snapshot.schema.length === expected.schemaObjects && schemaDigest(snapshot.schema) === expected.schemaSha256
       && snapshot.ledger.length === expected.ledgerRows && ledgerDigest(snapshot.ledger) === expected.ledgerNamesSha256
@@ -323,37 +442,59 @@ function snapshotMatches(snapshot, expected) {
  * exclusive and written before the single submission. Any uncertain outcome
  * leaves it behind and blocks replay.
  */
-export async function executePreparedStagingV4Step(step, { attemptPath, completionPath,
-  readSnapshot, executeBatch, now = () => new Date().toISOString() } = {}) {
+export async function executePreparedStagingV4Step(step, options = {}) {
+  const allowedOptions = ['readSnapshot', 'readControls', 'executeBatch', 'now'];
+  if (!options || Object.getPrototypeOf(options) !== Object.prototype
+    || Object.keys(options).some(key => !allowedOptions.includes(key))) throw safeError('executor_options_invalid');
+  const { readSnapshot, readControls, executeBatch, now = () => new Date().toISOString() } = options;
   if (!step || step.target?.accountId !== '846c924bf17bf4f3dd15c97a4c5d1d51'
-    || !compiledSteps.has(step) || !['operations', 'client'].includes(step.application) || typeof attemptPath !== 'string'
-    || typeof completionPath !== 'string' || typeof readSnapshot !== 'function' || typeof executeBatch !== 'function') {
+    || !compiledSteps.has(step) || !['operations', 'client'].includes(step.application)
+    || typeof readSnapshot !== 'function' || typeof readControls !== 'function' || typeof executeBatch !== 'function') {
     throw safeError('reviewed_execution_adapter_required');
   }
-  const markerName = `${step.intentId}`;
-  if (path.dirname(path.resolve(attemptPath)) !== path.dirname(path.resolve(completionPath))
-    || path.basename(attemptPath) !== `${markerName}.attempt.json`
-    || path.basename(completionPath) !== `${markerName}.postcheck.json`) throw safeError('attempt_artifact_path_invalid');
+  const { attempt: attemptPath, completion: completionPath } = stagingV4JournalPaths(step.intentId);
   if (fs.existsSync(attemptPath)) throw safeError('attempt_exists_reconcile_only');
   if (fs.existsSync(completionPath)) throw safeError('completion_exists_reconcile_only');
-  const before = await readSnapshot(step.target);
-  if (!snapshotMatches(before, step.pre)) throw safeError('preflight_snapshot_mismatch');
+  let beforeControls, before;
+  try {
+    before = await readSnapshot(step.target);
+  } catch { throw safeError('current_preflight_read_unavailable'); }
+  if (!snapshotMatches(before, step.pre, step.target)) throw safeError('preflight_snapshot_mismatch');
+  try {
+    beforeControls = await readControls(step.target);
+    const beforeNowValue = now();
+    const beforeNowMs = typeof beforeNowValue === 'number' ? beforeNowValue : Date.parse(beforeNowValue);
+    if (!Number.isFinite(beforeNowMs)) throw safeError('executor_clock_invalid');
+    if (beforeNowMs - Date.parse(before.observedAt) > STAGING_V4_CONTROL_MAX_AGE_MS
+      || Date.parse(before.observedAt) > beforeNowMs + STAGING_V4_CONTROL_FUTURE_SKEW_MS) throw safeError('schema_snapshot_stale');
+    assertFreshStagingV4Controls(beforeControls, step.target, step.controls, beforeNowMs);
+  } catch { throw safeError('current_preflight_read_unavailable'); }
+  const nowValue = now();
   const attempt = Object.freeze({ schemaVersion: 1, status: 'submitted-outcome-must-be-reconciled',
     intentId: step.intentId, application: step.application, migration: step.migration,
-    migrationSha256: step.migrationSha256, target: step.target, pre: step.pre,
-    requestBodySha256: step.requestBodySha256, attemptedAt: now(), retryAllowed: false });
+    migrationSha256: step.migrationSha256, target: step.target, pre: step.pre, controls: step.controls,
+    requestBodySha256: step.requestBodySha256, attemptedAt: nowValue, retryAllowed: false });
   try { writeOnce(attemptPath, attempt); }
   catch (error) { if (error?.code === 'EEXIST') throw safeError('attempt_exists_reconcile_only'); throw error; }
   let response;
   try { response = await executeBatch(step.target, step.requestBody); }
   catch { throw safeError('submission_outcome_uncertain_reconcile_only'); }
   if (!response || response.success !== true) throw safeError('submission_response_uncertain_reconcile_only');
-  let after;
-  try { after = await readSnapshot(step.target); }
+  let afterControls, after;
+  try {
+    after = await readSnapshot(step.target);
+    afterControls = await readControls(step.target);
+    const postNowValue = now();
+    const postNowMs = typeof postNowValue === 'number' ? postNowValue : Date.parse(postNowValue);
+    if (!Number.isFinite(postNowMs)) throw safeError('executor_clock_invalid');
+    if (postNowMs - Date.parse(after.observedAt) > STAGING_V4_CONTROL_MAX_AGE_MS
+      || Date.parse(after.observedAt) > postNowMs + STAGING_V4_CONTROL_FUTURE_SKEW_MS) throw safeError('schema_snapshot_stale');
+    assertFreshStagingV4Controls(afterControls, step.target, step.controls, postNowMs);
+  }
   catch { throw safeError('postcheck_unavailable_reconcile_only'); }
-  if (!snapshotMatches(after, step.post)) throw safeError('postcheck_mismatch_reconcile_only');
+  if (!snapshotMatches(after, step.post, step.target)) throw safeError('postcheck_mismatch_reconcile_only');
   const completion = Object.freeze({ schemaVersion: 1, status: 'postchecked', intentId: step.intentId,
-    application: step.application, migration: step.migration, target: step.target,
+    application: step.application, migration: step.migration, target: step.target, controls: step.controls,
     requestBodySha256: step.requestBodySha256, post: step.post, postcheckedAt: now(), retryAllowed: false });
   try { writeOnce(completionPath, completion); }
   catch { throw safeError('completion_receipt_write_uncertain_reconcile_only'); }

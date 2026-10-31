@@ -5,8 +5,9 @@ import path from 'node:path';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { compileStagingV4MigrationPlan, executePreparedStagingV4Step,
-  readCapturedStagingV4Capsule, STAGING_V4_CAPSULE_SHA256, STAGING_V4_MAX_PARAM_BYTES,
-  STAGING_V4_MAX_SQL_BYTES, splitMigrationSql, stagingV4MigrationOperatorProfiles,
+  assertFreshStagingV4Controls, buildCurrentStagingV4ControlSnapshot, readCapturedStagingV4Capsule, STAGING_V4_CAPSULE_SHA256,
+  STAGING_V4_JOURNAL_ROOT, STAGING_V4_MAX_PARAM_BYTES, STAGING_V4_MAX_SQL_BYTES,
+  splitMigrationSql, stagingV4JournalPaths, stagingV4MigrationOperatorProfiles,
   validatePreparedStagingV4Plan } from './staging-v4-migration-operator.mjs';
 
 const capsulePath = process.env.LEDGETOP_STAGING_V4_CONTROLS_CAPSULE_PATH;
@@ -20,16 +21,20 @@ const expectedNames = Object.freeze({
   client: Object.freeze(['0243_operations_portal_native_inquiry_capability.sql']),
 });
 
+function capturedSchemaRows(db) {
+  return db.prepare(`SELECT type,name,tbl_name,sql FROM sqlite_schema
+    WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*'
+      AND type IN ('table','view','index','trigger') ORDER BY type,name`).all()
+    .map(row => ({ type: row.type, name: row.name, tbl_name: row.tbl_name, sql: row.sql }));
+}
+
 function openCapturedDb(baseline) {
   const db = new DatabaseSync(':memory:');
   db.exec('PRAGMA foreign_keys=ON');
   for (const type of ['table', 'index', 'view', 'trigger']) {
     for (const row of baseline.schema.filter(item => item.type === type)) db.exec(row.sql);
   }
-  assert.deepEqual(db.prepare(`SELECT type,name,tbl_name,sql FROM sqlite_schema
-    WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ('_cf_KV','_cf_METADATA')
-      AND type IN ('table','view','index','trigger') ORDER BY type,name`).all()
-    .map(row => ({ type: row.type, name: row.name, tbl_name: row.tbl_name, sql: row.sql })), baseline.schema);
+  assert.deepEqual(capturedSchemaRows(db), baseline.schema);
   const insert = db.prepare('INSERT INTO d1_migrations(id,name) VALUES(?,?)');
   for (const row of baseline.ledger) insert.run(row.id, row.name);
   return db;
@@ -68,11 +73,15 @@ test('captured capsule SHA is mandatory', () => {
 test('compiles both migrations against the exact captured schemas and ledgers in SQLite', fixtureTest, () => {
   const capsule = readCapturedStagingV4Capsule(capsulePath);
   assert.equal(capsule.capsuleSha256, STAGING_V4_CAPSULE_SHA256);
+  assert(Object.isFrozen(capsule.byApplication.operations.schema));
+  assert(Object.isFrozen(capsule.byApplication.operations.schema[0]));
   const plans = {};
   for (const application of ['operations', 'client']) {
     const plan = compileStagingV4MigrationPlan({ capsule, application,
       runId: application === 'operations' ? '77b33374-8164-4e89-88b9-4a2a0ef12001' : '77b33374-8164-4e89-88b9-4a2a0ef12002' });
     plans[application] = plan;
+    assert(Object.isFrozen(plan.steps[0].requestBody.batch));
+    assert(Object.isFrozen(plan.steps[0].requestBody.batch[0].params));
     assert.deepEqual(plan.steps.map(step => step.migration), expectedNames[application]);
     assert.equal(plan.executed, false);
     assert.equal(plan.providerWrites, 0);
@@ -98,14 +107,12 @@ test('compiles both migrations against the exact captured schemas and ledgers in
 });
 
 test('stale ledger or schema in the capsule is refused before compilation', fixtureTest, () => {
-  const staleLedger = readCapturedStagingV4Capsule(capsulePath);
-  staleLedger.byApplication.operations.ledger[224].name = '0225_wrong.sql';
-  assert.throws(() => compileStagingV4MigrationPlan({ capsule: staleLedger, application: 'operations' }),
-    { code: 'baseline_ledger_mismatch' });
-  const staleSchema = readCapturedStagingV4Capsule(capsulePath);
-  staleSchema.byApplication.operations.schema[0].sql += ' ';
-  assert.throws(() => compileStagingV4MigrationPlan({ capsule: staleSchema, application: 'operations' }),
-    { code: 'baseline_schema_mismatch' });
+  const verified = readCapturedStagingV4Capsule(capsulePath);
+  assert.throws(() => { verified.byApplication.operations.ledger[224].name = '0225_wrong.sql'; }, TypeError);
+  assert.throws(() => { verified.byApplication.operations.schema[0].sql += ' '; }, TypeError);
+  const forged = { ...verified, byApplication: structuredClone(verified.byApplication) };
+  assert.throws(() => compileStagingV4MigrationPlan({ capsule: forged, application: 'operations' }),
+    { code: 'pinned_controls_capsule_required' });
 });
 
 test('same-batch SQLite guard aborts stale schema and stale ledger before DDL', fixtureTest, () => {
@@ -119,12 +126,25 @@ test('same-batch SQLite guard aborts stale schema and stale ledger before DDL', 
 
   const staleSchema = openCapturedDb(baseline);
   try {
-    staleSchema.exec('CREATE TABLE stale_schema_drift(id INTEGER PRIMARY KEY)');
+    staleSchema.exec('CREATE TABLE sqliteX_drift(id INTEGER PRIMARY KEY)');
+    assert(capturedSchemaRows(staleSchema).some(row => row.name === 'sqliteX_drift'),
+      'capture-compatible GLOB filter includes legal application names beginning sqliteX');
     assert.throws(() => applyLocalBatch(staleSchema, firstStep.requestBody), /CHECK constraint failed/u);
     assert(columnAbsent(staleSchema), 'schema drift blocks DDL and rolls back the guard batch');
-    assert.equal(staleSchema.prepare("SELECT COUNT(*) AS n FROM sqlite_schema WHERE name='stale_schema_drift'").get().n, 1,
+    assert.equal(staleSchema.prepare("SELECT COUNT(*) AS n FROM sqlite_schema WHERE name='sqliteX_drift'").get().n, 1,
       'pre-existing drift remains untouched');
   } finally { staleSchema.close(); }
+
+  const providerShadow = openCapturedDb(baseline);
+  try {
+    providerShadow.exec('CREATE TABLE _cf_provider_shadow(id INTEGER PRIMARY KEY)');
+    assert.equal(capturedSchemaRows(providerShadow).some(row => row.name === '_cf_provider_shadow'), false,
+      'capture-compatible filter ignores Cloudflare shadow objects');
+    applyLocalBatch(providerShadow, firstStep.requestBody);
+    assert.equal(providerShadow.prepare('PRAGMA table_info(operations_portal_native_recipient_intents)')
+      .all().some(row => row.name === 'permission_schema_version'), true,
+    'schema guard and snapshot reader ignore the same _cf_* shadow');
+  } finally { providerShadow.close(); }
 
   const staleLedger = openCapturedDb(baseline);
   try {
@@ -135,81 +155,86 @@ test('same-batch SQLite guard aborts stale schema and stale ledger before DDL', 
   } finally { staleLedger.close(); }
 });
 
-test('preflight mismatch sends nothing; uncertain submitted outcome persists intent and blocks replay', fixtureTest, async () => {
+test('fresh control read enforces account, database, active/latest/runtime/binding/gate hashes and freshness', fixtureTest, () => {
   const capsule = readCapturedStagingV4Capsule(capsulePath);
   const step = compileStagingV4MigrationPlan({ capsule, application: 'client',
     runId: '77b33374-8164-4e89-88b9-4a2a0ef12003' }).steps[0];
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'staging-v4-intent-'));
-  const attemptPath = path.join(directory, `${step.intentId}.attempt.json`);
-  const completionPath = path.join(directory, `${step.intentId}.postcheck.json`);
-  let submissions = 0, reads = 0;
-  try {
-    await assert.rejects(executePreparedStagingV4Step(step, { attemptPath, completionPath,
-      readSnapshot: async () => ({ schema: [], ledger: [] }), executeBatch: async () => { submissions++; return { success: true }; } }),
-    { code: 'preflight_snapshot_mismatch' });
-    assert.equal(fs.existsSync(attemptPath), false, 'preflight mismatch occurs before a durable submission intent');
-    await assert.rejects(executePreparedStagingV4Step(step, { attemptPath, completionPath,
-      readSnapshot: async () => { reads++; return step.pre; },
-      executeBatch: async () => { submissions++; throw new Error('ambiguous transport'); } }),
-    { code: 'submission_outcome_uncertain_reconcile_only' });
-    assert.equal(submissions, 1);
-    assert.equal(fs.existsSync(attemptPath), true, 'attempt is durable before the uncertain submission');
-    await assert.rejects(executePreparedStagingV4Step(step, { attemptPath, completionPath,
-      readSnapshot: async () => { reads++; return step.pre; },
-      executeBatch: async () => { submissions++; return { success: true }; } }), { code: 'attempt_exists_reconcile_only' });
-    assert.equal(reads, 1, 'replay is blocked before a second read or submission');
-    assert.equal(submissions, 1, 'uncertain transport is never retried');
-  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  const target = step.target, now = Date.parse('2026-10-31T02:30:00.000Z');
+  const snapshot = (overrides = {}) => ({ schemaVersion: 1, observedAt: '2026-10-31T02:29:00.000Z',
+    accountId: target.accountId, environment: 'staging', databaseId: target.databaseId,
+    workerName: target.worker, binding: target.binding, controls: step.controls, ...overrides });
+  assert.equal(assertFreshStagingV4Controls(snapshot(), target, step.controls, now), true);
+  assert.throws(() => assertFreshStagingV4Controls(snapshot({ accountId: '0'.repeat(32) }), target, step.controls, now),
+    { code: 'current_controls_drift' });
+  assert.throws(() => assertFreshStagingV4Controls(snapshot({ databaseId: '0'.repeat(36) }), target, step.controls, now),
+    { code: 'current_controls_drift' });
+  assert.throws(() => assertFreshStagingV4Controls(snapshot({ controls: { ...step.controls, latestVersionId: 'drift' } }), target, step.controls, now),
+    { code: 'current_controls_drift' });
+  assert.throws(() => assertFreshStagingV4Controls(snapshot({ observedAt: '2026-10-31T02:20:00.000Z' }), target, step.controls, now),
+    { code: 'current_controls_snapshot_stale' });
+  assert.throws(() => assertFreshStagingV4Controls(snapshot({ observedAt: '2026-10-31T02:31:00.000Z' }), target, step.controls, now),
+    { code: 'current_controls_snapshot_stale' });
 });
 
-test('an uncertain response after submit leaves a non-replayable intent marker', fixtureTest, async () => {
+test('current controls adapter DTO maps sanitized runtime/control metadata without raw values', fixtureTest, () => {
+  const raw = JSON.parse(fs.readFileSync(capsulePath, 'utf8'));
+  const capsule = readCapturedStagingV4Capsule(capsulePath);
+  const expected = capsule.controls.operations;
+  const current = buildCurrentStagingV4ControlSnapshot(raw, 'operations');
+  assert.deepEqual(current.controls, expected);
+  assert.equal(current.databaseId, '78b34173-b168-4e3d-9832-bb9d245cc6b8');
+  assert.equal(current.binding, 'OPS_DB');
+  assertFreshStagingV4Controls(current, { accountId: current.accountId, databaseId: current.databaseId,
+    worker: current.workerName, binding: current.binding }, expected, Date.parse(current.observedAt));
+});
+
+test('intent identity and journal path remain stable across recompile; callers cannot select a directory', fixtureTest, async () => {
+  const capsule = readCapturedStagingV4Capsule(capsulePath);
+  const originalPlan = compileStagingV4MigrationPlan({ capsule, application: 'client',
+    runId: '77b33374-8164-4e89-88b9-4a2a0ef12004' });
+  const validatedPlan = validatePreparedStagingV4Plan(JSON.parse(JSON.stringify(originalPlan)), capsule);
+  const first = validatedPlan.steps[0];
+  assert(Object.isFrozen(validatedPlan.steps[0].requestBody.batch[0].params));
+  assert.throws(() => { validatedPlan.steps[0].requestBody.batch[0].params[2] = 'tampered'; }, TypeError);
+  const second = compileStagingV4MigrationPlan({ capsule, application: 'client',
+    runId: '77b33374-8164-4e89-88b9-4a2a0ef12007' }).steps[0];
+  assert.equal(first.intentId, second.intentId);
+  assert.equal(stagingV4JournalPaths(first.intentId).root, STAGING_V4_JOURNAL_ROOT);
+  assert.deepEqual(stagingV4JournalPaths(first.intentId), stagingV4JournalPaths(second.intentId));
+  let reads = 0, submits = 0;
+  await assert.rejects(executePreparedStagingV4Step(first, { attemptPath: path.join(os.tmpdir(), 'alternate.attempt.json'),
+    completionPath: path.join(os.tmpdir(), 'alternate.postcheck.json'), readSnapshot: async () => { reads++; return {}; },
+    readControls: async () => { reads++; return {}; }, executeBatch: async () => { submits++; return { success: true }; } }),
+  { code: 'executor_options_invalid' });
+  assert.equal(reads, 0);
+  assert.equal(submits, 0);
+});
+
+test('executor requires fresh controls and refuses before submission on account, binding, or snapshot drift', fixtureTest, async () => {
   const capsule = readCapturedStagingV4Capsule(capsulePath);
   const step = compileStagingV4MigrationPlan({ capsule, application: 'client',
-    runId: '77b33374-8164-4e89-88b9-4a2a0ef12004' }).steps[0];
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'staging-v4-partial-'));
-  const attemptPath = path.join(directory, `${step.intentId}.attempt.json`);
-  const completionPath = path.join(directory, `${step.intentId}.postcheck.json`);
-  let reads = 0, submissions = 0;
-  const readSnapshot = async () => { reads++; return reads === 1 ? step.pre : step.pre; };
-  const executeBatch = async () => { submissions++; return { success: true, results: [{ success: true }] }; };
-  try {
-    await assert.rejects(executePreparedStagingV4Step(step, { attemptPath, completionPath, readSnapshot, executeBatch }),
-      { code: 'postcheck_mismatch_reconcile_only' });
-    assert.equal(submissions, 1);
-    assert.equal(fs.existsSync(attemptPath), true);
-    assert.equal(fs.existsSync(completionPath), false);
-    await assert.rejects(executePreparedStagingV4Step(step, { attemptPath, completionPath,
-      readSnapshot, executeBatch }), { code: 'attempt_exists_reconcile_only' });
-    assert.equal(submissions, 1, 'uncertain submission is never replayed');
-  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
-});
+    runId: '77b33374-8164-4e89-88b9-4a2a0ef12005' }).steps[0];
+  const now = '2026-10-31T02:30:00.000Z';
+  let snapshotReads = 0, submissions = 0;
+  await assert.rejects(executePreparedStagingV4Step(step, { now: () => now,
+    readControls: async () => ({ schemaVersion: 1, observedAt: now, accountId: step.target.accountId,
+      environment: 'staging', databaseId: step.target.databaseId, workerName: step.target.worker,
+      binding: step.target.binding, controls: { ...step.controls, rawControlSha256: '0'.repeat(64) } }),
+    readSnapshot: async () => { snapshotReads++; return { accountId: step.target.accountId, environment: 'staging',
+      databaseId: step.target.databaseId, workerName: step.target.worker, binding: step.target.binding,
+      readOnly: true, servedByPrimary: true, observedAt: now, ...step.pre }; },
+    executeBatch: async () => { submissions++; return { success: true }; } }),
+  { code: 'current_preflight_read_unavailable' });
+  assert.equal(snapshotReads, 1);
+  assert.equal(submissions, 0);
 
-test('successful single submission requires exact post-state and retains separate receipts', fixtureTest, async () => {
-  const capsule = readCapturedStagingV4Capsule(capsulePath);
-  const sourcePlan = compileStagingV4MigrationPlan({ capsule, application: 'client',
-    runId: '77b33374-8164-4e89-88b9-4a2a0ef12005' });
-  const prepared = validatePreparedStagingV4Plan(JSON.parse(JSON.stringify(sourcePlan)), capsule);
-  const step = prepared.steps[0];
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'staging-v4-success-'));
-  const attemptPath = path.join(directory, `${step.intentId}.attempt.json`);
-  const completionPath = path.join(directory, `${step.intentId}.postcheck.json`);
-  let reads = 0, submissions = 0;
-  try {
-    await assert.rejects(executePreparedStagingV4Step(JSON.parse(JSON.stringify(step)), { attemptPath, completionPath,
-      readSnapshot: async () => step.pre, executeBatch: async () => { submissions++; return { success: true }; } }),
-    { code: 'reviewed_execution_adapter_required' });
-    const result = await executePreparedStagingV4Step(step, { attemptPath, completionPath,
-      readSnapshot: async () => (++reads === 1 ? step.pre : step.post),
-      executeBatch: async (target, body) => { submissions++; assert.equal(target.databaseId, step.target.databaseId);
-        assert.equal(body.batch.length, step.requestBody.batch.length); return { success: true }; },
-      now: () => '2026-10-31T00:00:00.000Z' });
-    assert.equal(result.status, 'postchecked');
-    assert.equal(submissions, 1);
-    assert.equal(JSON.parse(fs.readFileSync(attemptPath, 'utf8')).retryAllowed, false);
-    assert.equal(JSON.parse(fs.readFileSync(completionPath, 'utf8')).requestBodySha256, step.requestBodySha256);
-    await assert.rejects(executePreparedStagingV4Step(step, { attemptPath, completionPath,
-      readSnapshot: async () => step.post, executeBatch: async () => { submissions++; return { success: true }; } }),
-    { code: 'attempt_exists_reconcile_only' });
-    assert.equal(submissions, 1, 'postchecked command is never submitted twice');
-  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  await assert.rejects(executePreparedStagingV4Step(step, { now: () => now,
+    readControls: async () => ({ schemaVersion: 1, observedAt: now, accountId: step.target.accountId,
+      environment: 'staging', databaseId: step.target.databaseId, workerName: step.target.worker,
+      binding: step.target.binding, controls: step.controls }),
+    readSnapshot: async () => ({ accountId: step.target.accountId, environment: 'staging',
+      databaseId: '0'.repeat(36), workerName: step.target.worker, binding: step.target.binding,
+      readOnly: true, servedByPrimary: true, observedAt: now, ...step.pre }),
+    executeBatch: async () => { submissions++; return { success: true }; } }), { code: 'preflight_snapshot_mismatch' });
+  assert.equal(submissions, 0);
 });
