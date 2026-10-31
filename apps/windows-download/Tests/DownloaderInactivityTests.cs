@@ -7,12 +7,15 @@ using LedgeTop.WindowsDownload;
 internal static class DownloaderInactivityTests
 {
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
+        ("download subphase timing observes synthetic transfer without exposing request data", DownloadTiming),
+        ("download timing isolates parallel requests and records failure and cancellation", DownloadTimingFailures),
         ("download stalled headers expire without publishing or leaking request resources", HeaderStall),
         ("download stalled body preserves owned prefix and resumes with range and final SHA", BodyStallResume),
         ("download stream creation and final EOF probe have inactivity bounds", CreationAndEofStalls),
         ("download caller cancellation stays distinct from network inactivity", ExplicitCancellation),
         ("download progressing chunks may exceed one inactivity interval in total", ActiveProgress),
-        ("download network inactivity configuration rejects invalid or unbounded budgets", Configuration)
+        ("download network inactivity configuration rejects invalid or unbounded budgets", Configuration),
+        ("hydration diagnostics byte GET preserves actual HTTP versus invalid metadata and network", FailureFacts)
     ];
     private static readonly Uri Origin = new("https://synthetic-files.example.invalid");
     private static readonly byte[] Bytes = Enumerable.Range(0,32).Select(i => (byte)(i * 7)).ToArray();
@@ -31,18 +34,89 @@ internal static class DownloaderInactivityTests
         try { await transfer.WaitAsync(TimeSpan.FromSeconds(2)); throw new Exception("Stalled transfer unexpectedly completed."); }
         catch (TransferException error) {
             Assert(error.Message == "Download stalled; owned partial data can be retried.", "Inactivity must have a static retryable error.");
+            Assert(error.Reason == TransferFailureReason.Timeout && error.HttpStatus is null, "Inactivity diagnostic lost its bounded reason.");
         } catch (TimeoutException) {
             cleanup.Cancel(); try { await transfer; } catch (OperationCanceledException) { }
             throw new Exception("Network inactivity budget did not stop the stalled transfer.");
         }
     }
     private static void NoFinal(DirectoryFixture root) => Assert(!File.Exists(Path.Combine(root.Path,"map.bin")),"Unverified file was published.");
+    private static async Task DownloadTiming() {
+        using var root = new DirectoryFixture();
+        using var engine = Engine(new AsyncHandler(async (_, ct) => { await Task.Delay(20, ct); return Response(new ByteArrayContent(Bytes)); }));
+        var observed = new List<HydrationTimingSummary>();
+        using var timing = new HydrationTiming(observed.Add);
+        using (DownloadTimingScope.BeginForTest(timing)) {
+            var output = await engine.DownloadAsync(Spec(), root.Path);
+            Assert((await File.ReadAllBytesAsync(output)).SequenceEqual(Bytes), "Timed transfer changed bytes.");
+        }
+        timing.AddAuthorizationTime(true, true, TimeSpan.Zero);
+        timing.Complete(HydrationTimingOutcome.Completed);
+        var summary = observed.Single();
+        Assert(summary.DownloadMilliseconds[0] >= 10, "Delayed synthetic headers were not recorded.");
+        Assert(summary.ActivityText.Contains("downloadHashMs=") && !summary.ActivityText.Contains("never-log-this"), "Private request data escaped timing.");
+    }
+    private static async Task DownloadTimingFailures() {
+        async Task<HydrationTimingSummary> Run(int delay, bool fail, bool cancel) {
+            using var root = new DirectoryFixture();
+            using var engine = Engine(new AsyncHandler(async (_, ct) => {
+                await Task.Delay(delay, ct);
+                if (fail) throw new HttpRequestException("PRIVATE connection");
+                return Response(new ByteArrayContent(Bytes));
+            }), TimeSpan.FromSeconds(3));
+            using var cancellation = new CancellationTokenSource();
+            var observed = new List<HydrationTimingSummary>();
+            using var timing = new HydrationTiming(observed.Add);
+            if (cancel) cancellation.CancelAfter(30);
+            using (DownloadTimingScope.BeginForTest(timing)) {
+                try {
+                    await engine.DownloadAsync(Spec(), root.Path, cancellation.Token);
+                    Assert(!fail && !cancel, "Synthetic failure unexpectedly completed.");
+                } catch (OperationCanceledException) when (cancel) { }
+                catch (TransferException) when (fail) { }
+            }
+            timing.AddAuthorizationTime(true, true, TimeSpan.Zero);
+            timing.Complete(cancel ? HydrationTimingOutcome.Cancelled : fail ? HydrationTimingOutcome.Failed : HydrationTimingOutcome.Completed);
+            return observed.Single();
+        }
+        var concurrent = await Task.WhenAll(Run(20, false, false), Run(100, false, false), Run(50, true, false), Run(1000, false, true));
+        Assert(concurrent[0].DownloadMilliseconds[0] >= 10 && concurrent[1].DownloadMilliseconds[0] >= 80 && concurrent[0].DownloadMilliseconds[0] < concurrent[1].DownloadMilliseconds[0], "Concurrent timings mixed or missing.");
+        Assert(concurrent[2].Outcome == HydrationTimingOutcome.Failed && concurrent[2].DownloadMilliseconds[0] >= 40 && concurrent[2].DownloadMilliseconds[1] == 0, "Failed header timing missing.");
+        Assert(concurrent[3].Outcome == HydrationTimingOutcome.Cancelled && concurrent[3].DownloadMilliseconds[0] >= 10 && concurrent[3].DownloadMilliseconds[1] == 0, "Cancelled header timing missing.");
+        Assert(concurrent.All(x => !x.ActivityText.Contains("PRIVATE") && !x.ActivityText.Contains("never-log-this")), "Private details escaped timing.");
+    }
     private static async Task HeaderStall() {
         using var root = new DirectoryFixture(); using var cleanup = new CancellationTokenSource();
         var handler = new StalledHeaders(); using var engine = Engine(handler);
         var transfer = engine.DownloadAsync(Spec(),root.Path,cleanup.Token);
         await handler.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2)); await ExpectIdle(transfer,cleanup);
         Assert(handler.Cancelled && handler.RequestContent.Disposed,"Stalled header request was not cancelled/disposed."); NoFinal(root);
+    }
+    private static async Task FailureFacts() {
+        foreach(var status in new[]{302,429,502,503}) {
+            using var root=new DirectoryFixture();var calls=0;
+            using var engine=Engine(new AsyncHandler((_,_)=>{calls++;return Task.FromResult(new HttpResponseMessage((HttpStatusCode)status){Content=new StringContent("SECRET response")});}));
+            try{await engine.DownloadAsync(Spec(),root.Path);throw new Exception("Unexpected download success");}
+            catch(TransferException error){Assert(error.Reason==TransferFailureReason.UnexpectedHttpStatus&&error.HttpStatus==status&&error.InnerException is null&&!error.Message.Contains("SECRET"),"HTTP diagnostic lost or leaked");}
+            Assert(calls==1,"Failure was retried");NoFinal(root);
+        }
+        using(var root=new DirectoryFixture())using(var engine=Engine(new AsyncHandler((_,_)=>{
+            var response=Response(new ByteArrayContent(Bytes));response.Content.Headers.ContentLength=Bytes.Length+1;return Task.FromResult(response);
+        }))) {
+            try{await engine.DownloadAsync(Spec(),root.Path);throw new Exception("Invalid length accepted");}
+            catch(TransferException error){Assert(error.Reason==TransferFailureReason.InvalidMetadata&&error.HttpStatus is null,"A successful HTTP envelope with invalid length was misclassified");}
+            NoFinal(root);
+        }
+        using(var root=new DirectoryFixture())using(var engine=Engine(new AsyncHandler((_,_)=>Task.FromResult(new HttpResponseMessage(HttpStatusCode.Created){Content=new ByteArrayContent(Bytes)})))) {
+            try{await engine.DownloadAsync(Spec(),root.Path);throw new Exception("Unsupported successful HTTP contract accepted");}
+            catch(TransferException error){Assert(error.Reason==TransferFailureReason.InvalidMetadata&&error.HttpStatus is null,"A successful but unsupported response was called an HTTP service failure");}
+            NoFinal(root);
+        }
+        using(var root=new DirectoryFixture())using(var engine=Engine(new AsyncHandler((_,_)=>throw new HttpRequestException("SECRET transport URL")))) {
+            try{await engine.DownloadAsync(Spec(),root.Path);throw new Exception("Missing network refusal");}
+            catch(TransferException error){Assert(error.Reason==TransferFailureReason.Network&&error.HttpStatus is null&&error.InnerException is null&&!error.Message.Contains("SECRET"),"Network failure leaked or lost classification");}
+            NoFinal(root);
+        }
     }
     private static async Task BodyStallResume() {
         using var root = new DirectoryFixture(); using var cleanup = new CancellationTokenSource();

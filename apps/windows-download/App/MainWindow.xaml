@@ -12,7 +12,13 @@
       <RowDefinition Height="Auto" />
       <RowDefinition Height="Auto" />
       <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
     </Grid.RowDefinitions>
+
+    <Border x:Name="TrayHint" Grid.Row="3" Visibility="Collapsed" Background="{StaticResource Soft}" Padding="18,8">
+      <TextBlock Text="Closing this window keeps LedgeTop Files running in the system tray. Right-click the tray icon to reopen it, pause downloads, or quit."
+                 Foreground="{StaticResource Muted}" FontSize="12" />
+    </Border>
 
     <!-- Header -->
     <Border Grid.Row="0" Background="{StaticResource HeaderBack}" Padding="18,10">
