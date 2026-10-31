@@ -35,6 +35,7 @@
     "CLIENT_PORTAL_REQUEST_V2_ENABLED": "false",
     "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED": "false",
     "CLIENT_PORTAL_OPS_INQUIRIES_ENABLED": "false",
+    "CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED": "false",
     "OPS_INVENTORY_CATALOG_PROMOTION_ENABLED": "false",
     "CLIENT_PORTAL_NATIVE_FEEDBACK_SOURCE_IDS": "",
     "PROJECT_ALPHA_CATALOG_SYNC_ENABLED": "false",
@@ -131,6 +132,7 @@
     { "binding": "CLIENT_ONBOARDING_RECIPIENT_BRIDGE", "service": "ledgetop-ops-staging", "entrypoint": "ClientOnboardingRecipientBridge" },
     { "binding": "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE", "service": "ledgetop-ops-staging", "entrypoint": "ClientPortalRecipientEnrollmentBridge" },
     { "binding": "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT", "service": "ledgetop-ops-staging", "entrypoint": "OperationsPortalNativeRecipientEnrollmentIngress" },
+    { "binding": "OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES", "service": "ledgetop-ops-staging", "entrypoint": "OperationsNativePrincipalInquiryIngress" },
     { "binding": "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER", "service": "ledgetop-ops-staging", "entrypoint": "OperationsPortalNativeDeliveryAuthorizationReader" }
   ],
   "stream": { "binding": "STREAM" },
