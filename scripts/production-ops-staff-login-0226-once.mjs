@@ -16,6 +16,7 @@ const SHA = /^[a-f0-9]{64}$/u;
 const MAX_ROWS = 20_000;
 const MAX_CAPTURE_AGE_MS = 60_000;
 const PLAN_TTL_MS = 5 * 60_000;
+const MAX_COMPILE_CONTEXTS = 8;
 
 export const PRODUCTION_OPS_0226_TARGET = Object.freeze({
   environment: 'production', accountId: '846c924bf17bf4f3dd15c97a4c5d1d51',
@@ -178,6 +179,29 @@ export function validateProductionOps0226LastSeenTransition(beforeRows, afterRow
   return { beforeRows: before.rows, afterRows: after.rows, beforeNonNullRows: before.nonNullRows,
     afterNonNullRows: after.nonNullRows, beforeSha256: before.sha256, afterSha256: after.sha256, changedCount };
 }
+export function validateProductionOps0226CapturedLastSeenTransition(capturedRows, afterRows) {
+  if (!Array.isArray(capturedRows) || !Array.isArray(afterRows)) fail('staff_identity_set_invalid');
+  const capturedIds = new Set();
+  const captured = capturedRows.map(row => {
+    if (!exactKeys(row, ['id','millis']) || typeof row.id !== 'string' || row.id.length === 0
+      || capturedIds.has(row.id) || (row.millis !== null && (!Number.isSafeInteger(row.millis) || !Number.isFinite(new Date(row.millis).getTime()))))
+      fail('staff_identity_set_invalid');
+    capturedIds.add(row.id);
+    return { id: row.id, millis: row.millis };
+  }).sort((a,b) => a.id.localeCompare(b.id));
+  const after = staffTelemetry(afterRows).normalized;
+  if (captured.length !== after.length || captured.some((row,index) => row.id !== after[index]?.id)) fail('staff_identity_set_changed');
+  let changedCount=0;
+  for (let i=0; i<captured.length; i++) {
+    const prior=captured[i], next=after[i];
+    if (prior.millis !== next.millis) changedCount++;
+    if (prior.millis !== null && (next.millis === null || next.millis < prior.millis)) fail('last_seen_timestamp_regressed');
+  }
+  return { beforeRows:captured.length, afterRows:after.length,
+    beforeNonNullRows:captured.filter(row => row.millis !== null).length,
+    afterNonNullRows:after.filter(row => row.millis !== null).length,
+    afterSha256:hash(canonical(after.map(({id,last_seen_at}) => ({id,last_seen_at})))), changedCount };
+}
 function protectedState(snapshot) {
   if (!exactKeys(snapshot.protectedRows, Object.keys(PRODUCTION_OPS_0226_PROTECTED_TABLES))) fail('protected_rows_invalid');
   if (!exactKeys(snapshot.authorityDigestExcludedColumns, ['staff_users'])
@@ -331,8 +355,20 @@ function compileProduction(snapshot, { sourceCommit, root = ROOT, now = Date.now
 /** The provider is injectable for local tests; production target and profile are fixed. */
 export function createProductionOps0226Operator(options = {}) {
   if (!exactKeys(options, [])) fail('operator_options_invalid');
+  const compiledTelemetryByPlanSha = new Map();
+  const compile = (...args) => {
+    const now = args[1]?.now ?? Date.now();
+    for (const [key,value] of compiledTelemetryByPlanSha) if (value.expiresAt <= now) compiledTelemetryByPlanSha.delete(key);
+    if (compiledTelemetryByPlanSha.size >= MAX_COMPILE_CONTEXTS) fail('compile_context_capacity');
+    const plan = compileProduction(...args);
+    const snapshot = args[0];
+    const telemetry = staffTelemetry(snapshot.protectedRows.staff_users);
+    compiledTelemetryByPlanSha.set(plan.planSha256, { expiresAt:Date.parse(plan.expiresAt),
+      rows:telemetry.normalized.map(({id,millis}) => ({id,millis})) });
+    return plan;
+  };
   return Object.freeze({
-    compile: compileProduction,
+    compile,
     executeOnce: async ({ plan, provider, journalPath, now = Date.now } = {}) => {
       if (!provider || typeof provider.readSnapshot !== 'function' || typeof provider.applyExactMigration !== 'function')
         fail('provider_contract_invalid');
@@ -343,6 +379,8 @@ export function createProductionOps0226Operator(options = {}) {
         || plan.schemaVersion !== 2 || plan.contract !== 'production-ops-staff-login-0226-one-shot-v2'
         || plan.planSha256 !== planHash(plan) || !commitValid(plan.sourceCommit)
         || plan.profileSourceMetadataSha256 !== PRODUCTION_OPS_0226_BASELINE.sourceMetadataSha256) fail('plan_invalid');
+      const compiledContext = compiledTelemetryByPlanSha.get(plan.planSha256);
+      if (!compiledContext || compiledContext.expiresAt <= now()) fail('plan_compile_context_missing');
       if (!exactKeys(plan.migration, ['name','sha256','sql','ledgerAppend'])
         || !exactKeys(plan.preflight, ['observedAt','target','ledgerCount','ledgerNamesSha256','ledgerSha256','schemaObjectCount','schemaSha256',
           'protectedTableCounts','protectedAuthorityTableDigests','protectedAuthorityStateSHA256','authorityDigestExcludedColumns',
@@ -368,6 +406,8 @@ export function createProductionOps0226Operator(options = {}) {
       const beforeSnapshot = await provider.readSnapshot({ target: PRODUCTION_OPS_0226_TARGET, phase: 'immediate-prewrite',
         query: PRODUCTION_OPS_0226_PRE_READ_QUERY });
       const before = receiptProjection(beforeSnapshot, PRODUCTION_OPS_0226_BASELINE, now());
+      const compileToPrewriteTelemetry = validateProductionOps0226CapturedLastSeenTransition(
+        compiledContext.rows, beforeSnapshot.protectedRows.staff_users);
       if (canonical(before.target) !== canonical(plan.preflight.target)
         || before.ledgerCount !== plan.preflight.ledgerCount
         || before.ledgerNamesSha256 !== plan.preflight.ledgerNamesSha256 || before.ledgerSha256 !== plan.preflight.ledgerSha256
@@ -383,7 +423,8 @@ export function createProductionOps0226Operator(options = {}) {
       try {
         await journal.append({ phase: 'migration-0226-apply-intent', planSha256: plan.planSha256,
           sourceCommit: plan.sourceCommit, migrationSha256: MIGRATION_SHA256, target: PRODUCTION_OPS_0226_TARGET,
-          preflight: before });
+          staffLastSeenAtCompileSha256: plan.preflight.staffLastSeenAtSha256,
+          staffLastSeenAtCompileToPrewriteChangedCount: compileToPrewriteTelemetry.changedCount, preflight: before });
         try {
           // One provider call. The injected adapter must not retry after an ambiguous response.
           await provider.applyExactMigration({ target: PRODUCTION_OPS_0226_TARGET, name: MIGRATION_NAME,
@@ -400,10 +441,13 @@ export function createProductionOps0226Operator(options = {}) {
           afterSnapshot = await provider.readSnapshot({ target: PRODUCTION_OPS_0226_TARGET, phase: 'postwrite',
             query: PRODUCTION_OPS_0226_POST_READ_QUERY });
           const after = validatePostSnapshot(beforeSnapshot, afterSnapshot, plan, PRODUCTION_OPS_0226_BASELINE, now());
+          after.staffLastSeenAtCompileSha256 = plan.preflight.staffLastSeenAtSha256;
+          after.staffLastSeenAtCompileToPrewriteChangedCount = compileToPrewriteTelemetry.changedCount;
           await journal.append({ phase: 'migration-0226-postread-verified', planSha256: plan.planSha256, postflight: after });
           return { schemaVersion: 2, contract: plan.contract, sourceCommit: plan.sourceCommit,
             planSha256: plan.planSha256, migrationSha256: MIGRATION_SHA256, target: PRODUCTION_OPS_0226_TARGET,
-            before, after, mutationCalls: 1 };
+            before, after, staffLastSeenAtCompileSha256:plan.preflight.staffLastSeenAtSha256,
+            staffLastSeenAtCompileToPrewriteChangedCount:compileToPrewriteTelemetry.changedCount, mutationCalls: 1 };
         } catch (error) {
           await journal.append({ phase: 'migration-0226-postread-unverified', planSha256: plan.planSha256,
             reason: error?.message?.startsWith('production_ops_0226:') ? error.message : 'postread_failed',
