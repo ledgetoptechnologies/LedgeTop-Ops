@@ -12,7 +12,8 @@ const CLIENT = '3ba4c8c9-70b4-4696-810f-0503f512e728';
 const CLIENT_LATEST = '4f124119-c34b-4608-ba90-ad438c47a90b';
 const SYNC = '470134b4-ef95-4702-98f3-110e4f4cbbb0';
 const CANDIDATE = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-const SOURCE = '9bf5def4f14226f257ffc1ca4d89a659b51aac1a';
+const SOURCE = 'c2ce0b6feaa3f410dd6284bd5ce5763818958ec8';
+const PREVIOUS_SOURCE = '9bf5def4f14226f257ffc1ca4d89a659b51aac1a';
 const DB = { ops: '78b34173-b168-4e3d-9832-bb9d245cc6b8', delivery: 'b6f653ab-9acd-4421-9ad0-207754b59aeb' };
 const disabled = Object.freeze({ CLIENT_PORTAL_REQUEST_V2_ENABLED: null, CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED: 'false',
   CLIENT_PORTAL_OPS_INQUIRIES_ENABLED: null, CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED: 'false',
@@ -320,6 +321,8 @@ test('compiler rejects profile, implicit latest inheritance, gate, binding, sour
   const heldV2 = { ...plan, schemaVersion: 2, contract: 'staging-backend-only-v2' };
   assert.throws(() => validateStagingBackendReleasePlan(opts, heldV2), /plan changed/);
   assert.throws(() => compileStagingBackendReleasePlan({ ...opts, sourceCommit: 'f'.repeat(40) }), /build source commit/);
+  assert.throws(() => compileStagingBackendReleasePlan({ ...opts, sourceCommit: PREVIOUS_SOURCE,
+    artifact: f.artifact('client', PREVIOUS_SOURCE) }), /Only the reviewed current backend source commit is accepted/);
   const stale = clone(base); stale.observedAt = new Date(Date.now() - 60 * 60_000).toISOString();
   assert.throws(() => compileStagingBackendReleasePlan(makeOptions(stale, 'client')), /controls capsule is stale/);
   fs.appendFileSync(opts.artifact.sourceMap.path, ' ');

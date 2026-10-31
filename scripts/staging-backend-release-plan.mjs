@@ -46,7 +46,7 @@ const OPS_NAMED_WORKER_EXPORTS = Object.freeze({
   ClientPortalNativeFinancialReader: Object.freeze({ type: 'worker' }),
   OperationsNativePrincipalInquiryIngress: Object.freeze({ type: 'worker' }),
 });
-const SOURCE_COMMIT = '9bf5def4f14226f257ffc1ca4d89a659b51aac1a';
+const SOURCE_COMMIT = 'c2ce0b6feaa3f410dd6284bd5ce5763818958ec8';
 const MAIN_MODULE_NAMES = Object.freeze({ operations: 'staging-native-authority-entrypoint.js', client: 'index.js' });
 
 const clone = value => structuredClone(value);
