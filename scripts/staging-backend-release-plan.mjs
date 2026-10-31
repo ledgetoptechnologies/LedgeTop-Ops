@@ -26,6 +26,41 @@ const TARGETS = Object.freeze({
     latestVersionId: '470134b4-ef95-4702-98f3-110e4f4cbbb0',
     databases: dbPins(STAGING_INVENTORY['ops-sync']) }),
 });
+const CURRENT_PROFILE_SOURCE_COMMIT = 'b22abeccd1889ed2f745db98c6123bafa5820b97';
+const CURRENT_PROFILE_TARGETS = Object.freeze({
+  operations: Object.freeze({ workerName: STAGING_INVENTORY.operations.name,
+    activeVersionId: '1d79a7ad-d077-49ec-bb3c-7e73d8799773', latestVersionId: '1d79a7ad-d077-49ec-bb3c-7e73d8799773',
+    mainModuleName: 'staging-native-authority-entrypoint.js', databases: dbPins(STAGING_INVENTORY.operations) }),
+  client: Object.freeze({ workerName: STAGING_INVENTORY.delivery.name,
+    activeVersionId: 'b1f9053b-e1b9-4435-8bc0-49d03b393fab', latestVersionId: 'b1f9053b-e1b9-4435-8bc0-49d03b393fab',
+    mainModuleName: 'index.js', databases: dbPins(STAGING_INVENTORY.delivery) }),
+  sync: Object.freeze({ workerName: STAGING_INVENTORY['ops-sync'].name,
+    activeVersionId: '470134b4-ef95-4702-98f3-110e4f4cbbb0', latestVersionId: '470134b4-ef95-4702-98f3-110e4f4cbbb0',
+    databases: dbPins(STAGING_INVENTORY['ops-sync']) }),
+});
+const CURRENT_PROFILE_PINS = Object.freeze({
+  schemaSHA256: 'bd7531ad0a2900a82d237d922194a8b2b736f642ba6a3dabb2fe99551c797d7a',
+  operations: Object.freeze({ rawControlSHA256: '9365ca8688739498ac7b148a159e531b7d4a2957aed7843d5af527d7f6f96326',
+    rawBindingsSHA256: 'c74ab2e01d78ca70baaa974c4a58e2fbb4ec47fc70a1a532e5f827916fc60c84',
+    bindingIdentitySHA256: '7ecefefe509d398b91df0ecacb7ec020ddee0cad55a6bd1ad970537bb7744e19',
+    serviceBindingsSHA256: 'd361793f289cd5546016afd94f51d8fd284009453566ce2c178829d6945a5154',
+    settingsSHA256: '9de7539c47fdd0a8b6b5662a49336d30f42815309717f36b273524e3ee74ec6b',
+    runtimeSHA256: '9166b35d6905c5916fc515cac614d9db43806358d01d77e3a9f666f5d11a65ce',
+    assetsConfigSHA256: '0ef07e7023dabbef7f8c6d6bc51e72cf669fc203335fa9d1f5c7e8d306cbde88',
+    schedulesSHA256: '16c7f2cd36bf3274194240d9dca27e3d1c41f38a1a78b6918d1d5c4346ff5011',
+    flagsSHA256: '7c8e20772b90df207ba2a9bb22f8c20cde53880ae19d11fd0dbec357c6cfd96e',
+    exportsSHA256: 'eb9bd3ea973af496a98c0a8eaf02ac596d6e891fea2d338ac1cd058a98a2075a' }),
+  client: Object.freeze({ rawControlSHA256: 'c392eda9c76a12184201a697a31a60c48c63ecab7ba02b92489f040f1badab32',
+    rawBindingsSHA256: '7a538de1590b3a8575ad708b51cff8aeffd7360380da5155fe66957529b471dd',
+    bindingIdentitySHA256: 'ebed92836d35bbcead5d7379b3667ea9afcf3611d0cfc5081e07b75ce20f0bb0',
+    serviceBindingsSHA256: '2911f91c32c3f7c407f21f5a9573413dd5434d80e8ee9d4b46b6f506556adef5',
+    settingsSHA256: 'c0e34207712844d7d71c152c241736bdd7893ac4ad4025143a54914c18ba2511',
+    runtimeSHA256: '432733e3d1c4b53a0f3e5744572414f47a11904131ef49d33ddcf63b2b6f130e',
+    assetsConfigSHA256: 'b1c41485893a0ed4b1a9933fbbe880e3da77e6c0b90d12866c105f1e478bf1f3',
+    schedulesSHA256: '9af169f5a55d6393a02f894c4c52b5a97e115de6a505a51b8ef883c347c8549a',
+    flagsSHA256: '2784fc23f3c87688c72285f1f9f43638891ada3753281c5d5811a53574bbe18b',
+    exportsSHA256: '9151e2ed7fc023457e7a71556e867cd770af52b1a840f7db8165ed9bbee22e17' }),
+});
 const APPS = Object.freeze(['operations', 'client', 'sync']);
 const SAFE_CONTROL_KEYS = new Set(['schemaVersion','purpose','environment','accountId','observedAt','workers','schema',
   'secretValuesPersisted','applicationRowsRead','resourceWrites']);
@@ -218,7 +253,7 @@ function rejectRawValues(value, location = 'controls') {
   }
 }
 
-function checkedControls(controls, { allowOpsSuccessor = false } = {}) {
+function checkedControls(controls, { allowOpsSuccessor = false, targets = TARGETS } = {}) {
   rejectRawValues(controls);
   need(ownKeysAre(controls, [...SAFE_CONTROL_KEYS]) && controls.schemaVersion === 1
     && controls.purpose === CAPSULE_PURPOSE && controls.environment === 'staging'
@@ -228,20 +263,20 @@ function checkedControls(controls, { allowOpsSuccessor = false } = {}) {
   need(Number.isFinite(Date.parse(controls.observedAt)) && Date.parse(controls.observedAt) <= Date.now(),
     'Staging controls observation time is invalid');
   need(ownKeysAre(controls.schema, ['OPS_DB','DELIVERY_DB'])
-    && controls.schema.OPS_DB?.id === TARGETS.operations.databases.OPS_DB
-    && controls.schema.DELIVERY_DB?.id === TARGETS.client.databases.DELIVERY_DB,
+    && controls.schema.OPS_DB?.id === targets.operations.databases.OPS_DB
+    && controls.schema.DELIVERY_DB?.id === targets.client.databases.DELIVERY_DB,
   'Hash-only D1 schema metadata must remain on the exact staging databases');
   need(ownKeysAre(controls.workers, APPS), 'Exact Operations, Client and Sync controls are required');
   for (const app of APPS) {
     const row = controls.workers[app];
     const opsSuccessorIdentity = app === 'operations' && allowOpsSuccessor
-      && UUID.test(row.activeVersionId ?? '') && row.activeVersionId !== TARGETS.operations.activeVersionId
+      && UUID.test(row.activeVersionId ?? '') && row.activeVersionId !== targets.operations.activeVersionId
       && row.activeVersionId === row.latestVersionId;
-    const expectedMainModule = opsSuccessorIdentity ? MAIN_MODULE_NAMES.operations : 'index.js';
-    need(ownKeysAre(row, [...SAFE_WORKER_KEYS]) && row.workerName === TARGETS[app].workerName
+    const expectedMainModule = opsSuccessorIdentity ? MAIN_MODULE_NAMES.operations : (targets[app].mainModuleName ?? 'index.js');
+    need(ownKeysAre(row, [...SAFE_WORKER_KEYS]) && row.workerName === targets[app].workerName
       && UUID.test(row.activeVersionId ?? '') && UUID.test(row.latestVersionId ?? '')
-      && (opsSuccessorIdentity || (row.activeVersionId === TARGETS[app].activeVersionId
-        && row.latestVersionId === TARGETS[app].latestVersionId))
+      && (opsSuccessorIdentity || (row.activeVersionId === targets[app].activeVersionId
+        && row.latestVersionId === targets[app].latestVersionId))
       && SHA.test(row.rawBindingsSHA256 ?? '') && SHA.test(row.rawControlSHA256 ?? ''),
     `${app} staging control identity or hashes are invalid`);
     need(Array.isArray(row.deployment?.versions) && row.deployment.versions.length === 1
@@ -252,7 +287,7 @@ function checkedControls(controls, { allowOpsSuccessor = false } = {}) {
       && Array.isArray(row.modern.modules) && row.modern.modules.length === 1
       && ownKeysAre(row.modern.modules[0], ['name','contentType','bytes','sha256'])
       && row.modern.modules[0].name === expectedMainModule
-      && (!opsSuccessorIdentity || row.modern.main_module === expectedMainModule)
+      && (!(opsSuccessorIdentity || targets[app].mainModuleName) || row.modern.main_module === expectedMainModule)
       && typeof row.modern.modules[0].contentType === 'string'
       && Number.isSafeInteger(row.modern.modules[0].bytes) && row.modern.modules[0].bytes > 0
       && SHA.test(row.modern.modules[0].sha256 ?? '')
@@ -315,7 +350,7 @@ function checkedControls(controls, { allowOpsSuccessor = false } = {}) {
       }
     }
     const databaseBindings = bindings.filter(binding => binding.type === 'd1');
-    const databasePins = TARGETS[app].databases ?? {};
+    const databasePins = targets[app].databases ?? {};
     need(equal(Object.fromEntries(databaseBindings.map(binding => [binding.name, binding.id])), databasePins),
       `${app} exact staging D1 binding IDs differ`);
     const cronRows = row.schedules.schedules;
@@ -332,7 +367,7 @@ function checkedControls(controls, { allowOpsSuccessor = false } = {}) {
   return controls;
 }
 
-function verifyArtifact(artifact, sourceCommit, application) {
+function verifyArtifact(artifact, sourceCommit, application, expectedSourceCommit = SOURCE_COMMIT) {
   need(ownKeysAre(artifact, ['sourceCommit','main','sourceMap']) && COMMIT.test(sourceCommit ?? '')
     && artifact.sourceCommit === sourceCommit, 'Exact build source commit and module pins required');
   const contents = new Map();
@@ -361,7 +396,7 @@ function verifyArtifact(artifact, sourceCommit, application) {
     'Genuine sibling source map must be pinned beside the native main module');
   const sourceMap = JSON.parse(contents.get('source map').toString('utf8'));
   verifySourceMap(sourceMap, sourceMap);
-  need(sourceCommit === SOURCE_COMMIT, 'Only the reviewed current backend source commit is accepted');
+  need(sourceCommit === expectedSourceCommit, 'Only the reviewed current backend source commit is accepted');
   return { sourceCommit, main: clone(artifact.main), sourceMap: clone(artifact.sourceMap),
     modules: [
       { name: expectedMain, content_type: 'application/javascript+module', content_base64: contents.get('main').toString('base64') },
@@ -425,6 +460,59 @@ const controlHashes = worker => ({ rawControlSHA256: worker.rawControlSHA256,
   runtimeSHA256: hash(canonical(worker.version.resources.script_runtime)),
   assetsConfigSHA256: hash(canonical(worker.modern.assets ?? null)),
   schedulesSHA256: hash(canonical(worker.schedules.schedules)) });
+
+const bindingIdentityHash = worker => hash(canonical(worker.modern.bindings
+  .map(({ name, type }) => ({ name, type })).sort((a, b) => a.name.localeCompare(b.name))));
+const serviceBindingsHash = worker => hash(canonical(worker.version.resources.bindings
+  .filter(binding => binding.type === 'service')
+  .map(({ name, type, service, entrypoint, environment }) => ({ name, type, service, entrypoint, environment: environment ?? null }))
+  .sort((a, b) => a.name.localeCompare(b.name))));
+
+function checkedCurrentProfilePins(controls, { opsSuccessor = false } = {}) {
+  need(hash(canonical(controls.schema)) === CURRENT_PROFILE_PINS.schemaSHA256,
+    'Current profile D1 schema differs from the reviewed baseline');
+  for (const app of ['operations','client']) {
+    const worker = controls.workers[app], pins = CURRENT_PROFILE_PINS[app];
+    need(worker.version.resources.bindings.length === (app === 'operations' ? 152 : 125)
+      && bindingIdentityHash(worker) === pins.bindingIdentitySHA256
+      && serviceBindingsHash(worker) === pins.serviceBindingsSHA256,
+    `${app} binding names, types, or service targets differ from the reviewed current profile`);
+    const actual = controlHashes(worker);
+    const keys = opsSuccessor && app === 'operations'
+      ? ['settingsSHA256','runtimeSHA256','assetsConfigSHA256','schedulesSHA256']
+      : ['rawControlSHA256','rawBindingsSHA256','settingsSHA256','runtimeSHA256','assetsConfigSHA256','schedulesSHA256'];
+    need(keys.every(key => actual[key] === pins[key])
+      && hash(canonical(worker.selectedFlags)) === pins.flagsSHA256
+      && hash(canonical(worker.modern.exports)) === pins.exportsSHA256,
+    `${app} settings, runtime, schedules, gates, exports, or captured controls differ from the reviewed current profile`);
+  }
+  return controls;
+}
+
+function validateCurrentOpsSuccessor(receipt, receiptSHA256, controls, sourceCommit) {
+  const keys = ['schemaVersion','contract','accountId','workerName','baselineVersionId','candidateVersionId','sourceCommit',
+    'planSHA256','mainSHA256','sourceMapSHA256','rawControlSHA256','rawBindingsSHA256','settingsSHA256','runtimeSHA256',
+    'assetsConfigSHA256','schedulesSHA256','observedAt'];
+  const ops = controls.workers.operations;
+  need(ownKeysAre(receipt, keys) && receipt.schemaVersion === 4
+    && receipt.contract === 'staging-backend-ops-successor-observation-v4'
+    && receipt.accountId === STAGING_ACCOUNT_ID && receipt.workerName === CURRENT_PROFILE_TARGETS.operations.workerName
+    && receipt.baselineVersionId === CURRENT_PROFILE_TARGETS.operations.activeVersionId
+    && receipt.candidateVersionId === ops.activeVersionId && receipt.candidateVersionId !== receipt.baselineVersionId
+    && receipt.sourceCommit === sourceCommit && COMMIT.test(receipt.sourceCommit)
+    && [receipt.planSHA256,receipt.mainSHA256,receipt.sourceMapSHA256].every(value => SHA.test(value ?? '')),
+  'Current Client planning requires the exact reviewed Ops successor receipt');
+  need(ops.modern.main_module === CURRENT_PROFILE_TARGETS.operations.mainModuleName
+    && ops.modern.modules[0]?.name === CURRENT_PROFILE_TARGETS.operations.mainModuleName
+    && receipt.mainSHA256 === ops.modern.modules[0].sha256,
+  'Ops successor receipt main identity or hash differs from the installed executable module');
+  const actual = controlHashes(ops);
+  for (const key of Object.keys(actual)) need(receipt[key] === actual[key], `Ops successor receipt ${key} differs from current controls`);
+  need(Number.isFinite(Date.parse(receipt.observedAt)) && Date.parse(receipt.observedAt) <= Date.parse(controls.observedAt),
+    'Ops successor receipt must precede the fresh controls capture');
+  return { receiptSHA256, candidateVersionId: receipt.candidateVersionId, sourceCommit: receipt.sourceCommit,
+    planSHA256: receipt.planSHA256, observedAt: receipt.observedAt };
+}
 
 function validateOperationsSuccessor(receipt, receiptSHA256, controls, sourceCommit) {
   const keys = ['schemaVersion','contract','accountId','workerName','baselineVersionId','candidateVersionId','sourceCommit',
@@ -553,6 +641,158 @@ export function compileStagingBackendReleasePlan({ controlsFile, application, ar
     && plan.selectedControlPins.schedulesSHA256 === hash(canonical(selected.schedules.schedules)),
   'Worker-level settings and schedules must remain exactly pinned');
   return freeze(plan);
+}
+
+function currentProfileBindingRows(worker, application) {
+  const bindings = worker.version.resources.bindings;
+  need(bindings.filter(binding => binding.name === 'ASSETS' && binding.type === 'assets').length === 1,
+    `${application} must retain its one captured native ASSETS binding`);
+  const rows = bindings.filter(binding => !(binding.name === 'ASSETS' && binding.type === 'assets'))
+    .map(({ name }) => ({ name, type: 'inherit', version_id: worker.activeVersionId }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  need(rows.length === (application === 'operations' ? 151 : 124)
+    && new Set(rows.map(row => row.name)).size === rows.length,
+  `${application} non-asset binding inventory differs from the pinned active baseline`);
+  return rows;
+}
+
+function compileCurrentProfileVersionParams(worker, application, artifact) {
+  const params = {
+    account_id: STAGING_ACCOUNT_ID,
+    deploy: false,
+    annotations: Object.fromEntries(Object.entries(worker.settings.annotations ?? {})
+      .filter(([key]) => ['workers/message','workers/tag'].includes(key))),
+    bindings: currentProfileBindingRows(worker, application),
+    compatibility_date: worker.modern.compatibility_date,
+    compatibility_flags: clone(worker.modern.compatibility_flags),
+    exports: clone(worker.modern.exports),
+    main_module: artifact.modules[0].name,
+    modules: clone(artifact.modules),
+    usage_model: worker.modern.usage_model,
+  };
+  if (worker.modern.assets?.config) params.assets = { config: clone(worker.modern.assets.config) };
+  if (worker.modern.cache_options !== undefined) params.cache_options = clone(worker.modern.cache_options);
+  if (worker.modern.containers !== undefined) params.containers = clone(worker.modern.containers);
+  if (worker.modern.limits !== undefined) params.limits = clone(worker.modern.limits);
+  if (worker.settings.placement && Object.keys(worker.settings.placement).length > 0) {
+    need(typeof worker.settings.placement.mode === 'string', 'Nondefault placement must include its native mode');
+    params.placement = clone(worker.settings.placement);
+  }
+  need(equal(params.exports, worker.modern.exports)
+    && equal(worker.modern.exports, worker.version.resources.script_runtime.exports ?? {})
+    && equal(worker.modern.assets?.config ?? null, params.assets?.config ?? null)
+    && !Object.hasOwn(params.assets ?? {}, 'jwt') && !Object.hasOwn(params, 'migrations'),
+  'Current profile must preserve exports and native asset configuration without migration or JWT fields');
+  for (const key of ['cache_options','containers','limits']) {
+    if (worker.modern[key] !== undefined) need(equal(params[key], worker.modern[key]), `Modern ${key} must be inherited exactly`);
+  }
+  return params;
+}
+
+/** Fixed successor compiler for the reviewed post-recipient staging profile.
+ * This schema is separate from v3: it pins the new active Ops/Client versions,
+ * preserves their existing export/binding sets, and never adds a service. */
+export function compileCurrentStagingBackendReleasePlan({ controlsFile, application, artifact, sourceCommit,
+  operationsSuccessorReceipt, retainedAssets, now = () => Date.now() } = {}) {
+  need(['operations','client'].includes(application) && typeof now === 'function',
+    'Only the fixed current Operations or Client staging target is supported');
+  need(sourceCommit === CURRENT_PROFILE_SOURCE_COMMIT, 'Only the exact reviewed current source commit is accepted');
+  const pinnedControls = readPinnedJson(controlsFile, 'Current staging controls capsule');
+  const parsed = pinnedControls.value;
+  const opsSuccessorCapture = application === 'client' && operationsSuccessorReceipt !== undefined
+    && parsed?.workers?.operations?.activeVersionId !== CURRENT_PROFILE_TARGETS.operations.activeVersionId;
+  const controls = checkedControls(parsed, { allowOpsSuccessor: opsSuccessorCapture, targets: CURRENT_PROFILE_TARGETS });
+  const nowMs = now(), observed = Date.parse(controls.observedAt);
+  need(Number.isFinite(nowMs) && Number.isFinite(observed) && observed <= nowMs && nowMs - observed <= 30 * 60_000,
+    'Current staging controls capsule is stale; capture again before planning');
+  need(controls.workers.sync.activeVersionId === CURRENT_PROFILE_TARGETS.sync.activeVersionId
+    && controls.workers.sync.latestVersionId === CURRENT_PROFILE_TARGETS.sync.latestVersionId,
+  'Ops Sync staging version changed; this release cannot update or absorb Sync');
+  let opsSuccessor;
+  if (application === 'operations') {
+    need(controls.workers.client.activeVersionId === CURRENT_PROFILE_TARGETS.client.activeVersionId
+      && controls.workers.client.latestVersionId === CURRENT_PROFILE_TARGETS.client.latestVersionId,
+    'Current Ops release must precede the still-pinned Client version');
+    need(operationsSuccessorReceipt === undefined, 'Ops baseline plan does not accept a successor receipt');
+    checkedCurrentProfilePins(controls);
+  } else {
+    const opsIsBaseline = controls.workers.operations.activeVersionId === CURRENT_PROFILE_TARGETS.operations.activeVersionId;
+    if (opsIsBaseline) {
+      need(operationsSuccessorReceipt === undefined, 'Unneeded Ops successor receipt is not accepted at the current baseline');
+      checkedCurrentProfilePins(controls);
+    } else {
+      need(opsSuccessorCapture && operationsSuccessorReceipt,
+        'Current Client plan after an Ops successor requires its reviewed readback receipt');
+      checkedCurrentProfilePins(controls, { opsSuccessor: true });
+      const pinnedReceipt = readPinnedJson(operationsSuccessorReceipt, 'Current Ops successor receipt', { maxBytes: 64 * 1024 });
+      opsSuccessor = validateCurrentOpsSuccessor(pinnedReceipt.value, pinnedReceipt.sha256, controls, sourceCommit);
+    }
+  }
+  const selected = controls.workers[application], target = CURRENT_PROFILE_TARGETS[application];
+  need(selected.activeVersionId === target.activeVersionId && selected.latestVersionId === target.latestVersionId,
+    `${application} selected active/latest version differs from the reviewed current profile`);
+  const nativeArtifact = verifyArtifact(artifact, sourceCommit, application, CURRENT_PROFILE_SOURCE_COMMIT);
+  const checkedAssets = checkedRetainedAssets(retainedAssets, controls, application);
+  const versionCreateParams = compileCurrentProfileVersionParams(selected, application, nativeArtifact);
+  const assetsConfig = clone(versionCreateParams.assets.config);
+  delete versionCreateParams.assets;
+  const observations = Object.fromEntries(APPS.map(app => [app, {
+    workerName: controls.workers[app].workerName, activeVersionId: controls.workers[app].activeVersionId,
+    latestVersionId: controls.workers[app].latestVersionId, ...controlHashes(controls.workers[app]),
+  }]));
+  const plan = {
+    schemaVersion: 4, contract: 'staging-backend-only-current-profile-v4', application, accountId: STAGING_ACCOUNT_ID,
+    selectedWorker: target.workerName, selectedActiveVersionId: selected.activeVersionId,
+    selectedLatestVersionId: selected.latestVersionId, sourceCommit: nativeArtifact.sourceCommit,
+    controlsCapture: { sha256: pinnedControls.sha256, bytes: pinnedControls.bytes, observedAt: controls.observedAt },
+    databaseSchemaSHA256: hash(canonical(controls.schema)), releaseSequence: ['operations','client'],
+    ...(opsSuccessor ? { operationsSuccessor: opsSuccessor } : {}),
+    artifact: { sourceCommit: nativeArtifact.sourceCommit, main: nativeArtifact.main, sourceMap: nativeArtifact.sourceMap },
+    offlineOnly: true, deploymentEnabled: false, executionAllowed: false, held: true,
+    holdReasons: ['current-profile-native-runtime-and-asset-inheritance-qualification-required',
+      'retained-asset-48-hour-release-coverage-not-qualified'],
+    nativeExecutionQualification: { ready: false,
+      reason: 'offline-held-until-current-profile-native-runtime-and-retained-asset-coverage-qualification' },
+    assetsUploadRequired: true, assetJwtIncluded: false, liveNamespaceVerified: false,
+    assetReconstitution: { bindingName: 'ASSETS', sourceVersionId: selected.activeVersionId,
+      manifestSHA256: checkedAssets.manifestSHA256, manifestBytes: checkedAssets.manifestBytes,
+      observedAt: checkedAssets.observedAt, filesRoot: checkedAssets.filesRoot, totalFiles: checkedAssets.files.length,
+      totalBytes: checkedAssets.totalBytes, files: checkedAssets.files, assetsConfig: checkedAssets.assetsConfig,
+      localOnlyFiles: checkedAssets.excludedFiles, localFileInventoryMatched: true,
+      remoteNamespaceCompleteness: 'unproven', retainedReleaseCoverage: 'unqualified', requiredRetainedCoverageHours: 48,
+      reconstitutionPermitted: false, namespaceReconstituted: false, namespaceInherited: false,
+      runtimeProofRequired: true, automaticPruning: false },
+    assetUploadRecipe: { protocol: 'workers-static-assets-upload-v1', manifestInput: 'validated-local-file-materialization',
+      uploadAssetSetAllowed: false, requiresReviewedRetainedReleaseCoverageEvidence: true,
+      providerContentHash: 'BLAKE3(base64(asset bytes) + extension without dot), lowercase hex first 32 chars',
+      providerManifestBytesPersisted: false, completionJwtRequired: true,
+      completionJwtSource: 'successful asset upload-session completion', completionJwtMemoryOnly: true,
+      completionJwtPersisted: false, assetsConfig, attachToVersionCreateAs: 'assets.jwt', neverPersistAssetBytesBase64: true },
+    automaticPruning: false,
+    workerControlPreservation: { settingsSHA256: controlHashes(selected).settingsSHA256,
+      schedulesSHA256: controlHashes(selected).schedulesSHA256,
+      selectedFlagsSHA256: hash(canonical(selected.selectedFlags)), exportsSHA256: hash(canonical(selected.modern.exports)) },
+    baselineMainModule: clone(selected.modern.modules[0]), selectedControlPins: controlHashes(selected), observations,
+    expectedUnchangedSchedules: clone(selected.schedules.schedules),
+    expectedUnchangedResources: clone(selected.version.resources),
+    expectedUnchangedSettings: clone(selected.settings), expectedUnchangedModernAssets: clone(selected.modern.assets),
+    expectedUnchangedExports: clone(selected.modern.exports), expectedUnchangedSelectedFlags: clone(selected.selectedFlags),
+    noMigrationConfig: true, noOpsSyncUpdate: true, versionCreateTemplate: versionCreateParams,
+  };
+  need(versionCreateParams.deploy === false && !versionCreateParams.bindings.some(row => row.name === 'ASSETS')
+    && !Object.hasOwn(versionCreateParams, 'assets') && plan.assetUploadRecipe.completionJwtRequired
+    && plan.assetUploadRecipe.completionJwtMemoryOnly && plan.assetUploadRecipe.completionJwtPersisted === false,
+  'Current profile held template must exclude ASSETS and JWT until separately qualified');
+  need(versionCreateParams.bindings.length === (application === 'operations' ? 151 : 124)
+    && versionCreateParams.bindings.every(row => row.type === 'inherit' && row.version_id === selected.activeVersionId)
+    && equal(versionCreateParams.exports, selected.modern.exports),
+  'Current profile must inherit exactly all active non-asset bindings and preserve the exact exports');
+  return freeze(plan);
+}
+
+export function validateCurrentStagingBackendReleasePlan(options, plan) {
+  need(equal(plan, compileCurrentStagingBackendReleasePlan(options)), 'Current staging backend-only plan changed');
+  return plan;
 }
 
 export function validateStagingBackendReleasePlan(options, plan) {

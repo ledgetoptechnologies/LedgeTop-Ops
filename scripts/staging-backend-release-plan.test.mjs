@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { canonical, hash } from './production-deploy.mjs';
 import { STAGING_ACCOUNT_ID } from './staging-requirements.mjs';
-import { compileStagingBackendReleasePlan, validateStagingBackendReleasePlan } from './staging-backend-release-plan.mjs';
+import { compileCurrentStagingBackendReleasePlan, compileStagingBackendReleasePlan,
+  validateCurrentStagingBackendReleasePlan, validateStagingBackendReleasePlan } from './staging-backend-release-plan.mjs';
 
 const OPS = '1ffe4525-7e29-4ea2-a407-726abf7f10c6';
 const CLIENT = '3ba4c8c9-70b4-4696-810f-0503f512e728';
@@ -13,6 +14,9 @@ const CLIENT_LATEST = '4f124119-c34b-4608-ba90-ad438c47a90b';
 const SYNC = '470134b4-ef95-4702-98f3-110e4f4cbbb0';
 const CANDIDATE = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const SOURCE = 'c2ce0b6feaa3f410dd6284bd5ce5763818958ec8';
+const CURRENT_OPS = '1d79a7ad-d077-49ec-bb3c-7e73d8799773';
+const CURRENT_CLIENT = 'b1f9053b-e1b9-4435-8bc0-49d03b393fab';
+const CURRENT_SOURCE = 'b22abeccd1889ed2f745db98c6123bafa5820b97';
 const PREVIOUS_SOURCE = '9bf5def4f14226f257ffc1ca4d89a659b51aac1a';
 const DB = { ops: '78b34173-b168-4e3d-9832-bb9d245cc6b8', delivery: 'b6f653ab-9acd-4421-9ad0-207754b59aeb' };
 const disabled = Object.freeze({ CLIENT_PORTAL_REQUEST_V2_ENABLED: null, CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED: 'false',
@@ -373,4 +377,122 @@ test('private actual controls capsule with synthetic module and asset pins compo
       assert.equal(plan.versionCreateTemplate.bindings.filter(row => row.name === 'OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES').length, 1);
     }
   }
+});
+
+const currentProfileControlsPath = process.env.LEDGETOP_STAGING_CURRENT_PROFILE_CONTROLS_FILE;
+const currentProfileControlsSha = process.env.LEDGETOP_STAGING_CURRENT_PROFILE_CONTROLS_SHA256;
+const currentProfileDryrunRoot = process.env.LEDGETOP_STAGING_CURRENT_PROFILE_DRYRUN_ROOT;
+test('current profile v4 accepts the actual 152/125 baseline and rejects baseline, source, binding, export, and freshness drift', {
+  skip: !(currentProfileControlsPath && currentProfileControlsSha),
+}, t => {
+  const f = fixture(t), capture = JSON.parse(fs.readFileSync(currentProfileControlsPath, 'utf8'));
+  const observedAt = Date.parse(capture.observedAt), controlsFile = { path: currentProfileControlsPath, sha256: currentProfileControlsSha };
+  const dryrunArtifact = application => {
+    if (!currentProfileDryrunRoot) return f.artifact(application, CURRENT_SOURCE);
+    const isOps = application === 'operations';
+    const mainName = isOps ? 'staging-native-authority-entrypoint.js' : 'index.js';
+    const directory = path.join(currentProfileDryrunRoot, isOps ? 'operations' : 'client', 'bundle');
+    const pin = file => { const bytes = fs.readFileSync(file); return { path: file, size: bytes.length, sha256: hash(bytes) }; };
+    const main = pin(path.join(directory, mainName)), sourceMap = pin(`${main.path}.map`);
+    const expected = isOps
+      ? { main: ['99cd0aec4ef22b3bc424d3cb100cfbcb6feb163bd78a827fe8442390ba61f318', 8_657_644],
+        sourceMap: ['fe36c25c59e3cc3dcfe3f672931092859fe02cbb25f7b46b6608a35407397f28', 15_026_211] }
+      : { main: ['3a5bfec73c59cb066f0797a499f1227f28bd8b233c8b383d92d4729f86015679', 2_854_236],
+        sourceMap: ['f47427d47666c676f0d31c8572ff041da74f9372f857197bf68119b536e309a1', 5_023_896] };
+    assert.deepEqual([main.sha256, main.size], expected.main);
+    assert.deepEqual([sourceMap.sha256, sourceMap.size], expected.sourceMap);
+    return { sourceCommit: CURRENT_SOURCE, main, sourceMap };
+  };
+  assert.equal(capture.workers.operations.activeVersionId, CURRENT_OPS);
+  assert.equal(capture.workers.operations.version.resources.bindings.length, 152);
+  assert.equal(capture.workers.client.activeVersionId, CURRENT_CLIENT);
+  assert.equal(capture.workers.client.version.resources.bindings.length, 125);
+  assert.equal(capture.workers.sync.activeVersionId, SYNC);
+  const optionsFor = application => ({ controlsFile, application, artifact: dryrunArtifact(application),
+    sourceCommit: CURRENT_SOURCE, retainedAssets: f.retainedAssets(capture, application), now: () => observedAt + 1_000 });
+  const plans = {};
+  for (const application of ['operations','client']) {
+    const options = optionsFor(application), plan = compileCurrentStagingBackendReleasePlan(options);
+    plans[application] = { options, plan };
+    assert.equal(plan.schemaVersion, 4);
+    assert.equal(plan.contract, 'staging-backend-only-current-profile-v4');
+    assert.equal(plan.selectedActiveVersionId, application === 'operations' ? CURRENT_OPS : CURRENT_CLIENT);
+    assert.equal(plan.sourceCommit, CURRENT_SOURCE);
+    assert.equal(plan.executionAllowed, false); assert.equal(plan.held, true);
+    assert.equal(plan.versionCreateTemplate.deploy, false);
+    assert.equal(Object.hasOwn(plan.versionCreateTemplate, 'assets'), false);
+    assert.equal(Object.hasOwn(plan.versionCreateTemplate, 'migrations'), false);
+    assert.equal(plan.versionCreateTemplate.bindings.length, application === 'operations' ? 151 : 124);
+    assert.ok(plan.versionCreateTemplate.bindings.every(row => row.type === 'inherit'
+      && row.version_id === plan.selectedActiveVersionId));
+    assert.equal(plan.versionCreateTemplate.bindings.some(row => row.name === 'ASSETS'), false);
+    assert.deepEqual(plan.versionCreateTemplate.exports, capture.workers[application].modern.exports);
+    assert.equal(plan.workerControlPreservation.selectedFlagsSHA256, hash(canonical(capture.workers[application].selectedFlags)));
+    assert.equal(plan.workerControlPreservation.exportsSHA256, hash(canonical(capture.workers[application].modern.exports)));
+    assert.equal(plan.assetReconstitution.totalFiles, 2);
+    assert.equal(validateCurrentStagingBackendReleasePlan(options, plan), plan);
+  }
+  assert.equal(plans.client.plan.versionCreateTemplate.bindings.some(row => row.name === 'OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES'
+    && row.type === 'service'), false, 'no Client service is added to the already-installed baseline');
+
+  const wrongBaseline = clone(capture), ops = wrongBaseline.workers.operations;
+  ops.activeVersionId = CANDIDATE; ops.latestVersionId = CANDIDATE;
+  ops.version.id = CANDIDATE; ops.modern.id = CANDIDATE; ops.deployment.versions[0].version_id = CANDIDATE;
+  const wrongBaselinePin = f.writeJson('current-wrong-baseline.json', wrongBaseline);
+  assert.throws(() => compileCurrentStagingBackendReleasePlan({ ...plans.operations.options, controlsFile: wrongBaselinePin }), /identity or hashes|exact active/i);
+
+  assert.throws(() => compileCurrentStagingBackendReleasePlan({ ...plans.operations.options,
+    sourceCommit: PREVIOUS_SOURCE, artifact: f.artifact('operations', PREVIOUS_SOURCE) }), /exact reviewed current source commit/);
+
+  const addedBinding = clone(plans.operations.plan);
+  addedBinding.versionCreateTemplate.bindings.push({ name: 'UNREVIEWED_SERVICE', type: 'service', service: 'other-worker',
+    entrypoint: 'Unreviewed', version_id: CURRENT_OPS });
+  assert.throws(() => validateCurrentStagingBackendReleasePlan(plans.operations.options, addedBinding), /plan changed/);
+  const addedExport = clone(plans.client.plan);
+  addedExport.versionCreateTemplate.exports.UnreviewedExport = { type: 'worker' };
+  assert.throws(() => validateCurrentStagingBackendReleasePlan(plans.client.options, addedExport), /plan changed/);
+
+  const staleCapture = clone(capture); staleCapture.observedAt = new Date(observedAt - 60 * 60_000).toISOString();
+  const stalePin = f.writeJson('current-stale-controls.json', staleCapture);
+  const staleOptions = { ...plans.operations.options, controlsFile: stalePin, now: () => observedAt + 1_000 };
+  assert.throws(() => compileCurrentStagingBackendReleasePlan(staleOptions), /controls capsule is stale/);
+
+  // Model the separately activated Ops successor without relabeling the old
+  // capture. Client remains on its exact current version and control snapshot.
+  const successor = clone(capture), nextOps = successor.workers.operations;
+  successor.observedAt = new Date(observedAt + 1_000).toISOString();
+  nextOps.activeVersionId = CANDIDATE; nextOps.latestVersionId = CANDIDATE;
+  nextOps.version.id = CANDIDATE; nextOps.modern.id = CANDIDATE;
+  nextOps.version.number += 1; nextOps.modern.number += 1;
+  nextOps.deployment.versions = [{ version_id: CANDIDATE, percentage: 100 }];
+  nextOps.rawControlSHA256 = hash('synthetic current-profile Ops successor observation');
+  nextOps.modern.modules[0] = { ...nextOps.modern.modules[0],
+    bytes: plans.operations.plan.artifact.main.size, sha256: plans.operations.plan.artifact.main.sha256 };
+  const successorControls = f.writeJson('current-ops-successor-controls.json', successor);
+  const receipt = { schemaVersion: 4, contract: 'staging-backend-ops-successor-observation-v4',
+    accountId: STAGING_ACCOUNT_ID, workerName: nextOps.workerName, baselineVersionId: CURRENT_OPS,
+    candidateVersionId: CANDIDATE, sourceCommit: CURRENT_SOURCE,
+    planSHA256: hash(canonical(plans.operations.plan)), mainSHA256: nextOps.modern.modules[0].sha256,
+    sourceMapSHA256: plans.operations.plan.artifact.sourceMap.sha256,
+    rawControlSHA256: nextOps.rawControlSHA256, rawBindingsSHA256: nextOps.rawBindingsSHA256,
+    settingsSHA256: hash(canonical(nextOps.settings)), runtimeSHA256: hash(canonical(nextOps.version.resources.script_runtime)),
+    assetsConfigSHA256: hash(canonical(nextOps.modern.assets)), schedulesSHA256: hash(canonical(nextOps.schedules.schedules)),
+    observedAt: new Date(observedAt + 500).toISOString() };
+  const successorOptions = { ...plans.client.options, controlsFile: successorControls,
+    operationsSuccessorReceipt: f.writeJson('current-ops-successor-receipt.json', receipt), now: () => observedAt + 2_000 };
+  const nextClient = compileCurrentStagingBackendReleasePlan(successorOptions);
+  assert.equal(nextClient.operationsSuccessor.candidateVersionId, CANDIDATE);
+  assert.equal(nextClient.selectedActiveVersionId, CURRENT_CLIENT);
+  assert.ok(nextClient.versionCreateTemplate.bindings.every(row => row.type === 'inherit' && row.version_id === CURRENT_CLIENT));
+  assert.throws(() => compileCurrentStagingBackendReleasePlan({ ...successorOptions, operationsSuccessorReceipt: undefined }));
+  for (const change of [{ mainSHA256: 'e'.repeat(64) }, { sourceCommit: PREVIOUS_SOURCE },
+    { candidateVersionId: CURRENT_OPS }, { rawBindingsSHA256: 'f'.repeat(64) },
+    { observedAt: new Date(observedAt + 3_000).toISOString() }]) {
+    assert.throws(() => compileCurrentStagingBackendReleasePlan({ ...successorOptions,
+      operationsSuccessorReceipt: f.writeJson('current-bad-successor-receipt.json', { ...receipt, ...change }) }));
+  }
+  const driftedSuccessor = clone(successor);
+  driftedSuccessor.workers.operations.settings.tags = ['unexpected'];
+  assert.throws(() => compileCurrentStagingBackendReleasePlan({ ...successorOptions,
+    controlsFile: f.writeJson('current-drifted-successor-controls.json', driftedSuccessor) }));
 });

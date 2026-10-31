@@ -13,6 +13,8 @@ import {
   compileStagingBackendReleasePlan,
   validateStagingBackendReleasePlan,
   STAGING_BACKEND_RELEASE_TARGETS,
+  compileCurrentStagingBackendReleasePlan,
+  validateCurrentStagingBackendReleasePlan,
 } from './staging-backend-release-plan.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -20,6 +22,8 @@ const SHA = /^[a-f0-9]{64}$/u;
 const HASH32 = /^[a-f0-9]{32}$/u;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
 const SOURCE_COMMIT = 'c2ce0b6feaa3f410dd6284bd5ce5763818958ec8';
+const CURRENT_SOURCE_COMMIT = 'b22abeccd1889ed2f745db98c6123bafa5820b97';
+const CURRENT_WORKERS = Object.freeze({ operations: 'ledgetop-ops-staging', client: 'ledgetop-clients-staging' });
 const V7_RUNTIME_PROOF_SHA256 = '0d4c66619a4393594008be2261c865a4b631ad0204de4d5f3e5b21d579b18d84';
 const COVERAGE_PURPOSE = 'staging-served-release-coverage-v1';
 const REQUIRED_COVERAGE_SOURCES = Object.freeze([
@@ -134,6 +138,35 @@ function checkedHeldPlan(planOptions, heldPlan) {
         entrypoint: 'OperationsNativePrincipalInquiryIngress' },
     ])),
   'Existing non-service bindings must inherit from the reviewed active version');
+  return heldPlan;
+}
+
+function checkedCurrentHeldPlan(planOptions, heldPlan) {
+  need(heldPlan?.schemaVersion === 4 && heldPlan.contract === 'staging-backend-only-current-profile-v4'
+    && heldPlan.sourceCommit === CURRENT_SOURCE_COMMIT && heldPlan.held === true
+    && heldPlan.offlineOnly === true && heldPlan.executionAllowed === false && heldPlan.deploymentEnabled === false
+    && heldPlan.assetsUploadRequired === true && heldPlan.assetJwtIncluded === false
+    && heldPlan.liveNamespaceVerified === false && heldPlan.assetReconstitution?.namespaceReconstituted === false
+    && heldPlan.assetReconstitution?.namespaceInherited === false
+    && heldPlan.assetUploadRecipe?.uploadAssetSetAllowed === false,
+  'Only the exact held current-profile v4 source plan is accepted; release flags cannot be promoted');
+  validateCurrentStagingBackendReleasePlan(planOptions, heldPlan);
+  need(CURRENT_WORKERS[heldPlan.application] === heldPlan.selectedWorker && heldPlan.accountId === STAGING_ACCOUNT_ID
+    && UUID.test(heldPlan.selectedActiveVersionId ?? '') && UUID.test(heldPlan.selectedLatestVersionId ?? ''),
+  'Current plan does not name a fixed staging Worker');
+  const template = heldPlan.versionCreateTemplate;
+  need(template?.account_id === STAGING_ACCOUNT_ID && template.deploy === false
+    && Array.isArray(template.modules) && template.modules.length === 2
+    && template.modules[0].name === template.main_module && template.modules[1].name === `${template.main_module}.map`
+    && !Object.hasOwn(template, 'assets') && Array.isArray(template.bindings)
+    && !template.bindings.some(row => row.name === 'ASSETS')
+    && template.bindings.every(row => row.type === 'inherit' && row.version_id === heldPlan.selectedActiveVersionId)
+    && equal(template.exports, heldPlan.expectedUnchangedExports),
+  'Current v4 template must preserve exact exports and explicitly inherit every active non-asset binding');
+  const baseline = heldPlan.expectedUnchangedResources.bindings.filter(row => row.name !== 'ASSETS');
+  need(baseline.length === template.bindings.length
+    && baseline.every(row => template.bindings.some(item => item.name === row.name)),
+  'Current v4 template binding inventory must match the full captured baseline');
   return heldPlan;
 }
 
@@ -364,7 +397,7 @@ function safeVersionCreateTemplate(plan, completionJwt) {
   return params;
 }
 
-function checkReadback(readback, candidateVersionId, plan, candidateParams) {
+function checkReadback(readback, candidateVersionId, plan, candidateParams, currentProfile = false) {
   const keys = ['latestVersionId','deployment','candidate'];
   const deployments = readback?.deployment;
   const exactRows = Array.isArray(deployments) && deployments.every(row => ownKeysAre(row, ['versionId','percentage']));
@@ -410,17 +443,17 @@ function checkReadback(readback, candidateVersionId, plan, candidateParams) {
   const baselineAssets = plan.expectedUnchangedResources.bindings.filter(row => row.name === 'ASSETS');
   need(equal(baselineAssets, [{ name: 'ASSETS', type: 'assets' }]),
     'Pinned active capsule must contain the exact native ASSETS binding');
-  const reviewedServices = candidateParams.bindings.filter(row => row.type === 'service').map(row => {
+  const reviewedServices = currentProfile ? [] : candidateParams.bindings.filter(row => row.type === 'service').map(row => {
     if (plan.application !== 'client' || row.name !== 'OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES'
       || row.service !== 'ledgetop-ops-staging' || row.entrypoint !== 'OperationsNativePrincipalInquiryIngress'
       || Object.hasOwn(row, 'environment')) return row;
     // Cloudflare resolves the omitted service environment to `production`.
     return { ...row, environment: 'production' };
   });
-  const expectedResolvedBindings = [
-    ...plan.expectedUnchangedResources.bindings.filter(row => row.name !== 'OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES'),
-    ...reviewedServices,
-  ].sort((a, b) => a.name.localeCompare(b.name));
+  const expectedResolvedBindings = currentProfile
+    ? plan.expectedUnchangedResources.bindings.slice().sort((a, b) => a.name.localeCompare(b.name))
+    : [ ...plan.expectedUnchangedResources.bindings.filter(row => row.name !== 'OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES'),
+      ...reviewedServices ].sort((a, b) => a.name.localeCompare(b.name));
   const actualResolvedBindings = candidate.resolvedBindings;
   need(actualResolvedBindings.every(row => row && typeof row === 'object' && row.type !== 'inherit')
     && new Set(actualResolvedBindings.map(row => row?.name)).size === actualResolvedBindings.length
@@ -444,10 +477,40 @@ export function validateStagingBackendAssetCandidateReadback({ readback, candida
   return checkReadback(readback, candidateVersionId, heldPlan, candidateParams);
 }
 
+export function validateCurrentStagingBackendAssetCoverageEvidence({ coverageEvidenceFile, heldPlan, now = () => Date.now() } = {}) {
+  need(heldPlan?.schemaVersion === 4 && heldPlan.contract === 'staging-backend-only-current-profile-v4'
+    && heldPlan.sourceCommit === CURRENT_SOURCE_COMMIT && heldPlan.held === true && heldPlan.executionAllowed === false
+    && CURRENT_WORKERS[heldPlan.application] === heldPlan.selectedWorker && typeof now === 'function',
+  'A held current-profile v4 staging plan and clock are required');
+  const checked = checkedCoverageEvidence(coverageEvidenceFile, heldPlan, now());
+  return { evidenceSHA256: checked.fileSHA256, observedAt: checked.observedAt,
+    window: checked.window, releaseCount: checked.releaseCount, requiredAssetCount: checked.requiredAssetCount };
+}
+
+export function validateCurrentStagingBackendAssetMaterialization({ heldPlan, hashBlake3 } = {}) {
+  need(heldPlan?.schemaVersion === 4 && heldPlan.contract === 'staging-backend-only-current-profile-v4'
+    && heldPlan.sourceCommit === CURRENT_SOURCE_COMMIT && heldPlan.held === true && heldPlan.executionAllowed === false
+    && heldPlan.deploymentEnabled === false && heldPlan.assetsUploadRequired === true && heldPlan.assetJwtIncluded === false
+    && heldPlan.accountId === STAGING_ACCOUNT_ID && CURRENT_WORKERS[heldPlan.application] === heldPlan.selectedWorker,
+  'Only a held, exact source-pinned current-profile v4 staging plan can be locally byte-validated');
+  const verified = verifyAssetFiles(heldPlan, hashBlake3);
+  const totalBytes = [...verified.files.values()].reduce((sum, file) => sum + file.size, 0);
+  return { application: heldPlan.application, fileCount: verified.files.size, uniqueUploadCount: verified.uploads.size,
+    duplicateContentPathCount: verified.files.size - verified.uploads.size, totalBytes };
+}
+
+export function validateCurrentStagingBackendAssetCandidateReadback({ readback, candidateVersionId, heldPlan, candidateParams } = {}) {
+  need(heldPlan?.schemaVersion === 4 && heldPlan.contract === 'staging-backend-only-current-profile-v4'
+    && heldPlan.sourceCommit === CURRENT_SOURCE_COMMIT && heldPlan.held === true && heldPlan.executionAllowed === false && UUID.test(candidateVersionId ?? '')
+    && candidateParams && typeof candidateParams === 'object',
+  'A held current-profile v4 plan, candidate ID and exact request are required');
+  return checkReadback(readback, candidateVersionId, heldPlan, candidateParams, true);
+}
+
 /** Create a single held staging candidate. All mutations are one-shot and
  * journaled before submission; a failed/uncertain step is never retried. */
-export function createStagingBackendAssetCandidateUploader({ sdk, uploadBucket, readFreshControls,
-  readCandidateState, journal, hashBlake3, now = () => Date.now() } = {}) {
+function createAssetCandidateUploader({ sdk, uploadBucket, readFreshControls,
+  readCandidateState, journal, hashBlake3, now = () => Date.now(), currentProfile = false } = {}) {
   need(sdk && typeof sdk.createAssetUploadSession === 'function' && typeof sdk.createVersion === 'function'
     && typeof uploadBucket === 'function' && typeof readFreshControls === 'function'
     && typeof readCandidateState === 'function' && typeof now === 'function',
@@ -455,17 +518,21 @@ export function createStagingBackendAssetCandidateUploader({ sdk, uploadBucket, 
   const oneAttemptJournal = checkedJournal(journal);
 
   return async function createCandidate({ planOptions, heldPlan, runtimeProofFile, coverageEvidenceFile } = {}) {
-    checkedHeldPlan(planOptions, heldPlan);
+    currentProfile ? checkedCurrentHeldPlan(planOptions, heldPlan) : checkedHeldPlan(planOptions, heldPlan);
     verifyRuntimeProof(runtimeProofFile);
     let lastObservedAt = isoMs(heldPlan.controlsCapture.observedAt);
     let token;
-    const planKey = `${heldPlan.application}/${heldPlan.selectedWorker}/${heldPlan.selectedActiveVersionId}/${SOURCE_COMMIT}`;
+    const sourceCommit = currentProfile ? CURRENT_SOURCE_COMMIT : SOURCE_COMMIT;
+    // Preserve consumed v3 journal keys exactly; only the new contract gets a
+    // namespace prefix. Renaming old keys could make a prior action replayable.
+    const planKey = `${currentProfile ? 'v4/' : ''}${heldPlan.application}/${heldPlan.selectedWorker}/${heldPlan.selectedActiveVersionId}/${sourceCommit}`;
 
     async function recheckBaseline(step) {
       let controlFile;
       try { controlFile = await readFreshControls(heldPlan.application, heldPlan.selectedWorker); }
       catch { throw new Error(`Fresh staging controls unavailable before ${step}; candidate held`); }
-      const fresh = compileStagingBackendReleasePlan({ ...planOptions, controlsFile: controlFile, now });
+      const compile = currentProfile ? compileCurrentStagingBackendReleasePlan : compileStagingBackendReleasePlan;
+      const fresh = compile({ ...planOptions, controlsFile: controlFile, now });
       const freshAt = isoMs(fresh.controlsCapture.observedAt);
       need(freshAt >= lastObservedAt && now() - freshAt <= 30 * 60_000,
         `Fresh staging controls moved backwards or became stale before ${step}`);
@@ -559,11 +626,24 @@ export function createStagingBackendAssetCandidateUploader({ sdk, uploadBucket, 
       try { readback = await readCandidateState(current.selectedWorker, candidateVersionId); }
       catch { return { candidateVersionId, readbackVerified: false }; }
       let readbackVerified = false;
-      try { readbackVerified = validateStagingBackendAssetCandidateReadback({ readback, candidateVersionId,
-        heldPlan: current, candidateParams: versionRequest }); } catch { /* return the candidate ID with a false readback status */ }
+      try {
+        readbackVerified = currentProfile
+          ? validateCurrentStagingBackendAssetCandidateReadback({ readback, candidateVersionId, heldPlan: current, candidateParams: versionRequest })
+          : validateStagingBackendAssetCandidateReadback({ readback, candidateVersionId, heldPlan: current, candidateParams: versionRequest });
+      } catch { /* return the candidate ID with a false readback status */ }
       return { candidateVersionId, readbackVerified };
     } finally {
       token = undefined;
     }
   };
+}
+
+export function createStagingBackendAssetCandidateUploader(options = {}) {
+  return createAssetCandidateUploader({ ...options, currentProfile: false });
+}
+
+/** Current-profile v4 successor: separate schema and journal namespace, with
+ * the same one-shot inactive candidate mechanics and no added Client binding. */
+export function createCurrentStagingBackendAssetCandidateUploader(options = {}) {
+  return createAssetCandidateUploader({ ...options, currentProfile: true });
 }

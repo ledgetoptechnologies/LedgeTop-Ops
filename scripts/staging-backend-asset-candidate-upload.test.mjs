@@ -9,7 +9,10 @@ import { canonical, hash } from './production-deploy.mjs';
 import { STAGING_ACCOUNT_ID } from './staging-requirements.mjs';
 import { compileStagingBackendReleasePlan } from './staging-backend-release-plan.mjs';
 import { createStagingBackendAssetCandidateUploader, validateStagingBackendAssetCoverageEvidence,
-  validateStagingBackendAssetMaterialization, validateStagingBackendAssetCandidateReadback } from './staging-backend-asset-candidate-upload.mjs';
+  validateStagingBackendAssetMaterialization, validateStagingBackendAssetCandidateReadback,
+  createCurrentStagingBackendAssetCandidateUploader, validateCurrentStagingBackendAssetCandidateReadback,
+  validateCurrentStagingBackendAssetCoverageEvidence, validateCurrentStagingBackendAssetMaterialization }
+  from './staging-backend-asset-candidate-upload.mjs';
 
 const OPS = '1ffe4525-7e29-4ea2-a407-726abf7f10c6';
 const CLIENT = '3ba4c8c9-70b4-4696-810f-0503f512e728';
@@ -410,6 +413,14 @@ test('an uncertain upload-session POST is journaled and never retried', async t 
   assert.equal(reserves, 1); assert.equal(completions, 1); assert.equal(state.calls.length, 1);
 });
 
+test('legacy consumed journal keys remain consumed after adding the v4 contract', async t => {
+  const f = fixture(t), state = harness(f, { session: { buckets: [], jwt: 'u'.repeat(24) } });
+  state.journal.add(`${f.heldPlan.application}/${f.heldPlan.selectedWorker}/${f.heldPlan.selectedActiveVersionId}/${SOURCE}/asset-upload-session`);
+  await assert.rejects(state.adapter({ planOptions: f.planOptions, heldPlan: f.heldPlan,
+    runtimeProofFile: f.runtimeProofFile, coverageEvidenceFile: f.coverageFile }), /refusing replay/);
+  assert.deepEqual(state.calls, []);
+});
+
 test('coverage path conflicts and expired observations are refused before SDK calls', async t => {
   const f = fixture(t), state = harness(f, { session: { buckets: [], jwt: 'u'.repeat(24) } });
   const conflict = clone(f.coverageBody);
@@ -429,4 +440,113 @@ test('the v2/offline plan cannot be promoted into a candidate upload', async t =
   const v2 = clone(f.heldPlan); v2.schemaVersion = 2;
   await assert.rejects(state.adapter({ planOptions: f.planOptions, heldPlan: v2, runtimeProofFile: f.runtimeProofFile, coverageEvidenceFile: f.coverageFile }));
   assert.deepEqual(state.calls, []);
+});
+
+const currentPlanRoot = process.env.LEDGETOP_STAGING_CURRENT_PROFILE_PLAN_ROOT;
+test('v4 readback preserves the exact current Client binding inventory and old v3 API refuses it', t => {
+  if (!currentPlanRoot) return t.skip('current-profile held plans are not configured');
+  const planOptions = JSON.parse(fs.readFileSync(path.join(currentPlanRoot, 'client', 'plan-options.private.json'), 'utf8'));
+  const heldPlan = JSON.parse(fs.readFileSync(path.join(currentPlanRoot, 'client', 'successor.held.json'), 'utf8'));
+  assert.equal(heldPlan.schemaVersion, 4);
+  assert.equal(heldPlan.sourceCommit, 'b22abeccd1889ed2f745db98c6123bafa5820b97');
+  assert.equal(heldPlan.expectedUnchangedResources.bindings.length, 125);
+  assert.equal(heldPlan.versionCreateTemplate.bindings.length, 124);
+  assert.ok(heldPlan.versionCreateTemplate.bindings.some(row => row.name === 'OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES'
+    && row.type === 'inherit' && row.version_id === heldPlan.selectedActiveVersionId));
+  const candidateParams = clone(heldPlan.versionCreateTemplate);
+  candidateParams.bindings = [...candidateParams.bindings, { name: 'ASSETS', type: 'assets' }].sort((a, b) => a.name.localeCompare(b.name));
+  candidateParams.assets = { config: clone(heldPlan.assetUploadRecipe.assetsConfig), jwt: 'synthetic-in-memory-token' };
+  candidateParams.deploy = false; candidateParams.bindings_inherit = 'strict';
+  const resolvedBindings = clone(heldPlan.expectedUnchangedResources.bindings)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const readback = { latestVersionId: CANDIDATE, deployment: [{ versionId: heldPlan.selectedActiveVersionId, percentage: 100 }], candidate: {
+    id: CANDIDATE, mainModule: candidateParams.main_module,
+    modules: candidateParams.modules.map((module, index) => ({ name: module.name,
+      bytes: index === 0 ? heldPlan.artifact.main.size : heldPlan.artifact.sourceMap.size,
+      sha256: index === 0 ? heldPlan.artifact.main.sha256 : heldPlan.artifact.sourceMap.sha256,
+      content_type: module.content_type })), resolvedBindings,
+    assetsConfig: candidateParams.assets.config, compatibilityDate: candidateParams.compatibility_date,
+    compatibilityFlags: candidateParams.compatibility_flags, exports: candidateParams.exports,
+  } };
+  assert.equal(validateCurrentStagingBackendAssetCandidateReadback({ readback, candidateVersionId: CANDIDATE, heldPlan, candidateParams }), true);
+  const missingExisting = clone(readback);
+  missingExisting.candidate.resolvedBindings = missingExisting.candidate.resolvedBindings
+    .filter(row => row.name !== 'OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES');
+  assert.throws(() => validateCurrentStagingBackendAssetCandidateReadback({ readback: missingExisting,
+    candidateVersionId: CANDIDATE, heldPlan, candidateParams }));
+  assert.throws(() => validateStagingBackendAssetCandidateReadback({ readback, candidateVersionId: CANDIDATE, heldPlan, candidateParams }));
+  const coverageFile = { path: path.join(currentPlanRoot, 'client', 'successor.coverage.json'),
+    sha256: hash(fs.readFileSync(path.join(currentPlanRoot, 'client', 'successor.coverage.json'))) };
+  const coverageObservedAt = Date.parse(JSON.parse(fs.readFileSync(coverageFile.path, 'utf8')).observedAt);
+  const coverage = validateCurrentStagingBackendAssetCoverageEvidence({ coverageEvidenceFile: coverageFile,
+    heldPlan, now: () => coverageObservedAt + 1_000 });
+  assert.ok(coverage.requiredAssetCount > 0);
+  const wrongSource = clone(heldPlan); wrongSource.sourceCommit = SOURCE;
+  assert.throws(() => validateCurrentStagingBackendAssetMaterialization({ heldPlan: wrongSource,
+    hashBlake3: () => assert.fail('wrong source must stop before reading assets') }));
+  assert.equal(typeof createCurrentStagingBackendAssetCandidateUploader, 'function');
+});
+
+test('the v4 uploader rejects a v3 plan before any mocked mutation', async t => {
+  const f = fixture(t), calls = [];
+  const adapter = createCurrentStagingBackendAssetCandidateUploader({ sdk: {
+    async createAssetUploadSession() { calls.push('session'); assert.fail('wrong-schema plan must stop before SDK'); },
+    async createVersion() { calls.push('version'); assert.fail('wrong-schema plan must stop before SDK'); },
+  }, uploadBucket: async () => { calls.push('bucket'); assert.fail('wrong-schema plan must stop before upload'); },
+  async readFreshControls() { calls.push('controls'); return f.controlsFile; },
+  async readCandidateState() { calls.push('readback'); return undefined; },
+  journal: { async reserve() { calls.push('journal'); return true; }, async complete() {} },
+  hashBlake3: f.hashBlake3, now: () => f.fixedNow });
+  await assert.rejects(adapter({ planOptions: f.planOptions, heldPlan: f.heldPlan,
+    runtimeProofFile: f.runtimeProofFile, coverageEvidenceFile: f.coverageFile }));
+  assert.deepEqual(calls, []);
+});
+
+test('actual current Client assets traverse the v4 mock uploader without adding services or weakening the v3 entry point', async t => {
+  if (!currentPlanRoot) return t.skip('current-profile held plans are not configured');
+  const f = fixture(t), planOptions = JSON.parse(fs.readFileSync(path.join(currentPlanRoot, 'client', 'plan-options.private.json')));
+  const heldPlan = JSON.parse(fs.readFileSync(path.join(currentPlanRoot, 'client', 'successor.held.json')));
+  const coveragePath = path.join(currentPlanRoot, 'client', 'successor.coverage.json');
+  const coverageEvidenceFile = { path: coveragePath, sha256: hash(fs.readFileSync(coveragePath)) };
+  const observed = Date.parse(JSON.parse(fs.readFileSync(coveragePath)).observedAt);
+  const mutations = [], reservations = new Set(); let request;
+  const options = {
+    sdk: {
+      async createAssetUploadSession(worker, body, policy) {
+        mutations.push('session'); assert.equal(worker, heldPlan.selectedWorker);
+        assert.equal(policy.maxRetries, 0); assert.equal(Object.keys(body.manifest).length, 217);
+        return { buckets: [], jwt: 'synthetic-completion-token-0001' };
+      },
+      async createVersion(worker, body, policy) {
+        mutations.push('version'); assert.equal(worker, heldPlan.selectedWorker); assert.equal(policy.maxRetries, 0);
+        assert.equal(body.deploy, false); assert.equal(body.bindings_inherit, 'strict');
+        assert.equal(body.bindings.filter(row => row.type === 'service').length, 0);
+        assert.equal(body.bindings.length, 125); request = body; return { id: CANDIDATE };
+      },
+    },
+    uploadBucket: async () => assert.fail('cache-hit mock has no upload bucket'),
+    async readFreshControls() { return planOptions.controlsFile; },
+    async readCandidateState() {
+      return { latestVersionId: CANDIDATE, deployment: [{ versionId: heldPlan.selectedActiveVersionId, percentage: 100 }],
+        candidate: { id: CANDIDATE, mainModule: request.main_module,
+          modules: [{ name: request.main_module, bytes: heldPlan.artifact.main.size, sha256: heldPlan.artifact.main.sha256,
+            content_type: 'application/javascript+module' }],
+          resolvedBindings: clone(heldPlan.expectedUnchangedResources.bindings).sort((a, b) => a.name.localeCompare(b.name)),
+          assetsConfig: request.assets.config, compatibilityDate: request.compatibility_date,
+          compatibilityFlags: request.compatibility_flags, exports: request.exports } };
+    },
+    journal: { async reserve(key) { assert.match(key, /^v4\//); if (reservations.has(key)) return false; reservations.add(key); return true; },
+      async complete(key) { assert.ok(reservations.has(key)); } },
+    hashBlake3: f.hashBlake3, now: () => observed + 1_000,
+  };
+  // The legacy export must not accept a caller-supplied strategy switch.
+  const legacy = createStagingBackendAssetCandidateUploader({ ...options, currentProfile: true });
+  await assert.rejects(legacy({ planOptions, heldPlan, coverageEvidenceFile, runtimeProofFile: f.runtimeProofFile }), /held v3/);
+  assert.deepEqual(mutations, []);
+  const upload = createCurrentStagingBackendAssetCandidateUploader(options);
+  assert.deepEqual(await upload({ planOptions, heldPlan, coverageEvidenceFile, runtimeProofFile: f.runtimeProofFile }),
+    { candidateVersionId: CANDIDATE, readbackVerified: true });
+  assert.deepEqual(mutations, ['session', 'version']);
+  await assert.rejects(upload({ planOptions, heldPlan, coverageEvidenceFile, runtimeProofFile: f.runtimeProofFile }), /refusing replay/);
+  assert.deepEqual(mutations, ['session', 'version']);
 });
