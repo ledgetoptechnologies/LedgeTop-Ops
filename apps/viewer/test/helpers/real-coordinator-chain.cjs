@@ -5,15 +5,16 @@ const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypt
 const {checkPilotBoundary,sealPilotDbIdentity,verifyPilotDbIdentity}=require('./pilot-fixture-boundary.cjs');
 const {copyPilotPhotos}=require('./pilot-photo-fixture.cjs'),{readPilotIdentity}=require('./pilot-identity.cjs');
 const {executePilotJob}=require('./pilot-job.cjs'),{readTerminalReceipt}=require('./pilot-receipts.cjs');
+const {authorizePilotPhase}=require('./pilot-phase-authorization.cjs');
 const root=process.env.VIEWER_FIXTURE_ROOT,input=process.env.VIEWER_FIXTURE_PHOTOS,endpoint=process.env.VIEWER_FIXTURE_COORDINATOR,token=process.env.TEST_VIEWER_TOKEN,key=process.env.VIEWER_FIXTURE_KEY,phase=process.argv[2];
 if(!root||!input||!endpoint||!token?.startsWith('synthetic-')||!key||!['prepare','submit','status','finish','resume-ingest'].includes(phase))throw Error('missing disposable fixture configuration');
 // These checks are defense in depth only. The supervisor must independently
 // enforce the private mount/network namespace and exclusive fixture ownership.
 const ownerId=process.env.VIEWER_FIXTURE_OWNER;
-// Only the in-process, network-free test provider can run later phases until
-// the real supervisor and receipt handoff have been reviewed.
+// The marker is issued by the isolated supervisor for one explicit phase.
+// It does not replace supervisor-enforced isolation, deadlines, or no-replay.
 const synthetic=process.env.LTDS_PILOT_SYNTHETIC_TEST==='1';
-if(phase!=='prepare'&&!synthetic)throw Error('pilot execution held pending integrated supervision and receipt review');
+authorizePilotPhase({phase,synthetic,enabled:process.env.VIEWER_PILOT_REAL_ENABLED,ownerId,nonce:process.env.VIEWER_PILOT_PHASE_NONCE});
 if(synthetic)require('./pilot-synthetic-fetch.cjs');
 const {openDatabase}=require('../../server/database'),{ProcessingRepository}=require('../../server/processingRepository'),{ViewerRepository}=require('../../server/repository'),{StorageManager}=require('../../server/storageManager'),{ProviderCredentials}=require('../../server/providerCredentials'),{processSubmit,processReconcile,processIngest,attemptCapability}=require('../../server/processingWorker'),{NodeOdmProvider}=require('../../server/nodeOdmProvider');
 checkPilotBoundary({root,input,endpoint,ownerId,phase});
