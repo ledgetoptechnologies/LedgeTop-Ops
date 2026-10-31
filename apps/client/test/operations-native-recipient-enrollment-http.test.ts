@@ -93,6 +93,10 @@ describe("Ops-native individual consent HTTP boundary", () => {
     for (const malformed of [
       { permissionSchemaVersion: 3, permissions: ["operations.request.create"] },
       { permissionSchemaVersion: 5, permissions: ["operations.service_home.read"] },
+      { permissionSchemaVersion: null, permissions: null },
+      { permissionSchemaVersion: null, permissions: ["operations.service_home.read"] },
+      { permissionSchemaVersion: undefined, permissions: ["operations.service_home.read"] },
+      { permissionSchemaVersion: 3, permissions: undefined },
       { permissionSchemaVersion: 3, permissions: ["operations.service_home.read"], extra: true },
     ]) {
       d.binding!.inspectNativeEnrollment = vi.fn().mockResolvedValue(JSON.stringify({ intentId, revision: 1, state: "issued",

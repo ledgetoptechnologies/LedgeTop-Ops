@@ -170,8 +170,9 @@ export async function handleOperationsNativeRecipientEnrollmentHttp(request: Req
       if (!fresh()) return response({ error: "Sign-in required" }, 401);
       const selected = result && exact(result.target, ["targetId", "targetRevision", "clientRecordId", "displayLabel"]);
       const selectedTarget = selected && target({ targetId: selected.targetId, targetRevision: selected.targetRevision, clientRecordId: selected.clientRecordId });
-      const version = result?.permissionSchemaVersion ?? 3;
-      const permissions = result?.permissions ?? ["operations.service_home.read"];
+      const hasCapabilityMetadata = result !== null && (Object.hasOwn(result, "permissionSchemaVersion") || Object.hasOwn(result, "permissions"));
+      const version = hasCapabilityMetadata ? result?.permissionSchemaVersion : 3;
+      const permissions = hasCapabilityMetadata ? result?.permissions : ["operations.service_home.read"];
       const parsedPermissions = parseOperationsPortalNativeRecipientCapabilities(version, "recipient.grant", permissions);
       if (!result || result.intentId !== input.intentId || result.revision !== 1 || result.state !== "issued"
         || !selectedTarget || typeof selected?.displayLabel !== "string" || !selected.displayLabel.trim()
