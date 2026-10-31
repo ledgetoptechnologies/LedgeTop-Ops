@@ -124,10 +124,29 @@ test("a link that includes service requests says so, and the recipient accepts e
     acknowledgedPermissionSchemaVersion: 4, acknowledgedPermissions: ["operations.request.create", "operations.service_home.read"] });
 });
 
+// Old backends and new ones replying for home-only links send exactly the original five keys.
+test("a link with no access metadata is view-only, and its consent keeps the original body exactly", async ({ page }) => {
+  const redeems = await mockNative(page, {});
+  await page.goto(`${nativeOrigin}${path}#${opaqueToken}`);
+  await expect(page.locator(".client-recipient-access li")).toHaveText(["View your service home"]);
+  await page.getByRole("checkbox", { name: /I confirm this is the client account/ }).check();
+  await page.getByRole("button", { name: "Submit for administrator review" }).click();
+  await expect(page.getByRole("heading", { name: "Confirmation submitted" })).toBeVisible();
+  expect(redeems).toEqual([{ intentId, opaqueToken, operationId: expect.any(String), acknowledged: true,
+    acknowledgedTarget: { targetId, targetRevision: 2, clientRecordId: target.clientRecordId } }]);
+});
+
 for (const [name, access] of [
-  ["isn't stated", {}],
   ["isn't one the portal knows", { permissions: ["operations.request.create"], permissionSchemaVersion: 4 }],
   ["doesn't match its version", { ...requestAccess, permissionSchemaVersion: 3 }],
+  ["has an unknown version", { ...homeAccess, permissionSchemaVersion: 5 }],
+  ["lists no permissions", { permissions: [], permissionSchemaVersion: 3 }],
+  ["isn't a list", { permissions: "operations.service_home.read", permissionSchemaVersion: 3 }],
+  ["is null", { permissions: null, permissionSchemaVersion: null }],
+  ["has a version but no permissions", { permissionSchemaVersion: 4 }],
+  ["has permissions but no version", { permissions: requestAccess.permissions }],
+  ["comes with an unexpected field", { ...homeAccess, capabilityStatus: "pending" }],
+  ["has only an unexpected field", { capabilityStatus: "pending" }],
 ] as const)
   test(`a link whose access ${name} can't be confirmed`, async ({ page }) => {
     const redeems = await mockNative(page, access);
