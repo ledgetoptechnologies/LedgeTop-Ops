@@ -52,6 +52,8 @@ export interface Env {
   CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST?: string;
   CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED?: string;
   CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED?: string;
+  /** Default-off private mirror for the v4 request.create companion. */
+  CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED?: string;
   /** Explicit production deployment assertion; verify physical bindings before activation. */
   CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE?: string;
   /** Default-off native delivery command consumer. Persistence alone never grants byte access. */
