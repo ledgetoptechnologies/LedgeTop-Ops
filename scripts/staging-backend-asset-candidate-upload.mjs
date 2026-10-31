@@ -366,11 +366,16 @@ function safeVersionCreateTemplate(plan, completionJwt) {
 
 function checkReadback(readback, candidateVersionId, plan, candidateParams) {
   const keys = ['latestVersionId','deployment','candidate'];
-  need(ownKeysAre(readback, keys) && Array.isArray(readback.deployment) && readback.deployment.length === 1
-    && ownKeysAre(readback.deployment[0], ['versionId','percentage'])
-    && readback.deployment[0].versionId === plan.selectedActiveVersionId && readback.deployment[0].percentage === 100
-    && readback.latestVersionId === candidateVersionId,
-  'Fresh candidate readback did not preserve the baseline 100% deployment and identify the candidate as latest');
+  const deployments = readback?.deployment;
+  const exactRows = Array.isArray(deployments) && deployments.every(row => ownKeysAre(row, ['versionId','percentage']));
+  const baseline100 = exactRows && deployments.length > 0 && deployments.filter(row =>
+    row.versionId === plan.selectedActiveVersionId && row.percentage === 100).length === 1;
+  const oldOnly = deployments?.length === 1 && baseline100;
+  const exactSmoke = deployments?.length === 2 && baseline100
+    && new Set(deployments.map(row => row.versionId)).size === 2
+    && deployments.filter(row => row.versionId === candidateVersionId && row.percentage === 0).length === 1;
+  need(ownKeysAre(readback, keys) && (oldOnly || exactSmoke) && readback.latestVersionId === candidateVersionId,
+  'Fresh candidate readback must keep the baseline at 100%, optionally add this candidate at exactly 0%, and identify it as latest');
   const candidate = readback.candidate;
   need(ownKeysAre(candidate, ['id','mainModule','modules','resolvedBindings','assetsConfig','compatibilityDate','compatibilityFlags','exports'])
     && candidate.id === candidateVersionId && candidate.mainModule === candidateParams.main_module

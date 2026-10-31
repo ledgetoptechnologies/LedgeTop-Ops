@@ -232,6 +232,31 @@ test('readback requires native ASSETS and the exact production-defaulted Client 
   }
 });
 
+test('readback accepts only the exact zero-percent candidate smoke phase', t => {
+  const f = fixture(t), candidateParams = candidateParamsFor(f), valid = readbackFor(f, candidateParams);
+  const smoke = clone(valid);
+  smoke.deployment = [
+    { versionId: f.baselineVersionId, percentage: 100 },
+    { versionId: CANDIDATE, percentage: 0 },
+  ];
+  assert.equal(validateStagingBackendAssetCandidateReadback({ readback: smoke, candidateVersionId: CANDIDATE,
+    heldPlan: f.heldPlan, candidateParams }), true);
+
+  for (const deployment of [
+    [{ versionId: f.baselineVersionId, percentage: 100 }, { versionId: CANDIDATE, percentage: 1 }],
+    [{ versionId: f.baselineVersionId, percentage: 100 }, { versionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', percentage: 0 }],
+    [{ versionId: f.baselineVersionId, percentage: 100 }, { versionId: f.baselineVersionId, percentage: 0 }],
+    [{ versionId: f.baselineVersionId, percentage: 100 }, { versionId: CANDIDATE, percentage: 0 },
+      { versionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', percentage: 0 }],
+    [{ versionId: f.baselineVersionId, percentage: 0 }, { versionId: CANDIDATE, percentage: 100 }],
+  ]) {
+    const changed = clone(smoke);
+    changed.deployment = deployment;
+    assert.throws(() => validateStagingBackendAssetCandidateReadback({ readback: changed,
+      candidateVersionId: CANDIDATE, heldPlan: f.heldPlan, candidateParams }));
+  }
+});
+
 test('runtime module readback permits an omitted diagnostic source map but never omits the main module', t => {
   const f = fixture(t), candidateParams = candidateParamsFor(f), complete = readbackFor(f, candidateParams);
   const withoutMap = clone(complete);
