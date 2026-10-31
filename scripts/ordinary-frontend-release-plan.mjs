@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { canonical, hash, need, compileConfig, validateInstallation, validateReviewedExpectedDeploymentVersions,
-  ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256, ordinaryFrontendPreflightDescriptor } from './production-deploy.mjs';
+  ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
+  OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, ordinaryFrontendPreflightDescriptor } from './production-deploy.mjs';
 import { domainRecognitionProfile } from './production-domain-recognition.mjs';
 
 const equal = (a, b) => canonical(a) === canonical(b);
@@ -92,13 +93,18 @@ export function verifyOrdinaryFrontendArtifacts(release) {
 /** OFFLINE compiler only. The caller pins the source, complete capture and
  * resulting packet before a separately reviewed native versioned execution. */
 export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
-  profile = domainRecognitionProfile('portal-entry-canonical'), expectedDeploymentVersions, ordinaryFrontendPreflightMode } = {}) {
+  profile = domainRecognitionProfile('portal-entry-canonical'), expectedDeploymentVersions, ordinaryFrontendPreflightMode,
+  installedOpsSuccessorReaderContract } = {}) {
   need(['operations', 'client'].includes(app) && release?.application === app, 'Exact frontend application required');
+  need(installedOpsSuccessorReaderContract === undefined
+    || (installedOpsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT && app === 'client'),
+  'Installed Ops successor-reader recognition is an explicit Client-only read contract');
   const reviewedExpectedDeploymentVersions = validateReviewedExpectedDeploymentVersions(expectedDeploymentVersions);
   const before = clone(snapshot), beforeProfile = clone(profile);
   const installationPreflight = ordinaryFrontendPreflightDescriptor(beforeProfile, ordinaryFrontendPreflightMode);
   validateInstallation(before, { profile: beforeProfile, expectedDeploymentVersions: reviewedExpectedDeploymentVersions,
-    ...(ordinaryFrontendPreflightMode === undefined ? {} : { ordinaryFrontendPreflightMode, ordinaryFrontendApp: app }) });
+    ...(ordinaryFrontendPreflightMode === undefined ? {} : { ordinaryFrontendPreflightMode, ordinaryFrontendApp: app }),
+    opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
   const browserProof = verifyOrdinaryFrontendArtifacts(release);
   const state = before[app], bindings = state.version.resources.bindings;
   need(bindings.filter(row => row.name === 'ASSETS').length === 1
@@ -107,7 +113,8 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
   const assets = clone(state.modern.assets);
   need(assets && equal(Object.keys(assets), ['config']) && assets.config.base_path === '/'
     && Object.keys(assets.config).every(key => ['base_path', 'html_handling', 'not_found_handling', 'run_worker_first'].includes(key)), 'Unsupported installed asset configuration');
-  const config = compileConfig(before, app, release.main.path, beforeProfile, reviewedExpectedDeploymentVersions, ordinaryFrontendPreflightMode);
+  const config = compileConfig(before, app, release.main.path, beforeProfile, reviewedExpectedDeploymentVersions,
+    ordinaryFrontendPreflightMode, installedOpsSuccessorReaderContract);
   config.find_additional_modules = false;
   config.keep_vars = false;
   config.unsafe.metadata.keep_bindings = [];
@@ -128,6 +135,7 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
     }
   return freeze({ schemaVersion: 1, application: app, sourceCommit: release.sourceCommit,
     installationPreflight,
+    ...(installedOpsSuccessorReaderContract === undefined ? {} : { installedOpsSuccessorReaderContract }),
     ...(reviewedExpectedDeploymentVersions ? { expectedDeploymentVersions: clone(reviewedExpectedDeploymentVersions) } : {}),
     offlineOnly: true, deploymentEnabled: false, assetsUpload: true, historicalOrphanAssetsRetained: false,
     liveNamespaceVerified: false, nativeCompletionJwtMustRemainUnmodified: true,

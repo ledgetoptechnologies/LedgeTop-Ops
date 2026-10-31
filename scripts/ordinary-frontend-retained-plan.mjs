@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { canonical, hash, need, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
-  ORDINARY_FRONTEND_PREFLIGHT_MODE } from './production-deploy.mjs';
+  ORDINARY_FRONTEND_PREFLIGHT_MODE, OPS_SUCCESSOR_READER_INSTALLED_CONTRACT } from './production-deploy.mjs';
 import { validateOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
 import { collectFrontendAssets, ledgerBytes, mergeAssetLedger, preserveRootHtmlArchive, validateAssetLedger } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
@@ -42,9 +42,14 @@ export function validateInstalledRetainedLedger(snapshot, { app, workerName, acc
   return validateAssetLedger(ledger, { workerName, accountId });
 }
 
-function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, previousAssetBytes, observedAt } = {}) {
+function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, previousAssetBytes, observedAt,
+  installedOpsSuccessorReaderContract } = {}) {
   need(ordinaryPlan?.schemaVersion === 1 && ['operations', 'client'].includes(ordinaryPlan.application),
     'Version 1 pinned ordinary frontend plan required');
+  need(installedOpsSuccessorReaderContract === ordinaryPlan.installedOpsSuccessorReaderContract
+    && (installedOpsSuccessorReaderContract === undefined
+      || (installedOpsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT && ordinaryPlan.application === 'client')),
+  'Retained plan must preserve the exact selected read-only Ops recognition contract');
   need(ordinaryPlan.installationPreflight?.mode === ORDINARY_FRONTEND_PREFLIGHT_MODE
     && ordinaryPlan.installationPreflight.profileSHA256 === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256
     && profile && hash(canonical(profile)) === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
@@ -52,7 +57,7 @@ function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, 
   validateOrdinaryFrontendReleasePlan(snapshot, ordinaryPlan, { app: ordinaryPlan.application,
     release: ordinaryPlan.release, profile,
     ...(ordinaryPlan.expectedDeploymentVersions === undefined ? {} : { expectedDeploymentVersions: ordinaryPlan.expectedDeploymentVersions }),
-    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE });
+    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, installedOpsSuccessorReaderContract });
   const app = ordinaryPlan.application, workerName = WORKERS[app], accountId = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
   const parentVersionId = snapshot?.[app]?.version?.id;
   need(UUID.test(parentVersionId ?? ''), 'Captured active parent version is required');
@@ -81,6 +86,7 @@ function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, 
   const pinnedOrdinaryPlan = deepFreeze(structuredClone(ordinaryPlan));
   return deepFreeze({ schemaVersion: 2, contract: 'ordinary-frontend-retained-native-module-v2',
     application: app, workerName, accountId, sourceCommit: ordinaryPlan.sourceCommit, parentVersionId,
+    ...(installedOpsSuccessorReaderContract === undefined ? {} : { installedOpsSuccessorReaderContract }),
     rootHtmlArchive: retained.archive,
     ordinaryPlan: pinnedOrdinaryPlan, ordinaryPlanSHA256: planHash, retentionLedger: ledger, retentionLedgerSHA256: hash(bytes),
     nativeAdditionalModule: modulePin,
@@ -160,7 +166,7 @@ export function retainedNativeConfig(plan, staged) {
 
 /** Verify the v2 ledger plus exact main and provider-optional map while
  * delegating runtime, returned-map, binding and assets-config checks. */
-export function verifyOrdinaryFrontendRetainedCandidateModules({ before, plan, candidate, modern } = {}) {
+export function verifyOrdinaryFrontendRetainedCandidateModules({ before, plan, candidate, modern, opsSuccessorReaderContract } = {}) {
   need(plan?.schemaVersion === 2 && plan.contract === 'ordinary-frontend-retained-native-module-v2'
     && Array.isArray(modern?.modules) && modern.modules.length >= 2 && modern.modules.length <= 3
     && new Set(modern.modules.map(row => row?.name)).size === modern.modules.length,
@@ -178,7 +184,7 @@ export function verifyOrdinaryFrontendRetainedCandidateModules({ before, plan, c
     && ledger.sourceCommit === plan.sourceCommit, 'Candidate ledger lineage or identity mismatch');
   const nativeModules = modern.modules.filter(row => row.name !== module.name);
   const runtimeProof = verifyOrdinaryFrontendCandidateModules({ before, plan: plan.ordinaryPlan, candidate,
-    modern: { ...modern, modules: nativeModules }, allowProviderOmittedMap: true });
+    modern: { ...modern, modules: nativeModules }, allowProviderOmittedMap: true, opsSuccessorReaderContract });
   return Object.freeze({ ...runtimeProof, retainedLedgerModuleVerified: true,
     retainedLedgerSHA256: plan.retentionLedgerSHA256, retainedAssetCount: ledger.assets.length,
     retainedAssetBytes: ledger.assets.reduce((sum, row) => sum + row.size, 0) });
