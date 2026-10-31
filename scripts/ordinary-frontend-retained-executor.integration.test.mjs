@@ -16,6 +16,8 @@ import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness
 import { prepareOpsLegacyLedgerBootstrap, completeOpsLegacyLedgerBootstrap } from './ordinary-frontend-ops-ledger-bootstrap.mjs';
 import { ORDINARY_FRONTEND_AUTHORITY_CONTRACT } from './ordinary-frontend-authority.mjs';
 import { ORDINARY_FRONTEND_AUTHORITY_TABLES } from './ordinary-frontend-authority-reader.mjs';
+import { POST0226_LOGIN_TABLES, POST0226_STAFF_PRESERVATION_CONTRACT, createPost0226StaffPreservationReview }
+  from './ordinary-frontend-authority-post0226.mjs';
 
 const fixturePath = process.env.LEDGETOP_ORDINARY_FRONTEND_EXECUTOR_PRIVATE_FIXTURE;
 const opsBytePathsPath = process.env.LEDGETOP_ORDINARY_FRONTEND_EXECUTOR_OPS_BYTE_PATHS;
@@ -114,8 +116,24 @@ function syntheticFrontendAuthority(sourceCommit) {
     observedAt: new Date().toISOString(), snapshot: clone(snapshot) }) };
 }
 
-function harness(t, fixture, app, { failCandidateAssets = false, failStaff = false,
-  frontendAuthority = false, driftFrontendAuthorityAt = 0 } = {}) {
+async function syntheticPost0226StaffPreservation(sourceCommit) {
+  const capturedAt = Date.now(), rows = Object.fromEntries(Object.keys(POST0226_LOGIN_TABLES).map(table => [table,
+    { count:table === 'staff_login_binding_control' ? 1 : 0, sha256:hash(`${table}-empty-synthetic-state`) }]));
+  const tableCounts = Object.fromEntries(Object.keys(ORDINARY_FRONTEND_AUTHORITY_TABLES).map(table => [table, 0]));
+  tableCounts.staff_users = 1; tableCounts.staff_role_assignments = 1; tableCounts.native_staff_access_reconciliation = 1;
+  const state = { schemaVersion:1, contract:POST0226_STAFF_PRESERVATION_CONTRACT, sourceCommit,
+    accountId:NATIVE_STAFF_PRODUCTION_TARGET.accountId, databaseId:NATIVE_STAFF_PRODUCTION_TARGET.databaseId,
+    observedAt:new Date(capturedAt-5_000).toISOString(), baseSnapshotSha256:'a'.repeat(64), baseTableCounts:tableCounts,
+    loginSchemaSha256:'b'.repeat(64), loginRows:rows, loginRowsSha256:hash(canonical(rows)), bridgeMismatchCount:1,
+    nativeControlEnabled:0, legacyActiveStaffCount:1, preservationOnly:true, fullStaffCutoverReadiness:false,
+    aliasLinkingAuthorized:false, schemaSha256:'b'.repeat(64) };
+  const review = await createPost0226StaffPreservationReview(state, { sourceCommit, now:capturedAt,
+    reviewedAt:new Date(capturedAt).toISOString(), expiresAt:new Date(capturedAt+15*60_000).toISOString() });
+  return { review, observation:() => ({ ...clone(state), observedAt:new Date().toISOString() }) };
+}
+
+async function harness(t, fixture, app, { failCandidateAssets = false, failStaff = false,
+  frontendAuthority = false, driftFrontendAuthorityAt = 0, post0226Authority = false, driftPost0226At = 0 } = {}) {
   const before = clone(fixture.snapshot), artifact = assetFiles(t, app), sourceCommit = fixture.artifactSourceCommit;
   assert.ok(HEX40.test(sourceCommit)); artifact.release.sourceCommit = sourceCommit;
   const operationsExpected = { operations: clone(FIXED_OPS_WEIGHTS) };
@@ -207,9 +225,13 @@ function harness(t, fixture, app, { failCandidateAssets = false, failStaff = fal
   const sourceReader = sourceRoot => path.resolve(sourceRoot).toLowerCase() === path.resolve(fixture.artifactSourceRoot).toLowerCase()
     ? fixture.artifactSourceCommit : fixture.executorSourceCommit;
   const frontendPacket = frontendAuthority ? syntheticFrontendAuthority(sourceCommit) : null;
+  const post0226Packet = post0226Authority ? await syntheticPost0226StaffPreservation(sourceCommit) : null;
+  const post0226AuthorityPhases = [], post0226ReaderCalls = [];
   const frontendAuthorityPhases = [], options = { app, plan: retainedPlan, profile: fixture.profile, expectedDeploymentVersions,
-    assetVerifierProvider, ...(frontendAuthority ? { staffAuthorityContract: ORDINARY_FRONTEND_AUTHORITY_CONTRACT,
-      frontendAuthorityReview: frontendPacket.review } : { staffCutoverReview: { synthetic: true } }), reader, cli: fixture.cliPath,
+    assetVerifierProvider, ...(post0226Authority ? { staffAuthorityContract:POST0226_STAFF_PRESERVATION_CONTRACT,
+      post0226StaffPreservationReview:post0226Packet.review } : frontendAuthority
+      ? { staffAuthorityContract: ORDINARY_FRONTEND_AUTHORITY_CONTRACT, frontendAuthorityReview: frontendPacket.review }
+      : { staffCutoverReview: { synthetic: true } }), reader, cli: fixture.cliPath,
     journalDirectory, artifactSourceRoot: fixture.artifactSourceRoot, executorSourceRoot, sourceReader,
     captureFn, runNative, now: () => Date.now(),
     readFrontendAuthority: async () => {
@@ -220,13 +242,26 @@ function harness(t, fixture, app, { failCandidateAssets = false, failStaff = fal
         division_id: null, scope_key: 'global', created_by: 'staff:legacy', created_at: '2026-10-30 00:00:00' });
       return observation;
     },
+    readPost0226StaffPreservation: async args => {
+      post0226ReaderCalls.push(clone(args));
+      post0226AuthorityPhases.push(post0226AuthorityPhases.length + 1);
+      const observation = post0226Packet?.observation();
+      if (driftPost0226At === post0226AuthorityPhases.length) {
+        observation.baseSnapshotSha256 = 'c'.repeat(64);
+        observation.baseTableCounts.roles += 1;
+        observation.loginRowsSha256 = 'd'.repeat(64);
+        observation.nativeControlEnabled = 1;
+      }
+      return observation;
+    },
     readStaffCutover: async () => { staffPhases.push(staffPhases.length + 1); if (failStaff) throw new Error('synthetic held staff readiness'); return staffReadiness(sourceCommit); } };
   return { options, before, active, ordinaryPlan, retainedPlan, previousLedger, previousAssetBytes,
-    candidateAssets, candidateId, nativeCalls, providerEvents, staffPhases, frontendAuthorityPhases, journalDirectory };
+    candidateAssets, candidateId, nativeCalls, providerEvents, staffPhases, frontendAuthorityPhases, post0226AuthorityPhases,
+    post0226ReaderCalls, journalDirectory };
 }
 
 test('private sanitized fixture: full Client state machine preserves exact Ops 0/100 weights', { skip: !fixturePath }, async t => {
-  const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8')), h = harness(t, fixture, 'client');
+  const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8')), h = await harness(t, fixture, 'client');
   const result = await executeOrdinaryFrontendRetainedRelease(h.options);
   assert.equal(result.activated, true); assert.equal(result.candidateModulesVerified, true);
   assert.equal(result.nativeExecutionQualification.ready, false);
@@ -249,7 +284,7 @@ test('private sanitized fixture: full Client state machine preserves exact Ops 0
 });
 
 test('private sanitized fixture: full Ops state machine qualifies staff around every mutation and handles fractional cutover', { skip: !fixturePath || !opsBytePathsPath }, async t => {
-  const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8')), h = harness(t, fixture, 'operations');
+  const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8')), h = await harness(t, fixture, 'operations');
   const result = await executeOrdinaryFrontendRetainedRelease(h.options);
   assert.equal(result.activated, true); assert.equal(result.nativeExecutionQualification.ready, false);
   assert.deepEqual(h.nativeCalls.map(row => row.phase), ['upload', 'namespace-stage', 'activate']);
@@ -269,7 +304,7 @@ test('private sanitized fixture: full Ops state machine qualifies staff around e
 
 test('private sanitized fixture: explicit frontend-only contract checks every Ops phase without native cutover reads', { skip: !fixturePath || !opsBytePathsPath }, async t => {
   const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
-  const h = harness(t, fixture, 'operations', { frontendAuthority: true });
+  const h = await harness(t, fixture, 'operations', { frontendAuthority: true });
   const result = await executeOrdinaryFrontendRetainedRelease(h.options);
   assert.equal(result.activated, true);
   assert.deepEqual(h.nativeCalls.map(row => row.phase), ['upload','namespace-stage','activate']);
@@ -279,9 +314,49 @@ test('private sanitized fixture: explicit frontend-only contract checks every Op
   assert.equal(h.providerEvents.filter(row => row[0] === 'remove').length, 3);
 });
 
+test('private sanitized fixture: separate post-0226 preservation contract accepts sequential unchanged reads through activation',
+  { skip: !fixturePath || !opsBytePathsPath }, async t => {
+    const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+    const h = await harness(t, fixture, 'operations', { post0226Authority:true });
+    const result = await executeOrdinaryFrontendRetainedRelease(h.options);
+    assert.equal(result.activated, true);
+    assert.equal(h.post0226AuthorityPhases.length, 8);
+    assert.equal(h.post0226ReaderCalls.every(args => !Object.hasOwn(args, 'review')), true,
+      'executor receives a raw observation and validates it against the separate post-0226 review');
+    assert.deepEqual(h.staffPhases, [], 'post-0226 preservation does not invoke native cutover readiness');
+    assert.deepEqual(h.frontendAuthorityPhases, [], 'post-0226 review is not passed through the pre-0226 reader');
+    assert.deepEqual(h.nativeCalls.map(row => row.phase), ['upload','namespace-stage','activate']);
+  });
+
+test('private sanitized fixture: post-0226 role/profile/login drift holds before activation without retry',
+  { skip: !fixturePath || !opsBytePathsPath }, async t => {
+    const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+    const h = await harness(t, fixture, 'operations', { post0226Authority:true, driftPost0226At:5 });
+    await assert.rejects(executeOrdinaryFrontendRetainedRelease(h.options), /reviewed_staff_login_or_authority_state_changed/u);
+    assert.equal(h.post0226AuthorityPhases.length, 5);
+    assert.deepEqual(h.nativeCalls.map(row => row.phase), ['upload','namespace-stage']);
+    assert.equal(h.nativeCalls.some(row => row.phase === 'activate'), false);
+    assert.equal(h.staffPhases.length, 0);
+  });
+
+test('post-0226 contract rejects mixed authority packets and Client selection before any mutation',
+  { skip: !fixturePath || !opsBytePathsPath }, async t => {
+    const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+    const ops = await harness(t, fixture, 'operations', { post0226Authority:true });
+    ops.options.staffCutoverReview = { synthetic:true };
+    await assert.rejects(executeOrdinaryFrontendRetainedRelease(ops.options), /Post-0226 frontend release requires only its separate preservation review/u);
+    assert.deepEqual(ops.nativeCalls, []); assert.deepEqual(ops.providerEvents, []);
+    assert.equal(fs.existsSync(ops.journalDirectory), false);
+
+    const client = await harness(t, fixture, 'client', { post0226Authority:true });
+    await assert.rejects(executeOrdinaryFrontendRetainedRelease(client.options), /Client release cannot select an Operations-only authority contract/u);
+    assert.deepEqual(client.nativeCalls, []); assert.deepEqual(client.providerEvents, []);
+    assert.equal(fs.existsSync(client.journalDirectory), false);
+  });
+
 test('private sanitized fixture: reviewed authority drift holds before the next native version mutation', { skip: !fixturePath || !opsBytePathsPath }, async t => {
   const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
-  const h = harness(t, fixture, 'operations', { frontendAuthority: true, driftFrontendAuthorityAt: 2 });
+  const h = await harness(t, fixture, 'operations', { frontendAuthority: true, driftFrontendAuthorityAt: 2 });
   await assert.rejects(executeOrdinaryFrontendRetainedRelease(h.options), /reviewed_staff_or_control_state_changed/u);
   assert.equal(h.frontendAuthorityPhases.length, 2);
   assert.deepEqual(h.staffPhases, [], 'frontend-only drift does not fall back to native cutover readiness');
@@ -292,7 +367,7 @@ test('private sanitized fixture: reviewed authority drift holds before the next 
 });
 
 test('private sanitized fixture: ambiguous Client asset failure after one upload and namespace stage does not activate or retry', { skip: !fixturePath }, async t => {
-  const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8')), h = harness(t, fixture, 'client', { failCandidateAssets: true });
+  const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8')), h = await harness(t, fixture, 'client', { failCandidateAssets: true });
   await assert.rejects(executeOrdinaryFrontendRetainedRelease(h.options), /static_asset_verification_refused/);
   assert.deepEqual(h.nativeCalls.map(row => row.phase), ['upload', 'namespace-stage']);
   assert.equal(h.providerEvents.filter(row => row[0] === 'create').length, 2);
@@ -304,7 +379,7 @@ test('private sanitized fixture: ambiguous Client asset failure after one upload
 });
 
 test('private sanitized fixture: Ops staff hold stops before baseline verifier writes and upload', { skip: !fixturePath || !opsBytePathsPath }, async t => {
-  const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8')), h = harness(t, fixture, 'operations', { failStaff: true });
+  const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8')), h = await harness(t, fixture, 'operations', { failStaff: true });
   await assert.rejects(executeOrdinaryFrontendRetainedRelease(h.options), /synthetic held staff readiness/);
   assert.deepEqual(h.nativeCalls, []); assert.deepEqual(h.providerEvents, []);
   assert.equal(fs.existsSync(h.journalDirectory), false);
