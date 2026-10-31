@@ -132,9 +132,13 @@ function fixture(t, application = 'operations') {
 }
 
 function readbackFor(f, request, candidateVersionId = CANDIDATE) {
-  const serviceBindings = request.bindings.filter(row => row.type === 'service');
-  const resolvedBindings = [...f.heldPlan.expectedUnchangedResources.bindings.filter(row => row.name !== 'ASSETS'),
-    ...serviceBindings].sort((a, b) => a.name.localeCompare(b.name));
+  const serviceBindings = request.bindings.filter(row => row.type === 'service').map(row =>
+    row.name === 'OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES' && row.service === 'ledgetop-ops-staging'
+      && row.entrypoint === 'OperationsNativePrincipalInquiryIngress' && !Object.hasOwn(row, 'environment')
+      ? { ...row, environment: 'production' } : row);
+  const resolvedBindings = [...f.heldPlan.expectedUnchangedResources.bindings
+    .filter(row => row.name !== 'OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES'), ...serviceBindings]
+    .sort((a, b) => a.name.localeCompare(b.name));
   return { latestVersionId: candidateVersionId, deployment: [{ versionId: f.baselineVersionId, percentage: 100 }], candidate: {
     id: candidateVersionId, mainModule: request.main_module,
     modules: request.modules.map(module => { const pin = module.name === f.heldPlan.artifact.main.path.split(/[\\/]/u).at(-1) ? f.heldPlan.artifact.main : f.heldPlan.artifact.sourceMap;
@@ -142,6 +146,14 @@ function readbackFor(f, request, candidateVersionId = CANDIDATE) {
     resolvedBindings, assetsConfig: request.assets.config, compatibilityDate: request.compatibility_date,
     compatibilityFlags: request.compatibility_flags, exports: request.exports,
   } };
+}
+
+function candidateParamsFor(f, jwt = 'synthetic-completion-token-0001') {
+  const request = clone(f.heldPlan.versionCreateTemplate);
+  request.bindings = [...request.bindings, { name: 'ASSETS', type: 'assets' }].sort((a, b) => a.name.localeCompare(b.name));
+  request.assets = { config: clone(f.heldPlan.assetUploadRecipe.assetsConfig), jwt };
+  request.deploy = false; request.bindings_inherit = 'strict';
+  return request;
 }
 
 function harness(f, { session, bucketResponses = [], createVersion = async () => ({ id: CANDIDATE }), readback = undefined,
@@ -159,7 +171,10 @@ function harness(f, { session, bucketResponses = [], createVersion = async () =>
         return f.writeJson('drifted-controls.json', drifted);
       }
       return f.controlsFile;
-    }, async readCandidateState(worker, candidateVersionId) { calls.push({ type: 'readback', worker, candidateVersionId }); return typeof readback === 'function' ? readback(createdRequest, candidateVersionId) : readback; },
+    }, async readCandidateState(worker, candidateVersionId) {
+      const result = typeof readback === 'function' ? readback(createdRequest, candidateVersionId) : readback;
+      calls.push({ type: 'readback', worker, candidateVersionId, result }); return result;
+    },
     journal: { async reserve(key) { if (journal.has(key)) return false; journal.add(key); return true; }, async complete(key) { assert.ok(journal.has(key)); } },
     hashBlake3: f.hashBlake3, now: () => f.fixedNow });
   return { calls, adapter, journal };
@@ -197,6 +212,24 @@ test('Client candidate retains its exact reviewed Ops service binding and resolv
   assert.deepEqual(request.bindings.filter(row => row.type === 'service'), [{ name: 'OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES',
     type: 'service', service: 'ledgetop-ops-staging', entrypoint: 'OperationsNativePrincipalInquiryIngress' }]);
   assert.ok(request.bindings.filter(row => row.type === 'inherit').every(row => row.version_id === CLIENT));
+  assert.equal(state.calls.find(row => row.type === 'readback').result.candidate.resolvedBindings
+    .find(row => row.name === 'OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES').environment, 'production');
+});
+
+test('readback requires native ASSETS and the exact production-defaulted Client service', t => {
+  const f = fixture(t, 'client'), candidateParams = candidateParamsFor(f);
+  const valid = readbackFor(f, candidateParams);
+  assert.equal(validateStagingBackendAssetCandidateReadback({ readback: valid, candidateVersionId: CANDIDATE,
+    heldPlan: f.heldPlan, candidateParams }), true);
+  for (const mutate of [
+    row => { row.candidate.resolvedBindings = row.candidate.resolvedBindings.filter(binding => binding.name !== 'ASSETS'); },
+    row => { row.candidate.resolvedBindings = row.candidate.resolvedBindings.map(binding => binding.name === 'ASSETS' ? { name: 'ASSETS', type: 'plain_text' } : binding); },
+    row => { row.candidate.resolvedBindings = row.candidate.resolvedBindings.map(binding => binding.name === 'OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES' ? { ...binding, environment: 'staging' } : binding); },
+  ]) {
+    const changed = clone(valid); mutate(changed);
+    assert.throws(() => validateStagingBackendAssetCandidateReadback({ readback: changed,
+      candidateVersionId: CANDIDATE, heldPlan: f.heldPlan, candidateParams }));
+  }
 });
 
 test('readback cannot pass by echoing inherit instructions as if they were resolved bindings', async t => {
@@ -221,7 +254,7 @@ test('actual sanitized Ops capsule binding inventory validates a hash-only resol
   const candidateParams = clone(heldPlan.versionCreateTemplate);
   candidateParams.bindings = [...candidateParams.bindings, { name: 'ASSETS', type: 'assets' }].sort((a, b) => a.name.localeCompare(b.name));
   candidateParams.assets = { config: clone(heldPlan.assetUploadRecipe.assetsConfig), jwt: 'synthetic-completion-token-0001' };
-  const resolvedBindings = baselineBindings.filter(row => row.name !== 'ASSETS').sort((a, b) => a.name.localeCompare(b.name));
+  const resolvedBindings = baselineBindings.slice().sort((a, b) => a.name.localeCompare(b.name));
   const readback = { latestVersionId: CANDIDATE, deployment: [{ versionId: heldPlan.selectedActiveVersionId, percentage: 100 }], candidate: {
     id: CANDIDATE, mainModule: candidateParams.main_module,
     modules: candidateParams.modules.map((row, index) => {

@@ -386,9 +386,19 @@ function checkReadback(readback, candidateVersionId, plan, candidateParams) {
       'Candidate module readback requires exact name, size and hash fields');
     return row;
   });
+  const baselineAssets = plan.expectedUnchangedResources.bindings.filter(row => row.name === 'ASSETS');
+  need(equal(baselineAssets, [{ name: 'ASSETS', type: 'assets' }]),
+    'Pinned active capsule must contain the exact native ASSETS binding');
+  const reviewedServices = candidateParams.bindings.filter(row => row.type === 'service').map(row => {
+    if (plan.application !== 'client' || row.name !== 'OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES'
+      || row.service !== 'ledgetop-ops-staging' || row.entrypoint !== 'OperationsNativePrincipalInquiryIngress'
+      || Object.hasOwn(row, 'environment')) return row;
+    // Cloudflare resolves the omitted service environment to `production`.
+    return { ...row, environment: 'production' };
+  });
   const expectedResolvedBindings = [
-    ...plan.expectedUnchangedResources.bindings.filter(row => row.name !== 'ASSETS'),
-    ...candidateParams.bindings.filter(row => row.type === 'service'),
+    ...plan.expectedUnchangedResources.bindings.filter(row => row.name !== 'OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES'),
+    ...reviewedServices,
   ].sort((a, b) => a.name.localeCompare(b.name));
   const actualResolvedBindings = candidate.resolvedBindings;
   need(actualResolvedBindings.every(row => row && typeof row === 'object' && row.type !== 'inherit')
