@@ -67,9 +67,14 @@ function controlWorker(app, versionId, latestVersionId = versionId) {
 }
 
 function controls({ opsVersion = OPS, opsLatest = opsVersion, clientVersion = CLIENT, clientLatest = CLIENT_LATEST } = {}) {
+  const operations = controlWorker('operations', opsVersion, opsLatest);
+  if (opsVersion !== OPS) {
+    operations.modern.main_module = 'staging-native-authority-entrypoint.js';
+    operations.modern.modules[0].name = 'staging-native-authority-entrypoint.js';
+  }
   return { schemaVersion: 1, purpose: 'staging-v4-current-controls-and-full-schema-readonly-v1', environment: 'staging',
     accountId: STAGING_ACCOUNT_ID, observedAt: new Date(Date.now() - 60_000).toISOString(),
-    workers: { operations: controlWorker('operations', opsVersion, opsLatest), client: controlWorker('client', clientVersion, clientLatest), sync: controlWorker('sync', SYNC) },
+    workers: { operations, client: controlWorker('client', clientVersion, clientLatest), sync: controlWorker('sync', SYNC) },
     schema: { OPS_DB: { id: DB.ops }, DELIVERY_DB: { id: DB.delivery } }, secretValuesPersisted: false,
     applicationRowsRead: 0, resourceWrites: 0 };
 }
@@ -209,9 +214,10 @@ test('Client planning after Ops successor requires a v3 hash-pinned active/lates
     retainedAssets: f.retainedAssets(before, 'operations') });
   const successor = controls({ opsVersion: CANDIDATE }), ops = successor.workers.operations;
   ops.rawControlSHA256 = hash('successor-control');
+  ops.modern.modules[0].sha256 = opsPlan.artifact.main.sha256;
   const receipt = { schemaVersion: 3, contract: 'staging-backend-ops-successor-observation-v3', accountId: STAGING_ACCOUNT_ID,
     workerName: ops.workerName, baselineVersionId: OPS, candidateVersionId: CANDIDATE, sourceCommit: SOURCE,
-    planSHA256: hash(canonical(opsPlan)), mainSHA256: opsPlan.artifact.main.sha256, sourceMapSHA256: opsPlan.artifact.sourceMap.sha256,
+    planSHA256: hash(canonical(opsPlan)), mainSHA256: ops.modern.modules[0].sha256, sourceMapSHA256: opsPlan.artifact.sourceMap.sha256,
     rawControlSHA256: ops.rawControlSHA256, rawBindingsSHA256: ops.rawBindingsSHA256,
     settingsSHA256: hash(canonical(ops.settings)), runtimeSHA256: hash(canonical(ops.version.resources.script_runtime)),
     assetsConfigSHA256: hash(canonical(ops.modern.assets)), schedulesSHA256: hash(canonical(ops.schedules.schedules)),
@@ -225,6 +231,16 @@ test('Client planning after Ops successor requires a v3 hash-pinned active/lates
   const changed = clone(receipt); changed.rawBindingsSHA256 = 'f'.repeat(64);
   const tampered = { ...options, operationsSuccessorReceipt: f.writeJson('tampered.json', changed) };
   assert.throws(() => compileStagingBackendReleasePlan(tampered), /rawBindingsSHA256 differs/);
+
+  const wrongName = clone(successor); wrongName.workers.operations.modern.modules[0].name = 'index.js';
+  assert.throws(() => compileStagingBackendReleasePlan({ ...options, controlsFile: f.writeJson('wrong-main-name.json', wrongName) }),
+    /complete installed version\/settings\/bindings\/schedules capture required/);
+  const wrongMainModule = clone(successor); wrongMainModule.workers.operations.modern.main_module = 'index.js';
+  assert.throws(() => compileStagingBackendReleasePlan({ ...options, controlsFile: f.writeJson('wrong-main-module.json', wrongMainModule) }),
+    /complete installed version\/settings\/bindings\/schedules capture required/);
+  const wrongMainHash = clone(receipt); wrongMainHash.mainSHA256 = hash('not-the-installed-main');
+  assert.throws(() => compileStagingBackendReleasePlan({ ...options, operationsSuccessorReceipt: f.writeJson('wrong-main-hash.json', wrongMainHash) }),
+    /main identity or hash differs from the installed executable module/);
 });
 
 test('local asset materialization pins exact config, files, bytes, and baseline without claiming completeness', t => {

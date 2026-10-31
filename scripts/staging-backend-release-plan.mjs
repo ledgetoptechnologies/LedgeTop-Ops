@@ -235,7 +235,9 @@ function checkedControls(controls, { allowOpsSuccessor = false } = {}) {
   for (const app of APPS) {
     const row = controls.workers[app];
     const opsSuccessorIdentity = app === 'operations' && allowOpsSuccessor
-      && UUID.test(row.activeVersionId ?? '') && row.activeVersionId === row.latestVersionId;
+      && UUID.test(row.activeVersionId ?? '') && row.activeVersionId !== TARGETS.operations.activeVersionId
+      && row.activeVersionId === row.latestVersionId;
+    const expectedMainModule = opsSuccessorIdentity ? MAIN_MODULE_NAMES.operations : 'index.js';
     need(ownKeysAre(row, [...SAFE_WORKER_KEYS]) && row.workerName === TARGETS[app].workerName
       && UUID.test(row.activeVersionId ?? '') && UUID.test(row.latestVersionId ?? '')
       && (opsSuccessorIdentity || (row.activeVersionId === TARGETS[app].activeVersionId
@@ -249,7 +251,9 @@ function checkedControls(controls, { allowOpsSuccessor = false } = {}) {
       && typeof row.version.resources?.script?.last_deployed_from === 'string'
       && Array.isArray(row.modern.modules) && row.modern.modules.length === 1
       && ownKeysAre(row.modern.modules[0], ['name','contentType','bytes','sha256'])
-      && row.modern.modules[0].name === 'index.js' && typeof row.modern.modules[0].contentType === 'string'
+      && row.modern.modules[0].name === expectedMainModule
+      && (!opsSuccessorIdentity || row.modern.main_module === expectedMainModule)
+      && typeof row.modern.modules[0].contentType === 'string'
       && Number.isSafeInteger(row.modern.modules[0].bytes) && row.modern.modules[0].bytes > 0
       && SHA.test(row.modern.modules[0].sha256 ?? '')
       && Array.isArray(row.version.resources.bindings) && row.settings?.bindings && Array.isArray(row.settings.bindings)
@@ -427,6 +431,7 @@ function validateOperationsSuccessor(receipt, receiptSHA256, controls, sourceCom
     'planSHA256','mainSHA256','sourceMapSHA256','rawControlSHA256','rawBindingsSHA256','settingsSHA256','runtimeSHA256',
     'assetsConfigSHA256','schedulesSHA256','observedAt'];
   const ops = controls.workers.operations;
+  const expectedMainModule = MAIN_MODULE_NAMES.operations;
   need(ownKeysAre(receipt, keys) && receipt.schemaVersion === PLAN_SCHEMA_VERSION
     && receipt.contract === 'staging-backend-ops-successor-observation-v3'
     && receipt.accountId === STAGING_ACCOUNT_ID && receipt.workerName === TARGETS.operations.workerName
@@ -435,6 +440,10 @@ function validateOperationsSuccessor(receipt, receiptSHA256, controls, sourceCom
     && receipt.sourceCommit === sourceCommit && COMMIT.test(receipt.sourceCommit)
     && [receipt.planSHA256,receipt.mainSHA256,receipt.sourceMapSHA256].every(value => SHA.test(value ?? '')),
   'Client sequencing requires an exact reviewed Ops successor receipt matching the fresh active deployment');
+  need(ops.modern.main_module === expectedMainModule && ops.modern.modules[0]?.name === expectedMainModule
+    && receipt.mainSHA256 === ops.modern.modules[0].sha256,
+  'Ops successor receipt main identity or hash differs from the installed executable module');
+  // Modern controls attest only the installed executable main; sourceMapSHA256 remains a local build/plan pin, not remote readback.
   const actual = controlHashes(ops);
   for (const key of Object.keys(actual)) need(receipt[key] === actual[key], `Ops successor receipt ${key} differs from current controls`);
   need(Number.isFinite(Date.parse(receipt.observedAt)) && Date.parse(receipt.observedAt) <= Date.parse(controls.observedAt),
