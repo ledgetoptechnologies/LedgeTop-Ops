@@ -188,6 +188,42 @@ test('current controls adapter DTO maps sanitized runtime/control metadata witho
     worker: current.workerName, binding: current.binding }, expected, Date.parse(current.observedAt));
 });
 
+test('each Worker requires its own exact default-off gates and accepts the pinned baseline', fixtureTest, () => {
+  const raw = JSON.parse(fs.readFileSync(capsulePath, 'utf8'));
+  const capsule = readCapturedStagingV4Capsule(capsulePath);
+  const now = Date.parse(raw.observedAt);
+  for (const application of ['operations', 'client']) {
+    const baseline = buildCurrentStagingV4ControlSnapshot(raw, application);
+    assert.deepEqual(baseline.controls, capsule.controls[application]);
+    const target = { accountId: raw.accountId, databaseId: baseline.databaseId,
+      worker: baseline.workerName, binding: baseline.binding };
+    assert.equal(assertFreshStagingV4Controls(baseline, target, capsule.controls[application], now), true);
+  }
+
+  const operationsGate = structuredClone(raw);
+  operationsGate.workers.operations.selectedFlags.CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED = 'true';
+  const operationsChanged = buildCurrentStagingV4ControlSnapshot(operationsGate, 'operations');
+  assert.throws(() => assertFreshStagingV4Controls(operationsChanged,
+    { accountId: raw.accountId, databaseId: operationsChanged.databaseId, worker: operationsChanged.workerName,
+      binding: operationsChanged.binding }, capsule.controls.operations, now), { code: 'current_controls_drift' });
+
+  const clientGate = structuredClone(raw);
+  clientGate.workers.client.selectedFlags.CLIENT_PORTAL_OPS_INQUIRIES_ENABLED = 'true';
+  const clientChanged = buildCurrentStagingV4ControlSnapshot(clientGate, 'client');
+  assert.throws(() => assertFreshStagingV4Controls(clientChanged,
+    { accountId: raw.accountId, databaseId: clientChanged.databaseId, worker: clientChanged.workerName,
+      binding: clientChanged.binding }, capsule.controls.client, now), { code: 'current_controls_drift' });
+
+  const missingWriterGate = structuredClone(raw);
+  delete missingWriterGate.workers.client.selectedFlags.CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED;
+  assert.throws(() => buildCurrentStagingV4ControlSnapshot(missingWriterGate, 'client'),
+    { code: 'worker_controls_capsule_invalid' });
+  const missingOpsGate = structuredClone(raw);
+  delete missingOpsGate.workers.operations.selectedFlags.CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED;
+  assert.throws(() => buildCurrentStagingV4ControlSnapshot(missingOpsGate, 'operations'),
+    { code: 'worker_controls_capsule_invalid' });
+});
+
 test('intent identity and journal path remain stable across recompile; callers cannot select a directory', fixtureTest, async () => {
   const capsule = readCapturedStagingV4Capsule(capsulePath);
   const originalPlan = compileStagingV4MigrationPlan({ capsule, application: 'client',

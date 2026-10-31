@@ -121,11 +121,11 @@ function selectedD1Binding(bindings, bindingName, databaseId) {
   return Object.freeze({ name: bindingName, type: 'd1', databaseId });
 }
 
-function controlPinFromCapsule(capsule, application) {
+function controlPinFromCapsule(capsule, application, { requireOffFlags = true } = {}) {
   const worker = capsule.workers?.[application], target = TARGETS[application];
   const requiredOffFlags = application === 'operations'
-    ? ['OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED']
-    : ['CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED', 'CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED'];
+    ? ['OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED', 'CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED']
+    : ['CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED', 'CLIENT_PORTAL_OPS_INQUIRIES_ENABLED'];
   if (!worker || worker.workerName !== target.worker || !worker.activeVersionId || !worker.latestVersionId
     || !worker.deployment?.id || !worker.modern?.id || !Number.isSafeInteger(worker.modern.number)
     || typeof worker.modern.main_module !== 'string' || typeof worker.modern.compatibility_date !== 'string'
@@ -133,7 +133,9 @@ function controlPinFromCapsule(capsule, application) {
     || !/^[a-f0-9]{64}$/u.test(worker.rawControlSHA256 ?? '')
     || !worker.selectedFlags || !worker.schedules || !Array.isArray(worker.schedules.schedules)
     || requiredOffFlags.some(name => !Object.hasOwn(worker.selectedFlags, name)
-      || ![null, 'false'].includes(worker.selectedFlags[name]))) throw safeError('worker_controls_capsule_invalid');
+      || !(requireOffFlags ? [null, 'false'] : [null, 'false', 'true']).includes(worker.selectedFlags[name]))) {
+    throw safeError('worker_controls_capsule_invalid');
+  }
   return deepFreeze({
     workerName: worker.workerName,
     activeVersionId: worker.activeVersionId,
@@ -159,7 +161,7 @@ export function buildCurrentStagingV4ControlSnapshot(readResult, application) {
   if (!target || !readResult || readResult.accountId !== '846c924bf17bf4f3dd15c97a4c5d1d51'
     || readResult.environment !== 'staging' || !Number.isFinite(Date.parse(readResult.observedAt))
     || new Date(readResult.observedAt).toISOString() !== readResult.observedAt) throw safeError('current_controls_read_result_invalid');
-  const controls = controlPinFromCapsule(readResult, application);
+  const controls = controlPinFromCapsule(readResult, application, { requireOffFlags: false });
   return deepFreeze({ schemaVersion: 1, observedAt: readResult.observedAt,
     accountId: readResult.accountId, environment: readResult.environment, databaseId: target.databaseId,
     workerName: target.worker, binding: target.binding, controls });
