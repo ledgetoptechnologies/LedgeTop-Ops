@@ -11,7 +11,11 @@ if(!root||!input||!endpoint||!token?.startsWith('synthetic-')||!key||!['prepare'
 // These checks are defense in depth only. The supervisor must independently
 // enforce the private mount/network namespace and exclusive fixture ownership.
 const ownerId=process.env.VIEWER_FIXTURE_OWNER;
-if(phase!=='prepare')throw Error('pilot execution held pending integrated supervision and receipt review');
+// Only the in-process, network-free test provider can run later phases until
+// the real supervisor and receipt handoff have been reviewed.
+const synthetic=process.env.LTDS_PILOT_SYNTHETIC_TEST==='1';
+if(phase!=='prepare'&&!synthetic)throw Error('pilot execution held pending integrated supervision and receipt review');
+if(synthetic)require('./pilot-synthetic-fetch.cjs');
 checkPilotBoundary({root,input,endpoint,ownerId,phase});
 process.umask(0o077);
 (async()=>{const config=Object.fromEntries(['datasets','models','cache','trash'].map(k=>[`${k}Mount`,path.join(root,k)]));Object.assign(config,{storageReserveBytes:0,storageReservePercent:0,meshDerivativesEnabled:true,processingProviderTransferTimeoutMs:3600000,opsBaseUrl:'https://ops.invalid'});if(phase==='prepare'){fs.mkdirSync(root,{mode:0o700});for(const k of ['datasets','models','cache','trash'])fs.mkdirSync(config[`${k}Mount`]);}const db=openDatabase(path.join(root,'viewer.sqlite'));try{if(phase==='prepare')sealPilotDbIdentity({parent:'/fixture-state',root,ownerId,database:db});else verifyPilotDbIdentity({database:db,parent:'/fixture-state',ownerId});const processing=new ProcessingRepository(db),repository=new ViewerRepository(db),storage=new StorageManager(config);storage.initialize();const sealed=new ProviderCredentials({processing,activeKeyId:'fixture',keys:{fixture:key}}),credentials={resolve:()=>token,sealAttemptCapability:sealed.sealAttemptCapability.bind(sealed),openAttemptCapability:sealed.openAttemptCapability.bind(sealed)};const deps={processing,repository,storage,config,providerCredentials:credentials};let attempt;
