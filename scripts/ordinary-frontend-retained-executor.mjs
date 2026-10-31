@@ -354,6 +354,9 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   'Unreviewed installed Ops successor reader contract');
   needFn(installedOpsSuccessorReaderContract === undefined || app === 'client',
     'Installed Ops successor reader recognition is read-only and cannot authorize an Operations release');
+  needFn(ordinaryPlan.installedOpsSuccessorReaderContract === installedOpsSuccessorReaderContract
+    && pinnedPlan.installedOpsSuccessorReaderContract === installedOpsSuccessorReaderContract,
+  'Executor selector must exactly match the read-only Ops contract pinned in both release plans');
   needFn(assetVerifierProvider && ['createVerifier','fetchVerifierAsset','removeVerifier','verifierAbsent']
     .every(name => typeof assetVerifierProvider[name] === 'function'), 'Bounded candidate namespace verifier is required before upload');
   expectedDeploymentVersions ??= ordinaryPlan.expectedDeploymentVersions;
@@ -456,7 +459,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before upload');
   needFn(hash(canonical(before)) === ordinaryPlan.baselineSHA256, 'Captured installation differs from exact pinned offline plan baseline');
   validateOrdinaryFrontendRetainedPlan(before, pinnedPlan, { ordinaryPlan, profile, previousLedger,
-    previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt });
+    previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt,
+    installedOpsSuccessorReaderContract });
   writePrivateJson(journalDirectory, 'release-plan.private.json', { schemaVersion: 2, contract: pinnedPlan.contract,
     application: app, sourceCommit, baselineVersionId, ordinaryPlanSHA256: pinnedPlan.ordinaryPlanSHA256,
     ledgerSHA256: pinnedPlan.retentionLedgerSHA256, rollbackVersionId: baselineVersionId,
@@ -477,7 +481,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     needFn(equal(stableState(before, app), stableState(preuploadRaw, app)), 'Production controls changed before native asset/module upload');
   }
   validateOrdinaryFrontendRetainedPlan(before, pinnedPlan, { ordinaryPlan, profile, previousLedger,
-    previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt });
+    previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt,
+    installedOpsSuccessorReaderContract });
   needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before candidate qualification');
   let candidateId;
   if (resumeCandidate) {
