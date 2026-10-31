@@ -307,6 +307,92 @@ describe("Operations-native recipient authority end-to-end D1", () => {
   });
   afterEach(async () => runtime.dispose());
 
+  it("reports the current home-only v3 grant in owner review without requiring v4 companion tables", async () => {
+    await applyCleanupMigration(ops);
+    const issued = await issueOperationsPortalNativeRecipientIntent(ops, {
+      operationId: id(251), targetId, targetClientRecordId: clientId, expiresAt: future(), owner,
+    });
+    expect(issued.review.permissionSchemaVersion).toBe(3);
+    await redeemOperationsPortalNativeRecipientIntent(ops, { operationId: id(252), intentId: issued.review.intentId,
+      opaqueToken: issued.opaqueToken!, principal: { issuer, subject }, recipientLabel: "legacy-v3@example.test",
+      verifiedUntil: future(), acknowledgedTarget: { targetId, targetRevision: 1, clientRecordId: clientId } });
+    await confirmOperationsPortalNativeRecipientIntent(ops, { operationId: id(253), intentId: issued.review.intentId,
+      expectedRevision: 2, owner });
+    const clientEnv = { DELIVERY_DB:client, ENVIRONMENT:"staging", EXPECTED_HOST:"client-staging.example.test",
+      CLIENT_PORTAL_ORIGIN:"https://client-staging.example.test",
+      CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST:"client-staging.example.test",
+      CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED:"true",
+      CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED:"true" };
+    await materializeOperationsPortalNativeRecipientAuthority(ops, id(253));
+    const dispatched = await dispatchOperationsPortalNativeRecipientAuthority({ OPS_DB:ops,
+      OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED:"true",
+      OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY:{
+        applyNativeAuthority:(wire:string) => applyOperationsPortalNativeRecipientAuthority(clientEnv, wire),
+        getNativeAuthorityStatus:(wire:string) => readOperationsPortalNativeRecipientAuthorityStatus(clientEnv, wire),
+      } }, id(253));
+    expect(dispatched).toMatchObject({ status:"acknowledged", operationId:id(253) });
+    const durable = await ops.prepare(`SELECT intent.state,intent.permission_schema_version,intent.expires_at,
+        intent.recipient_verified_until,head.recipient_binding_id binding_id,head.latest_operation_id grant_operation_id,
+        head.state head_state,head.permission_schema_version head_schema,head.grant_revision,head.expires_at base_expires_at,receipt.resulting_state,
+        workspace.state workspace_state,workspace.ownership_epoch workspace_epoch,binding.status binding_status,
+        binding.access_issuer,binding.access_subject,binding.expires_at binding_expires_at
+      FROM operations_portal_native_recipient_intents intent
+      JOIN operations_portal_native_recipient_authority_heads head ON head.enrollment_intent_id=intent.intent_id
+      JOIN operations_portal_native_authority_receipts receipt ON receipt.operation_id=head.latest_operation_id
+      JOIN operations_portal_native_workspace_authority_heads workspace ON workspace.target_id=head.target_id
+      JOIN client_onboarding_recipient_identity_bindings binding ON binding.binding_id=head.recipient_binding_id
+      WHERE intent.intent_id=?`).bind(issued.review.intentId).first<Record<string, unknown>>();
+    expect(durable).toMatchObject({ state:"active", permission_schema_version:3, head_state:"active", head_schema:3,
+      resulting_state:"active", workspace_state:"active", binding_status:"active", access_issuer:issuer, access_subject:subject });
+    expect(Date.parse(String(durable?.expires_at))).toBeGreaterThan(Date.now());
+
+    for (const table of ["closures","history","outbox","heads","receipts","commands"])
+      await ops.prepare(`DROP TABLE operations_portal_native_inquiry_capability_${table}`).run();
+    await expect(readOperationsPortalNativeRecipientIntentForOwner(ops, issued.review.intentId, owner))
+      .resolves.toMatchObject({ permissionSchemaVersion:3, state:"active", capabilityStatus:"not_requested",
+        effectivePermissions:["operations.service_home.read"] });
+
+    const deniedReview = () => expect(readOperationsPortalNativeRecipientIntentForOwner(ops, issued.review.intentId, owner))
+      .resolves.toMatchObject({ permissionSchemaVersion:3, capabilityStatus:"not_requested", effectivePermissions:[] });
+    const expiredAt = new Date(Date.now() - 60_000).toISOString();
+    await ops.prepare("UPDATE client_onboarding_recipient_identity_bindings SET expires_at=? WHERE binding_id=?")
+      .bind(expiredAt, durable?.binding_id).run();
+    await deniedReview();
+    await ops.prepare("UPDATE client_onboarding_recipient_identity_bindings SET expires_at=NULL WHERE binding_id=?")
+      .bind(durable?.binding_id).run();
+
+    await ops.prepare("DROP TRIGGER operations_portal_native_receipts_no_update").run();
+    await ops.prepare("UPDATE operations_portal_native_authority_receipts SET resulting_state='revoked' WHERE operation_id=?")
+      .bind(durable?.grant_operation_id).run();
+    await deniedReview();
+    await ops.prepare("UPDATE operations_portal_native_authority_receipts SET resulting_state='active' WHERE operation_id=?")
+      .bind(durable?.grant_operation_id).run();
+
+    await ops.prepare("DROP TRIGGER operations_portal_native_recipient_head_update_guard").run();
+    await ops.prepare("UPDATE operations_portal_native_recipient_authority_heads SET expires_at=? WHERE recipient_binding_id=?")
+      .bind(expiredAt, durable?.binding_id).run();
+    await deniedReview();
+    await ops.prepare("UPDATE operations_portal_native_recipient_authority_heads SET expires_at=NULL WHERE recipient_binding_id=?")
+      .bind(durable?.binding_id).run();
+    await ops.prepare("UPDATE operations_portal_native_recipient_authority_heads SET grant_revision=grant_revision+1 WHERE recipient_binding_id=?")
+      .bind(durable?.binding_id).run();
+    await deniedReview();
+    await ops.prepare("UPDATE operations_portal_native_recipient_authority_heads SET grant_revision=? WHERE recipient_binding_id=?")
+      .bind(durable?.grant_revision, durable?.binding_id).run();
+
+    await ops.prepare("DROP TRIGGER operations_portal_native_workspace_finalize_guard").run();
+    await ops.prepare("UPDATE operations_portal_native_workspace_authority_heads SET ownership_epoch=? WHERE target_id=?")
+      .bind(Number(durable?.workspace_epoch) + 1, targetId).run();
+    await deniedReview();
+    await ops.prepare("UPDATE operations_portal_native_workspace_authority_heads SET ownership_epoch=? WHERE target_id=?")
+      .bind(durable?.workspace_epoch, targetId).run();
+
+    await ops.prepare("DROP TRIGGER operations_portal_native_recipient_transition_guard").run();
+    await ops.prepare("UPDATE operations_portal_native_recipient_intents SET expires_at=?,recipient_verified_until=? WHERE intent_id=?")
+      .bind(expiredAt, expiredAt, issued.review.intentId).run();
+    await deniedReview();
+  });
+
   it("pins an explicit request-create selection in the immutable issue review without changing the v3 home grant", async () => {
     const issued = await issueOperationsPortalNativeRecipientIntent(ops, { operationId: id(70), targetId,
       targetClientRecordId: clientId, expiresAt: future(), owner, legacyShape: false, permissionSchemaVersion: 4,
@@ -445,6 +531,33 @@ describe("Operations-native recipient authority end-to-end D1", () => {
       .resolves.toMatchObject({ ok: true, action: "grant", state: "active", replayed: true });
     await expect(readNativeOperationsRequestCapabilities(client, { issuer, subject }, true))
       .resolves.toMatchObject([{ targetId, baseOperationId: pins.grant_operation_id, capabilityOperationId: id(73) }]);
+    await expect(readOperationsPortalNativeRecipientIntentForOwner(ops, issued.review.intentId, owner))
+      .resolves.toMatchObject({ capabilityStatus:"active", effectivePermissions:permissions });
+    const recipientBindingId = await ops.prepare(`SELECT recipient_binding_id FROM operations_portal_native_recipient_intents
+      WHERE intent_id=?`).bind(issued.review.intentId).first<string>("recipient_binding_id");
+    const expiredBinding = new Date(Date.now() - 60_000).toISOString();
+    await ops.prepare("UPDATE client_onboarding_recipient_identity_bindings SET expires_at=? WHERE binding_id=?")
+      .bind(expiredBinding, recipientBindingId).run();
+    await expect(readOperationsPortalNativeRecipientIntentForOwner(ops, issued.review.intentId, owner))
+      .resolves.toMatchObject({ effectivePermissions:[] });
+    await ops.prepare("UPDATE client_onboarding_recipient_identity_bindings SET expires_at=NULL WHERE binding_id=?")
+      .bind(recipientBindingId).run();
+    await expect(readOperationsPortalNativeRecipientIntentForOwner(ops, issued.review.intentId, owner))
+      .resolves.toMatchObject({ capabilityStatus:"active", effectivePermissions:permissions });
+
+    const headUpdateGuard = await ops.prepare(`SELECT sql FROM sqlite_master WHERE type='trigger'
+      AND name='operations_portal_native_recipient_head_update_guard'`).first<string>("sql");
+    expect(headUpdateGuard).toBeTypeOf("string");
+    await ops.prepare("DROP TRIGGER operations_portal_native_recipient_head_update_guard").run();
+    await ops.prepare("UPDATE operations_portal_native_recipient_authority_heads SET expires_at=? WHERE recipient_binding_id=?")
+      .bind(expiredBinding, recipientBindingId).run();
+    await expect(readOperationsPortalNativeRecipientIntentForOwner(ops, issued.review.intentId, owner))
+      .resolves.toMatchObject({ effectivePermissions:[] });
+    await ops.prepare("UPDATE operations_portal_native_recipient_authority_heads SET expires_at=NULL WHERE recipient_binding_id=?")
+      .bind(recipientBindingId).run();
+    await ops.prepare(headUpdateGuard!).run();
+    await expect(readOperationsPortalNativeRecipientIntentForOwner(ops, issued.review.intentId, owner))
+      .resolves.toMatchObject({ capabilityStatus:"active", effectivePermissions:permissions });
     await expect(readNativeOperationsRequestCapabilities(client, { issuer: "https://foreign.cloudflareaccess.com",
       subject: "access|other" }, true)).resolves.toEqual([]);
     await publishClientPublicationSuccessor(client);

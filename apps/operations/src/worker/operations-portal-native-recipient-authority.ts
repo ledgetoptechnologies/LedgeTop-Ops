@@ -620,6 +620,39 @@ export async function readOperationsPortalNativeRecipientIntentForOwner(
   const recoveryOperationId = row.state === "confirming" || row.state === "active" ? row.grant_operation_id
     : row.state === "revoking" || row.state === "revoked" ? row.revoke_operation_id : null;
   const result = review(row);
+  if (row.permission_schema_version === 3 && row.state === "active") {
+    const current = await session.prepare(`SELECT EXISTS(SELECT 1
+      FROM operations_portal_native_recipient_authority_heads base
+      JOIN operations_portal_native_workspace_authority_heads workspace ON workspace.target_id=base.target_id
+        AND workspace.target_revision=intent.target_revision AND workspace.state='active'
+        AND workspace.ownership_epoch=base.ownership_epoch
+      JOIN operations_portal_native_authority_receipts receipt ON receipt.operation_id=base.latest_operation_id
+        AND receipt.target_id=base.target_id AND receipt.recipient_binding_id=base.recipient_binding_id
+        AND receipt.enrollment_intent_id=base.enrollment_intent_id AND receipt.issuer=base.issuer AND receipt.subject=base.subject
+        AND receipt.client_authority_id=workspace.client_authority_id AND receipt.workspace_id=workspace.workspace_id
+        AND receipt.ownership_epoch=base.ownership_epoch AND receipt.grant_revision=base.grant_revision
+        AND receipt.resulting_state='active' AND receipt.permission_schema_version=3
+        AND receipt.permissions_json='["operations.service_home.read"]'
+      JOIN client_onboarding_recipient_identity_bindings binding ON binding.binding_id=base.recipient_binding_id
+        AND binding.status='active' AND binding.access_issuer=base.issuer AND binding.access_subject=base.subject
+        AND (binding.expires_at IS NULL OR binding.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      WHERE intent.intent_id=? AND intent.state='active' AND intent.permission_schema_version=3
+        AND intent.requested_permissions_json='["operations.service_home.read"]'
+        AND intent.recipient_binding_id=base.recipient_binding_id AND intent.access_issuer=base.issuer
+        AND intent.access_subject=base.subject AND intent.grant_operation_id=base.latest_operation_id
+        AND intent.recipient_verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        AND intent.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        AND base.enrollment_intent_id=intent.intent_id AND base.target_id=intent.target_id
+        AND base.target_client_record_id=intent.target_client_record_id AND base.state='active'
+        AND base.permission_schema_version=3 AND base.permissions_json='["operations.service_home.read"]'
+        AND (base.expires_at IS NULL OR base.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      ) home_current FROM operations_portal_native_recipient_intents intent WHERE intent.intent_id=?`)
+      .bind(intentId, intentId).first<{ home_current: number }>();
+    return Object.freeze({ ...result,
+      effectivePermissions: current?.home_current === 1
+        ? Object.freeze(["operations.service_home.read"] as string[]) : Object.freeze([] as string[]),
+      recipientLabel: presentationLabel(row.recipient_label, row.intent_id), recoveryOperationId });
+  }
   if (row.permission_schema_version !== 4 || row.state !== "active") {
     const capabilityTable = row.permission_schema_version === 4 && (row.state === "revoked" || row.state === "revoking")
       ? await session.prepare(`SELECT 1 FROM sqlite_master WHERE type='table'
@@ -641,13 +674,15 @@ export async function readOperationsPortalNativeRecipientIntentForOwner(
           AND base_receipt.resulting_state='active' AND base_receipt.permission_schema_version=3
           AND base_receipt.permissions_json='["operations.service_home.read"]'
         JOIN operations_portal_native_workspace_authority_heads workspace ON workspace.target_id=base.target_id
-          AND workspace.ownership_epoch=base.ownership_epoch AND workspace.state='active'
+          AND workspace.target_revision=intent.target_revision AND workspace.ownership_epoch=base.ownership_epoch AND workspace.state='active'
         JOIN client_onboarding_recipient_identity_bindings binding ON binding.binding_id=base.recipient_binding_id
           AND binding.status='active' AND binding.access_issuer=base.issuer AND binding.access_subject=base.subject
+          AND (binding.expires_at IS NULL OR binding.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         WHERE base.enrollment_intent_id=intent.intent_id AND base.recipient_binding_id=intent.recipient_binding_id
           AND base.latest_operation_id=intent.grant_operation_id AND base.state='active'
           AND base.permission_schema_version=3 AND base.permissions_json='["operations.service_home.read"]'
           AND (base.expires_at IS NULL OR base.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+          AND intent.recipient_verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')
           AND intent.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')) home_current,
       EXISTS(SELECT 1 FROM operations_portal_native_inquiry_capability_heads cap_head
         JOIN operations_portal_native_inquiry_capability_commands cap ON cap.operation_id=cap_head.latest_operation_id
@@ -665,6 +700,10 @@ export async function readOperationsPortalNativeRecipientIntentForOwner(
           AND base.ownership_epoch=cap_head.base_ownership_epoch AND base.grant_revision=cap_head.base_grant_revision
           AND base.state='active' AND base.permission_schema_version=3
           AND base.permissions_json='["operations.service_home.read"]'
+          AND (base.expires_at IS NULL OR base.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        JOIN client_onboarding_recipient_identity_bindings binding ON binding.binding_id=base.recipient_binding_id
+          AND binding.status='active' AND binding.access_issuer=base.issuer AND binding.access_subject=base.subject
+          AND (binding.expires_at IS NULL OR binding.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         JOIN operations_portal_native_authority_receipts base_receipt ON base_receipt.operation_id=base.latest_operation_id
           AND base_receipt.target_id=base.target_id AND base_receipt.recipient_binding_id=base.recipient_binding_id
           AND base_receipt.ownership_epoch=base.ownership_epoch AND base_receipt.grant_revision=base.grant_revision
@@ -678,6 +717,7 @@ export async function readOperationsPortalNativeRecipientIntentForOwner(
           AND publication.snapshot_id=cap.publication_snapshot_id AND publication.snapshot_sha256=cap.publication_snapshot_sha256
         WHERE cap_head.intent_id=intent.intent_id AND cap_head.state='active' AND cap.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')
           AND intent.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')
+          AND intent.recipient_verified_until>strftime('%Y-%m-%dT%H:%M:%fZ','now')
           AND base.enrollment_intent_id=intent.intent_id AND base.latest_operation_id=intent.grant_operation_id
           AND cap.base_operation_id=intent.grant_operation_id AND cap.recipient_binding_id=intent.recipient_binding_id
           AND cap.target_id=intent.target_id AND cap.target_client_record_id=intent.target_client_record_id
