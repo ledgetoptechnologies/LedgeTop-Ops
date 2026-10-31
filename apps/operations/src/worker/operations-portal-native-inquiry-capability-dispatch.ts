@@ -4,10 +4,11 @@ import { canonicalOperationsPortalNativeInquiryCapabilityCommandV4,
 const HASH = /^[0-9a-f]{64}$/u;
 const encoder = new TextEncoder();
 export interface OperationsNativeInquiryCapabilityBinding {
-  applyNativeInquiryCapability(commandJson: string): Promise<unknown>;
-  closeNativeInquiryCapability(closureJson: string): Promise<unknown>;
-  getNativeInquiryCapabilityStatus(statusJson: string): Promise<unknown>;
+  applyNativeInquiryCapability?: (commandJson: string) => unknown;
+  closeNativeInquiryCapability?: (closureJson: string) => unknown;
+  getNativeInquiryCapabilityStatus?: (statusJson: string) => unknown;
 }
+type ReadyOperationsNativeInquiryCapabilityBinding = Required<OperationsNativeInquiryCapabilityBinding>;
 export type OperationsNativeInquiryCapabilityEnv = Readonly<{
   OPS_DB: D1Database;
   OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?: OperationsNativeInquiryCapabilityBinding;
@@ -42,7 +43,7 @@ function rpcResult(value: unknown, expectedAction: "grant" | "revoke", operation
   if (expectedAction === "revoke" && result.state !== "revoked") return null;
   return result as unknown as Extract<Result, { ok: true }>;
 }
-async function applyWithStatus(binding: OperationsNativeInquiryCapabilityBinding, command: Command,
+async function applyWithStatus(binding: ReadyOperationsNativeInquiryCapabilityBinding, command: Command,
   requestFingerprint: string): Promise<Extract<Result, { ok: true }> | null> {
   let responseValue: unknown = null;
   try { responseValue = await binding.applyNativeInquiryCapability(canonicalOperationsPortalNativeInquiryCapabilityCommandV4(command)); }
@@ -59,7 +60,20 @@ async function applyWithStatus(binding: OperationsNativeInquiryCapabilityBinding
       action: command.action, state: expectedState, replayed: true };
   } catch { return null; }
 }
-async function closeWithStatus(binding: OperationsNativeInquiryCapabilityBinding, closureJson: string,
+async function grantStatusWithoutApply(binding: ReadyOperationsNativeInquiryCapabilityBinding, command: Command,
+  requestFingerprint: string): Promise<"not_found" | Extract<Result, { ok: true }> | null> {
+  try {
+    const status = exactObject(await binding.getNativeInquiryCapabilityStatus(JSON.stringify({ protocolVersion: 1,
+      operationId: command.operationId })));
+    if (status?.ok === false && status.code === "not_found") return "not_found";
+    if (!status || status.ok !== true || status.protocolVersion !== 1 || status.operationId !== command.operationId
+      || status.requestFingerprint !== requestFingerprint || status.action !== "grant"
+      || (status.state !== "prepared" && status.state !== "active")) return null;
+    return { ok: true, protocolVersion: 1, operationId: command.operationId, requestFingerprint,
+      action: "grant", state: status.state, replayed: true };
+  } catch { return null; }
+}
+async function closeWithStatus(binding: ReadyOperationsNativeInquiryCapabilityBinding, closureJson: string,
   operationId: string, requestFingerprint: string, operationsReceiptFingerprint: string): Promise<boolean> {
   try {
     const closed = exactObject(await binding.closeNativeInquiryCapability(closureJson));
@@ -79,11 +93,13 @@ async function closeWithStatus(binding: OperationsNativeInquiryCapabilityBinding
  * pins before accepting a grant. */
 export async function prepareOperationsNativeInquiryCapability(env: OperationsNativeInquiryCapabilityEnv,
   raw: unknown): Promise<Result> {
-  if (env.OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED !== "true") return fail("disabled", true);
   let document: unknown = raw;
   if (typeof raw === "string") { try { document = JSON.parse(raw); } catch { document = null; } }
   const command = parseOperationsPortalNativeInquiryCapabilityCommandV4(document);
   if (!command) return fail("invalid");
+  // The feature switch gates creation of request.create authority. Explicit
+  // owner revocation remains available as a safety operation after shutdown.
+  if (command.action === "grant" && env.OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED !== "true") return fail("disabled", true);
   const canonical = canonicalOperationsPortalNativeInquiryCapabilityCommandV4(command);
   if (typeof raw !== "string" || raw !== canonical) return fail("invalid");
   const db = env.OPS_DB.withSession("first-primary"), fingerprint = await hash(canonical);
@@ -159,9 +175,13 @@ export async function prepareOperationsNativeInquiryCapability(env: OperationsNa
  * Replaying this function reconciles ambiguous RPC results from durable state. */
 export async function dispatchOperationsNativeInquiryCapability(env: OperationsNativeInquiryCapabilityEnv,
   operationId: string): Promise<Result> {
-  if (env.OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED !== "true") return fail("disabled", true);
   const binding = env.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY;
-  if (!binding) return fail("unavailable", true);
+  if (!binding || typeof binding.applyNativeInquiryCapability !== "function"
+    || typeof binding.closeNativeInquiryCapability !== "function"
+    || typeof binding.getNativeInquiryCapabilityStatus !== "function") return fail("unavailable", true);
+  const readyBinding: ReadyOperationsNativeInquiryCapabilityBinding = { applyNativeInquiryCapability: binding.applyNativeInquiryCapability,
+    closeNativeInquiryCapability: binding.closeNativeInquiryCapability,
+    getNativeInquiryCapabilityStatus: binding.getNativeInquiryCapabilityStatus };
   const db = env.OPS_DB.withSession("first-primary");
   const row = await db.prepare(`SELECT command.operation_id,command.request_fingerprint,command.canonical_command_json,
       outbox.state,outbox.attempts FROM operations_portal_native_inquiry_capability_commands command
@@ -174,12 +194,32 @@ export async function dispatchOperationsNativeInquiryCapability(env: OperationsN
   if (!command) return fail("stored_command_invalid");
   if (canonicalOperationsPortalNativeInquiryCapabilityCommandV4(command) !== row.canonical_command_json) return fail("stored_command_noncanonical");
   if (await hash(row.canonical_command_json) !== row.request_fingerprint) return fail("stored_command_fingerprint_mismatch");
+  const intentState = command.action === "grant" ? await db.prepare(`SELECT state FROM operations_portal_native_recipient_intents
+    WHERE intent_id=? AND permission_schema_version=4`).bind(command.recipient.enrollmentIntentId).first<string>("state") : null;
+  if (command.action === "grant" && intentState === null) return fail("stale");
+  const revocationStarted = intentState === "revoking" || intentState === "revoked";
+  if (command.action === "grant" && !revocationStarted
+    && env.OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED !== "true") return fail("disabled", true);
   const priorClosure = await db.prepare(`SELECT request_fingerprint FROM operations_portal_native_inquiry_capability_closures
     WHERE operation_id=?`).bind(operationId).first<string>("request_fingerprint");
   if (priorClosure === row.request_fingerprint) return { ok: true, protocolVersion: 1, operationId,
     requestFingerprint: row.request_fingerprint, action: command.action, state: "active", replayed: true };
+  if (command.action === "revoke") {
+    const priorRevoke = await db.prepare(`SELECT receipt.request_fingerprint FROM operations_portal_native_inquiry_capability_receipts receipt
+      JOIN operations_portal_native_inquiry_capability_heads head ON head.latest_operation_id=receipt.operation_id
+        AND head.intent_id=? AND head.state='revoked' AND head.revision=?
+      WHERE receipt.operation_id=? AND receipt.request_fingerprint=? AND receipt.state='revoked'`)
+      .bind(command.recipient.enrollmentIntentId, Number(command.transition.resultingRevision), operationId,
+        row.request_fingerprint).first<string>("request_fingerprint");
+    if (priorRevoke === row.request_fingerprint) return { ok: true, protocolVersion: 1, operationId,
+      requestFingerprint: row.request_fingerprint, action: "revoke", state: "revoked", replayed: true };
+  }
   if (command.action === "grant") {
-    const clientPrepared = await applyWithStatus(binding, command, row.request_fingerprint);
+    const clientPrepared = revocationStarted
+      ? await grantStatusWithoutApply(readyBinding, command, row.request_fingerprint)
+      : env.OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED === "true"
+        ? await applyWithStatus(readyBinding, command, row.request_fingerprint) : null;
+    if (clientPrepared === "not_found") return fail("capability_not_found");
     if (!clientPrepared) return fail("client_unavailable", true);
     const operationsReceiptFingerprint = await hash(`${operationId}\n${row.request_fingerprint}\n${clientPrepared.requestFingerprint}\nprepared`);
     try {
@@ -203,9 +243,13 @@ export async function dispatchOperationsNativeInquiryCapability(env: OperationsN
           updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE operation_id=?`).bind(operationId),
       ]);
     } catch { return fail("receipt_conflict"); }
+    const currentIntentState = await db.prepare(`SELECT state FROM operations_portal_native_recipient_intents
+      WHERE intent_id=? AND permission_schema_version=4`).bind(command.recipient.enrollmentIntentId).first<string>("state");
+    if (currentIntentState !== "active") return fail("revocation_pending", true);
+    if (env.OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED !== "true") return fail("disabled", true);
     const closureJson = JSON.stringify({ protocolVersion: 1, operationId, requestFingerprint: row.request_fingerprint,
       clientReceiptFingerprint: clientPrepared.requestFingerprint, operationsReceiptFingerprint, closedAt: new Date().toISOString() });
-    if (!await closeWithStatus(binding, closureJson, operationId, row.request_fingerprint, operationsReceiptFingerprint))
+    if (!await closeWithStatus(readyBinding, closureJson, operationId, row.request_fingerprint, operationsReceiptFingerprint))
       return fail("client_closure_pending", true);
     try {
       await db.batch([
@@ -225,7 +269,7 @@ export async function dispatchOperationsNativeInquiryCapability(env: OperationsN
     return { ok: true, protocolVersion: 1, operationId, requestFingerprint: row.request_fingerprint,
       action: "grant", state: "active", replayed: false };
   }
-  const clientRevoked = await applyWithStatus(binding, command, row.request_fingerprint);
+  const clientRevoked = await applyWithStatus(readyBinding, command, row.request_fingerprint);
   if (!clientRevoked) return fail("client_unavailable", true);
   const operationsReceiptFingerprint = await hash(`${operationId}\n${row.request_fingerprint}\n${clientRevoked.requestFingerprint}\nrevoked`);
   try {

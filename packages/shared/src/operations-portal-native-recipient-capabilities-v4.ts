@@ -105,7 +105,8 @@ export function parseOperationsPortalNativeInquiryCapabilityCommandV4(
       || !transition || !nonnegativeDecimal(transition.expectedRevision) || !positiveDecimal(transition.resultingRevision)
       || (command.action === "grant" ? transition.expectedRevision !== "0" || transition.resultingRevision !== "1"
         : BigInt(transition.resultingRevision) !== BigInt(transition.expectedRevision) + 1n)
-      || !exactInstant(command.expiresAt) || !exactInstant(command.observedAt) || command.expiresAt <= command.observedAt
+      || !exactInstant(command.expiresAt) || !exactInstant(command.observedAt)
+      || command.action === "grant" && command.expiresAt <= command.observedAt
       || !actor || !OPAQUE(actor.staffId, 191) || !OPAQUE(actor.verifiedAccessSubject, 512)
       || !positiveDecimal(actor.admissionVersion) || !positiveDecimal(actor.profileVersion)
       || !positiveDecimal(actor.grantGeneration) || !exactInstant(actor.verifiedUntil)

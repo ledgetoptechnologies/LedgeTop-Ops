@@ -12,6 +12,8 @@ import { reserveOperationsPortalNativeWorkspaceCleanupRecovery } from "./operati
 import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
 import { admittedOperationsRequestOrigin } from "./host-admission";
 import { parseOperationsPortalNativeRecipientIssueRequest } from "@ltds/shared/operations-portal-native-recipient-capabilities-v4";
+import { ensureOperationsNativeRecipientInquiryCapability } from "./operations-portal-native-recipient-inquiry-owner";
+import type { OperationsNativeInquiryCapabilityEnv } from "./operations-portal-native-inquiry-capability-dispatch";
 
 const BASE = "/api/native-client-portal/operations-recipient-enrollment";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -20,7 +22,7 @@ type Actor = AuthenticatedNativeStaffWithAdmissionVersion;
 type Configuration = NativeStaffAccessConfiguration & Readonly<{ origin: string; recipientOrigin: string; csrfSecret: string }>;
 export type OperationsNativeRecipientOwnerHttpDependencies = Readonly<{
   environment: string; expectedHost: string; operationsOrigins?: string; configuration: Configuration;
-  database: D1Database; dispatch: OperationsPortalNativeRecipientAuthorityDispatchEnv;
+  database: D1Database; dispatch: OperationsPortalNativeRecipientAuthorityDispatchEnv & OperationsNativeInquiryCapabilityEnv;
 }>;
 class Failure extends Error { constructor(readonly status: number, readonly code: string) { super(code); } }
 const response = (status: number, body: unknown) => Response.json(body, { status, headers: {
@@ -217,9 +219,22 @@ export async function handleOperationsNativeRecipientOwnerHttp(request: Request,
       const dispatched = await dispatchOperationsPortalNativeRecipientAuthority(d.dispatch, value.operationId); alive(actor);
       if (dispatched.status === "rejected") return response(409, { operationId: value.operationId, status: "rejected" });
       if (dispatched.status === "disabled") throw new Failure(503, "unavailable");
+      let status: "acknowledged" | "pending" = dispatched.status === "acknowledged" ? "acknowledged" : "pending";
+      if (command.action === "recipient.grant" && dispatched.status === "acknowledged"
+        && intent.permissionSchemaVersion === 4) {
+        const companion = await ensureOperationsNativeRecipientInquiryCapability(d.dispatch, intentId!, value.operationId,
+          "grant", actor); alive(actor);
+        if (!companion.ok) {
+          const current = await readOperationsPortalNativeRecipientIntentForOwner(d.database, intentId!, actor); alive(actor);
+          return response(companion.retryable ? 202 : 409, { operationId: value.operationId,
+          intent: current,
+          status: companion.retryable ? "pending" : "rejected",
+          ...(companion.retryable ? {} : { error: "request_capability_unavailable" }) });
+        }
+        if (companion.state !== "active") status = "pending";
+      }
       const current = await readOperationsPortalNativeRecipientIntentForOwner(d.database, intentId!, actor); alive(actor);
-      return response(dispatched.status === "acknowledged" ? 200 : 202, { operationId: value.operationId,
-        status: dispatched.status === "acknowledged" ? "acknowledged" : "pending", intent: current });
+      return response(status === "acknowledged" ? 200 : 202, { operationId: value.operationId, status, intent: current });
     }
     if (action === "cancel") {
       const result = await cancelOperationsPortalNativeRecipientIntent(d.database, input); alive(actor);
@@ -227,7 +242,35 @@ export async function handleOperationsNativeRecipientOwnerHttp(request: Request,
     }
     if (action === "confirm") {
       const current = await readOperationsPortalNativeRecipientIntentForOwner(d.database, intentId!, actor); alive(actor);
-      if (current.permissionSchemaVersion === 4) throw new Failure(409, "request_capability_unavailable");
+      if (current.permissionSchemaVersion === 4 && (d.dispatch.OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED !== "true"
+        || typeof d.dispatch.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?.applyNativeInquiryCapability !== "function"
+        || typeof d.dispatch.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?.closeNativeInquiryCapability !== "function"
+        || typeof d.dispatch.OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?.getNativeInquiryCapabilityStatus !== "function"))
+        throw new Failure(409, "request_capability_unavailable");
+    }
+    if (action === "revoke") {
+      const current = await readOperationsPortalNativeRecipientIntentForOwner(d.database, intentId!, actor); alive(actor);
+      const result = await revokeOperationsPortalNativeRecipient(d.database, input); alive(actor);
+      await materializeOperationsPortalNativeRecipientAuthority(d.database, result.authorityOperationId); alive(actor);
+      const dispatched = await dispatchOperationsPortalNativeRecipientAuthority(d.dispatch, result.authorityOperationId); alive(actor);
+      let companion: Awaited<ReturnType<typeof ensureOperationsNativeRecipientInquiryCapability>> | null = null;
+      if (current.permissionSchemaVersion === 4) {
+        companion = await ensureOperationsNativeRecipientInquiryCapability(d.dispatch, intentId!, result.authorityOperationId,
+          "revoke", actor); alive(actor);
+      }
+      if (dispatched.status === "rejected") return response(409, { operationId: result.authorityOperationId, status: "rejected" });
+      if (dispatched.status === "disabled") throw new Failure(503, "unavailable");
+      if (companion && !companion.ok) {
+        const intent = await readOperationsPortalNativeRecipientIntentForOwner(d.database, intentId!, actor); alive(actor);
+        return response(companion.retryable ? 202 : 409, { operationId: result.authorityOperationId, intent,
+          status: companion.retryable ? "pending" : "rejected",
+          ...(companion.retryable ? {} : { error: "request_capability_unavailable" }) });
+      }
+      const intent = await readOperationsPortalNativeRecipientIntentForOwner(d.database, intentId!, actor); alive(actor);
+      const status = dispatched.status === "acknowledged" && (!companion || companion.state === "revoked")
+        ? "acknowledged" : "pending";
+      return response(status === "acknowledged" ? 200 : 202, { operationId: result.authorityOperationId,
+        status, intent, replayed: result.replayed });
     }
     const result = action === "confirm" ? await confirmOperationsPortalNativeRecipientIntent(d.database, input)
       : await revokeOperationsPortalNativeRecipient(d.database, input);
@@ -236,9 +279,24 @@ export async function handleOperationsNativeRecipientOwnerHttp(request: Request,
     const dispatched = await dispatchOperationsPortalNativeRecipientAuthority(d.dispatch, result.authorityOperationId); alive(actor);
     if (dispatched.status === "rejected") return response(409, { operationId: result.authorityOperationId, status: "rejected" });
     if (dispatched.status === "disabled") throw new Failure(503, "unavailable");
+    let status: "acknowledged" | "pending" = dispatched.status === "acknowledged" ? "acknowledged" : "pending";
+    if (action === "confirm" && dispatched.status === "acknowledged") {
+      const current = await readOperationsPortalNativeRecipientIntentForOwner(d.database, intentId!, actor); alive(actor);
+      if (current.permissionSchemaVersion === 4) {
+        const companion = await ensureOperationsNativeRecipientInquiryCapability(d.dispatch, intentId!, result.authorityOperationId,
+          "grant", actor); alive(actor);
+        if (!companion.ok) {
+          const current = await readOperationsPortalNativeRecipientIntentForOwner(d.database, intentId!, actor); alive(actor);
+          return response(companion.retryable ? 202 : 409, { operationId: result.authorityOperationId, intent: current,
+          status: companion.retryable ? "pending" : "rejected",
+          ...(companion.retryable ? {} : { error: "request_capability_unavailable" }) });
+        }
+        if (companion.state !== "active") status = "pending";
+      }
+    }
     const intent = await readOperationsPortalNativeRecipientIntentForOwner(d.database, intentId!, actor); alive(actor);
-    return response(dispatched.status === "acknowledged" ? 200 : 202, { operationId: result.authorityOperationId,
-      status: dispatched.status === "acknowledged" ? "acknowledged" : "pending", intent, replayed: result.replayed });
+    return response(status === "acknowledged" ? 200 : 202, { operationId: result.authorityOperationId,
+      status, intent, replayed: result.replayed });
   } catch (error) {
     const denied = error instanceof Error && (error.message === "operations_portal_native_recipient_denied"
       || error.message === "operations_portal_native_workspace_cleanup_denied");
