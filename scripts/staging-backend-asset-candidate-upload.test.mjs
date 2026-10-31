@@ -368,6 +368,19 @@ test('a bucket may upload only the missing cached hashes and must use its final 
   assert.equal(state.calls.find(row => row.type === 'version').request.assets.jwt, 'final-completion-token-0001');
 });
 
+test('v3 intermediate bucket contract still rejects a 202 response before version creation', async t => {
+  const f = fixture(t), hashes = [...new Set(f.heldPlan.assetReconstitution.files.map(row => {
+    const bytes = f.rawAssets[row.path.slice(1)], extension = path.posix.extname(row.path).slice(1);
+    return f.hashBlake3(Buffer.from(`${bytes.toString('base64')}${extension}`, 'utf8')).slice(0, 32);
+  }))];
+  assert.ok(hashes.length >= 2);
+  const state = harness(f, { session: { buckets: [[hashes[0]], [hashes[1]]], jwt: 'initial-session-token-0001' },
+    bucketResponses: [{ status: 202 }, { status: 201, completionJwt: 'final-completion-token-0001' }] });
+  await assert.rejects(state.adapter({ planOptions: f.planOptions, heldPlan: f.heldPlan,
+    runtimeProofFile: f.runtimeProofFile, coverageEvidenceFile: f.coverageFile }), /bucket response/);
+  assert.deepEqual(state.calls.map(row => row.type), ['session', 'bucket']);
+});
+
 test('conflicting local files that collide to one provider hash are rejected before upload', async t => {
   const f = fixture(t), state = harness(f, { session: { buckets: [], jwt: 'u'.repeat(24) } });
   const collisionHasher = bytes => bytes.toString('utf8') === 'QQ==txt'
@@ -485,6 +498,89 @@ test('v4 readback preserves the exact current Client binding inventory and old v
   assert.throws(() => validateCurrentStagingBackendAssetMaterialization({ heldPlan: wrongSource,
     hashBlake3: () => assert.fail('wrong source must stop before reading assets') }));
   assert.equal(typeof createCurrentStagingBackendAssetCandidateUploader, 'function');
+});
+
+test('current v4 two-bucket upload accepts 202 only between buckets and requires final 201 JWT', {
+  skip: !currentPlanRoot && 'current-profile held plans are not configured',
+}, async t => {
+  const planRoot = path.resolve(currentPlanRoot);
+  const planOptions = JSON.parse(fs.readFileSync(path.join(planRoot, 'client', 'plan-options.private.json'), 'utf8'));
+  const heldPlan = JSON.parse(fs.readFileSync(path.join(planRoot, 'client', 'successor.held.json'), 'utf8'));
+  const coverageEvidenceFile = { path: path.join(planRoot, 'client', 'successor.coverage.json'),
+    sha256: hash(fs.readFileSync(path.join(planRoot, 'client', 'successor.coverage.json'))) };
+  const coverageTime = Date.parse(JSON.parse(fs.readFileSync(coverageEvidenceFile.path, 'utf8')).observedAt);
+  const now = () => Math.max(Date.parse(heldPlan.controlsCapture.observedAt), coverageTime) + 2_000;
+  async function run(statuses, omitFinalJwt = false) {
+    const calls = [], used = new Set(); let bucketIndex = 0, requestForReadback, validationError, validationDiagnostics;
+    const adapter = createCurrentStagingBackendAssetCandidateUploader({
+      sdk: {
+        async createAssetUploadSession(worker, request, options) {
+          calls.push({ type: 'session', worker, options });
+          const hashes = [...new Set(Object.values(request.manifest).map(row => row.hash))];
+          assert.ok(hashes.length >= 2);
+          return { buckets: [[hashes[0]], [hashes[1]]], jwt: 'initial-memory-only-jwt-0001' };
+        },
+        async createVersion(worker, request, options) {
+          calls.push({ type: 'version', worker, options, jwt: request.assets.jwt });
+          requestForReadback = clone(request);
+          return { id: CANDIDATE };
+        },
+      },
+      async uploadBucket(request) {
+        calls.push({ type: 'bucket', index: bucketIndex, retryCount: request.maxRetries });
+        used.add(request.uploadJwt);
+        const status = statuses[bucketIndex++];
+        return { status, ...(status === 201 && !omitFinalJwt ? { completionJwt: 'final-memory-only-jwt-0002' } : {}) };
+      },
+      async readFreshControls() { return planOptions.controlsFile; },
+      async readCandidateState() {
+        calls.push({ type: 'readback' });
+        const value = { latestVersionId: CANDIDATE,
+          deployment: [{ versionId: heldPlan.selectedActiveVersionId, percentage: 100 }], candidate: {
+            id: CANDIDATE, mainModule: requestForReadback.main_module,
+            modules: requestForReadback.modules.map((module, index) => ({ name: module.name,
+              bytes: index === 0 ? heldPlan.artifact.main.size : heldPlan.artifact.sourceMap.size,
+              sha256: index === 0 ? heldPlan.artifact.main.sha256 : heldPlan.artifact.sourceMap.sha256,
+              content_type: module.content_type })),
+            resolvedBindings: clone(heldPlan.expectedUnchangedResources.bindings).sort((a, b) => a.name.localeCompare(b.name)),
+            assetsConfig: requestForReadback.assets.config, compatibilityDate: requestForReadback.compatibility_date,
+            compatibilityFlags: requestForReadback.compatibility_flags, exports: requestForReadback.exports,
+          } };
+        validationDiagnostics = {
+          bindings: canonical(value.candidate.resolvedBindings) === canonical(heldPlan.expectedUnchangedResources.bindings.slice().sort((a,b)=>a.name.localeCompare(b.name))),
+          inheritCounts: [value.candidate.resolvedBindings.filter(row=>row.type==='inherit').length,
+            heldPlan.expectedUnchangedResources.bindings.filter(row=>row.type==='inherit').length],
+          nameCounts: [value.candidate.resolvedBindings.length, new Set(value.candidate.resolvedBindings.map(row=>row.name)).size],
+          asset: canonical(value.candidate.assetsConfig) === canonical(requestForReadback.assets.config),
+          date: value.candidate.compatibilityDate === requestForReadback.compatibility_date,
+          flags: canonical(value.candidate.compatibilityFlags) === canonical(requestForReadback.compatibility_flags),
+          exports: canonical(value.candidate.exports) === canonical(requestForReadback.exports),
+        };
+        try { validateCurrentStagingBackendAssetCandidateReadback({ readback: value, candidateVersionId: CANDIDATE,
+          heldPlan, candidateParams: requestForReadback }); } catch (error) { validationError = error; }
+        return value;
+      },
+      journal: { async reserve(key) { if (used.has(key)) return false; used.add(key); return true; }, async complete() {} },
+      hashBlake3: bytes => blake3(bytes).toString('hex'), now,
+    });
+    try {
+      const result = await adapter({ planOptions, heldPlan, runtimeProofFile: { path: RUNTIME_PROOF,
+        sha256: '0d4c66619a4393594008be2261c865a4b631ad0204de4d5f3e5b21d579b18d84' }, coverageEvidenceFile });
+      return { result, calls, validationError, validationDiagnostics };
+    } catch (error) { return { error, calls, validationError, validationDiagnostics }; }
+  }
+  const accepted = await run([202, 201]);
+  assert.deepEqual(accepted.result, { candidateVersionId: CANDIDATE, readbackVerified: true },
+    `${String(accepted.validationError)} ${JSON.stringify(accepted.validationDiagnostics)}`);
+  assert.deepEqual(accepted.calls.filter(row => row.type === 'bucket').map(row => row.index), [0, 1]);
+  assert.equal(accepted.calls.filter(row => row.type === 'version').length, 1);
+  assert.equal(accepted.calls.find(row => row.type === 'version').jwt, 'final-memory-only-jwt-0002');
+  const final202 = await run([202, 202]);
+  assert.match(String(final202.error), /bucket response/);
+  assert.equal(final202.calls.filter(row => row.type === 'version').length, 0);
+  const missingCompletionJwt = await run([202, 201], true);
+  assert.match(String(missingCompletionJwt.error), /bucket response/);
+  assert.equal(missingCompletionJwt.calls.filter(row => row.type === 'version').length, 0);
 });
 
 test('the v4 uploader rejects a v3 plan before any mocked mutation', async t => {

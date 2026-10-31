@@ -603,7 +603,8 @@ function createAssetCandidateUploader({ sdk, uploadBucket, readFreshControls,
             uploadJwt: token, files: rows, maxRetries: 0, timeoutMs: 25_000,
           }));
           const final = index === session.buckets.length - 1;
-          need(response && response.status === (final ? 201 : 200)
+          const acceptedIntermediateStatus = currentProfile ? [200, 202].includes(response?.status) : response?.status === 200;
+          need(response && (final ? response.status === 201 : acceptedIntermediateStatus)
             && (final ? typeof response.completionJwt === 'string' && response.completionJwt.length >= 16
               && response.completionJwt.length <= 8_192 : response.completionJwt === undefined),
           'Asset upload bucket response did not meet the one-response status/JWT contract');
