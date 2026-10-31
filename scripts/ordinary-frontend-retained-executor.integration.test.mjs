@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { hash, canonical, validateInstallation, ORDINARY_FRONTEND_PREFLIGHT_MODE } from './production-deploy.mjs';
 import { compileOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
 import { compileOrdinaryFrontendRetainedPlan } from './ordinary-frontend-retained-plan.mjs';
-import { executeOrdinaryFrontendRetainedRelease } from './ordinary-frontend-retained-executor.mjs';
+import { executeOrdinaryFrontendRetainedRelease, validateProductionAuthorityPacketSelection } from './ordinary-frontend-retained-executor.mjs';
 import { mergeAssetLedger, ledgerBytes } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { prepareOpsLegacyLedgerBootstrap, completeOpsLegacyLedgerBootstrap } from './ordinary-frontend-ops-ledger-bootstrap.mjs';
@@ -31,6 +31,14 @@ const FIXED_OPS_WEIGHTS = [
 const clone = value => structuredClone(value);
 const codepoint = (a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
 const appWorker = app => app === 'operations' ? 'ledgetop-ops' : 'ledgetop-clients';
+
+test('production authority selection requires one Operations packet and zero Client packets', () => {
+  assert.equal(validateProductionAuthorityPacketSelection({ app:'client' }), true);
+  assert.throws(() => validateProductionAuthorityPacketSelection({ app:'client', review:{ synthetic:true } }), /Client release cannot select/u);
+  assert.throws(() => validateProductionAuthorityPacketSelection({ app:'operations' }), /exactly one/u);
+  assert.throws(() => validateProductionAuthorityPacketSelection({ app:'operations', review:{ synthetic:true }, post0226Review:{ synthetic:true } }), /exactly one/u);
+  assert.equal(validateProductionAuthorityPacketSelection({ app:'operations', post0226Review:{ synthetic:true } }), true);
+});
 const moduleMap = bytes => ({ name: 'index.js.map', content_base64: bytes.toString('base64') });
 
 function assetFiles(t, app) {

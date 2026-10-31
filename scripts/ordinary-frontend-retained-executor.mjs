@@ -725,7 +725,7 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
     'Native cutover packet cannot be combined with frontend-only authority');
   if (staffAuthorityContract === POST0226_STAFF_PRESERVATION_CONTRACT)
     needFn(!staffReviewPath && !frontendAuthorityReviewPath, 'Post-0226 preservation review cannot be combined with another authority packet');
-  needFn([review, frontendReview, post0226Review].filter(Boolean).length === 1, 'Select exactly one Operations staff authority packet');
+  validateProductionAuthorityPacketSelection({ app, review, frontendReview, post0226Review });
   const assetVerifierProvider = createJournaledAssetVerifierProvider({ accountId: env.CLOUDFLARE_ACCOUNT_ID,
     token: env.CLOUDFLARE_API_TOKEN, fetchImpl, profile: PROFILE, journalDirectory, sourceCommit: planSourceCommit });
   return executeOrdinaryFrontendRetainedRelease({ app, plan, profile, expectedDeploymentVersions,
@@ -736,6 +736,16 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
     runNative: (cli, args, directory, phase, cwd) => runNativeProductionCommand(cli, args, directory, phase, cwd, env),
     sourceReader: root => deploymentSourceCommit(root, env),
     readStaffCutover: args => readNativeStaffCutoverReadiness(args) });
+}
+
+/** Operations releases select one authority packet; Client releases select none. */
+export function validateProductionAuthorityPacketSelection({ app, review, frontendReview, post0226Review } = {}) {
+  needFn(app === 'operations' || app === 'client', 'Production authority packet application is invalid');
+  const count = [review, frontendReview, post0226Review].filter(Boolean).length;
+  needFn(app === 'operations' ? count === 1 : count === 0,
+    app === 'operations' ? 'Select exactly one Operations staff authority packet'
+      : 'Client release cannot select an Operations staff authority packet');
+  return true;
 }
 
 /** Bind every temporary verifier mutation intent to the already validated plan. */
