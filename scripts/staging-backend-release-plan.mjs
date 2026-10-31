@@ -61,6 +61,63 @@ const CURRENT_PROFILE_PINS = Object.freeze({
     flagsSHA256: '2784fc23f3c87688c72285f1f9f43638891ada3753281c5d5811a53574bbe18b',
     exportsSHA256: '9151e2ed7fc023457e7a71556e867cd770af52b1a840f7db8165ed9bbee22e17' }),
 });
+const OWNER_REVIEW_PROFILE_SOURCE_COMMIT = '4ee6cbe84265d07e2998b795f2a130763e95d4db';
+const OWNER_REVIEW_PROFILE_CONTRACT = 'staging-backend-only-owner-review-profile-v5';
+const OWNER_REVIEW_PROFILE_TARGETS = Object.freeze({
+  operations: Object.freeze({ workerName: STAGING_INVENTORY.operations.name,
+    activeVersionId: 'e299b7af-f9ed-424b-ae8f-3fdff4f0614e', latestVersionId: 'e299b7af-f9ed-424b-ae8f-3fdff4f0614e',
+    mainModuleName: 'staging-native-authority-entrypoint.js', databases: dbPins(STAGING_INVENTORY.operations) }),
+  client: Object.freeze({ workerName: STAGING_INVENTORY.delivery.name,
+    activeVersionId: '2e8dd07c-3ccc-47ea-91ce-6e896b42313d', latestVersionId: '2e8dd07c-3ccc-47ea-91ce-6e896b42313d',
+    mainModuleName: 'index.js', databases: dbPins(STAGING_INVENTORY.delivery) }),
+  sync: Object.freeze({ workerName: STAGING_INVENTORY['ops-sync'].name,
+    activeVersionId: '470134b4-ef95-4702-98f3-110e4f4cbbb0', latestVersionId: '470134b4-ef95-4702-98f3-110e4f4cbbb0',
+    mainModuleName: 'index.js', databases: dbPins(STAGING_INVENTORY['ops-sync']) }),
+});
+const OWNER_REVIEW_PROFILE_PINS = Object.freeze({
+  schemaSHA256: 'bd7531ad0a2900a82d237d922194a8b2b736f642ba6a3dabb2fe99551c797d7a',
+  operations: Object.freeze({ bindingCount: 152, mainModuleSHA256: '99cd0aec4ef22b3bc424d3cb100cfbcb6feb163bd78a827fe8442390ba61f318',
+    rawControlSHA256: 'e68499732c24bece4327a1f5913aec376a83e10bc711fa5617f40dbfaa783890',
+    rawBindingsSHA256: 'c74ab2e01d78ca70baaa974c4a58e2fbb4ec47fc70a1a532e5f827916fc60c84',
+    bindingIdentitySHA256: '7ecefefe509d398b91df0ecacb7ec020ddee0cad55a6bd1ad970537bb7744e19',
+    serviceBindingsSHA256: 'd361793f289cd5546016afd94f51d8fd284009453566ce2c178829d6945a5154',
+    settingsSHA256: '9de7539c47fdd0a8b6b5662a49336d30f42815309717f36b273524e3ee74ec6b',
+    runtimeSHA256: '9166b35d6905c5916fc515cac614d9db43806358d01d77e3a9f666f5d11a65ce',
+    assetsConfigSHA256: '0ef07e7023dabbef7f8c6d6bc51e72cf669fc203335fa9d1f5c7e8d306cbde88',
+    schedulesSHA256: '16c7f2cd36bf3274194240d9dca27e3d1c41f38a1a78b6918d1d5c4346ff5011',
+    flagsSHA256: '7c8e20772b90df207ba2a9bb22f8c20cde53880ae19d11fd0dbec357c6cfd96e',
+    exportsSHA256: 'eb9bd3ea973af496a98c0a8eaf02ac596d6e891fea2d338ac1cd058a98a2075a' }),
+  client: Object.freeze({ bindingCount: 125, mainModuleSHA256: '3a5bfec73c59cb066f0797a499f1227f28bd8b233c8b383d92d4729f86015679',
+    rawControlSHA256: 'be95f9eb005faf22d0bd4b786cf263207c2534a589528d55fe29eee51cf6071c',
+    rawBindingsSHA256: '7a538de1590b3a8575ad708b51cff8aeffd7360380da5155fe66957529b471dd',
+    bindingIdentitySHA256: 'ebed92836d35bbcead5d7379b3667ea9afcf3611d0cfc5081e07b75ce20f0bb0',
+    serviceBindingsSHA256: '2911f91c32c3f7c407f21f5a9573413dd5434d80e8ee9d4b46b6f506556adef5',
+    settingsSHA256: 'c0e34207712844d7d71c152c241736bdd7893ac4ad4025143a54914c18ba2511',
+    runtimeSHA256: '432733e3d1c4b53a0f3e5744572414f47a11904131ef49d33ddcf63b2b6f130e',
+    assetsConfigSHA256: 'b1c41485893a0ed4b1a9933fbbe880e3da77e6c0b90d12866c105f1e478bf1f3',
+    schedulesSHA256: '9af169f5a55d6393a02f894c4c52b5a97e115de6a505a51b8ef883c347c8549a',
+    flagsSHA256: '2784fc23f3c87688c72285f1f9f43638891ada3753281c5d5811a53574bbe18b',
+    exportsSHA256: '9151e2ed7fc023457e7a71556e867cd770af52b1a840f7db8165ed9bbee22e17' }),
+  sync: Object.freeze({ bindingCount: 14, mainModuleSHA256: 'a32b8c8711b8e48431b3e44b3eafaaedef2af089b08d5dcbeb282b76fb660531',
+    rawControlSHA256: 'c0789fbca6df3c9401fa8deeee0d1cf020c5d117075204c2b0fd054632c63597',
+    rawBindingsSHA256: 'ab1319e6567ab55e0660f3c63236d4c0953e8e424f8ffd74a9c263755edc4e77',
+    bindingIdentitySHA256: 'a4a8ef8297f4951b77d765e7e788dbd14ca878bef41292cb25f8caf603187214',
+    serviceBindingsSHA256: '38fe4a900c580555b081c6a61aeeb942e8e9b17e3f79a69f5ee6daaffcb35ab3',
+    settingsSHA256: 'b071022e6a7e801fc5cbeae69ec091931b273cc66d9ff5769579cbd300556792',
+    runtimeSHA256: 'bbef71ec49024f2cb2e6c00f4eaa82c1949b05ee5a2103b6bfb8c72a0e931666',
+    assetsConfigSHA256: '74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b',
+    schedulesSHA256: '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+    flagsSHA256: '2b84c18c712d945d7682c42d08be81d933baaee84aca3adda3d7b8f88c5f79bd',
+    exportsSHA256: '74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b' }),
+});
+const OWNER_REVIEW_PROFILE_ARTIFACT = Object.freeze({
+  main: Object.freeze({ path: 'C:/Users/fstor/.codex/artifacts/production-ops-retained-resume-execution-20261031/recipient-integrated-owner-review-worker-dryrun-v4-20261031/operations/bundle/staging-native-authority-entrypoint.js',
+    size: 8_660_985, sha256: '2ab14ee0ff246f5849c657dff48cc8f47555f99779b9753f19c5188979141992' }),
+  sourceMap: Object.freeze({ path: 'C:/Users/fstor/.codex/artifacts/production-ops-retained-resume-execution-20261031/recipient-integrated-owner-review-worker-dryrun-v4-20261031/operations/bundle/staging-native-authority-entrypoint.js.map',
+    size: 15_030_187, sha256: '44f1b074e94d86393b31177c3afe33b5b869444fcd604ae8a0a270418a380cb6' }),
+});
+const OWNER_REVIEW_ASSET_FILE_COUNT = 282;
+const OWNER_REVIEW_ASSET_TOTAL_BYTES = 44_449_189;
 const APPS = Object.freeze(['operations', 'client', 'sync']);
 const SAFE_CONTROL_KEYS = new Set(['schemaVersion','purpose','environment','accountId','observedAt','workers','schema',
   'secretValuesPersisted','applicationRowsRead','resourceWrites']);
@@ -188,7 +245,7 @@ function inspectAssetTree(root) {
   return secondRead;
 }
 
-function checkedRetainedAssets(input, controls, application) {
+function checkedRetainedAssets(input, controls, application, { expectedFileCount, expectedTotalBytes } = {}) {
   need(ownKeysAre(input, ['manifestFile','filesRoot']), 'A pinned complete retained-asset manifest and files root are required');
   const { manifestFile, filesRoot } = input;
   const pinned = readPinnedJson(manifestFile, 'Retained asset manifest', { maxBytes: 16 * 1024 * 1024 });
@@ -228,13 +285,18 @@ function checkedRetainedAssets(input, controls, application) {
     && equal(excludedFiles, excludedFiles.slice().sort((a, b) => a.path.localeCompare(b.path)))
     && excludedFiles.every(row => !expected.some(asset => asset.path === row.path)),
   'Only exact known local-only support files may be excluded from the uploaded asset manifest');
+  const totalBytes = expected.reduce((sum, row) => sum + row.size, 0);
+  if (expectedFileCount !== undefined) need(expected.length === expectedFileCount,
+    'Owner-review retained asset manifest must contain the complete 282-file profile');
+  if (expectedTotalBytes !== undefined) need(totalBytes === expectedTotalBytes,
+    'Owner-review retained asset manifest must match the reviewed 44,449,189-byte inventory');
   need(path.isAbsolute(filesRoot), 'Retained asset files root must be absolute');
   const actual = inspectAssetTree(filesRoot);
   const completeLocalInventory = [...expected, ...excludedFiles].sort((a, b) => a.path.localeCompare(b.path));
   need(equal(actual, completeLocalInventory), 'Retained asset file bytes or whole-file inventory differ from the pinned materialization');
   return { manifestSHA256: pinned.sha256, manifestBytes: pinned.bytes, observedAt: manifest.observedAt,
     sourceVersionId: manifest.sourceVersionId, filesRoot: path.resolve(filesRoot), assetsConfig: clone(manifest.assetsConfig),
-    files: expected, excludedFiles, totalBytes: expected.reduce((sum, row) => sum + row.size, 0) };
+    files: expected, excludedFiles, totalBytes };
 }
 
 function rejectRawValues(value, location = 'controls') {
@@ -487,6 +549,54 @@ function checkedCurrentProfilePins(controls, { opsSuccessor = false } = {}) {
     `${app} settings, runtime, schedules, gates, exports, or captured controls differ from the reviewed current profile`);
   }
   return controls;
+}
+
+function ownerReviewWorkerObservation(worker) {
+  const pins = controlHashes(worker);
+  return {
+    workerName: worker.workerName, activeVersionId: worker.activeVersionId, latestVersionId: worker.latestVersionId,
+    deployment: clone(worker.deployment.versions), mainModuleName: worker.modern.modules[0].name,
+    mainModuleSHA256: worker.modern.modules[0].sha256, bindingCount: worker.version.resources.bindings.length,
+    ...pins, bindingIdentitySHA256: bindingIdentityHash(worker), serviceBindingsSHA256: serviceBindingsHash(worker),
+    selectedFlagsSHA256: hash(canonical(worker.selectedFlags)), exportsSHA256: hash(canonical(worker.modern.exports ?? null)),
+  };
+}
+
+function readOwnerReviewStagingBackendControlsSnapshot(controlsFile, { now = () => Date.now() } = {}) {
+  need(typeof now === 'function', 'Owner-review staging control snapshot requires a clock');
+  const pinnedControls = readPinnedJson(controlsFile, 'Owner-review staging controls capsule');
+  const controls = checkedControls(pinnedControls.value, { targets: OWNER_REVIEW_PROFILE_TARGETS });
+  const nowMs = now(), observed = Date.parse(controls.observedAt);
+  need(Number.isFinite(nowMs) && Number.isFinite(observed) && observed <= nowMs && nowMs - observed <= 30 * 60_000,
+    'Owner-review staging controls capsule is stale; capture again before planning');
+  need(hash(canonical(controls.schema)) === OWNER_REVIEW_PROFILE_PINS.schemaSHA256,
+    'Owner-review D1 schema differs from the exact reviewed profile');
+  for (const app of APPS) {
+    const worker = controls.workers[app], pins = OWNER_REVIEW_PROFILE_PINS[app], observation = ownerReviewWorkerObservation(worker);
+    need(worker.version.resources.bindings.length === pins.bindingCount
+      && observation.mainModuleName === OWNER_REVIEW_PROFILE_TARGETS[app].mainModuleName
+      && observation.mainModuleSHA256 === pins.mainModuleSHA256
+      && observation.bindingIdentitySHA256 === pins.bindingIdentitySHA256
+      && observation.serviceBindingsSHA256 === pins.serviceBindingsSHA256,
+    `${app} owner-review binding or installed module identity differs from the exact profile`);
+    const controlKeys = ['rawControlSHA256','rawBindingsSHA256','settingsSHA256','runtimeSHA256','assetsConfigSHA256','schedulesSHA256'];
+    need(controlKeys.every(key => observation[key] === pins[key])
+      && observation.selectedFlagsSHA256 === pins.flagsSHA256 && observation.exportsSHA256 === pins.exportsSHA256,
+    `${app} owner-review controls, settings, runtime, schedules, flags, or exports differ from the exact profile`);
+  }
+  const selected = controls.workers.operations;
+  const snapshot = {
+    schemaVersion: 5, contract: OWNER_REVIEW_PROFILE_CONTRACT, accountId: STAGING_ACCOUNT_ID,
+    observedAt: controls.observedAt, databaseSchemaSHA256: hash(canonical(controls.schema)),
+    selectedWorker: selected.workerName, selectedActiveVersionId: selected.activeVersionId,
+    selectedLatestVersionId: selected.latestVersionId, selectedControlPins: controlHashes(selected),
+    observations: Object.fromEntries(APPS.map(app => [app, ownerReviewWorkerObservation(controls.workers[app])])),
+  };
+  return { pinnedControls, controls, snapshot: freeze(snapshot) };
+}
+
+export function validateOwnerReviewStagingBackendControlsSnapshot(controlsFile, options) {
+  return readOwnerReviewStagingBackendControlsSnapshot(controlsFile, options).snapshot;
 }
 
 function validateCurrentOpsSuccessor(receipt, receiptSHA256, controls, sourceCommit) {
@@ -792,6 +902,91 @@ export function compileCurrentStagingBackendReleasePlan({ controlsFile, applicat
 
 export function validateCurrentStagingBackendReleasePlan(options, plan) {
   need(equal(plan, compileCurrentStagingBackendReleasePlan(options)), 'Current staging backend-only plan changed');
+  return plan;
+}
+
+/** Fixed Ops-only compiler for the post-UI owner-review profile.
+ * It accepts only the reviewed source, all-worker staging control pins, and
+ * complete retained asset inventory. The result remains held and offline. */
+export function compileOwnerReviewStagingBackendReleasePlan({ controlsFile, application, artifact, sourceCommit,
+  retainedAssets, now = () => Date.now() } = {}) {
+  need(application === 'operations' && typeof now === 'function',
+    'Only the fixed Operations owner-review staging target is supported');
+  need(sourceCommit === OWNER_REVIEW_PROFILE_SOURCE_COMMIT,
+    'Only the exact reviewed owner-review source commit is accepted');
+  const { pinnedControls, controls, snapshot } = readOwnerReviewStagingBackendControlsSnapshot(controlsFile, { now });
+  const target = OWNER_REVIEW_PROFILE_TARGETS.operations, selected = controls.workers.operations;
+  const expectedArtifact = OWNER_REVIEW_PROFILE_ARTIFACT;
+  need(ownKeysAre(artifact, ['sourceCommit','main','sourceMap'])
+    && artifact.sourceCommit === OWNER_REVIEW_PROFILE_SOURCE_COMMIT
+    && [['main', artifact.main], ['source map', artifact.sourceMap]].every(([label, pin]) => {
+      const expected = expectedArtifact[label === 'main' ? 'main' : 'sourceMap'];
+      return ownKeysAre(pin, ['path','size','sha256']) && path.resolve(pin.path) === path.resolve(expected.path)
+        && pin.size === expected.size && pin.sha256 === expected.sha256;
+    }), 'The exact reviewed Operations dry-run main and source map are required');
+  const nativeArtifact = verifyArtifact(artifact, sourceCommit, 'operations', OWNER_REVIEW_PROFILE_SOURCE_COMMIT);
+  const checkedAssets = checkedRetainedAssets(retainedAssets, controls, 'operations', {
+    expectedFileCount: OWNER_REVIEW_ASSET_FILE_COUNT, expectedTotalBytes: OWNER_REVIEW_ASSET_TOTAL_BYTES,
+  });
+  const versionCreateParams = compileCurrentProfileVersionParams(selected, 'operations', nativeArtifact);
+  need(versionCreateParams.bindings.length === 151
+    && versionCreateParams.bindings.every(binding => binding.type === 'inherit'
+      && binding.version_id === target.activeVersionId)
+    && equal(versionCreateParams.exports, selected.modern.exports)
+    && equal(versionCreateParams.compatibility_flags, selected.modern.compatibility_flags)
+    && !versionCreateParams.bindings.some(binding => binding.name === 'ASSETS'),
+  'Owner-review version template must preserve the active Ops profile and inherit exactly 151 non-asset bindings');
+  const assetsConfig = clone(versionCreateParams.assets.config);
+  delete versionCreateParams.assets;
+  const plan = {
+    schemaVersion: 5, contract: OWNER_REVIEW_PROFILE_CONTRACT, application: 'operations', accountId: STAGING_ACCOUNT_ID,
+    selectedWorker: target.workerName, selectedActiveVersionId: selected.activeVersionId,
+    selectedLatestVersionId: selected.latestVersionId, sourceCommit: nativeArtifact.sourceCommit,
+    controlsCapture: { sha256: pinnedControls.sha256, bytes: pinnedControls.bytes, observedAt: controls.observedAt },
+    databaseSchemaSHA256: snapshot.databaseSchemaSHA256, releaseSequence: ['operations'],
+    artifact: { sourceCommit: nativeArtifact.sourceCommit, main: nativeArtifact.main, sourceMap: nativeArtifact.sourceMap },
+    offlineOnly: true, deploymentEnabled: false, executionAllowed: false, held: true,
+    holdReasons: ['owner-review-profile-native-runtime-and-asset-inheritance-qualification-required',
+      'retained-asset-48-hour-release-coverage-not-qualified'],
+    nativeExecutionQualification: { ready: false,
+      reason: 'offline-held-until-owner-review-profile-runtime-and-retained-assets-qualification' },
+    assetsUploadRequired: true, assetJwtIncluded: false, liveNamespaceVerified: false,
+    assetReconstitution: { bindingName: 'ASSETS', sourceVersionId: selected.activeVersionId,
+      manifestSHA256: checkedAssets.manifestSHA256, manifestBytes: checkedAssets.manifestBytes,
+      observedAt: checkedAssets.observedAt, filesRoot: checkedAssets.filesRoot,
+      totalFiles: checkedAssets.files.length, totalBytes: checkedAssets.totalBytes,
+      files: checkedAssets.files, assetsConfig: checkedAssets.assetsConfig, localOnlyFiles: checkedAssets.excludedFiles,
+      localFileInventoryMatched: true, remoteNamespaceCompleteness: 'unproven', retainedReleaseCoverage: 'unqualified',
+      requiredRetainedCoverageHours: 48, reconstitutionPermitted: false, namespaceReconstituted: false,
+      namespaceInherited: false, runtimeProofRequired: true, automaticPruning: false },
+    assetUploadRecipe: { protocol: 'workers-static-assets-upload-v1', manifestInput: 'validated-local-file-materialization',
+      uploadAssetSetAllowed: false, requiresReviewedRetainedReleaseCoverageEvidence: true,
+      providerContentHash: 'BLAKE3(base64(asset bytes) + extension without dot), lowercase hex first 32 chars',
+      providerManifestBytesPersisted: false, completionJwtRequired: true,
+      completionJwtSource: 'successful asset upload-session completion', completionJwtMemoryOnly: true,
+      completionJwtPersisted: false, assetsConfig, attachToVersionCreateAs: 'assets.jwt', neverPersistAssetBytesBase64: true },
+    automaticPruning: false,
+    workerControlPreservation: { settingsSHA256: controlHashes(selected).settingsSHA256,
+      schedulesSHA256: controlHashes(selected).schedulesSHA256,
+      selectedFlagsSHA256: hash(canonical(selected.selectedFlags)), exportsSHA256: hash(canonical(selected.modern.exports)) },
+    baselineMainModule: clone(selected.modern.modules[0]), selectedControlPins: snapshot.selectedControlPins,
+    observations: snapshot.observations, expectedUnchangedSchedules: clone(selected.schedules.schedules),
+    expectedUnchangedResources: clone(selected.version.resources), expectedUnchangedSettings: clone(selected.settings),
+    expectedUnchangedModernAssets: clone(selected.modern.assets), expectedUnchangedExports: clone(selected.modern.exports),
+    expectedUnchangedSelectedFlags: clone(selected.selectedFlags), noMigrationConfig: true, noOpsSyncUpdate: true,
+    versionCreateTemplate: versionCreateParams,
+  };
+  need(plan.versionCreateTemplate.deploy === false && !Object.hasOwn(plan.versionCreateTemplate, 'assets')
+    && !Object.hasOwn(plan.versionCreateTemplate, 'migrations') && plan.versionCreateTemplate.bindings.length === 151
+    && plan.assetReconstitution.totalFiles === OWNER_REVIEW_ASSET_FILE_COUNT
+    && plan.assetReconstitution.totalBytes === OWNER_REVIEW_ASSET_TOTAL_BYTES,
+  'Owner-review held template must remain Ops-only, migration-free, and pinned to all retained assets');
+  return freeze(plan);
+}
+
+export function validateOwnerReviewStagingBackendReleasePlan(options, plan) {
+  need(equal(plan, compileOwnerReviewStagingBackendReleasePlan(options)),
+    'Owner-review staging backend-only plan changed');
   return plan;
 }
 

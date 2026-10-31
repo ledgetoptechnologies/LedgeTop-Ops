@@ -7,11 +7,13 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { canonical, hash } from './production-deploy.mjs';
 import { STAGING_ACCOUNT_ID } from './staging-requirements.mjs';
-import { compileStagingBackendReleasePlan } from './staging-backend-release-plan.mjs';
+import { compileStagingBackendReleasePlan, compileOwnerReviewStagingBackendReleasePlan } from './staging-backend-release-plan.mjs';
 import { createStagingBackendAssetCandidateUploader, validateStagingBackendAssetCoverageEvidence,
   validateStagingBackendAssetMaterialization, validateStagingBackendAssetCandidateReadback,
   createCurrentStagingBackendAssetCandidateUploader, validateCurrentStagingBackendAssetCandidateReadback,
-  validateCurrentStagingBackendAssetCoverageEvidence, validateCurrentStagingBackendAssetMaterialization }
+  validateCurrentStagingBackendAssetCoverageEvidence, validateCurrentStagingBackendAssetMaterialization,
+  createOwnerReviewStagingBackendAssetCandidateUploader, validateOwnerReviewStagingBackendAssetCandidateReadback,
+  validateOwnerReviewStagingBackendAssetBucketResponse }
   from './staging-backend-asset-candidate-upload.mjs';
 
 const OPS = '1ffe4525-7e29-4ea2-a407-726abf7f10c6';
@@ -645,4 +647,171 @@ test('actual current Client assets traverse the v4 mock uploader without adding 
   assert.deepEqual(mutations, ['session', 'version']);
   await assert.rejects(upload({ planOptions, heldPlan, coverageEvidenceFile, runtimeProofFile: f.runtimeProofFile }), /refusing replay/);
   assert.deepEqual(mutations, ['session', 'version']);
+});
+
+
+test('Owner Review v5 uploader rejects wrong contract, source, and Client target before adapter activity', async t => {
+  const f=fixture(t,'operations'), calls=[];
+  const uploader=createOwnerReviewStagingBackendAssetCandidateUploader({
+    sdk:{async createAssetUploadSession(){calls.push('session');},async createVersion(){calls.push('version');}},
+    uploadBucket:async()=>{calls.push('bucket');},async readFreshControls(){calls.push('controls');return f.controlsFile;},
+    async readCandidateState(){calls.push('readback');},
+    journal:{async reserve(){calls.push('journal');return true;},async complete(){}},hashBlake3:f.hashBlake3,now:()=>f.fixedNow,
+  });
+  const base={...clone(f.heldPlan),schemaVersion:5,contract:'staging-backend-only-owner-review-profile-v5',
+    sourceCommit:'4ee6cbe84265d07e2998b795f2a130763e95d4db',selectedWorker:'ledgetop-ops-staging',
+    selectedActiveVersionId:'e299b7af-f9ed-424b-ae8f-3fdff4f0614e',selectedLatestVersionId:'e299b7af-f9ed-424b-ae8f-3fdff4f0614e'};
+  await assert.rejects(uploader({planOptions:f.planOptions,heldPlan:f.heldPlan,runtimeProofFile:f.runtimeProofFile,coverageEvidenceFile:f.coverageFile}));
+  const legacy=createStagingBackendAssetCandidateUploader({sdk:{async createAssetUploadSession(){calls.push('legacy-session');},async createVersion(){}},
+    uploadBucket:async()=>{},async readFreshControls(){return f.controlsFile;},async readCandidateState(){},
+    journal:{async reserve(){return true;},async complete(){}},hashBlake3:f.hashBlake3,now:()=>f.fixedNow,ownerReviewProfile:true});
+  await assert.rejects(legacy({planOptions:f.planOptions,heldPlan:base,runtimeProofFile:f.runtimeProofFile,coverageEvidenceFile:f.coverageFile}));
+  const current=createCurrentStagingBackendAssetCandidateUploader({sdk:{async createAssetUploadSession(){calls.push('current-session');},async createVersion(){}},
+    uploadBucket:async()=>{},async readFreshControls(){return f.controlsFile;},async readCandidateState(){},
+    journal:{async reserve(){return true;},async complete(){}},hashBlake3:f.hashBlake3,now:()=>f.fixedNow,ownerReviewProfile:true});
+  await assert.rejects(current({planOptions:f.planOptions,heldPlan:base,runtimeProofFile:f.runtimeProofFile,coverageEvidenceFile:f.coverageFile}));
+  const wrongSource={...base,sourceCommit:SOURCE};
+  await assert.rejects(uploader({planOptions:f.planOptions,heldPlan:wrongSource,runtimeProofFile:f.runtimeProofFile,coverageEvidenceFile:f.coverageFile}));
+  const clientTarget={...base,application:'client',selectedWorker:'ledgetop-clients-staging',selectedActiveVersionId:CLIENT,selectedLatestVersionId:CLIENT_LATEST};
+  await assert.rejects(uploader({planOptions:f.planOptions,heldPlan:clientTarget,runtimeProofFile:f.runtimeProofFile,coverageEvidenceFile:f.coverageFile}));
+  assert.deepEqual(calls,[]);
+});
+
+test('Owner Review v5 readback requires latest candidate and exact zero-percent candidate while baseline stays at 100%', t => {
+  const f=fixture(t,'operations');
+  const heldPlan={...clone(f.heldPlan),schemaVersion:5,contract:'staging-backend-only-owner-review-profile-v5',
+    sourceCommit:'4ee6cbe84265d07e2998b795f2a130763e95d4db',application:'operations',accountId:STAGING_ACCOUNT_ID,
+    selectedWorker:'ledgetop-ops-staging',selectedActiveVersionId:'e299b7af-f9ed-424b-ae8f-3fdff4f0614e',
+    selectedLatestVersionId:'e299b7af-f9ed-424b-ae8f-3fdff4f0614e',offlineOnly:true,deploymentEnabled:false,executionAllowed:false,
+    assetsUploadRequired:true,assetJwtIncluded:false};
+  const candidateParams=clone(heldPlan.versionCreateTemplate);
+  candidateParams.bindings=[...candidateParams.bindings,{name:'ASSETS',type:'assets'}].sort((a,b)=>a.name.localeCompare(b.name));
+  candidateParams.assets={config:clone(heldPlan.assetUploadRecipe.assetsConfig),jwt:'local-only-test-jwt-value'};
+  candidateParams.deploy=false; candidateParams.bindings_inherit='strict';
+  const resolvedBindings=clone(heldPlan.expectedUnchangedResources.bindings).sort((a,b)=>a.name.localeCompare(b.name));
+  const valid={latestVersionId:CANDIDATE,deployment:[{versionId:heldPlan.selectedActiveVersionId,percentage:100},
+      {versionId:CANDIDATE,percentage:0}],candidate:{id:CANDIDATE,mainModule:candidateParams.main_module,
+      modules:[{name:candidateParams.main_module,bytes:heldPlan.artifact.main.size,sha256:heldPlan.artifact.main.sha256,
+        content_type:candidateParams.modules[0].content_type}],resolvedBindings,assetsConfig:candidateParams.assets.config,
+      compatibilityDate:candidateParams.compatibility_date,compatibilityFlags:candidateParams.compatibility_flags,exports:candidateParams.exports}};
+  assert.equal(validateOwnerReviewStagingBackendAssetCandidateReadback({readback:valid,candidateVersionId:CANDIDATE,heldPlan,candidateParams}),true);
+  const activated=clone(valid); activated.deployment[1].percentage=1; activated.deployment[0].percentage=99;
+  assert.throws(()=>validateOwnerReviewStagingBackendAssetCandidateReadback({readback:activated,candidateVersionId:CANDIDATE,heldPlan,candidateParams}));
+  const wrongLatest=clone(valid); wrongLatest.latestVersionId=heldPlan.selectedActiveVersionId;
+  assert.throws(()=>validateOwnerReviewStagingBackendAssetCandidateReadback({readback:wrongLatest,candidateVersionId:CANDIDATE,heldPlan,candidateParams}));
+});
+
+
+test('Owner Review v5 bucket acknowledgements accept 200/202 only between buckets and require final 201 JWT', () => {
+  assert.equal(validateOwnerReviewStagingBackendAssetBucketResponse({response:{status:200},final:false}),true);
+  assert.equal(validateOwnerReviewStagingBackendAssetBucketResponse({response:{status:202},final:false}),true);
+  assert.equal(validateOwnerReviewStagingBackendAssetBucketResponse({response:{status:201,completionJwt:'final-jwt-12345678'},final:true}),true);
+  for (const response of [{status:201},{status:200,completionJwt:'unexpected-jwt-123456'},
+    {status:201,completionJwt:'short'},{status:204,completionJwt:'final-jwt-12345678'}]) {
+    assert.throws(()=>validateOwnerReviewStagingBackendAssetBucketResponse({response,final:false}));
+  }
+  for (const response of [{status:200},{status:202,completionJwt:'unexpected-jwt-123456'},
+    {status:201},{status:201,completionJwt:'short'}]) {
+    assert.throws(()=>validateOwnerReviewStagingBackendAssetBucketResponse({response,final:true}));
+  }
+});
+
+test('Owner Review v5 actual retained plan uses a local mock only and reserves a distinct replay-proof v5 namespace', {
+  skip: process.env.LEDGETOP_OWNER_REVIEW_LOCAL_REPLAY !== '1' && 'set LEDGETOP_OWNER_REVIEW_LOCAL_REPLAY=1 for the bounded local 282-file mock rehearsal',
+}, async t => {
+  const P='C:/Users/fstor/.codex/artifacts/production-ops-retained-resume-execution-20261031';
+  const controlsPath=process.env.LEDGETOP_OWNER_REVIEW_CONTROLS_PATH
+    || path.join(P,'recipient-owner-review-qualification-controls-20261031','controls.private.json');
+  const retainedRoot=path.join(P,'recipient-owner-review-retained-assets-20261031');
+  const bundleRoot=path.join(P,'recipient-integrated-owner-review-worker-dryrun-v4-20261031','operations','bundle');
+  const pin=(file,sha256)=>({path:file,sha256});
+  const mainPath=path.join(bundleRoot,'staging-native-authority-entrypoint.js');
+  const mapPath=path.join(bundleRoot,'staging-native-authority-entrypoint.js.map');
+  const controlsFile=pin(controlsPath,process.env.LEDGETOP_OWNER_REVIEW_CONTROLS_SHA256
+    || '6e472445026d4f8159e80d85ae4d90ea53dd8938581d46df35276f516096c4fd');
+  const manifestFile=pin(path.join(retainedRoot,'manifest.json'),'db4d4f9f256f852a9296d150e35aa08301c4d7e3684334ccca201117ca66ee29');
+  const planOptions={controlsFile,application:'operations',sourceCommit:'4ee6cbe84265d07e2998b795f2a130763e95d4db',
+    artifact:{sourceCommit:'4ee6cbe84265d07e2998b795f2a130763e95d4db',
+      main:{path:mainPath,size:8_660_985,sha256:'2ab14ee0ff246f5849c657dff48cc8f47555f99779b9753f19c5188979141992'},
+      sourceMap:{path:mapPath,size:15_030_187,sha256:'44f1b074e94d86393b31177c3afe33b5b869444fcd604ae8a0a270418a380cb6'}},
+    retainedAssets:{manifestFile,filesRoot:path.join(retainedRoot,'assets')}};
+  const heldPlan=compileOwnerReviewStagingBackendReleasePlan(planOptions);
+  assert.equal(heldPlan.schemaVersion,5); assert.equal(heldPlan.application,'operations');
+  assert.equal(heldPlan.assetReconstitution.totalFiles,282); assert.equal(heldPlan.assetReconstitution.totalBytes,44_449_189);
+  const coveragePath=path.join(retainedRoot,'successor.coverage.json');
+  const coverageEvidenceFile=pin(coveragePath,hash(fs.readFileSync(coveragePath)));
+  const journal=new Set(), calls=[]; let request, validationError;
+  const uploader=createOwnerReviewStagingBackendAssetCandidateUploader({
+    sdk:{
+      async createAssetUploadSession(worker,body,policy) {
+        calls.push('session'); assert.equal(worker,'ledgetop-ops-staging'); assert.equal(policy.maxRetries,0);
+        assert.equal(Object.keys(body.manifest).length,282); return {buckets:[],jwt:'owner-review-memory-only-test-jwt'};
+      },
+      async createVersion(worker,body,policy) {
+        calls.push('version'); assert.equal(worker,'ledgetop-ops-staging'); assert.equal(policy.maxRetries,0);
+        assert.equal(body.deploy,false); assert.equal(body.bindings_inherit,'strict'); assert.equal(body.bindings.length,152);
+        request=clone(body); return {id:CANDIDATE};
+      },
+    },
+    uploadBucket:async()=>assert.fail('cache-complete mock does not send a bucket'),
+    async readFreshControls(){return controlsFile;},
+    async readCandidateState(worker,candidateId){
+      calls.push('readback'); assert.equal(worker,'ledgetop-ops-staging'); assert.equal(candidateId,CANDIDATE);
+      const value={latestVersionId:CANDIDATE,deployment:[{versionId:heldPlan.selectedActiveVersionId,percentage:100},
+          {versionId:CANDIDATE,percentage:0}],candidate:{id:CANDIDATE,mainModule:request.main_module,
+          modules:[{name:request.main_module,bytes:heldPlan.artifact.main.size,sha256:heldPlan.artifact.main.sha256,
+            content_type:request.modules[0].content_type}],
+          resolvedBindings:clone(heldPlan.expectedUnchangedResources.bindings).sort((a,b)=>a.name.localeCompare(b.name)),
+          assetsConfig:request.assets.config,compatibilityDate:request.compatibility_date,
+          compatibilityFlags:request.compatibility_flags,exports:request.exports}};
+      try {
+        const currentPlan=compileOwnerReviewStagingBackendReleasePlan({...planOptions,now:()=>Date.now()});
+        validateOwnerReviewStagingBackendAssetCandidateReadback({readback:value,candidateVersionId:CANDIDATE,heldPlan:currentPlan,candidateParams:request});
+      } catch (error) { validationError=error.message; }
+      return value;
+    },
+    journal:{async reserve(key){assert.match(key,/^v5\//u);if(journal.has(key))return false;journal.add(key);return true;},async complete(key){assert.ok(journal.has(key));}},
+    hashBlake3:bytes=>blake3(Buffer.from(bytes)).toString('hex'),now:()=>Date.now(),
+  });
+  const runtimeProofFile={path:RUNTIME_PROOF,sha256:'0d4c66619a4393594008be2261c865a4b631ad0204de4d5f3e5b21d579b18d84'};
+  const args={planOptions,heldPlan,runtimeProofFile,coverageEvidenceFile};
+  const uploaded=await uploader(args);
+  assert.equal(validationError,undefined,`readback error: ${validationError}`);
+  assert.deepEqual(uploaded,{candidateVersionId:CANDIDATE,readbackVerified:true});
+  assert.deepEqual(calls,['session','version','readback']);
+  await assert.rejects(uploader(args),/refusing replay/u);
+  assert.deepEqual(calls,['session','version','readback']);
+});
+
+
+test('current injected uploader clock rejects a stale held capsule before SDK, fresh-read, or journal work even when planOptions clock is historical', {
+  skip: !currentPlanRoot && 'current-profile held plans are not configured',
+}, async t => {
+  const planRoot=path.resolve(currentPlanRoot);
+  const planOptions=JSON.parse(fs.readFileSync(path.join(planRoot,'client','plan-options.private.json'),'utf8'));
+  const heldPlan=JSON.parse(fs.readFileSync(path.join(planRoot,'client','successor.held.json'),'utf8'));
+  const oldClock=Date.parse(heldPlan.controlsCapture.observedAt)+1_000;
+  planOptions.now=()=>oldClock;
+  const calls=[];
+  const staleNow=Date.now;
+  const uploader=createCurrentStagingBackendAssetCandidateUploader({
+    sdk:{async createAssetUploadSession(){calls.push('session');assert.fail('stale profile must stop before SDK');},
+      async createVersion(){calls.push('version');assert.fail('stale profile must stop before SDK');}},
+    uploadBucket:async()=>{calls.push('bucket');assert.fail('stale profile must stop before upload');},
+    async readFreshControls(){calls.push('fresh-controls');return planOptions.controlsFile;},
+    async readCandidateState(){calls.push('readback');},
+    journal:{async reserve(){calls.push('journal');return true;},async complete(){}},
+    hashBlake3(bytes){
+      if (Buffer.from(bytes).toString('utf8')==='QQ==txt')
+        return '42f8fed80a10e56fb584724a8ea0e156e928a529e86ab234a8d5b79057256bab';
+      calls.push('asset-read'); throw new Error('asset verification must not reach file bytes for a stale profile');
+    },
+    now:()=>staleNow(),
+  });
+  const coveragePath=path.join(planRoot,'client','successor.coverage.json');
+  const coverageEvidenceFile={path:coveragePath,sha256:hash(fs.readFileSync(coveragePath))};
+  await assert.rejects(uploader({planOptions,heldPlan,
+    runtimeProofFile:{path:RUNTIME_PROOF,sha256:'0d4c66619a4393594008be2261c865a4b631ad0204de4d5f3e5b21d579b18d84'},
+    coverageEvidenceFile}),/stale/u);
+  assert.deepEqual(calls,[]);
 });

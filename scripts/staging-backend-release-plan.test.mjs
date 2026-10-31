@@ -6,7 +6,9 @@ import path from 'node:path';
 import { canonical, hash } from './production-deploy.mjs';
 import { STAGING_ACCOUNT_ID } from './staging-requirements.mjs';
 import { compileCurrentStagingBackendReleasePlan, compileStagingBackendReleasePlan,
-  validateCurrentStagingBackendReleasePlan, validateStagingBackendReleasePlan } from './staging-backend-release-plan.mjs';
+  compileOwnerReviewStagingBackendReleasePlan, validateCurrentStagingBackendReleasePlan,
+  validateOwnerReviewStagingBackendControlsSnapshot, validateOwnerReviewStagingBackendReleasePlan,
+  validateStagingBackendReleasePlan } from './staging-backend-release-plan.mjs';
 
 const OPS = '1ffe4525-7e29-4ea2-a407-726abf7f10c6';
 const CLIENT = '3ba4c8c9-70b4-4696-810f-0503f512e728';
@@ -495,4 +497,117 @@ test('current profile v4 accepts the actual 152/125 baseline and rejects baselin
   driftedSuccessor.workers.operations.settings.tags = ['unexpected'];
   assert.throws(() => compileCurrentStagingBackendReleasePlan({ ...successorOptions,
     controlsFile: f.writeJson('current-drifted-successor-controls.json', driftedSuccessor) }));
+});
+
+const ownerReviewControlsPath = process.env.LEDGETOP_OWNER_REVIEW_CONTROLS_FILE
+  ?? 'C:/Users/fstor/.codex/artifacts/production-ops-retained-resume-execution-20261031/recipient-owner-review-qualification-controls-20261031/controls.private.json';
+const ownerReviewControlsSHA256 = process.env.LEDGETOP_OWNER_REVIEW_CONTROLS_SHA256
+  ?? '6e472445026d4f8159e80d85ae4d90ea53dd8938581d46df35276f516096c4fd';
+const ownerReviewDryrunRoot = 'C:/Users/fstor/.codex/artifacts/production-ops-retained-resume-execution-20261031/recipient-integrated-owner-review-worker-dryrun-v4-20261031/operations/bundle';
+const ownerReviewAssetsRoot = 'C:/Users/fstor/.codex/artifacts/production-ops-retained-resume-execution-20261031/recipient-owner-review-retained-assets-20261031';
+const ownerReviewAssetManifestSHA256 = 'db4d4f9f256f852a9296d150e35aa08301c4d7e3684334ccca201117ca66ee29';
+const ownerReviewSourceCommit = '4ee6cbe84265d07e2998b795f2a130763e95d4db';
+const ownerReviewBaseInputsExist = [
+  ownerReviewControlsPath,
+  path.join(ownerReviewDryrunRoot, 'staging-native-authority-entrypoint.js'),
+  path.join(ownerReviewDryrunRoot, 'staging-native-authority-entrypoint.js.map'),
+  path.join(ownerReviewAssetsRoot, 'manifest.json'), path.join(ownerReviewAssetsRoot, 'assets'),
+].every(file => fs.existsSync(file));
+const ownerReviewCapture = ownerReviewBaseInputsExist ? JSON.parse(fs.readFileSync(ownerReviewControlsPath, 'utf8')) : null;
+const ownerReviewAssetsManifest = ownerReviewBaseInputsExist
+  ? JSON.parse(fs.readFileSync(path.join(ownerReviewAssetsRoot, 'manifest.json'), 'utf8')) : null;
+const ownerReviewInputsExist = ownerReviewBaseInputsExist
+  && Date.parse(ownerReviewAssetsManifest.observedAt) <= Date.parse(ownerReviewCapture.observedAt)
+  && Date.parse(ownerReviewCapture.observedAt) - Date.parse(ownerReviewAssetsManifest.observedAt) <= 30 * 60_000;
+
+test('owner-review v5 rejects unsupported application and source before reading controls', () => {
+  const unusable = { controlsFile: { path: 'Z:/missing.json', sha256: '0'.repeat(64) },
+    artifact: {}, retainedAssets: {} };
+  assert.throws(() => compileOwnerReviewStagingBackendReleasePlan({ ...unusable, application: 'client',
+    sourceCommit: ownerReviewSourceCommit }), /Only the fixed Operations owner-review staging target/);
+  assert.throws(() => compileOwnerReviewStagingBackendReleasePlan({ ...unusable, application: 'operations',
+    sourceCommit: CURRENT_SOURCE }), /exact reviewed owner-review source commit/);
+});
+
+test('owner-review v5 snapshot accepts the exact three-worker profile and rejects schema, settings, target, and freshness drift', {
+  skip: !ownerReviewBaseInputsExist,
+}, t => {
+  const f = fixture(t), capture = clone(ownerReviewCapture), observedAt = Date.parse(capture.observedAt);
+  const controlsFile = { path: ownerReviewControlsPath, sha256: ownerReviewControlsSHA256 }, now = () => observedAt + 1_000;
+  const profile = validateOwnerReviewStagingBackendControlsSnapshot(controlsFile, { now });
+  assert.deepEqual([profile.schemaVersion, profile.contract, profile.accountId],
+    [5, 'staging-backend-only-owner-review-profile-v5', STAGING_ACCOUNT_ID]);
+  assert.equal(profile.databaseSchemaSHA256, 'bd7531ad0a2900a82d237d922194a8b2b736f642ba6a3dabb2fe99551c797d7a');
+  assert.deepEqual([profile.selectedWorker, profile.selectedActiveVersionId, profile.selectedLatestVersionId],
+    ['ledgetop-ops-staging', 'e299b7af-f9ed-424b-ae8f-3fdff4f0614e', 'e299b7af-f9ed-424b-ae8f-3fdff4f0614e']);
+  assert.deepEqual(Object.keys(profile.observations).sort(), ['client','operations','sync']);
+  for (const [application, activeVersionId] of Object.entries({ operations: 'e299b7af-f9ed-424b-ae8f-3fdff4f0614e',
+    client: '2e8dd07c-3ccc-47ea-91ce-6e896b42313d', sync: SYNC })) {
+    assert.equal(profile.observations[application].activeVersionId, activeVersionId);
+    assert.deepEqual(profile.observations[application].deployment, [{ version_id: activeVersionId, percentage: 100 }]);
+  }
+  assert.throws(() => validateOwnerReviewStagingBackendControlsSnapshot({ ...controlsFile, sha256: 'f'.repeat(64) },
+    { now }), /missing, malformed or changed/);
+  const schemaDrift = clone(capture); schemaDrift.schema.OPS_DB.results.push({ unexpected: 'schema drift' });
+  assert.throws(() => validateOwnerReviewStagingBackendControlsSnapshot(f.writeJson('owner-review-schema-drift.json', schemaDrift),
+    { now }), /D1 schema differs/);
+  const settingsDrift = clone(capture); settingsDrift.workers.client.settings.tags.push('unexpected');
+  assert.throws(() => validateOwnerReviewStagingBackendControlsSnapshot(f.writeJson('owner-review-settings-drift.json', settingsDrift),
+    { now }), /controls, settings, runtime, schedules, flags, or exports differ/);
+  const staleCapture = clone(capture); staleCapture.observedAt = new Date(observedAt - 60 * 60_000).toISOString();
+  assert.throws(() => validateOwnerReviewStagingBackendControlsSnapshot(f.writeJson('owner-review-stale-controls.json', staleCapture),
+    { now }), /controls capsule is stale/);
+  const wrongOpsTarget = clone(capture); wrongOpsTarget.workers.operations.latestVersionId = '1d79a7ad-d077-49ec-bb3c-7e73d8799773';
+  assert.throws(() => validateOwnerReviewStagingBackendControlsSnapshot(f.writeJson('owner-review-wrong-ops-target.json', wrongOpsTarget),
+    { now }), /control identity or hashes are invalid/);
+});
+
+test('owner-review v5 compiles only the corrected Operations source over exact all-worker controls and retained assets', {
+  skip: !ownerReviewInputsExist,
+}, t => {
+  const f = fixture(t), capture = JSON.parse(fs.readFileSync(ownerReviewControlsPath, 'utf8'));
+  const observedAt = Date.parse(capture.observedAt);
+  const controlsFile = { path: ownerReviewControlsPath, sha256: ownerReviewControlsSHA256 };
+  const artifact = {
+    sourceCommit: ownerReviewSourceCommit,
+    main: { path: path.join(ownerReviewDryrunRoot, 'staging-native-authority-entrypoint.js'), size: 8_660_985,
+      sha256: '2ab14ee0ff246f5849c657dff48cc8f47555f99779b9753f19c5188979141992' },
+    sourceMap: { path: path.join(ownerReviewDryrunRoot, 'staging-native-authority-entrypoint.js.map'), size: 15_030_187,
+      sha256: '44f1b074e94d86393b31177c3afe33b5b869444fcd604ae8a0a270418a380cb6' },
+  };
+  const retainedAssets = { manifestFile: { path: path.join(ownerReviewAssetsRoot, 'manifest.json'),
+    sha256: ownerReviewAssetManifestSHA256 }, filesRoot: path.join(ownerReviewAssetsRoot, 'assets') };
+  const options = { controlsFile, application: 'operations', artifact, sourceCommit: ownerReviewSourceCommit,
+    retainedAssets, now: () => observedAt + 1_000 };
+  const plan = compileOwnerReviewStagingBackendReleasePlan(options);
+  assert.equal(plan.schemaVersion, 5); assert.equal(plan.contract, 'staging-backend-only-owner-review-profile-v5');
+  assert.equal(plan.application, 'operations'); assert.equal(plan.sourceCommit, ownerReviewSourceCommit);
+  assert.equal(plan.controlsCapture.sha256, controlsFile.sha256);
+  assert.deepEqual(plan.artifact, artifact);
+  assert.equal(plan.selectedActiveVersionId, 'e299b7af-f9ed-424b-ae8f-3fdff4f0614e');
+  assert.deepEqual(plan.releaseSequence, ['operations']);
+  assert.equal(plan.offlineOnly, true); assert.equal(plan.deploymentEnabled, false);
+  assert.equal(plan.executionAllowed, false); assert.equal(plan.held, true);
+  assert.equal(plan.noMigrationConfig, true); assert.equal(plan.noOpsSyncUpdate, true);
+  assert.equal(plan.assetReconstitution.totalFiles, 282); assert.equal(plan.assetReconstitution.totalBytes, 44_449_189);
+  assert.equal(plan.assetReconstitution.sourceVersionId, plan.selectedActiveVersionId);
+  assert.equal(plan.assetReconstitution.remoteNamespaceCompleteness, 'unproven');
+  const params = plan.versionCreateTemplate;
+  assert.equal(params.deploy, false); assert.equal(params.main_module, 'staging-native-authority-entrypoint.js');
+  assert.equal(params.bindings.length, 151);
+  assert.ok(params.bindings.every(row => row.type === 'inherit' && row.version_id === plan.selectedActiveVersionId));
+  assert.equal(params.bindings.some(row => row.name === 'ASSETS'), false);
+  assert.equal(Object.hasOwn(params, 'assets'), false); assert.equal(Object.hasOwn(params, 'migrations'), false);
+  assert.deepEqual(params.exports, capture.workers.operations.modern.exports);
+  assert.deepEqual(params.compatibility_flags, capture.workers.operations.modern.compatibility_flags);
+  assert.deepEqual(plan.expectedUnchangedSchedules, capture.workers.operations.schedules.schedules);
+  assert.deepEqual(plan.expectedUnchangedSelectedFlags, capture.workers.operations.selectedFlags);
+  assert.deepEqual(plan.observations, validateOwnerReviewStagingBackendControlsSnapshot(controlsFile, { now: options.now }).observations);
+  assert.equal(validateOwnerReviewStagingBackendReleasePlan(options, plan), plan);
+
+  const wrongSource = { ...options, sourceCommit: CURRENT_SOURCE, artifact: f.artifact('operations', CURRENT_SOURCE) };
+  assert.throws(() => compileOwnerReviewStagingBackendReleasePlan(wrongSource), /exact reviewed owner-review source commit/);
+  const wrongArtifact = { ...options, artifact: { ...artifact, main: { ...artifact.main, sha256: 'f'.repeat(64) } } };
+  assert.throws(() => compileOwnerReviewStagingBackendReleasePlan(wrongArtifact), /exact reviewed Operations dry-run/);
+
 });
