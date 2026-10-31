@@ -14,6 +14,13 @@ import { readOperationsPortalNativeWorkspaceCleanupForOwner, reserveOperationsPo
   revokeOperationsPortalNativeWorkspaceAuthority }
   from "../src/worker/operations-portal-native-workspace-cleanup";
 import { readClientPortalServiceMetadata } from "../src/worker/client-portal-service-metadata";
+import { canonicalOperationsPortalNativeInquiryCapabilityCommandV4 }
+  from "../../../packages/shared/src/operations-portal-native-recipient-capabilities-v4";
+import { prepareOperationsNativeInquiryCapability, dispatchOperationsNativeInquiryCapability }
+  from "../src/worker/operations-portal-native-inquiry-capability-dispatch";
+import { applyOperationsPortalNativeInquiryCapability, closeOperationsPortalNativeInquiryCapability,
+  readOperationsPortalNativeInquiryCapabilityStatus } from "../../client/src/worker/operations-portal-native-inquiry-capability";
+import { readNativeOperationsRequestCapabilities } from "../../client/src/worker/client-portal/operations-native-request-capability-read";
 
 const id = (n: number) => `${String(n).padStart(8, "0")}-0000-4000-8000-000000000000`;
 const targetId = id(1), authorityId = id(2), publicationOperationId = id(3), publicationId = id(4), snapshotId = id(5),
@@ -25,6 +32,11 @@ const owner = { identity: { kind: "native" as const, staffId: "staff:owner", ver
   email: "owner@example.test", displayName: "Owner", profileVersion: 3 }, admissionVersion: 2, verifiedUntil: future() };
 
 async function applyCleanupMigration(database: D1Database) {
+  // 0234 is an application successor after the recipient v2 rewrite. Reapply
+  // the migration on this fixture after resetting its empty test-only tables.
+  for (const table of ["closures", "history", "outbox", "heads", "receipts", "commands"]) {
+    await database.prepare(`DROP TABLE IF EXISTS operations_portal_native_inquiry_capability_${table}`).run();
+  }
   const migration = readFileSync(new URL("../migrations/0157_operations_portal_native_workspace_cleanup.sql",
     import.meta.url), "utf8");
   await database.batch(splitD1MigrationStatements(migration).map(statement => database.prepare(statement)));
@@ -34,6 +46,9 @@ async function applyCleanupMigration(database: D1Database) {
   const labels = readFileSync(new URL("../migrations/0160_operations_portal_native_recipient_labels.sql",
     import.meta.url), "utf8");
   await database.batch(splitD1MigrationStatements(labels).map(statement => database.prepare(statement)));
+  const inquiryCapabilityMigration = readFileSync(new URL("../migrations/0234_operations_portal_native_inquiry_capability.sql",
+    import.meta.url), "utf8");
+  await database.batch(splitD1MigrationStatements(inquiryCapabilityMigration).map(statement => database.prepare(statement)));
 }
 
 async function advancePublication(ops: D1Database) {
@@ -252,6 +267,9 @@ describe("Operations-native recipient authority end-to-end D1", () => {
     const clientCleanupMigration = readFileSync(new URL("../../client/migrations/0226_operations_portal_native_workspace_cleanup.sql",
       import.meta.url), "utf8");
     await client.batch(splitD1MigrationStatements(clientCleanupMigration).map(statement => client.prepare(statement)));
+    const clientInquiryCapabilityMigration = readFileSync(new URL("../../client/migrations/0243_operations_portal_native_inquiry_capability.sql",
+      import.meta.url), "utf8");
+    await client.batch(splitD1MigrationStatements(clientInquiryCapabilityMigration).map(statement => client.prepare(statement)));
     await client.batch([
       client.prepare("INSERT INTO operations_portal_workspace_publication_commands VALUES(?,?)").bind(publicationOperationId, targetId),
       client.prepare("INSERT INTO operations_portal_workspace_publication_receipts VALUES(?,?,?,?,1,1,?,?)")
@@ -308,6 +326,129 @@ describe("Operations-native recipient authority end-to-end D1", () => {
     const redeemed = await redeemOperationsPortalNativeRecipientIntent(ops, { ...redeem,
       acknowledgedPermissions: permissions, acknowledgedPermissionSchemaVersion: 4 });
     expect(redeemed.review).toMatchObject({ state: "pending", permissionSchemaVersion: 4, permissions });
+  });
+
+  it("closes the explicit request.create companion only after both D1 receipts and hides it on publication drift", async () => {
+    const permissions = ["operations.request.create", "operations.service_home.read"] as const;
+    const issued = await issueOperationsPortalNativeRecipientIntent(ops, { operationId: id(70), targetId,
+      targetClientRecordId: clientId, expiresAt: future(), owner, legacyShape: false,
+      permissionSchemaVersion: 4, permissions });
+    await redeemOperationsPortalNativeRecipientIntent(ops, { operationId: id(71), intentId: issued.review.intentId,
+      opaqueToken: issued.opaqueToken!, principal: { issuer, subject }, recipientLabel: "recipient@example.test",
+      verifiedUntil: future(), acknowledgedTarget: { targetId, targetRevision: 1, clientRecordId: clientId },
+      acknowledgedPermissions: permissions, acknowledgedPermissionSchemaVersion: 4 });
+    await confirmOperationsPortalNativeRecipientIntent(ops, { operationId: id(72), intentId: issued.review.intentId,
+      expectedRevision: 2, owner });
+    await applyCleanupMigration(ops);
+    await materializeOperationsPortalNativeRecipientAuthority(ops, id(72));
+    const clientEnv = { DELIVERY_DB: client, ENVIRONMENT: "staging", EXPECTED_HOST: "client-staging.example.test",
+      CLIENT_PORTAL_ORIGIN: "https://client-staging.example.test",
+      CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST: "client-staging.example.test",
+      CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED: "true",
+      CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED: "true",
+      CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED: "true" };
+    let loseApplyResponse = true, holdFirstClosure = true, loseClosureResponse = true;
+    const binding = {
+      applyNativeAuthority: (wire: string) => applyOperationsPortalNativeRecipientAuthority({ ...clientEnv,
+        CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED: "true" }, wire),
+      getNativeAuthorityStatus: (wire: string) => readOperationsPortalNativeRecipientAuthorityStatus(clientEnv, wire),
+      applyNativeInquiryCapability: async (wire: string) => {
+        const result = await applyOperationsPortalNativeInquiryCapability(clientEnv, wire);
+        if (loseApplyResponse && JSON.parse(result).ok === true) {
+          loseApplyResponse = false; throw new Error("simulated Client apply response loss");
+        }
+        return result;
+      },
+      closeNativeInquiryCapability: async (wire: string) => {
+        if (holdFirstClosure) { holdFirstClosure = false;
+          return JSON.stringify({ ok: false, protocolVersion: 1, code: "temporary_failure", retryable: true }); }
+        const result = await closeOperationsPortalNativeInquiryCapability(clientEnv, wire);
+        if (loseClosureResponse) { loseClosureResponse = false; throw new Error("simulated Client closure response loss"); }
+        return result;
+      },
+      getNativeInquiryCapabilityStatus: (wire: string) => readOperationsPortalNativeInquiryCapabilityStatus(clientEnv, wire),
+    };
+    const dispatchEnv = { OPS_DB: ops, OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: binding,
+      OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED: "true" };
+    await expect(dispatchOperationsPortalNativeRecipientAuthority(dispatchEnv, id(72)))
+      .resolves.toMatchObject({ status: "acknowledged" });
+    const pins = await ops.prepare(`SELECT intent.expires_at,intent.grant_operation_id,intent.target_client_record_id,
+        intent.access_issuer,intent.access_subject,recipient.recipient_binding_id,recipient.ownership_epoch,
+        recipient.grant_revision,workspace.target_revision,workspace.client_authority_id,workspace.workspace_id,
+        publication.latest_operation_id publication_operation_id,publication.publication_revision,
+        publication.source_sequence,publication.snapshot_id,publication.snapshot_sha256
+      FROM operations_portal_native_recipient_intents intent
+      JOIN operations_portal_native_recipient_authority_heads recipient ON recipient.enrollment_intent_id=intent.intent_id
+      JOIN operations_portal_native_workspace_authority_heads workspace ON workspace.target_id=intent.target_id
+      JOIN operations_portal_workspace_publication_heads publication ON publication.target_id=workspace.target_id
+      WHERE intent.intent_id=?`).bind(issued.review.intentId).first<Record<string, string | number>>();
+    if (!pins) throw new Error("expected current v3 and publication pins");
+    const makeCommand = (operationId: string, action: "grant" | "revoke") => canonicalOperationsPortalNativeInquiryCapabilityCommandV4({
+      protocol: "operations-portal-native-inquiry-capability", protocolVersion: 1, permissionSchemaVersion: 4,
+      action, operationId, target: { targetId, targetRevision: String(pins.target_revision),
+        clientAuthorityId: pins.client_authority_id, workspaceId: pins.workspace_id, targetClientRecordId: pins.target_client_record_id },
+      recipient: { recipientBindingId: pins.recipient_binding_id, enrollmentIntentId: issued.review.intentId,
+        issuer: pins.access_issuer, subject: pins.access_subject },
+      baseAuthority: { operationId: pins.grant_operation_id, ownershipEpoch: String(pins.ownership_epoch),
+        grantRevision: String(pins.grant_revision) },
+      publication: { operationId: pins.publication_operation_id, revision: String(pins.publication_revision),
+        sourceSequence: String(pins.source_sequence), snapshotId: pins.snapshot_id, snapshotSha256: pins.snapshot_sha256 },
+      transition: action === "grant" ? { expectedRevision: "0", resultingRevision: "1" }
+        : { expectedRevision: "1", resultingRevision: "2" }, permission: "operations.request.create",
+      expiresAt: pins.expires_at, actorProof: { staffId: owner.identity.staffId,
+        verifiedAccessSubject: owner.identity.verifiedAccessSubject, admissionVersion: String(owner.admissionVersion),
+        profileVersion: String(owner.identity.profileVersion), grantGeneration: "4", verifiedUntil: future() },
+      observedAt: new Date().toISOString(),
+    });
+    const grantWire = makeCommand(id(73), "grant");
+    const preparedGrant = await prepareOperationsNativeInquiryCapability({ ...dispatchEnv,
+      OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED: "true" }, grantWire);
+    if (!preparedGrant.ok) throw new Error(`companion-prepare-${preparedGrant.code}`);
+    expect(preparedGrant).toMatchObject({ ok: true, action: "grant", state: "prepared", replayed: false });
+    await expect(prepareOperationsNativeInquiryCapability({ ...dispatchEnv,
+      OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED: "true" }, grantWire))
+      .resolves.toMatchObject({ ok: true, state: "pending", replayed: true });
+    await expect(readNativeOperationsRequestCapabilities(client, { issuer, subject }, true)).resolves.toEqual([]);
+    await client.prepare(`UPDATE operations_portal_workspace_publication_heads SET revision=2 WHERE target_id=?`)
+      .bind(targetId).run();
+    expect(JSON.parse(await binding.applyNativeInquiryCapability(grantWire)))
+      .toMatchObject({ ok: false, code: "conflict" });
+    expect(await client.prepare(`SELECT count(*) count FROM operations_portal_native_inquiry_capability_commands
+      WHERE operation_id=?`).bind(id(73)).first<number>("count")).toBe(0);
+    await client.prepare(`UPDATE operations_portal_workspace_publication_heads SET revision=1 WHERE target_id=?`)
+      .bind(targetId).run();
+    const partialGrant = await dispatchOperationsNativeInquiryCapability({ ...dispatchEnv,
+      OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED: "true" }, id(73));
+    expect(partialGrant).toMatchObject({ ok: false, code: "client_closure_pending", retryable: true });
+    await expect(readNativeOperationsRequestCapabilities(client, { issuer, subject }, true)).resolves.toEqual([]);
+    const grantDelivered = await dispatchOperationsNativeInquiryCapability({ ...dispatchEnv,
+      OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED: "true" }, id(73));
+    if (!grantDelivered.ok) throw new Error(`companion-dispatch-${grantDelivered.code}`);
+    expect(grantDelivered).toMatchObject({ ok: true, action: "grant", state: "active", replayed: false });
+    await expect(dispatchOperationsNativeInquiryCapability({ ...dispatchEnv,
+      OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED: "true" }, id(73)))
+      .resolves.toMatchObject({ ok: true, action: "grant", state: "active", replayed: true });
+    await expect(readNativeOperationsRequestCapabilities(client, { issuer, subject }, true))
+      .resolves.toMatchObject([{ targetId, baseOperationId: pins.grant_operation_id, capabilityOperationId: id(73) }]);
+    await expect(readNativeOperationsRequestCapabilities(client, { issuer: "https://foreign.cloudflareaccess.com",
+      subject: "access|other" }, true)).resolves.toEqual([]);
+    const revokeWire = makeCommand(id(74), "revoke");
+    await expect(prepareOperationsNativeInquiryCapability({ ...dispatchEnv,
+      OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED: "true" }, revokeWire))
+      .resolves.toMatchObject({ ok: true, action: "revoke", state: "prepared" });
+    await client.prepare(`UPDATE operations_portal_workspace_publication_heads SET revision=2 WHERE target_id=?`)
+      .bind(targetId).run();
+    await expect(readNativeOperationsRequestCapabilities(client, { issuer, subject }, true)).resolves.toEqual([]);
+    await expect(dispatchOperationsNativeInquiryCapability({ ...dispatchEnv,
+      OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED: "true" }, id(74)))
+      .resolves.toMatchObject({ ok: true, action: "revoke", state: "revoked" });
+    await expect(readNativeOperationsRequestCapabilities(client, { issuer, subject }, true)).resolves.toEqual([]);
+    expect(await ops.prepare(`SELECT count(*) count FROM operations_portal_native_inquiry_capability_closures
+      WHERE operation_id=? AND resulting_state='active'`).bind(id(73)).first<number>("count")).toBe(1);
+    expect(await ops.prepare(`SELECT state FROM operations_portal_native_inquiry_capability_heads WHERE intent_id=?`)
+      .bind(issued.review.intentId).first<string>("state")).toBe("revoked");
+    expect((await ops.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+    expect((await client.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   });
 
   it("issues, redeems, reviews, confirms, recovers transport, authorizes metadata, and revokes", async () => {
