@@ -390,7 +390,9 @@ describe("Operations-native recipient authority end-to-end D1", () => {
     await ops.prepare("DROP TRIGGER operations_portal_native_recipient_transition_guard").run();
     await ops.prepare("UPDATE operations_portal_native_recipient_intents SET expires_at=?,recipient_verified_until=? WHERE intent_id=?")
       .bind(expiredAt, expiredAt, issued.review.intentId).run();
-    await deniedReview();
+    await expect(readOperationsPortalNativeRecipientIntentForOwner(ops, issued.review.intentId, owner))
+      .resolves.toMatchObject({ permissionSchemaVersion:3, state:"active", capabilityStatus:"not_requested",
+        effectivePermissions:["operations.service_home.read"] });
   });
 
   it("pins an explicit request-create selection in the immutable issue review without changing the v3 home grant", async () => {
@@ -654,6 +656,25 @@ describe("Operations-native recipient authority end-to-end D1", () => {
     expect(await recovery.json()).toMatchObject({ status: "acknowledged", intent: { capabilityStatus: "active",
       effectivePermissions: permissions } });
     await expect(readNativeOperationsRequestCapabilities(client, { issuer, subject }, true)).resolves.toHaveLength(1);
+
+    const enrollmentProof = await ops.prepare(`SELECT recipient_verified_until FROM operations_portal_native_recipient_intents
+      WHERE intent_id=?`).bind(issued.review.intentId).first<{ recipient_verified_until: string }>();
+    expect(enrollmentProof?.recipient_verified_until).toBeTruthy();
+    const transitionGuard = await ops.prepare(`SELECT sql FROM sqlite_master WHERE type='trigger'
+      AND name='operations_portal_native_recipient_transition_guard'`).first<{ sql: string }>();
+    expect(transitionGuard?.sql).toBeTruthy();
+    await ops.prepare("DROP TRIGGER operations_portal_native_recipient_transition_guard").run();
+    try {
+      await ops.prepare(`UPDATE operations_portal_native_recipient_intents SET recipient_verified_until=? WHERE intent_id=?`)
+        .bind(new Date(Date.now() - 60_000).toISOString(), issued.review.intentId).run();
+      await expect(readOperationsPortalNativeRecipientIntentForOwner(ops, issued.review.intentId, owner))
+        .resolves.toMatchObject({ capabilityStatus: "active", effectivePermissions: permissions });
+      await expect(readNativeOperationsRequestCapabilities(client, { issuer, subject }, true)).resolves.toHaveLength(1);
+      await ops.prepare(`UPDATE operations_portal_native_recipient_intents SET recipient_verified_until=? WHERE intent_id=?`)
+        .bind(enrollmentProof!.recipient_verified_until, issued.review.intentId).run();
+    } finally {
+      await ops.prepare(transitionGuard!.sql).run();
+    }
 
     const opsInquiryMigration = readFileSync(new URL("../migrations/0235_ops_principal_inquiries.sql", import.meta.url), "utf8");
     await ops.batch(splitD1MigrationStatements(opsInquiryMigration).map(statement => ops.prepare(statement)));
