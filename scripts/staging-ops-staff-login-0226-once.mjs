@@ -22,7 +22,8 @@ export const STAGING_OPS_0226_TARGET = Object.freeze({
 /** Full legacy staff/role/profile/admission state. Rows are transient in memory;
  * only their counts and digests enter plans and journals. */
 export const STAGING_OPS_0226_PROTECTED_TABLES = Object.freeze(Object.fromEntries(Object.entries({
-  staff_users: ['id','email','display_name','access_subject','status'],
+  staff_users: ['id','email','display_name','access_subject','project_alpha_user_id','status','created_at','updated_at','last_seen_at',
+    'provisioning_source','sync_protected'],
   staff_role_assignments: ['id','staff_id','role_id','scope','division_id','scope_key','created_by','created_at'],
   local_staff_role_assignments: ['id','staff_id','role_id','scope','division_id','created_by','created_at'],
   staff_permission_overrides: ['id','staff_id','permission_key','effect','scope','division_id','scope_key','created_by','created_at'],
@@ -30,8 +31,8 @@ export const STAGING_OPS_0226_PROTECTED_TABLES = Object.freeze(Object.fromEntrie
   roles: ['id','name','description','immutable','created_at','updated_at'],
   permissions: ['key','description'],
   role_permissions: ['role_id','permission_key'],
-  divisions: ['id','name','code','active','created_at','updated_at'],
-  native_staff_admissions: ['staff_id','bound_access_subject','active','admitted_by','version','created_at','updated_at'],
+  divisions: ['id','name','code','project_alpha_business_unit_id','active','created_at','updated_at'],
+  native_staff_admissions: ['staff_id','bound_access_subject','active','admitted_by','created_at','updated_at','version'],
   native_staff_profiles: ['staff_id','login_email','display_name','version','created_at','updated_at'],
   native_staff_admin_delegations: ['id','actor_staff_id','action','effect','scope_kind','business_area_id','division_id',
     'target_staff_id','active','version','granted_by','created_at','updated_at'],
@@ -41,16 +42,7 @@ export const STAGING_OPS_0226_PROTECTED_TABLES = Object.freeze(Object.fromEntrie
     'attempt_generation','attempts','last_attempt_at','last_success_at','last_error'],
 }).map(([name, columns]) => [name, Object.freeze(columns)])));
 
-const REQUIRED_TABLE_COLUMNS = Object.freeze({
-  staff_users: ['id','email','display_name','access_subject','status'],
-  staff_role_assignments: ['staff_id','role_id','scope'],
-  staff_permission_overrides: ['staff_id','permission_key','effect','scope'],
-  native_staff_profiles: ['staff_id','login_email','display_name','version','updated_at'],
-  native_staff_access_reconciliation: ['singleton','enabled','generation','applied_generation','lease_id','lease_until',
-    'attempt_generation','attempts','last_attempt_at','last_success_at','last_error'],
-});
-const LOGIN_TABLES = Object.freeze(['staff_login_binding_control','staff_login_generations','staff_login_binding_intents',
-  'staff_login_bindings','staff_login_binding_audit']);
+const REQUIRED_TABLE_COLUMNS = Object.freeze({ ...STAGING_OPS_0226_PROTECTED_TABLES });
 const LOGIN_PREFIX_OBJECTS = Object.freeze([
   'staff_login_binding_control','staff_login_generations','staff_login_binding_intents','staff_login_bindings','staff_login_binding_audit',
   'staff_login_bindings_active_email','staff_login_bindings_active_subject',
@@ -64,6 +56,7 @@ const LOGIN_PREFIX_OBJECTS = Object.freeze([
 export const STAGING_OPS_0226_BASELINE = Object.freeze({
   ledgerCount: 228,
   ledgerNamesSha256: '141339754613ec2cebcc738e4e40c751e330e5bfcb5b5027e2286d61f4902fbc',
+  ledgerSha256: 'aa555ae2aeecad2b86d0fbbf2a1023ec32411b84430aeb966de6257af1b2f789',
   schemaObjectCount: 2482,
   schemaSha256: '0669845dedc950215d37efff792ceae8ce29f335590eea45721619c8aa438388',
   requiredMigrations: Object.freeze([
@@ -106,7 +99,7 @@ function orderedSchema(schema) {
   return schema;
 }
 function schemaFingerprint(schema) {
-  const rows = orderedSchema(schema);
+  const rows = orderedSchema(schema).filter(row => row.sql !== null && !row.name.startsWith('sqlite_') && !row.name.startsWith('_cf_'));
   return hash(JSON.stringify(rows.map(row => [row.type,row.name,row.tbl_name,row.sql])));
 }
 function ledgerFingerprint(ledger) {
@@ -116,9 +109,12 @@ function ledgerFingerprint(ledger) {
     fail('ledger_invalid');
   return hash(ledger.map(row => row.name).join('\n'));
 }
+function fullLedgerFingerprint(ledger) {
+  // Validate the complete id/name sequence independently of the readable names digest.
+  ledgerFingerprint(ledger);
+  return hash(JSON.stringify(ledger.map(row => [row.id,row.name])));
+}
 function objectKey(row) { return `${row.type}\u0000${row.name}\u0000${row.tbl_name}`; }
-function sortedByName(rows) { return [...rows].sort((a,b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0); }
-
 function protectedState(snapshot) {
   if (!exactKeys(snapshot.protectedRows, Object.keys(STAGING_OPS_0226_PROTECTED_TABLES))) fail('protected_rows_invalid');
   const counts = {}, digests = {};
@@ -138,15 +134,17 @@ function validateTarget(target) {
     || Object.entries(STAGING_OPS_0226_TARGET).some(([key,value]) => target[key] !== value)) fail('target_mismatch');
 }
 function validateBaseline(snapshot, baseline, now) {
-  if (!exactKeys(baseline, ['ledgerCount','ledgerNamesSha256','schemaObjectCount','schemaSha256','requiredMigrations','forbiddenPending'])
+  if (!exactKeys(baseline, ['ledgerCount','ledgerNamesSha256','ledgerSha256','schemaObjectCount','schemaSha256','requiredMigrations','forbiddenPending'])
     || !Number.isSafeInteger(baseline.ledgerCount) || baseline.ledgerCount < 1 || !SHA.test(baseline.ledgerNamesSha256)
+    || !SHA.test(baseline.ledgerSha256)
     || !Number.isSafeInteger(baseline.schemaObjectCount) || baseline.schemaObjectCount < 1 || !SHA.test(baseline.schemaSha256)
     || !Array.isArray(baseline.requiredMigrations) || !Array.isArray(baseline.forbiddenPending)) fail('baseline_profile_invalid');
   if (!exactKeys(snapshot, ['target','observedAt','ledger','schema','schemaColumns','protectedRows'])
     || !iso(snapshot.observedAt, now)) fail('snapshot_stale_or_invalid');
   validateTarget(snapshot.target);
-  const namesSha256 = ledgerFingerprint(snapshot.ledger), schemaSha256 = schemaFingerprint(snapshot.schema);
+  const namesSha256 = ledgerFingerprint(snapshot.ledger), ledgerSha256 = fullLedgerFingerprint(snapshot.ledger), schemaSha256 = schemaFingerprint(snapshot.schema);
   if (snapshot.ledger.length !== baseline.ledgerCount || namesSha256 !== baseline.ledgerNamesSha256) fail('ledger_pin_mismatch');
+  if (ledgerSha256 !== baseline.ledgerSha256) fail('ledger_pin_mismatch');
   if (snapshot.schema.length !== baseline.schemaObjectCount || schemaSha256 !== baseline.schemaSha256) fail('schema_pin_mismatch');
   const names = new Set(snapshot.ledger.map(row => row.name));
   if (baseline.requiredMigrations.some(name => !names.has(name)) || baseline.forbiddenPending.some(name => names.has(name)))
@@ -155,11 +153,12 @@ function validateBaseline(snapshot, baseline, now) {
   if (!exactKeys(snapshot.schemaColumns, Object.keys(REQUIRED_TABLE_COLUMNS))) fail('precondition_columns_invalid');
   for (const [table, required] of Object.entries(REQUIRED_TABLE_COLUMNS)) {
     const columns = snapshot.schemaColumns[table];
-    if (!Array.isArray(columns) || new Set(columns).size !== columns.length || required.some(name => !columns.includes(name)))
+    if (!Array.isArray(columns) || columns.length !== required.length || new Set(columns).size !== columns.length
+      || columns.some((name,index) => name !== required[index]))
       fail('precondition_columns_invalid');
   }
   const state = protectedState(snapshot);
-  return { namesSha256, schemaSha256, state };
+  return { namesSha256, ledgerSha256, schemaSha256, state };
 }
 
 function expectedLoginObjects(sql) {
@@ -171,8 +170,8 @@ function expectedLoginObjects(sql) {
       CREATE TABLE staff_permission_overrides(staff_id TEXT,permission_key TEXT,effect TEXT,scope TEXT);
       CREATE TABLE native_staff_profiles(staff_id TEXT PRIMARY KEY,version INTEGER NOT NULL,updated_at TEXT);`);
     db.exec(sql);
-    const all = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE substr(name,1,12)='staff_login_' OR tbl_name IN (?,?,?,?,?) ORDER BY type,name")
-      .all(...LOGIN_TABLES);
+    const all = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE sql IS NOT NULL AND substr(name,1,12)='staff_login_' ORDER BY type,name")
+      .all();
     const named = all.filter(row => row.name.startsWith('staff_login_'));
     if (named.length !== 23 || named.some(row => !LOGIN_PREFIX_OBJECTS.includes(row.name))
       || LOGIN_PREFIX_OBJECTS.some(name => !named.some(row => row.name === name))) fail('migration_object_contract_invalid');
@@ -193,7 +192,7 @@ function migrationSql(root = ROOT) {
 function receiptProjection(snapshot, baseline, now) {
   const validated = validateBaseline(snapshot, baseline, now);
   return { observedAt: snapshot.observedAt, target: STAGING_OPS_0226_TARGET,
-    ledgerCount: snapshot.ledger.length, ledgerNamesSha256: validated.namesSha256,
+    ledgerCount: snapshot.ledger.length, ledgerNamesSha256: validated.namesSha256, ledgerSha256: validated.ledgerSha256,
     schemaObjectCount: snapshot.schema.length, schemaSha256: validated.schemaSha256,
     protectedTableCounts: validated.state.counts, protectedStateSha256: validated.state.stateSha256,
     nativeStaffControlEnabled: 0 };
@@ -240,7 +239,7 @@ export function createStagingOps0226Operator({ baseline = STAGING_OPS_0226_BASEL
         || plan.schemaVersion !== 1 || plan.contract !== 'staging-ops-staff-login-0226-one-shot-v1'
         || plan.planSha256 !== planHash(plan) || !commitValid(plan.sourceCommit)) fail('plan_invalid');
       if (!exactKeys(plan.migration, ['name','sha256','sql','ledgerAppend'])
-        || !exactKeys(plan.preflight, ['observedAt','target','ledgerCount','ledgerNamesSha256','schemaObjectCount','schemaSha256',
+        || !exactKeys(plan.preflight, ['observedAt','target','ledgerCount','ledgerNamesSha256','ledgerSha256','schemaObjectCount','schemaSha256',
           'protectedTableCounts','protectedStateSha256','nativeStaffControlEnabled'])
         || !validIso(plan.compiledAt) || !validIso(plan.expiresAt)
         || Date.parse(plan.compiledAt) > now() || Date.parse(plan.expiresAt) <= now()
@@ -253,7 +252,8 @@ export function createStagingOps0226Operator({ baseline = STAGING_OPS_0226_BASEL
       const beforeSnapshot = await provider.readSnapshot({ target: STAGING_OPS_0226_TARGET, phase: 'immediate-prewrite',
         query: STAGING_OPS_0226_PRE_READ_QUERY });
       const before = receiptProjection(beforeSnapshot, baseline, now());
-      if (before.ledgerNamesSha256 !== plan.preflight.ledgerNamesSha256 || before.schemaSha256 !== plan.preflight.schemaSha256
+      if (before.ledgerNamesSha256 !== plan.preflight.ledgerNamesSha256 || before.ledgerSha256 !== plan.preflight.ledgerSha256
+        || before.schemaSha256 !== plan.preflight.schemaSha256
         || before.protectedStateSha256 !== plan.preflight.protectedStateSha256
         || canonical(before.protectedTableCounts) !== canonical(plan.preflight.protectedTableCounts)) fail('prewrite_drift');
 
@@ -308,7 +308,8 @@ const schemaColumnsSql = Object.keys(REQUIRED_TABLE_COLUMNS).map(table => `'${ta
 const commonSnapshotSql = `SELECT json_object(
   'ledger',json((SELECT json_group_array(json_object('id',id,'name',name)) FROM (SELECT id,name FROM d1_migrations ORDER BY id))),
   'schema',json((SELECT json_group_array(json_object('type',type,'name',name,'tbl_name',tbl_name,'sql',sql))
-    FROM (SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name))),
+    FROM (SELECT type,name,tbl_name,sql FROM sqlite_master WHERE sql IS NOT NULL
+      AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' ORDER BY type,name))),
   'schemaColumns',json_object(${schemaColumnsSql}),
   'protectedRows',json_object(${protectedRowsSql})`;
 export const STAGING_OPS_0226_PRE_READ_QUERY = `${commonSnapshotSql}) AS staging_ops_0226_snapshot`;
@@ -325,6 +326,7 @@ export const STAGING_OPS_0226_POST_READ_QUERY = `${commonSnapshotSql},
 export function parseStagingOps0226SnapshotResult(value, { observedAt, target = STAGING_OPS_0226_TARGET } = {}) {
   let payload; try { payload = typeof value === 'string' ? JSON.parse(value) : value; } catch { fail('read_result_invalid'); }
   if (!Array.isArray(payload) || payload.length !== 1 || payload[0]?.success !== true || !Array.isArray(payload[0].results)
+    || payload[0].meta?.rows_written !== 0 || payload[0].meta?.changed_db !== false || payload[0].meta?.served_by_primary !== true
     || payload[0].results.length !== 1 || typeof payload[0].results[0]?.staging_ops_0226_snapshot !== 'string'
     || Buffer.byteLength(payload[0].results[0].staging_ops_0226_snapshot) > 24 * 1024 * 1024) fail('read_result_invalid');
   let snapshot; try { snapshot = JSON.parse(payload[0].results[0].staging_ops_0226_snapshot); } catch { fail('read_result_invalid'); }
@@ -358,7 +360,8 @@ function validatePostSnapshot(beforeSnapshot, afterSnapshot, plan, baseline, now
     || login.generationsCount !== 0 || login.intentsCount !== 0 || login.bindingsCount !== 0 || login.auditCount !== 0)
     fail('login_seed_state_not_empty');
   return { observedAt: afterReceipt.observedAt, ledgerCount: afterSnapshot.ledger.length,
-    ledgerNamesSha256: ledgerFingerprint(afterSnapshot.ledger), schemaObjectCount: afterSnapshot.schema.length,
+    ledgerNamesSha256: ledgerFingerprint(afterSnapshot.ledger), ledgerSha256: fullLedgerFingerprint(afterSnapshot.ledger),
+    schemaObjectCount: afterSnapshot.schema.length,
     schemaSha256: schemaFingerprint(afterSnapshot.schema), protectedTableCounts: afterReceipt.protectedTableCounts,
     protectedStateSha256: afterReceipt.protectedStateSha256, nativeStaffControlEnabled: 0,
     migrationRecordAdded: MIGRATION_NAME, loginObjectsAdded: 23, seededLoginRows: 1, aliasRowsAdded: 0 };
