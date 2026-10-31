@@ -11,8 +11,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SHA = /^[a-f0-9]{64}$/u;
 const COMMIT = /^[a-f0-9]{40}$/u;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
-const CONTRACT = 'staging-backend-only-v2';
-const PLAN_SCHEMA_VERSION = 2;
+const CONTRACT = 'staging-backend-only-v3';
+const PLAN_SCHEMA_VERSION = 3;
 const CAPSULE_PURPOSE = 'staging-v4-current-controls-and-full-schema-readonly-v1';
 const dbPins = inventory => Object.freeze(Object.fromEntries(inventory.d1_databases.map(row => [row.binding, row.database_id])));
 const TARGETS = Object.freeze({
@@ -82,6 +82,121 @@ function readPinnedJson(pin, label, { maxBytes = 16 * 1024 * 1024, outside = tru
     return { value: JSON.parse(bytes.toString('utf8')), bytes: bytes.length, sha256: pin.sha256 };
   } catch { throw new Error(`${label} missing, malformed or changed; plan held`); }
   finally { if (handle !== undefined) fs.closeSync(handle); }
+}
+
+const ASSET_MANIFEST_PURPOSE = 'staging-retained-assets-materialization-v1';
+const MAX_ASSET_FILES = 20_000;
+const MAX_ASSET_BYTES = 512 * 1024 * 1024;
+const MATERIALIZATION_ONLY_PATHS = new Set(['/.assetsignore']);
+
+function checkedAssetPath(value) {
+  need(typeof value === 'string' && value.startsWith('/') && value.length > 1
+    && !/[\\\\%?#\u0000-\u001f\u007f]/u.test(value), 'Asset manifest paths must be canonical absolute URL paths');
+  const segments = value.slice(1).split('/');
+  need(segments.every(segment => segment.length > 0 && segment !== '.' && segment !== '..'),
+    'Asset manifest paths cannot contain empty or traversal segments');
+  return value;
+}
+
+function inspectAssetTree(root) {
+  need(path.isAbsolute(root), 'Retained asset files root must be absolute');
+  outsideRepository(root);
+  let canonicalRoot;
+  try { canonicalRoot = fs.realpathSync(root); } catch { throw new Error('Retained asset files root is missing or changed'); }
+  need(path.resolve(canonicalRoot) === path.resolve(root), 'Retained asset files root cannot traverse a link');
+  const rootStat = fs.lstatSync(root);
+  need(rootStat.isDirectory() && !rootStat.isSymbolicLink(), 'Retained asset files root must be a real directory');
+  const found = [];
+  let totalBytes = 0;
+  function visit(directory, prefix = '', depth = 0) {
+    need(depth <= 64, 'Retained asset directory nesting exceeds the bounded inventory depth');
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name);
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const stat = fs.lstatSync(absolute);
+      need(!stat.isSymbolicLink() && !entry.isSymbolicLink(), 'Retained asset tree cannot contain links');
+      if (stat.isDirectory()) { visit(absolute, relative, depth + 1); continue; }
+      need(stat.isFile() && stat.nlink === 1, 'Retained asset files must be single-link regular files');
+      const urlPath = checkedAssetPath(`/${relative.replaceAll('\\', '/')}`);
+      const descriptor = fs.openSync(absolute, 'r');
+      let bytes;
+      try {
+        const before = fs.fstatSync(descriptor);
+        need(before.isFile() && before.nlink === 1 && before.size === stat.size
+          && before.dev === stat.dev && before.ino === stat.ino, 'Retained asset changed while opening');
+        bytes = fs.readFileSync(descriptor);
+        const after = fs.fstatSync(descriptor), current = fs.lstatSync(absolute);
+        need(bytes.length === before.size && after.size === before.size && after.mtimeMs === before.mtimeMs
+          && after.ino === before.ino && after.dev === before.dev && current.ino === before.ino
+          && current.dev === before.dev && current.nlink === 1,
+        'Retained asset changed while being hashed');
+      } finally { fs.closeSync(descriptor); }
+      need(bytes.length <= MAX_ASSET_BYTES, 'Retained asset file exceeds the bounded inventory size');
+      totalBytes += bytes.length;
+      need(totalBytes <= MAX_ASSET_BYTES && found.length < MAX_ASSET_FILES, 'Retained asset inventory exceeds bounded limits');
+      found.push({ path: urlPath, size: bytes.length, sha256: hash(bytes) });
+    }
+  }
+  visit(root);
+  found.sort((a, b) => a.path.localeCompare(b.path));
+  const secondRead = [];
+  const firstRead = clone(found);
+  found.length = 0;
+  totalBytes = 0;
+  visit(root);
+  found.sort((a, b) => a.path.localeCompare(b.path));
+  secondRead.push(...found);
+  need(equal(firstRead, secondRead), 'Retained asset tree changed while the complete inventory was verified');
+  return secondRead;
+}
+
+function checkedRetainedAssets(input, controls, application) {
+  need(ownKeysAre(input, ['manifestFile','filesRoot']), 'A pinned complete retained-asset manifest and files root are required');
+  const { manifestFile, filesRoot } = input;
+  const pinned = readPinnedJson(manifestFile, 'Retained asset manifest', { maxBytes: 16 * 1024 * 1024 });
+  const manifest = pinned.value;
+  const keys = ['schemaVersion','purpose','environment','accountId','workerName','sourceVersionId','observedAt',
+    'scope','assetsConfig','files','excludedFiles'];
+  const selected = controls.workers[application];
+  need(ownKeysAre(manifest, keys) && manifest.schemaVersion === 1 && manifest.purpose === ASSET_MANIFEST_PURPOSE
+    && manifest.environment === 'staging' && manifest.accountId === STAGING_ACCOUNT_ID
+    && manifest.workerName === selected.workerName && manifest.sourceVersionId === selected.activeVersionId
+    && manifest.scope === 'local-file-materialization-only',
+  'A hash-pinned local asset materialization for the selected active staging version is required');
+  const observed = Date.parse(manifest.observedAt), controlsObserved = Date.parse(controls.observedAt);
+  need(Number.isFinite(observed) && observed <= controlsObserved && controlsObserved - observed <= 30 * 60_000,
+    'Retained asset manifest must be fresh and precede its controls capture');
+  need(equal(manifest.assetsConfig, selected.modern.assets?.config),
+    'Retained asset manifest ASSETS configuration differs from the active profile');
+  need(Array.isArray(manifest.files) && manifest.files.length > 0 && manifest.files.length <= MAX_ASSET_FILES,
+    'Retained asset manifest must include the complete nonempty file inventory');
+  const expected = manifest.files.map(row => {
+    need(ownKeysAre(row, ['path','size','sha256']), 'Retained asset file descriptors must have exact fields');
+    return { path: checkedAssetPath(row.path), size: row.size, sha256: row.sha256 };
+  });
+  need(expected.every(row => Number.isSafeInteger(row.size) && row.size >= 0 && SHA.test(row.sha256 ?? ''))
+    && new Set(expected.map(row => row.path)).size === expected.length
+    && equal(expected, expected.slice().sort((a, b) => a.path.localeCompare(b.path))),
+  'Retained asset manifest paths must be unique, sorted, and pinned by size and SHA-256');
+  need(Array.isArray(manifest.excludedFiles) && manifest.excludedFiles.length <= MATERIALIZATION_ONLY_PATHS.size,
+    'Local-only materialization file inventory is invalid');
+  const excludedFiles = manifest.excludedFiles.map(row => {
+    need(ownKeysAre(row, ['path','size','sha256']), 'Local-only file descriptors must have exact fields');
+    return { path: checkedAssetPath(row.path), size: row.size, sha256: row.sha256 };
+  });
+  need(excludedFiles.every(row => MATERIALIZATION_ONLY_PATHS.has(row.path) && Number.isSafeInteger(row.size)
+    && row.size >= 0 && SHA.test(row.sha256 ?? ''))
+    && new Set(excludedFiles.map(row => row.path)).size === excludedFiles.length
+    && equal(excludedFiles, excludedFiles.slice().sort((a, b) => a.path.localeCompare(b.path)))
+    && excludedFiles.every(row => !expected.some(asset => asset.path === row.path)),
+  'Only exact known local-only support files may be excluded from the uploaded asset manifest');
+  need(path.isAbsolute(filesRoot), 'Retained asset files root must be absolute');
+  const actual = inspectAssetTree(filesRoot);
+  const completeLocalInventory = [...expected, ...excludedFiles].sort((a, b) => a.path.localeCompare(b.path));
+  need(equal(actual, completeLocalInventory), 'Retained asset file bytes or whole-file inventory differ from the pinned materialization');
+  return { manifestSHA256: pinned.sha256, manifestBytes: pinned.bytes, observedAt: manifest.observedAt,
+    sourceVersionId: manifest.sourceVersionId, filesRoot: path.resolve(filesRoot), assetsConfig: clone(manifest.assetsConfig),
+    files: expected, excludedFiles, totalBytes: expected.reduce((sum, row) => sum + row.size, 0) };
 }
 
 function rejectRawValues(value, location = 'controls') {
@@ -254,7 +369,8 @@ function bindingRows(worker, app) {
     const rows = bindings.filter(binding => binding.name === name && binding.type === 'd1');
     need(rows.length === 1 && rows[0].id === id, `${app} D1 binding ${name} differs from fixed staging target`);
   }
-  const rows = bindings.map(({ name }) => ({ name, type: 'inherit', version_id: worker.activeVersionId }));
+  const rows = bindings.filter(binding => !(binding.name === 'ASSETS' && binding.type === 'assets'))
+    .map(({ name }) => ({ name, type: 'inherit', version_id: worker.activeVersionId }));
   if (app === 'client') rows.push({ ...OPS_NATIVE_PRINCIPAL_BINDING, type: 'service' });
   need(new Set(rows.map(row => row.name)).size === rows.length, `${app} generated binding names must remain unique`);
   return rows.sort((a, b) => a.name.localeCompare(b.name));
@@ -309,7 +425,7 @@ function validateOperationsSuccessor(receipt, receiptSHA256, controls, sourceCom
     'assetsConfigSHA256','schedulesSHA256','observedAt'];
   const ops = controls.workers.operations;
   need(ownKeysAre(receipt, keys) && receipt.schemaVersion === PLAN_SCHEMA_VERSION
-    && receipt.contract === 'staging-backend-ops-successor-observation-v2'
+    && receipt.contract === 'staging-backend-ops-successor-observation-v3'
     && receipt.accountId === STAGING_ACCOUNT_ID && receipt.workerName === TARGETS.operations.workerName
     && receipt.baselineVersionId === TARGETS.operations.activeVersionId
     && receipt.candidateVersionId === ops.activeVersionId && receipt.candidateVersionId !== receipt.baselineVersionId
@@ -327,7 +443,7 @@ function validateOperationsSuccessor(receipt, receiptSHA256, controls, sourceCom
 /** Compile one fixed-target application. Client planning after an Ops release
  * requires a separately hash-pinned observation receipt; no ready flag is read. */
 export function compileStagingBackendReleasePlan({ controlsFile, application, artifact, sourceCommit,
-  operationsSuccessorReceipt, now = () => Date.now() } = {}) {
+  operationsSuccessorReceipt, retainedAssets, now = () => Date.now() } = {}) {
   need(['operations','client'].includes(application) && typeof now === 'function',
     'Only the fixed Operations or Client staging backend target is supported');
   const pinnedControls = readPinnedJson(controlsFile, 'Staging controls capsule');
@@ -360,7 +476,10 @@ export function compileStagingBackendReleasePlan({ controlsFile, application, ar
     }
   }
   const nativeArtifact = verifyArtifact(artifact, sourceCommit, application);
+  const checkedAssets = checkedRetainedAssets(retainedAssets, controls, application);
   const versionCreateParams = compileModernVersionParams(selected, application, nativeArtifact);
+  const assetsConfig = clone(versionCreateParams.assets.config);
+  delete versionCreateParams.assets;
   const observations = Object.fromEntries(APPS.map(app => [app, {
     workerName: controls.workers[app].workerName, activeVersionId: controls.workers[app].activeVersionId,
     latestVersionId: controls.workers[app].latestVersionId, ...controlHashes(controls.workers[app]),
@@ -378,11 +497,26 @@ export function compileStagingBackendReleasePlan({ controlsFile, application, ar
     ...(opsSuccessor ? { operationsSuccessor: opsSuccessor } : {}),
     artifact: { sourceCommit: nativeArtifact.sourceCommit, main: nativeArtifact.main, sourceMap: nativeArtifact.sourceMap },
     offlineOnly: true, deploymentEnabled: false, executionAllowed: false, held: true,
-    holdReasons: ['modern-version-api-runtime-qualification-required','asset-inheritance-runtime-proof-required'],
-    nativeExecutionQualification: { ready: false, reason: 'current-profile-offline-only-until-modern-api-and-asset-inheritance-qualification' },
-    assetsUpload: false, assetJwtIncluded: false, liveNamespaceVerified: false,
-    assetInheritance: { bindingName: 'ASSETS', versionId: selected.activeVersionId, explicitVersionId: true },
-    assetInheritanceRuntimeProofRequired: true, automaticPruning: false,
+    holdReasons: ['modern-version-api-runtime-qualification-required','retained-asset-48-hour-release-coverage-not-qualified'],
+    nativeExecutionQualification: { ready: false, reason: 'offline-held-until-modern-api-reconstitution-and-48-hour-coverage-qualification' },
+    assetsUploadRequired: true, assetJwtIncluded: false, liveNamespaceVerified: false,
+    assetReconstitution: { bindingName: 'ASSETS', sourceVersionId: selected.activeVersionId,
+      manifestSHA256: checkedAssets.manifestSHA256, manifestBytes: checkedAssets.manifestBytes,
+      observedAt: checkedAssets.observedAt, filesRoot: checkedAssets.filesRoot, totalFiles: checkedAssets.files.length,
+      totalBytes: checkedAssets.totalBytes, files: checkedAssets.files, assetsConfig: checkedAssets.assetsConfig,
+      localOnlyFiles: checkedAssets.excludedFiles,
+      localFileInventoryMatched: true, remoteNamespaceCompleteness: 'unproven', retainedReleaseCoverage: 'unqualified',
+      requiredRetainedCoverageHours: 48,
+      reconstitutionPermitted: false, namespaceReconstituted: false, namespaceInherited: false,
+      runtimeProofRequired: true, automaticPruning: false },
+    assetUploadRecipe: { protocol: 'workers-static-assets-upload-v1', uploadLocalManifest: true,
+      uploadAssetSetAllowed: false, requiresReviewedCompleteNamespaceEvidence: true,
+      providerContentHash: 'BLAKE3(base64(asset bytes) + file extension)',
+      providerManifestBytesPersisted: false,
+      completionJwtRequired: true, completionJwtSource: 'successful asset upload-session completion',
+      completionJwtMemoryOnly: true, completionJwtPersisted: false, assetsConfig,
+      attachToVersionCreateAs: 'assets.jwt', neverPersistAssetBytesBase64: true },
+    automaticPruning: false,
     workerControlPreservation: { settingsSHA256: controlHashes(selected).settingsSHA256,
       schedulesSHA256: controlHashes(selected).schedulesSHA256 },
     baselineMainModule: clone(selected.modern.modules[0]),
@@ -391,16 +525,18 @@ export function compileStagingBackendReleasePlan({ controlsFile, application, ar
     expectedUnchangedResources: clone(selected.version.resources),
     expectedUnchangedSettings: clone(selected.settings),
     expectedUnchangedModernAssets: clone(selected.modern.assets),
-    noMigrationConfig: true, noOpsSyncUpdate: true, versionCreateParams,
+    noMigrationConfig: true, noOpsSyncUpdate: true, versionCreateTemplate: versionCreateParams,
   };
-  need(versionCreateParams.deploy === false && versionCreateParams.bindings.some(row => row.name === 'ASSETS'
-    && row.type === 'inherit' && row.version_id === selected.activeVersionId)
-    && !Object.hasOwn(versionCreateParams.assets ?? {}, 'jwt'),
-  'Held modern version-create plan must pin existing assets with no asset upload or deployment');
-  const expectedBindingCount = selected.version.resources.bindings.length + (application === 'client' ? 1 : 0);
+  need(versionCreateParams.deploy === false && !versionCreateParams.bindings.some(row => row.name === 'ASSETS')
+    && !Object.hasOwn(versionCreateParams, 'assets') && plan.assetUploadRecipe.completionJwtRequired
+    && plan.assetUploadRecipe.completionJwtMemoryOnly && plan.assetUploadRecipe.completionJwtPersisted === false,
+  'Held version-create template must exclude assets until a complete-manifest upload yields an in-memory JWT');
+  const expectedBindingCount = selected.version.resources.bindings.filter(binding => !(binding.name === 'ASSETS' && binding.type === 'assets')).length
+    + (application === 'client' ? 1 : 0);
   need(versionCreateParams.bindings.length === expectedBindingCount
-    && versionCreateParams.bindings.filter(row => row.type === 'inherit').length === selected.version.resources.bindings.length,
-  'Every existing binding must inherit the explicit active version; only Client adds its reviewed Ops service');
+    && versionCreateParams.bindings.filter(row => row.type === 'inherit').length
+      === selected.version.resources.bindings.filter(binding => !(binding.name === 'ASSETS' && binding.type === 'assets')).length,
+  'Every non-asset binding must inherit the explicit active version; Client adds only its reviewed Ops service');
   need(plan.selectedControlPins.settingsSHA256 === hash(canonical(selected.settings))
     && plan.selectedControlPins.schedulesSHA256 === hash(canonical(selected.schedules.schedules)),
   'Worker-level settings and schedules must remain exactly pinned');
