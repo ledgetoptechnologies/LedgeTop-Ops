@@ -142,7 +142,7 @@ function readbackFor(f, request, candidateVersionId = CANDIDATE) {
   return { latestVersionId: candidateVersionId, deployment: [{ versionId: f.baselineVersionId, percentage: 100 }], candidate: {
     id: candidateVersionId, mainModule: request.main_module,
     modules: request.modules.map(module => { const pin = module.name === f.heldPlan.artifact.main.path.split(/[\\/]/u).at(-1) ? f.heldPlan.artifact.main : f.heldPlan.artifact.sourceMap;
-      return { name: module.name, bytes: pin.size, sha256: pin.sha256 }; }),
+      return { name: module.name, bytes: pin.size, sha256: pin.sha256, content_type: module.content_type }; }),
     resolvedBindings, assetsConfig: request.assets.config, compatibilityDate: request.compatibility_date,
     compatibilityFlags: request.compatibility_flags, exports: request.exports,
   } };
@@ -232,6 +232,42 @@ test('readback requires native ASSETS and the exact production-defaulted Client 
   }
 });
 
+test('runtime module readback permits an omitted diagnostic source map but never omits the main module', t => {
+  const f = fixture(t), candidateParams = candidateParamsFor(f), complete = readbackFor(f, candidateParams);
+  const withoutMap = clone(complete);
+  withoutMap.candidate.modules = withoutMap.candidate.modules.filter(row => row.content_type !== 'application/source-map');
+  assert.equal(validateStagingBackendAssetCandidateReadback({ readback: withoutMap, candidateVersionId: CANDIDATE,
+    heldPlan: f.heldPlan, candidateParams }), true);
+  const withoutMain = clone(complete);
+  withoutMain.candidate.modules = withoutMain.candidate.modules.filter(row => row.name !== candidateParams.main_module);
+  assert.throws(() => validateStagingBackendAssetCandidateReadback({ readback: withoutMain, candidateVersionId: CANDIDATE,
+    heldPlan: f.heldPlan, candidateParams }));
+});
+
+test('runtime module readback rejects unknown modules and a wrong returned source map', t => {
+  const f = fixture(t), candidateParams = candidateParamsFor(f), valid = readbackFor(f, candidateParams);
+  const unknown = clone(valid);
+  unknown.candidate.modules.push({ name: 'extra.js', bytes: 1, sha256: 'a'.repeat(64), content_type: 'application/javascript+module' });
+  assert.throws(() => validateStagingBackendAssetCandidateReadback({ readback: unknown, candidateVersionId: CANDIDATE,
+    heldPlan: f.heldPlan, candidateParams }));
+  const wrongMap = clone(valid);
+  wrongMap.candidate.modules.find(row => row.content_type === 'application/source-map').sha256 = 'b'.repeat(64);
+  assert.throws(() => validateStagingBackendAssetCandidateReadback({ readback: wrongMap, candidateVersionId: CANDIDATE,
+    heldPlan: f.heldPlan, candidateParams }));
+});
+
+test('module readback order is irrelevant only when names are unique and every row is valid', t => {
+  const f = fixture(t), candidateParams = candidateParamsFor(f), valid = readbackFor(f, candidateParams);
+  const reordered = clone(valid);
+  reordered.candidate.modules.reverse();
+  assert.equal(validateStagingBackendAssetCandidateReadback({ readback: reordered, candidateVersionId: CANDIDATE,
+    heldPlan: f.heldPlan, candidateParams }), true);
+  const duplicate = clone(valid);
+  duplicate.candidate.modules.push(clone(duplicate.candidate.modules[0]));
+  assert.throws(() => validateStagingBackendAssetCandidateReadback({ readback: duplicate, candidateVersionId: CANDIDATE,
+    heldPlan: f.heldPlan, candidateParams }));
+});
+
 test('readback cannot pass by echoing inherit instructions as if they were resolved bindings', async t => {
   const f = fixture(t), state = harness(f, { session: { buckets: [], jwt: 'x'.repeat(24) },
     readback: request => ({ ...readbackFor(f, request), candidate: {
@@ -259,7 +295,7 @@ test('actual sanitized Ops capsule binding inventory validates a hash-only resol
     id: CANDIDATE, mainModule: candidateParams.main_module,
     modules: candidateParams.modules.map((row, index) => {
       const pin = index === 0 ? heldPlan.artifact.main : heldPlan.artifact.sourceMap;
-      return { name: row.name, bytes: pin.size, sha256: pin.sha256 };
+      return { name: row.name, bytes: pin.size, sha256: pin.sha256, content_type: row.content_type };
     }), resolvedBindings, assetsConfig: candidateParams.assets.config,
     compatibilityDate: candidateParams.compatibility_date, compatibilityFlags: candidateParams.compatibility_flags,
     exports: candidateParams.exports,

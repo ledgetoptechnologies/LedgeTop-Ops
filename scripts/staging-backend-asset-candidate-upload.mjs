@@ -374,18 +374,34 @@ function checkReadback(readback, candidateVersionId, plan, candidateParams) {
   const candidate = readback.candidate;
   need(ownKeysAre(candidate, ['id','mainModule','modules','resolvedBindings','assetsConfig','compatibilityDate','compatibilityFlags','exports'])
     && candidate.id === candidateVersionId && candidate.mainModule === candidateParams.main_module
-    && Array.isArray(candidate.modules) && candidate.modules.length === candidateParams.modules.length
+    && Array.isArray(candidate.modules)
     && Array.isArray(candidate.resolvedBindings),
   'Candidate readback does not match its source and pinned metadata');
-  const expectedModules = candidateParams.modules.map((module, index) => {
-    const pin = index === 0 ? plan.artifact.main : plan.artifact.sourceMap;
-    return { name: module.name, bytes: pin.size, sha256: pin.sha256 };
-  });
+  const mainName = candidateParams.main_module;
+  const mainRequest = candidateParams.modules.find(module => module.name === mainName);
+  const sourceMapRequest = candidateParams.modules.find(module => module.name === `${mainName}.map`);
+  need(candidateParams.modules.length === 2 && mainRequest && mainRequest.content_type !== 'application/source-map'
+    && sourceMapRequest?.content_type === 'application/source-map',
+  'Candidate request must contain one executable main module and its diagnostic source map');
+  const expectedRuntimeModules = [{ name: mainRequest.name, bytes: plan.artifact.main.size,
+    sha256: plan.artifact.main.sha256, content_type: mainRequest.content_type }];
+  const expectedSourceMap = { name: sourceMapRequest.name, bytes: plan.artifact.sourceMap.size,
+    sha256: plan.artifact.sourceMap.sha256, content_type: 'application/source-map' };
   const actualModules = candidate.modules.map(row => {
-    need(ownKeysAre(row, ['name','bytes','sha256']) && Number.isSafeInteger(row.bytes) && SHA.test(row.sha256 ?? ''),
+    need(ownKeysAre(row, ['name','bytes','sha256','content_type']) && typeof row.name === 'string'
+      && Number.isSafeInteger(row.bytes) && SHA.test(row.sha256 ?? '') && typeof row.content_type === 'string',
       'Candidate module readback requires exact name, size and hash fields');
     return row;
   });
+  const moduleNames = actualModules.map(row => row.name);
+  need(new Set(moduleNames).size === moduleNames.length, 'Candidate module readback contains duplicate names');
+  const actualRuntimeModules = actualModules.filter(row => row.content_type !== 'application/source-map');
+  const actualSourceMaps = actualModules.filter(row => row.content_type === 'application/source-map');
+  need(actualSourceMaps.length <= 1 && equal(actualRuntimeModules, expectedRuntimeModules)
+    && (actualSourceMaps.length === 0 || equal(actualSourceMaps, [expectedSourceMap])),
+  'Candidate runtime modules or any returned diagnostic source map differ from the reviewed bytes');
+  // If Cloudflare omits the diagnostic application/source-map module from modern readback,
+  // its remote bytes are not established here; the pinned local source-map size/hash remains validated separately.
   const baselineAssets = plan.expectedUnchangedResources.bindings.filter(row => row.name === 'ASSETS');
   need(equal(baselineAssets, [{ name: 'ASSETS', type: 'assets' }]),
     'Pinned active capsule must contain the exact native ASSETS binding');
@@ -403,7 +419,6 @@ function checkReadback(readback, candidateVersionId, plan, candidateParams) {
   const actualResolvedBindings = candidate.resolvedBindings;
   need(actualResolvedBindings.every(row => row && typeof row === 'object' && row.type !== 'inherit')
     && new Set(actualResolvedBindings.map(row => row?.name)).size === actualResolvedBindings.length
-    && equal(actualModules, expectedModules)
     && equal(actualResolvedBindings, expectedResolvedBindings)
     && equal(candidate.assetsConfig, candidateParams.assets.config)
     && candidate.compatibilityDate === candidateParams.compatibility_date
