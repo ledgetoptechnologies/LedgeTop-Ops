@@ -43,7 +43,8 @@ receipt or cleanup authorization may be inferred from these rows.
 
 `referenceLifecycleEffectFence.js` can install a separate claim table only in
 an isolated fixture. `applyStorageMutation` accepts an explicitly injected
-fixture fence; no runtime caller injects it and no migration installs the table.
+fixture fence, or a fixture can register one for a single repository instance;
+no runtime caller registers it and no migration installs the table.
 In one immediate transaction a claim reloads the stored mutation and rejects
 any existing binding or other in-flight lifecycle claim. The binding draft
 checks the same claim table, and a reciprocal insert trigger rejects a binding
@@ -64,6 +65,22 @@ outside it. Its fixture callback and database are not trusted production
 authority; a real design must also prevent early journal completion by another
 executor, protect all relevant mutation identities and install a safe migration
 and recovery protocol. Never infer receipt issuance or deletion authority.
+
+### Audited entry points and current fixture coverage
+
+| Entry point | Current state |
+| --- | --- |
+| `storageLifecycle.applyStorageMutation` for managed dataset/output trash, restore and purge | Participates only when an isolated fixture explicitly injects or registers a fence on that repository instance. Tests exercise interrupted rename/delete, project-container trash and reconciliation. API, container restore/purge and maintenance converge here, but have not all been exercised end to end under the fixture. |
+| `importCleanup` and catalog adoption recovery | Existing `viewer_source_effect_claims` participate in reciprocal global exclusion with the lifecycle fixture; uncertain existing claims remain held. The fixture checks both claim orderings. Their own source bytes and external writers are not fenced. |
+| Initial `StorageManager.adoptImport` and adoption cleanup | Not covered by this lifecycle claim. Adoption has separate intent checks; it does not establish a physical fence. |
+| Catalog source cleanup (`reconcileCatalogSourceCleanups` / `removeAdoptedSourceIfMatches`) | Not covered; asynchronous check-to-effect gap remains and roots can alias. |
+| WebODM staging cleanup, upload cleanup, photo/GCP writes, model/derivative cleanup | Not covered. Even nominally distinct roots can alias until independently attested. |
+| Direct `StorageManager` legacy helpers, old binaries, other processes and NAS clients | Not covered. Registration is per object, so a new repository instance or another process does not inherit it. |
+
+The existing claim table and this fixture mutually reject new in-flight claims
+under SQLite's write transaction. Fixture tests check both orderings and a
+simultaneous cross-type claim race. No normal server, API or worker entry point
+enables fixture registration.
 
 `test/fixtures/viewer-processing-source-map-public.json` is an unsigned public
 synthetic mapping for the two-file fixture. Its indexed dataset manifest and

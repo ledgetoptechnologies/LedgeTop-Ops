@@ -15,9 +15,13 @@ function markApplied(processing,mutation,options){
 }
 
 function applyStorageMutation(processing,storage,input,{faultAt=null,supersessionProof=null,containerAction=null,sourceFence=null}={}){
-  // Explicitly injected by isolated fence tests only; no runtime caller enables
-  // this experiment and it must not be mistaken for production fencing.
-  if(sourceFence)return sourceFence.run(typeof input==='string'?input:input?.id,()=>applyStorageMutation(processing,storage,input,{faultAt,supersessionProof,containerAction}));
+  // Registration/injection exists for isolated fixture tests only. Runtime
+  // does not install or enable the experiment.
+  const fence=sourceFence||require('./referenceLifecycleEffectFence').registeredOfflineFixtureFence(processing);
+  if(fence)return fence.run(typeof input==='string'?input:input?.id,()=>applyStorageMutationCore(processing,storage,input,{faultAt,supersessionProof,containerAction}));
+  return applyStorageMutationCore(processing,storage,input,{faultAt,supersessionProof,containerAction});
+}
+function applyStorageMutationCore(processing,storage,input,{faultAt=null,supersessionProof=null,containerAction=null}={}){
   const mutation=processing.getStorageMutation(typeof input==='string'?input:input?.id);
   if(!mutation)return null;
   if(mutation.status==='complete'||mutation.status==='failed')return mutation;
