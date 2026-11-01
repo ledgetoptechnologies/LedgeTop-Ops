@@ -2,6 +2,14 @@
 
 Status: design only. The current worker does not automatically discover or remove abandoned spools. A crash can leave a partial `.processing-archive-` directory, and a reclaimed job can complete while an earlier worker is still alive and writing. Lease expiration, file age, a PID, a directory name, or an incomplete archive alone is not sufficient authority to delete it.
 
+## Publication must also be fenced
+
+The current archive capture promotes an extracted directory before `recordAttemptArchiveReceipt` checks the lease. A synthetic two-worker test demonstrates that a worker whose lease was reclaimed can finish its response, rename an archive into the shared final destination, and exit without a recorded receipt. This is a release blocker: a lease check after a filesystem mutation cannot undo the mutation. The existence check immediately before rename is not an atomic no-replace operation, and historical handling of unreceipted directories must not be assumed safe for a newly promoted stale archive.
+
+A replacement design must bind every write, extraction, promotion, receipt, and output registration to a unique lease generation. Expensive writes belong in isolated generation-specific staging locations; the worker must hold a proven cross-process publication fence and revalidate current database authority immediately before promotion. Prevent replacement of an existing destination atomically, and define crash recovery for every boundary between durable filesystem promotion and database commit. A database check followed by an unlocked rename is insufficient because authority can change between them; a database transaction alone does not make a filesystem operation atomic. Where no reliable lock, no-replace primitive, or crash recovery proof exists, stop before shared publication and preserve the data for review. Handle pre-existing historical directories through a separately reviewed compatibility policy rather than accepting or deleting them by inference.
+
+Qualify the design with paused workers resumed both before and after the replacement's promotion, competing promotions at the same boundary, lost/expired leases, repeated owners with distinct generations, process death at every filesystem/receipt boundary, rollback and database outage, and filesystem replacement/symlink attacks. Verify accepted outputs and receipts belong to the winning generation and stale workers cannot mutate published paths or create accepted unreceipted output. Tests must use the actual supported filesystem and multi-container topology as well as synthetic fixtures.
+
 Any implementation must establish and test all of the following before enabling cleanup:
 
 - Persist a unique spool identity and exact job, attempt, and lease generation before accepting download bytes. Reconcile crashes between reservation, directory creation, and journal updates without treating unregistered files as disposable.
