@@ -6,6 +6,14 @@ for Viewer on the NAS. Its actual storage, restore coupling, credentials,
 authority lifecycle and running topology have not been verified. All tests
 below use isolated synthetic stores until the owners qualify that topology.
 
+Processing reports a previous read-only census on cluster .89 found a named
+Docker state volume mounted at `/prototype-state`, running as UID/GID 10001,
+at source revision `693cb7e`. This is historical, not a current inspection or
+proof of independent backup/restore, key ownership or single-writer fencing.
+Its cooperative operation intents/fences are disabled; no deployed protected
+v2 anchor has been established. Reverify the actual owner and topology before
+any staging change.
+
 ## Scope and prerequisites
 
 If the coordinator checkpoint and its trusted identity survive independently,
