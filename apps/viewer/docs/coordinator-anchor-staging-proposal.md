@@ -14,6 +14,15 @@ Its cooperative operation intents/fences are disabled; no deployed protected
 v2 anchor has been established. Reverify the actual owner and topology before
 any staging change.
 
+Processing reports its existing coordinator witness covers NodeODM signed
+operations, not Viewer ledger-event identity. Its separate remote-checkpoint
+experiment hard-disables authority. Neither an mTLS peer nor a caller-supplied
+Viewer digest is enough to authorize CAS: a real design needs a coordinator-owned
+pre-existing parent claim and durable operation pin, an independently verified
+exact canonical Viewer transition, current authority, and durable cross-store
+intents with an actual stream/process fence. Its synthetic transport tests and
+the Viewer's pending/receipt SQLite experiment do not establish that path.
+
 ## Scope and prerequisites
 
 If the coordinator checkpoint and its trusted identity survive independently,
