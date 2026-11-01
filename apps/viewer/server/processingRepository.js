@@ -184,9 +184,10 @@ function indexedFileMetadata(file) {
 }
 
 class ProcessingRepository {
-  constructor(database, { logMaxBytes = 10 * 1024 * 1024 } = {}) {
+  constructor(database, { logMaxBytes = 10 * 1024 * 1024, derivativeIntentGuard = false } = {}) {
     this.database = database;
     this.logMaxBytes = logMaxBytes;
+    this.derivativeIntentGuard = derivativeIntentGuard === true;
     this.seedPresets();
   }
 
@@ -720,6 +721,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
         ORDER BY updated_at,id LIMIT ?`).all(t,t,n);
       let terminal=0;
       for(const row of rows){
+        if(this.derivativeIntentGuard&&require('./nativeDerivativeIntentCandidate').heldInTransaction(this.database,row.id))continue;
         const request=json(row.request_json,{}),code=Date.parse(row.deadline_at||'')<=Date.parse(t)?'derivative_timeout':'derivative_retry_exhausted';
         const message=code==='derivative_timeout'?'derivative wall-clock deadline expired':'derivative lease retry limit exhausted';
         if(this.database.prepare("UPDATE derivative_jobs SET status='failed',result_json=?,lease_owner=NULL,lease_expires_at=NULL,completed_at=?,updated_at=? WHERE id=? AND status='leased' AND lease_token=?").run(JSON.stringify({error:message,code}),t,t,row.id,row.lease_token).changes!==1)continue;
@@ -763,6 +765,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       const activeHeavy=this.database.prepare("SELECT id FROM derivative_jobs WHERE derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased' AND lease_expires_at>? LIMIT 1").get(t);
       const candidates=this.database.prepare("SELECT * FROM derivative_jobs WHERE status='pending' OR (status='leased' AND lease_expires_at<=?) ORDER BY CASE WHEN derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased' THEN 0 ELSE 1 END,created_at,id LIMIT 100").all(t);
       for(const row of candidates){
+        if(this.derivativeIntentGuard&&require('./nativeDerivativeIntentCandidate').heldInTransaction(this.database,row.id))continue;
         const heavy=isHeavyDerivativeType(row.derivative_type);
         if(heavy&&(activeHeavy||lock?.job_id&&Date.parse(lock.lease_expires_at)>nowMs))continue;
         const attempts=Number(row.attempt_count)||0;
