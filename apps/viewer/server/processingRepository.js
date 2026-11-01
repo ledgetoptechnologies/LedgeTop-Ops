@@ -20,6 +20,9 @@ const {
   stable,
 }=require('../lod-converter-policy.cjs');
 const CONTROLLED_CONVERTER_COMMAND_SHA256_SET=new Set(ACCEPTED_CONTROLLED_CONVERTER_COMMAND_SHA256);
+// Experimental native registrations have no qualified writer authority yet.
+// This participating-worker guard is not protection from direct SQL writers.
+function nativeReferenceDerivativeHold(db){const row=db.prepare("SELECT type FROM sqlite_master WHERE name='native_reference_model_registration_candidate'").get();if(!row)return '';if(row.type!=='table')throw Object.assign(new Error('native reference registration schema unavailable'),{code:'native_derivative_hold'});return 'AND NOT EXISTS (SELECT 1 FROM native_reference_model_registration_candidate n WHERE n.attempt_id=derivative_jobs.attempt_id)';}
 // Only an exact durable receipt, and for final readiness its marker, can
 // release an experimental derivative intent. Direct writers remain a trust boundary.
 const DERIVATIVE_UNRESOLVED_INTENT_SQL=`NOT EXISTS (SELECT 1 FROM native_derivative_intent_candidate i WHERE i.attempt_id=derivative_jobs.attempt_id AND NOT EXISTS (
@@ -741,12 +744,12 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   terminalizeExhaustedDerivatives(limit=20){
     return this.transaction(()=>{
       const t=now(),n=Math.max(1,Math.min(Number(limit)||20,100));
-      if(this.derivativeIntentGuard)prepareDerivativeIntentGuard(this.database);
+      if(this.derivativeIntentGuard)prepareDerivativeIntentGuard(this.database);const nativeHold=nativeReferenceDerivativeHold(this.database);
       const rows=this.database.prepare(`SELECT * FROM derivative_jobs
         WHERE status='leased'
           AND ((deadline_at IS NOT NULL AND deadline_at<=?)
             OR (lease_expires_at<=? AND derivative_type IN ('ept','mesh_tiles','lod_audit') AND attempt_count>=3))
-        ${this.derivativeIntentGuard?`AND ${DERIVATIVE_UNRESOLVED_INTENT_SQL} AND ${DERIVATIVE_OPTIONAL_READY_HOLD_SQL}`:''}
+        ${this.derivativeIntentGuard?`AND ${DERIVATIVE_UNRESOLVED_INTENT_SQL} AND ${DERIVATIVE_OPTIONAL_READY_HOLD_SQL}`:''} ${nativeHold}
         ORDER BY updated_at,id LIMIT ?`).all(t,t,n);
       let terminal=0;
       for(const row of rows){
@@ -785,14 +788,14 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   claimDerivative(owner,leaseSeconds=600){
     this.terminalizeExhaustedDerivatives(20);
     return this.transaction(()=>{
-      if(this.derivativeIntentGuard)prepareDerivativeIntentGuard(this.database);
+      if(this.derivativeIntentGuard)prepareDerivativeIntentGuard(this.database);const nativeHold=nativeReferenceDerivativeHold(this.database);
       if(this.measurementCalculationActive())return null;
       const t=now(),nowMs=Date.parse(t),lock=this.database.prepare('SELECT * FROM lod_conversion_lock WHERE id=1').get();
       // Migration v28 may observe heavy leases created by the previous worker
       // before EPT shared the token-fenced singleton. Treat any still-live
       // heavy lease as the singleton owner until it expires.
       const activeHeavy=this.database.prepare("SELECT id FROM derivative_jobs WHERE derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased' AND lease_expires_at>? LIMIT 1").get(t);
-      const candidates=this.database.prepare(`SELECT * FROM derivative_jobs WHERE (status='pending' OR (status='leased' AND lease_expires_at<=?)) ${this.derivativeIntentGuard?`AND ${DERIVATIVE_UNRESOLVED_INTENT_SQL} AND ${DERIVATIVE_OPTIONAL_READY_HOLD_SQL}`:''} ORDER BY CASE WHEN derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased' THEN 0 ELSE 1 END,created_at,id LIMIT 100`).all(t);
+      const candidates=this.database.prepare(`SELECT * FROM derivative_jobs WHERE (status='pending' OR (status='leased' AND lease_expires_at<=?)) ${this.derivativeIntentGuard?`AND ${DERIVATIVE_UNRESOLVED_INTENT_SQL} AND ${DERIVATIVE_OPTIONAL_READY_HOLD_SQL}`:''} ${nativeHold} ORDER BY CASE WHEN derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased' THEN 0 ELSE 1 END,created_at,id LIMIT 100`).all(t);
       for(const row of candidates){
         const heavy=isHeavyDerivativeType(row.derivative_type);
         if(heavy&&(activeHeavy||lock?.job_id&&Date.parse(lock.lease_expires_at)>nowMs))continue;
