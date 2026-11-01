@@ -16,7 +16,7 @@ def unique_pairs(pairs):
     return value
 
 def main():
-    sock_path, db_path, script, allowed_uid, public_key = sys.argv[1:]
+    sock_path, db_path, script, allowed_uid, public_key, broker_key = sys.argv[1:]
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(sock_path)
     os.chmod(sock_path, 0o666)
@@ -46,13 +46,13 @@ def main():
                     if not data.endswith(b'\n') or len(data) > 4096:
                         raise ValueError('bad request')
                     req = json.loads(data, object_pairs_hook=unique_pairs)
-                    if type(req) is not dict or set(req) != {'operation', 'request', 'token'} or req['operation'] not in ('complete', 'complete_drop_reply') or type(req['request']) is not dict or type(req['token']) is not str:
+                    if type(req) is not dict or set(req) != {'operation', 'request', 'token', 'nonce'} or req['operation'] not in ('complete', 'complete_drop_reply') or type(req['request']) is not dict or type(req['token']) is not str or type(req['nonce']) is not str:
                         raise ValueError('bad request')
-                    child = subprocess.Popen(['node', script, db_path, str(uid), public_key], stdin=subprocess.PIPE,
+                    child = subprocess.Popen(['node', script, db_path, str(uid), public_key, broker_key], stdin=subprocess.PIPE,
                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     print('CHILD ' + str(child.pid), flush=True)
                     try:
-                        stdout, _ = child.communicate(input=json.dumps({'request':req['request'],'token':req['token']}).encode(), timeout=5)
+                        stdout, _ = child.communicate(input=json.dumps({'request':req['request'],'token':req['token'],'nonce':req['nonce']}).encode(), timeout=5)
                     except subprocess.TimeoutExpired:
                         child.kill()
                         child.communicate()
@@ -65,7 +65,7 @@ def main():
                     if child.returncode != 0:
                         raise ValueError('transition failed')
                     parsed = json.loads(stdout)
-                    if set(parsed) != {'attemptId', 'commitId'}:
+                    if set(parsed) != {'result', 'signature'}:
                         raise ValueError('bad result')
                     if req['operation'] == 'complete_drop_reply':
                         # Fixture-only fault injection after the transaction committed.
