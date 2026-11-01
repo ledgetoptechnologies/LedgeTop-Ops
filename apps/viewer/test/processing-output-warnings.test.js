@@ -14,3 +14,7 @@ test('absent, malformed, truncated or mismatched inventory reports unknown, not 
   const valid=files('other.txt','another.txt'),cases=[null,files(),{...valid,attemptId:'other'},{...valid,providerTaskId:'other'},{...valid,archiveSha256:'invalid'},{...valid,archiveFiles:valid.archiveFiles.slice(0,1)},{...valid,archiveManifestSha256:sha('wrong')},{...valid,archiveFiles:Array(10001).fill(valid.archiveFiles[0])},{...valid,archiveFiles:[{relativePath:'../unsafe',byteSize:1,sha256:sha('x')}]},{...valid,archiveFiles:[valid.archiveFiles[0],valid.archiveFiles[0]]}];
   for(const item of cases)assert.deepEqual(warnings(attempt,item).map(x=>x.code),['3d_tiles_inventory_unavailable']);
 });
+test('ODM-shaped inventory with EPT and mesh tiles but no point-cloud tileset reports only the provider point-cloud notice',()=>{
+  const synthetic=files('entwine_pointcloud/ept.json','odm_georeferencing/odm_georeferenced_model.laz','odm_texturing/odm_textured_model_geo.obj','odm_texturing/odm_textured_model_geo.glb','odm_orthophoto/odm_orthophoto.tif','3d_tiles/model/tileset.json','3d_tiles/pointcloud/entwine/ept.json');
+  const result=warnings(attempt,synthetic);assert.deepEqual(result.map(item=>item.code),['pointcloud_3d_tiles_missing']);assert.match(result[0].message,/Viewer uses EPT/);
+});
