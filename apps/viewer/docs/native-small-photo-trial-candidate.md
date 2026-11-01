@@ -8,6 +8,8 @@ The operator reported the API and worker image ID `sha256:eea9638f5979dc53ee7e40
 
 The coordinating agent reports that the native coordinator retains per-task uploads and cached outputs when marked removed, but has no Viewer-ingestion acknowledgement; the engines have age-based cleanup. Treat the engine retention window as an unresolved, time-bound risk until a complete archive is captured and independently verified. The agent's in-app Viewer launch through Operations reported `Failed to fetch`; Beau subsequently reported the Viewer opens normally in his own browser and that the in-app browser needed a refresh. The agent's browser control was unavailable, so the refreshed session has not been independently verified.
 
+The live Viewer-compatible path currently relies on the coordinator polling the engine. A separate reference outbox/retry daemon has not been established as running on the nodes or connected to this path. During a prolonged coordinator outage, neither a durable completion notification nor a Viewer-ingestion acknowledgement is established, and engine cleanup can remove the result before capture. Do not infer that either notification or acknowledgement works from the successful supervised test.
+
 ## Before submitting
 
 - Use a dedicated test project and a small, authorized, overlapping photo set of known count and byte size. Use an appropriate photogrammetry dataset rather than arbitrary unrelated images. Keep the original source in place and record an inventory with hashes without including client data or credentials in the review record. For this first pipeline smoke, omit GCP inputs; GCP selection is a separate acceptance test.
