@@ -714,14 +714,15 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   terminalizeExhaustedDerivatives(limit=20){
     return this.transaction(()=>{
       const t=now(),n=Math.max(1,Math.min(Number(limit)||20,100));
+      if(this.derivativeIntentGuard)require('./nativeDerivativeIntentCandidate').attestInTransaction(this.database);
       const rows=this.database.prepare(`SELECT * FROM derivative_jobs
         WHERE status='leased'
           AND ((deadline_at IS NOT NULL AND deadline_at<=?)
             OR (lease_expires_at<=? AND derivative_type IN ('ept','mesh_tiles','lod_audit') AND attempt_count>=3))
+        ${this.derivativeIntentGuard?'AND NOT EXISTS (SELECT 1 FROM native_derivative_intent_candidate i WHERE i.attempt_id=derivative_jobs.attempt_id)':''}
         ORDER BY updated_at,id LIMIT ?`).all(t,t,n);
       let terminal=0;
       for(const row of rows){
-        if(this.derivativeIntentGuard&&require('./nativeDerivativeIntentCandidate').heldInTransaction(this.database,row.id))continue;
         const request=json(row.request_json,{}),code=Date.parse(row.deadline_at||'')<=Date.parse(t)?'derivative_timeout':'derivative_retry_exhausted';
         const message=code==='derivative_timeout'?'derivative wall-clock deadline expired':'derivative lease retry limit exhausted';
         if(this.database.prepare("UPDATE derivative_jobs SET status='failed',result_json=?,lease_owner=NULL,lease_expires_at=NULL,completed_at=?,updated_at=? WHERE id=? AND status='leased' AND lease_token=?").run(JSON.stringify({error:message,code}),t,t,row.id,row.lease_token).changes!==1)continue;
@@ -757,15 +758,15 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   claimDerivative(owner,leaseSeconds=600){
     this.terminalizeExhaustedDerivatives(20);
     return this.transaction(()=>{
+      if(this.derivativeIntentGuard)require('./nativeDerivativeIntentCandidate').attestInTransaction(this.database);
       if(this.measurementCalculationActive())return null;
       const t=now(),nowMs=Date.parse(t),lock=this.database.prepare('SELECT * FROM lod_conversion_lock WHERE id=1').get();
       // Migration v28 may observe heavy leases created by the previous worker
       // before EPT shared the token-fenced singleton. Treat any still-live
       // heavy lease as the singleton owner until it expires.
       const activeHeavy=this.database.prepare("SELECT id FROM derivative_jobs WHERE derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased' AND lease_expires_at>? LIMIT 1").get(t);
-      const candidates=this.database.prepare("SELECT * FROM derivative_jobs WHERE status='pending' OR (status='leased' AND lease_expires_at<=?) ORDER BY CASE WHEN derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased' THEN 0 ELSE 1 END,created_at,id LIMIT 100").all(t);
+      const candidates=this.database.prepare(`SELECT * FROM derivative_jobs WHERE (status='pending' OR (status='leased' AND lease_expires_at<=?)) ${this.derivativeIntentGuard?'AND NOT EXISTS (SELECT 1 FROM native_derivative_intent_candidate i WHERE i.attempt_id=derivative_jobs.attempt_id)':''} ORDER BY CASE WHEN derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased' THEN 0 ELSE 1 END,created_at,id LIMIT 100`).all(t);
       for(const row of candidates){
-        if(this.derivativeIntentGuard&&require('./nativeDerivativeIntentCandidate').heldInTransaction(this.database,row.id))continue;
         const heavy=isHeavyDerivativeType(row.derivative_type);
         if(heavy&&(activeHeavy||lock?.job_id&&Date.parse(lock.lease_expires_at)>nowMs))continue;
         const attempts=Number(row.attempt_count)||0;
