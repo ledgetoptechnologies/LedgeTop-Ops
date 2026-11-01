@@ -256,9 +256,14 @@ class StorageManager {
   removeAdoptedSource(absolutePath){if(!absolutePath)return;const resolved=path.resolve(absolutePath);const allowed=Object.entries(this.roots).some(([key,root])=>['dataset_import','terra_import'].includes(key)&&root&&(resolved===path.resolve(root)||resolved.startsWith(`${path.resolve(root)}${path.sep}`)));if(!allowed)throw new Error('import cleanup path is outside an adoptable root');fs.rmSync(resolved,{recursive:true,force:true});}
   reconcileAdoptionIntent(rootKey,relativePath,datasetRelative){
     const source=this.resolve(rootKey,relativePath),destination=this.resolve('datasets',datasetRelative),incomplete=`${destination}.incomplete`;
-    const recover=(candidate)=>{if(!fs.existsSync(candidate))return false;if(!fs.existsSync(source)){fs.mkdirSync(path.dirname(source),{recursive:true});fs.renameSync(candidate,source);}else fs.rmSync(candidate,{recursive:true,force:true});return true;};
-    const destinationRecovered=recover(destination),incompleteRecovered=recover(incomplete);
-    return destinationRecovered||incompleteRecovered;
+    // Multiple copies or an existing source are ambiguous: never remove one
+    // merely because another path exists. Preserve every tree for review.
+    const inspect=target=>{try{return fs.lstatSync(target);}catch(error){if(error.code==='ENOENT')return null;throw error;}},sourceStat=inspect(source),destinationStat=inspect(destination),incompleteStat=inspect(incomplete),sourceExists=Boolean(sourceStat),destinationExists=Boolean(destinationStat),incompleteExists=Boolean(incompleteStat);
+    if(sourceExists&&(destinationExists||incompleteExists)||destinationExists&&incompleteExists)throw Object.assign(new Error('adoption recovery has conflicting paths'),{code:'adoption_recovery_conflict'});
+    const candidate=destinationExists?destination:incompleteExists?incomplete:null;
+    if(!candidate)return false;
+    const candidateStat=destinationExists?destinationStat:incompleteStat;if(!candidateStat.isDirectory()||candidateStat.isSymbolicLink())throw Object.assign(new Error('adoption recovery candidate is not a directory'),{code:'adoption_recovery_conflict'});
+    fs.mkdirSync(path.dirname(source),{recursive:true});fs.renameSync(candidate,source);return true;
   }
   moveToTrash(rootKey,relativePath,entityType,entityId){if(rootKey!=='datasets'&&rootKey!=='models')throw Object.assign(new Error('only Viewer-managed assets can be trashed'),{code:'external_reference'});const source=this.resolve(rootKey,relativePath,{mustExist:true}),trashRelative=`${entityType}/${entityId}-${crypto.randomUUID()}`,destination=this.resolve('trash',trashRelative);fs.mkdirSync(path.dirname(destination),{recursive:true});if(fs.statSync(source).dev!==fs.statSync(this.roots.trash).dev)throw new Error('trash must be on the same filesystem');fs.renameSync(source,destination);return{rootKey,relativePath,trashRelative};}
   pathExists(rootKey,relativePath){try{return fs.existsSync(this.resolve(rootKey,relativePath));}catch{return false;}}

@@ -125,6 +125,20 @@ this experiment. Do not manually clear a claim, delete a source, or assume a
 timeout establishes safety. A reviewed operational procedure and tested
 reconciliation are required before rollout.
 
+The recovery helper now refuses to choose or delete a tree when an inspection
+finds the original and a managed candidate both present, or both complete and
+incomplete candidates present. It leaves those trees and the uncertain effect
+held. When the dataset is absent and the helper is invoked, missing paths also
+leave the journal and effect held rather than being treated as recovery. The
+existing single-candidate rename remains available
+for an ordinary uninterrupted recovery; it does not establish trusted source
+identity, content verification, exclusion of old/external writers, or power-loss
+durability. Inspection and rename are separate: a racing writer can create a
+source path between them, and ordinary rename can replace an empty directory.
+Atomic no-replace rename and verified executor exclusion are still required.
+These changes do not reclaim an existing in-flight claim or provide
+automatic reconciliation of a previously interrupted callback.
+
 `test/fixtures/viewer-processing-source-map-public.json` is an unsigned public
 synthetic mapping for the two-file fixture. Its indexed dataset manifest and
 selected Processing submission manifest have distinct hashes: only the image is
