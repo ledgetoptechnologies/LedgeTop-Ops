@@ -145,6 +145,8 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   // fallback after a crash between filesystem promotion and receipt commit.
   // Recheck in the actual existing-directory branch after source hashing.
   if(!fs.existsSync(destination)){
+    if(archiveReceipt)throw Object.assign(new Error('recorded archive directory is unavailable'),{code:'ingest_recovery_state_changed'});
+    if(!processing.beginIngestPublication(job.id,job.lease_owner,job.attempt_count))throw Object.assign(new Error('processing lease or publication generation was lost'),{code:'lease_lost'});
     const adapter=adapterFor(provider,config,providerCredentials);
     let response;try{response=await adapter.downloadAll(attempt.providerTaskId,{signal});}catch(error){if(!signal?.aborted&&transientDownloadError(error))throw downloadUnavailable();throw error;}
     const declared=Number(response.headers.get('content-length')||0);
@@ -153,12 +155,13 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     const streamErrors=new WeakSet(),reader=response.body.getReader(),lengthHeader=response.headers.get('content-length'),encoding=response.headers.get('content-encoding'),expectedLength=(!encoding||encoding.toLowerCase()==='identity')&&lengthHeader&&/^\d+$/.test(lengthHeader)&&Number.isSafeInteger(Number(lengthHeader))?Number(lengthHeader):null;
     const readable=Readable.from((async function*(){let received=0;try{for(;;){let part;try{part=await reader.read();}catch(error){if(error&&typeof error==='object')streamErrors.add(error);throw error;}if(part.done){if(expectedLength!==null&&received<expectedLength)throw downloadUnavailable();return;}received+=part.value.byteLength;yield part.value;}}finally{try{await reader.cancel();}catch{}reader.releaseLock();}})());
     const destroy=readable._destroy;readable._destroy=function(error,callback){try{Promise.resolve(reader.cancel()).catch(()=>{});}catch{}destroy.call(this,error,callback);};
-    let captured;try{captured=await captureProcessingArchive(readable,destination,{maxEntries:100000,maxBytes:maximumExpansion,maxArchiveBytes:maximumExpansion,maxDiskBytes:maximumExpansion,signal});}catch(error){if(!signal?.aborted&&error&&typeof error==='object'&&streamErrors.has(error)&&transientDownloadError(error))throw downloadUnavailable();throw error;}
-    archiveReceipt=processing.recordAttemptArchiveReceipt(job.id,job.lease_owner,captured);
-    if(!archiveReceipt)throw Object.assign(new Error('processing archive receipt or lease was lost'),{code:'lease_lost'});
+    try{await captureProcessingArchive(readable,destination,{maxEntries:100000,maxBytes:maximumExpansion,maxArchiveBytes:maximumExpansion,maxDiskBytes:maximumExpansion,signal,publish:(staged,target,captured)=>{
+      archiveReceipt=processing.recordAttemptArchiveReceipt(job.id,job.lease_owner,captured,{generation:job.attempt_count,promote:()=>{fs.mkdirSync(target,{mode:0o700});for(const entry of fs.readdirSync(staged))fs.renameSync(path.join(staged,entry),path.join(target,entry));}});
+      if(!archiveReceipt)throw Object.assign(new Error('processing archive receipt or lease was lost'),{code:'lease_lost'});
+    }});}catch(error){if(!signal?.aborted&&error&&typeof error==='object'&&streamErrors.has(error)&&transientDownloadError(error))throw downloadUnavailable();throw error;}
   }else if(archiveReceipt){
     await verifyProcessingArchive(destination,archiveReceipt,{signal});
-  }else if(recoveredIngest){
+  }else if(recoveredIngest||processing.getIngestPublicationIntent(attempt.id)){
     throw Object.assign(new Error('recovered archive receipt is unavailable'),{code:'ingest_recovery_state_changed'});
   }
   // Ordinary historical jobs retain their existing unreceipted-directory

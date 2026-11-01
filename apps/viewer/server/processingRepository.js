@@ -509,8 +509,15 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     const record=this.getAttemptTransferProvenance(job.attempt_id)?.initialization;if(!record)return true;
     record.ambiguous=true;this.database.prepare('UPDATE processing_attempt_transfer_provenance SET initialization_json=?,updated_at=? WHERE attempt_id=?').run(JSON.stringify(record),now(),job.attempt_id);return true;
   });}
-  recordAttemptArchiveReceipt(jobId,owner,{archiveSha256,archiveFiles,archiveManifestSha256,archiveByteSize=null}){return this.transaction(()=>{
+  getIngestPublicationIntent(attemptId){return this.database.prepare('SELECT * FROM ingest_publication_intents WHERE attempt_id=?').get(attemptId)||null;}
+  beginIngestPublication(jobId,owner,generation){return this.transaction(()=>{
+    const job=this.provenanceJob(jobId,owner,'ingest');if(!job||Number(job.attempt_count)!==generation)return false;
+    const existing=this.getIngestPublicationIntent(job.attempt_id),t=now();if(existing&&existing.job_id!==job.id){const previous=this.database.prepare("SELECT status,lease_expires_at FROM processing_jobs WHERE id=?").get(existing.job_id);if(previous?.status==='leased'&&previous.lease_expires_at>t)return false;}
+    this.database.prepare(`INSERT INTO ingest_publication_intents(attempt_id,job_id,lease_generation,created_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET job_id=excluded.job_id,lease_generation=excluded.lease_generation,updated_at=excluded.updated_at`).run(job.attempt_id,job.id,generation,t,t);return true;
+  });}
+  recordAttemptArchiveReceipt(jobId,owner,{archiveSha256,archiveFiles,archiveManifestSha256,archiveByteSize=null},{generation=null,promote=null}={}){return this.transaction(()=>{
     const job=this.provenanceJob(jobId,owner,'ingest');if(!job)return null;
+    if(promote){const intent=this.getIngestPublicationIntent(job.attempt_id);if(!Number.isSafeInteger(generation)||Number(job.attempt_count)!==generation||!intent||intent.job_id!==job.id||Number(intent.lease_generation)!==generation)return null;}
     const attempt=this.getAttempt(job.attempt_id),transfer=this.getAttemptTransferProvenance(attempt.id);
     const digest=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value),seen=new Set();
     if(!digest(archiveSha256)||!Array.isArray(archiveFiles)||!archiveFiles.length||archiveFiles.length>100000||archiveByteSize!==null&&(!Number.isSafeInteger(archiveByteSize)||archiveByteSize<=0))return null;
@@ -518,6 +525,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     const manifest=crypto.createHash('sha256').update(JSON.stringify(files)).digest('hex');if(manifest!==archiveManifestSha256)return null;
     const receipt={schemaVersion:1,attemptId:attempt.id,providerTaskId:attempt.providerTaskId,archiveSha256,archiveByteSize,archiveManifestSha256:manifest,archiveFiles:files};
     if(transfer?.archive)return JSON.stringify(transfer.archive)===JSON.stringify(receipt)?transfer.archive:null;
+    if(promote){promote();const current=this.provenanceJob(jobId,owner,'ingest');if(!current||Number(current.attempt_count)!==generation)throw Object.assign(new Error('processing lease expired during publication'),{code:'lease_lost'});}
     const t=now();this.database.prepare(`INSERT INTO processing_attempt_transfer_provenance(attempt_id,initialization_json,archive_json,created_at,updated_at) VALUES(?,'{"state":"unknown"}',?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET archive_json=excluded.archive_json,updated_at=excluded.updated_at WHERE archive_json IS NULL`).run(attempt.id,JSON.stringify(receipt),t,t);return receipt;
   });}
   getVerifiedAttemptProducerReceipt(attemptId){
