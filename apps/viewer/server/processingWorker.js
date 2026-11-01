@@ -150,8 +150,8 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     const declared=Number(response.headers.get('content-length')||0);
     if(declared>maximumExpansion)throw Object.assign(new Error('provider result exceeds available storage'),{code:'insufficient_storage'});
     fs.mkdirSync(path.dirname(destination),{recursive:true});
-    const streamErrors=new WeakSet(),reader=response.body.getReader();
-    const readable=Readable.from((async function*(){try{for(;;){let part;try{part=await reader.read();}catch(error){if(error&&typeof error==='object')streamErrors.add(error);throw error;}if(part.done)return;yield part.value;}}finally{try{await reader.cancel();}catch{}reader.releaseLock();}})());
+    const streamErrors=new WeakSet(),reader=response.body.getReader(),lengthHeader=response.headers.get('content-length'),encoding=response.headers.get('content-encoding'),expectedLength=(!encoding||encoding.toLowerCase()==='identity')&&lengthHeader&&/^\d+$/.test(lengthHeader)&&Number.isSafeInteger(Number(lengthHeader))?Number(lengthHeader):null;
+    const readable=Readable.from((async function*(){let received=0;try{for(;;){let part;try{part=await reader.read();}catch(error){if(error&&typeof error==='object')streamErrors.add(error);throw error;}if(part.done){if(expectedLength!==null&&received<expectedLength)throw downloadUnavailable();return;}received+=part.value.byteLength;yield part.value;}}finally{try{await reader.cancel();}catch{}reader.releaseLock();}})());
     const destroy=readable._destroy;readable._destroy=function(error,callback){try{Promise.resolve(reader.cancel()).catch(()=>{});}catch{}destroy.call(this,error,callback);};
     let captured;try{captured=await captureProcessingArchive(readable,destination,{maxEntries:100000,maxBytes:maximumExpansion,maxArchiveBytes:maximumExpansion,maxDiskBytes:maximumExpansion,signal});}catch(error){if(!signal?.aborted&&error&&typeof error==='object'&&streamErrors.has(error)&&transientDownloadError(error))throw downloadUnavailable();throw error;}
     archiveReceipt=processing.recordAttemptArchiveReceipt(job.id,job.lease_owner,captured);
