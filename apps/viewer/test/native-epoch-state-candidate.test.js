@@ -12,4 +12,11 @@ test('durable epoch and revoke identity hold local writes through restart',{skip
   db.close();db=new DatabaseSync(file);client=state.createState({db,enabled:true});assert.deepEqual(client.prepareRevoke({attemptId,identitySha256,buildBody:()=>{throw new Error('must not regenerate');}}),first);
   assert.throws(()=>client.begin({attemptId,identitySha256:'b'.repeat(64),checkContext:()=>true}),{code:'native_epoch_hold'});assert.throws(()=>db.exec('INSERT INTO processing_attempts DEFAULT VALUES'),/native operation unresolved/);
   assert.equal(db.prepare('SELECT operation_id FROM native_operation_fence_candidate').get().operation_id,operationId);
+  const taskUuid='00000000-0000-4000-8000-000000000002',expected={operationId,taskUuid,environment:'staging',manifestId:attemptId,manifestSha256:identitySha256,requestId:first.requestId};
+  const common={operationId,taskUuid,environment:'staging',manifestId:attemptId,manifestSha256:identitySha256,operationKind:'plan_bind',generation:1,epoch:1};
+  const envelope={protocol:'native-plan-epoch-v2-experiment',version:2,taskUuid,operationId,environment:'staging',generation:1,epoch:1,result:{...common,state:'closed_without_bind',requestId:first.requestId,manifestReceipt:null,planIntentPresent:false,planIntentSha256:null,planReceipt:null}};
+  const input={attemptId,identitySha256,expected,envelope,checkContext:()=>true};
+  assert.throws(()=>client.finish({...input,envelope:{...envelope,result:{...envelope.result,requestId:operationId}}}),{code:'native_epoch_hold'});assert.throws(()=>db.exec('INSERT INTO processing_attempts DEFAULT VALUES'),/native operation unresolved/);
+  db.exec("CREATE TRIGGER refuse_release BEFORE DELETE ON native_operation_fence_candidate BEGIN SELECT RAISE(ABORT,'synthetic failure'); END");assert.throws(()=>client.finish(input),{code:'native_epoch_hold'});assert.equal(db.prepare('SELECT terminal_receipt FROM native_epoch_state_candidate').get().terminal_receipt,null);assert.equal(db.prepare('SELECT COUNT(*) n FROM native_operation_fence_candidate').get().n,1);db.exec('DROP TRIGGER refuse_release');
+  assert.deepEqual(client.finish(input),envelope);assert.equal(db.prepare('SELECT COUNT(*) n FROM native_operation_fence_candidate').get().n,0);assert.deepEqual(client.finish(input),envelope);
 });

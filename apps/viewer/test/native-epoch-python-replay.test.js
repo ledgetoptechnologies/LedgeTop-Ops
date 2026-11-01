@@ -1,10 +1,10 @@
 'use strict';
-// Synthetic loopback only. The source tar must match the SHA-256 of a git archive of Processing 0b6d813f.
+// Synthetic loopback only. The source tar must match the SHA-256 of a git archive of Processing 95f0de97.
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto'),{spawn,spawnSync}=require('node:child_process'),readline=require('node:readline');
 const {createTransport}=require('../server/nativeEpochTransportCandidate'),{validate:validateEpoch}=require('../server/nativeEpochReceiptCandidate'),{buildPlan,checkPlanReceipt}=require('../server/nativePlanCandidate'),{checkReceipt}=require('../server/nativeManifestBindingCandidate'),{canonical,validate:validateManifest}=require('../server/nativeManifestCandidate');
 const archive=process.env.PROCESSING_SYNTHETIC_ARCHIVE;
 test('Viewer and verified synthetic Python coordinator replay both epoch close outcomes',{skip:!archive,timeout:30000},async t=>{
-  const bytes=fs.readFileSync(archive);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),'f9f2f3162b3b6ae41d4e4dc1650ae69c3c50d0ce44a1f15e28c70ff7fff77bf8');
+  const bytes=fs.readFileSync(archive);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),'6b38f883b1aeafae83bbba49698a518881e9918609ceb5b4406f4e0dc4be533d');
   const source=fs.mkdtempSync(path.join(os.tmpdir(),'epoch-source-')),snapshot=path.join(source,'verified-source.tar');fs.writeFileSync(snapshot,bytes,{flag:'wx'});
   const extracted=spawnSync('tar',['-xf',snapshot,'-C',source],{stdio:'ignore',timeout:5000});if(extracted.status!==0){fs.rmSync(source,{recursive:true,force:true});assert.equal(extracted.status,0);}fs.rmSync(snapshot);
   const child=spawn('python3',['-m','tests.native_epoch_http_fixture'],{cwd:source,env:{...process.env,PYTHONPATH:source,PYTHONNOUSERSITE:'1',PYTHONPYCACHEPREFIX:path.join(source,'.pycache'),PROCESSING_SYNTHETIC_EPOCH_HTTP_FIXTURE:'1'},stdio:['pipe','pipe','pipe']});
@@ -36,7 +36,7 @@ test('Viewer and verified synthetic Python coordinator replay both epoch close o
     assert.equal(closedResult.state,accept?'bound_then_closed':'closed_without_bind');assert.equal(closedResult.planIntentPresent,true);
     assert.deepEqual(await call('revoke',revoke),firstClose);assert.deepEqual(await call('status'),firstClose);
     validateEpoch(await call('status'),expected,{action:'status',checkManifest,checkPlan});
-    const late=await fetch(`http://127.0.0.1:${info.port}/task/ledgetop/plan-epoch-v2/${task}/${operation}/1/1/accept?token=synthetic-staging-token-${'s'.repeat(32)}`,{method:'POST',headers:{'content-type':'application/json','X-LedgeTop-Capability':cap},body:built.bytes,signal:AbortSignal.timeout(5000)});
+    const late=await fetch(`http://127.0.0.1:${info.port}/task/ledgetop/plan-epoch-v2/${task}/${operation}/1/1/accept`,{method:'POST',headers:{'content-type':'application/json','X-LedgeTop-Environment-Token':'synthetic-staging-token-'+'s'.repeat(32),'X-LedgeTop-Capability':cap},body:built.bytes,signal:AbortSignal.timeout(5000)});
     assert.equal(late.status,409);await late.arrayBuffer();assert.deepEqual(await call('status'),firstClose);
     await assert.rejects(call('revoke',{...revoke,expectedPlanSha256:null}),{code:'native_epoch_hold'});
   }
