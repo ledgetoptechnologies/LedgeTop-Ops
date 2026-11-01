@@ -156,7 +156,7 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(compose, /LOCAL_DERIVATIVES_ENABLED:\s+"false"/);
   assert.match(compose, /MESH_DERIVATIVES_ENABLED:\s+\$\{MESH_DERIVATIVES_ENABLED:-true\}/);
   assert.match(compose, /OBJ2TILES_BIN:\s+\/opt\/obj2tiles\/Obj2Tiles/);
-  assert.match(compose, /viewer-worker:[\s\S]*processing_worker_heartbeat/);
+  assert.match(compose, /viewer-worker:[\s\S]*server\/workerHealthcheck\.js/);
   assert.doesNotMatch(compose, /viewer-worker:[\s\S]*healthcheck:\s*\{disable:\s*true\}/);
   assert.doesNotMatch(compose, /^\s{2}gateway:/m);
   assert.match(compose, /viewer-api:[\s\S]*?ports:\s*\["\$\{VIEWER_BIND_ADDRESS:-192\.168\.50\.80\}:\$\{VIEWER_PORT:-8088\}:8088"\]/);
