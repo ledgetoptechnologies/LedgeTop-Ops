@@ -50,9 +50,19 @@ def main():
                     for key in ('attemptId', 'jobId'):
                         if type(req[key]) is not str or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', req[key]):
                             raise ValueError('bad identity')
-                    result = subprocess.run(['node', script, db_path, req['attemptId'], req['jobId']],
-                                            capture_output=True, timeout=5, check=True)
-                    parsed = json.loads(result.stdout)
+                    child = subprocess.Popen(['node', script, db_path, req['attemptId'], req['jobId']],
+                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    if os.environ.get('VIEWER_BROKER_FIXTURE_REPORT_CHILD') == '1':
+                        print('CHILD ' + str(child.pid), flush=True)
+                    try:
+                        stdout, _ = child.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.communicate()
+                        raise
+                    if child.returncode != 0:
+                        raise ValueError('transition failed')
+                    parsed = json.loads(stdout)
                     if set(parsed) != {'commitId'}:
                         raise ValueError('bad result')
                     conn.sendall(json.dumps(parsed, separators=(',', ':')).encode() + b'\n')

@@ -1,6 +1,7 @@
 'use strict';
 // Synthetic broker-owned transition only. No production authorization semantics.
 const {DatabaseSync}=require('node:sqlite'),{ProcessingRepository}=require('../../server/processingRepository'),marker=require('../../server/nativeIngestCommitCandidate');
+if(process.env.VIEWER_BROKER_FIXTURE_PAUSE==='1')Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10000);
 const [file,attemptId,jobId]=process.argv.slice(2),db=new DatabaseSync(file);db.exec('PRAGMA busy_timeout=5000');
 try{
   const job=db.prepare("SELECT attempt_id,status,job_type,lease_owner FROM processing_jobs WHERE id=?").get(jobId);
