@@ -52,14 +52,18 @@ def main():
                             raise ValueError('bad identity')
                     child = subprocess.Popen(['node', script, db_path, req['attemptId'], req['jobId']],
                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    if os.environ.get('VIEWER_BROKER_FIXTURE_REPORT_CHILD') == '1':
-                        print('CHILD ' + str(child.pid), flush=True)
+                    print('CHILD ' + str(child.pid), flush=True)
                     try:
                         stdout, _ = child.communicate(timeout=5)
                     except subprocess.TimeoutExpired:
                         child.kill()
                         child.communicate()
                         raise
+                    finally:
+                        if child.poll() is None:
+                            child.kill()
+                            child.communicate()
+                        print('REAPED ' + str(child.pid), flush=True)
                     if child.returncode != 0:
                         raise ValueError('transition failed')
                     parsed = json.loads(stdout)
