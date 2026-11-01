@@ -10,6 +10,6 @@ test('requested 3D Tiles are reported independently from the recorded archive li
   assert.deepEqual(warnings({...attempt,options:{}},files('other.txt')),[]);assert.deepEqual(warnings({...attempt,options:{'3d-tiles':false}},files('other.txt')),[]);
 });
 test('absent, malformed, truncated or mismatched inventory reports unknown, not missing',()=>{
-  const valid=files('other.txt','another.txt'),cases=[null,files(),{...valid,attemptId:'other'},{...valid,providerTaskId:'other'},{...valid,archiveSha256:'invalid'},{...valid,archiveFiles:valid.archiveFiles.slice(0,1)},{...valid,archiveManifestSha256:sha('wrong')},{...valid,archiveFiles:[{relativePath:'../unsafe',byteSize:1,sha256:sha('x')}]},{...valid,archiveFiles:[valid.archiveFiles[0],valid.archiveFiles[0]]}];
+  const valid=files('other.txt','another.txt'),cases=[null,files(),{...valid,attemptId:'other'},{...valid,providerTaskId:'other'},{...valid,archiveSha256:'invalid'},{...valid,archiveFiles:valid.archiveFiles.slice(0,1)},{...valid,archiveManifestSha256:sha('wrong')},{...valid,archiveFiles:Array(10001).fill(valid.archiveFiles[0])},{...valid,archiveFiles:[{relativePath:'../unsafe',byteSize:1,sha256:sha('x')}]},{...valid,archiveFiles:[valid.archiveFiles[0],valid.archiveFiles[0]]}];
   for(const item of cases)assert.deepEqual(warnings(attempt,item).map(x=>x.code),['3d_tiles_inventory_unavailable']);
 });
