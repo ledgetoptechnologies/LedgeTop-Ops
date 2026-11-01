@@ -3,6 +3,7 @@ import json
 import os
 import select
 import socket
+import ssl
 import struct
 import subprocess
 import sys
@@ -16,7 +17,10 @@ def unique_pairs(pairs):
     return value
 
 def main():
-    sock_path, db_path, script, allowed_uid, public_key, broker_key = sys.argv[1:]
+    sock_path, db_path, script, allowed_uid, public_key, broker_key, tls_cert, tls_key = sys.argv[1:]
+    tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_context.minimum_version = ssl.TLSVersion.TLSv1_3
+    tls_context.load_cert_chain(tls_cert, tls_key)
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(sock_path)
     os.chmod(sock_path, 0o666)
@@ -29,10 +33,16 @@ def main():
             if not readable or sys.stdin in readable:
                 graceful = True
                 break
-            conn, _ = server.accept()
+            raw, _ = server.accept()
+            raw.settimeout(5)
+            _, uid, _ = struct.unpack('3i', raw.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            try:
+                conn = tls_context.wrap_socket(raw, server_side=True)
+            except (ssl.SSLError, OSError):
+                raw.close()
+                continue
             with conn:
                 conn.settimeout(5)
-                _, uid, _ = struct.unpack('3i', conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
                 if uid != int(allowed_uid):
                     conn.sendall(b'{"error":"unauthorized"}\n')
                     continue
@@ -70,7 +80,7 @@ def main():
                     if req['operation'] == 'complete_drop_reply':
                         # Fixture-only fault injection after the transaction committed.
                         continue
-                    conn.sendall(json.dumps(parsed, separators=(',', ':')).encode() + b'\n')
+                    conn.sendall(json.dumps(parsed['result'], separators=(',', ':')).encode() + b'\n')
                 except Exception:
                     conn.sendall(b'{"error":"hold"}\n')
     finally:
