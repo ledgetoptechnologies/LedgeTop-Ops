@@ -5,6 +5,7 @@ function files(...paths){const archiveFiles=paths.map(relativePath=>({relativePa
 test('requested 3D Tiles are reported independently from the recorded archive listing',()=>{
   assert.deepEqual(warnings(attempt,files('other.txt')).map(x=>x.code),['mesh_3d_tiles_missing','pointcloud_3d_tiles_missing']);
   assert.deepEqual(warnings(attempt,files('3d_tiles/model/tileset.json')).map(x=>x.code),['pointcloud_3d_tiles_missing']);
+  assert.match(warnings(attempt,files('3d_tiles/model/tileset.json'))[0].message,/Viewer uses EPT.*when an EPT asset is available/);
   assert.deepEqual(warnings(attempt,files('3d_tiles/pointcloud/tileset.json')).map(x=>x.code),['mesh_3d_tiles_missing']);
   assert.deepEqual(warnings(attempt,files('3d_tiles/model/tileset.json','3d_tiles/pointcloud/tileset.json')),[]);
   assert.deepEqual(warnings({...attempt,options:{}},files('other.txt')),[]);assert.deepEqual(warnings({...attempt,options:{'3d-tiles':false}},files('other.txt')),[]);

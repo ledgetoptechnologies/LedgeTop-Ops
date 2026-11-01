@@ -34,7 +34,7 @@ test('expanded task has compact facts and one task menu, without duplicate tools
   assert.equal((html.match(/data-action="toggle-task"/g)||[]).length,1);
 });
 test('processing output notices appear only to authorized operators and escape their text',()=>{
-  const f=fixture(['viewer.processing.read']);f.state.taskDetails.task.outputWarnings=[{message:'Missing <mesh> tiles'}];assert.match(f.context.taskPanel(f.task),/Missing &lt;mesh&gt; tiles/);
+  const f=fixture(['viewer.processing.read']);f.state.taskDetails.task.outputWarnings=[{message:'Missing <mesh> tiles'}];assert.match(f.context.taskPanel(f.task),/Missing &lt;mesh&gt; tiles/);f.state.taskPage='files';assert.match(f.context.taskWorkspaceBody(f.task,f.dataset),/Missing &lt;mesh&gt; tiles/);f.state.taskPage='settings';const settings=f.context.taskWorkspaceBody(f.task,f.dataset);assert.match(settings,/Missing &lt;mesh&gt; tiles/);assert.match(settings,/Task output for processing-node details/);
   const denied=fixture([]);denied.state.taskDetails.task.outputWarnings=[{message:'Missing tiles'}];assert.doesNotMatch(denied.context.taskPanel(denied.task),/Missing tiles/);
 });
 

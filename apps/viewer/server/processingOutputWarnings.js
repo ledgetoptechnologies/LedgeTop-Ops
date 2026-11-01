@@ -10,8 +10,8 @@ function processingOutputWarnings(attempt,archive){
   if(crypto.createHash('sha256').update(JSON.stringify(files)).digest('hex')!==archive.archiveManifestSha256)return unknown;
   const paths=new Set(files.map(file=>file.relativePath));
   return [
-    ['3d_tiles/model/tileset.json','mesh_3d_tiles_missing','Requested mesh 3D Tiles were not found in the processing archive.'],
-    ['3d_tiles/pointcloud/tileset.json','pointcloud_3d_tiles_missing','Requested point-cloud 3D Tiles were not found in the processing archive.'],
+    ['3d_tiles/model/tileset.json','mesh_3d_tiles_missing','Requested provider mesh 3D Tiles were not found in the processing archive. Viewer-generated mesh tiles are tracked separately.'],
+    ['3d_tiles/pointcloud/tileset.json','pointcloud_3d_tiles_missing','Requested provider point-cloud 3D Tiles were not found in the processing archive. Viewer uses EPT for its point-cloud view when an EPT asset is available.'],
   ].filter(([path])=>!paths.has(path)).map(([,code,message])=>({code,message}));
 }
 module.exports={processingOutputWarnings};
