@@ -719,7 +719,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
         WHERE status='leased'
           AND ((deadline_at IS NOT NULL AND deadline_at<=?)
             OR (lease_expires_at<=? AND derivative_type IN ('ept','mesh_tiles','lod_audit') AND attempt_count>=3))
-        ${this.derivativeIntentGuard?'AND NOT EXISTS (SELECT 1 FROM native_derivative_intent_candidate i WHERE i.attempt_id=derivative_jobs.attempt_id)':''}
+        ${this.derivativeIntentGuard?'AND NOT EXISTS (SELECT 1 FROM native_derivative_intent_candidate i WHERE i.attempt_id=derivative_jobs.attempt_id AND NOT EXISTS (SELECT 1 FROM native_derivative_resolution_candidate r WHERE r.job_id=i.job_id AND r.request_digest=i.request_digest))':''}
         ORDER BY updated_at,id LIMIT ?`).all(t,t,n);
       let terminal=0;
       for(const row of rows){
@@ -765,7 +765,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       // before EPT shared the token-fenced singleton. Treat any still-live
       // heavy lease as the singleton owner until it expires.
       const activeHeavy=this.database.prepare("SELECT id FROM derivative_jobs WHERE derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased' AND lease_expires_at>? LIMIT 1").get(t);
-      const candidates=this.database.prepare(`SELECT * FROM derivative_jobs WHERE (status='pending' OR (status='leased' AND lease_expires_at<=?)) ${this.derivativeIntentGuard?'AND NOT EXISTS (SELECT 1 FROM native_derivative_intent_candidate i WHERE i.attempt_id=derivative_jobs.attempt_id)':''} ORDER BY CASE WHEN derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased' THEN 0 ELSE 1 END,created_at,id LIMIT 100`).all(t);
+      const candidates=this.database.prepare(`SELECT * FROM derivative_jobs WHERE (status='pending' OR (status='leased' AND lease_expires_at<=?)) ${this.derivativeIntentGuard?'AND NOT EXISTS (SELECT 1 FROM native_derivative_intent_candidate i WHERE i.attempt_id=derivative_jobs.attempt_id AND NOT EXISTS (SELECT 1 FROM native_derivative_resolution_candidate r WHERE r.job_id=i.job_id AND r.request_digest=i.request_digest))':''} ORDER BY CASE WHEN derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased' THEN 0 ELSE 1 END,created_at,id LIMIT 100`).all(t);
       for(const row of candidates){
         const heavy=isHeavyDerivativeType(row.derivative_type);
         if(heavy&&(activeHeavy||lock?.job_id&&Date.parse(lock.lease_expires_at)>nowMs))continue;

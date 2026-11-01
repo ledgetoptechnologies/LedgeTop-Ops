@@ -15,4 +15,5 @@ function complete(db,request,{authorize,reviewBaseUrl}={}){
     const p=Object.create(ProcessingRepository.prototype);p.database=db;p.logMaxBytes=10485760;p.transaction=fn=>fn();const completed=p.completeDerivativeAndMaybeReady(request.jobId,request.owner,request.result,{event:e,leaseToken:request.leaseToken});if(!completed)throw new Error('derivative completion hold');const saved={attemptId:request.attemptId,ready:completed.ready,commitId:completed.ready?marker.read(db,request.attemptId,true).commit_id:null};db.prepare('INSERT INTO native_derivative_receipt_candidate VALUES(?,?,?,?)').run(request.requestId,request.jobId,hash,JSON.stringify(saved));db.exec('COMMIT');return saved;
   }catch(error){if(db.isTransaction)db.exec('ROLLBACK');throw error;}
 }
-module.exports={install,complete};
+function attestInTransaction(db){if(!db.isTransaction)throw new Error('derivative completion hold');attest(db);}
+module.exports={install,complete,attestInTransaction};
