@@ -158,6 +158,22 @@ any fence against older executors. No Python/native move helper is wired into
 Viewer, and the runtime path continues to hold. The actual target must be
 qualified without exposing live data; unsupported or ambiguous outcomes hold.
 
+`test/helpers/reference_noreplace_fixture.py` is a test-only descriptor-relative
+Linux `renameat2(RENAME_NOREPLACE)` experiment, not a runtime helper. It
+requires inherited parent-directory descriptors and a caller-supplied expected
+device/inode, never falls back to ordinary rename, and treats syscall errors or
+an interrupted result as uncertain. Tests exercise the real Viewer observation
+followed by a synthetic helper invocation, existing-target refusal, a
+cross-device error, symlink and identity rejection. The caller-provided scope
+is not security; inspection and the syscall do not pin the source name against
+replacement, validate the full tree or stop external writers. No production
+route or claim-release path invokes it. A source name replaced after its
+pre-check can cause a different tree to move before the post-check notices;
+`uncertain` includes possible filesystem effects and must never trigger an
+automatic rollback or claim release. See
+`catalog-adoption-recovery-operator-procedure.md` for the operator investigation
+and remaining release requirements.
+
 `test/fixtures/viewer-processing-source-map-public.json` is an unsigned public
 synthetic mapping for the two-file fixture. Its indexed dataset manifest and
 selected Processing submission manifest have distinct hashes: only the image is
