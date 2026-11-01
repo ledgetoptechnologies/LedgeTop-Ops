@@ -23,4 +23,10 @@ test('ambiguous or mismatched outcomes are held',()=>{
   assert.throws(()=>validate(wrap(base),identity),{code:'native_epoch_hold'});
   assert.throws(()=>validate({...wrap(base),operationId:identity.requestId},identity,checks),{code:'native_epoch_hold'});
   assert.throws(()=>validate(wrap(base),{...identity,requestId:undefined},checks),{code:'native_epoch_hold'});
+  assert.throws(()=>validate(wrap({...common,state:'open'}),identity,{...checks,action:'revoke'}),{code:'native_epoch_hold'});
+});
+test('manifest and plan actions require their own exact receipt validators',()=>{
+  assert.equal(validate(wrap(manifest),identity,{...checks,action:'manifest'}),manifest);
+  assert.equal(validate(wrap(plan),{...identity,manifestReceipt:manifest},{...checks,action:'accept'}),plan);
+  assert.throws(()=>validate(wrap(plan),identity,{action:'accept'}),{code:'native_epoch_hold'});
 });
