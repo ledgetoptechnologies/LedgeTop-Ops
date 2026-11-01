@@ -1,7 +1,8 @@
 'use strict';
 // Synthetic loopback only. The source tar must match the SHA-256 of a git archive of Processing 95f0de97.
-const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto'),{spawn,spawnSync}=require('node:child_process'),readline=require('node:readline');
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),http=require('node:http'),crypto=require('node:crypto'),{spawn,spawnSync}=require('node:child_process'),readline=require('node:readline');
 const {createTransport}=require('../server/nativeEpochTransportCandidate'),{validate:validateEpoch}=require('../server/nativeEpochReceiptCandidate'),{buildPlan,checkPlanReceipt}=require('../server/nativePlanCandidate'),{checkReceipt}=require('../server/nativeManifestBindingCandidate'),{canonical,validate:validateManifest}=require('../server/nativeManifestCandidate');
+const {DatabaseSync}=require('node:sqlite'),{applyMigrations}=require('../server/database'),operationFence=require('../server/nativeOperationFenceCandidate'),epochState=require('../server/nativeEpochStateCandidate');
 const archive=process.env.PROCESSING_SYNTHETIC_ARCHIVE;
 test('Viewer and verified synthetic Python coordinator replay both epoch close outcomes',{skip:!archive,timeout:30000},async t=>{
   const bytes=fs.readFileSync(archive);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),'6b38f883b1aeafae83bbba49698a518881e9918609ceb5b4406f4e0dc4be533d');
@@ -18,9 +19,10 @@ test('Viewer and verified synthetic Python coordinator replay both epoch close o
   const template=JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/native-input-manifest-v1-candidate.json'),'utf8')).vectors[0];
   const cap=Buffer.alloc(32,7).toString('base64url'),catalog=crypto.createHash('sha256').update('ltds-viewer-selected-catalog-v1\0[]').digest('hex');
   async function scenario(n,accept){
-    const task=`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`,operation=`00000000-0000-4000-8001-${String(n).padStart(12,'0')}`,requestId=`00000000-0000-4000-8002-${String(n).padStart(12,'0')}`;
+    const task=`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
     const manifest=JSON.parse(template.canonical);manifest.id=`attempt-${n}`;delete manifest.sha256;manifest.sha256=crypto.createHash('sha256').update(canonical(manifest)).digest('hex');const manifestBytes=Buffer.from(canonical(manifest));
-    const expected={taskUuid:task,operationId:operation,environment:'staging',manifestId:manifest.id,manifestSha256:manifest.sha256,requestId};
+    const stateRoot=fs.mkdtempSync(path.join(os.tmpdir(),'epoch-viewer-state-')),dbFile=path.join(stateRoot,'viewer.sqlite'),db=new DatabaseSync(dbFile),connections=[db];t.after(()=>{for(const connection of connections)connection.close();fs.rmSync(stateRoot,{recursive:true,force:true});});applyMigrations(db);operationFence.install(db,true);epochState.install(db,true);let state=epochState.createState({db,enabled:true});const operation=state.begin({attemptId:manifest.id,identitySha256:manifest.sha256,checkContext:()=>true});
+    const expected={taskUuid:task,operationId:operation,environment:'staging',manifestId:manifest.id,manifestSha256:manifest.sha256};
     const row={task_uuid:task,environment:'staging',attempt_id:manifest.id};const checked=validateManifest(manifestBytes,manifest.id);let receipt,plan,planContext;
     const checkManifest=value=>{try{checkReceipt(value,row,checked);return true;}catch{return false;}};
     const checkPlan=value=>{try{checkPlanReceipt(value,planContext);return true;}catch{return false;}};
@@ -31,14 +33,28 @@ test('Viewer and verified synthetic Python coordinator replay both epoch close o
     const built=buildPlan({receipt,taskName:'Synthetic 🌍',options:{},outputs:null,catalogDigest:catalog});plan=JSON.parse(built.bytes);expected.planSha256=built.sha256;expected.manifestReceipt=receipt;planContext={row,receipt,record:{plan_sha256:built.sha256},plan};
     validateEpoch(await call('intent',built.bytes),expected,{action:'intent'});
     if(accept)validateEpoch(await call('accept',built.bytes),expected,{action:'accept',checkPlan});
-    const revoke={schemaVersion:2,requestId,expectedManifestSha256:manifest.sha256,expectedManifestBindingId:receipt.bindingId,expectedPlanSha256:built.sha256};
-    const checks={action:'revoke',checkManifest,checkPlan},firstClose=await call('revoke',revoke),closedResult=validateEpoch(firstClose,expected,checks);
+    const pending=state.prepareRevoke({attemptId:manifest.id,identitySha256:manifest.sha256,buildBody:requestId=>({schemaVersion:2,requestId,expectedManifestSha256:manifest.sha256,expectedManifestBindingId:receipt.bindingId,expectedPlanSha256:built.sha256})});expected.requestId=pending.requestId;const revoke=pending.body;
+    const checks={action:'revoke',checkManifest,checkPlan};let firstClose;
+    if(accept){
+      let signalReady;const ready=new Promise(resolve=>{signalReady=resolve;});
+      const proxy=http.createServer((req,res)=>{const chunks=[];req.on('data',x=>chunks.push(x));req.on('end',async()=>{try{const upstream=await fetch(`http://127.0.0.1:${info.port}${req.url}`,{method:'POST',headers:{'content-type':'application/json','X-LedgeTop-Environment-Token':'synthetic-staging-token-'+'s'.repeat(32),'X-LedgeTop-Capability':cap},body:Buffer.concat(chunks),signal:AbortSignal.timeout(5000)});const text=await upstream.text();signalReady({status:upstream.status,text,res});}catch(error){signalReady({error});}});});
+      await new Promise(resolve=>proxy.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>{proxy.close(resolve);proxy.closeAllConnections();}));
+      const code="const {createTransport}=require(process.argv[1]),{createState}=require(process.argv[2]),{DatabaseSync}=require('node:sqlite');const db=new DatabaseSync(process.argv[3]),attemptId=process.argv[7],identitySha256=process.argv[8],saved=db.prepare('SELECT operation_id FROM native_epoch_state_candidate WHERE attempt_id=?').get(attemptId),pending=createState({db,enabled:true}).prepareRevoke({attemptId,identitySha256,buildBody:()=>{throw Error('unexpected regeneration');}});db.close();const t=createTransport({endpoint:process.argv[4],environmentToken:'synthetic-staging-token-'+'s'.repeat(32),enabled:true});t.request('revoke',process.argv[5],saved.operation_id,process.argv[6],pending.body).then(()=>process.exit(3),()=>process.exit(4));";
+      const sender=spawn(process.execPath,['-e',code,require.resolve('../server/nativeEpochTransportCandidate'),require.resolve('../server/nativeEpochStateCandidate'),dbFile,`http://127.0.0.1:${proxy.address().port}`,task,cap,manifest.id,manifest.sha256],{stdio:'ignore'});const senderClosed=new Promise(resolve=>sender.once('close',(code,signal)=>resolve({code,signal})));t.after(async()=>{if(sender.exitCode===null&&sender.signalCode===null)sender.kill('SIGKILL');await senderClosed;});
+      const intercepted=await Promise.race([ready,new Promise((_,reject)=>setTimeout(()=>reject(new Error('revoke proxy timed out')),7000).unref())]);assert.ifError(intercepted.error);assert.equal(intercepted.status,200);sender.kill('SIGKILL');assert.equal((await senderClosed).signal,'SIGKILL');intercepted.res.destroy();firstClose=JSON.parse(intercepted.text);
+      const recoveryDb=new DatabaseSync(dbFile);connections.push(recoveryDb);state=epochState.createState({db:recoveryDb,enabled:true});assert.equal(db.prepare('SELECT COUNT(*) n FROM native_operation_fence_candidate').get().n,1);assert.deepEqual(await call('status'),firstClose);
+      assert.deepEqual(state.prepareRevoke({attemptId:manifest.id,identitySha256:manifest.sha256,buildBody:()=>{throw new Error('must not regenerate');}}),pending);
+    }else firstClose=await call('revoke',revoke);
+    const closedResult=validateEpoch(firstClose,expected,checks);
     assert.equal(closedResult.state,accept?'bound_then_closed':'closed_without_bind');assert.equal(closedResult.planIntentPresent,true);
     assert.deepEqual(await call('revoke',revoke),firstClose);assert.deepEqual(await call('status'),firstClose);
     validateEpoch(await call('status'),expected,{action:'status',checkManifest,checkPlan});
     const late=await fetch(`http://127.0.0.1:${info.port}/task/ledgetop/plan-epoch-v2/${task}/${operation}/1/1/accept`,{method:'POST',headers:{'content-type':'application/json','X-LedgeTop-Environment-Token':'synthetic-staging-token-'+'s'.repeat(32),'X-LedgeTop-Capability':cap},body:built.bytes,signal:AbortSignal.timeout(5000)});
     assert.equal(late.status,409);await late.arrayBuffer();assert.deepEqual(await call('status'),firstClose);
     await assert.rejects(call('revoke',{...revoke,expectedPlanSha256:null}),{code:'native_epoch_hold'});
+    assert.equal(db.prepare('SELECT COUNT(*) n FROM native_operation_fence_candidate').get().n,1);
+    assert.deepEqual(state.finish({attemptId:manifest.id,identitySha256:manifest.sha256,expected,envelope:firstClose,checkContext:()=>true,checkManifest,checkPlan}),firstClose);
+    assert.equal(db.prepare('SELECT COUNT(*) n FROM native_operation_fence_candidate').get().n,0);
   }
   await scenario(11,false);await scenario(12,true);
   lines.close();child.stdin.end('STOP\n');const result=await closed;stopped=true;assert.equal(result.code,0,stderr);
