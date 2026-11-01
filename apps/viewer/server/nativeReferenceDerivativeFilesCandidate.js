@@ -30,7 +30,7 @@ async function inspect({db,storage,attemptId,jobId,authorize,maxBytes,signal,ena
     const expected=new Map(saved.files.map(file=>[file.relativePath,file])),seen=new Set();let entries=0;
     const walk=async(dir,prefix='')=>{const directory=fs.lstatSync(dir,{bigint:true});if(!directory.isDirectory()||directory.isSymbolicLink())throw hold();for(const entry of fs.readdirSync(dir,{withFileTypes:true})){signal?.throwIfAborted();if(++entries>20000)throw hold();const rel=prefix?`${prefix}/${entry.name}`:entry.name,absolute=path.join(dir,entry.name),stat=fs.lstatSync(absolute,{bigint:true});if(stat.isSymbolicLink())throw hold();if(stat.isDirectory()){await walk(absolute,rel);continue;}const wanted=expected.get(rel);if(!stat.isFile()||!wanted||stat.size!==BigInt(wanted.byteSize)||seen.has(rel))throw hold();if(await hashStableFile(absolute,stat,signal)!==wanted.sha256)throw hold();seen.add(rel);}if(!same(directory,fs.lstatSync(dir,{bigint:true})))throw hold();};
     await walk(root);if(seen.size!==expected.size)throw hold();const after=receipt.inspect(db,args),current=snapshot(db,attemptId,jobId);if(JSON.stringify(before)!==JSON.stringify(after)||JSON.stringify(saved)!==JSON.stringify(current))throw hold();
-    return{state:'file_evidence_only',attemptId,jobId,activationPlanSha256:before.activationPlanSha256,manifestSha256:saved.asset.manifest_sha256,fileCount:seen.size,byteSize:saved.bytes};
+    return{state:'file_evidence_only',attemptId,jobId,activationPlanSha256:before.activationPlanSha256,manifestSha256:saved.asset.manifest_sha256,fileCount:seen.size,byteSize:saved.bytes,ready:before.ready};
   }catch{throw hold();}
 }
 module.exports={inspect};
