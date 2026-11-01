@@ -46,9 +46,9 @@ def main():
                     if not data.endswith(b'\n') or len(data) > 4096:
                         raise ValueError('bad request')
                     req = json.loads(data, object_pairs_hook=unique_pairs)
-                    if type(req) is not dict or set(req) != {'operation', 'request'} or req['operation'] != 'complete' or type(req['request']) is not dict:
+                    if type(req) is not dict or set(req) != {'operation', 'request'} or req['operation'] not in ('complete', 'complete_drop_reply') or type(req['request']) is not dict:
                         raise ValueError('bad request')
-                    child = subprocess.Popen(['node', script, db_path], stdin=subprocess.PIPE,
+                    child = subprocess.Popen(['node', script, db_path, str(uid)], stdin=subprocess.PIPE,
                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     print('CHILD ' + str(child.pid), flush=True)
                     try:
@@ -67,6 +67,9 @@ def main():
                     parsed = json.loads(stdout)
                     if set(parsed) != {'attemptId', 'commitId'}:
                         raise ValueError('bad result')
+                    if req['operation'] == 'complete_drop_reply':
+                        # Fixture-only fault injection after the transaction committed.
+                        continue
                     conn.sendall(json.dumps(parsed, separators=(',', ':')).encode() + b'\n')
                 except Exception:
                     conn.sendall(b'{"error":"hold"}\n')
