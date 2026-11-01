@@ -494,6 +494,10 @@ class ViewerRepository {
     });
   }
 
+  adoptNativeModelVersion(input, fence) {
+    return this.transaction(()=>{const fail=()=>{throw Object.assign(new Error('native model recovery requires review'),{code:'native_model_recovery_hold'});},marker=this.database.prepare('SELECT * FROM native_reference_model_registration_candidate WHERE attempt_id=?').get(fence?.attemptId);if(!marker||!fence?.recoveryId)fail();require('./processingRepository').guardNativeModelWrite(this.database,fence.attemptId,marker.model_id,marker.version_id,fence);const snapshots=require('./nativeReferenceModelSnapshotCandidate'),version=this.database.prepare('SELECT status FROM model_versions WHERE id=? AND model_id=?').get(marker.version_id,marker.model_id),model=this.database.prepare('SELECT active_version_id FROM models WHERE id=?').get(marker.model_id);if(input.provider!=='ltds-processing'||input.providerVersionId!==fence.attemptId||input.makeActive!==false||snapshots.hash(input)!==marker.input_sha256||!version||version.status!=='importing'||!model||model.active_version_id===marker.version_id||this.database.prepare('SELECT 1 FROM model_outputs WHERE id=?').get(marker.version_id)||this.database.prepare('SELECT 1 FROM derivative_jobs WHERE attempt_id=? LIMIT 1').get(fence.attemptId))fail();return this.getModel(marker.model_id);});
+  }
+
   unregisterModel(id) {
     const modelId = this.resolveModelId(id);
     if (!modelId) return false;
