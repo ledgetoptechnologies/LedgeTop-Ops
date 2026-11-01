@@ -241,7 +241,7 @@ function readyEvent(processing, config, attempt) {
 
 async function emitReady(processing, config, attempt, job, owner, result, readinessBroker=null) {
   const event=readyEvent(processing,config,attempt);let completed;
-  if(readinessBroker){try{completed=await readinessBroker.completeDerivative({attemptId:attempt.id,jobId:job.id,owner,leaseToken:job.lease_token,result,event});if(!completed||completed.attemptId!==attempt.id||typeof completed.ready!=='boolean'||(completed.ready?!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(completed.commitId):completed.commitId!==null))throw new Error('invalid reply');}catch{throw Object.assign(new Error('derivative completion requires reconciliation'),{code:'readiness_outcome_unknown'});}}
+  if(readinessBroker){try{const input={attemptId:attempt.id,jobId:job.id,owner,leaseToken:job.lease_token,result,event},prepared=await readinessBroker.prepareDerivative(input),{digest}=require('./nativeReadinessRequestDigestCandidate');if(!prepared||!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(prepared.requestId)||digest(prepared)!==digest({operation:'completeDerivative',requestId:prepared.requestId,...input})||await readinessBroker.confirmPrepared(prepared)!==true)throw new Error('intent not confirmed');completed=await readinessBroker.completeDerivative(prepared);if(!completed||completed.attemptId!==attempt.id||typeof completed.ready!=='boolean'||(completed.ready?!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(completed.commitId):completed.commitId!==null))throw new Error('invalid reply');}catch{throw Object.assign(new Error('derivative completion requires reconciliation'),{code:'readiness_outcome_unknown'});}}
   else completed=processing.completeDerivativeAndMaybeReady(job.id,owner,result,{event,leaseToken:job.lease_token});
   if (!completed) throw Object.assign(new Error('derivative lease was lost'), { code: 'lease_lost' });
   return completed;
@@ -466,7 +466,7 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
 
 async function processOneDerivative({ processing, storage, config, lodAuditScript = null, generateMeshTilesImpl = generateMeshTiles, readinessBroker = null }, owner) {
   if(processing.derivativeIntentGuard===true&&!readinessBroker)throw new Error('derivative broker required');
-  if(readinessBroker){if(processing.derivativeIntentGuard!==true||typeof readinessBroker.reconcilePending!=='function'||typeof readinessBroker.completeDerivative!=='function')throw new Error('derivative broker guard required');await readinessBroker.reconcilePending();}
+  if(readinessBroker){if(processing.derivativeIntentGuard!==true||['reconcilePending','prepareDerivative','confirmPrepared','completeDerivative'].some(key=>typeof readinessBroker[key]!=='function'))throw new Error('derivative broker guard required');await readinessBroker.reconcilePending();}
   const job = processing.claimDerivative(owner);
   if (!job) return false;
   const startedAt = Date.now();
