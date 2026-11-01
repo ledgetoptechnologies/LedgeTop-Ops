@@ -97,7 +97,8 @@ class NodeOdmProvider {
       testedBaseline: detectedType === 'clusterodm' ? '1.5.x' : '2.2.3',
       compatibilityWarning: null,
     };
-    const compatibilityContract={apiVersion:capabilities.apiVersion,engine:capabilities.engine,engineVersion:capabilities.engineVersion,maxImages:capabilities.maxImages,maxParallelTasks:capabilities.maxParallelTasks,providerType:capabilities.providerType,options:capabilities.options};
+    for(const key of ['ledgetopMaxInputBytes','ledgetopMaxUploadRequestBytes'])if(Object.hasOwn(info,key)){if(!Number.isSafeInteger(info[key])||info[key]<1)throw providerCapabilityError('provider_probe_unsupported',`Provider advertised an invalid ${key} capability.`);capabilities[key]=info[key];}
+    const compatibilityContract={apiVersion:capabilities.apiVersion,engine:capabilities.engine,engineVersion:capabilities.engineVersion,maxImages:capabilities.maxImages,maxParallelTasks:capabilities.maxParallelTasks,providerType:capabilities.providerType,options:capabilities.options,ledgetopMaxInputBytes:capabilities.ledgetopMaxInputBytes,ledgetopMaxUploadRequestBytes:capabilities.ledgetopMaxUploadRequestBytes};
     return { capabilities, fingerprint: crypto.createHash('sha256').update(JSON.stringify(compatibilityContract)).digest('hex') };
   }
 
