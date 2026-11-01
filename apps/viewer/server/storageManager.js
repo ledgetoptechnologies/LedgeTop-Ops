@@ -263,7 +263,9 @@ class StorageManager {
     const candidate=destinationExists?destination:incompleteExists?incomplete:null;
     if(!candidate)return false;
     const candidateStat=destinationExists?destinationStat:incompleteStat;if(!candidateStat.isDirectory()||candidateStat.isSymbolicLink())throw Object.assign(new Error('adoption recovery candidate is not a directory'),{code:'adoption_recovery_conflict'});
-    fs.mkdirSync(path.dirname(source),{recursive:true});fs.renameSync(candidate,source);return true;
+    // Node's rename can replace a newly created empty destination. Until a
+    // verified no-replace primitive and executor fence exist, retain the tree.
+    return false;
   }
   moveToTrash(rootKey,relativePath,entityType,entityId){if(rootKey!=='datasets'&&rootKey!=='models')throw Object.assign(new Error('only Viewer-managed assets can be trashed'),{code:'external_reference'});const source=this.resolve(rootKey,relativePath,{mustExist:true}),trashRelative=`${entityType}/${entityId}-${crypto.randomUUID()}`,destination=this.resolve('trash',trashRelative);fs.mkdirSync(path.dirname(destination),{recursive:true});if(fs.statSync(source).dev!==fs.statSync(this.roots.trash).dev)throw new Error('trash must be on the same filesystem');fs.renameSync(source,destination);return{rootKey,relativePath,trashRelative};}
   pathExists(rootKey,relativePath){try{return fs.existsSync(this.resolve(rootKey,relativePath));}catch{return false;}}

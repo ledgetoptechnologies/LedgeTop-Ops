@@ -113,8 +113,9 @@ not automatically run it again, even after its lease or process has expired.
 This is an existing availability limitation, not a new effect of fixture
 registration. The original catalog tests expected an automatic retry and also
 failed on the unchanged baseline. They now assert the existing held state and
-preservation of bytes, while a separate real-filesystem test confirms recovery
-that completes without interruption still restores the source.
+preservation of bytes. Before the new no-replace hold described below, a
+separate real-filesystem test confirmed uninterrupted recovery could restore
+the source; the current candidate intentionally holds that case as well.
 
 An uncertain effect requires operator investigation: preserve both original
 and destination data, identify the exact journal and filesystem identities,
@@ -125,19 +126,37 @@ this experiment. Do not manually clear a claim, delete a source, or assume a
 timeout establishes safety. A reviewed operational procedure and tested
 reconciliation are required before rollout.
 
-The recovery helper now refuses to choose or delete a tree when an inspection
-finds the original and a managed candidate both present, or both complete and
-incomplete candidates present. It leaves those trees and the uncertain effect
-held. When the dataset is absent and the helper is invoked, missing paths also
-leave the journal and effect held rather than being treated as recovery. The
-existing single-candidate rename remains available
-for an ordinary uninterrupted recovery; it does not establish trusted source
-identity, content verification, exclusion of old/external writers, or power-loss
-durability. Inspection and rename are separate: a racing writer can create a
-source path between them, and ordinary rename can replace an empty directory.
-Atomic no-replace rename and verified executor exclusion are still required.
-These changes do not reclaim an existing in-flight claim or provide
-automatic reconciliation of a previously interrupted callback.
+The current candidate deliberately changes default recovery availability:
+when the dataset is absent, the helper now leaves even a single candidate in
+place and returns a hold. It no longer uses ordinary rename, because inspection
+and rename race and Node's rename can replace an empty directory. Conflicting,
+missing, source-only and single-candidate cases retain the journal and claim;
+the existing dataset-present path continues to follow its previous branch.
+This prevents automatic recovery for those cases until a qualified, atomic
+no-replace primitive and executor exclusion are available. It is a reviewable
+source change, not deployed or enabled on a server. Operators would need to
+preserve the trees and investigate as above; no safe claim-clear or approved
+operator procedure exists yet. Do not silently deploy this availability change.
+
+`referenceAdoptionRecoveryObservation.js` is an unexposed, read-only synthetic
+diagnostic: it compares a single same-device candidate's directory dev/inode,
+total byte count and tree fingerprint with the recorded adoption intent. It
+returns an observation, never a move authorization or custody proof. Source
+identity is not independently trusted, inode identity is unsuitable for a
+cross-device copy, and a matching fingerprint does not exclude concurrent or
+old writers. The current fingerprint does not represent empty directories and
+its ordering/format is not a versioned cross-runtime manifest. Root aliases,
+mount identity, metadata, fsync/power loss, and complete writer fencing remain
+unresolved. These changes do not reclaim any existing in-flight claim.
+
+The locally available Viewer test image reported Node 24.22.2, Python ctypes,
+and a libc `renameat2` symbol. An isolated temporary-filesystem probe of
+`RENAME_NOREPLACE` held an existing destination and moved to an absent one.
+This does not establish the installed production image, actual staging or NAS
+mount support, descriptor anchoring, failure semantics, cross-host locking, or
+any fence against older executors. No Python/native move helper is wired into
+Viewer, and the runtime path continues to hold. The actual target must be
+qualified without exposing live data; unsupported or ambiguous outcomes hold.
 
 `test/fixtures/viewer-processing-source-map-public.json` is an unsigned public
 synthetic mapping for the two-file fixture. Its indexed dataset manifest and
