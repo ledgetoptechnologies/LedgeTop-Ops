@@ -120,3 +120,20 @@ requires the synthetic staging/test issuer, key ID, deployments and authority
 UUID, and prints the test SPKI and signature. The helper checks fixture shape,
 not authority; no signature from this public key is a real Viewer issuance or
 cross-system authorization.
+
+The isolated fixture can also insert the observed indexed binding and its
+association outbox row in one SQLite transaction. Failed inspection rolls both
+back; the production admission guard remains in place. This is an unfenced
+filesystem observation, not physical custody.
+
+`test/helpers/reference-v2-association-stdin-fixture.js` is a synthetic-only
+cross-process harness. It accepts schema version 1 JSON on stdin and emits a
+JSON result with the persisted body, signature, test public key and SQLite
+path. It accepts staging/test inputs with manifest ID `dataset-d`, selected
+direct-child ASCII source names, and the fixed test validity interval. The
+caller supplies a private, empty, owned output directory and is responsible
+for its cleanup. `prepare-sign` creates the fixture; `replay` requires the same
+inputs and uses the stored signature without calling the signer. Setting
+`VIEWER_ASSOC_FIXTURE_PAUSE_AFTER_COMMIT=1` writes a `FIXTURE_SIGNED_COMMIT`
+marker and stops the owned process for crash testing. The helper embeds the
+same public test seed and cannot establish real authority or custody.

@@ -23,7 +23,7 @@ function prepareObservedSourceBindingDraft(processing,{id,attemptId,managedRoot}
 }
 function prepare(processing,{id,attemptId},observation) {
   if(!validId(id)||!validId(attemptId))throw unavailable();
-  return processing.transaction(()=>{
+  return processing.transactionOrOwned(()=>{
     if(processing.database.prepare('PRAGMA foreign_keys').get().foreign_keys!==1)throw unavailable();
     if(observation&&processing.database.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='viewer_source_binding_unavailable'").get())throw Object.assign(new Error('source binding admission unavailable'),{code:'source_binding_unavailable'});
     const attempt=processing.getAttempt(attemptId),task=attempt&&processing.getTask(attempt.taskId);
