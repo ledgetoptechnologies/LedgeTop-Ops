@@ -20,6 +20,18 @@ const {
   stable,
 }=require('../lod-converter-policy.cjs');
 const CONTROLLED_CONVERTER_COMMAND_SHA256_SET=new Set(ACCEPTED_CONTROLLED_CONVERTER_COMMAND_SHA256);
+// Only an exact durable receipt, and for final readiness its marker, can
+// release an experimental derivative intent. Direct writers remain a trust boundary.
+const DERIVATIVE_UNRESOLVED_INTENT_SQL=`NOT EXISTS (SELECT 1 FROM native_derivative_intent_candidate i WHERE i.attempt_id=derivative_jobs.attempt_id AND NOT EXISTS (
+ SELECT 1 FROM native_derivative_resolution_candidate r JOIN native_derivative_receipt_candidate c ON c.job_id=r.job_id JOIN derivative_jobs completed ON completed.id=i.job_id
+ WHERE r.job_id=i.job_id AND r.request_digest=i.request_digest AND c.request_id=i.request_id AND c.request_digest=i.request_digest AND c.result_json=r.result_json AND completed.status='complete' AND completed.attempt_id=i.attempt_id
+ AND CASE WHEN json_valid(i.request_json) THEN viewer_derivative_intent_digest_candidate(i.request_json)=i.request_digest AND json_extract(i.request_json,'$.operation')='completeDerivative' AND json_extract(i.request_json,'$.requestId')=i.request_id AND json_extract(i.request_json,'$.jobId')=i.job_id AND json_extract(i.request_json,'$.attemptId')=i.attempt_id AND json_type(i.request_json,'$.result')='object' AND json_extract(i.request_json,'$.result')=completed.result_json ELSE 0 END
+ AND CASE WHEN json_valid(r.result_json) THEN
+   (SELECT COUNT(*) FROM json_each(r.result_json))=3 AND json_type(r.result_json,'$.attemptId')='text' AND json_extract(r.result_json,'$.attemptId')=i.attempt_id
+   AND ((json_type(r.result_json,'$.ready')='false' AND json_type(r.result_json,'$.commitId')='null') OR
+        (json_type(r.result_json,'$.ready')='true' AND json_type(r.result_json,'$.commitId')='text' AND EXISTS (SELECT 1 FROM native_ingest_commit_candidate m WHERE m.attempt_id=i.attempt_id AND m.commit_id=json_extract(r.result_json,'$.commitId'))))
+ ELSE 0 END))`;
+function prepareDerivativeIntentGuard(database){require('./nativeDerivativeIntentCandidate').attestInTransaction(database);require('./nativeDerivativeCompletionCandidate').attestInTransaction(database);require('./nativeIngestCommitCandidate').attest(database,true);const {digest}=require('./nativeReadinessRequestDigestCandidate');database.function('viewer_derivative_intent_digest_candidate',{deterministic:true},value=>{try{return digest(JSON.parse(value));}catch{return null;}});}
 
 const BUILT_IN_PRESETS = [
   ['standard', 'Standard', { 'feature-quality': 'high', 'pc-quality': 'medium' }],
@@ -714,12 +726,12 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   terminalizeExhaustedDerivatives(limit=20){
     return this.transaction(()=>{
       const t=now(),n=Math.max(1,Math.min(Number(limit)||20,100));
-      if(this.derivativeIntentGuard)require('./nativeDerivativeIntentCandidate').attestInTransaction(this.database);
+      if(this.derivativeIntentGuard)prepareDerivativeIntentGuard(this.database);
       const rows=this.database.prepare(`SELECT * FROM derivative_jobs
         WHERE status='leased'
           AND ((deadline_at IS NOT NULL AND deadline_at<=?)
             OR (lease_expires_at<=? AND derivative_type IN ('ept','mesh_tiles','lod_audit') AND attempt_count>=3))
-        ${this.derivativeIntentGuard?'AND NOT EXISTS (SELECT 1 FROM native_derivative_intent_candidate i WHERE i.attempt_id=derivative_jobs.attempt_id AND NOT EXISTS (SELECT 1 FROM native_derivative_resolution_candidate r WHERE r.job_id=i.job_id AND r.request_digest=i.request_digest))':''}
+        ${this.derivativeIntentGuard?`AND ${DERIVATIVE_UNRESOLVED_INTENT_SQL}`:''}
         ORDER BY updated_at,id LIMIT ?`).all(t,t,n);
       let terminal=0;
       for(const row of rows){
@@ -758,14 +770,14 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   claimDerivative(owner,leaseSeconds=600){
     this.terminalizeExhaustedDerivatives(20);
     return this.transaction(()=>{
-      if(this.derivativeIntentGuard)require('./nativeDerivativeIntentCandidate').attestInTransaction(this.database);
+      if(this.derivativeIntentGuard)prepareDerivativeIntentGuard(this.database);
       if(this.measurementCalculationActive())return null;
       const t=now(),nowMs=Date.parse(t),lock=this.database.prepare('SELECT * FROM lod_conversion_lock WHERE id=1').get();
       // Migration v28 may observe heavy leases created by the previous worker
       // before EPT shared the token-fenced singleton. Treat any still-live
       // heavy lease as the singleton owner until it expires.
       const activeHeavy=this.database.prepare("SELECT id FROM derivative_jobs WHERE derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased' AND lease_expires_at>? LIMIT 1").get(t);
-      const candidates=this.database.prepare(`SELECT * FROM derivative_jobs WHERE (status='pending' OR (status='leased' AND lease_expires_at<=?)) ${this.derivativeIntentGuard?'AND NOT EXISTS (SELECT 1 FROM native_derivative_intent_candidate i WHERE i.attempt_id=derivative_jobs.attempt_id AND NOT EXISTS (SELECT 1 FROM native_derivative_resolution_candidate r WHERE r.job_id=i.job_id AND r.request_digest=i.request_digest))':''} ORDER BY CASE WHEN derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased' THEN 0 ELSE 1 END,created_at,id LIMIT 100`).all(t);
+      const candidates=this.database.prepare(`SELECT * FROM derivative_jobs WHERE (status='pending' OR (status='leased' AND lease_expires_at<=?)) ${this.derivativeIntentGuard?`AND ${DERIVATIVE_UNRESOLVED_INTENT_SQL}`:''} ORDER BY CASE WHEN derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased' THEN 0 ELSE 1 END,created_at,id LIMIT 100`).all(t);
       for(const row of candidates){
         const heavy=isHeavyDerivativeType(row.derivative_type);
         if(heavy&&(activeHeavy||lock?.job_id&&Date.parse(lock.lease_expires_at)>nowMs))continue;
