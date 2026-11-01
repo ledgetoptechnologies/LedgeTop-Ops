@@ -3,7 +3,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),{DatabaseSy
 const {applyMigrations}=require('../server/database');
 const {ProcessingRepository}=require('../server/processingRepository');
 const {ViewerRepository}=require('../server/repository');
-const {registerIngest}=require('../server/ingestRegistration');
+const {registerIngest,recordIngestEvidence}=require('../server/ingestRegistration');
 
 test('migration 41 preserves existing pending and leased work in a populated database',()=>{
   const db=new DatabaseSync(':memory:');
@@ -42,6 +42,11 @@ test('stale same-owner ingest cannot renew, defer, fail, or override cancellatio
     assert.throws(()=>r.failIngestDownloadJob(current.id,'same-owner',new Date().toISOString(),current.attempt_count),{code:'lease_lost'});
     db.exec('DROP TRIGGER synthetic_delay');
     assert.equal(db.prepare('SELECT status FROM processing_jobs WHERE id=?').get(current.id).status,'leased');
+    db.prepare('UPDATE processing_jobs SET lease_expires_at=? WHERE id=?').run(new Date(Date.now()+60000).toISOString(),current.id);
+    db.exec('CREATE TABLE synthetic_evidence(value INTEGER)');
+    db.prepare('UPDATE processing_jobs SET lease_expires_at=? WHERE id=?').run(new Date(Date.now()+50).toISOString(),current.id);
+    assert.throws(()=>recordIngestEvidence({processing:r,fence:{jobId:current.id,owner:'same-owner',generation:current.attempt_count,attemptId:attempt.id},write:()=>{db.exec('INSERT INTO synthetic_evidence VALUES (1)');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,100);}}),{code:'lease_lost'});
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM synthetic_evidence').get().n,0);
     db.prepare('UPDATE processing_jobs SET lease_expires_at=? WHERE id=?').run(new Date(Date.now()+60000).toISOString(),current.id);
     assert.equal(r.heartbeatJob(old.id,'same-owner',60,old.attempt_count),false);
     assert.equal(r.failIngestDownloadJob(old.id,'same-owner',new Date().toISOString(),old.attempt_count),false);

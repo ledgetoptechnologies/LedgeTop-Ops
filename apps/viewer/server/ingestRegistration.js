@@ -16,4 +16,10 @@ function registerIngest({processing,repository,fence,modelInput,outputInput}){
     return {model,version};
   });
 }
-module.exports={registerIngest};
+function recordIngestEvidence({processing,fence,write}){
+  return processing.transaction(()=>{
+    const check=()=>{const j=processing.provenanceJob(fence.jobId,fence.owner,'ingest'),a=j&&processing.getAttempt(j.attempt_id),t=a&&processing.getTask(a.taskId);if(!j||j.attempt_id!==fence.attemptId||j.attempt_count!==fence.generation||a?.status!=='ingesting'||t?.activeAttemptId!==a.id)throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});};
+    check();write();check();
+  });
+}
+module.exports={registerIngest,recordIngestEvidence};

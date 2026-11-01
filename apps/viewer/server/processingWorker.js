@@ -15,7 +15,7 @@ const {lodDerivativeSpecs}=require('./lodDerivativePolicy');
 const {buildMeshRecoveryManifest}=require('./retainedManifest');
 const {canonicalDerivativeInput}=require('./derivativeInputSnapshot');
 const {verifyRecoveredIngestSources}=require('./processingIngestRecovery');
-const {registerIngest}=require('./ingestRegistration');
+const {registerIngest,recordIngestEvidence}=require('./ingestRegistration');
 const observationPersistenceError=Symbol('observationPersistenceError');
 const transientDownloadError=error=>error?.name==='TimeoutError'||(error?.name==='TypeError'&&['fetch failed','terminated'].includes(error?.message))||[error?.code,error?.cause?.code].some(code=>['ECONNRESET','ECONNREFUSED','ECONNABORTED','ETIMEDOUT','EPIPE','ENOTFOUND','EAI_AGAIN','ENETUNREACH','ENETDOWN','ENETRESET','EHOSTUNREACH','EHOSTDOWN','UND_ERR_SOCKET','UND_ERR_CONNECT_TIMEOUT','UND_ERR_HEADERS_TIMEOUT','UND_ERR_BODY_TIMEOUT'].includes(code))||error?.status===408||error?.status===429||(Number.isInteger(error?.status)&&error.status>=500&&error.status<=599);
 const downloadUnavailable=()=>Object.assign(new Error('Provider result download is temporarily unavailable; Viewer will keep checking the original job.'),{code:'provider_download_unavailable'});
@@ -201,14 +201,13 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   const producer=archiveReceipt?processing.getVerifiedAttemptProducerReceipt(attempt.id):null;
   const explicitUnits=await inspectRegisteredSourceUnits({repository,storage,modelId:model.id,modelVersionId:version.id,signal});
   const unitCandidates=await prepareProcessingUnitEvidence({producer,destination,sourcePrefix:relative,modelId:model.id,modelVersionId:version.id,assets:repository.getModelVersion(model.id,version.id).activeVersion.assets,signal});
-  if(explicitUnits.length||unitCandidates.length)processing.transaction(()=>{
+  if(explicitUnits.length||unitCandidates.length)recordIngestEvidence({processing,fence,write:()=>{
     signal?.throwIfAborted();
-    if(processing.provenanceJob(job.id,job.lease_owner,'ingest')?.attempt_count!==job.attempt_count)throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
     const evidence=new MeasurementSourceUnitEvidence(repository.database);
     for(const candidate of explicitUnits)evidence.recordExplicitMetadata(candidate.request,candidate.inspection);
     for(const candidate of unitCandidates)evidence.recordVerifiedOdm(candidate.request,candidate.input);
-    if(processing.provenanceJob(job.id,job.lease_owner,'ingest')?.attempt_count!==job.attempt_count)throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
-  });
+    signal?.throwIfAborted();
+  }});
   const readyEvent={eventId:`processing-ready-${attempt.id}`,schemaVersion:1,type:'processing.ready_for_review',projectId:project.id,projectDisplayName:project.displayName,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'ready_for_review',reviewUrl:`${config.opsBaseUrl}/operations/processing?attemptId=${encodeURIComponent(attempt.id)}`};
   if(derivatives.length&&derivatives.some((spec)=>!spec.request?.optional)){const activated=processing.completeIngestAndEnqueueDerivatives(job.id,job.lease_owner,attempt.id,derivatives,{ingestedAt:new Date().toISOString(),trustedInputFilesByType,requireTrustedInputs:true,ingestGeneration:job.attempt_count});if(!activated)throw Object.assign(new Error('processing lease was lost or ingest state changed'),{code:'lease_lost'});}
   else{const ready=processing.completeOutputForReview(attempt.id,{jobId:job.id,owner:job.lease_owner,ingestedAt:new Date().toISOString(),event:readyEvent,ingestGeneration:job.attempt_count});if(!ready)throw Object.assign(new Error('processing lease was lost or staged output changed'),{code:'lease_lost'});if(derivatives.length&&!processing.enqueueOptionalDerivatives(attempt.id,derivatives))throw Object.assign(new Error('optional derivatives could not be queued'),{code:'derivative_activation_conflict'});}
