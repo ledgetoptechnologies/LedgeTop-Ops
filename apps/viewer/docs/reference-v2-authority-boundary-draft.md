@@ -83,3 +83,26 @@ when anchor access fails or history is pruned: return unknown/hold, never infer
 absence. Full-object/chunk identity, signed response/reconciliation schemas,
 hash domains, failure codes, key lifecycle and paired cross-language vectors are
 still open. Do not deploy or activate from this proposal.
+
+## Experimental registry interoperability
+
+Processing is exploring a separately false-gated signed registry with domain
+`ltds-v2-registry-experiment-v1` followed by one NUL. Its current synthetic
+snapshot has closed fields `version`, `epoch`, `revision`, `issuedAt`, `expiresAt`
+and `keys`; each key has `issuer`, `keyId`, `purpose`, `publicKey`, `notBefore`,
+`notAfter` and `revoked`. This is not an agreed production wire. Root authority,
+clock, expected epoch and minimum revision are externally supplied to the
+experiment; neither its signature nor caller-supplied values prove freshness.
+
+Joint negative vectors should cover signature/domain substitution, wrong root,
+issuer, key ID, purpose, audience or operation; duplicate tuples and reused
+public keys across roles; malformed/noncanonical bytes; expired, revoked,
+not-yet-valid and rotated keys; stale epoch/revision, same revision with different
+bytes, anchor unavailability and rollback/restore; and unauthorized identity
+disclosure. Agree an independently trusted mapping of issuer, purpose, audience
+and operation, including whether key material reuse is forbidden. The current
+experimental registry key entries do not themselves encode audience/operation;
+caller-provided expected fields cannot substitute for a trusted role policy.
+Root pinning, distribution, compromise/revocation and rotation must have a
+separately protected lifecycle and anti-rollback anchor. Public test keys and
+synthetic anchors must never be accepted by production trust configuration.
