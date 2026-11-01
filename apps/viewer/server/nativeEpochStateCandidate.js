@@ -1,0 +1,19 @@
+'use strict';
+// Isolated test-only durable state primitive, not a Viewer integration or production migration.
+const crypto=require('node:crypto'),fence=require('./nativeOperationFenceCandidate'),{parse}=require('./nativeBindingStrictJson');
+const hold=()=>Object.assign(new Error('native epoch state requires review'),{code:'native_epoch_hold'});
+const hash=/^[0-9a-f]{64}$/;
+const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+function checkBody(body,id){const keys=['schemaVersion','requestId','expectedManifestSha256','expectedManifestBindingId','expectedPlanSha256'].sort();if(!body||typeof body!=='object'||Array.isArray(body)||JSON.stringify(Object.keys(body).sort())!==JSON.stringify(keys)||body.schemaVersion!==2||body.requestId!==id||!uuid.test(id)||!hash.test(body.expectedManifestSha256)||![body.expectedManifestBindingId,body.expectedPlanSha256].every(x=>x===null||(typeof x==='string'&&hash.test(x))))throw hold();return body;}
+const ddl="CREATE TABLE native_epoch_state_candidate (attempt_id TEXT PRIMARY KEY, identity_sha256 TEXT NOT NULL, operation_id TEXT NOT NULL UNIQUE, revoke_request_id TEXT, revoke_body TEXT, terminal_receipt TEXT)";
+function tx(db,fn){if(db.isTransaction)throw hold();let own=false;try{db.exec('BEGIN IMMEDIATE');own=true;const value=fn();db.exec('COMMIT');own=false;return value;}catch{if(own&&db.isTransaction)db.exec('ROLLBACK');throw hold();}}
+function install(db,enabled=false){if(enabled!==true)throw hold();tx(db,()=>{const prior=db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='native_epoch_state_candidate'").get();if(prior&&prior.sql!==ddl)throw hold();if(!prior)db.exec(ddl);fence.ensureInTransaction(db);});}
+function createState({db,enabled=false}){
+  if(enabled!==true||!db)throw hold();
+  function row(id){return db.prepare('SELECT * FROM native_epoch_state_candidate WHERE attempt_id=?').get(id);}
+  function held(r){fence.ensureInTransaction(db);const f=db.prepare('SELECT * FROM native_operation_fence_candidate WHERE singleton=1').get();if(!r||!f||f.attempt_id!==r.attempt_id||f.kind!=='manifest'||f.identity_sha256!==r.identity_sha256||f.operation_id!==r.operation_id)throw hold();}
+  function begin({attemptId,identitySha256,checkContext}){if(typeof attemptId!=='string'||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(attemptId)||!hash.test(identitySha256)||typeof checkContext!=='function')throw hold();return tx(db,()=>{if(checkContext()!==true)throw hold();const prior=row(attemptId);if(prior){if(prior.identity_sha256!==identitySha256||prior.terminal_receipt!==null)throw hold();held(prior);return prior.operation_id;}const operationId=fence.acquire(db,{attemptId,kind:'manifest',identitySha256});db.prepare('INSERT INTO native_epoch_state_candidate VALUES(?,?,?,NULL,NULL,NULL)').run(attemptId,identitySha256,operationId);return operationId;});}
+  function prepareRevoke({attemptId,identitySha256,buildBody}){if(typeof buildBody!=='function')throw hold();return tx(db,()=>{const r=row(attemptId);held(r);if(r.identity_sha256!==identitySha256||r.terminal_receipt!==null)throw hold();if(r.revoke_request_id){if(typeof r.revoke_body!=='string'||r.revoke_request_id===r.operation_id)throw hold();return{requestId:r.revoke_request_id,body:checkBody(parse(Buffer.from(r.revoke_body)),r.revoke_request_id)};}if(r.revoke_body!==null)throw hold();const requestId=crypto.randomUUID();if(requestId===r.operation_id)throw hold();const body=checkBody(buildBody(requestId),requestId),text=JSON.stringify(body);if(db.prepare('UPDATE native_epoch_state_candidate SET revoke_request_id=?,revoke_body=? WHERE attempt_id=? AND revoke_request_id IS NULL').run(requestId,text,attemptId).changes!==1)throw hold();return{requestId,body:checkBody(parse(Buffer.from(text)),requestId)};});}
+  return{begin,prepareRevoke};
+}
+module.exports={install,createState};
