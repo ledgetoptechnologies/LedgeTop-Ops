@@ -350,9 +350,14 @@ class ViewerRepository {
     });
   }
 
-  upsertModelVersion(input) {
+  upsertModelVersion(input, {ingestFence=null}={}) {
     const timestamp = now();
     return this.transaction(() => {
+      const checkIngestFence=()=>{ if (ingestFence) {
+        const f=ingestFence, valid=Number.isSafeInteger(f.generation)&&this.database.prepare("SELECT 1 FROM processing_jobs j JOIN processing_attempts a ON a.id=j.attempt_id JOIN processing_tasks t ON t.id=a.task_id WHERE j.id=? AND j.job_type='ingest' AND j.status='leased' AND j.lease_owner=? AND j.attempt_count=? AND j.lease_expires_at>? AND a.id=? AND a.status='ingesting' AND t.active_attempt_id=a.id").get(f.jobId,f.owner,f.generation,now(),f.attemptId);
+        if(!valid)throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
+      }};
+      checkIngestFence();
       // Upgrade reconciliation tests and interrupted rolling starts can open a
       // repository against an older schema before the remaining migrations
       // are applied. Existing model writes remain compatible, but camera
@@ -474,6 +479,7 @@ class ViewerRepository {
         this.database.prepare('UPDATE models SET active_version_id=?,status=?,updated_at=? WHERE id=?')
           .run(versionId, 'ready', timestamp, modelId);
       }
+      checkIngestFence();
       return this.getModel(modelId);
     });
   }

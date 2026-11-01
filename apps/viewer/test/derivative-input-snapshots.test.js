@@ -57,7 +57,7 @@ function providerIngest(context) {
   context.processing.transitionAttemptForJob(job.id, owner, 'ingesting');
   const model = context.repository.upsertModelVersion({ provider: 'ltds-processing', providerModelId: task.id, providerVersionId: attempt.id, displayName: task.displayName, status: 'importing', assets: [], makeActive: false });
   const versionId = context.db.prepare('SELECT id FROM model_versions WHERE model_id=?').get(model.id).id;
-  context.processing.setAttemptResultForJob(job.id, owner, model.id, versionId);
+  context.processing.setAttemptResultForJob(job.id, owner, model.id, versionId, job.attempt_count);
   context.processing.registerModelOutput({ versionId, modelId: model.id, taskId: task.id, attemptId: attempt.id, projectId: project.id, relativePath: `${task.id}/${attempt.id}`, status: 'staged', byteSize: 33_400_000_000, assetCount: 0 });
   return { project, dataset, task, attempt, versionId, owner, job };
 }
@@ -94,7 +94,7 @@ test('provider ingest atomically exposes pending jobs with exact mesh and EPT cl
   const activated = context.processing.completeIngestAndEnqueueDerivatives(item.job.id, item.owner, item.attempt.id, [
     { type: 'mesh_tiles', request: { optional: false } },
     { type: 'ept', request: { optional: false } },
-  ], { trustedInputFilesByType: { mesh_tiles: providerMeshFiles, ept: providerEptFiles }, requireTrustedInputs: true });
+  ], { trustedInputFilesByType: { mesh_tiles: providerMeshFiles, ept: providerEptFiles }, requireTrustedInputs: true, ingestGeneration: item.job.attempt_count });
   assert.equal(activated.status, 'derivatives');
   assert.equal(context.db.prepare('SELECT status FROM processing_jobs WHERE id=?').get(item.job.id).status, 'complete');
   const jobs = context.db.prepare('SELECT id,derivative_type,status FROM derivative_jobs WHERE attempt_id=? ORDER BY derivative_type').all(item.attempt.id);
@@ -123,7 +123,7 @@ test('provider ingest rolls back jobs, snapshots, files, and journals when a req
   assert.throws(() => context.processing.completeIngestAndEnqueueDerivatives(item.job.id, item.owner, item.attempt.id, [
     { type: 'mesh_tiles', request: { optional: false } },
     { type: 'ept', request: { optional: false } },
-  ], { trustedInputFilesByType: { mesh_tiles: meshFiles }, requireTrustedInputs: true }), { code: 'invalid_derivative_input' });
+  ], { trustedInputFilesByType: { mesh_tiles: meshFiles }, requireTrustedInputs: true, ingestGeneration: item.job.attempt_count }), { code: 'invalid_derivative_input' });
   assert.equal(context.processing.getAttempt(item.attempt.id).status, 'ingesting');
   assert.equal(context.db.prepare('SELECT status FROM processing_jobs WHERE id=?').get(item.job.id).status, 'leased');
   for (const table of ['derivative_jobs', 'derivative_input_snapshots', 'derivative_input_files', 'derivative_storage_journal']) {
