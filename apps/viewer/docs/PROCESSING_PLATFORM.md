@@ -150,6 +150,16 @@ immutable `gcp_list.txt` generated from a processing attempt's saved GCP
 correspondences replaces any legacy input with that name; source CSV/GCP files
 remain administrative bytes and are never sent upstream.
 
+When a provider advertises a valid total input-byte limit, task submission also
+checks a conservative lower bound consisting only of photos that would be sent.
+If those photos alone exceed the advertised limit, Viewer rejects the new
+submission before creating a processing task. Private administrative files are
+not included in that lower bound. This new check does not block an exact replay
+of an already accepted submission if the advertised byte limit changes. This early
+check is not a free-space check or reservation: the worker still validates the
+complete photo and auxiliary inventory and current limits before sending, and
+an absent advertised limit does not establish that capacity is available.
+
 Draft creation is recoverable across an admin-session renewal. Persist the
 `submissionId` UUID, exact normalized body, and `Idempotency-Key` before `POST
 /api/v1/tasks`. The first commit returns `201`; the same subject and exact
