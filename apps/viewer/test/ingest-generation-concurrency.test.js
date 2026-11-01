@@ -10,15 +10,17 @@ if(!isMainThread){
   const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
   const {applyMigrations}=require('../server/database');
   test('a waiting old worker cannot renew an expired and reclaimed same-owner lease',{timeout:10000},async t=>{
-    const root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-ingest-generation-')),file=path.join(root,'test.sqlite');
-    const db=new DatabaseSync(file);db.exec('PRAGMA foreign_keys=ON');applyMigrations(db);
-    t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
+    const prefix=path.join(os.tmpdir(),'viewer-ingest-generation-'),root=fs.mkdtempSync(prefix),identity=fs.lstatSync(root,{bigint:true}),file=path.join(root,'test.sqlite');let db=null,worker=null,workerClosed=null;
+    const bounded=async promise=>{let timer;try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('owned worker did not close; fixture retained')),3000);})]);}finally{clearTimeout(timer);}};
+    t.after(async()=>{if(db?.isTransaction)db.exec('ROLLBACK');if(worker){await bounded(worker.terminate());await bounded(workerClosed);worker=null;}if(db)db.close();const current=fs.lstatSync(root,{bigint:true});if(identity.ino!==0n&&current.isDirectory()&&!current.isSymbolicLink()&&current.dev===identity.dev&&current.ino===identity.ino)fs.rmSync(root,{recursive:true,force:true});else throw Error('owned fixture identity changed or unavailable; retained');});
+    assert.ok(path.isAbsolute(root)&&root.startsWith(prefix)&&identity.ino!==0n&&identity.isDirectory()&&!identity.isSymbolicLink());
+    db=new DatabaseSync(file);db.exec('PRAGMA foreign_keys=ON');applyMigrations(db);
     const r=new ProcessingRepository(db),project=r.createProject({displayName:'Synthetic'}),dataset=r.createDataset({projectId:project.id,displayName:'Source',storageMode:'managed',rootKey:'datasets',relativePath:'source'});
     r.finalizeDataset(dataset.id,[{id:'p',relativePath:'photo.jpg',byteSize:1,sha256:'a'.repeat(64)}],'b'.repeat(64));
     const provider=r.upsertProvider({type:'nodeodm',displayName:'Synthetic',endpoint:'http://127.0.0.1:9',enabled:true,authEnvKey:require('../server/providerAuth').NO_AUTH_MARKER}),task=r.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Task'}),attempt=r.createAttempt({taskId:task.id,providerId:provider.id,options:{}});
     db.prepare("UPDATE processing_jobs SET status='complete' WHERE attempt_id=?").run(attempt.id);r.transitionAttempt(attempt.id,'ingesting');r.enqueueJob(attempt.id,'ingest');
     const old=r.claimJob('same-owner');assert.ok(old);
-    const worker=new Worker(__filename,{workerData:{path:file,id:old.id,generation:old.attempt_count}});t.after(async()=>{await worker.terminate();});
+    worker=new Worker(__filename,{workerData:{path:file,id:old.id,generation:old.attempt_count}});workerClosed=new Promise(resolve=>worker.once('exit',resolve));
     const ready=new Promise((resolve,reject)=>{worker.once('message',resolve);worker.once('error',reject);});assert.equal(await ready,'ready');
     db.exec('BEGIN IMMEDIATE');db.prepare('UPDATE processing_jobs SET lease_expires_at=? WHERE id=?').run(new Date(Date.now()+200).toISOString(),old.id);
     const starting=new Promise((resolve,reject)=>{worker.once('message',resolve);worker.once('error',reject);});worker.postMessage('go');assert.equal(await starting,'starting');
