@@ -33,7 +33,7 @@ const DERIVATIVE_UNRESOLVED_INTENT_SQL=`NOT EXISTS (SELECT 1 FROM native_derivat
  ELSE 0 END))`;
 // Brokered optional completion is not implemented; do not claim or terminalize
 // already-ready optional work while this experimental guard is enabled.
-const DERIVATIVE_OPTIONAL_READY_HOLD_SQL=`NOT ((CASE WHEN json_valid(derivative_jobs.request_json) THEN COALESCE(json_type(derivative_jobs.request_json,'$.optional'),'null') NOT IN ('null','false') ELSE 0 END) AND EXISTS (SELECT 1 FROM processing_attempts a WHERE a.id=derivative_jobs.attempt_id AND a.status IN ('ready_for_review','published')))`;
+const DERIVATIVE_OPTIONAL_READY_HOLD_SQL=`EXISTS (SELECT 1 FROM processing_attempts a WHERE a.id=derivative_jobs.attempt_id AND CASE WHEN json_valid(derivative_jobs.request_json) THEN json_type(derivative_jobs.request_json)='object' AND NOT (COALESCE(json_type(derivative_jobs.request_json,'$.optional'),'null') NOT IN ('null','false') AND a.status IN ('ready_for_review','published')) ELSE 0 END)`;
 function prepareDerivativeIntentGuard(database){require('./nativeDerivativeIntentCandidate').attestInTransaction(database);require('./nativeDerivativeCompletionCandidate').attestInTransaction(database);require('./nativeIngestCommitCandidate').attest(database,true);const {digest}=require('./nativeReadinessRequestDigestCandidate');database.function('viewer_derivative_intent_digest_candidate',{deterministic:true},value=>{try{return digest(JSON.parse(value));}catch{return null;}});}
 
 const BUILT_IN_PRESETS = [
