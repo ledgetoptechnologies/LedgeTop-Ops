@@ -1,7 +1,6 @@
 """Synthetic Linux-only broker boundary; not a production service or protocol."""
 import json
 import os
-import re
 import select
 import socket
 import struct
@@ -47,16 +46,13 @@ def main():
                     if not data.endswith(b'\n') or len(data) > 4096:
                         raise ValueError('bad request')
                     req = json.loads(data, object_pairs_hook=unique_pairs)
-                    if type(req) is not dict or set(req) != {'operation', 'attemptId', 'jobId'} or req['operation'] != 'complete':
+                    if type(req) is not dict or set(req) != {'operation', 'request'} or req['operation'] != 'complete' or type(req['request']) is not dict:
                         raise ValueError('bad request')
-                    for key in ('attemptId', 'jobId'):
-                        if type(req[key]) is not str or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', req[key]):
-                            raise ValueError('bad identity')
-                    child = subprocess.Popen(['node', script, db_path, req['attemptId'], req['jobId']],
+                    child = subprocess.Popen(['node', script, db_path], stdin=subprocess.PIPE,
                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     print('CHILD ' + str(child.pid), flush=True)
                     try:
-                        stdout, _ = child.communicate(timeout=5)
+                        stdout, _ = child.communicate(input=json.dumps(req['request']).encode(), timeout=5)
                     except subprocess.TimeoutExpired:
                         child.kill()
                         child.communicate()
@@ -69,7 +65,7 @@ def main():
                     if child.returncode != 0:
                         raise ValueError('transition failed')
                     parsed = json.loads(stdout)
-                    if set(parsed) != {'commitId'}:
+                    if set(parsed) != {'attemptId', 'commitId'}:
                         raise ValueError('bad result')
                     conn.sendall(json.dumps(parsed, separators=(',', ':')).encode() + b'\n')
                 except Exception:
