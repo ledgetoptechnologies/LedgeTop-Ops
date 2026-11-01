@@ -2,6 +2,12 @@
 
 This is a proposed first trial of the existing Viewer → coordinator → NodeODM → Viewer ingest path, not the disabled manifest/epoch experiment. It does not authorize a provider change, publication, deletion, or a production release. Confirm the deployed API and worker image digests and source revision, configured provider and sanitized probe results before treating source behavior below as deployed behavior. Node discovery by itself is not an end-to-end compatibility check.
 
+## Evidence received November 1, 2026
+
+The operator reported the API and worker image ID `sha256:eea9638f5979dc53ee7e4010e917f46bc85225aeebcb30b4b62e69a6c2abf632` with OCI revision `c2bba3d589ad0ea4718e94dc72f742b7c0d0e5ff`. The coordinating agent reported a sanitized coordinator `/info` with version `2.4.0`, engine `ledgetop-processing`, engine version `0.2.0`, queue count `0`, `maxImages: null` and absent resource fields; `/options` included `pc-ept`, `gltf` and `3d-tiles`. The `nodeOdmProvider.js` source at that exact revision accepts those information fields and classifies the response as `nodeodm`. The configured Viewer provider type, actual installed source/label correspondence, capability fingerprint and operational preflight are not established by these reports. This is not a completed job or ingest test.
+
+The coordinating agent reports that the native coordinator retains per-task uploads and cached outputs when marked removed, but has no Viewer-ingestion acknowledgement; the engines have age-based cleanup. Treat the engine retention window as an unresolved, time-bound risk until a complete archive is captured and independently verified. The Viewer launch through Operations also reported `Failed to fetch`, so the persisted provider configuration has not yet been checked in that UI.
+
 ## Before submitting
 
 - Use a dedicated test project and a small, authorized, overlapping photo set of known count and byte size. Use an appropriate photogrammetry dataset rather than arbitrary unrelated images. Keep the original source in place and record an inventory with hashes without including client data or credentials in the review record. For this first pipeline smoke, omit GCP inputs; GCP selection is a separate acceptance test.
