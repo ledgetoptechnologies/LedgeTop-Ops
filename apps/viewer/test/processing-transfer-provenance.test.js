@@ -71,7 +71,7 @@ test('ack loss, repeated initialization, observed existing task, mismatched comp
 test('worker records fresh create receipt but recovery of lost acknowledgement is ambiguous',async t=>{
   for(const lost of [false,true]){
     const f=fixture(t);let exists=false;
-    const adapter={status:async()=>{if(!exists)throw Object.assign(new Error('missing'),{code:'provider_task_not_found'});return{status:'queued',imagesCount:0};},
+    const adapter={status:async()=>{if(!exists)throw Object.assign(new Error('missing'),{code:'provider_task_not_found'});return{status:'queued_upstream',imagesCount:0};},
       initialize:async()=>{exists=true;if(lost)throw new Error('ack lost');return{uuid:f.attempt.providerTaskId};},upload:async()=>{},commit:async()=>{}};
     const deps={processing:f.processing,storage:f.storage,config:{},providerCredentials:{},adapterFactory:()=>adapter};
     if(lost){await assert.rejects(processSubmit(f.job,deps),/ack lost/);await processSubmit(f.job,deps);}
