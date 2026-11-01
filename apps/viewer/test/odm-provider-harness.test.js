@@ -132,6 +132,7 @@ test('processIngest rejects a provider mesh without EPT before adopting it', asy
     database,
     getAttempt: () => attempt,
     getAttemptTransferProvenance: () => null,
+    getIngestPublicationIntent: () => null,
     getTask: () => task,
     getProject: () => ({ id:task.projectId, displayName:'EPT project' }),
     getProvider: () => ({ id:attempt.providerId, type:'nodeodm', endpoint:'http://127.0.0.1:3000' }),
@@ -168,8 +169,10 @@ test('processIngest exposes a pending mesh derivative only with its verified pro
   processing.finalizeDataset(dataset.id, [{ relativePath:'photo.jpg', byteSize:1, sha256:'a'.repeat(64) }], 'b'.repeat(64));
   const task = processing.createTask({ projectId:project.id, datasetId:dataset.id, displayName:'Provider snapshot task' });
   const provider = processing.upsertProvider({ type:'nodeodm', displayName:'ODM', endpoint:'http://127.0.0.1:3000', enabled:true });
-  const attempt = processing.createAttempt({ taskId:task.id, providerId:provider.id, options:{}, createdBy:'ops:test' }), owner = 'provider-snapshot-owner', job = processing.claimJob(owner);
-  processing.transitionAttemptForJob(job.id, owner, 'ingesting');
+  const attempt = processing.createAttempt({ taskId:task.id, providerId:provider.id, options:{}, createdBy:'ops:test' }), owner = 'provider-snapshot-owner';
+  database.prepare("UPDATE processing_jobs SET status='complete' WHERE attempt_id=?").run(attempt.id);
+  processing.transitionAttempt(attempt.id, 'ingesting');processing.enqueueJob(attempt.id,'ingest');const job=processing.claimJob(owner);
+  assert.equal(job.job_type,'ingest');
   const destination = path.join(config.modelsMount, task.id, attempt.id);
   for (const entry of completeOutputEntries) {
     const absolute = path.join(destination, ...entry.path.split('/'));
