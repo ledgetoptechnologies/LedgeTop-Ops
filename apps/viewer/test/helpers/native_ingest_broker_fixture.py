@@ -48,21 +48,24 @@ def main():
                     continue
                 try:
                     data = bytearray()
-                    while not data.endswith(b'\n') and len(data) <= 4096:
-                        part = conn.recv(4097 - len(data))
+                    while not data.endswith(b'\n') and len(data) <= 65536:
+                        part = conn.recv(65537 - len(data))
                         if not part:
                             break
                         data.extend(part)
-                    if not data.endswith(b'\n') or len(data) > 4096:
+                    if not data.endswith(b'\n') or len(data) > 65536:
                         raise ValueError('bad request')
                     req = json.loads(data, object_pairs_hook=unique_pairs)
-                    if type(req) is not dict or set(req) != {'operation', 'request', 'token', 'nonce'} or req['operation'] not in ('complete', 'complete_drop_reply') or type(req['request']) is not dict or type(req['token']) is not str or type(req['nonce']) is not str:
+                    derivative = type(req) is dict and 'grant' in req
+                    credential_key = 'grant' if derivative else 'token'
+                    allowed = ('prepare', 'confirm', 'complete') if derivative else ('complete', 'complete_drop_reply')
+                    if type(req) is not dict or set(req) != {'operation', 'request', credential_key, 'nonce'} or req['operation'] not in allowed or type(req['request']) is not dict or type(req[credential_key]) is not str or type(req['nonce']) is not str:
                         raise ValueError('bad request')
                     child = subprocess.Popen(['node', script, db_path, str(uid), public_key, broker_key], stdin=subprocess.PIPE,
                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     print('CHILD ' + str(child.pid), flush=True)
                     try:
-                        stdout, _ = child.communicate(input=json.dumps({'request':req['request'],'token':req['token'],'nonce':req['nonce']}).encode(), timeout=5)
+                        stdout, _ = child.communicate(input=json.dumps({'request':req['request'],'token':req[credential_key],'nonce':req['nonce'],'action':req['operation'] if derivative else None}).encode(), timeout=5)
                     except subprocess.TimeoutExpired:
                         child.kill()
                         child.communicate()
@@ -79,6 +82,8 @@ def main():
                         raise ValueError('bad result')
                     if req['operation'] == 'complete_drop_reply':
                         # Fixture-only fault injection after the transaction committed.
+                        continue
+                    if derivative and req['operation'] == 'complete' and os.environ.get('VIEWER_BROKER_FIXTURE_DROP_DERIVATIVE_REPLY') == '1':
                         continue
                     conn.sendall(json.dumps(parsed['result'], separators=(',', ':')).encode() + b'\n')
                 except Exception:
