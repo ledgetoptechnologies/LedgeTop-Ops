@@ -17,9 +17,10 @@ recorded or unknown, never authoritative absence. These are internal fixture
 methods, not a proposed network or authentication interface.
 
 Focused synthetic tests cover normal reopen, exit without explicit database
-close after commit, quota, duplicate/conflicting IDs and sequential operations
-through two connections. They do not prove concurrent races, kill-at-transaction
-boundaries, storage power-loss guarantees, current authority, ledger epoch and
+close after commit, quota, duplicate/conflicting IDs, two competing worker
+connections against one byte cap, and killing an owned child after it reports a
+committed admission. They do not prove kill-at-transaction boundaries, storage
+power-loss guarantees, real network-stream fencing, current authority, ledger epoch and
 retention watermarks, signed adoption, predecessor fencing, or proxy behavior.
 All are release blockers, along with paired wire and staging qualification.
 

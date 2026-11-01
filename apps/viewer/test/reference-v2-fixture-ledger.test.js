@@ -59,3 +59,36 @@ test('process exit without database close preserves the committed charge', t => 
   const db=new DatabaseSync(file);
   try {const ledger=createFixtureLedger(db,FIXTURE_SCOPE);assert.deepEqual(ledger.fixtureRead(id(2)),{outcome:'recorded',state:'active',chargedBytes:3});assert.throws(()=>ledger.admit(input({deliveryId:id(3)})),{code:'fence_required'});assert.equal(db.prepare('SELECT charged_bytes FROM v2_fixture_jobs').get().charged_bytes,3)} finally {db.close()}
 });
+
+test('two concurrent worker connections cannot overspend the same job', async t => {
+  const {Worker}=require('node:worker_threads');
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-v2-ledger-race-'));
+  const file=path.join(dir,'fixture.sqlite');let db=new DatabaseSync(file);
+  let workers=[];
+  t.after(async()=>{await Promise.all(workers.map(w=>w.terminate()));try{db.close()}catch{}for(const suffix of ['', '-journal', '-wal', '-shm']){try{fs.unlinkSync(file+suffix)}catch(e){if(e.code!=='ENOENT')throw e}}fs.rmdirSync(dir)});
+  createFixtureLedger(db,FIXTURE_SCOPE).provision({jobId:'job',manifestHash:'a'.repeat(64),byteLimit:3,requestLimit:2});db.close();
+  const barrier=new SharedArrayBuffer(4),state=new Int32Array(barrier),modulePath=require.resolve('../server/referenceV2FixtureLedger');
+  const script=`const {parentPort,workerData}=require('node:worker_threads');const {DatabaseSync}=require('node:sqlite');const {createFixtureLedger,FIXTURE_SCOPE}=require(workerData.modulePath);const db=new DatabaseSync(workerData.file);const l=createFixtureLedger(db,FIXTURE_SCOPE);const id=n=>Buffer.alloc(32,n).toString('base64url');parentPort.postMessage('ready');Atomics.wait(new Int32Array(workerData.barrier),0,0,5000);try{l.admit({jobId:'job',manifestHash:'a'.repeat(64),requestId:id(workerData.n),requestHash:(workerData.n===1?'b':'c').repeat(64),deliveryId:id(workerData.n+2),responseBytes:3});parentPort.postMessage('accepted')}catch(e){parentPort.postMessage(e.code||'unexpected_error')}finally{db.close();parentPort.close()}`;
+  workers=[1,2].map(n=>new Worker(script,{eval:true,workerData:{file,modulePath,barrier,n}}));
+  const outcomes=workers.map(w=>new Promise((resolve,reject)=>{let ready=false;w.on('message',m=>{if(m==='ready'){ready=true;if(workers.every(x=>x.fixtureReady)){Atomics.store(state,0,1);Atomics.notify(state,0,2)} }else resolve(m)});w.on('error',reject);w.on('exit',code=>{if(code!==0)reject(Error('worker exited '+code));else if(!ready)reject(Error('worker exited before barrier'))})}));
+  // Mark readiness separately so both admissions are released together.
+  for(const w of workers)w.on('message',m=>{if(m==='ready'){w.fixtureReady=true;if(workers.every(x=>x.fixtureReady)){Atomics.store(state,0,1);Atomics.notify(state,0,2)}}});
+  const values=await Promise.all(outcomes);assert.deepEqual(values.sort(),['accepted','byte_limit']);
+  db=new DatabaseSync(file);assert.equal(db.prepare('SELECT charged_bytes FROM v2_fixture_jobs').get().charged_bytes,3);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM v2_fixture_deliveries').get().n,1);
+});
+
+test('owned child killed after committed admission leaves its charge and active hold', async t => {
+  const {spawn}=require('node:child_process');
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-v2-ledger-kill-'));
+  const file=path.join(dir,'fixture.sqlite');let child,db;
+  t.after(async()=>{if(child&&child.exitCode===null&&child.signalCode===null){child.kill();await new Promise(resolve=>child.once('exit',resolve))}if(db)db.close();for(const suffix of ['', '-journal', '-wal', '-shm']){try{fs.unlinkSync(file+suffix)}catch(e){if(e.code!=='ENOENT')throw e}}fs.rmdirSync(dir)});
+  const modulePath=require.resolve('../server/referenceV2FixtureLedger');
+  const script=`const {DatabaseSync}=require('node:sqlite');const {createFixtureLedger,FIXTURE_SCOPE}=require(process.argv[1]);const db=new DatabaseSync(process.argv[2]);const l=createFixtureLedger(db,FIXTURE_SCOPE);const id=n=>Buffer.alloc(32,n).toString('base64url');l.provision({jobId:'job',manifestHash:'a'.repeat(64),byteLimit:6,requestLimit:2});l.admit({jobId:'job',manifestHash:'a'.repeat(64),requestId:id(1),requestHash:'b'.repeat(64),deliveryId:id(2),responseBytes:3});process.send('committed');setInterval(()=>{},1000);`;
+  child=spawn(process.execPath,['-e',script,modulePath,file],{stdio:['ignore','ignore','ignore','ipc']});
+  const committed=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('child timeout')),10000);child.once('message',m=>{clearTimeout(timer);resolve(m)});child.once('error',e=>{clearTimeout(timer);reject(e)});child.once('exit',()=>{clearTimeout(timer);reject(Error('child exited before commit'))})});
+  assert.equal(committed,'committed');const exited=new Promise(resolve=>child.once('exit',resolve));child.kill();await exited;
+  db=new DatabaseSync(file);const ledger=createFixtureLedger(db,FIXTURE_SCOPE);
+  assert.deepEqual(ledger.fixtureRead(id(2)),{outcome:'recorded',state:'active',chargedBytes:3});
+  assert.throws(()=>ledger.admit(input({deliveryId:id(3)})),{code:'fence_required'});
+  assert.equal(db.prepare('SELECT charged_bytes FROM v2_fixture_jobs').get().charged_bytes,3);
+});
