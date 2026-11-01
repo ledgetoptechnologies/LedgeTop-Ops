@@ -36,6 +36,9 @@ function inspectFixture({scope,processing,bindingId,intentBytes,signature,regist
   if(coordinatorObservation===undefined&&associationConfig!==undefined)fail();
   let viewerJournal='not_inspected',proposal=null;
   if(coordinatorObservation!==undefined){
+    // The coordinator-bound experiment requires an authority UUID; the
+    // earlier public signature-only vector's slug is not an admissible mapping.
+    if(!uuid(intent.coordinatorAuthorityId))fail();
     const keys=['jobId','coordinatorAttemptId','generation','environment','authorityId','manifestSha256','pipelineDigest','submissionId'];
     if(!coordinatorObservation||Object.getPrototypeOf(coordinatorObservation)!==Object.prototype||Object.keys(coordinatorObservation).length!==keys.length||keys.some(k=>!Object.hasOwn(coordinatorObservation,k)))fail();
     const journal=db.prepare('SELECT j.*,a.dataset_id AS attempt_dataset_id,t.project_id AS task_project_id,t.dataset_id AS task_dataset_id,t.active_attempt_id AS task_active_attempt_id FROM viewer_reference_attempt_journal j JOIN processing_attempts a ON a.id=j.attempt_id JOIN processing_tasks t ON t.id=a.task_id WHERE j.attempt_id=?').get(binding.attempt_id);if(!journal||!uuid(binding.attempt_id)||!uuid(journal.submission_id)||journal.attempt_dataset_id!==dataset.id||journal.task_dataset_id!==dataset.id||journal.task_project_id!==dataset.project_id||journal.task_active_attempt_id!==binding.attempt_id||!journal.job_json||sha(journal.request_json)!==journal.request_sha256||sha(journal.job_json)!==journal.job_sha256)fail();

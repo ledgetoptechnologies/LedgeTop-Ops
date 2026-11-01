@@ -1,6 +1,6 @@
 {
   "notice": "PUBLIC SYNTHETIC UNSIGNED PROPOSAL; no authority or custody",
-  "intentCanonical": "{\"attemptId\":\"00000000-0000-4000-8000-000000000002\",\"audience\":\"viewer-deploy\",\"byteBudget\":3,\"claimBindingSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"coordinatorAuthorityId\":\"authority-1\",\"coordinatorDeploymentId\":\"coord-deploy\",\"coordinatorEpoch\":\"epoch-1\",\"environment\":\"staging\",\"expiresAt\":1100,\"generation\":1,\"idempotencyId\":\"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI\",\"inputManifestSha256\":\"90a4be94222d175f732fe29e0d30e9cd006595884da4dd9b04fb67e27d298489\",\"intentId\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"issuedAt\":1000,\"issuer\":\"coordinator\",\"jobId\":\"00000000-0000-4000-8000-000000000001\",\"keyId\":\"coord-key\",\"kind\":\"reservation-intent\",\"objectCount\":1,\"operation\":\"reserve-source\",\"policyId\":\"policy-1\",\"reservationRequestId\":\"AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM\",\"totalSourceBytes\":3,\"trustDomain\":\"test\",\"version\":1,\"viewerDeploymentId\":\"viewer-deploy\",\"viewerLedgerEpoch\":\"ledger-epoch-1\",\"viewerLedgerId\":\"ledger-1\"}",
+  "intentCanonical": "{\"attemptId\":\"00000000-0000-4000-8000-000000000002\",\"audience\":\"viewer-deploy\",\"byteBudget\":3,\"claimBindingSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"coordinatorAuthorityId\":\"00000000-0000-4000-8000-000000000004\",\"coordinatorDeploymentId\":\"coord-deploy\",\"coordinatorEpoch\":\"epoch-1\",\"environment\":\"staging\",\"expiresAt\":1100,\"generation\":1,\"idempotencyId\":\"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI\",\"inputManifestSha256\":\"90a4be94222d175f732fe29e0d30e9cd006595884da4dd9b04fb67e27d298489\",\"intentId\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"issuedAt\":1000,\"issuer\":\"coordinator\",\"jobId\":\"00000000-0000-4000-8000-000000000001\",\"keyId\":\"coord-key\",\"kind\":\"reservation-intent\",\"objectCount\":1,\"operation\":\"reserve-source\",\"policyId\":\"policy-1\",\"reservationRequestId\":\"AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM\",\"totalSourceBytes\":3,\"trustDomain\":\"test\",\"version\":1,\"viewerDeploymentId\":\"viewer-deploy\",\"viewerLedgerEpoch\":\"ledger-epoch-1\",\"viewerLedgerId\":\"ledger-1\"}",
   "body": {
     "version": 1,
     "kind": "attempt-mapping",
@@ -14,7 +14,7 @@
     "environment": "staging",
     "trustDomain": "test",
     "coordinatorDeploymentId": "coord-deploy",
-    "coordinatorAuthorityId": "authority-1",
+    "coordinatorAuthorityId": "00000000-0000-4000-8000-000000000004",
     "coordinatorEpoch": "epoch-1",
     "viewerDeploymentId": "viewer-deploy",
     "viewerLedgerId": "ledger-1",
@@ -26,10 +26,10 @@
     "generation": 1,
     "manifestSha256": "90a4be94222d175f732fe29e0d30e9cd006595884da4dd9b04fb67e27d298489",
     "pipelineDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "intentDigest": "68fa91d3f5a1f2e3c95526cb4a193e3892ebd2bf5a813c914949a1107fd2304a",
+    "intentDigest": "6cbdd90bcde41e64a6e4ceb76579efdaa848b329d1f0ea3d7f9181d7538bda80",
     "claimLineageSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   },
-  "canonicalUtf8": "{\"audience\":\"coord-deploy\",\"claimLineageSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"coordinatorAttemptId\":\"00000000-0000-4000-8000-000000000002\",\"coordinatorAuthorityId\":\"authority-1\",\"coordinatorDeploymentId\":\"coord-deploy\",\"coordinatorEpoch\":\"epoch-1\",\"environment\":\"staging\",\"expiresAt\":1100,\"generation\":1,\"intentDigest\":\"68fa91d3f5a1f2e3c95526cb4a193e3892ebd2bf5a813c914949a1107fd2304a\",\"issuedAt\":1000,\"issuer\":\"viewer\",\"jobId\":\"00000000-0000-4000-8000-000000000001\",\"keyId\":\"fixture-key\",\"kind\":\"attempt-mapping\",\"manifestSha256\":\"90a4be94222d175f732fe29e0d30e9cd006595884da4dd9b04fb67e27d298489\",\"nonce\":\"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc\",\"operation\":\"bind-attempt\",\"pipelineDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"submissionId\":\"56f7e8af-73c7-4a51-9903-c59cc68c033b\",\"trustDomain\":\"test\",\"version\":1,\"viewerAttemptId\":\"00000000-0000-4000-8000-000000000003\",\"viewerDeploymentId\":\"viewer-deploy\",\"viewerLedgerEpoch\":\"ledger-epoch-1\",\"viewerLedgerId\":\"ledger-1\"}",
+  "canonicalUtf8": "{\"audience\":\"coord-deploy\",\"claimLineageSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"coordinatorAttemptId\":\"00000000-0000-4000-8000-000000000002\",\"coordinatorAuthorityId\":\"00000000-0000-4000-8000-000000000004\",\"coordinatorDeploymentId\":\"coord-deploy\",\"coordinatorEpoch\":\"epoch-1\",\"environment\":\"staging\",\"expiresAt\":1100,\"generation\":1,\"intentDigest\":\"6cbdd90bcde41e64a6e4ceb76579efdaa848b329d1f0ea3d7f9181d7538bda80\",\"issuedAt\":1000,\"issuer\":\"viewer\",\"jobId\":\"00000000-0000-4000-8000-000000000001\",\"keyId\":\"fixture-key\",\"kind\":\"attempt-mapping\",\"manifestSha256\":\"90a4be94222d175f732fe29e0d30e9cd006595884da4dd9b04fb67e27d298489\",\"nonce\":\"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc\",\"operation\":\"bind-attempt\",\"pipelineDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"submissionId\":\"56f7e8af-73c7-4a51-9903-c59cc68c033b\",\"trustDomain\":\"test\",\"version\":1,\"viewerAttemptId\":\"00000000-0000-4000-8000-000000000003\",\"viewerDeploymentId\":\"viewer-deploy\",\"viewerLedgerEpoch\":\"ledger-epoch-1\",\"viewerLedgerId\":\"ledger-1\"}",
   "signatureDomain": "ltds-v2-two-attempt-binding-experiment-v1\u0000",
-  "bodyCommitment": "ef54bb1ac195b1d098c730da20d80683088516ce5d170178942b544f1cf84f25"
+  "bodyCommitment": "149f50eea8c0be0a9e86de4301c7a74eafa622a220489f96eb11194a7ee2a8ab"
 }

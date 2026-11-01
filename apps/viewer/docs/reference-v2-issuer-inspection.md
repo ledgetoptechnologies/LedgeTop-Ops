@@ -69,6 +69,10 @@ different synthetic UUIDs and is checked against the actual fixture journal.
 It is neither a signature nor an agreed wire. A production implementation must
 derive and verify both sides from independently authorized persisted records,
 and must not serialize a claim token or token-derived fingerprint.
+The coordinator-bound fixture requires `coordinatorAuthorityId` to be a UUID;
+the older `authority-1` value is valid only for the separate signature-only
+vector and is rejected as an association. The UUID in this Viewer vector is a
+synthetic proposal, not evidence of any actual coordinator record.
 
 Before any real receipt or source reservation: establish independently trusted
 issuer/key/audience/purpose, revocation and current epoch/clock; define a
