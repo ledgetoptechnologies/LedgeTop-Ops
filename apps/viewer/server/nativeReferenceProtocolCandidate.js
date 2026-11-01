@@ -12,4 +12,4 @@ function validManifest(manifest,expected){
   }catch{throw Object.assign(new Error('reference result manifest requires review'),{code:'native_reference_manifest_hold'});}
 }
 function classifyResultResponse(status,body){if(status===200)return'provisional';if(status===503&&keys(body,['error'])&&body.error==='result_read_unavailable')return'retry';return'hold';}
-module.exports={validManifest,classifyResultResponse};
+module.exports={canonical,validManifest,classifyResultResponse};
