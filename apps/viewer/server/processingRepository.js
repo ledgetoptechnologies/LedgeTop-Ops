@@ -31,6 +31,9 @@ const DERIVATIVE_UNRESOLVED_INTENT_SQL=`NOT EXISTS (SELECT 1 FROM native_derivat
    AND ((json_type(r.result_json,'$.ready')='false' AND json_type(r.result_json,'$.commitId')='null') OR
         (json_type(r.result_json,'$.ready')='true' AND json_type(r.result_json,'$.commitId')='text' AND EXISTS (SELECT 1 FROM native_ingest_commit_candidate m WHERE m.attempt_id=i.attempt_id AND m.commit_id=json_extract(r.result_json,'$.commitId'))))
  ELSE 0 END))`;
+// Brokered optional completion is not implemented; do not claim or terminalize
+// already-ready optional work while this experimental guard is enabled.
+const DERIVATIVE_OPTIONAL_READY_HOLD_SQL=`NOT ((CASE WHEN json_valid(derivative_jobs.request_json) THEN COALESCE(json_type(derivative_jobs.request_json,'$.optional'),'null') NOT IN ('null','false') ELSE 0 END) AND EXISTS (SELECT 1 FROM processing_attempts a WHERE a.id=derivative_jobs.attempt_id AND a.status IN ('ready_for_review','published')))`;
 function prepareDerivativeIntentGuard(database){require('./nativeDerivativeIntentCandidate').attestInTransaction(database);require('./nativeDerivativeCompletionCandidate').attestInTransaction(database);require('./nativeIngestCommitCandidate').attest(database,true);const {digest}=require('./nativeReadinessRequestDigestCandidate');database.function('viewer_derivative_intent_digest_candidate',{deterministic:true},value=>{try{return digest(JSON.parse(value));}catch{return null;}});}
 
 const BUILT_IN_PRESETS = [
@@ -731,7 +734,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
         WHERE status='leased'
           AND ((deadline_at IS NOT NULL AND deadline_at<=?)
             OR (lease_expires_at<=? AND derivative_type IN ('ept','mesh_tiles','lod_audit') AND attempt_count>=3))
-        ${this.derivativeIntentGuard?`AND ${DERIVATIVE_UNRESOLVED_INTENT_SQL}`:''}
+        ${this.derivativeIntentGuard?`AND ${DERIVATIVE_UNRESOLVED_INTENT_SQL} AND ${DERIVATIVE_OPTIONAL_READY_HOLD_SQL}`:''}
         ORDER BY updated_at,id LIMIT ?`).all(t,t,n);
       let terminal=0;
       for(const row of rows){
@@ -777,7 +780,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       // before EPT shared the token-fenced singleton. Treat any still-live
       // heavy lease as the singleton owner until it expires.
       const activeHeavy=this.database.prepare("SELECT id FROM derivative_jobs WHERE derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased' AND lease_expires_at>? LIMIT 1").get(t);
-      const candidates=this.database.prepare(`SELECT * FROM derivative_jobs WHERE (status='pending' OR (status='leased' AND lease_expires_at<=?)) ${this.derivativeIntentGuard?`AND ${DERIVATIVE_UNRESOLVED_INTENT_SQL}`:''} ORDER BY CASE WHEN derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased' THEN 0 ELSE 1 END,created_at,id LIMIT 100`).all(t);
+      const candidates=this.database.prepare(`SELECT * FROM derivative_jobs WHERE (status='pending' OR (status='leased' AND lease_expires_at<=?)) ${this.derivativeIntentGuard?`AND ${DERIVATIVE_UNRESOLVED_INTENT_SQL} AND ${DERIVATIVE_OPTIONAL_READY_HOLD_SQL}`:''} ORDER BY CASE WHEN derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased' THEN 0 ELSE 1 END,created_at,id LIMIT 100`).all(t);
       for(const row of candidates){
         const heavy=isHeavyDerivativeType(row.derivative_type);
         if(heavy&&(activeHeavy||lock?.job_id&&Date.parse(lock.lease_expires_at)>nowMs))continue;
