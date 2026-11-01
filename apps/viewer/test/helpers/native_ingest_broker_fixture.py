@@ -23,10 +23,12 @@ def main():
     os.chmod(sock_path, 0o666)
     server.listen(4)
     print('READY', flush=True)
+    graceful = False
     try:
         while True:
             readable, _, _ = select.select([server, sys.stdin], [], [], 30)
             if not readable or sys.stdin in readable:
+                graceful = True
                 break
             conn, _ = server.accept()
             with conn:
@@ -75,6 +77,8 @@ def main():
     finally:
         server.close()
         os.unlink(sock_path)
+        if graceful:
+            print('DRAINED', flush=True)
 
 if __name__ == '__main__':
     main()
