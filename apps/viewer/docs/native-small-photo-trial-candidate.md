@@ -1,0 +1,20 @@
+# Native Viewer small-photo trial: acceptance and hold plan
+
+This is a proposed first trial of the existing Viewer → coordinator → NodeODM → Viewer ingest path, not the disabled manifest/epoch experiment. It does not authorize a provider change, publication, deletion, or a production release. Confirm the deployed API and worker image digests and source revision, configured provider and sanitized probe results before treating source behavior below as deployed behavior. Node discovery by itself is not an end-to-end compatibility check.
+
+## Before submitting
+
+- Use a dedicated test project and a small, authorized, overlapping photo set of known count and byte size. Use an appropriate photogrammetry dataset rather than arbitrary unrelated images. Keep the original source in place and record an inventory with hashes without including client data or credentials in the review record. For this first pipeline smoke, omit GCP inputs; GCP selection is a separate acceptance test.
+- Verify the actual Viewer build, active provider identity and health, coordinator capability schema, selected provider type and exact options, available disk/inodes and resource headroom, and a known supported engine/node. Confirm no unrelated job or older writer will interfere. Preserve existing Viewer and coordinator credentials and suppress tokens from URLs/logs; verify proxy logging separately.
+- Viewer source at this branch detects NodeODM 2.x with non-sentinel resource fields or ClusterODM 1.x with all three resource fields equal to `99999999999`. It also validates option schemas and advertised limits. This source check is not evidence that the installed image implements the same contract. If probe, selected options, size limits or required output flags do not match, hold instead of altering production configuration to force a match.
+- Confirm immutable raw dataset retention, provider archive retention and sufficient headroom for upload, archive download, extraction and derivatives. Record exact attempt/provider IDs and the existing release/rollback procedure without recording secrets. Ensure no public share or publication is created by the test.
+
+## Execute one job and inspect
+
+Submit once through the existing Viewer UI using a dedicated test task. Record the submission and provider task IDs. Check initialization, upload, commit, coordinator scheduling, node execution, terminal status, archive availability and Viewer ingest in order. A transport timeout or unexpected status is an inspection hold: do not create a second task or manually delete an upstream task to recover. Preserve the original submission identifiers and inspect the Viewer attempt and coordinator state first.
+
+Acceptance requires one corresponding coordinator job, successful archive download and integrity/inventory validation, and a `ready_for_review` Viewer attempt with the expected derived outputs. Open a private review session and confirm the available orthophoto and 3D/point-cloud outputs load correctly, with an operator inspecting image placement and a representative measurement. A finished engine job alone is not acceptance. Do not publish the result or grant client/public access as part of this smoke test.
+
+## Failure and rollback
+
+On ambiguous submission, missing output, failed ingest, source mismatch, insufficient space or unexpected mutations, stop further test submissions and preserve the original source, task identifiers, provider state, archive and Viewer logs. Capture sanitized status and error codes; do not retry initialization or purge raw bytes, source CSV, provider archives, spools or model versions merely to clear an alert. Use the existing documented reconciliation path only after the exact state is known. Keep the previously active published model/version untouched; any later software rollback follows the independently reviewed deployment procedure and must not discard uncertain data. This trial cannot qualify power-loss durability, exclusive writers, physical fencing, concurrent cancellation races or all measurement workflows.
