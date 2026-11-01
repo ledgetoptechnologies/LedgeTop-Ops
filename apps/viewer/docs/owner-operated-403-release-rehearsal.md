@@ -148,24 +148,41 @@ sudo docker inspect ix-model-viewer-viewer-api-1 ix-model-viewer-viewer-worker-1
 sudo docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
 ```
 
-Inside the running Viewer API container shell, this opens the configured SQLite
-file read-only and prints schema versions and aggregated job/intent counts. It
-makes no checkpoint and does not print path, credentials, job IDs or client data.
-It is a point-in-time view; all writers still require the census above.
+Inside each running Viewer API and worker container shell, this loads the
+Viewer's actual `/app/server/config` module and opens its configured SQLite file
+read-only. It prints the resolved file's device/inode, schema version and
+aggregated job/intent counts, without printing the path, credentials, job IDs or
+client data. Compare the API and worker device/inode and confirm the mount mapping
+with the owner. The module path is based on the observed `/app` layout; if it is
+missing or the identity differs, stop and establish the actual image layout.
+It makes no checkpoint, but SQLite WAL-mode read access can use or create
+shared-memory sidecars depending on SQLite and filesystem state, so this is not
+a guarantee of zero filesystem writes. Qualify that behavior on a separate
+synthetic copy before running it on sensitive storage. The script shell's
+environment may differ from the running service's; matching path device/inode
+before and after the query does not prove which file the running process had
+open throughout, or rule out an ABA replacement. Treat it as a point-in-time
+observation, not process FD evidence. All writers still require the census above.
 
 ```sh
 node <<'NODE'
 const {DatabaseSync}=require('node:sqlite');
-const path=require('node:path');
-const data=process.env.DATA_DIR||path.join(process.cwd(),'data');
+const fs=require('node:fs');
 let db;
 try {
-  db=new DatabaseSync(process.env.DATABASE_PATH||path.join(data,'viewer.sqlite'),{readOnly:true});
+  const {config}=require('/app/server/config');
+  const resolved=fs.realpathSync(config.databasePath);
+  const file=fs.statSync(resolved);
+  db=new DatabaseSync(resolved,{readOnly:true});
+  db.exec('BEGIN'); // Keep these aggregate SELECTs in one SQLite read snapshot.
   const versions=db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get();
   const jobs=db.prepare('SELECT status,COUNT(*) AS count FROM processing_jobs GROUP BY status').all();
   const exists=db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ingest_publication_intents'").get();
   const intents=exists?db.prepare('SELECT COUNT(*) AS count FROM ingest_publication_intents').get().count:null;
-  console.log(JSON.stringify({schemaVersion:versions.version,jobs,intentCount:intents}));
+  db.exec('COMMIT');
+  const after=fs.statSync(resolved);
+  if(file.dev!==after.dev||file.ino!==after.ino)throw new Error('database identity changed');
+  console.log(JSON.stringify({device:file.dev,inode:file.ino,schemaVersion:versions.version,jobs,intentCount:intents}));
 } catch {
   console.error('Read-only Viewer inventory failed; stop and inspect the schema.');
   process.exitCode=1;
@@ -173,9 +190,9 @@ try {
 NODE
 ```
 
-These commands do not determine the registry manifest digest, identify all
-non-container writers, verify an old-worker fence, create a backup, or authorize
-any deployment. Resolve those separately before any operational rehearsal.
+These commands do not establish the running process's open database identity,
+determine the registry manifest digest, identify all non-container writers,
+verify an old-worker fence, create a backup, or authorize any deployment. Resolve those separately before any operational rehearsal.
 
 After the first inspection, use the actual printed image ID as the argument to
 `sudo docker image inspect`, with this format, to inspect its local ID and any
