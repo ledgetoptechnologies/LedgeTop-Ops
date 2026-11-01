@@ -59,15 +59,15 @@ async function processSubmit(job,{processing,storage,config,providerCredentials,
   const actualInputFiles=files.map(file=>{const source=sourceFileByPath.get(file.relativePath);return{relativePath:file.relativePath,byteSize:file.buffer?file.buffer.length:source.byteSize,sha256:file.buffer?crypto.createHash('sha256').update(file.buffer).digest('hex'):source.sha256};});
   validateProviderInputLimits(provider.capabilities,photoFiles,auxiliaryFiles);
   if(processing.validateAttemptInputInventory&&!processing.validateAttemptInputInventory(job.id,job.lease_owner,dataset.files,actualInputFiles))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
-  let known=null;try{known=await adapter.status(attempt.providerTaskId,{signal});}catch(error){if(error.code!=='provider_task_not_found')throw error;}
+  const ambiguous=()=>{throw Object.assign(new Error('Upstream task state is ambiguous; existing task and source files have been retained for review.'),{code:'provider_submission_ambiguous'});};
+  let known=null;try{known=await adapter.status(attempt.providerTaskId,{signal});}catch(error){if(error.code!=='provider_task_not_found'){if(signal?.aborted||error?.name==='AbortError'||error?.code==='ABORT_ERR')throw error;if(attempt.submissionPhase!=='new')ambiguous();throw error;}}
   const freshTaskMissing=!known&&attempt.submissionPhase==='new';
   const save=(phase,count=attempt.uploadedFileCount)=>{if(!processing.setSubmissionStateForJob(job.id,job.lease_owner,phase,count))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});attempt={...attempt,submissionPhase:phase,uploadedFileCount:count};};
-  const ambiguous=()=>{throw Object.assign(new Error('Upstream task state is ambiguous; existing task and source files have been retained for review.'),{code:'provider_submission_ambiguous'});};
   if(known&&attempt.submissionPhase==='new')ambiguous();
   if(known&&['running','completed'].includes(known.status)&&!['committing','committed'].includes(attempt.submissionPhase))ambiguous();
   if(known&&attempt.submissionPhase==='initializing'){if(processing.markAttemptInitializationAmbiguous&&!processing.markAttemptInitializationAmbiguous(job.id,job.lease_owner))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});save('initialized',0);}
   if(known&&attempt.submissionPhase==='uploading'){
-    const providerCount=Number(known.imagesCount);
+    const providerCount=known.imagesCount;
     if(!Number.isSafeInteger(providerCount)||providerCount<attempt.uploadedFileCount||providerCount>photoFiles.length)ambiguous();else save('uploading',providerCount);
   }
   if(known&&attempt.submissionPhase==='uploading_auxiliary')ambiguous();
