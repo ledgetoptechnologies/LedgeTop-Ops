@@ -288,9 +288,10 @@ test('mutation first blocks binding; existing mutation cannot resume when bindin
  // Restore task metadata only to isolate the in-flight mutation guard.
  f.db.exec("UPDATE processing_tasks SET status='draft' WHERE id='t'");
  assert.throws(()=>admit(f),{code:'source_binding_unavailable'});
- f.db.exec("DELETE FROM storage_mutations WHERE id='"+mutation.id+"'");
+ const saved=f.db.prepare('SELECT * FROM storage_mutations WHERE id=?').get(mutation.id);f.db.prepare('DELETE FROM storage_mutations WHERE id=?').run(mutation.id);
  admit(f);let touched=false;
- assert.throws(()=>applyStorageMutation(f.p,{pathExistsStrict:()=>{touched=true;return true;}},{id:'old',status:'intent',type:'trash',entityType:'dataset',entityId:'d',sourceRootKey:'datasets',sourceRelativePath:'synthetic'}),{code:'source_binding_retained'});
+ const columns=Object.keys(saved);f.db.prepare(`INSERT INTO storage_mutations(${columns.join(',')}) VALUES(${columns.map(()=>'?').join(',')})`).run(...Object.values(saved));
+ assert.throws(()=>applyStorageMutation(f.p,{pathExistsStrict:()=>{touched=true;return true;}},mutation.id),{code:'source_binding_retained'});
  assert.equal(touched,false);
 });
 
