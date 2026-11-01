@@ -239,16 +239,8 @@ function readyEvent(processing, config, attempt) {
   };
 }
 
-async function emitReady(processing, config, attempt, job, owner, result, readinessBroker = null) {
-  const event=readyEvent(processing,config,attempt);
-  let completed;
-  if(readinessBroker){
-    // Experimental injection only. The broker must durably retain the exact
-    // request before sending; an ambiguous response must never trigger a
-    // direct-write fallback or a terminal derivative failure.
-    try{completed=await readinessBroker.completeDerivative({attemptId:attempt.id,jobId:job.id,owner,leaseToken:job.lease_token,result,event});if(!completed||completed.attemptId!==attempt.id||typeof completed.ready!=='boolean'||(completed.ready?!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(completed.commitId):completed.commitId!==null))throw new Error('invalid broker reply');}
-    catch{throw Object.assign(new Error('derivative completion outcome requires reconciliation'),{code:'readiness_outcome_unknown'});}
-  }else completed=processing.completeDerivativeAndMaybeReady(job.id,owner,result,{event,leaseToken:job.lease_token});
+function emitReady(processing, config, attempt, job, owner, result) {
+  const completed = processing.completeDerivativeAndMaybeReady(job.id, owner, result, { event: readyEvent(processing, config, attempt), leaseToken: job.lease_token });
   if (!completed) throw Object.assign(new Error('derivative lease was lost'), { code: 'lease_lost' });
   return completed;
 }
@@ -470,7 +462,7 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
   }
 }
 
-async function processOneDerivative({ processing, storage, config, lodAuditScript = null, generateMeshTilesImpl = generateMeshTiles, readinessBroker = null }, owner) {
+async function processOneDerivative({ processing, storage, config, lodAuditScript = null, generateMeshTilesImpl = generateMeshTiles }, owner) {
   const job = processing.claimDerivative(owner);
   if (!job) return false;
   const startedAt = Date.now();
@@ -646,11 +638,10 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
     };
     if (request.optional && ['ready_for_review', 'published'].includes(attempt.status)) {
       if (!processing.completeOptionalDerivative(job.id, owner, completedResult, job.lease_token)) throw Object.assign(new Error('derivative lease was lost'), { code: 'lease_lost' });
-    } else await emitReady(processing, config, attempt, job, owner, completedResult, readinessBroker);
+    } else emitReady(processing, config, attempt, job, owner, completedResult);
     console.info(`[derivative] type=${job.derivative_type} outcome=complete durationMs=${completedResult.durationMs}`);
     return true;
   } catch (error) {
-    if(error.code==='readiness_outcome_unknown')return true;
     const safe = sanitizeLogMessage(error.message).slice(0, 1000);
     const errorCode = String(error.code || 'derivative_failed').replace(/[^a-z0-9_-]/gi, '').slice(0, 80) || 'derivative_failed';
     console.error(`[derivative] type=${['lod_audit','mesh_tiles','ept'].includes(job.derivative_type)?job.derivative_type:'unsupported'} outcome=failed durationMs=${Math.max(0,Date.now()-startedAt)} code=${errorCode}`);
@@ -695,7 +686,6 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
 
 module.exports = {
   assertLodArtifactsMatchSnapshot,
-  emitReady,
   derivativeResourceSnapshot,
   generateMeshTiles,
   isExplicitResourcePressure,
