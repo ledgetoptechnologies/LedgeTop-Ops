@@ -31,4 +31,4 @@ function createPlanBindingCandidate({db,processing,vault,transport,expectedEnvir
   }
   return{bindOrRecover};
 }
-module.exports={buildPlan,installPlanCandidateSchema,createPlanCandidate,createPlanBindingCandidate};
+module.exports={buildPlan,installPlanCandidateSchema,createPlanCandidate,createPlanBindingCandidate,checkPlanReceipt};

@@ -1,0 +1,42 @@
+'use strict';
+// Synthetic loopback only. The invoker must independently verify the clean Processing checkout matches the stated commit.
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),{spawn}=require('node:child_process'),readline=require('node:readline');
+const {createTransport}=require('../server/nativeEpochTransportCandidate'),{validate:validateEpoch}=require('../server/nativeEpochReceiptCandidate'),{buildPlan,checkPlanReceipt}=require('../server/nativePlanCandidate'),{checkReceipt}=require('../server/nativeManifestBindingCandidate'),{canonical,validate:validateManifest}=require('../server/nativeManifestCandidate');
+const source=process.env.PROCESSING_SYNTHETIC_SOURCE;
+test('Viewer and pinned synthetic Python coordinator replay both epoch close outcomes',{skip:!source,timeout:30000},async t=>{
+  assert.equal(process.env.PROCESSING_SOURCE_COMMIT,'0b6d813f6ebf31eac43ea64a8d7dfb09f2fe6a44');
+  const child=spawn('python3',['-m','tests.native_epoch_http_fixture'],{cwd:source,env:{...process.env,PROCESSING_SYNTHETIC_EPOCH_HTTP_FIXTURE:'1'},stdio:['pipe','pipe','pipe']});
+  let stderr='';child.stderr.on('data',chunk=>{stderr=(stderr+chunk.toString()).slice(-4096);});
+  const closed=new Promise(resolve=>child.once('close',(code,signal)=>resolve({code,signal})));let stopped=false;
+  const timer=setTimeout(()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');},25000);
+  t.after(async()=>{clearTimeout(timer);if(!stopped&&child.exitCode===null&&child.signalCode===null){child.stdin.end('STOP\n');const result=await Promise.race([closed,new Promise(resolve=>setTimeout(()=>resolve(null),7000).unref())]);if(!result){child.kill('SIGKILL');await closed;}}});
+  const lines=readline.createInterface({input:child.stdout});const first=await Promise.race([new Promise((resolve,reject)=>{lines.once('line',resolve);child.once('error',reject);child.once('exit',()=>reject(new Error('fixture exited before readiness')));}),new Promise((_,reject)=>setTimeout(()=>reject(new Error('fixture readiness timed out')),8000).unref())]);
+  const info=JSON.parse(first);assert.equal(info.fixture,'synthetic-v2');assert.equal(info.host,'127.0.0.1');
+  const client=createTransport({endpoint:`http://127.0.0.1:${info.port}`,environmentToken:'synthetic-staging-token-'+'s'.repeat(32),enabled:true});
+  const template=JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/native-input-manifest-v1-candidate.json'),'utf8')).vectors[0];
+  const cap=Buffer.alloc(32,7).toString('base64url'),catalog=crypto.createHash('sha256').update('ltds-viewer-selected-catalog-v1\0[]').digest('hex');
+  async function scenario(n,accept){
+    const task=`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`,operation=`00000000-0000-4000-8001-${String(n).padStart(12,'0')}`,requestId=`00000000-0000-4000-8002-${String(n).padStart(12,'0')}`;
+    const manifest=JSON.parse(template.canonical);manifest.id=`attempt-${n}`;delete manifest.sha256;manifest.sha256=crypto.createHash('sha256').update(canonical(manifest)).digest('hex');const manifestBytes=Buffer.from(canonical(manifest));
+    const expected={taskUuid:task,operationId:operation,environment:'staging',manifestId:manifest.id,manifestSha256:manifest.sha256,requestId};
+    const row={task_uuid:task,environment:'staging',attempt_id:manifest.id};const checked=validateManifest(manifestBytes,manifest.id);let receipt,plan,planContext;
+    const checkManifest=value=>{try{checkReceipt(value,row,checked);return true;}catch{return false;}};
+    const checkPlan=value=>{try{checkPlanReceipt(value,planContext);return true;}catch{return false;}};
+    const call=(action,body)=>client.request(action,task,operation,cap,body);
+    const openBody={schemaVersion:2,operationKind:'plan_bind',manifestId:manifest.id,manifestSha256:manifest.sha256};
+    validateEpoch(await call('open',openBody),expected,{action:'open'});validateEpoch(await call('open',openBody),expected,{action:'open'});
+    receipt=validateEpoch(await call('manifest',manifestBytes),expected,{action:'manifest',checkManifest});
+    const built=buildPlan({receipt,taskName:'Synthetic 🌍',options:{},outputs:null,catalogDigest:catalog});plan=JSON.parse(built.bytes);expected.planSha256=built.sha256;expected.manifestReceipt=receipt;planContext={row,receipt,record:{plan_sha256:built.sha256},plan};
+    validateEpoch(await call('intent',built.bytes),expected,{action:'intent'});
+    if(accept)validateEpoch(await call('accept',built.bytes),expected,{action:'accept',checkPlan});
+    const revoke={schemaVersion:2,requestId,expectedManifestSha256:manifest.sha256,expectedManifestBindingId:receipt.bindingId,expectedPlanSha256:built.sha256};
+    const checks={action:'revoke',checkManifest,checkPlan},firstClose=await call('revoke',revoke),closedResult=validateEpoch(firstClose,expected,checks);
+    assert.equal(closedResult.state,accept?'bound_then_closed':'closed_without_bind');assert.equal(closedResult.planIntentPresent,true);
+    assert.deepEqual(await call('revoke',revoke),firstClose);assert.deepEqual(await call('status'),firstClose);
+    validateEpoch(await call('status'),expected,{action:'status',checkManifest,checkPlan});
+    await assert.rejects(call('accept',built.bytes),{code:'native_epoch_hold'});
+    await assert.rejects(call('revoke',{...revoke,expectedPlanSha256:null}),{code:'native_epoch_hold'});
+  }
+  await scenario(11,false);await scenario(12,true);
+  lines.close();child.stdin.end('STOP\n');const result=await closed;stopped=true;assert.equal(result.code,0,stderr);
+});
