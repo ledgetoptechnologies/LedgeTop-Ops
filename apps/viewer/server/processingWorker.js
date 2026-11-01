@@ -215,8 +215,8 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   const producer=archiveReceipt?processing.getVerifiedAttemptProducerReceipt(attempt.id):null;
   const explicitUnits=await inspectRegisteredSourceUnits({repository,storage,modelId:model.id,modelVersionId:version.id,signal});
   const unitCandidates=await prepareProcessingUnitEvidence({producer,destination,sourcePrefix:relative,modelId:model.id,modelVersionId:version.id,assets:repository.getModelVersion(model.id,version.id).activeVersion.assets,signal});
-  if(processing.nativeRecoveryRequireNoUnitEvidence&&(explicitUnits.length||unitCandidates.length))throw Object.assign(new Error('native recovery unit evidence requires review'),{code:'native_recovery_unit_hold'});
-  if(explicitUnits.length||unitCandidates.length)processing.transaction(()=>{
+  if(processing.nativeUnitEvidenceCommit)processing.nativeUnitEvidenceCommit({modelId:model.id,versionId:version.id,explicitUnits,unitCandidates});
+  else if(explicitUnits.length||unitCandidates.length)processing.transaction(()=>{
     signal?.throwIfAborted();
     if(!processing.provenanceJob(job.id,job.lease_owner,'ingest'))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
     const evidence=new MeasurementSourceUnitEvidence(repository.database);
