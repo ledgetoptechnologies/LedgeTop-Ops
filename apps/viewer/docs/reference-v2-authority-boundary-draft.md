@@ -44,3 +44,42 @@ The branch's SQLite fixture is intentionally not this ledger: its scope label,
 caller-provided job budget and synthetic stop operation are not authentication
 or fencing; it has no trusted epoch, retention coverage or adoption. A valid
 canonical parser result is syntax evidence only.
+
+## Processing proposal for joint review
+
+Processing proposes the coordinator as sole claim/worker authorization issuer,
+mutually authenticated service-to-service TLS, and a separately signed,
+versioned and domain-separated grant for the Viewer audience and exact
+operation/request/job/environment/manifest/reservation/generation, actor and
+authority epoch. Ed25519 with explicit key IDs is a candidate only. Establish
+key distribution, rotation, revocation, audience, expiration, clock behavior,
+canonical bytes and deployed TLS termination/identity propagation before use;
+mTLS and canonical JSON alone do not prove current authority.
+
+Processing proposes Viewer-signed reconciliation evidence for the Processing
+audience binding the immutable request, delivery, charge, ledger identity/epoch,
+monotonic revision and complete retention/admission-window coverage. Observation
+authorization is separate from admission. A signed statement still needs an
+independently protected current epoch/anti-rollback anchor and demonstrable
+retention and predecessor fencing; neither a signature nor a restored database
+alone makes an absence authoritative. The meaning, origin and units of each
+watermark and its proof are unresolved.
+
+The proposed coordinator-side operation fence/pin must be durable before charge
+and remain held across disconnect or crash until authenticated quiescence or
+externally verified isolation. SQLite cannot atomically fence a remote coordinator
+using a local callback. Specify paired durable states, who may release the pin,
+the exact stream/worker/process boundary, authority renewal/revocation while a
+stream runs, and recovery for a crash between every pair of operations. Expiry,
+socket closure, a stale acknowledgment or a coordinator restart is not by itself
+proof that bytes stopped. No indefinite-free-replay or charge reset follows a
+lost response. A signed recovery adoption must be durable and bind the immutable
+original request, current actor, monotonic recovery generation and independently
+verified predecessor fence; old proofs cannot regain authority.
+
+An independently protected monotonic anchor or explicitly reviewed offline
+re-enrollment is needed when restoring a ledger or journal. Agree on behavior
+when anchor access fails or history is pruned: return unknown/hold, never infer
+absence. Full-object/chunk identity, signed response/reconciliation schemas,
+hash domains, failure codes, key lifecycle and paired cross-language vectors are
+still open. Do not deploy or activate from this proposal.
