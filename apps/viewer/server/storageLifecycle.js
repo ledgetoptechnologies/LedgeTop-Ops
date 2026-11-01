@@ -14,7 +14,10 @@ function markApplied(processing,mutation,options){
   throw conflict('lifecycle journal changed while applying filesystem effect');
 }
 
-function applyStorageMutation(processing,storage,input,{faultAt=null,supersessionProof=null,containerAction=null}={}){
+function applyStorageMutation(processing,storage,input,{faultAt=null,supersessionProof=null,containerAction=null,sourceFence=null}={}){
+  // Explicitly injected by isolated fence tests only; no runtime caller enables
+  // this experiment and it must not be mistaken for production fencing.
+  if(sourceFence)return sourceFence.run(typeof input==='string'?input:input?.id,()=>applyStorageMutation(processing,storage,input,{faultAt,supersessionProof,containerAction}));
   const mutation=processing.getStorageMutation(typeof input==='string'?input:input?.id);
   if(!mutation)return null;
   if(mutation.status==='complete'||mutation.status==='failed')return mutation;

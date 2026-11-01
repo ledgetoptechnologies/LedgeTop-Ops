@@ -1,0 +1,130 @@
+{
+  "format": "viewer-processing-source-map-experiment-v1",
+  "notice": "PUBLIC SYNTHETIC DATA; no source custody or signature",
+  "fixtureSourceCommit": "aa2c8541",
+  "observedFiles": [
+    {
+      "id": "image",
+      "relativePath": "one.jpg",
+      "byteSize": 3,
+      "sha256": "f8146b6cb4961f87a1519047b8c83402754ed108ade55457d43166e564b7b4fe",
+      "processingRole": "auto"
+    },
+    {
+      "id": "survey",
+      "relativePath": "raw.csv",
+      "byteSize": 3,
+      "sha256": "53bb9b0b38ac812554abeb88ea6d56760d07ec147a75e8761c4f57ecc298218f",
+      "processingRole": "auto"
+    }
+  ],
+  "datasetManifestSha256": "b6926d82b155fe8922d53afb650daf1cd4046e44738cee21657b09fd0096c3c0",
+  "preparationInput": {
+    "enabled": true,
+    "dataset": {
+      "id": "d",
+      "status": "finalized",
+      "storageMode": "managed",
+      "manifestSha256": "b6926d82b155fe8922d53afb650daf1cd4046e44738cee21657b09fd0096c3c0",
+      "files": [
+        {
+          "id": "image",
+          "relativePath": "one.jpg",
+          "byteSize": 3,
+          "sha256": "f8146b6cb4961f87a1519047b8c83402754ed108ade55457d43166e564b7b4fe",
+          "processingRole": "auto"
+        },
+        {
+          "id": "survey",
+          "relativePath": "raw.csv",
+          "byteSize": 3,
+          "sha256": "53bb9b0b38ac812554abeb88ea6d56760d07ec147a75e8761c4f57ecc298218f",
+          "processingRole": "auto"
+        }
+      ]
+    },
+    "submissionId": "56f7e8af-73c7-4a51-9903-c59cc68c033b",
+    "capabilities": {
+      "protocol": "ltds-reference-v1",
+      "schemaVersion": 1,
+      "environment": "staging",
+      "capabilityFingerprint": "1111111111111111111111111111111111111111111111111111111111111111",
+      "limits": {
+        "metadataBytes": 4194304,
+        "objects": 10000,
+        "integer": 9007199254740991
+      },
+      "engines": {
+        "odm": {
+          "available": true,
+          "optionsFingerprint": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "treedar": {
+          "available": false,
+          "admissionVersion": "treedar-lidar-v1"
+        },
+        "gaussian_splat": {
+          "available": false,
+          "enabled": false
+        }
+      }
+    },
+    "optionsCatalog": {
+      "schemaVersion": 1,
+      "environment": "staging",
+      "capabilityFingerprint": "1111111111111111111111111111111111111111111111111111111111111111",
+      "optionsFingerprint": "2222222222222222222222222222222222222222222222222222222222222222",
+      "options": []
+    },
+    "odmOptions": {}
+  },
+  "submission": {
+    "schemaVersion": 1,
+    "submissionId": "56f7e8af-73c7-4a51-9903-c59cc68c033b",
+    "manifest": {
+      "id": "dataset-d",
+      "revision": 1,
+      "sha256": "90a4be94222d175f732fe29e0d30e9cd006595884da4dd9b04fb67e27d298489",
+      "totalBytes": 3,
+      "objectCount": 1,
+      "inputCounts": {
+        "images": 1,
+        "lidarObjects": 0,
+        "points": 0
+      },
+      "objects": [
+        {
+          "id": "image",
+          "name": "one.jpg",
+          "byteSize": 3,
+          "sha256": "f8146b6cb4961f87a1519047b8c83402754ed108ade55457d43166e564b7b4fe",
+          "kind": "image",
+          "mediaType": "image/jpeg"
+        }
+      ]
+    },
+    "pipeline": {
+      "odm": {
+        "requested": true,
+        "options": {},
+        "optionsFingerprint": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "treedar": {
+        "requested": false,
+        "inputObjectIds": [],
+        "provenanceReceiptId": null
+      },
+      "gaussian_splat": {
+        "requested": false
+      }
+    },
+    "capabilityFingerprint": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "sourceFiles": {
+    "image": "one.jpg"
+  },
+  "retainedExcludedIds": [
+    "survey"
+  ],
+  "processingManifestSha256": "90a4be94222d175f732fe29e0d30e9cd006595884da4dd9b04fb67e27d298489"
+}

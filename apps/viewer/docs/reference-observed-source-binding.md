@@ -38,3 +38,36 @@ replay; verified independent issuer/epoch/clock; durable source retention and
 audited acceptance plus separately authorized cleanup. Reconcile crashes and
 power loss on the actual storage system. Until then uncertainty holds and no
 receipt or cleanup authorization may be inferred from these rows.
+
+## Cooperative lifecycle exclusion experiment
+
+`referenceLifecycleEffectFence.js` can install a separate claim table only in
+an isolated fixture. `applyStorageMutation` accepts an explicitly injected
+fixture fence; no runtime caller injects it and no migration installs the table.
+In one immediate transaction a claim reloads the stored mutation and rejects
+any existing binding or other in-flight lifecycle claim. The binding draft
+checks the same claim table, and a reciprocal insert trigger rejects a binding
+while an effect is in flight. This conservatively serializes all participating
+lifecycle effects, including disjoint paths, because aliases are not attested.
+The claim remains held around the filesystem operation and journal completion.
+Only a cooperative callback reporting a durably completed journal settles it;
+exceptions, process death and uncertainty hold indefinitely, including a crash
+after the journal completes but before settlement. No timeout or lease permits
+takeover. There is deliberately no automatic recovery or release. The tests use
+real synthetic rename/delete effects, two SQLite connections, replacement
+guards and killed owned child processes; they do not prove power-loss behavior.
+
+This experiment is not installed, enabled, an OS lock, or a complete fence.
+Uninstrumented lifecycle calls, catalog/import/adoption paths, uploads, direct
+storage helpers, older binaries, other NAS clients and database owners remain
+outside it. Its fixture callback and database are not trusted production
+authority; a real design must also prevent early journal completion by another
+executor, protect all relevant mutation identities and install a safe migration
+and recovery protocol. Never infer receipt issuance or deletion authority.
+
+`test/fixtures/viewer-processing-source-map-public.json` is an unsigned public
+synthetic mapping for the two-file fixture. Its indexed dataset manifest and
+selected Processing submission manifest have distinct hashes: only the image is
+submitted and the raw CSV is retained/excluded. The accompanying test checks
+object ID, filename, size and digest mappings; it does not prove physical
+custody or authenticate a future multi-object receipt.
