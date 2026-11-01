@@ -485,6 +485,7 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
     derivativePhase(processing, job, owner, 'claimed');
     if (['cancelled', 'failed'].includes(attempt.status)) throw Object.assign(new Error('attempt is no longer active'), { code: 'lease_lost' });
     request = JSON.parse(job.request_json || '{}');
+    if(readinessBroker&&request.optional&&['ready_for_review','published'].includes(attempt.status))throw Object.assign(new Error('optional derivative requires broker integration'),{code:'readiness_outcome_unknown'});
     if (request.optional && ['lod_audit', 'mesh_tiles'].includes(job.derivative_type)
       && ['ready_for_review', 'published'].includes(attempt.status)) {
       throw Object.assign(new Error('ready and published model versions are immutable; create a new processing attempt'), { code: 'derivative_in_place_disabled' });
