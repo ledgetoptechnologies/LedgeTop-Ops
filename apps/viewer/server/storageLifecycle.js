@@ -17,7 +17,8 @@ function markApplied(processing,mutation,options){
 function applyStorageMutation(processing,storage,input,{faultAt=null,supersessionProof=null,containerAction=null,sourceFence=null}={}){
   // Registration/injection exists for isolated fixture tests only. Runtime
   // does not install or enable the experiment.
-  const fence=sourceFence||require('./referenceLifecycleEffectFence').registeredOfflineFixtureFence(processing);
+  const fixture=require('./referenceLifecycleEffectFence'),fence=sourceFence||fixture.registeredOfflineFixtureFence(processing);
+  if(!fence&&fixture.hasOfflineFixture(processing))throw Object.assign(new Error('offline lifecycle fixture is not registered'),{code:'lifecycle_effect_held'});
   if(fence)return fence.run(typeof input==='string'?input:input?.id,()=>applyStorageMutationCore(processing,storage,input,{faultAt,supersessionProof,containerAction}));
   return applyStorageMutationCore(processing,storage,input,{faultAt,supersessionProof,containerAction});
 }

@@ -136,8 +136,11 @@ async function mapCatalogCandidate(operation, { processing, repository, storage,
       if(!adoptionIntent){const source=storage.resolve(sourceRootKey,sourceRelativePath,{mustExist:true}),stat=fs.statSync(source,{bigint:true}),scan=storage.scanTree(sourceRootKey,sourceRelativePath);adoptionIntent={rootKey:sourceRootKey,relativePath:sourceRelativePath,datasetRelative:ids.datasetId,sourceFingerprint:approvedFingerprint,sourceByteSize:scan.byteSize,sourceDev:String(stat.dev),sourceIno:String(stat.ino),sourceCtimeNs:String(stat.ctimeNs),sourceMtimeNs:String(stat.mtimeNs)};}
       if(!processing.setCatalogAdoptionIntent(operation.id,operation.lease_owner,adoptionIntent))throw Object.assign(new Error('catalog import lease was lost before adoption was journaled'),{code:'operation_lease_lost'});
     }
-    const adopted = await storage.adoptImport(sourceRootKey, sourceRelativePath, ids.datasetId, {externalReference:request.storageMode==='external_reference',expectedFingerprint:approvedFingerprint,onProgress:(value)=>progress(0.05+value*0.5)});
-    if(adopted.sourceToRemove&&!processing.setCatalogSourceCleanup(operation.id,operation.lease_owner,adoptionIntent))throw Object.assign(new Error('catalog import lease was lost before source cleanup was journaled'),{code:'operation_lease_lost'});
+    const fixture=require('./referenceLifecycleEffectFence'),fence=fixture.registeredOfflineFixtureFence(processing);
+    if(request.storageMode==='adopted'&&!fence&&fixture.hasOfflineFixture(processing))throw Object.assign(new Error('offline adoption fixture is not registered'),{code:'lifecycle_effect_held'});
+    const adopt=()=>storage.adoptImport(sourceRootKey, sourceRelativePath, ids.datasetId, {externalReference:request.storageMode==='external_reference',expectedFingerprint:approvedFingerprint,onProgress:(value)=>progress(0.05+value*0.5)});
+    const adopted=request.storageMode==='adopted'&&fence?await fence.runCatalogAdoption(operation,adoptionIntent,{rootKey:sourceRootKey,relativePath:sourceRelativePath,fingerprint:approvedFingerprint,datasetId:ids.datasetId},adopt):await adopt();
+    if(adopted.sourceToRemove&&!(request.storageMode==='adopted'&&fence)&&!processing.setCatalogSourceCleanup(operation.id,operation.lease_owner,adoptionIntent))throw Object.assign(new Error('catalog import lease was lost before source cleanup was journaled'),{code:'operation_lease_lost'});
     const files = adopted.scan.files;
     for (const file of files) if (!file.sha256) file.sha256 = await hashFile(file.absolutePath);
     dataset = processing.finalizeDataset(dataset.id, files.map((file)=>({relativePath:file.relativePath,byteSize:file.byteSize,sha256:file.sha256,metadata:file.metadata||{}})), manifestHash(files));

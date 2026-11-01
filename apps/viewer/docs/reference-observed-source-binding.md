@@ -72,15 +72,58 @@ and recovery protocol. Never infer receipt issuance or deletion authority.
 | --- | --- |
 | `storageLifecycle.applyStorageMutation` for managed dataset/output trash, restore and purge | Participates only when an isolated fixture explicitly injects or registers a fence on that repository instance. Tests exercise interrupted rename/delete, project-container trash and reconciliation. API, container restore/purge and maintenance converge here, but have not all been exercised end to end under the fixture. |
 | `importCleanup` and catalog adoption recovery | Existing `viewer_source_effect_claims` participate in reciprocal global exclusion with the lifecycle fixture; uncertain existing claims remain held. The fixture checks both claim orderings. Their own source bytes and external writers are not fenced. |
-| Initial `StorageManager.adoptImport` and adoption cleanup | Not covered by this lifecycle claim. Adoption has separate intent checks; it does not establish a physical fence. |
-| Catalog source cleanup (`reconcileCatalogSourceCleanups` / `removeAdoptedSourceIfMatches`) | Not covered; asynchronous check-to-effect gap remains and roots can alias. |
+| Initial catalog adoption (`catalogImport.mapCatalogCandidate` / `StorageManager.adoptImport`) | Adopted-mode catalog calls participate only on a registered fixture repository, after their adoption intent is persisted. The fixture checks source, destination and fingerprint, holds the claim across the awaited operation, and commits any source-cleanup intent with settlement. Generic import and WebODM adoption remain uncovered; no physical fence is established. |
+| Catalog source cleanup (`reconcileCatalogSourceCleanups` / `removeAdoptedSourceIfMatches`) | Participates only on a registered fixture repository. A durable claim spans the awaited callback; confirmed success settles the claim and clears the matching journal together. False, thrown or interrupted outcomes remain held. Tests exercise actual verified quarantine removal on synthetic files and callback interruption/restart. |
 | WebODM staging cleanup, upload cleanup, photo/GCP writes, model/derivative cleanup | Not covered. Even nominally distinct roots can alias until independently attested. |
-| Direct `StorageManager` legacy helpers, old binaries, other processes and NAS clients | Not covered. Registration is per object, so a new repository instance or another process does not inherit it. |
+| Direct `StorageManager` legacy helpers, old binaries and NAS clients | Not covered. Registration is per object; updated unregistered lifecycle and catalog-cleanup entry points refuse to proceed if the fixture schema is present. |
 
 The existing claim table and this fixture mutually reject new in-flight claims
 under SQLite's write transaction. Fixture tests check both orderings and a
 simultaneous cross-type claim race. No normal server, API or worker entry point
 enables fixture registration.
+
+The catalog cleanup fixture uses a separate durable claim table, mutual guards
+with bindings and the other effect claims, and immutable operation payload
+while the callback is running. A newly opened unregistered repository refuses
+the covered cleanup and lifecycle entry points if fixture tables exist; this
+only applies to updated code, not old binaries or direct storage calls. Fixture
+installation is transactional and registration checks required object names,
+but does not attest their SQL definitions or protect against a database owner.
+The callback is trusted to await its work; no receipt or physical fencing is
+implied. There is no automatic release after an uncertain outcome.
+
+Initial catalog adoption has its own fixture claim. It binds the stored
+operation, owner, source root/path/fingerprint, dataset ID and metadata to the
+callback arguments; row guards hold the operation, dataset and indexed files
+while the effect is awaited. A successful cross-device result journals the
+matching source-cleanup identity atomically with claim settlement; exceptions,
+lease loss and crashes leave an in-flight hold. Tests cover a real synthetic
+same-device adoption, mismatched source, guarded metadata, journal creation and
+a killed process after a synthetic rename. The callback, database, source
+fingerprint and root remain untrusted in production; the test does not prove a
+cross-device storage system or external-writer fence. Generic import, WebODM,
+upload and other direct operations need separate coverage before activation.
+
+## Existing adoption-recovery behavior
+
+The default code already records a v53 catalog adoption-recovery effect before
+calling the filesystem recovery callback. If that callback throws or its
+process dies, the effect stays `in_flight`; a subsequent maintenance pass does
+not automatically run it again, even after its lease or process has expired.
+This is an existing availability limitation, not a new effect of fixture
+registration. The original catalog tests expected an automatic retry and also
+failed on the unchanged baseline. They now assert the existing held state and
+preservation of bytes, while a separate real-filesystem test confirms recovery
+that completes without interruption still restores the source.
+
+An uncertain effect requires operator investigation: preserve both original
+and destination data, identify the exact journal and filesystem identities,
+and independently establish that all old executors and children have stopped
+before any reviewed reconciliation or release. There is currently no qualified
+automatic proof, claim-clear mechanism, or safe operator recovery procedure in
+this experiment. Do not manually clear a claim, delete a source, or assume a
+timeout establishes safety. A reviewed operational procedure and tested
+reconciliation are required before rollout.
 
 `test/fixtures/viewer-processing-source-map-public.json` is an unsigned public
 synthetic mapping for the two-file fixture. Its indexed dataset manifest and

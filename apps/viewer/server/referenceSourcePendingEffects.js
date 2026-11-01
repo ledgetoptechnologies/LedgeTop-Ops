@@ -11,6 +11,8 @@ function hasPendingSourceEffects(processing,source){
  const db=processing.database;
  // The optional offline lifecycle-fence experiment may not be installed.
  if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_lifecycle_effects'").get()&&db.prepare("SELECT 1 FROM reference_lifecycle_effects WHERE state='in_flight' LIMIT 1").get())return true;
+ if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_catalog_cleanup_effects'").get()&&db.prepare("SELECT 1 FROM reference_catalog_cleanup_effects WHERE state='in_flight' LIMIT 1").get())return true;
+ if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_adoption_effects'").get()&&db.prepare("SELECT 1 FROM reference_adoption_effects WHERE state='in_flight' LIMIT 1").get())return true;
  // Unknown physical aliases mean an unclosed durable effect blocks globally.
  if(db.prepare("SELECT 1 FROM viewer_source_effect_claims WHERE state='in_flight' LIMIT 1").get())return true;
  // Configured roots can alias physically. Until a real scope attestor exists,
