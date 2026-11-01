@@ -1,15 +1,17 @@
 'use strict';
-// Synthetic loopback only. The invoker must independently verify the clean Processing checkout matches the stated commit.
-const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),{spawn}=require('node:child_process'),readline=require('node:readline');
+// Synthetic loopback only. The source tar must match the SHA-256 of a git archive of Processing 0b6d813f.
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto'),{spawn,spawnSync}=require('node:child_process'),readline=require('node:readline');
 const {createTransport}=require('../server/nativeEpochTransportCandidate'),{validate:validateEpoch}=require('../server/nativeEpochReceiptCandidate'),{buildPlan,checkPlanReceipt}=require('../server/nativePlanCandidate'),{checkReceipt}=require('../server/nativeManifestBindingCandidate'),{canonical,validate:validateManifest}=require('../server/nativeManifestCandidate');
-const source=process.env.PROCESSING_SYNTHETIC_SOURCE;
-test('Viewer and pinned synthetic Python coordinator replay both epoch close outcomes',{skip:!source,timeout:30000},async t=>{
-  assert.equal(process.env.PROCESSING_SOURCE_COMMIT,'0b6d813f6ebf31eac43ea64a8d7dfb09f2fe6a44');
-  const child=spawn('python3',['-m','tests.native_epoch_http_fixture'],{cwd:source,env:{...process.env,PROCESSING_SYNTHETIC_EPOCH_HTTP_FIXTURE:'1'},stdio:['pipe','pipe','pipe']});
+const archive=process.env.PROCESSING_SYNTHETIC_ARCHIVE;
+test('Viewer and verified synthetic Python coordinator replay both epoch close outcomes',{skip:!archive,timeout:30000},async t=>{
+  const bytes=fs.readFileSync(archive);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),'f9f2f3162b3b6ae41d4e4dc1650ae69c3c50d0ce44a1f15e28c70ff7fff77bf8');
+  const source=fs.mkdtempSync(path.join(os.tmpdir(),'epoch-source-')),snapshot=path.join(source,'verified-source.tar');fs.writeFileSync(snapshot,bytes,{flag:'wx'});
+  const extracted=spawnSync('tar',['-xf',snapshot,'-C',source],{stdio:'ignore',timeout:5000});if(extracted.status!==0){fs.rmSync(source,{recursive:true,force:true});assert.equal(extracted.status,0);}fs.rmSync(snapshot);
+  const child=spawn('python3',['-m','tests.native_epoch_http_fixture'],{cwd:source,env:{...process.env,PYTHONPATH:source,PYTHONNOUSERSITE:'1',PYTHONPYCACHEPREFIX:path.join(source,'.pycache'),PROCESSING_SYNTHETIC_EPOCH_HTTP_FIXTURE:'1'},stdio:['pipe','pipe','pipe']});
   let stderr='';child.stderr.on('data',chunk=>{stderr=(stderr+chunk.toString()).slice(-4096);});
   const closed=new Promise(resolve=>child.once('close',(code,signal)=>resolve({code,signal})));let stopped=false;
   const timer=setTimeout(()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');},25000);
-  t.after(async()=>{clearTimeout(timer);if(!stopped&&child.exitCode===null&&child.signalCode===null){child.stdin.end('STOP\n');const result=await Promise.race([closed,new Promise(resolve=>setTimeout(()=>resolve(null),7000).unref())]);if(!result){child.kill('SIGKILL');await closed;}}});
+  t.after(async()=>{clearTimeout(timer);if(!stopped&&child.exitCode===null&&child.signalCode===null){child.stdin.end('STOP\n');const result=await Promise.race([closed,new Promise(resolve=>setTimeout(()=>resolve(null),7000).unref())]);if(!result){child.kill('SIGKILL');await closed;}}fs.rmSync(source,{recursive:true,force:true});});
   const lines=readline.createInterface({input:child.stdout});const first=await Promise.race([new Promise((resolve,reject)=>{lines.once('line',resolve);child.once('error',reject);child.once('exit',()=>reject(new Error('fixture exited before readiness')));}),new Promise((_,reject)=>setTimeout(()=>reject(new Error('fixture readiness timed out')),8000).unref())]);
   const info=JSON.parse(first);assert.equal(info.fixture,'synthetic-v2');assert.equal(info.host,'127.0.0.1');
   const client=createTransport({endpoint:`http://127.0.0.1:${info.port}`,environmentToken:'synthetic-staging-token-'+'s'.repeat(32),enabled:true});
@@ -34,7 +36,8 @@ test('Viewer and pinned synthetic Python coordinator replay both epoch close out
     assert.equal(closedResult.state,accept?'bound_then_closed':'closed_without_bind');assert.equal(closedResult.planIntentPresent,true);
     assert.deepEqual(await call('revoke',revoke),firstClose);assert.deepEqual(await call('status'),firstClose);
     validateEpoch(await call('status'),expected,{action:'status',checkManifest,checkPlan});
-    await assert.rejects(call('accept',built.bytes),{code:'native_epoch_hold'});
+    const late=await fetch(`http://127.0.0.1:${info.port}/task/ledgetop/plan-epoch-v2/${task}/${operation}/1/1/accept?token=synthetic-staging-token-${'s'.repeat(32)}`,{method:'POST',headers:{'content-type':'application/json','X-LedgeTop-Capability':cap},body:built.bytes,signal:AbortSignal.timeout(5000)});
+    assert.equal(late.status,409);await late.arrayBuffer();assert.deepEqual(await call('status'),firstClose);
     await assert.rejects(call('revoke',{...revoke,expectedPlanSha256:null}),{code:'native_epoch_hold'});
   }
   await scenario(11,false);await scenario(12,true);
