@@ -83,3 +83,40 @@ receipt outbox, crash/restore reconciliation, and signed wire vectors; define
 acceptance and separately authorized release. The Processing source projection
 at commit `5d8394b` is similarly disabled and uses supplied snapshots. A local
 fixture match is not evidence any of those prerequisites is satisfied.
+
+## Disabled association signing outbox fixture
+
+`referenceV2AssociationOutboxFixture.js` creates a disposable-only SQLite
+outbox for the proposed **attempt mapping**, not a source-reservation receipt.
+The production method `liveIssue()` always rejects; no migration or route calls
+this fixture. It uses the existing inspection inside one `BEGIN IMMEDIATE`
+transaction to read the actual fixture binding, dataset and Viewer journal,
+then commits the exact canonical body, signed coordinator intent, fixture
+viewer public key and idempotency identities. A second SQLite writer test
+confirms the fixture's snapshot transaction holds the write lock. This does not
+lock filesystem writers or authenticate the supplied coordinator observation.
+
+The test-only signer runs after commit. Its Ed25519 signature is checked with
+the stored fixture public key, then the input, binding and journal are checked
+again in a new transaction before the signature is stored. Exact replay returns
+the stored bytes and signature without signing again; conflicts hold. Replay
+revalidates the supplied clock, key and records and can therefore fail closed
+after expiry or changes. An owned child is killed after signing but before the
+outbox update; its signature is not captured. A separate in-process signing
+interruption is compared with retry after reopening. Tests also reject signer
+mutation of message, key and expected context.
+When encoded for the proposed wire, a 64-byte Ed25519 signature is canonical
+unpadded base64url of 86 ASCII characters. No real key or signing service is
+used; schema/trigger integrity, independently current trust, storage rollback,
+physical source pin, quota, and actual cross-system attempt mapping remain
+unqualified. No response from this fixture permits source cleanup or delivery.
+The separate public `test/fixtures/viewer-two-attempt-association-signed-fixture.json`
+contains a fixed public test key and detached signature over the same canonical
+proposal. `test/helpers/reference-v2-mapping-test-signer.js` deliberately embeds
+the public test seed (32 bytes of `0x51`) so Processing can sign its own
+synthetic fixture; it must never be used as a production credential. It accepts
+exact canonical ASCII body bytes on standard input without a trailing newline,
+requires the synthetic staging/test issuer, key ID, deployments and authority
+UUID, and prints the test SPKI and signature. The helper checks fixture shape,
+not authority; no signature from this public key is a real Viewer issuance or
+cross-system authorization.

@@ -1,0 +1,8 @@
+{
+  "notice": "PUBLIC FIXED TEST KEY AND SIGNATURE; no authority, custody or source reservation",
+  "canonicalUtf8": "{\"audience\":\"coord-deploy\",\"claimLineageSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"coordinatorAttemptId\":\"00000000-0000-4000-8000-000000000002\",\"coordinatorAuthorityId\":\"00000000-0000-4000-8000-000000000004\",\"coordinatorDeploymentId\":\"coord-deploy\",\"coordinatorEpoch\":\"epoch-1\",\"environment\":\"staging\",\"expiresAt\":1100,\"generation\":1,\"intentDigest\":\"6cbdd90bcde41e64a6e4ceb76579efdaa848b329d1f0ea3d7f9181d7538bda80\",\"issuedAt\":1000,\"issuer\":\"viewer\",\"jobId\":\"00000000-0000-4000-8000-000000000001\",\"keyId\":\"fixture-key\",\"kind\":\"attempt-mapping\",\"manifestSha256\":\"90a4be94222d175f732fe29e0d30e9cd006595884da4dd9b04fb67e27d298489\",\"nonce\":\"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc\",\"operation\":\"bind-attempt\",\"pipelineDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"submissionId\":\"56f7e8af-73c7-4a51-9903-c59cc68c033b\",\"trustDomain\":\"test\",\"version\":1,\"viewerAttemptId\":\"00000000-0000-4000-8000-000000000003\",\"viewerDeploymentId\":\"viewer-deploy\",\"viewerLedgerEpoch\":\"ledger-epoch-1\",\"viewerLedgerId\":\"ledger-1\"}",
+  "signatureDomain": "ltds-v2-two-attempt-binding-experiment-v1\u0000",
+  "bodyCommitment": "149f50eea8c0be0a9e86de4301c7a74eafa622a220489f96eb11194a7ee2a8ab",
+  "publicKeySpkiDerHex": "302a300506032b6570032100c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a",
+  "signatureBase64url": "ui5diulQ-alJzI2AOwadyFBoL7vPDtglYTMo-Xl0Z8o5R9Q_eCr52lefdCWZldMJX_s1vhHm3fDWJan7AjzFCg"
+}
