@@ -48,6 +48,15 @@ receipt/reservation IDs and source revision. See Processing's
 `reference_v2_reservation_candidate.py` for exact field sets and validation.
 There is no claim-token-derived fingerprint in the Viewer contract.
 
+The public vector `test/fixtures/viewer-synthetic-reservation-v1.json` captures
+the local fixture's source bytes, input, exact canonical intent and receipt,
+SHA-256 values, test public key, domain including the NUL byte, and detached
+signature. `reference-v2-reservation-public-vector.test.js` reproduces the
+receipt and verifies positive and negative signatures. This is the synthetic
+outbox used by the managed-file experiment, not the proposed Processing wire:
+the file mapping is local and is not attested by that synthetic receipt. The
+vector has no private key or real data and conveys no authority.
+
 Real issuance still requires independently authenticated intent and current
 authority/epoch, approved exact schema and policy, a durable real multi-file
 source pin and quota across all writers, stream and old-binary fencing,

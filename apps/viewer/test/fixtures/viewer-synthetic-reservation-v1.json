@@ -1,0 +1,26 @@
+{
+  "format": "viewer-synthetic-reservation-vector-v1",
+  "warning": "Public synthetic fixture only; not Processing wire or production authority",
+  "sourceBase64": "cHVibGljIHN5bnRoZXRpYyBmaWxlIGZpeHR1cmUK",
+  "input": {
+    "intentId": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+    "idempotencyId": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+    "reservationId": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+    "receiptId": "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ",
+    "jobId": "fixture-job",
+    "generation": 1,
+    "sourceId": "fixture-source",
+    "sourceRevision": "rev-1",
+    "sourceSha256": "b4a618e95756f57df596d17034ba8a1f187977cd90adeae226e96927d53f3cc2",
+    "sourceBytes": 30,
+    "byteBudget": 30,
+    "keyId": "fixture-key",
+    "publicKeyDer": "MCowBQYDK2VwAyEAKDXg-2z7tOEYWJRUnur9SCkfEOpsp1zCJTAhTKl13mo"
+  },
+  "canonicalIntentUtf8": "{\"byteBudget\":30,\"generation\":1,\"idempotencyId\":\"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI\",\"intentId\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"jobId\":\"fixture-job\",\"keyId\":\"fixture-key\",\"publicKeyDer\":\"MCowBQYDK2VwAyEAKDXg-2z7tOEYWJRUnur9SCkfEOpsp1zCJTAhTKl13mo\",\"receiptId\":\"BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ\",\"reservationId\":\"AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM\",\"sourceBytes\":30,\"sourceId\":\"fixture-source\",\"sourceRevision\":\"rev-1\",\"sourceSha256\":\"b4a618e95756f57df596d17034ba8a1f187977cd90adeae226e96927d53f3cc2\"}",
+  "intentSha256": "c66d49c4c3c25444df385f6c1ddca2557097dd1291ce7ee49e902c14e96bc129",
+  "receiptUtf8": "{\"byteBudget\":30,\"generation\":1,\"intentSha256\":\"c66d49c4c3c25444df385f6c1ddca2557097dd1291ce7ee49e902c14e96bc129\",\"jobId\":\"fixture-job\",\"keyId\":\"fixture-key\",\"receiptId\":\"BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ\",\"reservationId\":\"AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM\",\"scope\":\"synthetic-only\",\"sourceBytes\":30,\"sourceId\":\"fixture-source\",\"sourceRevision\":\"rev-1\",\"sourceSha256\":\"b4a618e95756f57df596d17034ba8a1f187977cd90adeae226e96927d53f3cc2\",\"version\":1}",
+  "receiptSha256": "094be597aa8532b88768e0618f7d7e079d78d264fa87b5e58fc7af988d0d1218",
+  "signatureDomainUtf8WithNul": "ltds-v2-synthetic-reservation-receipt-v1\u0000",
+  "signatureBase64url": "kKsbvLkSEzeGw2CfVmiN_cEioJMzU1SJBDFkCsg9HHtVD6xDk_0X-ljApnQr0L-GnLCjt4y6lFRj6g1reDA9CQ"
+}
