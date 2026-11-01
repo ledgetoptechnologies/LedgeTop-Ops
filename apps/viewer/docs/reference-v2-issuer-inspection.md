@@ -28,6 +28,48 @@ mapping or claim lineage is inferred from similar IDs or names. The test also
 rejects a validly signed, protocol-valid subset that tries to submit the raw
 CSV in place of the image.
 
+## Provisional two-attempt association
+
+The optional fixture comparison reads `viewer_reference_attempt_journal` by
+the bound Viewer attempt, verifies exact stored request/job hashes, matches the
+local task/dataset, submission ID, environment, job ID, generation, Processing
+manifest and pipeline digest, and compares these with the supplied coordinator
+observation and signed intent. The coordinator observation, key registry,
+clock and signed claim-lineage value are still supplied and untrusted. A local
+journal match is **not** an authenticated or current coordinator claim.
+The pipeline digest is compared to the stored job and supplied observation; it
+is not independently recomputed from the submission pipeline or authenticated.
+The separate database reads do not form a consistent transaction snapshot.
+
+For joint review only, the unsigned proposal has exactly these fields:
+
+`version`, `kind`, `issuer`, `keyId`, `audience`, `operation`, `issuedAt`,
+`expiresAt`, `nonce`, `environment`, `trustDomain`, `coordinatorDeploymentId`,
+`coordinatorAuthorityId`, `coordinatorEpoch`, `viewerDeploymentId`,
+`viewerLedgerId`, `viewerLedgerEpoch`, `viewerAttemptId`,
+`coordinatorAttemptId`, `submissionId`, `jobId`, `generation`, `manifestSha256`,
+`pipelineDigest`, `intentDigest`, and `claimLineageSha256`.
+
+Literal fixture values are `kind: "attempt-mapping"` and
+`operation: "bind-attempt"`. The nonce is exactly 32 bytes encoded as
+canonical unpadded base64url (43 ASCII characters); validating its encoding
+does not establish how it was generated.
+
+The experimental detached-signature domain proposal is ASCII
+`ltds-v2-two-attempt-binding-experiment-v1` followed by one NUL and the exact
+canonical body. The separate diagnostic body commitment is SHA-256 of ASCII
+`ltds-v2-two-attempt-binding-digest-experiment-v1`, one NUL, and those same
+body bytes. `intentDigest` is the existing domain-separated intent commitment;
+`claimLineageSha256` is copied from the signed intent but is not independently
+verified. `nonce`, issued/expiry times and the 300-second limit are provisional;
+shape checking cannot prove randomness or trustworthy time. The proposed body
+is not allowed to outlive its input intent. The public unsigned
+vector `test/fixtures/viewer-two-attempt-association-proposal.json` uses two
+different synthetic UUIDs and is checked against the actual fixture journal.
+It is neither a signature nor an agreed wire. A production implementation must
+derive and verify both sides from independently authorized persisted records,
+and must not serialize a claim token or token-derived fingerprint.
+
 Before any real receipt or source reservation: establish independently trusted
 issuer/key/audience/purpose, revocation and current epoch/clock; define a
 durable, authoritative cross-system job/attempt/claim mapping; qualify source
