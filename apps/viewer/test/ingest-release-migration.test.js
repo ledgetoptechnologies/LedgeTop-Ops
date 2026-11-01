@@ -3,6 +3,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),{DatabaseSy
 const {applyMigrations}=require('../server/database');
 const {ProcessingRepository}=require('../server/processingRepository');
 const {ViewerRepository}=require('../server/repository');
+const {registerIngest}=require('../server/ingestRegistration');
 
 test('migration 41 preserves existing pending and leased work in a populated database',()=>{
   const db=new DatabaseSync(':memory:');
@@ -35,6 +36,13 @@ test('stale same-owner ingest cannot renew, defer, fail, or override cancellatio
     db.prepare("UPDATE processing_jobs SET status='complete' WHERE attempt_id=?").run(attempt.id);r.transitionAttempt(attempt.id,'ingesting');r.enqueueJob(attempt.id,'ingest');
     const old=r.claimJob('same-owner');assert.ok(old);db.prepare("UPDATE processing_jobs SET lease_expires_at='2000' WHERE id=?").run(old.id);
     const current=r.claimJob('same-owner');assert.equal(current.id,old.id);assert.ok(current.attempt_count>old.attempt_count);
+    db.prepare('UPDATE processing_jobs SET lease_expires_at=? WHERE id=?').run(new Date(Date.now()+50).toISOString(),current.id);
+    db.function('synthetic_wait',()=>{Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,100);return 0;});
+    db.exec("CREATE TRIGGER synthetic_delay BEFORE UPDATE OF error_code ON processing_attempts BEGIN SELECT synthetic_wait(); END");
+    assert.throws(()=>r.failIngestDownloadJob(current.id,'same-owner',new Date().toISOString(),current.attempt_count),{code:'lease_lost'});
+    db.exec('DROP TRIGGER synthetic_delay');
+    assert.equal(db.prepare('SELECT status FROM processing_jobs WHERE id=?').get(current.id).status,'leased');
+    db.prepare('UPDATE processing_jobs SET lease_expires_at=? WHERE id=?').run(new Date(Date.now()+60000).toISOString(),current.id);
     assert.equal(r.heartbeatJob(old.id,'same-owner',60,old.attempt_count),false);
     assert.equal(r.failIngestDownloadJob(old.id,'same-owner',new Date().toISOString(),old.attempt_count),false);
     assert.equal(r.failJob(old.id,'same-owner','test','test',new Date().toISOString(),old.attempt_count),false);
@@ -46,11 +54,14 @@ test('stale same-owner ingest cannot renew, defer, fail, or override cancellatio
     assert.throws(()=>viewer.upsertModelVersion({provider:'test',providerModelId:'model',providerVersionId:'version',displayName:'Test',assets:[]},{ingestFence:fence}),{code:'lease_lost'});
     assert.throws(()=>r.registerModelOutput({versionId:'version',modelId:'model',taskId:task.id,attemptId:attempt.id,projectId:project.id,relativePath:'synthetic',byteSize:1,assetCount:1,ingestFence:fence}),{code:'lease_lost'});
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM models WHERE provider='test'").get().n,0);
-    const valid={...fence,generation:current.attempt_count};
-    const model=viewer.upsertModelVersion({provider:'test',providerModelId:'model',providerVersionId:'version',displayName:'Test',assets:[],status:'importing',makeActive:false},{ingestFence:valid});
-    const version=db.prepare('SELECT id FROM model_versions WHERE model_id=?').get(model.id);
-    assert.ok(r.setAttemptResultForJob(current.id,'same-owner',model.id,version.id,current.attempt_count));
-    assert.ok(r.registerModelOutput({versionId:version.id,modelId:model.id,taskId:task.id,attemptId:attempt.id,projectId:project.id,relativePath:'synthetic',byteSize:1,assetCount:0,status:'staged',ingestFence:valid}));
+    const valid={...fence,generation:current.attempt_count},modelInput={provider:'test',providerModelId:'model',providerVersionId:'version',displayName:'Test',assets:[],status:'importing',makeActive:false},outputInput={taskId:task.id,attemptId:attempt.id,projectId:project.id,relativePath:'synthetic',byteSize:1,assetCount:0,status:'staged'};
+    db.exec("CREATE TRIGGER reject_synthetic_output BEFORE INSERT ON model_outputs BEGIN SELECT RAISE(ABORT,'injected output failure'); END");
+    assert.throws(()=>registerIngest({processing:r,repository:viewer,fence:valid,modelInput,outputInput}),/injected output failure/);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM models WHERE provider='test'").get().n,0);
+    assert.equal(r.getAttempt(attempt.id).resultModelId,null);
+    db.exec('DROP TRIGGER reject_synthetic_output');
+    const {model,version}=registerIngest({processing:r,repository:viewer,fence:valid,modelInput,outputInput});
+    assert.ok(r.getModelOutput(version.id));
     assert.equal(db.prepare('SELECT status FROM processing_jobs WHERE id=?').get(old.id).status,'leased');
     r.cancelAttempt(attempt.id);assert.equal(r.failIngestDownloadJob(current.id,'same-owner',new Date().toISOString(),current.attempt_count),false);
     assert.throws(()=>viewer.upsertModelVersion({provider:'test',providerModelId:'after-cancel',providerVersionId:'version',displayName:'Test',assets:[]},{ingestFence:valid}),{code:'lease_lost'});
