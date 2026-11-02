@@ -25,16 +25,16 @@ function readMetadata(db,datasetId,projectId){
  const computed=crypto.createHash('sha256').update(JSON.stringify(files.map(f=>({relativePath:f.relative_path,byteSize:f.byte_size,sha256:f.sha256})))).digest('hex');
  if(total!==d.byte_size||computed!==d.manifest_sha256)throw fail();return {dataset:d,files};
 }
-function createSourceSnapshotAcquirer({database,environment,projectId,holderRegistry,managedRoot}={}){
+function createSourceSnapshotAcquirer({database,environment,projectId,holderRegistry,managedRoot,managedRootFd}={}){
  // Caller-controlled registries are not authentication; production binding is a separate gate.
- if(!database||!['staging','production'].includes(environment)||!slug(projectId)||!Array.isArray(holderRegistry)||holderRegistry.length!==1||!holderRegistry[0]||holderRegistry[0].holderId!=='viewer-odm'||holderRegistry[0].environment!==environment||holderRegistry[0].projectId!==projectId||!slug(holderRegistry[0].registryVersion)||typeof managedRoot!=='string'||!path.isAbsolute(managedRoot))throw fail();
+ if(!database||!['staging','production'].includes(environment)||!slug(projectId)||!Array.isArray(holderRegistry)||holderRegistry.length!==1||!holderRegistry[0]||holderRegistry[0].holderId!=='viewer-odm'||holderRegistry[0].environment!==environment||holderRegistry[0].projectId!==projectId||!slug(holderRegistry[0].registryVersion)||typeof managedRoot!=='string'||!path.isAbsolute(managedRoot)||(managedRootFd!==undefined&&(!Number.isInteger(managedRootFd)||managedRootFd<0)))throw fail();
  const holder=Object.freeze({...holderRegistry[0]});
  function acquire({datasetId,holderId}={}){
   if(process.platform!=='linux'||!fs.existsSync('/proc/self/fd')||!slug(datasetId)||holderId!==holder.holderId)throw fail();
-  const meta=readMetadata(database,datasetId,projectId),rootPath=path.resolve(managedRoot);
+  const meta=readMetadata(database,datasetId,projectId),rootPath=path.resolve(managedRoot),openRoot=()=>managedRootFd===undefined?openAbsoluteDir(rootPath):fs.openSync(`/proc/self/fd/${managedRootFd}`,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_CLOEXEC);
   let rootFd,datasetFd;
   try{
-   rootFd=openAbsoluteDir(rootPath);
+   rootFd=openRoot();
    const rootBefore=fs.fstatSync(rootFd,{bigint:true});datasetFd=openPath(rootFd,meta.dataset.relative_path,true);const datasetBefore=fs.fstatSync(datasetFd,{bigint:true});
    // One bounded buffer per acquisition, not one megabyte per photo. Files
    // are read sequentially and their bytes are never placed in SQLite.
@@ -55,12 +55,12 @@ function createSourceSnapshotAcquirer({database,environment,projectId,holderRegi
    // Reopen every name from the pinned root to detect replacement while walking.
    for(const item of observed.values()){const fd=openPath(datasetFd,item.relativePath);try{if(identity(fs.fstatSync(fd,{bigint:true}))!==item.fileIdentity)throw fail();}finally{fs.closeSync(fd);}}
    const freshDatasetFd=openPath(rootFd,meta.dataset.relative_path,true);try{if(identity(fs.fstatSync(freshDatasetFd,{bigint:true}))!==identity(datasetBefore))throw fail();}finally{fs.closeSync(freshDatasetFd);}
-   const freshRootFd=openAbsoluteDir(rootPath);try{if(identity(fs.fstatSync(freshRootFd,{bigint:true}))!==identity(rootBefore))throw fail();}finally{fs.closeSync(freshRootFd);}
+   const freshRootFd=openRoot();try{if(identity(fs.fstatSync(freshRootFd,{bigint:true}))!==identity(rootBefore))throw fail();}finally{fs.closeSync(freshRootFd);}
    const finalMeta=readMetadata(database,datasetId,projectId);if(JSON.stringify(finalMeta)!==JSON.stringify(meta))throw fail();
    const files=[...observed.values()].sort((a,b)=>a.relativePath<b.relativePath?-1:a.relativePath>b.relativePath?1:0).map(({fileIdentity,...v})=>v);
    // A later cheap identity check detects ordinary changes after hashing. It
    // is not a lock: bytes can still change immediately after this check.
-   function verifyIdentity(){let root,dir;try{root=openAbsoluteDir(rootPath);if(identity(fs.fstatSync(root,{bigint:true}))!==identity(rootBefore))throw fail();dir=openPath(root,meta.dataset.relative_path,true);if(identity(fs.fstatSync(dir,{bigint:true}))!==identity(datasetBefore))throw fail();for(const [rel,expected] of directories){const fd=rel?openPath(dir,rel,true):fs.openSync(`/proc/self/fd/${dir}`,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_CLOEXEC);try{if(identity(fs.fstatSync(fd,{bigint:true}))!==expected)throw fail()}finally{fs.closeSync(fd)}}for(const item of observed.values()){const fd=openPath(dir,item.relativePath);try{if(identity(fs.fstatSync(fd,{bigint:true}))!==item.fileIdentity)throw fail()}finally{fs.closeSync(fd)}}return true}catch{throw fail()}finally{if(dir!==undefined)fs.closeSync(dir);if(root!==undefined)fs.closeSync(root)}}
+   function verifyIdentity(){let root,dir;try{root=openRoot();if(identity(fs.fstatSync(root,{bigint:true}))!==identity(rootBefore))throw fail();dir=openPath(root,meta.dataset.relative_path,true);if(identity(fs.fstatSync(dir,{bigint:true}))!==identity(datasetBefore))throw fail();for(const [rel,expected] of directories){const fd=rel?openPath(dir,rel,true):fs.openSync(`/proc/self/fd/${dir}`,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_CLOEXEC);try{if(identity(fs.fstatSync(fd,{bigint:true}))!==expected)throw fail()}finally{fs.closeSync(fd)}}for(const item of observed.values()){const fd=openPath(dir,item.relativePath);try{if(identity(fs.fstatSync(fd,{bigint:true}))!==item.fileIdentity)throw fail()}finally{fs.closeSync(fd)}}return true}catch{throw fail()}finally{if(dir!==undefined)fs.closeSync(dir);if(root!==undefined)fs.closeSync(root)}}
    return {type:'unfenced_source_snapshot',environment,projectId,holderId:holder.holderId,registryVersion:holder.registryVersion,datasetId,rootKey:'datasets',datasetRelativePath:meta.dataset.relative_path,datasetManifestSha256:meta.dataset.manifest_sha256,files,verifyIdentity};
   }catch(error){if(error?.code==='source_snapshot_unavailable')throw error;throw fail();}finally{if(datasetFd!==undefined)fs.closeSync(datasetFd);if(rootFd!==undefined)fs.closeSync(rootFd);}
  }

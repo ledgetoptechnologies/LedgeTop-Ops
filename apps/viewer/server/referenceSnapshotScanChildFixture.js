@@ -1,0 +1,10 @@
+'use strict';
+// Owned offline test child; no route, issuer or production authority.
+const fs=require('node:fs'),{DatabaseSync}=require('node:sqlite'),{descriptorMountId}=require('./storageManager'),{createSourceSnapshotAcquirer}=require('./sourceSnapshotAcquisition');
+function identity(fd){const stat=fs.fstatSync(fd,{bigint:true});if(!stat.isDirectory())throw Error('root unavailable');return {dev:String(stat.dev),ino:String(stat.ino),mountId:descriptorMountId(fd)}}
+function same(a,b){return a.dev===b.dev&&a.ino===b.ino&&a.mountId===b.mountId}
+try{
+ const bytes=fs.readFileSync(0);if(bytes.length>8192)throw Error('input limit');const input=JSON.parse(bytes.toString('utf8'));let root,db,check;
+ try{root=fs.openSync(input.snapshotRoot,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC);if(!same(identity(root),input.rootIdentity))throw Error('root identity mismatch');db=new DatabaseSync(input.databasePath,{readOnly:true});db.exec('PRAGMA foreign_keys=ON');const observed=createSourceSnapshotAcquirer({database:db,environment:'staging',projectId:input.projectId,holderRegistry:[{holderId:'viewer-odm',environment:'staging',projectId:input.projectId,registryVersion:'fixture'}],managedRoot:input.snapshotRoot,managedRootFd:root}).acquire({datasetId:input.datasetId,holderId:'viewer-odm'});observed.verifyIdentity();check=fs.openSync(input.snapshotRoot,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC);if(!same(identity(check),input.rootIdentity)||!same(identity(root),input.rootIdentity)||observed.datasetManifestSha256!==input.manifestSha256)throw Error('identity mismatch');process.stdout.write(JSON.stringify({rootIdentity:identity(root),datasetId:observed.datasetId,manifestSha256:observed.datasetManifestSha256,objectCount:observed.files.length}));
+ }finally{if(check!==undefined)fs.closeSync(check);if(db)db.close();if(root!==undefined)fs.closeSync(root)}
+}catch{process.stderr.write('snapshot scan fixture unavailable\n');process.exitCode=1}

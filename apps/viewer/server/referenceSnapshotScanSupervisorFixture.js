@@ -1,0 +1,20 @@
+'use strict';
+// Test-only process orchestration. No authenticated root authority or hold.
+const path=require('node:path'),{spawn}=require('node:child_process'),{validateSnapshotEvidenceFixture}=require('./referenceSnapshotBridgeFixture');
+const fail=()=>Object.assign(new Error('snapshot scan fixture unavailable'),{code:'snapshot_scan_fixture_unavailable'});
+async function scanSnapshotFixture({scope,databasePath,snapshotRoot,rootIdentity,getEvidence,signal,timeoutMs=30000,onSpawn}={}){
+ if(scope!=='isolated-snapshot-scan-supervisor'||!path.isAbsolute(databasePath||'')||!path.isAbsolute(snapshotRoot||'')||!rootIdentity||!['dev','ino','mountId'].every(k=>typeof rootIdentity[k]==='string'&&/^\d{1,32}$/.test(rootIdentity[k]))||typeof getEvidence!=='function'||!Number.isSafeInteger(timeoutMs)||timeoutMs<1||timeoutMs>3600000||(onSpawn!==undefined&&typeof onSpawn!=='function')||signal?.aborted)throw fail();
+ const deadline=performance.now()+timeoutMs,remaining=()=>Math.max(0,deadline-performance.now()),check=()=>{if(signal?.aborted||remaining()<=0)throw fail()};
+ async function evidencePhase(){check();return new Promise((resolve,reject)=>{let done=false;const controller=new AbortController(),finish=(error,value)=>{if(done)return;done=true;clearTimeout(timer);signal?.removeEventListener('abort',abort);error?reject(fail()):resolve(value)},abort=()=>{controller.abort();finish(true)},timer=setTimeout(abort,Math.max(1,remaining()));signal?.addEventListener('abort',abort,{once:true});Promise.resolve().then(()=>{if(done||controller.signal.aborted)throw fail();check();return getEvidence({signal:controller.signal})}).then(value=>{try{check();finish(false,validateSnapshotEvidenceFixture(value))}catch{finish(true)}},()=>finish(true));if(signal?.aborted)abort()})}
+ const first=await evidencePhase();check();
+ const input={databasePath,snapshotRoot,rootIdentity,projectId:first.projectId,datasetId:first.datasetId,manifestSha256:first.manifestSha256};let child;
+ const result=await new Promise((resolve,reject)=>{
+  let stdout='',done=false,interrupted=false,exitTimer;const finish=(error,value)=>{if(done)return;done=true;clearTimeout(timer);clearTimeout(exitTimer);signal?.removeEventListener('abort',stop);error?reject(error):resolve(value)};
+  const stop=()=>{if(interrupted)return;interrupted=true;if(child?.pid){try{child.kill('SIGKILL')}catch{}exitTimer=setTimeout(()=>finish(Object.assign(new Error('owned snapshot child exit unconfirmed'),{code:'snapshot_scan_child_exit_unconfirmed',ownedPid:child.pid})),2000)}else finish(fail())},timer=setTimeout(stop,Math.max(1,remaining()));
+  try{child=spawn(process.execPath,[require.resolve('./referenceSnapshotScanChildFixture')],{stdio:['pipe','pipe','ignore'],windowsHide:true});signal?.addEventListener('abort',stop,{once:true});child.stdout.on('data',chunk=>{stdout+=chunk;if(stdout.length>4096)stop()});child.stdout.on('error',stop);child.once('error',()=>{if(child.pid)stop();else finish(fail())});child.once('close',code=>{if(interrupted||code!==0)return finish(fail());try{finish(null,JSON.parse(stdout))}catch{finish(fail())}});child.stdin.on('error',()=>{});child.stdin.end(JSON.stringify(input));if(onSpawn){try{onSpawn(child.pid)}catch{stop()}}if(signal?.aborted)stop()}catch{if(child?.pid)stop();else finish(fail())}
+ });
+ check();const fresh=await evidencePhase();check();
+ const stable=['version','environment','authorityId','authorityEpoch','keyId','volumeId','snapshotId','holdId','projectId','datasetId','manifestSha256'];if(stable.some(k=>first[k]!==fresh[k])||result.datasetId!==first.datasetId||result.manifestSha256!==first.manifestSha256||!Number.isSafeInteger(result.objectCount)||result.objectCount<1||['dev','ino','mountId'].some(k=>result.rootIdentity?.[k]!==rootIdentity[k]))throw fail();
+ check();return Object.freeze({scope:'untrusted_fixture_evidence_no_custody',datasetId:result.datasetId,manifestSha256:result.manifestSha256,objectCount:result.objectCount,storageBarrier:'unverified',authorityFreshness:'caller_supplied_rechecked'});
+}
+module.exports={scanSnapshotFixture};

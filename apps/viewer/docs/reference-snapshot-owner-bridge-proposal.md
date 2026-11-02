@@ -68,8 +68,20 @@ authority epoch, revocation, hold and descriptor-to-view identity after the
 scan and again at commit, including a renewal plan for long scans. The current
 scan uses synchronous reads and would block a live Node event loop; it needs a
 bounded owned worker or process, cancellation, cleanup and I/O qualification
-before production. The fixture now includes a key ID, but neither its registry
-nor its clock is independently trusted.
+before production. An offline supervisor fixture now performs its scan in one
+owned child, pins the opened root descriptor, checks the caller-supplied device,
+inode and mount ID before and after scanning, and asks for another signed
+evidence packet afterward. One deadline and cancellation signal cover evidence
+retrieval and the child; timeout/cancellation kills the owned child and waits
+for exit, reporting its PID if termination cannot be confirmed. The callback
+receives the signal but an evidence provider that ignores cancellation can
+continue its own work. Tests verify child exit for ordinary cancellation and
+timeout. The child closes its descriptor before the final evidence check, and
+the expected root identity, registry and clock are caller-supplied: the result
+does not bind the descriptor to the signed volume/snapshot/hold or establish a
+real fence. Ancestor-path, privileged writer and replacement races remain.
+Neither its registry nor its clock is independently trusted, and this process
+fixture is not wired to admission, signing or production startup.
 
 The separate compatibility rehearsal seeds nonempty synthetic rows before
 fixture-only deny triggers and checks schema-aware reopen. It does not prove a
