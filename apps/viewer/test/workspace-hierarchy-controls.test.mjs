@@ -56,9 +56,11 @@ test('the Customers dialog lists active customers first, escapes names and offer
   assert.doesNotMatch(html, /Alpha <County>/);
   assert.match(html, /<small>2 projects<\/small>/);
   assert.match(html, /data-hierarchy="archive" data-kind="group" data-id="group-roads"/);
+  assert.match(html, /data-hierarchy="create-project" data-kind="organization" data-id="org-alpha">Create project<\/button>/);
   assert.match(html, /data-hierarchy="restore" data-kind="group" data-id="group-closed"/);
   assert.match(html, /data-hierarchy="restore" data-kind="organization" data-id="org-old"/);
   assert.doesNotMatch(html, /data-hierarchy="add-group" data-kind="organization" data-id="org-old"/, 'no new groups inside an archived customer');
+  assert.doesNotMatch(html, /data-hierarchy="create-project" data-kind="organization" data-id="org-old"/, 'no project creation inside an archived customer');
   assert.doesNotMatch(html, /delete/i, 'there is no delete');
   assert.match(html, /don't change who can see a model/);
 });
@@ -68,4 +70,6 @@ test('the workspace wires the controls only behind the management capability', a
   assert.match(source, /\$\{canManageHierarchy\(state\.hierarchy,can\)\?'<button type="button" class="secondary-button" data-action="manage-customers"/);
   assert.match(source, /\$\{canManageHierarchy\(state\.hierarchy,can\)\?button\('set-project-customer',project\.id,'Set customer'\):''\}/);
   assert.match(source, /hierarchyWrite\(`\/api\/v1\/projects\/\$\{encodeURIComponent\(project\.id\)\}\/hierarchy`,'PATCH',assignmentBody\(/);
+  assert.match(source, /\/api\/v1\/processing\/organizations\/\$\{encodeURIComponent\(entity\.id\)\}\/projects`,'POST',body,'Project created for customer'/);
+  assert.match(source, /JSON\.stringify\(\[entity\.id,body\]\).*key=`viewer\.customer-project\.v1:\$\{digest\}`/, 'the same request key is reproducible after losing tab session storage');
 });

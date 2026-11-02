@@ -20,10 +20,37 @@ idempotency key. Mutations and audit records commit in the same transaction.
 | --- | --- |
 | Paginated organizations and groups | `GET /api/v1/processing/hierarchy` |
 | Create organization | `POST /api/v1/processing/organizations` |
+| Create a project for an active organization | `POST /api/v1/processing/organizations/:organizationId/projects` |
 | Rename or archive organization | `PATCH /api/v1/processing/organizations/:id` |
 | Create group | `POST /api/v1/processing/project-groups` |
 | Rename or archive group | `PATCH /api/v1/processing/project-groups/:id` |
 | Assign or clear a project's grouping | `PATCH /api/v1/projects/:id/hierarchy` |
+
+Customer-bound project creation uses the normal project-write permission and
+required idempotency key. Its closed body accepts `displayName`, optional
+`description`, and optional `defaultUnits`. Project insertion, assignment to
+the selected customer with no group, and the audit event commit in one database
+transaction. The response includes the project with its exact organization ID
+and hierarchy revision.
+
+The project ID is deterministic for the authenticated admin session, request
+subject, request key, and request hash. The exact 201 response receipt commits
+in the same transaction as project insertion, customer assignment, and audit.
+It remains available across admin-session renewal and project rename/archive,
+so a retry replays the original response instead of inferring it from mutable
+project state. After the normal seven-day response retention, the receipt is
+redacted to a small `410 idempotency_result_expired` tombstone, preventing a
+late retry from creating a duplicate without retaining the old project
+details; after that response, the caller must locate the project in the
+workspace. The UI derives the key from the customer ID and request body, so
+the same request can recover without tab-session storage. A changed request
+using the same key conflicts. Archived or missing organizations fail without
+leaving a project, assignment, or audit record.
+
+Active project names are unique within a customer, regardless of group. The
+same name may be used under another customer. Legacy unassigned projects keep
+their own uniqueness scope, and customer assignment, rename, and restore all
+enforce the destination scope.
 
 The list accepts `limit` from 1 to 100 and returns an opaque `nextCursor` when
 more records remain. The workspace requests 100 per page and follows cursors,
@@ -55,9 +82,10 @@ its preset initialization. A conflicting version or an old private hierarchy
 footprint is refused; it is not silently adopted or renumbered. A schema without
 the component retains the legacy unassigned DTO defaults.
 
-This source branch selectively reuses the hierarchy component from `ccb24bef`.
-It does not merge the older reference-provider branch. It is prepared on the
-upload-fixed main commit `4b4f7075` and has not been deployed.
+This customer-project creation candidate is based on draft PR #406's hierarchy
+head `b489c4bf738befcad4c7867869117c9cab41b5e3`; it does not merge the older
+reference-provider branch. It is an isolated candidate and has not been
+deployed.
 
 ## Verification and remaining acceptance
 
@@ -73,6 +101,7 @@ database connection and access grants were unchanged. This proves API-to-groupin
 interoperability, not rendered browser usability.
 
 Current-main reconciliation, actual GCP-schema interoperability, independent
-review, the workspace's create/assign controls, desktop/mobile rendering and
-operator acceptance remain release gates. TrueNAS installation remains under
-Beau's control.
+review and operator acceptance remain release gates. The direct
+customer-bound project creation flow and its browser rendering passed focused
+synthetic checks in this candidate. TrueNAS installation remains under Beau's
+control.

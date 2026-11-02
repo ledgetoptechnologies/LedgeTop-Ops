@@ -2,6 +2,7 @@ import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -169,6 +170,16 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   // archived customers refuse new assignments, and a group must belong to the chosen customer.
   const hierarchy = runtime.hierarchy;
   const hierarchyError = (code, status = 400) => json({ error: code, code }, status);
+  const organizationProjectCreate = pathname.match(/^\/api\/v1\/processing\/organizations\/([^/]+)\/projects$/);
+  if (organizationProjectCreate && method === 'POST') {
+    const organizationId = decodeURIComponent(organizationProjectCreate[1]);
+    if (hierarchy.organizations.find(item => item.id === organizationId)?.status !== 'active') return hierarchyError('organization_archived', 409);
+    if (Object.keys(body).sort().join() !== 'description,displayName' || typeof body.displayName !== 'string' || !body.displayName.trim()) return hierarchyError('invalid_project_fields');
+    const project = { id: `customer-project-${runtime.projects.length + 1}`, displayName: body.displayName.trim(), description: body.description || '', status: 'active', organizationId, groupId: null, hierarchyRevision: 1 };
+    runtime.projects.push(project);
+    hierarchy.assignments.set(project.id, { organizationId, groupId: null, hierarchyRevision: 1 });
+    return json({ project }, 201);
+  }
   if (pathname === '/api/v1/processing/hierarchy') return json({ schemaVersion: 1, organizations: hierarchy.organizations, groups: hierarchy.groups, nextCursor: null, capabilities: { manageHierarchy: runtime.manageHierarchy && (runtime.permissions || ['viewer.projects.write']).includes('viewer.projects.write') } });
   const hierarchyEntity = pathname.match(/^\/api\/v1\/processing\/(organizations|project-groups)(?:\/([^/]+))?$/);
   if (hierarchyEntity && ['POST', 'PATCH'].includes(method)) {
@@ -189,7 +200,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   }
   const projectHierarchy = pathname.match(/^\/api\/v1\/projects\/([^/]+)\/hierarchy$/);
   if (projectHierarchy && method === 'PATCH') {
-    const project = fixtures.projects.find(item => item.id === decodeURIComponent(projectHierarchy[1]));
+    const project = runtime.projects.find(item => item.id === decodeURIComponent(projectHierarchy[1]));
     const current = hierarchy.assignments.get(project?.id) || { organizationId: null, groupId: null, hierarchyRevision: 0 };
     if (!project) return hierarchyError('project_not_found', 404);
     if (Object.keys(body).sort().join() !== 'expectedRevision,groupId,organizationId') return hierarchyError('invalid_hierarchy_fields');
@@ -199,7 +210,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
     hierarchy.assignments.set(project.id, { organizationId: body.organizationId, groupId: body.groupId, hierarchyRevision: current.hierarchyRevision + 1 });
     return json({ project: { ...project, ...hierarchy.assignments.get(project.id) } });
   }
-  if (pathname === '/api/v1/projects') return json({ projects: fixtures.projects.filter(item=>!runtime.archivedProjects.has(item.id)).map(item => ({ ...item, ...(hierarchy.assignments.get(item.id) || {}) })), nextCursor: null });
+  if (pathname === '/api/v1/projects') return json({ projects: runtime.projects.filter(item=>!runtime.archivedProjects.has(item.id)).map(item => ({ ...item, ...(hierarchy.assignments.get(item.id) || {}) })), nextCursor: null });
   if (pathname === '/api/v1/datasets') return json({ datasets: fixtures.datasets, nextCursor: null });
   if (pathname === '/api/v1/tasks') return json({ tasks: fixtures.tasks.filter(item=>!runtime.archivedTasks.has(item.id)), nextCursor: null });
   if (pathname === '/api/v1/processing/providers' && method === 'GET') return json({ providers: fixtures.providers });
@@ -417,8 +428,19 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   return json({ error: `Unhandled fixture route: ${pathname}` }, 404);
 }
 
+function resetInteractiveRuntime(runtime) {
+  runtime.projects = structuredClone(fixtures.projects);
+  runtime.hierarchy = { sequence: 0, organizations: [{ id: 'org-adams', displayName: 'Adams County', status: 'active', revision: 1 }, { id: 'org-zenith', displayName: 'Zenith Materials', status: 'active', revision: 1 }], groups: [], assignments: new Map(runtime.projects.filter(item => item.organizationId).map(item => [item.id, { organizationId: item.organizationId, groupId: item.groupId ?? null, hierarchyRevision: item.hierarchyRevision ?? 1 }])) };
+  runtime.manageHierarchy = true; runtime.forceHierarchyConflict = false; runtime.logSequence = 0; runtime.flakyDiagnosticRequests = 0;
+  runtime.correspondences = []; runtime.shares = []; runtime.requests = []; runtime.permissions = null;
+  runtime.outputs = structuredClone(fixtures.outputs); runtime.archivedProjects = new Set(); runtime.archivedTasks = new Set();
+  runtime.failNextStorage = false; runtime.operations = structuredClone(fixtures.operations); runtime.derivatives = structuredClone(fixtures.derivatives);
+  runtime.failOrthophotoResponse = false; runtime.rejectCompanionRepair = false;
+  delete runtime.orthophotoResponseGate; delete runtime.taskDetailResponseGate;
+}
+
 function startFixtureServer() {
-  const runtime = { manageHierarchy: true, forceHierarchyConflict: false, hierarchy: { sequence: 0, organizations: [{ id: 'org-adams', displayName: 'Adams County', status: 'active', revision: 1 }, { id: 'org-zenith', displayName: 'Zenith Materials', status: 'active', revision: 1 }], groups: [], assignments: new Map(fixtures.projects.filter(item => item.organizationId).map(item => [item.id, { organizationId: item.organizationId, groupId: item.groupId ?? null, hierarchyRevision: item.hierarchyRevision ?? 1 }])) }, logSequence: 0, flakyDiagnosticRequests: 0, correspondences: [], shares: [], requests: [], permissions: null, outputs: structuredClone(fixtures.outputs), archivedProjects: new Set(), archivedTasks: new Set(), failNextStorage: false, operations: structuredClone(fixtures.operations), derivatives: structuredClone(fixtures.derivatives) };
+  const runtime = { projects: structuredClone(fixtures.projects), manageHierarchy: true, forceHierarchyConflict: false, hierarchy: { sequence: 0, organizations: [{ id: 'org-adams', displayName: 'Adams County', status: 'active', revision: 1 }, { id: 'org-zenith', displayName: 'Zenith Materials', status: 'active', revision: 1 }], groups: [], assignments: new Map(fixtures.projects.filter(item => item.organizationId).map(item => [item.id, { organizationId: item.organizationId, groupId: item.groupId ?? null, hierarchyRevision: item.hierarchyRevision ?? 1 }])) }, logSequence: 0, flakyDiagnosticRequests: 0, correspondences: [], shares: [], requests: [], permissions: null, outputs: structuredClone(fixtures.outputs), archivedProjects: new Set(), archivedTasks: new Set(), failNextStorage: false, operations: structuredClone(fixtures.operations), derivatives: structuredClone(fixtures.derivatives) };
   const builtRoot = path.join(root, 'dist');
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
@@ -686,8 +708,18 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitForRequest(runtime, hierarchyStart, 'POST', '/api/v1/processing/organizations');
     const greenleaf = `org-created-${sequenceBefore + 1}`;
     await waitFor(client, `document.querySelector('[data-customer-id="${greenleaf}"]') !== null`, `${viewport.name}: new customer missing from the dialog`);
+    const createProjectStart = runtime.requests.length;
+    await client.evaluate(`document.querySelector('[data-customer-id="${greenleaf}"] [data-hierarchy="create-project"]').click()`);
+    await decide('Create project for Greenleaf Fire Department', { displayName: 'New Build', description: 'Synthetic project hierarchy fixture' });
+    await waitForRequest(runtime, createProjectStart, 'POST', `/api/v1/processing/organizations/${greenleaf}/projects`);
+    await waitFor(client, "document.querySelector('#workspace-toast')?.textContent.includes('Project created for customer') && !document.querySelector('[aria-busy=\"true\"]')", `${viewport.name}: customer-bound project create did not settle`);
+    assert.deepEqual(runtime.requests.filter(item => item.method === 'POST' && item.path.endsWith(`/organizations/${greenleaf}/projects`)).at(-1).body, { displayName: 'New Build', description: 'Synthetic project hierarchy fixture' }, `${viewport.name}: customer-bound create request`);
+    const projectCreateRequest=runtime.requests.filter(item => item.method === 'POST' && item.path.endsWith(`/organizations/${greenleaf}/projects`)).at(-1),expectedKey=`viewer.customer-project.v1:${createHash('sha256').update(JSON.stringify([greenleaf,projectCreateRequest.body])).digest('hex')}`;
+    assert.equal(projectCreateRequest.idempotencyKey,expectedKey,`${viewport.name}: retry key must be reproducible without tab session storage`);
+    assert.equal(runtime.projects.at(-1).organizationId, greenleaf, `${viewport.name}: created project customer`);
+    assert.equal(runtime.projects.at(-1).groupId, null, `${viewport.name}: New Build is a project, not a group`);
     await client.evaluate(`document.querySelector('[data-customer-id="${greenleaf}"] [data-hierarchy="add-group"]').click()`);
-    await decide('Add a group to Greenleaf Fire Department', { displayName: 'New Build' });
+    await decide('Add a group to Greenleaf Fire Department', { displayName: 'Field Sites' });
     await waitForRequest(runtime, hierarchyStart, 'POST', '/api/v1/processing/project-groups');
     const newBuild = `group-created-${sequenceBefore + 2}`;
     await waitFor(client, `document.querySelector('[data-customer-id="${greenleaf}"] [data-group-id="${newBuild}"]') !== null`, `${viewport.name}: new group missing from the dialog`);
@@ -707,7 +739,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "document.querySelector('#project-filter') !== null", `${viewport.name}: Projects did not return`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.project-group')].map(group=>[group.querySelector('h2').textContent,[...group.querySelectorAll('.project-subgroup h3')].map(item=>item.textContent).join(','),[...group.querySelectorAll('.project-row')].map(row=>row.dataset.projectName).join(',')])`), [
       ['Adams County', '', 'johnson road survey'],
-      ['Greenleaf Fire Department', 'New Build', 'alpha quarry'],
+      ['Greenleaf Fire Department', 'Field Sites', 'new build,alpha quarry'],
     ], `${viewport.name}: project did not regroup under its customer and group`);
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: grouped Projects overflows`);
 
@@ -728,24 +760,27 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='Johnson'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('[data-project-name]')].map(row=>({name:row.dataset.projectName,hidden:row.hidden}))`), [
       { name: 'johnson road survey', hidden: false },
+      { name: 'new build', hidden: true },
       { name: 'alpha quarry', hidden: true },
     ], `${viewport.name}: project search result visibility`);
     const groupVisibility = `[...document.querySelectorAll('.project-group')].map(group=>({label:group.querySelector('h2').textContent,shown:getComputedStyle(group).display!=='none'}))`;
     assert.deepEqual(await client.evaluate(groupVisibility), [
       { label: 'Adams County', shown: true },
+      { label: 'Greenleaf Fire Department', shown: false },
       { label: 'Zenith Materials', shown: false },
     ], `${viewport.name}: empty customer group heading stayed visible during search`);
     await client.evaluate(`document.querySelector('[data-project-status="ready"]').click()`);
     await client.evaluate(`document.querySelector('[data-project-status="all"]').click()`);
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value=''; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
-    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.project-row')].map(row=>getComputedStyle(row).display!=='none')`), [true, true],
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.project-row')].map(row=>getComputedStyle(row).display!=='none')`), [true, true, true],
       `${viewport.name}: clearing search after a status filter did not restore every project`);
     assert.deepEqual(await client.evaluate(groupVisibility), [
       { label: 'Adams County', shown: true },
+      { label: 'Greenleaf Fire Department', shown: true },
       { label: 'Zenith Materials', shown: true },
     ], `${viewport.name}: customer headings did not return after clearing search`);
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='zenith'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
-    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('[data-project-name]')].map(row=>row.hidden)`), [true, false],
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('[data-project-name]')].map(row=>row.hidden)`), [true, true, false],
       `${viewport.name}: customer-name search did not find its project`);
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='no such project'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
     assert.equal(await client.evaluate(`getComputedStyle(document.querySelector('.project-no-matches')).display!=='none'`), true, `${viewport.name}: no-match message missing`);
@@ -1082,7 +1117,7 @@ test('project-first workspace is interactive and overflow-free in real desktop a
       { name: 'desktop', width: 1440, height: 900, mobile: false },
       { name: '390px mobile', width: 390, height: 844, mobile: true },
       { name: '320px mobile', width: 320, height: 720, mobile: true },
-    ].filter(viewport => !requestedViewport || viewport.name === requestedViewport)) await t.test(viewport.name, () => verifyViewport(devTools, origin, viewport, runtime));
+    ].filter(viewport => !requestedViewport || viewport.name === requestedViewport)) { resetInteractiveRuntime(runtime); await t.test(viewport.name, () => verifyViewport(devTools, origin, viewport, runtime)); }
   } finally {
     try {
       if (browser) {

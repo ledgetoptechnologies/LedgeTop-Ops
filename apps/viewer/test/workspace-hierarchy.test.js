@@ -132,3 +132,71 @@ test('hierarchy API enforces permission, mutate receipts, closed fields and CAS'
   assert.equal((await c.request(update,{method:'PATCH',body:{expectedRevision:1,status:'archived'}})).status,200);
   assert.equal((await c.request(`/api/v1/projects/${project.id}`)).status,200);
 });
+
+test('customer project receipt survives session renewal and later project changes, then redacts without allowing duplicates',async t=>{
+  const c=await apiFixture(t),organization=c.processing.createHierarchyEntity('organization',{displayName:'Greenleaf Fire Department'}),route=`/api/v1/processing/organizations/${organization.id}/projects`,body={displayName:'New Build',description:'Synthetic customer project'},key=crypto.randomUUID(),permissionsBefore=snapshot(c.db,['session_grants','viewer_sessions','public_shares']);
+  const createdResponse=await c.request(route,{method:'POST',body,key});assert.equal(createdResponse.status,201);const project=(await createdResponse.json()).project;
+  assert.equal(project.displayName,'New Build');assert.equal(project.organizationId,organization.id);assert.equal(project.groupId,null);assert.equal(project.hierarchyRevision,1);
+  assert.deepEqual(snapshot(c.db,['session_grants','viewer_sessions','public_shares']),permissionsBefore,'customer hierarchy remains display metadata and does not grant access');
+  const receipt=c.processing.getSubjectOperationReceipt('synthetic:operator',key);assert.equal(receipt.responseStatus,201);assert.deepEqual(receipt.response,{project});assert.equal(receipt.operationId,null);
+  const renamed=await c.request(`/api/v1/projects/${project.id}`,{method:'PATCH',body:{displayName:'Renamed after create'}});assert.equal(renamed.status,200);
+  const renewedToken=c.token(['viewer.projects.read','viewer.projects.write']),recoveredResponse=await c.request(route,{method:'POST',body,key,token:renewedToken});assert.equal(recoveredResponse.status,201);assert.equal(recoveredResponse.headers.get('idempotency-replayed'),'true');assert.deepEqual((await recoveredResponse.json()).project,project);
+  assert.equal((await c.request(route,{method:'POST',body:{...body,description:'changed body'},key,token:renewedToken})).status,409);
+  c.processing.pruneSubjectOperationReceipts(7,Date.now()+8*86400_000);const pruned=c.processing.getSubjectOperationReceipt('synthetic:operator',key);assert.equal(pruned.responseStatus,410);assert.deepEqual(pruned.response,{error:'idempotency_result_expired',code:'idempotency_result_expired'});
+  const lateRetry=await c.request(route,{method:'POST',body,key,token:renewedToken});assert.equal(lateRetry.status,410);assert.equal(lateRetry.headers.get('idempotency-replayed'),'true');assert.deepEqual(await lateRetry.json(),pruned.response);
+  assert.equal(c.db.prepare('SELECT count(*) n FROM projects').get().n,1);assert.equal(c.db.prepare('SELECT count(*) n FROM viewer_project_hierarchy WHERE project_id=? AND organization_id=? AND group_id IS NULL').get(project.id,organization.id).n,1);
+  const audits=c.db.prepare("SELECT action,entity_id,details_json FROM audit_events WHERE action='project.created_for_organization'").all();assert.equal(audits.length,1);assert.equal(audits[0].entity_id,project.id);assert.equal(JSON.parse(audits[0].details_json).organizationId,organization.id);
+});
+
+test('project title uniqueness follows customer scope through create, rename, assignment and groups',async t=>{
+  const c=await apiFixture(t),first=c.processing.createHierarchyEntity('organization',{displayName:'Customer One'}),second=c.processing.createHierarchyEntity('organization',{displayName:'Customer Two'}),group=c.processing.createHierarchyEntity('group',{organizationId:first.id,displayName:'Site A'}),create=(org,displayName,key=crypto.randomUUID())=>c.request(`/api/v1/processing/organizations/${org.id}/projects`,{method:'POST',body:{displayName},key});
+  const oneResponse=await create(first,'New Build');assert.equal(oneResponse.status,201);const one=(await oneResponse.json()).project;
+  assert.equal((await c.request(`/api/v1/projects/${one.id}/hierarchy`,{method:'PATCH',body:{organizationId:first.id,groupId:group.id,expectedRevision:1}})).status,200);
+  assert.equal((await create(first,'new build')).status,409,'same customer name conflicts even in another group');
+  const twoResponse=await create(second,'New Build');assert.equal(twoResponse.status,201);const two=(await twoResponse.json()).project;
+  assert.equal((await c.request(`/api/v1/projects/${two.id}/hierarchy`,{method:'PATCH',body:{organizationId:first.id,groupId:null,expectedRevision:1}})).status,409,'assignment cannot introduce a duplicate into the target customer');
+  assert.equal((await c.request(`/api/v1/projects/${two.id}`,{method:'PATCH',body:{displayName:'Different'}})).status,200);
+  assert.equal((await c.request(`/api/v1/projects/${two.id}`,{method:'PATCH',body:{displayName:'New Build'}})).status,200,'another customer may use the same project name');
+  const unassigned=c.processing.createProject({displayName:'Legacy Unassigned'});assert.throws(()=>c.processing.createProject({displayName:'legacy unassigned'}),{code:'project_name_conflict'});
+  assert.equal((await create(first,'Legacy Unassigned')).status,201,'assigned projects have a separate name scope from legacy unassigned projects');
+  assert.ok(unassigned.id);
+});
+
+test('generic project creation cannot spoof the customer scope or bypass unassigned uniqueness',async t=>{
+  const c=await apiFixture(t),organization=c.processing.createHierarchyEntity('organization',{displayName:'Spoof Target'}),existing=c.processing.createProject({displayName:'Existing Unassigned'});
+  assert.throws(()=>c.processing.createProject({displayName:'Existing Unassigned',nameScopeOrganizationId:organization.id}),{code:'project_name_conflict'});
+  const forged=await c.request('/api/v1/projects',{method:'POST',body:{displayName:'Existing Unassigned',nameScopeOrganizationId:organization.id}});assert.equal(forged.status,400);
+  const projectCount=c.db.prepare('SELECT count(*) n FROM projects').get().n;assert.equal(projectCount,1);assert.equal(c.processing.getProject(existing.id).organizationId,null);
+});
+
+test('concurrent customer project creates serialize the same-scope name check',async t=>{
+  const c=await apiFixture(t),organization=c.processing.createHierarchyEntity('organization',{displayName:'Concurrent Customer'}),route=`/api/v1/processing/organizations/${organization.id}/projects`,body={displayName:'Concurrent Site'},responses=await Promise.all([c.request(route,{method:'POST',body,key:crypto.randomUUID()}),c.request(route,{method:'POST',body,key:crypto.randomUUID()})]);
+  assert.deepEqual(responses.map(response=>response.status).sort(),[201,409]);assert.equal(c.db.prepare("SELECT count(*) n FROM projects WHERE display_name='Concurrent Site'").get().n,1);assert.equal(c.db.prepare('SELECT count(*) n FROM viewer_project_hierarchy').get().n,1);assert.equal(c.db.prepare("SELECT count(*) n FROM audit_events WHERE action='project.created_for_organization'").get().n,1);
+});
+
+test('archived project restore rechecks the original customer name scope',t=>{
+  const{processing:p}=fixture(t),organization=p.createHierarchyEntity('organization',{displayName:'Restore Customer'}),first=p.createProject({displayName:'Site One'},{nameScopeOrganizationId:organization.id});
+  p.assignProjectHierarchy(first.id,{organizationId:organization.id,groupId:null,expectedRevision:0});
+  const trash=p.trashProject(first.id);assert.ok(trash?.id);
+  const replacement=p.createProject({displayName:'Site One'},{nameScopeOrganizationId:organization.id});p.assignProjectHierarchy(replacement.id,{organizationId:organization.id,groupId:null,expectedRevision:0});
+  assert.equal(p.canRestoreMetadataEntity(trash.id),false);
+  assert.equal(p.restoreMetadataEntity(trash.id),null);
+  assert.equal(p.getProject(first.id).status,'archived');assert.equal(p.getProject(replacement.id).status,'active');
+});
+
+test('customer creation rolls back its response receipt when audit persistence fails and can retry',async t=>{
+  const c=await apiFixture(t),organization=c.processing.createHierarchyEntity('organization',{displayName:'Receipt Recovery Customer'}),route=`/api/v1/processing/organizations/${organization.id}/projects`,body={displayName:'Retry Safely'},key=crypto.randomUUID(),insertAudit=c.processing.insertAudit;
+  c.processing.insertAudit=function(input){if(input.action==='project.created_for_organization')throw new Error('synthetic audit outage');return insertAudit.call(this,input);};
+  assert.equal((await c.request(route,{method:'POST',body,key})).status,500);c.processing.insertAudit=insertAudit;
+  assert.equal(c.db.prepare('SELECT count(*) n FROM projects').get().n,0);assert.equal(c.db.prepare('SELECT count(*) n FROM viewer_project_hierarchy').get().n,0);
+  let receipt=c.processing.getSubjectOperationReceipt('synthetic:operator',key);assert.equal(receipt.responseStatus,null);assert.equal(receipt.response,null);
+  c.db.prepare('UPDATE subject_operation_receipts SET created_at=? WHERE subject=? AND client_key=?').run(new Date(Date.now()-3*60_000).toISOString(),'synthetic:operator',key);
+  const retry=await c.request(route,{method:'POST',body,key});assert.equal(retry.status,201);receipt=c.processing.getSubjectOperationReceipt('synthetic:operator',key);assert.equal(receipt.responseStatus,201);
+  assert.equal(c.db.prepare('SELECT count(*) n FROM projects').get().n,1);assert.equal(c.db.prepare('SELECT count(*) n FROM viewer_project_hierarchy').get().n,1);assert.equal(c.db.prepare("SELECT count(*) n FROM audit_events WHERE action='project.created_for_organization'").get().n,1);
+});
+
+test('create project for archived customer rolls back the project, assignment and audit together',async t=>{
+  const c=await apiFixture(t),organization=c.processing.createHierarchyEntity('organization',{displayName:'Archived Customer'});c.processing.updateHierarchyEntity('organization',organization.id,{status:'archived',expectedRevision:1});
+  const read=()=>({projects:c.db.prepare('SELECT * FROM projects ORDER BY id').all(),hierarchy:c.db.prepare('SELECT * FROM viewer_project_hierarchy ORDER BY project_id').all(),audits:c.db.prepare('SELECT * FROM audit_events ORDER BY id').all()}),before=read(),response=await c.request(`/api/v1/processing/organizations/${organization.id}/projects`,{method:'POST',body:{displayName:'Must not be created'}});
+  assert.equal(response.status,409);assert.deepEqual(read(),before);
+});
