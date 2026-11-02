@@ -55,7 +55,7 @@ function reservationBody(receiptId = fixture.acceptance.receiptId) {
   return body;
 }
 
-function treeDarReservation(receiptId = 'treedar-receipt', { combined = false } = {}) {
+function treeDarReservation(receiptId = 'treedar-receipt', { combined = false, jobId = fixture.resultManifest.jobId } = {}) {
   const roles = [
     'ground_model', 'canopy_height', 'canopy_height_unfiltered', 'crown_labels',
     'crowns', 'tree_table', 'tree_features', 'run_summary', 'report', 'preview',
@@ -70,7 +70,7 @@ function treeDarReservation(receiptId = 'treedar-receipt', { combined = false } 
   const resultManifest = {
     protocol: protocol.TREEDAR_RESULT_PROTOCOL,
     schemaVersion: 2,
-    jobId: fixture.resultManifest.jobId,
+    jobId,
     generation: fixture.resultManifest.generation,
     environment: fixture.resultManifest.environment,
     pipelineDigest: fixture.resultManifest.pipelineDigest,
@@ -81,12 +81,14 @@ function treeDarReservation(receiptId = 'treedar-receipt', { combined = false } 
   resultManifest.resultManifestSha256 = protocol.resultManifestSha256(resultManifest);
   const expected = {
     ...expectedFromFixture(),
+    jobId,
     resultManifestSha256: resultManifest.resultManifestSha256,
     objectIds: resultManifest.objects.map(object => object.id),
   };
   const acceptance = structuredClone(fixture.acceptance);
   acceptance.receiptId = receiptId;
   acceptance.storageReceiptId = `storage-${receiptId}`;
+  acceptance.jobId = jobId;
   acceptance.resultManifestSha256 = resultManifest.resultManifestSha256;
   acceptance.acceptedObjectIds = [...expected.objectIds];
   return {
@@ -252,7 +254,7 @@ httpIntegrationTest('real Express middleware preserves binary streams and the si
   assert.equal(fs.readFileSync(path.join(storage.root, 'receipt-1', 'result-1.bin'), 'utf8'), 'abc');
 
   const treeReceiptId = 'treedar-express-v2';
-  const tree = treeDarReservation(treeReceiptId, { combined: true });
+  const tree = treeDarReservation(treeReceiptId, { combined: true, jobId: 'treedar-express-job' });
   const treeReservationPath = `${TREEDAR_PATH}/${treeReceiptId}`;
   const treeBody = Buffer.from(JSON.stringify(tree.body));
   const treeReserved = await fetch(base + treeReservationPath, {
