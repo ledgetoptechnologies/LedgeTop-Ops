@@ -253,3 +253,12 @@ both cases. The test checks Processing rejects zero-length, wrong wire class,
 more than 256 files, more than 64 MiB and noncanonical bytes. Its container-only
 data and caller-asserted completeness do not prove authenticated inventory,
 source custody, physical stream fencing, GCP semantics or retry authority.
+
+The revised paired fixture also passed against clean Processing commit
+`499a544da71f8e6662a89597914b8e5429bc9f00`, which commits binding and journal
+intent in one transaction. It killed the synthetic process after the binding
+insert and before journal preparation, verified both tables were absent after
+restart, committed the exact replay and exited, then rejected reordered replay
+and accepted the original. This exercises that particular pre-journal point
+and the post-commit point; it does not test a crash after journal writes but
+before commit or establish a physical fence. Viewer continues to hold.

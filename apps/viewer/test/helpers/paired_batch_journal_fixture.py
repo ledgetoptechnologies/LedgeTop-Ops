@@ -25,7 +25,7 @@ if mode == 'validate':
     sys.exit(0)
 if mode == 'crash':
     root.mkdir(mode=0o700)
-elif mode != 'replay' or not root.is_dir():
+elif mode not in ('recover', 'replay') or not root.is_dir():
     raise ValueError('fixture replay root required')
 body = sys.stdin.buffer.read(65537)
 if not body or len(body) > 65536:
@@ -43,7 +43,12 @@ try:
     if mode == 'crash':
         def crash_before_journal(*args, **kwargs):
             os._exit(76)
-        adapter.journal.prepare = crash_before_journal
+        adapter.journal._prepare_in_transaction = crash_before_journal
+    if mode == 'recover':
+        with queue._db() as db:
+            for table in ('viewer_batch_fixture_bindings', 'viewer_batch_intents'):
+                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                    raise RuntimeError('partial transaction was not rolled back')
     try:
         result = adapter.prepare(task, 'production', capability, generation=1,
             attempt_id=intent['attemptId'], intent_bytes=body)
@@ -52,6 +57,8 @@ try:
             print('{"error":"fixture_binding_conflict"}', flush=True)
             sys.exit(42)
         raise
+    if mode == 'recover':
+        os._exit(77)
     snapshots = []
     for entry, data in zip(intent['entries'], (b'photo!', b'points'), strict=True):
         name = base64.urlsafe_b64decode(entry['wireNameUtf8Base64url'] + '===').decode('ascii')
