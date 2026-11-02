@@ -2522,6 +2522,126 @@ const MIGRATIONS = [
       ))) OR (NEW.status='planned' AND NEW.completed_at IS NOT NULL)
       BEGIN SELECT RAISE(ABORT,'container plan cannot complete'); END;
   `},
+  // Dormant durable transfer intent. It stores digests and reservation identity,
+  // never the bearer grant; dispatch remains disabled until a production adapter
+  // and recovery authority are implemented and reviewed.
+  {version:57,name:'viewer_reference_transfer_outbox_dormant',sql:`
+    CREATE TABLE viewer_reference_transfer_outbox (
+      outbox_id TEXT PRIMARY KEY NOT NULL,
+      attempt_id TEXT NOT NULL REFERENCES viewer_reference_attempt_journal(attempt_id) ON DELETE RESTRICT,
+      job_id TEXT NOT NULL,
+      generation INTEGER NOT NULL CHECK(typeof(generation)='integer' AND generation>0),
+      environment TEXT NOT NULL CHECK(environment IN ('staging','production')),
+      reservation_id TEXT NOT NULL,
+      reservation_generation INTEGER NOT NULL CHECK(typeof(reservation_generation)='integer' AND reservation_generation>0),
+      reservation_nonce_sha256 TEXT NOT NULL CHECK(length(reservation_nonce_sha256)=64 AND reservation_nonce_sha256 NOT GLOB '*[^0-9a-f]*'),
+      reservation_expires_at TEXT NOT NULL,
+      reservation_byte_budget INTEGER NOT NULL CHECK(typeof(reservation_byte_budget)='integer' AND reservation_byte_budget>0),
+      manifest_sha256 TEXT NOT NULL CHECK(length(manifest_sha256)=64 AND manifest_sha256 NOT GLOB '*[^0-9a-f]*'),
+      grant_id TEXT NOT NULL,
+      grant_identity_sha256 TEXT NOT NULL CHECK(length(grant_identity_sha256)=64 AND grant_identity_sha256 NOT GLOB '*[^0-9a-f]*'),
+      grant_sha256 TEXT NOT NULL CHECK(length(grant_sha256)=64 AND grant_sha256 NOT GLOB '*[^0-9a-f]*'),
+      state TEXT NOT NULL CHECK(state IN ('prepared','sending','uncertain','acknowledged','held')),
+      send_attempts INTEGER NOT NULL DEFAULT 0 CHECK(typeof(send_attempts)='integer' AND send_attempts>=0),
+      sender_generation INTEGER NOT NULL DEFAULT 0 CHECK(typeof(sender_generation)='integer' AND sender_generation>=0),
+      acknowledgement_sha256 TEXT CHECK(acknowledgement_sha256 IS NULL OR (length(acknowledgement_sha256)=64 AND acknowledgement_sha256 NOT GLOB '*[^0-9a-f]*')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(attempt_id,reservation_id,reservation_generation),
+      CHECK((state='acknowledged')=(acknowledgement_sha256 IS NOT NULL))
+    );
+    CREATE INDEX viewer_reference_transfer_outbox_state_idx ON viewer_reference_transfer_outbox(state,created_at);
+    CREATE TRIGGER viewer_reference_transfer_outbox_identity_immutable BEFORE UPDATE ON viewer_reference_transfer_outbox
+      WHEN NEW.rowid IS NOT OLD.rowid OR NEW.outbox_id IS NOT OLD.outbox_id OR NEW.attempt_id IS NOT OLD.attempt_id OR NEW.job_id IS NOT OLD.job_id OR NEW.generation IS NOT OLD.generation OR NEW.environment IS NOT OLD.environment OR NEW.reservation_id IS NOT OLD.reservation_id OR NEW.reservation_generation IS NOT OLD.reservation_generation OR NEW.reservation_nonce_sha256 IS NOT OLD.reservation_nonce_sha256 OR NEW.reservation_expires_at IS NOT OLD.reservation_expires_at OR NEW.reservation_byte_budget IS NOT OLD.reservation_byte_budget OR NEW.manifest_sha256 IS NOT OLD.manifest_sha256 OR NEW.grant_id IS NOT OLD.grant_id OR NEW.grant_identity_sha256 IS NOT OLD.grant_identity_sha256 OR NEW.grant_sha256 IS NOT OLD.grant_sha256 OR NEW.created_at IS NOT OLD.created_at
+      BEGIN SELECT RAISE(ABORT,'reference transfer outbox identity immutable'); END;
+    CREATE TRIGGER viewer_reference_transfer_outbox_transition BEFORE UPDATE ON viewer_reference_transfer_outbox
+      WHEN NOT (
+        (OLD.state='prepared' AND NEW.state='sending' AND NEW.send_attempts=OLD.send_attempts+1 AND NEW.sender_generation>OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state IN ('sending','uncertain') AND NEW.state='sending' AND NEW.send_attempts=OLD.send_attempts+1 AND NEW.sender_generation>OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state='sending' AND NEW.state IN ('uncertain','held') AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state IN ('sending','uncertain') AND NEW.state='acknowledged' AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NOT NULL)
+      )
+      BEGIN SELECT RAISE(ABORT,'reference transfer outbox transition invalid'); END;
+    CREATE TRIGGER viewer_reference_transfer_outbox_no_delete BEFORE DELETE ON viewer_reference_transfer_outbox
+      BEGIN SELECT RAISE(ABORT,'reference transfer outbox retained'); END;
+  `},
+  // Tighten v57 in a forward-only migration so already-applied candidate
+  // databases keep their migration identity and upgrade safely.
+  {version:58,name:'viewer_reference_transfer_outbox_sender_fence',sql:`
+    DROP TRIGGER viewer_reference_transfer_outbox_transition;
+    CREATE TRIGGER viewer_reference_transfer_outbox_transition BEFORE UPDATE ON viewer_reference_transfer_outbox
+      WHEN NOT (
+        (OLD.state='prepared' AND NEW.state='sending' AND NEW.send_attempts=OLD.send_attempts+1 AND NEW.sender_generation>OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state='sending' AND NEW.state IN ('uncertain','held') AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state='uncertain' AND NEW.state='held' AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state='sending' AND NEW.state='acknowledged' AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NOT NULL)
+      )
+      BEGIN SELECT RAISE(ABORT,'reference transfer outbox transition invalid'); END;
+  `},
+  {version:59,name:'viewer_reference_transfer_outbox_grant_digest',sql:`
+    CREATE TABLE viewer_reference_transfer_grant_bindings (
+      outbox_id TEXT PRIMARY KEY NOT NULL REFERENCES viewer_reference_transfer_outbox(outbox_id) ON DELETE RESTRICT,
+      canonical_grant_sha256 TEXT NOT NULL CHECK(length(canonical_grant_sha256)=64 AND canonical_grant_sha256 NOT GLOB '*[^0-9a-f]*'),
+      created_at TEXT NOT NULL
+    );
+    CREATE TRIGGER viewer_reference_transfer_grant_binding_no_replace BEFORE INSERT ON viewer_reference_transfer_grant_bindings
+      WHEN EXISTS(SELECT 1 FROM viewer_reference_transfer_grant_bindings WHERE outbox_id=NEW.outbox_id OR rowid=NEW.rowid)
+      BEGIN SELECT RAISE(ABORT,'reference transfer grant binding retained'); END;
+    CREATE TRIGGER viewer_reference_transfer_grant_binding_immutable BEFORE UPDATE ON viewer_reference_transfer_grant_bindings
+      BEGIN SELECT RAISE(ABORT,'reference transfer grant binding immutable'); END;
+    CREATE TRIGGER viewer_reference_transfer_grant_binding_no_delete BEFORE DELETE ON viewer_reference_transfer_grant_bindings
+      BEGIN SELECT RAISE(ABORT,'reference transfer grant binding retained'); END;
+  `},
+  {version:60,name:'viewer_reference_transfer_outbox_status_reconciliation',sql:`
+    CREATE TABLE viewer_reference_transfer_outbox_reconciliations (
+      outbox_id TEXT PRIMARY KEY NOT NULL REFERENCES viewer_reference_transfer_outbox(outbox_id) ON DELETE RESTRICT,
+      recovery_generation INTEGER NOT NULL CHECK(typeof(recovery_generation)='integer' AND recovery_generation>0),
+      canonical_grant_sha256 TEXT NOT NULL CHECK(length(canonical_grant_sha256)=64 AND canonical_grant_sha256 NOT GLOB '*[^0-9a-f]*'),
+      acknowledgement_sha256 TEXT NOT NULL CHECK(length(acknowledgement_sha256)=64 AND acknowledgement_sha256 NOT GLOB '*[^0-9a-f]*'),
+      created_at TEXT NOT NULL
+    );
+    CREATE TRIGGER viewer_reference_transfer_outbox_reconciliation_no_replace BEFORE INSERT ON viewer_reference_transfer_outbox_reconciliations
+      WHEN EXISTS(SELECT 1 FROM viewer_reference_transfer_outbox_reconciliations WHERE outbox_id=NEW.outbox_id OR rowid=NEW.rowid)
+      BEGIN SELECT RAISE(ABORT,'reference transfer reconciliation retained'); END;
+    CREATE TRIGGER viewer_reference_transfer_outbox_reconciliation_immutable BEFORE UPDATE ON viewer_reference_transfer_outbox_reconciliations
+      BEGIN SELECT RAISE(ABORT,'reference transfer reconciliation immutable'); END;
+    CREATE TRIGGER viewer_reference_transfer_outbox_reconciliation_no_delete BEFORE DELETE ON viewer_reference_transfer_outbox_reconciliations
+      BEGIN SELECT RAISE(ABORT,'reference transfer reconciliation retained'); END;
+    DROP TRIGGER viewer_reference_transfer_outbox_transition;
+    CREATE TRIGGER viewer_reference_transfer_outbox_transition BEFORE UPDATE ON viewer_reference_transfer_outbox
+      WHEN NOT (
+        (OLD.state='prepared' AND NEW.state='sending' AND NEW.send_attempts=OLD.send_attempts+1 AND NEW.sender_generation>OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state='sending' AND NEW.state IN ('uncertain','held') AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state='uncertain' AND NEW.state='held' AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state='sending' AND NEW.state='acknowledged' AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NOT NULL AND NOT EXISTS(SELECT 1 FROM viewer_reference_transfer_outbox_reconciliations WHERE outbox_id=OLD.outbox_id)) OR
+        (OLD.state IN ('sending','uncertain') AND NEW.state='acknowledged' AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NOT NULL AND EXISTS(SELECT 1 FROM viewer_reference_transfer_outbox_reconciliations r JOIN viewer_reference_transfer_grant_bindings g ON g.outbox_id=r.outbox_id WHERE r.outbox_id=OLD.outbox_id AND r.recovery_generation>OLD.sender_generation AND r.canonical_grant_sha256=g.canonical_grant_sha256 AND r.acknowledgement_sha256=NEW.acknowledgement_sha256))
+      )
+      BEGIN SELECT RAISE(ABORT,'reference transfer outbox transition invalid'); END;
+  `},
+  {version:61,name:'viewer_reference_transfer_reconciliation_claim_purpose',sql:`
+    CREATE TABLE viewer_reference_transfer_reconciliation_claims (
+      attempt_id TEXT NOT NULL REFERENCES viewer_reference_attempt_journal(attempt_id) ON DELETE RESTRICT,
+      recovery_generation INTEGER NOT NULL CHECK(typeof(recovery_generation)='integer' AND recovery_generation>0),
+      outbox_id TEXT NOT NULL REFERENCES viewer_reference_transfer_outbox(outbox_id) ON DELETE RESTRICT,
+      owner TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(attempt_id,recovery_generation),
+      UNIQUE(outbox_id,recovery_generation)
+    );
+    CREATE TRIGGER viewer_reference_transfer_reconciliation_claim_no_replace BEFORE INSERT ON viewer_reference_transfer_reconciliation_claims
+      WHEN EXISTS(SELECT 1 FROM viewer_reference_transfer_reconciliation_claims WHERE (attempt_id=NEW.attempt_id AND recovery_generation=NEW.recovery_generation) OR rowid=NEW.rowid)
+      BEGIN SELECT RAISE(ABORT,'reference transfer recovery claim retained'); END;
+    CREATE TRIGGER viewer_reference_transfer_reconciliation_claim_immutable BEFORE UPDATE ON viewer_reference_transfer_reconciliation_claims
+      BEGIN SELECT RAISE(ABORT,'reference transfer recovery claim immutable'); END;
+    CREATE TRIGGER viewer_reference_transfer_reconciliation_claim_no_delete BEFORE DELETE ON viewer_reference_transfer_reconciliation_claims
+      BEGIN SELECT RAISE(ABORT,'reference transfer recovery claim retained'); END;
+    CREATE TRIGGER viewer_reference_transfer_reconciliation_claim_validate BEFORE INSERT ON viewer_reference_transfer_reconciliation_claims
+      WHEN NOT EXISTS(SELECT 1 FROM viewer_reference_transfer_outbox o JOIN viewer_reference_attempt_journal j ON j.attempt_id=o.attempt_id WHERE o.outbox_id=NEW.outbox_id AND o.attempt_id=NEW.attempt_id AND o.state IN ('sending','uncertain') AND NEW.recovery_generation>o.sender_generation AND j.lease_owner=NEW.owner AND j.lease_generation=NEW.recovery_generation)
+      BEGIN SELECT RAISE(ABORT,'reference transfer recovery claim invalid'); END;
+    CREATE TRIGGER viewer_reference_transfer_outbox_reconciliation_validate BEFORE INSERT ON viewer_reference_transfer_outbox_reconciliations
+      WHEN NOT EXISTS(SELECT 1 FROM viewer_reference_transfer_outbox o JOIN viewer_reference_transfer_reconciliation_claims c ON c.outbox_id=o.outbox_id AND c.attempt_id=o.attempt_id AND c.recovery_generation=NEW.recovery_generation JOIN viewer_reference_attempt_journal j ON j.attempt_id=c.attempt_id AND j.lease_owner=c.owner AND j.lease_generation=c.recovery_generation WHERE o.outbox_id=NEW.outbox_id AND o.state IN ('sending','uncertain'))
+      BEGIN SELECT RAISE(ABORT,'reference transfer reconciliation claim missing'); END;
+  `},
 ];
 
 function applyMigrations(database) {

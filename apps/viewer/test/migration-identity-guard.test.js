@@ -28,6 +28,36 @@ test('v40 upgrades to canonical 41 and detects a modified or unrecorded protecte
  db.exec('DROP TABLE gcp_odm_crs_confirmations');const before=schema(db);assert.throws(()=>applyMigrations(db),{code:'migration_identity_conflict'});assert.equal(schema(db),before);
 });
 
+test('dormant transfer outbox migration identity rejects a missing immutable binding trigger',t=>{
+ const db=legacy();t.after(()=>db.close());applyMigrations(db);
+ assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=57').get().name,'viewer_reference_transfer_outbox_dormant');
+ assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=58').get().name,'viewer_reference_transfer_outbox_sender_fence');
+ assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=59').get().name,'viewer_reference_transfer_outbox_grant_digest');
+ assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=60').get().name,'viewer_reference_transfer_outbox_status_reconciliation');
+ assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=61').get().name,'viewer_reference_transfer_reconciliation_claim_purpose');
+ assertProtectedMigrationIdentity(db,MIGRATIONS);
+ db.exec('DROP TRIGGER viewer_reference_transfer_grant_binding_immutable');
+ assert.throws(()=>assertProtectedMigrationIdentity(db,MIGRATIONS),{code:'migration_identity_conflict'});
+});
+
+test('previous v57 outbox schema upgrades through the forward-only sender-fence migration',t=>{
+ const db=legacy();t.after(()=>db.close());
+ for(const migration of MIGRATIONS.filter(item=>item.version>40&&item.version<=57)){
+  db.exec(migration.sql);migration.after?.(db);
+  db.prepare('INSERT INTO schema_migrations VALUES (?,?,?)').run(migration.version,migration.name,'2000-01-01T00:00:00Z');
+ }
+ assertProtectedMigrationIdentity(db,MIGRATIONS);
+ applyMigrations(db);
+ assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=57').get().name,'viewer_reference_transfer_outbox_dormant');
+ assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=58').get().name,'viewer_reference_transfer_outbox_sender_fence');
+ assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=59').get().name,'viewer_reference_transfer_outbox_grant_digest');
+ assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=60').get().name,'viewer_reference_transfer_outbox_status_reconciliation');
+ assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=61').get().name,'viewer_reference_transfer_reconciliation_claim_purpose');
+ const trigger=db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='viewer_reference_transfer_outbox_transition'").get().sql;
+ assert.match(trigger,/OLD\.state='prepared' AND NEW\.state='sending'/);
+ assert.doesNotMatch(trigger,/OLD\.state IN \('sending','uncertain'\) AND NEW\.state='sending'/);
+});
+
 test('wrong protected ledger names fail before journal mode or migration changes',t=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'migration-guard-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
  for(const version of [41,42,45,46,47]){const file=path.join(dir,`${version}.sqlite`),db=new DatabaseSync(file);db.exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL); INSERT INTO schema_migrations VALUES(${version},'other_feature','t'); CREATE TABLE untouched(value TEXT); INSERT INTO untouched VALUES('keep')`);db.close();const hash=()=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),before=hash();assert.throws(()=>openDatabase(file),{code:'migration_identity_conflict'});assert.equal(hash(),before);}

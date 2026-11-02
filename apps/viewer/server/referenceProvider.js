@@ -6,6 +6,14 @@ const { createHash } = require('node:crypto');
 const p = require('./referenceProtocol');
 const {validateReferenceOptions,decodeOptionsWire}=require('./referenceOptions');
 const { createEndpointCaFetch } = require('./referenceCaTransport');
+const verifiedTransferGrantAcks = new WeakMap();
+function isVerifiedTransferGrantAck(value, expected) {
+  const evidence = value && typeof value === 'object' ? verifiedTransferGrantAcks.get(value) : null;
+  if (!evidence || !expected) return false;
+  let current; try { current = JSON.stringify(value); } catch { return false; }
+  return evidence.serialized === current && evidence.provider === expected.provider && evidence.jobId === expected.jobId &&
+    evidence.environment === expected.environment && evidence.grantSha256 === expected.grantSha256;
+}
 class ReferenceProviderError extends Error {
   constructor(code) { super(code); this.name = 'ReferenceProviderError'; this.code = code; }
 }
@@ -34,12 +42,14 @@ function transferRequest(v) {
   // Expiry blocks using a grant, never reading status for reconciliation.
 }
 function ack(v, expected) {
-  closed(v,['reservationId','generation','manifestSha256','nonce','accepted']); slug(v.reservationId); slug(v.nonce); integer(v.generation); hash(v.manifestSha256);
+  closed(v,['reservationId','generation','manifestSha256','nonce','accepted','grantSha256']); slug(v.reservationId); slug(v.nonce); integer(v.generation); hash(v.manifestSha256); hash(v.grantSha256);
   if (v.accepted !== true) fail('INVALID_RESPONSE');
-  binding(v,expected,['reservationId','generation','manifestSha256','nonce']); return v;
+  binding(v,expected,['reservationId','generation','manifestSha256','nonce']);
+  if (expected.grantSha256 !== undefined && v.grantSha256 !== expected.grantSha256) fail('BINDING_MISMATCH');
+  return v;
 }
 class ReferenceProvider {
-  #endpoint; #token; #environment; #enabled; #fetch; #jobs = new Map(); #manifests = new Map(); #submissions = new Map();
+  #endpoint; #token; #environment; #enabled; #fetch; #attestableTransport; #jobs = new Map(); #manifests = new Map(); #submissions = new Map();
   constructor({ endpoint, token, environment, enabled = false, fetchImpl, privateCaPem, timeoutMs = 30000, transferTimeoutMs = 300000, maxObjectBytes = p.LIMITS.metadataBytes } = {}) {
     let url; try { url = new URL(endpoint); } catch { fail('INVALID_ENDPOINT'); }
     if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash || !/^https:\/\/[^/?#\s\\]+\/?$/.test(endpoint)) fail('INVALID_ENDPOINT');
@@ -53,7 +63,7 @@ class ReferenceProvider {
       try { transport = createEndpointCaFetch({ origin: url.origin, caPem: privateCaPem, timeoutMs: Math.min(Math.max(timeoutMs, transferTimeoutMs), 2147483647) }); }
       catch { fail('INVALID_CONFIGURATION'); }
     }
-    this.#endpoint = url.origin; this.#token = token; this.#environment = environment; this.#enabled = enabled; this.#fetch = transport;
+    this.#endpoint = url.origin; this.#token = token; this.#environment = environment; this.#enabled = enabled; this.#fetch = transport; this.#attestableTransport = fetchImpl === undefined;
     this.timeoutMs = timeoutMs; this.transferTimeoutMs = transferTimeoutMs; this.maxObjectBytes = maxObjectBytes;
   }
   #check() { if (!this.#enabled) fail('PROVIDER_DISABLED'); }
@@ -116,7 +126,11 @@ class ReferenceProvider {
     if (job.resultManifestSha256 !== null) hash(job.resultManifestSha256);
     for (const key of ['jobId','generation','environment','manifestSha256','inputManifestSha256','pipelineDigest','resultManifestSha256']) if (Object.hasOwn(expected,key)) { const actualKey = key === 'inputManifestSha256' ? 'manifestSha256' : key; if (!equal(job[actualKey],expected[key])) fail('BINDING_MISMATCH'); }
     if (job.transferRequest !== null) { transferRequest(job.transferRequest); binding(job.transferRequest,job,['generation','manifestSha256']); }
-    if (job.transferGrantAcknowledgement !== null) { if (!job.transferRequest) fail('BINDING_MISMATCH'); ack(job.transferGrantAcknowledgement,job.transferRequest); }
+    if (job.transferGrantAcknowledgement !== null) {
+      if (!job.transferRequest) fail('BINDING_MISMATCH');
+      const grantAck=ack(job.transferGrantAcknowledgement,job.transferRequest);
+      if (this.#attestableTransport) verifiedTransferGrantAcks.set(grantAck,{serialized:JSON.stringify(grantAck),provider:this,jobId:job.jobId,environment:job.environment,grantSha256:grantAck.grantSha256,endpoint:this.#endpoint});
+    }
     const previous = this.#jobs.get(job.jobId);
     if (previous) {
       binding(job,previous,['jobId','generation','environment','manifestSha256','pipelineDigest']);
@@ -202,8 +216,12 @@ class ReferenceProvider {
     if (!job?.transferRequest) fail('BINDING_REQUIRED');
     const submission = this.#submissions.get(jobId);
     const grantBinding = {...job.transferRequest,jobId,generation:expected.generation,environment:this.#environment,objectIds:submission?.manifest.objects.map(o => o.id) ?? expected.objectIds};
-    safeValidate(() => p.validateTransferGrant(grant,grantBinding));
-    return ack(await this.#json('/jobs/' + jobId + '/transfer-grants',{method:'POST',body:grant,signal}),grant);
+    let immutableGrant; try { immutableGrant = structuredClone(grant); } catch { fail('INVALID_REQUEST'); }
+    safeValidate(() => p.validateTransferGrant(immutableGrant,grantBinding));
+    const grantSha256 = p.sha256(p.canonicalBytes(immutableGrant));
+    const accepted = ack(await this.#json('/jobs/' + jobId + '/transfer-grants',{method:'POST',body:immutableGrant,signal}),{...grantBinding,grantSha256});
+    if (this.#attestableTransport) verifiedTransferGrantAcks.set(accepted,{serialized:JSON.stringify(accepted),provider:this,jobId,environment:this.#environment,grantSha256,endpoint:this.#endpoint});
+    return accepted;
   }
   async acceptResult(jobId, receipt, expectedBinding, {signal} = {}) {
     this.#check(); const job = this.#expected(jobId,expectedBinding), manifest = this.#manifests.get(jobId);
@@ -249,4 +267,4 @@ class ReferenceProvider {
     })();
   }
 }
-module.exports = { ReferenceProvider, ReferenceProviderError };
+module.exports = { ReferenceProvider, ReferenceProviderError, isVerifiedTransferGrantAck };

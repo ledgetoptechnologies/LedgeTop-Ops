@@ -5,6 +5,11 @@ const {DatabaseSync}=require('node:sqlite');
 // Only the newly allocated migration identities are checked here. Earlier
 // ledger history retains its established compatibility behavior.
 const protectedMigrations=[
+  {version:57,name:'viewer_reference_transfer_outbox_dormant',objects:['viewer_reference_transfer_outbox','viewer_reference_transfer_outbox_state_idx','viewer_reference_transfer_outbox_identity_immutable','viewer_reference_transfer_outbox_no_delete']},
+  {version:58,name:'viewer_reference_transfer_outbox_sender_fence',objects:['viewer_reference_transfer_outbox_transition']},
+  {version:59,name:'viewer_reference_transfer_outbox_grant_digest',objects:['viewer_reference_transfer_grant_bindings','viewer_reference_transfer_grant_binding_no_replace','viewer_reference_transfer_grant_binding_immutable','viewer_reference_transfer_grant_binding_no_delete']},
+  {version:60,name:'viewer_reference_transfer_outbox_status_reconciliation',objects:['viewer_reference_transfer_outbox_reconciliations','viewer_reference_transfer_outbox_reconciliation_no_replace','viewer_reference_transfer_outbox_reconciliation_immutable','viewer_reference_transfer_outbox_reconciliation_no_delete','viewer_reference_transfer_outbox_transition']},
+  {version:61,name:'viewer_reference_transfer_reconciliation_claim_purpose',objects:['viewer_reference_transfer_reconciliation_claims','viewer_reference_transfer_reconciliation_claim_no_replace','viewer_reference_transfer_reconciliation_claim_immutable','viewer_reference_transfer_reconciliation_claim_no_delete','viewer_reference_transfer_reconciliation_claim_validate','viewer_reference_transfer_outbox_reconciliation_validate']},
   {version:56,name:'container_trash_recovery_plan',objects:['container_trash_plans','container_trash_plan_members','container_trash_plan_claims','container_trash_actions','container_trash_action_items','container_action_lock_identity','container_action_lock_no_replace','container_action_lock_no_update','container_action_lock_no_delete','container_action_item_no_delete','container_action_item_guard','container_action_item_no_replace','container_action_membership_sealed','container_action_membership_no_update','container_action_membership_no_delete','container_trash_action_no_replace','container_trash_action_guard','container_trash_action_no_delete','container_trash_plan_claim_no_replace','container_trash_plan_claim_no_update','container_trash_plan_claim_no_early_delete','container_trash_plan_member_identity','container_trash_plan_member_no_replace','container_trash_plan_member_no_delete','container_trash_plan_no_delete','container_trash_plan_no_replace','container_trash_plan_identity','container_trash_plan_state_guard']},
   {version:55,name:'upload_cleanup_receipts',objects:['upload_cleanup_receipts']},
   {version:54,name:'processing_initialization_snapshots',objects:['processing_initialization_snapshots','processing_initialization_purge_authorizations','processing_initialization_purge_insert','processing_initialization_purge_no_replace','processing_initialization_purge_no_update','processing_initialization_snapshot_no_replace','processing_initialization_snapshot_no_update','processing_initialization_snapshot_no_delete','processing_initialization_parent_no_delete','processing_initialization_parent_no_replace','processing_initialization_parent_conflict_update','processing_initialization_parent_identity']},
@@ -65,18 +70,49 @@ function assertProtectedMigrationIdentity(database,migrations) {
   for(const spec of protectedMigrations) {
     const entry=ledger?database.prepare('SELECT name FROM schema_migrations WHERE version=?').get(spec.version):null;
     const found=spec.objects.map(name=>database.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name=? COLLATE NOCASE").all(name));
-    if(!entry){if(found.some(rows=>rows.length))throw incompatible(`unrecorded objects for ${spec.version}`);continue;}
+    if(!entry){
+      if(spec.version===60&&ledger&&database.prepare('SELECT 1 FROM schema_migrations WHERE version IN (57,58,59) LIMIT 1').get()){
+        const expectedPrior=new DatabaseSync(':memory:');
+        try{
+          const priorVersion=database.prepare('SELECT MAX(version) AS version FROM schema_migrations WHERE version IN (57,58,59)').get().version;
+          for(const version of [57,58,59].filter(version=>version<=priorVersion))expectedPrior.exec(migrations.find(item=>item.version===version).sql);
+          const reference=expectedPrior.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name='viewer_reference_transfer_outbox_transition'").get(),actual=found.at(-1)?.[0];
+          if(found.slice(0,-1).some(rows=>rows.length)||found.at(-1)?.length!==1||!actual||actual.type!==reference.type||actual.name!==reference.name||actual.tbl_name!==reference.tbl_name||normalize(actual.sql)!==normalize(reference.sql))throw incompatible('unapplied status-reconciliation migration has an incompatible predecessor');
+        }finally{expectedPrior.close();}
+        continue;
+      }
+      if(spec.version===58&&ledger&&database.prepare('SELECT 1 FROM schema_migrations WHERE version=57').get()){
+        const prior=migrations.find(item=>item.version===57&&item.name==='viewer_reference_transfer_outbox_dormant');
+        const expectedPrior=new DatabaseSync(':memory:');
+        try{
+          expectedPrior.exec(prior.sql);
+          const actual=found[0]?.[0],reference=expectedPrior.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name='viewer_reference_transfer_outbox_transition'").get();
+          if(found[0]?.length!==1||!actual||actual.type!==reference.type||actual.name!==reference.name||actual.tbl_name!==reference.tbl_name||normalize(actual.sql)!==normalize(reference.sql))throw incompatible('unapplied sender-fence migration has an incompatible predecessor');
+        }finally{expectedPrior.close();}
+        continue;
+      }
+      if(found.some(rows=>rows.length))throw incompatible(`unrecorded objects for ${spec.version}`);continue;
+    }
     if(entry.name!==spec.name)throw incompatible(`version ${spec.version} has a different name`);
+    // Migration 60 deliberately replaces the v58 transition trigger. Its own
+    // protected identity validates the final trigger; v58 still retains its
+    // ledger name but its predecessor trigger is no longer the live object.
+    if(spec.version===58&&ledger&&database.prepare('SELECT 1 FROM schema_migrations WHERE version>=60').get())continue;
     const expectedMigration=migrations.find(item=>item.version===spec.version&&item.name===spec.name);
     if(!expectedMigration)throw incompatible(`version ${spec.version} is not supported by this build`);
     const expected=new DatabaseSync(':memory:');
     try {
+      if(spec.version>=58&&spec.version<=61)expected.exec(migrations.find(item=>item.version===57&&item.name==='viewer_reference_transfer_outbox_dormant').sql);
+      if(spec.version>=59&&spec.version<=61)expected.exec(migrations.find(item=>item.version===58&&item.name==='viewer_reference_transfer_outbox_sender_fence').sql);
+      if(spec.version>=60&&spec.version<=61)expected.exec(migrations.find(item=>item.version===59&&item.name==='viewer_reference_transfer_outbox_grant_digest').sql);
+      if(spec.version===61)expected.exec(migrations.find(item=>item.version===60&&item.name==='viewer_reference_transfer_outbox_status_reconciliation').sql);
       if(spec.version===50)expected.exec('CREATE TABLE dataset_operations(id TEXT PRIMARY KEY,operation_type TEXT,payload_json TEXT,processing_attempt_id TEXT,status TEXT,upload_id TEXT,import_preview_id TEXT)');
       if(spec.version===51)expected.exec('CREATE TABLE processing_attempts(id TEXT PRIMARY KEY,provider_id TEXT,provider_task_id TEXT); CREATE TABLE processing_attempt_gcp_snapshots(attempt_id TEXT PRIMARY KEY)');
       if(spec.version===53)expected.exec('CREATE TABLE import_cleanup_jobs(id TEXT PRIMARY KEY,retained_import_id TEXT,cleanup_type TEXT,root_key TEXT,relative_path TEXT,status TEXT,lease_owner TEXT,lease_token TEXT,lease_generation INTEGER,expected_byte_size INTEGER,expected_sha256 TEXT,expected_dev TEXT,expected_ino TEXT,expected_ctime_ns TEXT,expected_mtime_ns TEXT,quarantine_relative_path TEXT); CREATE TABLE datasets(id TEXT PRIMARY KEY,root_key TEXT,relative_path TEXT); CREATE TABLE dataset_files(id TEXT PRIMARY KEY,dataset_id TEXT,relative_path TEXT,byte_size INTEGER,sha256 TEXT); CREATE TABLE processing_attempts(id TEXT PRIMARY KEY,dataset_id TEXT,task_id TEXT,attempt_number INTEGER,provider_id TEXT,provider_task_id TEXT); CREATE TABLE processing_tasks(id TEXT PRIMARY KEY,project_id TEXT,dataset_id TEXT)');
       if(spec.version===54)expected.exec('CREATE TABLE processing_attempts(id TEXT PRIMARY KEY,task_id TEXT,attempt_number INTEGER,dataset_id TEXT,provider_id TEXT,provider_task_id TEXT,options_json TEXT,capability_fingerprint TEXT,reservation_required INTEGER); CREATE TABLE processing_tasks(id TEXT PRIMARY KEY,status TEXT,purged_at TEXT); CREATE TABLE storage_trash(id TEXT PRIMARY KEY,entity_type TEXT,entity_id TEXT,permanently_deleted_at TEXT); CREATE TABLE audit_events(id TEXT PRIMARY KEY,action TEXT,entity_type TEXT,entity_id TEXT,details_json TEXT)');
       if(spec.version===55)expected.exec('CREATE TABLE upload_sessions(id TEXT PRIMARY KEY)');
       if(spec.version===56)expected.exec('CREATE TABLE storage_trash(id TEXT PRIMARY KEY,entity_type TEXT,entity_id TEXT,permanently_deleted_at TEXT); CREATE TABLE container_trash_members(container_trash_id TEXT,member_trash_id TEXT,entity_type TEXT,entity_id TEXT)');
+      if(spec.version===57)expected.exec('CREATE TABLE viewer_reference_attempt_journal(attempt_id TEXT PRIMARY KEY)');
       expected.exec(expectedMigration.sql);
       for(let i=0;i<spec.objects.length;i++) {
         const object=spec.objects[i],matches=found[i],actual=matches[0],reference=expected.prepare('SELECT type,tbl_name,sql FROM sqlite_master WHERE name=?').get(object);
@@ -84,7 +120,7 @@ function assertProtectedMigrationIdentity(database,migrations) {
       }
       const tables=spec.objects.filter((_,i)=>found[i][0]?.type==='table');
       const extras=database.prepare(`SELECT type,name,tbl_name FROM sqlite_master WHERE type IN ('index','trigger') AND sql IS NOT NULL AND tbl_name COLLATE NOCASE IN (${tables.map(()=>'?').join(',')})`).all(...tables);
-      if(extras.some(row=>!expected.prepare('SELECT 1 FROM sqlite_master WHERE type=? AND name=? AND tbl_name=?').get(row.type,row.name,row.tbl_name)))throw incompatible(`unexpected index or trigger for version ${spec.version}`);
+      if(extras.some(row=>!expected.prepare('SELECT 1 FROM sqlite_master WHERE type=? AND name=? AND tbl_name=?').get(row.type,row.name,row.tbl_name)&&!(spec.version===60&&row.name==='viewer_reference_transfer_outbox_reconciliation_validate'&&ledger&&database.prepare('SELECT 1 FROM schema_migrations WHERE version=61').get())))throw incompatible(`unexpected index or trigger for version ${spec.version}`);
     } finally {expected.close();}
   }
 }
