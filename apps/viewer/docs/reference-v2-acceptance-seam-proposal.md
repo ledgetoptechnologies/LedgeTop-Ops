@@ -8,10 +8,11 @@ client job from this proposal.
 
 ## Existing evidence
 
-Beau's read-only check found a matching saved ODM attempt and a schema-v1
-archive receipt: identity, 71-entry inventory, bounds and inventory digest
-matched; `3d-tiles` was true and the mesh tileset was listed. The queried
-point-cloud 3D Tiles candidate path was not listed. This is evidence about a
+Beau's read-only Viewer API metadata check matched the saved task and provider
+attempt and found a schema-v1 archive receipt: identity, 71-entry inventory,
+bounds and inventory digest matched; `3d-tiles` was boolean true and
+`3d_tiles/model/tileset.json` was listed. The specific path
+`3d_tiles/pointcloud/tileset.json` was not listed. This is evidence about a
 recorded inventory, not current disk custody, a completed orchestrator return,
 TreeDar, genuine LiDAR or absence of EPT/point-cloud files elsewhere. Viewer
 discovers EPT separately via `entwine_pointcloud/ept.json`.
