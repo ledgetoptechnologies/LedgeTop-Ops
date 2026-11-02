@@ -228,3 +228,18 @@ not infer or verify GCP semantics from filenames. Its integer representation,
 other binding fields and canonicalization remain different. Cross-language
 mapping must wait for a mutually reviewed exact contract and actual durable
 receiver associations; this fixture alone is not that mapping.
+
+The following fictional ASCII Viewer batch vector is public and contains no
+real source hashes. Its two entries are in multipart order, and the GCP role is
+explicit intent rather than verified GCP semantics. The single-line canonical
+UTF-8 bytes, without a newline, are:
+
+```json
+{"attemptId":"00000000-0000-4000-8000-000000000001","batchId":"00000000-0000-4000-8000-000000000002","entries":[{"role":"photo","sha256":"1111111111111111111111111111111111111111111111111111111111111111","sizeBytes":"6","wireNameUtf8Base64url":"Zmlyc3QuanBn"},{"role":"gcp","sha256":"5555555555555555555555555555555555555555555555555555555555555555","sizeBytes":"6","wireNameUtf8Base64url":"Z2NwX2xpc3QudHh0"}],"initializationSha256":"2222222222222222222222222222222222222222222222222222222222222222","manifestSha256":"3333333333333333333333333333333333333333333333333333333333333333","providerId":"00000000-0000-4000-8000-000000000003","providerTaskId":"00000000-0000-4000-8000-000000000004","reservationSha256":"4444444444444444444444444444444444444444444444444444444444444444"}
+```
+
+SHA-256 of ASCII `ltds-viewer-batch-intent-fixture-v1`, a NUL byte, and those
+payload bytes is `c8cf385d6f6fe6988039065eec01df344a9f3252caf1010f5076e1411918b08d`.
+Independently constructed Node and Python calculations match this example;
+it does not establish an agreed Processing wire format or general Unicode
+canonicalization. Reordering entries changes the digest and is a batch conflict.

@@ -1,10 +1,16 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),{DatabaseSync:Database}=require('node:sqlite');
-const {createBatchIntentFixture}=require('../server/referenceBatchIntentFixture');
+const {createBatchIntentFixture,canonicalIntent}=require('../server/referenceBatchIntentFixture');
 const {FIXTURE_SCOPE}=require('../server/referenceV2FixtureLedger');
 const ids=Array.from({length:6},(_,i)=>`00000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`);
 const file=(name,role='photo')=>({wireNameUtf8Base64url:Buffer.from(name).toString('base64url'),role,sizeBytes:'6',sha256:'11'.repeat(32)});
 const input=()=>({attemptId:ids[0],batchId:ids[1],providerId:ids[2],providerTaskId:ids[3],initializationSha256:'22'.repeat(32),manifestSha256:'33'.repeat(32),reservationSha256:'44'.repeat(32),entries:[file('first.jpg'),file('second.jpg')]});
+test('public ASCII batch vector binds role and multipart order',()=>{
+  const crypto=require('node:crypto'),intent={...input(),entries:[file('first.jpg'),{...file('gcp_list.txt','gcp'),sha256:'55'.repeat(32)}]};
+  const digest=x=>crypto.createHash('sha256').update('ltds-viewer-batch-intent-fixture-v1\0','ascii').update(canonicalIntent(x)).digest('hex');
+  assert.equal(digest(intent),'c8cf385d6f6fe6988039065eec01df344a9f3252caf1010f5076e1411918b08d');
+  assert.notEqual(digest({...intent,entries:[...intent.entries].reverse()}),digest(intent));
+});
 test('fixture persists immutable batch and maps observations without releasing hold',()=>{
   const db=new Database(':memory:');try{
     assert.throws(()=>createBatchIntentFixture(db,'production'),{code:'fixture_scope_required'});
