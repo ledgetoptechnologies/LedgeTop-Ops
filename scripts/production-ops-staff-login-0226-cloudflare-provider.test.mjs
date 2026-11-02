@@ -44,7 +44,7 @@ test('read snapshot uses only the pinned read query and preserves primary/read-o
   assert.equal(PRODUCTION_OPS_0226_POST_READ_QUERY.includes("'loginState'"), true);
 });
 
-test('exact migration is one transactional, no-retry D1 batch including its ledger append', async () => {
+test('exact migration is one REST batch request, without assuming transactionality or retrying', async () => {
   const requests = [];
   const provider = createProductionOps0226CloudflareProvider({ getBearerToken: async () => 'synthetic-token-'.padEnd(32, 'x'),
     fetchImpl: async (url, init) => {
@@ -80,5 +80,22 @@ test('migration refuses changed SQL and does not retry ambiguous transport failu
     sha256: 'c25b03f4499c6de80d586a583c0e59b8c39b264248645c59733304ebe751d0c5', sql: `${migration}\n`, appendLedger: true }), /migration_pin_mismatch/u);
   await assert.rejects(provider.applyExactMigration({ target: PRODUCTION_OPS_0226_TARGET, name: '0226_staff_login_bindings.sql',
     sha256: 'c25b03f4499c6de80d586a583c0e59b8c39b264248645c59733304ebe751d0c5', sql: migration, appendLedger: true }), /request_uncertain_no_retry/u);
+  assert.equal(mutationCalls, 1);
+});
+
+test('partial REST batch results are ambiguous and are never retried', async () => {
+  let mutationCalls = 0;
+  const provider = createProductionOps0226CloudflareProvider({ getBearerToken: async () => 'synthetic-token-'.padEnd(32, 'x'),
+    fetchImpl: async (_url, init) => {
+      if (init.method === 'GET') return response(validMetadata);
+      mutationCalls++;
+      const batch = JSON.parse(init.body).batch;
+      return response({ success: true, result: batch.map((_item, index) => ({ success: index < 3,
+        results: [], ...(index === 2 ? { meta: { changes: 1 } } : {}) })) });
+    } });
+  await provider.assertTarget();
+  await assert.rejects(provider.applyExactMigration({ target: PRODUCTION_OPS_0226_TARGET, name: '0226_staff_login_bindings.sql',
+    sha256: 'c25b03f4499c6de80d586a583c0e59b8c39b264248645c59733304ebe751d0c5', sql: migration, appendLedger: true }),
+  /batch_outcome_uncertain_no_retry/u);
   assert.equal(mutationCalls, 1);
 });
