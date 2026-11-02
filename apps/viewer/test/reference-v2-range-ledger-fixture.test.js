@@ -1,17 +1,17 @@
 'use strict';
 const test=require('node:test'), assert=require('node:assert/strict'), fs=require('node:fs'), os=require('node:os'), path=require('node:path'), crypto=require('node:crypto');
 const {openFixture,validateGrant,mac}=require('./helpers/reference-v2-range-ledger-fixture.cjs');
+const vectors=require('./fixtures/reference-v2-range-ledger-vectors.json');
 test('closed v2 proposal and charged ranges survive close/reopen, replacement and failed verification',t=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'v2-range-ledger-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
- const file=path.join(dir,'fixture.sqlite'),key=Buffer.alloc(32,7),policy={version:1,chunkBytes:4,requestBudget:2,byteBudget:8};
- const r={version:2,environment:'staging',jobId:'job-1',manifestSha256:'a'.repeat(64),generation:1,reservationId:'reservation-1',policy};
- const g={...r,grantId:'grant-1'};validateGrant(g,r);
+ const file=path.join(dir,'fixture.sqlite'),key=Buffer.alloc(32,7),r=vectors.reservation,policy=r.policy;
+ const g={...r,...vectors.grants[0]};validateGrant(g,r);
  assert.throws(()=>validateGrant({...g,extra:true},r),{code:'FIXTURE_REJECTED'});
  assert.throws(()=>validateGrant({...g,policy:{...policy,requestBudget:3}},r),{code:'FIXTURE_REJECTED'});
  let f=openFixture(file,key);assert.equal(f.charge(r,g,'object-1',0,4),'charged');f.close();
  f=openFixture(file,key);try{
   assert.equal(f.status(r,'object-1',0).state,'uncertain');
-  const r2={...r,generation:2,reservationId:'reservation-2'},g2={...r2,grantId:'grant-2'};
+  const r2={...r,generation:vectors.grants[1].generation,reservationId:vectors.grants[1].reservationId},g2={...r2,grantId:vectors.grants[1].grantId};
   assert.throws(()=>f.charge(r2,g2,'object-1',0,4),{code:'FIXTURE_REJECTED'});
   assert.throws(()=>f.verify(r2,'object-1',0,Buffer.from('abcd'),'0'.repeat(64)),{code:'FIXTURE_REJECTED'});
   assert.equal(f.status(r,'object-1',0).state,'uncertain');
@@ -22,4 +22,18 @@ test('closed v2 proposal and charged ranges survive close/reopen, replacement an
   assert.throws(()=>f.charge(r2,g2,'object-1',8,1),{code:'FIXTURE_REJECTED'});
   assert.deepEqual({...f.usage(r2)},{requests:2,bytes:8});
  }finally{f.close();}
+});
+
+test('shared v2 event vectors drive fixture charge, reopen and synthetic evidence checks', t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'v2-range-vectors-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const file=path.join(dir,'fixture.sqlite'),key=Buffer.alloc(32,7),base=vectors.reservation;
+ let fixture=openFixture(file,key);
+ try { for(const event of vectors.events) {
+  const ref=vectors.grants[event.grant],r={...base,generation:ref.generation,reservationId:ref.reservationId},g={...r,grantId:ref.grantId};
+  if(event.action==='reopen'){fixture.close();fixture=openFixture(file,key);assert.equal(fixture.status(r,event.objectId,event.start).state,event.expected);}
+  else if(event.action==='charge'){const run=()=>fixture.charge(r,g,event.objectId,event.start,event.length);if(event.expected==='rejected')assert.throws(run,{code:'FIXTURE_REJECTED'});else assert.equal(run(),event.expected);}
+  else {const bytes=Buffer.from(event.content),evidence={identity:JSON.stringify([r.environment,r.jobId,r.manifestSha256]),objectId:event.objectId,start:event.start,length:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')},proof=event.action==='verify-invalid'?'0'.repeat(64):mac(key,evidence);if(event.expected==='rejected')assert.throws(()=>fixture.verify(r,event.objectId,event.start,bytes,proof),{code:'FIXTURE_REJECTED'});else {fixture.verify(r,event.objectId,event.start,bytes,proof);assert.equal(fixture.status(r,event.objectId,event.start).state,event.expected);}}
+  assert.deepEqual({...fixture.usage(r)},{requests:event.requests,bytes:event.bytes});
+  assert.equal(fixture.status(r,event.objectId,event.start)?.state??null,event.rangeState);
+ }} finally {fixture.close();}
 });
