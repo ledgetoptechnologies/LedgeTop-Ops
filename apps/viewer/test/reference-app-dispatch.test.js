@@ -73,21 +73,20 @@ function transferOutboxFixture(t){
  const input={job:activeJob,reservation,manifestSha256:f.request.manifest.sha256,objectIds,grantId:'grant-outbox',grantIdentitySha256:cryptoHash(JSON.stringify({jobId:bound.jobId,reservationId:reservation.reservationId})),grant};
  return{...f,claim,bound:activeJob,reservation,input,outbox:new ReferenceTransferOutbox(f.db,{journal:f.journal})};
 }
-test('durable transfer outbox binds immutable grant identity and records exact ACK across retry',t=>{
+test('durable transfer outbox binds request objects and refuses replay without sender fencing',t=>{
  const f=transferOutboxFixture(t),first=f.outbox.prepare(f.claim,f.input),again=f.outbox.prepare(f.claim,f.input);
  assert.equal(first.outbox_id,again.outbox_id);assert.equal(first.state,'prepared');assert.equal(first.send_attempts,0);
+ assert.throws(()=>f.outbox.prepare(f.claim,{...f.input,grant:{...f.input.grant,objectIds:['forged-object']}}),{code:'reference_transfer_outbox_binding'});
  assert.throws(()=>f.outbox.prepare(f.claim,{...f.input,grant:{...f.input.grant,token:'different-synthetic-token'}}),{code:'reference_transfer_outbox_conflict'});
  const send={grantId:f.input.grantId,grantIdentitySha256:f.input.grantIdentitySha256,grant:f.input.grant};
  f.outbox.beginSend(f.claim,first.outbox_id,send);const uncertain=f.outbox.markUncertain(f.claim,first.outbox_id);assert.equal(uncertain.state,'uncertain');
  f.journal.release(f.claim);const retryClaim=f.journal.claim('a','sender-two');assert.equal(retryClaim.generation,f.claim.generation+1);
  const retryRecord=f.outbox.prepare(retryClaim,f.input);assert.equal(retryRecord.grant_sha256,first.grant_sha256);
- const sending=f.outbox.beginSend(retryClaim,first.outbox_id,send);assert.equal(sending.state,'sending');assert.equal(sending.send_attempts,2);
+ assert.throws(()=>f.outbox.beginSend(retryClaim,first.outbox_id,send),{code:'reference_transfer_outbox_sender_unfenced'});
  const ack={reservationId:f.reservation.reservationId,generation:f.reservation.generation,manifestSha256:f.reservation.manifestSha256,nonce:f.reservation.nonce,accepted:true};
- assert.throws(()=>f.outbox.acknowledge(retryClaim,first.outbox_id,{...ack,nonce:'wrong'}),{code:'reference_transfer_outbox_ack_binding'});
- const accepted=f.outbox.acknowledge(retryClaim,first.outbox_id,ack);assert.equal(accepted.state,'acknowledged');assert.match(accepted.acknowledgement_sha256,/^[a-f0-9]{64}$/);
- assert.equal(JSON.stringify(accepted).includes('synthetic-bearer-not-persisted'),false);
- assert.equal(f.outbox.acknowledge(retryClaim,first.outbox_id,ack).acknowledgement_sha256,accepted.acknowledgement_sha256);
- const reopened=new ReferenceTransferOutbox(f.db,{journal:f.journal});assert.equal(reopened.find('a',f.reservation.reservationId,f.reservation.generation).acknowledgement_sha256,accepted.acknowledgement_sha256);
+ assert.throws(()=>f.outbox.acknowledge(retryClaim,first.outbox_id,ack),{code:'reference_transfer_outbox_ack_binding'});
+ assert.equal(f.outbox.find('a',f.reservation.reservationId,f.reservation.generation).state,'uncertain');
+ assert.equal(JSON.stringify(first).includes('synthetic-bearer-not-persisted'),false);
 });
 test('outbox keeps a send claim held when process failure leaves state uncertain',t=>{
  const f=transferOutboxFixture(t),row=f.outbox.prepare(f.claim,f.input);f.outbox.beginSend(f.claim,row.outbox_id,{grantId:f.input.grantId,grantIdentitySha256:f.input.grantIdentitySha256,grant:f.input.grant});

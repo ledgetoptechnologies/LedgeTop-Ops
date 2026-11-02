@@ -6,6 +6,8 @@ const { createHash } = require('node:crypto');
 const p = require('./referenceProtocol');
 const {validateReferenceOptions,decodeOptionsWire}=require('./referenceOptions');
 const { createEndpointCaFetch } = require('./referenceCaTransport');
+const verifiedTransferGrantAcks = new WeakSet();
+function isVerifiedTransferGrantAck(value) { return Boolean(value && typeof value === 'object' && verifiedTransferGrantAcks.has(value)); }
 class ReferenceProviderError extends Error {
   constructor(code) { super(code); this.name = 'ReferenceProviderError'; this.code = code; }
 }
@@ -203,7 +205,9 @@ class ReferenceProvider {
     const submission = this.#submissions.get(jobId);
     const grantBinding = {...job.transferRequest,jobId,generation:expected.generation,environment:this.#environment,objectIds:submission?.manifest.objects.map(o => o.id) ?? expected.objectIds};
     safeValidate(() => p.validateTransferGrant(grant,grantBinding));
-    return ack(await this.#json('/jobs/' + jobId + '/transfer-grants',{method:'POST',body:grant,signal}),grant);
+    const accepted = ack(await this.#json('/jobs/' + jobId + '/transfer-grants',{method:'POST',body:grant,signal}),grant);
+    verifiedTransferGrantAcks.add(accepted);
+    return accepted;
   }
   async acceptResult(jobId, receipt, expectedBinding, {signal} = {}) {
     this.#check(); const job = this.#expected(jobId,expectedBinding), manifest = this.#manifests.get(jobId);
@@ -249,4 +253,4 @@ class ReferenceProvider {
     })();
   }
 }
-module.exports = { ReferenceProvider, ReferenceProviderError };
+module.exports = { ReferenceProvider, ReferenceProviderError, isVerifiedTransferGrantAck };
