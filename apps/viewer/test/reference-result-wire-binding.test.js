@@ -22,6 +22,35 @@ test('result object is bound to sealed manifest headers and fully verified bytes
   assert.equal(Buffer.concat(chunks).toString(),'abc');
 });
 
+test('zero-byte report remains downloadable through the full-body path',async()=>{
+  const f=fixture();f.manifest.engineVersions={treedar:'synthetic-1'};f.manifest.objects=[{id:'empty-report',role:'report',byteSize:0,sha256:p.sha256(Buffer.alloc(0))}];f.manifest.resultManifestSha256=p.resultManifestSha256(f.manifest);f.expected.requestedEngines=['treedar'];f.expected.resultManifestSha256=f.manifest.resultManifestSha256;
+  f.provider=new ReferenceProvider({endpoint:'https://example.test',token:'synthetic-token-only',environment:'staging',enabled:true,fetchImpl:async url=>url.endsWith('/results')?new Response(JSON.stringify(f.manifest),{headers:{'content-type':'application/json'}}):new Response(null,{headers:{'content-type':'application/octet-stream','content-length':'0','x-result-sha256':f.manifest.objects[0].sha256,'x-result-manifest-sha256':f.manifest.resultManifestSha256}})});
+  await f.provider.results('job-1',f.expected);const pieces=[];for await(const chunk of await f.provider.downloadObject('job-1','empty-report',{expectedBinding:f.expected}))pieces.push(chunk);assert.deepEqual(Buffer.concat(pieces),Buffer.alloc(0));
+});
+
+test('resumed result download requires an exact sealed-object 206 range', async()=>{
+  const requests=[];
+  const f=fixture();
+  f.provider=new ReferenceProvider({endpoint:'https://example.test',token:'synthetic-token-only',environment:'staging',enabled:true,fetchImpl:async(url,init)=>{
+    requests.push({url,init});
+    if(url.endsWith('/results'))return new Response(JSON.stringify(f.manifest),{headers:{'content-type':'application/json'}});
+    return new Response('bc',{status:206,headers:{'content-type':'application/zip','content-length':'2','content-range':'bytes 1-2/3','x-result-sha256':f.manifest.objects[0].sha256,'x-result-manifest-sha256':f.manifest.resultManifestSha256}});
+  }});
+  await f.provider.results('job-1',f.expected);
+  const pieces=[];for await(const chunk of await f.provider.downloadObject('job-1','archive-1',{expectedBinding:f.expected,rangeStart:1}))pieces.push(chunk);
+  assert.equal(Buffer.concat(pieces).toString(),'bc');
+  assert.equal(requests[1].init.headers.Range,'bytes=1-2');
+  for(const mutate of [headers=>({...headers,'content-range':'bytes 0-1/3'}),headers=>({...headers,'content-length':'3'})]){
+    const bad=fixture(),headers=mutate({'content-type':'application/zip','content-length':'2','content-range':'bytes 1-2/3','x-result-sha256':bad.manifest.objects[0].sha256,'x-result-manifest-sha256':bad.manifest.resultManifestSha256});
+    bad.provider=new ReferenceProvider({endpoint:'https://example.test',token:'synthetic-token-only',environment:'staging',enabled:true,fetchImpl:async url=>url.endsWith('/results')?new Response(JSON.stringify(bad.manifest),{headers:{'content-type':'application/json'}}):new Response('bc',{status:206,headers})});
+    await bad.provider.results('job-1',bad.expected);
+    await assert.rejects(bad.provider.downloadObject('job-1','archive-1',{expectedBinding:bad.expected,rangeStart:1}),{code:'BINDING_MISMATCH'});
+  }
+  const oldStatus=fixture();oldStatus.provider=new ReferenceProvider({endpoint:'https://example.test',token:'synthetic-token-only',environment:'staging',enabled:true,fetchImpl:async url=>url.endsWith('/results')?new Response(JSON.stringify(oldStatus.manifest),{headers:{'content-type':'application/json'}}):new Response('bc',{headers:{'content-type':'application/zip','content-length':'2','x-result-sha256':oldStatus.manifest.objects[0].sha256,'x-result-manifest-sha256':oldStatus.manifest.resultManifestSha256}})});
+  await oldStatus.provider.results('job-1',oldStatus.expected);
+  await assert.rejects(oldStatus.provider.downloadObject('job-1','archive-1',{expectedBinding:oldStatus.expected,rangeStart:1}),{code:'HTTP_ERROR'});
+});
+
 test('missing or mismatched result binding headers fail before exposing bytes', async () => {
   const base=fixture();
   for (const headers of [{},{'x-result-sha256':base.manifest.objects[0].sha256},{'x-result-sha256':'b'.repeat(64),'x-result-manifest-sha256':base.manifest.resultManifestSha256},{'x-result-sha256':base.manifest.objects[0].sha256,'x-result-manifest-sha256':'c'.repeat(64)}]) {

@@ -59,7 +59,7 @@ class ReferenceProvider {
   #check() { if (!this.#enabled) fail('PROVIDER_DISABLED'); }
   #environmentCheck(v) { if (v.environment !== this.#environment) fail('BINDING_MISMATCH'); }
   #signal(signal, binary) { return signal ? AbortSignal.any([signal,AbortSignal.timeout(binary ? this.transferTimeoutMs : this.timeoutMs)]) : AbortSignal.timeout(binary ? this.transferTimeoutMs : this.timeoutMs); }
-  async #request(route, {method = 'GET', body, signal, binary = false, mediaType = 'application/octet-stream'} = {}) {
+  async #request(route, {method = 'GET', body, signal, binary = false, mediaType = 'application/octet-stream', rangeHeader} = {}) {
     this.#check();
     let encoded;
     if (body !== undefined) { bounded(body); try { encoded = JSON.stringify(body); } catch { fail('INVALID_REQUEST'); } if (Buffer.byteLength(encoded) > p.LIMITS.metadataBytes) fail('METADATA_LIMIT'); }
@@ -68,9 +68,10 @@ class ReferenceProvider {
     // private CA is isolated to this exact endpoint; redirects never forward
     // credentials. Neither choice accepts transport options from request DTOs.
     let response;
-    try { response = await this.#fetch(this.#endpoint + p.PREFIX + route,{method,headers:{Authorization:'Bearer ' + this.#token,Accept:binary ? mediaType : 'application/json',...(encoded === undefined ? {} : {'Content-Type':'application/json'})},body:encoded,redirect:'error',signal:combined}); }
+    try { response = await this.#fetch(this.#endpoint + p.PREFIX + route,{method,headers:{Authorization:'Bearer ' + this.#token,Accept:binary ? mediaType : 'application/json',...(encoded === undefined ? {} : {'Content-Type':'application/json'}),...(rangeHeader ? {Range:rangeHeader} : {})},body:encoded,redirect:'error',signal:combined}); }
     catch { fail(method === 'POST' ? 'UNCERTAIN' : combined.aborted ? 'TIMEOUT' : 'TRANSPORT_ERROR'); }
-    if (response.redirected || !((method === 'POST' && route === '/jobs') ? [200,201] : [200]).includes(response.status)) {
+    const acceptedStatuses = rangeHeader ? [206] : (method === 'POST' && route === '/jobs') ? [200,201] : [200];
+    if (response.redirected || !acceptedStatuses.includes(response.status)) {
       try { await response.body?.cancel(); } catch { /* best effort */ }
       if (response.redirected || response.status >= 300 && response.status < 400) fail('REDIRECT_REJECTED');
       fail(({401:'UNAUTHORIZED',403:'FORBIDDEN',404:'NOT_FOUND',409:'CONFLICT'})[response.status] || (method === 'POST' && response.status >= 500 ? 'UNCERTAIN' : 'HTTP_ERROR'));
@@ -84,6 +85,7 @@ class ReferenceProvider {
   }
   async *#chunks(transport, limit) {
     const {response,signal,method} = transport;
+    if (!response.body && limit === 0 && response.headers.get('content-length') === '0') return;
     if (!response.body || typeof response.body.getReader !== 'function') fail('INVALID_RESPONSE');
     const reader = response.body.getReader(); let total = 0, complete = false;
     const aborted = () => { void reader.cancel().catch(() => {}); };
@@ -226,26 +228,28 @@ class ReferenceProvider {
     if (typeof value.created !== 'boolean' || typeof value.fullyAccepted !== 'boolean' || !Array.isArray(value.acceptedObjectIds) || new Set(value.acceptedObjectIds).size !== value.acceptedObjectIds.length || value.acceptedObjectIds.some(id => !expected.objectIds.includes(id)) || receipt.acceptedObjectIds.some(id => !value.acceptedObjectIds.includes(id)) || value.fullyAccepted !== expected.objectIds.every(id => value.acceptedObjectIds.includes(id)) || value.fullyAccepted !== (value.job.phase === 'completed')) fail('BINDING_MISMATCH');
     return value;
   }
-  async downloadObject(jobId, objectId, {expectedBinding, maxBytes = this.maxObjectBytes, signal} = {}) {
+  async downloadObject(jobId, objectId, {expectedBinding, maxBytes = this.maxObjectBytes, signal, rangeStart = 0} = {}) {
     this.#check(); this.#expected(jobId,expectedBinding); slug(objectId);
     // Hold a single sealed snapshot across the network await: another results()
     // call may update the cached manifest while this download is in flight.
     const manifest = this.#manifests.get(jobId);
     const object = manifest?.objects.find(o => o.id === objectId);
     if (!object) fail('BINDING_REQUIRED');
-    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > this.maxObjectBytes || object.byteSize > maxBytes) fail('BODY_LIMIT');
-    const transport = await this.#request('/jobs/' + jobId + '/results/' + objectId,{binary:true,signal,mediaType:object.role === 'odm_archive' ? 'application/zip' : 'application/octet-stream'});
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > this.maxObjectBytes || object.byteSize > maxBytes || !Number.isSafeInteger(rangeStart) || rangeStart < 0 || (object.byteSize === 0 ? rangeStart !== 0 : rangeStart >= object.byteSize)) fail('BODY_LIMIT');
+    const rangeHeader = rangeStart > 0 ? `bytes=${rangeStart}-${object.byteSize-1}` : undefined;
+    const responseBytes = object.byteSize - rangeStart;
+    const transport = await this.#request('/jobs/' + jobId + '/results/' + objectId,{binary:true,signal,mediaType:object.role === 'odm_archive' ? 'application/zip' : 'application/octet-stream',rangeHeader});
     if (transport.response.headers.get('x-result-sha256') !== object.sha256 || transport.response.headers.get('x-result-manifest-sha256') !== manifest.resultManifestSha256) {
       try { await transport.response.body?.cancel(); } catch {}
       fail('BINDING_MISMATCH');
     }
     const declared = transport.response.headers.get('content-length');
-    if (declared !== String(object.byteSize)) { try { await transport.response.body?.cancel(); } catch {} fail('BINDING_MISMATCH'); }
-    const source = this.#chunks(transport,Math.min(maxBytes,object.byteSize));
+    if (declared !== String(responseBytes) || (rangeHeader && transport.response.headers.get('content-range') !== `bytes ${rangeStart}-${object.byteSize-1}/${object.byteSize}`)) { try { await transport.response.body?.cancel(); } catch {} fail('BINDING_MISMATCH'); }
+    const source = this.#chunks(transport,Math.min(maxBytes,responseBytes));
     return (async function* () {
-      const digest = createHash('sha256'); let bytes = 0;
-      for await (const chunk of source) { bytes += chunk.length; digest.update(chunk); yield chunk; }
-      if (bytes !== object.byteSize || digest.digest('hex') !== object.sha256) fail('DIGEST_MISMATCH');
+      const digest = rangeStart === 0 ? createHash('sha256') : null; let bytes = 0;
+      for await (const chunk of source) { bytes += chunk.length; digest?.update(chunk); yield chunk; }
+      if (bytes !== responseBytes || (digest && digest.digest('hex') !== object.sha256)) fail('DIGEST_MISMATCH');
     })();
   }
 }
