@@ -29,10 +29,10 @@ test('shared v2 event vectors drive fixture charge, reopen and synthetic evidenc
  const file=path.join(dir,'fixture.sqlite'),key=Buffer.alloc(32,7),base=vectors.reservation;
  let fixture=openFixture(file,key);
  try { for(const event of vectors.events) {
-  const ref=vectors.grants[event.grant],r={...base,generation:ref.generation,reservationId:ref.reservationId},g={...r,grantId:ref.grantId};
+  const ref=vectors.grants[event.grant],reordered={byteBudget:base.policy.byteBudget,requestBudget:base.policy.requestBudget,chunkBytes:base.policy.chunkBytes,version:base.policy.version},r={...base,generation:ref.generation,reservationId:ref.reservationId,policy:event.reorderPolicy?reordered:base.policy},g={...r,grantId:ref.grantId};
   if(event.action==='reopen'){fixture.close();fixture=openFixture(file,key);assert.equal(fixture.status(r,event.objectId,event.start).state,event.expected);}
   else if(event.action==='charge'){const run=()=>fixture.charge(r,g,event.objectId,event.start,event.length);if(event.expected==='rejected')assert.throws(run,{code:'FIXTURE_REJECTED'});else assert.equal(run(),event.expected);}
-  else {const bytes=Buffer.from(event.content),evidence={identity:JSON.stringify([r.environment,r.jobId,r.manifestSha256]),objectId:event.objectId,start:event.start,length:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')},proof=event.action==='verify-invalid'?'0'.repeat(64):mac(key,evidence);if(event.expected==='rejected')assert.throws(()=>fixture.verify(r,event.objectId,event.start,bytes,proof),{code:'FIXTURE_REJECTED'});else {fixture.verify(r,event.objectId,event.start,bytes,proof);assert.equal(fixture.status(r,event.objectId,event.start).state,event.expected);}}
+  else {const bytes=Buffer.from(event.content),evidence={identity:JSON.stringify([r.environment,r.jobId,r.manifestSha256]),objectId:event.objectId,start:event.start,length:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')},proof=event.action==='verify-invalid'?'0'.repeat(64):event.proof;if(event.expected==='rejected')assert.throws(()=>fixture.verify(r,event.objectId,event.start,bytes,proof),{code:'FIXTURE_REJECTED'});else {assert.equal(mac(key,evidence),event.proof);fixture.verify(r,event.objectId,event.start,bytes,proof);assert.equal(fixture.status(r,event.objectId,event.start).state,event.expected);}}
   assert.deepEqual({...fixture.usage(r)},{requests:event.requests,bytes:event.bytes});
   assert.equal(fixture.status(r,event.objectId,event.start)?.state??null,event.rangeState);
  }} finally {fixture.close();}

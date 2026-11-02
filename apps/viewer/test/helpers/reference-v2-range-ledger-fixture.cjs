@@ -26,7 +26,7 @@ function openFixture(file,key) {
     close:()=>db.close(),
     charge(r,g,objectId,start,length) {
       validateGrant(g,r);if (!id(objectId) || !Number.isSafeInteger(start) || start<0 || !positive(length) || length>r.policy.chunkBytes || !Number.isSafeInteger(start+length)) fail();
-      const keyId=identity(r),policy=JSON.stringify(r.policy);
+      const keyId=identity(r),policy=JSON.stringify(Object.fromEntries(Object.keys(r.policy).sort().map(k=>[k,r.policy[k]])));
       db.exec('BEGIN IMMEDIATE');try {
         const job=db.prepare('SELECT * FROM jobs WHERE identity=?').get(keyId);
         if (job && job.policy!==policy) fail();
