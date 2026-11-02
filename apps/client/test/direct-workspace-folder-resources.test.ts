@@ -73,7 +73,7 @@ describe('direct Operations workspace folder resources',()=>{
       db.prepare('CREATE TABLE portal_v2_public_links(id TEXT PRIMARY KEY,token TEXT)'),
       db.prepare('INSERT INTO portal_v2_public_links VALUES(\'old-link\',\'untouched\')'),
     ]);
-    const migration=readFileSync(new URL('../migrations/0243_direct_workspace_folder_grants.sql',import.meta.url),'utf8');
+    const migration=readFileSync(new URL('../migrations/0244_direct_workspace_folder_grants.sql',import.meta.url),'utf8');
     await db.batch(splitD1MigrationStatements(migration).map(sql=>db.prepare(sql)));
     // The direct-folder feature defaults on; operators may explicitly disable it.
     env={DELIVERY_DB:db,DATA_BUCKET:bucket,DELIVERY_SESSION_SECRET:'direct-folder-test-session-secret-value-0001'} as Env;

@@ -547,7 +547,7 @@ test("optional Ops gates accept only absence or literal false and never hide exp
   }
 });
 
-test("pins the native portal migration inventories through Delivery 0243 and Operations 0231", () => {
+test("pins the native portal migration inventories through Delivery 0244 and Operations 0231", () => {
   assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 218);
   assert.equal(REQUIRED_STAGING_MIGRATIONS.operations[0], "0014_staff_acl_controls.sql");
   assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0231_owner_google_ads_summary.sql");
@@ -612,7 +612,7 @@ test("pins the native portal migration inventories through Delivery 0243 and Ope
     "0240_viewer_direct_grant_receipt_immutability.sql",
     "0241_app_release_pilot.sql",
     "0242_client_ops_triage_inquiries.sql",
-    "0243_direct_workspace_folder_grants.sql",
+    "0244_direct_workspace_folder_grants.sql",
   ]);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0123_native_directory_authority_history.sql")), [
     "0123_native_directory_authority_history.sql",

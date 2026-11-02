@@ -1,4 +1,4 @@
-import migration from "../migrations/0243_direct_workspace_folder_grants.sql?raw";
+import migration from "../migrations/0244_direct_workspace_folder_grants.sql?raw";
 import {afterEach,beforeEach,describe,expect,it} from "vitest";
 import {Miniflare} from "miniflare";
 import {splitD1MigrationStatements} from "./helpers/d1-migrations";
