@@ -152,6 +152,11 @@ class ReferenceTransferBroker {
     if(scope!=='synthetic-only'||typeof operationId!=='string'||!Number.isSafeInteger(senderGeneration)||senderGeneration<1)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
     return this.tx(()=>{const result=this.db.prepare("UPDATE fixture_atomic_delivery SET state='sending',sender_generation=? WHERE operation_id=? AND state='prepared' AND sender_generation=0").run(senderGeneration,operationId);if(result.changes!==1)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');return true;});
   }
+  // Synthetic receiver-only replay. A generation is not a real sender fence.
+  reclaimAtomicDeliveryFixture({scope,operationId,senderGeneration}={}) {
+    if(scope!=='synthetic-only'||typeof operationId!=='string'||!Number.isSafeInteger(senderGeneration)||senderGeneration<1)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+    return this.tx(()=>{const result=this.db.prepare("UPDATE fixture_atomic_delivery SET state='sending',sender_generation=? WHERE operation_id=? AND state IN ('sending','uncertain') AND sender_generation<?").run(senderGeneration,operationId,senderGeneration);if(result.changes!==1)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');return true;});
+  }
   markAtomicDeliveryUncertainFixture({scope,operationId,senderGeneration}={}) {
     if(scope!=='synthetic-only')fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
     return this.tx(()=>{if(this.db.prepare("UPDATE fixture_atomic_delivery SET state='uncertain' WHERE operation_id=? AND state='sending' AND sender_generation=?").run(operationId,senderGeneration).changes!==1)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');return true;});

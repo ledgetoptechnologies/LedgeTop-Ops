@@ -1,7 +1,8 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {ReferenceTransferBroker}=require('../server/referenceTransferBroker'),p=require('../server/referenceProtocol');
-test('broker synthetic method commits grant and sealed record together',t=>{
+const {receiverFixture,replayFixture}=require('./helpers/synthetic-grant-receiver.cjs');
+test('broker synthetic method commits grant and sealed record together',async t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-broker-fixture-'));t.diagnostic(`Retained synthetic fixture directory: ${root}`);
  const file=path.join(root,'image.jpg'),dbfile=path.join(root,'broker.sqlite');fs.writeFileSync(file,'abcdef');const key=Buffer.alloc(32,9);
  const manifest={id:'m',revision:1,sha256:'0'.repeat(64),totalBytes:6,objectCount:1,inputCounts:{images:1,lidarObjects:0,points:0},objects:[{id:'image',name:'image.jpg',byteSize:6,sha256:p.sha256('abcdef'),kind:'image',mediaType:'image/jpeg'}]};manifest.sha256=p.manifestSha256(manifest);
@@ -29,10 +30,17 @@ test('broker synthetic method commits grant and sealed record together',t=>{
   assert.throws(()=>broker.acknowledgeAtomicDeliveryFixture({...ackArgs,ack:{...ack,grantSha256:'f'.repeat(64)}}),{code:'TRANSFER_ACCOUNTING_UNAVAILABLE'});
   assert.throws(()=>broker.acknowledgeAtomicDeliveryFixture({...ackArgs,ack:{...ack,extra:true}}),{code:'TRANSFER_ACCOUNTING_UNAVAILABLE'});
   assert.deepEqual(owner.issue('op',binding,input),first);assert.equal(broker.acknowledgeAtomicDeliveryFixture(ackArgs),true);assert.equal(broker.acknowledgeAtomicDeliveryFixture(ackArgs),true);
+  const reservation2={...reservation,reservationId:'r2',nonce:'nonce2'},input2={...input,jobId:'j2',reservation:reservation2},binding2={...binding,jobId:'j2',reservationId:'r2'},receiver=receiverFixture();
+  const first2=owner.issue('op2',binding2,input2);broker.beginAtomicDeliveryFixture({scope:'synthetic-only',operationId:'op2',senderGeneration:1});const oldAck=receiver.post(first2);
+  broker.markAtomicDeliveryUncertainFixture({scope:'synthetic-only',operationId:'op2',senderGeneration:1});broker.close();broker=new ReferenceTransferBroker({databasePath:dbfile,managedRoot:root,environment:'staging'});owner=construct();
+  const replay=await replayFixture({broker,owner,input:input2,binding:binding2,operationId:'op2',senderGeneration:2,receiver,keyProvider:()=>({keyId:'k',key})});assert.deepEqual(replay.bytes,first2);assert.deepEqual(replay.ack,oldAck);
+  assert.throws(()=>broker.acknowledgeAtomicDeliveryFixture({scope:'synthetic-only',operationId:'op2',senderGeneration:1,ack:oldAck,keyProvider:()=>({keyId:'k',key}),verifyReceiver:()=>true}),{code:'TRANSFER_ACCOUNTING_UNAVAILABLE'});
+  const changedGrant={...JSON.parse(first2.toString()),token:'changed'};assert.throws(()=>receiver.post(p.canonicalBytes(changedGrant)),/synthetic receiver conflict/);
+  const expired={...JSON.parse(first2.toString()),expiresAt:'2000-01-01T00:00:00.000Z'};await assert.rejects(replayFixture({broker,owner:{issue:()=>p.canonicalBytes(expired)},input:input2,binding:binding2,operationId:'op2',senderGeneration:3,receiver,keyProvider:()=>({keyId:'k',key})}),/synthetic expired hold/);
   assert.throws(()=>owner.issue('op',{...binding,attemptId:'changed'},input),{code:'RESERVATION_BINDING'});
   assert.throws(()=>broker.mintGrantAndSealFixture({scope:'synthetic-only',operationId:'op',binding,input,verifyReservation:()=>true,verifySourcePin:()=>true,keyProvider:()=>({keyId:'k',key:Buffer.alloc(32,8)})}),{code:'TRANSFER_ACCOUNTING_UNAVAILABLE'});
   assert.throws(()=>broker.mintGrantAndSealFixture({scope:'synthetic-only',operationId:'op',binding,input}),{code:'TRANSFER_ACCOUNTING_UNAVAILABLE'});
-  assert.throws(()=>owner.issue('different-operation',binding,input),{code:'TRANSFER_ACCOUNTING_UNAVAILABLE'});assert.equal(broker.db.prepare('SELECT count(*) n FROM reference_grants').get().n,1);
+  assert.throws(()=>owner.issue('different-operation',binding,input),{code:'TRANSFER_ACCOUNTING_UNAVAILABLE'});assert.equal(broker.db.prepare('SELECT count(*) n FROM reference_grants').get().n,2);
   broker.db.prepare('UPDATE fixture_atomic_grants SET ciphertext=? WHERE operation_id=?').run(Buffer.from([1,2,3]),'op');assert.throws(()=>owner.issue('op',binding,input),{code:'TRANSFER_ACCOUNTING_UNAVAILABLE'});
  }finally{broker.close();}
 });
