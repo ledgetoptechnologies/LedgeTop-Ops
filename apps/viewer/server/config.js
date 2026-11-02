@@ -37,6 +37,9 @@ function normalizedOrigin(value) {
 
 const environment = process.env.NODE_ENV || 'development';
 const production = environment === 'production';
+const deploymentEnvironmentExplicit = Boolean(String(process.env.VIEWER_DEPLOYMENT_ENVIRONMENT || '').trim());
+const deploymentEnvironment = String(process.env.VIEWER_DEPLOYMENT_ENVIRONMENT
+  || (production ? 'production' : 'staging')).trim();
 let sessionSecret = process.env.SESSION_SECRET || '';
 let sessionSecretGenerated = false;
 if (!sessionSecret && !production) {
@@ -112,6 +115,8 @@ const config = {
   measurementPoissonBin: process.env.MEASUREMENT_POISSON_BIN || '/opt/poisson/PoissonRecon',
   environment,
   production,
+  deploymentEnvironment,
+  deploymentEnvironmentExplicit,
   port: positiveInteger(process.env.PORT, 8080),
   expectedHost: String(process.env.EXPECTED_HOST || '').trim().toLowerCase(),
   publicBaseUrl,
@@ -168,7 +173,7 @@ const config = {
   referenceAcceptanceReceiptIssuerId: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_RECEIPT_ISSUER_ID || '').trim(),
   referenceAcceptanceReceiptKeyId: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_RECEIPT_KEY_ID || '').trim(),
   referenceAcceptanceReceiptPrivateKeyPem: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_RECEIPT_PRIVATE_KEY_PEM || ''),
-  referenceAcceptanceEnvironment: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_ENVIRONMENT || (production ? 'production' : 'staging')).trim(),
+  referenceAcceptanceEnvironment: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_ENVIRONMENT || deploymentEnvironment).trim(),
   processingRoot,
   datasetsMount: process.env.DATASETS_MOUNT || path.join(processingRoot, 'datasets'),
   modelsMount: process.env.MODELS_MOUNT || path.join(processingRoot, 'models'),
@@ -285,9 +290,13 @@ function validate() {
       const key = require('node:crypto').createPrivateKey(config.referenceAcceptanceReceiptPrivateKeyPem.replace(/\\n/g, '\n'));
       if (key.asymmetricKeyType !== 'ed25519') problems.push('VIEWER_REFERENCE_ACCEPTANCE_RECEIPT_PRIVATE_KEY_PEM must be an Ed25519 private key');
     } catch { problems.push('VIEWER_REFERENCE_ACCEPTANCE_RECEIPT_PRIVATE_KEY_PEM must be a valid Ed25519 private key'); }
+    if (!config.deploymentEnvironmentExplicit)
+      problems.push('VIEWER_DEPLOYMENT_ENVIRONMENT must be set explicitly when Viewer reference acceptance is enabled');
+    if (!['staging', 'production'].includes(config.deploymentEnvironment))
+      problems.push('VIEWER_DEPLOYMENT_ENVIRONMENT must be staging or production');
     if (!['staging', 'production'].includes(config.referenceAcceptanceEnvironment)
-        || config.referenceAcceptanceEnvironment !== (config.production ? 'production' : 'staging'))
-      problems.push('VIEWER_REFERENCE_ACCEPTANCE_ENVIRONMENT must match this server environment');
+        || config.referenceAcceptanceEnvironment !== config.deploymentEnvironment)
+      problems.push('VIEWER_REFERENCE_ACCEPTANCE_ENVIRONMENT must match VIEWER_DEPLOYMENT_ENVIRONMENT');
     const configuredKeys = config.serviceAuthKeys || { [config.serviceAuthKeyId]: config.serviceAuthSecret };
     if (config.referenceAcceptanceServiceKeyId === config.serviceAuthKeyId
         || !configuredKeys[config.referenceAcceptanceServiceKeyId]
