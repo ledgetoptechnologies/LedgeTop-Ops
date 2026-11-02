@@ -33,8 +33,9 @@ function fixture(t, options = {}) {
   const job = { jobId: 'job-1', generation: 1, environment: 'staging', manifestSha256: manifest.sha256,
     submission: { manifest }, transferRequest };
   let now = now0;
+  const grantTokenKey = crypto.randomBytes(32);
   const dbPath = path.join(root, 'range-v2.sqlite');
-  let broker = new SourceRangeV2BrokerCandidate({ databasePath: dbPath, managedRoot: root, allowCreate: true, now: () => now, maxGrantTtlMs: 5000 });
+  let broker = new SourceRangeV2BrokerCandidate({ databasePath: dbPath, managedRoot: root, grantTokenKey, allowCreate: true, now: () => now, maxGrantTtlMs: 5000 });
   const resolveSource = binding => ({
     jobId: binding.jobId, generation: binding.generation, environment: binding.environment,
     manifestSha256: binding.manifestSha256, sourceVersion: binding.sourceVersion,
@@ -49,8 +50,8 @@ function fixture(t, options = {}) {
     return { objectId: object.id, authorization: `Bearer ${grant.token}`, method: 'GET', range: `bytes=0-${object.byteSize - 1}`,
       ifMatch: `"sha256-${object.sha256}"`, requestId, ...overrides };
   }
-  t.after(() => { try { broker.close(); } catch {} fs.rmSync(root, { recursive: true, force: true }); });
-  return { root, file, bytes, manifest, job, transferRequest, dbPath, get broker() { return broker; }, set broker(value) { broker = value; }, resolveSource, mint, headers, setNow(value) { now = value; }, getNow() { return now; } };
+  t.after(() => { try { broker.close(); } catch {} grantTokenKey.fill(0); fs.rmSync(root, { recursive: true, force: true }); });
+  return { root, file, bytes, manifest, job, transferRequest, dbPath, get broker() { return broker; }, set broker(value) { broker = value; }, resolveSource, mint, headers, setNow(value) { now = value; }, getNow() { return now; }, getGrantTokenKey() { return Buffer.from(grantTokenKey); } };
 }
 
 async function collect(stream) { const chunks = []; for await (const chunk of stream) chunks.push(chunk); return Buffer.concat(chunks); }
@@ -133,14 +134,14 @@ test('only fixed 8 MiB aligned ranges and digest If-Match are accepted', async t
   assert.throws(() => f.broker.mintGrant({ job: badJob, resolveSource: f.resolveSource }), { code: 'INVALID_TRANSFER_REQUEST' });
 });
 
-test('unique requests and bytes charge once while attempts survive grant rotation and restart', async t => {
-  const f = fixture(t), first = f.mint(), originalHeaders = f.headers(first);
-  const response1 = await f.broker.readAuthorizedRange(originalHeaders);
+test('exact bearer grant survives broker restart before outbox persistence and charges attempts once', async t => {
+  const f = fixture(t), first = f.mint();
+  const response1 = await f.broker.readAuthorizedRange(f.headers(first));
   response1.body.destroy(); // Lost response after the server durably recorded the attempt.
   f.broker.close();
-  f.broker = new SourceRangeV2BrokerCandidate({ databasePath: f.dbPath, managedRoot: f.root, now: f.getNow, maxGrantTtlMs: 5000 });
+  f.broker = new SourceRangeV2BrokerCandidate({ databasePath: f.dbPath, managedRoot: f.root, grantTokenKey: f.getGrantTokenKey(), now: f.getNow, maxGrantTtlMs: 5000 });
   const second = f.mint();
-  await assert.rejects(f.broker.readAuthorizedRange(originalHeaders), { code: 'UNAUTHORIZED' });
+  assert.deepEqual(second, first);
   const retry = await f.broker.readAuthorizedRange(f.headers(second));
   assert.deepEqual(await collect(retry.body), f.bytes);
   const usage = f.broker.db.prepare('SELECT requests_used,bytes_used,attempts_used FROM source_range_usage').get();
@@ -148,6 +149,28 @@ test('unique requests and bytes charge once while attempts survive grant rotatio
   const third = await f.broker.readAuthorizedRange(f.headers(second)); third.body.destroy();
   await assert.rejects(f.broker.readAuthorizedRange(f.headers(second)), { code: 'TRANSFER_LIMIT' });
   assert.deepEqual({ ...f.broker.db.prepare('SELECT requests_used,bytes_used,attempts_used FROM source_range_usage').get() }, { requests_used: 1, bytes_used: 10, attempts_used: 3 });
+});
+
+test('expired grant rotates to a unique unrecoverable bearer without reviving the old token', async t => {
+  const f = fixture(t), first = f.mint();
+  f.setNow(Date.parse(first.expiresAt) + 1);
+  const second = f.mint();
+  assert.notEqual(second.token, first.token);
+  await assert.rejects(f.broker.readAuthorizedRange(f.headers(first)), { code: 'UNAUTHORIZED' });
+  const response = await f.broker.readAuthorizedRange(f.headers(second));
+  assert.deepEqual(await collect(response.body), f.bytes);
+});
+
+test('grant key rotation does not recover an old bearer after broker restart', async t => {
+  const f = fixture(t), first = f.mint();
+  f.broker.close();
+  f.broker = new SourceRangeV2BrokerCandidate({ databasePath: f.dbPath, managedRoot: f.root,
+    grantTokenKey: crypto.randomBytes(32), now: f.getNow, maxGrantTtlMs: 5000 });
+  const second = f.mint();
+  assert.notEqual(second.token, first.token);
+  await assert.rejects(f.broker.readAuthorizedRange(f.headers(first)), { code: 'UNAUTHORIZED' });
+  const response = await f.broker.readAuthorizedRange(f.headers(second));
+  assert.deepEqual(await collect(response.body), f.bytes);
 });
 
 test('unique request budget below manifest minimum is rejected before grant creation', t => {

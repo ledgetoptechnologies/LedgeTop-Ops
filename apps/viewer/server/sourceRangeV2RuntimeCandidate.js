@@ -7,7 +7,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { HEADER_NAME, constantTimeSecretEqual } = require('./proxyGate');
-const { SourceRangeV2BrokerCandidate, createSourceRangeV2Handler } = require('./sourceRangeV2Candidate');
+const { SourceRangeV2BrokerCandidate, createSourceRangeV2Handler, deriveSourceRangeGrantTokenKey } = require('./sourceRangeV2Candidate');
 const { resolveSourceRangeV2Candidate } = require('./sourceRangeV2ResolverCandidate');
 const { ReferenceTransferGrantVault, deriveReferenceTransferGrantKey } = require('./referenceTransferGrantVault');
 const { ReferenceTransferOutbox } = require('./referenceTransferOutbox');
@@ -54,15 +54,19 @@ function createSourceRangeV2RuntimeCandidate({ config, database, storage } = {})
       || !Number.isSafeInteger(config.trustProxyHops) || config.trustProxyHops < 1)) fail('SOURCE_RANGE_TRANSPORT_CONFIGURATION_INVALID');
 
   const privateDirectory = ensurePrivateStateDirectory(config.dataDir);
-  let broker;
+  let broker, grantTokenKey;
   try {
+    grantTokenKey = deriveSourceRangeGrantTokenKey(config.processingSourceRangeGrantSecret);
     broker = new SourceRangeV2BrokerCandidate({
       databasePath: path.join(privateDirectory, 'broker.sqlite'),
       managedRoot: config.datasetsMount,
+      grantTokenKey,
       allowCreate: true,
     });
   } catch {
     fail('SOURCE_RANGE_STATE_UNAVAILABLE');
+  } finally {
+    grantTokenKey?.fill(0);
   }
 
   const handler = createSourceRangeV2Handler({

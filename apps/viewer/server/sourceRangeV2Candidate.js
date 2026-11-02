@@ -6,7 +6,7 @@
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
-const { createHash, randomBytes, randomUUID, timingSafeEqual } = require('node:crypto');
+const { createHash, createHmac, hkdfSync, randomUUID, timingSafeEqual } = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const { Readable } = require('node:stream');
 const protocol = require('./referenceProtocol');
@@ -30,6 +30,14 @@ class SourceRangeV2Error extends Error {
 }
 const fail = code => { throw new SourceRangeV2Error(code); };
 const sha256 = value => createHash('sha256').update(value).digest('hex');
+function deriveSourceRangeGrantTokenKey(grantSecret) {
+  if (typeof grantSecret !== 'string' || Buffer.byteLength(grantSecret) < 32) fail('GRANT_TOKEN_KEY_UNAVAILABLE');
+  return Buffer.from(hkdfSync('sha256', Buffer.from(grantSecret, 'utf8'), Buffer.from('ledgetop-viewer-source-range-v2'), Buffer.from('source-range-grant-token-hmac-v1'), 32));
+}
+function tokenForGrant(key, identityJson, grantId) {
+  if (!Buffer.isBuffer(key) || key.length !== 32 || typeof grantId !== 'string' || !ID.test(grantId)) fail('GRANT_TOKEN_KEY_UNAVAILABLE');
+  return createHmac('sha256', key).update('LTDS-SOURCE-RANGE-GRANT-V1\0').update(identityJson).update('\0').update(grantId).digest('base64url');
+}
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.getPrototypeOf(value) === Object.prototype && Object.keys(value).length === keys.length
   && keys.every(key => Object.hasOwn(value, key)) && Object.keys(value).every(key => keys.includes(key));
@@ -82,7 +90,7 @@ function canonicalTransfer(job) {
 }
 
 class SourceRangeV2BrokerCandidate {
-  constructor({ databasePath, managedRoot, now = Date.now, maxGrantTtlMs = 300000, allowCreate = false } = {}) {
+  constructor({ databasePath, managedRoot, grantTokenKey, now = Date.now, maxGrantTtlMs = 300000, allowCreate = false } = {}) {
     if (typeof databasePath !== 'string' || !path.isAbsolute(databasePath) || databasePath === ':memory:') fail('DURABLE_DATABASE_REQUIRED');
     if (!Number.isSafeInteger(maxGrantTtlMs) || maxGrantTtlMs < 1000 || maxGrantTtlMs > 3600000 || typeof now !== 'function') fail('INVALID_CONFIGURATION');
     if (typeof managedRoot !== 'string' || !path.isAbsolute(managedRoot)) fail('UNSAFE_SOURCE');
@@ -91,6 +99,7 @@ class SourceRangeV2BrokerCandidate {
     this.databasePath = databasePath;
     this.now = now;
     this.maxGrantTtlMs = maxGrantTtlMs;
+    this.grantTokenKey = Buffer.isBuffer(grantTokenKey) && grantTokenKey.length === 32 ? Buffer.from(grantTokenKey) : null;
     this.streams = new Set();
     const fresh = !fs.existsSync(databasePath);
     if (fresh && allowCreate !== true) fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
@@ -213,6 +222,7 @@ class SourceRangeV2BrokerCandidate {
   }
 
   mintGrant({ job, resolveSource } = {}) {
+    if (!this.grantTokenKey) fail('GRANT_TOKEN_KEY_UNAVAILABLE');
     if (typeof resolveSource !== 'function' || !job || typeof job !== 'object' || Array.isArray(job)) fail('SOURCE_RESOLVER_REQUIRED');
     const transfer = canonicalTransfer(job);
     if (!slug(job.jobId) || !['staging', 'production'].includes(job.environment) || !Number.isSafeInteger(job.generation) || job.generation < 1 || !HASH.test(job.manifestSha256)) fail('INVALID_JOB_BINDING');
@@ -250,16 +260,9 @@ class SourceRangeV2BrokerCandidate {
     if (!Number.isSafeInteger(now) || leaseExpiry <= now) fail('STALE_RESERVATION');
     const expiresMs = Math.min(now + this.maxGrantTtlMs, leaseExpiry);
     const expiresAt = new Date(expiresMs).toISOString();
-    const grantId = randomUUID(), token = randomBytes(32).toString('base64url'), tokenHash = sha256(token);
-    const grant = {
-      protocol: 'source-range-v2', reservationId: transfer.reservationId, generation: job.generation,
-      expiresAt, manifestSha256: manifest.sha256, sourceVersion: transfer.sourceVersion,
-      jobId: job.jobId, environment: job.environment, objectIds: transfer.objectIds,
-      nonce: transfer.nonce, token, chunkBytes: CHUNK_BYTES, requestBudget: transfer.requestBudget,
-      byteBudget: transfer.byteBudget, attemptBudget: transfer.attemptBudget,
-    };
+    const grantId = randomUUID(), token = tokenForGrant(this.grantTokenKey, identityJson, grantId), tokenHash = sha256(token);
     try {
-      this.#tx(() => {
+      const issued = this.#tx(() => {
         const old = this.db.prepare('SELECT * FROM source_range_usage WHERE identity_key=?').get(identityKey);
         if (old) {
           if (old.identity_json !== identityJson || old.transfer_json !== transferJson || old.objects_json !== objectsJson
@@ -274,11 +277,32 @@ class SourceRangeV2BrokerCandidate {
           const insertObject = this.db.prepare('INSERT INTO source_range_objects(identity_key,object_id,source_path,byte_size,object_sha256) VALUES(?,?,?,?,?)');
           for (const object of resolvedById.values()) insertObject.run(identityKey, object.id, object.path, object.byteSize, object.sha256);
         }
+        const active = this.db.prepare('SELECT id,token_hash,expires_ms FROM source_range_grants WHERE identity_key=? AND revoked=0 ORDER BY id LIMIT 2').all(identityKey);
+        if (active.length > 1) fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+        if (active.length === 1 && active[0].expires_ms > now) {
+          const replayToken = tokenForGrant(this.grantTokenKey, identityJson, active[0].id);
+          const storedHash = Buffer.from(active[0].token_hash, 'hex'), replayHash = Buffer.from(sha256(replayToken), 'hex');
+          if (storedHash.length === replayHash.length && timingSafeEqual(storedHash, replayHash)) {
+            return { protocol: 'source-range-v2', reservationId: transfer.reservationId, generation: job.generation,
+              expiresAt: new Date(active[0].expires_ms).toISOString(), manifestSha256: manifest.sha256,
+              sourceVersion: transfer.sourceVersion, jobId: job.jobId, environment: job.environment,
+              objectIds: transfer.objectIds, nonce: transfer.nonce, token: replayToken, chunkBytes: CHUNK_BYTES,
+              requestBudget: transfer.requestBudget, byteBudget: transfer.byteBudget, attemptBudget: transfer.attemptBudget };
+          }
+        }
+        // If issuance committed but the caller crashed before persisting its
+        // delivery outbox, the id lets us reconstruct the exact bearer. Legacy
+        // or expired rows are revoked before issuing a fresh, unique token.
         this.db.prepare('UPDATE source_range_grants SET revoked=1 WHERE identity_key=? AND revoked=0').run(identityKey);
         this.db.prepare('INSERT INTO source_range_grants(id,identity_key,token_hash,expires_ms) VALUES(?,?,?,?)').run(grantId, identityKey, tokenHash, expiresMs);
+        return { protocol: 'source-range-v2', reservationId: transfer.reservationId, generation: job.generation,
+          expiresAt, manifestSha256: manifest.sha256, sourceVersion: transfer.sourceVersion,
+          jobId: job.jobId, environment: job.environment, objectIds: transfer.objectIds,
+          nonce: transfer.nonce, token, chunkBytes: CHUNK_BYTES, requestBudget: transfer.requestBudget,
+          byteBudget: transfer.byteBudget, attemptBudget: transfer.attemptBudget };
       });
+      return structuredClone(issued);
     } catch (error) { if (error instanceof SourceRangeV2Error) throw error; fail('TRANSFER_ACCOUNTING_UNAVAILABLE'); }
-    return structuredClone(grant);
   }
 
   async readAuthorizedRange({ objectId, authorization, method, range, ifMatch, requestId } = {}) {
@@ -401,7 +425,7 @@ class SourceRangeV2BrokerCandidate {
     this.db.prepare('UPDATE source_range_grants SET revoked=1 WHERE identity_key=?').run(identityKey);
   }
 
-  close() { for (const stream of this.streams) stream.destroy(); this.db.close(); }
+  close() { for (const stream of this.streams) stream.destroy(); this.db.close(); this.grantTokenKey?.fill(0); }
 }
 
 function json(res, status, error) {
@@ -462,4 +486,4 @@ function createSourceRangeV2Handler({ broker, enabled = false, isProtectedTransp
   };
 }
 
-module.exports = { CHUNK_BYTES, PREFIX, REQUEST_HEADER, SourceRangeV2Error, SourceRangeV2BrokerCandidate, createSourceRangeV2Handler, canonicalIdentity, requestIdFor };
+module.exports = { CHUNK_BYTES, PREFIX, REQUEST_HEADER, SourceRangeV2Error, SourceRangeV2BrokerCandidate, createSourceRangeV2Handler, canonicalIdentity, requestIdFor, deriveSourceRangeGrantTokenKey };
