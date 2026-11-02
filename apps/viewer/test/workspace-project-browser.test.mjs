@@ -258,6 +258,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
     : json({ runs: [
       { attemptId: 'attempt-johnson', attemptNumber: 2, taskId: 'task-johnson', taskDisplayName: 'Johnson reconstruction', projectId: 'project-johnson', projectDisplayName: 'Johnson Road Survey', status: 'running', phase: 'processing', derivativeCount: 0, failedDerivativeCount: 0, createdAt: '2026-08-18T12:00:00.000Z', updatedAt: '2026-08-18T12:04:00.000Z' },
       { attemptId: 'attempt-johnson-old', attemptNumber: 1, taskId: 'task-johnson', taskDisplayName: 'Johnson reconstruction', projectId: 'project-johnson', projectDisplayName: 'Johnson Road Survey', status: 'failed', phase: 'obj2tiles_generate', error: { code: 'obj2tiles_exit_nonzero', message: 'Textured tile conversion failed.' }, derivativeCount: 1, failedDerivativeCount: 1, createdAt: '2026-08-17T12:00:00.000Z', updatedAt: '2026-08-17T12:04:00.000Z', completedAt: '2026-08-17T12:04:00.000Z' },
+      { attemptId: 'attempt-global-cancelled', attemptNumber: 3, taskId: 'task-quarry', taskDisplayName: 'Quarry reconstruction', projectId: 'project-quarry', projectDisplayName: 'Alpha Quarry', status: 'cancelled', phase: 'cancelled', error: { code: 'provider_cancelled', message: 'ODM processing cancelled by provider.' }, derivativeCount: 0, failedDerivativeCount: 0, createdAt: '2026-08-18T12:02:00.000Z', updatedAt: '2026-08-18T12:03:00.000Z', completedAt: '2026-08-18T12:03:00.000Z' },
       { attemptId: 'attempt-global-flaky', attemptNumber: 2, taskId: 'task-quarry', taskDisplayName: 'Quarry reconstruction', projectId: 'project-quarry', projectDisplayName: 'Alpha Quarry', status: 'failed', phase: 'materializing_recovery', error: { code: 'recovery_failed', message: 'Recovery diagnostics are available.' }, derivativeCount: 0, failedDerivativeCount: 0, createdAt: '2026-08-18T12:00:00.000Z', updatedAt: '2026-08-18T12:03:00.000Z', completedAt: '2026-08-18T12:03:00.000Z' },
     ], nextCursor: 'diagnostic-page-two' });
   if (pathname === '/api/v1/processing/derivatives/derivative-failed/retry' && method === 'POST') {
@@ -359,6 +360,12 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
     derivativeJobs: [{ id: 'derivative-old', type: 'mesh_tiles', status: 'failed', errorMessage: 'Tile conversion failed.' }],
     processingJobs: [], operations: [], logs: [{ createdAt: '2026-08-17T12:04:00.000Z', level: 'error', message: 'Obj2Tiles exited with code 1 [REDACTED PATH]' }],
     logsTruncated: false, logRetentionDays: 30,
+  } });
+  if (pathname === '/api/v1/attempts/attempt-global-cancelled/diagnostics') return json({ diagnostics: {
+    attempt: { id: 'attempt-global-cancelled', attemptNumber: 3, status: 'cancelled' },
+    errorDetail: { errorCode: 'provider_cancelled', errorMessage: 'ODM processing cancelled by provider.', stage: 'cancelled' },
+    events: [{ eventType: 'processing_attempt.provider_cancelled', phase: 'cancelled', severity: 'warning', message: 'ODM processing cancelled by provider.', createdAt: '2026-08-18T12:03:00.000Z' }],
+    processingJobs: [], derivativeJobs: [], operations: [], logs: [], logsTruncated: false, logRetentionDays: 30,
   } });
   if (pathname === '/api/v1/attempts/attempt-global-flaky/diagnostics') {
     runtime.flakyDiagnosticRequests += 1;
@@ -670,6 +677,16 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     const runDiagnosticText = await client.evaluate(`document.querySelector('#global-attempt-diagnostic-attempt-johnson-old').textContent`);
     for (const expected of ['obj2tiles_exit_nonzero', 'obj2tiles generate', 'diag-browser-41', '[REDACTED PATH]']) assert.equal(runDiagnosticText.toLowerCase().includes(expected.toLowerCase()), true, `${viewport.name}: missing run diagnostic ${expected}`);
     await waitForRequest(runtime, requestStart, 'GET', '/api/v1/attempts/attempt-johnson-old/diagnostics');
+    await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-global-cancelled"] [data-action="open-global-attempt-diagnostics"]').click()`);
+    await waitFor(client, "document.querySelector('#global-attempt-diagnostic-attempt-global-cancelled .diagnostic-cancellation') !== null", `${viewport.name}: provider cancellation was not rendered with its distinct diagnostics`);
+    const cancellationPanel = await client.evaluate(`(() => { const panel=document.querySelector('#global-attempt-diagnostic-attempt-global-cancelled'); return {text:panel.textContent, alert:panel.querySelector('[role=\"alert\"]')!==null, failure:panel.querySelector('.diagnostic-error')!==null, summary:document.querySelector('[data-diagnostic-attempt-id=\"attempt-global-cancelled\"] .attempt-cancel-summary')!==null, errorSummary:document.querySelector('[data-diagnostic-attempt-id=\"attempt-global-cancelled\"] .attempt-error-summary')!==null}; })()`);
+    assert.match(cancellationPanel.text, /Cancellation details/);
+    assert.match(cancellationPanel.text, /provider_cancelled/);
+    assert.equal(cancellationPanel.alert, false, `${viewport.name}: a cancellation must not be announced as an alert`);
+    assert.equal(cancellationPanel.failure, false, `${viewport.name}: a cancellation must not use failure styling`);
+    assert.equal(cancellationPanel.summary, true, `${viewport.name}: cancellation summary was not rendered`);
+    assert.equal(cancellationPanel.errorSummary, false, `${viewport.name}: cancellation summary used failure styling`);
+    await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-global-cancelled"] [data-action="open-global-attempt-diagnostics"]').click()`);
     await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson-old"] [data-action="open-global-attempt-diagnostics"]').click(); history.back()`);
     await waitFor(client, "document.querySelector('[data-action=\"task-settings\"]') !== null", `${viewport.name}: returning from Diagnostics did not restore task tools`);
     await client.evaluate(`document.querySelector('[data-action="task-settings"]').click()`);
