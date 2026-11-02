@@ -229,6 +229,14 @@ StorageManager callers remain unqualified.
 Filesystem and SQLite durability under actual NAS failures is not established;
 callback completion is not sufficient evidence to release a production claim.
 
+`test/reference-managed-upload-custody-e2e.test.js` joins the actual upload
+worker, fixture writer claim, unlocked scan, indexed binding, outbox signature
+and database reopen into one synthetic flow. The raw CSV stays in the Viewer
+binding and is excluded from the submitted photo manifest. It removes admission
+triggers only in the disposable test database and uses a raw SQLite reopen;
+normal `openDatabase` rejects that altered protected schema. This demonstrates
+that the fixture cannot be activated by ordinary startup.
+
 ## Deployment evidence still required
 
 No process inventory or idle period by itself proves old writers have stopped.
@@ -241,6 +249,19 @@ the reserved objects for the full reservation lifetime, and a way to detect
 restarts, changed mounts, lost barriers and stale authority. Any unavailable or
 ambiguous evidence must hold admission. The fixture claims and identity checks
 are not that barrier; no TrueNAS or NAS configuration was inspected here.
+
+One candidate design to investigate is a storage-authority-controlled,
+read-only immutable snapshot or equivalent retained source, identified by a
+stable volume and snapshot identity and retained by a durable hold. Hash that
+retained view outside SQLite, compare it with the indexed manifest, and bind
+the exact snapshot and hold to the reservation in a short transaction. The
+storage authority must independently prevent snapshot deletion or replacement
+and supply current authenticated evidence before transfer and release. A
+rollout would also need to stop and account for prior Viewer workers and direct
+mount clients, prevent them from regaining write access, and prove new workers
+use the barrier; a version check or process list alone is insufficient. Storage
+support, privileges, failure behavior, aliases, retention and capacity remain
+unverified. This proposal makes no snapshot or configuration change.
 
 Existing `requireProcessingHeadroom` groups dataset, cache and model estimates
 by observed filesystem device and includes local active attempt and derivative
