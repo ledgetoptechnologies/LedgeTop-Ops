@@ -6,6 +6,7 @@ const { createHash } = require('node:crypto');
 const p = require('./referenceProtocol');
 const {validateReferenceOptions,decodeOptionsWire}=require('./referenceOptions');
 const { createEndpointCaFetch } = require('./referenceCaTransport');
+const SOURCE_RANGE_CHUNK_BYTES = 8 * 1024 * 1024;
 const verifiedTransferGrantAcks = new WeakMap();
 function isVerifiedTransferGrantAck(value, expected) {
   const evidence = value && typeof value === 'object' ? verifiedTransferGrantAcks.get(value) : null;
@@ -40,6 +41,32 @@ function transferRequest(v) {
   slug(v.reservationId); slug(v.nonce); integer(v.generation); integer(v.byteBudget); hash(v.manifestSha256);
   if (typeof v.expiresAt !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(v.expiresAt) || !Number.isFinite(Date.parse(v.expiresAt)) || new Date(v.expiresAt).toISOString() !== v.expiresAt) fail('INVALID_RESPONSE');
   // Expiry blocks using a grant, never reading status for reconciliation.
+}
+function sourceRangeTransferRequest(v) {
+  closed(v,['protocol','reservationId','generation','expiresAt','manifestSha256','sourceVersion','objectIds','chunkBytes','requestBudget','byteBudget','nonce','attemptBudget']);
+  if (v.protocol !== 'source-range-v2') fail('INVALID_RESPONSE');
+  slug(v.reservationId); slug(v.nonce); integer(v.generation); hash(v.manifestSha256);
+  if (v.generation < 1 || typeof v.expiresAt !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(v.expiresAt)
+    || !Number.isFinite(Date.parse(v.expiresAt)) || new Date(v.expiresAt).toISOString() !== v.expiresAt
+    || typeof v.sourceVersion !== 'string' || !/^[\x21-\x7e]{1,256}$/.test(v.sourceVersion)
+    || v.chunkBytes !== SOURCE_RANGE_CHUNK_BYTES || !Array.isArray(v.objectIds) || !v.objectIds.length
+    || v.objectIds.length > p.LIMITS.objects || v.objectIds.some(id => { try { slug(id); return false; } catch { return true; } })
+    || new Set(v.objectIds).size !== v.objectIds.length
+    || !['requestBudget','byteBudget','attemptBudget'].every(key => Number.isSafeInteger(v[key]) && v[key] > 0)) fail('INVALID_RESPONSE');
+}
+function validateSourceRangeGrant(v, expected) {
+  const fields=['protocol','reservationId','generation','expiresAt','manifestSha256','sourceVersion','jobId','environment','objectIds','nonce','token','chunkBytes','requestBudget','byteBudget','attemptBudget'];
+  closed(v,fields);
+  if(v.protocol!=='source-range-v2'||v.environment!==expected.environment)fail('BINDING_MISMATCH');
+  slug(v.jobId); slug(v.reservationId); slug(v.nonce); integer(v.generation); hash(v.manifestSha256);
+  if(typeof v.expiresAt!=='string'||!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(v.expiresAt)
+    ||!Number.isFinite(Date.parse(v.expiresAt))||new Date(v.expiresAt).toISOString()!==v.expiresAt
+    ||typeof v.sourceVersion!=='string'||!/^[\x21-\x7e]{1,256}$/.test(v.sourceVersion)
+    ||v.chunkBytes!==SOURCE_RANGE_CHUNK_BYTES||!Array.isArray(v.objectIds)||!equal(v.objectIds,expected.objectIds)
+    ||!['requestBudget','byteBudget','attemptBudget'].every(key=>Number.isSafeInteger(v[key])&&v[key]>0)
+    ||typeof v.token!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(v.token))fail('INVALID_RESPONSE');
+  binding(v,expected,['jobId','reservationId','generation','manifestSha256','sourceVersion','objectIds','nonce','chunkBytes','requestBudget','byteBudget','attemptBudget']);
+  if(Date.parse(v.expiresAt)>Date.parse(expected.expiresAt))fail('BINDING_MISMATCH');
 }
 function ack(v, expected) {
   closed(v,['reservationId','generation','manifestSha256','nonce','accepted','grantSha256']); slug(v.reservationId); slug(v.nonce); integer(v.generation); hash(v.manifestSha256); hash(v.grantSha256);
@@ -125,7 +152,11 @@ class ReferenceProvider {
     if (job.error !== null && (typeof job.error !== 'string' || !/^[a-z][a-z0-9_]{0,79}$/.test(job.error))) fail('INVALID_RESPONSE');
     if (job.resultManifestSha256 !== null) hash(job.resultManifestSha256);
     for (const key of ['jobId','generation','environment','manifestSha256','inputManifestSha256','pipelineDigest','resultManifestSha256']) if (Object.hasOwn(expected,key)) { const actualKey = key === 'inputManifestSha256' ? 'manifestSha256' : key; if (!equal(job[actualKey],expected[key])) fail('BINDING_MISMATCH'); }
-    if (job.transferRequest !== null) { transferRequest(job.transferRequest); binding(job.transferRequest,job,['generation','manifestSha256']); }
+    if (job.transferRequest !== null) {
+      if (job.transferRequest?.protocol === 'source-range-v2') sourceRangeTransferRequest(job.transferRequest);
+      else transferRequest(job.transferRequest);
+      binding(job.transferRequest,job,['generation','manifestSha256']);
+    }
     if (job.transferGrantAcknowledgement !== null) {
       if (!job.transferRequest) fail('BINDING_MISMATCH');
       const grantAck=ack(job.transferGrantAcknowledgement,job.transferRequest);
@@ -138,7 +169,14 @@ class ReferenceProvider {
       if (previous.transferRequest !== null) binding(job,previous,['transferRequest']);
     }
     const submission = this.#submissions.get(job.jobId);
-    if (submission && job.transferRequest) safeValidate(() => p.validateTransferByteBudget(submission.manifest.totalBytes,job.transferRequest.byteBudget));
+    if (submission && job.transferRequest) {
+      if (job.transferRequest.protocol === 'source-range-v2') {
+        const transfer=job.transferRequest, manifest=submission.manifest;
+        const ids=manifest.objects.map(object=>object.id), minimum=manifest.objects.reduce((sum,object)=>sum+Math.ceil(object.byteSize/SOURCE_RANGE_CHUNK_BYTES),0);
+        const sourceVersion=typeof manifest.id==='string'&&manifest.id.startsWith('dataset-')?`dataset:${manifest.id.slice(8)}:${manifest.sha256}`:null;
+        if(sourceVersion!==transfer.sourceVersion||!equal(ids,transfer.objectIds)||transfer.byteBudget<manifest.totalBytes||transfer.byteBudget>p.transferByteBudgetLimit(manifest.totalBytes)||transfer.requestBudget<minimum||transfer.attemptBudget<minimum)fail('BINDING_MISMATCH');
+      } else safeValidate(() => p.validateTransferByteBudget(submission.manifest.totalBytes,job.transferRequest.byteBudget));
+    }
     this.#jobs.set(job.jobId,structuredClone(job)); return job;
   }
   #checkExpected(jobId, expected) {
@@ -217,7 +255,8 @@ class ReferenceProvider {
     const submission = this.#submissions.get(jobId);
     const grantBinding = {...job.transferRequest,jobId,generation:expected.generation,environment:this.#environment,objectIds:submission?.manifest.objects.map(o => o.id) ?? expected.objectIds};
     let immutableGrant; try { immutableGrant = structuredClone(grant); } catch { fail('INVALID_REQUEST'); }
-    safeValidate(() => p.validateTransferGrant(immutableGrant,grantBinding));
+    if (job.transferRequest.protocol === 'source-range-v2') safeValidate(() => validateSourceRangeGrant(immutableGrant,grantBinding));
+    else safeValidate(() => p.validateTransferGrant(immutableGrant,grantBinding));
     const grantSha256 = p.sha256(p.canonicalBytes(immutableGrant));
     const accepted = ack(await this.#json('/jobs/' + jobId + '/transfer-grants',{method:'POST',body:immutableGrant,signal}),{...grantBinding,grantSha256});
     if (this.#attestableTransport) verifiedTransferGrantAcks.set(accepted,{serialized:JSON.stringify(accepted),provider:this,jobId,environment:this.#environment,grantSha256,endpoint:this.#endpoint});
