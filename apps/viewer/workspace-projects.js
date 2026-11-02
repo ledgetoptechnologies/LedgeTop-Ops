@@ -23,6 +23,7 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { mountGcpGeographicMap, mapPage } from './workspace-gcp-geographic.mjs';
 import { DIRECT_CLIENT_GRANTS_PATH, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
+import { publicationConfirmation, publicationViewNotice } from './workspace-publication-views.mjs';
 
 const dialogs=createWorkspaceDialogs();
 
@@ -85,11 +86,12 @@ async function openShareModal(projectId,onlyOutputId=null){
   const taskIds=new Set(state.tasks.filter(task=>task.projectId===projectId).map(task=>task.id));
   const outputs=state.outputs.filter(output=>taskIds.has(output.taskId)&&(!onlyOutputId||output.id===onlyOutputId)
     &&(output.activePublished||output.status==='ready'));
+  for(const output of outputs)delete state.sharePreflight[output.id];
   shareModal(projectId,onlyOutputId);
   const reads=[];
   if(can('viewer.shares.read'))for(const output of outputs)reads.push((async()=>{
     try{const result=await api(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/shares`);
-      if(current()){state.sharePreflight[output.id]={...result,error:null};state.shares[output.id]=result.shares||[];}
+      if(current()){state.sharePreflight[output.id]={...result,error:null,contextId:context.id};state.shares[output.id]=result.shares||[];}
     }catch(error){if(current())state.sharePreflight[output.id]={error:error.message};}
   })());
   if(!onlyOutputId&&(can('viewer.shares.read')||can('viewer.shares.revoke')))reads.push((async()=>{
@@ -690,7 +692,7 @@ async function confirmCancelAttempt(id){if(!can('viewer.processing.write')||stat
 async function restartTask(id){const task=state.tasks.find(item=>item.id===id),attempt=task?.latestAttempt;if(!attempt?.providerId)return toast('The task has no prior provider configuration',true);return mutate(`/api/v1/tasks/${encodeURIComponent(id)}/attempts`,{method:'POST',body:{providerId:attempt.providerId,...(attempt.presetId?{presetId:attempt.presetId}:{}),options:attempt.options||{}}},'New processing attempt queued')}
 async function readyViewerLauncher(){const launch=beginIsolatedViewerLaunch();if(!await launch.waitUntilReady())throw new Error('Viewer popup was blocked or failed to initialize');return launch}
 async function openReview(id){let launch=null;try{launch=await readyViewerLauncher();const result=await api(`/api/v1/attempts/${encodeURIComponent(id)}/review-sessions`,{method:'POST',body:{}});if(!reviewSessionController.track(launch.channelId,{attemptId:result.attemptId,modelId:result.modelId,modelVersionId:result.modelVersionId,sessionTtlSeconds:result.sessionTtlSeconds}))throw responseError('invalid review session response',502);if(!launch.navigate(result.embedUrl,{renewable:true}))throw responseError('invalid review navigation response',502);setTimeout(()=>launch.close(),1000)}catch(error){launch?.fail();if(launch)reviewSessionController.untrack(launch.channelId);toast(error.message,true)}}
-async function publishAttempt(id){try{const result=await api(`/api/v1/attempts/${encodeURIComponent(id)}/review-sessions`,{method:'POST',body:{}});if(await dialogs.confirm(`Publish the verified ${result.assetKinds.join(', ')} assets?`,{title:'Publish output',submitLabel:'Publish'}))await mutate(`/api/v1/attempts/${encodeURIComponent(id)}/publish`,{method:'POST',body:{selectedAssetKinds:result.assetKinds}},'Output published')}catch(error){toast(error.message,true)}}
+async function publishAttempt(id){try{const result=await api(`/api/v1/attempts/${encodeURIComponent(id)}/review-sessions`,{method:'POST',body:{}}),confirmation=publicationConfirmation(result.assetKinds);if(!confirmation)throw new Error('The verified publication views could not be identified. Refresh and review this model.');if(await dialogs.confirm(confirmation,{title:'Publish output',submitLabel:'Publish'}))await mutate(`/api/v1/attempts/${encodeURIComponent(id)}/publish`,{method:'POST',body:{selectedAssetKinds:result.assetKinds}},'Output published')}catch(error){toast(error.message,true)}}
 async function viewPublishedOutput(id){let launch=null;try{launch=await readyViewerLauncher();const result=await api(`/api/v1/processing/outputs/${encodeURIComponent(id)}/view-sessions`,{method:'POST',body:{}});if(result.sessionMode!=='published'||!reviewSessionController.track(launch.channelId,{sessionMode:'published',outputId:id,modelId:result.modelId,modelVersionId:result.modelVersionId,sessionTtlSeconds:result.sessionTtlSeconds}))throw responseError('invalid Viewer session response',502);if(!launch.navigate(result.embedUrl,{renewable:true}))throw responseError('invalid Viewer session response',502);setTimeout(()=>launch.close(),1000)}catch(error){launch?.fail();if(launch)reviewSessionController.untrack(launch.channelId);toast(error.message,true)}}
 async function downloadOutputAsset(id,url,isReport){const output=state.outputs.find(item=>item.id===id);if(!isReport)return outputDownloadMenu(output);if(!url)return toast('This output does not expose that artifact',true);try{await authenticatedDownload(url,`${safeFileName(output?.displayName)}-report.pdf`)}catch(error){toast(error.message,true)}}
 async function purgeTrash(id,entityId){const input=await dialogs.form({title:'Permanently delete item',message:`Permanent deletion cannot be undone. Type the exact identifier to continue: ${entityId}`,submitLabel:'Permanently delete',destructive:true,fields:[{name:'typedId',label:'Exact identifier',required:true,maxLength:entityId.length,exact:entityId}]});if(!input)return;return mutate(`/api/v1/storage/trash/${encodeURIComponent(id)}`,{method:'DELETE',body:{typedId:input.typedId}},'Item permanently deleted')}
@@ -741,10 +743,11 @@ function clientGrantBody(form,onlyOutputId){
     permissions:{measure:form.elements.measure.checked,cameras:form.elements.cameras.checked,download:form.elements.download.checked}}};
 }
 function clientSharePanel(output,onlyOutputId){
-  const legacy=legacyClientSharePanel(output,onlyOutputId);
-  if(state.clientDirectAccess)return directClientShareCard(onlyOutputId)
+  const legacy=legacyClientSharePanel(output,onlyOutputId),preflight=output&&state.sharePreflight[output.id],current=Boolean(preflight&&!preflight.error&&!state.shareContext?.loading&&preflight.contextId===state.shareContext?.id),notice=onlyOutputId&&current?publicationViewNotice(preflight.eligibleAssetKinds):'';
+  const viewNotice=notice?`<p class="form-note">${esc(notice)}</p>`:'';
+  if(state.clientDirectAccess)return viewNotice+directClientShareCard(onlyOutputId)
     +`<details class="share-legacy"><summary>Share through an Operations project instead</summary><div data-legacy-client-share-panel>${legacy}</div></details>`;
-  return legacy;
+  return viewNotice+legacy;
 }
 function legacyClientSharePanel(output,onlyOutputId){
   if(can('viewer.client_grants.manage')&&state.shareContext?.clientLoading)return card('Authenticated client access',empty('Checking Operations client access… Public links can be created separately.'));
@@ -891,8 +894,9 @@ function shareModal(projectId,onlyOutputId=null){
   if(selected){
     const output=selected,preflight=state.sharePreflight[output.id],ready=!output.activePublished,mayCreate=can('viewer.shares.create')&&(!ready||can('viewer.processing.publish'));
     const blocked=Boolean(preflight?.error),views=availableShareViews(output),warning=preflight?.existingAccessUpdateRequired?'Activating this version can update existing model/client access and project links. Confirmation is required before creating the link.':ready?'This model is private. Create public link activates its verified public derivatives and creates a revocable link.':'Links follow this model’s latest published version.';
+    const viewNotice=preflight&&!preflight.error&&!checking&&preflight.contextId===state.shareContext?.id?publicationViewNotice(preflight.eligibleAssetKinds):'';
     const form=checking?empty('Checking share eligibility…'):mayCreate&&!blocked&&views.length?
-      `<form class="manage-form share-form" data-output-id="${esc(output.id)}">${field('Link label','label','maxlength="120"')}${field('Optional password','password','type="password" minlength="8" autocomplete="new-password"')}${field('Expiry (optional)','expiresAt','type="datetime-local"')}${shareViewControls(output)}<label class="check"><input type="checkbox" name="measure" checked> Temporary measurements (not saved to the project)</label><label class="check"><input type="checkbox" name="cameras" checked> Camera positions</label><label class="check"><input type="checkbox" name="download"> Downloads, including model report</label><p class="form-note">${esc(warning)}</p><button class="primary-button">Create public link</button></form>`:
+      `<form class="manage-form share-form" data-output-id="${esc(output.id)}">${field('Link label','label','maxlength="120"')}${field('Optional password','password','type="password" minlength="8" autocomplete="new-password"')}${field('Expiry (optional)','expiresAt','type="datetime-local"')}${shareViewControls(output)}${viewNotice?`<p class="form-note">${esc(viewNotice)}</p>`:''}<label class="check"><input type="checkbox" name="measure" checked> Temporary measurements (not saved to the project)</label><label class="check"><input type="checkbox" name="cameras" checked> Camera positions</label><label class="check"><input type="checkbox" name="download"> Downloads, including model report</label><p class="form-note">${esc(warning)}</p><button class="primary-button">Create public link</button></form>`:
       blocked?empty('Sharing eligibility could not be verified. Close and reopen Share to retry.'):empty(mayCreate?'No verified views are available for this link.':'Creating a link requires share permission and, for private ready models, activation permission.');
     const list=can('viewer.shares.read')?`<div class="data-list top-gap">${(state.shares[output.id]||[]).map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Public link')}</strong><small>${esc(shareSettingsSummary(share))}</small></div>${badge(share.revokedAt?'revoked':share.expiresAt&&Date.parse(share.expiresAt)<=Date.now()?'expired':'active')}<div class="row-actions">${!share.revokedAt?`${button('copy-existing-share',share.id,'Copy link')}${button('open-existing-share',share.id,'Open')}${can('viewer.shares.create')?button('edit-share',share.id,'Edit settings'):''}${can('viewer.shares.revoke')?button('revoke-share',share.id,'Revoke'):''}`:''}</div></div>`).join('')||empty('No public links.')}</div>`:'';
     publicCards=card(output.displayName||'Model',form+list);
