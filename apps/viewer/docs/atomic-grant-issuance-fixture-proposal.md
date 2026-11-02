@@ -18,6 +18,16 @@ A reviewed future migration must select one authoritative transactional database
 
 ### Candidate owner comparison
 
+Processing's read-only host check on 2026-11-02 reported cluster `.89` root
+with about 111 GiB free of 295 GiB and 629.51 GiB unallocated in its volume
+group; main `.88` had about 1.4 TiB free of 1.8 TiB on the NodeODM data
+filesystem. The synthetic provider policy routes large jobs to main; this is a
+reasonable planning constraint for roughly 50 GB of source data, not a live
+capacity reservation. Recheck actual target mounts, expansion/intermediate
+needs, retained copies and concurrent reservations immediately before admitting
+work. Unallocated volume-group capacity is not usable filesystem space until
+an operator provisions it; no resizing or runtime change is included here.
+
 Prefer the **existing broker database as the candidate issuance owner**, contingent on the changes and proofs below. Its existing `mintGrant` transaction already commits the grant row and job usage ledger together, so adding a reviewed broker-side operation/intent and encrypted envelope in that same transaction can avoid moving authorization and accounting into the Viewer journal. The Viewer journal should first durably bind a stable operation ID, attempt, exact job/generation, environment, reservation/nonce, manifest and ordered objects, then request the broker-owned operation; it must hold on unknown outcome and reconcile by that same ID. This is a two-system handoff, not a cross-database atomic transaction: a Viewer journal commit is not proof that a broker grant exists, and an absent broker row after rollback/restore is not proof that it never existed.
 
 This is not a property of the current implementation. The existing broker accepts caller-supplied `reservationAvailable`, capabilities, reservation and file paths; its path/source checks happen before its internal transaction. A boolean or matching fingerprint is not a storage-owner, job, reservation, caller or source-custody attestation. Its existing replacement/revocation logic also permits cases beyond one immutable grant per job/reservation; it does not implement the proposed stable operation or encrypted outbox. Before selecting this owner for any real lane, establish an independently authenticated caller and current reservation/claim, an immutable source pin and purge/writer fence, in-transaction exact binding and authorization/usage checks, and a unique non-replaceable operation/reservation identity. Protect the encrypted record, immutable nonce/key identity and grant authorization under the same durable transaction; no network send until commit and independently trusted receiver. Source pin validity must remain enforceable over the transfer, not only at a pre-transaction path scan.
