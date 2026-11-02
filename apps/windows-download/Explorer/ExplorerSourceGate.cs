@@ -3,7 +3,7 @@ using LedgeTop.WindowsDownload;
 namespace LedgeTop.Files.Explorer;
 
 /// <summary>Pause is cancellation/availability, never authentication. Live resume reads only the current cached source session.</summary>
-internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IHydrationAuthoritySource, IHydrationMutationAwareSource, IDisposable
+internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IVerifiedHydrationDownloadSource, IHydrationAuthoritySource, IHydrationMutationAwareSource, IDisposable
 {
     private readonly IQueuedDownloadSource source;
     private readonly ExplorerRootScope scope;
@@ -88,6 +88,26 @@ internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IHydrationAuth
         var lease = Lease(cancellationToken); using var linked = lease.Linked;
         var result = await source.DownloadAsync(spec, destination, progress, linked.Token).ConfigureAwait(false);
         Current(lease.Epoch); return result;
+    }
+    public async Task<VerifiedHydrationDownload> DownloadForHydrationAsync(DownloadSpec spec, string destination,
+        CancellationToken cancellationToken = default)
+    {
+        var lease = Lease(cancellationToken); using var linked = lease.Linked;
+        VerifiedHydrationDownload? result = null;
+        try {
+            if (source is IVerifiedHydrationDownloadSource verified)
+                result = await verified.DownloadForHydrationAsync(spec, destination, linked.Token).ConfigureAwait(false);
+            else {
+                var path = await source.DownloadAsync(spec, destination, cancellationToken: linked.Token).ConfigureAwait(false);
+                result = new VerifiedHydrationDownload(path,
+                    new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.Asynchronous), integrityVerified: false);
+            }
+            Current(lease.Epoch);
+            var completed = result; result = null;
+            return completed;
+        } finally {
+            if (result is not null) await result.DisposeAsync().ConfigureAwait(false);
+        }
     }
     public void Dispose()
     {

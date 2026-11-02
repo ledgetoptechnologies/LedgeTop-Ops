@@ -10,7 +10,7 @@ public sealed record QueuedDownloadReference(string PrincipalId, string Resource
 
 /// <summary>One configured human Access source. No credential or byte URL is persisted.
 /// Metadata redirects, ambient cookies and alternate origins are never accepted.</summary>
-public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable, IHydrationMutationAwareSource
+public abstract class QueuedDownloadSource : IQueuedDownloadSource, IVerifiedHydrationDownloadSource, IDisposable, IHydrationMutationAwareSource
 {
     bool IHydrationMutationAwareSource.CoordinatesHydrationMutations => GetType() == typeof(EmployeeQueuedDownloadSource) || GetType() == typeof(PortalQueuedDownloadSource);
     private readonly CloudflareAccessSession session;
@@ -89,10 +89,20 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable,
     }
     public Task<string> DownloadAsync(DownloadSpec spec, string destination, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default)
     {
+        ValidateContentUri(spec);
+        return downloader.DownloadAsync(spec, destination, cancellationToken: cancellationToken, progress: progress);
+    }
+    async Task<VerifiedHydrationDownload> IVerifiedHydrationDownloadSource.DownloadForHydrationAsync(DownloadSpec spec,
+        string destination, CancellationToken cancellationToken)
+    {
+        ValidateContentUri(spec);
+        return await downloader.DownloadVerifiedForHydrationAsync(spec, destination, cancellationToken).ConfigureAwait(false);
+    }
+    private void ValidateContentUri(DownloadSpec spec)
+    {
         if (!spec.ContentUri.IsAbsoluteUri || spec.ContentUri.GetLeftPart(UriPartial.Authority) != Origin.GetLeftPart(UriPartial.Authority)
             || spec.ContentUri.UserInfo.Length != 0 || spec.ContentUri.Query.Length != 0 || spec.ContentUri.Fragment.Length != 0) throw Invalid();
         ContentPath(spec.ContentUri.AbsolutePath);
-        return downloader.DownloadAsync(spec, destination, cancellationToken: cancellationToken, progress: progress);
     }
     private ResolvedQueuedDownload Parse(JsonElement root)
     {

@@ -193,6 +193,17 @@ public sealed class Downloader : IDisposable
     public async Task<string> DownloadAsync(DownloadSpec spec, string outputRoot, CancellationToken cancellationToken = default,
         IProgress<DownloadProgress>? progress = null)
     {
+        await using var verified = await DownloadVerifiedFileCoreAsync(spec, outputRoot, cancellationToken, progress).ConfigureAwait(false);
+        return verified.Path;
+    }
+
+    internal Task<VerifiedHydrationDownload> DownloadVerifiedForHydrationAsync(DownloadSpec spec, string outputRoot,
+        CancellationToken cancellationToken = default, IProgress<DownloadProgress>? progress = null) =>
+        DownloadVerifiedFileCoreAsync(spec, outputRoot, cancellationToken, progress);
+
+    private async Task<VerifiedHydrationDownload> DownloadVerifiedFileCoreAsync(DownloadSpec spec, string outputRoot,
+        CancellationToken cancellationToken, IProgress<DownloadProgress>? progress)
+    {
         cancellationToken.ThrowIfCancellationRequested(); Validate(spec);
         // This is a per-network-await budget, not a total download deadline.
         // Rearm for headers/stream creation/each read, and stop it during local
@@ -318,7 +329,8 @@ public sealed class Downloader : IDisposable
             RequireRegularFile(partialPath);
             Report(spec.Length, DownloadPhase.Verifying);
             // Keep a read handle denying writes through final promotion (Windows permits rename via Delete sharing).
-            await using (var verify = new FileStream(partialPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 65536, FileOptions.Asynchronous)) {
+            var verify = new FileStream(partialPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 65536, FileOptions.Asynchronous);
+            try {
                 if (verify.Length != spec.Length) throw new TransferException("Partial length changed before verification.");
                 byte[] actual;
                 using (DownloadTimingScope.Measure(3)) actual = await SHA256.HashDataAsync(verify, cancellationToken);
@@ -333,7 +345,10 @@ public sealed class Downloader : IDisposable
                 // Promotion is the commit boundary. Deferred state cleanup must not report a completed download as failed.
                 try { HydrationMutationScope.Run(() => { RequireRegularFile(statePath); File.Delete(statePath); }, committedCleanup: true); }
                 catch (IOException) { } catch (UnauthorizedAccessException) { } catch (TransferException) { }
-                return finalPath;
+                return new VerifiedHydrationDownload(finalPath, verify, integrityVerified: true);
+            } catch {
+                await verify.DisposeAsync().ConfigureAwait(false);
+                throw;
             }
         } catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (OperationCanceledException) when (network.IsCancellationRequested) {

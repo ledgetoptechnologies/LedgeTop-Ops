@@ -56,7 +56,8 @@ internal static class HydrationTimingTests
         using var fixture = new Fixture(); var output = new List<HydrationTimingSummary>();
         await fixture.Run(output.Add);
         var cold = output.Single();
-        Check(cold.Outcome == HydrationTimingOutcome.Completed && cold.CacheHit == false && fixture.Source.Downloads == 1 && fixture.Native.Transfers == 1);
+        Check(cold.Outcome == HydrationTimingOutcome.Completed && cold.CacheHit == false && fixture.Source.Downloads == 1
+            && fixture.Source.VerifiedLeases == 1 && fixture.Native.Transfers == 1);
         Check(cold.PhaseMilliseconds[2] == 40 && cold.PhaseMilliseconds[4] == 100 && cold.PhaseMilliseconds[6] == 40 && cold.PhaseMilliseconds[7] == 5);
         Check(cold.PhaseMilliseconds.Sum() == cold.TotalMilliseconds);
         output.Clear(); await fixture.Run(output.Add);
@@ -119,17 +120,25 @@ internal static class HydrationTimingTests
         public int Execute(nint info, nint parameters) { clock.Now += 5; Transfers++; return 0; }
         public int ReportProgress(long connectionKey, long transferKey, long total, long completed) => 0;
     }
-    private sealed class Source(Clock clock) : IQueuedDownloadSource, IHydrationMutationAwareSource {
+    private sealed class Source(Clock clock) : IQueuedDownloadSource, IVerifiedHydrationDownloadSource, IHydrationMutationAwareSource {
         bool IHydrationMutationAwareSource.CoordinatesHydrationMutations => true;
         internal static readonly byte[] Bytes = new byte[8192];
         internal readonly PlaceholderIdentity Identity = new("pilot", "employee", "https://timing.invalid", "odqp1_" + new string('a', 64), "odqr1_PRIVATE", "oef1_" + new string('b', 64), "v1", "PRIVATE.bin", Bytes.Length, "\"v1\"", Convert.ToHexStringLower(SHA256.HashData(Bytes)));
         internal bool Fail, Hold;
-        internal int Downloads;
+        internal int Downloads, VerifiedLeases;
         internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously), Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public string Alias => "employee";
         public Uri Origin => new("https://timing.invalid");
         public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken = default) { clock.Now += 10; if (Fail) throw new IOException("PRIVATE source path"); return Task.FromResult(new QueuedDownloadSession(Identity.PrincipalId, DateTimeOffset.UtcNow.AddHours(1))); }
         public Task<ResolvedQueuedDownload> ResolveAsync(string reference, CancellationToken cancellationToken = default) { clock.Now += 20; return Task.FromResult(new ResolvedQueuedDownload(Identity.PrincipalId, Identity.LogicalFileId, Identity.RemoteVersion, new DownloadSpec(Identity.LogicalFileId + ":" + Identity.RemoteVersion, new Uri(Origin, "/bytes"), Identity.FileName, Identity.Length, Identity.ETag, Identity.Sha256))); }
         public async Task<string> DownloadAsync(DownloadSpec spec, string destination, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default) { Downloads++; Entered.TrySetResult(); if (Hold) await Release.Task.WaitAsync(cancellationToken); clock.Now += 100; var file = Path.Combine(destination, spec.FileName); await File.WriteAllBytesAsync(file, Bytes, cancellationToken); return file; }
+        public async Task<VerifiedHydrationDownload> DownloadForHydrationAsync(DownloadSpec spec, string destination, CancellationToken cancellationToken = default) {
+            VerifiedLeases++; var path = await DownloadAsync(spec, destination, cancellationToken: cancellationToken);
+            var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 65536, FileOptions.Asynchronous);
+            if (stream.Length != spec.Length || !CryptographicOperations.FixedTimeEquals(await SHA256.HashDataAsync(stream, cancellationToken), Convert.FromHexString(spec.Sha256))) {
+                await stream.DisposeAsync(); throw new TransferException("Synthetic verified download mismatch.");
+            }
+            return new VerifiedHydrationDownload(path, stream, integrityVerified: true);
+        }
     }
 }

@@ -101,6 +101,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     {
         var completed = false;
         var stage = HydrationStage.Context;
+        VerifiedHydrationDownload? freshDownload = null;
         try {
             identity.Encode(); // Enforce the 4096-byte native FileIdentity ceiling, even before authorization.
             if (identity.Channel != channel || identity.SourceAlias != source.Alias || identity.Origin != source.Origin.GetLeftPart(UriPartial.Authority)
@@ -144,8 +145,12 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                     try {
                         string downloaded;
                         using (DownloadTimingScope.Begin(timing, identity))
-                        using (HydrationMutationScope.Begin(action => WithQuota(admission.Quota, action), cancellationToken))
-                            downloaded = await source.DownloadAsync(resolved.Spec, entry, cancellationToken: cancellationToken);
+                        using (HydrationMutationScope.Begin(action => WithQuota(admission.Quota, action), cancellationToken)) {
+                            if (source is IVerifiedHydrationDownloadSource verifiedSource) {
+                                freshDownload = await verifiedSource.DownloadForHydrationAsync(resolved.Spec, entry, cancellationToken).ConfigureAwait(false);
+                                downloaded = freshDownload.Path;
+                            } else downloaded = await source.DownloadAsync(resolved.Spec, entry, cancellationToken: cancellationToken);
+                        }
                         if (Path.GetFullPath(downloaded) != file) throw new TransferException("Hydration source returned an unexpected cache path.");
                     } catch (Exception error) { primary = error; throw; }
                     finally {
@@ -161,9 +166,11 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 }
                 stage = HydrationStage.CacheVerification; timing?.Enter(HydrationTimingStage.CacheVerification);
                 RequireSafe(file);
-                // Windows denies concurrent writes and replacement through verification and publication.
-                await using var input = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.Asynchronous);
-                if (input.Length != identity.Length || !CryptographicOperations.FixedTimeEquals(await SHA256.HashDataAsync(input, cancellationToken), Convert.FromHexString(identity.Sha256)))
+                // On a cold cache, the production downloader hands off the exact still-open stream
+                // it hashed before promotion. Cache hits and untrusted adapters are fully rehashed.
+                await using var input = freshDownload?.Stream ?? new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.Asynchronous);
+                if (input.Length != identity.Length || (freshDownload?.IntegrityVerified != true
+                    && !CryptographicOperations.FixedTimeEquals(await SHA256.HashDataAsync(input, cancellationToken), Convert.FromHexString(identity.Sha256))))
                     throw new TransferException("Hydration cache integrity check failed.");
                 stage = HydrationStage.AuthorizationAfter; timing?.Enter(HydrationTimingStage.AuthorizationAfter);
                 using (AuthorizationTimingScope.Begin(timing, identity, false)) await Authorize(identity, cancellationToken); // Download/hash may be lengthy; never treat cached bytes as authority.
@@ -182,6 +189,8 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             if (e is OperationCanceledException && cancellationToken.IsCancellationRequested) throw;
             throw new TransferException("Hydration unavailable; no automatic sign-in or retry was attempted.",
                 (sink as IPlaceholderFailureDiagnostics)?.PrimaryFailure ?? diagnostic);
+        } finally {
+            if (freshDownload is not null) await freshDownload.DisposeAsync().ConfigureAwait(false);
         }
     }
     internal static async Task TransferVerifiedRange(Stream input, long offset, long length, IPlaceholderTransferSink sink, CancellationToken token) {

@@ -21,6 +21,26 @@ public interface IQueuedDownloadSource
     Task<string> DownloadAsync(DownloadSpec spec, string destination, IProgress<DownloadProgress>? progress = null,
         CancellationToken cancellationToken = default);
 }
+
+/// <summary>Optional cold-cache path that returns the exact stream already verified by the downloader.</summary>
+internal interface IVerifiedHydrationDownloadSource
+{
+    Task<VerifiedHydrationDownload> DownloadForHydrationAsync(DownloadSpec spec, string destination,
+        CancellationToken cancellationToken = default);
+}
+
+internal sealed class VerifiedHydrationDownload(string path, FileStream stream, bool integrityVerified) : IAsyncDisposable
+{
+    private FileStream? owned = stream ?? throw new ArgumentNullException(nameof(stream));
+    internal string Path { get; } = path ?? throw new ArgumentNullException(nameof(path));
+    internal bool IntegrityVerified { get; } = integrityVerified;
+    internal FileStream Stream => owned ?? throw new ObjectDisposedException(nameof(VerifiedHydrationDownload));
+    public async ValueTask DisposeAsync()
+    {
+        var current = Interlocked.Exchange(ref owned, null);
+        if (current is not null) await current.DisposeAsync().ConfigureAwait(false);
+    }
+}
 public enum QueuedTransferState { Queued, Running, Paused, Cancelled, Completed, Failed, VersionChanged, LoginRequired, AccessDenied, ResourceUnavailable }
 public sealed record QueuedTransfer(Guid JobId, string ResourceReference, string Destination, string LogicalFileId,
     string RemoteVersion, string FileName, long Length, string ETag, string Sha256, bool RecoveryRequired, QueuedTransferState State, string? ErrorCode);
