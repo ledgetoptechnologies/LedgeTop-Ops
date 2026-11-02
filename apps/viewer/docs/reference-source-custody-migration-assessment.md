@@ -94,6 +94,24 @@ existing admission gates remain in place, and verifies that an unknown
 forward migration makes the current build refuse startup. This comparison is
 test-only, not an implementation of a production schema identity guard.
 
+The compatibility preview test additionally executes the actual
+`openDatabase`/protected-verifier functions with an in-memory test-only
+substitution for a synthetic version 999 and this exact schema. The simulated
+schema-aware build accepts that version, the unmodified current verifier refuses
+it, and the simulated aware verifier refuses an added trigger. Version 999 is a
+test sentinel, not an allocation; this is not an actual compatibility build,
+does not prove nonempty-record rollback, and does not fence already-running
+processes.
+
+Ownership review on November 1, 2026 found open PR #371 at head
+`79622f895ae31dfc295c95940fdc338f73277179`; its diff introduces protected
+Viewer identities 41, 42 and 44–47 and changes the startup verifier. It must
+be reconciled with the current branch's later identities before allocation.
+Open PR #404 covers Viewer upgrade/rollback rehearsal. This check does not
+establish ownership of unseen branches or the deployed ledger. The existing
+Claude Viewer link is recorded, but the message-bus tool was unavailable in
+this session; no new confirmation or current delivery is claimed.
+
 An independent read-only review found the following blockers before any
 successor could admit records: enforce attempt/task/project/dataset identity;
 match every indexed file's path, size and hash; seal an exact count and
