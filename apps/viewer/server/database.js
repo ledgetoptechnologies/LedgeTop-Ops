@@ -2671,6 +2671,18 @@ const MIGRATIONS = [
     CREATE TRIGGER viewer_source_spool_project_delete BEFORE DELETE ON projects WHEN EXISTS(SELECT 1 FROM viewer_source_spool_holds WHERE project_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
     CREATE TRIGGER viewer_source_spool_trash_insert BEFORE INSERT ON storage_trash WHEN EXISTS(SELECT 1 FROM viewer_source_spool_holds h WHERE (NEW.entity_type='dataset' AND NEW.entity_id=h.dataset_id) OR (NEW.entity_type='task' AND NEW.entity_id=h.task_id) OR (NEW.entity_type='project' AND NEW.entity_id=h.project_id)) BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
   `},
+  {version:63,name:'viewer_source_spool_copy_candidate',sql:`
+    CREATE TABLE viewer_source_spool_intents (
+      attempt_id TEXT PRIMARY KEY REFERENCES viewer_source_spool_holds(attempt_id) ON DELETE RESTRICT,
+      manifest_sha256 TEXT NOT NULL CHECK(length(manifest_sha256)=64),
+      state TEXT NOT NULL CHECK(state IN ('prepared','copying','sealed')),
+      seal_sha256 TEXT,
+      CHECK((state='sealed' AND length(seal_sha256)=64) OR (state<>'sealed' AND seal_sha256 IS NULL))
+    );
+    CREATE TRIGGER viewer_source_spool_intent_no_delete BEFORE DELETE ON viewer_source_spool_intents BEGIN SELECT RAISE(ABORT,'spool intent retained'); END;
+    CREATE TRIGGER viewer_source_spool_intent_no_replace BEFORE INSERT ON viewer_source_spool_intents WHEN EXISTS(SELECT 1 FROM viewer_source_spool_intents WHERE attempt_id=NEW.attempt_id OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'spool intent retained'); END;
+    CREATE TRIGGER viewer_source_spool_intent_transition BEFORE UPDATE ON viewer_source_spool_intents WHEN NEW.attempt_id IS NOT OLD.attempt_id OR NEW.manifest_sha256 IS NOT OLD.manifest_sha256 OR NOT ((OLD.state='prepared' AND NEW.state='copying' AND NEW.seal_sha256 IS NULL) OR (OLD.state='copying' AND NEW.state='sealed' AND length(NEW.seal_sha256)=64)) BEGIN SELECT RAISE(ABORT,'spool intent retained'); END;
+  `},
 ];
 
 function applyMigrations(database) {
