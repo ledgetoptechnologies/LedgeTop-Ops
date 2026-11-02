@@ -1,0 +1,58 @@
+# Design only. All services are profiled, fail closed, and require explicit paths.
+# Never overlay this on a deployed app; host ACL and lock inode are unqualified.
+services:
+  candidate-api-mount:
+    profiles: [spool-design-only]
+    image: ${SPOOL_CANDIDATE_IMAGE:?set an explicit local test image}
+    entrypoint: [node, -e, "process.exit(78)"]
+    read_only: true
+    volumes:
+      - type: bind
+        source: ${SPOOL_CANDIDATE_PARENT:?set a disposable test parent}
+        target: /app/storage
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${SPOOL_CANDIDATE_SPOOL:?set a disposable test spool}
+        target: /app/storage/processing-spool
+        read_only: true
+        bind: {create_host_path: false}
+  candidate-worker-mount:
+    profiles: [spool-design-only]
+    image: ${SPOOL_CANDIDATE_IMAGE:?set an explicit local test image}
+    entrypoint: [node, -e, "process.exit(78)"]
+    read_only: true
+    volumes:
+      - type: bind
+        source: ${SPOOL_CANDIDATE_PARENT:?set a disposable test parent}
+        target: /app/storage
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${SPOOL_CANDIDATE_SPOOL:?set a disposable test spool}
+        target: /app/storage/processing-spool
+        read_only: true
+        bind: {create_host_path: false}
+  source-spool-copy:
+    profiles: [spool-design-only]
+    image: ${SPOOL_CANDIDATE_IMAGE:?set an explicit local test image}
+    scale: 1
+    # -F execs node in place; this candidate worker immediately exits 78.
+    entrypoint: [/usr/bin/flock, -n, -F, /app/storage/processing-spool/.writer-lock, node, /app/server/sourceSpoolCopyWorkerCandidate.js]
+    read_only: true
+    user: "568:568"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    environment:
+      SPOOL_SOURCE_ROOT: /app/source
+      SPOOL_ROOT: /app/storage/processing-spool
+      SPOOL_API_ORIGIN: ${SPOOL_CANDIDATE_API_ORIGIN:?set a disposable test HTTPS origin}
+    volumes:
+      - type: bind
+        source: ${SPOOL_CANDIDATE_SOURCE:?set a disposable test source}
+        target: /app/source
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${SPOOL_CANDIDATE_SPOOL:?set a disposable test spool}
+        target: /app/storage/processing-spool
+        bind: {create_host_path: false}
