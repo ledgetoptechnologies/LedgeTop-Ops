@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
-const { randomBytes, randomUUID, timingSafeEqual } = require('node:crypto');
+const { randomBytes, randomUUID, timingSafeEqual, createCipheriv, createDecipheriv } = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const { Readable } = require('node:stream');
 const p = require('./referenceProtocol');
@@ -84,7 +84,8 @@ class ReferenceTransferBroker {
     if (!fs.statSync(real).isFile()) fail('UNSAFE_SOURCE'); return real;
     } catch (error) { if (error instanceof ReferenceTransferError) throw error; fail('SOURCE_UNAVAILABLE'); }
   }
-  mintGrant(input) {
+  mintGrant(input) { return this.#mintGrant(input, fn => this.tx(fn)); }
+  #mintGrant(input, transact) {
     exact(input, ['jobId', 'generation', 'manifest', 'reservation', 'reservationAvailable', 'objectFiles', 'capabilities', 'capabilityFingerprint', 'replace']);
     const { jobId, generation, manifest, reservation, objectFiles, capabilities } = input;
     if (input.reservationAvailable !== true || !reservation) fail('RESERVATION_REQUIRED');
@@ -101,7 +102,7 @@ class ReferenceTransferBroker {
     const metadata = { jobId, generation, reservationId: reservation.reservationId, manifestSha256: manifest.sha256, environment: this.environment, objectIds: manifest.objects.map(o => o.id), nonce: reservation.nonce, byteBudget: reservation.byteBudget, expiresAt: reservation.expiresAt };
     const metadataJson=JSON.stringify(metadata),filesJson=JSON.stringify(files),identity=JSON.stringify({ metadata, files, capabilityFingerprint: input.capabilityFingerprint });
     validateStoredSizes(metadataJson,filesJson,identity);
-    return this.tx(() => {
+    return transact(() => {
       const usage=this.db.prepare('SELECT * FROM reference_job_usage WHERE job_id=?').get(jobId);
       const legacy=this.db.prepare('SELECT 1 FROM reference_grants WHERE job_id=? LIMIT 1').get(jobId);
       if(!usage&&legacy)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
@@ -125,6 +126,49 @@ class ReferenceTransferBroker {
       this.db.prepare('INSERT INTO reference_grants(id,job_id,reservation_id,identity,token_hash,metadata,files,expires_ms) VALUES(?,?,?,?,?,?,?,?)').run(grantId, jobId, reservation.reservationId, identity, p.sha256(Buffer.from(token)), metadataJson, filesJson, expires);
       return { grantId, grant: { ...metadata, token }, reused: false, tokenRecoverable: true };
     });
+  }
+  // Explicitly synthetic and unmounted. This is not authenticated authority,
+  // a production migration, anti-rollback, or a source custody guarantee.
+  migrateAtomicGrantFixture(scope) {
+    if(scope!=='synthetic-only') fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+    this.tx(()=>this.db.exec("CREATE TABLE IF NOT EXISTS fixture_atomic_grants (operation_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, generation INTEGER NOT NULL, reservation_id TEXT NOT NULL, binding BLOB NOT NULL, key_id TEXT NOT NULL, version INTEGER NOT NULL, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL, tag BLOB NOT NULL, grant_sha256 TEXT NOT NULL, UNIQUE(job_id,generation,reservation_id), UNIQUE(key_id,nonce)); CREATE TABLE IF NOT EXISTS fixture_atomic_delivery (operation_id TEXT PRIMARY KEY REFERENCES fixture_atomic_grants(operation_id), state TEXT NOT NULL CHECK(state IN ('prepared','sending','uncertain','acknowledged')), sender_generation INTEGER NOT NULL DEFAULT 0, ack_sha256 TEXT)"));
+  }
+  mintGrantAndSealFixture({scope,operationId,binding,input,verifyReservation,verifySourcePin,keyProvider}={}) {
+    if(scope!=='synthetic-only'||typeof operationId!=='string'||!operationId||!binding||typeof verifyReservation!=='function'||typeof verifySourcePin!=='function'||typeof keyProvider!=='function')fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+    const keyInfo=keyProvider();if(!keyInfo||typeof keyInfo.keyId!=='string'||!keyInfo.keyId||!Buffer.isBuffer(keyInfo.key)||keyInfo.key.length!==32)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+    exact(binding,['attemptId','environment','jobId','generation','reservationId','manifestSha256','objectIds']);
+    if(Object.keys(binding).length!==7||!input?.manifest||!input.reservation||binding.environment!==this.environment||binding.jobId!==input.jobId||binding.generation!==input.generation||binding.reservationId!==input.reservation.reservationId||binding.manifestSha256!==input.manifest.sha256||!Array.isArray(binding.objectIds)||JSON.stringify(binding.objectIds)!==JSON.stringify(input.manifest.objects.map(x=>x.id))||typeof binding.attemptId!=='string'||!binding.attemptId)fail('RESERVATION_BINDING');
+    const aad=p.canonicalBytes({domain:'synthetic-atomic-grant-v1',version:1,keyId:keyInfo.keyId,binding});
+    return this.tx(()=>{
+      if(verifyReservation({operationId,binding,input})!==true||verifySourcePin({operationId,binding,input})!==true)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+      const old=this.db.prepare('SELECT * FROM fixture_atomic_grants WHERE operation_id=?').get(operationId);
+      if(old){if(old.key_id!==keyInfo.keyId||old.version!==1||!Buffer.from(old.binding).equals(aad))fail('RESERVATION_BINDING');try{const d=createDecipheriv('aes-256-gcm',keyInfo.key,old.nonce);d.setAAD(aad);d.setAuthTag(old.tag);const bytes=Buffer.concat([d.update(old.ciphertext),d.final()]);if(p.sha256(bytes)!==old.grant_sha256)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');return bytes;}catch{fail('TRANSFER_ACCOUNTING_UNAVAILABLE');}}
+      const minted=this.#mintGrant(input,fn=>fn());if(minted.reused||!minted.grant?.token)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+      const bytes=p.canonicalBytes(minted.grant),nonce=randomBytes(12),cipher=createCipheriv('aes-256-gcm',keyInfo.key,nonce);cipher.setAAD(aad);const encrypted=Buffer.concat([cipher.update(bytes),cipher.final()]);
+      this.db.prepare('INSERT INTO fixture_atomic_grants VALUES(?,?,?,?,?,?,1,?,?,?,?)').run(operationId,input.jobId,input.generation,input.reservation.reservationId,aad,keyInfo.keyId,nonce,encrypted,cipher.getAuthTag(),p.sha256(bytes));this.db.prepare("INSERT INTO fixture_atomic_delivery(operation_id,state) VALUES(?,'prepared')").run(operationId);return bytes;
+    });
+  }
+  beginAtomicDeliveryFixture({scope,operationId,senderGeneration}={}) {
+    if(scope!=='synthetic-only'||typeof operationId!=='string'||!Number.isSafeInteger(senderGeneration)||senderGeneration<1)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+    return this.tx(()=>{const result=this.db.prepare("UPDATE fixture_atomic_delivery SET state='sending',sender_generation=? WHERE operation_id=? AND state='prepared' AND sender_generation=0").run(senderGeneration,operationId);if(result.changes!==1)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');return true;});
+  }
+  // Synthetic receiver-only replay. A generation is not a real sender fence.
+  reclaimAtomicDeliveryFixture({scope,operationId,senderGeneration}={}) {
+    if(scope!=='synthetic-only'||typeof operationId!=='string'||!Number.isSafeInteger(senderGeneration)||senderGeneration<1)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+    return this.tx(()=>{const result=this.db.prepare("UPDATE fixture_atomic_delivery SET state='sending',sender_generation=? WHERE operation_id=? AND state IN ('sending','uncertain') AND sender_generation<?").run(senderGeneration,operationId,senderGeneration);if(result.changes!==1)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');return true;});
+  }
+  markAtomicDeliveryUncertainFixture({scope,operationId,senderGeneration}={}) {
+    if(scope!=='synthetic-only')fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+    return this.tx(()=>{if(this.db.prepare("UPDATE fixture_atomic_delivery SET state='uncertain' WHERE operation_id=? AND state='sending' AND sender_generation=?").run(operationId,senderGeneration).changes!==1)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');return true;});
+  }
+  acknowledgeAtomicDeliveryFixture({scope,operationId,senderGeneration,ack,keyProvider,verifyReceiver}={}) {
+    if(scope!=='synthetic-only'||typeof keyProvider!=='function'||typeof verifyReceiver!=='function'||!ack||typeof ack!=='object'||Array.isArray(ack))fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+    const keys=['accepted','generation','grantSha256','manifestSha256','nonce','reservationId'];if(JSON.stringify(Object.keys(ack).sort())!==JSON.stringify(keys))fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+    return this.tx(()=>{const row=this.db.prepare('SELECT g.*,d.state,d.sender_generation,d.ack_sha256 FROM fixture_atomic_grants g JOIN fixture_atomic_delivery d USING(operation_id) WHERE g.operation_id=?').get(operationId);const k=keyProvider();if(!row||!k||k.keyId!==row.key_id||!Buffer.isBuffer(k.key)||k.key.length!==32||row.version!==1||row.sender_generation!==senderGeneration||verifyReceiver({operationId,ack})!==true)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+      let grant;try{const d=createDecipheriv('aes-256-gcm',k.key,row.nonce);d.setAAD(Buffer.from(row.binding));d.setAuthTag(row.tag);const bytes=Buffer.concat([d.update(row.ciphertext),d.final()]);if(p.sha256(bytes)!==row.grant_sha256)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');grant=JSON.parse(bytes.toString('utf8'));}catch{fail('TRANSFER_ACCOUNTING_UNAVAILABLE');}
+      if(ack.accepted!==true||ack.reservationId!==grant.reservationId||ack.generation!==grant.generation||ack.manifestSha256!==grant.manifestSha256||ack.nonce!==grant.nonce||ack.grantSha256!==row.grant_sha256)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');const hash=p.sha256(p.canonicalBytes(ack));
+      if(row.state==='acknowledged'){if(row.ack_sha256!==hash)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');return true;}
+      if(!['sending','uncertain'].includes(row.state))fail('TRANSFER_ACCOUNTING_UNAVAILABLE');if(this.db.prepare("UPDATE fixture_atomic_delivery SET state='acknowledged',ack_sha256=? WHERE operation_id=? AND state IN ('sending','uncertain') AND sender_generation=?").run(hash,operationId,senderGeneration).changes!==1)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');return true;});
   }
   revokeGrant(grantId) { slug(grantId); this.db.prepare('UPDATE reference_grants SET revoked=1 WHERE id=?').run(grantId); }
   async readAuthorizedObject(request) {

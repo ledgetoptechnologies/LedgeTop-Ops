@@ -1,0 +1,14 @@
+'use strict';
+// Public synthetic vector generator; fixed seed is deliberately not secret.
+const crypto=require('node:crypto'),p=require('../../server/referenceProtocol');
+const seed=Buffer.alloc(32,7),privateKey=crypto.createPrivateKey({key:Buffer.concat([Buffer.from('302e020100300506032b657004220420','hex'),seed]),format:'der',type:'pkcs8'});
+const sha=x=>crypto.createHash('sha256').update(x).digest('hex'),message=(domain,value)=>Buffer.concat([Buffer.from(domain,'ascii'),Buffer.from([0]),p.canonicalBytes(value)]);
+const objects=[{id:'Image-B',byteSize:3,sha256:'b'.repeat(64)},{id:'image-a',byteSize:3,sha256:'c'.repeat(64)}];
+const inputManifest={id:'manifest-1',revision:1,sha256:'0'.repeat(64),totalBytes:6,objectCount:2,inputCounts:{images:2,lidarObjects:0,points:0},objects:[{id:'image-a',name:'a.jpg',byteSize:3,sha256:'c'.repeat(64),kind:'image',mediaType:'image/jpeg'},{id:'Image-B',name:'b.jpg',byteSize:3,sha256:'b'.repeat(64),kind:'image',mediaType:'image/jpeg'}]};inputManifest.sha256=p.manifestSha256(inputManifest);p.validateManifest(inputManifest);
+const sourceIntent={operationId:'operation-1',jobId:'job-1',generation:1,environment:'staging',manifestSha256:inputManifest.sha256,objects};
+const snapshotName='ltds-'+sha(p.canonicalBytes(sourceIntent)).slice(0,32);
+const closure=message('LTDS-SOURCE-CLOSURE-V2',objects);
+const payload={schemaVersion:2,receiptType:'source_retention_v2',receiptId:'receipt-1',storageReceiptId:'storage-1',operationId:'operation-1',issuerId:'issuer-1',keyId:'key-1',keyEpoch:1,ownerInstanceId:'owner-1',ledgerEpoch:'epoch-1',jobId:'job-1',generation:1,environment:'staging',inputManifestSha256:inputManifest.sha256,pipelineDigest:'d'.repeat(64),datasetId:'tank/processing-spool',snapshotId:'tank/processing-spool@'+snapshotName,snapshotCreateTxg:'18446744073709551615',holdId:'truenas',objects,sourceClosureSha256:sha(closure),retainedAt:'2026-10-28T12:00:00.000Z',validationVersion:'candidate-v2',retentionGuarantee:'until_explicit_release_ack_v2'};
+const signed=message('LTDS-SOURCE-RETENTION-V2',payload),signature=crypto.sign(null,signed,privateKey).toString('base64url'),publicDer=crypto.createPublicKey(privateKey).export({format:'der',type:'spki'});
+const vector={status:'PUBLIC_SYNTHETIC_UNAGREED_NOT_AUTHORITY',inputManifest,sourceIntent,testPrivateSeedHex:seed.toString('hex'),publicKeySpkiDerBase64:publicDer.toString('base64'),objectsCanonicalUtf8Base64:p.canonicalBytes(objects).toString('base64'),closureMessageBase64:closure.toString('base64'),closureSha256:sha(closure),payloadCanonicalUtf8Base64:p.canonicalBytes(payload).toString('base64'),signedMessageBase64:signed.toString('base64'),signedMessageSha256:sha(signed),envelope:{payload,signatureAlgorithm:'Ed25519',signature}};
+process.stdout.write(JSON.stringify(vector,null,2)+'\n');
