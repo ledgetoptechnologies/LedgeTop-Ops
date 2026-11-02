@@ -2683,6 +2683,20 @@ const MIGRATIONS = [
     CREATE TRIGGER viewer_source_spool_intent_no_replace BEFORE INSERT ON viewer_source_spool_intents WHEN EXISTS(SELECT 1 FROM viewer_source_spool_intents WHERE attempt_id=NEW.attempt_id OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'spool intent retained'); END;
     CREATE TRIGGER viewer_source_spool_intent_transition BEFORE UPDATE ON viewer_source_spool_intents WHEN NEW.attempt_id IS NOT OLD.attempt_id OR NEW.manifest_sha256 IS NOT OLD.manifest_sha256 OR NOT ((OLD.state='prepared' AND NEW.state='copying' AND NEW.seal_sha256 IS NULL) OR (OLD.state='copying' AND NEW.state='sealed' AND length(NEW.seal_sha256)=64)) BEGIN SELECT RAISE(ABORT,'spool intent retained'); END;
   `},
+  {version:64,name:'viewer_source_spool_generation_hold_candidate',sql:`
+    CREATE TABLE viewer_source_spool_generation_holds (
+      attempt_id TEXT NOT NULL REFERENCES viewer_source_spool_holds(attempt_id) ON DELETE RESTRICT,
+      generation INTEGER NOT NULL CHECK(generation>0),
+      directory_id TEXT NOT NULL UNIQUE,
+      manifest_sha256 TEXT NOT NULL CHECK(length(manifest_sha256)=64),
+      reserved_bytes INTEGER NOT NULL CHECK(reserved_bytes>0),
+      state TEXT NOT NULL CHECK(state='held'),
+      PRIMARY KEY(attempt_id,generation)
+    );
+    CREATE TRIGGER viewer_source_spool_generation_no_update BEFORE UPDATE ON viewer_source_spool_generation_holds BEGIN SELECT RAISE(ABORT,'generation retained'); END;
+    CREATE TRIGGER viewer_source_spool_generation_no_delete BEFORE DELETE ON viewer_source_spool_generation_holds BEGIN SELECT RAISE(ABORT,'generation retained'); END;
+    CREATE TRIGGER viewer_source_spool_generation_no_replace BEFORE INSERT ON viewer_source_spool_generation_holds WHEN EXISTS(SELECT 1 FROM viewer_source_spool_generation_holds WHERE (attempt_id=NEW.attempt_id AND generation=NEW.generation) OR directory_id=NEW.directory_id OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'generation retained'); END;
+  `},
 ];
 
 function applyMigrations(database) {
