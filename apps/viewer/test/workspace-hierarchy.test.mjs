@@ -32,6 +32,17 @@ test('projects group by exact organization id, customers sorted by name, Unassig
   assert.deepEqual(sections.at(-1).ungrouped.map(item => item.id), ['legacy']);
 });
 
+test('hierarchy loading accepts more than twenty pages with the explicit page size', async () => {
+  let calls = 0;
+  const loaded = await loadHierarchy(async cursor => {
+    calls += 1;
+    const page = Number(cursor || 0);
+    return { schemaVersion: 1, organizations: [{ id: `org-${page}`, displayName: `Org ${page}` }], groups: [], nextCursor: page < 20 ? String(page + 1) : null };
+  });
+  assert.equal(calls, 21);
+  assert.equal(loaded.organizations.length, 21);
+});
+
 test('unknown ids and groups from another customer never move or merge projects', () => {
   const sections = groupProjects([project('ghost', 'org-missing'), project('mismatch', 'org-a', 'group-foreign'), project('same-name', 'org-b')], {
     ...hierarchy,

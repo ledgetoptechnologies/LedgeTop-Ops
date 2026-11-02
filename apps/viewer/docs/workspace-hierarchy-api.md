@@ -25,6 +25,12 @@ idempotency key. Mutations and audit records commit in the same transaction.
 | Rename or archive group | `PATCH /api/v1/processing/project-groups/:id` |
 | Assign or clear a project's grouping | `PATCH /api/v1/projects/:id/hierarchy` |
 
+The list accepts `limit` from 1 to 100 and returns an opaque `nextCursor` when
+more records remain. The workspace requests 100 per page and follows cursors,
+with a hard stop at 100 pages (up to 10,000 combined organization and group
+records). If the bound is reached, grouping reports an error instead of showing
+a silently incomplete hierarchy.
+
 Creation takes `displayName` and, for a group, `organizationId`. Metadata updates
 take `expectedRevision` plus `displayName` or `status`. Assignment takes all three
 fields: `organizationId`, `groupId`, and `expectedRevision`. Null identifiers

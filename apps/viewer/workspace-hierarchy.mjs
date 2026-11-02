@@ -5,7 +5,7 @@
 const byName = (a, b) => String(a.displayName || '').localeCompare(String(b.displayName || ''), 'en-US', { sensitivity: 'base' });
 
 /** Collect every page of GET /api/v1/processing/hierarchy before grouping (rows of one kind may span pages). */
-export async function loadHierarchy(fetchPage, { maxPages = 20 } = {}) {
+export async function loadHierarchy(fetchPage, { maxPages = 100 } = {}) {
   const organizations = [], groups = [];
   let cursor = null, capabilities = {};
   for (let page = 0; page < maxPages; page += 1) {
