@@ -181,3 +181,30 @@ concurrent requests, and identical Python/Node canonical bytes and MACs. A
 shared HMAC proves only that a holder made the statement; it does not establish
 the issuing process's identity, ledger freshness, a fence, or durable charge.
 Local database rollback and removal of retained task data remain unresolved.
+
+### Public synthetic encoding vector
+
+This vector is deliberately fictional: the repeated-byte hashes are not
+hashes of real inputs, `complete` is an invented assertion, and the publicly
+known key must never be used outside tests. Processing confirms that its current
+`viewer_files` records have no durable batch association or stream intent, and
+that initialization, manifest and batch intent fields would currently be caller
+assertions. No present issuer can truthfully make this receipt. This vector
+tests bytes only; it grants no authority and does not alter the hold.
+
+For this ASCII-only example, the candidate canonical UTF-8 payload is exactly
+the following single line, without a trailing newline:
+
+```json
+{"admissionGeneration":"2","attemptId":"00000000-0000-4000-8000-000000000001","authorityId":"test-authority","batchId":"00000000-0000-4000-8000-000000000002","batchIntentSha256":"1111111111111111111111111111111111111111111111111111111111111111","complete":true,"entries":[{"role":"photo","sha256":"2222222222222222222222222222222222222222222222222222222222222222","sizeBytes":"6","wireNameUtf8Base64url":"Zmlyc3QuanBn"}],"initializationSha256":"3333333333333333333333333333333333333333333333333333333333333333","keyId":"public-test-key","manifestSha256":"4444444444444444444444444444444444444444444444444444444444444444","receiptId":"00000000-0000-4000-8000-000000000004","requestId":"00000000-0000-4000-8000-000000000003","reservationSha256":"5555555555555555555555555555555555555555555555555555555555555555","schema":"ltds-coordinator-inventory-fixture-v1","scope":"batch","snapshotId":"00000000-0000-4000-8000-000000000005","taskGeneration":"1","taskId":"00000000-0000-4000-8000-000000000006"}
+```
+
+- Public key hex: `000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f`.
+- Payload SHA-256: `121e14b94ec3a6677be25f3d7e56234b4720b9a6e44f94ee28e8d35b5c42d0b6`.
+- HMAC-SHA256 over the specified domain, NUL and payload:
+  `69e96fdf72b79c1a3a675b858055cf2c6a6de3b61bff6d0bb589c2dece0ab6e6`.
+
+Independent Python and Node calculations matched for this restricted example.
+It does not establish full RFC 8785 compatibility: Unicode ordering, escaping,
+invalid input, duplicate keys and boundary cases still need shared vectors and
+actual independent canonicalizer implementations.
