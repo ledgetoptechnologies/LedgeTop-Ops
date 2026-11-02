@@ -21,6 +21,7 @@ import {
 import { clientFeedbackSchemaAvailable, createClientFeedbackRouter } from "./feedback-routes";
 import {createClientNotificationHistoryRouter,mutateNativeDeliveryNotification,mutateAuthenticatedDeliveryNotification} from './notification-history';
 import {createAuthenticatedDeliveryResourceRouter} from './authenticated-delivery-resources';
+import {createDirectWorkspaceFolderResourceRouter} from './direct-workspace-folder-resources';
 import { createClientAppReleaseRouter } from './app-release-routes';
 import {decodeAuthenticatedDeliveryHandle} from './authenticated-delivery-handles';
 import type {
@@ -534,6 +535,7 @@ export function createClientPortalRouter(
   router.route("/v2/workspaces", createNativePortalWorkspaceRouter());
   router.route("/v2/workspaces", createBusinessProfileRouter());
   router.route("/authenticated-deliveries",createAuthenticatedDeliveryResourceRouter());
+  router.route("/direct-workspace-folders",createDirectWorkspaceFolderResourceRouter());
   router.route("/app", createClientAppReleaseRouter());
 
   router.get("/session/status", async (c) => {
