@@ -165,6 +165,9 @@ const config = {
   referenceAcceptanceManagedRoot: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_MANAGED_ROOT || '').trim(),
   referenceAcceptanceMaxBytes: Math.min(positiveInteger(process.env.VIEWER_REFERENCE_ACCEPTANCE_MAX_BYTES, 100 * 1024 ** 3), 2 * 1024 ** 4),
   referenceAcceptanceServiceKeyId: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_SERVICE_KEY_ID || '').trim(),
+  referenceAcceptanceReceiptIssuerId: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_RECEIPT_ISSUER_ID || '').trim(),
+  referenceAcceptanceReceiptKeyId: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_RECEIPT_KEY_ID || '').trim(),
+  referenceAcceptanceReceiptPrivateKeyPem: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_RECEIPT_PRIVATE_KEY_PEM || ''),
   referenceAcceptanceEnvironment: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_ENVIRONMENT || (production ? 'production' : 'staging')).trim(),
   processingRoot,
   datasetsMount: process.env.DATASETS_MOUNT || path.join(processingRoot, 'datasets'),
@@ -274,6 +277,14 @@ function validate() {
       problems.push('VIEWER_REFERENCE_ACCEPTANCE_MANAGED_ROOT must be absolute when enabled');
     if (!/^[A-Za-z0-9._-]{1,64}$/.test(config.referenceAcceptanceServiceKeyId))
       problems.push('VIEWER_REFERENCE_ACCEPTANCE_SERVICE_KEY_ID must name a dedicated service key');
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(config.referenceAcceptanceReceiptIssuerId))
+      problems.push('VIEWER_REFERENCE_ACCEPTANCE_RECEIPT_ISSUER_ID must name the Viewer receipt issuer');
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(config.referenceAcceptanceReceiptKeyId))
+      problems.push('VIEWER_REFERENCE_ACCEPTANCE_RECEIPT_KEY_ID must name the Viewer receipt signing key');
+    try {
+      const key = require('node:crypto').createPrivateKey(config.referenceAcceptanceReceiptPrivateKeyPem.replace(/\\n/g, '\n'));
+      if (key.asymmetricKeyType !== 'ed25519') problems.push('VIEWER_REFERENCE_ACCEPTANCE_RECEIPT_PRIVATE_KEY_PEM must be an Ed25519 private key');
+    } catch { problems.push('VIEWER_REFERENCE_ACCEPTANCE_RECEIPT_PRIVATE_KEY_PEM must be a valid Ed25519 private key'); }
     if (!['staging', 'production'].includes(config.referenceAcceptanceEnvironment)
         || config.referenceAcceptanceEnvironment !== (config.production ? 'production' : 'staging'))
       problems.push('VIEWER_REFERENCE_ACCEPTANCE_ENVIRONMENT must match this server environment');

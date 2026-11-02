@@ -150,4 +150,24 @@ function validateAcceptance(v, expected) {
   if (!expected) fail('acceptance.binding'); binding(v, expected, ['jobId', 'generation', 'environment', 'inputManifestSha256', 'pipelineDigest', 'resultManifestSha256']);
   if (!Array.isArray(expected.objectIds) || v.acceptedObjectIds.some(id => !expected.objectIds.includes(id))) fail('acceptedObjectIds', 'BINDING_MISMATCH'); return v;
 }
-module.exports = { PROTOCOL, PREFIX, LIMITS, ReferenceProtocolError, canonicalBytes, canonicalManifestBytes, manifestSha256, canonicalResultManifestBytes, resultManifestSha256, transferByteBudgetLimit, validateTransferByteBudget, sha256, createCapabilities, validateCapabilities, validateManifest, validateSubmission, validateTransferRequest, validateTransferGrant, validateResultManifest, validateAcceptance };
+function validateViewerReceipt(v) {
+  record(v, ['protocol', 'schemaVersion', 'issuerId', 'keyId', 'receiptId', 'storageReceiptId', 'jobId', 'generation', 'environment', 'inputManifestSha256', 'pipelineDigest', 'resultManifestSha256', 'acceptedObjectIds', 'objects', 'acceptedAt', 'signature'], 'viewerReceipt');
+  if (v.protocol !== 'ltds-viewer-accepted-copy-v1' || v.schemaVersion !== 1) fail('viewerReceipt.version');
+  for (const key of ['issuerId', 'keyId', 'receiptId', 'storageReceiptId', 'jobId']) id(v[key], `viewerReceipt.${key}`);
+  integer(v.generation, 'viewerReceipt.generation'); environment(v.environment);
+  for (const key of ['inputManifestSha256', 'pipelineDigest', 'resultManifestSha256']) hash(v[key], `viewerReceipt.${key}`);
+  timestamp(v.acceptedAt, 'viewerReceipt.acceptedAt');
+  if (!Array.isArray(v.acceptedObjectIds) || !v.acceptedObjectIds.length || v.acceptedObjectIds.length > LIMITS.objects) fail('viewerReceipt.acceptedObjectIds');
+  for (const objectId of v.acceptedObjectIds) id(objectId, 'viewerReceipt.acceptedObjectIds');
+  if (new Set(v.acceptedObjectIds).size !== v.acceptedObjectIds.length) fail('viewerReceipt.acceptedObjectIds');
+  array(v.objects, 'viewerReceipt.objects');
+  if (v.objects.length !== v.acceptedObjectIds.length) fail('viewerReceipt.objects');
+  for (let index = 0; index < v.objects.length; index++) {
+    const object = v.objects[index]; record(object, ['id', 'byteSize', 'sha256'], 'viewerReceipt.object');
+    id(object.id, 'viewerReceipt.object.id'); integer(object.byteSize, 'viewerReceipt.object.byteSize'); hash(object.sha256, 'viewerReceipt.object.sha256');
+    if (object.id !== v.acceptedObjectIds[index]) fail('viewerReceipt.object.binding');
+  }
+  if (typeof v.signature !== 'string' || !/^[A-Za-z0-9_-]{86}$/.test(v.signature)) fail('viewerReceipt.signature');
+  return v;
+}
+module.exports = { PROTOCOL, PREFIX, LIMITS, ReferenceProtocolError, canonicalBytes, canonicalManifestBytes, manifestSha256, canonicalResultManifestBytes, resultManifestSha256, transferByteBudgetLimit, validateTransferByteBudget, sha256, createCapabilities, validateCapabilities, validateManifest, validateSubmission, validateTransferRequest, validateTransferGrant, validateResultManifest, validateAcceptance, validateViewerReceipt };

@@ -5,10 +5,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { Worker } = require('node:worker_threads');
 const fixture = require('./fixtures/reference-v1.contract.json');
+const crossLanguageReceipt = require('./fixtures/viewer-accepted-copy-receipt-v1.json');
 const { ReferenceAcceptanceLedger } = require('../server/referenceAcceptance');
 const { createReferenceAcceptanceApi, PATH, referenceAcceptanceJsonBodyType } = require('../server/referenceAcceptanceApi');
+const { createViewerReceiptSigner, verifyViewerReceipt } = require('../server/referenceReceipt');
 const { signServiceRequest } = require('../server/serviceAuth');
 let express = null;
 try { express = require('express'); } catch {}
@@ -20,6 +23,12 @@ const keyId = 'synthetic-processing-v1';
 const otherKeyId = 'synthetic-ops-service-v1';
 const otherSecret = 'synthetic-ops-service-secret-not-a-credential-0001';
 const keys = { [keyId]: secret, [otherKeyId]: otherSecret };
+const receiptKeyPair = crypto.generateKeyPairSync('ed25519');
+const receiptSigner = createViewerReceiptSigner({
+  issuerId: 'viewer-acceptance', keyId: 'viewer-test-2026',
+  privateKeyPem: receiptKeyPair.privateKey.export({ type: 'pkcs8', format: 'pem' }),
+});
+const trustedReceiptKeys = { 'viewer-test-2026': receiptKeyPair.publicKey.export({ type: 'spki', format: 'pem' }) };
 
 function expectedFromFixture() {
   const resultManifest = fixture.resultManifest;
@@ -69,7 +78,7 @@ function startRouteHarness({ ledger, repo = repository() }) {
   };
   createReferenceAcceptanceApi({
     repository: repo, ledger, serviceKeyId: keyId, serviceAuthKeys: keys,
-    environment: 'staging', chunkBytes: 1024, routerFactory: () => router,
+    receiptSigner, environment: 'staging', chunkBytes: 1024, routerFactory: () => router,
   });
 
   function routeFor(method, opts) {
@@ -157,7 +166,7 @@ httpIntegrationTest('real Express middleware preserves binary streams and the si
     type: referenceAcceptanceJsonBodyType,
     verify(req, _res, bytes) { req.rawBody = Buffer.from(bytes); },
   }));
-  app.use(createReferenceAcceptanceApi({ repository: repo, ledger, serviceKeyId: keyId, serviceAuthKeys: keys, environment: 'staging', chunkBytes: 1024 }));
+  app.use(createReferenceAcceptanceApi({ repository: repo, ledger, serviceKeyId: keyId, serviceAuthKeys: keys, receiptSigner, environment: 'staging', chunkBytes: 1024 }));
   const server = app.listen(0, '127.0.0.1');
   t.after(async () => { await new Promise(resolve => server.close(resolve)); ledger.close(); });
   await new Promise((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
@@ -197,6 +206,8 @@ httpIntegrationTest('real Express middleware preserves binary streams and the si
   const committedPath = `${PATH}/${fixture.acceptance.receiptId}/commit`;
   const committed = await fetch(base + committedPath, { method: 'POST', headers: signHeaders('POST', committedPath, Buffer.alloc(0), 'application/json') });
   assert.equal(committed.status, 201);
+  const committedBody = await committed.json();
+  assert.equal(verifyViewerReceipt(committedBody.viewerReceipt, trustedReceiptKeys), true);
   assert.equal(fs.readFileSync(path.join(storage.root, 'receipt-1', 'result-1.bin'), 'utf8'), 'abc');
 
   async function apiGet() {
@@ -272,13 +283,40 @@ enabledTest('metadata alone cannot ACK; chunk transfer resumes and replays safel
   assert.equal(accepted.body.state, 'accepted');
   assert.deepEqual(accepted.body.acceptedObjectIds, ['result-1']);
   assert.equal(accepted.body.fullyAccepted, false);
+  assert.equal(verifyViewerReceipt(accepted.body.viewerReceipt, trustedReceiptKeys), true);
+  assert.notEqual(accepted.body.viewerReceipt.receiptId, fixture.acceptance.receiptId);
+  assert.notEqual(accepted.body.viewerReceipt.storageReceiptId, fixture.acceptance.storageReceiptId);
+  assert.equal(accepted.body.viewerReceipt.issuerId, 'viewer-acceptance');
+  assert.deepEqual(accepted.body.viewerReceipt.objects, [{ id: 'result-1', byteSize: 3, sha256: crypto.createHash('sha256').update('abc').digest('hex') }]);
   const replay = await api.request('POST', fixture.acceptance.receiptId);
   assert.equal(replay.status, 200);
   assert.deepEqual(replay.body, accepted.body);
   const status = await api.request('GET', fixture.acceptance.receiptId);
   assert.equal(status.status, 200);
   assert.deepEqual(status.body, accepted.body);
+  assert.equal(verifyViewerReceipt(status.body.viewerReceipt, trustedReceiptKeys), true);
   assert.equal(fs.readFileSync(path.join(storage.root, 'receipt-1', 'result-1.bin'), 'utf8'), 'abc');
+});
+
+test('Viewer acceptance receipt is independently signed and rejects tampering or an unknown key', () => {
+  const receiptSigner = createViewerReceiptSigner({
+    issuerId: 'viewer-acceptance', keyId: 'viewer-test-2026',
+    privateKeyPem: receiptKeyPair.privateKey.export({ type: 'pkcs8', format: 'pem' }),
+  });
+  const expected = expectedFromFixture();
+  const receipt = receiptSigner({ expected, resultManifest: fixture.resultManifest, acceptedObjectIds: ['result-1'] });
+  assert.equal(verifyViewerReceipt(receipt, trustedReceiptKeys), true);
+  assert.equal(verifyViewerReceipt({ ...receipt, generation: receipt.generation + 1 }, trustedReceiptKeys), false);
+  assert.equal(verifyViewerReceipt(receipt, {}), false);
+});
+
+test('Viewer verifies the cross-language signed accepted-copy receipt vector', () => {
+  const receipt = crossLanguageReceipt.receipt;
+  assert.equal(receipt.protocol, 'ltds-viewer-accepted-copy-v1');
+  assert.equal(receipt.issuerId, crossLanguageReceipt.issuerId);
+  assert.equal(receipt.keyId, crossLanguageReceipt.keyId);
+  assert.equal(verifyViewerReceipt(receipt, { [crossLanguageReceipt.keyId]: crossLanguageReceipt.publicKeyPem }), true);
+  assert.equal(verifyViewerReceipt({ ...receipt, resultManifestSha256: '0'.repeat(64) }, { [crossLanguageReceipt.keyId]: crossLanguageReceipt.publicKeyPem }), false);
 });
 
 enabledTest('reservation quota is atomic and prevents retaining more than the configured accepted-copy budget', async t => {

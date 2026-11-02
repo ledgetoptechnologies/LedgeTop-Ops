@@ -38,6 +38,7 @@ function publicStatus(record) {
     acceptedObjectIds,
     fullyAccepted: manifestObjectIds.every(id => acceptedObjectIds.includes(id)),
     acceptance: record.acceptance,
+    viewerReceipt: record.storage.viewerReceipt,
   };
 }
 function publicTransfer(transfer) {
@@ -56,11 +57,12 @@ function publicTransfer(transfer) {
   };
 }
 
-function createReferenceAcceptanceApi({ repository, ledger, serviceKeyId, serviceAuthKeys, environment, chunkBytes = 16 * 1024 * 1024, routerFactory = () => require('express').Router() }) {
+function createReferenceAcceptanceApi({ repository, ledger, serviceKeyId, serviceAuthKeys, receiptSigner, environment, chunkBytes = 16 * 1024 * 1024, routerFactory = () => require('express').Router() }) {
   if (!repository || typeof repository.consumeServiceNonce !== 'function'
       || !ledger || typeof ledger.reserveTransfer !== 'function' || typeof ledger.stageObjectChunk !== 'function'
       || typeof ledger.commitTransfer !== 'function' || typeof ledger.getVerified !== 'function'
       || typeof ledger.getTransfer !== 'function' || typeof serviceKeyId !== 'string' || !serviceAuthKeys?.[serviceKeyId]
+      || typeof receiptSigner !== 'function'
       || !['staging', 'production'].includes(environment) || !Number.isSafeInteger(chunkBytes) || chunkBytes < 1) fail('REFERENCE_ACCEPTANCE_CONFIG_INVALID');
 
   const router = routerFactory();
@@ -147,9 +149,10 @@ function createReferenceAcceptanceApi({ repository, ledger, serviceKeyId, servic
     try {
       if (req.rawBody?.length) fail('INVALID_ACCEPTANCE_REQUEST');
       const existing = ledger.getVerified(req.params.receiptId);
-      const record = ledger.commitTransfer(req.params.receiptId);
+      if (existing && !existing.storage.viewerReceipt) fail('VIEWER_RECEIPT_MISSING');
+      const record = ledger.commitTransfer(req.params.receiptId, receiptSigner);
       const verified = existing || ledger.getVerified(req.params.receiptId);
-      if (!verified || verified.acceptance.receiptId !== record.acceptance.receiptId) fail('ACCEPTANCE_CONFLICT');
+      if (!verified || !verified.storage.viewerReceipt || verified.acceptance.receiptId !== record.acceptance.receiptId) fail('ACCEPTANCE_CONFLICT');
       return res.status(existing ? 200 : 201).json(publicStatus(verified));
     } catch (error) {
       const [status, code] = safeError(error);
@@ -160,7 +163,10 @@ function createReferenceAcceptanceApi({ repository, ledger, serviceKeyId, servic
   router.get(`${PATH}/:receiptId`, (req, res) => {
     try {
       const accepted = ledger.getVerified(req.params.receiptId);
-      if (accepted) return res.json(publicStatus(accepted));
+      if (accepted) {
+        if (!accepted.storage.viewerReceipt) fail('VIEWER_RECEIPT_MISSING');
+        return res.json(publicStatus(accepted));
+      }
       const transfer = ledger.getTransfer(req.params.receiptId);
       return transfer ? res.status(202).json(publicTransfer(transfer)) : res.status(404).json({ error: 'acceptance not found', code: 'acceptance_not_found' });
     } catch (error) {

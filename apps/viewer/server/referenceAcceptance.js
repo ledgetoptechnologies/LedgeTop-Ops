@@ -372,16 +372,23 @@ class ReferenceAcceptanceLedger {
       throw error;
     } finally { if (fd !== undefined) fs.closeSync(fd); }
   }
-  commitTransfer(receiptId) {
+  commitTransfer(receiptId, receiptSigner) {
     const transfer = this.getTransfer(receiptId);
     if (!transfer) fail('UNKNOWN_TRANSFER');
     const already = this.getVerified(receiptId);
-    if (already) return already;
+    if (already) {
+      if (!already.storage.viewerReceipt) fail('VIEWER_RECEIPT_MISSING');
+      return already;
+    }
+    if (typeof receiptSigner !== 'function') fail('VIEWER_RECEIPT_SIGNER_REQUIRED');
     if (transfer.objects.some(object => object.state !== 'complete' || object.receivedBytes !== object.expectedBytes)) fail('TRANSFER_INCOMPLETE');
     const payload = this.db.prepare('SELECT payload FROM transfer_intents WHERE receipt_id=?').get(receiptId);
     const record = JSON.parse(payload.payload);
     const objects = record.acceptance.acceptedObjectIds.map(objectId => ({ id: objectId, relativePath: `${receiptId}/${objectId}.bin` }));
-    const accepted = this.accept({ expected: record.expected, resultManifest: record.resultManifest, acceptance: record.acceptance, objects, queueAcknowledgement: false });
+    const viewerReceipt = receiptSigner({ expected: record.expected, resultManifest: record.resultManifest,
+      acceptedObjectIds: record.acceptance.acceptedObjectIds });
+    const accepted = this.accept({ expected: record.expected, resultManifest: record.resultManifest,
+      acceptance: record.acceptance, objects, viewerReceipt, queueAcknowledgement: false });
     return this.getVerified(receiptId) || accepted;
   }
   get(receiptId) {
@@ -443,7 +450,7 @@ class ReferenceAcceptanceLedger {
       for (const { fd } of handles) fs.closeSync(fd);
     }
   }
-  accept({ expected, resultManifest, acceptance, objects, pins = [], reconstruction = {}, queueAcknowledgement = true }) {
+  accept({ expected, resultManifest, acceptance, objects, pins = [], reconstruction = {}, viewerReceipt = null, queueAcknowledgement = true }) {
     protocol.validateResultManifest(resultManifest, expected);
     protocol.validateAcceptance(acceptance, expected);
     if (expected.resultManifestSha256 !== resultManifest.resultManifestSha256 || encode(expected.objectIds) !== encode(resultManifest.objects.map(o => o.id))) fail('BINDING_MISMATCH');
@@ -454,7 +461,8 @@ class ReferenceAcceptanceLedger {
     if (new Set(mapping.map(o => o.id)).size !== mapping.length || new Set(mapping.map(o => o.relativePath.toLowerCase())).size !== mapping.length || mapping.some(o => !acceptance.acceptedObjectIds.includes(o.id))) fail('INVALID_ACCEPTED_CLOSURE');
     for (const pin of pins) { keys(pin, ['objectId','pinId']); identifier(pin.pinId); if (!acceptance.acceptedObjectIds.includes(pin.objectId)) fail('INVALID_PIN'); }
     // Store the complete immutable manifest and mapping, independent of legacy projections.
-    const storage = bounded({ managedRoot: this.root, resultManifest, objects: mapping, initialPins: pins, reconstruction });
+    if (viewerReceipt !== null) protocol.validateViewerReceipt(viewerReceipt);
+    const storage = bounded({ managedRoot: this.root, resultManifest, objects: mapping, initialPins: pins, reconstruction, viewerReceipt });
     const existing = this.db.prepare('SELECT * FROM acceptances WHERE receipt_id=? OR storage_id=?').all(acceptance.receiptId, acceptance.storageReceiptId);
     if (existing.length) {
       if (existing.length !== 1 || existing[0].payload !== payload || existing[0].storage !== storage) fail('ACCEPTANCE_CONFLICT');

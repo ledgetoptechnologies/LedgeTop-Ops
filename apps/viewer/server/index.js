@@ -168,6 +168,12 @@ if (config.processingPlatformEnabled) app.use(createProcessingApi({ repository, 
 let referenceAcceptanceLedger = null;
 if (config.referenceAcceptanceEnabled) {
   const { ReferenceAcceptanceLedger } = require('./referenceAcceptance');
+  const { createViewerReceiptSigner } = require('./referenceReceipt');
+  const receiptSigner = createViewerReceiptSigner({
+    issuerId: config.referenceAcceptanceReceiptIssuerId,
+    keyId: config.referenceAcceptanceReceiptKeyId,
+    privateKeyPem: config.referenceAcceptanceReceiptPrivateKeyPem,
+  });
   referenceAcceptanceLedger = new ReferenceAcceptanceLedger({
     databasePath: config.referenceAcceptanceDatabasePath,
     managedRoot: config.referenceAcceptanceManagedRoot,
@@ -179,6 +185,7 @@ if (config.referenceAcceptanceEnabled) {
     ledger: referenceAcceptanceLedger,
     serviceKeyId: config.referenceAcceptanceServiceKeyId,
     serviceAuthKeys,
+    receiptSigner,
     environment: config.referenceAcceptanceEnvironment,
     chunkBytes: config.referenceAcceptanceChunkBytes,
   }));
