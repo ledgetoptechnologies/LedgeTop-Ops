@@ -46,7 +46,11 @@ An unresolved `sending`, `uncertain`, or `held` row also blocks ordinary claim
 and claim-next selection. Neither a dispatch claim nor its recovery lease can
 be released while the row remains unresolved; a failed or unavailable status
 stays leased until expiry, then can receive another recovery claim instead of
-returning to normal dispatch.
+returning to normal dispatch. Release checks and lease clearing share one
+`BEGIN IMMEDIATE` transaction, serializing against a competing sender. If an
+attempt has multiple unresolved outboxes, reconciliation selects the oldest
+eligible row; after its receipt is confirmed, a fresh recovery generation can
+claim the next row even if the prior recovery lease was released.
 
 The provider identity still needs a production authority binding. The current
 primitive accepts a provider instance supplied by its caller and verifies that
