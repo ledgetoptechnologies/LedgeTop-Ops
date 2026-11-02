@@ -81,9 +81,18 @@ function createSourceRangeV2RuntimeCandidate({ config, database, storage } = {})
       return req.socket?.encrypted === true;
     },
   });
-  const grantVault = new ReferenceTransferGrantVault(database, {
-    key: deriveReferenceTransferGrantKey(config.processingSourceRangeGrantSecret),
-  });
+  let grantVault, grantVaultKey;
+  try {
+    grantVaultKey = deriveReferenceTransferGrantKey(config.processingSourceRangeGrantSecret);
+    grantVault = new ReferenceTransferGrantVault(database, { key: grantVaultKey });
+    grantVault.validateActive();
+  } catch {
+    try { broker.close(); } catch {}
+    try { grantVault?.close(); } catch {}
+    fail('SOURCE_RANGE_STATE_UNAVAILABLE');
+  } finally {
+    grantVaultKey?.fill(0);
+  }
   const runtime = {
     handler,
     grantVault,

@@ -60,6 +60,13 @@ class ReferenceTransferGrantVault {
     }
   }
 
+  validateActive() {
+    const rows = this.db.prepare("SELECT outbox_id FROM viewer_reference_transfer_grant_vault WHERE state='active' ORDER BY outbox_id LIMIT 10001").all();
+    if (rows.length > 10000) fail('reference_transfer_vault_unavailable');
+    for (const row of rows) this.load(row.outbox_id);
+    return rows.length;
+  }
+
   clearAfterAcknowledgement(outboxId) {
     if (typeof outboxId !== 'string' || !ID.test(outboxId)) fail('reference_transfer_vault_invalid');
     const row = this.db.prepare('SELECT state FROM viewer_reference_transfer_grant_vault WHERE outbox_id=?').get(outboxId);

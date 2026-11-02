@@ -269,9 +269,9 @@ function validate() {
       problems.push('PROCESSING_SOURCE_RANGE_V2_ENABLED requires PROCESSING_PLATFORM_ENABLED');
     if (typeof config.processingSourceRangeGrantSecret !== 'string' || Buffer.byteLength(config.processingSourceRangeGrantSecret) < 32)
       problems.push('PROCESSING_SOURCE_RANGE_V2_ENABLED requires PROCESSING_SOURCE_RANGE_GRANT_SECRET with at least 32 bytes');
-    // This secret must remain stable across restarts: the source broker derives
-    // short-lived grant bearers from its durable grant IDs to recover the exact
-    // bearer if the process crashes before persisting its encrypted outbox copy.
+    // Keep this secret unchanged while any source grant or encrypted transfer
+    // outbox entry is unresolved. It derives broker bearers and vault keys;
+    // runtime startup verifies active grants and outbox ciphertexts before use.
     // The production reverse proxy must be identifiable and authenticated.
     // req.secure is meaningful only behind this configured trust boundary.
     if (config.production && !config.trustedProxyAllowlist.entries.length)

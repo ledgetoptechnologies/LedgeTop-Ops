@@ -10,6 +10,13 @@ const { createSourceRangeV2RuntimeCandidate, sourceRangeV2Middleware } = require
 const { PREFIX } = require('../server/sourceRangeV2Candidate');
 const { parseTrustedProxyAddresses } = require('../server/proxyGate');
 
+function emptyVaultDatabase() {
+  return { prepare(sql) {
+    if (sql.startsWith("SELECT outbox_id FROM viewer_reference_transfer_grant_vault WHERE state='active'")) return { all: () => [] };
+    throw new Error('unexpected database query');
+  } };
+}
+
 test('runtime remains absent and creates no source state while disabled', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'source-range-v2-runtime-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -26,7 +33,7 @@ test('enabled runtime creates a durable private subdirectory and mounts only the
   fs.mkdirSync(dataDir); fs.mkdirSync(datasetsMount);
   let runtime;
   t.after(() => { try { runtime?.close(); } catch {} fs.rmSync(root, { recursive: true, force: true }); });
-  const database = { prepare() { throw new Error('the resolver must not run before a grant is minted'); } };
+  const database = emptyVaultDatabase();
   runtime = createSourceRangeV2RuntimeCandidate({
     config: { processingSourceRangeV2Enabled: true, processingPlatformEnabled: true,
       production: false, dataDir, datasetsMount, processingSourceRangeGrantSecret: 'stable-grant-encryption-secret-0123456789' },
@@ -77,6 +84,26 @@ test('enabled runtime refuses an absent durable grant encryption key before open
   assert.equal(fs.existsSync(path.join(dataDir, 'source-range-v2')), false);
 });
 
+test('runtime refuses secret rotation that makes an unresolved encrypted grant unreadable', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'source-range-v2-runtime-'));
+  const dataDir = path.join(root, 'data'), datasetsMount = path.join(root, 'datasets');
+  fs.mkdirSync(dataDir); fs.mkdirSync(datasetsMount);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const database = { prepare(sql) {
+    if (sql.startsWith("SELECT outbox_id FROM viewer_reference_transfer_grant_vault WHERE state='active'")) return { all: () => [{ outbox_id: 'active-outbox' }] };
+    if (sql.includes('FROM viewer_reference_transfer_grant_vault v')) return { get: () => ({
+      ciphertext: Buffer.from('encrypted grant from prior secret'), iv: Buffer.alloc(12), auth_tag: Buffer.alloc(16),
+      state: 'active', canonical_grant_sha256: 'a'.repeat(64),
+    }) };
+    throw new Error('unexpected database query');
+  } };
+  assert.throws(() => createSourceRangeV2RuntimeCandidate({
+    config: { processingSourceRangeV2Enabled: true, processingPlatformEnabled: true,
+      production: false, dataDir, datasetsMount, processingSourceRangeGrantSecret: 'rotated-grant-secret-0123456789-abcdef' },
+    database, storage: { resolve() {} },
+  }), { code: 'SOURCE_RANGE_STATE_UNAVAILABLE' });
+});
+
 test('production range requests require trusted HTTPS, proxy source and the proxy secret', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'source-range-v2-runtime-'));
   const dataDir = path.join(root, 'data'), datasetsMount = path.join(root, 'datasets');
@@ -88,7 +115,7 @@ test('production range requests require trusted HTTPS, proxy source and the prox
     config: { processingSourceRangeV2Enabled: true, processingPlatformEnabled: true,
       production: true, dataDir, datasetsMount, trustedProxyAllowlist: parseTrustedProxyAddresses('127.0.0.1'),
       proxySharedSecret: secret, processingSourceRangeGrantSecret: 'stable-grant-encryption-secret-0123456789', trustProxyHops: 1 },
-    database: { prepare() { throw new Error('range auth must fail before source resolution'); } },
+    database: emptyVaultDatabase(),
     storage: { resolve() { throw new Error('range auth must fail before source resolution'); } },
   });
   const request = ({ secure = true, remoteAddress = '127.0.0.1', suppliedSecret = secret } = {}) => ({

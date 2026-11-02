@@ -123,6 +123,7 @@ class SourceRangeV2BrokerCandidate {
       if (process.platform !== 'win32') fs.chmodSync(databasePath, 0o600);
     } catch (error) {
       this.db.close();
+      this.grantTokenKey?.fill(0);
       if (error instanceof SourceRangeV2Error) throw error;
       fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
     }
@@ -204,6 +205,13 @@ class SourceRangeV2BrokerCandidate {
     for (const row of grants) {
       if (!useMap.has(row.identity_key) || !HASH.test(row.token_hash) || !Number.isSafeInteger(row.expires_ms)
         || ![0, 1].includes(row.revoked) || !slug(row.id)) fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+      if (row.revoked === 0 && row.expires_ms > this.now()) {
+        const identityJson = useMap.get(row.identity_key).row.identity_json;
+        const expectedHash = Buffer.from(sha256(tokenForGrant(this.grantTokenKey, identityJson, row.id)), 'hex');
+        const storedHash = Buffer.from(row.token_hash, 'hex');
+        if (storedHash.length !== expectedHash.length || !timingSafeEqual(storedHash, expectedHash))
+          fail('GRANT_TOKEN_KEY_ROTATION_BLOCKED');
+      }
     }
   }
 

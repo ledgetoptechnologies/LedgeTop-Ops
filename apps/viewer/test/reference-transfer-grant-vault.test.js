@@ -47,5 +47,8 @@ test('grant vault authenticates ciphertext and uses an explicit stable key', t =
   const otherKey = deriveReferenceTransferGrantKey('another stable session secret with enough entropy 0123456789');
   assert.throws(() => new ReferenceTransferGrantVault(f.db, { key: Buffer.alloc(31) }), { code:'reference_transfer_vault_unavailable' });
   assert.notDeepEqual(otherKey, f.key);
-  assert.throws(() => new ReferenceTransferGrantVault(f.db, { key: otherKey }).load('outbox'), { code:'reference_transfer_vault_corrupt' });
+  const rotated = new ReferenceTransferGrantVault(f.db, { key: otherKey });
+  assert.throws(() => rotated.load('outbox'), { code:'reference_transfer_vault_corrupt' });
+  assert.throws(() => rotated.validateActive(), { code:'reference_transfer_vault_corrupt' });
+  assert.equal(f.db.prepare('SELECT state FROM viewer_reference_transfer_grant_vault WHERE outbox_id=?').get('outbox').state, 'active');
 });

@@ -161,11 +161,16 @@ test('expired grant rotates to a unique unrecoverable bearer without reviving th
   assert.deepEqual(await collect(response.body), f.bytes);
 });
 
-test('grant key rotation does not recover an old bearer after broker restart', async t => {
+test('grant key rotation is refused until the active broker grant expires', async t => {
   const f = fixture(t), first = f.mint();
   f.broker.close();
+  const rotatedKey = crypto.randomBytes(32);
+  assert.throws(() => new SourceRangeV2BrokerCandidate({ databasePath: f.dbPath, managedRoot: f.root,
+    grantTokenKey: rotatedKey, now: f.getNow, maxGrantTtlMs: 5000 }), { code: 'GRANT_TOKEN_KEY_ROTATION_BLOCKED' });
+  f.setNow(Date.parse(first.expiresAt) + 1);
   f.broker = new SourceRangeV2BrokerCandidate({ databasePath: f.dbPath, managedRoot: f.root,
-    grantTokenKey: crypto.randomBytes(32), now: f.getNow, maxGrantTtlMs: 5000 });
+    grantTokenKey: rotatedKey, now: f.getNow, maxGrantTtlMs: 5000 });
+  rotatedKey.fill(0);
   const second = f.mint();
   assert.notEqual(second.token, first.token);
   await assert.rejects(f.broker.readAuthorizedRange(f.headers(first)), { code: 'UNAUTHORIZED' });
