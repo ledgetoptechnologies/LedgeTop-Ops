@@ -9,8 +9,9 @@ const crypto = require('node:crypto');
 const { Worker } = require('node:worker_threads');
 const fixture = require('./fixtures/reference-v1.contract.json');
 const crossLanguageReceipt = require('./fixtures/viewer-accepted-copy-receipt-v1.json');
+const protocol = require('../server/referenceProtocol');
 const { ReferenceAcceptanceLedger } = require('../server/referenceAcceptance');
-const { createReferenceAcceptanceApi, PATH, referenceAcceptanceJsonBodyType } = require('../server/referenceAcceptanceApi');
+const { createReferenceAcceptanceApi, PATH, TREEDAR_PATH, referenceAcceptanceJsonBodyType } = require('../server/referenceAcceptanceApi');
 const { createViewerReceiptSigner, verifyViewerReceipt } = require('../server/referenceReceipt');
 const { signServiceRequest } = require('../server/serviceAuth');
 let express = null;
@@ -54,6 +55,46 @@ function reservationBody(receiptId = fixture.acceptance.receiptId) {
   return body;
 }
 
+function treeDarReservation(receiptId = 'treedar-receipt', { combined = false } = {}) {
+  const roles = [
+    'ground_model', 'canopy_height', 'canopy_height_unfiltered', 'crown_labels',
+    'crowns', 'tree_table', 'tree_features', 'run_summary', 'report', 'preview',
+    'area_map_preview', 'engine_manifest', 'area_labels', 'tree_areas',
+  ];
+  if (combined) roles.push('odm_archive', 'report');
+  const objects = roles.map((role, index) => {
+    const id = `${combined && role === 'report' && index === roles.length - 1 ? 'odm' : 'td'}-${role}-${index}`;
+    const bytes = Buffer.from(`synthetic:${id}`);
+    return { id, role, byteSize: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), bytes };
+  });
+  const resultManifest = {
+    protocol: protocol.TREEDAR_RESULT_PROTOCOL,
+    schemaVersion: 2,
+    jobId: fixture.resultManifest.jobId,
+    generation: fixture.resultManifest.generation,
+    environment: fixture.resultManifest.environment,
+    pipelineDigest: fixture.resultManifest.pipelineDigest,
+    engineVersions: combined ? { odm: 'odm-synthetic-1', treedar: 'treedar-synthetic-1' } : { treedar: 'treedar-synthetic-1' },
+    objects: objects.map(({ id, role, byteSize, sha256 }) => ({ id, role, byteSize, sha256 })),
+    resultManifestSha256: '0'.repeat(64),
+  };
+  resultManifest.resultManifestSha256 = protocol.resultManifestSha256(resultManifest);
+  const expected = {
+    ...expectedFromFixture(),
+    resultManifestSha256: resultManifest.resultManifestSha256,
+    objectIds: resultManifest.objects.map(object => object.id),
+  };
+  const acceptance = structuredClone(fixture.acceptance);
+  acceptance.receiptId = receiptId;
+  acceptance.storageReceiptId = `storage-${receiptId}`;
+  acceptance.resultManifestSha256 = resultManifest.resultManifestSha256;
+  acceptance.acceptedObjectIds = [...expected.objectIds];
+  return {
+    body: { inputManifest: fixture.submission.manifest, expected, resultManifest, acceptance },
+    objects,
+  };
+}
+
 function repository() {
   const seen = new Set();
   return {
@@ -81,9 +122,9 @@ function startRouteHarness({ ledger, repo = repository() }) {
     receiptSigner, environment: 'staging', chunkBytes: 1024, routerFactory: () => router,
   });
 
-  function routeFor(method, opts) {
+  function routeFor(method, opts, pathPrefix) {
     return routes.find(({ method: verb, route }) => {
-      if (verb !== method) return false;
+      if (verb !== method || !route.startsWith(`${pathPrefix}/`)) return false;
       if (opts.objectId) return route.endsWith('/:objectId');
       if (method === 'POST') return route.endsWith('/:receiptId/commit');
       return route.endsWith('/:receiptId');
@@ -91,10 +132,10 @@ function startRouteHarness({ ledger, repo = repository() }) {
   }
 
   return {
-    async request(method, receiptId, body, { objectId, offset = 0, signingKeyId = keyId, badSignature = false, rawBodyOverride } = {}) {
+    async request(method, receiptId, body, { objectId, offset = 0, pathPrefix = PATH, signingKeyId = keyId, badSignature = false, rawBodyOverride } = {}) {
       const pathname = objectId
-        ? `${PATH}/${encodeURIComponent(receiptId)}/objects/${encodeURIComponent(objectId)}?offset=${offset}`
-        : method === 'POST' ? `${PATH}/${encodeURIComponent(receiptId)}/commit` : `${PATH}/${encodeURIComponent(receiptId)}`;
+        ? `${pathPrefix}/${encodeURIComponent(receiptId)}/objects/${encodeURIComponent(objectId)}?offset=${offset}`
+        : method === 'POST' ? `${pathPrefix}/${encodeURIComponent(receiptId)}/commit` : `${pathPrefix}/${encodeURIComponent(receiptId)}`;
       const isBinary = Boolean(objectId);
       const rawBody = rawBodyOverride !== undefined
         ? rawBodyOverride
@@ -116,7 +157,7 @@ function startRouteHarness({ ledger, repo = repository() }) {
         get(name) { return headers[name.toLowerCase()]; },
         ...(isBinary ? { async *[Symbol.asyncIterator]() { if (rawBody.length) yield rawBody; } } : {}),
       };
-      const selected = routeFor(method, { objectId });
+      const selected = routeFor(method, { objectId }, pathPrefix);
       assert.ok(selected, `missing ${method} route for ${pathname}`);
       return new Promise(resolve => {
         const res = {
@@ -244,6 +285,58 @@ test('route rejects a mismatched source manifest before creating a transfer rese
   assert.equal(calls, 0);
 });
 
+test('TreeDar v2 accepts only the private combined/TreeDar result schema and full closure', async () => {
+  assert.deepEqual(protocol.TREEDAR_PRODUCER_ROLES, [
+    'ground_model', 'canopy_height', 'canopy_height_unfiltered', 'crown_labels', 'area_labels',
+    'orthophoto_point_colour', 'crowns', 'tree_table', 'tree_features', 'tree_areas',
+    'lasting_tree_ids', 'area_types_template', 'labels', 'quality_report', 'run_summary',
+    'preview', 'area_map_preview', 'tree_type_predictions', 'classifier_report',
+    'final_test_predictions', 'report',
+  ]);
+  const reservations = [];
+  const ledger = {
+    reserveTransfer(payload) {
+      reservations.push(payload);
+      return { receiptId: payload.acceptance.receiptId, state: 'receiving', expected: payload.expected,
+        acceptance: payload.acceptance, objects: payload.expected.objectIds.map(objectId => ({
+          objectId, expectedBytes: payload.resultManifest.objects.find(object => object.id === objectId).byteSize,
+          expectedSha256: payload.resultManifest.objects.find(object => object.id === objectId).sha256,
+          receivedBytes: 0, state: 'pending',
+        })) };
+    },
+    stageObjectChunk() {}, commitTransfer() {}, getVerified() { return null; }, getTransfer() { return null; },
+  };
+  const api = startRouteHarness({ ledger });
+  const combined = treeDarReservation('treedar-combined', { combined: true });
+  const accepted = await api.request('PUT', 'treedar-combined', combined.body, { pathPrefix: TREEDAR_PATH });
+  assert.equal(accepted.status, 202);
+  assert.equal(reservations.length, 1);
+  assert.deepEqual(reservations[0].resultManifest.engineVersions, { odm: 'odm-synthetic-1', treedar: 'treedar-synthetic-1' });
+  assert.equal(reservations[0].resultManifest.objects.filter(object => object.role === 'report').length, 2);
+  assert.deepEqual(accepted.body.acceptedObjectIds, combined.body.expected.objectIds);
+
+  const partial = treeDarReservation('treedar-partial');
+  partial.body.acceptance.acceptedObjectIds.pop();
+  const rejectedPartial = await api.request('PUT', 'treedar-partial', partial.body, { pathPrefix: TREEDAR_PATH });
+  assert.equal(rejectedPartial.status, 409);
+  assert.equal(rejectedPartial.body.code, 'INVALID_ACCEPTED_CLOSURE');
+
+  const unknownRole = treeDarReservation('treedar-unknown-role');
+  unknownRole.body.resultManifest.objects[12].role = 'arbitrary_file';
+  unknownRole.body.resultManifest.resultManifestSha256 = protocol.resultManifestSha256(unknownRole.body.resultManifest);
+  unknownRole.body.expected.resultManifestSha256 = unknownRole.body.resultManifest.resultManifestSha256;
+  unknownRole.body.acceptance.resultManifestSha256 = unknownRole.body.resultManifest.resultManifestSha256;
+  const rejectedRole = await api.request('PUT', 'treedar-unknown-role', unknownRole.body, { pathPrefix: TREEDAR_PATH });
+  assert.equal(rejectedRole.status, 400);
+  assert.equal(rejectedRole.body.code, 'INVALID_PROTOCOL');
+  assert.equal(reservations.length, 1);
+
+  const wrongPath = await api.request('PUT', 'treedar-path-isolated', treeDarReservation('treedar-path-isolated').body);
+  assert.equal(wrongPath.status, 400);
+  assert.equal(wrongPath.body.code, 'INVALID_PROTOCOL');
+  assert.equal(reservations.length, 1);
+});
+
 enabledTest('metadata alone cannot ACK; chunk transfer resumes and replays safely across restart', async t => {
   const storage = tempStorage(t);
   let ledger = new ReferenceAcceptanceLedger(storage);
@@ -296,6 +389,103 @@ enabledTest('metadata alone cannot ACK; chunk transfer resumes and replays safel
   assert.deepEqual(status.body, accepted.body);
   assert.equal(verifyViewerReceipt(status.body.viewerReceipt, trustedReceiptKeys), true);
   assert.equal(fs.readFileSync(path.join(storage.root, 'receipt-1', 'result-1.bin'), 'utf8'), 'abc');
+});
+
+enabledTest('TreeDar v2 combined result resumes across restart and returns the same full-closure receipt on replay', async t => {
+  const storage = tempStorage(t);
+  let ledger = new ReferenceAcceptanceLedger(storage);
+  let api = startRouteHarness({ ledger });
+  t.after(() => { try { ledger.close(); } catch {} });
+  const receiptId = 'treedar-combined-restart';
+  const prepared = treeDarReservation(receiptId, { combined: true });
+  const reserved = await api.request('PUT', receiptId, prepared.body, { pathPrefix: TREEDAR_PATH });
+  assert.equal(reserved.status, 202);
+  assert.equal(reserved.body.state, 'receiving');
+  assert.equal(reserved.body.objects.length, prepared.objects.length);
+
+  const firstObject = prepared.objects[0];
+  const firstCut = Math.min(5, firstObject.bytes.length - 1);
+  const partial = await api.request('PUT', receiptId, firstObject.bytes.subarray(0, firstCut), {
+    pathPrefix: TREEDAR_PATH, objectId: firstObject.id, offset: 0,
+  });
+  assert.equal(partial.status, 200);
+  assert.equal(partial.body.receivedBytes, firstCut);
+  ledger.close();
+
+  ledger = new ReferenceAcceptanceLedger(storage);
+  api = startRouteHarness({ ledger });
+  const replayedReservation = await api.request('PUT', receiptId, prepared.body, { pathPrefix: TREEDAR_PATH });
+  assert.equal(replayedReservation.status, 202);
+  const resumed = await api.request('GET', receiptId, undefined, { pathPrefix: TREEDAR_PATH });
+  assert.equal(resumed.status, 202);
+  assert.equal(resumed.body.objects.find(object => object.objectId === firstObject.id).receivedBytes, firstCut);
+  const wrongProtocolPath = await api.request('GET', receiptId);
+  assert.equal(wrongProtocolPath.status, 404);
+
+  const remainder = await api.request('PUT', receiptId, firstObject.bytes.subarray(firstCut), {
+    pathPrefix: TREEDAR_PATH, objectId: firstObject.id, offset: firstCut,
+  });
+  assert.equal(remainder.status, 200);
+  assert.equal(remainder.body.complete, true);
+  for (const object of prepared.objects.slice(1)) {
+    const uploaded = await api.request('PUT', receiptId, object.bytes, {
+      pathPrefix: TREEDAR_PATH, objectId: object.id, offset: 0,
+    });
+    assert.equal(uploaded.status, 200);
+    assert.equal(uploaded.body.complete, true);
+  }
+
+  const committed = await api.request('POST', receiptId, undefined, { pathPrefix: TREEDAR_PATH });
+  assert.equal(committed.status, 201);
+  assert.equal(committed.body.fullyAccepted, true);
+  assert.deepEqual(committed.body.acceptedObjectIds, prepared.body.expected.objectIds);
+  assert.equal(verifyViewerReceipt(committed.body.viewerReceipt, trustedReceiptKeys), true);
+  assert.deepEqual(committed.body.viewerReceipt.acceptedObjectIds, [...prepared.body.expected.objectIds].sort());
+  for (const object of prepared.objects) {
+    assert.deepEqual(fs.readFileSync(path.join(storage.root, receiptId, `${object.id}.bin`)), object.bytes);
+  }
+
+  const statusReplay = await api.request('GET', receiptId, undefined, { pathPrefix: TREEDAR_PATH });
+  assert.equal(statusReplay.status, 200);
+  assert.deepEqual(statusReplay.body.acceptance, committed.body.acceptance);
+  assert.deepEqual(statusReplay.body.viewerReceipt, committed.body.viewerReceipt);
+  const commitReplay = await api.request('POST', receiptId, undefined, { pathPrefix: TREEDAR_PATH });
+  assert.equal(commitReplay.status, 200);
+  assert.deepEqual(commitReplay.body.viewerReceipt, committed.body.viewerReceipt);
+});
+
+enabledTest('TreeDar v2 applies the durable byte quota and rejects tampered object bytes', async t => {
+  const quotaStorage = tempStorage(t);
+  const quotaLedger = new ReferenceAcceptanceLedger({ ...quotaStorage, maxManagedBytes: 1 });
+  t.after(() => { try { quotaLedger.close(); } catch {} });
+  const quotaApi = startRouteHarness({ ledger: quotaLedger });
+  const overQuota = treeDarReservation('treedar-over-quota');
+  const quotaResponse = await quotaApi.request('PUT', 'treedar-over-quota', overQuota.body, { pathPrefix: TREEDAR_PATH });
+  assert.equal(quotaResponse.status, 507);
+  assert.equal(quotaResponse.body.code, 'STORAGE_QUOTA_EXCEEDED');
+  assert.equal(quotaLedger.getTransfer('treedar-over-quota'), null);
+
+  const storage = tempStorage(t);
+  const ledger = new ReferenceAcceptanceLedger(storage);
+  t.after(() => { try { ledger.close(); } catch {} });
+  const api = startRouteHarness({ ledger });
+  const receiptId = 'treedar-tamper';
+  const prepared = treeDarReservation(receiptId);
+  assert.equal((await api.request('PUT', receiptId, prepared.body, { pathPrefix: TREEDAR_PATH })).status, 202);
+  const object = prepared.objects[0];
+  const tampered = Buffer.alloc(object.bytes.length, 0x78);
+  const rejected = await api.request('PUT', receiptId, tampered, {
+    pathPrefix: TREEDAR_PATH, objectId: object.id, offset: 0,
+  });
+  assert.equal(rejected.status, 409);
+  assert.equal(rejected.body.code, 'STORAGE_DIGEST_MISMATCH');
+  const held = await api.request('GET', receiptId, undefined, { pathPrefix: TREEDAR_PATH });
+  assert.equal(held.status, 202);
+  assert.equal(held.body.state, 'held');
+  const commit = await api.request('POST', receiptId, undefined, { pathPrefix: TREEDAR_PATH });
+  assert.equal(commit.status, 409);
+  assert.equal(commit.body.code, 'TRANSFER_INCOMPLETE');
+  assert.equal(ledger.get(receiptId), null);
 });
 
 test('Viewer acceptance receipt is independently signed and rejects tampering or an unknown key', () => {

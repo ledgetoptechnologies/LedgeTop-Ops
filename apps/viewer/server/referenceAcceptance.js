@@ -25,6 +25,24 @@ function keys(value, names) {
   if (!value || Object.getPrototypeOf(value) !== Object.prototype || Object.keys(value).length !== names.length || names.some(k => !Object.hasOwn(value, k))) fail('INVALID_STORAGE_METADATA');
 }
 function identifier(value) { if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)) fail('INVALID_IDENTIFIER'); }
+function validateTransferPayload(payload) {
+  if (!payload || !payload.inputManifest || !payload.expected || !payload.resultManifest || !payload.acceptance) fail('INVALID_ACCEPTANCE_REQUEST');
+  protocol.validateManifest(payload.inputManifest);
+  protocol.validateStoredResultManifest(payload.resultManifest, payload.expected);
+  protocol.validateAcceptance(payload.acceptance, payload.expected);
+  const objectIds = payload.resultManifest.objects.map(object => object.id);
+  if (payload.inputManifest.sha256 !== payload.expected.inputManifestSha256
+      || protocol.manifestSha256(payload.inputManifest) !== payload.expected.inputManifestSha256
+      || payload.resultManifest.resultManifestSha256 !== payload.expected.resultManifestSha256
+      || encode(payload.expected.objectIds) !== encode(objectIds)) fail('BINDING_MISMATCH');
+  if (payload.resultManifest.schemaVersion === 2
+      && encode(payload.acceptance.acceptedObjectIds) !== encode(objectIds)) fail('INVALID_ACCEPTED_CLOSURE');
+  return payload;
+}
+function validateAcceptedClosure(resultManifest, acceptance) {
+  if (resultManifest.schemaVersion === 2
+      && encode(acceptance.acceptedObjectIds) !== encode(resultManifest.objects.map(object => object.id))) fail('INVALID_ACCEPTED_CLOSURE');
+}
 function safePath(root, relative) {
   if (typeof relative !== 'string' || !relative || relative.length > 1024 || relative.includes('\\') || relative.includes(':') || path.isAbsolute(relative) || relative.split('/').some(p => !p || p === '.' || p === '..' || /[. ]$/.test(p) || /[\x00-\x1f<>"|?*]/.test(p) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(p))) fail('UNSAFE_STORAGE_PATH');
   const absolute = path.resolve(root, relative);
@@ -129,17 +147,11 @@ class ReferenceAcceptanceLedger {
     if (actualBytes > BigInt(this.maxManagedBytes)) fail('STORAGE_QUOTA_EXCEEDED');
   }
   reserveTransfer({ inputManifest, expected, resultManifest, acceptance }) {
-    protocol.validateManifest(inputManifest);
-    protocol.validateResultManifest(resultManifest, expected);
-    protocol.validateAcceptance(acceptance, expected);
-    if (inputManifest.sha256 !== expected.inputManifestSha256
-        || protocol.manifestSha256(inputManifest) !== expected.inputManifestSha256
-        || expected.resultManifestSha256 !== resultManifest.resultManifestSha256
-        || encode(expected.objectIds) !== encode(resultManifest.objects.map(object => object.id))) fail('BINDING_MISMATCH');
-    const payload = bounded({ inputManifest, expected, resultManifest, acceptance });
+    const payload = validateTransferPayload({ inputManifest, expected, resultManifest, acceptance });
+    const encodedPayload = bounded(payload);
     const current = this.db.prepare('SELECT payload FROM transfer_intents WHERE receipt_id=?').get(acceptance.receiptId);
     if (current) {
-      if (current.payload !== payload) fail('ACCEPTANCE_RESERVATION_CONFLICT');
+      if (current.payload !== encodedPayload) fail('ACCEPTANCE_RESERVATION_CONFLICT');
       return this.getTransfer(acceptance.receiptId);
     }
     if (this.get(acceptance.receiptId)) fail('ACCEPTANCE_RESERVATION_CONFLICT');
@@ -148,7 +160,7 @@ class ReferenceAcceptanceLedger {
     try {
       const raced = this.db.prepare('SELECT payload FROM transfer_intents WHERE receipt_id=?').get(acceptance.receiptId);
       if (raced) {
-        if (raced.payload !== payload) fail('ACCEPTANCE_RESERVATION_CONFLICT');
+        if (raced.payload !== encodedPayload) fail('ACCEPTANCE_RESERVATION_CONFLICT');
         this.db.exec('COMMIT');
         return this.getTransfer(acceptance.receiptId);
       }
@@ -160,7 +172,7 @@ class ReferenceAcceptanceLedger {
       const reserved = this.db.prepare('SELECT COALESCE(SUM(expected_bytes),0) AS bytes FROM transfer_objects').get().bytes;
       if (BigInt(reserved) + requestedBytes > BigInt(this.maxManagedBytes)) fail('STORAGE_QUOTA_EXCEEDED');
       this.db.prepare('INSERT INTO transfer_intents(receipt_id,payload,state,created_at) VALUES(?,?,?,?)')
-        .run(acceptance.receiptId, payload, 'receiving', new Date().toISOString());
+        .run(acceptance.receiptId, encodedPayload, 'receiving', new Date().toISOString());
       for (const objectId of acceptance.acceptedObjectIds) {
         const object = resultManifest.objects.find(item => item.id === objectId);
         if (!object) fail('INVALID_ACCEPTED_CLOSURE');
@@ -179,7 +191,7 @@ class ReferenceAcceptanceLedger {
     try {
       const row = this.db.prepare('SELECT payload,state FROM transfer_intents WHERE receipt_id=?').get(receiptId);
       if (!row) { this.db.exec('COMMIT'); return null; }
-      const payload = JSON.parse(row.payload);
+      const payload = validateTransferPayload(JSON.parse(row.payload));
       let transferState = row.state;
       const quarantines = [];
       const rows = this.db.prepare('SELECT object_id,relative_path,expected_bytes,expected_sha256,received_bytes,state FROM transfer_objects WHERE receipt_id=? ORDER BY object_id').all(receiptId);
@@ -273,17 +285,19 @@ class ReferenceAcceptanceLedger {
         fs.renameSync(item.partialPath, item.quarantine);
         syncDirectory(item.directory);
       }
-      return { receiptId, state: transferState, expected: payload.expected, acceptance: payload.acceptance, objects };
+      return { receiptId, state: transferState, expected: payload.expected, acceptance: payload.acceptance,
+        resultManifestSchemaVersion: payload.resultManifest.schemaVersion, objects };
     } catch (error) {
       try { this.db.exec('ROLLBACK'); } catch {}
       throw error;
     }
   }
-  async stageObjectChunk({ receiptId, objectId, offset, contentLength, declaredSha256, source, maxChunkBytes = 16 * 1024 * 1024 }) {
+  async stageObjectChunk({ receiptId, objectId, offset, contentLength, declaredSha256, source, maxChunkBytes = 16 * 1024 * 1024, schemaVersion }) {
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(contentLength) || contentLength < 0
         || contentLength > maxChunkBytes || !/^[a-f0-9]{64}$/.test(declaredSha256 || '') || !source?.[Symbol.asyncIterator]) fail('INVALID_TRANSFER_CHUNK');
     const transfer = this.getTransfer(receiptId);
     if (!transfer) fail('UNKNOWN_TRANSFER');
+    if (schemaVersion !== undefined && transfer.resultManifestSchemaVersion !== schemaVersion) fail('UNKNOWN_TRANSFER');
     const entry = transfer.objects.find(object => object.objectId === objectId);
     if (!entry) fail('INVALID_TRANSFER_OBJECT');
     const chunk = Buffer.allocUnsafe(contentLength); let received = 0;
@@ -372,11 +386,13 @@ class ReferenceAcceptanceLedger {
       throw error;
     } finally { if (fd !== undefined) fs.closeSync(fd); }
   }
-  commitTransfer(receiptId, receiptSigner) {
+  commitTransfer(receiptId, receiptSigner, { schemaVersion } = {}) {
     const transfer = this.getTransfer(receiptId);
     if (!transfer) fail('UNKNOWN_TRANSFER');
+    if (schemaVersion !== undefined && transfer.resultManifestSchemaVersion !== schemaVersion) fail('UNKNOWN_TRANSFER');
     const already = this.getVerified(receiptId);
     if (already) {
+      if (schemaVersion !== undefined && already.storage.resultManifest.schemaVersion !== schemaVersion) fail('UNKNOWN_TRANSFER');
       if (!already.storage.viewerReceipt) fail('VIEWER_RECEIPT_MISSING');
       return already;
     }
@@ -409,8 +425,9 @@ class ReferenceAcceptanceLedger {
       resultManifestSha256: acceptance.resultManifestSha256,
       objectIds: storage.resultManifest?.objects?.map(object => object.id),
     };
-    protocol.validateResultManifest(storage.resultManifest, expected);
+    protocol.validateStoredResultManifest(storage.resultManifest, expected);
     protocol.validateAcceptance(acceptance, expected);
+    validateAcceptedClosure(storage.resultManifest, acceptance);
     if (acceptance.acceptedObjectIds.length !== storage.objects.length
         || encode(acceptance.acceptedObjectIds) !== encode(storage.objects.map(object => object.id))) fail('INVALID_ACCEPTED_CLOSURE');
 
@@ -451,8 +468,9 @@ class ReferenceAcceptanceLedger {
     }
   }
   accept({ expected, resultManifest, acceptance, objects, pins = [], reconstruction = {}, viewerReceipt = null, queueAcknowledgement = true }) {
-    protocol.validateResultManifest(resultManifest, expected);
+    protocol.validateStoredResultManifest(resultManifest, expected);
     protocol.validateAcceptance(acceptance, expected);
+    validateAcceptedClosure(resultManifest, acceptance);
     if (expected.resultManifestSha256 !== resultManifest.resultManifestSha256 || encode(expected.objectIds) !== encode(resultManifest.objects.map(o => o.id))) fail('BINDING_MISMATCH');
     if (!acceptance.acceptedObjectIds.length || !Array.isArray(objects) || objects.length !== acceptance.acceptedObjectIds.length || !Array.isArray(pins) || pins.length > protocol.LIMITS.objects) fail('INVALID_ACCEPTED_CLOSURE');
     const payload = bounded(acceptance);

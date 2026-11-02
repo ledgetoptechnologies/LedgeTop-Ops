@@ -1,6 +1,6 @@
 # TreeDar Viewer artifact contract proposal
 
-**Status: draft for owner and implementation review.** This proposal does not enable TreeDar transfers, client access, rendering, or source cleanup. The current accepted-copy API remains ODM-only.
+**Status: draft for owner and implementation review.** This proposal does not enable client access, rendering, or source cleanup. The current accepted-copy API remains ODM-only on v1; a private v2 path is being developed for TreeDar-only and combined ODM→TreeDar parent jobs.
 
 ## Goals and safety boundaries
 
@@ -30,6 +30,7 @@ Keep the TreeDar producer role names in the manifest. The source filename is pro
 | `area_types_template` | `area_types.csv` | editable template, when emitted | private indexed attachment | downloadable template only |
 | `labels` | `labels.csv` | label data, when emitted | private indexed attachment | searchable table after schema review |
 | `tree_type_predictions` | `classify/predictions.csv` | classifier output, when emitted | private indexed attachment | searchable table; clearly marked as predictions |
+| `final_test_predictions` | `classify/final_test_predictions.csv` | evaluation predictions, when emitted | staff-only attachment | none by default |
 | `quality_report` | `qc.json` | QA metadata, when emitted | staff-only attachment | none by default |
 | `run_summary` | `summary.json` | run metadata | staff-only attachment | concise approved summary only |
 | `classifier_report` | `classify/classify_report.json` | model QA metadata, when emitted | staff-only attachment | none by default |
@@ -37,29 +38,38 @@ Keep the TreeDar producer role names in the manifest. The source filename is pro
 | `preview` | `tree_map.png` | raster preview | private indexed attachment | thumbnail/preview only |
 | `area_map_preview` | `areas.png` | raster preview, when emitted | private indexed attachment | thumbnail/preview only |
 | `engine_manifest` | `manifest.json` | engine provenance | internal-only, never client-linked | none |
+| `odm_archive` | ODM stage archive | ODM stage archive | private indexed attachment | none; retain as private source evidence |
 
-The Producer role registry is authoritative for which optional outputs exist. A Viewer v2 registry must explicitly allow each role and define format, maximum size, and whether the role is a layer, table, attachment, or internal metadata. The list above is a proposal, not yet a protocol change.
+The Producer role registry is authoritative for which optional outputs exist. A Viewer v2 registry must explicitly allow each role and define format, maximum size, and whether the role is a layer, table, attachment, or internal metadata. The `odm_archive` role is allowed only when `engineVersions` contains both `odm` and `treedar`. The list above is a proposal, not yet a client visibility decision.
 
 ## Manifest and storage shape
 
-Use a versioned TreeDar result-manifest contract rather than relaxing the existing ODM endpoint. Each object descriptor should bind:
+Use a versioned result-manifest contract rather than relaxing the existing ODM endpoint. The v2 path accepts only `engineVersions:{treedar:<version>}` or `engineVersions:{odm:<version>,treedar:<version>}`. ODM-only results continue through v1 unchanged. Each v2 object descriptor binds:
 
 ```json
 {
-  "id": "treedar-…",
-  "role": "ground_model",
-  "format": "geotiff",
-  "byteSize": 123,
-  "sha256": "…",
-  "metadata": {
-    "mediaType": "image/tiff",
-    "crs": "…",
-    "verticalUnits": "metre"
-  }
+  "protocol": "ltds-reference-result-v2",
+  "schemaVersion": 2,
+  "jobId": "…",
+  "generation": 1,
+  "environment": "staging",
+  "pipelineDigest": "…",
+  "engineVersions": {"treedar": "…"},
+  "objects": [
+    {
+      "id": "treedar-…",
+      "role": "ground_model",
+      "byteSize": 123,
+      "sha256": "…"
+    }
+  ],
+  "resultManifestSha256": "…"
 }
 ```
 
-Only role-specific metadata belongs in this descriptor. No absolute path, `relativePath`, host path, or arbitrary display URL may come from the worker. The Viewer derives a safe label and its internal object path from the validated role and object identity. Metadata must be canonicalized into the signed result manifest and receipt binding; objects remain separate byte streams uploaded by object ID.
+The exact top-level keys are `protocol`, `schemaVersion`, `jobId`, `generation`, `environment`, `pipelineDigest`, `engineVersions`, `objects`, and `resultManifestSha256`. Each object has exactly `id`, `role`, `byteSize`, and `sha256`; no arbitrary object metadata is accepted. Allow at most 102 objects total: up to 100 TreeDar outputs plus an ODM archive and a second report for combined jobs. Each byte size is a positive safe integer, and the existing managed-storage quota bounds each reservation and total retained bytes. The existing canonical result digest excludes only `resultManifestSha256`. Processing object order is preserved: `expected.objectIds`, `objects`, and legacy `acceptance.acceptedObjectIds` must describe the same complete ordered closure. The Viewer signature sorts accepted IDs in its own signed receipt format.
+
+The v2 object-role allowlist is the exact TreeDar Producer `ROLES` registry, plus `engine_manifest` (internal-only) and `odm_archive` (combined jobs only). Require exactly one `engine_manifest`; require exactly one `odm_archive` when the `odm` engine is present, and none otherwise. Each TreeDar role appears at most once; `report` may appear twice only for a combined job. No absolute path, `relativePath`, host path, or arbitrary display URL may come from the worker. The Viewer derives safe labels and storage paths from the validated role and object identity. The manifest hash and signed Viewer receipt bind the role and object descriptor bytes.
 
 The acceptance closure includes every declared object, including internal provenance objects. A signed receipt for only the client-visible subset is insufficient to authorize result-cache cleanup. Conversely, a full accepted copy does not make every object client-visible.
 

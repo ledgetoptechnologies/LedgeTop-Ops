@@ -4,10 +4,12 @@ const protocol = require('./referenceProtocol');
 const { verifyServiceRequest, verifyServiceRequestDigest } = require('./serviceAuth');
 
 const PATH = '/api/v1/reference/v1/acceptances';
+const TREEDAR_PATH = '/api/v1/reference/v2/acceptances';
+const ACCEPTANCE_PATHS = Object.freeze([{ path: PATH, schemaVersion: 1 }, { path: TREEDAR_PATH, schemaVersion: 2 }]);
 const fail = code => { const error = new Error(code); error.code = code; throw error; };
 function referenceAcceptanceJsonBodyType(req) {
   const binaryReferencePath = req.method === 'PUT'
-    && /^\/api\/v1\/reference\/v1\/acceptances\/[^/]+\/objects\/[^/]+\/?$/i.test(req.path || '');
+    && /^\/api\/v1\/reference\/v[12]\/acceptances\/[^/]+\/objects\/[^/]+\/?$/i.test(req.path || '');
   if (binaryReferencePath) return false;
   return Boolean(req.is('application/json'));
 }
@@ -71,7 +73,7 @@ function createReferenceAcceptanceApi({ repository, ledger, serviceKeyId, servic
 
   // Binary transfers use signed chunk digests and are bounded before reading.
   // The ledger compares the digest to the actual chunk bytes before writing.
-  router.put(`${PATH}/:receiptId/objects/:objectId`, async (req, res) => {
+  for (const { path: basePath, schemaVersion } of ACCEPTANCE_PATHS) router.put(`${basePath}/:receiptId/objects/:objectId`, async (req, res) => {
     try {
       if (req.get('Content-Type') !== 'application/octet-stream') return res.status(415).json({ error: 'application/octet-stream required', code: 'invalid_content_type' });
       const suppliedDigest = req.get('X-LTDS-Content-SHA256');
@@ -102,10 +104,11 @@ function createReferenceAcceptanceApi({ repository, ledger, serviceKeyId, servic
           declaredSha256: suppliedDigest,
           source: req,
           maxChunkBytes: chunkBytes,
+          schemaVersion,
         });
       } finally { activeUploads--; }
       // A completed object chunk is not a job acceptance. Only /commit can
-      // issue the v1 accepted-copy receipt after every declared object verifies.
+      // issue the signed accepted-copy receipt after every declared object verifies.
       return res.json({ ...result, state: result.complete ? 'object_complete' : 'receiving' });
     } catch (error) {
       const [status, code] = safeError(error);
@@ -125,7 +128,7 @@ function createReferenceAcceptanceApi({ repository, ledger, serviceKeyId, servic
   }
   router.use(authenticateJson);
 
-  router.put(`${PATH}/:receiptId`, (req, res) => {
+  for (const { path: basePath, schemaVersion } of ACCEPTANCE_PATHS) router.put(`${basePath}/:receiptId`, (req, res) => {
     try {
       const body = req.body;
       if (!exactKeys(body, ['inputManifest', 'expected', 'resultManifest', 'acceptance'])) fail('INVALID_ACCEPTANCE_REQUEST');
@@ -134,8 +137,13 @@ function createReferenceAcceptanceApi({ repository, ledger, serviceKeyId, servic
       if (req.params.receiptId !== acceptance?.receiptId || expected.environment !== environment) fail('BINDING_MISMATCH');
       protocol.validateManifest(inputManifest);
       if (protocol.manifestSha256(inputManifest) !== expected.inputManifestSha256 || inputManifest.sha256 !== expected.inputManifestSha256) fail('BINDING_MISMATCH');
-      protocol.validateResultManifest(resultManifest, expected);
-      if (Object.keys(resultManifest.engineVersions).length !== 1 || !Object.hasOwn(resultManifest.engineVersions, 'odm')) fail('INVALID_PROTOCOL');
+      if (schemaVersion === 1) {
+        protocol.validateResultManifest(resultManifest, expected);
+        if (Object.keys(resultManifest.engineVersions).length !== 1 || !Object.hasOwn(resultManifest.engineVersions, 'odm')) fail('INVALID_PROTOCOL');
+      } else {
+        protocol.validateTreeDarResultManifest(resultManifest, expected);
+        if (JSON.stringify(acceptance.acceptedObjectIds) !== JSON.stringify(resultManifest.objects.map(object => object.id))) fail('INVALID_ACCEPTED_CLOSURE');
+      }
       protocol.validateAcceptance(acceptance, expected);
       const transfer = ledger.reserveTransfer({ inputManifest, expected, resultManifest, acceptance });
       return res.status(202).json(publicTransfer(transfer));
@@ -145,12 +153,15 @@ function createReferenceAcceptanceApi({ repository, ledger, serviceKeyId, servic
     }
   });
 
-  router.post(`${PATH}/:receiptId/commit`, (req, res) => {
+  for (const { path: basePath, schemaVersion } of ACCEPTANCE_PATHS) router.post(`${basePath}/:receiptId/commit`, (req, res) => {
     try {
       if (req.rawBody?.length) fail('INVALID_ACCEPTANCE_REQUEST');
       const existing = ledger.getVerified(req.params.receiptId);
+      if (existing && existing.storage.resultManifest.schemaVersion !== schemaVersion) fail('UNKNOWN_TRANSFER');
       if (existing && !existing.storage.viewerReceipt) fail('VIEWER_RECEIPT_MISSING');
-      const record = ledger.commitTransfer(req.params.receiptId, receiptSigner);
+      const pending = existing ? null : ledger.getTransfer(req.params.receiptId);
+      if (!existing && (!pending || pending.resultManifestSchemaVersion !== schemaVersion)) fail('UNKNOWN_TRANSFER');
+      const record = ledger.commitTransfer(req.params.receiptId, receiptSigner, { schemaVersion });
       const verified = existing || ledger.getVerified(req.params.receiptId);
       if (!verified || !verified.storage.viewerReceipt || verified.acceptance.receiptId !== record.acceptance.receiptId) fail('ACCEPTANCE_CONFLICT');
       return res.status(existing ? 200 : 201).json(publicStatus(verified));
@@ -160,14 +171,16 @@ function createReferenceAcceptanceApi({ repository, ledger, serviceKeyId, servic
     }
   });
 
-  router.get(`${PATH}/:receiptId`, (req, res) => {
+  for (const { path: basePath, schemaVersion } of ACCEPTANCE_PATHS) router.get(`${basePath}/:receiptId`, (req, res) => {
     try {
       const accepted = ledger.getVerified(req.params.receiptId);
       if (accepted) {
+        if (accepted.storage.resultManifest.schemaVersion !== schemaVersion) fail('UNKNOWN_TRANSFER');
         if (!accepted.storage.viewerReceipt) fail('VIEWER_RECEIPT_MISSING');
         return res.json(publicStatus(accepted));
       }
       const transfer = ledger.getTransfer(req.params.receiptId);
+      if (transfer && transfer.resultManifestSchemaVersion !== schemaVersion) fail('UNKNOWN_TRANSFER');
       return transfer ? res.status(202).json(publicTransfer(transfer)) : res.status(404).json({ error: 'acceptance not found', code: 'acceptance_not_found' });
     } catch (error) {
       const [status, code] = safeError(error);
@@ -178,4 +191,4 @@ function createReferenceAcceptanceApi({ repository, ledger, serviceKeyId, servic
   return router;
 }
 
-module.exports = { PATH, createReferenceAcceptanceApi, referenceAcceptanceJsonBodyType };
+module.exports = { PATH, TREEDAR_PATH, createReferenceAcceptanceApi, referenceAcceptanceJsonBodyType };

@@ -3,7 +3,17 @@
 const { createHash, randomBytes } = require('node:crypto');
 const PROTOCOL = 'ltds-reference-v1';
 const PREFIX = '/ltds/v1';
+const TREEDAR_RESULT_PROTOCOL = 'ltds-reference-result-v2';
 const LIMITS = Object.freeze({ metadataBytes: 4 * 1024 * 1024, objects: 10000, integer: Number.MAX_SAFE_INTEGER });
+const TREEDAR_MAX_OBJECTS = 100;
+const TREEDAR_RESULT_MAX_OBJECTS = TREEDAR_MAX_OBJECTS + 2;
+const TREEDAR_PRODUCER_ROLES = Object.freeze([
+  'ground_model', 'canopy_height', 'canopy_height_unfiltered', 'crown_labels', 'area_labels',
+  'orthophoto_point_colour', 'crowns', 'tree_table', 'tree_features', 'tree_areas',
+  'lasting_tree_ids', 'area_types_template', 'labels', 'quality_report', 'run_summary', 'preview',
+  'area_map_preview', 'tree_type_predictions', 'classifier_report', 'final_test_predictions', 'report',
+]);
+const TREEDAR_ROLES = Object.freeze([...TREEDAR_PRODUCER_ROLES, 'engine_manifest', 'odm_archive']);
 class ReferenceProtocolError extends Error {
   constructor(code, path) { super(`${code}: ${path}`); this.name = 'ReferenceProtocolError'; this.code = code; this.path = path; }
 }
@@ -143,6 +153,61 @@ function validateResultManifest(v, expected) {
   }
   return v;
 }
+function validateTreeDarResultManifest(v, expected) {
+  metadata(v);
+  record(v, ['protocol', 'schemaVersion', 'jobId', 'generation', 'environment', 'pipelineDigest', 'engineVersions', 'objects', 'resultManifestSha256'], 'treeDarResultManifest');
+  if (v.protocol !== TREEDAR_RESULT_PROTOCOL || v.schemaVersion !== 2) fail('treeDarResultManifest.version');
+  id(v.jobId, 'jobId'); integer(v.generation, 'generation'); environment(v.environment);
+  hash(v.pipelineDigest, 'pipelineDigest'); hash(v.resultManifestSha256, 'resultManifestSha256');
+  if (!v.engineVersions || typeof v.engineVersions !== 'object' || Array.isArray(v.engineVersions)
+      || Object.getPrototypeOf(v.engineVersions) !== Object.prototype) fail('engineVersions');
+  const engines = Object.keys(v.engineVersions).sort();
+  if (JSON.stringify(engines) !== JSON.stringify(['treedar'])
+      && JSON.stringify(engines) !== JSON.stringify(['odm', 'treedar'])) fail('engineVersions.engine');
+  for (const [engine, version] of Object.entries(v.engineVersions)) {
+    if (!['odm', 'treedar'].includes(engine)) fail('engineVersions.engine');
+    text(version, 'engineVersions.version', 128);
+    if (!/^[\x21-\x7e]+$/.test(version)) fail('engineVersions.version');
+  }
+  if (!Array.isArray(v.objects) || v.objects.length < 1 || v.objects.length > TREEDAR_RESULT_MAX_OBJECTS) fail('objects');
+  const ids = new Set(), roles = new Map();
+  for (const object of v.objects) {
+    record(object, ['id', 'role', 'byteSize', 'sha256'], 'treeDarResultObject');
+    id(object.id, 'object.id');
+    if (ids.has(object.id)) fail('object.duplicate');
+    ids.add(object.id);
+    if (!TREEDAR_ROLES.includes(object.role)) fail('object.role');
+    integer(object.byteSize, 'object.byteSize');
+    if (object.byteSize < 1) fail('object.byteSize');
+    hash(object.sha256, 'object.sha256');
+    roles.set(object.role, (roles.get(object.role) || 0) + 1);
+  }
+  const requiredTreeDarRoles = [
+    'ground_model', 'canopy_height', 'canopy_height_unfiltered', 'crown_labels',
+    'crowns', 'tree_table', 'tree_features', 'run_summary', 'report', 'preview',
+    'area_map_preview', 'engine_manifest',
+  ];
+  if (requiredTreeDarRoles.some(role => role === 'report'
+    ? ![1, 2].includes(roles.get(role)) : roles.get(role) !== 1)) fail('treeDarResultManifest.requiredRoles');
+  for (const [role, count] of roles) {
+    if (count > (role === 'report' ? 2 : 1)) fail('treeDarResultManifest.roleMultiplicity');
+  }
+  const hasOdm = Object.hasOwn(v.engineVersions, 'odm');
+  if ((roles.get('report') || 0) > 1 && !hasOdm) fail('treeDarResultManifest.roleMultiplicity');
+  if ((roles.get('odm_archive') || 0) !== (hasOdm ? 1 : 0)) fail('treeDarResultManifest.odmArchive');
+  if (resultManifestSha256(v) !== v.resultManifestSha256) fail('resultManifestSha256', 'DIGEST_MISMATCH');
+  if (!expected) fail('resultManifest.binding');
+  binding(v, expected, ['jobId', 'generation', 'environment', 'pipelineDigest']);
+  if (!Array.isArray(expected.objectIds)
+      || expected.objectIds.length !== v.objects.length
+      || JSON.stringify(expected.objectIds) !== JSON.stringify(v.objects.map(object => object.id))) fail('objectIds', 'BINDING_MISMATCH');
+  if (expected.resultManifestSha256 !== v.resultManifestSha256) fail('resultManifestSha256', 'BINDING_MISMATCH');
+  return v;
+}
+function validateStoredResultManifest(v, expected) {
+  if (v && v.schemaVersion === 2) return validateTreeDarResultManifest(v, expected);
+  return validateResultManifest(v, expected);
+}
 function validateAcceptance(v, expected) {
   metadata(v);
   record(v, ['schemaVersion', 'receiptId', 'storageReceiptId', 'jobId', 'generation', 'environment', 'inputManifestSha256', 'pipelineDigest', 'resultManifestSha256', 'acceptedObjectIds', 'acceptedAt', 'validationVersion'], 'acceptance');
@@ -170,4 +235,4 @@ function validateViewerReceipt(v) {
   if (typeof v.signature !== 'string' || !/^[A-Za-z0-9_-]{86}$/.test(v.signature)) fail('viewerReceipt.signature');
   return v;
 }
-module.exports = { PROTOCOL, PREFIX, LIMITS, ReferenceProtocolError, canonicalBytes, canonicalManifestBytes, manifestSha256, canonicalResultManifestBytes, resultManifestSha256, transferByteBudgetLimit, validateTransferByteBudget, sha256, createCapabilities, validateCapabilities, validateManifest, validateSubmission, validateTransferRequest, validateTransferGrant, validateResultManifest, validateAcceptance, validateViewerReceipt };
+module.exports = { PROTOCOL, PREFIX, TREEDAR_RESULT_PROTOCOL, TREEDAR_MAX_OBJECTS, TREEDAR_RESULT_MAX_OBJECTS, TREEDAR_PRODUCER_ROLES, TREEDAR_ROLES, LIMITS, ReferenceProtocolError, canonicalBytes, canonicalManifestBytes, manifestSha256, canonicalResultManifestBytes, resultManifestSha256, transferByteBudgetLimit, validateTransferByteBudget, sha256, createCapabilities, validateCapabilities, validateManifest, validateSubmission, validateTransferRequest, validateTransferGrant, validateResultManifest, validateTreeDarResultManifest, validateStoredResultManifest, validateAcceptance, validateViewerReceipt };

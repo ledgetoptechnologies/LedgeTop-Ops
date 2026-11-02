@@ -158,8 +158,8 @@ const config = {
 
   processingPlatformEnabled: bool(process.env.PROCESSING_PLATFORM_ENABLED, false),
   processingWorkerEnabled: bool(process.env.PROCESSING_WORKER_ENABLED, false),
-  // The reference-v1 accepted-copy endpoint is disabled unless explicitly
-  // enabled with dedicated durable storage and a dedicated service identity.
+  // Private accepted-copy endpoints are disabled unless explicitly enabled
+  // with dedicated durable storage and a dedicated service identity.
   referenceAcceptanceEnabled: bool(process.env.VIEWER_REFERENCE_ACCEPTANCE_ENABLED, false),
   referenceAcceptanceDatabasePath: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_DATABASE_PATH || '').trim(),
   referenceAcceptanceManagedRoot: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_MANAGED_ROOT || '').trim(),
