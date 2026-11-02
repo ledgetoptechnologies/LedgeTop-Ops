@@ -209,9 +209,20 @@ class ReferenceProvider {
     this.#check(); const job = this.#expected(jobId,expectedBinding), manifest = this.#manifests.get(jobId);
     if (!manifest) fail('BINDING_REQUIRED');
     const expected = {...job,inputManifestSha256:job.manifestSha256 ?? job.inputManifestSha256,resultManifestSha256:manifest.resultManifestSha256,objectIds:manifest.objects.map(o => o.id)};
+    // Keep the submitted receipt and its confirmation bound across network
+    // awaits, even if a caller mutates its original object.
+    try { receipt=structuredClone(receipt); } catch { fail('INVALID_REQUEST'); }
     safeValidate(() => p.validateAcceptance(receipt,expected));
+    const receiptSha256=p.sha256(p.canonicalBytes(receipt));
     const value = await this.#json('/jobs/' + jobId + '/acceptance',{method:'POST',body:receipt,signal});
-    closed(value,['job','created','fullyAccepted','acceptedObjectIds']); this.#job(value.job,expected);
+    // Older coordinators return only these fields; that form does not confirm
+    // a receipt ID or digest and must not be treated as custody evidence.
+    const keys=['job','created','fullyAccepted','acceptedObjectIds'];
+    if (value && Object.hasOwn(value,'receiptId') && Object.hasOwn(value,'receiptSha256')) {
+      closed(value,[...keys,'receiptId','receiptSha256']);
+      if (value.receiptId!==receipt.receiptId || value.receiptSha256!==receiptSha256) fail('BINDING_MISMATCH');
+    } else closed(value,keys);
+    this.#job(value.job,expected);
     if (typeof value.created !== 'boolean' || typeof value.fullyAccepted !== 'boolean' || !Array.isArray(value.acceptedObjectIds) || new Set(value.acceptedObjectIds).size !== value.acceptedObjectIds.length || value.acceptedObjectIds.some(id => !expected.objectIds.includes(id)) || receipt.acceptedObjectIds.some(id => !value.acceptedObjectIds.includes(id)) || value.fullyAccepted !== expected.objectIds.every(id => value.acceptedObjectIds.includes(id)) || value.fullyAccepted !== (value.job.phase === 'completed')) fail('BINDING_MISMATCH');
     return value;
   }
