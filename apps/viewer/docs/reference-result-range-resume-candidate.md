@@ -20,8 +20,11 @@ model, or change the live Viewer route.
   failed stream also persists its received tail before returning the error.
 - An exact prior candidate journal schema is migrated transactionally by
   retaining its intents and initializing transfer progress at offset zero.
-  Unknown schemas fail closed. Existing ready files are still verified against
-  their original binding before reuse.
+  WAL, FULL synchronous mode, foreign-key enforcement and the exclusive root
+  authority are established before migration. A post-commit barrier failure is
+  reported without attempting rollback; reopening verifies the committed
+  schema. Unknown schemas fail closed. Existing ready files are still verified
+  against their original binding before reuse.
 - A prefix whose bytes no longer match its durable digest stays held: the
   candidate does not discard it, request another range, or publish a result.
   Recovery requires an operator-reviewed repair or restore that re-establishes
@@ -42,9 +45,10 @@ model, or change the live Viewer route.
 The synthetic tests cover exact range headers and status, mismatched range
 metadata, interruption and restart, uncheckpointed-tail truncation, prefix and
 whole-object digest checks, pending-byte quotas, link/unlink crash recovery,
-old-schema migration, zero-byte reports, corrupted-prefix hold behavior, and
-lost acceptance acknowledgement replay. Filesystem durability tests require
-Linux descriptor and directory-fsync behavior; a Windows run skips those cases.
+old-schema migration including post-commit authority loss, zero-byte reports,
+corrupted-prefix hold behavior, and lost acceptance acknowledgement replay.
+Filesystem durability tests require Linux descriptor and directory-fsync
+behavior; a Windows run skips those cases.
 
 The feature remains a candidate until the Viewer chat reviews the isolated
 branch, its upstream/PR base is resolved, and an authorized runtime wiring and

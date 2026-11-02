@@ -36,13 +36,18 @@ function schemaMatches(db,ddl) {
 function schema(db) {if(!schemaMatches(db,DDL))fail('REFERENCE_RESULT_JOURNAL_SCHEMA');}
 function migrateLegacyJournal(db,authority) {
   if(!schemaMatches(db,JOURNAL_DDL))fail('REFERENCE_RESULT_JOURNAL_SCHEMA');
+  checkAuthority(authority);
   db.exec('BEGIN IMMEDIATE');
+  let transactionOpen=true;
   try {
     for(const sql of TRANSFER_DDL)db.exec(sql);
     const emptyDigest=p.sha256(Buffer.alloc(0));
     for(const row of db.prepare('SELECT storage_key FROM result_journal').all())db.prepare('INSERT INTO result_transfer_progress VALUES(?,?,?)').run(row.storage_key,0,emptyDigest);
-    checkAuthority(authority);db.exec('COMMIT');fs.fsyncSync(authority.rootFd);checkAuthority(authority);
-  } catch(error) {db.exec('ROLLBACK');throw error;}
+    checkAuthority(authority);db.exec('COMMIT');transactionOpen=false;
+    // A failure after COMMIT is an uncertain durability report, not a reason
+    // to issue ROLLBACK against an already-committed schema change.
+    fs.fsyncSync(authority.rootFd);checkAuthority(authority);
+  } catch(error) {if(transactionOpen){try{db.exec('ROLLBACK');}catch{}}throw error;}
 }
 class ReferenceResultJournal {
   constructor({authority,maxBytes,maxPendingBytes=maxBytes}={}) {
@@ -55,12 +60,12 @@ class ReferenceResultJournal {
     try {const fd=fs.openSync(filename,fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_WRONLY|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC,0o600);try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}fs.fsyncSync(authority.rootFd);created=true;}catch(e){if(e.code!=='EEXIST')throw e;}
     this.db=new DatabaseSync(filename);
     try {
+      this.db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
+      if(this.db.prepare('PRAGMA foreign_keys').get().foreign_keys!==1 || this.db.prepare('PRAGMA synchronous').get().synchronous!==2 || this.db.prepare('PRAGMA journal_mode').get().journal_mode!=='wal')fail('REFERENCE_RESULT_JOURNAL_DURABILITY');
       const existing=this.db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").get().n;
       if(existing===0){if(!created)fail('REFERENCE_RESULT_JOURNAL_SCHEMA');for(const sql of DDL)this.db.exec(sql);}
       else if(!schemaMatches(this.db,DDL))migrateLegacyJournal(this.db,authority);
       schema(this.db);
-      this.db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
-      if(this.db.prepare('PRAGMA foreign_keys').get().foreign_keys!==1 || this.db.prepare('PRAGMA synchronous').get().synchronous!==2 || this.db.prepare('PRAGMA journal_mode').get().journal_mode!=='wal')fail('REFERENCE_RESULT_JOURNAL_DURABILITY');
       fs.fsyncSync(authority.rootFd);checkAuthority(authority);
     }catch(e){this.db.close();throw e;}
   }
