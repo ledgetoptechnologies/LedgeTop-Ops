@@ -18,7 +18,7 @@ function grant(overrides: Record<string, unknown> = {}) {
 }
 type Call = { path: string; method: string; query: URLSearchParams; body: any; key?: string };
 
-async function mock(page: Page, options: { unavailable?: boolean; recipients?: (query: string) => unknown[]; grants?: unknown[];
+async function mock(page: Page, options: { unavailable?: boolean; projectFolder?: unknown; listBody?: unknown; recipients?: (query: string) => unknown[]; grants?: unknown[];
   onCreate?: (route: Route, attempt: number) => Promise<unknown> | undefined; preview?: (body: any) => unknown } = {}) {
   const calls: Call[] = []; let grants = options.grants ?? []; let creates = 0;
   await page.route("**/api/**", async route => {
@@ -37,7 +37,7 @@ async function mock(page: Page, options: { unavailable?: boolean; recipients?: (
     if (call.path === "/api/delivery/client-recipients") {
       const q = url.searchParams.get("q") ?? "";
       const rows = options.recipients ? options.recipients(q) : recent.filter(item => item.displayName.toLowerCase().includes(q.toLowerCase()));
-      return route.fulfill({ json: { mode: q ? "search" : "recent", recipients: rows } });
+      return route.fulfill({ json: options.listBody ?? { mode: q ? "search" : "recent", projectFolder: options.projectFolder ?? false, recipients: rows } });
     }
     if (call.path === "/api/delivery/client-recipients/grants" && call.method === "GET") return route.fulfill({ json: { grants } });
     if (call.path === "/api/delivery/client-recipients/grants/preview") return route.fulfill({ json: options.preview ? options.preview(call.body)
@@ -107,6 +107,25 @@ test("without the new client list on the server, the existing sharing panel is s
   await expect(page.getByRole("combobox", { name: "Portal connection" })).toBeVisible();
   await expect(page.getByRole("region", { name: "Share with a client" })).toHaveCount(0);
   await expect(page.getByText("Client sharing could not be loaded", { exact: false })).toHaveCount(0);
+});
+
+test("a project folder keeps the project grant flow and its access terms", async ({ page }) => {
+  const calls = await mock(page, { projectFolder: true });
+  await openClientTab(page);
+  await expect(page.getByRole("combobox", { name: "Portal connection" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Share with a client" })).toHaveCount(0);
+  expect(calls.some(call => call.path === "/api/delivery/client-recipients/grants")).toBe(false);
+});
+
+for (const [label, listBody] of [
+  ["a list that doesn't say whether this is a project folder", { mode: "recent", recipients: [] }],
+  ["a list with an unexpected field", { mode: "recent", projectFolder: false, recipients: [], divisions: [] }],
+  ["a list for the wrong mode", { mode: "search", projectFolder: false, recipients: [] }],
+] as const) test(`the client list refuses ${label}`, async ({ page }) => {
+  await mock(page, { listBody });
+  await openClientTab(page);
+  await expect(page.getByRole("alert").filter({ hasText: "could not be verified" })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Portal connection" })).toHaveCount(0);
 });
 
 test("a client without a working portal can't be shared with yet", async ({ page }) => {

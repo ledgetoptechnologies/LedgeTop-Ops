@@ -52,7 +52,8 @@ const errorMessage = (caught: unknown) => {
   return message || "Client sharing could not be loaded. Try again.";
 };
 
-/** Renders nothing until the server confirms the unified recipient list exists; `onUnavailable` hands back to the older panel. */
+/** Renders nothing until the server confirms the unified recipient list exists for this folder; `onUnavailable` hands back
+ * to the older panels, both before the endpoint ships and for project folders, which keep their project grant flow. */
 export function ClientRecipientSharePanel({ folder, creationEnabled, onUnavailable, onBusyChange }: {
   folder: { id: string }; creationEnabled: boolean; onUnavailable: () => void; onBusyChange?: (busy: boolean) => void;
 }) {
@@ -81,11 +82,15 @@ export function ClientRecipientSharePanel({ folder, creationEnabled, onUnavailab
   const search = useCallback((value: string) => {
     listController.current?.abort(); const controller = new AbortController(); listController.current = controller;
     setListBusy(true); setListError("");
-    api<{ mode: string; recipients: unknown[] }>(`${base}?folderRef=${encodeURIComponent(folder.id)}&q=${encodeURIComponent(value.trim())}&limit=20`, { signal: controller.signal })
+    api<{ mode: string; projectFolder: boolean; recipients: unknown[] }>(`${base}?folderRef=${encodeURIComponent(folder.id)}&q=${encodeURIComponent(value.trim())}&limit=20`, { signal: controller.signal })
       .then(response => {
         if (controller.signal.aborted) return;
         const mode = value.trim() ? "search" : "recent";
-        const rows = exact(response, ["mode", "recipients"]) && response.mode === mode && Array.isArray(response.recipients) && response.recipients.length <= 20
+        const shape = exact(response, ["mode", "projectFolder", "recipients"]);
+        if (!shape || typeof response.projectFolder !== "boolean") throw invalid();
+        // A project folder keeps the project grant flow and its customer/collaborator terms.
+        if (response.projectFolder) { if (available === null) { setAvailable(false); onUnavailable(); return; } throw invalid(); }
+        const rows = response.mode === mode && Array.isArray(response.recipients) && response.recipients.length <= 20
           ? response.recipients.map(recipient) : null;
         if (!rows || rows.some(row => row === null) || new Set(rows.map(row => row!.recipientId)).size !== rows.length) throw invalid();
         setAvailable(true); setListMode(mode); setRecipients(rows as Recipient[]);
