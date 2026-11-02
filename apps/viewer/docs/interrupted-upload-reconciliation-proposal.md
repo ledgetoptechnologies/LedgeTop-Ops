@@ -243,3 +243,13 @@ payload bytes is `c8cf385d6f6fe6988039065eec01df344a9f3252caf1010f5076e1411918b0
 Independently constructed Node and Python calculations match this example;
 it does not establish an agreed Processing wire format or general Unicode
 canonicalization. Reordering entries changes the digest and is a batch conflict.
+
+The opt-in paired fixture exercises this restricted mapping against Processing
+commit `5b3c67d92c18c2bc19c6080ee4591f8470001ff2`: a synthetic process exits
+after binding but before journal preparation, reordered replay conflicts, and
+exact replay allows two synthetic TaskStore writes and journal associations.
+Viewer maps a subset and then exact observed records while returning `hold` in
+both cases. The test checks Processing rejects zero-length, wrong wire class,
+more than 256 files, more than 64 MiB and noncanonical bytes. Its container-only
+data and caller-asserted completeness do not prove authenticated inventory,
+source custody, physical stream fencing, GCP semantics or retry authority.
