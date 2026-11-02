@@ -34,9 +34,9 @@ function transferRequest(v) {
   // Expiry blocks using a grant, never reading status for reconciliation.
 }
 function ack(v, expected) {
-  closed(v,['reservationId','generation','manifestSha256','nonce','accepted']); slug(v.reservationId); slug(v.nonce); integer(v.generation); hash(v.manifestSha256);
+  closed(v,['reservationId','generation','manifestSha256','nonce','accepted','grantSha256']); slug(v.reservationId); slug(v.nonce); integer(v.generation); hash(v.manifestSha256); hash(v.grantSha256);
   if (v.accepted !== true) fail('INVALID_RESPONSE');
-  binding(v,expected,['reservationId','generation','manifestSha256','nonce']); return v;
+  binding(v,expected,['reservationId','generation','manifestSha256','nonce','grantSha256']); return v;
 }
 class ReferenceProvider {
   #endpoint; #token; #environment; #enabled; #fetch; #jobs = new Map(); #manifests = new Map(); #submissions = new Map();
@@ -116,7 +116,7 @@ class ReferenceProvider {
     if (job.resultManifestSha256 !== null) hash(job.resultManifestSha256);
     for (const key of ['jobId','generation','environment','manifestSha256','inputManifestSha256','pipelineDigest','resultManifestSha256']) if (Object.hasOwn(expected,key)) { const actualKey = key === 'inputManifestSha256' ? 'manifestSha256' : key; if (!equal(job[actualKey],expected[key])) fail('BINDING_MISMATCH'); }
     if (job.transferRequest !== null) { transferRequest(job.transferRequest); binding(job.transferRequest,job,['generation','manifestSha256']); }
-    if (job.transferGrantAcknowledgement !== null) { if (!job.transferRequest) fail('BINDING_MISMATCH'); ack(job.transferGrantAcknowledgement,job.transferRequest); }
+    if (job.transferGrantAcknowledgement !== null) { if (!job.transferRequest||!expected.grantSha256) fail('BINDING_REQUIRED'); hash(expected.grantSha256); ack(job.transferGrantAcknowledgement,{...job.transferRequest,grantSha256:expected.grantSha256}); }
     const previous = this.#jobs.get(job.jobId);
     if (previous) {
       binding(job,previous,['jobId','generation','environment','manifestSha256','pipelineDigest']);
@@ -202,8 +202,10 @@ class ReferenceProvider {
     if (!job?.transferRequest) fail('BINDING_REQUIRED');
     const submission = this.#submissions.get(jobId);
     const grantBinding = {...job.transferRequest,jobId,generation:expected.generation,environment:this.#environment,objectIds:submission?.manifest.objects.map(o => o.id) ?? expected.objectIds};
-    safeValidate(() => p.validateTransferGrant(grant,grantBinding));
-    return ack(await this.#json('/jobs/' + jobId + '/transfer-grants',{method:'POST',body:grant,signal}),grant);
+    let frozen;try{frozen=structuredClone(grant)}catch{fail('INVALID_REQUEST')}
+    safeValidate(() => p.validateTransferGrant(frozen,grantBinding));
+    const grantSha256=p.sha256(p.canonicalBytes(frozen));
+    return ack(await this.#json('/jobs/' + jobId + '/transfer-grants',{method:'POST',body:frozen,signal}),{...frozen,grantSha256});
   }
   async acceptResult(jobId, receipt, expectedBinding, {signal} = {}) {
     this.#check(); const job = this.#expected(jobId,expectedBinding), manifest = this.#manifests.get(jobId);
