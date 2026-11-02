@@ -86,10 +86,22 @@ internal static class ExeUpdateWindowsPolicyTests
                 "natural late termination never causes retry or late-success relabeling");
         }
         Require(await ExeUpdateInstallerWait.ObserveAsync(new Child { CodeThrows = true }) == ExeUpdateInstallResult.Uncertain, "unknown exit code is not success");
-        Console.WriteLine("Windows update pure policy tests passed; no process, pipe, registry, file, auth or installer operation executed.");
+        Console.WriteLine("Windows update policy tests passed; the unsigned local test executable was refused before update execution.");
     }
     private static async Task MetadataChecks()
     {
+        Require(WindowsAuthenticodePublisher.MatchesExpectedCommonName("Ledge Top Technologies LLC") &&
+            !WindowsAuthenticodePublisher.MatchesExpectedCommonName("LedgeTop Technologies LLC") &&
+            !WindowsAuthenticodePublisher.MatchesExpectedCommonName("Ledge Top Technologies LLC, Inc.") &&
+            !WindowsAuthenticodePublisher.MatchesExpectedCommonName(null), "publisher common name must match the approved company exactly");
+        if (OperatingSystem.IsWindows()) {
+            try {
+                WindowsAuthenticodePublisher.RequireTrustedCompanyInstaller(Environment.ProcessPath!);
+                throw new Exception("An unsigned local test executable passed publisher verification.");
+            } catch (IOException) {
+                // Synthetic builds are intentionally unsigned; they must fail closed before install.
+            }
+        }
         foreach (var status in Enum.GetValues<WindowsAppReleaseStatus>()) {
             var log = new List<string>();
             var result = new WindowsAppReleaseCheck(status, "0.5.3.0", status == WindowsAppReleaseStatus.Available

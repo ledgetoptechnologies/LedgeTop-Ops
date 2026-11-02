@@ -104,6 +104,10 @@ internal static class ExeUpdateWindowsTrust
                 if (pe.HasMetadata || pe.PEHeaders.PEHeader is null ||
                     (pe.PEHeaders.CoffHeader.Characteristics & Characteristics.ExecutableImage) == 0 ||
                     (pe.PEHeaders.CoffHeader.Characteristics & Characteristics.Dll) != 0) throw new IOException("Update installer PE refused.");
+            // Keep the held read-only file handle open through WinTrust and signer extraction.
+            // The local SHA-256 binds this byte sequence to the offer; Authenticode additionally
+            // proves Windows trust and the expected company publisher before the helper can run it.
+            WindowsAuthenticodePublisher.RequireTrustedCompanyInstaller(candidate.InstallerPath);
             var info = FileVersionInfo.GetVersionInfo(candidate.InstallerPath);
             var anchor = ExeUpdateInstallerAnchor.Parse(info.Comments);
             if (info.FileVersion != candidate.Release.Version || anchor.SourceCommit != candidate.Release.SourceCommit)

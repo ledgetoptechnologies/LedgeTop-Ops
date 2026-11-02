@@ -1,19 +1,22 @@
 # Installed Windows application and Operations-managed updates
 
-## Current owner direction — October 28, 2026
+## Current owner direction — November 2, 2026
 
-Beau created an Azure Artifact Signing account and requests signing again. The
-earlier unsigned-only decision below is historical. Portal observation confirmed
-the Basic signing account in East US. At Beau's explicit request, his Azure user
-was assigned Artifact Signing Identity Verifier on that signing resource only;
-Azure returned a success notification. Beau completed the organization form, and
-the portal subsequently showed Public validation for Ledge Top Technologies LLC
-as **In Progress**. No business identifier was copied into these records. The
-relationship between the requested publisher name and the business identifier's
-existing name remains an owner question; approval must not be presumed. Public
-Trust certificate profile, signer permission, CI federation and actual signing
-remain unqualified. No purchase, signing secret or certificate trust change was
-made by this work.
+Beau reports that Microsoft approved the organization validation. A read-only
+Azure CLI check confirmed the `LedgeTopFiles` PublicTrust profile is Active, the
+`Artifact Signing Certificate Profile Signer` assignment is scoped directly to
+that profile, and GitHub OIDC trust is limited to this repository's protected
+`windows-release` environment on `main`. The corresponding non-secret GitHub
+environment variables are present. No installer has yet been signed or
+published, and the Operations update feed remains off.
+
+The current source change adds Windows Authenticode chain verification and an
+exact `Ledge Top Technologies LLC` signer common-name check before the update
+helper can run a staged installer. A local unsigned test executable was refused
+and the focused Windows updater tests pass. A trusted LedgeTop-signed installer
+has not yet exercised this path. The offline offer builder still rejects signed
+installer receipts, so signed packaging and the in-app update sequence remain
+unqualified.
 
 The next release must be tested through the installed app's update action,
 including authenticated offer/download, byte and publisher verification, safe
@@ -24,13 +27,10 @@ acceptance; prior versions are archived. Its main-PC install and launch passed,
 which does not qualify the in-app update sequence. The Operations update feed
 remains off. GitHub holds source
 and CI evidence, rather than serving as an enabled update channel.
-The existing EXE consumer verifies authenticated release bytes but does not
-perform Authenticode publisher verification. The current offline offer builder
-refuses signed installers. Both require actual signed-release support before the
-future publisher-enforced path can be qualified; signing a setup file alone does
-not complete this integration. The current unsigned installed version can only
-bootstrap using its existing authenticated hash/ETag policy. A subsequent signed
-version-to-version update must prove publisher enforcement as well as lifecycle.
+The current unsigned installed version can only bootstrap using its existing
+authenticated hash/ETag policy. A signed version-to-version update must prove
+publisher enforcement as well as lifecycle: authenticated offer/download, byte
+verification, safe provider drain, old-process exit, installation and reconnect.
 
 Beau also narrowed the first Windows release to employees. It should have one
 employee sign-in entry and clearly explain that client access is not available
