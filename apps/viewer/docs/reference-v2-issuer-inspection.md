@@ -169,6 +169,11 @@ retried or released. Tests show a second SQLite writer can commit during file
 reading, metadata changes fail closed, process death leaves no binding, and
 10,001 metadata records (10,000 images plus CSV) can be bound without copying
 their contents into SQLite. The metadata test does not read 50 GB of source.
+Fixture-only SQLite triggers hold indexed dataset/file updates, deletes and
+replacement while a scan intent is active. Tests use a separate connection to
+check these guards and show that a missing guard holds finalization. The fixture
+checks trigger names, not trusted schema definitions or protection against a
+database administrator; these triggers are not a production writer fence.
 
 An optional synthetic association is now prepared in the same final transaction
 as the binding and scan-intent state change. Signing remains outside that

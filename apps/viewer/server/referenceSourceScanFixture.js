@@ -15,12 +15,23 @@ function createSourceScanFixture(processing,scope){
  CREATE TRIGGER IF NOT EXISTS reference_source_scan_fixture_no_replace BEFORE INSERT ON reference_source_scan_fixture WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE id=NEW.id OR rowid=NEW.rowid OR state='scanning') BEGIN SELECT RAISE(ABORT,'scan intent retained'); END;
  CREATE TRIGGER IF NOT EXISTS reference_source_scan_fixture_no_delete BEFORE DELETE ON reference_source_scan_fixture BEGIN SELECT RAISE(ABORT,'scan intent retained'); END;
  CREATE TRIGGER IF NOT EXISTS reference_source_scan_fixture_no_update BEFORE UPDATE ON reference_source_scan_fixture WHEN NOT(OLD.state='scanning' AND NEW.state='committed' AND NEW.id IS OLD.id AND NEW.attempt_id IS OLD.attempt_id AND NEW.binding_id IS OLD.binding_id AND NEW.dataset_id IS OLD.dataset_id AND NEW.project_id IS OLD.project_id AND NEW.manifest_sha256 IS OLD.manifest_sha256 AND NEW.token IS OLD.token) BEGIN SELECT RAISE(ABORT,'scan intent immutable'); END;`);
+ // These disposable-database guards fence indexed rows only. They do not
+ // protect file bytes, unregistered writers, aliases or external NAS access.
+ db.exec(`CREATE TRIGGER IF NOT EXISTS reference_scan_dataset_update BEFORE UPDATE ON datasets WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning' AND dataset_id=OLD.id) BEGIN SELECT RAISE(ABORT,'scan metadata retained'); END;
+ CREATE TRIGGER IF NOT EXISTS reference_scan_dataset_delete BEFORE DELETE ON datasets WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning' AND dataset_id=OLD.id) BEGIN SELECT RAISE(ABORT,'scan metadata retained'); END;
+ CREATE TRIGGER IF NOT EXISTS reference_scan_dataset_insert BEFORE INSERT ON datasets WHEN EXISTS(SELECT 1 FROM datasets d JOIN reference_source_scan_fixture s ON s.dataset_id=d.id AND s.state='scanning' WHERE d.id=NEW.id OR d.rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'scan metadata retained'); END;
+ CREATE TRIGGER IF NOT EXISTS reference_scan_file_insert BEFORE INSERT ON dataset_files WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning' AND dataset_id=NEW.dataset_id) OR EXISTS(SELECT 1 FROM dataset_files f JOIN reference_source_scan_fixture s ON s.dataset_id=f.dataset_id AND s.state='scanning' WHERE f.id=NEW.id OR f.rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'scan metadata retained'); END;
+ CREATE TRIGGER IF NOT EXISTS reference_scan_file_update BEFORE UPDATE ON dataset_files WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning' AND dataset_id IN (OLD.dataset_id,NEW.dataset_id)) BEGIN SELECT RAISE(ABORT,'scan metadata retained'); END;
+ CREATE TRIGGER IF NOT EXISTS reference_scan_file_delete BEFORE DELETE ON dataset_files WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning' AND dataset_id=OLD.dataset_id) BEGIN SELECT RAISE(ABORT,'scan metadata retained'); END;`);
+ const guards=['reference_source_scan_fixture_no_replace','reference_source_scan_fixture_no_delete','reference_source_scan_fixture_no_update','reference_scan_dataset_update','reference_scan_dataset_delete','reference_scan_dataset_insert','reference_scan_file_insert','reference_scan_file_update','reference_scan_file_delete'];
+ const checkGuards=()=>{const q=db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?");if(guards.some(name=>!q.get(name)))fail()};
  function run({scanId,bindingId,attemptId,managedRoot,association,afterReserve,afterScan,afterOutbox}={}){
   if(!id(scanId)||!id(bindingId)||!id(attemptId)||typeof managedRoot!=='string'||(afterReserve!==undefined&&typeof afterReserve!=='function')||(afterScan!==undefined&&typeof afterScan!=='function')||(afterOutbox!==undefined&&typeof afterOutbox!=='function')||(association!==undefined&&(!association||association.args?.processing!==processing||association.args?.bindingId!==bindingId||!Buffer.isBuffer(association.publicKeyDer))))fail();
   // Install the disposable outbox schema before either transactional phase.
   const outbox=association&&createAssociationOutboxFixture(processing,'isolated-association-outbox-fixture');
   const token=crypto.randomBytes(32).toString('hex');
   const reserved=processing.transaction(()=>{
+   checkGuards();
    if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='viewer_source_binding_unavailable'").get())fail();
    const attempt=processing.getAttempt(attemptId),task=attempt&&processing.getTask(attempt.taskId),dataset=attempt&&processing.getDataset(attempt.datasetId);
    if(!attempt||!task||!dataset||task.activeAttemptId!==attemptId||task.datasetId!==dataset.id||task.projectId!==dataset.projectId||attempt.status!=='pending'||dataset.status!=='finalized'||dataset.storageMode!=='managed'||dataset.rootKey!=='datasets'||!/^[a-f0-9]{64}$/.test(dataset.manifestSha256)||db.prepare("SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning'").get())fail();
@@ -32,6 +43,7 @@ function createSourceScanFixture(processing,scope){
   const observed=acquirer.acquire({datasetId:reserved.datasetId,holderId:'viewer-odm'});
   if(afterScan)afterScan();
   return processing.transaction(()=>{
+   checkGuards();
    const claim=db.prepare("SELECT * FROM reference_source_scan_fixture WHERE id=? AND token=? AND state='scanning'").get(scanId,token),dataset=processing.getDataset(reserved.datasetId,true);
    if(!claim||!dataset||dataset.manifestSha256!==reserved.manifestSha256||observed.datasetManifestSha256!==reserved.manifestSha256||!Array.isArray(dataset.files)||dataset.files.length!==observed.files.length)fail();
    const normalize=files=>files.map(f=>({id:f.id,relativePath:f.relativePath,byteSize:f.byteSize,sha256:f.sha256})).sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0);
