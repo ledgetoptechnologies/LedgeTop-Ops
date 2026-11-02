@@ -85,6 +85,7 @@ class ReferenceProvider {
   }
   async *#chunks(transport, limit) {
     const {response,signal,method} = transport;
+    if (!response.body && limit === 0 && response.headers.get('content-length') === '0') return;
     if (!response.body || typeof response.body.getReader !== 'function') fail('INVALID_RESPONSE');
     const reader = response.body.getReader(); let total = 0, complete = false;
     const aborted = () => { void reader.cancel().catch(() => {}); };
@@ -234,7 +235,7 @@ class ReferenceProvider {
     const manifest = this.#manifests.get(jobId);
     const object = manifest?.objects.find(o => o.id === objectId);
     if (!object) fail('BINDING_REQUIRED');
-    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > this.maxObjectBytes || object.byteSize > maxBytes || !Number.isSafeInteger(rangeStart) || rangeStart < 0 || rangeStart >= object.byteSize) fail('BODY_LIMIT');
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > this.maxObjectBytes || object.byteSize > maxBytes || !Number.isSafeInteger(rangeStart) || rangeStart < 0 || (object.byteSize === 0 ? rangeStart !== 0 : rangeStart >= object.byteSize)) fail('BODY_LIMIT');
     const rangeHeader = rangeStart > 0 ? `bytes=${rangeStart}-${object.byteSize-1}` : undefined;
     const responseBytes = object.byteSize - rangeStart;
     const transport = await this.#request('/jobs/' + jobId + '/results/' + objectId,{binary:true,signal,mediaType:object.role === 'odm_archive' ? 'application/zip' : 'application/octet-stream',rangeHeader});

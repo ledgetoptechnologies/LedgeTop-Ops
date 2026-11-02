@@ -7,15 +7,18 @@ const {DatabaseSync}=require('node:sqlite');
 const p=require('./referenceProtocol');
 const {checkAuthority,retainReferenceResultResumable,recoverLinkedReferenceResult,verifyRetainedReferenceResult}=require('./referenceResultSpool');
 const fail=code=>{const e=new Error(code);e.code=code;throw e;};
-const DDL=[
+const JOURNAL_DDL=[
   `CREATE TABLE result_journal (storage_key TEXT PRIMARY KEY NOT NULL, job_id TEXT NOT NULL, generation INTEGER NOT NULL, environment TEXT NOT NULL, object_id TEXT NOT NULL, binding_json TEXT NOT NULL, root_device TEXT NOT NULL, root_inode TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','ready')), UNIQUE(job_id,generation,environment,object_id))`,
-  `CREATE TABLE result_transfer_progress (storage_key TEXT PRIMARY KEY NOT NULL REFERENCES result_journal(storage_key), offset INTEGER NOT NULL CHECK(offset>=0), prefix_sha256 TEXT NOT NULL)`,
   `CREATE TRIGGER result_journal_no_replace BEFORE INSERT ON result_journal WHEN EXISTS(SELECT 1 FROM result_journal WHERE storage_key=NEW.storage_key OR rowid=NEW.rowid OR (job_id=NEW.job_id AND generation=NEW.generation AND environment=NEW.environment AND object_id=NEW.object_id)) BEGIN SELECT RAISE(ABORT,'result journal replacement'); END`,
   `CREATE TRIGGER result_journal_no_delete BEFORE DELETE ON result_journal BEGIN SELECT RAISE(ABORT,'result journal retention'); END`,
-  `CREATE TRIGGER result_journal_immutable BEFORE UPDATE ON result_journal WHEN NEW.rowid IS NOT OLD.rowid OR NEW.storage_key IS NOT OLD.storage_key OR NEW.job_id IS NOT OLD.job_id OR NEW.generation IS NOT OLD.generation OR NEW.environment IS NOT OLD.environment OR NEW.object_id IS NOT OLD.object_id OR NEW.binding_json IS NOT OLD.binding_json OR NEW.root_device IS NOT OLD.root_device OR NEW.root_inode IS NOT OLD.root_inode OR (OLD.state='ready' AND NEW.state<>'ready') BEGIN SELECT RAISE(ABORT,'result journal immutable'); END`,
+  `CREATE TRIGGER result_journal_immutable BEFORE UPDATE ON result_journal WHEN NEW.rowid IS NOT OLD.rowid OR NEW.storage_key IS NOT OLD.storage_key OR NEW.job_id IS NOT OLD.job_id OR NEW.generation IS NOT OLD.generation OR NEW.environment IS NOT OLD.environment OR NEW.object_id IS NOT OLD.object_id OR NEW.binding_json IS NOT OLD.binding_json OR NEW.root_device IS NOT OLD.root_device OR NEW.root_inode IS NOT OLD.root_inode OR (OLD.state='ready' AND NEW.state<>'ready') BEGIN SELECT RAISE(ABORT,'result journal immutable'); END`
+];
+const TRANSFER_DDL=[
+  `CREATE TABLE result_transfer_progress (storage_key TEXT PRIMARY KEY NOT NULL REFERENCES result_journal(storage_key), offset INTEGER NOT NULL CHECK(offset>=0), prefix_sha256 TEXT NOT NULL)`,
   `CREATE TRIGGER result_transfer_progress_no_delete BEFORE DELETE ON result_transfer_progress BEGIN SELECT RAISE(ABORT,'result progress retention'); END`,
   `CREATE TRIGGER result_transfer_progress_guard BEFORE UPDATE ON result_transfer_progress WHEN NEW.rowid IS NOT OLD.rowid OR NEW.storage_key IS NOT OLD.storage_key OR NEW.offset<OLD.offset OR (NEW.offset=OLD.offset AND NEW.prefix_sha256 IS NOT OLD.prefix_sha256) OR NOT EXISTS(SELECT 1 FROM result_journal WHERE storage_key=OLD.storage_key AND state='pending') BEGIN SELECT RAISE(ABORT,'result progress monotonicity'); END`
 ];
+const DDL=[...JOURNAL_DDL,...TRANSFER_DDL];
 function binding(expected,manifest,objectId) {
   if (!expected || !Number.isSafeInteger(expected.generation) || expected.generation<1 || !Array.isArray(expected.requestedEngines) || !expected.requestedEngines.includes('odm') || !/^[a-f0-9]{64}$/.test(expected.inputManifestSha256||'') || !/^[a-f0-9]{64}$/.test(expected.resultManifestSha256||'')) fail('REFERENCE_RESULT_BINDING');
   p.validateResultManifest(manifest,expected);
@@ -24,11 +27,22 @@ function binding(expected,manifest,objectId) {
   if(!object || object.role!=='odm_archive' || object.byteSize<1)fail('REFERENCE_RESULT_BINDING');
   return {jobId:manifest.jobId,generation:manifest.generation,environment:manifest.environment,inputManifestSha256:expected.inputManifestSha256,pipelineDigest:manifest.pipelineDigest,resultManifestSha256:manifest.resultManifestSha256,objectId:object.id,objectSha256:object.sha256,objectBytes:object.byteSize};
 }
-function schema(db) {
+function schemaMatches(db,ddl) {
   const actual=db.prepare("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all();
   const reference=new DatabaseSync(':memory:');
-  try {for(const sql of DDL)reference.exec(sql);const expected=reference.prepare("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all();if(JSON.stringify(actual)!==JSON.stringify(expected))fail('REFERENCE_RESULT_JOURNAL_SCHEMA');}
+  try {for(const sql of ddl)reference.exec(sql);const expected=reference.prepare("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all();return JSON.stringify(actual)===JSON.stringify(expected);}
   finally {reference.close();}
+}
+function schema(db) {if(!schemaMatches(db,DDL))fail('REFERENCE_RESULT_JOURNAL_SCHEMA');}
+function migrateLegacyJournal(db,authority) {
+  if(!schemaMatches(db,JOURNAL_DDL))fail('REFERENCE_RESULT_JOURNAL_SCHEMA');
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for(const sql of TRANSFER_DDL)db.exec(sql);
+    const emptyDigest=p.sha256(Buffer.alloc(0));
+    for(const row of db.prepare('SELECT storage_key FROM result_journal').all())db.prepare('INSERT INTO result_transfer_progress VALUES(?,?,?)').run(row.storage_key,0,emptyDigest);
+    checkAuthority(authority);db.exec('COMMIT');fs.fsyncSync(authority.rootFd);checkAuthority(authority);
+  } catch(error) {db.exec('ROLLBACK');throw error;}
 }
 class ReferenceResultJournal {
   constructor({authority,maxBytes,maxPendingBytes=maxBytes}={}) {
@@ -43,6 +57,7 @@ class ReferenceResultJournal {
     try {
       const existing=this.db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").get().n;
       if(existing===0){if(!created)fail('REFERENCE_RESULT_JOURNAL_SCHEMA');for(const sql of DDL)this.db.exec(sql);}
+      else if(!schemaMatches(this.db,DDL))migrateLegacyJournal(this.db,authority);
       schema(this.db);
       this.db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
       if(this.db.prepare('PRAGMA foreign_keys').get().foreign_keys!==1 || this.db.prepare('PRAGMA synchronous').get().synchronous!==2 || this.db.prepare('PRAGMA journal_mode').get().journal_mode!=='wal')fail('REFERENCE_RESULT_JOURNAL_DURABILITY');

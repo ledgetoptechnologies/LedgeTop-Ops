@@ -22,6 +22,12 @@ test('result object is bound to sealed manifest headers and fully verified bytes
   assert.equal(Buffer.concat(chunks).toString(),'abc');
 });
 
+test('zero-byte report remains downloadable through the full-body path',async()=>{
+  const f=fixture();f.manifest.engineVersions={treedar:'synthetic-1'};f.manifest.objects=[{id:'empty-report',role:'report',byteSize:0,sha256:p.sha256(Buffer.alloc(0))}];f.manifest.resultManifestSha256=p.resultManifestSha256(f.manifest);f.expected.requestedEngines=['treedar'];f.expected.resultManifestSha256=f.manifest.resultManifestSha256;
+  f.provider=new ReferenceProvider({endpoint:'https://example.test',token:'synthetic-token-only',environment:'staging',enabled:true,fetchImpl:async url=>url.endsWith('/results')?new Response(JSON.stringify(f.manifest),{headers:{'content-type':'application/json'}}):new Response(null,{headers:{'content-type':'application/octet-stream','content-length':'0','x-result-sha256':f.manifest.objects[0].sha256,'x-result-manifest-sha256':f.manifest.resultManifestSha256}})});
+  await f.provider.results('job-1',f.expected);const pieces=[];for await(const chunk of await f.provider.downloadObject('job-1','empty-report',{expectedBinding:f.expected}))pieces.push(chunk);assert.deepEqual(Buffer.concat(pieces),Buffer.alloc(0));
+});
+
 test('resumed result download requires an exact sealed-object 206 range', async()=>{
   const requests=[];
   const f=fixture();

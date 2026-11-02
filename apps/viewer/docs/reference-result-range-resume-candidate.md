@@ -18,6 +18,15 @@ model, or change the live Viewer route.
   prefix on restart, discards only bytes beyond the last recorded checkpoint,
   and resumes from the recorded offset. Periodic checkpoints are 8 MiB; a
   failed stream also persists its received tail before returning the error.
+- An exact prior candidate journal schema is migrated transactionally by
+  retaining its intents and initializing transfer progress at offset zero.
+  Unknown schemas fail closed. Existing ready files are still verified against
+  their original binding before reuse.
+- A prefix whose bytes no longer match its durable digest stays held: the
+  candidate does not discard it, request another range, or publish a result.
+  Recovery requires an operator-reviewed repair or restore that re-establishes
+  the exact prefix; this candidate does not yet provide an operator repair
+  command.
 - The full object length and SHA-256 must match before a no-replace link can
   publish the retained file. A crash after linking but before removing the
   temporary name is recovered only when both names identify the same private,
@@ -33,7 +42,8 @@ model, or change the live Viewer route.
 The synthetic tests cover exact range headers and status, mismatched range
 metadata, interruption and restart, uncheckpointed-tail truncation, prefix and
 whole-object digest checks, pending-byte quotas, link/unlink crash recovery,
-and lost acceptance acknowledgement replay. Filesystem durability tests require
+old-schema migration, zero-byte reports, corrupted-prefix hold behavior, and
+lost acceptance acknowledgement replay. Filesystem durability tests require
 Linux descriptor and directory-fsync behavior; a Windows run skips those cases.
 
 The feature remains a candidate until the Viewer chat reviews the isolated
