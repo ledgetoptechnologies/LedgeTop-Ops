@@ -2,6 +2,7 @@
 // Unmounted observational candidate. Not physical reservation or authority.
 const fs=require('node:fs'),path=require('node:path'),{performance}=require('node:perf_hooks');
 const {createCapacityObserver}=require('./capacityObservation');
+const spoolObservers=new WeakSet();
 const fail=()=>{throw Object.assign(new Error('spool capacity unavailable'),{code:'SPOOL_CAPACITY_UNAVAILABLE'});};
 const ident=x=>typeof x==='string'&&/^[A-Za-z0-9._:-]{1,128}$/.test(x);
 const number=x=>{if(x<0n||x>BigInt(Number.MAX_SAFE_INTEGER))fail();return Number(x);};
@@ -15,6 +16,7 @@ function createSpoolCapacityObserver({storageRoot,spoolRelative,domainId,domainR
   return {domainId,domainRevision,sampledAt:performance.now(),samples:[{domainId,domainRevision,availableBytes,availableInodes,reserveBytes,reserveInodes}]};
  }catch{fail();}finally{if(current!==undefined)fs.closeSync(current);if(root!==undefined)fs.closeSync(root);}}};
  // A branded observer is still not an independently trusted domain attestor.
- return createCapacityObserver({attestor});
+ const observer=createCapacityObserver({attestor});spoolObservers.add(observer);return observer;
 }
-module.exports={createSpoolCapacityObserver};
+function isSpoolCapacityObserver(observer){return spoolObservers.has(observer);}
+module.exports={createSpoolCapacityObserver,isSpoolCapacityObserver};

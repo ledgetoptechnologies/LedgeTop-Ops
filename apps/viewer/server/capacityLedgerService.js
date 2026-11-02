@@ -31,7 +31,8 @@ function commitmentsForDomain(db,domainId,domainRevision){
   }
   return {count,commitments:count?[{id:'aggregate',domainId,domainRevision,remainingBytes:Number(bytes),remainingInodes:Number(inodes)}]:[]};
 }
-function reserve(db,input,observer){
+function reserve(db,input,observer,{precondition}={}){
+  if(precondition!==undefined&&typeof precondition!=='function')throw failure('capacity_request_invalid');
   const request={id:text(input.id,128),domainId:text(input.domainId,128),domainRevision:text(input.domainRevision,128),writerKind:text(input.writerKind,64),writerId:text(input.writerId,128),writerNamespace:text(input.writerNamespace,256),ownerId:text(input.ownerId,128),fenceToken:text(input.fenceToken,128),generation:amount(input.generation),peakBytes:amount(input.peakBytes),peakInodes:amount(input.peakInodes)};
   if(!request.generation)throw failure('capacity_request_invalid');
   enabled(db);
@@ -39,6 +40,7 @@ function reserve(db,input,observer){
   const observation=observer.observe(request.domainId,request.domainRevision);
   return transaction(db,()=>{
     enabled(db);
+    if(precondition)precondition();
     const samples=observer.validate(observation,request.domainId,request.domainRevision);
     const {count,commitments}=commitmentsForDomain(db,request.domainId,request.domainRevision);
     const baseline=evaluateCapacityBudget({domainId:request.domainId,domainRevision:request.domainRevision,samples,commitments,requestBytes:0,requestInodes:0});
