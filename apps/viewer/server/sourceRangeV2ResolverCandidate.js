@@ -71,9 +71,11 @@ function resolveSourceRangeV2Candidate({ database, storage, job } = {}) {
   const transferIds = new Set(transfer.objectIds);
   if (manifestIds.some(id => !transferIds.has(id))) fail('SOURCE_BINDING_MISMATCH');
 
-  // Dataset manifest identity is the immutable source revision. The transfer
-  // issuer and this resolver must use this same value when constructing a job.
-  const sourceVersion = `dataset:${bound.dataset_id}:${bound.dataset_manifest_sha256}`;
+  // The selected-input manifest ID carries the Viewer dataset ID and its
+  // digest commits to the exact bytes requested. This is derivable by the
+  // Processing scheduler as well as the Viewer source authority.
+  if (request.manifest.id !== `dataset-${bound.dataset_id}`) fail('SOURCE_BINDING_MISMATCH');
+  const sourceVersion = `dataset:${bound.dataset_id}:${request.manifest.sha256}`;
   if (transfer.sourceVersion !== sourceVersion) fail('SOURCE_BINDING_MISMATCH');
 
   const rows = database.prepare(`

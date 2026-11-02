@@ -26,7 +26,7 @@ function fixture() {
     CREATE TABLE processing_attempt_gcp_snapshots(attempt_id TEXT,content_text TEXT,sha256 TEXT);
   `);
   const bytes = Buffer.from('photo-bytes');
-  const manifest = { id: 'manifest-1', revision: 1, sha256: '0'.repeat(64), totalBytes: bytes.length, objectCount: 1,
+  const manifest = { id: 'dataset-dataset-1', revision: 1, sha256: '0'.repeat(64), totalBytes: bytes.length, objectCount: 1,
     inputCounts: { images: 1, lidarObjects: 0, points: 0 },
     objects: [{ id: 'file-1', name: 'photo.jpg', byteSize: bytes.length, sha256: hash(bytes), kind: 'image', mediaType: 'image/jpeg' }] };
   manifest.sha256 = protocol.manifestSha256(manifest);
@@ -35,7 +35,7 @@ function fixture() {
   const jobFields = { jobId: 'job-1', generation: 2, environment: 'production', manifestSha256: manifest.sha256, pipelineDigest: 'b'.repeat(64) };
   const datasetId = 'dataset-1', datasetManifestSha256 = 'c'.repeat(64), attemptId = 'attempt-1';
   const job = { ...jobFields, submission: { manifest }, transferRequest: { protocol: 'source-range-v2', generation: 2,
-    manifestSha256: manifest.sha256, sourceVersion: `dataset:${datasetId}:${datasetManifestSha256}`, objectIds: ['file-1'] } };
+    manifestSha256: manifest.sha256, sourceVersion: `dataset:${datasetId}:${manifest.sha256}`, objectIds: ['file-1'] } };
   const requestJson = JSON.stringify(request), jobJson = JSON.stringify(jobFields);
   database.prepare('INSERT INTO viewer_reference_attempt_journal VALUES(?,?,?,?,?,?,?,?,?)').run(attemptId, submissionId, 'production', requestJson,
     hash(Buffer.from(requestJson)), manifest.sha256, jobFields.jobId, jobJson, hash(Buffer.from(jobJson)));
@@ -58,7 +58,7 @@ test('resolves only journal-bound objects from the active finalized managed data
   assert.equal(result.generation, f.job.generation);
   assert.equal(result.environment, 'production');
   assert.equal(result.manifestSha256, f.manifest.sha256);
-  assert.equal(result.sourceVersion, `dataset:${f.datasetId}:${f.datasetManifestSha256}`);
+  assert.equal(result.sourceVersion, `dataset:${f.datasetId}:${f.manifest.sha256}`);
   assert.deepEqual(result.objects, [{ id: 'file-1', path: '/managed/dataset-1/photos/photo.jpg', byteSize: f.bytes.length, sha256: hash(f.bytes) }]);
 });
 
