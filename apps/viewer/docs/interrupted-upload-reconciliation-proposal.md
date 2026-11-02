@@ -142,3 +142,42 @@ generation, manifest, object and range, plus unique physical delivery IDs and
 bounded retransmission budgets. It still needs atomic server-side uniqueness and
 charge before sending, authenticated status and retention, current authority,
 and independently enforced predecessor fencing. Unknowns remain held.
+
+## Candidate fixture receipt (not an agreed wire protocol)
+
+For cross-language, disabled local experiments, a closed payload could contain
+`schema`, `receiptId`, `requestId`, `attemptId`, `batchId`, `taskId`,
+`taskGeneration`, `authorityId`, `admissionGeneration`, `reservationSha256`,
+`initializationSha256`, `manifestSha256`, `batchIntentSha256`, `snapshotId`,
+`scope`, `complete`, `entries` and `keyId`. Each accepted entry would contain
+`wireNameUtf8Base64url`, `role`, `sizeBytes` and `sha256`, derived from bytes
+actually accepted rather than merely echoing expected input. The scope and
+completeness claim must match what the prototype can establish; a cooperative
+snapshot is not a claim of a physical fence. If fields are unavailable, a
+different explicitly versioned fixture schema is necessary; never fabricate
+values or interpret missing fields as recovery authority.
+
+Candidate encoding: canonical lowercase UUIDs and SHA-256 hex, bounded unsigned
+canonical decimal strings for sizes and generations (avoiding JavaScript number
+precision loss), strict unpadded base64url of validated exact UTF-8 wire-name
+bytes, and a closed role vocabulary. Sort entries by decoded wire-name bytes
+then role; reject duplicates and names equivalent under receiver rules. Use
+bounded inputs, reject duplicate decoded keys and unknown/missing fields, and
+require canonical byte-for-byte encoding. RFC 8785 JCS on this restricted schema
+is a candidate, subject to cross-language vectors and implementation agreement;
+Python compact `ensure_ascii` JSON and JavaScript serialization must not be
+assumed equivalent. A separate envelope carries payload and lowercase hex MAC;
+for a provisioned test-only key, the proposed HMAC-SHA256 input is ASCII
+`ltds-coordinator-inventory-fixture-v1`, one NUL byte, then canonical payload
+bytes. Validate a fixed-length MAC in constant time. No key fallback, no real
+credentials, and no network endpoint are implied.
+
+Receipt and request identifiers bind immutable bytes: same identifier and same
+payload replays the durable original; same identifier and different payload is
+a conflict. Test duplicate keys, escaped and non-ASCII names, invalid UTF-8,
+normalization/case aliases, invalid base64url, integer boundaries, reordering,
+unknown fields, altered MAC and key IDs, crash at each transaction boundary,
+concurrent requests, and identical Python/Node canonical bytes and MACs. A
+shared HMAC proves only that a holder made the statement; it does not establish
+the issuing process's identity, ledger freshness, a fence, or durable charge.
+Local database rollback and removal of retained task data remain unresolved.
