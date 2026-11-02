@@ -36,13 +36,15 @@ function createSourceSnapshotAcquirer({database,environment,projectId,holderRegi
   try{
    rootFd=openAbsoluteDir(rootPath);
    const rootBefore=fs.fstatSync(rootFd,{bigint:true});datasetFd=openPath(rootFd,meta.dataset.relative_path,true);const datasetBefore=fs.fstatSync(datasetFd,{bigint:true});
-   const indexed=new Map(meta.files.map(f=>[f.relative_path,f])),observed=new Map(),directories=new Map();let dirs=0;
+   // One bounded buffer per acquisition, not one megabyte per photo. Files
+   // are read sequentially and their bytes are never placed in SQLite.
+   const indexed=new Map(meta.files.map(f=>[f.relative_path,f])),observed=new Map(),directories=new Map(),buffer=Buffer.allocUnsafe(CHUNK);let dirs=0;
    function walk(fd,prefix=''){
     if(++dirs>MAX_DIRS)throw fail();const directoryBefore=identity(fs.fstatSync(fd,{bigint:true}));directories.set(prefix,directoryBefore);const dir=fs.opendirSync(`/proc/self/fd/${fd}`);
     try{let ent;while((ent=dir.readSync())!==null){const rel=prefix?`${prefix}/${ent.name}`:ent.name;relative(rel);if(ent.isDirectory()){const child=openDir(fd,ent.name);try{walk(child,rel);}finally{fs.closeSync(child);}}else if(ent.isFile()){
       if(observed.size>=LIMIT||!indexed.has(rel))throw fail();const fileFd=openFile(fd,ent.name);try{
        const before=fs.fstatSync(fileFd,{bigint:true}),expected=indexed.get(rel);if(before.nlink!==1n||before.size!==BigInt(expected.byte_size))throw fail();
-       const digest=crypto.createHash('sha256'),buffer=Buffer.allocUnsafe(CHUNK);let offset=0;while(offset<expected.byte_size){const size=Math.min(buffer.length,expected.byte_size-offset),read=fs.readSync(fileFd,buffer,0,size,offset);if(read!==size)throw fail();digest.update(buffer.subarray(0,read));offset+=read;}
+       const digest=crypto.createHash('sha256');let offset=0;while(offset<expected.byte_size){const size=Math.min(buffer.length,expected.byte_size-offset),read=fs.readSync(fileFd,buffer,0,size,offset);if(read!==size)throw fail();digest.update(buffer.subarray(0,read));offset+=read;}
        const after=fs.fstatSync(fileFd,{bigint:true}),actual=digest.digest('hex');if(identity(before)!==identity(after)||actual!==expected.sha256)throw fail();observed.set(rel,{id:expected.id,relativePath:rel,byteSize:expected.byte_size,sha256:actual,isRawCsv:/\.csv$/i.test(rel),fileIdentity:identity(after)});
       }finally{fs.closeSync(fileFd);}
     }else throw fail();}}finally{dir.closeSync()}

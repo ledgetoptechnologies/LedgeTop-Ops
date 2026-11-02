@@ -137,3 +137,21 @@ inputs and uses the stored signature without calling the signer. Setting
 `VIEWER_ASSOC_FIXTURE_PAUSE_AFTER_COMMIT=1` writes a `FIXTURE_SIGNED_COMMIT`
 marker and stops the owned process for crash testing. The helper embeds the
 same public test seed and cannot establish real authority or custody.
+
+## Large datasets and limits
+
+The metadata planner test covers 10,000 image records totalling 52,428,800,000
+bytes and a separate retained raw CSV; it allocates no image payloads. The
+current v1 contract permits at most 10,000 submitted objects and 4 MiB of
+submission metadata, so longer names or a generated GCP auxiliary can exceed
+these limits. The snapshot reader reuses one 1 MiB buffer while hashing source
+files, and the binding table stores file identity metadata, not image bytes.
+This test is not a 50 GB NAS benchmark or proof of retention.
+
+The offline acquisition currently hashes every source synchronously while a
+SQLite write transaction is held. That can block other writers for an
+unacceptable time on a real large dataset, and filesystem and NAS writers
+remain unfenced. A production design needs a durable source-side retention
+barrier and an interruption-safe, bounded scan that does not hold that lock
+across full dataset I/O; revalidate the barrier and metadata before the short
+commit. Do not enable admission based on the fixture's scale test.

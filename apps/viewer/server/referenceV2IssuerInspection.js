@@ -27,12 +27,12 @@ function inspectFixture({scope,processing,bindingId,intentBytes,signature,regist
   for(const row of bound){const f=files.get(row.file_id);if(!f||row.relative_path!==f.relative_path||row.byte_size!==f.byte_size||row.sha256!==f.sha256)fail()}
   if(!sourceFiles||Object.getPrototypeOf(sourceFiles)!==Object.prototype||!Array.isArray(excludedIds)||new Set(excludedIds).size!==excludedIds.length)fail();
   const objects=manifest.objects,ids=new Set(objects.map(o=>o.id));if(ids.size!==objects.length||Object.keys(sourceFiles).length!==ids.size||Object.keys(sourceFiles).some(id=>!ids.has(id)))fail();
-  const excluded=[...files.keys()].filter(id=>!ids.has(id)).sort();if(JSON.stringify([...excludedIds].sort())!==JSON.stringify(excluded))fail();
+  const excluded=[...files.keys()].filter(id=>!ids.has(id)).sort(),excludedSet=new Set(excluded);if(JSON.stringify([...excludedIds].sort())!==JSON.stringify(excluded))fail();
   for(const object of objects){const f=files.get(object.id);if(!f||sourceFiles[object.id]!==f.relative_path||path.posix.basename(f.relative_path)!==object.name||f.byte_size!==object.byteSize||f.sha256!==object.sha256)fail()}
   // Rebuild the currently supported image-only projection from indexed roles;
   // generated GCP auxiliaries require a separately designed binding.
   const rebuilt=prepareReferenceSubmission({enabled:true,dataset:processing.getDataset(dataset.id,true),submissionId:submission.submissionId,capabilities,optionsCatalog,odmOptions:submission.pipeline.odm.options});
-  if(!p.canonicalBytes(rebuilt.submission).equals(p.canonicalBytes(submission))||!p.canonicalBytes({...rebuilt.sourceFiles}).equals(p.canonicalBytes(sourceFiles))||rebuilt.permanentCsvIds.some(id=>!excluded.includes(id)))fail();
+  if(!p.canonicalBytes(rebuilt.submission).equals(p.canonicalBytes(submission))||!p.canonicalBytes({...rebuilt.sourceFiles}).equals(p.canonicalBytes(sourceFiles))||rebuilt.permanentCsvIds.some(id=>!excludedSet.has(id)))fail();
   if(coordinatorObservation===undefined&&associationConfig!==undefined)fail();
   let viewerJournal='not_inspected',proposal=null;
   if(coordinatorObservation!==undefined){
