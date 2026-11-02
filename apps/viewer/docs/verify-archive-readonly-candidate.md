@@ -12,8 +12,10 @@ prove an authenticated receipt, pin a storage snapshot, ensure future
 custody, or establish the absence of EPT outside this archive inventory.
 
 This source has not been matched to an actual deployed image, tested inside
-its Linux container, or qualified against concurrent parent-directory rename
-and storage mutation. Do not provide or run a production command until the
+its Linux container, or qualified against adversarial concurrent parent-directory
+rename and storage mutation. A synthetic parent replacement test holds, and
+directory and named-file identity checks were added, but the walk is still
+path-based rather than descriptor-pinned. Do not run a production command until the
 operator verifies the exact installed build, runtime, mounts, privileges and
 isolated read-only behavior. A scan can read up to 500 GiB sequentially and
 should be scheduled with regard to other workloads. Windows did not permit
