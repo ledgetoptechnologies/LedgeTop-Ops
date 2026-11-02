@@ -2,9 +2,9 @@ using System.Text.RegularExpressions;
 
 namespace LedgeTop.Files;
 
-// Unwired planning contract only. It does not persist state, grant access, touch roots,
-// or authorize cleanup. Lexical path checks do not prove file-system separation; a caller must
-// hold and verify actual parent/file identities and make every phase durable under the index lease.
+// Generation planning and durable removal state. Planning still does not grant access or
+// touch roots. Lexical path checks do not prove file-system separation; callers must hold and
+// verify actual parent/file identities and make every phase durable under the index lease.
 internal static class FreshGenerationPlan
 {
     internal const string NewLabel = "LedgeTop Files — Current files";
@@ -14,8 +14,11 @@ internal static class FreshGenerationPlan
         uint ProfileDirectoryVolume, ulong ProfileDirectoryFileId, long ProfileRevision, uint ProfileDocumentVolume, ulong ProfileDocumentFileId,
         uint RootVolume = 0, ulong RootFileId = 0, Guid NamespaceClsid = default);
     internal sealed record RootEvidence(uint Volume, ulong FileId, Guid NamespaceClsid, long ProfileRevision, uint ProfileDocumentVolume, ulong ProfileDocumentFileId);
+    internal sealed record RemovalReceipt(Guid GenerationId, uint ProfileVolume, ulong ProfileFileId, long ProfileRevision);
     internal enum Phase { OldActive, Prepared, OldDrained, NewReady, Published }
-    internal sealed record State(Generation Old, Generation? New, Phase Phase, RootEvidence? ReadyRoot = null);
+    internal enum RemovalPhase { CandidateIntent, CandidateRemoved, PriorIntent, Complete }
+    internal sealed record State(Generation Old, Generation? New, Phase Phase, RootEvidence? ReadyRoot = null,
+        RemovalPhase? Removal = null, RemovalReceipt? CandidateRemoval = null, RemovalReceipt? PriorRemoval = null);
 
     internal static State Prepare(State state, Generation candidate, Scope freshlyVerified, bool explicitlyRequested, bool filesystemSeparationVerified)
     {

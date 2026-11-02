@@ -5,8 +5,8 @@ using System.Text.Json.Serialization;
 
 namespace LedgeTop.Files;
 
-// Schema-2 selector codec, deliberately unwired. It is data validation, not a trusted
-// ownership receipt or a filesystem lease; callers must verify real roots and durable CAS.
+// Schema-2 selector codec. It is data validation, not a trusted ownership receipt or
+// filesystem lease; callers must verify real roots and durable CAS.
 internal static class FreshGenerationIndexCodec
 {
     internal const string Owner = "LedgeTop.Files.ConnectedExplorer.Generations/1";
@@ -62,6 +62,27 @@ internal static class FreshGenerationIndexCodec
             FreshGenerationPlan.Phase.Published => FreshGenerationPlan.Publish(FreshGenerationPlan.Ready(FreshGenerationPlan.Drained(prepared, true), scope, next.Id, next.ManifestDigest, next.RootPath, index.State.ReadyRoot!, true), true),
             _ => throw new IOException("Unknown fresh-generation phase.")
         };
+        if (index.State.Removal is { } removal) {
+            if (index.State.Phase != FreshGenerationPlan.Phase.Published ||
+                removal is not (FreshGenerationPlan.RemovalPhase.CandidateIntent or FreshGenerationPlan.RemovalPhase.CandidateRemoved or
+                    FreshGenerationPlan.RemovalPhase.PriorIntent or FreshGenerationPlan.RemovalPhase.Complete))
+                throw new IOException("Fresh generation removal is not published.");
+            var candidateReceiptRequired = removal is FreshGenerationPlan.RemovalPhase.CandidateRemoved or
+                FreshGenerationPlan.RemovalPhase.PriorIntent or FreshGenerationPlan.RemovalPhase.Complete;
+            var priorReceiptRequired = removal == FreshGenerationPlan.RemovalPhase.Complete;
+            var ready = index.State.ReadyRoot!;
+            bool Matches(FreshGenerationPlan.RemovalReceipt? receipt, FreshGenerationPlan.Generation generation,
+                uint volume, ulong priorFileId, long revision) => receipt is { } actual && actual.GenerationId == generation.Id &&
+                actual.ProfileVolume == volume && actual.ProfileFileId != 0 && actual.ProfileFileId != priorFileId && actual.ProfileRevision == revision;
+            if ((candidateReceiptRequired ? !Matches(index.State.CandidateRemoval, next, ready.ProfileDocumentVolume,
+                    ready.ProfileDocumentFileId, checked(ready.ProfileRevision + 2)) : index.State.CandidateRemoval is not null) ||
+                (priorReceiptRequired ? !Matches(index.State.PriorRemoval, old, old.ProfileDocumentVolume,
+                    old.ProfileDocumentFileId, checked(old.ProfileRevision + 2)) : index.State.PriorRemoval is not null))
+                throw new IOException("Fresh generation removal receipts do not match the removed profile identities.");
+            expected = expected with { Removal = removal, CandidateRemoval = index.State.CandidateRemoval, PriorRemoval = index.State.PriorRemoval };
+        } else if (index.State.CandidateRemoval is not null || index.State.PriorRemoval is not null) {
+            throw new IOException("Fresh generation removal receipts have no removal phase.");
+        }
         if (index.State != expected || index.ActiveGeneration != (index.State.Phase == FreshGenerationPlan.Phase.Published ? next.Id : old.Id))
             throw new IOException("Fresh generation selector and phase disagree.");
     }

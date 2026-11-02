@@ -110,6 +110,8 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("Fresh startup recognition rejects mismatched selectors without adoption", LedgeTop.Files.Tests.FreshStartupRecognitionTests.Run),
     ("First transition composition preserves generated prior connection", FirstTransitionCompositionTests.Run),
     ("Fresh generation coordinator retains old selector across injected failures", LedgeTop.Files.Tests.FreshGenerationCoordinatorTests.Run),
+    ("Fresh generation removal resumes both exact roots and preserves local files", LedgeTop.Files.Tests.FreshGenerationRemovalCoordinatorTests.Run),
+    ("Connected and installer removal resume exact schema-2 roots after restart", LedgeTop.Files.Tests.ConnectedExplorerRemovalTests.Run),
     ("Windows startup settings preserve fixed installed ownership and foreign values", WindowsStartupAdapterTests.Run),
     ("Installed payload verifier binds exact inventory and retained filesystem handles", InstalledPayloadVerifierTests.Run),
     ("Installer maintenance validates fixed pilot ownership and drains offline cleanup", InstallerMaintenanceTests.Run),
@@ -130,6 +132,9 @@ var selectedGroups = args.Contains("--staging-schedule-only")
     ? groups.Where(group => group.Name.StartsWith("Fresh startup recognition", StringComparison.Ordinal)).ToArray()
     : args.Contains("--fresh-generation-plan-only")
     ? groups.Where(group => group.Name.StartsWith("Fresh generation ", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--fresh-generation-removal-only")
+    ? groups.Where(group => group.Name.StartsWith("Fresh generation removal", StringComparison.Ordinal) ||
+        group.Name.StartsWith("Connected and installer removal", StringComparison.Ordinal)).ToArray()
     : args.Contains("--connection-diagnostics-only")
     ? groups.Where(group => group.Name.StartsWith("Connection diagnostics", StringComparison.Ordinal) || group.Name.StartsWith("Local connection diagnostic store", StringComparison.Ordinal) || group.Name.StartsWith("Connected Explorer coordinates", StringComparison.Ordinal) || group.Name.StartsWith("Explorer settings require", StringComparison.Ordinal)).ToArray()
     : args.Contains("--employee-first-release-only")

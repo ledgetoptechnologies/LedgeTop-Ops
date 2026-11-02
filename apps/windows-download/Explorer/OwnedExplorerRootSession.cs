@@ -6,6 +6,11 @@ using LedgeTop.WindowsDownload;
 
 namespace LedgeTop.Files.Explorer;
 
+internal sealed record OwnedExplorerRemovalBinding(Guid Identity, ExplorerRootScope Scope, string ProfileDirectory,
+    string RootPath, string ManifestDigest, uint ProfileDirectoryVolume, ulong ProfileDirectoryFileId, long ProfileRevision,
+    uint ProfileDocumentVolume, ulong ProfileDocumentFileId, uint RootVolume, ulong RootFileId, Guid NamespaceClsid);
+internal sealed record OwnedExplorerRemovalEvidence(Guid Identity, uint ProfileVolume, ulong ProfileFileId, long ProfileRevision);
+
 /// <summary>
 /// Shared owned-root lifecycle for generated and connected Explorer sessions. No browser or catalog capture API.
 /// Connected generations persist an immutable, credentialless manifest before any native registration.
@@ -73,6 +78,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
     private Profile? reservedCandidate;
     private PreparedConnectedGeneration? preparedCandidate;
     private Profile? profile;
+    internal OwnedExplorerRemovalEvidence? RemovedGenerationEvidence { get; private set; }
     private ShellRegistration? registration;
     private NativePlaceholderProvider? provider;
     private ExplorerSourceGate? source;
@@ -181,7 +187,9 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
         SetState(ExplorerPreviewState.Running);
         Add(generated ? "Generated-file downloads resumed. This does not sign in to a real account." : "Downloads resumed using the current signed-in account.");
     });
-    public Task RemoveAsync() => OperateAsync(RemoveCoreAsync);
+    public Task RemoveAsync() => OperateAsync(() => RemoveCoreAsync());
+    internal Task RemoveFreshGenerationAsync(OwnedExplorerRemovalBinding expected, Func<bool> selectorProof) =>
+        OperateAsync(() => RemoveCoreAsync(expected, selectorProof));
 
     /// <summary>
     /// Reserve a new connected candidate in a previously absent profile directory, without
@@ -744,14 +752,24 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
     internal event Action<OwnedExplorerRootSession, string>? HydrationTimingObserved;
     internal event Action<OwnedExplorerRootSession, HydrationFailureDiagnostic>? HydrationFailureObserved;
 
-    private async Task RemoveCoreAsync()
+    private async Task RemoveCoreAsync(OwnedExplorerRemovalBinding? expected = null, Func<bool>? selectorProof = null)
     {
-        if (!Directory.Exists(directory)) { SetState(ExplorerPreviewState.Removed); return; }
+        if (expected is not null && selectorProof?.Invoke() != true)
+            throw new IOException("The fresh-files selector is not current.");
+        if (!Directory.Exists(directory)) {
+            if (expected is not null) throw new IOException("The selected fresh-files profile is missing; ownership needs review.");
+            SetState(ExplorerPreviewState.Removed); return;
+        }
         AcquireLease(allowCreate: false);
         profile = ReadProfile();
         var p = profile;
+        if (expected is not null) VerifyRemovalGeneration(p, expected);
         SetRoot(p.Root);
-        if (p.Phase == Phase.Removed) { SetState(ExplorerPreviewState.Removed); return; }
+        if (p.Phase == Phase.Removed) {
+            if (expected is not null) RemovedGenerationEvidence = VerifyRemovedGeneration(expected, selectorProof!) ??
+                throw new IOException("The fresh-files root removal is not confirmed.");
+            SetState(ExplorerPreviewState.Removed); return;
+        }
 
         source?.Pause();
         if (provider is not null)
@@ -781,6 +799,8 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
             if (p.Phase <= Phase.NativeRegisterIntent || p.Phase == Phase.NativeRemoveIntent)
             {
                 Save(p with { Phase = Phase.Removed }); SetState(ExplorerPreviewState.Removed);
+                if (expected is not null) RemovedGenerationEvidence = VerifyRemovedGeneration(expected, selectorProof!) ??
+                    throw new IOException("The fresh-files root removal is not confirmed.");
                 Add("The preview integration was removed. Online-only items may no longer be present in the local folder."); return;
             }
             throw new IOException("The native registration disappeared outside the recorded removal sequence; it was not recreated.");
@@ -800,12 +820,76 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
         var cache = EnsureCache(p);
         await using (var verifier = CreateProvider(registration, source, cache)) verifier.ValidateForRemoval();
 
+        if (expected is not null && selectorProof?.Invoke() != true)
+            throw new IOException("The fresh-files selector changed before unregistering this root.");
         Save(profile! with { Phase = Phase.NativeRemoveIntent });
         registration.Unregister(); registration = null;
         Save(profile! with { Phase = Phase.Removed });
+        if (expected is not null) RemovedGenerationEvidence = VerifyRemovedGeneration(expected, selectorProof!) ??
+            throw new IOException("The fresh-files root removal is not confirmed.");
         source.Dispose(); source = null;
         SetState(ExplorerPreviewState.Removed);
         Add("The preview integration was removed. Check the previous folder for local files; online-only items may no longer be present.");
+    }
+
+    private void VerifyRemovalGeneration(Profile observed, OwnedExplorerRemovalBinding expected)
+    {
+        var expectedRevision = observed.Phase switch {
+            Phase.Ready => expected.ProfileRevision,
+            Phase.NativeRemoveIntent => checked(expected.ProfileRevision + 1),
+            Phase.Removed => checked(expected.ProfileRevision + 2),
+            _ => -1
+        };
+        if (generated || expected.Scope != scope || observed.Owner != ConnectedOwner || observed.Sid != sid ||
+            observed.Identity != expected.Identity || !string.Equals(directory, expected.ProfileDirectory, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(observed.Root, expected.RootPath, StringComparison.OrdinalIgnoreCase) ||
+            observed.RootFileId == 0 || unchecked((ulong)observed.RootFileId) != expected.RootFileId ||
+            observed.NamespaceClsid != expected.NamespaceClsid || observed.Binding is null ||
+            observed.Binding.Digest != expected.ManifestDigest || observed.Binding.Scope != scope ||
+            observed.Revision != expectedRevision)
+            throw new IOException("The saved root does not match the fresh-files selector.");
+        if (expected.ProfileDirectoryVolume == 0 || expected.ProfileDirectoryFileId == 0 ||
+            expected.ProfileDocumentVolume == 0 || expected.ProfileDocumentFileId == 0 || expected.RootVolume == 0 || expected.RootFileId == 0)
+            throw new IOException("The fresh-files selector has incomplete physical identity.");
+        var manifest = ReadFrozenManifestFile(observed);
+        if (manifest.Scope != scope || manifest.Digest != expected.ManifestDigest)
+            throw new IOException("The saved root inventory does not match the fresh-files selector.");
+        using var handles = ConnectedGenerationHandleLease.Open(directory, observed.Binding.File, observed.Root);
+        var profileBytes = handles.ReadProfile();
+        if (!ProfileBytesMatch(profileBytes) || ReadProfile() != observed ||
+            handles.ProfileDirectoryVolume != expected.ProfileDirectoryVolume ||
+            handles.ProfileDirectoryFileId != expected.ProfileDirectoryFileId ||
+            handles.ProfileVolume != expected.ProfileDocumentVolume ||
+            (observed.Phase == Phase.Ready ? handles.ProfileFileId != expected.ProfileDocumentFileId :
+                handles.ProfileFileId == expected.ProfileDocumentFileId) ||
+            handles.RootVolume != expected.RootVolume || handles.RootFileId != expected.RootFileId)
+            throw new IOException("The fresh-files profile or root identity changed.");
+        handles.Recheck();
+    }
+
+    private OwnedExplorerRemovalEvidence? VerifyRemovedGeneration(OwnedExplorerRemovalBinding expected, Func<bool> selectorProof)
+    {
+        if (selectorProof() != true) return null;
+        var observed = ReadProfile();
+        if (observed.Phase != Phase.Removed || observed.Identity != expected.Identity || observed.Owner != ConnectedOwner ||
+            observed.Sid != sid || !string.Equals(observed.Root, expected.RootPath, StringComparison.OrdinalIgnoreCase) ||
+            observed.RootFileId == 0 || unchecked((ulong)observed.RootFileId) != expected.RootFileId ||
+            observed.NamespaceClsid != expected.NamespaceClsid || observed.Binding is null ||
+            observed.Binding.Digest != expected.ManifestDigest || observed.Binding.Scope != expected.Scope ||
+            observed.Revision != checked(expected.ProfileRevision + 2) ||
+            !string.Equals(directory, expected.ProfileDirectory, StringComparison.OrdinalIgnoreCase)) return null;
+        if (!NativeRootRegistration.HasExactRootFileId(observed.Root, observed.RootFileId)) return null;
+        using var handles = ConnectedGenerationHandleLease.Open(directory, observed.Binding.File, observed.Root);
+        if (handles.ProfileDirectoryVolume != expected.ProfileDirectoryVolume ||
+            handles.ProfileDirectoryFileId != expected.ProfileDirectoryFileId || handles.RootVolume != expected.RootVolume ||
+            handles.ProfileVolume != expected.ProfileDocumentVolume || handles.ProfileFileId == 0 ||
+            handles.RootFileId != expected.RootFileId || !ProfileBytesMatch(handles.ReadProfile())) return null;
+        var absence = ShellRegistration.Inspect(observed.Root, ShellRegistration.CreateId(observed.Identity), Context(observed),
+            observed.NamespaceClsid, observed.Icon, ProfileDisplayName(observed));
+        handles.Recheck();
+        if (!absence.CompleteAbsenceVerified || !selectorProof() || ReadProfile() != observed ||
+            !NativeRootRegistration.HasExactRootFileId(observed.Root, observed.RootFileId)) return null;
+        return new(observed.Identity, handles.ProfileVolume, handles.ProfileFileId, observed.Revision);
     }
 
     private void VerifyPinnedRoot(Profile p, ShellRegistration native, bool allowUnrecordedId = false)

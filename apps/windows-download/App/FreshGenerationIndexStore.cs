@@ -3,7 +3,7 @@ using System.Security.Cryptography;
 
 namespace LedgeTop.Files;
 
-// Unwired durable selector primitive. Caller must hold the existing per-index lease,
+// Durable selector primitive. Caller must hold the existing per-index lease,
 // validate the exact schema-1 owner/profile and authenticated scope, and preserve both
 // generations. This version admits one fresh-generation operation only; it is not a
 // repeatable refresh/history mechanism. This is not a compare-and-swap against an
@@ -32,13 +32,18 @@ internal static class FreshGenerationIndexStore
         var priorIsGeneration = IsGeneration(expected);
         if (priorIsGeneration) {
             var prior = FreshGenerationIndexCodec.Decode(expected);
+            var removalTransition = prior.State.Phase == FreshGenerationPlan.Phase.Published &&
+                next.State.Phase == FreshGenerationPlan.Phase.Published &&
+                ValidRemovalTransition(prior.State, next.State);
             if (next.Revision != checked(prior.Revision + 1) || next.Sid != prior.Sid || next.Channel != prior.Channel ||
                 next.Source != prior.Source || next.Principal != prior.Principal || next.OriginSha256 != prior.OriginSha256 ||
                 next.LegacyBackupSha256 != prior.LegacyBackupSha256 ||
                 Convert.ToHexStringLower(SHA256.HashData(Read(directory, LegacyBackup))) != prior.LegacyBackupSha256 ||
                 next.State.Old != prior.State.Old || next.State.New != prior.State.New ||
                 (prior.State.Phase == FreshGenerationPlan.Phase.NewReady && next.State.ReadyRoot != prior.State.ReadyRoot) ||
-                (int)next.State.Phase != (int)prior.State.Phase + 1)
+                (prior.State.Removal is not null && !removalTransition) ||
+                (next.State.Removal is not null && !removalTransition) ||
+                (!removalTransition && (int)next.State.Phase != (int)prior.State.Phase + 1))
                 throw new IOException("Generation selector transition is not consecutive.");
         } else {
             // The caller strictly validates exact bytes as the owned schema-1 index and returns its revision.
@@ -68,6 +73,34 @@ internal static class FreshGenerationIndexStore
         File.Move(temporary, Path.Combine(directory, Current), overwrite: true);
         if (!Read(directory, Current).AsSpan().SequenceEqual(nextBytes)) throw new IOException("Published selector could not be verified.");
         return nextBytes;
+    }
+    internal static FreshGenerationPlan.RemovalPhase? NextRemoval(FreshGenerationPlan.RemovalPhase? current) => current switch {
+        null => FreshGenerationPlan.RemovalPhase.CandidateIntent,
+        FreshGenerationPlan.RemovalPhase.CandidateIntent => FreshGenerationPlan.RemovalPhase.CandidateRemoved,
+        FreshGenerationPlan.RemovalPhase.CandidateRemoved => FreshGenerationPlan.RemovalPhase.PriorIntent,
+        FreshGenerationPlan.RemovalPhase.PriorIntent => FreshGenerationPlan.RemovalPhase.Complete,
+        FreshGenerationPlan.RemovalPhase.Complete => throw new IOException("Fresh generation removal is already complete."),
+        _ => throw new IOException("Unknown fresh generation removal phase.")
+    };
+    private static bool ValidRemovalTransition(FreshGenerationPlan.State prior, FreshGenerationPlan.State next)
+    {
+        if (next.Removal != NextRemoval(prior.Removal)) return false;
+        return prior.Removal switch {
+            null => prior.CandidateRemoval is null && prior.PriorRemoval is null &&
+                next.CandidateRemoval is null && next.PriorRemoval is null,
+            FreshGenerationPlan.RemovalPhase.CandidateIntent => next.CandidateRemoval is { } candidate &&
+                candidate.GenerationId == prior.New?.Id && candidate.ProfileFileId != 0 &&
+                candidate.ProfileFileId != prior.ReadyRoot?.ProfileDocumentFileId &&
+                candidate.ProfileVolume == prior.ReadyRoot?.ProfileDocumentVolume && candidate.ProfileRevision == prior.ReadyRoot?.ProfileRevision + 2 &&
+                next.PriorRemoval is null,
+            FreshGenerationPlan.RemovalPhase.CandidateRemoved => prior.CandidateRemoval is { } saved &&
+                next.CandidateRemoval == saved && next.PriorRemoval is null,
+            FreshGenerationPlan.RemovalPhase.PriorIntent => prior.CandidateRemoval is { } existing &&
+                next.CandidateRemoval == existing && next.PriorRemoval is { } previous &&
+                previous.GenerationId == prior.Old.Id && previous.ProfileFileId != 0 && previous.ProfileFileId != prior.Old.ProfileDocumentFileId &&
+                previous.ProfileVolume == prior.Old.ProfileDocumentVolume && previous.ProfileRevision == prior.Old.ProfileRevision + 2,
+            _ => false
+        };
     }
     private static bool IsGeneration(byte[] bytes)
     {

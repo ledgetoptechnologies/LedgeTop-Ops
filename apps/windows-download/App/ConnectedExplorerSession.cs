@@ -48,6 +48,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private readonly Func<IFilesBackend, string, string, CancellationToken, Task<ExplorerCatalogSnapshot>> capture;
     private readonly Func<bool> coldPreparationAdmission;
     private readonly SyntheticFirstTransitionHooks? syntheticFirstTransition;
+    private readonly FreshGenerationRemovalCoordinator.RemoveExactRoot? syntheticFreshRootRemoval;
     private readonly string channel, alias, origin, originHash, stateBase, preferredRoot, indexDirectory, indexPath, sid;
     private readonly SemaphoreSlim operations = new(1, 1);
     private readonly object view = new(), lifetime = new();
@@ -74,6 +75,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     // Read-only UI hint. An invalid index or an incomplete/held transition must
     // not expose schema-1 reconnect, removal or update actions.
     internal bool CanStartPublishedFresh { get { lock (view) return CanStartPublishedFreshLocked(); } }
+    internal bool CanRemovePublishedFreshForInstaller { get { lock (view) return heldFreshSelector is { } saved && ValidRemovableFreshSelector(saved); } }
     internal bool CanStartFreshReadOnlyConnection { get { lock (view) return
         (FreshGenerationStagingQualification.Allows(channel, alias, origin) || syntheticFirstTransition is not null) && alias == "employee" &&
         !disposed && !closeRequested && !invalidIndex && !freshPreparationReview && !coldPreparationReview &&
@@ -88,7 +90,8 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private bool CanStartPublishedFreshLocked() => coldPreparationAdmission() && !disposed && !closeRequested && !invalidIndex &&
         !coldPreparationReview && !freshPreparationReview && heldFreshAdapter is null && heldColdRestart is null &&
         indexLease is null && backend is null && engine is null && heldFreshSelector is { } saved &&
-        saved.State.Phase == FreshGenerationPlan.Phase.Published && saved.State.New is { } next && saved.ActiveGeneration == next.Id;
+        saved.State.Phase == FreshGenerationPlan.Phase.Published && saved.State.Removal is null &&
+        saved.State.New is { } next && saved.ActiveGeneration == next.Id;
     internal bool RequiresOwnershipReview { get { lock (view) return !freshReadOnlyActive && !CanStartPublishedFreshLocked() && (invalidIndex || heldFreshSelector is not null || heldFreshAdapter is not null || heldColdRestart is not null || coldPreparationReview || freshPreparationReview); } }
 
     // Installer check only: validate the published staging selector and both
@@ -515,7 +518,8 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     internal ConnectedExplorerSession(Func<IFilesBackend> backendFactory, string channel, string alias, Uri trustedOrigin,
         string stateBaseDirectory, string preferredRoot, Func<ConnectedExplorerEngineRequest, ConnectedExplorerEngine> engineFactory,
         Func<IFilesBackend, string, string, CancellationToken, Task<ExplorerCatalogSnapshot>> capture,
-        Func<bool>? syntheticColdPreparationAdmission = null, SyntheticFirstTransitionHooks? syntheticFirstTransition = null)
+        Func<bool>? syntheticColdPreparationAdmission = null, SyntheticFirstTransitionHooks? syntheticFirstTransition = null,
+        FreshGenerationRemovalCoordinator.RemoveExactRoot? syntheticFreshRootRemoval = null)
     {
         ArgumentNullException.ThrowIfNull(backendFactory); ArgumentNullException.ThrowIfNull(engineFactory); ArgumentNullException.ThrowIfNull(capture);
         if (channel is not ("pilot" or "stable") || alias is null || !Regex.IsMatch(alias, "\\A[a-z0-9][a-z0-9_-]{0,63}\\z"))
@@ -526,6 +530,9 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         // CreateForSession has a separate hard-false production gate.
         coldPreparationAdmission = syntheticColdPreparationAdmission ?? (() => FreshGenerationStagingQualification.Allows(channel, alias, origin));
         this.syntheticFirstTransition = syntheticFirstTransition;
+        if (syntheticFreshRootRemoval is not null && syntheticColdPreparationAdmission is null)
+            throw new IOException("Synthetic fresh-root removal requires the explicit test admission seam.");
+        this.syntheticFreshRootRemoval = syntheticFreshRootRemoval;
         stateBase = LocalDirectoryPath(stateBaseDirectory); this.preferredRoot = LocalDirectoryPath(preferredRoot, rootLeaf: true);
         indexDirectory = Path.Combine(stateBase, "connected-explorer-" + channel + "-" + alias);
         indexPath = Path.Combine(indexDirectory, "current.json");
@@ -542,7 +549,9 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                 if (heldFreshSelector is not null) {
                     var published = heldFreshSelector.State.Phase == FreshGenerationPlan.Phase.Published &&
                         heldFreshSelector.State.New is { } current && heldFreshSelector.ActiveGeneration == current.Id;
-                    invalidIndex = !published || !coldPreparationAdmission(); state = ExplorerPreviewState.Failed;
+                    invalidIndex = !published || !coldPreparationAdmission();
+                    state = heldFreshSelector.State.Removal == FreshGenerationPlan.RemovalPhase.Complete
+                        ? ExplorerPreviewState.Removed : ExplorerPreviewState.Failed;
                     Add(invalidIndex ? "This PC has a fresh-files transition that needs review. Some previous online-only files may be unavailable."
                         : "The current files connection is ready to reconnect.");
                     return;
@@ -811,8 +820,16 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         token.ThrowIfCancellationRequested();
         _ = ValidatePreviousRemoval();
         // Never retain a signed-in backend for removal: the cleanup engine's source always denies network operations.
-        await DrainCurrentAsync(trace); token.ThrowIfCancellationRequested();
         trace.Phase = ConnectionPhase.LocalOwnership;
+        if (heldFreshSelector is { } fresh) {
+            if (!ValidRemovableFreshSelector(fresh)) throw new IOException("The fresh-files selector needs ownership review before removal.");
+            if (heldFreshAdapter is not null) await StopPublishedFreshCoreAsync().ConfigureAwait(false);
+            if (heldColdRestart is not null) await StopColdFreshRestartCoreAsync().ConfigureAwait(false);
+            await DrainCurrentAsync(trace).ConfigureAwait(false); token.ThrowIfCancellationRequested();
+            await RemovePublishedFreshAsync(token, trace).ConfigureAwait(false);
+            return;
+        }
+        await DrainCurrentAsync(trace); token.ThrowIfCancellationRequested();
         if (index is null) { SetState(ExplorerPreviewState.Removed); return; }
         AcquireExistingIndexLease(); RestoreCleanupEngine();
         _ = ValidatePreviousRemoval();
@@ -827,6 +844,95 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         SetState(ExplorerPreviewState.Removed);
         Add("The Explorer connection was removed. Check the previous folder for local files; online-only items may no longer be present.");
     });
+
+    private bool ValidRemovableFreshSelector(FreshGenerationIndexCodec.Index expected) =>
+        expected.State.Phase == FreshGenerationPlan.Phase.Published && expected.State.New is { } current &&
+        expected.State.ReadyRoot is not null && expected.ActiveGeneration == current.Id &&
+        expected.Sid == sid && expected.Channel == channel && expected.Source == alias && expected.OriginSha256 == originHash;
+
+    // The generation selector itself is the removal journal. We preserve both root
+    // directories and their files; only exact Windows registrations are removed.
+    private async Task RemovePublishedFreshAsync(CancellationToken token, ConnectionFailureTrace trace)
+    {
+        var expected = heldFreshSelector ?? throw new IOException("No fresh-files selector is available.");
+        if (!ValidRemovableFreshSelector(expected)) throw new IOException("The fresh-files selector is not a removable published generation.");
+        var lockPath = Path.Combine(indexDirectory, "index.lock");
+        if (!File.Exists(lockPath) || (File.GetAttributes(lockPath) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+            throw new IOException("The fresh-files selector lock is unavailable.");
+        indexLease ??= new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        var pin = new FreshGenerationIndexLockPin(indexLease, lockPath);
+        var selectorPath = Path.Combine(indexDirectory, FreshGenerationIndexStore.Current);
+        var backupPath = Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup);
+        var current = expected;
+        bool ExactSelector() => pin.StillHeld(indexLease) &&
+            FreshGenerationStartup.Observe(selectorPath, backupPath, sid, channel, alias, originHash) == current;
+        byte[] CurrentBytes()
+        {
+            if (!ExactSelector()) throw new IOException("The fresh-files selector changed during removal.");
+            var info = new FileInfo(selectorPath);
+            if (!info.Exists || info.Length is < 1 or > 16384 || (info.Attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+                throw new IOException("The fresh-files selector is missing or invalid.");
+            byte[] bytes;
+            using (var stream = new FileStream(selectorPath, FileMode.Open, FileAccess.Read, FileShare.Read)) {
+                if (stream.Length != info.Length) throw new IOException("The fresh-files selector changed while opening.");
+                bytes = new byte[(int)stream.Length]; stream.ReadExactly(bytes);
+            }
+            if (!FreshGenerationIndexCodec.Decode(bytes).Equals(current)) throw new IOException("The fresh-files selector changed during removal.");
+            return bytes;
+        }
+        async Task Publish(FreshGenerationIndexCodec.Index next)
+        {
+            var priorBytes = CurrentBytes();
+            await FreshGenerationIndexStore.PublishAsync(indexDirectory, priorBytes, next,
+                () => pin.StillHeld(indexLease), _ => null).ConfigureAwait(false);
+            current = next;
+            if (!ExactSelector()) throw new IOException("The fresh-files removal journal could not be confirmed.");
+        }
+        var scope = new ExplorerRootScope(channel, alias, origin, expected.Principal);
+        var ready = expected.State.ReadyRoot!;
+        var candidate = expected.State.New! with {
+            ProfileRevision = ready.ProfileRevision,
+            ProfileDocumentVolume = ready.ProfileDocumentVolume,
+            ProfileDocumentFileId = ready.ProfileDocumentFileId,
+            RootVolume = ready.Volume,
+            RootFileId = ready.FileId,
+            NamespaceClsid = ready.NamespaceClsid
+        };
+        async Task<FreshGenerationPlan.RemovalReceipt?> RemoveRoot(FreshGenerationPlan.Generation generation,
+            Func<bool> selectorProof, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!selectorProof()) return null;
+            if (syntheticFreshRootRemoval is not null)
+                return await syntheticFreshRootRemoval(generation, selectorProof, cancellationToken).ConfigureAwait(false);
+            var root = new OwnedExplorerRootSession(generation.ProfileDirectory, generation.RootPath,
+                new CleanupSource(alias, new Uri(origin)), scope);
+            var binding = new OwnedExplorerRemovalBinding(generation.Id, scope, generation.ProfileDirectory, generation.RootPath,
+                generation.ManifestDigest, generation.ProfileDirectoryVolume, generation.ProfileDirectoryFileId,
+                generation.ProfileRevision, generation.ProfileDocumentVolume, generation.ProfileDocumentFileId,
+                generation.RootVolume, generation.RootFileId, generation.NamespaceClsid);
+            try {
+                await root.RemoveFreshGenerationAsync(binding, selectorProof).ConfigureAwait(false);
+                var evidence = root.RemovedGenerationEvidence;
+                if (root.State != ExplorerPreviewState.Removed || evidence is null || !selectorProof()) return null;
+                return new(evidence.Identity, evidence.ProfileVolume, evidence.ProfileFileId, evidence.ProfileRevision);
+            } finally { await root.DisposeAsync().ConfigureAwait(false); }
+        }
+
+        trace.Phase = ConnectionPhase.ProviderRemoval;
+        var completed = await FreshGenerationRemovalCoordinator.RemoveAsync(expected, () => {
+            if (!ExactSelector()) throw new IOException("The fresh-files selector changed during removal.");
+            return current;
+        }, Publish, (generation, proof, cancellationToken) =>
+            RemoveRoot(generation.Id == candidate.Id ? candidate : generation, proof, cancellationToken), token).ConfigureAwait(false);
+        if (completed.State.Removal != FreshGenerationPlan.RemovalPhase.Complete || !ExactSelector())
+            throw new IOException("Both fresh-files registrations were not confirmed removed.");
+        heldFreshSelector = completed;
+        invalidIndex = false;
+        indexLease.Dispose(); indexLease = null;
+        SetState(ExplorerPreviewState.Removed);
+        Add("The Explorer connection was removed. Both files folders were kept; online-only items may no longer be present locally.");
+    }
 
     private async Task OperateAsync(ConnectionAction operation, Func<CancellationToken, ConnectionFailureTrace, Task> action, CancellationToken requestedCancellation = default)
     {
@@ -848,12 +954,15 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         }
         var wasRunning = false;
         try {
-            if (heldFreshAdapter is not null || heldColdRestart is not null || coldPreparationReview || freshPreparationReview) throw new IOException("Fresh connection ownership needs review before further operations.");
+            if (operation != ConnectionAction.Remove &&
+                (heldFreshAdapter is not null || heldColdRestart is not null || coldPreparationReview || freshPreparationReview))
+                throw new IOException("Fresh connection ownership needs review before further operations.");
             var observedRunning = operation == ConnectionAction.Recheck && previousState == ExplorerPreviewState.Running &&
                 previousEngine?.Session.State == ExplorerPreviewState.Running;
             lock (view) wasRunning = observedRunning && viewEpoch == observedEpoch && ReferenceEquals(engine, previousEngine);
             token.ThrowIfCancellationRequested();
-            if (invalidIndex) throw new IOException("The saved Explorer index needs ownership review.");
+            if (invalidIndex && !(operation == ConnectionAction.Remove && heldFreshSelector is { } removable && ValidRemovableFreshSelector(removable)))
+                throw new IOException("The saved Explorer index needs ownership review.");
             await action(token, trace).ConfigureAwait(false);
         } catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception) when (heldFreshAdapter is not null || heldColdRestart is not null || coldPreparationReview || freshPreparationReview) {

@@ -135,9 +135,12 @@ internal static class InstallerMaintenance
                 foreach (var mode in new[] { AccessMode.Client, AccessMode.Employee }) {
                     var session = prepare(mode); sessions.Add(session);
                     if (session.State == ExplorerPreviewState.Failed) {
-                        var valid = arguments[0] == CheckArgument &&
-                            (validatePublishedForTest is not null ? await validatePublishedForTest(session) :
-                             session is ConnectedExplorerSession connected && await connected.ValidatePublishedSelectorForInstallAsync());
+                        var valid = arguments[0] switch {
+                            CheckArgument => validatePublishedForTest is not null ? await validatePublishedForTest(session) :
+                                session is ConnectedExplorerSession connected && await connected.ValidatePublishedSelectorForInstallAsync(),
+                            RemoveArgument => session is ConnectedExplorerSession removable && removable.CanRemovePublishedFreshForInstaller,
+                            _ => false
+                        };
                         if (!valid) throw new IOException("Owned connection needs review.");
                     }
                 }
