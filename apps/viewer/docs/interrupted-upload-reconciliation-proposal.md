@@ -208,3 +208,23 @@ Independent Python and Node calculations matched for this restricted example.
 It does not establish full RFC 8785 compatibility: Unicode ordering, escaping,
 invalid input, duplicate keys and boundary cases still need shared vectors and
 actual independent canonicalizer implementations.
+
+### Viewer local batch fixture
+
+`referenceBatchIntentFixture.js` is an unmounted, synthetic-only experiment.
+Its caller must supply a dedicated trusted fixture database: the scope string
+does not verify the SQLite connection or protect tables from direct writers.
+It stores an immutable batch intent, including original multipart order, and
+compares caller-supplied observations by exact name, role, size and hash.
+Every result returns `hold`; `complete` and the inventory are unverified caller
+assertions. The restricted ASCII name profile, decimal-string sizes and
+canonical JSON are not an agreed Processing protocol. It does not record a
+qualified provider origin, deployment epoch, stream identity, physical budget,
+source proof or fence. No current application path creates these records.
+
+Processing reports its local draft now accepts explicit `photo`, `gcp` and
+`auxiliary` intent roles, validates photo versus non-photo wire class, and does
+not infer or verify GCP semantics from filenames. Its integer representation,
+other binding fields and canonicalization remain different. Cross-language
+mapping must wait for a mutually reviewed exact contract and actual durable
+receiver associations; this fixture alone is not that mapping.
