@@ -16,6 +16,13 @@ function fixture(t){
 const admit=({p})=>prepareSourceBindingDraft(p,{id:'binding',attemptId:'a'});
 function enableOnlyForSyntheticFixture(db){db.exec('DROP TRIGGER viewer_source_binding_unavailable');}
 
+test('ten thousand large-photo metadata records bind without file payloads',t=>{
+ const db=new DatabaseSync(':memory:');t.after(()=>db.close());db.exec('PRAGMA foreign_keys=ON');applyMigrations(db);const p=new ProcessingRepository(db);p.createProject({id:'p',displayName:'Synthetic'});p.createDataset({id:'d',projectId:'p',displayName:'Synthetic',storageMode:'managed',rootKey:'datasets',relativePath:'synthetic'});
+ const files=Array.from({length:10000},(_,i)=>({id:'i'+i,relativePath:`IMG_${String(i).padStart(5,'0')}.jpg`,byteSize:5*1024*1024,sha256:'a'.repeat(64)}));files.push({id:'survey',relativePath:'raw.csv',byteSize:128,sha256:'b'.repeat(64)});p.finalizeDataset('d',files,'c'.repeat(64));
+ db.exec("INSERT INTO processing_tasks(id,project_id,dataset_id,display_name,status,created_at,updated_at) VALUES('t','p','d','T','draft','t','t'); INSERT INTO processing_attempts(id,task_id,dataset_id,attempt_number,options_json,status,created_at,updated_at) VALUES('a','t','d',1,'{}','pending','t','t'); UPDATE processing_tasks SET active_attempt_id='a' WHERE id='t'; DROP TRIGGER viewer_source_binding_unavailable");
+ const result=prepareSourceBindingDraft(p,{id:'binding',attemptId:'a'});assert.equal(result.objectCount,10001);assert.equal(db.prepare('SELECT COUNT(*) n FROM viewer_source_binding_objects').get().n,10001);assert.equal(db.prepare('SELECT SUM(byte_size) n FROM viewer_source_binding_objects').get().n,10000*5*1024*1024+128);assert.equal(p.datasetHasRetainedCsv('d'),true);assert.equal(p.archiveDataset('d'),null);
+});
+
 test('hard disabled source binding never issues a pin or mutates metadata',t=>{
  const f=fixture(t);assert.throws(()=>admit(f),/source binding admission unavailable/);
  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM viewer_source_bindings').get().n,0);

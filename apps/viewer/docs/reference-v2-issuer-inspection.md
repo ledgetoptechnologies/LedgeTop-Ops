@@ -155,3 +155,24 @@ remain unfenced. A production design needs a durable source-side retention
 barrier and an interruption-safe, bounded scan that does not hold that lock
 across full dataset I/O; revalidate the barrier and metadata before the short
 commit. Do not enable admission based on the fixture's scale test.
+
+`referenceSourceScanFixture.js` explores that transaction split in disposable
+databases only. It commits a single retained `scanning` intent in a short
+transaction, observes the files with no SQLite write transaction held, then
+compares the observed files against current indexed metadata and calls the
+existing source-binding draft in a second transaction. The normal admission
+trigger must be removed only in a disposable fixture. An interrupted or failed
+scan remains `scanning` and blocks another fixture scan; it is not automatically
+retried or released. Tests show a second SQLite writer can commit during file
+reading, metadata changes fail closed, process death leaves no binding, and
+10,001 metadata records (10,000 images plus CSV) can be bound without copying
+their contents into SQLite. The metadata test does not read 50 GB of source.
+
+The intent is not connected to the filesystem, existing lifecycle writers,
+NAS administration or external clients. A file can change after observation
+and before or after the metadata commit, without changing its indexed row;
+aliases and replace/restore races also remain. The scan checks for many changes
+while it reads, but it cannot close those races. The fixture does not atomically
+commit an association outbox with this split binding. Production requires an
+enforced source-side barrier, recovery semantics and an atomic association
+commit before the disabled gate can be reconsidered.
