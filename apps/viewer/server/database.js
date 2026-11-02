@@ -2642,6 +2642,35 @@ const MIGRATIONS = [
       WHEN NOT EXISTS(SELECT 1 FROM viewer_reference_transfer_outbox o JOIN viewer_reference_transfer_reconciliation_claims c ON c.outbox_id=o.outbox_id AND c.attempt_id=o.attempt_id AND c.recovery_generation=NEW.recovery_generation JOIN viewer_reference_attempt_journal j ON j.attempt_id=c.attempt_id AND j.lease_owner=c.owner AND j.lease_generation=c.recovery_generation WHERE o.outbox_id=NEW.outbox_id AND o.state IN ('sending','uncertain'))
       BEGIN SELECT RAISE(ABORT,'reference transfer reconciliation claim missing'); END;
   `},
+  // Provisional review identity only; deployment requires migration census.
+  {version:62,name:'viewer_source_spool_hold_candidate',sql:`
+    CREATE TABLE viewer_source_spool_holds (
+      attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+      task_id TEXT NOT NULL REFERENCES processing_tasks(id) ON DELETE RESTRICT,
+      dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+      manifest_sha256 TEXT NOT NULL CHECK(length(manifest_sha256)=64),
+      created_at TEXT NOT NULL
+    );
+    CREATE TRIGGER viewer_source_spool_hold_no_update BEFORE UPDATE ON viewer_source_spool_holds BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
+    CREATE TRIGGER viewer_source_spool_hold_no_delete BEFORE DELETE ON viewer_source_spool_holds BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
+    CREATE TRIGGER viewer_source_spool_hold_no_replace BEFORE INSERT ON viewer_source_spool_holds WHEN EXISTS(SELECT 1 FROM viewer_source_spool_holds WHERE attempt_id=NEW.attempt_id OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
+    CREATE TRIGGER viewer_source_spool_hold_no_trash BEFORE INSERT ON viewer_source_spool_holds WHEN EXISTS(SELECT 1 FROM storage_trash s WHERE s.permanently_deleted_at IS NULL AND ((s.entity_type='dataset' AND s.entity_id=NEW.dataset_id) OR (s.entity_type='task' AND s.entity_id=NEW.task_id) OR (s.entity_type='project' AND s.entity_id=NEW.project_id))) BEGIN SELECT RAISE(ABORT,'source hold invalid'); END;
+    CREATE TRIGGER viewer_source_spool_hold_validate BEFORE INSERT ON viewer_source_spool_holds WHEN NOT EXISTS(SELECT 1 FROM processing_attempts a JOIN processing_tasks t ON t.id=a.task_id AND t.active_attempt_id=a.id JOIN datasets d ON d.id=t.dataset_id AND d.project_id=t.project_id JOIN projects p ON p.id=t.project_id WHERE a.id=NEW.attempt_id AND t.id=NEW.task_id AND d.id=NEW.dataset_id AND p.id=NEW.project_id AND d.manifest_sha256=NEW.manifest_sha256 AND d.status='finalized' AND d.storage_mode='managed' AND d.root_key='datasets' AND p.status='active' AND p.purged_at IS NULL AND t.status NOT IN ('archived','cancelled') AND t.purged_at IS NULL AND a.status IN ('pending','admitted','initializing','uploading','committed','queued_upstream','running','ingesting')) OR EXISTS(SELECT 1 FROM storage_mutations m WHERE m.status IN ('intent','fs_applied','failed') AND ((m.entity_type='dataset' AND m.entity_id=NEW.dataset_id) OR (m.entity_type='task' AND m.entity_id=NEW.task_id) OR (m.entity_type='project' AND m.entity_id=NEW.project_id))) OR EXISTS(SELECT 1 FROM dataset_operations o WHERE o.dataset_id=NEW.dataset_id AND o.status IN ('queued','leased')) BEGIN SELECT RAISE(ABORT,'source hold invalid'); END;
+    CREATE TRIGGER viewer_source_spool_dataset_update BEFORE UPDATE ON datasets WHEN EXISTS(SELECT 1 FROM viewer_source_spool_holds WHERE dataset_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
+    CREATE TRIGGER viewer_source_spool_dataset_delete BEFORE DELETE ON datasets WHEN EXISTS(SELECT 1 FROM viewer_source_spool_holds WHERE dataset_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
+    CREATE TRIGGER viewer_source_spool_file_insert BEFORE INSERT ON dataset_files WHEN EXISTS(SELECT 1 FROM viewer_source_spool_holds WHERE dataset_id=NEW.dataset_id) BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
+    CREATE TRIGGER viewer_source_spool_file_update BEFORE UPDATE ON dataset_files WHEN EXISTS(SELECT 1 FROM viewer_source_spool_holds WHERE dataset_id IN (OLD.dataset_id,NEW.dataset_id)) BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
+    CREATE TRIGGER viewer_source_spool_file_delete BEFORE DELETE ON dataset_files WHEN EXISTS(SELECT 1 FROM viewer_source_spool_holds WHERE dataset_id=OLD.dataset_id) BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
+    CREATE TRIGGER viewer_source_spool_mutation_insert BEFORE INSERT ON storage_mutations WHEN EXISTS(SELECT 1 FROM viewer_source_spool_holds h WHERE (NEW.entity_type='dataset' AND NEW.entity_id=h.dataset_id) OR (NEW.entity_type='task' AND NEW.entity_id=h.task_id) OR (NEW.entity_type='project' AND NEW.entity_id=h.project_id)) BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
+    CREATE TRIGGER viewer_source_spool_task_rebind BEFORE UPDATE OF dataset_id,project_id ON processing_tasks WHEN EXISTS(SELECT 1 FROM viewer_source_spool_holds WHERE task_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
+    CREATE TRIGGER viewer_source_spool_task_active BEFORE UPDATE OF active_attempt_id ON processing_tasks WHEN NEW.active_attempt_id IS NOT OLD.active_attempt_id AND EXISTS(SELECT 1 FROM viewer_source_spool_holds WHERE task_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
+    CREATE TRIGGER viewer_source_spool_task_archive BEFORE UPDATE OF status,purged_at ON processing_tasks WHEN (NEW.status='archived' OR NEW.purged_at IS NOT NULL) AND EXISTS(SELECT 1 FROM viewer_source_spool_holds WHERE task_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
+    CREATE TRIGGER viewer_source_spool_task_delete BEFORE DELETE ON processing_tasks WHEN EXISTS(SELECT 1 FROM viewer_source_spool_holds WHERE task_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
+    CREATE TRIGGER viewer_source_spool_project_archive BEFORE UPDATE OF status,purged_at ON projects WHEN (NEW.status<>'active' OR NEW.purged_at IS NOT NULL) AND EXISTS(SELECT 1 FROM viewer_source_spool_holds WHERE project_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
+    CREATE TRIGGER viewer_source_spool_project_delete BEFORE DELETE ON projects WHEN EXISTS(SELECT 1 FROM viewer_source_spool_holds WHERE project_id=OLD.id) BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
+    CREATE TRIGGER viewer_source_spool_trash_insert BEFORE INSERT ON storage_trash WHEN EXISTS(SELECT 1 FROM viewer_source_spool_holds h WHERE (NEW.entity_type='dataset' AND NEW.entity_id=h.dataset_id) OR (NEW.entity_type='task' AND NEW.entity_id=h.task_id) OR (NEW.entity_type='project' AND NEW.entity_id=h.project_id)) BEGIN SELECT RAISE(ABORT,'source hold retained'); END;
+  `},
 ];
 
 function applyMigrations(database) {

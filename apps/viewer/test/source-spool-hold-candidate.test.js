@@ -1,0 +1,19 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+const {openDatabase}=require('../server/database');
+const {prepareSourceSpoolHold}=require('../server/sourceSpoolHoldCandidate');
+function fixture(t){const root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-source-hold-')),file=path.join(root,'viewer.sqlite'),db=openDatabase(file);t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});db.exec(`
+ INSERT INTO projects(id,display_name,created_at,updated_at) VALUES('p','Project','t','t');
+ INSERT INTO datasets(id,project_id,display_name,storage_mode,root_key,relative_path,status,manifest_sha256,created_at,updated_at) VALUES('d','p','Dataset','managed','datasets','d','finalized','${'a'.repeat(64)}','t','t');
+ INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,created_at) VALUES('f','d','f.jpg',1,'${'b'.repeat(64)}','t');
+ INSERT INTO processing_tasks(id,project_id,dataset_id,display_name,status,created_at,updated_at) VALUES('t','p','d','Task','draft','t','t');
+ INSERT INTO processing_attempts(id,task_id,attempt_number,options_json,status,created_at,updated_at) VALUES('a','t',1,'{}','pending','t','t');
+ UPDATE processing_tasks SET active_attempt_id='a' WHERE id='t';`);return db;}
+test('actual Viewer rows acquire an immutable hold and refuse covered metadata and trash mutations',t=>{
+ const db=fixture(t);assert.deepEqual(prepareSourceSpoolHold(db,{attemptId:'a'}),{state:'held',replayed:false});assert.deepEqual(prepareSourceSpoolHold(db,{attemptId:'a'}),{state:'held',replayed:true});
+ for(const sql of ["UPDATE datasets SET status='trashed' WHERE id='d'","DELETE FROM dataset_files WHERE id='f'","UPDATE dataset_files SET sha256='c' WHERE id='f'","UPDATE processing_tasks SET dataset_id='d' WHERE id='t'","UPDATE processing_tasks SET active_attempt_id=NULL WHERE id='t'","UPDATE processing_tasks SET status='archived' WHERE id='t'","DELETE FROM processing_tasks WHERE id='t'","UPDATE projects SET status='archived' WHERE id='p'","DELETE FROM projects WHERE id='p'","DELETE FROM viewer_source_spool_holds WHERE attempt_id='a'","INSERT INTO storage_trash(id,entity_type,entity_id,root_key,relative_path,purge_after,created_at) VALUES('s','project','p','datasets','d','later','t')","INSERT INTO storage_mutations(id,mutation_type,entity_type,entity_id,trash_id,status,created_at,updated_at) VALUES('m','trash','dataset','d','trash-1','intent','t','t')"]) assert.throws(()=>db.exec(sql),/source hold retained/);
+ db.exec("UPDATE processing_attempts SET status='cancelled' WHERE id='a'; UPDATE processing_tasks SET status='cancelled' WHERE id='t'");
+ assert.equal(db.prepare('SELECT count(*) n FROM viewer_source_spool_holds').get().n,1,'cancellation does not release retained source');
+});
+test('an existing dataset mutation prevents a hold',t=>{const db=fixture(t);db.exec("INSERT INTO storage_mutations(id,mutation_type,entity_type,entity_id,trash_id,status,created_at,updated_at) VALUES('m','trash','dataset','d','trash-1','intent','t','t')");assert.throws(()=>prepareSourceSpoolHold(db,{attemptId:'a'}),{code:'SOURCE_SPOOL_HOLD_UNAVAILABLE'});assert.equal(db.prepare('SELECT count(*) n FROM viewer_source_spool_holds').get().n,0)});
+test('a reopened connection sees the hold and cannot archive the parent',t=>{const db=fixture(t);prepareSourceSpoolHold(db,{attemptId:'a'});const file=db.prepare('PRAGMA database_list').all().find(row=>row.name==='main').file,second=openDatabase(file);try{assert.equal(second.prepare('SELECT count(*) n FROM viewer_source_spool_holds').get().n,1);assert.throws(()=>second.exec("UPDATE projects SET status='archived' WHERE id='p'"),/source hold retained/);}finally{second.close();}});
