@@ -158,6 +158,14 @@ const config = {
 
   processingPlatformEnabled: bool(process.env.PROCESSING_PLATFORM_ENABLED, false),
   processingWorkerEnabled: bool(process.env.PROCESSING_WORKER_ENABLED, false),
+  // The reference-v1 accepted-copy endpoint is disabled unless explicitly
+  // enabled with dedicated durable storage and a dedicated service identity.
+  referenceAcceptanceEnabled: bool(process.env.VIEWER_REFERENCE_ACCEPTANCE_ENABLED, false),
+  referenceAcceptanceDatabasePath: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_DATABASE_PATH || '').trim(),
+  referenceAcceptanceManagedRoot: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_MANAGED_ROOT || '').trim(),
+  referenceAcceptanceMaxBytes: Math.min(positiveInteger(process.env.VIEWER_REFERENCE_ACCEPTANCE_MAX_BYTES, 100 * 1024 ** 3), 2 * 1024 ** 4),
+  referenceAcceptanceServiceKeyId: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_SERVICE_KEY_ID || '').trim(),
+  referenceAcceptanceEnvironment: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_ENVIRONMENT || (production ? 'production' : 'staging')).trim(),
   processingRoot,
   datasetsMount: process.env.DATASETS_MOUNT || path.join(processingRoot, 'datasets'),
   modelsMount: process.env.MODELS_MOUNT || path.join(processingRoot, 'models'),
@@ -165,6 +173,7 @@ const config = {
   trashMount: process.env.TRASH_MOUNT || path.join(processingRoot, 'trash'),
   datasetImportMount: process.env.DATASET_IMPORT_MOUNT || '',
   uploadChunkBytes: Math.min(positiveInteger(process.env.UPLOAD_CHUNK_BYTES, 16 * 1024 * 1024), 32 * 1024 * 1024),
+  referenceAcceptanceChunkBytes: Math.min(positiveInteger(process.env.VIEWER_REFERENCE_ACCEPTANCE_CHUNK_BYTES, 4 * 1024 * 1024), 4 * 1024 * 1024),
   uploadMaxFiles: Math.min(positiveInteger(process.env.UPLOAD_MAX_FILES, 20000), 100000),
   uploadMaxManifestBytes: Math.min(positiveInteger(process.env.UPLOAD_MAX_MANIFEST_BYTES, 2 * 1024 * 1024), 5 * 1024 * 1024),
   storageReserveBytes: positiveInteger(process.env.STORAGE_RESERVE_BYTES, 20 * 1024 * 1024 * 1024),
@@ -253,6 +262,30 @@ function validate() {
       try { const u=new URL(origin);if(u.origin!==origin||u.username||u.password||!['http:','https:'].includes(u.protocol))throw new Error(); }
       catch { problems.push(`PROCESSING_PROVIDER_ORIGINS contains invalid exact origin: ${origin}`); }
     }
+  }
+  if (config.referenceAcceptanceEnabled) {
+    if (!config.processingPlatformEnabled)
+      problems.push('PROCESSING_PLATFORM_ENABLED must be true when Viewer reference acceptance is enabled');
+    if (process.platform !== 'linux')
+      problems.push('Viewer reference acceptance requires Linux directory fsync support');
+    if (!path.isAbsolute(config.referenceAcceptanceDatabasePath))
+      problems.push('VIEWER_REFERENCE_ACCEPTANCE_DATABASE_PATH must be absolute when enabled');
+    if (!path.isAbsolute(config.referenceAcceptanceManagedRoot))
+      problems.push('VIEWER_REFERENCE_ACCEPTANCE_MANAGED_ROOT must be absolute when enabled');
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(config.referenceAcceptanceServiceKeyId))
+      problems.push('VIEWER_REFERENCE_ACCEPTANCE_SERVICE_KEY_ID must name a dedicated service key');
+    if (!['staging', 'production'].includes(config.referenceAcceptanceEnvironment)
+        || config.referenceAcceptanceEnvironment !== (config.production ? 'production' : 'staging'))
+      problems.push('VIEWER_REFERENCE_ACCEPTANCE_ENVIRONMENT must match this server environment');
+    const configuredKeys = config.serviceAuthKeys || { [config.serviceAuthKeyId]: config.serviceAuthSecret };
+    if (config.referenceAcceptanceServiceKeyId === config.serviceAuthKeyId
+        || !configuredKeys[config.referenceAcceptanceServiceKeyId]
+        || configuredKeys[config.referenceAcceptanceServiceKeyId] === configuredKeys[config.serviceAuthKeyId])
+      problems.push('Viewer reference acceptance requires its own service authentication key');
+    const root = path.resolve(config.referenceAcceptanceManagedRoot);
+    const database = path.resolve(config.referenceAcceptanceDatabasePath);
+    if (root && (database === root || database.startsWith(root + path.sep)))
+      problems.push('VIEWER_REFERENCE_ACCEPTANCE_DATABASE_PATH must be outside the accepted-copy root');
   }
   if(Boolean(config.viewerEventPreviousKeyId)!==Boolean(config.viewerEventPreviousSecret))problems.push('VIEWER_EVENT_PREVIOUS_KEY_ID and VIEWER_EVENT_PREVIOUS_SECRET must be configured together');
   if(config.viewerEventPreviousSecret&&config.viewerEventPreviousSecret.length<32)problems.push('VIEWER_EVENT_PREVIOUS_SECRET must contain at least 32 characters');

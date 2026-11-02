@@ -17,6 +17,7 @@ const { createApiV1 } = require('./apiV1');
 const { ProcessingRepository } = require('./processingRepository');
 const { StorageManager } = require('./storageManager');
 const { createProcessingApi } = require('./processingApi');
+const { createReferenceAcceptanceApi, referenceAcceptanceJsonBodyType } = require('./referenceAcceptanceApi');
 const { sanitizeLogMessage } = require('./processingSecurity');
 const { createProxyGate } = require('./proxyGate');
 const { ProviderCredentials } = require('./providerCredentials');
@@ -145,6 +146,9 @@ app.use(express.json({
   // Processing upload manifests are separately validated and capped. Keep the
   // legacy surface small when the processing feature is disabled.
   limit: config.processingPlatformEnabled ? config.uploadMaxManifestBytes : '100kb',
+  // Keep the signed binary reference stream untouched even if a sender sets an
+  // incorrect JSON media type. Its route will reject that type explicitly.
+  type: config.referenceAcceptanceEnabled ? referenceAcceptanceJsonBodyType : 'application/json',
   verify(req, _res, buffer) {
     // HMAC verification must hash the exact octets Ops sent, not a
     // re-serialized JavaScript object.
@@ -161,6 +165,24 @@ app.use(shareApi);
 if (processingRepository) app.use(createProjectShareApi({ repository, processing: processingRepository }));
 app.use(createApiV1(repository));
 if (config.processingPlatformEnabled) app.use(createProcessingApi({ repository, processing: processingRepository, storage: storageManager, providerCredentials }));
+let referenceAcceptanceLedger = null;
+if (config.referenceAcceptanceEnabled) {
+  const { ReferenceAcceptanceLedger } = require('./referenceAcceptance');
+  referenceAcceptanceLedger = new ReferenceAcceptanceLedger({
+    databasePath: config.referenceAcceptanceDatabasePath,
+    managedRoot: config.referenceAcceptanceManagedRoot,
+    maxManagedBytes: config.referenceAcceptanceMaxBytes,
+  });
+  const serviceAuthKeys = config.serviceAuthKeys || { [config.serviceAuthKeyId]: config.serviceAuthSecret };
+  app.use(createReferenceAcceptanceApi({
+    repository,
+    ledger: referenceAcceptanceLedger,
+    serviceKeyId: config.referenceAcceptanceServiceKeyId,
+    serviceAuthKeys,
+    environment: config.referenceAcceptanceEnvironment,
+    chunkBytes: config.referenceAcceptanceChunkBytes,
+  }));
+}
 app.use(apiRouter);
 app.use(assetsRouter);
 
@@ -237,6 +259,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
     // closing the shared SQLite handle. Docker's stop_grace_period is the outer
     // bound if a client never completes.
     server.close((error) => {
+      try { referenceAcceptanceLedger?.close(); } catch { /* already closed */ }
       try { database.close(); } catch { /* already closed */ }
       process.exit(error ? 1 : 0);
     });
