@@ -4,6 +4,7 @@ const {applyMigrations}=require('../server/database');const p=require('../server
 const {prepareReferenceSubmission}=require('../server/referenceSubmissionDraft');const {ReferenceProvider,isVerifiedTransferGrantAck}=require('../server/referenceProvider');
 const {ReferenceAppJournal,processReferenceOne,createSyntheticReferenceDispatcher}=require('../server/referenceAppDispatch');
 const {ReferenceTransferOutbox}=require('../server/referenceTransferOutbox');
+const {ReferenceTransferGrantVault,deriveReferenceTransferGrantKey}=require('../server/referenceTransferGrantVault');
 function fixture(t,databasePath=':memory:'){
  const db=new DatabaseSync(databasePath);t.after(()=>db.close());applyMigrations(db);db.exec('PRAGMA foreign_keys=OFF');
  db.exec(`INSERT INTO projects(id,display_name,status,created_at,updated_at) VALUES('p','P','active','t','t');INSERT INTO datasets(id,project_id,display_name,storage_mode,root_key,relative_path,status,created_at,updated_at) VALUES('d','p','D','managed','datasets','d','finalized','t','t');INSERT INTO processing_tasks(id,project_id,dataset_id,display_name,status,created_at,updated_at) VALUES('t','p','d','T','draft','t','t');INSERT INTO processing_attempts(id,task_id,dataset_id,attempt_number,options_json,status,created_at,updated_at) VALUES('a','t','d',1,'{}','pending','t','t');UPDATE processing_tasks SET active_attempt_id='a' WHERE id='t';UPDATE reference_catalog_projection_state SET scan_complete=1;DROP TRIGGER viewer_reference_attempt_admission_unavailable;DROP TRIGGER viewer_reference_provider_unavailable;DROP TRIGGER viewer_reference_protocol_unavailable;DROP TRIGGER viewer_reference_genesis_unavailable;DROP TRIGGER viewer_reference_genesis_no_existing;INSERT INTO viewer_reference_providers VALUES('r','Ref','https://example.test',0);INSERT INTO viewer_reference_attempt_genesis VALUES('a','r');INSERT INTO viewer_reference_attempt_protocols VALUES('a','r','reference-v1');`);
@@ -113,6 +114,20 @@ function transferOutboxFixture(t,databasePath){
  const input={job:activeJob,reservation,manifestSha256:f.request.manifest.sha256,objectIds,grantId:'grant-outbox',grantIdentitySha256:cryptoHash(JSON.stringify({jobId:bound.jobId,reservationId:reservation.reservationId})),grant};
  return{...f,claim,bound:activeJob,reservation,input,outbox:new ReferenceTransferOutbox(f.db,{journal:f.journal})};
 }
+test('source-range-v2 outbox durably replays the same encrypted bearer after dispatcher reconstruction',t=>{
+ const f=transferOutboxFixture(t),reservation={protocol:'source-range-v2',reservationId:'reservation-v2-outbox',generation:1,expiresAt:new Date(Date.now()+120000).toISOString(),manifestSha256:f.request.manifest.sha256,sourceVersion:`dataset:d:${f.request.manifest.sha256}`,objectIds:['i1'],chunkBytes:8*1024*1024,requestBudget:1,byteBudget:9,nonce:'nonce-v2-outbox',attemptBudget:3};
+ const grant={protocol:'source-range-v2',reservationId:reservation.reservationId,generation:1,expiresAt:new Date(Date.now()+60000).toISOString(),manifestSha256:reservation.manifestSha256,sourceVersion:reservation.sourceVersion,jobId:f.bound.jobId,environment:f.bound.environment,objectIds:['i1'],nonce:reservation.nonce,token:require('node:crypto').randomBytes(32).toString('base64url'),chunkBytes:reservation.chunkBytes,requestBudget:reservation.requestBudget,byteBudget:reservation.byteBudget,attemptBudget:reservation.attemptBudget};
+ const vault=new ReferenceTransferGrantVault(f.db,{key:deriveReferenceTransferGrantKey('stable session secret for synthetic v2 vault 0123456789')}),outbox=new ReferenceTransferOutbox(f.db,{journal:f.journal,grantVault:vault});
+ const job={...f.bound,transferRequest:reservation},input={job,reservation,manifestSha256:f.request.manifest.sha256,grant};
+ const row=outbox.prepare(f.claim,input),stored=f.db.prepare('SELECT ciphertext,state FROM viewer_reference_transfer_grant_vault WHERE outbox_id=?').get(row.outbox_id);
+ assert.equal(stored.state,'active');assert.equal(Buffer.from(stored.ciphertext).includes(Buffer.from(grant.token)),false);
+ const restarted=new ReferenceTransferOutbox(f.db,{journal:f.journal,grantVault:new ReferenceTransferGrantVault(f.db,{key:deriveReferenceTransferGrantKey('stable session secret for synthetic v2 vault 0123456789')})});
+ const provider={postTransferGrant:async()=>{}};
+ assert.equal(restarted.beginSend(f.claim,row.outbox_id,{provider}).state,'sending');
+ assert.deepEqual(vault.load(row.outbox_id),grant);
+ assert.equal(restarted.markUncertain(f.claim,row.outbox_id).state,'uncertain');
+ assert.throws(()=>f.journal.release(f.claim),{code:'reference_dispatch_reconciliation_pending'});
+});
 test('release serializes against a second-connection sender transition',t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'reference-release-race-')),file=path.join(root,'viewer.sqlite');
  const f=transferOutboxFixture(t,file),row=f.outbox.prepare(f.claim,f.input),other=new DatabaseSync(file);other.exec('PRAGMA busy_timeout=0');t.after(()=>other.close());t.after(()=>fs.rmSync(root,{recursive:true,force:true}));

@@ -60,7 +60,7 @@ function validateSourceRangeGrant(v, expected) {
   if(v.protocol!=='source-range-v2'||v.environment!==expected.environment)fail('BINDING_MISMATCH');
   slug(v.jobId); slug(v.reservationId); slug(v.nonce); integer(v.generation); hash(v.manifestSha256);
   if(typeof v.expiresAt!=='string'||!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(v.expiresAt)
-    ||!Number.isFinite(Date.parse(v.expiresAt))||new Date(v.expiresAt).toISOString()!==v.expiresAt
+    ||!Number.isFinite(Date.parse(v.expiresAt))||new Date(v.expiresAt).toISOString()!==v.expiresAt||Date.parse(v.expiresAt)<=Date.now()
     ||typeof v.sourceVersion!=='string'||!/^[\x21-\x7e]{1,256}$/.test(v.sourceVersion)
     ||v.chunkBytes!==SOURCE_RANGE_CHUNK_BYTES||!Array.isArray(v.objectIds)||!equal(v.objectIds,expected.objectIds)
     ||!['requestBudget','byteBudget','attemptBudget'].every(key=>Number.isSafeInteger(v[key])&&v[key]>0)
@@ -174,7 +174,8 @@ class ReferenceProvider {
         const transfer=job.transferRequest, manifest=submission.manifest;
         const ids=manifest.objects.map(object=>object.id), minimum=manifest.objects.reduce((sum,object)=>sum+Math.ceil(object.byteSize/SOURCE_RANGE_CHUNK_BYTES),0);
         const sourceVersion=typeof manifest.id==='string'&&manifest.id.startsWith('dataset-')?`dataset:${manifest.id.slice(8)}:${manifest.sha256}`:null;
-        if(sourceVersion!==transfer.sourceVersion||!equal(ids,transfer.objectIds)||transfer.byteBudget<manifest.totalBytes||transfer.byteBudget>p.transferByteBudgetLimit(manifest.totalBytes)||transfer.requestBudget<minimum||transfer.attemptBudget<minimum)fail('BINDING_MISMATCH');
+        const expectedAttempts=Math.min(Number.MAX_SAFE_INTEGER,minimum*3);
+        if(sourceVersion!==transfer.sourceVersion||!equal(ids,transfer.objectIds)||transfer.byteBudget!==p.transferByteBudgetLimit(manifest.totalBytes)||transfer.requestBudget!==minimum||transfer.attemptBudget!==expectedAttempts)fail('BINDING_MISMATCH');
       } else safeValidate(() => p.validateTransferByteBudget(submission.manifest.totalBytes,job.transferRequest.byteBudget));
     }
     this.#jobs.set(job.jobId,structuredClone(job)); return job;
@@ -306,4 +307,4 @@ class ReferenceProvider {
     })();
   }
 }
-module.exports = { ReferenceProvider, ReferenceProviderError, isVerifiedTransferGrantAck };
+module.exports = { ReferenceProvider, ReferenceProviderError, isVerifiedTransferGrantAck, sourceRangeTransferRequest, validateSourceRangeGrant };

@@ -5,6 +5,7 @@ const {DatabaseSync}=require('node:sqlite');
 // Only the newly allocated migration identities are checked here. Earlier
 // ledger history retains its established compatibility behavior.
 const protectedMigrations=[
+  {version:66,name:'viewer_reference_transfer_grant_vault_candidate',objects:['viewer_reference_transfer_grant_vault','viewer_reference_transfer_grant_vault_no_replace','viewer_reference_transfer_grant_vault_transition','viewer_reference_transfer_grant_vault_no_delete']},
   {version:65,name:'viewer_source_copy_outbox_candidate',objects:['viewer_source_copy_outbox','viewer_source_copy_outbox_no_delete','viewer_source_copy_outbox_no_replace','viewer_source_copy_outbox_transition']},
   {version:64,name:'viewer_source_spool_generation_hold_candidate',objects:['viewer_source_spool_generation_holds','viewer_source_spool_generation_no_update','viewer_source_spool_generation_no_delete','viewer_source_spool_generation_no_replace']},
   {version:63,name:'viewer_source_spool_copy_candidate',objects:['viewer_source_spool_intents','viewer_source_spool_intent_no_delete','viewer_source_spool_intent_no_replace','viewer_source_spool_intent_transition']},
@@ -121,6 +122,7 @@ function assertProtectedMigrationIdentity(database,migrations) {
       if(spec.version===63)expected.exec('CREATE TABLE viewer_source_spool_holds(attempt_id TEXT PRIMARY KEY)');
       if(spec.version===64)expected.exec('CREATE TABLE viewer_source_spool_holds(attempt_id TEXT PRIMARY KEY)');
       if(spec.version===65)expected.exec('CREATE TABLE viewer_source_spool_generation_holds(attempt_id TEXT,generation INTEGER,PRIMARY KEY(attempt_id,generation))');
+      if(spec.version===66)expected.exec('CREATE TABLE viewer_reference_transfer_outbox(outbox_id TEXT PRIMARY KEY,state TEXT)');
       expected.exec(expectedMigration.sql);
       for(let i=0;i<spec.objects.length;i++) {
         const object=spec.objects[i],matches=found[i],actual=matches[0],reference=expected.prepare('SELECT type,tbl_name,sql FROM sqlite_master WHERE name=?').get(object);

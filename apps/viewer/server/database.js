@@ -2715,6 +2715,29 @@ const MIGRATIONS = [
     CREATE TRIGGER viewer_source_copy_outbox_no_replace BEFORE INSERT ON viewer_source_copy_outbox WHEN NEW.status<>'requested' OR NEW.receipt_json IS NOT NULL OR EXISTS(SELECT 1 FROM viewer_source_copy_outbox WHERE operation_id=NEW.operation_id OR (attempt_id=NEW.attempt_id AND generation=NEW.generation) OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'copy outbox retained'); END;
     CREATE TRIGGER viewer_source_copy_outbox_transition BEFORE UPDATE ON viewer_source_copy_outbox WHEN NEW.rowid IS NOT OLD.rowid OR NEW.operation_id IS NOT OLD.operation_id OR NEW.attempt_id IS NOT OLD.attempt_id OR NEW.generation IS NOT OLD.generation OR NEW.worker_id IS NOT OLD.worker_id OR NEW.claim_json IS NOT OLD.claim_json OR NEW.claim_sha256 IS NOT OLD.claim_sha256 OR NOT ((OLD.status='requested' AND NEW.status='claimed' AND NEW.receipt_json IS NULL) OR (OLD.status='claimed' AND NEW.status='sealed' AND NEW.receipt_json IS NOT NULL)) BEGIN SELECT RAISE(ABORT,'copy outbox retained'); END;
   `},
+  {version:66,name:'viewer_reference_transfer_grant_vault_candidate',sql:`
+    CREATE TABLE viewer_reference_transfer_grant_vault (
+      outbox_id TEXT PRIMARY KEY NOT NULL REFERENCES viewer_reference_transfer_outbox(outbox_id) ON DELETE RESTRICT,
+      ciphertext BLOB,
+      iv BLOB,
+      auth_tag BLOB,
+      state TEXT NOT NULL CHECK(state IN ('active','cleared')),
+      created_at TEXT NOT NULL,
+      cleared_at TEXT,
+      CHECK((state='active' AND ciphertext IS NOT NULL AND iv IS NOT NULL AND auth_tag IS NOT NULL AND cleared_at IS NULL) OR
+            (state='cleared' AND ciphertext IS NULL AND iv IS NULL AND auth_tag IS NULL AND cleared_at IS NOT NULL))
+    );
+    CREATE TRIGGER viewer_reference_transfer_grant_vault_no_replace BEFORE INSERT ON viewer_reference_transfer_grant_vault
+      WHEN EXISTS(SELECT 1 FROM viewer_reference_transfer_grant_vault WHERE outbox_id=NEW.outbox_id OR rowid=NEW.rowid)
+      BEGIN SELECT RAISE(ABORT,'transfer grant vault retained'); END;
+    CREATE TRIGGER viewer_reference_transfer_grant_vault_transition BEFORE UPDATE ON viewer_reference_transfer_grant_vault
+      WHEN NEW.rowid IS NOT OLD.rowid OR NEW.outbox_id IS NOT OLD.outbox_id OR NEW.created_at IS NOT OLD.created_at OR OLD.state<>'active' OR NEW.state<>'cleared'
+        OR NEW.ciphertext IS NOT NULL OR NEW.iv IS NOT NULL OR NEW.auth_tag IS NOT NULL OR NEW.cleared_at IS NULL
+        OR NOT EXISTS(SELECT 1 FROM viewer_reference_transfer_outbox WHERE outbox_id=OLD.outbox_id AND state='acknowledged')
+      BEGIN SELECT RAISE(ABORT,'transfer grant vault transition invalid'); END;
+    CREATE TRIGGER viewer_reference_transfer_grant_vault_no_delete BEFORE DELETE ON viewer_reference_transfer_grant_vault
+      BEGIN SELECT RAISE(ABORT,'transfer grant vault retained'); END;
+  `},
 ];
 
 function applyMigrations(database) {
