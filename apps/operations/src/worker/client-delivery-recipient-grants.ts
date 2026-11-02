@@ -117,14 +117,8 @@ async function resolveFolder(env: Env, principal: StaffPrincipal, folderRef: str
   let listed: R2Objects;
   try { listed = await env.DATA_BUCKET.list({ prefix, delimiter: "/", limit: 1 }); } catch { return unavailable(); }
   if (!listed.objects.length && !listed.delimitedPrefixes.length) throw new HTTPException(404, { message: "Folder not found" });
-  try {
-    const mapped = await db(env.OPS_DB).prepare(["SELECT 1 ok FROM project_folders folder JOIN pa_projects project ON project.id=folder.project_id",
-      "WHERE project.active=1 AND project.projection_source_id LIKE 'project-alpha:%'",
-      "AND (substr(?,1,length(rtrim(folder.r2_prefix,'/')||'/'))=rtrim(folder.r2_prefix,'/')||'/'",
-      "OR substr(rtrim(folder.r2_prefix,'/')||'/',1,length(?))=?) LIMIT 1"].join(" "))
-      .bind(prefix, prefix, prefix).first();
-    if (mapped) conflict("This folder is covered by a Project Alpha folder mapping; use the project sharing flow.");
-  } catch (error) { if (error instanceof HTTPException) throw error; return unavailable(); }
+  // Ops profile sharing is an independent grant. A PA project mapping may
+  // provide another sharing route, but it must not block direct client sharing.
   return prefix;
 }
 async function readRecord(env: Env, id: string): Promise<RecordRow> {
@@ -267,7 +261,6 @@ async function resolve(env: Env, principal: StaffPrincipal, folderRef: string, r
   expectedVersion: string, mustBeReady: boolean): Promise<Resolved> {
   const prefix = await resolveFolder(env, principal, folderRef), record = await readRecord(env, recipientId);
   const listed = await listClientDeliveryRecipients(env, principal, { folderRef, q: record.display_name, limit: 20 });
-  if (listed.projectFolder) conflict("This folder is covered by a Project Alpha folder mapping; use the project sharing flow.");
   const recipient = listed.recipients.find(row => row.recipientId === recipientId) as Recipient | undefined;
   if (!recipient) return conflict();
   if (recipient.recipientVersion !== expectedVersion || recipient.type !== record.record_kind
@@ -365,7 +358,6 @@ async function listAll(env: Env, principal: StaffPrincipal, folderRef: string) {
     if (authority.workspaceId !== binding.workspaceId) conflict();
     const rootId = await ownerRecordId(env, binding), record = await readRecord(env, rootId);
     const rows = await listClientDeliveryRecipients(env, principal, { folderRef, q: record.display_name, limit: 20 });
-    if (rows.projectFolder) conflict();
     const recipient = rows.recipients.find(value => value.recipientId === rootId) as Recipient | undefined;
     if (!recipient || !publicationContains(authority, parseSnapshot(authority.snapshotJson), record)) return conflict();
     const context = await resolve(env, principal, folderRef, rootId, recipient.recipientVersion, false);

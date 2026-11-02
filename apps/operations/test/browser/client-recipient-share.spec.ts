@@ -109,12 +109,17 @@ test("without the new client list on the server, the existing sharing panel is s
   await expect(page.getByText("Client sharing could not be loaded", { exact: false })).toHaveCount(0);
 });
 
-test("a project folder keeps the project grant flow and its access terms", async ({ page }) => {
+test("an Ops profile can receive a direct folder grant even when the folder has a Project Alpha mapping", async ({ page }) => {
   const calls = await mock(page, { projectFolder: true });
   await openClientTab(page);
-  await expect(page.getByRole("combobox", { name: "Portal connection" })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Share with a client" })).toHaveCount(0);
-  expect(calls.some(call => call.path === "/api/delivery/client-recipients/grants")).toBe(false);
+  const panel = page.getByRole("region", { name: "Share with a client" });
+  await expect(panel).toBeVisible();
+  await page.getByRole("option", { name: /Lori Koschnick/ }).click();
+  await page.getByRole("button", { name: "Review sharing" }).click();
+  await expect(page.getByRole("region", { name: "Review sharing with a client" })).toContainText("This folder and everything in it");
+  await page.getByRole("button", { name: "Share folder" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Shared with Lori Koschnick." })).toBeVisible();
+  expect(calls.some(call => call.path === "/api/delivery/client-recipients/grants" && call.method === "POST")).toBe(true);
 });
 
 for (const [label, listBody] of [

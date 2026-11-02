@@ -88,8 +88,8 @@ export function ClientRecipientSharePanel({ folder, creationEnabled, onUnavailab
         const mode = value.trim() ? "search" : "recent";
         const shape = exact(response, ["mode", "projectFolder", "recipients"]);
         if (!shape || typeof response.projectFolder !== "boolean") throw invalid();
-        // A project folder keeps the project grant flow and its customer/collaborator terms.
-        if (response.projectFolder) { if (available === null) { setAvailable(false); onUnavailable(); return; } throw invalid(); }
+        // Project Alpha folder mappings do not decide whether an Ops profile
+        // can receive a separate Client Workspace grant.
         const rows = response.mode === mode && Array.isArray(response.recipients) && response.recipients.length <= 20
           ? response.recipients.map(recipient) : null;
         if (!rows || rows.some(row => row === null) || new Set(rows.map(row => row!.recipientId)).size !== rows.length) throw invalid();
