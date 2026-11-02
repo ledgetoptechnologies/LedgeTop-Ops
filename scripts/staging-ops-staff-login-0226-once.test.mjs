@@ -292,3 +292,9 @@ test('snapshot query is SELECT-only and parser requires no-write primary-read me
       { observedAt:'2026-10-31T00:00:00.000Z' }), /read_result_invalid/u);
   }
 });
+
+test('receipt labels the seeded feature control row without implying a login binding', () => {
+  const source = fs.readFileSync(new URL('./staging-ops-staff-login-0226-once.mjs', import.meta.url), 'utf8');
+  assert.match(source, /seededControlRows: 1/u);
+  assert.doesNotMatch(source, /seededLoginRows/u);
+});
