@@ -7,7 +7,7 @@ const crypto = require('node:crypto');
 const { decodeV2Metadata: decode, requireSpoolV2Profile: profile, LIMITS } = require('../server/referenceV2StrictCandidate');
 const root = path.join(__dirname, 'fixtures/reference-v2-lexical');
 const cases = require('./fixtures/reference-v2-lexical/index.json');
-const { canonicalBytes } = require('../server/referenceProtocol');
+const { canonicalBytes } = require('./helpers/reference-v2-canonical-snapshot.cjs');
 
 test('rejects exact Processing lexical invalid fixtures with verified bytes', () => {
   for (const item of cases) {
