@@ -23,6 +23,7 @@ const { ProviderCredentials } = require('./providerCredentials');
 const { runtimeIdentity, setRuntimeIdentityHeaders } = require('./runtimeIdentity');
 const { reconcileImportedCameraPhotoLinks } = require('./cameraPhotos');
 const { workspaceConnectSources } = require('./workspaceConnectPolicy');
+const { createSourceRangeV2RuntimeCandidate, sourceRangeV2Middleware } = require('./sourceRangeV2RuntimeCandidate');
 
 const problems = validate();
 if (problems.length) {
@@ -49,6 +50,7 @@ let repository;
 let processingRepository;
 let storageManager;
 let providerCredentials;
+let sourceRangeV2Runtime;
 let buildIdentity;
 try {
   database = openDatabase(config.databasePath);
@@ -61,6 +63,7 @@ try {
     if (migratedProviderCredentials) console.log(`[migration] encrypted ${migratedProviderCredentials} legacy processing provider credential(s)`);
     storageManager = new StorageManager(config);
     storageManager.initialize();
+    sourceRangeV2Runtime = createSourceRangeV2RuntimeCandidate({ config, database, storage: storageManager });
   }
   const migration = migrateLegacyJson(repository, config.dataDir);
   if (!migration.skipped && (migration.models || migration.shares)) {
@@ -114,6 +117,10 @@ app.use((req, res, next) => {
 // Optional staged hardening can additionally require the separately managed
 // proxy's shared header secret and a matching socket source address/CIDR.
 app.use(createProxyGate(config));
+// This handler is absent unless the explicit candidate flag is enabled. In
+// production, the proxy gate authenticates the configured proxy address and
+// shared secret before the handler checks the trusted HTTPS scheme.
+if (sourceRangeV2Runtime) app.use(sourceRangeV2Middleware(sourceRangeV2Runtime.handler));
 
 app.get('/api/v1/health', (_req, res) => {
   setRuntimeIdentityHeaders(res, buildIdentity);
@@ -228,6 +235,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
     // closing the shared SQLite handle. Docker's stop_grace_period is the outer
     // bound if a client never completes.
     server.close((error) => {
+      try { sourceRangeV2Runtime?.close(); } catch { /* best-effort stream shutdown */ }
       try { database.close(); } catch { /* already closed */ }
       process.exit(error ? 1 : 0);
     });

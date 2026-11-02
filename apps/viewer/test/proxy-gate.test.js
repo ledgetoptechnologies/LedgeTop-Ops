@@ -80,3 +80,15 @@ test('production validation permits disabled proxy hardening but rejects malform
   assert.ok(validateProduction({ TRUSTED_PROXY_ADDRESSES: '192.168.50.0/99' }).some((problem) => problem.startsWith('TRUSTED_PROXY_ADDRESSES')));
   assert.deepEqual(validateProduction({ TRUSTED_PROXY_ADDRESSES: '127.0.0.1/32' }), []);
 });
+
+test('production source-range serving requires authenticated trusted HTTPS proxy configuration', () => {
+  const missing = validateProduction({ PROCESSING_PLATFORM_ENABLED: 'true', PROCESSING_SOURCE_RANGE_V2_ENABLED: 'true',
+    TRUSTED_PROXY_ADDRESSES: '', PROXY_SHARED_SECRET: '' });
+  assert.ok(missing.some(problem => problem.includes('PROCESSING_SOURCE_RANGE_V2_ENABLED requires TRUSTED_PROXY_ADDRESSES')));
+  assert.ok(missing.some(problem => problem.includes('PROCESSING_SOURCE_RANGE_V2_ENABLED requires PROXY_SHARED_SECRET')));
+  const configured = validateProduction({ PROCESSING_PLATFORM_ENABLED: 'true', PROCESSING_SOURCE_RANGE_V2_ENABLED: 'true',
+    TRUSTED_PROXY_ADDRESSES: '127.0.0.1/32', PROXY_SHARED_SECRET: validSecret, PROVIDER_CREDENTIALS_KEY: 'a'.repeat(64) });
+  assert.deepEqual(configured, []);
+  const disabled = validateProduction({ PROCESSING_SOURCE_RANGE_V2_ENABLED: 'false', TRUSTED_PROXY_ADDRESSES: '', PROXY_SHARED_SECRET: '' });
+  assert.deepEqual(disabled, []);
+});

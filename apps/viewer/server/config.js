@@ -159,6 +159,9 @@ const config = {
   xAccelRedirectPrefix: String(process.env.X_ACCEL_REDIRECT_PREFIX || '').replace(/\/+$/, ''),
 
   processingPlatformEnabled: bool(process.env.PROCESSING_PLATFORM_ENABLED, false),
+  // Candidate byte-range source serving remains opt-in until its dispatcher,
+  // acknowledgement path and production acceptance are fully integrated.
+  processingSourceRangeV2Enabled: bool(process.env.PROCESSING_SOURCE_RANGE_V2_ENABLED, false),
   processingWorkerEnabled: bool(process.env.PROCESSING_WORKER_ENABLED, false),
   processingRoot,
   datasetsMount: process.env.DATASETS_MOUNT || path.join(processingRoot, 'datasets'),
@@ -258,6 +261,18 @@ function validate() {
       try { const u=new URL(origin);if(u.origin!==origin||u.username||u.password||!['http:','https:'].includes(u.protocol))throw new Error(); }
       catch { problems.push(`PROCESSING_PROVIDER_ORIGINS contains invalid exact origin: ${origin}`); }
     }
+  }
+  if (config.processingSourceRangeV2Enabled) {
+    if (!config.processingPlatformEnabled)
+      problems.push('PROCESSING_SOURCE_RANGE_V2_ENABLED requires PROCESSING_PLATFORM_ENABLED');
+    // The production reverse proxy must be identifiable and authenticated.
+    // req.secure is meaningful only behind this configured trust boundary.
+    if (config.production && !config.trustedProxyAllowlist.entries.length)
+      problems.push('PROCESSING_SOURCE_RANGE_V2_ENABLED requires TRUSTED_PROXY_ADDRESSES in production');
+    if (config.production && !config.proxySharedSecret)
+      problems.push('PROCESSING_SOURCE_RANGE_V2_ENABLED requires PROXY_SHARED_SECRET in production');
+    if (config.production && config.trustProxyHops < 1)
+      problems.push('PROCESSING_SOURCE_RANGE_V2_ENABLED requires a trusted proxy hop in production');
   }
   if(Boolean(config.viewerEventPreviousKeyId)!==Boolean(config.viewerEventPreviousSecret))problems.push('VIEWER_EVENT_PREVIOUS_KEY_ID and VIEWER_EVENT_PREVIOUS_SECRET must be configured together');
   if(config.viewerEventPreviousSecret&&config.viewerEventPreviousSecret.length<32)problems.push('VIEWER_EVENT_PREVIOUS_SECRET must contain at least 32 characters');
