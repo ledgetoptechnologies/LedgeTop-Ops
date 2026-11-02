@@ -422,6 +422,116 @@ enabledTest('metadata alone cannot ACK; chunk transfer resumes and replays safel
   assert.equal(fs.readFileSync(path.join(storage.root, 'receipt-1', 'result-1.bin'), 'utf8'), 'abc');
 });
 
+enabledTest('concurrent commits for one receipt converge on one durable acceptance and recover by authenticated status', async t => {
+  const workers = [];
+  t.after(async () => {
+    await Promise.all(workers.map(async worker => {
+      if (worker.threadId !== -1) await worker.terminate().catch(() => {});
+    }));
+  });
+  const storage = tempStorage(t);
+  const initial = new ReferenceAcceptanceLedger(storage);
+  const initialApi = startRouteHarness({ ledger: initial });
+  assert.equal((await reserve(initialApi)).status, 202);
+  assert.equal((await upload(initialApi, 'abc')).status, 200);
+  initial.close();
+
+  const gate = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+  const privateKeyPem = receiptKeyPair.privateKey.export({ type: 'pkcs8', format: 'pem' });
+  const workerScript = `
+    const { parentPort, workerData } = require('node:worker_threads');
+    const { ReferenceAcceptanceLedger } = require(workerData.ledgerModulePath);
+    const { createViewerReceiptSigner } = require(workerData.receiptModulePath);
+    const ledger = new ReferenceAcceptanceLedger({
+      ...workerData.storage,
+      failpoint(name) {
+        if (name !== 'beforeLedgerCommit') return;
+        parentPort.postMessage({ ready: true });
+        const wait = Atomics.wait(new Int32Array(workerData.gate), 0, 0, 10000);
+        if (wait === 'timed-out') throw new Error('concurrent_acceptance_barrier_timeout');
+      },
+    });
+    const signer = createViewerReceiptSigner({
+      issuerId: 'viewer-acceptance', keyId: 'viewer-test-2026',
+      privateKeyPem: workerData.privateKeyPem,
+    });
+    parentPort.postMessage({ connected: true });
+    parentPort.once('message', () => {
+      try {
+        const record = ledger.commitTransfer(workerData.receiptId, signer, { schemaVersion: 1 });
+        parentPort.postMessage({ outcome: {
+          receiptId: record.acceptance.receiptId,
+          storageReceiptId: record.acceptance.storageReceiptId,
+          viewerReceipt: record.storage.viewerReceipt,
+        } });
+      } catch (error) {
+        parentPort.postMessage({ failure: error.code || error.message || 'unexpected_error' });
+      } finally { ledger.close(); }
+    });
+  `;
+  const startWorker = () => {
+    const worker = new Worker(workerScript, {
+      eval: true,
+      workerData: {
+        ledgerModulePath: path.resolve(__dirname, '../server/referenceAcceptance.js'),
+        receiptModulePath: path.resolve(__dirname, '../server/referenceReceipt.js'),
+        storage,
+        receiptId: fixture.acceptance.receiptId,
+        privateKeyPem,
+        gate,
+      },
+    });
+    let connectedResolve, connectedReject, readyResolve, readyReject, outcomeResolve, outcomeReject, exitResolve, exitReject;
+    const connected = new Promise((resolve, reject) => { connectedResolve = resolve; connectedReject = reject; });
+    const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
+    const outcome = new Promise((resolve, reject) => { outcomeResolve = resolve; outcomeReject = reject; });
+    const exit = new Promise((resolve, reject) => { exitResolve = resolve; exitReject = reject; });
+    for (const pending of [connected, ready, outcome, exit]) pending.catch(() => {});
+    worker.on('message', message => {
+      if (message.connected) connectedResolve();
+      if (message.ready) readyResolve();
+      if (message.outcome) outcomeResolve(message.outcome);
+      if (message.failure) outcomeReject(new Error(`concurrent_acceptance_failed:${message.failure}`));
+    });
+    worker.on('error', error => { connectedReject(error); readyReject(error); outcomeReject(error); });
+    worker.on('exit', code => {
+      if (code === 0) exitResolve();
+      else {
+        const error = new Error(`concurrent_acceptance_worker_exit_${code}`);
+        connectedReject(error); readyReject(error); outcomeReject(error); exitReject(error);
+      }
+    });
+    workers.push(worker);
+    return { worker, connected, ready, outcome, exit };
+  };
+
+  const first = startWorker(); await first.connected;
+  const second = startWorker(); await second.connected;
+  first.worker.postMessage('commit'); second.worker.postMessage('commit');
+  await Promise.all([first.ready, second.ready]);
+  Atomics.store(new Int32Array(gate), 0, 1);
+  Atomics.notify(new Int32Array(gate), 0, 2);
+  const outcomes = await Promise.all([first.outcome, second.outcome]);
+  await Promise.all([first.exit, second.exit]);
+  assert.deepEqual(outcomes[0], outcomes[1], 'both callers receive the same committed signed receipt');
+
+  const ledger = new ReferenceAcceptanceLedger(storage);
+  t.after(() => ledger.close());
+  assert.equal(ledger.db.prepare('SELECT COUNT(*) AS count FROM acceptances').get().count, 1);
+  assert.equal(ledger.db.prepare('SELECT COUNT(*) AS count FROM ack_outbox').get().count, 0,
+    'transfer acceptance returns its receipt directly; it does not create the separate worker ACK outbox item');
+  assert.equal(ledger.db.prepare('SELECT state FROM transfer_intents WHERE receipt_id=?').get(fixture.acceptance.receiptId).state, 'accepted');
+  assert.equal(ledger.db.prepare('SELECT COUNT(*) AS count FROM transfer_objects WHERE receipt_id=?').get(fixture.acceptance.receiptId).count, 1);
+
+  const api = startRouteHarness({ ledger });
+  const status = await api.request('GET', fixture.acceptance.receiptId);
+  assert.equal(status.status, 200);
+  assert.equal(status.body.state, 'accepted');
+  assert.equal(verifyViewerReceipt(status.body.viewerReceipt, trustedReceiptKeys), true);
+  assert.deepEqual(status.body.viewerReceipt, outcomes[0].viewerReceipt);
+  assert.equal(fs.readFileSync(path.join(storage.root, 'receipt-1', 'result-1.bin'), 'utf8'), 'abc');
+});
+
 enabledTest('TreeDar v2 combined result resumes across restart and returns the same full-closure receipt on replay', async t => {
   const storage = tempStorage(t);
   let ledger = new ReferenceAcceptanceLedger(storage);

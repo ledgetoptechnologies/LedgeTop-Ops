@@ -25,6 +25,19 @@ function keys(value, names) {
   if (!value || Object.getPrototypeOf(value) !== Object.prototype || Object.keys(value).length !== names.length || names.some(k => !Object.hasOwn(value, k))) fail('INVALID_STORAGE_METADATA');
 }
 function identifier(value) { if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)) fail('INVALID_IDENTIFIER'); }
+function sameCommittedStorage(existingJson, proposedJson) {
+  let existing, proposed;
+  try { existing = JSON.parse(existingJson); proposed = JSON.parse(proposedJson); }
+  catch { return false; }
+  if (!existing?.viewerReceipt || !proposed?.viewerReceipt) return false;
+  try {
+    protocol.validateViewerReceipt(existing.viewerReceipt);
+    protocol.validateViewerReceipt(proposed.viewerReceipt);
+  } catch { return false; }
+  const { viewerReceipt: _existingReceipt, ...existingCore } = existing;
+  const { viewerReceipt: _proposedReceipt, ...proposedCore } = proposed;
+  return encode(existingCore) === encode(proposedCore);
+}
 function validateTransferPayload(payload) {
   if (!payload || !payload.inputManifest || !payload.expected || !payload.resultManifest || !payload.acceptance) fail('INVALID_ACCEPTANCE_REQUEST');
   protocol.validateManifest(payload.inputManifest);
@@ -483,7 +496,9 @@ class ReferenceAcceptanceLedger {
     const storage = bounded({ managedRoot: this.root, resultManifest, objects: mapping, initialPins: pins, reconstruction, viewerReceipt });
     const existing = this.db.prepare('SELECT * FROM acceptances WHERE receipt_id=? OR storage_id=?').all(acceptance.receiptId, acceptance.storageReceiptId);
     if (existing.length) {
-      if (existing.length !== 1 || existing[0].payload !== payload || existing[0].storage !== storage) fail('ACCEPTANCE_CONFLICT');
+      if (existing.length !== 1 || existing[0].receipt_id !== acceptance.receiptId
+          || existing[0].storage_id !== acceptance.storageReceiptId || existing[0].payload !== payload
+          || !sameCommittedStorage(existing[0].storage, storage)) fail('ACCEPTANCE_CONFLICT');
       return this.getVerified(acceptance.receiptId);
     }
     const generations = this.db.prepare('SELECT generation,binding FROM acceptances WHERE job_id=? AND environment=?').all(acceptance.jobId, acceptance.environment);
@@ -509,6 +524,14 @@ class ReferenceAcceptanceLedger {
       this.failpoint('beforeLedgerCommit');
       this.db.exec('BEGIN IMMEDIATE');
       try {
+        const committed = this.db.prepare('SELECT * FROM acceptances WHERE receipt_id=? OR storage_id=?').all(acceptance.receiptId, acceptance.storageReceiptId);
+        if (committed.length) {
+          if (committed.length !== 1 || committed[0].receipt_id !== acceptance.receiptId
+              || committed[0].storage_id !== acceptance.storageReceiptId || committed[0].payload !== payload
+              || !sameCommittedStorage(committed[0].storage, storage)) fail('ACCEPTANCE_CONFLICT');
+          this.db.exec('ROLLBACK');
+          return this.getVerified(acceptance.receiptId);
+        }
         const current = this.db.prepare('SELECT generation,binding FROM acceptances WHERE job_id=? AND environment=?').all(acceptance.jobId, acceptance.environment);
         if (current.some(r => r.generation > acceptance.generation || r.generation === acceptance.generation && r.binding !== binding)) fail('GENERATION_CONFLICT');
         this.db.prepare('INSERT INTO acceptances VALUES(?,?,?,?,?,?,?,?)').run(acceptance.receiptId, acceptance.storageReceiptId, acceptance.jobId, acceptance.environment, acceptance.generation, binding, payload, storage);
