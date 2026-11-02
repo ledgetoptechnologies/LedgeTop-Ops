@@ -1,14 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
     <UseWPF>true</UseWPF>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AssemblyName>LedgeTop.Files</AssemblyName>
     <RootNamespace>LedgeTop.Files</RootNamespace>
-    <ApplicationIcon />
+    <ApplicationIcon>../../operations/public/favicon.ico</ApplicationIcon>
   </PropertyGroup>
   <!-- Packaged releases compile their channel in (-p:LedgeTopReleaseChannel=pilot|stable). A developer build must say so
        explicitly (-p:LedgeTopDeveloperBuild=true); a build with neither refuses to connect or show demo data. -->
@@ -19,6 +20,13 @@
   <ItemGroup Condition="'$(LedgeTopDeveloperBuild)' != ''">
     <AssemblyMetadata Include="LedgeTop.BuildMode" Value="developer" />
   </ItemGroup>
+  <!-- Explicit opt-in is permitted solely for an isolated packaged pilot build. -->
+  <PropertyGroup Condition="'$(LedgeTopFreshStaging)' == 'true'">
+    <DefineConstants>$(DefineConstants);LEDGETOP_FRESH_GENERATION_STAGING</DefineConstants>
+  </PropertyGroup>
+  <Target Name="RequireFreshStagingPilot" BeforeTargets="BeforeBuild" Condition="'$(LedgeTopFreshStaging)' != ''">
+    <Error Condition="!$([System.String]::Equals('$(LedgeTopFreshStaging)', 'true', StringComparison.Ordinal)) Or !$([System.String]::Equals('$(LedgeTopPackage)', 'true', StringComparison.Ordinal)) Or !$([System.String]::Equals('$(LedgeTopReleaseChannel)', 'pilot', StringComparison.Ordinal)) Or '$(LedgeTopDeveloperBuild)' != ''" Text="LedgeTopFreshStaging requires an explicitly packaged pilot build." />
+  </Target>
   <Target Name="RequireDeveloperOptIn" BeforeTargets="BeforeBuild"
           Condition="'$(LedgeTopDeveloperBuild)' != '' And !$([System.String]::Equals('$(LedgeTopDeveloperBuild)', 'true', StringComparison.Ordinal))">
     <Error Text="LedgeTopDeveloperBuild must be exactly 'true' (got '$(LedgeTopDeveloperBuild)')." />
@@ -33,8 +41,10 @@
     <Error Text="Package builds need LedgeTopReleaseChannel=pilot or stable (got '$(LedgeTopReleaseChannel)')." />
   </Target>
   <ItemGroup>
+    <AssemblyMetadata Include="LedgeTop.InstallerMaintenanceProtocol" Value="1" />
     <!-- The developer marker belongs to the app only; Core builds once with the same properties either way. -->
     <ProjectReference Include="../Core/WindowsDownload.Core.csproj" GlobalPropertiesToRemove="LedgeTopDeveloperBuild" />
+    <ProjectReference Include="../Explorer/WindowsDownload.Explorer.csproj" GlobalPropertiesToRemove="LedgeTopDeveloperBuild" />
     <InternalsVisibleTo Include="LedgeTop.Files.Tests" />
     <!-- WPF omits these implicit usings; no code here uses WPF's Path shape. -->
     <Using Include="System.IO" />

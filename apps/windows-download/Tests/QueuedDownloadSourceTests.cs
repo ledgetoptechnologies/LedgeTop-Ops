@@ -12,6 +12,12 @@ internal static class QueuedDownloadSourceTests
     private static byte[] Bytes => "synthetic durable source verified content"u8.ToArray();
     private static string Sha => Convert.ToHexStringLower(SHA256.HashData(Bytes));
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
+        ("Company resolve bounded busy retry rechecks and fails closed", BusyRetry),
+        ("Company resolve bounded busy stalled bodies and cancellation", BusyStalled),
+        ("Company busy retry uses a bounded monotonic contention budget", BusyBudget),
+        ("queue authorization timing separates fake token and response header delays", AuthorizationTiming),
+        ("Company hydration authoritative HTTP resolve removes only redundant Session probes", CompanyHydrationAuthority),
+        ("queue bounded auth diagnostics distinguish actual HTTP401 operations", AuthDiagnostics),
         ("queue source employee and portal metadata renews exact identity with human fixed-origin GETs", Metadata),
         ("queue source selection queries encode once and unsafe selectors reject before authentication", Selection),
         ("queue source manifests reject foreign URLs weak metadata and unknown JSON fields", InvalidManifests),
@@ -19,11 +25,213 @@ internal static class QueuedDownloadSourceTests
         ("queue source verified downloader emits truthful progress without credential persistence", Download),
         ("queue source cancellation does not launch login or start another request", Cancellation),
         ("queue actual adapter joins lightweight reference durable enqueue renewal and verified completion", JoinedQueue),
-        ("portal queue resumes an owned partial through only the dedicated successor byte path", SuccessorResume)
+        ("portal queue resumes an owned partial through only the dedicated successor byte path", SuccessorResume),
+        ("queue metadata diagnostics classify bounded reasons and actual HTTP status", FailureReasons)
     ];
+    private static HttpResponseMessage Busy(string body = "{\"error\":\"employee_gateway_busy\"}") {
+        var response = new HttpResponseMessage(HttpStatusCode.ServiceUnavailable) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+        response.Headers.CacheControl = new CacheControlHeaderValue { NoStore = true }; return response;
+    }
+    private static async Task BusyRetry() {
+        using var f = new Fixture();
+        var attempts = 0;
+        using (var source = f.Source(true, new Handler((_, _) => Task.FromResult(++attempts < 3 ? Busy() : Json(Envelope(true)))))) {
+            await source.ResolveAsync(Reference); Assert(attempts == 3);
+        }
+        attempts = 0;
+        using (var source = f.Source(true, new Handler((_, _) => Task.FromResult(++attempts == 1 ? Busy() : new HttpResponseMessage(HttpStatusCode.Forbidden))))) {
+            await Throws<AccessDeniedException>(() => source.ResolveAsync(Reference)); Assert(attempts == 2);
+        }
+        attempts = 0;
+        using (var source = f.Source(true, new Handler((_, _) => { attempts++; return Task.FromResult(Busy()); }), clock: new FakeBusyClock().Clock)) {
+            await Throws<TransferException>(() => source.ResolveAsync(Reference)); Assert(attempts == 10);
+        }
+        foreach (var employee in new[] { true, false }) {
+            attempts = 0;
+            using var source = f.Source(employee, new Handler((_, _) => { attempts++; return Task.FromResult(Busy(employee ? "{\"error\":\"other\"}" : "{\"error\":\"employee_gateway_busy\"}")); }));
+            await Throws<TransferException>(() => source.ResolveAsync(Reference)); Assert(attempts == 1);
+        }
+        using var cts = new CancellationTokenSource(); attempts = 0;
+        using (var source = f.Source(true, new Handler((_, _) => { attempts++; cts.Cancel(); return Task.FromResult(Busy()); }))) {
+            await Throws<OperationCanceledException>(() => source.ResolveAsync(Reference, cts.Token)); Assert(attempts == 1);
+        }
+    }
+    private sealed class FakeBusyClock {
+        internal long Milliseconds;
+        internal BusyRetryClock Clock => new(() => Milliseconds, start => TimeSpan.FromMilliseconds(Milliseconds - start),
+            cap => cap, (delay, token) => { token.ThrowIfCancellationRequested(); Milliseconds += (long)delay.TotalMilliseconds; return Task.CompletedTask; });
+    }
+    private static async Task BusyBudget() {
+        using var f = new Fixture(); var clock = new FakeBusyClock(); var attempts = 0;
+        using (var source = f.Source(true, new Handler((_, _) => Task.FromResult(++attempts < 7 ? Busy() : Json(Envelope(true)))), clock: clock.Clock)) {
+            await source.ResolveAsync(Reference); Assert(clock.Milliseconds >= 10_000 && attempts == 7);
+        }
+        clock = new(); attempts = 0;
+        using (var source = f.Source(true, new Handler((_, _) => { attempts++; clock.Milliseconds += 5_000; return Task.FromResult(Busy()); }), clock: clock.Clock)) {
+            try { await source.ResolveAsync(Reference); throw new Exception("Expected busy failure"); }
+            catch (TransferException error) {
+                var diagnostic = HydrationFailureDiagnostic.FromException(HydrationStage.AuthorizationBefore, error);
+                Assert(error.Reason == TransferFailureReason.ServiceBusy && error.HttpStatus is null && diagnostic.ActivityText.Contains("file service is busy", StringComparison.Ordinal));
+                Assert(!diagnostic.ActivityText.Contains(Reference, StringComparison.Ordinal));
+            }
+            Assert(clock.Milliseconds >= 30_000 && attempts < 10);
+        }
+        var generic = HydrationFailureDiagnostic.FromException(HydrationStage.AuthorizationBefore, new TransferException("generic", TransferFailureReason.UnexpectedHttpStatus, 503));
+        var cancelled = HydrationFailureDiagnostic.FromException(HydrationStage.AuthorizationBefore, new OperationCanceledException());
+        Assert(!generic.ActivityText.Contains("file service is busy", StringComparison.Ordinal));
+        Assert(cancelled.Category == HydrationFailureCategory.Cancelled && !cancelled.ActivityText.Contains("file service is busy", StringComparison.Ordinal));
+        using var boundaryCancel = new CancellationTokenSource(); attempts = 0;
+        var boundaryClock = new BusyRetryClock(() => 0, _ => { boundaryCancel.Cancel(); return TimeSpan.FromSeconds(30); },
+            _ => throw new Exception("No jitter after cancellation"), (_, _) => throw new Exception("No wait after cancellation"));
+        using (var source = f.Source(true, new Handler((_, _) => { attempts++; return Task.FromResult(Busy()); }), clock: boundaryClock)) {
+            await Throws<OperationCanceledException>(() => source.ResolveAsync(Reference, boundaryCancel.Token)); Assert(attempts == 1);
+        }
+        clock = new(); attempts = 0;
+        using (var source = f.Source(true, new Handler((_, _) => { attempts++; if (attempts == 2) clock.Milliseconds += 35_000; return Task.FromResult(attempts == 1 ? Busy() : Json(Envelope(true))); }), clock: clock.Clock)) {
+            await source.ResolveAsync(Reference); Assert(attempts == 2 && clock.Milliseconds > 30_000);
+        }
+    }
+    private sealed class StalledStream : Stream {
+        private readonly TaskCompletionSource<int> blocked = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly bool partial;
+        private bool sent;
+        public StalledStream(bool partial) { this.partial = partial; }
+        public override bool CanRead => true; public override bool CanSeek => false; public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException(); public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken token = default) {
+            if (partial && !sent) { sent = true; buffer.Span[0] = (byte)'{'; return ValueTask.FromResult(1); }
+            return new(blocked.Task); // deliberately ignores the cancellation token
+        }
+        protected override void Dispose(bool disposing) { blocked.TrySetResult(0); base.Dispose(disposing); }
+        public override int Read(byte[] b, int o, int c) => throw new NotSupportedException(); public override void Flush() { }
+        public override long Seek(long o, SeekOrigin origin) => throw new NotSupportedException(); public override void SetLength(long v) => throw new NotSupportedException(); public override void Write(byte[] b, int o, int c) => throw new NotSupportedException();
+    }
+    private static async Task BusyStalled() {
+        using var f = new Fixture();
+        foreach (bool partial in new[] { false, true }) {
+            var attempts = 0;
+            using var source = f.Source(true, new Handler((_, _) => { attempts++; var r = new HttpResponseMessage(HttpStatusCode.ServiceUnavailable) { Content = new StreamContent(new StalledStream(partial)) }; r.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json"); r.Headers.CacheControl = new CacheControlHeaderValue { NoStore = true }; return Task.FromResult(r); }));
+            var watch = System.Diagnostics.Stopwatch.StartNew(); await Throws<TransferException>(() => source.ResolveAsync(Reference));
+            Assert(attempts == 1 && watch.Elapsed < TimeSpan.FromSeconds(6));
+        }
+        var count = 0; using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        using var cancelled = f.Source(true, new Handler((_, _) => { count++; var r = new HttpResponseMessage(HttpStatusCode.ServiceUnavailable) { Content = new StreamContent(new StalledStream(true)) }; r.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json"); r.Headers.CacheControl = new CacheControlHeaderValue { NoStore = true }; return Task.FromResult(r); }));
+        await Throws<OperationCanceledException>(() => cancelled.ResolveAsync(Reference, cancellation.Token)); Assert(count == 1);
+        var retryCount = 0; using var retryCancel = new CancellationTokenSource();
+        using var waiting = f.Source(true, new Handler((_, _) => { retryCount++; retryCancel.CancelAfter(TimeSpan.FromMilliseconds(75)); return Task.FromResult(Busy()); }));
+        await Throws<OperationCanceledException>(() => waiting.ResolveAsync(Reference, retryCancel.Token)); Assert(retryCount == 1);
+    }
+    private static async Task AuthorizationTiming()
+    {
+        var gateIdentity = new PlaceholderIdentity("pilot", "employee", "https://ops-staging.ledgetopdroneservices.com", Principal, Reference, "oef1_" + new string('a', 64), "v1", "synthetic.bin", 1, "\"v1\"", new string('b', 64));
+        using (var gateTiming = new HydrationTiming(_ => { })) {
+            using var eligible = AuthorizationTimingScope.Begin(gateTiming, gateIdentity, true);
+            using var wrongSource = AuthorizationTimingScope.Begin(gateTiming, gateIdentity with { SourceAlias = "portal" }, true);
+            using var wrongOrigin = AuthorizationTimingScope.Begin(gateTiming, gateIdentity with { Origin = "https://ops.example.invalid" }, true);
+            Assert(wrongSource is null && wrongOrigin is null);
+#if LEDGETOP_AUTH_TIMING_STAGING
+            Assert(eligible is not null);
+#else
+            Assert(eligible is null);
+#endif
+        }
+        using var f = new Fixture(); f.Runner.Delay = TimeSpan.FromMilliseconds(35);
+        using var source = f.Source(true, new Handler(async (_, token) => { await Task.Delay(60, token); return Json(Envelope(true)); }));
+        var summaries = new List<HydrationTimingSummary>();
+        using (var timing = new HydrationTiming(summaries.Add)) {
+            using (AuthorizationTimingScope.BeginForTest(timing, true)) await source.ResolveAsync(Reference);
+            timing.Complete(HydrationTimingOutcome.Completed);
+        }
+        var summary = summaries.Single();
+        Assert(summary.AuthorizationCounts[0] == 1 && summary.AuthorizationCounts[1] == 1 && summary.AuthorizationCounts[2] == 0 && summary.AuthorizationCounts[3] == 0);
+        Assert(summary.AuthorizationMilliseconds[0] >= 20 && summary.AuthorizationMilliseconds[1] >= 40);
+        Assert(!summary.ActivityText.Contains(f.Runner.Token, StringComparison.Ordinal) && !summary.ActivityText.Contains("https:", StringComparison.Ordinal) && !summary.ActivityText.Contains(Reference, StringComparison.Ordinal));
+        var failed = new List<HydrationTimingSummary>();
+        using (var timing = new HydrationTiming(failed.Add)) {
+            f.Runner.Error = new IOException("private synthetic token error");
+            using (AuthorizationTimingScope.BeginForTest(timing, false)) await Throws<LoginRequiredException>(() => source.ResolveAsync(Reference));
+            timing.Complete(HydrationTimingOutcome.Failed);
+        }
+        Assert(failed.Single().AuthorizationCounts[2] == 1 && failed.Single().AuthorizationCounts[3] == 0);
+        Assert(!failed.Single().ActivityText.Contains("private", StringComparison.Ordinal));
+        async Task<HydrationTimingSummary> Parallel(bool before) {
+            using var fixture = new Fixture(); fixture.Runner.Delay = TimeSpan.FromMilliseconds(20);
+            using var parallelSource = fixture.Source(true, new Handler(async (_, token) => { await Task.Delay(25, token); return Json(Envelope(true)); }));
+            var output = new List<HydrationTimingSummary>();
+            using var timing = new HydrationTiming(output.Add);
+            using (AuthorizationTimingScope.BeginForTest(timing, before)) await parallelSource.ResolveAsync(Reference);
+            timing.Complete(HydrationTimingOutcome.Completed); return output.Single();
+        }
+        var concurrent = await Task.WhenAll(Parallel(true), Parallel(false));
+        Assert(concurrent[0].AuthorizationCounts.SequenceEqual(new[] { 1, 1, 0, 0 }) && concurrent[1].AuthorizationCounts.SequenceEqual(new[] { 0, 0, 1, 1 }));
+        using var cancelledFixture = new Fixture(); cancelledFixture.Runner.Delay = TimeSpan.FromMilliseconds(10);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancelledSource = cancelledFixture.Source(true, new Handler(async (_, token) => { entered.TrySetResult(); await Task.Delay(5000, token); return Json(Envelope(true)); }));
+        using var cancellation = new CancellationTokenSource(); var cancelled = new List<HydrationTimingSummary>();
+        using (var timing = new HydrationTiming(cancelled.Add)) {
+            using (AuthorizationTimingScope.BeginForTest(timing, true)) {
+                var pending = cancelledSource.ResolveAsync(Reference, cancellation.Token);
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(10)); cancellation.Cancel();
+                await Throws<OperationCanceledException>(() => pending);
+            }
+            timing.Complete(HydrationTimingOutcome.Cancelled);
+        }
+        Assert(cancelled.Single().AuthorizationCounts[0] == 1 && cancelled.Single().AuthorizationCounts[1] == 1 && cancelled.Single().Outcome == HydrationTimingOutcome.Cancelled);
+    }
     private static void Assert(bool value) { if (!value) throw new Exception("Queue source assertion failed."); }
     private static async Task Throws<T>(Func<Task> run) where T : Exception { try { await run(); } catch (T) { return; } throw new Exception("Expected safe queue source failure."); }
     private static string Base(bool employee) => employee ? "/api/staff/files" : "/api/client/operations/data";
+    private static async Task FailureReasons()
+    {
+        using var fixture = new Fixture();
+        foreach (var employee in new[] { true, false }) {
+            using (var source=fixture.Source(employee,new Handler((_,_)=>Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden))))) {
+                try { await source.GetSessionAsync(); throw new Exception("Expected session denial."); }
+                catch(AccessDeniedException denied) { Assert(denied.Operation==DenialOperation.QueueSession && denied.MediaType==DenialMediaType.Unknown); }
+                if (source is EmployeeQueuedDownloadSource staff) {
+                    try { await staff.GetReferenceAsync("11111111-1111-4111-8111-111111111111","test.txt"); throw new Exception("Expected reference denial."); }
+                    catch(AccessDeniedException denied) { Assert(denied.Operation==DenialOperation.QueueReference && denied.MediaType==DenialMediaType.Unknown); }
+                }
+            }
+            foreach (var item in new[] { ("text/html",DenialMediaType.Html), ("application/json",DenialMediaType.Json), ("application/private-secret",DenialMediaType.Other) }) {
+                using var source = fixture.Source(employee, new Handler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden) { Content = new StringContent("secret-body", System.Text.Encoding.UTF8, item.Item1) })));
+                try { await source.ResolveAsync(Reference); throw new Exception("Expected HTTP denial."); }
+                catch (AccessDeniedException denied) { Assert(denied.Reason == AccessDenialReason.HttpForbidden && denied.Operation==DenialOperation.QueueResolve && denied.MediaType==item.Item2 && !denied.Message.Contains("secret")); }
+            }
+            foreach (var status in new[] { HttpStatusCode.Unauthorized, HttpStatusCode.Forbidden, HttpStatusCode.NotFound, HttpStatusCode.Conflict }) {
+                using var source = fixture.Source(employee, new Handler((_, _) => Task.FromResult(new HttpResponseMessage(status))));
+                if (status == HttpStatusCode.Unauthorized) await Throws<LoginRequiredException>(() => source.ResolveAsync(Reference));
+                else if (status == HttpStatusCode.Forbidden) {
+                    try { await source.ResolveAsync(Reference); throw new Exception("Expected HTTP denial."); }
+                    catch (AccessDeniedException denied) { Assert(denied.Reason == AccessDenialReason.HttpForbidden); }
+                }
+                else await Throws<ResourceUnavailableException>(() => source.ResolveAsync(Reference));
+            }
+            foreach (var status in new[] { 302, 400, 429, 503 }) {
+                var handler = new Handler((_, _) => Task.FromResult(new HttpResponseMessage((HttpStatusCode)status)));
+                using var source = fixture.Source(employee, handler);
+                try { await source.ResolveAsync(Reference); throw new Exception("Expected actual HTTP status."); }
+                catch (TransferException error) { Assert(error.Reason == TransferFailureReason.UnexpectedHttpStatus && error.HttpStatus == status && error.InnerException is null); }
+                Assert(handler.Calls == 1);
+            }
+            using (var source = fixture.Source(employee, new Handler((_, _) => Task.FromResult(Json(new { unexpected = "private-detail" }))))) {
+                try { await source.ResolveAsync(Reference); throw new Exception("Expected invalid metadata."); }
+                catch (TransferException error) { Assert(error.Reason == TransferFailureReason.InvalidMetadata && error.HttpStatus is null && !error.Message.Contains("private-detail", StringComparison.Ordinal)); }
+            }
+            foreach (var (failure, reason) in new (Exception, TransferFailureReason)[] {
+                (new HttpRequestException("private-detail"), TransferFailureReason.Network),
+                (new IOException("private-detail"), TransferFailureReason.ResponseRead),
+                (new OperationCanceledException("private-detail"), TransferFailureReason.Timeout) }) {
+                using var source = fixture.Source(employee, new Handler((_, _) => throw failure));
+                try { await source.ResolveAsync(Reference); throw new Exception("Expected transport classification."); }
+                catch (TransferException error) { Assert(error.Reason == reason && error.HttpStatus is null && error.InnerException is null && !error.Message.Contains("private-detail", StringComparison.Ordinal)); }
+            }
+        }
+        using var cancel = new CancellationTokenSource(); cancel.Cancel();
+        var unused = new Handler((_, _) => throw new Exception("Cancelled request reached HTTP."));
+        using var cancelled = fixture.Source(true, unused);
+        await Throws<OperationCanceledException>(() => cancelled.ResolveAsync(Reference, cancel.Token)); Assert(unused.Calls == 0 && fixture.Runner.Logins == 0);
+    }
     private static Dictionary<string, object?> Manifest(bool employee, string handle = "renewed") => new() {
         ["schemaVersion"] = 1, ["logicalFileId"] = (employee ? "oef1_" : "ondf1_") + new string('b',64), ["remoteVersion"] = employee ? Sha : "provider-version-one",
         ["strongETag"] = "\"" + Sha + "\"", ["size"] = Bytes.Length, ["sha256"] = Sha, ["name"] = "queue.bin",
@@ -35,6 +243,98 @@ internal static class QueuedDownloadSourceTests
         if(selected) { result.Remove("manifest"); result["resourceRef"]=Reference; } return result;
     }
     private static HttpResponseMessage Json(object value) => new(HttpStatusCode.OK) {Content=new StringContent(JsonSerializer.Serialize(value),Encoding.UTF8,"application/json")};
+    private static async Task CompanyHydrationAuthority()
+    {
+        foreach (var mode in new[] { "employee", "employee-lifetime", "portal", "portal-lifetime", "opaque-wrapper", "before403", "after403", "beforeBusyThen403", "afterBusyThen403", "after401", "afterPrincipal", "afterVersion", "afterLength", "afterExpiry" }) {
+            using var f = new Fixture(); var sessions = 0; var resolves = 0; var downloads = 0; var busySent = false;
+            var employee = !mode.StartsWith("portal", StringComparison.Ordinal);
+            using var original = f.Source(employee, new Handler((request, _) => {
+                Assert(request.Headers.GetValues("Cf-Access-Token").Single() == f.Runner.Token);
+                if (request.RequestUri!.AbsolutePath.EndsWith("/session", StringComparison.Ordinal)) {
+                    sessions++; return Task.FromResult(Json(new { schemaVersion = 1, principalId = Principal, expiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600 }));
+                }
+                Assert(request.RequestUri.AbsolutePath == Base(employee) + "/queue/resolve"); resolves++;
+                if ((mode == "beforeBusyThen403" && downloads == 0 || mode == "afterBusyThen403" && downloads != 0)) {
+                    if (!busySent) { busySent = true; return Task.FromResult(Busy()); }
+                    return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden));
+                }
+                if (mode == "before403" || downloads != 0 && mode == "after403") return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden));
+                if (downloads != 0 && mode == "after401") return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Unauthorized));
+                var envelope = Envelope(employee);
+                if (downloads != 0 && mode == "afterPrincipal") envelope["principalId"] = "odqp1_" + new string('f', 64);
+                var manifest = (Dictionary<string, object?>)envelope["manifest"]!;
+                if (downloads != 0 && mode == "afterVersion") { var sha = new string('e', 64); manifest["sha256"] = sha; manifest["remoteVersion"] = sha; manifest["strongETag"] = "\"" + sha + "\""; }
+                if (downloads != 0 && mode == "afterLength") manifest["size"] = Bytes.Length + 1;
+                if (downloads != 0 && mode == "afterExpiry") manifest["expiresAt"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 5;
+                return Task.FromResult(Json(envelope));
+            }), new Handler((request, _) => {
+                downloads++; Assert(request.Headers.GetValues("Cf-Access-Token").Single() == f.Runner.Token);
+                var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Bytes) };
+                response.Headers.ETag = EntityTagHeaderValue.Parse("\"" + Sha + "\""); return Task.FromResult(response);
+            }));
+            IQueuedDownloadSource selected = mode == "opaque-wrapper" ? new OpaqueSource(original) : original;
+            if (mode.EndsWith("-lifetime", StringComparison.Ordinal)) selected = new LifetimeQueuedDownloadSource(new LifetimeQueuedDownloadSource(selected, CancellationToken.None), CancellationToken.None);
+            var id = new PlaceholderIdentity("pilot", selected.Alias, f.Session.Origin.GetLeftPart(UriPartial.Authority), Principal, Reference,
+                (employee ? "oef1_" : "ondf1_") + new string('b', 64), employee ? Sha : "provider-version-one", "queue.bin", Bytes.Length, "\"" + Sha + "\"", Sha);
+            using var coordinator = new PlaceholderHydrationCoordinator(selected, "pilot", f.Root, expectedPrincipal: Principal);
+            var sink = new AuthoritySink();
+            if (mode == "opaque-wrapper") {
+                await coordinator.HydrateAsync(id, 0, id.Length, sink);
+                Assert(sink.Written == Bytes.Length && sink.Completed == 1 && sink.Failed == 0 && sessions == 4 && resolves == 2 && downloads == 1);
+            } else if (mode is "employee" or "employee-lifetime" or "portal" or "portal-lifetime") {
+                try { await coordinator.HydrateAsync(id, 0, id.Length, sink); }
+                catch (TransferException error) { throw new Exception("Company synthetic " + mode + "/" + error.HydrationFailure?.Stage + "/" + error.HydrationFailure?.Category + "/" + error.HydrationFailure?.Reason); }
+                Assert(sink.Written == Bytes.Length && sink.Completed == 1 && sink.Failed == 0 && downloads == 1 && resolves == 2);
+                Assert(sessions == (mode.StartsWith("employee", StringComparison.Ordinal) ? 0 : 4));
+                Assert(f.Runner.Calls == (mode.StartsWith("employee", StringComparison.Ordinal) ? 3 : 7) && f.Runner.Logins == 0);
+            } else {
+                await Throws<TransferException>(() => coordinator.HydrateAsync(id, 0, id.Length, sink));
+                Assert(sink.Written == 0 && sink.Completed == 0 && sink.Failed == 1 && sessions == 0 && f.Runner.Logins == 0);
+                Assert(downloads == (mode is "before403" or "beforeBusyThen403" ? 0 : 1));
+            }
+        }
+    }
+    private sealed class AuthoritySink : IPlaceholderTransferSink {
+        internal long Written; internal int Completed, Failed;
+        public Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) { Written += bytes.Length; return Task.CompletedTask; }
+        public Task CompleteAsync(CancellationToken token) { Completed++; return Task.CompletedTask; }
+        public Task FailAsync(string code) { Failed++; return Task.CompletedTask; }
+    }
+    private sealed class OpaqueSource(IQueuedDownloadSource inner) : IQueuedDownloadSource {
+        public string Alias => inner.Alias;
+        public Uri Origin => inner.Origin;
+        public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken token = default) => inner.GetSessionAsync(token);
+        public Task<ResolvedQueuedDownload> ResolveAsync(string reference, CancellationToken token = default) => inner.ResolveAsync(reference, token);
+        public Task<string> DownloadAsync(DownloadSpec spec, string destination, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default) => inner.DownloadAsync(spec, destination, progress, cancellationToken);
+    }
+
+    private static async Task AuthDiagnostics() {
+        foreach (var employee in new[] { true, false }) {
+            using var f = new Fixture(); var calls = 0;
+            using var source = f.Source(employee, new Handler((_, _) => { calls++; return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Unauthorized) { Content = new StringContent("PRIVATE response token") }); }));
+            async Task Expect(Func<Task> action, LoginFailureOperation operation) {
+                try { await action(); throw new Exception("Expected HTTP401."); }
+                catch (LoginRequiredException error) {
+                    Assert(error.Reason == LoginFailureReason.HttpUnauthorized && error.Operation == operation);
+                    Assert(error.InnerException is null && !error.ToString().Contains("PRIVATE") && !error.ToString().Contains(f.Runner.Token));
+                }
+            }
+            await Expect(() => source.GetSessionAsync(), LoginFailureOperation.QueueSession);
+            await Expect(() => source.ResolveAsync(Reference), LoginFailureOperation.QueueResolve);
+            if (employee) await Expect(() => ((EmployeeQueuedDownloadSource)source).GetReferenceAsync("20000000-0000-4000-8000-000000000001", "synthetic.bin"), LoginFailureOperation.QueueReference);
+            else await Expect(() => ((PortalQueuedDownloadSource)source).GetReferenceAsync("ond1_current"), LoginFailureOperation.QueueReference);
+            Assert(calls == 3 && f.Runner.Calls == 3 && f.Runner.Logins == 0);
+            f.Runner.Error = new LoginRequiredException(LoginFailureReason.HelperExitedUnsuccessfully, LoginFailureOperation.Unknown);
+            try { await source.GetSessionAsync(); throw new Exception("Expected helper failure before HTTP."); }
+            catch (LoginRequiredException error) { Assert(error.Reason == LoginFailureReason.HelperExitedUnsuccessfully && error.Operation == LoginFailureOperation.CachedToken); }
+            Assert(calls == 3 && f.Runner.Logins == 0);
+            f.Runner.Error = null;
+            using var cancellation = new CancellationTokenSource();
+            using var waiting = f.Source(employee, new Handler(async (_, ct) => { cancellation.Cancel(); await Task.Delay(Timeout.Infinite, ct); return new(HttpStatusCode.Unauthorized); }));
+            await Throws<OperationCanceledException>(() => waiting.GetSessionAsync(cancellation.Token));
+        }
+    }
+
     private static async Task Metadata() {
         foreach(var employee in new[]{true,false}) {
             using var f = new Fixture(); var requests = new List<string>();
@@ -213,22 +513,24 @@ internal static class QueuedDownloadSourceTests
         }
     }
     private sealed class Handler(Func<HttpRequestMessage,CancellationToken,Task<HttpResponseMessage>> action):HttpMessageHandler {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken)=>action(request,cancellationToken);
+        internal int Calls;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken) { Calls++; return action(request,cancellationToken); }
     }
     private sealed class Runner:IAccessCommandRunner {
-        internal int Calls,Logins;internal string Token="";
-        public Task<AccessCommandResult> RunAsync(string path,IReadOnlyList<string> arguments,CancellationToken ct) {
-            Calls++;if(arguments.Contains("login"))Logins++;
+        internal int Calls,Logins;internal string Token=""; internal Exception? Error; internal TimeSpan Delay;
+        public async Task<AccessCommandResult> RunAsync(string path,IReadOnlyList<string> arguments,CancellationToken ct) {
+            Calls++;if(arguments.Contains("login"))Logins++; if (Error is not null) throw Error;
+            if (Delay > TimeSpan.Zero) await Task.Delay(Delay, ct);
             Token="eyJhbGciOiJSUzI1NiJ9."+Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(new{sub="synthetic-person",exp=DateTimeOffset.UtcNow.ToUnixTimeSeconds()+3600})).TrimEnd('=').Replace('+','-').Replace('/','_')+".c2ln";
-            return Task.FromResult(new AccessCommandResult(0,Token,""));
+            return new AccessCommandResult(0,Token,"");
         }
     }
     private sealed class Fixture:IDisposable {
         internal string Root=Path.Combine(Path.GetTempPath(),"ltds-queue-source-synthetic-"+Guid.NewGuid().ToString("N"));internal Runner Runner=new();internal CloudflareAccessSession Session;
         internal Fixture(){Directory.CreateDirectory(Root);var binary=Path.Combine(Root,"synthetic.bin");File.WriteAllText(binary,"synthetic owned never executed");Session=new(new Uri("https://source.example.invalid/portal/"),binary,Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(binary))),Runner);}
-        internal QueuedDownloadSource Source(bool employee,HttpMessageHandler metadata,HttpMessageHandler? data=null) {
+        internal QueuedDownloadSource Source(bool employee,HttpMessageHandler metadata,HttpMessageHandler? data=null, BusyRetryClock? clock=null) {
             var downloader=data is null?new Downloader(Session):new Downloader(data,[Session.Origin],session:Session);
-            return employee?new EmployeeQueuedDownloadSource("staff",Session,metadata,downloader):new PortalQueuedDownloadSource("portal",Session,metadata,downloader);
+            return employee?new EmployeeQueuedDownloadSource("staff",Session,metadata,downloader,clock):new PortalQueuedDownloadSource("portal",Session,metadata,downloader);
         }
         public void Dispose()=>Directory.Delete(Root,true);
     }

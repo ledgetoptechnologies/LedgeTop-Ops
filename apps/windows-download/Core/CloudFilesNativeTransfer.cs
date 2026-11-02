@@ -40,7 +40,9 @@ internal static class CloudFilesNativeTransfer {
         HydrateForCallbackAsync(coordinator, identity, context, token, new WindowsNative(), TimeSpan.FromSeconds(20));
 
     internal static async Task HydrateForCallbackAsync(PlaceholderHydrationCoordinator coordinator, PlaceholderIdentity identity,
-        CloudFilesOperationContext context, CancellationToken token, ICloudFilesTransferNative native, TimeSpan heartbeatInterval) {
+        CloudFilesOperationContext context, CancellationToken token, ICloudFilesTransferNative native, TimeSpan heartbeatInterval, Action<HydrationTimingSummary>? observeTiming = null, TimeProvider? timingClock = null) {
+        using var timing = observeTiming is null ? null : new HydrationTiming(observeTiming, timingClock);
+        var timingOutcome = HydrationTimingOutcome.Failed;
         AssertAbi();
         // Empty FETCH_DATA requests are deliberately unsupported: no invented zero-byte native completion.
         if (context.FileSize != identity.Length || context.RequiredOffset < 0 || context.RequiredLength <= 0
@@ -48,17 +50,21 @@ internal static class CloudFilesNativeTransfer {
             || context.RequiredOffset % 4096 != 0
             || (context.RequiredLength % 4096 != 0 && context.RequiredLength != context.FileSize - context.RequiredOffset)
             || heartbeatInterval <= TimeSpan.Zero || heartbeatInterval >= TimeSpan.FromSeconds(60))
-            throw new TransferException("Native hydration context is unsupported.");
+            throw new TransferException("Native hydration context is unsupported.",
+                new HydrationFailureDiagnostic(HydrationStage.Context, HydrationFailureCategory.Transfer, TransferFailureReason.InvalidMetadata));
         using var sink = new Sink(context, native, token, heartbeatInterval);
         try {
             sink.StartProgress();
-            await coordinator.HydrateAsync(identity, context.RequiredOffset, context.RequiredLength, sink, sink.Token);
-        } catch (Exception) {
+            if (timing is null) await coordinator.HydrateAsync(identity, context.RequiredOffset, context.RequiredLength, sink, sink.Token);
+            else await coordinator.HydrateTimedAsync(identity, context.RequiredOffset, context.RequiredLength, sink, sink.Token, timing);
+            timingOutcome = HydrationTimingOutcome.Completed;
+        } catch (Exception error) {
+            sink.ObservePrimaryFailure(HydrationFailureDiagnostic.FromException(HydrationStage.Context, error));
             await sink.FailAsync(token.IsCancellationRequested ? "cancelled" : "unavailable");
-            if (sink.Committed) return;
-            if (token.IsCancellationRequested) throw new OperationCanceledException(token);
-            throw new TransferException("Native hydration unavailable.");
-        } finally { await sink.StopProgressAsync(); }
+            if (sink.Committed) { timingOutcome = HydrationTimingOutcome.Completed; return; }
+            if (token.IsCancellationRequested) { timingOutcome = HydrationTimingOutcome.Cancelled; throw new OperationCanceledException(token); }
+            throw new TransferException("Native hydration unavailable.", sink.PrimaryFailure!);
+        } finally { await sink.StopProgressAsync(); timing?.Complete(timingOutcome); }
     }
 
     internal static void AssertAbi() {
@@ -76,7 +82,7 @@ internal static class CloudFilesNativeTransfer {
             throw new TransferException("Cloud Files transfer ABI is unsupported.");
     }
 
-    private sealed class Sink : IPlaceholderTransferSink, IDisposable {
+    private sealed class Sink : IPlaceholderTransferSink, IPlaceholderFailureDiagnostics, IDisposable {
         private readonly CloudFilesOperationContext context;
         private readonly ICloudFilesTransferNative native;
         private readonly CancellationToken caller;
@@ -87,6 +93,9 @@ internal static class CloudFilesNativeTransfer {
         private long next;
         private bool terminal;
         private volatile bool progressFailed;
+        private HydrationFailureDiagnostic? primaryFailure;
+        public HydrationFailureDiagnostic? PrimaryFailure { get { lock (nativeGate) return primaryFailure; } }
+        public void ObservePrimaryFailure(HydrationFailureDiagnostic diagnostic) { lock (nativeGate) primaryFailure ??= diagnostic; }
         internal bool Committed { get; private set; }
         internal CancellationToken Token => operation.Token;
         internal Sink(CloudFilesOperationContext context, ICloudFilesTransferNative native, CancellationToken token, TimeSpan interval) {
@@ -102,8 +111,16 @@ internal static class CloudFilesNativeTransfer {
             lock (nativeGate) {
                 if (terminal) throw new TransferException("Native transfer is terminal.");
                 // Truthful indeterminate progress: temporary download bytes are not yet verified hydration.
-                if (native.ReportProgress(context.ConnectionKey, context.TransferKey, 1, 0) != 0)
-                    throw new TransferException("Native progress unavailable.");
+                int status;
+                try { status = native.ReportProgress(context.ConnectionKey, context.TransferKey, 1, 0); }
+                catch (Exception error) {
+                    primaryFailure ??= HydrationFailureDiagnostic.FromException(HydrationStage.NativeProgress, error);
+                    throw new TransferException("Native progress unavailable.", primaryFailure);
+                }
+                if (status != 0) {
+                    primaryFailure ??= new(HydrationStage.NativeProgress, HydrationFailureCategory.Native, nativeHResult: status);
+                    throw new TransferException("Native progress unavailable.", primaryFailure);
+                }
             }
         }
         private async Task PumpAsync() {
@@ -160,7 +177,18 @@ internal static class CloudFilesNativeTransfer {
                 memory = Marshal.AllocHGlobal(96);
                 Marshal.StructureToPtr(info, memory, false); Marshal.StructureToPtr(parameters, memory + 48, false);
                 // The native contract is synchronous. Cancellation never releases this pin before Execute returns.
-                if (native.Execute(memory, memory + 48) != 0) throw new TransferException("Native transfer failed.");
+                int result;
+                try { result = native.Execute(memory, memory + 48); }
+                catch (Exception error) {
+                    primaryFailure ??= HydrationFailureDiagnostic.FromException(HydrationStage.NativeTransfer, error);
+                    throw new TransferException("Native transfer failed.", primaryFailure);
+                }
+                if (result != 0) {
+                    if (status == 0) primaryFailure ??= new(HydrationStage.NativeTransfer, HydrationFailureCategory.Native, nativeHResult: result);
+                    else if (primaryFailure is { } primary) primaryFailure = primary.WithSettlement(result);
+                    else primaryFailure = new(HydrationStage.NativeTransfer, HydrationFailureCategory.Native, nativeHResult: result);
+                    throw new TransferException("Native transfer failed.", primaryFailure);
+                }
             } finally {
                 if (memory != 0) Marshal.FreeHGlobal(memory);
                 if (pin.IsAllocated) pin.Free();

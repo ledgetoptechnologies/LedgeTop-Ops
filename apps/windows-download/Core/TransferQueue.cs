@@ -9,6 +9,9 @@ namespace LedgeTop.WindowsDownload;
 
 public sealed record QueuedDownloadSession(string PrincipalId, DateTimeOffset ExpiresAt);
 public sealed record ResolvedQueuedDownload(string PrincipalId, string LogicalFileId, string RemoteVersion, DownloadSpec Spec);
+/// <summary>A source must finish all destination writes before DownloadAsync settles, including on failure or cancellation.
+/// A source used for hydration must not recursively wait for another hydration on the same cache root.
+/// Custom sources are admitted exclusively for that root; independently implemented background writers are not coordinated.</summary>
 public interface IQueuedDownloadSource
 {
     string Alias { get; }

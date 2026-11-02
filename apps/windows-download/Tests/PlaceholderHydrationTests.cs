@@ -94,7 +94,13 @@ internal static class PlaceholderHydrationTests
         var sink = new Sink {BeforeWrite=()=>{var file=Directory.GetFiles(f.Root,"example.bin",SearchOption.AllDirectories).Single();try {using var writer=new FileStream(file,FileMode.Open,FileAccess.Write,FileShare.ReadWrite);}catch(IOException){blocked=true;}}};
         await f.Coordinator.HydrateAsync(Identity,0,4096,sink);Assert(blocked);
         using var another = new PlaceholderHydrationCoordinator(f.Source,"pilot",f.Root);
-        var attempted = false; var exclusive = new Sink { BeforeWrite = () => { var nested = new Sink(); try { another.HydrateAsync(Identity,0,4096,nested).GetAwaiter().GetResult(); } catch(TransferException) { attempted = true; } } };
+        var attempted = false; var exclusive = new Sink { BeforeWrite = () => {
+            var nested = new Sink(); using var cancel = new CancellationTokenSource();
+            var waiting = another.HydrateAsync(Identity,0,4096,nested,cancel.Token);
+            Assert(!waiting.IsCompleted); cancel.Cancel();
+            try { waiting.GetAwaiter().GetResult(); } catch(OperationCanceledException) { attempted = true; }
+            Assert(nested.Failed == 1 && nested.Complete == 0);
+        } };
         await f.Coordinator.HydrateAsync(Identity,0,4096,exclusive); Assert(attempted);
         var bad = new Sink {ThrowComplete=true};await Reject(()=>f.Coordinator.HydrateAsync(Identity,0,4096,bad));Assert(bad.Complete==1&&bad.Failed==0);
     }
@@ -105,8 +111,9 @@ internal static class PlaceholderHydrationTests
         public Task CompleteAsync(CancellationToken token){Complete++;if(ThrowComplete)throw new IOException("synthetic-secret-token");return Task.CompletedTask;}
         public Task FailAsync(string code){Assert(code is "cancelled" or "unavailable");Failed++;return Task.CompletedTask;}
     }
-    private sealed class Source : IQueuedDownloadSource, IDisposable
+    private sealed class Source : IQueuedDownloadSource, IDisposable, IHydrationMutationAwareSource
     {
+        bool IHydrationMutationAwareSource.CoordinatesHydrationMutations => true;
         private readonly Downloader engine;internal int Downloads,Resolves;internal string Mode="";internal Action? AfterDownload;internal bool CorruptTransport;
         public string Alias=>Mode=="alias"?"changed":"portal";public Uri Origin=>new(Mode=="origin"?"https://changed.example.invalid":"https://source.example.invalid");
         internal Source(){engine=new Downloader(new Handler(this),[Origin]);}

@@ -5,13 +5,16 @@ on:
     branches: [main]
     paths:
       - apps/windows-download/**
+      - scripts/windows-*
+      - apps/operations/public/favicon.ico
       - .github/workflows/windows-download.yml
+
 permissions:
   contents: read
 
 jobs:
   synthetic-transfer:
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: windows-latest
     timeout-minutes: 10
     defaults:
@@ -23,17 +26,87 @@ jobs:
       DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set isolated runner paths for later steps
+        run: |
+          @(
+            "NUGET_PACKAGES=$env:RUNNER_TEMP/windows-files-nuget"
+            "WINDOWS_SDK_CONFIG=$env:RUNNER_TEMP/windows-sdk-reference/NuGet.Config"
+            "DOTNET_CLI_HOME=$env:RUNNER_TEMP/windows-dotnet-home"
+            "LEDGETOP_TEST_ARTIFACT_ROOT=$env:RUNNER_TEMP/windows-test-artifacts"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: apps/windows-download/global.json
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '24.19.0'
+      - name: Bootstrap the exact signed Windows SDK reference package into an isolated local feed
+        run: ../../scripts/windows-bootstrap-sdk-reference.ps1 -OutputDirectory "$env:RUNNER_TEMP/windows-sdk-reference" -DotnetPath (Get-Command dotnet).Source -IncludeRuntimePacks
+      - name: Verify offline build-prerequisite refusal and local-feed reuse
+        run: ../../scripts/windows-bootstrap-sdk-reference.test.ps1 -OutputRoot "$env:RUNNER_TEMP/windows-sdk-bootstrap-tests" -DotnetPath (Get-Command dotnet).Source -SourcePackagePath "$env:RUNNER_TEMP/windows-sdk-reference/feed/microsoft.windows.sdk.net.ref.10.0.22621.57.nupkg"
       - name: Build synthetic Windows acceptance harness
-        run: dotnet build Tests/WindowsDownload.Tests.csproj --configuration Release
+        run: dotnet build Tests/WindowsDownload.Tests.csproj --configuration Release -p:RestoreConfigFile="$env:WINDOWS_SDK_CONFIG"
       - name: Verify transfers against synthetic HTTP handlers and temporary files
         run: dotnet run --project Tests/WindowsDownload.Tests.csproj --configuration Release --no-build
+      - name: Verify synthetic reference response fixture decoding
+        run: dotnet run --project Tests/WindowsDownload.Tests.csproj --configuration Release --no-build -- --reference-preview-response-fixture-tests
+      - name: Verify owned cache eviction through the emitted apphost
+        run: |
+          $env:DOTNET_ROOT = Split-Path -Parent (Get-Command dotnet).Source
+          & ./Tests/bin/Release/net10.0/LedgeTop.WindowsDownload.Tests.exe --cache-reclamation-only
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build the Windows desktop acceptance harness
-        run: dotnet build AppTests/WindowsDownload.App.Tests.csproj --configuration Release
+        run: dotnet build AppTests/WindowsDownload.App.Tests.csproj --configuration Release -p:RestoreConfigFile="$env:WINDOWS_SDK_CONFIG"
       - name: Verify identity changes, queue controls and rendered desktop screens
         run: dotnet run --project AppTests/WindowsDownload.App.Tests.csproj --configuration Release --no-build -- "${{ runner.temp }}/windows-files-ui"
+      - name: Build Explorer and retained live acceptance consoles without invoking native or live modes
+        run: |
+          dotnet build ExplorerTests/WindowsDownload.Explorer.Tests.csproj --configuration Release -p:RestoreConfigFile="$env:WINDOWS_SDK_CONFIG"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet build LiveStagingAcceptance/WindowsDownload.LiveStagingAcceptance.csproj --configuration Release -p:RestoreConfigFile="$env:WINDOWS_SDK_CONFIG"
+      - name: Verify embedded branding policy without provider registration
+        run: dotnet run --project ExplorerTests/WindowsDownload.Explorer.Tests.csproj --configuration Release --no-build -- --branding-policy-tests
+      - name: Verify identity refresh recovery without native or backend access
+        run: dotnet run --project ExplorerTests/WindowsDownload.Explorer.Tests.csproj --configuration Release --no-build -- --identity-refresh-transaction-tests
+      - name: Verify package-context classification without querying native identity
+        run: dotnet run --project ExplorerTests/WindowsDownload.Explorer.Tests.csproj --configuration Release --no-build -- --package-context-policy-tests
+      - name: Verify Explorer label compatibility without native registration
+        run: dotnet run --project ExplorerTests/WindowsDownload.Explorer.Tests.csproj --configuration Release --no-build -- --display-name-policy-tests
+      - name: Verify failed availability intents without native or source calls
+        run: dotnet run --project ExplorerTests/WindowsDownload.Explorer.Tests.csproj --configuration Release --no-build -- --availability-intent-policy-tests
+      - name: Pure paused-source gate policy
+        run: dotnet run --project ExplorerTests/WindowsDownload.Explorer.Tests.csproj --configuration Release --no-build -- --source-gate-policy-tests
+      - name: Company hydration authority through Explorer source gate
+        run: dotnet run --project ExplorerTests/WindowsDownload.Explorer.Tests.csproj --configuration Release --no-build -- --company-hydration-source-gate-tests
+      - name: Pure local availability native-operation diagnostics
+        run: dotnet run --project ExplorerTests/WindowsDownload.Explorer.Tests.csproj --configuration Release --no-build -- --local-availability-operation-tests
+      - name: Verify Company Shell diagnostic parser without real profile or Shell reads
+        run: powershell.exe -NoProfile -File Diagnostics/ShellStateV2/Read-LedgeTopShellState.ps1 -PureTestsOnly
+      - name: Verify offline update policy and installer template contracts
+        run: node --test ../../scripts/windows-update-policy.test.mjs ../../scripts/windows-workflow.test.mjs Packaging/UnsignedInstaller.test.mjs Packaging/StartupRegistry.test.mjs Packaging/ActivationFaultSimulation.test.mjs
+      - name: Qualify pinned public packaging test tools without executing the helper
+        run: ../../scripts/windows-bootstrap-packaging-test-tools.ps1 -OutputDirectory "$env:RUNNER_TEMP/windows-packaging-tools"
+      - name: Verify public packaging tool refusal and full archive reuse offline
+        run: ../../scripts/windows-bootstrap-packaging-test-tools.test.ps1 -OutputRoot "$env:RUNNER_TEMP/windows-packaging-tool-tests" -SourceArchivePath "$env:RUNNER_TEMP/windows-packaging-tools/nsis-3.13.zip" -HelperPath "$env:RUNNER_TEMP/windows-packaging-tools/cloudflared.exe" -HelperLicensePath "$env:RUNNER_TEMP/windows-packaging-tools/LICENSE.cloudflared.txt"
+      - name: Verify unsigned builder inputs using synthetic files without compiling or executing an installer
+        run: |
+          $reviewed=(& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ../../scripts/windows-unsigned-installer.test.ps1 -HelperPath "$env:RUNNER_TEMP/windows-packaging-tools/cloudflared.exe" -ReviewedCommit $reviewed -SourceRepository (Resolve-Path ../..).Path -RequirePositiveValidation
+      - name: Verify native release offer construction using an unexecuted synthetic PE
+        run: |
+          $reviewed=(& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $fixture=& ../../scripts/windows-release-test-fixture.ps1 -OutputDirectory "$env:RUNNER_TEMP/windows-release-fixture" -HelperPath "$env:RUNNER_TEMP/windows-packaging-tools/cloudflared.exe" -CoreAssemblyPath (Resolve-Path Core/bin/Release/net10.0/LedgeTop.WindowsDownload.dll).Path -CompilerPath "$env:RUNNER_TEMP/windows-packaging-tools/toolchain/nsis-3.13/Bin/makensis.exe" -DotnetPath (Get-Command dotnet).Source -ReviewedCommit $reviewed -SourceRepository (Resolve-Path ../..).Path | ConvertFrom-Json
+          $offers=Join-Path $env:RUNNER_TEMP 'windows-offer-contracts'
+          [IO.Directory]::CreateDirectory($offers) | Out-Null
+          ../../scripts/windows-app-release-offer.test.ps1 -InstallerDirectory $fixture.installerDirectory -PayloadDirectory $fixture.payloadDirectory -ArtifactRoot $offers -SourceRepository (Resolve-Path ../..).Path
+      - name: Publish a private self-contained pilot solely for notice composition checks
+        run: dotnet publish App/WindowsDownload.App.csproj --configuration Release --runtime win-x64 --self-contained true --output "$env:RUNNER_TEMP/windows-notice-payload" -p:LedgeTopPackage=true -p:LedgeTopReleaseChannel=pilot -p:UseSharedCompilation=false -p:RestoreConfigFile="$env:WINDOWS_SDK_CONFIG"
+      - name: Verify SDK and runtime notice composition against that fresh payload
+        run: ../../scripts/windows-explorer-preview-notices.test.ps1 -SourcePayloadDirectory "$env:RUNNER_TEMP/windows-notice-payload" -NugetPackagesDirectory "$env:NUGET_PACKAGES"
+      - name: Verify runtime-pack refusal and signature-qualified offline feed reuse
+        run: ../../scripts/windows-bootstrap-sdk-reference.test.ps1 -OutputRoot "$env:RUNNER_TEMP/windows-runtime-bootstrap-tests" -DotnetPath (Get-Command dotnet).Source -SourcePackagePath "$env:RUNNER_TEMP/windows-sdk-reference/feed/microsoft.windows.sdk.net.ref.10.0.22621.57.nupkg" -RuntimePackageDirectory "$env:NUGET_PACKAGES"
       - name: Retain synthetic desktop screenshots
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
