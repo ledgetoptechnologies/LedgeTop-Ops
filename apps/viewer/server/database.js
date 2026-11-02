@@ -2618,6 +2618,30 @@ const MIGRATIONS = [
       )
       BEGIN SELECT RAISE(ABORT,'reference transfer outbox transition invalid'); END;
   `},
+  {version:61,name:'viewer_reference_transfer_reconciliation_claim_purpose',sql:`
+    CREATE TABLE viewer_reference_transfer_reconciliation_claims (
+      attempt_id TEXT NOT NULL REFERENCES viewer_reference_attempt_journal(attempt_id) ON DELETE RESTRICT,
+      recovery_generation INTEGER NOT NULL CHECK(typeof(recovery_generation)='integer' AND recovery_generation>0),
+      outbox_id TEXT NOT NULL REFERENCES viewer_reference_transfer_outbox(outbox_id) ON DELETE RESTRICT,
+      owner TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(attempt_id,recovery_generation),
+      UNIQUE(outbox_id,recovery_generation)
+    );
+    CREATE TRIGGER viewer_reference_transfer_reconciliation_claim_no_replace BEFORE INSERT ON viewer_reference_transfer_reconciliation_claims
+      WHEN EXISTS(SELECT 1 FROM viewer_reference_transfer_reconciliation_claims WHERE (attempt_id=NEW.attempt_id AND recovery_generation=NEW.recovery_generation) OR rowid=NEW.rowid)
+      BEGIN SELECT RAISE(ABORT,'reference transfer recovery claim retained'); END;
+    CREATE TRIGGER viewer_reference_transfer_reconciliation_claim_immutable BEFORE UPDATE ON viewer_reference_transfer_reconciliation_claims
+      BEGIN SELECT RAISE(ABORT,'reference transfer recovery claim immutable'); END;
+    CREATE TRIGGER viewer_reference_transfer_reconciliation_claim_no_delete BEFORE DELETE ON viewer_reference_transfer_reconciliation_claims
+      BEGIN SELECT RAISE(ABORT,'reference transfer recovery claim retained'); END;
+    CREATE TRIGGER viewer_reference_transfer_reconciliation_claim_validate BEFORE INSERT ON viewer_reference_transfer_reconciliation_claims
+      WHEN NOT EXISTS(SELECT 1 FROM viewer_reference_transfer_outbox o JOIN viewer_reference_attempt_journal j ON j.attempt_id=o.attempt_id WHERE o.outbox_id=NEW.outbox_id AND o.attempt_id=NEW.attempt_id AND o.state IN ('sending','uncertain') AND NEW.recovery_generation>o.sender_generation AND j.lease_owner=NEW.owner AND j.lease_generation=NEW.recovery_generation)
+      BEGIN SELECT RAISE(ABORT,'reference transfer recovery claim invalid'); END;
+    CREATE TRIGGER viewer_reference_transfer_outbox_reconciliation_validate BEFORE INSERT ON viewer_reference_transfer_outbox_reconciliations
+      WHEN NOT EXISTS(SELECT 1 FROM viewer_reference_transfer_outbox o JOIN viewer_reference_transfer_reconciliation_claims c ON c.outbox_id=o.outbox_id AND c.attempt_id=o.attempt_id AND c.recovery_generation=NEW.recovery_generation JOIN viewer_reference_attempt_journal j ON j.attempt_id=c.attempt_id AND j.lease_owner=c.owner AND j.lease_generation=c.recovery_generation WHERE o.outbox_id=NEW.outbox_id AND o.state IN ('sending','uncertain'))
+      BEGIN SELECT RAISE(ABORT,'reference transfer reconciliation claim missing'); END;
+  `},
 ];
 
 function applyMigrations(database) {

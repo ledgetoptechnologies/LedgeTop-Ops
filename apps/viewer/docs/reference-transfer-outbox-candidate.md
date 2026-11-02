@@ -35,6 +35,21 @@ is created only for the built-in HTTPS transport; the durable reconciliation
 record retains only its digests and recovery generation. A caller-created or
 mutated DTO cannot mark the row acknowledged.
 
+Migration 61 gives an expired-transfer recovery lease a separate durable
+purpose record tied to one attempt, generation, owner, and outbox row. Normal
+dispatch, job binding, grant preparation, sending, and ordinary ACK methods
+reject that claim. Reconciliation requires that same purpose record and exact
+outbox ID. The v61 migration also requires the purpose record before inserting
+the reconciliation receipt. This prevents a recovery lease from being reused
+as a general dispatch lease by repository APIs.
+
+The provider identity still needs a production authority binding. The current
+primitive accepts a provider instance supplied by its caller and verifies that
+the ACK came from its built-in authenticated HTTPS status path; it does not yet
+prove that the endpoint belongs to the immutable provider assignment or a
+durable receiver lineage. A future adapter must bind the endpoint, receiver
+identity/epoch, and rollback/restore authority before this is deployable.
+
 This is a persistence building block, not an enabled transfer adapter. The
 public dispatch lane remains hard-off. There is no startup scanner or runtime
 calling this narrow reconciliation primitive, broker-to-outbox adapter, or
@@ -46,7 +61,8 @@ before the outbox can be activated.
 Synthetic tests cover immutable identity, changed-grant rejection, journal-
 derived object binding, refusal to retry an uncertain sender, expired-lease
 recovery only for pending sends, exact authenticated ACK reconciliation after
-restart, mismatch retention, forward-only migrations through v60, and non-
+restart, mismatch retention, recovery-claim isolation, forward-only migrations
+through v61, and non-
 persistence of the bearer. They do not prove actual Viewer process restart on
 the NAS, key provisioning, automatic replay, a deployed Processing ACK, or
 production custody.

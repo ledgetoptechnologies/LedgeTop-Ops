@@ -17,8 +17,9 @@ class ReferenceTransferOutbox {
   tx(fn){this.db.exec('BEGIN IMMEDIATE');try{const value=fn();this.db.exec('COMMIT');return value}catch(error){try{this.db.exec('ROLLBACK')}catch{}throw error}}
   row(outboxId){if(!id(outboxId))fail('reference_transfer_outbox_invalid');const row=this.db.prepare('SELECT * FROM viewer_reference_transfer_outbox WHERE outbox_id=?').get(outboxId);if(!row)fail('reference_transfer_outbox_missing');return row}
   find(attemptId,reservationId,reservationGeneration){if(!id(attemptId)||!id(reservationId)||!Number.isSafeInteger(reservationGeneration)||reservationGeneration<1)fail('reference_transfer_outbox_invalid');return this.db.prepare('SELECT * FROM viewer_reference_transfer_outbox WHERE attempt_id=? AND reservation_id=? AND reservation_generation=?').get(attemptId,reservationId,reservationGeneration)||null;}
-  #claim(claim){
+  #claim(claim,purpose='dispatch'){
     if(!claim||!id(claim.attemptId)||!id(claim.owner)||!Number.isSafeInteger(claim.generation)||claim.generation<1)fail('reference_transfer_outbox_invalid');
+    if(claim.kind!==purpose)fail('reference_transfer_outbox_claim_purpose');
     const state=this.journal.read(claim);return{attempt_id:claim.attemptId,job_id:state.job?.jobId,state};
   }
   prepare(claim,{job,reservation,manifestSha256,grantId,grantIdentitySha256,grant}={}){
@@ -73,7 +74,7 @@ class ReferenceTransferOutbox {
     this.db.prepare("UPDATE viewer_reference_transfer_outbox SET state='acknowledged',acknowledgement_sha256=?,updated_at=? WHERE outbox_id=? AND state='sending' AND sender_generation=?").run(ackHash,new Date(this.now()).toISOString(),outboxId,claim.generation);
   })}
   reconcileAcknowledged(claim,outboxId,ack,{provider}={}){if(!provider)fail('reference_transfer_outbox_ack_binding');return this.tx(()=>{
-    this.#claim(claim);const row=this.row(outboxId);if(row.attempt_id!==claim.attemptId)fail('reference_transfer_outbox_binding');
+    this.#claim(claim,'transfer-reconciliation');if(claim.outboxId!==outboxId)fail('reference_transfer_outbox_claim_purpose');const row=this.row(outboxId);if(row.attempt_id!==claim.attemptId)fail('reference_transfer_outbox_binding');
     const grantBinding=this.db.prepare('SELECT canonical_grant_sha256 FROM viewer_reference_transfer_grant_bindings WHERE outbox_id=?').get(outboxId);
     if(!grantBinding||!isVerifiedTransferGrantAck(ack,{provider,jobId:row.job_id,environment:row.environment,grantSha256:grantBinding.canonical_grant_sha256})||!ack||typeof ack!=='object'||Array.isArray(ack)||Object.keys(ack).sort().join(',')!=='accepted,generation,grantSha256,manifestSha256,nonce,reservationId'||ack.accepted!==true||ack.reservationId!==row.reservation_id||ack.generation!==row.reservation_generation||ack.manifestSha256!==row.manifest_sha256||ack.grantSha256!==grantBinding.canonical_grant_sha256||typeof ack.nonce!=='string'||digest(Buffer.from(ack.nonce))!==row.reservation_nonce_sha256)fail('reference_transfer_outbox_ack_binding');
     const canonical=JSON.stringify({reservationId:ack.reservationId,generation:ack.generation,manifestSha256:ack.manifestSha256,nonce:ack.nonce,grantSha256:ack.grantSha256,accepted:true}),ackHash=digest(Buffer.from(canonical));

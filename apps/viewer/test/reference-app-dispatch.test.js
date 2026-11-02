@@ -115,14 +115,14 @@ test('outbox keeps a send claim held when process failure leaves state uncertain
  const f=transferOutboxFixture(t),row=f.outbox.prepare(f.claim,f.input),provider={postTransferGrant:async()=>{}};f.outbox.beginSend(f.claim,row.outbox_id,{grantId:f.input.grantId,grantIdentitySha256:f.input.grantIdentitySha256,grant:f.input.grant,provider});
  assert.equal(new ReferenceTransferOutbox(f.db,{journal:f.journal}).find('a',f.reservation.reservationId,f.reservation.generation).state,'sending');
  assert.equal(f.journal.claim('a','sender-after-crash'),null);
- assert.throws(()=>f.outbox.beginSend({attemptId:'a',owner:'sender-after-crash',generation:f.claim.generation+1},row.outbox_id,{grantId:f.input.grantId,grantIdentitySha256:f.input.grantIdentitySha256,grant:f.input.grant,provider}),{code:'reference_dispatch_lease_lost'});
+ assert.throws(()=>f.outbox.beginSend({attemptId:'a',owner:'sender-after-crash',generation:f.claim.generation+1},row.outbox_id,{grantId:f.input.grantId,grantIdentitySha256:f.input.grantIdentitySha256,grant:f.input.grant,provider}),{code:'reference_transfer_outbox_claim_purpose'});
 });
 test('expired sender claim can only reconcile an exact authenticated grant ACK',async t=>{
  for(const mismatch of [false,true])await t.test(mismatch?'wrong sealed grant digest stays uncertain':'exact sealed grant ACK settles after restart',async t=>{
   const f=transferOutboxFixture(t),claim=f.claim,row=f.outbox.prepare(claim,f.input),sender={postTransferGrant:async()=>{}};f.outbox.beginSend(claim,row.outbox_id,{grantId:f.input.grantId,grantIdentitySha256:f.input.grantIdentitySha256,grant:f.input.grant,provider:sender});f.outbox.markUncertain(claim,row.outbox_id);
   const journal=new ReferenceAppJournal(f.db);assert.equal(journal.claimExpiredTransferReconciliation('a','too-early'),null);
   f.db.prepare('UPDATE viewer_reference_attempt_journal SET lease_expires_ms=0 WHERE attempt_id=?').run('a');
-  const recovery=journal.claimExpiredTransferReconciliation('a','reconciler');assert.equal(recovery.generation,claim.generation+1);
+  const recovery=journal.claimExpiredTransferReconciliation('a','reconciler');assert.equal(recovery.generation,claim.generation+1);assert.equal(recovery.kind,'transfer-reconciliation');assert.equal(recovery.outboxId,row.outbox_id);assert.throws(()=>journal.read({...recovery,kind:'dispatch',outboxId:undefined}),{code:'reference_dispatch_claim_purpose'});assert.throws(()=>f.outbox.beginSend(recovery,row.outbox_id,{grantId:f.input.grantId,grantIdentitySha256:f.input.grantIdentitySha256,grant:f.input.grant,provider:sender}),{code:'reference_transfer_outbox_claim_purpose'});assert.throws(()=>journal.bindJob(recovery,{...f.bound}),{code:'reference_dispatch_claim_purpose'});
   const previousFetch=global.fetch,grantSha256=p.sha256(p.canonicalBytes(f.input.grant)),ack={reservationId:f.reservation.reservationId,generation:f.reservation.generation,manifestSha256:f.reservation.manifestSha256,nonce:f.reservation.nonce,accepted:true,grantSha256:mismatch?'f'.repeat(64):grantSha256};
   global.fetch=async url=>url.endsWith('/jobs/job-1')?response({...f.bound,phase:'awaiting_transfer',transferRequest:f.reservation,transferGrantAcknowledgement:ack}):(()=>{throw Error('unexpected request')})();
   try{
