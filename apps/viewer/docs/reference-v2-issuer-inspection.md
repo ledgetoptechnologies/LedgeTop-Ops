@@ -203,3 +203,17 @@ while it reads, but it cannot close those races. Production requires an
 enforced source-side barrier, recovery semantics and a verified authority
 before the disabled gate can be reconsidered. Generated GCP auxiliary binding
 is not yet supported by this inspector even when within the v1 object limit.
+
+The current writer audit identifies `datasetOperationWorker.finalizeUpload` →
+`StorageManager.assembleFile` for assembled uploads; `copyTaskPhotos` for task
+photo copying; `StorageManager.adoptImport` and recovery/cleanup for imports;
+and `moveExact`, trash, restore, and purge for lifecycle effects. The raw GCP
+archive and reference GCP materializers are presently dormant primitives.
+The disposable cooperative fixture has a managed-writer adapter with durable
+in-flight claims, global exclusion against scan/binding, and a fail-closed hold
+for failed or uncertain callbacks. Tests wrap the actual upload assembly and
+raw GCP archive functions and exercise scan/write exclusion. The adapter is
+not wired into the production worker or storage methods; photo copy, the GCP
+materializer and direct or legacy StorageManager callers remain unqualified.
+Successful callback return is only a fixture completion signal, not proof of
+durable filesystem settlement or permission to release a production claim.
