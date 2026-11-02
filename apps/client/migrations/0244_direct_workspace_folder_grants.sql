@@ -1,8 +1,9 @@
 PRAGMA foreign_keys=ON;
 
 -- Direct Ops folder grants are separate from PA/project delivery grants.
--- Authority is evaluated from the current Ops workspace publication, the
--- current folder binding, and current workspace membership on every read.
+-- The Ops folder is selected from its own delivery catalog; it is not bound
+-- to a Client workspace. Authority is re-evaluated from the exact Ops
+-- recipient publication and current workspace membership on every read.
 CREATE TABLE operations_portal_direct_folder_grants (
   grant_id TEXT PRIMARY KEY,
   grant_version INTEGER NOT NULL CHECK(grant_version>=1),
@@ -14,9 +15,8 @@ CREATE TABLE operations_portal_direct_folder_grants (
   publication_snapshot_id TEXT NOT NULL,
   publication_snapshot_sha256 TEXT NOT NULL CHECK(length(publication_snapshot_sha256)=64),
   source_id TEXT NOT NULL,
-  folder_binding_id TEXT NOT NULL,
-  binding_source_version TEXT NOT NULL,
-  binding_receipt_version INTEGER NOT NULL CHECK(binding_receipt_version>=1),
+  folder_ref TEXT NOT NULL CHECK(length(folder_ref) BETWEEN 2 AND 1400
+    AND folder_ref NOT GLOB '*[^A-Za-z0-9_-]*'),
   owner_scope_type TEXT NOT NULL CHECK(owner_scope_type IN('organization','client')),
   owner_record_id TEXT NOT NULL,
   recipient_record_id TEXT NOT NULL,
@@ -30,7 +30,6 @@ CREATE TABLE operations_portal_direct_folder_grants (
   updated_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE(grant_id,workspace_id),
   FOREIGN KEY(workspace_id) REFERENCES portal_v2_workspaces(id) ON DELETE RESTRICT,
-  FOREIGN KEY(folder_binding_id,workspace_id) REFERENCES portal_v2_folder_bindings(id,workspace_id) ON DELETE RESTRICT,
   CHECK(expires_at IS NULL OR strftime('%Y-%m-%dT%H:%M:%fZ',expires_at) IS NOT NULL),
   CHECK((status='active' AND revoked_at IS NULL AND revoked_by_operation_id IS NULL)
     OR (status='revoked' AND revoked_at IS NOT NULL AND revoked_by_operation_id IS NOT NULL)
@@ -38,10 +37,10 @@ CREATE TABLE operations_portal_direct_folder_grants (
 );
 
 CREATE UNIQUE INDEX operations_portal_direct_folder_one_active
-  ON operations_portal_direct_folder_grants(workspace_id,folder_binding_id)
+  ON operations_portal_direct_folder_grants(workspace_id,folder_ref,recipient_record_id)
   WHERE status='active' AND revoked_at IS NULL;
 CREATE INDEX operations_portal_direct_folder_read
-  ON operations_portal_direct_folder_grants(workspace_id,status,expires_at,folder_binding_id);
+  ON operations_portal_direct_folder_grants(folder_ref,workspace_id,status,expires_at,recipient_record_id);
 
 CREATE TABLE operations_portal_direct_folder_grant_mutations (
   operation_id TEXT PRIMARY KEY,
@@ -87,9 +86,7 @@ WHEN OLD.grant_id IS NOT NEW.grant_id OR OLD.workspace_id IS NOT NEW.workspace_i
   OR OLD.target_revision IS NOT NEW.target_revision OR OLD.publication_revision IS NOT NEW.publication_revision
   OR OLD.publication_snapshot_id IS NOT NEW.publication_snapshot_id
   OR OLD.publication_snapshot_sha256 IS NOT NEW.publication_snapshot_sha256
-  OR OLD.source_id IS NOT NEW.source_id OR OLD.folder_binding_id IS NOT NEW.folder_binding_id
-  OR OLD.binding_source_version IS NOT NEW.binding_source_version
-  OR OLD.binding_receipt_version IS NOT NEW.binding_receipt_version
+  OR OLD.source_id IS NOT NEW.source_id OR OLD.folder_ref IS NOT NEW.folder_ref
   OR OLD.owner_scope_type IS NOT NEW.owner_scope_type OR OLD.owner_record_id IS NOT NEW.owner_record_id
   OR OLD.recipient_record_id IS NOT NEW.recipient_record_id OR OLD.audience IS NOT NEW.audience
   OR OLD.expires_at IS NOT NEW.expires_at OR OLD.created_by_operation_id IS NOT NEW.created_by_operation_id

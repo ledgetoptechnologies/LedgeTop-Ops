@@ -10,8 +10,8 @@ type Bindings={Bindings:Env;Variables:{clientSession:ClientPortalSession;clientP
 type Ctx=Context<Bindings>;
 type Kind='folder'|'cursor'|'file';
 type Claims={v:1;kind:Kind;workspaceId:string;issuer:string;subject:string;grantId:string;grantVersion:number;
-  sourceId:string;targetId:string;targetRevision:number;clientAuthorityId:string;bindingId:string;
-  bindingSourceVersion:string;bindingReceiptVersion:number;path:string;expires:number;after?:string;entryKind?:'folder'|'file';etag?:string};
+  sourceId:string;targetId:string;targetRevision:number;clientAuthorityId:string;
+  path:string;expires:number;after?:string;entryKind?:'folder'|'file';etag?:string};
 type FileRow={r2_key:string;etag:string;size:number;uploaded_at:string;content_type:string|null;media_kind:string};
 const TTL=15*60_000,PAGE=25;
 const unavailable=():never=>{throw new HTTPException(404,{message:'Shared folder is unavailable'});};
@@ -27,13 +27,12 @@ const text=(value:unknown,max=512):value is string=>typeof value==='string'&&val
 function strictClaims(value:unknown):Claims|null{
   if(!value||typeof value!=='object'||Array.isArray(value))return null;
   const x=value as Record<string,unknown>,base=['v','kind','workspaceId','issuer','subject','grantId','grantVersion','sourceId','targetId',
-    'targetRevision','clientAuthorityId','bindingId','bindingSourceVersion','bindingReceiptVersion','path','expires'];
+    'targetRevision','clientAuthorityId','path','expires'];
   const allowed=x.kind==='cursor'?[...base,'after','entryKind']:x.kind==='file'?[...base,'etag']:base;
   if(Object.keys(x).length!==allowed.length||Object.keys(x).some(key=>!allowed.includes(key))||x.v!==1
     ||!['folder','cursor','file'].includes(String(x.kind))||!text(x.workspaceId,128)||!text(x.issuer)||!text(x.subject)
     ||!text(x.grantId,128)||!Number.isSafeInteger(x.grantVersion)||Number(x.grantVersion)<1||!text(x.sourceId,128)
     ||!text(x.targetId,128)||!Number.isSafeInteger(x.targetRevision)||Number(x.targetRevision)<1||!text(x.clientAuthorityId,128)
-    ||!text(x.bindingId,128)||!text(x.bindingSourceVersion)||!Number.isSafeInteger(x.bindingReceiptVersion)||Number(x.bindingReceiptVersion)<1
     ||typeof x.path!=='string'||!canonicalPath(x.path,x.kind!=='file')||!Number.isSafeInteger(x.expires)
     ||Number(x.expires)<=Date.now()||Number(x.expires)>Date.now()+TTL+60_000)return null;
   if(x.kind==='cursor'&&(!text(x.after,1024)||String(x.after).includes('/')||String(x.after).includes('\\')
@@ -62,8 +61,7 @@ async function decode(c:Ctx,raw:string):Promise<Claims|null>{
 function claimsFor(folder:DirectWorkspaceFolderResource,principal:VerifiedClientPrincipal,path='',kind:Kind='folder'):Claims{
   return {v:1,kind,workspaceId:folder.workspaceId,issuer:principal.issuer,subject:principal.subject,grantId:folder.grantId,
     grantVersion:folder.grantVersion,sourceId:folder.sourceId,targetId:folder.targetId,targetRevision:folder.targetRevision,
-    clientAuthorityId:folder.clientAuthorityId,bindingId:folder.bindingId,bindingSourceVersion:folder.bindingSourceVersion,
-    bindingReceiptVersion:folder.bindingReceiptVersion,path,expires:Date.now()+TTL};
+    clientAuthorityId:folder.clientAuthorityId,path,expires:Date.now()+TTL};
 }
 async function currentFolder(c:Ctx,claims:Claims):Promise<DirectWorkspaceFolderResource>{
   const principal=c.get('clientPrincipal'),session=c.get('clientSession');
@@ -72,8 +70,7 @@ async function currentFolder(c:Ctx,claims:Claims):Promise<DirectWorkspaceFolderR
   try{resources=await listAuthorizedDirectWorkspaceFolderResourcesForPrincipal(c.env,{workspaceId:session.workspaceId,issuer:principal.issuer,subject:principal.subject});}
   catch{return temporary();}
   const folder=resources.find(item=>item.grantId===claims.grantId&&item.grantVersion===claims.grantVersion
-    &&item.bindingId===claims.bindingId&&item.bindingSourceVersion===claims.bindingSourceVersion
-    &&item.bindingReceiptVersion===claims.bindingReceiptVersion&&item.workspaceId===claims.workspaceId
+    &&item.workspaceId===claims.workspaceId
     &&item.sourceId===claims.sourceId&&item.targetId===claims.targetId&&item.targetRevision===claims.targetRevision);
   if(!folder||isHiddenKey(folder.r2Prefix))return unavailable();
   return folder;
@@ -95,7 +92,7 @@ function fileDto(c:Ctx,row:FileRow,handle:string):ClientPortalFile{
 function metaMatches(row:FileRow,key:string){return row.r2_key===key&&Number.isSafeInteger(row.size)&&row.size>=0;}
 
 /** Project-free, active-workspace direct shares. Handles are encrypted and
- * each request rereads membership, grant, binding, receipt and source pins. */
+ * each request rereads membership, grant, recipient publication and source pins. */
 export function createDirectWorkspaceFolderResourceRouter(){
   const router=new Hono<Bindings>();
   router.use('*',async(c,next)=>{c.header('Cache-Control','private, no-store');c.header('Cloudflare-CDN-Cache-Control','no-store');
@@ -115,8 +112,7 @@ export function createDirectWorkspaceFolderResourceRouter(){
     const rawCursor=c.req.query('cursor'),cursor=rawCursor?await decode(c,rawCursor):null;
     if(rawCursor&&(!cursor||cursor.kind!=='cursor'||cursor.grantId!==parent.grantId||cursor.grantVersion!==parent.grantVersion
       ||cursor.workspaceId!==parent.workspaceId||cursor.issuer!==parent.issuer||cursor.subject!==parent.subject
-      ||cursor.bindingId!==parent.bindingId||cursor.bindingSourceVersion!==parent.bindingSourceVersion
-      ||cursor.bindingReceiptVersion!==parent.bindingReceiptVersion||cursor.sourceId!==parent.sourceId||cursor.targetId!==parent.targetId
+      ||cursor.sourceId!==parent.sourceId||cursor.targetId!==parent.targetId
       ||cursor.targetRevision!==parent.targetRevision||cursor.clientAuthorityId!==parent.clientAuthorityId||cursor.path!==parent.path))return unavailable();
     if(cursor)await currentFolder(c,cursor);
     const upper=prefix.slice(0,-1)+'0';

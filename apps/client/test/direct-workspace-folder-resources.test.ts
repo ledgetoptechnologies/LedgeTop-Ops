@@ -2,6 +2,7 @@ import {Miniflare} from 'miniflare';
 import {afterEach,beforeEach,describe,expect,it} from 'vitest';
 import {Hono} from 'hono';
 import {readFileSync} from 'node:fs';
+import {Buffer} from 'node:buffer';
 import {splitD1MigrationStatements} from './helpers/d1-migrations';
 import {createDirectWorkspaceFolderResourceRouter} from '../src/worker/client-portal/direct-workspace-folder-resources';
 import {readDirectFolderWorkspaceState,listDirectWorkspaceFolderGrants,applyDirectWorkspaceFolderGrant} from '../src/worker/operations-portal-direct-folder-grants';
@@ -10,6 +11,7 @@ import type {ClientPortalSession,VerifiedClientPrincipal} from '../src/worker/cl
 
 const sha='a'.repeat(64),workspace='df-workspace',target='df-target',authority='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const source='project-alpha:primary',rootPublic='pa-root',rootRecord='ops-org',recipient='ops-client';
+const folderRef=Buffer.from('Jobs/Clients/Example Org').toString('base64url');
 const issuer='https://access.example.test',subject='access|customer';
 const principal:VerifiedClientPrincipal={issuer,subject,email:'customer@example.test'};
 const secondPrincipal:VerifiedClientPrincipal={issuer,subject:'access|coworker',email:'coworker@example.test'};
@@ -35,7 +37,6 @@ describe('direct Operations workspace folder resources',()=>{
     ]};
     await db.batch([
       db.prepare('CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,root_type TEXT,pa_organization_public_id TEXT,pa_client_public_id TEXT,project_alpha_source_id TEXT,status TEXT)'),
-      db.prepare('CREATE TABLE portal_v2_folder_bindings(id TEXT NOT NULL,workspace_id TEXT NOT NULL,owner_scope_type TEXT,owner_public_id TEXT,r2_prefix TEXT,source_type TEXT,source_version TEXT,status TEXT,revoked_at TEXT,UNIQUE(id,workspace_id))'),
       db.prepare('CREATE TABLE portal_v2_workspace_memberships(id TEXT,workspace_id TEXT,identity_id TEXT,source_type TEXT,status TEXT,source_version TEXT,expires_at TEXT,revoked_at TEXT)'),
       db.prepare('CREATE TABLE portal_v2_identities(id TEXT PRIMARY KEY,issuer TEXT,subject TEXT,status TEXT,revoked_at TEXT)'),
       db.prepare('CREATE TABLE pa_portal_workspace_sources(workspace_id TEXT,projection_source_id TEXT)'),
@@ -48,7 +49,6 @@ describe('direct Operations workspace folder resources',()=>{
       db.prepare('CREATE TABLE portal_v2_directory_entities(workspace_id TEXT,generation_id TEXT,entity_type TEXT,public_id TEXT,parent_public_id TEXT,source_version TEXT,active INTEGER)'),
       db.prepare('CREATE TABLE pa_portal_projection_checkpoints(workspace_id TEXT,source_generation TEXT,source_sequence INTEGER,snapshot_generation_id TEXT)'),
       db.prepare('CREATE TABLE pa_portal_projection_generations(id TEXT,workspace_id TEXT,source_generation TEXT,source_sequence INTEGER,projection_source_id TEXT,status TEXT,complete INTEGER)'),
-      db.prepare('CREATE TABLE portal_primary_staff_bindings(binding_id TEXT,workspace_id TEXT,source_id TEXT,root_type TEXT,root_public_id TEXT,owner_scope_type TEXT,owner_public_id TEXT,project_public_id TEXT,directory_generation_id TEXT,snapshot_generation_id TEXT,source_sequence INTEGER,root_source_version TEXT,r2_prefix TEXT,ownership_kind TEXT,state TEXT,version INTEGER)'),
       db.prepare(`CREATE TABLE file_index(r2_key TEXT PRIMARY KEY,etag TEXT,size INTEGER,uploaded_at TEXT,content_type TEXT,media_kind TEXT)`),
       db.prepare(`CREATE TABLE delivery_tombstones(physical_key TEXT,tombstone_kind TEXT,restored_at TEXT)`),
       db.prepare('INSERT INTO portal_v2_workspaces VALUES(?,?,?,?,?,?)').bind(workspace,'organization',rootPublic,null,source,'active'),
@@ -67,9 +67,6 @@ describe('direct Operations workspace folder resources',()=>{
       db.prepare('INSERT INTO portal_v2_identities VALUES(?,?,?,\'active\',NULL)').bind('df-identity-2',issuer,secondPrincipal.subject),
       db.prepare('INSERT INTO portal_v2_workspace_memberships VALUES(?,?,?,\'operations\',\'active\',\'member-v1\',NULL,NULL)').bind('df-member',workspace,'df-identity'),
       db.prepare('INSERT INTO portal_v2_workspace_memberships VALUES(?,?,?,\'operations\',\'active\',\'member-v1\',NULL,NULL)').bind('df-member-2',workspace,'df-identity-2'),
-      db.prepare('INSERT INTO portal_v2_folder_bindings VALUES(?,?,?,?,?,\'operations\',\'binding-v1\',\'active\',NULL)').bind('df-binding',workspace,'organization',rootPublic,'Jobs/Clients/Example Org/'),
-      db.prepare(`INSERT INTO portal_primary_staff_bindings VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'explicit_workspace','active',1)`)
-        .bind('df-binding',workspace,source,'organization',rootPublic,'organization',rootPublic,null,'df-directory-generation','df-projection-generation',1,'root-v1','Jobs/Clients/Example Org/'),
       db.prepare('CREATE TABLE portal_v2_public_links(id TEXT PRIMARY KEY,token TEXT)'),
       db.prepare('INSERT INTO portal_v2_public_links VALUES(\'old-link\',\'untouched\')'),
     ]);
@@ -80,9 +77,9 @@ describe('direct Operations workspace folder resources',()=>{
     const state=await readDirectFolderWorkspaceState(env,{protocolVersion:1,workspaceId:workspace,targetId:target,clientAuthorityId:authority,sourceId:source});
     if(!state.ok)throw new Error(`state setup failed: ${state.code}`);
     const command={protocolVersion:1,operationId:'df-create-op',action:'grant.create',workspaceId:workspace,targetId:target,
-      clientAuthorityId:authority,sourceId:source,folderBindingId:'df-binding',ownerScopeType:'organization',ownerRecordId:rootPublic,
+      clientAuthorityId:authority,sourceId:source,folderRef,
       recipientRecordId:recipient,expectedWorkspaceVersion:state.workspaceVersion,expectedMembershipVersion:state.membershipVersion,
-      expectedBindingSourceVersion:'binding-v1',expectedBindingReceiptVersion:1,grantId:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',expiresAt:null};
+      grantId:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',expiresAt:null};
     const created=await applyDirectWorkspaceFolderGrant(env,command);if(!created.ok)throw new Error(`grant setup failed: ${created.code}`);
     const map=await bucket.put('Jobs/Clients/Example Org/map.txt','map content',{httpMetadata:{contentType:'text/plain'}});
     const task=await bucket.put('Jobs/Clients/Example Org/sub/task.txt','task content',{httpMetadata:{contentType:'text/plain'}});
@@ -141,13 +138,18 @@ describe('direct Operations workspace folder resources',()=>{
     expect(denied.status).toBe(404);
   });
 
-  it('invalidates existing handles as soon as the exact binding version changes',async()=>{
+  it('invalidates existing handles after the direct client-profile grant is revoked',async()=>{
     const root=await app.request('https://client.test/api/client/direct-workspace-folders',{},env);
     folderHandle=(await root.json() as {items:Array<{id:string}>}).items[0]!.id;
     const files=await app.request(`https://client.test/api/client/direct-workspace-folders/${encodeURIComponent(folderHandle)}/files`,{},env);
     fileHandle=(await files.json() as {files:Array<{id:string}>}).files[0]!.id;
-    await db.prepare("UPDATE portal_v2_folder_bindings SET source_version='binding-v2' WHERE id='df-binding'").run();
-    await db.prepare("UPDATE portal_primary_staff_bindings SET version=version+1 WHERE binding_id='df-binding'").run();
+    const state=await readDirectFolderWorkspaceState(env,{protocolVersion:1,workspaceId:workspace,targetId:target,clientAuthorityId:authority,sourceId:source});
+    expect(state.ok).toBe(true);if(!state.ok)throw new Error(state.code);
+    const revoked=await applyDirectWorkspaceFolderGrant(env,{protocolVersion:1,operationId:'df-revoke-after-handle',action:'grant.revoke',
+      workspaceId:workspace,targetId:target,clientAuthorityId:authority,sourceId:source,folderRef,recipientRecordId:recipient,
+      expectedWorkspaceVersion:state.workspaceVersion,expectedMembershipVersion:state.membershipVersion,
+      grantId:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',expectedGrantVersion:1});
+    expect(revoked).toMatchObject({ok:true,state:'revoked'});
     const denied=await app.request(`https://client.test/api/client/direct-workspace-folders/files/${encodeURIComponent(fileHandle)}`,{},env);
     expect(denied.status).toBe(404);
   });
@@ -158,13 +160,12 @@ describe('direct Operations workspace folder resources',()=>{
     expect(state.ok).toBe(true);if(!state.ok)throw new Error(state.code);
     expect(state.memberCount).toBe(0);
     const common={protocolVersion:1,workspaceId:workspace,targetId:target,clientAuthorityId:authority,sourceId:source,
-      folderBindingId:'df-binding',ownerScopeType:'organization',ownerRecordId:rootPublic,recipientRecordId:recipient,
+      folderRef,
       expectedWorkspaceVersion:state.workspaceVersion,expectedMembershipVersion:state.membershipVersion};
     const listing=await listDirectWorkspaceFolderGrants(env,common);
-    expect(listing.ok).toBe(true);if(!listing.ok)throw new Error(listing.code);
+    if(!listing.ok)throw new Error(listing.code);
     expect(listing.memberCount).toBe(0);expect(listing.grants).toMatchObject([{grantId:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',status:'active'}]);
-    const revoked=await applyDirectWorkspaceFolderGrant(env,{...common,action:'grant.revoke',operationId:'df-revoke-after-removal',
-      expectedBindingSourceVersion:listing.bindingSourceVersion,expectedBindingReceiptVersion:listing.bindingReceiptVersion,
+    const revoked=await applyDirectWorkspaceFolderGrant(env,{...common,recipientRecordId:recipient,action:'grant.revoke',operationId:'df-revoke-after-removal',
       grantId:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',expectedGrantVersion:1});
     expect(revoked).toMatchObject({ok:true,state:'revoked',version:2});
   });

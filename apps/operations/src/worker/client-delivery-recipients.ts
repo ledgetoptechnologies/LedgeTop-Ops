@@ -65,7 +65,9 @@ export async function clientRecipientVersion(material: unknown): Promise<string>
   return `crv_${b64url(new Uint8Array(digest))}`;
 }
 
-async function authorizeFolder(env: Env, principal: StaffPrincipal, folderRef: string): Promise<{ prefix: string; projectFolder: boolean }> {
+export async function authorizeClientRecipientFolder(env: Env, principal: StaffPrincipal, folderRef: string): Promise<{
+  prefix: string; projectFolder: boolean; divisionIds: string[];
+}> {
   let decoded: string;
   try { decoded = decodeRef(folderRef); } catch (error) { throw error; }
   const prefix = normalizePrefix(decoded);
@@ -93,7 +95,7 @@ async function authorizeFolder(env: Env, principal: StaffPrincipal, folderRef: s
   } else {
     await requirePermission(env, principal, "delivery.share.create", undefined, true);
   }
-  return { prefix, projectFolder: mappings.length > 0 };
+  return { prefix, projectFolder: mappings.length > 0, divisionIds: divisions };
 }
 
 async function readRoots(env: Env, q: string, limit: number): Promise<RootRow[]> {
@@ -222,7 +224,7 @@ async function readWorkspaceState(env: Env, authority: AuthorityRow | undefined)
 export async function listClientDeliveryRecipients(env: Env, principal: StaffPrincipal, input: { folderRef: string; q?: string; limit?: number }) {
   const q = input.q ?? "", limit = input.limit ?? MAX_RECIPIENTS;
   if (typeof q !== "string" || q.length > MAX_QUERY || q.trim() !== q || !Number.isInteger(limit) || limit < 1 || limit > MAX_RECIPIENTS) badRequest();
-  const folder = await authorizeFolder(env, principal, input.folderRef);
+  const folder = await authorizeClientRecipientFolder(env, principal, input.folderRef);
   let roots: RootRow[];
   try { roots = await readRoots(env, q, limit); } catch { return unavailable(); }
   let pins: Map<string, AuthorityRow>;

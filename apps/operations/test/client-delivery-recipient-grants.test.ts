@@ -71,10 +71,10 @@ describe("client delivery recipient grants contract", () => {
       audience: "all_members" as const, expiresAt: null };
     const context = { prefix: "Jobs/Clients/Example/", authority: { targetId: "target", targetRevision: 1,
       clientAuthorityId: "authority", workspaceId: "workspace", publicationRevision: 3, sourceSequence: 3,
-      snapshotId: "snapshot", snapshotSha256: "a".repeat(64), operationId: "operation", ackToken: "ack", checkpointId: "checkpoint" },
+      rootKind: "organization", rootRecordId: "ops-root", snapshotId: "snapshot", snapshotSha256: "a".repeat(64),
+      operationId: "operation", ackToken: "ack", checkpointId: "checkpoint" },
       workspace: { workspaceVersion: "b".repeat(64), membershipVersion: "c".repeat(64), memberCount: 2 },
-      binding: { id: "binding", sourceVersion: "source-version", receiptVersion: 4, ownerScopeType: "organization",
-        ownerPublicId: "pa-root", opsDivisionId: "division" },
+      folderRef: "Sm9icy9DbGllbnRzL0V4YW1wbGU", divisionIds: ["division"], recipientRecordId: "ops-recipient",
       record: { record_id: "ops-recipient", current_version: 1, organization_record_id: "ops-root",
         relationship_version: 2, organization_version: 5 } } as unknown as Resolved;
     const submitted = await previewVersionForContext(context, "staff-1", input);
@@ -82,7 +82,7 @@ describe("client delivery recipient grants contract", () => {
     const write = vi.fn();
     const guardedMutation = async () => { await assertReviewedPreview(changed, "staff-1", input, submitted); return write(); };
     await expect(guardedMutation()).rejects.toMatchObject({ status: 409 });
-    await expect(assertReviewedPreview({ ...context, binding: { ...context.binding, receiptVersion: 5 } } as Resolved,
+    await expect(assertReviewedPreview({ ...context, divisionIds: ["other-division"] } as Resolved,
       "staff-1", input, submitted)).rejects.toMatchObject({ status: 409 });
     expect(write).not.toHaveBeenCalled();
   });

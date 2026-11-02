@@ -1,9 +1,8 @@
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { authorizeDeliveryFolderPrefix, decodeRef, encodeRef, normalizePrefix } from "./delivery";
+import { decodeRef, encodeRef, normalizePrefix } from "./delivery";
 import { hasPermission, requirePermission } from "./acl";
-import { requireActivePrimaryWorkspaceBindingReceipt } from "./primary-delivery-workspace-bindings";
-import { listClientDeliveryRecipients } from "./client-delivery-recipients";
+import { authorizeClientRecipientFolder, listClientDeliveryRecipients } from "./client-delivery-recipients";
 import type { Env, StaffPrincipal } from "./types";
 
 type App = Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>;
@@ -15,9 +14,6 @@ type Authority = { targetId: string; targetRevision: number; clientAuthorityId: 
   rootKind: "organization" | "standalone_client"; rootRecordId: string; publicationRevision: number; sourceSequence: number;
   snapshotId: string; snapshotSha256: string; operationId: string; ackToken: string; acknowledgedClaimToken: string;
   checkpointId: string; currentCheckpointId: string; snapshotJson: string };
-type Binding = { id: string; workspaceId: string; sourceId: string; ownerScopeType: Scope; ownerPublicId: string;
-  r2Prefix: string; sourceVersion: string; receiptVersion: number; opsDivisionId: string; projectPublicId: null;
-  rootType: Authority["rootKind"]; rootPublicId: string; rootRecordId: string };
 type RecordRow = { record_id: string; record_kind: "client" | "organization"; current_version: number; display_name: string;
   organization_record_id: string | null; relationship_version: string | number | null; organization_version: number | null;
   organization_name: string | null };
@@ -26,18 +22,18 @@ type Recipient = { recipientId: string; recipientVersion: string; type: "client"
 type WorkspacePins = { workspaceId: string; targetId: string; clientAuthorityId: string; targetRevision: number;
   publicationRevision: number; sourceId: string; snapshotId: string; snapshotSha256: string; workspaceVersion: string;
   membershipVersion: string; memberCount: number; portalReady: boolean };
-type DirectGrant = { grantId: string; version: number; workspaceId: string; folderBindingId: string; recipientRecordId: string;
-  ownerScopeType: Scope; ownerRecordId: string; bindingSourceVersion: string; bindingReceiptVersion: number;
+type DirectGrant = { grantId: string; version: number; workspaceId: string; r2Prefix: string; recipientRecordId: string;
+  ownerScopeType: Scope; ownerRecordId: string;
   audience: "all_members"; status: "active" | "revoked" | "expired"; expiresAt: string | null;
   createdAt: string; revokedAt: string | null; canRevoke: boolean };
-export type Resolved = { prefix: string; folderRef: string; binding: Binding; authority: Authority; snapshot: Snapshot;
+export type Resolved = { prefix: string; folderRef: string; divisionIds: string[]; authority: Authority; snapshot: Snapshot;
   recipient: Recipient; record: RecordRow; workspace: WorkspacePins; recipientRecordId: string; canRevoke: boolean };
 type Rpc = { readDirectFolderWorkspaceState(value: unknown): Promise<unknown>;
   listDirectWorkspaceFolderGrants(value: unknown): Promise<unknown>; applyDirectWorkspaceFolderGrant(value: unknown): Promise<unknown> };
 
 const PRIMARY = "project-alpha:primary", VERSION = /^[a-f0-9]{64}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
-const GRANT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u, MAX_BINDINGS = 50;
+const GRANT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u, MAX_GRANTS = 100;
 const db = (value: D1Database) => value.withSession("first-primary");
 const badRequest = (): never => { throw new HTTPException(400, { message: "Client folder sharing request is invalid" }); };
 const conflict = (message = "Client or folder access changed. Refresh and review sharing again."): never => {
@@ -79,7 +75,7 @@ function service(env: Env): Rpc {
 function rpcError(value: unknown): never {
   const row = exact(value, ["ok", "protocolVersion", "code", "retryable"]);
   if (!row || row.ok !== false || row.protocolVersion !== 1 || typeof row.code !== "string" || typeof row.retryable !== "boolean") return unavailable();
-  if (row.code === "conflict" || row.code === "folder_not_bound") return conflict();
+  if (row.code === "conflict") return conflict();
   if (row.code === "invalid") return badRequest();
   return unavailable();
 }
@@ -111,16 +107,6 @@ function parseIdempotencyKey(value: string | undefined): string {
   return value;
 }
 
-async function resolveFolder(env: Env, principal: StaffPrincipal, folderRef: string): Promise<string> {
-  const prefix = parseFolderRef(folderRef).prefix;
-  await authorizeDeliveryFolderPrefix(env, principal, prefix);
-  let listed: R2Objects;
-  try { listed = await env.DATA_BUCKET.list({ prefix, delimiter: "/", limit: 1 }); } catch { return unavailable(); }
-  if (!listed.objects.length && !listed.delimitedPrefixes.length) throw new HTTPException(404, { message: "Folder not found" });
-  // Ops profile sharing is an independent grant. A PA project mapping may
-  // provide another sharing route, but it must not block direct client sharing.
-  return prefix;
-}
 async function readRecord(env: Env, id: string): Promise<RecordRow> {
   try {
     const row = await db(env.OPS_DB).prepare(["SELECT record.record_id,record.record_kind,record.current_version,json_extract(revision.profile_json,'$.name') display_name,",
@@ -207,44 +193,6 @@ async function readAuthority(env: Env, rootRecordId: string): Promise<Authority>
     return authority;
   } catch (error) { if (error instanceof HTTPException) throw error; return unavailable(); }
 }
-async function readBinding(env: Env, prefix: string, authority: Authority): Promise<Binding> {
-  try {
-    const rows = await db(env.DELIVERY_DB).prepare(["SELECT binding.id,binding.workspace_id,workspace.project_alpha_source_id source_id,binding.owner_scope_type,",
-      "binding.owner_public_id,binding.r2_prefix,binding.source_version,receipt.version receipt_version,receipt.ops_division_id,receipt.project_public_id,",
-      "receipt.root_type,receipt.root_public_id,workspace.root_type workspace_root_type,workspace.root_record_id",
-      "FROM portal_v2_folder_bindings binding JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id AND workspace.status='active'",
-      "AND workspace.project_alpha_source_id='project-alpha:primary'",
-      "JOIN portal_primary_staff_bindings receipt ON receipt.binding_id=binding.id AND receipt.workspace_id=binding.workspace_id",
-      "AND receipt.source_id='project-alpha:primary' AND receipt.state='active' AND receipt.ownership_kind='explicit_workspace'",
-      "AND receipt.project_public_id IS NULL AND receipt.owner_scope_type IN ('organization','client') AND receipt.r2_prefix=binding.r2_prefix",
-      "WHERE binding.workspace_id=? AND binding.r2_prefix=? AND binding.source_type='operations' AND binding.status='active'",
-      "AND binding.revoked_at IS NULL AND binding.source_version IS NOT NULL LIMIT 2"].join(" "))
-      .bind(authority.workspaceId, prefix).all<Binding & { workspace_root_type: string }>();
-    if (rows.results.length !== 1) return conflict(rows.results.length ? "More than one active Client Workspace binding matches this folder." : "This folder is not explicitly linked to that client workspace.");
-    const row = rows.results[0]!;
-    if (row.sourceId !== PRIMARY || row.rootRecordId !== authority.rootRecordId || row.rootType !== authority.rootKind
-      || row.workspace_root_type !== authority.rootKind || !row.id || !row.ownerPublicId || !row.sourceVersion
-      || !Number.isSafeInteger(row.receiptVersion) || !row.opsDivisionId || row.projectPublicId !== null || row.r2Prefix !== prefix) return conflict();
-    return row;
-  } catch (error) { if (error instanceof HTTPException) throw error; return unavailable(); }
-}
-async function ownerRecordId(env: Env, binding: Binding): Promise<string> {
-  try {
-    const rows = await db(env.OPS_DB).prepare(["SELECT mapping.record_id FROM project_alpha_active_directory_mappings mapping",
-      "JOIN operations_directory_records record ON record.record_id=mapping.record_id AND record.record_kind=mapping.resource_type",
-      "WHERE mapping.source_id='project-alpha:primary' AND mapping.resource_type=? AND mapping.project_alpha_public_id=? LIMIT 2"].join(" "))
-      .bind(binding.ownerScopeType, binding.ownerPublicId).all<{ record_id: string }>();
-    if (rows.results.length !== 1) return conflict("The Client Workspace owner mapping is missing or ambiguous.");
-    return rows.results[0]!.record_id;
-  } catch (error) { if (error instanceof HTTPException) throw error; return unavailable(); }
-}
-async function validateBinding(env: Env, principal: StaffPrincipal, binding: Binding): Promise<boolean> {
-  const proof = await requireActivePrimaryWorkspaceBindingReceipt(env, binding.id, binding.r2Prefix);
-  if (!proof || proof.ownershipMode !== "explicit_workspace" || proof.divisionId !== binding.opsDivisionId)
-    return conflict("The explicit Client Workspace folder binding is no longer current.");
-  await requirePermission(env, principal, "delivery.share.create", { divisionId: proof.divisionId }, true);
-  return hasPermission(env, principal, "delivery.share.revoke", { divisionId: proof.divisionId });
-}
 export function publicationContains(authority: Authority, snapshot: Snapshot, record: RecordRow): boolean {
   const root = snapshot.directoryRecords.find(row => row.recordId === authority.rootRecordId);
   const target = snapshot.directoryRecords.find(row => row.recordId === record.record_id);
@@ -259,7 +207,8 @@ export function publicationContains(authority: Authority, snapshot: Snapshot, re
 }
 async function resolve(env: Env, principal: StaffPrincipal, folderRef: string, recipientId: string,
   expectedVersion: string, mustBeReady: boolean): Promise<Resolved> {
-  const prefix = await resolveFolder(env, principal, folderRef), record = await readRecord(env, recipientId);
+  const folderAuthorization = await authorizeClientRecipientFolder(env, principal, folderRef), prefix = folderAuthorization.prefix;
+  const record = await readRecord(env, recipientId);
   const listed = await listClientDeliveryRecipients(env, principal, { folderRef, q: record.display_name, limit: 20 });
   const recipient = listed.recipients.find(row => row.recipientId === recipientId) as Recipient | undefined;
   if (!recipient) return conflict();
@@ -270,59 +219,51 @@ async function resolve(env: Env, principal: StaffPrincipal, folderRef: string, r
   const authority = await readAuthority(env, record.organization_record_id ?? record.record_id);
   const snapshot = parseSnapshot(authority.snapshotJson);
   if (!publicationContains(authority, snapshot, record)) conflict("The selected client is not part of the current published workspace.");
-  const binding = await readBinding(env, prefix, authority);
-  const rootOwnerRecordId = await ownerRecordId(env, binding);
-  if (rootOwnerRecordId !== authority.rootRecordId
-    || binding.ownerScopeType !== (authority.rootKind === "organization" ? "organization" : "client")
-    || (record.record_kind === "organization" && authority.rootRecordId !== recipientId))
-    conflict("This folder is not explicitly bound to the selected client workspace.");
-  const canRevoke = await validateBinding(env, principal, binding);
+  const canRevoke = folderAuthorization.divisionIds.length
+    ? (await Promise.all(folderAuthorization.divisionIds.map(divisionId => hasPermission(env, principal, "delivery.share.revoke", { divisionId })))).every(Boolean)
+    : await hasPermission(env, principal, "delivery.share.revoke");
   const response = await service(env).readDirectFolderWorkspaceState({ protocolVersion: 1, workspaceId: authority.workspaceId,
-    targetId: authority.targetId, clientAuthorityId: authority.clientAuthorityId, sourceId: binding.sourceId });
+    targetId: authority.targetId, clientAuthorityId: authority.clientAuthorityId, sourceId: PRIMARY });
   const state = exact(response, ["ok", "protocolVersion", "workspaceId", "targetId", "clientAuthorityId", "targetRevision",
     "publicationRevision", "sourceId", "snapshotId", "snapshotSha256", "workspaceVersion", "membershipVersion", "memberCount", "portalReady"]);
   if (!state || state.ok !== true || state.protocolVersion !== 1) rpcError(response);
   if (state.workspaceId !== authority.workspaceId || state.targetId !== authority.targetId || state.clientAuthorityId !== authority.clientAuthorityId
     || state.targetRevision !== authority.targetRevision || state.publicationRevision !== authority.publicationRevision
-    || state.sourceId !== binding.sourceId || state.snapshotId !== authority.snapshotId || state.snapshotSha256 !== authority.snapshotSha256
+    || state.sourceId !== PRIMARY || state.snapshotId !== authority.snapshotId || state.snapshotSha256 !== authority.snapshotSha256
     || typeof state.workspaceVersion !== "string" || !VERSION.test(state.workspaceVersion)
     || typeof state.membershipVersion !== "string" || !VERSION.test(state.membershipVersion)
     || !Number.isSafeInteger(state.memberCount) || Number(state.memberCount) < 0 || typeof state.portalReady !== "boolean") conflict();
   if (mustBeReady && (state.portalReady !== true || Number(state.memberCount) < 1))
     conflict("This client's portal needs at least one active member before folder sharing can be reviewed.");
-  return { prefix, folderRef, binding, authority, snapshot, recipient, record, workspace: state as unknown as WorkspacePins,
-    recipientRecordId: recipientId, canRevoke };
+  const canonicalFolderRef = encodeRef(prefix.slice(0, -1));
+  return { prefix, folderRef: canonicalFolderRef, divisionIds: folderAuthorization.divisionIds, authority, snapshot, recipient, record,
+    workspace: state as unknown as WorkspacePins, recipientRecordId: recipientId, canRevoke };
 }
 function listInput(context: Resolved) {
   return { protocolVersion: 1, workspaceId: context.authority.workspaceId, targetId: context.authority.targetId,
-    clientAuthorityId: context.authority.clientAuthorityId, sourceId: context.binding.sourceId, folderBindingId: context.binding.id,
-    ownerScopeType: context.binding.ownerScopeType, ownerRecordId: context.binding.rootPublicId,
-    recipientRecordId: context.recipientRecordId, expectedWorkspaceVersion: context.workspace.workspaceVersion,
+    clientAuthorityId: context.authority.clientAuthorityId, sourceId: PRIMARY, folderRef: context.folderRef,
+    expectedWorkspaceVersion: context.workspace.workspaceVersion,
     expectedMembershipVersion: context.workspace.membershipVersion };
 }
-function parseGrantList(value: unknown): { workspaceVersion: string; membershipVersion: string; memberCount: number;
-  bindingSourceVersion: string; bindingReceiptVersion: number; grants: DirectGrant[] } {
-  const row = exact(value, ["ok", "protocolVersion", "workspaceVersion", "membershipVersion", "memberCount", "bindingSourceVersion",
-    "bindingReceiptVersion", "grants"]);
+function parseGrantList(value: unknown, context: Resolved): { workspaceVersion: string; membershipVersion: string; memberCount: number; grants: DirectGrant[] } {
+  const row = exact(value, ["ok", "protocolVersion", "workspaceVersion", "membershipVersion", "memberCount", "grants"]);
   if (!row || row.ok !== true || row.protocolVersion !== 1 || typeof row.workspaceVersion !== "string" || !VERSION.test(row.workspaceVersion)
     || typeof row.membershipVersion !== "string" || !VERSION.test(row.membershipVersion) || !Number.isSafeInteger(row.memberCount)
-    || typeof row.bindingSourceVersion !== "string" || !Number.isSafeInteger(row.bindingReceiptVersion)
     || !Array.isArray(row.grants) || row.grants.length > 100) rpcError(value);
   const grants: DirectGrant[] = [];
   for (const raw of row.grants as unknown[]) {
-    const grant = exact(raw, ["grantId", "version", "workspaceId", "folderBindingId", "recipientRecordId", "ownerScopeType",
-      "ownerRecordId", "bindingSourceVersion", "bindingReceiptVersion", "audience", "status", "expiresAt", "createdAt", "revokedAt", "canRevoke"]);
+    const grant = exact(raw, ["grantId", "version", "workspaceId", "r2Prefix", "recipientRecordId", "ownerScopeType",
+      "ownerRecordId", "audience", "status", "expiresAt", "createdAt", "revokedAt", "canRevoke"]);
     if (!grant || typeof grant.grantId !== "string" || !UUID.test(grant.grantId) || !Number.isSafeInteger(grant.version)
-      || typeof grant.workspaceId !== "string" || typeof grant.folderBindingId !== "string" || typeof grant.recipientRecordId !== "string"
+      || grant.workspaceId !== context.authority.workspaceId || grant.r2Prefix !== context.prefix || typeof grant.recipientRecordId !== "string"
       || !["organization", "client"].includes(String(grant.ownerScopeType)) || typeof grant.ownerRecordId !== "string"
-      || typeof grant.bindingSourceVersion !== "string" || !Number.isSafeInteger(grant.bindingReceiptVersion)
+      || grant.ownerScopeType !== (context.authority.rootKind === "organization" ? "organization" : "client")
       || grant.audience !== "all_members" || !["active", "revoked", "expired"].includes(String(grant.status))
       || !(grant.expiresAt === null || iso(grant.expiresAt) !== null) || iso(grant.createdAt) === null
       || !(grant.revokedAt === null || iso(grant.revokedAt) !== null) || typeof grant.canRevoke !== "boolean") return unavailable();
     grants.push(grant as unknown as DirectGrant);
   }
-  return { workspaceVersion: row.workspaceVersion, membershipVersion: row.membershipVersion, memberCount: Number(row.memberCount),
-    bindingSourceVersion: row.bindingSourceVersion, bindingReceiptVersion: Number(row.bindingReceiptVersion), grants };
+  return { workspaceVersion: row.workspaceVersion, membershipVersion: row.membershipVersion, memberCount: Number(row.memberCount), grants };
 }
 export function grantView(row: DirectGrant, recipient: Recipient, canRevoke: boolean) {
   const expiresAt = row.expiresAt === null ? null : iso(row.expiresAt);
@@ -332,41 +273,40 @@ export function grantView(row: DirectGrant, recipient: Recipient, canRevoke: boo
     recipientCount: recipient.memberCount, status, expiresAt, updatedAt: iso(row.revokedAt) ?? iso(row.createdAt)!,
     canRevoke: canRevoke && status === "active" };
 }
-async function bindingsForFolder(env: Env, prefix: string): Promise<Binding[]> {
+async function workspacesForFolder(env: Env, folderRef: string): Promise<Array<{ workspace_id: string; root_record_id: string; target_id: string; client_authority_id: string }>> {
   try {
-    const rows = await db(env.DELIVERY_DB).prepare(["SELECT binding.id,binding.workspace_id,workspace.project_alpha_source_id source_id,",
-      "binding.owner_scope_type,binding.owner_public_id,binding.r2_prefix,binding.source_version,receipt.version receipt_version,receipt.ops_division_id,",
-      "receipt.project_public_id,receipt.root_type,receipt.root_public_id,authority.root_record_id",
-      "FROM portal_v2_folder_bindings binding JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id AND workspace.status='active'",
+    const rows = await db(env.DELIVERY_DB).prepare(["SELECT DISTINCT grant_record.workspace_id,authority.root_record_id,grant_record.target_id,grant_record.client_authority_id",
+      "FROM operations_portal_direct_folder_grants grant_record",
+      "JOIN portal_v2_workspaces workspace ON workspace.id=grant_record.workspace_id AND workspace.status='active'",
       "AND workspace.project_alpha_source_id='project-alpha:primary'",
-      "JOIN portal_primary_staff_bindings receipt ON receipt.binding_id=binding.id AND receipt.workspace_id=binding.workspace_id",
-      "AND receipt.source_id='project-alpha:primary' AND receipt.state='active' AND receipt.ownership_kind='explicit_workspace'",
-      "AND receipt.project_public_id IS NULL AND receipt.owner_scope_type IN ('organization','client') AND receipt.r2_prefix=binding.r2_prefix",
       "JOIN operations_portal_native_workspace_authority_heads authority ON authority.workspace_id=workspace.id",
-      "AND authority.state='active' AND authority.root_kind=workspace.root_type",
-      "WHERE binding.r2_prefix=? AND binding.source_type='operations' AND binding.status='active' AND binding.revoked_at IS NULL",
-      "AND binding.source_version IS NOT NULL ORDER BY binding.workspace_id LIMIT ?"].join(" "))
-      .bind(prefix, MAX_BINDINGS + 1).all<Binding>();
-    if (rows.results.length > MAX_BINDINGS) return unavailable();
+      "AND authority.state='active' AND authority.root_kind=workspace.root_type AND authority.target_id=grant_record.target_id",
+      "AND authority.client_authority_id=grant_record.client_authority_id",
+      "WHERE grant_record.folder_ref=? AND grant_record.source_id='project-alpha:primary'",
+      "ORDER BY grant_record.workspace_id LIMIT ?"].join(" "))
+      .bind(folderRef, MAX_GRANTS + 1).all<{workspace_id:string;root_record_id:string;target_id:string;client_authority_id:string}>();
+    if (rows.results.length > MAX_GRANTS) return unavailable();
     return rows.results;
   } catch { return unavailable(); }
 }
 async function listAll(env: Env, principal: StaffPrincipal, folderRef: string) {
-  const prefix = await resolveFolder(env, principal, folderRef), bindings = await bindingsForFolder(env, prefix), grants = [];
-  for (const binding of bindings) {
-    const authority = await readAuthority(env, binding.rootRecordId);
-    if (authority.workspaceId !== binding.workspaceId) conflict();
-    const rootId = await ownerRecordId(env, binding), record = await readRecord(env, rootId);
+  const authorized = await authorizeClientRecipientFolder(env, principal, folderRef), prefix = authorized.prefix;
+  const canonicalFolderRef = encodeRef(prefix.slice(0, -1));
+  const workspaces = await workspacesForFolder(env, canonicalFolderRef), grants = [];
+  for (const locator of workspaces) {
+    const authority = await readAuthority(env, locator.root_record_id);
+    if (authority.workspaceId !== locator.workspace_id || authority.targetId !== locator.target_id
+      || authority.clientAuthorityId !== locator.client_authority_id) conflict();
+    const rootId = locator.root_record_id, record = await readRecord(env, rootId);
     const rows = await listClientDeliveryRecipients(env, principal, { folderRef, q: record.display_name, limit: 20 });
     const recipient = rows.recipients.find(value => value.recipientId === rootId) as Recipient | undefined;
     if (!recipient || !publicationContains(authority, parseSnapshot(authority.snapshotJson), record)) return conflict();
     const context = await resolve(env, principal, folderRef, rootId, recipient.recipientVersion, false);
-    const result = parseGrantList(await service(env).listDirectWorkspaceFolderGrants(listInput(context)));
+    if (context.folderRef !== canonicalFolderRef) conflict();
+    const result = parseGrantList(await service(env).listDirectWorkspaceFolderGrants(listInput(context)), context);
     if (result.workspaceVersion !== context.workspace.workspaceVersion || result.membershipVersion !== context.workspace.membershipVersion
-      || result.bindingSourceVersion !== binding.sourceVersion || result.bindingReceiptVersion !== binding.receiptVersion
-      || result.grants.some(grant => grant.workspaceId !== binding.workspaceId || grant.folderBindingId !== binding.id
-        || grant.ownerRecordId !== binding.rootPublicId || grant.ownerScopeType !== binding.ownerScopeType)) conflict();
-    const canRevoke = await hasPermission(env, principal, "delivery.share.revoke", { divisionId: binding.opsDivisionId });
+      || result.grants.some(grant => grant.ownerRecordId.length === 0)) conflict();
+    const canRevoke = context.canRevoke;
     for (const grant of result.grants) {
       const target = await readRecord(env, grant.recipientRecordId);
       if (!publicationContains(authority, parseSnapshot(authority.snapshotJson), target)) conflict("A shared client is no longer in the current published workspace.");
@@ -385,8 +325,7 @@ export async function previewVersionForContext(context: Resolved, staffId: strin
       context.authority.sourceSequence, context.authority.snapshotId, context.authority.snapshotSha256,
       context.authority.operationId, context.authority.ackToken, context.authority.checkpointId],
     membership: [context.workspace.workspaceVersion, context.workspace.membershipVersion, context.workspace.memberCount],
-    binding: [context.binding.id, context.binding.sourceVersion, context.binding.receiptVersion,
-      context.binding.ownerScopeType, context.binding.ownerPublicId, context.binding.opsDivisionId],
+    folderAuthorization: [context.folderRef, context.divisionIds],
     record: [context.record.record_id, context.record.current_version, context.record.organization_record_id,
       context.record.relationship_version, context.record.organization_version], expiresAt: input.expiresAt });
 }
@@ -405,67 +344,64 @@ async function createGrant(env: Env, principal: StaffPrincipal, input: ReturnTyp
   await assertReviewedPreview(context, principal.id, input, previewVersion);
   const operationId = await deterministicUuid(["direct-folder-grant", principal.id, key, "create"]);
   const grantId = await deterministicUuid(["direct-folder-grant-id", principal.id, key, "create"]);
-  const response = await client.applyDirectWorkspaceFolderGrant({ ...listInput(context), protocolVersion: 1, operationId,
-    action: "grant.create", expectedBindingSourceVersion: context.binding.sourceVersion,
-    expectedBindingReceiptVersion: context.binding.receiptVersion, grantId, expiresAt: input.expiresAt });
+  const response = await client.applyDirectWorkspaceFolderGrant({ ...listInput(context), recipientRecordId: context.recipientRecordId,
+    protocolVersion: 1, operationId, action: "grant.create", grantId, expiresAt: input.expiresAt });
   const result = exact(response, ["ok", "protocolVersion", "operationId", "grantId", "version", "state", "replayed"]);
   if (!result || result.ok !== true || result.protocolVersion !== 1) rpcError(response);
   if (result.operationId !== operationId || result.grantId !== grantId || !Number.isSafeInteger(result.version)
     || result.state !== "active" || typeof result.replayed !== "boolean") return unavailable();
-  const listing = parseGrantList(await client.listDirectWorkspaceFolderGrants(listInput(context)));
+  const listing = parseGrantList(await client.listDirectWorkspaceFolderGrants(listInput(context)), context);
   const grant = listing.grants.find(value => value.grantId === grantId);
   if (!grant || grant.recipientRecordId !== input.recipientId || grant.version !== result.version || grant.status !== "active") return unavailable();
   return { grant: grantView(grant, context.recipient, context.canRevoke), replayed: result.replayed };
 }
 async function revokeGrant(env: Env, principal: StaffPrincipal, grantId: string, version: number, key: string) {
   if (!GRANT_ID.test(grantId)) badRequest();
-  let locator: { workspace_id: string; binding_id: string; r2_prefix: string; source_id: string; target_id: string; client_authority_id: string;
-    owner_scope_type: Scope; owner_record_id: string; recipient_record_id: string; root_record_id: string } | null;
+  let locators: Array<{ workspace_id: string; folder_ref: string; source_id: string; target_id: string; client_authority_id: string;
+    recipient_record_id: string; root_record_id: string; grant_version:number; status:string }>;
   try {
-    locator = await db(env.DELIVERY_DB).prepare(["SELECT grant_record.workspace_id,grant_record.folder_binding_id binding_id,binding.r2_prefix,",
-      "grant_record.source_id,grant_record.target_id,grant_record.client_authority_id,grant_record.owner_scope_type,",
-      "grant_record.owner_record_id,grant_record.recipient_record_id,authority.root_record_id",
+    locators = (await db(env.DELIVERY_DB).prepare(["SELECT grant_record.workspace_id,grant_record.folder_ref,",
+      "grant_record.source_id,grant_record.target_id,grant_record.client_authority_id,grant_record.recipient_record_id,",
+      "grant_record.grant_version,grant_record.status,authority.root_record_id",
       "FROM operations_portal_direct_folder_grants grant_record",
-      "JOIN portal_v2_folder_bindings binding ON binding.id=grant_record.folder_binding_id AND binding.workspace_id=grant_record.workspace_id",
-      "JOIN portal_primary_staff_bindings receipt ON receipt.binding_id=binding.id AND receipt.workspace_id=binding.workspace_id",
-      "AND receipt.state='active' AND receipt.ownership_kind='explicit_workspace' AND receipt.project_public_id IS NULL",
       "JOIN portal_v2_workspaces workspace ON workspace.id=grant_record.workspace_id AND workspace.status='active'",
       "JOIN operations_portal_native_workspace_authority_heads authority ON authority.workspace_id=workspace.id AND authority.state='active'",
-      "WHERE grant_record.grant_id=? AND binding.source_type='operations' AND binding.status='active' AND binding.revoked_at IS NULL",
-      "AND receipt.source_id=grant_record.source_id AND receipt.r2_prefix=binding.r2_prefix",
-      "AND grant_record.status IN ('active','revoked') LIMIT 2"].join(" "))
-      .bind(grantId).first();
+      "AND authority.target_id=grant_record.target_id AND authority.client_authority_id=grant_record.client_authority_id",
+      "WHERE grant_record.grant_id=? AND grant_record.status='active' LIMIT 2"].join(" "))
+      .bind(grantId).all<{workspace_id:string;folder_ref:string;source_id:string;target_id:string;client_authority_id:string;
+        recipient_record_id:string;root_record_id:string;grant_version:number;status:string}>()).results;
   } catch { return unavailable(); }
-  if (!locator) return conflict("This share was not found or its folder authority is no longer active.");
+  if (locators.length !== 1) return conflict("This share was not found or its folder authority is no longer active.");
+  const locator=locators[0]!;
   if (locator.source_id !== PRIMARY || !UUID.test(locator.client_authority_id)) return unavailable();
   const authority = await readAuthority(env, locator.root_record_id);
   if (authority.workspaceId !== locator.workspace_id || authority.targetId !== locator.target_id
     || authority.clientAuthorityId !== locator.client_authority_id) conflict();
-  const folderRef = encodeRef(locator.r2_prefix.slice(0, -1));
-  const binding = await readBinding(env, locator.r2_prefix, authority);
-  if (binding.id !== locator.binding_id || binding.sourceId !== locator.source_id
-    || binding.ownerScopeType !== locator.owner_scope_type || binding.rootPublicId !== locator.owner_record_id) conflict();
+  const folderRef = locator.folder_ref;
+  const folder = parseFolderRef(folderRef);
+  if (encodeRef(folder.prefix.slice(0, -1)) !== folderRef) conflict();
   const record = await readRecord(env, locator.recipient_record_id);
   const rows = await listClientDeliveryRecipients(env, principal, { folderRef, q: record.display_name, limit: 20 });
   const recipient = rows.recipients.find(value => value.recipientId === locator.recipient_record_id) as Recipient | undefined;
   if (!recipient) return conflict("The Client Workspace recipient is no longer available.");
   const context = await resolve(env, principal, folderRef, locator.recipient_record_id, recipient.recipientVersion, false);
-  if (context.binding.id !== locator.binding_id) conflict();
   const client = service(env), input = listInput(context);
-  const current = parseGrantList(await client.listDirectWorkspaceFolderGrants(input)).grants.find(value => value.grantId === grantId);
+  if(context.folderRef!==folderRef)conflict();
+  const current = parseGrantList(await client.listDirectWorkspaceFolderGrants(input),context).grants.find(value => value.grantId === grantId);
   if (!current || current.recipientRecordId !== locator.recipient_record_id || current.workspaceId !== locator.workspace_id
-    || current.folderBindingId !== locator.binding_id || current.ownerRecordId !== locator.owner_record_id
-    || current.ownerScopeType !== locator.owner_scope_type) conflict();
-  await requirePermission(env, principal, "delivery.share.revoke", { divisionId: binding.opsDivisionId }, true);
+    || current.version !== locator.grant_version || current.version !== version || current.status !== "active") conflict();
+  if (context.divisionIds.length) {
+    for (const divisionId of context.divisionIds)
+      await requirePermission(env, principal, "delivery.share.revoke", { divisionId }, true);
+  } else await requirePermission(env, principal, "delivery.share.revoke", undefined, true);
   const operationId = await deterministicUuid(["direct-folder-grant", principal.id, key, "revoke"]);
-  const response = await client.applyDirectWorkspaceFolderGrant({ ...input, protocolVersion: 1, operationId,
-    action: "grant.revoke", expectedBindingSourceVersion: binding.sourceVersion,
-    expectedBindingReceiptVersion: binding.receiptVersion, grantId, expectedGrantVersion: version });
+  const response = await client.applyDirectWorkspaceFolderGrant({ ...input, recipientRecordId: context.recipientRecordId,
+    protocolVersion: 1, operationId, action: "grant.revoke", grantId, expectedGrantVersion: version });
   const result = exact(response, ["ok", "protocolVersion", "operationId", "grantId", "version", "state", "replayed"]);
   if (!result || result.ok !== true || result.protocolVersion !== 1) rpcError(response);
   if (result.operationId !== operationId || result.grantId !== grantId || result.version !== version + 1
     || result.state !== "revoked" || typeof result.replayed !== "boolean") return unavailable();
-  const listing = parseGrantList(await client.listDirectWorkspaceFolderGrants(input));
+  const listing = parseGrantList(await client.listDirectWorkspaceFolderGrants(input),context);
   const revoked = listing.grants.find(value => value.grantId === grantId);
   if (!revoked || revoked.version !== result.version || revoked.status !== "revoked") return unavailable();
   return { grant: grantView(revoked, context.recipient, false), replayed: result.replayed };

@@ -1,7 +1,6 @@
 import type { Env } from "./types";
 import { d1TablesPresent } from "./schema-readiness";
 import { sha256Hex } from "./security";
-import { folderOwnerEntityTypeSql } from "../../../../packages/shared/src/folder-owner-entity";
 
 type DatabaseEnv = Pick<Env, "DELIVERY_DB" | "CLIENT_PORTAL_DIRECT_FOLDER_GRANTS_ENABLED">;
 const directFolderGrantsEnabled = (env: DatabaseEnv) => env.CLIENT_PORTAL_DIRECT_FOLDER_GRANTS_ENABLED?.trim().toLowerCase() !== "false";
@@ -13,13 +12,10 @@ type WorkspaceState = {
   publicationRevision: number; sourceId: string; snapshotId: string; snapshotSha256: string;
   rootKind: string; rootRecordId: string; rootPublicId: string; workspaceVersion: string; membershipVersion: string; memberCount: number; snapshot: Snapshot;
 };
-type Binding = { id: string; workspace_id: string; owner_scope_type: string; owner_public_id: string;
-  r2_prefix: string; source_type: string; source_version: string | null; status: string; revoked_at: string | null;
-  receipt_version:number;root_type:string;root_public_id:string;ownership_kind:string;project_public_id:string|null };
 type GrantRow = { grant_id: string; grant_version: number; workspace_id: string; target_id: string;
   client_authority_id: string; target_revision: number; publication_revision: number; publication_snapshot_id: string;
-  publication_snapshot_sha256: string; source_id: string; folder_binding_id: string; binding_source_version: string;
-  binding_receipt_version:number; owner_scope_type: "organization" | "client"; owner_record_id: string;
+  publication_snapshot_sha256: string; source_id: string; folder_ref: string;
+  owner_scope_type: "organization" | "client"; owner_record_id: string;
   recipient_record_id: string; status: "active" | "revoked" | "expired"; expires_at: string | null;
   created_at: string; revoked_at: string | null };
 
@@ -54,6 +50,16 @@ function safePrefix(value: unknown): value is string {
   const parts = value.slice(0, -1).split("/");
   return parts.every(part => part.length > 0 && part !== "." && part !== ".." && part.length <= 255);
 }
+function folderRefPrefix(value: unknown): string | null {
+  if (typeof value !== "string" || value.length < 2 || value.length > 1400 || !/^[A-Za-z0-9_-]+$/u.test(value)) return null;
+  try {
+    const bytes = Uint8Array.from(atob(value.replace(/-/gu, "+").replace(/_/gu, "/").padEnd(Math.ceil(value.length / 4) * 4, "=")), ch => ch.charCodeAt(0));
+    const canonical = btoa(String.fromCharCode(...bytes)).replace(/\+/gu, "-").replace(/\//gu, "_").replace(/=+$/gu, "");
+    if (canonical !== value) return null;
+    const path = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return safePrefix(`${path}/`) ? `${path}/` : null;
+  } catch { return null; }
+}
 
 function parseSnapshot(raw: string): Snapshot | null {
   try {
@@ -64,8 +70,7 @@ function parseSnapshot(raw: string): Snapshot | null {
   } catch { return null; }
 }
 
-function matchingDirectory(snapshot: Snapshot, input: { rootKind: string; rootRecordId: string; recipientRecordId: string;
-  rootPublicId:string;ownerScopeType:"organization"|"client";ownerRecordId:string;sourceId:string }): boolean {
+function matchingDirectory(snapshot: Snapshot, input: { rootKind: string; rootRecordId: string; recipientRecordId: string }): boolean {
   const records = snapshot.directoryRecords as SnapshotRecord[];
   const get = (id: string) => records.find(record => record.recordId === id);
   const root = get(input.rootRecordId);
@@ -73,8 +78,7 @@ function matchingDirectory(snapshot: Snapshot, input: { rootKind: string; rootRe
   const recipient = get(input.recipientRecordId);
   if (!recipient) return false;
   const rootDirectoryKind = input.rootKind === "organization" ? "organization" : "client";
-  if (root.kind !== rootDirectoryKind||input.ownerRecordId!==input.rootPublicId
-    ||input.ownerScopeType!==(input.rootKind==="organization"?"organization":"client")) return false;
+  if (root.kind !== rootDirectoryKind) return false;
   if (input.rootKind === "standalone_client") return recipient.recordId === input.rootRecordId
     && recipient.kind === "client" && recipient.parentRecordId === null;
   return recipient.recordId === input.rootRecordId
@@ -87,7 +91,7 @@ async function tableReady(env: DatabaseEnv): Promise<boolean> {
     "operations_portal_direct_folder_grant_mutations", "operations_portal_direct_folder_grant_audit",
     "operations_portal_native_workspace_authority_heads", "operations_portal_workspace_publication_heads",
     "operations_portal_workspace_publication_snapshots", "operations_portal_workspace_publication_receipts",
-    "portal_v2_workspaces", "portal_v2_folder_bindings", "portal_primary_staff_bindings",
+    "portal_v2_workspaces",
     "portal_v2_directory_checkpoints","portal_v2_directory_generations","portal_v2_directory_entities",
     "pa_portal_projection_checkpoints","pa_portal_projection_generations",
     "portal_v2_workspace_memberships", "portal_v2_identities"]);
@@ -150,68 +154,14 @@ function commonState(value: Record<string,unknown>) {
     clientAuthorityId:value.clientAuthorityId as string,sourceId:value.sourceId as string };
 }
 
-async function currentExplicitBinding(env:DatabaseEnv,input:{folderBindingId:string;workspaceId:string;sourceId:string;
-  ownerScopeType:"organization"|"client";ownerRecordId:string;expectedBindingSourceVersion?:string;expectedBindingReceiptVersion?:number},state:WorkspaceState):Promise<Binding|null>{
-  const ownerEntityType=folderOwnerEntityTypeSql("binding.owner_scope_type","binding.owner_public_id","workspace.root_type","workspace.pa_client_public_id");
-  const row=await session(env).prepare(`SELECT binding.id,binding.workspace_id,binding.owner_scope_type,binding.owner_public_id,
-      binding.r2_prefix,binding.source_type,binding.source_version,binding.status,binding.revoked_at,
-      receipt.version receipt_version,receipt.root_type,receipt.root_public_id,receipt.ownership_kind,receipt.project_public_id
-    FROM portal_v2_folder_bindings binding
-    JOIN portal_primary_staff_bindings receipt ON receipt.binding_id=binding.id AND receipt.workspace_id=binding.workspace_id
-      AND receipt.r2_prefix=binding.r2_prefix AND receipt.state='active' AND receipt.source_id=?
-      AND receipt.ownership_kind='explicit_workspace' AND receipt.project_public_id IS NULL
-      AND receipt.owner_scope_type IN('organization','client')
-    JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id AND workspace.status='active'
-      AND workspace.project_alpha_source_id=? AND workspace.root_type=receipt.root_type
-      AND COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id)=receipt.root_public_id
-      AND receipt.root_public_id=?
-    JOIN pa_portal_workspace_sources source ON source.workspace_id=workspace.id AND source.projection_source_id=?
-    JOIN portal_v2_directory_checkpoints directory_checkpoint ON directory_checkpoint.workspace_id=workspace.id
-      AND directory_checkpoint.source_sequence=receipt.source_sequence
-    JOIN portal_v2_directory_generations directory_generation ON directory_generation.id=directory_checkpoint.active_generation_id
-      AND directory_generation.workspace_id=workspace.id AND directory_generation.status='active' AND directory_generation.complete=1
-      AND directory_generation.id=receipt.directory_generation_id
-    JOIN portal_v2_directory_entities owner ON owner.workspace_id=workspace.id AND owner.generation_id=directory_checkpoint.active_generation_id
-      AND owner.entity_type=${ownerEntityType} AND owner.public_id=binding.owner_public_id AND owner.active=1
-    JOIN portal_v2_directory_entities root ON root.workspace_id=workspace.id AND root.generation_id=directory_checkpoint.active_generation_id
-      AND root.entity_type=workspace.root_type AND root.public_id=receipt.root_public_id AND root.active=1
-      AND root.parent_public_id IS NULL AND root.source_version=receipt.root_source_version
-    JOIN pa_portal_projection_checkpoints projection_checkpoint ON projection_checkpoint.workspace_id=workspace.id
-      AND projection_checkpoint.source_generation=(SELECT generation.source_generation FROM pa_portal_projection_generations generation
-        WHERE generation.id=receipt.snapshot_generation_id AND generation.workspace_id=workspace.id)
-      AND projection_checkpoint.source_sequence=receipt.source_sequence AND projection_checkpoint.snapshot_generation_id=receipt.snapshot_generation_id
-    JOIN pa_portal_projection_generations projection_generation ON projection_generation.id=projection_checkpoint.snapshot_generation_id
-      AND projection_generation.workspace_id=workspace.id AND projection_generation.projection_source_id=receipt.source_id
-      AND projection_generation.status='active' AND projection_generation.complete=1
-    WHERE binding.id=? AND binding.workspace_id=? AND binding.source_type='operations'
-      AND binding.status='active' AND binding.revoked_at IS NULL AND binding.source_version IS NOT NULL
-      AND binding.owner_scope_type=receipt.owner_scope_type AND binding.owner_public_id=receipt.owner_public_id
-      AND binding.owner_scope_type=? AND binding.owner_public_id=?
-      AND ((workspace.root_type='organization' AND binding.owner_scope_type='organization'
-          AND binding.owner_public_id=receipt.root_public_id)
-        OR (workspace.root_type='standalone_client' AND binding.owner_scope_type='client'
-          AND owner.entity_type='standalone_client' AND owner.public_id=receipt.root_public_id))
-      AND (? IS NULL OR binding.source_version=?) AND (? IS NULL OR receipt.version=?)
-      AND ((receipt.root_type='organization' AND EXISTS(SELECT 1 FROM portal_v2_directory_entities root
-        WHERE root.workspace_id=workspace.id AND root.generation_id=directory_checkpoint.active_generation_id
-          AND root.entity_type='organization' AND root.public_id=receipt.root_public_id AND root.active=1 AND root.parent_public_id IS NULL))
-        OR (receipt.root_type='standalone_client' AND EXISTS(SELECT 1 FROM portal_v2_directory_entities root
-        WHERE root.workspace_id=workspace.id AND root.generation_id=directory_checkpoint.active_generation_id
-          AND root.entity_type='standalone_client' AND root.public_id=receipt.root_public_id AND root.active=1 AND root.parent_public_id IS NULL)))`)
-    .bind(input.sourceId,input.sourceId,state.rootPublicId,input.sourceId,input.folderBindingId,input.workspaceId,
-      input.ownerScopeType,input.ownerRecordId,
-      input.expectedBindingSourceVersion??null,
-      input.expectedBindingSourceVersion??null,input.expectedBindingReceiptVersion??null,input.expectedBindingReceiptVersion??null)
-    .first<Binding>();
-  if(!row||row.root_type!==state.rootKind||!safePrefix(row.r2_prefix))return null;
-  return row;
-}
 function requestFingerprint(value: Record<string,unknown>,fields:readonly string[]): Promise<string> {
   return sha256Hex(JSON.stringify(["ops-direct-folder-grant-v1",fields.map(field=>[field,value[field]])]));
 }
-function grantView(row: GrantRow) { return { grantId:row.grant_id,version:row.grant_version,workspaceId:row.workspace_id,
-  folderBindingId:row.folder_binding_id,recipientRecordId:row.recipient_record_id,ownerScopeType:row.owner_scope_type,
-  ownerRecordId:row.owner_record_id,bindingSourceVersion:row.binding_source_version,bindingReceiptVersion:row.binding_receipt_version,
+function grantView(row: GrantRow) {
+  const r2Prefix=folderRefPrefix(row.folder_ref);if(!r2Prefix)throw new Error("direct-folder-reference-invalid");
+  return { grantId:row.grant_id,version:row.grant_version,workspaceId:row.workspace_id,
+  r2Prefix,recipientRecordId:row.recipient_record_id,ownerScopeType:row.owner_scope_type,
+  ownerRecordId:row.owner_record_id,
   audience:"all_members" as const,status:row.status,expiresAt:row.expires_at,
   createdAt:row.created_at,revokedAt:row.revoked_at,canRevoke:row.status==="active" }; }
 
@@ -231,62 +181,54 @@ export async function readDirectFolderWorkspaceState(env:DatabaseEnv,raw:unknown
   }catch{return fail("temporarily_unavailable");}
 }
 
-/** List direct Ops grants for one exact bound folder; never substitutes an empty list on database failure. */
+/** List direct Ops grants for one exact folder/profile pair; never substitutes an empty list on database failure. */
 export async function listDirectWorkspaceFolderGrants(env:DatabaseEnv,raw:unknown){
   if(!directFolderGrantsEnabled(env))return fail("disabled");
-  const value=plain(raw,["protocolVersion","workspaceId","targetId","clientAuthorityId","sourceId","folderBindingId",
-    "ownerScopeType","ownerRecordId","recipientRecordId","expectedWorkspaceVersion","expectedMembershipVersion"]);
+  const value=plain(raw,["protocolVersion","workspaceId","targetId","clientAuthorityId","sourceId","folderRef",
+    "expectedWorkspaceVersion","expectedMembershipVersion"]);
   if(!value||value.protocolVersion!==1||!validText(value.workspaceId)||!validText(value.targetId)
-    ||!UUID.test(String(value.clientAuthorityId))||!SOURCE.test(String(value.sourceId))||!validText(value.folderBindingId)
-    ||!['organization','client'].includes(String(value.ownerScopeType))
-    ||!validText(value.ownerRecordId)||!validText(value.recipientRecordId)||!SHA256.test(String(value.expectedWorkspaceVersion))
+    ||!UUID.test(String(value.clientAuthorityId))||!SOURCE.test(String(value.sourceId))||!folderRefPrefix(value.folderRef)
+    ||!SHA256.test(String(value.expectedWorkspaceVersion))
     ||!SHA256.test(String(value.expectedMembershipVersion)))return fail("invalid");
   try{
     const state=await workspaceState(env,commonState(value));if(!state)return fail("workspace_unavailable");
     if(state.workspaceVersion!==value.expectedWorkspaceVersion)return fail("conflict");
     if(state.membershipVersion!==value.expectedMembershipVersion)return fail("conflict");
-    const ownerScopeType=value.ownerScopeType as "organization"|"client";
-    if(!matchingDirectory(state.snapshot,{rootKind:state.rootKind,rootRecordId:state.rootRecordId,rootPublicId:state.rootPublicId,
-      sourceId:state.sourceId,ownerScopeType,ownerRecordId:String(value.ownerRecordId),recipientRecordId:String(value.recipientRecordId)}))return fail("folder_not_bound");
-    const binding=await currentExplicitBinding(env,{folderBindingId:String(value.folderBindingId),workspaceId:String(value.workspaceId),sourceId:String(value.sourceId),
-      ownerScopeType,ownerRecordId:String(value.ownerRecordId)},state);
-    if(!binding||binding.owner_scope_type!==ownerScopeType)return fail("folder_not_bound");
+    const ownerScopeType=state.rootKind==="organization"?"organization":"client";
     const rows=await session(env).prepare(`SELECT grant_id,grant_version,workspace_id,target_id,client_authority_id,
-      target_revision,publication_revision,publication_snapshot_id,publication_snapshot_sha256,source_id,folder_binding_id,
-      binding_source_version,binding_receipt_version,owner_scope_type,owner_record_id,recipient_record_id,status,expires_at,
-      created_at,revoked_at FROM operations_portal_direct_folder_grants WHERE workspace_id=? AND folder_binding_id=?
-      ORDER BY created_at DESC,grant_id LIMIT 101`).bind(value.workspaceId,value.folderBindingId).all<GrantRow>();
+      target_revision,publication_revision,publication_snapshot_id,publication_snapshot_sha256,source_id,folder_ref,
+      owner_scope_type,owner_record_id,recipient_record_id,status,expires_at,
+      created_at,revoked_at FROM operations_portal_direct_folder_grants WHERE workspace_id=? AND folder_ref=?
+      ORDER BY created_at DESC,grant_id LIMIT 101`).bind(value.workspaceId,value.folderRef).all<GrantRow>();
     if(rows.results.length>100)return fail("temporarily_unavailable");
-    const now=Date.now(),grants=rows.results.map(row=>({
-      ...grantView({...row,status:row.status==="active"&&row.expires_at&&Date.parse(row.expires_at)<=now?"expired":row.status}),
-    }));
+    if(rows.results.some(row=>row.owner_scope_type!==ownerScopeType||row.owner_record_id!==state.rootPublicId
+      ||!matchingDirectory(state.snapshot,{rootKind:state.rootKind,rootRecordId:state.rootRecordId,recipientRecordId:row.recipient_record_id})))return fail("conflict");
+    const now=Date.now(),grants=rows.results.map(row=>grantView({...row,
+      status:row.status==="active"&&row.expires_at&&Date.parse(row.expires_at)<=now?"expired":row.status}));
     const fresh=await workspaceState(env,commonState(value));
     if(!fresh||fresh.workspaceVersion!==state.workspaceVersion||fresh.membershipVersion!==state.membershipVersion)return fail("conflict");
     return {ok:true as const,protocolVersion:1 as const,workspaceVersion:state.workspaceVersion,
-      membershipVersion:state.membershipVersion,memberCount:state.memberCount,bindingSourceVersion:binding.source_version!,
-      bindingReceiptVersion:binding.receipt_version,grants};
+      membershipVersion:state.membershipVersion,memberCount:state.memberCount,grants};
   }catch{return fail("temporarily_unavailable");}
 }
 
-/** Idempotent, CAS-protected grant create/revoke. Path and audience authority
- * are derived from the Client-owned binding and acknowledged Ops snapshot. */
+/** Idempotent, CAS-protected grant create/revoke. Folder authority is an exact
+ * canonical Ops path; recipient authority comes from the acknowledged snapshot. */
 export async function applyDirectWorkspaceFolderGrant(env:DatabaseEnv,raw:unknown){
   if(!directFolderGrantsEnabled(env))return fail("disabled");
   const value=raw&&typeof raw==="object"&&!Array.isArray(raw)?raw as Record<string,unknown>:null;
   if(!value)return fail("invalid");
   const action=value.action;
   const commonFields=["protocolVersion","operationId","action","workspaceId","targetId","clientAuthorityId","sourceId",
-    "folderBindingId","ownerScopeType","ownerRecordId","recipientRecordId","expectedWorkspaceVersion",
-    "expectedMembershipVersion","expectedBindingSourceVersion","expectedBindingReceiptVersion","grantId"] as const;
+    "folderRef","recipientRecordId","expectedWorkspaceVersion",
+    "expectedMembershipVersion","grantId"] as const;
   const fields=action==="grant.create"?[...commonFields,"expiresAt"]:action==="grant.revoke"?[...commonFields,"expectedGrantVersion"]:[];
   const request=plain(raw,fields);
   if(!request||request.protocolVersion!==1||!validText(request.operationId)||!validText(request.workspaceId)
     ||!validText(request.targetId)||!UUID.test(String(request.clientAuthorityId))||!SOURCE.test(String(request.sourceId))
-    ||!validText(request.folderBindingId)
-    ||!['organization','client'].includes(String(request.ownerScopeType))||!validText(request.ownerRecordId)
+    ||!folderRefPrefix(request.folderRef)
     ||!validText(request.recipientRecordId)||!SHA256.test(String(request.expectedWorkspaceVersion))
-    ||!SHA256.test(String(request.expectedMembershipVersion))||!validText(request.expectedBindingSourceVersion,512)
-    ||!positive(request.expectedBindingReceiptVersion)
+    ||!SHA256.test(String(request.expectedMembershipVersion))
     ||!UUID.test(String(request.grantId))
     ||(action==="grant.create"&&request.expiresAt!==null&&(!validInstant(request.expiresAt)||Date.parse(String(request.expiresAt))<=Date.now()))
     ||(action==="grant.revoke"&&!positive(request.expectedGrantVersion)))return fail("invalid");
@@ -303,31 +245,25 @@ export async function applyDirectWorkspaceFolderGrant(env:DatabaseEnv,raw:unknow
       ||action==="grant.create"&&state.memberCount===0)return fail("conflict");
     const rootKind=state.rootKind;
     const rootRecordId=state.rootRecordId;
-    const ownerScopeType=request.ownerScopeType as "organization"|"client";
-    const owner={rootKind,rootRecordId,rootPublicId:state.rootPublicId,sourceId:state.sourceId,ownerScopeType,
-      ownerRecordId:String(request.ownerRecordId),recipientRecordId:String(request.recipientRecordId)};
-    if(action==="grant.create"&&!matchingDirectory(state.snapshot,owner))return fail("folder_not_bound");
-    if(action==="grant.revoke"&&(String(request.ownerRecordId)!==state.rootPublicId
-      ||ownerScopeType!==(state.rootKind==="organization"?"organization":"client")))return fail("folder_not_bound");
-    const binding=await currentExplicitBinding(env,{folderBindingId:String(request.folderBindingId),workspaceId:String(request.workspaceId),
-      sourceId:String(request.sourceId),ownerScopeType,ownerRecordId:String(request.ownerRecordId),expectedBindingSourceVersion:String(request.expectedBindingSourceVersion),
-      expectedBindingReceiptVersion:Number(request.expectedBindingReceiptVersion)},state);
-    if(!binding||binding.owner_scope_type!==ownerScopeType)return fail("folder_not_bound");
+    const ownerScopeType=rootKind==="organization"?"organization":"client";
+    const ownerRecordId=state.rootPublicId;
+    if(!matchingDirectory(state.snapshot,{rootKind,rootRecordId,recipientRecordId:String(request.recipientRecordId)}))return fail("conflict");
     const actionValue=action as Action;
     if(actionValue==="grant.create"){
       const exists=await db.prepare(`SELECT grant_id,grant_version,status FROM operations_portal_direct_folder_grants
-        WHERE workspace_id=? AND folder_binding_id=? AND status='active' AND revoked_at IS NULL`).bind(request.workspaceId,request.folderBindingId)
+        WHERE workspace_id=? AND folder_ref=? AND recipient_record_id=? AND status='active' AND revoked_at IS NULL`)
+        .bind(request.workspaceId,request.folderRef,request.recipientRecordId)
         .first<{grant_id:string;grant_version:number;status:string}>();
       if(exists)return fail("conflict");
       const result=await db.batch([
         db.prepare(`INSERT INTO operations_portal_direct_folder_grants(grant_id,grant_version,workspace_id,target_id,
           client_authority_id,target_revision,publication_revision,publication_snapshot_id,publication_snapshot_sha256,
-          source_id,folder_binding_id,binding_source_version,binding_receipt_version,owner_scope_type,owner_record_id,
+           source_id,folder_ref,owner_scope_type,owner_record_id,
           recipient_record_id,audience,status,expires_at,created_by_operation_id)
-          VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'all_members','active',?,?)`).bind(request.grantId,request.workspaceId,
+          VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?,'all_members','active',?,?)`).bind(request.grantId,request.workspaceId,
           request.targetId,request.clientAuthorityId,state.targetRevision,state.publicationRevision,state.snapshotId,
-          state.snapshotSha256,state.sourceId,binding.id,binding.source_version,binding.receipt_version,ownerScopeType,
-          request.ownerRecordId,request.recipientRecordId,request.expiresAt,request.operationId),
+          state.snapshotSha256,state.sourceId,request.folderRef,ownerScopeType,
+          ownerRecordId,request.recipientRecordId,request.expiresAt,request.operationId),
         db.prepare(`INSERT INTO operations_portal_direct_folder_grant_mutations(operation_id,request_fingerprint,action,
           grant_id,resulting_version,resulting_state) VALUES(?,?,'grant.create',?,1,'active')`)
           .bind(request.operationId,fingerprint,request.grantId),
@@ -339,21 +275,20 @@ export async function applyDirectWorkspaceFolderGrant(env:DatabaseEnv,raw:unknow
       if(!fresh||fresh.workspaceVersion!==state.workspaceVersion||fresh.membershipVersion!==state.membershipVersion)return fail("conflict");
       return {ok:true as const,protocolVersion:1 as const,operationId:String(request.operationId),grantId:String(request.grantId),version:1,state:"active" as const,replayed:result[0]!.meta.changes===0};
     }
-    const current=await db.prepare(`SELECT grant_version,status,workspace_id,folder_binding_id,owner_scope_type,owner_record_id,
-      recipient_record_id,binding_source_version,binding_receipt_version FROM operations_portal_direct_folder_grants
-      WHERE grant_id=? AND workspace_id=? AND folder_binding_id=?`).bind(request.grantId,request.workspaceId,request.folderBindingId)
-      .first<{grant_version:number;status:string;workspace_id:string;folder_binding_id:string;owner_scope_type:string;owner_record_id:string;
-        recipient_record_id:string;binding_source_version:string;binding_receipt_version:number}>();
+    const current=await db.prepare(`SELECT grant_version,status,workspace_id,folder_ref,owner_scope_type,owner_record_id,
+      recipient_record_id FROM operations_portal_direct_folder_grants
+      WHERE grant_id=? AND workspace_id=? AND folder_ref=?`).bind(request.grantId,request.workspaceId,request.folderRef)
+      .first<{grant_version:number;status:string;workspace_id:string;folder_ref:string;owner_scope_type:string;owner_record_id:string;
+        recipient_record_id:string}>();
     if(!current||current.status!=="active"||current.grant_version!==request.expectedGrantVersion
-      ||current.owner_scope_type!==ownerScopeType||current.owner_record_id!==request.ownerRecordId
-      ||current.recipient_record_id!==request.recipientRecordId||current.binding_source_version!==request.expectedBindingSourceVersion
-      ||current.binding_receipt_version!==request.expectedBindingReceiptVersion)return fail("conflict");
+      ||current.owner_scope_type!==ownerScopeType||current.owner_record_id!==ownerRecordId
+      ||current.recipient_record_id!==request.recipientRecordId)return fail("conflict");
     const nextVersion=current.grant_version+1,revokedAt=new Date().toISOString();
     await db.batch([
       db.prepare(`UPDATE operations_portal_direct_folder_grants SET status='revoked',grant_version=?,revoked_at=?,
-        revoked_by_operation_id=?,updated_at=? WHERE grant_id=? AND workspace_id=? AND folder_binding_id=?
+        revoked_by_operation_id=?,updated_at=? WHERE grant_id=? AND workspace_id=? AND folder_ref=?
         AND status='active' AND grant_version=?`).bind(nextVersion,revokedAt,request.operationId,revokedAt,
-          request.grantId,request.workspaceId,request.folderBindingId,current.grant_version),
+          request.grantId,request.workspaceId,request.folderRef,current.grant_version),
       db.prepare(`INSERT INTO operations_portal_direct_folder_grant_mutations(operation_id,request_fingerprint,action,
         grant_id,resulting_version,resulting_state) VALUES(?,?,'grant.revoke',?,?,'revoked')`)
         .bind(request.operationId,fingerprint,request.grantId,nextVersion),
@@ -370,10 +305,9 @@ export async function applyDirectWorkspaceFolderGrant(env:DatabaseEnv,raw:unknow
 }
 
 export type DirectWorkspaceFolderResource={workspaceId:string;targetId:string;targetRevision:number;clientAuthorityId:string;sourceId:string;
-  grantId:string;grantVersion:number;expiresAt:string|null;bindingId:string;bindingSourceVersion:string;bindingReceiptVersion:number;
-  r2Prefix:string;displayName:string};
+  grantId:string;grantVersion:number;expiresAt:string|null;r2Prefix:string;displayName:string};
 
-/** Current authority for project-free direct-folder list/open/download. Raw
+/** Current authority for direct-folder list/open/download. Raw
  * prefixes stay inside this Worker module and are never serialized. */
 export async function listAuthorizedDirectWorkspaceFolderResources(env:DatabaseEnv,input:{workspaceId:string;targetId:string;
   clientAuthorityId:string;sourceId:string;issuer:string;subject:string}):Promise<DirectWorkspaceFolderResource[]>{
@@ -382,47 +316,12 @@ export async function listAuthorizedDirectWorkspaceFolderResources(env:DatabaseE
   if(!await tableReady(env))throw new Error("direct-folder-schema-unavailable");
   const state=await workspaceState(env,input);if(!state)throw new Error("direct-folder-workspace-authority-unavailable");
   if(state.memberCount===0)return [];
-  const rows=await session(env).prepare(`SELECT binding.r2_prefix,grant_record.grant_id,grant_record.grant_version,grant_record.expires_at,
+  const rows=await session(env).prepare(`SELECT grant_record.folder_ref,grant_record.grant_id,grant_record.grant_version,grant_record.expires_at,
       grant_record.target_id,grant_record.target_revision,grant_record.client_authority_id,grant_record.source_id,
-      grant_record.folder_binding_id,grant_record.binding_receipt_version,grant_record.binding_source_version,
       grant_record.owner_scope_type,grant_record.owner_record_id,grant_record.recipient_record_id
     FROM operations_portal_direct_folder_grants grant_record
-    JOIN portal_v2_folder_bindings binding ON binding.id=grant_record.folder_binding_id
-      AND binding.workspace_id=grant_record.workspace_id AND binding.source_type='operations'
-      AND binding.status='active' AND binding.revoked_at IS NULL
-      AND binding.source_version=grant_record.binding_source_version
-    JOIN portal_primary_staff_bindings receipt ON receipt.binding_id=binding.id AND receipt.workspace_id=binding.workspace_id
-      AND receipt.source_id=grant_record.source_id AND receipt.r2_prefix=binding.r2_prefix
-      AND receipt.state='active' AND receipt.ownership_kind='explicit_workspace'
-      AND receipt.version=grant_record.binding_receipt_version AND receipt.owner_scope_type=binding.owner_scope_type
-      AND receipt.owner_public_id=binding.owner_public_id AND receipt.project_public_id IS NULL
     JOIN portal_v2_workspaces workspace ON workspace.id=grant_record.workspace_id AND workspace.status='active'
       AND workspace.project_alpha_source_id=grant_record.source_id
-      AND workspace.root_type=receipt.root_type
-      AND receipt.root_public_id=grant_record.owner_record_id
-      AND COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id)=receipt.root_public_id
-    JOIN portal_v2_directory_checkpoints directory_checkpoint ON directory_checkpoint.workspace_id=workspace.id
-      AND directory_checkpoint.source_sequence=receipt.source_sequence
-    JOIN portal_v2_directory_generations directory_generation ON directory_generation.id=directory_checkpoint.active_generation_id
-      AND directory_generation.workspace_id=workspace.id AND directory_generation.status='active' AND directory_generation.complete=1
-      AND directory_generation.id=receipt.directory_generation_id
-    JOIN portal_v2_directory_entities owner ON owner.workspace_id=workspace.id AND owner.generation_id=directory_checkpoint.active_generation_id
-      AND owner.entity_type=${folderOwnerEntityTypeSql("binding.owner_scope_type","binding.owner_public_id","workspace.root_type","workspace.pa_client_public_id")}
-      AND owner.public_id=binding.owner_public_id AND owner.active=1
-      AND ((workspace.root_type='organization' AND binding.owner_scope_type='organization'
-          AND binding.owner_public_id=receipt.root_public_id)
-        OR (workspace.root_type='standalone_client' AND binding.owner_scope_type='client'
-          AND owner.entity_type='standalone_client' AND owner.public_id=receipt.root_public_id))
-    JOIN portal_v2_directory_entities root ON root.workspace_id=workspace.id AND root.generation_id=directory_checkpoint.active_generation_id
-      AND root.entity_type=workspace.root_type AND root.public_id=receipt.root_public_id AND root.active=1
-      AND root.parent_public_id IS NULL AND root.source_version=receipt.root_source_version
-    JOIN pa_portal_projection_checkpoints projection_checkpoint ON projection_checkpoint.workspace_id=workspace.id
-      AND projection_checkpoint.source_generation=(SELECT generation.source_generation FROM pa_portal_projection_generations generation
-        WHERE generation.id=receipt.snapshot_generation_id AND generation.workspace_id=workspace.id)
-      AND projection_checkpoint.source_sequence=receipt.source_sequence AND projection_checkpoint.snapshot_generation_id=receipt.snapshot_generation_id
-    JOIN pa_portal_projection_generations projection_generation ON projection_generation.id=projection_checkpoint.snapshot_generation_id
-      AND projection_generation.workspace_id=workspace.id AND projection_generation.projection_source_id=receipt.source_id
-      AND projection_generation.status='active' AND projection_generation.complete=1
     JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=grant_record.workspace_id
       AND membership.status='active' AND membership.revoked_at IS NULL
       AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
@@ -432,25 +331,28 @@ export async function listAuthorizedDirectWorkspaceFolderResources(env:DatabaseE
       AND grant_record.target_revision=?
       AND grant_record.source_id=? AND grant_record.status='active' AND grant_record.revoked_at IS NULL
       AND (grant_record.expires_at IS NULL OR datetime(grant_record.expires_at)>datetime('now'))
-    ORDER BY binding.r2_prefix LIMIT 101`).bind(input.issuer,input.subject,input.workspaceId,input.targetId,
+    ORDER BY grant_record.folder_ref LIMIT 101`).bind(input.issuer,input.subject,input.workspaceId,input.targetId,
       input.clientAuthorityId,state.targetRevision,input.sourceId)
-    .all<{r2_prefix:string;grant_id:string;grant_version:number;expires_at:string|null;target_id:string;target_revision:number;
-      client_authority_id:string;source_id:string;folder_binding_id:string;binding_receipt_version:number;binding_source_version:string;
+    .all<{folder_ref:string;grant_id:string;grant_version:number;expires_at:string|null;target_id:string;target_revision:number;
+      client_authority_id:string;source_id:string;
       owner_scope_type:"organization"|"client";owner_record_id:string;recipient_record_id:string}>();
   if(rows.results.length>100)throw new Error("direct-folder-capacity-exceeded");
   // Re-read the workspace and the target identity after the folder query. This
   // makes a concurrent membership, publication, or authority change deny the read.
   const fresh=await workspaceState(env,input);
   if(!fresh||fresh.workspaceVersion!==state.workspaceVersion||fresh.membershipVersion!==state.membershipVersion)return [];
-  const eligible=rows.results.filter(row=>safePrefix(row.r2_prefix)
-    &&matchingDirectory(fresh.snapshot,{rootKind:fresh.rootKind,rootRecordId:fresh.rootRecordId,
-      rootPublicId:fresh.rootPublicId,sourceId:fresh.sourceId,ownerScopeType:row.owner_scope_type,ownerRecordId:row.owner_record_id,
-      recipientRecordId:row.recipient_record_id}));
-  return eligible.map(row=>({workspaceId:state.workspaceId,targetId:state.targetId,targetRevision:state.targetRevision,
+  const eligible=rows.results.flatMap(row=>{
+    const r2Prefix=folderRefPrefix(row.folder_ref);
+    if(!r2Prefix||row.owner_scope_type!==(fresh.rootKind==="organization"?"organization":"client")
+      ||row.owner_record_id!==fresh.rootPublicId
+      ||!matchingDirectory(fresh.snapshot,{rootKind:fresh.rootKind,rootRecordId:fresh.rootRecordId,
+        recipientRecordId:row.recipient_record_id}))return [];
+    return [{row,r2Prefix}];
+  });
+  return eligible.map(({row,r2Prefix})=>({workspaceId:state.workspaceId,targetId:state.targetId,targetRevision:state.targetRevision,
     clientAuthorityId:state.clientAuthorityId,sourceId:state.sourceId,grantId:row.grant_id,grantVersion:row.grant_version,
-    expiresAt:row.expires_at,bindingId:row.folder_binding_id,bindingSourceVersion:row.binding_source_version,
-    bindingReceiptVersion:row.binding_receipt_version,r2Prefix:row.r2_prefix,
-    displayName:row.r2_prefix.slice(0,-1).split("/").at(-1)??"Shared folder"}));
+    expiresAt:row.expires_at,r2Prefix,
+    displayName:r2Prefix.slice(0,-1).split("/").at(-1)??"Shared folder"}));
 }
 
 /** Resolve the current private Ops authority from the Client workspace rather

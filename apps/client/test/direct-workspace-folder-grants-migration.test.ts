@@ -5,17 +5,15 @@ import {splitD1MigrationStatements} from "./helpers/d1-migrations";
 
 describe("direct workspace folder grant migration",()=>{
   let mf:Miniflare,db:D1Database;
-  const workspace="direct-folder-workspace",binding="direct-folder-binding",grant="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const workspace="direct-folder-workspace",folderRef="Sm9icy9DbGllbnRzL0xvcmk",grant="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   beforeEach(async()=>{
     mf=new Miniflare({compatibilityDate:"2026-07-22",modules:true,script:"export default {}",
       d1Databases:{DELIVERY_DB:crypto.randomUUID()}});
     db=await mf.getD1Database("DELIVERY_DB") as unknown as D1Database;
     await db.batch([
       db.prepare("CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY)"),
-      db.prepare("CREATE TABLE portal_v2_folder_bindings(id TEXT NOT NULL,workspace_id TEXT NOT NULL,UNIQUE(id,workspace_id))"),
       db.prepare("CREATE TABLE portal_v2_public_links(id TEXT PRIMARY KEY,token TEXT NOT NULL)"),
       db.prepare("INSERT INTO portal_v2_workspaces VALUES(?)").bind(workspace),
-      db.prepare("INSERT INTO portal_v2_folder_bindings VALUES(?,?)").bind(binding,workspace),
       db.prepare("INSERT INTO portal_v2_public_links VALUES('old','still-valid')"),
     ]);
     await db.batch(splitD1MigrationStatements(migration).map(sql=>db.prepare(sql)));
@@ -24,10 +22,10 @@ describe("direct workspace folder grant migration",()=>{
 
   const addGrant=()=>db.prepare(`INSERT INTO operations_portal_direct_folder_grants(grant_id,grant_version,workspace_id,target_id,
     client_authority_id,target_revision,publication_revision,publication_snapshot_id,publication_snapshot_sha256,source_id,
-    folder_binding_id,binding_source_version,binding_receipt_version,owner_scope_type,owner_record_id,recipient_record_id,
-    audience,status,created_by_operation_id) VALUES(?,1,?,'target','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',1,1,'snapshot',?,
-    'project-alpha:primary',?,'binding-v1',1,'organization','pa-root','ops-root','all_members','active','create-op')`)
-    .bind(grant,workspace,"c".repeat(64),binding);
+    folder_ref,owner_scope_type,owner_record_id,recipient_record_id,audience,status,created_by_operation_id)
+    VALUES(?,1,?,'target','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',1,1,'snapshot',?,'project-alpha:primary',?,
+    'organization','pa-root','ops-root','all_members','active','create-op')`)
+    .bind(grant,workspace,"c".repeat(64),folderRef);
 
   it("keeps grant history immutable and confirms mutations match committed state",async()=>{
     await addGrant().run();
@@ -58,14 +56,16 @@ describe("direct workspace folder grant migration",()=>{
       .bind("f".repeat(64),grant).run();
   });
 
-  it("stores no raw R2 prefix and only supports the all-members audience",async()=>{
+  it("stores no raw R2 prefix or workspace binding and only supports the all-members audience",async()=>{
     const columns=await db.prepare("PRAGMA table_info(operations_portal_direct_folder_grants)").all<{name:string}>();
     expect(columns.results.map(row=>row.name)).not.toContain("r2_prefix");
+    expect(columns.results.map(row=>row.name)).not.toContain("folder_binding_id");
+    expect(columns.results.map(row=>row.name)).toContain("folder_ref");
     await expect(db.prepare(`INSERT INTO operations_portal_direct_folder_grants(grant_id,grant_version,workspace_id,target_id,
       client_authority_id,target_revision,publication_revision,publication_snapshot_id,publication_snapshot_sha256,source_id,
-      folder_binding_id,binding_source_version,binding_receipt_version,owner_scope_type,owner_record_id,recipient_record_id,
+      folder_ref,owner_scope_type,owner_record_id,recipient_record_id,
       audience,status,created_by_operation_id) VALUES('other',1,?,'target','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',1,1,'snapshot',?,
-      'project-alpha:primary',?,'binding-v1',1,'organization','pa-root','ops-root','principal','active','other-op')`)
-      .bind(workspace,"c".repeat(64),binding).run()).rejects.toThrow();
+      'project-alpha:primary',?,'organization','pa-root','ops-root','principal','active','other-op')`)
+      .bind(workspace,"c".repeat(64),folderRef).run()).rejects.toThrow();
   });
 });
