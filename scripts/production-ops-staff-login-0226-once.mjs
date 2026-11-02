@@ -538,7 +538,7 @@ function validatePostSnapshot(beforeSnapshot, afterSnapshot, plan, baseline, now
     protectedAuthorityStateSHA256: afterReceipt.protectedAuthorityStateSHA256, authorityDigestExcludedColumns: AUTHORITY_DIGEST_EXCLUDED_COLUMNS,
     staffLastSeenAtBeforeSha256: telemetry.beforeSha256, staffLastSeenAtAfterSha256: telemetry.afterSha256,
     staffLastSeenAtChangedCount: telemetry.changedCount, nativeStaffControlEnabled: 0,
-    migrationRecordAdded: MIGRATION_NAME, loginObjectsAdded: 23, seededLoginRows: 1, aliasRowsAdded: 0 };
+    migrationRecordAdded: MIGRATION_NAME, loginObjectsAdded: 23, seededControlRows: 1, aliasRowsAdded: 0 };
 }
 
 async function openOneShotJournal(filename) {
