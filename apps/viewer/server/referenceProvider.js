@@ -6,8 +6,14 @@ const { createHash } = require('node:crypto');
 const p = require('./referenceProtocol');
 const {validateReferenceOptions,decodeOptionsWire}=require('./referenceOptions');
 const { createEndpointCaFetch } = require('./referenceCaTransport');
-const verifiedTransferGrantAcks = new WeakSet();
-function isVerifiedTransferGrantAck(value) { return Boolean(value && typeof value === 'object' && verifiedTransferGrantAcks.has(value)); }
+const verifiedTransferGrantAcks = new WeakMap();
+function isVerifiedTransferGrantAck(value, expected) {
+  const evidence = value && typeof value === 'object' ? verifiedTransferGrantAcks.get(value) : null;
+  if (!evidence || !expected) return false;
+  let current; try { current = JSON.stringify(value); } catch { return false; }
+  return evidence.serialized === current && evidence.provider === expected.provider && evidence.jobId === expected.jobId &&
+    evidence.environment === expected.environment && evidence.grantSha256 === expected.grantSha256;
+}
 class ReferenceProviderError extends Error {
   constructor(code) { super(code); this.name = 'ReferenceProviderError'; this.code = code; }
 }
@@ -41,7 +47,7 @@ function ack(v, expected) {
   binding(v,expected,['reservationId','generation','manifestSha256','nonce']); return v;
 }
 class ReferenceProvider {
-  #endpoint; #token; #environment; #enabled; #fetch; #jobs = new Map(); #manifests = new Map(); #submissions = new Map();
+  #endpoint; #token; #environment; #enabled; #fetch; #attestableTransport; #jobs = new Map(); #manifests = new Map(); #submissions = new Map();
   constructor({ endpoint, token, environment, enabled = false, fetchImpl, privateCaPem, timeoutMs = 30000, transferTimeoutMs = 300000, maxObjectBytes = p.LIMITS.metadataBytes } = {}) {
     let url; try { url = new URL(endpoint); } catch { fail('INVALID_ENDPOINT'); }
     if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash || !/^https:\/\/[^/?#\s\\]+\/?$/.test(endpoint)) fail('INVALID_ENDPOINT');
@@ -55,7 +61,7 @@ class ReferenceProvider {
       try { transport = createEndpointCaFetch({ origin: url.origin, caPem: privateCaPem, timeoutMs: Math.min(Math.max(timeoutMs, transferTimeoutMs), 2147483647) }); }
       catch { fail('INVALID_CONFIGURATION'); }
     }
-    this.#endpoint = url.origin; this.#token = token; this.#environment = environment; this.#enabled = enabled; this.#fetch = transport;
+    this.#endpoint = url.origin; this.#token = token; this.#environment = environment; this.#enabled = enabled; this.#fetch = transport; this.#attestableTransport = fetchImpl === undefined;
     this.timeoutMs = timeoutMs; this.transferTimeoutMs = transferTimeoutMs; this.maxObjectBytes = maxObjectBytes;
   }
   #check() { if (!this.#enabled) fail('PROVIDER_DISABLED'); }
@@ -204,9 +210,11 @@ class ReferenceProvider {
     if (!job?.transferRequest) fail('BINDING_REQUIRED');
     const submission = this.#submissions.get(jobId);
     const grantBinding = {...job.transferRequest,jobId,generation:expected.generation,environment:this.#environment,objectIds:submission?.manifest.objects.map(o => o.id) ?? expected.objectIds};
-    safeValidate(() => p.validateTransferGrant(grant,grantBinding));
-    const accepted = ack(await this.#json('/jobs/' + jobId + '/transfer-grants',{method:'POST',body:grant,signal}),grant);
-    verifiedTransferGrantAcks.add(accepted);
+    let immutableGrant; try { immutableGrant = structuredClone(grant); } catch { fail('INVALID_REQUEST'); }
+    safeValidate(() => p.validateTransferGrant(immutableGrant,grantBinding));
+    const grantSha256 = createHash('sha256').update(JSON.stringify(immutableGrant)).digest('hex');
+    const accepted = ack(await this.#json('/jobs/' + jobId + '/transfer-grants',{method:'POST',body:immutableGrant,signal}),immutableGrant);
+    if (this.#attestableTransport) verifiedTransferGrantAcks.set(accepted,{serialized:JSON.stringify(accepted),provider:this,jobId,environment:this.#environment,grantSha256,endpoint:this.#endpoint});
     return accepted;
   }
   async acceptResult(jobId, receipt, expectedBinding, {signal} = {}) {

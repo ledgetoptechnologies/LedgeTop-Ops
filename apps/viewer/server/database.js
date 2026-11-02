@@ -2557,13 +2557,26 @@ const MIGRATIONS = [
     CREATE TRIGGER viewer_reference_transfer_outbox_transition BEFORE UPDATE ON viewer_reference_transfer_outbox
       WHEN NOT (
         (OLD.state='prepared' AND NEW.state='sending' AND NEW.send_attempts=OLD.send_attempts+1 AND NEW.sender_generation>OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state IN ('sending','uncertain') AND NEW.state='sending' AND NEW.send_attempts=OLD.send_attempts+1 AND NEW.sender_generation>OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state='sending' AND NEW.state IN ('uncertain','held') AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state IN ('sending','uncertain') AND NEW.state='acknowledged' AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NOT NULL)
+      )
+      BEGIN SELECT RAISE(ABORT,'reference transfer outbox transition invalid'); END;
+    CREATE TRIGGER viewer_reference_transfer_outbox_no_delete BEFORE DELETE ON viewer_reference_transfer_outbox
+      BEGIN SELECT RAISE(ABORT,'reference transfer outbox retained'); END;
+  `},
+  // Tighten v57 in a forward-only migration so already-applied candidate
+  // databases keep their migration identity and upgrade safely.
+  {version:58,name:'viewer_reference_transfer_outbox_sender_fence',sql:`
+    DROP TRIGGER viewer_reference_transfer_outbox_transition;
+    CREATE TRIGGER viewer_reference_transfer_outbox_transition BEFORE UPDATE ON viewer_reference_transfer_outbox
+      WHEN NOT (
+        (OLD.state='prepared' AND NEW.state='sending' AND NEW.send_attempts=OLD.send_attempts+1 AND NEW.sender_generation>OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
         (OLD.state='sending' AND NEW.state IN ('uncertain','held') AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
         (OLD.state='uncertain' AND NEW.state='held' AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
         (OLD.state='sending' AND NEW.state='acknowledged' AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NOT NULL)
       )
       BEGIN SELECT RAISE(ABORT,'reference transfer outbox transition invalid'); END;
-    CREATE TRIGGER viewer_reference_transfer_outbox_no_delete BEFORE DELETE ON viewer_reference_transfer_outbox
-      BEGIN SELECT RAISE(ABORT,'reference transfer outbox retained'); END;
   `},
 ];
 

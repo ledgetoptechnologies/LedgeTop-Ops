@@ -31,9 +31,25 @@ test('v40 upgrades to canonical 41 and detects a modified or unrecorded protecte
 test('dormant transfer outbox migration identity rejects a missing guard trigger',t=>{
  const db=legacy();t.after(()=>db.close());applyMigrations(db);
  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=57').get().name,'viewer_reference_transfer_outbox_dormant');
+ assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=58').get().name,'viewer_reference_transfer_outbox_sender_fence');
  assertProtectedMigrationIdentity(db,MIGRATIONS);
  db.exec('DROP TRIGGER viewer_reference_transfer_outbox_transition');
  assert.throws(()=>assertProtectedMigrationIdentity(db,MIGRATIONS),{code:'migration_identity_conflict'});
+});
+
+test('previous v57 outbox schema upgrades through the forward-only sender-fence migration',t=>{
+ const db=legacy();t.after(()=>db.close());
+ for(const migration of MIGRATIONS.filter(item=>item.version>40&&item.version<=57)){
+  db.exec(migration.sql);migration.after?.(db);
+  db.prepare('INSERT INTO schema_migrations VALUES (?,?,?)').run(migration.version,migration.name,'2000-01-01T00:00:00Z');
+ }
+ assertProtectedMigrationIdentity(db,MIGRATIONS);
+ applyMigrations(db);
+ assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=57').get().name,'viewer_reference_transfer_outbox_dormant');
+ assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=58').get().name,'viewer_reference_transfer_outbox_sender_fence');
+ const trigger=db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='viewer_reference_transfer_outbox_transition'").get().sql;
+ assert.match(trigger,/OLD\.state='prepared' AND NEW\.state='sending'/);
+ assert.doesNotMatch(trigger,/OLD\.state IN \('sending','uncertain'\) AND NEW\.state='sending'/);
 });
 
 test('wrong protected ledger names fail before journal mode or migration changes',t=>{
