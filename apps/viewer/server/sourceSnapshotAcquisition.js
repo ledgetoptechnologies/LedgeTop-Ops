@@ -58,7 +58,10 @@ function createSourceSnapshotAcquirer({database,environment,projectId,holderRegi
    const freshRootFd=openAbsoluteDir(rootPath);try{if(identity(fs.fstatSync(freshRootFd,{bigint:true}))!==identity(rootBefore))throw fail();}finally{fs.closeSync(freshRootFd);}
    const finalMeta=readMetadata(database,datasetId,projectId);if(JSON.stringify(finalMeta)!==JSON.stringify(meta))throw fail();
    const files=[...observed.values()].sort((a,b)=>a.relativePath<b.relativePath?-1:a.relativePath>b.relativePath?1:0).map(({fileIdentity,...v})=>v);
-   return {type:'unfenced_source_snapshot',environment,projectId,holderId:holder.holderId,registryVersion:holder.registryVersion,datasetId,rootKey:'datasets',datasetRelativePath:meta.dataset.relative_path,datasetManifestSha256:meta.dataset.manifest_sha256,files};
+   // A later cheap identity check detects ordinary changes after hashing. It
+   // is not a lock: bytes can still change immediately after this check.
+   function verifyIdentity(){let root,dir;try{root=openAbsoluteDir(rootPath);if(identity(fs.fstatSync(root,{bigint:true}))!==identity(rootBefore))throw fail();dir=openPath(root,meta.dataset.relative_path,true);if(identity(fs.fstatSync(dir,{bigint:true}))!==identity(datasetBefore))throw fail();for(const [rel,expected] of directories){const fd=rel?openPath(dir,rel,true):fs.openSync(`/proc/self/fd/${dir}`,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_CLOEXEC);try{if(identity(fs.fstatSync(fd,{bigint:true}))!==expected)throw fail()}finally{fs.closeSync(fd)}}for(const item of observed.values()){const fd=openPath(dir,item.relativePath);try{if(identity(fs.fstatSync(fd,{bigint:true}))!==item.fileIdentity)throw fail()}finally{fs.closeSync(fd)}}return true}catch{throw fail()}finally{if(dir!==undefined)fs.closeSync(dir);if(root!==undefined)fs.closeSync(root)}}
+   return {type:'unfenced_source_snapshot',environment,projectId,holderId:holder.holderId,registryVersion:holder.registryVersion,datasetId,rootKey:'datasets',datasetRelativePath:meta.dataset.relative_path,datasetManifestSha256:meta.dataset.manifest_sha256,files,verifyIdentity};
   }catch(error){if(error?.code==='source_snapshot_unavailable')throw error;throw fail();}finally{if(datasetFd!==undefined)fs.closeSync(datasetFd);if(rootFd!==undefined)fs.closeSync(rootFd);}
  }
  return Object.freeze({acquire});

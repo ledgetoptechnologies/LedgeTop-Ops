@@ -182,8 +182,21 @@ signature. Tests kill an owned process before and after the final commit and
 verify rollback or durable replay, and reject changed supplied authority data.
 This validates caller-supplied fixture snapshots, not a current authority.
 
-The intent is not connected to the filesystem, existing lifecycle writers,
-NAS administration or external clients. A file can change after observation
+An explicit disposable-fixture option connects the scan intent to the
+experimental lifecycle, import-cleanup, catalog-cleanup and adoption effect
+claims. Either an existing claim or scan intent prevents the other from being
+created, globally and transactionally. A process must actually use the relevant
+cooperative claim for this to work; this option is not installed in production.
+The scan reopens and checks captured root, directory and file identities after
+hashing, outside the write transaction, detecting ordinary replacement or
+content changes between the scan and that check. This is still not a lock.
+
+The intent is not connected to all filesystem writers, NAS administration or
+external clients. Current write paths include dataset upload assembly and
+finalization, import/adoption and cleanup, storage trash/restore/purge,
+photo imports and GCP raw/materialized files. Their complete coverage by the
+experimental cooperative claims has not been proven; old processes may bypass
+them entirely. A file can change after the final identity check
 and before or after the metadata commit, without changing its indexed row;
 aliases and replace/restore races also remain. The scan checks for many changes
 while it reads, but it cannot close those races. Production requires an

@@ -24,7 +24,7 @@ function createSourceScanFixture(processing,scope){
  CREATE TRIGGER IF NOT EXISTS reference_scan_file_update BEFORE UPDATE ON dataset_files WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning' AND dataset_id IN (OLD.dataset_id,NEW.dataset_id)) BEGIN SELECT RAISE(ABORT,'scan metadata retained'); END;
  CREATE TRIGGER IF NOT EXISTS reference_scan_file_delete BEFORE DELETE ON dataset_files WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning' AND dataset_id=OLD.dataset_id) BEGIN SELECT RAISE(ABORT,'scan metadata retained'); END;`);
  const guards=['reference_source_scan_fixture_no_replace','reference_source_scan_fixture_no_delete','reference_source_scan_fixture_no_update','reference_scan_dataset_update','reference_scan_dataset_delete','reference_scan_dataset_insert','reference_scan_file_insert','reference_scan_file_update','reference_scan_file_delete'];
- const checkGuards=()=>{const q=db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?");if(guards.some(name=>!q.get(name)))fail()};
+ const checkGuards=()=>{const q=db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?");if(guards.some(name=>!q.get(name)))fail();if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_scan_cooperation_marker'").get()){const extra=['reference_scan_effects_before_scan','reference_scan_blocks_source_effect','reference_scan_blocks_lifecycle_effect','reference_scan_blocks_catalog_effect','reference_scan_blocks_adoption_effect'];if(extra.some(name=>!q.get(name)))fail();require('./referenceLifecycleEffectFence').createOfflineLifecycleFence(processing,'isolated-lifecycle-fence-fixture')}};
  function run({scanId,bindingId,attemptId,managedRoot,association,afterReserve,afterScan,afterOutbox}={}){
   if(!id(scanId)||!id(bindingId)||!id(attemptId)||typeof managedRoot!=='string'||(afterReserve!==undefined&&typeof afterReserve!=='function')||(afterScan!==undefined&&typeof afterScan!=='function')||(afterOutbox!==undefined&&typeof afterOutbox!=='function')||(association!==undefined&&(!association||association.args?.processing!==processing||association.args?.bindingId!==bindingId||!Buffer.isBuffer(association.publicKeyDer))))fail();
   // Install the disposable outbox schema before either transactional phase.
@@ -42,6 +42,7 @@ function createSourceScanFixture(processing,scope){
   const acquirer=createSourceSnapshotAcquirer({database:db,environment:'staging',projectId:reserved.projectId,holderRegistry:[{holderId:'viewer-odm',environment:'staging',projectId:reserved.projectId,registryVersion:'fixture'}],managedRoot});
   const observed=acquirer.acquire({datasetId:reserved.datasetId,holderId:'viewer-odm'});
   if(afterScan)afterScan();
+  observed.verifyIdentity();
   return processing.transaction(()=>{
    checkGuards();
    const claim=db.prepare("SELECT * FROM reference_source_scan_fixture WHERE id=? AND token=? AND state='scanning'").get(scanId,token),dataset=processing.getDataset(reserved.datasetId,true);
@@ -57,4 +58,19 @@ function createSourceScanFixture(processing,scope){
  }
  return Object.freeze({run});
 }
-module.exports={createSourceScanFixture};
+// Explicitly opt a disposable DB into mutual exclusion with the already
+// installed cooperative lifecycle/import/catalog/adoption fixture. This is
+// global because physical aliases cannot be proven disjoint. It cannot fence
+// writers that do not acquire these experimental claims.
+function installCooperativeScanFixture(processing,scope){
+ if(scope!=='isolated-source-scan-cooperation'||!processing?.database)fail();
+ require('./referenceLifecycleEffectFence').createOfflineLifecycleFence(processing,'isolated-lifecycle-fence-fixture');
+ const db=processing.database;if(!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_source_scan_fixture'").get()||db.prepare("SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning'").get())fail();
+ processing.transaction(()=>db.exec(`CREATE TABLE reference_scan_cooperation_marker(id INTEGER PRIMARY KEY CHECK(id=1)); INSERT INTO reference_scan_cooperation_marker VALUES(1);
+ CREATE TRIGGER reference_scan_effects_before_scan BEFORE INSERT ON reference_source_scan_fixture WHEN EXISTS(SELECT 1 FROM viewer_source_effect_claims WHERE state='in_flight') OR EXISTS(SELECT 1 FROM reference_lifecycle_effects WHERE state='in_flight') OR EXISTS(SELECT 1 FROM reference_catalog_cleanup_effects WHERE state='in_flight') OR EXISTS(SELECT 1 FROM reference_adoption_effects WHERE state='in_flight') BEGIN SELECT RAISE(ABORT,'cooperative effect in flight'); END;
+ CREATE TRIGGER reference_scan_blocks_source_effect BEFORE INSERT ON viewer_source_effect_claims WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning') BEGIN SELECT RAISE(ABORT,'cooperative scan in flight'); END;
+ CREATE TRIGGER reference_scan_blocks_lifecycle_effect BEFORE INSERT ON reference_lifecycle_effects WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning') BEGIN SELECT RAISE(ABORT,'cooperative scan in flight'); END;
+ CREATE TRIGGER reference_scan_blocks_catalog_effect BEFORE INSERT ON reference_catalog_cleanup_effects WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning') BEGIN SELECT RAISE(ABORT,'cooperative scan in flight'); END;
+ CREATE TRIGGER reference_scan_blocks_adoption_effect BEFORE INSERT ON reference_adoption_effects WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning') BEGIN SELECT RAISE(ABORT,'cooperative scan in flight'); END;`));
+}
+module.exports={createSourceScanFixture,installCooperativeScanFixture};
