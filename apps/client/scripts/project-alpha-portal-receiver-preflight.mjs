@@ -43,7 +43,13 @@ function validatePortalCommonPreflight(config, secretNames) {
   if (vars.PROJECT_ALPHA_PORTAL_SYNC_ENABLED !== "true") errors.push("PROJECT_ALPHA_PORTAL_SYNC_ENABLED must be exactly true for the portal release");
   if (vars.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED !== "false") errors.push("PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED must remain exactly false; Project Alpha writes enter through Ops Sync");
   if (vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED !== "true") errors.push("CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED must be exactly true for schema-v3 ingestion");
-  for (const flag of disabledReceiverAdjacentFlags) if (vars[flag] !== "false") errors.push(`${flag} must remain exactly false for the portal release`);
+  for (const flag of disabledReceiverAdjacentFlags) {
+    // Ops inquiries are disabled by omission in the approved installed
+    // profile. The worker treats anything other than the exact string "true"
+    // as off, so keep both omission and explicit false safe for this flag.
+    if (flag === "CLIENT_PORTAL_OPS_INQUIRIES_ENABLED" && vars[flag] === undefined) continue;
+    if (vars[flag] !== "false") errors.push(`${flag} must remain exactly false for the portal release`);
+  }
   if (!safeId.test(vars.PROJECT_ALPHA_PORTAL_APPLICATION_KEY ?? "")) errors.push("PROJECT_ALPHA_PORTAL_APPLICATION_KEY is invalid");
   return errors;
 }
