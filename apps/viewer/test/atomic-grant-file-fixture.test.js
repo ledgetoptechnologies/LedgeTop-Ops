@@ -16,12 +16,17 @@ test('file-backed synthetic encrypted grants survive reopen and uncertain outcom
   assert.equal(db.prepare('SELECT count(*) n FROM synthetic_grants').get().n,0);
   const original=f.issue(db,'operation',binding,'key-1',key,()=>grant);const row=db.prepare('SELECT * FROM synthetic_grants WHERE operation_id=?').get('operation');
   assert.equal(Buffer.from(row.ciphertext).includes(Buffer.from(grant.token)),false);
-  assert.throws(()=>db.exec("INSERT INTO synthetic_grants SELECT 'duplicate',binding,key_id,nonce,ciphertext,tag,digest,state,ack_digest FROM synthetic_grants WHERE operation_id='operation'"));
+  assert.throws(()=>db.exec("INSERT INTO synthetic_grants SELECT 'duplicate',binding,key_id,envelope_version,nonce,ciphertext,tag,digest,state,ack_digest FROM synthetic_grants WHERE operation_id='operation'"));
+  assert.throws(()=>f.issue(db,'alias',binding,'alias-key',key,()=>grant),/fixture_hold/);
+  assert.throws(()=>db.exec("UPDATE synthetic_key_identities SET key_id='alias-key' WHERE key_id='key-1'"));
+  assert.throws(()=>db.exec("INSERT OR REPLACE INTO synthetic_key_identities SELECT 'alias-key',fingerprint FROM synthetic_key_identities WHERE key_id='key-1'"));
   db.close();db=open();let mints=0;
   assert.deepEqual(f.issue(db,'operation',binding,'key-1',key,()=>{mints++;return grant}),original);assert.equal(mints,0);
   assert.throws(()=>f.compareGrant(db,'operation',binding,'key-1',key,{...grant,token:'changed'}),/fixture_hold/);
   assert.throws(()=>f.recover(db,'operation',binding,'key-1',null),/fixture_hold/);
   assert.throws(()=>f.recover(db,'operation',binding,'key-2',other),/fixture_hold/);
+  db.exec("UPDATE synthetic_grants SET key_id='key-2' WHERE operation_id='operation'");assert.throws(()=>f.recover(db,'operation',binding,'key-2',key),/fixture_hold/);db.exec("UPDATE synthetic_grants SET key_id='key-1' WHERE operation_id='operation'");
+  db.exec("UPDATE synthetic_grants SET envelope_version=2 WHERE operation_id='operation'");assert.throws(()=>f.recover(db,'operation',binding,'key-1',key),/fixture_hold/);db.exec("UPDATE synthetic_grants SET envelope_version=1 WHERE operation_id='operation'");
   assert.throws(()=>f.recover(db,'operation',{...binding,objectIds:['two','one']},'key-1',key),/fixture_hold/);
   f.markSending(db,'operation');db.close();db=open();assert.throws(()=>f.markSending(db,'operation'),/fixture_hold/);
   assert.deepEqual(f.recover(db,'operation',binding,'key-1',key),original);
