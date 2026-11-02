@@ -13,6 +13,19 @@ function prepareSpoolIntent(db,attemptId){if(!id(attemptId))fail();db.exec('BEGI
 // Reconciliation never inspects or modifies files and never authorizes reuse.
 // A stale 'copying' state is uncertain even if a seal may exist on disk.
 function inspectSpoolIntent(db,attemptId){if(!id(attemptId))fail();const row=db.prepare('SELECT state FROM viewer_source_spool_intents WHERE attempt_id=?').get(attemptId);if(!row)fail();return {state:row.state==='copying'?'held_uncertain':row.state,admissionAvailable:false};}
+// Read-only diagnostic; a verified candidate is never adopted or admitted.
+function verifyExistingSpool(db,{attemptId,spoolRoot,maxBytes=68719476736}={}){
+ if(process.platform!=='linux'||!id(attemptId)||!Number.isSafeInteger(maxBytes)||maxBytes<1||maxBytes>68719476736)fail();
+ const row=db.prepare(`SELECT h.dataset_id,h.manifest_sha256,d.file_count,d.byte_size,i.state,i.seal_sha256 FROM viewer_source_spool_holds h JOIN datasets d ON d.id=h.dataset_id AND d.manifest_sha256=h.manifest_sha256 JOIN viewer_source_spool_intents i ON i.attempt_id=h.attempt_id AND i.manifest_sha256=h.manifest_sha256 WHERE h.attempt_id=? AND i.state IN ('copying','sealed')`).get(attemptId);
+ if(!row||!Number.isSafeInteger(row.file_count)||row.file_count<1||row.file_count>10000||!Number.isSafeInteger(row.byte_size)||row.byte_size<1||row.byte_size>maxBytes)fail();
+ const files=db.prepare('SELECT id,relative_path,byte_size,sha256 FROM dataset_files WHERE dataset_id=? ORDER BY rowid').all(row.dataset_id);
+ if(files.length!==row.file_count||files.some(f=>!id(f.id)||!relative(f.relative_path)||!Number.isSafeInteger(f.byte_size)||f.byte_size<1||!sha(f.sha256))||files.reduce((a,f)=>a+f.byte_size,0)!==row.byte_size||crypto.createHash('sha256').update(JSON.stringify(files.map(f=>({relativePath:f.relative_path,byteSize:f.byte_size,sha256:f.sha256})))).digest('hex')!==row.manifest_sha256)fail();
+ let root,dir,sealFd;try{root=openRoot(spoolRoot);dir=openDir(root,attemptId);const names=fs.readdirSync(`/proc/self/fd/${dir}`).sort(),expectedNames=[...files.map(f=>f.id),'.seal-pending','sealed.json'].sort();if(JSON.stringify(names)!==JSON.stringify(expectedNames))fail();
+  sealFd=walkFile(dir,'sealed.json');const sealStat=fs.fstatSync(sealFd,{bigint:true});if(sealStat.size>4194304n)fail();const seal=fs.readFileSync(sealFd),expected=Buffer.from(JSON.stringify({version:1,attemptId,manifestSha256:row.manifest_sha256,objects:files.map(f=>({id:f.id,byteSize:f.byte_size,sha256:f.sha256}))}));if(!seal.equals(expected))fail();const sealHash=crypto.createHash('sha256').update(seal).digest('hex');if(row.state==='sealed'&&row.seal_sha256!==sealHash)fail();
+  const buffer=Buffer.allocUnsafe(1024*1024);for(const f of files){let fd;try{fd=walkFile(dir,f.id);const before=fs.fstatSync(fd,{bigint:true});if(before.size!==BigInt(f.byte_size)||before.nlink!==1n)fail();const digest=crypto.createHash('sha256');let pos=0;while(pos<f.byte_size){const n=fs.readSync(fd,buffer,0,Math.min(buffer.length,f.byte_size-pos),pos);if(n<=0)fail();digest.update(buffer.subarray(0,n));pos+=n;}const after=fs.fstatSync(fd,{bigint:true});if(before.dev!==after.dev||before.ino!==after.ino||before.size!==after.size||before.mtimeNs!==after.mtimeNs||before.ctimeNs!==after.ctimeNs||digest.digest('hex')!==f.sha256)fail();}finally{if(fd!==undefined)fs.closeSync(fd);}}
+  return {state:'verified_candidate',sealSha256:sealHash,admissionAvailable:false};
+ }catch{fail();}finally{if(sealFd!==undefined)fs.closeSync(sealFd);if(dir!==undefined)fs.closeSync(dir);if(root!==undefined)fs.closeSync(root);}
+}
 function copySourceSpool(db,{attemptId,datasetRoot,spoolRoot,maxBytes=68719476736}={}){
  if(process.platform!=='linux'||!fs.existsSync('/proc/self/fd')||!id(attemptId)||!Number.isSafeInteger(maxBytes)||maxBytes<1||maxBytes>68719476736)fail();
  db.exec('BEGIN IMMEDIATE');let row,files;
@@ -23,4 +36,4 @@ function copySourceSpool(db,{attemptId,datasetRoot,spoolRoot,maxBytes=6871947673
   const seal=Buffer.from(JSON.stringify({version:1,attemptId,manifestSha256:row.manifest_sha256,objects:sealed})),digest=crypto.createHash('sha256').update(seal).digest('hex');let out;try{out=fs.openSync(`/proc/self/fd/${outputDir}/.seal-pending`,flags.O_WRONLY|flags.O_CREAT|flags.O_EXCL|flags.O_NOFOLLOW,0o600);fs.writeFileSync(out,seal);fs.fsyncSync(out);}finally{if(out!==undefined)fs.closeSync(out);}fs.linkSync(`/proc/self/fd/${outputDir}/.seal-pending`,`/proc/self/fd/${outputDir}/sealed.json`);fs.fsyncSync(outputDir);fs.fsyncSync(outputRoot);if(db.prepare("UPDATE viewer_source_spool_intents SET state='sealed',seal_sha256=? WHERE attempt_id=? AND state='copying'").run(digest,attemptId).changes!==1)fail();return {state:'sealed',sealSha256:digest};
  }catch{fail();}finally{if(outputDir!==undefined)fs.closeSync(outputDir);if(outputRoot!==undefined)fs.closeSync(outputRoot);if(sourceRoot!==undefined)fs.closeSync(sourceRoot);}
 }
-module.exports={prepareSpoolIntent,inspectSpoolIntent,copySourceSpool};
+module.exports={prepareSpoolIntent,inspectSpoolIntent,verifyExistingSpool,copySourceSpool};
