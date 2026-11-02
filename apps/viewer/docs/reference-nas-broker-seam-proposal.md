@@ -28,6 +28,18 @@ an independent NAS custody issuer exists. Preserve those v1 shapes, old jobs and
 the normal v1 route. A future broker/receipt API must be explicitly versioned and
 paired; the synthetic fixture's objects below are not a production wire format.
 
+### Existing Processing source contracts and gaps
+
+These are source-level contracts, not proof that a NAS broker, worker intake,
+or Viewer result ingestion is mounted or operational. Preserve both v1 APIs;
+names for any new service or wire remain unagreed.
+
+| Direction | Current Processing contract | Boundary still missing |
+| --- | --- | --- |
+| Source: broker → worker | `BrokerClient` requests HTTPS `GET /api/processing/reference/v1/objects/{objectId}` with a scoped bearer and a grant binding reservation ID, generation, expiry, manifest SHA-256, byte budget, nonce, job, environment and exact object IDs. It rejects redirects, checks actual size/hash into an exclusive private `.part`, fsyncs and publishes locally. | No Range/resume or physical byte/request meter in this client. The driver can retry a failed object from byte zero, up to three attempts. A real NAS issuer, physical accounting and predecessor-stream fence need separate qualification. |
+| Result bytes: worker → reader | A reader requests `GET /ltds/worker/v1/jobs/{jobId}/results/{objectId}` with its bearer and generation/object/result-manifest bindings. The result proxy supports ranges with durable read pins. | This is a worker result read, not a NAS accepted-copy receipt or proof that Viewer ingested and published the output. Actual deployed transport, writer fencing and NAS custody remain to be verified. |
+| Completion metadata: worker → coordinator | `ReferenceSender` posts metadata to `POST /ltds/worker/v1/results`. | This is a metadata completion acknowledgement, not an archive upload. Viewer acceptance is a later, separate receipt bound to the job, generation, environment, input/pipeline/result-manifest digests and accepted object IDs. There is no qualified NAS accepted-copy issuer or mounted Viewer reference ingest here. |
+
 ## Proposed operations and durable facts
 
 1. **Source registration.** NAS-owned storage associates an opaque source object
