@@ -8,12 +8,22 @@ const {validateReferenceOptions,decodeOptionsWire}=require('./referenceOptions')
 const { createEndpointCaFetch } = require('./referenceCaTransport');
 const SOURCE_RANGE_CHUNK_BYTES = 8 * 1024 * 1024;
 const verifiedTransferGrantAcks = new WeakMap();
+const verifiedTransferGrantAbsences = new WeakMap();
 function isVerifiedTransferGrantAck(value, expected) {
   const evidence = value && typeof value === 'object' ? verifiedTransferGrantAcks.get(value) : null;
   if (!evidence || !expected) return false;
   let current; try { current = JSON.stringify(value); } catch { return false; }
   return evidence.serialized === current && evidence.provider === expected.provider && evidence.jobId === expected.jobId &&
     evidence.environment === expected.environment && evidence.grantSha256 === expected.grantSha256;
+}
+function isVerifiedTransferGrantAbsent(value, expected) {
+  const evidence=value&&typeof value==='object'?verifiedTransferGrantAbsences.get(value):null;
+  if(!evidence||!expected)return false;
+  let current;try{current=JSON.stringify(value)}catch{return false;}
+  return evidence.serialized===current&&evidence.provider===expected.provider&&evidence.jobId===expected.jobId
+    &&evidence.environment===expected.environment&&evidence.reservationId===expected.reservationId
+    &&(expected.endpoint===undefined||evidence.endpoint===expected.endpoint)&&value.phase==='awaiting_transfer'
+    &&value.transferGrantAcknowledgement===null&&value.transferRequest?.reservationId===expected.reservationId;
 }
 class ReferenceProviderError extends Error {
   constructor(code) { super(code); this.name = 'ReferenceProviderError'; this.code = code; }
@@ -238,7 +248,7 @@ class ReferenceProvider {
     const job = this.#job(await this.#json('/jobs',{method:'POST',body:submission,signal}),{manifestSha256:submission.manifest.sha256});
     this.#submissions.set(job.jobId,structuredClone(submission)); return job;
   }
-  async status(jobId, expectedBinding, {signal} = {}) { this.#check(); this.#checkExpected(jobId,expectedBinding); return this.#job(await this.#json('/jobs/' + jobId,{signal}),{...expectedBinding,jobId}); }
+  async status(jobId, expectedBinding, {signal} = {}) { this.#check(); this.#checkExpected(jobId,expectedBinding);const job=this.#job(await this.#json('/jobs/' + jobId,{signal}),{...expectedBinding,jobId});if(this.#attestableTransport&&job.phase==='awaiting_transfer'&&job.transferRequest&&job.transferGrantAcknowledgement===null)verifiedTransferGrantAbsences.set(job,{serialized:JSON.stringify(job),provider:this,jobId:job.jobId,environment:job.environment,reservationId:job.transferRequest.reservationId,endpoint:this.#endpoint});return job; }
   async results(jobId, expectedBinding, {signal} = {}) {
     this.#check(); const expected = this.#expected(jobId,expectedBinding);
     const manifest = await this.#json('/jobs/' + jobId + '/results',{signal}); safeValidate(() => p.validateResultManifest(manifest,expected));
@@ -307,4 +317,4 @@ class ReferenceProvider {
     })();
   }
 }
-module.exports = { ReferenceProvider, ReferenceProviderError, isVerifiedTransferGrantAck, sourceRangeTransferRequest, validateSourceRangeGrant };
+module.exports = { ReferenceProvider, ReferenceProviderError, isVerifiedTransferGrantAck, isVerifiedTransferGrantAbsent, sourceRangeTransferRequest, validateSourceRangeGrant };

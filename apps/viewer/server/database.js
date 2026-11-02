@@ -2738,6 +2738,19 @@ const MIGRATIONS = [
     CREATE TRIGGER viewer_reference_transfer_grant_vault_no_delete BEFORE DELETE ON viewer_reference_transfer_grant_vault
       BEGIN SELECT RAISE(ABORT,'transfer grant vault retained'); END;
   `},
+  {version:67,name:'viewer_reference_transfer_exact_retry_candidate',sql:`
+    DROP TRIGGER viewer_reference_transfer_outbox_transition;
+    CREATE TRIGGER viewer_reference_transfer_outbox_transition BEFORE UPDATE ON viewer_reference_transfer_outbox
+      WHEN NOT (
+        (OLD.state='prepared' AND NEW.state='sending' AND NEW.send_attempts=OLD.send_attempts+1 AND NEW.sender_generation>OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state IN ('sending','uncertain') AND NEW.state='sending' AND NEW.send_attempts=OLD.send_attempts+1 AND NEW.sender_generation>OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL AND EXISTS(SELECT 1 FROM viewer_reference_transfer_reconciliation_claims c JOIN viewer_reference_attempt_journal j ON j.attempt_id=c.attempt_id AND j.lease_owner=c.owner AND j.lease_generation=c.recovery_generation WHERE c.attempt_id=OLD.attempt_id AND c.outbox_id=OLD.outbox_id AND c.recovery_generation=NEW.sender_generation)) OR
+        (OLD.state='sending' AND NEW.state IN ('uncertain','held') AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state='uncertain' AND NEW.state='held' AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state='sending' AND NEW.state='acknowledged' AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NOT NULL AND NOT EXISTS(SELECT 1 FROM viewer_reference_transfer_outbox_reconciliations WHERE outbox_id=OLD.outbox_id)) OR
+        (OLD.state IN ('sending','uncertain') AND NEW.state='acknowledged' AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NOT NULL AND EXISTS(SELECT 1 FROM viewer_reference_transfer_outbox_reconciliations r JOIN viewer_reference_transfer_grant_bindings g ON g.outbox_id=r.outbox_id WHERE r.outbox_id=OLD.outbox_id AND r.recovery_generation>OLD.sender_generation AND r.canonical_grant_sha256=g.canonical_grant_sha256 AND r.acknowledgement_sha256=NEW.acknowledgement_sha256))
+      )
+      BEGIN SELECT RAISE(ABORT,'reference transfer outbox transition invalid'); END;
+  `},
 ];
 
 function applyMigrations(database) {

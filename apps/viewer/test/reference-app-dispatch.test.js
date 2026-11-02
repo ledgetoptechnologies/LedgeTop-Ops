@@ -5,6 +5,8 @@ const {prepareReferenceSubmission}=require('../server/referenceSubmissionDraft')
 const {ReferenceAppJournal,processReferenceOne,createSyntheticReferenceDispatcher}=require('../server/referenceAppDispatch');
 const {ReferenceTransferOutbox}=require('../server/referenceTransferOutbox');
 const {ReferenceTransferGrantVault,deriveReferenceTransferGrantKey}=require('../server/referenceTransferGrantVault');
+const {createSourceRangeV2TransferDispatcher}=require('../server/sourceRangeV2TransferDispatcher');
+const {isVerifiedTransferGrantAbsent}=require('../server/referenceProvider');
 function fixture(t,databasePath=':memory:'){
  const db=new DatabaseSync(databasePath);t.after(()=>db.close());applyMigrations(db);db.exec('PRAGMA foreign_keys=OFF');
  db.exec(`INSERT INTO projects(id,display_name,status,created_at,updated_at) VALUES('p','P','active','t','t');INSERT INTO datasets(id,project_id,display_name,storage_mode,root_key,relative_path,status,created_at,updated_at) VALUES('d','p','D','managed','datasets','d','finalized','t','t');INSERT INTO processing_tasks(id,project_id,dataset_id,display_name,status,created_at,updated_at) VALUES('t','p','d','T','draft','t','t');INSERT INTO processing_attempts(id,task_id,dataset_id,attempt_number,options_json,status,created_at,updated_at) VALUES('a','t','d',1,'{}','pending','t','t');UPDATE processing_tasks SET active_attempt_id='a' WHERE id='t';UPDATE reference_catalog_projection_state SET scan_complete=1;DROP TRIGGER viewer_reference_attempt_admission_unavailable;DROP TRIGGER viewer_reference_provider_unavailable;DROP TRIGGER viewer_reference_protocol_unavailable;DROP TRIGGER viewer_reference_genesis_unavailable;DROP TRIGGER viewer_reference_genesis_no_existing;INSERT INTO viewer_reference_providers VALUES('r','Ref','https://example.test',0);INSERT INTO viewer_reference_attempt_genesis VALUES('a','r');INSERT INTO viewer_reference_attempt_protocols VALUES('a','r','reference-v1');`);
@@ -127,6 +129,39 @@ test('source-range-v2 outbox durably replays the same encrypted bearer after dis
  assert.deepEqual(vault.load(row.outbox_id),grant);
  assert.equal(restarted.markUncertain(f.claim,row.outbox_id).state,'uncertain');
  assert.throws(()=>f.journal.release(f.claim),{code:'reference_dispatch_reconciliation_pending'});
+});
+test('synthetic dispatcher completes v2 grant mint, durable send, and ACK without remint on replay',async t=>{
+ const f=fixture(t),reservation={protocol:'source-range-v2',reservationId:'reservation-v2-e2e',generation:1,expiresAt:new Date(Date.now()+120000).toISOString(),manifestSha256:f.request.manifest.sha256,sourceVersion:`dataset:d:${f.request.manifest.sha256}`,objectIds:['i1'],chunkBytes:8*1024*1024,requestBudget:1,byteBudget:9,nonce:'nonce-v2-e2e',attemptBudget:3};
+ let grantAck=null,posts=0,mints=0;const grant={protocol:'source-range-v2',reservationId:reservation.reservationId,generation:1,expiresAt:new Date(Date.now()+60000).toISOString(),manifestSha256:reservation.manifestSha256,sourceVersion:reservation.sourceVersion,jobId:'job-1',environment:'staging',objectIds:['i1'],nonce:reservation.nonce,token:require('node:crypto').randomBytes(32).toString('base64url'),chunkBytes:reservation.chunkBytes,requestBudget:reservation.requestBudget,byteBudget:reservation.byteBudget,attemptBudget:reservation.attemptBudget};
+ const awaiting={...job(f,'awaiting_transfer'),status:'running',transferRequest:reservation,transferGrantAcknowledgement:null};
+ const previousFetch=global.fetch;global.fetch=async(url,init)=>{
+  if(url.endsWith('/capabilities'))return response(f.caps);
+  if(url.endsWith('/jobs')&&init.method==='POST')return response(job(f));
+  if(url.endsWith('/jobs/job-1'))return response({...awaiting,transferGrantAcknowledgement:grantAck});
+  if(url.endsWith('/transfer-grants')){posts++;const sent=JSON.parse(init.body);assert.deepEqual(sent,grant);grantAck={reservationId:sent.reservationId,generation:sent.generation,manifestSha256:sent.manifestSha256,nonce:sent.nonce,accepted:true,grantSha256:p.sha256(p.canonicalBytes(sent))};return response(grantAck)}
+  throw Error('unexpected request');
+ };
+ try{
+  const provider=new ReferenceProvider({endpoint:'https://example.test',token:'synthetic-token-only',environment:'staging',enabled:true});
+  const vault=new ReferenceTransferGrantVault(f.db,{key:deriveReferenceTransferGrantKey('stable synthetic source range secret 0123456789')}),outbox=new ReferenceTransferOutbox(f.db,{journal:f.journal,grantVault:vault});
+  const runtime={mintGrant:bound=>{mints++;assert.deepEqual(bound.submission.manifest,f.request.manifest);return grant}};
+  const transfer=createSourceRangeV2TransferDispatcher({runtime,outbox,journal:f.journal});
+  const dispatcher=createSyntheticReferenceDispatcher({scope:'synthetic-fixture-only',journal:f.journal,provider,custody:{assertCurrent:async()=>{}},transfer});
+  assert.equal(await dispatcher({attemptId:'a',owner:'sender-one'}),true);
+  assert.equal(outbox.find('a',reservation.reservationId,1).state,'acknowledged');
+  assert.equal(f.db.prepare('SELECT state FROM viewer_reference_transfer_grant_vault').get().state,'cleared');
+  assert.equal(await dispatcher({attemptId:'a',owner:'sender-two'}),true);
+  assert.equal(posts,1);assert.equal(mints,1);
+ }finally{global.fetch=previousFetch}
+});
+test('expired sender reconciles an authenticated absent ACK by replaying only the exact encrypted v2 grant',async t=>{
+ const f=transferOutboxFixture(t),reservation={protocol:'source-range-v2',reservationId:'reservation-v2-retry',generation:1,expiresAt:new Date(Date.now()+180000).toISOString(),manifestSha256:f.request.manifest.sha256,sourceVersion:`dataset:d:${f.request.manifest.sha256}`,objectIds:['i1'],chunkBytes:8*1024*1024,requestBudget:1,byteBudget:9,nonce:'nonce-v2-retry',attemptBudget:3};
+ const grant={protocol:'source-range-v2',reservationId:reservation.reservationId,generation:1,expiresAt:new Date(Date.now()+90000).toISOString(),manifestSha256:reservation.manifestSha256,sourceVersion:reservation.sourceVersion,jobId:f.bound.jobId,environment:f.bound.environment,objectIds:['i1'],nonce:reservation.nonce,token:require('node:crypto').randomBytes(32).toString('base64url'),chunkBytes:reservation.chunkBytes,requestBudget:reservation.requestBudget,byteBudget:reservation.byteBudget,attemptBudget:reservation.attemptBudget};
+ const vault=new ReferenceTransferGrantVault(f.db,{key:deriveReferenceTransferGrantKey('stable source range retry secret 0123456789')}),outbox=new ReferenceTransferOutbox(f.db,{journal:f.journal,grantVault:vault}),job={...f.bound,phase:'awaiting_transfer',transferRequest:reservation},row=outbox.prepare(f.claim,{job,reservation,manifestSha256:f.request.manifest.sha256,grant});
+ const initialProvider={postTransferGrant:async()=>{}};outbox.beginSend(f.claim,row.outbox_id,{provider:initialProvider,grant});outbox.markUncertain(f.claim,row.outbox_id);
+ f.db.prepare("UPDATE viewer_reference_attempt_journal SET lease_expires_ms=0 WHERE attempt_id='a'").run();const recovery=f.journal.claimExpiredTransferReconciliation('a','recovery');let posts=0;const previousFetch=global.fetch;
+ global.fetch=async(url,init)=>{if(url.endsWith('/jobs/job-1'))return response(job);if(url.endsWith('/transfer-grants')){posts++;assert.deepEqual(JSON.parse(init.body),grant);if(posts===1)throw Error('synthetic lost retry ACK');return response({reservationId:grant.reservationId,generation:grant.generation,manifestSha256:grant.manifestSha256,nonce:grant.nonce,accepted:true,grantSha256:p.sha256(p.canonicalBytes(grant))})}throw Error('unexpected request')};
+ try{const provider=new ReferenceProvider({endpoint:'https://example.test',token:'synthetic-token-only',environment:'staging',enabled:true}),expected={jobId:'job-1',generation:1,environment:'staging',manifestSha256:f.request.manifest.sha256,pipelineDigest:'b'.repeat(64),objectIds:['i1']},observed=await provider.status('job-1',expected);assert.equal(isVerifiedTransferGrantAbsent(observed,{provider,jobId:'job-1',environment:'staging',reservationId:reservation.reservationId}),true);await assert.rejects(outbox.retrySameGrant(recovery,row.outbox_id,{provider,job:{...observed,phase:'processing'},expectedBinding:expected}),{code:'reference_transfer_outbox_reconciliation_required'});await assert.rejects(outbox.retrySameGrant(recovery,row.outbox_id,{provider,job:observed,expectedBinding:expected}),{code:'UNCERTAIN'});assert.equal(outbox.row(row.outbox_id).state,'uncertain');assert.equal(f.db.prepare('SELECT state FROM viewer_reference_transfer_grant_vault WHERE outbox_id=?').get(row.outbox_id).state,'active');assert.throws(()=>f.journal.release(recovery),{code:'reference_dispatch_reconciliation_pending'});f.db.prepare("UPDATE viewer_reference_attempt_journal SET lease_expires_ms=0 WHERE attempt_id='a'").run();const retry=f.journal.claimExpiredTransferReconciliation('a','recovery-two'),observedAgain=await provider.status('job-1',expected);assert.equal((await outbox.retrySameGrant(retry,row.outbox_id,{provider,job:observedAgain,expectedBinding:expected})).state,'acknowledged');assert.equal(posts,2);assert.equal(outbox.row(row.outbox_id).send_attempts,3);assert.equal(f.db.prepare('SELECT state FROM viewer_reference_transfer_grant_vault WHERE outbox_id=?').get(row.outbox_id).state,'cleared')}finally{global.fetch=previousFetch}
 });
 test('release serializes against a second-connection sender transition',t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'reference-release-race-')),file=path.join(root,'viewer.sqlite');

@@ -11,6 +11,7 @@ const { SourceRangeV2BrokerCandidate, createSourceRangeV2Handler } = require('./
 const { resolveSourceRangeV2Candidate } = require('./sourceRangeV2ResolverCandidate');
 const { ReferenceTransferGrantVault, deriveReferenceTransferGrantKey } = require('./referenceTransferGrantVault');
 const { ReferenceTransferOutbox } = require('./referenceTransferOutbox');
+const { createSourceRangeV2TransferDispatcher } = require('./sourceRangeV2TransferDispatcher');
 
 function fail(code) { throw Object.assign(new Error(code), { code }); }
 
@@ -79,7 +80,7 @@ function createSourceRangeV2RuntimeCandidate({ config, database, storage } = {})
   const grantVault = new ReferenceTransferGrantVault(database, {
     key: deriveReferenceTransferGrantKey(config.processingSourceRangeGrantSecret),
   });
-  return {
+  const runtime = {
     handler,
     grantVault,
     createTransferOutbox(journal) { return new ReferenceTransferOutbox(database, { journal, grantVault }); },
@@ -93,6 +94,10 @@ function createSourceRangeV2RuntimeCandidate({ config, database, storage } = {})
     },
     close() { try { broker.close(); } finally { grantVault.close(); } },
   };
+  runtime.createTransferDispatcher = journal => createSourceRangeV2TransferDispatcher({
+    runtime, journal, outbox: runtime.createTransferOutbox(journal),
+  });
+  return runtime;
 }
 
 function sourceRangeV2Middleware(handler) {

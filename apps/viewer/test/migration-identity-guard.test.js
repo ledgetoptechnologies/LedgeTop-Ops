@@ -53,9 +53,10 @@ test('previous v57 outbox schema upgrades through the forward-only sender-fence 
  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=59').get().name,'viewer_reference_transfer_outbox_grant_digest');
  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=60').get().name,'viewer_reference_transfer_outbox_status_reconciliation');
  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=61').get().name,'viewer_reference_transfer_reconciliation_claim_purpose');
+ assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=67').get().name,'viewer_reference_transfer_exact_retry_candidate');
  const trigger=db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='viewer_reference_transfer_outbox_transition'").get().sql;
  assert.match(trigger,/OLD\.state='prepared' AND NEW\.state='sending'/);
- assert.doesNotMatch(trigger,/OLD\.state IN \('sending','uncertain'\) AND NEW\.state='sending'/);
+ assert.match(trigger,/OLD\.state IN \('sending','uncertain'\) AND NEW\.state='sending'/);
 });
 
 test('wrong protected ledger names fail before journal mode or migration changes',t=>{

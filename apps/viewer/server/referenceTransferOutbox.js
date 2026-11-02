@@ -4,7 +4,7 @@
 // digests; the transfer bearer must be reconstructed by the source broker.
 const crypto=require('node:crypto');
 const p=require('./referenceProtocol');
-const {isVerifiedTransferGrantAck,sourceRangeTransferRequest,validateSourceRangeGrant}=require('./referenceProvider');
+const {isVerifiedTransferGrantAck,isVerifiedTransferGrantAbsent,sourceRangeTransferRequest,validateSourceRangeGrant}=require('./referenceProvider');
 const fail=code=>{throw Object.assign(new Error(code),{code})};
 const HASH=/^[a-f0-9]{64}$/;
 const id=x=>typeof x==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(x);
@@ -62,14 +62,42 @@ class ReferenceTransferOutbox {
     const result=this.db.prepare("UPDATE viewer_reference_transfer_outbox SET state='sending',send_attempts=send_attempts+1,sender_generation=?,updated_at=? WHERE outbox_id=? AND state='prepared' AND sender_generation<?").run(claim.generation,updated,outboxId,claim.generation);
     if(result.changes!==1)fail('reference_transfer_outbox_sender_unfenced');return this.row(outboxId);
   });if(updated.state==='sending')this.#sendProviders.set(outboxId,provider);return updated;}
+  async sendOnce(claim,outboxId,{provider,expectedBinding,signal}={}){
+    if(!provider||typeof provider.postTransferGrant!=='function'||!this.grantVault)fail('reference_transfer_outbox_invalid');
+    const row=this.row(outboxId);if(row.state==='acknowledged')return row;if(row.state!=='prepared')fail('reference_transfer_outbox_reconciliation_required');
+    const grant=this.grantVault.load(outboxId);this.beginSend(claim,outboxId,{provider,grant});
+    try{const ack=await provider.postTransferGrant(row.job_id,grant,expectedBinding,{signal});return this.acknowledge(claim,outboxId,ack)}
+    catch(error){if(this.row(outboxId).state==='sending'){try{this.markUncertain(claim,outboxId)}catch{/* preserve original ambiguous result */}}throw error}
+  }
   markUncertain(claim,outboxId){return this.#transition(claim,outboxId,row=>{
     if(row.state!=='sending'||row.sender_generation!==claim.generation)fail('reference_transfer_outbox_sender_unfenced');
     this.db.prepare("UPDATE viewer_reference_transfer_outbox SET state='uncertain',updated_at=? WHERE outbox_id=? AND state='sending' AND sender_generation=?").run(new Date(this.now()).toISOString(),outboxId,claim.generation);
-  })}
+  },claim.kind)}
   markHeld(claim,outboxId){return this.#transition(claim,outboxId,row=>{
     if(!['sending','uncertain'].includes(row.state)||row.sender_generation!==claim.generation)fail('reference_transfer_outbox_sender_unfenced');
     this.db.prepare("UPDATE viewer_reference_transfer_outbox SET state='held',updated_at=? WHERE outbox_id=? AND state IN ('sending','uncertain') AND sender_generation=?").run(new Date(this.now()).toISOString(),outboxId,claim.generation);
-  })}
+  },claim.kind)}
+  async retrySameGrant(claim,outboxId,{provider,job,expectedBinding,signal}={}){
+    if(!provider||!this.grantVault||!job)fail('reference_transfer_outbox_invalid');
+    const row=this.row(outboxId);
+    if(claim?.kind!=='transfer-reconciliation'||claim.outboxId!==outboxId||row.attempt_id!==claim.attemptId
+      ||row.state!=='uncertain'&&row.state!=='sending'
+      ||!isVerifiedTransferGrantAbsent(job,{provider,jobId:row.job_id,environment:row.environment,reservationId:row.reservation_id,endpoint:provider.endpoint}))fail('reference_transfer_outbox_reconciliation_required');
+    const grant=this.grantVault.load(outboxId);
+    if(Date.parse(grant.expiresAt)<=this.now())fail('reference_transfer_grant_expired');
+    this.tx(()=>{
+      this.#claim(claim,'transfer-reconciliation');
+      const current=this.row(outboxId);
+      if(current.state!=='uncertain'&&current.state!=='sending'||claim.generation<=current.sender_generation)fail('reference_transfer_outbox_sender_unfenced');
+      const result=this.db.prepare("UPDATE viewer_reference_transfer_outbox SET state='sending',send_attempts=send_attempts+1,sender_generation=?,updated_at=? WHERE outbox_id=? AND state IN ('sending','uncertain') AND sender_generation<?").run(claim.generation,new Date(this.now()).toISOString(),outboxId,claim.generation);
+      if(result.changes!==1)fail('reference_transfer_outbox_sender_unfenced');
+    });
+    this.#sendProviders.set(outboxId,provider);
+    try{
+      const ack=await provider.postTransferGrant(row.job_id,grant,expectedBinding,{signal});
+      return this.reconcileAcknowledged(claim,outboxId,ack,{provider});
+    }catch(error){if(this.row(outboxId).state==='sending'){try{this.markUncertain(claim,outboxId)}catch{/* keep the original ambiguity */}}throw error}
+  }
   acknowledge(claim,outboxId,ack){return this.#transition(claim,outboxId,row=>{
     const provider=this.#sendProviders.get(outboxId);
     const grantBinding=this.db.prepare('SELECT canonical_grant_sha256 FROM viewer_reference_transfer_grant_bindings WHERE outbox_id=?').get(outboxId);
@@ -85,6 +113,13 @@ class ReferenceTransferOutbox {
     if(!grantBinding||!isVerifiedTransferGrantAck(ack,{provider,jobId:row.job_id,environment:row.environment,grantSha256:grantBinding.canonical_grant_sha256})||!ack||typeof ack!=='object'||Array.isArray(ack)||Object.keys(ack).sort().join(',')!=='accepted,generation,grantSha256,manifestSha256,nonce,reservationId'||ack.accepted!==true||ack.reservationId!==row.reservation_id||ack.generation!==row.reservation_generation||ack.manifestSha256!==row.manifest_sha256||ack.grantSha256!==grantBinding.canonical_grant_sha256||typeof ack.nonce!=='string'||digest(Buffer.from(ack.nonce))!==row.reservation_nonce_sha256)fail('reference_transfer_outbox_ack_binding');
     const canonical=JSON.stringify({reservationId:ack.reservationId,generation:ack.generation,manifestSha256:ack.manifestSha256,nonce:ack.nonce,grantSha256:ack.grantSha256,accepted:true}),ackHash=digest(Buffer.from(canonical));
     if(row.state==='acknowledged'){if(row.acknowledgement_sha256!==ackHash)fail('reference_transfer_outbox_ack_conflict');this.grantVault?.clearAfterAcknowledgement(outboxId);return this.row(outboxId);}
+    // Exact-grant recovery sends under the new reconciliation generation. Its
+    // acknowledgement is a normal sender acknowledgement, distinct from a
+    // status-discovered ACK from the prior sender generation below.
+    if(row.state==='sending'&&row.sender_generation===claim.generation){
+      this.db.prepare("UPDATE viewer_reference_transfer_outbox SET state='acknowledged',acknowledgement_sha256=?,updated_at=? WHERE outbox_id=? AND state='sending' AND sender_generation=?").run(ackHash,new Date(this.now()).toISOString(),outboxId,claim.generation);
+      this.grantVault?.clearAfterAcknowledgement(outboxId);return this.row(outboxId);
+    }
     if(!['sending','uncertain'].includes(row.state)||claim.generation<=row.sender_generation)fail('reference_transfer_outbox_sender_unfenced');
     const existing=this.db.prepare('SELECT * FROM viewer_reference_transfer_outbox_reconciliations WHERE outbox_id=?').get(outboxId);
     if(existing){if(existing.recovery_generation!==claim.generation||existing.canonical_grant_sha256!==grantBinding.canonical_grant_sha256||existing.acknowledgement_sha256!==ackHash)fail('reference_transfer_outbox_ack_conflict');}
@@ -92,6 +127,6 @@ class ReferenceTransferOutbox {
     this.db.prepare("UPDATE viewer_reference_transfer_outbox SET state='acknowledged',acknowledgement_sha256=?,updated_at=? WHERE outbox_id=? AND state IN ('sending','uncertain') AND sender_generation=?").run(ackHash,new Date(this.now()).toISOString(),outboxId,row.sender_generation);this.grantVault?.clearAfterAcknowledgement(outboxId);
     return this.row(outboxId);
   })}
-  #transition(claim,outboxId,fn){return this.tx(()=>{this.#claim(claim);const row=this.row(outboxId);if(row.attempt_id!==claim.attemptId)fail('reference_transfer_outbox_binding');fn(row);return this.row(outboxId)})}
+  #transition(claim,outboxId,fn,purpose='dispatch'){return this.tx(()=>{this.#claim(claim,purpose);const row=this.row(outboxId);if(row.attempt_id!==claim.attemptId)fail('reference_transfer_outbox_binding');fn(row);return this.row(outboxId)})}
 }
 module.exports={ReferenceTransferOutbox,OUTBOX_COLUMNS};

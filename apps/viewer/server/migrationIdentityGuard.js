@@ -5,6 +5,7 @@ const {DatabaseSync}=require('node:sqlite');
 // Only the newly allocated migration identities are checked here. Earlier
 // ledger history retains its established compatibility behavior.
 const protectedMigrations=[
+  {version:67,name:'viewer_reference_transfer_exact_retry_candidate',objects:['viewer_reference_transfer_outbox_transition']},
   {version:66,name:'viewer_reference_transfer_grant_vault_candidate',objects:['viewer_reference_transfer_grant_vault','viewer_reference_transfer_grant_vault_no_replace','viewer_reference_transfer_grant_vault_transition','viewer_reference_transfer_grant_vault_no_delete']},
   {version:65,name:'viewer_source_copy_outbox_candidate',objects:['viewer_source_copy_outbox','viewer_source_copy_outbox_no_delete','viewer_source_copy_outbox_no_replace','viewer_source_copy_outbox_transition']},
   {version:64,name:'viewer_source_spool_generation_hold_candidate',objects:['viewer_source_spool_generation_holds','viewer_source_spool_generation_no_update','viewer_source_spool_generation_no_delete','viewer_source_spool_generation_no_replace']},
@@ -76,6 +77,29 @@ function assertProtectedMigrationIdentity(database,migrations) {
     const entry=ledger?database.prepare('SELECT name FROM schema_migrations WHERE version=?').get(spec.version):null;
     const found=spec.objects.map(name=>database.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name=? COLLATE NOCASE").all(name));
     if(!entry){
+      // The v67 retry trigger supersedes the reconciled v60 trigger. Earlier
+      // migrations legitimately have an intermediate trigger definition, so
+      // only apply v67's predecessor check once the v61 reconciliation schema
+      // is part of the recorded database state.
+      if(spec.version===67&&ledger&&!database.prepare('SELECT 1 FROM schema_migrations WHERE version=61').get())continue;
+      if(spec.version===67&&found[0]?.length){
+        const expectedPrior=new DatabaseSync(':memory:');
+        try{
+          for(const version of [57,58,59,60])expectedPrior.exec(migrations.find(item=>item.version===version).sql);
+          const actual=found[0]?.[0];
+          const matchesExpected=reference=>Boolean(actual&&reference&&actual.type===reference.type&&actual.name===reference.name&&actual.tbl_name===reference.tbl_name&&normalize(actual.sql)===normalize(reference.sql));
+          const predecessor=expectedPrior.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name='viewer_reference_transfer_outbox_transition'").get();
+          // The migration loop validates once before applying v67 and once
+          // after its SQL but before inserting the v67 ledger row. Accept the
+          // exact predecessor in the first check and the exact replacement
+          // trigger in the transactional second check.
+          const migration=migrations.find(item=>item.version===67&&item.name==='viewer_reference_transfer_exact_retry_candidate');
+          expectedPrior.exec(migration.sql);
+          const replacement=expectedPrior.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name='viewer_reference_transfer_outbox_transition'").get();
+          if(found[0]?.length!==1||(!matchesExpected(predecessor)&&!matchesExpected(replacement)))throw incompatible('unapplied exact-retry migration has an incompatible predecessor or replacement');
+        }finally{expectedPrior.close();}
+        continue;
+      }
       if(spec.version===60&&ledger&&database.prepare('SELECT 1 FROM schema_migrations WHERE version IN (57,58,59) LIMIT 1').get()){
         const expectedPrior=new DatabaseSync(':memory:');
         try{
@@ -103,6 +127,10 @@ function assertProtectedMigrationIdentity(database,migrations) {
     // protected identity validates the final trigger; v58 still retains its
     // ledger name but its predecessor trigger is no longer the live object.
     if(spec.version===58&&ledger&&database.prepare('SELECT 1 FROM schema_migrations WHERE version>=60').get())continue;
+    // Migration 67 deliberately replaces the v60 transition trigger. During
+    // its transaction the replacement exists before v67's ledger row is
+    // inserted, so avoid validating it against the superseded v60 SQL.
+    if(spec.version===60&&migrations.some(item=>item.version===67&&item.name==='viewer_reference_transfer_exact_retry_candidate')&&ledger&&database.prepare('SELECT 1 FROM schema_migrations WHERE version=61').get())continue;
     const expectedMigration=migrations.find(item=>item.version===spec.version&&item.name===spec.name);
     if(!expectedMigration)throw incompatible(`version ${spec.version} is not supported by this build`);
     const expected=new DatabaseSync(':memory:');
@@ -123,7 +151,8 @@ function assertProtectedMigrationIdentity(database,migrations) {
       if(spec.version===64)expected.exec('CREATE TABLE viewer_source_spool_holds(attempt_id TEXT PRIMARY KEY)');
       if(spec.version===65)expected.exec('CREATE TABLE viewer_source_spool_generation_holds(attempt_id TEXT,generation INTEGER,PRIMARY KEY(attempt_id,generation))');
       if(spec.version===66)expected.exec('CREATE TABLE viewer_reference_transfer_outbox(outbox_id TEXT PRIMARY KEY,state TEXT)');
-      expected.exec(expectedMigration.sql);
+      if(spec.version===67){for(const version of [57,58,59,60,61])expected.exec(migrations.find(item=>item.version===version).sql);expected.exec(expectedMigration.sql)}
+      else expected.exec(expectedMigration.sql);
       for(let i=0;i<spec.objects.length;i++) {
         const object=spec.objects[i],matches=found[i],actual=matches[0],reference=expected.prepare('SELECT type,tbl_name,sql FROM sqlite_master WHERE name=?').get(object);
         if(matches.length!==1||!reference||actual.name!==object||reference.type!==actual.type||reference.tbl_name!==actual.tbl_name||normalize(reference.sql)!==normalize(actual.sql))throw incompatible(`schema mismatch for ${object}`);
