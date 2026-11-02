@@ -19,6 +19,11 @@ path-based rather than descriptor-pinned. Do not run a production command until 
 operator verifies the exact installed build, runtime, mounts, privileges and
 isolated read-only behavior. A scan can read up to 500 GiB sequentially and
 should be scheduled with regard to other workloads. Windows did not permit
-synthetic symlink creation in the initial test, so that case needs a bounded
-Linux test before qualification. No production dataset or client file was
-read for this candidate.
+synthetic symlink creation. Processing independently reports the committed
+`ff52034d` test passed 1/1 in an ephemeral Node 24 Linux container, including
+the symlink rejection and injected read error; image
+`sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c`,
+one CPU, 512 MiB, no network and read-only source mount. The temporary container
+exited. That closes the synthetic Linux case only; actual deployed-image match,
+descriptor-pinned/adversarial rename safety and any live scan remain unverified.
+No production dataset or client file was read for this candidate.
