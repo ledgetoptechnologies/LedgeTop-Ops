@@ -7,14 +7,14 @@ function replayInput(f,identity){const manifest={id:'manifest-1',revision:1,sha2
 test('replacement grants share a durable cumulative byte budget',async t=>{const f=fixture(t);let grant=f.mint(1);assert.equal(await read(f.broker,grant),'abcdef');const old=grant;grant=f.mint(2);await assert.rejects(read(f.broker,old),{code:'UNAUTHORIZED'});assert.equal(await read(f.broker,grant),'abcdef');grant=f.mint(3);assert.equal(await read(f.broker,grant),'abcdef');grant=f.mint(4);await assert.rejects(read(f.broker,grant),{code:'TRANSFER_LIMIT'});assert.equal(f.broker.db.prepare('SELECT charged_bytes,requests FROM reference_job_usage').get().charged_bytes,18)});
 test('failed read remains charged and reopening does not reset accounting',async t=>{const f=fixture(t),grant=f.mint(1);fs.writeFileSync(f.file,'changed');await assert.rejects(read(f.broker,grant),{code:'SOURCE_CHANGED'});assert.equal(f.broker.db.prepare('SELECT charged_bytes FROM reference_job_usage').get().charged_bytes,6);f.broker.close();const reopened=new ReferenceTransferBroker({databasePath:f.databasePath,managedRoot:f.root,environment:'staging',now:f.getTime});assert.equal(reopened.db.prepare('SELECT charged_bytes,requests FROM reference_job_usage').get().charged_bytes,6);reopened.close()});
 test('stable recovery key replays an exact grant token after broker restart without storing plaintext',t=>{
-  const key=Buffer.alloc(32,0x42),f=fixture(t,{grantRecoveryKey:key}),first=f.mint(1),token=first.grant.token;
+  const key=Buffer.alloc(32,0x42),f=fixture(t,{grantRecoveryKey:key}),first=f.mint(1),token=first.grant.token,serializedGrant=Buffer.from(JSON.stringify(first.grant));
   assert.equal(Object.keys(f.broker).includes('grantRecoveryKey'),false);
   const identity=JSON.parse(f.broker.db.prepare('SELECT identity FROM reference_grants WHERE id=?').get(first.grantId).identity);
   const persisted=f.broker.db.prepare('SELECT token_hash,metadata,files,identity FROM reference_grants WHERE id=?').get(first.grantId);
   for(const value of Object.values(persisted))assert.equal(value.includes(token),false);
   f.broker.close();const reopened=new ReferenceTransferBroker({databasePath:f.databasePath,managedRoot:f.root,environment:'staging',now:f.getTime,grantRecoveryKey:key});
   const retry=reopened.mintGrant(replayInput(f,identity));
-  assert.equal(retry.grantId,first.grantId);assert.equal(retry.reused,true);assert.equal(retry.tokenRecoverable,true);assert.equal(retry.grant.token,token);assert.equal(reopened.db.prepare('SELECT COUNT(*) n FROM reference_grants').get().n,1);reopened.close();
+  assert.equal(retry.grantId,first.grantId);assert.equal(retry.reused,true);assert.equal(retry.tokenRecoverable,true);assert.equal(retry.grant.token,token);assert.deepEqual(Buffer.from(JSON.stringify(retry.grant)),serializedGrant);assert.equal(reopened.db.prepare('SELECT COUNT(*) n FROM reference_grants').get().n,1);reopened.close();
 });
 test('wrong or absent recovery key never emits a replacement token for an existing grant',t=>{
   const key=Buffer.alloc(32,0x42),f=fixture(t,{grantRecoveryKey:key}),first=f.mint(1),identity=JSON.parse(f.broker.db.prepare('SELECT identity FROM reference_grants WHERE id=?').get(first.grantId).identity);f.broker.close();
