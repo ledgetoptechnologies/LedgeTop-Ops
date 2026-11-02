@@ -15,6 +15,7 @@ Add-Type -OutputAssembly (Join-Path $payload 'LedgeTop.Files.dll') -TypeDefiniti
 using System.Reflection;
 [assembly:AssemblyMetadata("LedgeTop.ReleaseChannel","pilot")]
 [assembly:AssemblyMetadata("LedgeTop.InstallerMaintenanceProtocol","1")]
+[assembly:AssemblyMetadata("LedgeTop.FreshGenerationStagingQualification","true")]
 internal sealed class $type { }
 "@
 foreach ($file in @('LedgeTop.Files.exe','LedgeTop.Files.deps.json','LedgeTop.Files.runtimeconfig.json','coreclr.dll','hostfxr.dll','hostpolicy.dll','Notices/LICENSE.cloudflared.txt')) {
@@ -26,7 +27,7 @@ $inventory = @(Get-ChildItem -LiteralPath $payload -File -Recurse | ForEach-Obje
   [pscustomobject]@{path=[IO.Path]::GetRelativePath($payload,$_.FullName).Replace('\','/');bytes=$_.Length;sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
 } | Sort-Object path)
 $inventoryPath=Join-Path $root 'inventory.json'; $receiptPath=Join-Path $root 'build.json'
-$build = [ordered]@{status='private_connected_staging_pilot';sourceCommit=$ReviewedCommit;rid='win-x64';selfContained=$true;buildMode='packaged';compiledReleaseChannels=1;channel='pilot';applicationSha256=($inventory | Where-Object path -eq 'LedgeTop.Files.dll').sha256;helperSha256='76b2805253d0d6ffacb092a7acfbee99e7af6917835c0c5410e23f3ef5052da2';payloadFiles=$inventory.Count;payloadBytes=($inventory | Measure-Object bytes -Sum).Sum;cloudflaredIncluded=$true;signed=$false;installerMaintenanceProtocol=1;sourceArchiveSha256=('0'*64)}
+$build = [ordered]@{status='private_connected_staging_pilot';sourceCommit=$ReviewedCommit;rid='win-x64';selfContained=$true;buildMode='packaged';compiledReleaseChannels=1;channel='pilot';applicationSha256=($inventory | Where-Object path -eq 'LedgeTop.Files.dll').sha256;helperSha256='76b2805253d0d6ffacb092a7acfbee99e7af6917835c0c5410e23f3ef5052da2';payloadFiles=$inventory.Count;payloadBytes=($inventory | Measure-Object bytes -Sum).Sum;cloudflaredIncluded=$true;signed=$false;installerMaintenanceProtocol=1;freshGenerationStagingQualified=$true;sourceArchiveSha256=('0'*64)}
 function SaveFixtures { $inventory | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $inventoryPath -Encoding utf8; $build | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $receiptPath -Encoding utf8 }
 SaveFixtures
 # Exercise the exact production snapshot guards without running the script body,
@@ -89,6 +90,9 @@ $null=$build.Remove('installerMaintenanceProtocol'); SaveFixtures
 Reject 'legacy payload protocol absent' @{} 'required construction evidence'
 $build.installerMaintenanceProtocol=1; $build.channel='stable';SaveFixtures
 Reject 'different channel receipt' @{} 'approved unsigned pilot'
+$build.channel='pilot';$build.freshGenerationStagingQualified=$false;SaveFixtures
+Reject 'fresh-generation staging qualification is required' @{} 'approved unsigned pilot'
+$build.freshGenerationStagingQualified=$true;SaveFixtures
 $build.channel='pilot';$build.sourceCommit='0'*40;SaveFixtures
 Reject 'different source commit' @{} 'approved unsigned pilot'
 $build.sourceCommit=$ReviewedCommit;$build.signed=$true;SaveFixtures
@@ -101,6 +105,21 @@ $build.payloadBytes--;SaveFixtures
 $build.installerMaintenanceProtocol='1';SaveFixtures
 Reject 'protocol string cannot claim numeric evidence' @{} 'JSON integers'
 $build.installerMaintenanceProtocol=1;SaveFixtures
+$unqualified=Join-Path $root 'UnqualifiedFreshGeneration.dll';$type='InstallerUnqualifiedFixture'+[Guid]::NewGuid().ToString('N')
+Add-Type -OutputAssembly $unqualified -TypeDefinition @"
+using System.Reflection;
+[assembly:AssemblyMetadata("LedgeTop.ReleaseChannel","pilot")]
+[assembly:AssemblyMetadata("LedgeTop.InstallerMaintenanceProtocol","1")]
+internal sealed class $type { }
+"@
+$savedAssembly=Join-Path $root 'QualifiedFixture.dll';Copy-Item -LiteralPath (Join-Path $payload 'LedgeTop.Files.dll') -Destination $savedAssembly
+Copy-Item -LiteralPath $unqualified -Destination (Join-Path $payload 'LedgeTop.Files.dll') -Force
+$app=($inventory | Where-Object path -eq 'LedgeTop.Files.dll');$oldBytes=$app.bytes;$oldHash=$app.sha256
+$app.bytes=(Get-Item (Join-Path $payload 'LedgeTop.Files.dll')).Length;$app.sha256=(Get-FileHash (Join-Path $payload 'LedgeTop.Files.dll')).Hash.ToLowerInvariant()
+$build.applicationSha256=$app.sha256;$build.payloadBytes=($inventory | Measure-Object bytes -Sum).Sum;SaveFixtures
+Reject 'actual assembly lacks fresh-generation staging qualification' @{} 'staging-qualified pilot'
+Copy-Item -LiteralPath $savedAssembly -Destination (Join-Path $payload 'LedgeTop.Files.dll') -Force
+$app.bytes=$oldBytes;$app.sha256=$oldHash;$build.applicationSha256=$oldHash;$build.payloadBytes=($inventory | Measure-Object bytes -Sum).Sum;SaveFixtures
 $originalPath=$inventory[0].path;$inventory[0].path='../outside';SaveFixtures
 Reject 'inventory traversal' @{} 'Unsafe Windows filename'
 $inventory[0].path='helper\cloudflared.exe';SaveFixtures

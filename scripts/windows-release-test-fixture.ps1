@@ -47,6 +47,7 @@ using System.Reflection;
 [assembly:AssemblyInformationalVersion("$version")]
 [assembly:AssemblyMetadata("LedgeTop.ReleaseChannel","pilot")]
 [assembly:AssemblyMetadata("LedgeTop.InstallerMaintenanceProtocol","1")]
+[assembly:AssemblyMetadata("LedgeTop.FreshGenerationStagingQualification","true")]
 internal sealed class $type { }
 "@
 )
@@ -63,7 +64,7 @@ Copy-Item -LiteralPath $CoreAssemblyPath -Destination (Join-Path $app 'LedgeTop.
 $inventory=@(Get-ChildItem -LiteralPath $app -File -Recurse|ForEach-Object{[pscustomobject][ordered]@{path=[IO.Path]::GetRelativePath($app,$_.FullName).Replace('\','/');bytes=$_.Length;sha256=Hash $_.FullName}}|Sort-Object {$_.path})
 $inventoryPath=Join-Path $payload 'payload-inventory.json';$buildPath=Join-Path $payload 'build-receipt.json'
 $archiveHash=[Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes('synthetic source association only')))
-$build=[ordered]@{status='private_connected_staging_pilot';sourceCommit=$ReviewedCommit;rid='win-x64';selfContained=$true;buildMode='packaged';compiledReleaseChannels=1;channel='pilot';applicationVersion=$version;applicationSha256=Hash (Join-Path $app 'LedgeTop.Files.dll');helperSha256=Hash $HelperPath;payloadFiles=$inventory.Count;payloadBytes=[long](($inventory|Measure-Object bytes -Sum).Sum);cloudflaredIncluded=$true;signed=$false;installerMaintenanceProtocol=1;sourceArchiveSha256=$archiveHash}
+$build=[ordered]@{status='private_connected_staging_pilot';sourceCommit=$ReviewedCommit;rid='win-x64';selfContained=$true;buildMode='packaged';compiledReleaseChannels=1;channel='pilot';applicationVersion=$version;applicationSha256=Hash (Join-Path $app 'LedgeTop.Files.dll');helperSha256=Hash $HelperPath;payloadFiles=$inventory.Count;payloadBytes=[long](($inventory|Measure-Object bytes -Sum).Sum);cloudflaredIncluded=$true;signed=$false;installerMaintenanceProtocol=1;freshGenerationStagingQualified=$true;sourceArchiveSha256=$archiveHash}
 $inventory|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $inventoryPath -Encoding utf8
 $build|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $buildPath -Encoding utf8
 $dummy=Join-Path $installer "LedgeTop-Files-Pilot-$version-unsigned-setup.exe"

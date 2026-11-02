@@ -24,6 +24,9 @@
   <PropertyGroup Condition="'$(LedgeTopFreshStaging)' == 'true'">
     <DefineConstants>$(DefineConstants);LEDGETOP_FRESH_GENERATION_STAGING</DefineConstants>
   </PropertyGroup>
+  <ItemGroup Condition="'$(LedgeTopFreshStaging)' == 'true'">
+    <AssemblyMetadata Include="LedgeTop.FreshGenerationStagingQualification" Value="true" />
+  </ItemGroup>
   <Target Name="RequireFreshStagingPilot" BeforeTargets="BeforeBuild" Condition="'$(LedgeTopFreshStaging)' != ''">
     <Error Condition="!$([System.String]::Equals('$(LedgeTopFreshStaging)', 'true', StringComparison.Ordinal)) Or !$([System.String]::Equals('$(LedgeTopPackage)', 'true', StringComparison.Ordinal)) Or !$([System.String]::Equals('$(LedgeTopReleaseChannel)', 'pilot', StringComparison.Ordinal)) Or '$(LedgeTopDeveloperBuild)' != ''" Text="LedgeTopFreshStaging requires an explicitly packaged pilot build." />
   </Target>

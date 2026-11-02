@@ -98,7 +98,7 @@ function ApplicationMetadata([string]$AssemblyPath) {
     try {
       if (-not $pe.HasMetadata) { throw 'Application must contain managed release metadata.' }
       $reader = [Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($pe)
-      $channels = [Collections.Generic.List[string]]::new(); $protocols = [Collections.Generic.List[string]]::new(); $modes = 0
+      $channels = [Collections.Generic.List[string]]::new(); $protocols = [Collections.Generic.List[string]]::new(); $freshQualifications = [Collections.Generic.List[string]]::new(); $modes = 0
       foreach ($handle in $reader.GetAssemblyDefinition().GetCustomAttributes()) {
         $attribute = $reader.GetCustomAttribute($handle)
         if ($attribute.Constructor.Kind.ToString() -ne 'MemberReference') { continue }
@@ -112,9 +112,11 @@ function ApplicationMetadata([string]$AssemblyPath) {
         if ($key -ceq 'LedgeTop.ReleaseChannel') { $channels.Add($value) }
         if ($key -ceq 'LedgeTop.BuildMode') { $modes++ }
         if ($key -ceq 'LedgeTop.InstallerMaintenanceProtocol') { $protocols.Add($value) }
+        if ($key -ceq 'LedgeTop.FreshGenerationStagingQualification') { $freshQualifications.Add($value) }
       }
-      if ($channels.Count -ne 1 -or $channels[0] -cne 'pilot' -or $modes -ne 0 -or $protocols.Count -ne 1 -or $protocols[0] -cne '1') {
-        throw 'Payload must be pilot, non-developer, with exactly one installer maintenance protocol1 marker.'
+      if ($channels.Count -ne 1 -or $channels[0] -cne 'pilot' -or $modes -ne 0 -or $protocols.Count -ne 1 -or $protocols[0] -cne '1' -or
+          $freshQualifications.Count -ne 1 -or $freshQualifications[0] -cne 'true') {
+        throw 'Payload must be a staging-qualified pilot, non-developer build with exactly one installer maintenance protocol1 marker.'
       }
     } finally { $pe.Dispose() }
   } finally { $stream.Dispose() }
@@ -133,7 +135,7 @@ $manifestBytes = BoundedJsonBytes $PayloadInventoryPath 8388608
 $manifestHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($manifestBytes)).ToLowerInvariant()
 $inventory = @(JsonBytes $manifestBytes)
 $build = Json $BuildReceiptPath 4194304
-foreach ($key in @('status','sourceCommit','rid','selfContained','buildMode','compiledReleaseChannels','channel','applicationSha256','helperSha256','payloadFiles','payloadBytes','cloudflaredIncluded','signed','installerMaintenanceProtocol','sourceArchiveSha256')) {
+foreach ($key in @('status','sourceCommit','rid','selfContained','buildMode','compiledReleaseChannels','channel','applicationSha256','helperSha256','payloadFiles','payloadBytes','cloudflaredIncluded','signed','installerMaintenanceProtocol','sourceArchiveSha256','freshGenerationStagingQualified')) {
   if (-not $build.ContainsKey($key)) { throw 'Build receipt lacks required construction evidence.' }
 }
 foreach ($key in @('status','sourceCommit','rid','buildMode','channel','helperSha256','applicationSha256','sourceArchiveSha256')) {
@@ -152,6 +154,7 @@ if ($build.status -cne 'private_connected_staging_pilot' -or $build.sourceCommit
     $build.selfContained -isnot [bool] -or -not $build.selfContained -or $build.buildMode -cne 'packaged' -or $build.compiledReleaseChannels -ne 1 -or
     $build.channel -cne 'pilot' -or $build.cloudflaredIncluded -isnot [bool] -or -not $build.cloudflaredIncluded -or
     $build.signed -isnot [bool] -or $build.signed -or $build.installerMaintenanceProtocol -ne 1 -or
+    $build.freshGenerationStagingQualified -isnot [bool] -or -not $build.freshGenerationStagingQualified -or
     $build.helperSha256 -cne $helperSha -or $build.applicationSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or
     $build.sourceArchiveSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'Build receipt is outside the approved unsigned pilot construction scope.' }
 if ($inventory.Count -lt 1 -or $inventory.Count -gt 4096) { throw 'Payload inventory count is unsupported.' }
