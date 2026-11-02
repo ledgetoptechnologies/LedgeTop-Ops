@@ -3,7 +3,7 @@
   "status": "synthetic-proposal-not-wire-contract",
   "policy": {"chunkBytes":16777216,"maxObjectBytes":268435456,"maxObjects":10000,"maxManifestBytes":68719476736,"maxBaseRequests":20000,"maxRequests":30000,"headroomNumerator":3,"headroomDenominator":2},
   "plans": [
-    {"name":"empty object uses one GET","objects":[{"bytes":0,"count":1}],"accepted":true,"baseRequests":1,"requestBudget":2,"byteBudget":0},
+    {"name":"empty object rejected by current v1","objects":[{"bytes":0,"count":1}],"accepted":false},
     {"name":"exact chunk","objects":[{"bytes":16777216,"count":1}],"accepted":true,"baseRequests":1,"requestBudget":2,"byteBudget":25165824},
     {"name":"one byte past chunk","objects":[{"bytes":16777217,"count":1}],"accepted":true,"baseRequests":2,"requestBudget":3,"byteBudget":25165826},
     {"name":"max object","objects":[{"bytes":268435456,"count":1}],"accepted":true,"baseRequests":16,"requestBudget":24,"byteBudget":402653184},

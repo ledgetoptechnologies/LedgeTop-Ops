@@ -8,9 +8,9 @@ function plan(groups) {
   let count=0n, bytes=0n, requests=0n;
   const chunk=BigInt(policy.chunkBytes);
   for (const group of groups) {
-    if (!Number.isSafeInteger(group.bytes) || group.bytes < 0 || !Number.isSafeInteger(group.count) || group.count < 1 || group.bytes > policy.maxObjectBytes) return null;
+    if (!Number.isSafeInteger(group.bytes) || group.bytes < 1 || !Number.isSafeInteger(group.count) || group.count < 1 || group.bytes > policy.maxObjectBytes) return null;
     const n=BigInt(group.count), b=BigInt(group.bytes);
-    count+=n; bytes+=b*n; requests+=(b===0n ? 1n : (b+chunk-1n)/chunk)*n;
+    count+=n; bytes+=b*n; requests+=((b+chunk-1n)/chunk)*n;
   }
   if (count>BigInt(policy.maxObjects) || bytes>BigInt(policy.maxManifestBytes) || requests>BigInt(policy.maxBaseRequests)) return null;
   const ceilHalf=x=>(x*3n+1n)/2n;
