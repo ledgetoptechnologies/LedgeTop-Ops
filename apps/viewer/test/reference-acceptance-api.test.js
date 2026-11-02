@@ -251,6 +251,35 @@ httpIntegrationTest('real Express middleware preserves binary streams and the si
   assert.equal(verifyViewerReceipt(committedBody.viewerReceipt, trustedReceiptKeys), true);
   assert.equal(fs.readFileSync(path.join(storage.root, 'receipt-1', 'result-1.bin'), 'utf8'), 'abc');
 
+  const treeReceiptId = 'treedar-express-v2';
+  const tree = treeDarReservation(treeReceiptId, { combined: true });
+  const treeReservationPath = `${TREEDAR_PATH}/${treeReceiptId}`;
+  const treeBody = Buffer.from(JSON.stringify(tree.body));
+  const treeReserved = await fetch(base + treeReservationPath, {
+    method: 'PUT', headers: signHeaders('PUT', treeReservationPath, treeBody, 'application/json'), body: treeBody,
+  });
+  assert.equal(treeReserved.status, 202);
+  for (const object of tree.objects) {
+    const chunkPath = `${TREEDAR_PATH}/${treeReceiptId}/objects/${object.id}?offset=0`;
+    const uploaded = await fetch(base + chunkPath, {
+      method: 'PUT', headers: signHeaders('PUT', chunkPath, object.bytes, 'application/octet-stream'), body: object.bytes,
+    });
+    assert.equal(uploaded.status, 200);
+    assert.equal((await uploaded.json()).complete, true);
+  }
+  const treeCommitPath = `${TREEDAR_PATH}/${treeReceiptId}/commit`;
+  const treeCommit = await fetch(base + treeCommitPath, {
+    method: 'POST', headers: signHeaders('POST', treeCommitPath, Buffer.alloc(0), 'application/json'),
+  });
+  assert.equal(treeCommit.status, 201);
+  const treeCommittedBody = await treeCommit.json();
+  assert.equal(treeCommittedBody.fullyAccepted, true);
+  assert.equal(verifyViewerReceipt(treeCommittedBody.viewerReceipt, trustedReceiptKeys), true);
+  const treeStatusHeaders = signServiceRequest({ secret, keyId, method: 'GET', path: treeReservationPath, body: Buffer.alloc(0) });
+  const treeStatus = await fetch(base + treeReservationPath, { headers: treeStatusHeaders });
+  assert.equal(treeStatus.status, 200);
+  assert.deepEqual((await treeStatus.json()).viewerReceipt, treeCommittedBody.viewerReceipt);
+
   async function apiGet() {
     const headers = signServiceRequest({ secret, keyId, method: 'GET', path: reservationPath, body: Buffer.alloc(0) });
     const response = await fetch(base + reservationPath, { headers });
