@@ -63,8 +63,8 @@ describe('primary Viewer recipient private-proof configuration',()=>{
   expect(ops.vars.APPLICATION_KEY).toBe(client.vars.PROJECT_ALPHA_PORTAL_APPLICATION_KEY);
   expect(ops.vars.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED).toBeUndefined();
   expect(ops.vars.PROJECT_ALPHA_PORTAL_APPLICATION_KEY).toBeUndefined();
-  expect(ops.vars.CLIENT_VIEWER_SESSION_ISSUER_ENABLED).toBe('false');
-  expect(client.vars.CLIENT_VIEWER_ENABLED).toBe('false');
+  expect(ops.vars.CLIENT_VIEWER_SESSION_ISSUER_ENABLED).toBe('true');
+  expect(client.vars.CLIENT_VIEWER_ENABLED).toBe('true');
  });
 
  it('defaults to the matching private authority and denies absent, mismatched, or explicit legacy mode without its key',async()=>{
