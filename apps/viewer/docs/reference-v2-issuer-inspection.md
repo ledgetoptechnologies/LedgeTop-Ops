@@ -216,9 +216,16 @@ fixture injection for upload finalization, managed adoption and raw-photo copy. 
 it holds the claim across the actual copy, synchronizes the finalized tree and
 root, and waits for the dataset-operation receipt before completing the claim.
 Tests exercise the real worker paths, uncertain operation receipt and killed
-fixture writer. Existing lifecycle fixture injection covers its experimental
-trash/purge claim paths. The injection is not installed in production; the GCP
-materializer, direct and legacy StorageManager callers remain unqualified.
+fixture writer. An in-flight managed-writer claim now blocks another fixture
+writer as well as a scan. A current dataset worker seeing the fixture marker
+without its own matching injected handler defers its write after restart;
+this cannot constrain an old binary. Existing lifecycle fixture injection
+covers its experimental trash/purge claim paths. The dormant GCP materializers
+also accept explicit fixture injection; the reference materializer refuses a
+missing handler when it sees the marker. The raw archive primitive has no
+database in its ordinary interface, so a direct caller can omit the injection.
+None of these injections is installed in production; direct and legacy
+StorageManager callers remain unqualified.
 Filesystem and SQLite durability under actual NAS failures is not established;
 callback completion is not sufficient evidence to release a production claim.
 

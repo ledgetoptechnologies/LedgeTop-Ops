@@ -105,6 +105,12 @@ async function previewImport(operation, { storage, config }, updateProgress, sig
 async function processOneDatasetOperation(deps, owner) {
   const operation = deps.processing.claimDatasetOperation(owner);
   if (!operation) return false;
+  // A restarted current worker must not bypass an installed offline fixture.
+  // Older binaries and external writers remain outside this check.
+  const fixtureInstalled=deps.processing.database?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_scan_cooperation_marker'").get();
+  if(fixtureInstalled&&['upload_finalize','import_adopt'].includes(operation.operation_type)&&!require('./referenceSourceScanFixture').isManagedWriterFixture(deps.managedWriterFixture,deps.processing)){
+    deps.processing.deferDatasetOperation(operation.id,owner,5000);return true;
+  }
   // Hard-disabled reference admission makes an existing journal unsupported;
   // this is an interim refusal, not a fence against old/external writers.
   if(operation.operation_type==='catalog_map'&&!deps.processing.referenceCatalogRecoveryAllowed(operation.id))return false;

@@ -21,7 +21,7 @@ function checkedBytes(db,attemptId){
  const objects=request.manifest.objects.filter(o=>o.id===objectId);if(request.submissionId!==row.submission_id||request.manifest.sha256!==row.input_manifest_sha256||objects.length!==1||objects[0].kind!=='auxiliary'||objects[0].name!=='gcp_list.txt'||objects[0].sha256!==row.sha256||objects[0].byteSize!==bytes.length)throw fail('reference_gcp_identity_invalid');
  return {bytes,sha256:row.sha256,relativePath:relative,submissionId:row.submission_id};
 }
-function materializeReferenceGcp({db,rootFd,attemptId,enabled=false,verifyRoot=null}={}){
+function materializeReferenceGcpCore({db,rootFd,attemptId,enabled=false,verifyRoot=null}={}){
  if(enabled!==true)throw fail('reference_gcp_disabled');
  if(process.platform!=='linux'||!Number.isInteger(rootFd)||rootFd<0||typeof verifyRoot!=='function')throw fail('reference_gcp_root_unavailable');
  const data=checkedBytes(db,attemptId),opened=[];let tempName=null,tempFd=null,mountId;
@@ -39,5 +39,11 @@ function materializeReferenceGcp({db,rootFd,attemptId,enabled=false,verifyRoot=n
   // unlinking a mutable path could erase a replacement placed by another writer.
   fs.fsyncSync(dir);verify();return {relativePath:data.relativePath,sha256:data.sha256,byteSize:data.bytes.length,reused:false};
  }finally{if(tempFd!==null)fs.closeSync(tempFd);for(const fd of opened.reverse())fs.closeSync(fd);}
+}
+function materializeReferenceGcp(args={}){
+ if(args.enabled!==true)throw fail('reference_gcp_disabled');
+ const installed=args.db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_scan_cooperation_marker'").get();
+ if(installed||args.managedWriterFixture){const {isManagedWriterFixture}=require('./referenceSourceScanFixture');if(!args.processing||args.processing.database!==args.db||!isManagedWriterFixture(args.managedWriterFixture,args.processing))throw fail('reference_gcp_writer_unavailable');return args.managedWriterFixture.run('gcp_materialize',()=>materializeReferenceGcpCore(args));}
+ return materializeReferenceGcpCore(args);
 }
 module.exports={materializeReferenceGcp,validateReferenceGcpSnapshot:checkedBytes};

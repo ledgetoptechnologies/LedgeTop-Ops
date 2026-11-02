@@ -5,6 +5,7 @@ const crypto=require('node:crypto');
 const {createSourceSnapshotAcquirer}=require('./sourceSnapshotAcquisition');
 const {prepareSourceBindingDraft}=require('./referenceSourceBindingDraft');
 const {createAssociationOutboxFixture}=require('./referenceV2AssociationOutboxFixture');
+const managedWriterOwners=new WeakMap();
 const fail=()=>{throw Object.assign(new Error('source scan fixture unavailable'),{code:'source_scan_fixture_unavailable'})};
 const id=x=>typeof x==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(x);
 function createSourceScanFixture(processing,scope){
@@ -73,7 +74,7 @@ function installCooperativeScanFixture(processing,scope){
  CREATE TRIGGER reference_scan_blocks_lifecycle_effect BEFORE INSERT ON reference_lifecycle_effects WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning') BEGIN SELECT RAISE(ABORT,'cooperative scan in flight'); END;
  CREATE TRIGGER reference_scan_blocks_catalog_effect BEFORE INSERT ON reference_catalog_cleanup_effects WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning') BEGIN SELECT RAISE(ABORT,'cooperative scan in flight'); END;
  CREATE TRIGGER reference_scan_blocks_adoption_effect BEFORE INSERT ON reference_adoption_effects WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning') BEGIN SELECT RAISE(ABORT,'cooperative scan in flight'); END;
- CREATE TRIGGER reference_scan_blocks_managed_writer BEFORE INSERT ON reference_scan_managed_writers WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning') OR EXISTS(SELECT 1 FROM viewer_source_bindings) BEGIN SELECT RAISE(ABORT,'cooperative scan or binding retained'); END;
+ CREATE TRIGGER reference_scan_blocks_managed_writer BEFORE INSERT ON reference_scan_managed_writers WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE state='scanning') OR EXISTS(SELECT 1 FROM viewer_source_bindings) OR EXISTS(SELECT 1 FROM reference_scan_managed_writers WHERE state='in_flight') BEGIN SELECT RAISE(ABORT,'cooperative scan or binding retained'); END;
  CREATE TRIGGER reference_scan_managed_writer_no_replace BEFORE INSERT ON reference_scan_managed_writers WHEN EXISTS(SELECT 1 FROM reference_scan_managed_writers WHERE id=NEW.id OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'managed writer retained'); END;
  CREATE TRIGGER reference_scan_managed_writer_no_delete BEFORE DELETE ON reference_scan_managed_writers BEGIN SELECT RAISE(ABORT,'managed writer retained'); END;
  CREATE TRIGGER reference_scan_managed_writer_update BEFORE UPDATE ON reference_scan_managed_writers WHEN NOT(OLD.state='in_flight' AND NEW.state='completed' AND NEW.id IS OLD.id AND NEW.rowid IS OLD.rowid AND NEW.kind IS OLD.kind) BEGIN SELECT RAISE(ABORT,'managed writer retained'); END;`));
@@ -90,6 +91,7 @@ function createManagedWriterFixture(processing,scope){
   const complete=value=>{if(value===false||value===null||value===undefined)fail();processing.transaction(()=>{if(db.prepare("UPDATE reference_scan_managed_writers SET state='completed' WHERE id=? AND state='in_flight'").run(claim).changes!==1)fail()});return value};
   const result=callback();return result&&typeof result.then==='function'?Promise.resolve(result).then(complete):complete(result);
  }
- return Object.freeze({run});
+ const result=Object.freeze({run});managedWriterOwners.set(result,processing);return result;
 }
-module.exports={createSourceScanFixture,installCooperativeScanFixture,createManagedWriterFixture};
+function isManagedWriterFixture(value,processing){return Boolean(value&&managedWriterOwners.get(value)===processing)}
+module.exports={createSourceScanFixture,installCooperativeScanFixture,createManagedWriterFixture,isManagedWriterFixture};

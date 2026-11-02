@@ -36,7 +36,7 @@ function validateFile(directoryFd, name, expectedBytes, expectedHash, expectedMo
   } finally { fs.closeSync(fd); }
 }
 
-function materializeGcpRawSource(rootPath, { datasetId, bytes, sha256 }) {
+function materializeGcpRawSourceCore(rootPath, { datasetId, bytes, sha256 }) {
   if(process.platform!=='linux' || typeof datasetId!=='string' || !uuid.test(datasetId) || datasetId!==datasetId.toLowerCase() || typeof sha256!=='string' || !shaPattern.test(sha256) || !Buffer.isBuffer(bytes) || !bytes.length || bytes.length>MAX_SOURCE_BYTES || crypto.createHash('sha256').update(bytes).digest('hex')!==sha256) throw archiveError('invalid raw GCP archive input');
   const rootFd=fs.openSync(rootPath,DIR_FLAGS), opened=[];
   try {
@@ -58,6 +58,12 @@ function materializeGcpRawSource(rootPath, { datasetId, bytes, sha256 }) {
       return `.gcp-retained/${datasetId.toLowerCase()}/${finalName}`;
     } finally { if(tempFd!==undefined) fs.closeSync(tempFd); }
   } finally { for(const fd of opened.reverse())fs.closeSync(fd); fs.closeSync(rootFd); }
+}
+// Optional isolated fixture injection only. This primitive has no database in
+// its ordinary interface, so an old or direct caller can still bypass it.
+function materializeGcpRawSource(rootPath,input,{processing,managedWriterFixture}={}){
+ if(processing||managedWriterFixture){const {isManagedWriterFixture}=require('./referenceSourceScanFixture');if(!isManagedWriterFixture(managedWriterFixture,processing))throw archiveError('fixture writer unavailable');return managedWriterFixture.run('gcp_raw',()=>materializeGcpRawSourceCore(rootPath,input));}
+ return materializeGcpRawSourceCore(rootPath,input);
 }
 
 module.exports={materializeGcpRawSource};
