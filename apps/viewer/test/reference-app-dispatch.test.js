@@ -1,7 +1,7 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),{DatabaseSync}=require('node:sqlite');
 const {applyMigrations}=require('../server/database');const p=require('../server/referenceProtocol');
-const {prepareReferenceSubmission}=require('../server/referenceSubmissionDraft');const {ReferenceProvider}=require('../server/referenceProvider');
+const {prepareReferenceSubmission}=require('../server/referenceSubmissionDraft');const {ReferenceProvider,isVerifiedTransferGrantAck}=require('../server/referenceProvider');
 const {ReferenceAppJournal,processReferenceOne,createSyntheticReferenceDispatcher}=require('../server/referenceAppDispatch');
 const {ReferenceTransferOutbox}=require('../server/referenceTransferOutbox');
 function fixture(t){
@@ -16,6 +16,26 @@ function fixture(t){
 const cryptoHash=s=>require('node:crypto').createHash('sha256').update(s).digest('hex');
 function job(f,phase='queued'){return{jobId:'job-1',generation:1,environment:'staging',phase,manifestSha256:f.request.manifest.sha256,pipelineDigest:'b'.repeat(64),status:phase==='awaiting_acceptance'?'succeeded':'queued',nodeId:null,transferRequest:null,transferGrantAcknowledgement:null,error:null,resultManifestSha256:phase==='awaiting_acceptance'?'c'.repeat(64):null}}
 const response=x=>new Response(JSON.stringify(x),{status:200,headers:{'content-type':'application/json'}});
+test('grant ACK evidence is unchanged and bound to the exact provider, job, environment, and grant',async t=>{
+ const f=fixture(t),reservation={reservationId:'res-attested',generation:1,expiresAt:new Date(Date.now()+120000).toISOString(),manifestSha256:f.request.manifest.sha256,byteBudget:3,nonce:'nonce-attested'},ack={reservationId:reservation.reservationId,generation:1,manifestSha256:reservation.manifestSha256,nonce:reservation.nonce,accepted:true},previousFetch=global.fetch;
+ global.fetch=async(url,init)=>url.endsWith('/capabilities')?response(f.caps):url.endsWith('/jobs')&&init.method==='POST'?response(job(f)):url.endsWith('/jobs/job-1')?response({...job(f),transferRequest:reservation}):url.endsWith('/transfer-grants')?response(ack):(()=>{throw Error('unexpected request')})();
+ try{
+  const provider=new ReferenceProvider({endpoint:'https://example.test',token:'synthetic-token-only',environment:'staging',enabled:true});
+  await provider.capabilities();await provider.submit(f.request);
+  const expected={jobId:'job-1',generation:1,environment:'staging',manifestSha256:f.request.manifest.sha256,pipelineDigest:'b'.repeat(64),objectIds:f.request.manifest.objects.map(object=>object.id)};
+  await provider.status('job-1',expected);
+  const grant={jobId:'job-1',generation:1,reservationId:reservation.reservationId,manifestSha256:reservation.manifestSha256,environment:'staging',objectIds:expected.objectIds,nonce:reservation.nonce,byteBudget:reservation.byteBudget,expiresAt:reservation.expiresAt,token:'synthetic-bearer'};
+  const originalJob=job(f),activeJob={...originalJob,phase:'awaiting_transfer',transferRequest:reservation},claim=f.journal.claim('a','sender');f.journal.bindJob(claim,originalJob);
+  const outbox=new ReferenceTransferOutbox(f.db,{journal:f.journal}),grantIdentitySha256='d'.repeat(64),record=outbox.prepare(claim,{job:activeJob,reservation,manifestSha256:f.request.manifest.sha256,grantId:'grant-attested',grantIdentitySha256,grant});
+  outbox.beginSend(claim,record.outbox_id,{grantId:'grant-attested',grantIdentitySha256,grant,provider});
+  const accepted=await provider.postTransferGrant('job-1',grant,expected),grantSha256=cryptoHash(JSON.stringify(grant));
+  assert.equal(outbox.acknowledge(claim,record.outbox_id,accepted).state,'acknowledged');
+  assert.equal(isVerifiedTransferGrantAck(accepted,{provider,jobId:'job-1',environment:'staging',grantSha256}),true);
+  assert.equal(isVerifiedTransferGrantAck(accepted,{provider:{},jobId:'job-1',environment:'staging',grantSha256}),false);
+  accepted.nonce='mutated';assert.equal(isVerifiedTransferGrantAck(accepted,{provider,jobId:'job-1',environment:'staging',grantSha256}),false);
+  assert.throws(()=>outbox.acknowledge(claim,record.outbox_id,accepted),{code:'reference_transfer_outbox_ack_binding'});
+ }finally{global.fetch=previousFetch}
+});
 test('the production lane is hard-disabled and cannot be enabled through arguments',async()=>{let called=0;assert.equal(await processReferenceOne({enabled:true,provider:{submit(){called++}}}),false);assert.equal(called,0);assert.throws(()=>createSyntheticReferenceDispatcher({scope:'production'}),{code:'reference_dispatch_disabled'})});
 test('actual reference provider and v45 journal submit once, persist binding and poll after restart',async t=>{const f=fixture(t);let posts=0,custody=0,gets=0;const fetchImpl=async(url,init)=>{if(url.endsWith('/capabilities'))return response(f.caps);if(url.endsWith('/jobs')){posts++;assert.equal(init.method,'POST');return response(job(f))}if(url.endsWith('/jobs/job-1')){gets++;return response(job(f))}throw Error('unexpected request')};const makeProvider=()=>new ReferenceProvider({endpoint:'https://example.test',token:'synthetic-token-only',environment:'staging',enabled:true,fetchImpl});const authority={assertCurrent:async()=>{custody++}};let dispatch=createSyntheticReferenceDispatcher({scope:'synthetic-fixture-only',journal:f.journal,provider:makeProvider(),custody:authority});assert.equal(await dispatch({attemptId:'a',owner:'worker-1'}),true);dispatch=createSyntheticReferenceDispatcher({scope:'synthetic-fixture-only',journal:f.journal,provider:makeProvider(),custody:authority});assert.equal(await dispatch({attemptId:'a',owner:'worker-2'}),true);assert.equal(posts,1);assert.equal(gets,2);assert.equal(custody,2);assert.equal(f.db.prepare('SELECT job_id FROM viewer_reference_attempt_journal WHERE attempt_id=?').get('a').job_id,'job-1')});
 test('succeeded awaiting acceptance invokes result bridge but never declares publication',async t=>{const f=fixture(t),trace=[];const fetchImpl=async(url)=>url.endsWith('/capabilities')?response(f.caps):url.endsWith('/jobs')?response(job(f)):response(job(f,'awaiting_acceptance'));const provider=new ReferenceProvider({endpoint:'https://example.test',token:'synthetic-token-only',environment:'staging',enabled:true,fetchImpl});const dispatch=createSyntheticReferenceDispatcher({scope:'synthetic-fixture-only',journal:f.journal,provider,custody:{assertCurrent:async()=>{}},result:{handleResult:async({job})=>trace.push(job.phase)}});assert.equal(await dispatch({attemptId:'a',owner:'worker'}),true);assert.deepEqual(trace,['awaiting_acceptance']);assert.equal(f.db.prepare('SELECT status FROM processing_attempts WHERE id=?').get('a').status,'pending')});
