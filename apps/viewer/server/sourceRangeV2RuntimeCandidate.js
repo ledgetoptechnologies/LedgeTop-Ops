@@ -9,6 +9,8 @@ const path = require('node:path');
 const { HEADER_NAME, constantTimeSecretEqual } = require('./proxyGate');
 const { SourceRangeV2BrokerCandidate, createSourceRangeV2Handler } = require('./sourceRangeV2Candidate');
 const { resolveSourceRangeV2Candidate } = require('./sourceRangeV2ResolverCandidate');
+const { ReferenceTransferGrantVault, deriveReferenceTransferGrantKey } = require('./referenceTransferGrantVault');
+const { ReferenceTransferOutbox } = require('./referenceTransferOutbox');
 
 function fail(code) { throw Object.assign(new Error(code), { code }); }
 
@@ -44,6 +46,8 @@ function createSourceRangeV2RuntimeCandidate({ config, database, storage } = {})
   if (!config.processingSourceRangeV2Enabled) return null;
   if (config.processingPlatformEnabled !== true || !database?.prepare || !storage?.resolve
       || typeof config.dataDir !== 'string' || typeof config.datasetsMount !== 'string') fail('SOURCE_RANGE_CONFIGURATION_INVALID');
+  if (typeof config.processingSourceRangeGrantSecret !== 'string' || Buffer.byteLength(config.processingSourceRangeGrantSecret) < 32)
+    fail('SOURCE_RANGE_GRANT_KEY_CONFIGURATION_INVALID');
   if (config.production && (!config.trustedProxyAllowlist?.entries?.length
       || typeof config.proxySharedSecret !== 'string' || !config.proxySharedSecret
       || !Number.isSafeInteger(config.trustProxyHops) || config.trustProxyHops < 1)) fail('SOURCE_RANGE_TRANSPORT_CONFIGURATION_INVALID');
@@ -72,8 +76,13 @@ function createSourceRangeV2RuntimeCandidate({ config, database, storage } = {})
       return req.socket?.encrypted === true;
     },
   });
+  const grantVault = new ReferenceTransferGrantVault(database, {
+    key: deriveReferenceTransferGrantKey(config.processingSourceRangeGrantSecret),
+  });
   return {
     handler,
+    grantVault,
+    createTransferOutbox(journal) { return new ReferenceTransferOutbox(database, { journal, grantVault }); },
     // Kept in-process for the eventual journaled dispatcher integration; no
     // public grant-minting route is exposed by this candidate.
     mintGrant(job) {
@@ -82,7 +91,7 @@ function createSourceRangeV2RuntimeCandidate({ config, database, storage } = {})
         resolveSource: binding => resolveSourceRangeV2Candidate({ database, storage, job: { ...job, ...binding } }),
       });
     },
-    close() { broker.close(); },
+    close() { try { broker.close(); } finally { grantVault.close(); } },
   };
 }
 

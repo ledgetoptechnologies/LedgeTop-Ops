@@ -162,6 +162,8 @@ const config = {
   // Candidate byte-range source serving remains opt-in until its dispatcher,
   // acknowledgement path and production acceptance are fully integrated.
   processingSourceRangeV2Enabled: bool(process.env.PROCESSING_SOURCE_RANGE_V2_ENABLED, false),
+  // Independent stable key material for encrypted, pending source grant payloads.
+  processingSourceRangeGrantSecret: process.env.PROCESSING_SOURCE_RANGE_GRANT_SECRET || '',
   processingWorkerEnabled: bool(process.env.PROCESSING_WORKER_ENABLED, false),
   processingRoot,
   datasetsMount: process.env.DATASETS_MOUNT || path.join(processingRoot, 'datasets'),
@@ -265,6 +267,8 @@ function validate() {
   if (config.processingSourceRangeV2Enabled) {
     if (!config.processingPlatformEnabled)
       problems.push('PROCESSING_SOURCE_RANGE_V2_ENABLED requires PROCESSING_PLATFORM_ENABLED');
+    if (typeof config.processingSourceRangeGrantSecret !== 'string' || Buffer.byteLength(config.processingSourceRangeGrantSecret) < 32)
+      problems.push('PROCESSING_SOURCE_RANGE_V2_ENABLED requires PROCESSING_SOURCE_RANGE_GRANT_SECRET with at least 32 bytes');
     // The production reverse proxy must be identifiable and authenticated.
     // req.secure is meaningful only behind this configured trust boundary.
     if (config.production && !config.trustedProxyAllowlist.entries.length)

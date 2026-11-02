@@ -71,6 +71,8 @@ class ReferenceTransferGrantVault {
     if (result.changes !== 1) fail('reference_transfer_vault_ack_required');
     return true;
   }
+
+  close() { this.key.fill(0); }
 }
 
 module.exports = { ReferenceTransferGrantVault, deriveReferenceTransferGrantKey };

@@ -26,16 +26,19 @@ test('enabled runtime creates a durable private subdirectory and mounts only the
   fs.mkdirSync(dataDir); fs.mkdirSync(datasetsMount);
   let runtime;
   t.after(() => { try { runtime?.close(); } catch {} fs.rmSync(root, { recursive: true, force: true }); });
+  const database = { prepare() { throw new Error('the resolver must not run before a grant is minted'); } };
   runtime = createSourceRangeV2RuntimeCandidate({
     config: { processingSourceRangeV2Enabled: true, processingPlatformEnabled: true,
-      production: false, dataDir, datasetsMount },
-    database: { prepare() { throw new Error('the resolver must not run before a grant is minted'); } },
+      production: false, dataDir, datasetsMount, processingSourceRangeGrantSecret: 'stable-grant-encryption-secret-0123456789' },
+    database,
     storage: { resolve() { throw new Error('the resolver must not run before a grant is minted'); } },
   });
   const privateDir = path.join(dataDir, 'source-range-v2');
   const stat = fs.statSync(privateDir);
   assert.equal(stat.isDirectory(), true);
   if (process.platform !== 'win32') assert.equal(stat.mode & 0o077, 0);
+  assert.equal(typeof runtime.grantVault.load, 'function');
+  assert.equal(typeof runtime.createTransferOutbox({ db: database, read() {} }).prepare, 'function');
 
   const middleware = sourceRangeV2Middleware(runtime.handler);
   const server = http.createServer((req, res) => middleware(req, res, () => { res.statusCode = 404; res.end(); }));
@@ -54,10 +57,23 @@ test('production runtime refuses a missing trusted proxy identity before opening
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   assert.throws(() => createSourceRangeV2RuntimeCandidate({
     config: { processingSourceRangeV2Enabled: true, processingPlatformEnabled: true,
-      production: true, dataDir, datasetsMount, trustedProxyAllowlist: { entries: [] },
+      production: true, dataDir, datasetsMount, processingSourceRangeGrantSecret: 'stable-grant-encryption-secret-0123456789', trustedProxyAllowlist: { entries: [] },
       proxySharedSecret: '', trustProxyHops: 1 },
     database: { prepare() {} }, storage: { resolve() {} },
   }), { code: 'SOURCE_RANGE_TRANSPORT_CONFIGURATION_INVALID' });
+  assert.equal(fs.existsSync(path.join(dataDir, 'source-range-v2')), false);
+});
+
+test('enabled runtime refuses an absent durable grant encryption key before opening state', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'source-range-v2-runtime-'));
+  const dataDir = path.join(root, 'data'), datasetsMount = path.join(root, 'datasets');
+  fs.mkdirSync(dataDir); fs.mkdirSync(datasetsMount);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  assert.throws(() => createSourceRangeV2RuntimeCandidate({
+    config: { processingSourceRangeV2Enabled: true, processingPlatformEnabled: true,
+      production: false, dataDir, datasetsMount },
+    database: { prepare() {} }, storage: { resolve() {} },
+  }), { code:'SOURCE_RANGE_GRANT_KEY_CONFIGURATION_INVALID' });
   assert.equal(fs.existsSync(path.join(dataDir, 'source-range-v2')), false);
 });
 
@@ -71,7 +87,7 @@ test('production range requests require trusted HTTPS, proxy source and the prox
   runtime = createSourceRangeV2RuntimeCandidate({
     config: { processingSourceRangeV2Enabled: true, processingPlatformEnabled: true,
       production: true, dataDir, datasetsMount, trustedProxyAllowlist: parseTrustedProxyAddresses('127.0.0.1'),
-      proxySharedSecret: secret, trustProxyHops: 1 },
+      proxySharedSecret: secret, processingSourceRangeGrantSecret: 'stable-grant-encryption-secret-0123456789', trustProxyHops: 1 },
     database: { prepare() { throw new Error('range auth must fail before source resolution'); } },
     storage: { resolve() { throw new Error('range auth must fail before source resolution'); } },
   });
