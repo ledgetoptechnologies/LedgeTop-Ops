@@ -103,6 +103,24 @@ test sentinel, not an allocation; this is not an actual compatibility build,
 does not prove nonempty-record rollback, and does not fence already-running
 processes.
 
+The compatibility rehearsal now also seeds synthetic nonempty intent, hold,
+selected-photo, excluded-CSV and signed-outbox rows before the preview's deny
+triggers are installed, solely inside a disposable test migration. It verifies
+that a simulated schema-aware restart preserves those rows and the old verifier
+refuses the unknown version. The test substitutes the preview's protected
+identity and minimal parent-table bootstrap in memory; it does not show that
+production can admit, sign, release or recover these records.
+
+Another isolated child-process test starts an old writer before the synthetic
+migration. After migration, a fresh old startup refuses the database, but the
+already-running process can still change a source file and indexed metadata.
+This demonstrates why protected startup must be paired with independently
+enforced storage fencing. A qualifying deployment would have to establish the
+storage-side immutable view or revoke old writer access first, verify the
+barrier from the authoritative holder, and hold activation if any writer or
+alias remains unaccounted for. The checkout cannot prove that barrier or retire
+those writers without deployment-specific authority and evidence.
+
 Ownership review on November 1, 2026 found open PR #371 at head
 `79622f895ae31dfc295c95940fdc338f73277179`; its diff introduces protected
 Viewer identities 41, 42 and 44–47 and changes the startup verifier. It must
