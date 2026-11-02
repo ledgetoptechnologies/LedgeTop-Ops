@@ -28,6 +28,14 @@ test('v40 upgrades to canonical 41 and detects a modified or unrecorded protecte
  db.exec('DROP TABLE gcp_odm_crs_confirmations');const before=schema(db);assert.throws(()=>applyMigrations(db),{code:'migration_identity_conflict'});assert.equal(schema(db),before);
 });
 
+test('dormant transfer outbox migration identity rejects a missing guard trigger',t=>{
+ const db=legacy();t.after(()=>db.close());applyMigrations(db);
+ assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=57').get().name,'viewer_reference_transfer_outbox_dormant');
+ assertProtectedMigrationIdentity(db,MIGRATIONS);
+ db.exec('DROP TRIGGER viewer_reference_transfer_outbox_transition');
+ assert.throws(()=>assertProtectedMigrationIdentity(db,MIGRATIONS),{code:'migration_identity_conflict'});
+});
+
 test('wrong protected ledger names fail before journal mode or migration changes',t=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'migration-guard-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
  for(const version of [41,42,45,46,47]){const file=path.join(dir,`${version}.sqlite`),db=new DatabaseSync(file);db.exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL); INSERT INTO schema_migrations VALUES(${version},'other_feature','t'); CREATE TABLE untouched(value TEXT); INSERT INTO untouched VALUES('keep')`);db.close();const hash=()=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),before=hash();assert.throws(()=>openDatabase(file),{code:'migration_identity_conflict'});assert.equal(hash(),before);}

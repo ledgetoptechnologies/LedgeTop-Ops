@@ -118,9 +118,9 @@ class ReferenceTransferBroker {
       if (previous && previous.identity === identity && input.replace !== true) {
         if (this.#grantRecoveryKey) {
           const token=deriveGrantToken(this.#grantRecoveryKey,previous.id,identity),actual=Buffer.from(p.sha256(Buffer.from(token)),'hex'),expected=Buffer.from(previous.token_hash,'hex');
-          if(actual.length===expected.length&&timingSafeEqual(actual,expected))return {grantId:previous.id,grant:{...JSON.parse(previous.metadata),token},reused:true,tokenRecoverable:true};
+          if(actual.length===expected.length&&timingSafeEqual(actual,expected))return {grantId:previous.id,grant:{...JSON.parse(previous.metadata),token},grantIdentitySha256:p.sha256(Buffer.from(identity)),reused:true,tokenRecoverable:true};
         }
-        return { grantId: previous.id, grant: JSON.parse(previous.metadata), reused: true, tokenRecoverable: false };
+        return { grantId: previous.id, grant: JSON.parse(previous.metadata), grantIdentitySha256:p.sha256(Buffer.from(identity)), reused: true, tokenRecoverable: false };
       }
       const latestId=this.db.prepare('SELECT id FROM reference_grants WHERE job_id=? ORDER BY rowid DESC LIMIT 1').get(jobId);const latest=latestId?checkedGrant(this.db,latestId.id).row:null;
       if (latest) {
@@ -134,7 +134,7 @@ class ReferenceTransferBroker {
       this.db.prepare('UPDATE reference_grants SET revoked=1 WHERE job_id=?').run(jobId);
       const grantId = randomUUID(), token = this.#grantRecoveryKey ? deriveGrantToken(this.#grantRecoveryKey,grantId,identity) : randomBytes(32).toString('base64url');
       this.db.prepare('INSERT INTO reference_grants(id,job_id,reservation_id,identity,token_hash,metadata,files,expires_ms) VALUES(?,?,?,?,?,?,?,?)').run(grantId, jobId, reservation.reservationId, identity, p.sha256(Buffer.from(token)), metadataJson, filesJson, expires);
-      return { grantId, grant: { ...metadata, token }, reused: false, tokenRecoverable: this.#grantRecoveryKey !== null };
+      return { grantId, grant: { ...metadata, token }, grantIdentitySha256:p.sha256(Buffer.from(identity)), reused: false, tokenRecoverable: this.#grantRecoveryKey !== null };
     });
   }
   revokeGrant(grantId) { slug(grantId); this.db.prepare('UPDATE reference_grants SET revoked=1 WHERE id=?').run(grantId); }

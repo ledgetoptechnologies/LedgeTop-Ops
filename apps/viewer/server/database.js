@@ -2522,6 +2522,49 @@ const MIGRATIONS = [
       ))) OR (NEW.status='planned' AND NEW.completed_at IS NOT NULL)
       BEGIN SELECT RAISE(ABORT,'container plan cannot complete'); END;
   `},
+  // Dormant durable transfer intent. It stores digests and reservation identity,
+  // never the bearer grant; dispatch remains disabled until a production adapter
+  // and recovery authority are implemented and reviewed.
+  {version:57,name:'viewer_reference_transfer_outbox_dormant',sql:`
+    CREATE TABLE viewer_reference_transfer_outbox (
+      outbox_id TEXT PRIMARY KEY NOT NULL,
+      attempt_id TEXT NOT NULL REFERENCES viewer_reference_attempt_journal(attempt_id) ON DELETE RESTRICT,
+      job_id TEXT NOT NULL,
+      generation INTEGER NOT NULL CHECK(typeof(generation)='integer' AND generation>0),
+      environment TEXT NOT NULL CHECK(environment IN ('staging','production')),
+      reservation_id TEXT NOT NULL,
+      reservation_generation INTEGER NOT NULL CHECK(typeof(reservation_generation)='integer' AND reservation_generation>0),
+      reservation_nonce_sha256 TEXT NOT NULL CHECK(length(reservation_nonce_sha256)=64 AND reservation_nonce_sha256 NOT GLOB '*[^0-9a-f]*'),
+      reservation_expires_at TEXT NOT NULL,
+      reservation_byte_budget INTEGER NOT NULL CHECK(typeof(reservation_byte_budget)='integer' AND reservation_byte_budget>0),
+      manifest_sha256 TEXT NOT NULL CHECK(length(manifest_sha256)=64 AND manifest_sha256 NOT GLOB '*[^0-9a-f]*'),
+      grant_id TEXT NOT NULL,
+      grant_identity_sha256 TEXT NOT NULL CHECK(length(grant_identity_sha256)=64 AND grant_identity_sha256 NOT GLOB '*[^0-9a-f]*'),
+      grant_sha256 TEXT NOT NULL CHECK(length(grant_sha256)=64 AND grant_sha256 NOT GLOB '*[^0-9a-f]*'),
+      state TEXT NOT NULL CHECK(state IN ('prepared','sending','uncertain','acknowledged','held')),
+      send_attempts INTEGER NOT NULL DEFAULT 0 CHECK(typeof(send_attempts)='integer' AND send_attempts>=0),
+      sender_generation INTEGER NOT NULL DEFAULT 0 CHECK(typeof(sender_generation)='integer' AND sender_generation>=0),
+      acknowledgement_sha256 TEXT CHECK(acknowledgement_sha256 IS NULL OR (length(acknowledgement_sha256)=64 AND acknowledgement_sha256 NOT GLOB '*[^0-9a-f]*')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(attempt_id,reservation_id,reservation_generation),
+      CHECK((state='acknowledged')=(acknowledgement_sha256 IS NOT NULL))
+    );
+    CREATE INDEX viewer_reference_transfer_outbox_state_idx ON viewer_reference_transfer_outbox(state,created_at);
+    CREATE TRIGGER viewer_reference_transfer_outbox_identity_immutable BEFORE UPDATE ON viewer_reference_transfer_outbox
+      WHEN NEW.rowid IS NOT OLD.rowid OR NEW.outbox_id IS NOT OLD.outbox_id OR NEW.attempt_id IS NOT OLD.attempt_id OR NEW.job_id IS NOT OLD.job_id OR NEW.generation IS NOT OLD.generation OR NEW.environment IS NOT OLD.environment OR NEW.reservation_id IS NOT OLD.reservation_id OR NEW.reservation_generation IS NOT OLD.reservation_generation OR NEW.reservation_nonce_sha256 IS NOT OLD.reservation_nonce_sha256 OR NEW.reservation_expires_at IS NOT OLD.reservation_expires_at OR NEW.reservation_byte_budget IS NOT OLD.reservation_byte_budget OR NEW.manifest_sha256 IS NOT OLD.manifest_sha256 OR NEW.grant_id IS NOT OLD.grant_id OR NEW.grant_identity_sha256 IS NOT OLD.grant_identity_sha256 OR NEW.grant_sha256 IS NOT OLD.grant_sha256 OR NEW.created_at IS NOT OLD.created_at
+      BEGIN SELECT RAISE(ABORT,'reference transfer outbox identity immutable'); END;
+    CREATE TRIGGER viewer_reference_transfer_outbox_transition BEFORE UPDATE ON viewer_reference_transfer_outbox
+      WHEN NOT (
+        (OLD.state='prepared' AND NEW.state='sending' AND NEW.send_attempts=OLD.send_attempts+1 AND NEW.sender_generation>OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state IN ('sending','uncertain') AND NEW.state='sending' AND NEW.send_attempts=OLD.send_attempts+1 AND NEW.sender_generation>OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state='sending' AND NEW.state IN ('uncertain','held') AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state IN ('sending','uncertain') AND NEW.state='acknowledged' AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NOT NULL)
+      )
+      BEGIN SELECT RAISE(ABORT,'reference transfer outbox transition invalid'); END;
+    CREATE TRIGGER viewer_reference_transfer_outbox_no_delete BEFORE DELETE ON viewer_reference_transfer_outbox
+      BEGIN SELECT RAISE(ABORT,'reference transfer outbox retained'); END;
+  `},
 ];
 
 function applyMigrations(database) {
