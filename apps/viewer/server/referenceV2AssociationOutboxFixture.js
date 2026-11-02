@@ -24,7 +24,7 @@ function createAssociationOutboxFixture(processing,scope){
   db.prepare("INSERT INTO v2_assoc_fixture VALUES(?,?,?,?,?,?,?,?,?,NULL,'committed')").run(i.intent.intentId,i.intent.idempotencyId,i.intent.reservationRequestId,args.associationConfig.nonce,args.bindingId,args.intentBytes,args.signature,i.body,i.key);
   return {state:'committed',body:Buffer.from(i.body)};
  }
- function prepare(args,publicKeyDer){return processing.transaction(()=>prepareInTransaction(args,publicKeyDer))}
+ function prepare(args,publicKeyDer){return processing.transactionOrOwned(()=>prepareInTransaction(args,publicKeyDer))}
  // Only synthetic tests may call this. Binding insertion and the outbox share
  // one synchronous transaction; any failure must escape to roll both back.
  function prepareWithBinding(args,publicKeyDer,bindingRequest,{afterBinding}={}){return processing.transaction(()=>{

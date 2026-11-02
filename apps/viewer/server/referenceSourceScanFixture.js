@@ -4,6 +4,7 @@
 const crypto=require('node:crypto');
 const {createSourceSnapshotAcquirer}=require('./sourceSnapshotAcquisition');
 const {prepareSourceBindingDraft}=require('./referenceSourceBindingDraft');
+const {createAssociationOutboxFixture}=require('./referenceV2AssociationOutboxFixture');
 const fail=()=>{throw Object.assign(new Error('source scan fixture unavailable'),{code:'source_scan_fixture_unavailable'})};
 const id=x=>typeof x==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(x);
 function createSourceScanFixture(processing,scope){
@@ -14,8 +15,10 @@ function createSourceScanFixture(processing,scope){
  CREATE TRIGGER IF NOT EXISTS reference_source_scan_fixture_no_replace BEFORE INSERT ON reference_source_scan_fixture WHEN EXISTS(SELECT 1 FROM reference_source_scan_fixture WHERE id=NEW.id OR rowid=NEW.rowid OR state='scanning') BEGIN SELECT RAISE(ABORT,'scan intent retained'); END;
  CREATE TRIGGER IF NOT EXISTS reference_source_scan_fixture_no_delete BEFORE DELETE ON reference_source_scan_fixture BEGIN SELECT RAISE(ABORT,'scan intent retained'); END;
  CREATE TRIGGER IF NOT EXISTS reference_source_scan_fixture_no_update BEFORE UPDATE ON reference_source_scan_fixture WHEN NOT(OLD.state='scanning' AND NEW.state='committed' AND NEW.id IS OLD.id AND NEW.attempt_id IS OLD.attempt_id AND NEW.binding_id IS OLD.binding_id AND NEW.dataset_id IS OLD.dataset_id AND NEW.project_id IS OLD.project_id AND NEW.manifest_sha256 IS OLD.manifest_sha256 AND NEW.token IS OLD.token) BEGIN SELECT RAISE(ABORT,'scan intent immutable'); END;`);
- function run({scanId,bindingId,attemptId,managedRoot,afterReserve,afterScan}={}){
-  if(!id(scanId)||!id(bindingId)||!id(attemptId)||typeof managedRoot!=='string'||(afterReserve!==undefined&&typeof afterReserve!=='function')||(afterScan!==undefined&&typeof afterScan!=='function'))fail();
+ function run({scanId,bindingId,attemptId,managedRoot,association,afterReserve,afterScan,afterOutbox}={}){
+  if(!id(scanId)||!id(bindingId)||!id(attemptId)||typeof managedRoot!=='string'||(afterReserve!==undefined&&typeof afterReserve!=='function')||(afterScan!==undefined&&typeof afterScan!=='function')||(afterOutbox!==undefined&&typeof afterOutbox!=='function')||(association!==undefined&&(!association||association.args?.processing!==processing||association.args?.bindingId!==bindingId||!Buffer.isBuffer(association.publicKeyDer))))fail();
+  // Install the disposable outbox schema before either transactional phase.
+  const outbox=association&&createAssociationOutboxFixture(processing,'isolated-association-outbox-fixture');
   const token=crypto.randomBytes(32).toString('hex');
   const reserved=processing.transaction(()=>{
    if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='viewer_source_binding_unavailable'").get())fail();
@@ -34,8 +37,10 @@ function createSourceScanFixture(processing,scope){
    const normalize=files=>files.map(f=>({id:f.id,relativePath:f.relativePath,byteSize:f.byteSize,sha256:f.sha256})).sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0);
    if(JSON.stringify(normalize(dataset.files))!==JSON.stringify(normalize(observed.files)))fail();
    const binding=prepareSourceBindingDraft(processing,{id:bindingId,attemptId});
+   const prepared=outbox&&outbox.prepare(association.args,association.publicKeyDer);
+   if(afterOutbox)afterOutbox();
    if(db.prepare("UPDATE reference_source_scan_fixture SET state='committed' WHERE id=? AND token=? AND state='scanning'").run(scanId,token).changes!==1)fail();
-   return {...binding,observation:'unfenced_source_snapshot',scanId};
+   return {...binding,observation:'unfenced_source_snapshot',scanId,...(prepared?{association:prepared}:{})};
   });
  }
  return Object.freeze({run});

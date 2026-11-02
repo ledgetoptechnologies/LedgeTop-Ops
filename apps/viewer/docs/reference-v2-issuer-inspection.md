@@ -144,7 +144,9 @@ The metadata planner test covers 10,000 image records totalling 52,428,800,000
 bytes and a separate retained raw CSV; it allocates no image payloads. The
 current v1 contract permits at most 10,000 submitted objects and 4 MiB of
 submission metadata, so longer names or a generated GCP auxiliary can exceed
-these limits. The snapshot reader reuses one 1 MiB buffer while hashing source
+these limits. A generated GCP file counts as one object: at most 9,999 images
+can accompany it. The retained raw CSV is excluded from submission and does
+not consume a submitted-object slot. The snapshot reader reuses one 1 MiB buffer while hashing source
 files, and the binding table stores file identity metadata, not image bytes.
 This test is not a 50 GB NAS benchmark or proof of retention.
 
@@ -168,11 +170,18 @@ reading, metadata changes fail closed, process death leaves no binding, and
 10,001 metadata records (10,000 images plus CSV) can be bound without copying
 their contents into SQLite. The metadata test does not read 50 GB of source.
 
+An optional synthetic association is now prepared in the same final transaction
+as the binding and scan-intent state change. Signing remains outside that
+transaction and is revalidated before persisting; exact replay uses the stored
+signature. Tests kill an owned process before and after the final commit and
+verify rollback or durable replay, and reject changed supplied authority data.
+This validates caller-supplied fixture snapshots, not a current authority.
+
 The intent is not connected to the filesystem, existing lifecycle writers,
 NAS administration or external clients. A file can change after observation
 and before or after the metadata commit, without changing its indexed row;
 aliases and replace/restore races also remain. The scan checks for many changes
-while it reads, but it cannot close those races. The fixture does not atomically
-commit an association outbox with this split binding. Production requires an
-enforced source-side barrier, recovery semantics and an atomic association
-commit before the disabled gate can be reconsidered.
+while it reads, but it cannot close those races. Production requires an
+enforced source-side barrier, recovery semantics and a verified authority
+before the disabled gate can be reconsidered. Generated GCP auxiliary binding
+is not yet supported by this inspector even when within the v1 object limit.
