@@ -77,3 +77,39 @@ concurrent lifecycle/import/GCP paths, retained raw CSV, a representative
 local signatures do not prove 50 GiB NAS performance, retention, or authority.
 No TrueNAS action, production enablement, or migration is authorized by this
 assessment.
+
+## Unallocated compatibility schema preview and review
+
+`reference-custody-compatibility-schema.sql` is a runnable, unallocated design
+preview only. Its four separately named candidate tables describe intent,
+selected and retained-excluded objects, authority evidence and an outbox. All
+inserts are blocked and updates/deletes are blocked. The committed/signed
+outbox shape anticipates signing after commit, but its compatibility trigger
+does not permit that transition. It cannot issue an association, retain real
+files or represent a qualified production migration. It is not included in
+`MIGRATIONS`, and its objects are not protected by the production verifier.
+The preview test compares exact SQLite schema catalog entries against the
+preview, detects a changed trigger, reopens through normal startup while
+existing admission gates remain in place, and verifies that an unknown
+forward migration makes the current build refuse startup. This comparison is
+test-only, not an implementation of a production schema identity guard.
+
+An independent read-only review found the following blockers before any
+successor could admit records: enforce attempt/task/project/dataset identity;
+match every indexed file's path, size and hash; seal an exact count and
+canonical inventory digest including excluded raw CSV; prevent late additions
+and replacement under `INSERT OR REPLACE`; validate path and integer bounds;
+bind environment, protocol, job, generation, issuer, key, signature and
+canonical body to the same current attempt and authority. The preview's
+unconditional deny does not solve those future transition requirements.
+Fresh, authenticated source-retention evidence, current epoch and revocation,
+all writer fences, crash recovery and safe release remain separate blockers.
+
+Once ownership and a version are agreed, a compatibility build must recognize
+the exact chosen version and complete object/trigger/index definitions before
+it is used as a rollback artifact. The current verifier does not recognize an
+unknown new version, and already-running older workers are not stopped by a
+startup refusal. A later admission-capable successor would need a reviewed
+version-aware verifier for any changed schema definitions and a safe rollback
+build that understands all nonempty records. No old migration identity may be
+silently rewritten or reused, and no version is reserved by this document.

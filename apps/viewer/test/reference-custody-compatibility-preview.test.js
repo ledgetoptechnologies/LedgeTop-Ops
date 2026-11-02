@@ -1,0 +1,12 @@
+'use strict';
+// Unallocated schema preview, not installed by the application or a migration.
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),{DatabaseSync}=require('node:sqlite'),{openDatabase}=require('../server/database');
+const sql=fs.readFileSync(path.join(__dirname,'../docs/reference-custody-compatibility-schema.sql'),'utf8');
+function catalog(db){return db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name LIKE 'custody_candidate_%' AND sql IS NOT NULL ORDER BY type,name").all().map(row=>({...row}))}
+function expected(){const db=new DatabaseSync(':memory:');try{db.exec(sql);return catalog(db)}finally{db.close()}}
+function verifyPreview(db){assert.deepEqual(catalog(db),expected())}
+test('unallocated disabled compatibility preview survives normal startup without changing protected guards',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-compat-preview-')),file=path.join(root,'db.sqlite');let db=openDatabase(file);t.after(()=>{db?.close();fs.rmSync(root,{recursive:true,force:true})});const before=db.prepare("SELECT sql FROM sqlite_master WHERE name='viewer_source_binding_unavailable'").get().sql;db.exec(sql);verifyPreview(db);for(const table of ['custody_candidate_intents','custody_candidate_objects','custody_candidate_authority_evidence','custody_candidate_outbox'])assert.throws(()=>db.exec(`INSERT INTO ${table} DEFAULT VALUES`),/custody candidate disabled/);db.close();db=openDatabase(file);verifyPreview(db);assert.equal(db.prepare("SELECT sql FROM sqlite_master WHERE name='viewer_source_binding_unavailable'").get().sql,before);assert.throws(()=>db.prepare("INSERT INTO custody_candidate_intents VALUES('i','a','d','p',?, ?,1,0)").run('a'.repeat(64),'b'.repeat(64)),/custody candidate disabled/);
+ db.exec('DROP TRIGGER custody_candidate_outbox_disabled; CREATE TRIGGER custody_candidate_outbox_disabled BEFORE INSERT ON custody_candidate_outbox BEGIN SELECT 1; END');assert.throws(()=>verifyPreview(db));
+});
+test('current startup rejects an unknown forward migration identity',t=>{const root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-forward-version-')),file=path.join(root,'db.sqlite');t.after(()=>fs.rmSync(root,{recursive:true,force:true}));const db=openDatabase(file);db.prepare("INSERT INTO schema_migrations(version,name,applied_at) VALUES(999,'synthetic_unrecognized','test')").run();db.close();assert.throws(()=>openDatabase(file),{code:'migration_identity_conflict'})});
