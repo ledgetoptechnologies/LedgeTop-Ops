@@ -103,11 +103,11 @@ test('durable transfer outbox binds request objects and refuses replay without s
  assert.throws(()=>f.outbox.prepare(f.claim,{...f.input,grant:{...f.input.grant,token:'different-synthetic-token'}}),{code:'reference_transfer_outbox_conflict'});
  const send={grantId:f.input.grantId,grantIdentitySha256:f.input.grantIdentitySha256,grant:f.input.grant,provider:{postTransferGrant:async()=>{}}};
  f.outbox.beginSend(f.claim,first.outbox_id,send);const uncertain=f.outbox.markUncertain(f.claim,first.outbox_id);assert.equal(uncertain.state,'uncertain');
- f.journal.release(f.claim);const retryClaim=f.journal.claim('a','sender-two');assert.equal(retryClaim.generation,f.claim.generation+1);
- const retryRecord=f.outbox.prepare(retryClaim,f.input);assert.equal(retryRecord.grant_sha256,first.grant_sha256);
- assert.throws(()=>f.outbox.beginSend(retryClaim,first.outbox_id,send),{code:'reference_transfer_outbox_sender_unfenced'});
+ assert.throws(()=>f.journal.release(f.claim),{code:'reference_dispatch_reconciliation_pending'});f.db.prepare('UPDATE viewer_reference_attempt_journal SET lease_expires_ms=0 WHERE attempt_id=?').run('a');const retryClaim=f.journal.claimExpiredTransferReconciliation('a','sender-two');assert.equal(retryClaim.generation,f.claim.generation+1);
+ assert.throws(()=>f.outbox.prepare(retryClaim,f.input),{code:'reference_transfer_outbox_claim_purpose'});
+ assert.throws(()=>f.outbox.beginSend(retryClaim,first.outbox_id,send),{code:'reference_transfer_outbox_claim_purpose'});
  const ack={reservationId:f.reservation.reservationId,generation:f.reservation.generation,manifestSha256:f.reservation.manifestSha256,nonce:f.reservation.nonce,accepted:true};
- assert.throws(()=>f.outbox.acknowledge(retryClaim,first.outbox_id,ack),{code:'reference_transfer_outbox_ack_binding'});
+ assert.throws(()=>f.outbox.acknowledge(retryClaim,first.outbox_id,ack),{code:'reference_transfer_outbox_claim_purpose'});
  assert.equal(f.outbox.find('a',f.reservation.reservationId,f.reservation.generation).state,'uncertain');
  assert.equal(JSON.stringify(first).includes('synthetic-bearer-not-persisted'),false);
 });
@@ -128,7 +128,7 @@ test('expired sender claim can only reconcile an exact authenticated grant ACK',
   try{
    const provider=new ReferenceProvider({endpoint:'https://example.test',token:'synthetic-token-only',environment:'staging',enabled:true}),expected={jobId:'job-1',generation:1,environment:'staging',manifestSha256:f.request.manifest.sha256,pipelineDigest:'b'.repeat(64)};
    const status=await provider.status('job-1',expected),freshOutbox=new ReferenceTransferOutbox(f.db,{journal});
-   if(mismatch){assert.throws(()=>freshOutbox.reconcileAcknowledged(recovery,row.outbox_id,status.transferGrantAcknowledgement,{provider}),{code:'reference_transfer_outbox_ack_binding'});assert.equal(freshOutbox.find('a',f.reservation.reservationId,1).state,'uncertain');assert.equal(f.db.prepare('SELECT count(*) AS n FROM viewer_reference_transfer_outbox_reconciliations').get().n,0);}
+   if(mismatch){assert.throws(()=>freshOutbox.reconcileAcknowledged(recovery,row.outbox_id,status.transferGrantAcknowledgement,{provider}),{code:'reference_transfer_outbox_ack_binding'});assert.equal(freshOutbox.find('a',f.reservation.reservationId,1).state,'uncertain');assert.equal(f.db.prepare('SELECT count(*) AS n FROM viewer_reference_transfer_outbox_reconciliations').get().n,0);assert.throws(()=>journal.release(recovery),{code:'reference_dispatch_reconciliation_pending'});f.db.prepare('UPDATE viewer_reference_attempt_journal SET lease_owner=NULL,lease_expires_ms=NULL WHERE attempt_id=?').run('a');assert.equal(journal.claim('a','ordinary-dispatch'),null);assert.equal(journal.claimNext('ordinary-dispatch'),null);}
    else{const settled=freshOutbox.reconcileAcknowledged(recovery,row.outbox_id,status.transferGrantAcknowledgement,{provider});assert.equal(settled.state,'acknowledged');assert.equal(f.db.prepare('SELECT recovery_generation FROM viewer_reference_transfer_outbox_reconciliations WHERE outbox_id=?').get(row.outbox_id).recovery_generation,recovery.generation);journal.release(recovery);assert.equal(journal.claim('a','next-owner').generation,recovery.generation+1);}
   }finally{global.fetch=previousFetch;}
  });

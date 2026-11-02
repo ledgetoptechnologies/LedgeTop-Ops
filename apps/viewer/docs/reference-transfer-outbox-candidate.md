@@ -42,6 +42,11 @@ reject that claim. Reconciliation requires that same purpose record and exact
 outbox ID. The v61 migration also requires the purpose record before inserting
 the reconciliation receipt. This prevents a recovery lease from being reused
 as a general dispatch lease by repository APIs.
+An unresolved `sending`, `uncertain`, or `held` row also blocks ordinary claim
+and claim-next selection. Neither a dispatch claim nor its recovery lease can
+be released while the row remains unresolved; a failed or unavailable status
+stays leased until expiry, then can receive another recovery claim instead of
+returning to normal dispatch.
 
 The provider identity still needs a production authority binding. The current
 primitive accepts a provider instance supplied by its caller and verifies that
