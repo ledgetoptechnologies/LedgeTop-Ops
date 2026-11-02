@@ -2592,6 +2592,32 @@ const MIGRATIONS = [
     CREATE TRIGGER viewer_reference_transfer_grant_binding_no_delete BEFORE DELETE ON viewer_reference_transfer_grant_bindings
       BEGIN SELECT RAISE(ABORT,'reference transfer grant binding retained'); END;
   `},
+  {version:60,name:'viewer_reference_transfer_outbox_status_reconciliation',sql:`
+    CREATE TABLE viewer_reference_transfer_outbox_reconciliations (
+      outbox_id TEXT PRIMARY KEY NOT NULL REFERENCES viewer_reference_transfer_outbox(outbox_id) ON DELETE RESTRICT,
+      recovery_generation INTEGER NOT NULL CHECK(typeof(recovery_generation)='integer' AND recovery_generation>0),
+      canonical_grant_sha256 TEXT NOT NULL CHECK(length(canonical_grant_sha256)=64 AND canonical_grant_sha256 NOT GLOB '*[^0-9a-f]*'),
+      acknowledgement_sha256 TEXT NOT NULL CHECK(length(acknowledgement_sha256)=64 AND acknowledgement_sha256 NOT GLOB '*[^0-9a-f]*'),
+      created_at TEXT NOT NULL
+    );
+    CREATE TRIGGER viewer_reference_transfer_outbox_reconciliation_no_replace BEFORE INSERT ON viewer_reference_transfer_outbox_reconciliations
+      WHEN EXISTS(SELECT 1 FROM viewer_reference_transfer_outbox_reconciliations WHERE outbox_id=NEW.outbox_id OR rowid=NEW.rowid)
+      BEGIN SELECT RAISE(ABORT,'reference transfer reconciliation retained'); END;
+    CREATE TRIGGER viewer_reference_transfer_outbox_reconciliation_immutable BEFORE UPDATE ON viewer_reference_transfer_outbox_reconciliations
+      BEGIN SELECT RAISE(ABORT,'reference transfer reconciliation immutable'); END;
+    CREATE TRIGGER viewer_reference_transfer_outbox_reconciliation_no_delete BEFORE DELETE ON viewer_reference_transfer_outbox_reconciliations
+      BEGIN SELECT RAISE(ABORT,'reference transfer reconciliation retained'); END;
+    DROP TRIGGER viewer_reference_transfer_outbox_transition;
+    CREATE TRIGGER viewer_reference_transfer_outbox_transition BEFORE UPDATE ON viewer_reference_transfer_outbox
+      WHEN NOT (
+        (OLD.state='prepared' AND NEW.state='sending' AND NEW.send_attempts=OLD.send_attempts+1 AND NEW.sender_generation>OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state='sending' AND NEW.state IN ('uncertain','held') AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state='uncertain' AND NEW.state='held' AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NULL) OR
+        (OLD.state='sending' AND NEW.state='acknowledged' AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NOT NULL AND NOT EXISTS(SELECT 1 FROM viewer_reference_transfer_outbox_reconciliations WHERE outbox_id=OLD.outbox_id)) OR
+        (OLD.state IN ('sending','uncertain') AND NEW.state='acknowledged' AND NEW.send_attempts=OLD.send_attempts AND NEW.sender_generation=OLD.sender_generation AND NEW.acknowledgement_sha256 IS NOT NULL AND EXISTS(SELECT 1 FROM viewer_reference_transfer_outbox_reconciliations r JOIN viewer_reference_transfer_grant_bindings g ON g.outbox_id=r.outbox_id WHERE r.outbox_id=OLD.outbox_id AND r.recovery_generation>OLD.sender_generation AND r.canonical_grant_sha256=g.canonical_grant_sha256 AND r.acknowledgement_sha256=NEW.acknowledgement_sha256))
+      )
+      BEGIN SELECT RAISE(ABORT,'reference transfer outbox transition invalid'); END;
+  `},
 ];
 
 function applyMigrations(database) {

@@ -24,21 +24,29 @@ that an earlier HTTP sender stopped. An acknowledgment is accepted only while
 the original sender claim is active and only from the unmodified response
 object returned by the same provider instance that sent this grant, with the
 job, environment and canonical grant digest bound. A status response is parsed
-and carries the digest needed for future exact reconciliation, but the outbox
-does not transition an ambiguous row to acknowledged after restart. This process-local evidence
-is created only for the built-in HTTPS transport; it does not survive restart
-and is not a durable receiver attestation. A caller-created or mutated DTO
-cannot mark the row acknowledged.
+and carries the digest needed for exact reconciliation.
+`claimExpiredTransferReconciliation` permits a new journal generation to take
+over only an expired attempt that has a `sending` or `uncertain` outbox row.
+`reconcileAcknowledged` then records an immutable receipt and transitions the
+row only when the new provider instance returns an authenticated ACK matching
+the stored canonical grant digest and reservation binding. A missing or
+mismatched ACK leaves the row uncertain. This process-local response evidence
+is created only for the built-in HTTPS transport; the durable reconciliation
+record retains only its digests and recovery generation. A caller-created or
+mutated DTO cannot mark the row acknowledged.
 
 This is a persistence building block, not an enabled transfer adapter. The
-public dispatch lane remains hard-off. A process failure that leaves a row in
-`sending` also leaves the journal claim held; there is no startup fence,
-lease-recovery authority, broker-to-outbox adapter, or automatic replay loop.
-Those are explicit remaining requirements before the outbox can be activated.
+public dispatch lane remains hard-off. There is no startup scanner or runtime
+calling this narrow reconciliation primitive, broker-to-outbox adapter, or
+automatic replay loop. A missing status ACK remains held; exact POST replay
+requires the stable broker recovery key and the paired Processing idempotency
+semantics and is not wired here. Those are explicit remaining requirements
+before the outbox can be activated.
 
 Synthetic tests cover immutable identity, changed-grant rejection, journal-
-derived object binding, refusal to retry an uncertain sender, held state when
-the sender dies in `sending`, forward-only migration from v57, and non-
+derived object binding, refusal to retry an uncertain sender, expired-lease
+recovery only for pending sends, exact authenticated ACK reconciliation after
+restart, mismatch retention, forward-only migrations through v60, and non-
 persistence of the bearer. They do not prove actual Viewer process restart on
-the NAS, key provisioning, durable ACK reconciliation after restart, a real
-Processing ACK, or production custody.
+the NAS, key provisioning, automatic replay, a deployed Processing ACK, or
+production custody.

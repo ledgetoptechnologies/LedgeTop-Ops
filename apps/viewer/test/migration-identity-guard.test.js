@@ -33,6 +33,7 @@ test('dormant transfer outbox migration identity rejects a missing immutable bin
  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=57').get().name,'viewer_reference_transfer_outbox_dormant');
  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=58').get().name,'viewer_reference_transfer_outbox_sender_fence');
  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=59').get().name,'viewer_reference_transfer_outbox_grant_digest');
+ assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=60').get().name,'viewer_reference_transfer_outbox_status_reconciliation');
  assertProtectedMigrationIdentity(db,MIGRATIONS);
  db.exec('DROP TRIGGER viewer_reference_transfer_grant_binding_immutable');
  assert.throws(()=>assertProtectedMigrationIdentity(db,MIGRATIONS),{code:'migration_identity_conflict'});
@@ -49,6 +50,7 @@ test('previous v57 outbox schema upgrades through the forward-only sender-fence 
  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=57').get().name,'viewer_reference_transfer_outbox_dormant');
  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=58').get().name,'viewer_reference_transfer_outbox_sender_fence');
  assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=59').get().name,'viewer_reference_transfer_outbox_grant_digest');
+ assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=60').get().name,'viewer_reference_transfer_outbox_status_reconciliation');
  const trigger=db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='viewer_reference_transfer_outbox_transition'").get().sql;
  assert.match(trigger,/OLD\.state='prepared' AND NEW\.state='sending'/);
  assert.doesNotMatch(trigger,/OLD\.state IN \('sending','uncertain'\) AND NEW\.state='sending'/);
