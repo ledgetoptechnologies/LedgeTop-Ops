@@ -3,6 +3,8 @@
 These byte-for-byte fixtures and their index entries come from Processing
 `f40c68918ad2c612a415fc9447e4a3f9b87c15b7`,
 `contracts/reference-v2-candidate/invalid/`. Their hashes are checked before use.
+The sibling `canonical-vectors.json` is copied from the same Processing commit
+and pinned by its complete SHA-256 in the Viewer test.
 `boolean-integer` is a schema-level case and is intentionally excluded: a JSON
 decoder cannot determine whether a boolean occupies an integer schema field.
 

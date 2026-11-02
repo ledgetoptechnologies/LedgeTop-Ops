@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const { decodeV2Metadata: decode, requireSpoolV2Profile: profile, LIMITS } = require('../server/referenceV2StrictCandidate');
 const root = path.join(__dirname, 'fixtures/reference-v2-lexical');
 const cases = require('./fixtures/reference-v2-lexical/index.json');
+const { canonicalBytes } = require('../server/referenceProtocol');
 
 test('rejects exact Processing lexical invalid fixtures with verified bytes', () => {
   for (const item of cases) {
@@ -32,4 +33,23 @@ test('requires distinct spool v2 marker and exact expected record type', () => {
   assert.equal(profile(v2, 'source_release_ack_v2'), v2);
   for (const bad of [{schemaVersion:1,receiptType:'source_release_ack'}, {...v2, protocol:undefined}, {...v2, schemaVersion:1}, {...v2, receiptType:'source_release_ack'}, {...v2,receiptType:'accepted_copy_ack'}]) assert.throws(() => profile(bad,'source_release_ack_v2'));
   assert.throws(() => profile(v2, 'accepted_copy_ack'));
+});
+test('roundtrips the pinned Processing canonical and acceptance vectors', () => {
+  const raw = fs.readFileSync(path.join(root, 'canonical-vectors.json'));
+  const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+  assert.equal(sha(raw), '19a1b673bd9f1b88aea74a2c324936d9fdecb639ec579ca9286b406904d14e9a');
+  const packet = JSON.parse(raw);
+  assert.equal(packet.vectors.length, 3);
+  assert.equal(packet.domainSeparatedRecords.length, 1);
+  for (const vector of [...packet.vectors, ...packet.domainSeparatedRecords]) {
+    const canonical = Buffer.from(vector.canonicalUtf8Base64, 'base64');
+    assert.deepEqual(canonicalBytes(decode(canonical)), canonical);
+    assert.deepEqual(canonicalBytes(decode(Buffer.from(JSON.stringify(vector.value)))), canonical);
+    if (vector.prefixAscii) {
+      assert.equal(vector.prefixTerminatorHex, '00');
+      const digest = value => sha(Buffer.concat([Buffer.from(vector.prefixAscii, 'ascii'), Buffer.from([0]), canonicalBytes(value)]));
+      assert.equal(digest(decode(canonical)), vector.sha256);
+      assert.equal(digest(decode(Buffer.from(JSON.stringify(vector.changedValue)))), vector.changedSha256);
+    } else assert.equal(sha(canonical), vector.sha256);
+  }
 });
