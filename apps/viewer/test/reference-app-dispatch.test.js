@@ -18,8 +18,8 @@ function job(f,phase='queued'){return{jobId:'job-1',generation:1,environment:'st
 const response=x=>new Response(JSON.stringify(x),{status:200,headers:{'content-type':'application/json'}});
 test('shared Python/Viewer grant ACK vector binds the canonical grant digest',()=>{const fixture=require('./fixtures/reference-v1.contract.json');assert.equal(p.sha256(p.canonicalBytes(fixture.transferGrant)),fixture.transferGrantAcknowledgement.grantSha256);for(const key of ['reservationId','generation','manifestSha256','nonce'])assert.equal(fixture.transferGrantAcknowledgement[key],fixture.transferGrant[key]);assert.equal(fixture.transferGrantAcknowledgement.accepted,true)});
 test('grant ACK evidence is unchanged and bound to the exact provider, job, environment, and grant',async t=>{
- const f=fixture(t),reservation={reservationId:'res-attested',generation:1,expiresAt:new Date(Date.now()+120000).toISOString(),manifestSha256:f.request.manifest.sha256,byteBudget:3,nonce:'nonce-attested'},ack={reservationId:reservation.reservationId,generation:1,manifestSha256:reservation.manifestSha256,nonce:reservation.nonce,accepted:true},previousFetch=global.fetch;let wrongGrantAck=false;
- global.fetch=async(url,init)=>url.endsWith('/capabilities')?response(f.caps):url.endsWith('/jobs')&&init.method==='POST'?response(job(f)):url.endsWith('/jobs/job-1')?response({...job(f),transferRequest:reservation}):url.endsWith('/transfer-grants')?response({...ack,grantSha256:wrongGrantAck?'f'.repeat(64):p.sha256(p.canonicalBytes(JSON.parse(init.body)))}):(()=>{throw Error('unexpected request')})();
+ const f=fixture(t),reservation={reservationId:'res-attested',generation:1,expiresAt:new Date(Date.now()+120000).toISOString(),manifestSha256:f.request.manifest.sha256,byteBudget:3,nonce:'nonce-attested'},ack={reservationId:reservation.reservationId,generation:1,manifestSha256:reservation.manifestSha256,nonce:reservation.nonce,accepted:true},previousFetch=global.fetch;let grantAckMode='valid';
+ global.fetch=async(url,init)=>url.endsWith('/capabilities')?response(f.caps):url.endsWith('/jobs')&&init.method==='POST'?response(job(f)):url.endsWith('/jobs/job-1')?response({...job(f),transferRequest:reservation}):url.endsWith('/transfer-grants')?response(grantAckMode==='legacy'?ack:{...ack,grantSha256:grantAckMode==='wrong'?'f'.repeat(64):p.sha256(p.canonicalBytes(JSON.parse(init.body)))}):(()=>{throw Error('unexpected request')})();
  try{
   const provider=new ReferenceProvider({endpoint:'https://example.test',token:'synthetic-token-only',environment:'staging',enabled:true});
   await provider.capabilities();await provider.submit(f.request);
@@ -33,7 +33,8 @@ test('grant ACK evidence is unchanged and bound to the exact provider, job, envi
   assert.equal(outbox.acknowledge(claim,record.outbox_id,accepted).state,'acknowledged');
   assert.equal(isVerifiedTransferGrantAck(accepted,{provider,jobId:'job-1',environment:'staging',grantSha256}),true);
   assert.equal(isVerifiedTransferGrantAck(accepted,{provider:{},jobId:'job-1',environment:'staging',grantSha256}),false);
-  wrongGrantAck=true;await assert.rejects(provider.postTransferGrant('job-1',grant,expected),{code:'BINDING_MISMATCH'});wrongGrantAck=false;
+  grantAckMode='wrong';await assert.rejects(provider.postTransferGrant('job-1',grant,expected),{code:'BINDING_MISMATCH'});
+  grantAckMode='legacy';await assert.rejects(provider.postTransferGrant('job-1',grant,expected),{code:'INVALID_RESPONSE'});grantAckMode='valid';
   accepted.nonce='mutated';assert.equal(isVerifiedTransferGrantAck(accepted,{provider,jobId:'job-1',environment:'staging',grantSha256}),false);
   assert.throws(()=>outbox.acknowledge(claim,record.outbox_id,accepted),{code:'reference_transfer_outbox_ack_binding'});
  }finally{global.fetch=previousFetch}
