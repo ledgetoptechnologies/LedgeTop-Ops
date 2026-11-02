@@ -10,6 +10,10 @@ test('broker synthetic method commits grant and sealed record together',t=>{
  const construct=()=>({issue:(operationId,binding,input)=>broker.mintGrantAndSealFixture({scope:'synthetic-only',operationId,binding,input,verifyReservation:()=>true,verifySourcePin:()=>true,keyProvider:()=>({keyId:'k',key})})});
  try{
   assert.throws(()=>broker.migrateAtomicGrantFixture('production'),{code:'TRANSFER_ACCOUNTING_UNAVAILABLE'});broker.migrateAtomicGrantFixture('synthetic-only');
+  assert.throws(()=>broker.mintGrantAndSealFixture({scope:'synthetic-only',operationId:'stale',binding:{...binding,extra:true},input,verifyReservation:()=>true,verifySourcePin:()=>true,keyProvider:()=>({keyId:'k',key})}),{code:'EXTRA_FIELDS'});
+  let authority=true;assert.equal(authority,true);
+  assert.throws(()=>broker.mintGrantAndSealFixture({scope:'synthetic-only',operationId:'stale',binding,input,verifyReservation:()=>authority,verifySourcePin:()=>true,keyProvider:()=>{authority=false;return {keyId:'k',key}}}),{code:'TRANSFER_ACCOUNTING_UNAVAILABLE'});
+  assert.equal(broker.db.prepare('SELECT count(*) n FROM reference_grants').get().n,0);assert.equal(broker.db.prepare('SELECT count(*) n FROM reference_job_usage').get().n,0);assert.equal(broker.db.prepare('SELECT count(*) n FROM fixture_atomic_grants').get().n,0);
   let owner=construct();broker.db.exec("CREATE TRIGGER fixture_abort BEFORE INSERT ON fixture_atomic_grants BEGIN SELECT RAISE(ABORT,'abort seal'); END");
   assert.throws(()=>owner.issue('op',binding,input));broker.db.exec('DROP TRIGGER fixture_abort');
   assert.equal(broker.db.prepare('SELECT count(*) n FROM reference_grants').get().n,0);assert.equal(broker.db.prepare('SELECT count(*) n FROM reference_job_usage').get().n,0);

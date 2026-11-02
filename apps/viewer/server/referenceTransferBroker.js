@@ -135,11 +135,12 @@ class ReferenceTransferBroker {
   }
   mintGrantAndSealFixture({scope,operationId,binding,input,verifyReservation,verifySourcePin,keyProvider}={}) {
     if(scope!=='synthetic-only'||typeof operationId!=='string'||!operationId||!binding||typeof verifyReservation!=='function'||typeof verifySourcePin!=='function'||typeof keyProvider!=='function')fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
-    if(verifyReservation({operationId,binding,input})!==true||verifySourcePin({operationId,binding,input})!==true)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
     const keyInfo=keyProvider();if(!keyInfo||typeof keyInfo.keyId!=='string'||!keyInfo.keyId||!Buffer.isBuffer(keyInfo.key)||keyInfo.key.length!==32)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
-    if(!input?.manifest||!input.reservation||binding.environment!==this.environment||binding.jobId!==input.jobId||binding.generation!==input.generation||binding.reservationId!==input.reservation.reservationId||binding.manifestSha256!==input.manifest.sha256||!Array.isArray(binding.objectIds)||JSON.stringify(binding.objectIds)!==JSON.stringify(input.manifest.objects.map(x=>x.id))||typeof binding.attemptId!=='string'||!binding.attemptId)fail('RESERVATION_BINDING');
+    exact(binding,['attemptId','environment','jobId','generation','reservationId','manifestSha256','objectIds']);
+    if(Object.keys(binding).length!==7||!input?.manifest||!input.reservation||binding.environment!==this.environment||binding.jobId!==input.jobId||binding.generation!==input.generation||binding.reservationId!==input.reservation.reservationId||binding.manifestSha256!==input.manifest.sha256||!Array.isArray(binding.objectIds)||JSON.stringify(binding.objectIds)!==JSON.stringify(input.manifest.objects.map(x=>x.id))||typeof binding.attemptId!=='string'||!binding.attemptId)fail('RESERVATION_BINDING');
     const aad=p.canonicalBytes({domain:'synthetic-atomic-grant-v1',version:1,keyId:keyInfo.keyId,binding});
     return this.tx(()=>{
+      if(verifyReservation({operationId,binding,input})!==true||verifySourcePin({operationId,binding,input})!==true)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
       const old=this.db.prepare('SELECT * FROM fixture_atomic_grants WHERE operation_id=?').get(operationId);
       if(old){if(old.key_id!==keyInfo.keyId||old.version!==1||!Buffer.from(old.binding).equals(aad))fail('RESERVATION_BINDING');try{const d=createDecipheriv('aes-256-gcm',keyInfo.key,old.nonce);d.setAAD(aad);d.setAuthTag(old.tag);const bytes=Buffer.concat([d.update(old.ciphertext),d.final()]);if(p.sha256(bytes)!==old.grant_sha256)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');return bytes;}catch{fail('TRANSFER_ACCOUNTING_UNAVAILABLE');}}
       const minted=this.#mintGrant(input,fn=>fn());if(minted.reused||!minted.grant?.token)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
