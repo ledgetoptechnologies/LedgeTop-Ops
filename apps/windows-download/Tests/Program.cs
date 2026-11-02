@@ -38,6 +38,8 @@ if (args.Length == 3 && args[0] == "--windows-release-offer-fixture") {
 }
 
 if (args.FirstOrDefault() == "--company-hydration-authority-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
+if (args.FirstOrDefault() == "--access-token-coalescing-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
+if (args.FirstOrDefault() == "--portal-deadline-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
 
 var passed = 0;
 var tests = new (string Name, Func<Task> Run)[] {
@@ -70,6 +72,9 @@ if (args.Length == 1 && args[0] == "--four-slot-only") tests = FourSlotAdmission
 if (args.Length == 1 && args[0] == "--queue-source-only") tests = QueuedDownloadSourceTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--company-hydration-authority-only")
     tests = QueuedDownloadSourceTests.Groups.Where(test => test.Name.StartsWith("Company hydration", StringComparison.Ordinal)).ToArray();
+if (args.Length == 1 && args[0] == "--access-token-coalescing-only")
+    tests = AccessSessionTests.Groups.Where(test => test.Name.Contains("simultaneous cached-token reads", StringComparison.Ordinal)).ToArray();
+if (args.Length == 1 && args[0] == "--portal-deadline-only") tests = PortalClientDeadlineTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--downloader-inactivity-only") tests = DownloaderInactivityTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--hydration-timing-only") tests = HydrationTimingTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--authorization-timing-only") tests = QueuedDownloadSourceTests.Groups.Where(test => test.Name.StartsWith("queue authorization timing", StringComparison.Ordinal)).ToArray();

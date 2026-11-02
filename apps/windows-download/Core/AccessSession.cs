@@ -62,9 +62,17 @@ public sealed class CloudflareAccessSession
     private readonly IAccessCommandRunner runner;
     private readonly TimeSpan cachedCommandTimeout;
     private readonly object tokenPins = new();
+    private readonly object tokenReadSync = new();
+    private TokenRead? pendingTokenRead;
     private byte[]? pinnedTokenDigest;
     private int pinCount, pendingPins, activeLogins;
     private bool pinInvalidated;
+    private sealed class TokenRead(CancellationTokenSource cancellation, Task<string> task)
+    {
+        internal CancellationTokenSource Cancellation { get; } = cancellation;
+        internal Task<string> Task { get; } = task;
+        internal int Waiters;
+    }
     public Uri Origin { get; }
     public Uri ProtectedApplicationUrl { get; }
 
@@ -138,7 +146,9 @@ public sealed class CloudflareAccessSession
         }
         byte[]? digest = null;
         try {
-            var token = await GetTokenAsync(cancellationToken);
+            // A lease acquisition must independently observe the current cached identity;
+            // it cannot join a read that began before this reservation.
+            var token = await GetTokenAsync(cancellationToken, forceRefresh: true);
             digest = TokenDigest(token);
             lock (tokenPins) {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -179,10 +189,59 @@ public sealed class CloudflareAccessSession
         public void Dispose() => Interlocked.Exchange(ref current, null)?.ReleaseTokenPin();
     }
 
-    internal async Task<string> GetTokenAsync(CancellationToken cancellationToken = default)
+    internal async Task<string> GetTokenAsync(CancellationToken cancellationToken = default, bool forceRefresh = false)
     {
         // Unlike access login/curl, access token only reads an existing cached application token.
-        var result = await RunAsync(["access", "token", "--app", ProtectedApplicationUrl.AbsoluteUri], cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        string token;
+        if (forceRefresh) token = await ReadCachedTokenAsync(cancellationToken).ConfigureAwait(false);
+        else {
+            TokenRead read;
+            var observe = false;
+            lock (tokenReadSync) {
+                if (pendingTokenRead is null || pendingTokenRead.Cancellation.IsCancellationRequested) {
+                    var lifetime = new CancellationTokenSource();
+                    pendingTokenRead = new(lifetime, ReadCachedTokenAsync(lifetime.Token));
+                    observe = true;
+                }
+                read = pendingTokenRead;
+                read.Waiters++;
+            }
+            if (observe) _ = ClearTokenReadAsync(read);
+            try { token = await read.Task.WaitAsync(cancellationToken).ConfigureAwait(false); }
+            finally {
+                var drain = false;
+                lock (tokenReadSync) {
+                    read.Waiters--;
+                    if (read.Waiters == 0 && !read.Task.IsCompleted) {
+                        try { read.Cancellation.Cancel(); } catch (ObjectDisposedException) { }
+                        if (ReferenceEquals(pendingTokenRead, read)) pendingTokenRead = null;
+                        drain = true;
+                    }
+                }
+                if (drain) {
+                    try { _ = await read.Task.ConfigureAwait(false); } catch { /* Finish cancelling the shared helper before returning. */ }
+                }
+            }
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (tokenPins) {
+            if (pinCount != 0) {
+                var digest = TokenDigest(token);
+                try {
+                    if (pinInvalidated || !CryptographicOperations.FixedTimeEquals(pinnedTokenDigest!, digest)) {
+                        pinInvalidated = true;
+                        throw new LoginRequiredException(LoginFailureReason.CredentialPinChanged, LoginFailureOperation.CachedToken);
+                    }
+                } finally { CryptographicOperations.ZeroMemory(digest); }
+            }
+        }
+        return token;
+    }
+
+    private async Task<string> ReadCachedTokenAsync(CancellationToken cancellationToken)
+    {
+        var result = await RunAsync(["access", "token", "--app", ProtectedApplicationUrl.AbsoluteUri], cancellationToken).ConfigureAwait(false);
         if (result.ExitCode != 0) throw new LoginRequiredException(LoginFailureReason.HelperExitedUnsuccessfully, LoginFailureOperation.CachedToken);
         var token = result.Stdout.Trim();
         try {
@@ -197,19 +256,16 @@ public sealed class CloudflareAccessSession
         } catch (Exception error) when (error is FormatException or JsonException or InvalidOperationException) {
             throw new LoginRequiredException(LoginFailureReason.TokenMalformed, LoginFailureOperation.CachedToken);
         }
-        lock (tokenPins) {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (pinCount != 0) {
-                var digest = TokenDigest(token);
-                try {
-                    if (pinInvalidated || !CryptographicOperations.FixedTimeEquals(pinnedTokenDigest!, digest)) {
-                        pinInvalidated = true;
-                        throw new LoginRequiredException(LoginFailureReason.CredentialPinChanged, LoginFailureOperation.CachedToken);
-                    }
-                } finally { CryptographicOperations.ZeroMemory(digest); }
-            }
-        }
         return token;
+    }
+
+    private async Task ClearTokenReadAsync(TokenRead read)
+    {
+        try { await read.Task.ConfigureAwait(false); } catch { /* Each waiter receives the bounded failure. */ }
+        lock (tokenReadSync) {
+            if (ReferenceEquals(pendingTokenRead, read)) pendingTokenRead = null;
+        }
+        read.Cancellation.Dispose();
     }
 
     private async Task<AccessCommandResult> RunAsync(string[] arguments, CancellationToken cancellationToken)

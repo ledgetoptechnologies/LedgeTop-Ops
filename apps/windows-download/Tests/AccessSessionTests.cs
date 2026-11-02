@@ -18,6 +18,7 @@ internal static class AccessSessionTests
         ("Access redirects, authorization denial and cancellation never launch login", Responses),
         ("Access cached token pins block A-B-A before HTTP credential use", TokenPins),
         ("Access overlapping token leases share sticky failure and dispose independently", PinOverlap),
+        ("Access simultaneous cached-token reads share one helper process without caching across requests", TokenReadCoalescing),
         ("Access pin and login reservations fence delayed credential races", PinRaces),
         ("Access failed and cancelled pin acquisition leaves no login reservation", PinFailures),
         ("real synthetic subprocess preserves arguments bounds both outputs and cancels", RealSubprocess)
@@ -211,6 +212,34 @@ internal static class AccessSessionTests
         using var pin = await session.PinCachedTokenAsync();
         var separate = fixture.Session(new Runner { Result = new(0, a, "") });
         Assert(await separate.GetTokenAsync() == a);
+    }
+
+    private static async Task TokenReadCoalescing() {
+        using var fixture = new Fixture();
+        var runner = new Runner();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        runner.OnRun = async (_, token) => {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(token);
+            return runner.Result;
+        };
+        var session = fixture.Session(runner);
+        using var cancelFirst = new CancellationTokenSource();
+        var first = session.GetTokenAsync(cancelFirst.Token);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var second = session.GetTokenAsync();
+        Assert(runner.Calls.Count == 1);
+        cancelFirst.Cancel();
+        await Throws<OperationCanceledException>(() => first);
+        Assert(!release.Task.IsCanceled && runner.Calls.Count == 1);
+        release.TrySetResult();
+        Assert(await second == runner.Result.Stdout);
+        Assert(runner.Calls.Count == 1);
+
+        runner.OnRun = null;
+        Assert(await session.GetTokenAsync() == runner.Result.Stdout);
+        Assert(runner.Calls.Count == 2);
     }
 
     private static async Task PinRaces() {
