@@ -2578,6 +2578,20 @@ const MIGRATIONS = [
       )
       BEGIN SELECT RAISE(ABORT,'reference transfer outbox transition invalid'); END;
   `},
+  {version:59,name:'viewer_reference_transfer_outbox_grant_digest',sql:`
+    CREATE TABLE viewer_reference_transfer_grant_bindings (
+      outbox_id TEXT PRIMARY KEY NOT NULL REFERENCES viewer_reference_transfer_outbox(outbox_id) ON DELETE RESTRICT,
+      canonical_grant_sha256 TEXT NOT NULL CHECK(length(canonical_grant_sha256)=64 AND canonical_grant_sha256 NOT GLOB '*[^0-9a-f]*'),
+      created_at TEXT NOT NULL
+    );
+    CREATE TRIGGER viewer_reference_transfer_grant_binding_no_replace BEFORE INSERT ON viewer_reference_transfer_grant_bindings
+      WHEN EXISTS(SELECT 1 FROM viewer_reference_transfer_grant_bindings WHERE outbox_id=NEW.outbox_id OR rowid=NEW.rowid)
+      BEGIN SELECT RAISE(ABORT,'reference transfer grant binding retained'); END;
+    CREATE TRIGGER viewer_reference_transfer_grant_binding_immutable BEFORE UPDATE ON viewer_reference_transfer_grant_bindings
+      BEGIN SELECT RAISE(ABORT,'reference transfer grant binding immutable'); END;
+    CREATE TRIGGER viewer_reference_transfer_grant_binding_no_delete BEFORE DELETE ON viewer_reference_transfer_grant_bindings
+      BEGIN SELECT RAISE(ABORT,'reference transfer grant binding retained'); END;
+  `},
 ];
 
 function applyMigrations(database) {

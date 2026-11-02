@@ -91,8 +91,10 @@ async function start(config, env = process.env) {
   const sourceStat = fs.lstatSync(inputFile);
   if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.nlink !== 1 || protocol.sha256(fs.readFileSync(inputFile)) !== protocol.sha256(Buffer.from('abc'))) fail('FIXTURE_SOURCE_CHANGED');
   const fixtureBytes = fs.readFileSync(path.join(__dirname,'../fixtures/reference-v1.contract.json'));
-  if (protocol.sha256(fixtureBytes) !== '2c49ff86b8e20384c400ff56c8365418e643108aa9e6c29b46e938554e989b37') fail('FROZEN_FIXTURE_CHANGED');
-  const frozen = JSON.parse(fixtureBytes);
+  const normalizedFixtureBytes = Buffer.from(fixtureBytes.toString('utf8').replace(/\r\n/g,'\n'),'utf8');
+  if (protocol.sha256(normalizedFixtureBytes) !== 'c2870ecd73d34721f602f49e2b34c92865d8f4cf1f03ec735e853c4e3bdb083a') fail('FROZEN_FIXTURE_CHANGED');
+  const frozen = JSON.parse(normalizedFixtureBytes);
+  if (frozen.transferGrantAcknowledgement.grantSha256 !== protocol.sha256(protocol.canonicalBytes(frozen.transferGrant))) fail('TRANSFER_GRANT_ACK_VECTOR_MISMATCH');
   for (const basename of ['broker.sqlite','acceptance.sqlite']) for (const suffix of ['','-wal','-shm']) {
     const candidate = path.join(root,basename + suffix);
     if (fs.existsSync(candidate)) {
