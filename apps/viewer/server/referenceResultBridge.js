@@ -43,7 +43,7 @@ async function handleReferenceResult({provider, expected, journal, ledger, accep
   const storageKey = p.sha256(p.canonicalBytes(binding));
   if (acceptance.storageReceiptId !== storageKey) fail('REFERENCE_RESULT_BINDING');
   check();
-  const retained = await journal.retain({expected,manifest,objectId:object.id,signal,source:()=>provider.downloadObject(expected.jobId,object.id,{expectedBinding:expected,signal})});
+  const retained = await journal.retain({expected,manifest,objectId:object.id,signal,source:rangeStart=>provider.downloadObject(expected.jobId,object.id,{expectedBinding:expected,signal,rangeStart})});
   check();
   if (!retained || acceptance.storageReceiptId !== retained.storageKey || retained.binding?.objectId !== object.id || retained.binding?.objectSha256 !== object.sha256 || retained.binding?.objectBytes !== object.byteSize || retained.receipt?.relativePath !== `${retained.storageKey}.zip`) fail('REFERENCE_RESULT_BINDING');
 
