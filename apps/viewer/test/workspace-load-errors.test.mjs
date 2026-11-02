@@ -27,6 +27,7 @@ function harness({ failing = new Set(), previous = {}, onHierarchy = null, route
   let context;
   const reply = path => {
     if (path.startsWith('/api/v1/processing/hierarchy') && onHierarchy) return onHierarchy(context.state);
+    if (path.startsWith('/api/v1/processing/hierarchy?')) path = '/api/v1/processing/hierarchy';
     if (routes[path]) return routes[path](context.state);
     return failing.has(path)
       ? Promise.reject(new Error(`${path} returned 503`))
