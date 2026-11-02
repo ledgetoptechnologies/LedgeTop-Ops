@@ -2697,6 +2697,24 @@ const MIGRATIONS = [
     CREATE TRIGGER viewer_source_spool_generation_no_delete BEFORE DELETE ON viewer_source_spool_generation_holds BEGIN SELECT RAISE(ABORT,'generation retained'); END;
     CREATE TRIGGER viewer_source_spool_generation_no_replace BEFORE INSERT ON viewer_source_spool_generation_holds WHEN EXISTS(SELECT 1 FROM viewer_source_spool_generation_holds WHERE (attempt_id=NEW.attempt_id AND generation=NEW.generation) OR directory_id=NEW.directory_id OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'generation retained'); END;
   `},
+  {version:65,name:'viewer_source_copy_outbox_candidate',sql:`
+    CREATE TABLE viewer_source_copy_outbox (
+      operation_id TEXT PRIMARY KEY,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      worker_id TEXT NOT NULL,
+      claim_json TEXT NOT NULL,
+      claim_sha256 TEXT NOT NULL CHECK(length(claim_sha256)=64),
+      status TEXT NOT NULL CHECK(status IN ('requested','claimed','sealed')),
+      receipt_json TEXT,
+      UNIQUE(attempt_id,generation),
+      FOREIGN KEY(attempt_id,generation) REFERENCES viewer_source_spool_generation_holds(attempt_id,generation) ON DELETE RESTRICT,
+      CHECK((status='sealed' AND receipt_json IS NOT NULL) OR (status<>'sealed' AND receipt_json IS NULL))
+    );
+    CREATE TRIGGER viewer_source_copy_outbox_no_delete BEFORE DELETE ON viewer_source_copy_outbox BEGIN SELECT RAISE(ABORT,'copy outbox retained'); END;
+    CREATE TRIGGER viewer_source_copy_outbox_no_replace BEFORE INSERT ON viewer_source_copy_outbox WHEN NEW.status<>'requested' OR NEW.receipt_json IS NOT NULL OR EXISTS(SELECT 1 FROM viewer_source_copy_outbox WHERE operation_id=NEW.operation_id OR (attempt_id=NEW.attempt_id AND generation=NEW.generation) OR rowid=NEW.rowid) BEGIN SELECT RAISE(ABORT,'copy outbox retained'); END;
+    CREATE TRIGGER viewer_source_copy_outbox_transition BEFORE UPDATE ON viewer_source_copy_outbox WHEN NEW.rowid IS NOT OLD.rowid OR NEW.operation_id IS NOT OLD.operation_id OR NEW.attempt_id IS NOT OLD.attempt_id OR NEW.generation IS NOT OLD.generation OR NEW.worker_id IS NOT OLD.worker_id OR NEW.claim_json IS NOT OLD.claim_json OR NEW.claim_sha256 IS NOT OLD.claim_sha256 OR NOT ((OLD.status='requested' AND NEW.status='claimed' AND NEW.receipt_json IS NULL) OR (OLD.status='claimed' AND NEW.status='sealed' AND NEW.receipt_json IS NOT NULL)) BEGIN SELECT RAISE(ABORT,'copy outbox retained'); END;
+  `},
 ];
 
 function applyMigrations(database) {

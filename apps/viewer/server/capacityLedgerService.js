@@ -31,14 +31,16 @@ function commitmentsForDomain(db,domainId,domainRevision){
   }
   return {count,commitments:count?[{id:'aggregate',domainId,domainRevision,remainingBytes:Number(bytes),remainingInodes:Number(inodes)}]:[]};
 }
-function reserve(db,input,observer,{precondition}={}){
+function observeReservation(db,input,observer){
+  enabled(db);if(!isCapacityObserver(observer))throw failure('capacity_observation_unavailable');
+  return observer.observe(input.domainId,input.domainRevision);
+}
+function reserveWithinTransaction(db,input,observer,observation,{precondition}={}){
+  if(!db||db.isTransaction!==true)throw failure('capacity_transaction_required');
   if(precondition!==undefined&&typeof precondition!=='function')throw failure('capacity_request_invalid');
   const request={id:text(input.id,128),domainId:text(input.domainId,128),domainRevision:text(input.domainRevision,128),writerKind:text(input.writerKind,64),writerId:text(input.writerId,128),writerNamespace:text(input.writerNamespace,256),ownerId:text(input.ownerId,128),fenceToken:text(input.fenceToken,128),generation:amount(input.generation),peakBytes:amount(input.peakBytes),peakInodes:amount(input.peakInodes)};
   if(!request.generation)throw failure('capacity_request_invalid');
-  enabled(db);
   if(!isCapacityObserver(observer))throw failure('capacity_observation_unavailable');
-  const observation=observer.observe(request.domainId,request.domainRevision);
-  return transaction(db,()=>{
     enabled(db);
     if(precondition)precondition();
     const samples=observer.validate(observation,request.domainId,request.domainRevision);
@@ -61,7 +63,10 @@ function reserve(db,input,observer,{precondition}={}){
     const now=new Date().toISOString();
     db.prepare(`INSERT INTO viewer_capacity_reservations(id,domain_id,domain_revision,writer_kind,writer_id,writer_namespace,owner_id,fence_token,owner_generation,peak_bytes,materialized_bytes,remaining_bytes,peak_inodes,materialized_inodes,remaining_inodes,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,0,?,'held',?,?)`).run(request.id,request.domainId,request.domainRevision,request.writerKind,request.writerId,request.writerNamespace,request.ownerId,request.fenceToken,request.generation,request.peakBytes,request.peakBytes,request.peakInodes,request.peakInodes,now,now);
     return {id:request.id,state:'held',idempotent:false};
-  });
+}
+function reserve(db,input,observer,options={}){
+  const observation=observeReservation(db,input,observer);
+  return transaction(db,()=>reserveWithinTransaction(db,input,observer,observation,options));
 }
 function quiesce(db,{id,ownerId,fenceToken,generation}){
   text(id,128);text(ownerId,128);text(fenceToken,128);amount(generation);
@@ -95,4 +100,4 @@ function reconcileRetained(db,binding,verifier){
     return {id:binding.id,state:'retained',remainingBytes:row.remaining_bytes,remainingInodes:row.remaining_inodes,idempotent:false};
   });
 }
-module.exports={reserve,quiesce,reconcileRetained};
+module.exports={reserve,observeReservation,reserveWithinTransaction,quiesce,reconcileRetained};

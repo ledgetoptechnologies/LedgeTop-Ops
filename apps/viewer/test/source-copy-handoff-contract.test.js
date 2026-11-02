@@ -16,3 +16,4 @@ test('valid supplementary Unicode is preserved and lone surrogate paths are reje
  assert.equal(validateClaim(c).files[0].relativePath,'photos/café/🌲.jpg');
  for(const value of ['bad\ud800.jpg','bad\udc00.jpg']){const bad=structuredClone(c);bad.files[0].relativePath=value;assert.throws(()=>validateClaim(bad),{code:'SOURCE_COPY_CONTRACT_INVALID'});const other=structuredClone(c);other.datasetRelativePath=value;assert.throws(()=>validateClaim(other),{code:'SOURCE_COPY_CONTRACT_INVALID'});}
 });
+test('a claim exceeding the metadata byte bound is rejected',()=>{const c=structuredClone(vector.claim);c.files=Array.from({length:1100},(_,i)=>({...c.files[0],id:`file-${i}`,relativePath:`${i}-${'x'.repeat(3900)}`}));c.fileCount=c.files.length;c.byteSize=c.files.length*3;assert.throws(()=>validateClaim(c),{code:'SOURCE_COPY_CONTRACT_INVALID'});});
