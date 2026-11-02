@@ -85,7 +85,7 @@ function createManagedWriterFixture(processing,scope){
  if(scope!=='isolated-managed-writer-fixture'||!processing?.database)fail();
  const db=processing.database,required=['reference_scan_blocks_managed_writer','reference_scan_managed_writer_no_replace','reference_scan_managed_writer_no_delete','reference_scan_managed_writer_update','reference_scan_effects_before_scan'];
  function run(kind,callback){
-  const q=db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?");if(!['upload_finalize','photo_copy','gcp_raw','gcp_materialize','storage_move'].includes(kind)||typeof callback!=='function'||required.some(name=>!q.get(name)))fail();
+  const q=db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?");if(!['upload_finalize','photo_copy','import_adopt','gcp_raw','gcp_materialize','storage_move'].includes(kind)||typeof callback!=='function'||required.some(name=>!q.get(name)))fail();
   const claim=crypto.randomUUID();processing.transaction(()=>db.prepare("INSERT INTO reference_scan_managed_writers VALUES(?,?,'in_flight')").run(claim,kind));
   const complete=value=>{if(value===false||value===null||value===undefined)fail();processing.transaction(()=>{if(db.prepare("UPDATE reference_scan_managed_writers SET state='completed' WHERE id=? AND state='in_flight'").run(claim).changes!==1)fail()});return value};
   const result=callback();return result&&typeof result.then==='function'?Promise.resolve(result).then(complete):complete(result);

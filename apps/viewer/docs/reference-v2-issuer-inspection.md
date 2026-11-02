@@ -212,7 +212,7 @@ archive and reference GCP materializers are presently dormant primitives.
 The disposable cooperative fixture has a managed-writer adapter with durable
 in-flight claims, global exclusion against scan/binding, and a fail-closed hold
 for failed or uncertain callbacks. The dataset worker accepts an explicit
-fixture injection for upload finalization and raw-photo copy. With injection,
+fixture injection for upload finalization, managed adoption and raw-photo copy. With injection,
 it holds the claim across the actual copy, synchronizes the finalized tree and
 root, and waits for the dataset-operation receipt before completing the claim.
 Tests exercise the real worker paths, uncertain operation receipt and killed
@@ -221,3 +221,26 @@ trash/purge claim paths. The injection is not installed in production; the GCP
 materializer, direct and legacy StorageManager callers remain unqualified.
 Filesystem and SQLite durability under actual NAS failures is not established;
 callback completion is not sufficient evidence to release a production claim.
+
+## Deployment evidence still required
+
+No process inventory or idle period by itself proves old writers have stopped.
+Before enabling a real reservation, the deployment needs a verified inventory
+of every process and identity with write access to the actual source volume,
+including old Viewer workers, recovery jobs, direct mount clients, administrator
+sessions and services reachable through aliases. It needs a barrier enforced by
+the storage authority that prevents those identities from changing or removing
+the reserved objects for the full reservation lifetime, and a way to detect
+restarts, changed mounts, lost barriers and stale authority. Any unavailable or
+ambiguous evidence must hold admission. The fixture claims and identity checks
+are not that barrier; no TrueNAS or NAS configuration was inspected here.
+
+Existing `requireProcessingHeadroom` groups dataset, cache and model estimates
+by observed filesystem device and includes local active attempt and derivative
+estimates. A synthetic 50 GiB test exercises separate device groups and existing
+reservations; this does not measure a NAS, reserve free blocks or establish
+remote quota. Source intake separately checks dataset free space. Live admission
+would require current, authoritative capacity and inode evidence for each
+relevant physical volume, alias-aware shared-volume accounting, concurrent
+durable reservations, safety headroom, expiry/renewal and revalidation when
+mount or quota authority changes. No capacity claim is issued by this fixture.

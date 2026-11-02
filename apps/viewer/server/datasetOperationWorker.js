@@ -124,7 +124,8 @@ async function processOneDatasetOperation(deps, owner) {
   try {
     // Explicit test-only dependency; no runtime configuration installs it.
     // Keep its claim until the worker's durable operation receipt is written.
-    const fixtureKind=deps.managedWriterFixture&&(operation.operation_type==='upload_finalize'?'upload_finalize':operation.operation_type==='import_adopt'&&JSON.parse(operation.payload_json||'{}').rawPhotoCopy?'photo_copy':null);
+    const fixturePayload=deps.managedWriterFixture&&operation.operation_type==='import_adopt'?JSON.parse(operation.payload_json||'{}'):null;
+    const fixtureKind=deps.managedWriterFixture&&(operation.operation_type==='upload_finalize'?'upload_finalize':fixturePayload?.rawPhotoCopy?'photo_copy':fixturePayload&&fixturePayload.storageMode!=='external_reference'?'import_adopt':null);
     const execute=async()=>{
     let result;
     if (operation.operation_type === 'upload_finalize') result = await finalizeUpload(operation, deps, owner, updateProgress);

@@ -27,8 +27,8 @@ test('CSV datasets are protected from direct and resumed purge',t=>{
  db.prepare("UPDATE datasets SET status='trashed' WHERE id=?").run(dataset.id);db.prepare("INSERT INTO storage_trash(id,entity_type,entity_id,root_key,relative_path,byte_size,purge_after,created_at) VALUES ('trash-csv','dataset',?,'datasets','source',?,'2020-01-01','2020-01-01')").run(dataset.id,source.length);
  assert.equal(p.beginPurgeMutation('trash-csv','ops:test'),null);
  const {applyStorageMutation}=require('../server/storageLifecycle');let removed=false;
- const mutation={id:'old',type:'purge',entityType:'dataset',entityId:dataset.id,status:'intent',sourceRootKey:'trash',sourceRelativePath:'source'};
- assert.throws(()=>applyStorageMutation(p,{pathExistsStrict:()=>true,removeExact:()=>{removed=true;}},mutation),{code:'retained_csv'});assert.equal(removed,false);
+ db.prepare("INSERT INTO storage_mutations(id,mutation_type,entity_type,entity_id,trash_id,source_root_key,source_relative_path,status,created_at,updated_at) VALUES('old','purge','dataset',?,'trash-csv','trash','source','intent','2020','2020')").run(dataset.id);
+ assert.throws(()=>applyStorageMutation(p,{pathExistsStrict:()=>true,removeExact:()=>{removed=true;}},'old'),{code:'retained_csv'});assert.equal(removed,false);
 });
 
 test('a separately imported GCP source protects its raw dataset from purge',t=>{
@@ -43,7 +43,7 @@ test('a separately imported GCP source protects its raw dataset from purge',t=>{
  db.prepare("INSERT INTO container_trash_members(container_trash_id,member_trash_id,entity_type,entity_id,created_at) VALUES ('manual-container','manual-trash','dataset',?,'2020-01-01')").run(dataset.id);
  assert.equal(p.containerHasRetainedCsv('manual-container'),true);
  assert.equal(p.beginPurgeMutation('manual-trash','ops:test'),null);let removed=false;
- assert.throws(()=>require('../server/storageLifecycle').applyStorageMutation(p,{pathExistsStrict:()=>true,removeExact:()=>{removed=true;}},{id:'prior',type:'purge',entityType:'dataset',entityId:dataset.id,status:'intent',sourceRootKey:'trash',sourceRelativePath:'source'}),{code:'retained_csv'});
+ db.prepare("INSERT INTO storage_mutations(id,mutation_type,entity_type,entity_id,trash_id,source_root_key,source_relative_path,status,created_at,updated_at) VALUES('prior','purge','dataset',?,'manual-trash','trash','source','intent','2020','2020')").run(dataset.id);assert.throws(()=>require('../server/storageLifecycle').applyStorageMutation(p,{pathExistsStrict:()=>true,removeExact:()=>{removed=true;}},'prior'),{code:'lifecycle_conflict'});
  assert.equal(removed,false);assert.equal(db.prepare('SELECT source_content FROM gcp_sets WHERE id=?').get(set.id).source_content,source);
 });
 
@@ -126,7 +126,7 @@ test('failed raw-copy manifest protects partial CSV from dataset, container and 
  db.prepare("UPDATE datasets SET status='trashed' WHERE id=?").run(d.id);const insert=db.prepare("INSERT INTO storage_trash(id,entity_type,entity_id,root_key,relative_path,byte_size,purge_after,created_at) VALUES (?,?,?,'datasets','source',0,?,?)");insert.run('partial','dataset',d.id,timestamp,timestamp);insert.run('container','project',project.id,timestamp,timestamp);db.prepare("INSERT INTO container_trash_members(container_trash_id,member_trash_id,entity_type,entity_id,created_at) VALUES ('container','partial','dataset',?,?)").run(d.id,timestamp);
  const partialPath=path.join(root,'raw.csv'),raw='partial copy of survey data';fs.writeFileSync(partialPath,raw);
  assert.equal(p.datasetHasRetainedCsv(d.id),true);assert.equal(p.beginPurgeMutation('partial','test'),null);
- const {applyStorageMutation,purgeExpiredTrash}=require('../server/storageLifecycle');let removed=false;const storage={pathExistsStrict:()=>true,removeExact:()=>{removed=true;fs.unlinkSync(partialPath)}};const mutation={id:'prior',type:'purge',entityType:'dataset',entityId:d.id,status:'intent',sourceRootKey:'trash',sourceRelativePath:'source'};assert.throws(()=>applyStorageMutation(p,storage,mutation),{code:'retained_csv'});assert.deepEqual(purgeExpiredTrash(p,storage),[]);assert.equal(removed,false);assert.equal(fs.readFileSync(partialPath,'utf8'),raw);assert.equal(p.getTrash('partial').permanentlyDeletedAt,null);assert.equal(p.getTrash('container').permanentlyDeletedAt,null);
+ const {applyStorageMutation,purgeExpiredTrash}=require('../server/storageLifecycle');let removed=false;const storage={pathExistsStrict:()=>true,removeExact:()=>{removed=true;fs.unlinkSync(partialPath)}};db.prepare("INSERT INTO storage_mutations(id,mutation_type,entity_type,entity_id,trash_id,source_root_key,source_relative_path,status,created_at,updated_at) VALUES('prior','purge','dataset',?,'partial','trash','source','intent','2020','2020')").run(d.id);assert.throws(()=>applyStorageMutation(p,storage,'prior'),{code:'lifecycle_conflict'});assert.deepEqual(purgeExpiredTrash(p,storage),[]);assert.equal(removed,false);assert.equal(fs.readFileSync(partialPath,'utf8'),raw);assert.equal(p.getTrash('partial').permanentlyDeletedAt,null);assert.equal(p.getTrash('container').permanentlyDeletedAt,null);
 });
 
 test('failed generic adoption retains both CSV copies before indexing, without protecting finalized non-CSV imports',async t=>{
@@ -142,7 +142,7 @@ test('failed generic adoption retains both CSV copies before indexing, without p
  assert.equal(fs.readFileSync(path.join(root,'imports','with-csv','raw.csv'),'utf8'),body);assert.equal(fs.readFileSync(path.join(root,'datasets',dataset.relativePath,'raw.csv'),'utf8'),body);
  const trashMutation=p.beginTrashMutation(dataset.id,subject);assert.ok(trashMutation);applyStorageMutation(p,storage,trashMutation);const trash=p.getTrash(trashMutation.trashId);
  assert.equal(p.datasetHasRetainedCsv(dataset.id),true);assert.equal(p.beginPurgeMutation(trash.id,subject),null);
- assert.throws(()=>applyStorageMutation(p,storage,{id:'prior',type:'purge',entityType:'dataset',entityId:dataset.id,status:'intent',sourceRootKey:'trash',sourceRelativePath:trash.relativePath}),{code:'retained_csv'});
+ db.prepare("INSERT INTO storage_mutations(id,mutation_type,entity_type,entity_id,trash_id,source_root_key,source_relative_path,status,created_at,updated_at) VALUES('prior','purge','dataset',?,?,'trash',?,'intent','2020','2020')").run(dataset.id,trash.id,trash.relativePath);assert.throws(()=>applyStorageMutation(p,storage,'prior'),{code:'retained_csv'});
  const plain=await enqueue('no-csv',false);await processOneDatasetOperation({processing:p,storage,config:{}},'fixture-worker');assert.equal(p.getDatasetOperation(plain.id).status,'succeeded');assert.equal(p.datasetHasRetainedCsv(plain.datasetId),false);
  const success=await enqueue('success-csv',true);await processOneDatasetOperation({processing:p,storage,config:{}},'fixture-worker');assert.equal(p.getDatasetOperation(success.id).status,'succeeded');assert.equal(fs.readFileSync(path.join(root,'imports','success-csv','raw.csv'),'utf8'),body);assert.equal(fs.readFileSync(path.join(root,'datasets',success.datasetId,'raw.csv'),'utf8'),body);
  const originalPayload=db.prepare('SELECT payload_json FROM dataset_operations WHERE id=?').get(plain.id).payload_json;db.prepare("UPDATE dataset_operations SET payload_json='{}' WHERE id=?").run(plain.id);assert.equal(p.datasetHasRetainedCsv(plain.datasetId),true);db.prepare('UPDATE dataset_operations SET payload_json=? WHERE id=?').run(originalPayload,plain.id);
