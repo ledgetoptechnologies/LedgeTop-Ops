@@ -5,6 +5,7 @@ const constrainedMiniflare = windowsMiniflare || process.env.CI === "true";
 
 export default defineConfig({
   resolve: { preserveSymlinks: true },
+  esbuild: { jsx: "automatic" },
   test: {
     environment: "node",
     include: ["test/**/*.test.ts"],
