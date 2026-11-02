@@ -122,6 +122,10 @@ async function processOneDatasetOperation(deps, owner) {
     if (lostLease) throw Object.assign(new Error('dataset operation lease was lost'), { code: 'operation_lease_lost' });
   };
   try {
+    // Explicit test-only dependency; no runtime configuration installs it.
+    // Keep its claim until the worker's durable operation receipt is written.
+    const fixtureKind=deps.managedWriterFixture&&(operation.operation_type==='upload_finalize'?'upload_finalize':operation.operation_type==='import_adopt'&&JSON.parse(operation.payload_json||'{}').rawPhotoCopy?'photo_copy':null);
+    const execute=async()=>{
     let result;
     if (operation.operation_type === 'upload_finalize') result = await finalizeUpload(operation, deps, owner, updateProgress);
     else if (operation.operation_type === 'import_preview') {
@@ -146,6 +150,10 @@ async function processOneDatasetOperation(deps, owner) {
       else{result=await mapCatalogCandidate(operation,deps,updateProgress,controller.signal);deps.repository.audit({actorType:'admin',actorId:operation.subject,action:'catalog_import.mapped',entityType:'catalog_import_candidate',entityId:result.candidate.id,details:{projectId:result.project.id,taskId:result.task.id,modelId:result.model.id}});}
     }
     else throw Object.assign(new Error('dataset operation type is unsupported'), { code: 'unsupported_operation' });
+    if(fixtureKind){
+      if(!result?.dataset?.relativePath||result.dataset.status!=='finalized')throw Object.assign(new Error('managed writer dataset was not finalized'),{code:'managed_writer_unsettled'});
+      const {fsyncDirectory,fsyncDirectoryTree}=require('./durableFs');fsyncDirectoryTree(deps.storage.resolve('datasets',result.dataset.relativePath),{code:'managed_writer_sync_failed'});fsyncDirectory(deps.storage.roots.datasets,{code:'managed_writer_sync_failed'});
+    }
     let completed;
     if(operation.operation_type==='catalog_map'){
       if(!result?.attempt?.id||!Array.isArray(result.requiredDerivatives))throw Object.assign(new Error('catalog import returned an invalid readiness result'),{code:'invalid_import_result'});
@@ -161,6 +169,9 @@ async function processOneDatasetOperation(deps, owner) {
     if (lostLease || !completed)
       throw Object.assign(new Error('dataset operation lease was lost'), { code: 'operation_lease_lost' });
     if(operation.operation_type==='catalog_map'){deps.processing.clearCatalogAdoptionIntent(operation.id);await reconcileCatalogSourceCleanups(deps.processing,deps.storage,1);reconcileCatalogAdoptionRecoveries(deps.processing,deps.storage,1);}
+    return true;
+    };
+    if(fixtureKind)await deps.managedWriterFixture.run(fixtureKind,execute);else await execute();
   } catch (error) {
     if(error?.code==='retained_import_busy'&&deps.processing.deferDatasetOperation(operation.id,owner,5_000))return true;
     if(operation.operation_type==='catalog_map'){

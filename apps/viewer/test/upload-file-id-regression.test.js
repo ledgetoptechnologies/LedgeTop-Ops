@@ -31,7 +31,9 @@ test('upload-local IDs do not collide across datasets, including a retained fail
     return { dataset, upload, operation };
   };
   const first = makeUpload('First');
-  await processOneDatasetOperation({ processing, storage }, 'worker-first');
+  require('../server/referenceLifecycleEffectFence').installOfflineFixture(processing,'isolated-lifecycle-fence-fixture');const {createSourceScanFixture,installCooperativeScanFixture,createManagedWriterFixture}=require('../server/referenceSourceScanFixture');createSourceScanFixture(processing,'isolated-source-scan-fixture');installCooperativeScanFixture(processing,'isolated-source-scan-cooperation');const managedWriterFixture=createManagedWriterFixture(processing,'isolated-managed-writer-fixture'),complete=processing.completeDatasetOperation.bind(processing);let heldAtReceipt=false;processing.completeDatasetOperation=(...args)=>{heldAtReceipt=db.prepare("SELECT state FROM reference_scan_managed_writers WHERE kind='upload_finalize'").get()?.state==='in_flight';return complete(...args)};
+  await processOneDatasetOperation({ processing, storage, managedWriterFixture }, 'worker-first');
+  assert.equal(heldAtReceipt,true);assert.equal(db.prepare("SELECT state FROM reference_scan_managed_writers WHERE kind='upload_finalize'").get().state,'completed');processing.completeDatasetOperation=complete;
   assert.equal(processing.getDatasetOperation(first.operation.id, 'ops:test').status, 'succeeded');
   const original = processing.getDataset(first.dataset.id, true).files[0];
   const second = makeUpload('Second');
@@ -66,4 +68,8 @@ test('upload-local IDs do not collide across datasets, including a retained fail
   assert.equal(recovered.sha256, sha256);
   assert.deepEqual(fs.readFileSync(assembled), body);
   assert.equal(processing.getDataset(legacy.id, true).files[0].id, file.id);
+  // A lost/ambiguous operation receipt cannot release the injected claim.
+  const uncertain=makeUpload('Uncertain');processing.completeDatasetOperation=()=>false;
+  try{await processOneDatasetOperation({processing,storage,managedWriterFixture},'worker-uncertain')}finally{processing.completeDatasetOperation=complete}
+  assert.equal(processing.getDatasetOperation(uncertain.operation.id,'ops:test').status,'failed');assert.equal(db.prepare("SELECT COUNT(*) n FROM reference_scan_managed_writers WHERE kind='upload_finalize' AND state='in_flight'").get().n,1);
 });

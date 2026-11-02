@@ -211,9 +211,13 @@ and `moveExact`, trash, restore, and purge for lifecycle effects. The raw GCP
 archive and reference GCP materializers are presently dormant primitives.
 The disposable cooperative fixture has a managed-writer adapter with durable
 in-flight claims, global exclusion against scan/binding, and a fail-closed hold
-for failed or uncertain callbacks. Tests wrap the actual upload assembly and
-raw GCP archive functions and exercise scan/write exclusion. The adapter is
-not wired into the production worker or storage methods; photo copy, the GCP
-materializer and direct or legacy StorageManager callers remain unqualified.
-Successful callback return is only a fixture completion signal, not proof of
-durable filesystem settlement or permission to release a production claim.
+for failed or uncertain callbacks. The dataset worker accepts an explicit
+fixture injection for upload finalization and raw-photo copy. With injection,
+it holds the claim across the actual copy, synchronizes the finalized tree and
+root, and waits for the dataset-operation receipt before completing the claim.
+Tests exercise the real worker paths, uncertain operation receipt and killed
+fixture writer. Existing lifecycle fixture injection covers its experimental
+trash/purge claim paths. The injection is not installed in production; the GCP
+materializer, direct and legacy StorageManager callers remain unqualified.
+Filesystem and SQLite durability under actual NAS failures is not established;
+callback completion is not sufficient evidence to release a production claim.

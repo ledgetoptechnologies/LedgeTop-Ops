@@ -132,7 +132,9 @@ test('authenticated copy endpoint is durable/idempotent and worker finalizes a f
   assert.equal(body.operation.source.originalsPreserved, true);
   assert.equal(body.operation.projectId, project.id);
   const replay = await fetch(url, request), replayBody = await replay.json(); assert.equal(replay.status, 202); assert.equal(replayBody.operation.id, body.operation.id);
-  await processOneDatasetOperation({ processing, repository, storage: context.storage, config: context.config }, 'test-worker');
+  require('../server/referenceLifecycleEffectFence').installOfflineFixture(processing,'isolated-lifecycle-fence-fixture');const {createSourceScanFixture,installCooperativeScanFixture,createManagedWriterFixture}=require('../server/referenceSourceScanFixture');createSourceScanFixture(processing,'isolated-source-scan-fixture');installCooperativeScanFixture(processing,'isolated-source-scan-cooperation');const managedWriterFixture=createManagedWriterFixture(processing,'isolated-managed-writer-fixture'),finish=processing.completeDatasetOperation.bind(processing);let heldAtReceipt=false;processing.completeDatasetOperation=(...args)=>{heldAtReceipt=database.prepare("SELECT state FROM reference_scan_managed_writers WHERE kind='photo_copy'").get()?.state==='in_flight';return finish(...args)};
+  await processOneDatasetOperation({ processing, repository, storage: context.storage, config: context.config, managedWriterFixture }, 'test-worker');
+  assert.equal(heldAtReceipt,true);assert.equal(database.prepare("SELECT state FROM reference_scan_managed_writers WHERE kind='photo_copy'").get().state,'completed');
   const complete = processing.getDatasetOperation(body.operation.id); assert.equal(complete.status, 'succeeded', JSON.stringify(complete));
   assert.equal(processing.getDataset(body.dataset.id, true).files.length, 2);
   assert.equal(fs.readFileSync(originalSurvey, 'utf8'), survey);
