@@ -26,7 +26,13 @@ async function dispatchCore({journal,provider,custody,transfer,result,attemptId,
  let state=journal.read(claim);await custody.assertCurrent({attemptId,environment:state.environment,manifest:state.request.manifest,signal});journal.read(claim);
  if(!state.job){const job=await provider.submit(state.request,{signal});journal.bindJob(claim,job);state=journal.read(claim)}
  const expected=binding(state),job=await provider.status(state.job.jobId,expected,{signal});journal.read(claim);
- if(job.phase==='awaiting_transfer'&&!job.transferGrantAcknowledgement){await custody.assertCurrent({attemptId,environment:state.environment,manifest:state.request.manifest,signal});journal.read(claim);if(!transfer||typeof transfer.dispatchOnce!=='function')throw fail('reference_transfer_unavailable');await transfer.dispatchOnce({provider,job,expected,manifest:state.request.manifest,signal});journal.read(claim)}
+ if(job.phase==='awaiting_transfer'&&!job.transferGrantAcknowledgement){await custody.assertCurrent({attemptId,environment:state.environment,manifest:state.request.manifest,signal});journal.read(claim);if(!transfer||typeof transfer.dispatchOnce!=='function')throw fail('reference_transfer_unavailable');try{await transfer.dispatchOnce({provider,job,expected,manifest:state.request.manifest,signal})}catch(error){
+   // A trusted adapter may release the lease after an ambiguous POST only
+   // when it has durably established that a retry will resend the exact same
+   // recoverable grant for this reservation. Ordinary ambiguity stays held.
+   if(error?.code==='REFERENCE_GRANT_REPLAY_SAFE')journal.release(claim);
+   throw error;
+  }journal.read(claim)}
  if(job.phase==='awaiting_acceptance'){await custody.assertCurrent({attemptId,environment:state.environment,manifest:state.request.manifest,signal});journal.read(claim);if(!/^[a-f0-9]{64}$/.test(job.resultManifestSha256||''))throw fail('reference_result_binding_missing');if(!result||typeof result.handleResult!=='function')throw fail('reference_result_unavailable');await result.handleResult({provider,job,expected:{...expected,resultManifestSha256:job.resultManifestSha256},signal});journal.read(claim)}
  // A succeeded status alone is not publication or acceptance.
  journal.release(claim);return true;

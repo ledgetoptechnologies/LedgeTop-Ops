@@ -26,6 +26,13 @@ a random token and remains unrecoverable after restart, even if a key is added
 later; it must be held rather than silently replaced. The broker keeps the key
 in a private field and clears its in-memory copy on close.
 
+The dispatch core releases an ambiguous grant-send lease only when its trusted
+transfer adapter reports `REFERENCE_GRANT_REPLAY_SAFE`. That adapter contract
+means it durably knows the exact grant is recoverable and will resend the same
+bytes for the same reservation. Other ambiguous errors remain held. Synthetic
+tests cover this distinction, including a lost acknowledgement followed by an
+identical retry. No production adapter currently implements this contract.
+
 The synthetic tests cover process restart and exact replay with a stable key,
 no plaintext token in the persisted row, wrong-key and missing-key refusal,
 random legacy grant refusal, and invalid key length. They do not verify host
