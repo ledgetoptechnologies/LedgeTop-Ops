@@ -34,11 +34,12 @@ function slug(s) { if (typeof s !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,12
 function exact(o, fields) { if (!o || typeof o !== 'object' || Array.isArray(o) || ![Object.prototype,null].includes(Object.getPrototypeOf(o)) || Object.keys(o).some(k => !fields.includes(k))) fail('EXTRA_FIELDS'); }
 function deriveGrantToken(key,id,identity){return createHmac('sha256',key).update('ledgetop:reference-transfer-grant:v1\0').update(id).update('\0').update(identity).digest('base64url');}
 class ReferenceTransferBroker {
+  #grantRecoveryKey;
   constructor({ databasePath, managedRoot, environment, now = Date.now, maxGrantTtlMs = 300000, maxConcurrentRequests = 2, maxConcurrentBytes = 67108864, maxResponseBytes = 16777216, maxRequests = 100, allowCreate = false, grantRecoveryKey = null }) {
     if (!['staging', 'production'].includes(environment)) fail('INVALID_ENVIRONMENT');
     if (grantRecoveryKey !== null && (!Buffer.isBuffer(grantRecoveryKey) || grantRecoveryKey.length !== 32)) fail('INVALID_GRANT_RECOVERY_KEY');
     this.environment = environment; this.now = now; this.root = fs.realpathSync(managedRoot);
-    this.grantRecoveryKey = grantRecoveryKey === null ? null : Buffer.from(grantRecoveryKey);
+    this.#grantRecoveryKey = grantRecoveryKey === null ? null : Buffer.from(grantRecoveryKey);
     this.streams = new Set();
     this.settings = { maxGrantTtlMs, maxConcurrentRequests, maxConcurrentBytes, maxResponseBytes, maxRequests };
     for (const v of Object.values(this.settings)) if (!safeInt(v)) fail('INVALID_LIMIT');
@@ -115,8 +116,8 @@ class ReferenceTransferBroker {
       if(!usage)this.db.prepare('INSERT INTO reference_job_usage(job_id,environment,manifest_sha256,byte_limit,request_limit) VALUES(?,?,?,?,?)').run(jobId,this.environment,manifest.sha256,byteLimit,this.settings.maxRequests);
       const previousId=this.db.prepare('SELECT id FROM reference_grants WHERE job_id=? AND revoked=0 AND expires_ms>? ORDER BY rowid DESC LIMIT 1').get(jobId,now);const previous=previousId?checkedGrant(this.db,previousId.id).row:null;
       if (previous && previous.identity === identity && input.replace !== true) {
-        if (this.grantRecoveryKey) {
-          const token=deriveGrantToken(this.grantRecoveryKey,previous.id,identity),actual=Buffer.from(p.sha256(Buffer.from(token)),'hex'),expected=Buffer.from(previous.token_hash,'hex');
+        if (this.#grantRecoveryKey) {
+          const token=deriveGrantToken(this.#grantRecoveryKey,previous.id,identity),actual=Buffer.from(p.sha256(Buffer.from(token)),'hex'),expected=Buffer.from(previous.token_hash,'hex');
           if(actual.length===expected.length&&timingSafeEqual(actual,expected))return {grantId:previous.id,grant:{...JSON.parse(previous.metadata),token},reused:true,tokenRecoverable:true};
         }
         return { grantId: previous.id, grant: JSON.parse(previous.metadata), reused: true, tokenRecoverable: false };
@@ -131,9 +132,9 @@ class ReferenceTransferBroker {
       if(this.db.prepare('SELECT COUNT(*) AS n FROM reference_grants').get().n>=10000)fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
       validateAggregateBytes(grantBytes(this.db),Buffer.byteLength(metadataJson)+Buffer.byteLength(filesJson)+Buffer.byteLength(identity));
       this.db.prepare('UPDATE reference_grants SET revoked=1 WHERE job_id=?').run(jobId);
-      const grantId = randomUUID(), token = this.grantRecoveryKey ? deriveGrantToken(this.grantRecoveryKey,grantId,identity) : randomBytes(32).toString('base64url');
+      const grantId = randomUUID(), token = this.#grantRecoveryKey ? deriveGrantToken(this.#grantRecoveryKey,grantId,identity) : randomBytes(32).toString('base64url');
       this.db.prepare('INSERT INTO reference_grants(id,job_id,reservation_id,identity,token_hash,metadata,files,expires_ms) VALUES(?,?,?,?,?,?,?,?)').run(grantId, jobId, reservation.reservationId, identity, p.sha256(Buffer.from(token)), metadataJson, filesJson, expires);
-      return { grantId, grant: { ...metadata, token }, reused: false, tokenRecoverable: true };
+      return { grantId, grant: { ...metadata, token }, reused: false, tokenRecoverable: this.#grantRecoveryKey !== null };
     });
   }
   revokeGrant(grantId) { slug(grantId); this.db.prepare('UPDATE reference_grants SET revoked=1 WHERE id=?').run(grantId); }
@@ -247,6 +248,6 @@ class ReferenceTransferBroker {
       if (!handedOff) { if (handle) await handle.close(); release(); }
     }
   }
-  close() { for (const stream of this.streams) stream.destroy(); this.db.close(); }
+  close() { for (const stream of this.streams) stream.destroy(); this.#grantRecoveryKey?.fill(0);this.#grantRecoveryKey=null;this.db.close(); }
 }
 module.exports = { ReferenceTransferBroker, ReferenceTransferError, ERROR_CODES, validateStoredSizes, STORED_METADATA_LIMIT, STORED_FILES_LIMIT, STORED_IDENTITY_LIMIT, STORED_AGGREGATE_LIMIT, DATABASE_GRANT_LIMIT, validateAggregateBytes };

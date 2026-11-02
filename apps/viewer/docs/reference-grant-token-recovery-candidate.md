@@ -20,7 +20,14 @@ startup validation, rotation, backup and deployment wiring are not implemented
 here. The caller must provide the same key after restart through an approved
 secret channel, and must keep request bodies and returned bearers out of logs.
 
+The broker reports `tokenRecoverable` only when it can derive the token, both
+for a newly created grant and for a replay. A grant created without the key uses
+a random token and remains unrecoverable after restart, even if a key is added
+later; it must be held rather than silently replaced. The broker keeps the key
+in a private field and clears its in-memory copy on close.
+
 The synthetic tests cover process restart and exact replay with a stable key,
-no plaintext token in the persisted row, wrong-key refusal, and invalid key
-length. They do not verify host secret provisioning, worker authentication,
-NAS immutability, the durable Viewer dispatch outbox, or cross-host recovery.
+no plaintext token in the persisted row, wrong-key and missing-key refusal,
+random legacy grant refusal, and invalid key length. They do not verify host
+secret provisioning, worker authentication, NAS immutability, the durable
+Viewer dispatch outbox, or cross-host recovery.

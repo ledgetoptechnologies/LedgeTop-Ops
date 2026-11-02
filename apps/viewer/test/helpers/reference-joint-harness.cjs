@@ -19,7 +19,8 @@
  * pump return jobId/phase/status; ingest and replay-acceptance return durableCopy,
  * published:false, storageReceiptId/acceptance/acknowledged. GET state returns
  * safe job state and counts. Tokens, source paths and raw upstream errors never
- * appear in HTTP output. Grant tokens are never persisted or rotated on retry.
+ * appear in HTTP output. The broker recovery key below is fixed test data only;
+ * never persist production grant tokens or use this key outside the fixture.
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -100,7 +101,7 @@ async function start(config, env = process.env) {
     }
   }
   const client = new ReferenceProvider({endpoint:config.controlEndpoint,token:config.controlToken,environment:config.environment,enabled:true,maxObjectBytes:4194304});
-  const broker = new ReferenceTransferBroker({databasePath:path.join(root,'broker.sqlite'),managedRoot:inputRoot,environment:config.environment,allowCreate:true});
+  const broker = new ReferenceTransferBroker({databasePath:path.join(root,'broker.sqlite'),managedRoot:inputRoot,environment:config.environment,allowCreate:true,grantRecoveryKey:Buffer.alloc(32,0x73)});
   const ledger = new ReferenceAcceptanceLedger({databasePath:path.join(root,'acceptance.sqlite'),managedRoot:resultRoot});
   const brokerHandler = createReferenceBrokerHandler({broker,enabled:true});
   function expected() {
