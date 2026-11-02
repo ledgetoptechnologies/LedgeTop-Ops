@@ -5,7 +5,7 @@ const fail=()=>{throw Object.assign(new Error('source copy contract invalid'),{c
 const closed=(v,keys)=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')===[...keys].sort().join(',');
 const id=v=>typeof v==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(v);
 const hash=v=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v);
-const relative=v=>typeof v==='string'&&v.length>0&&v.length<=4096&&!v.includes('\\')&&!v.includes(':')&&v.split('/').length<=128&&v.split('/').every(p=>p&&p!=='.'&&p!=='..'&&!/[\x00-\x1f\x7f]/.test(p));
+const relative=v=>typeof v==='string'&&v.length>0&&v.length<=4096&&!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(v)&&!v.includes('\\')&&!v.includes(':')&&v.split('/').length<=128&&v.split('/').every(p=>p&&p!=='.'&&p!=='..'&&!/[\x00-\x1f\x7f]/.test(p));
 const digest=v=>crypto.createHash('sha256').update(JSON.stringify(v),'utf8').digest('hex');
 function validateClaim(c){
  if(!closed(c,['version','operationId','directoryId','attemptId','generation','datasetId','rootKey','datasetRelativePath','manifestSha256','sourceInventorySha256','fileCount','byteSize','files'])||c.version!==1||!id(c.operationId)||!id(c.directoryId)||c.operationId!==c.directoryId||!id(c.attemptId)||!Number.isSafeInteger(c.generation)||c.generation<1||c.directoryId!==`${c.attemptId}-g${c.generation}`||!id(c.datasetId)||c.rootKey!=='datasets'||!relative(c.datasetRelativePath)||!hash(c.manifestSha256)||!hash(c.sourceInventorySha256)||!Array.isArray(c.files)||!Number.isSafeInteger(c.fileCount)||c.fileCount<1||c.fileCount>10000||c.fileCount!==c.files.length||!Number.isSafeInteger(c.byteSize)||c.byteSize<1||c.byteSize>68719476736)fail();
