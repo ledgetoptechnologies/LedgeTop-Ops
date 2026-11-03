@@ -266,9 +266,10 @@ internal static class ExperimentalColdDownloaderTests
     internal static async Task ReservationCloseChildAsync(string root, string stage)
     {
         if (!Path.IsPathFullyQualified(root) || root.StartsWith(@"\\", StringComparison.Ordinal) || !Directory.Exists(root) ||
-            stage is not ("record" or "directory" or "entry" or "lease" or "markerforeign" or "postwrite")) throw new IOException("Synthetic teardown input invalid.");
+            stage is not ("record" or "directory" or "entry" or "lease" or "markerforeign" or "postwrite" or "authdispose" or "authcancel" or "authrace")) throw new IOException("Synthetic teardown input invalid.");
         if (stage == "markerforeign") { await MarkerForeignCloseChildAsync(root); return; }
         if (stage == "postwrite") { await PostWriteStatusChildAsync(root); return; }
+        if (stage is "authdispose" or "authcancel" or "authrace") { await AuthorizationBoundaryChildAsync(root, stage); return; }
         var scope = new string('a', 64); var key = new string('b', 64);
         var entryDir = Path.Combine(root, scope, key); Directory.CreateDirectory(entryDir);
         var reservationDir = Path.Combine(root, ".hydration-reservations-v2"); Directory.CreateDirectory(reservationDir);
@@ -295,6 +296,66 @@ internal static class ExperimentalColdDownloaderTests
         AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock"));
         if (stage != "lease") AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
         // Intentionally retain the owner until this synthetic child exits.
+    }
+    private static async Task AuthorizationBoundaryChildAsync(string applicationRoot, string stage)
+    {
+        using var source = new CoordinatorSource(); var identity = source.Identity;
+        var spec = (await source.ResolveAsync(identity.ResourceReference)).Spec;
+        using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", applicationRoot, expectedPrincipal: CoordinatorSource.Principal);
+        var root = Path.Combine(applicationRoot, "verified-hydration-v1"); var reservationDir = Path.Combine(root, ".hydration-reservations-v2"); Directory.CreateDirectory(reservationDir);
+        File.WriteAllBytes(Path.Combine(reservationDir, ".verified-hydration-owner"), "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+        Directory.CreateDirectory(Path.Combine(root, identity.ScopeKey, identity.CacheKey));
+        HydrationCacheConcurrency.Lease? admission = await HydrationCacheConcurrency.AcquireAsync(root, identity.ScopeKey + identity.CacheKey, CancellationToken.None);
+        admission.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate); var alias = admission;
+        ExperimentalEntryLease? entry = ExperimentalEntryLease.Open(admission, root, identity.ScopeKey, identity.CacheKey); var gate = admission.Quota;
+        var growth = spec.Length + Downloader.HydrationStateGrowthBudget(spec) + 1024;
+        var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = identity.ScopeKey, Entry = identity.CacheKey, Growth = growth });
+        ExperimentalReservationOwner? owner = null; ExperimentalReservationOwner.LeaseReceipt? receipt = null;
+        alias.RunExperimentalForRoot(root, () => HydrationQuotaGate.Run(gate, () => {
+            using var quota = new FileStream(Path.Combine(root, ".hydration-quota-v2.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            owner = ExperimentalReservationOwner.CreateWithOwnedEntry(root, identity.ScopeKey, identity.CacheKey, bytes, spec, ref admission, ref entry, quota);
+        }, CancellationToken.None));
+        owner!.RunWithLeaseForTest(() => HydrationQuotaGate.Run(gate, () => {
+            using var quota = new FileStream(Path.Combine(root, ".hydration-quota-v2.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            receipt = owner.ReleaseAndReturn(quota);
+        }, CancellationToken.None));
+        var recordPath = Path.Combine(reservationDir, identity.ScopeKey + "-" + identity.CacheKey + ".json");
+        using var cancellation = new CancellationTokenSource();
+        var entered = new ManualResetEventSlim(); var release = new ManualResetEventSlim(); var quotaHeld = new ManualResetEventSlim(); var quotaAttempt = new ManualResetEventSlim();
+        Task<string>? stageTask = null; Task? blocker = null;
+        try {
+            if (stage == "authrace") {
+                blocker = Task.Run(() => { lock (gate) { quotaHeld.Set(); if (!release.Wait(TimeSpan.FromSeconds(10))) throw new IOException("Synthetic quota blocker timed out."); } });
+                Check(quotaHeld.Wait(TimeSpan.FromSeconds(5)));
+                HydrationQuotaGate.BeforeWaitTestHook = () => quotaAttempt.Set();
+            } else {
+                PlaceholderHydrationCoordinator.ExperimentalAfterAuthorizationTestSignal = entered;
+                PlaceholderHydrationCoordinator.ExperimentalAfterAuthorizationReleaseTestSignal = release;
+            }
+            stageTask = Task.Run(async () => {
+                try { return await coordinator.ExperimentalAuthorizeAndStageAsync(identity, receipt!, cancellation.Token) ? "staged" : "capacity"; }
+                catch (ObjectDisposedException) { return "disposed"; } catch (OperationCanceledException) { return "cancelled"; }
+            });
+            if (stage == "authrace") {
+                Check(quotaAttempt.Wait(TimeSpan.FromSeconds(5)) && !stageTask.Wait(TimeSpan.FromMilliseconds(150)));
+                source.ResolveFailureForTest = new AccessDeniedException(); release.Set();
+                Check(await stageTask.WaitAsync(TimeSpan.FromSeconds(10)) == "staged");
+                var denied = false; try { await coordinator.ExperimentalReauthorizeStagedAsync(identity, receipt!); } catch (AccessDeniedException) { denied = true; }
+                Check(denied); receipt!.RemoveSyntheticReservationForTest(root, identity.ScopeKey + identity.CacheKey);
+            } else {
+                Check(entered.Wait(TimeSpan.FromSeconds(5)));
+                if (stage == "authdispose") coordinator.Dispose(); else cancellation.Cancel();
+                release.Set(); Check(await stageTask.WaitAsync(TimeSpan.FromSeconds(10)) == (stage == "authdispose" ? "disposed" : "cancelled"));
+            }
+            Check(!File.Exists(recordPath)); receipt!.Dispose(); receipt = null;
+        } finally {
+            release.Set(); PlaceholderHydrationCoordinator.ExperimentalAfterAuthorizationTestSignal = null; PlaceholderHydrationCoordinator.ExperimentalAfterAuthorizationReleaseTestSignal = null;
+            HydrationQuotaGate.BeforeWaitTestHook = null;
+            // Do not let this synthetic child exit while a started operation is unconfirmed.
+            if (stageTask is not null) await stageTask;
+            if (blocker is not null) await blocker;
+            receipt?.Dispose(); entry?.Dispose(); admission?.Dispose(); entered.Dispose(); release.Dispose(); quotaHeld.Dispose(); quotaAttempt.Dispose();
+        }
     }
     private static async Task PostWriteStatusChildAsync(string applicationRoot)
     {
@@ -812,10 +873,10 @@ internal static class ExperimentalColdDownloaderTests
                 AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true);
             } finally { entry?.Dispose(); admission?.Dispose(); }
         });
-        foreach (var stage in new[] { "record", "directory", "entry", "lease", "markerforeign", "postwrite" }) await WithFixture(async fixture => {
+        foreach (var stage in new[] { "record", "directory", "entry", "lease", "markerforeign", "postwrite", "authdispose", "authcancel", "authrace" }) await WithFixture(async fixture => {
             var root = Path.Combine(fixture.Path, "teardown"); Directory.CreateDirectory(root);
             await RunReservationCloseChildAsync(root, stage);
-            var cacheRoot = stage == "postwrite" ? Path.Combine(root, "verified-hydration-v1") : root;
+            var cacheRoot = stage is "postwrite" or "authdispose" or "authcancel" or "authrace" ? Path.Combine(root, "verified-hydration-v1") : root;
             AssertOtherProcessOpen(Path.Combine(cacheRoot, ".hydration-cache.lock"), true);
             if (stage == "postwrite") {
                 using var source = new CoordinatorSource(); var identity = source.Identity;

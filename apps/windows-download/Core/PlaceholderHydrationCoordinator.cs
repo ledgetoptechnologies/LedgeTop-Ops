@@ -436,20 +436,30 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             throw new TransferException("Hydration identity is unavailable.");
         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
     }
+    internal static ManualResetEventSlim? ExperimentalAfterAuthorizationTestSignal, ExperimentalAfterAuthorizationReleaseTestSignal;
+    private static void ExperimentalPauseAfterAuthorizationForTest()
+    {
+        if (ExperimentalAfterAuthorizationTestSignal is null) return;
+        ExperimentalAfterAuthorizationTestSignal.Set();
+        if (ExperimentalAfterAuthorizationReleaseTestSignal is null || !ExperimentalAfterAuthorizationReleaseTestSignal.Wait(TimeSpan.FromSeconds(10)))
+            throw new IOException("Synthetic authorization boundary timed out.");
+    }
     // Synchronous staging follows the fresh authority result directly. The
     // result is not exported as a token and remains synthetic-only.
     internal async Task<bool> ExperimentalAuthorizeAndStageAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt receipt, CancellationToken token = default)
     {
         ExperimentalValidateStagingIdentity(identity); ArgumentNullException.ThrowIfNull(receipt);
         var resolved = await AuthorizeWithRetry(identity, token).ConfigureAwait(false);
-        token.ThrowIfCancellationRequested();
+        ExperimentalPauseAfterAuthorizationForTest(); token.ThrowIfCancellationRequested();
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
         return receipt.StageSyntheticReservationForTest(root, identity, resolved.Spec, this, token);
     }
     internal async Task ExperimentalReauthorizeStagedAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt receipt, CancellationToken token = default)
     {
         ExperimentalValidateStagingIdentity(identity); ArgumentNullException.ThrowIfNull(receipt);
         var resolved = await AuthorizeWithRetry(identity, token).ConfigureAwait(false);
-        token.ThrowIfCancellationRequested();
+        ExperimentalPauseAfterAuthorizationForTest(); token.ThrowIfCancellationRequested();
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
         receipt.VerifySyntheticReservationForTest(root, identity, resolved.Spec, token);
     }
 #endif
