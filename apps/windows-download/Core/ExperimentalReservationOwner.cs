@@ -92,6 +92,7 @@ internal sealed class ExperimentalReservationOwner
             private readonly LeaseReceipt owner; private readonly DownloadUse use; private readonly Downloader downloader;
             private readonly DownloadSpec spec; private readonly PlaceholderIdentity identity; private readonly string entryDirectory, expectedPath;
             private Task? task; private int started;
+            private readonly object cancellationGate = new(); private readonly CancellationTokenSource workerCancellation = new(); private bool workerFinished;
             internal DownloadSession(LeaseReceipt owner, DownloadUse use, Downloader downloader, PlaceholderIdentity identity, DownloadSpec spec, string entryDirectory, object authority) {
                 if (!ReferenceEquals(authority, ReceiptAttachAuthority)) throw new InvalidOperationException("Download session authority invalid.");
                 this.owner = owner; this.use = use; this.downloader = downloader; this.identity = identity; this.spec = spec; this.entryDirectory = entryDirectory;
@@ -101,8 +102,8 @@ internal sealed class ExperimentalReservationOwner
             private async Task RunAsync() {
                 var useReleased = false; VerifiedHydrationDownload? download = null;
                 try {
-                    using (HydrationMutationScope.Begin((action, token) => owner.RunDownloadMutation(use, action, token), CancellationToken.None))
-                        download = await downloader.DownloadVerifiedForHydrationAsync(spec, entryDirectory, CancellationToken.None).ConfigureAwait(false);
+                    using (HydrationMutationScope.Begin((action, token) => owner.RunDownloadMutation(use, action, token), workerCancellation.Token))
+                        download = await downloader.DownloadVerifiedForHydrationAsync(spec, entryDirectory, workerCancellation.Token).ConfigureAwait(false);
                     if (!string.Equals(Path.GetFullPath(download.Path), expectedPath, StringComparison.OrdinalIgnoreCase) || download.Stream.CanWrite || download.Stream.Length != spec.Length)
                         throw new IOException("Synthetic download result changed.");
                     if (!download.IntegrityVerified && !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
@@ -113,7 +114,11 @@ internal sealed class ExperimentalReservationOwner
                         try { await download.DisposeAsync().ConfigureAwait(false); }
                         catch { owner.MarkDownloadUncertain(use); throw; }
                     }
-                    try { use.Dispose(); useReleased = true; }
+                    try {
+                        downloader.Dispose();
+                        lock (cancellationGate) { workerFinished = true; workerCancellation.Dispose(); }
+                        use.Dispose(); useReleased = true;
+                    } catch { owner.MarkDownloadUncertain(use); throw; }
                     finally { if (useReleased) lock (RegistryGate) DownloadSessions.Remove(this); }
                 }
             }
@@ -124,17 +129,29 @@ internal sealed class ExperimentalReservationOwner
                 if (!Matches(root, expectedIdentity, expectedSpec)) throw new ResourceUnavailableException();
                 owner.VerifySyntheticReservationForTest(root, expectedIdentity, expectedSpec, token);
             }
+            internal async Task<bool> CancelWorkerAndWaitAsync(TimeSpan timeout, CancellationToken waitToken = default) {
+                if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromSeconds(10)) throw new ArgumentOutOfRangeException(nameof(timeout));
+                var running = task ?? throw new InvalidOperationException("Synthetic download session did not start.");
+                lock (cancellationGate) { if (!workerFinished) workerCancellation.Cancel(); }
+                try { await running.WaitAsync(timeout, waitToken).ConfigureAwait(false); return true; }
+                catch (TimeoutException) { return false; }
+                catch (OperationCanceledException) when (!waitToken.IsCancellationRequested && running.IsCompleted) { return true; }
+                catch (Exception) when (!waitToken.IsCancellationRequested && running.IsCompleted) { return true; }
+            }
             internal async Task WaitAsync(CancellationToken waitToken = default) {
                 var running = task ?? throw new InvalidOperationException("Synthetic download session did not start.");
                 await running.WaitAsync(waitToken).ConfigureAwait(false);
             }
         }
-        internal DownloadSession StartSyntheticDownloadForTest(string requestedRoot, PlaceholderIdentity identity, DownloadSpec spec, Downloader downloader)
+        internal DownloadSession StartSyntheticDownloadForTest(string requestedRoot, PlaceholderIdentity identity, DownloadSpec spec, SyntheticReceiptDownloadSource source, object authority)
         {
-            ArgumentNullException.ThrowIfNull(downloader);
+            ArgumentNullException.ThrowIfNull(source);
+            if (!PlaceholderHydrationCoordinator.IsExperimentalDownloadAuthority(authority)) throw new InvalidOperationException("Synthetic download authorization is unavailable.");
             lock (gate) {
                 VerifySyntheticReservationForTest(requestedRoot, identity, spec);
                 var use = BeginSyntheticDownloadUse(requestedRoot, identity.ScopeKey + identity.CacheKey);
+                Downloader downloader;
+                try { downloader = source.Claim(spec); } catch { use.Dispose(); throw; }
                 var session = new DownloadSession(this, use, downloader, identity, spec, Path.Combine(root, identity.ScopeKey, identity.CacheKey), ReceiptAttachAuthority);
                 lock (RegistryGate) DownloadSessions.Add(session);
                 session.Start(); return session;

@@ -476,13 +476,15 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             }
         }
     }
+    private static readonly object ExperimentalDownloadAuthority = new();
+    internal static bool IsExperimentalDownloadAuthority(object value) => ReferenceEquals(value, ExperimentalDownloadAuthority);
     // Synthetic downloader session only; it never returns file bytes or writes to a sink.
-    internal async Task<ExperimentalReservationOwner.LeaseReceipt.DownloadSession> ExperimentalStartReceiptDownloadAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt receipt, Downloader downloader, CancellationToken token = default)
+    internal async Task<ExperimentalReservationOwner.LeaseReceipt.DownloadSession> ExperimentalStartReceiptDownloadAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt receipt, SyntheticReceiptDownloadSource source, CancellationToken token = default)
     {
-        ExperimentalValidateStagingIdentity(identity); ArgumentNullException.ThrowIfNull(receipt); ArgumentNullException.ThrowIfNull(downloader);
+        ExperimentalValidateStagingIdentity(identity); ArgumentNullException.ThrowIfNull(receipt); ArgumentNullException.ThrowIfNull(source);
         var resolved = await AuthorizeWithRetry(identity, token).ConfigureAwait(false);
         token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
-        return receipt.StartSyntheticDownloadForTest(root, identity, resolved.Spec, downloader);
+        return receipt.StartSyntheticDownloadForTest(root, identity, resolved.Spec, source, ExperimentalDownloadAuthority);
     }
     // No sink or file bytes are exposed by this synthetic observation.
     internal async Task ExperimentalWaitReceiptDownloadAuthorizedAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt.DownloadSession session, CancellationToken token = default)

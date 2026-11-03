@@ -1269,14 +1269,14 @@ internal static class ExperimentalColdDownloaderTests
                 File.WriteAllBytes(path, bytes);
                 Check(!receipt.StageSyntheticReservationForTest(root, identity, spec, coordinator) && File.ReadAllBytes(path).SequenceEqual(bytes)); File.Delete(path);
                 Check(await coordinator.ExperimentalAuthorizeAndStageAsync(identity, receipt)); AssertOtherProcessCannotOpen(path);
-                var blocked = new HeldDownloadStream(Content); var downloader = Engine((_, _) => Response(Content, blocked));
+                var blocked = SyntheticReceiptDownloadSource.Create(spec, Content);
                 ExperimentalReservationOwner.LeaseReceipt.DownloadSession? session = null; var terminal = false;
                 try {
                     source.ResolveFailureForTest = new AccessDeniedException(); var startDenied = false;
-                    try { _ = await coordinator.ExperimentalStartReceiptDownloadAsync(identity, receipt, downloader); } catch (AccessDeniedException) { startDenied = true; }
-                    Check(startDenied && !blocked.Entered.Task.IsCompleted); source.ResolveFailureForTest = null;
-                    session = await coordinator.ExperimentalStartReceiptDownloadAsync(identity, receipt, downloader);
-                    await blocked.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                    try { _ = await coordinator.ExperimentalStartReceiptDownloadAsync(identity, receipt, blocked); } catch (AccessDeniedException) { startDenied = true; }
+                    Check(startDenied && !blocked.Entered.IsCompleted); source.ResolveFailureForTest = null;
+                    session = await coordinator.ExperimentalStartReceiptDownloadAsync(identity, receipt, blocked);
+                    await blocked.Entered.WaitAsync(TimeSpan.FromSeconds(10));
                     using var cancelledWait = new CancellationTokenSource(); cancelledWait.Cancel(); var waitCancelled = false;
                     try { await session.WaitAsync(cancelledWait.Token); } catch (OperationCanceledException) { waitCancelled = true; }
                     Check(waitCancelled);
@@ -1284,7 +1284,7 @@ internal static class ExperimentalColdDownloaderTests
                     refusedWhileDownloading = false; try { receipt.Dispose(); } catch (IOException) { refusedWhileDownloading = true; } catch (InvalidOperationException) { refusedWhileDownloading = true; } Check(refusedWhileDownloading);
                     AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock")); AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
                     _ = session.WaitAsync(); // Deliberately abandon one waiter; the owned task continues.
-                    blocked.Release.TrySetResult();
+                    blocked.Release();
                     await session.WaitAsync().WaitAsync(TimeSpan.FromSeconds(15)); terminal = true;
                     Check(File.ReadAllBytes(Path.Combine(entryDir, identity.FileName)).SequenceEqual(Content));
                     source.ResolveFailureForTest = new AccessDeniedException(); var afterDenied = false;
@@ -1294,10 +1294,34 @@ internal static class ExperimentalColdDownloaderTests
                     var wrongSession = false;
                     try { await coordinator.ExperimentalWaitReceiptDownloadAuthorizedAsync(identity with { FileName = "other.bin" }, session); } catch (ResourceUnavailableException) { wrongSession = true; }
                     Check(wrongSession);
+                    var doubleStart = false; try { session.Start(); } catch (InvalidOperationException) { doubleStart = true; } Check(doubleStart);
+                    File.Delete(Path.Combine(entryDir, identity.FileName));
+                    foreach (var ignoreCancellation in new[] { false, true }) {
+                        var cancellationSource = SyntheticReceiptDownloadSource.Create(spec, Content, ignoreCancellation);
+                        var unauthenticated = false;
+                        try { _ = receipt.StartSyntheticDownloadForTest(root, identity, spec, cancellationSource, new object()); } catch (InvalidOperationException) { unauthenticated = true; }
+                        Check(unauthenticated);
+                        var worker = await coordinator.ExperimentalStartReceiptDownloadAsync(identity, receipt, cancellationSource); var settled = false;
+                        try {
+                            await cancellationSource.Entered.WaitAsync(TimeSpan.FromSeconds(10));
+                            var stopped = await worker.CancelWorkerAndWaitAsync(ignoreCancellation ? TimeSpan.FromMilliseconds(150) : TimeSpan.FromSeconds(5));
+                            Check(stopped != ignoreCancellation);
+                            if (ignoreCancellation) {
+                                var busy = false; try { _ = receipt.BeginSyntheticDownloadUse(root, identity.ScopeKey + identity.CacheKey); } catch (InvalidOperationException) { busy = true; } Check(busy);
+                                AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock")); AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
+                                cancellationSource.Release();
+                                Check(await worker.CancelWorkerAndWaitAsync(TimeSpan.FromSeconds(5)));
+                            }
+                            var cancelledWorker = false; try { await worker.WaitAsync(); } catch (OperationCanceledException) { cancelledWorker = true; }
+                            Check(cancelledWorker && !File.Exists(Path.Combine(entryDir, identity.FileName))); settled = true;
+                        } finally {
+                            cancellationSource.Release();
+                            if (!settled) UncertainTestResources.Add((fixture, receipt, worker, cancellationSource));
+                        }
+                    }
                 } finally {
-                    blocked.Release.TrySetResult();
-                    if (session is null || terminal) downloader.Dispose();
-                    else UncertainTestResources.Add((fixture, receipt, session, downloader, blocked));
+                    blocked.Release();
+                    if (session is not null && !terminal) UncertainTestResources.Add((fixture, receipt, session, blocked));
                 }
                 source.ResolveFailureForTest = new AccessDeniedException();
                 rejected = false; try { await coordinator.ExperimentalReauthorizeStagedAsync(identity, receipt); } catch (AccessDeniedException) { rejected = true; }
@@ -1798,15 +1822,6 @@ internal static class ExperimentalColdDownloaderTests
         });
         Check(PendingOwnedResources() == 0);
         Console.WriteLine("PASS gated synthetic Downloader: cold and resumed transfers, validation, collision, cancellation and coordinator recovery.");
-    }
-    private sealed class HeldDownloadStream(byte[] data) : MemoryStream(data)
-    {
-        internal TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken token = default) {
-            Entered.TrySetResult(); await Release.Task.WaitAsync(token).ConfigureAwait(false);
-            return await base.ReadAsync(buffer, token).ConfigureAwait(false);
-        }
     }
     private sealed class PrefixStream(byte[] data) : MemoryStream(data)
     {
