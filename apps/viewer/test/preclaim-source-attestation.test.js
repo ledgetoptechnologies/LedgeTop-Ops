@@ -144,6 +144,10 @@ test('preclaim signer holds GCP, scope mismatch, and an unaccepted outbox intent
   const args = { processing: f.processing, outbox: f.outbox, attemptId: f.attempt.id,
     snapshotPublicKey: f.snapshotKeys.publicKey, expectedSnapshotIssuerId: 'viewer-snapshot-issuer', expectedSnapshotKeyId: 'snapshot-key', signer: f.signer,
     authorityId: AUTHORITY_ID, principalId: 'viewer-staging', environment: 'staging', capabilities: f.capabilities };
+  const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-preclaim-foreign-db-'));
+  const otherDatabase = openDatabase(path.join(otherRoot, 'other.sqlite'));
+  t.after(() => { otherDatabase.close(); fs.rmSync(otherRoot, { recursive: true, force: true }); });
+  assert.throws(() => createPreclaimSourceAttestation({ ...args, outbox: new PreparedSubmissionOutbox(otherDatabase) }), { code: 'preclaim_database_mismatch' });
   assert.throws(() => createPreclaimSourceAttestation({ ...args, principalId: 'other-principal' }), { code: 'preclaim_scope_mismatch' });
   assert.throws(() => createPreclaimSourceAttestation(args), { code: 'preclaim_gcp_extension_unavailable' });
 });
@@ -173,4 +177,14 @@ test('preclaim signer enforces worker role and filename compatibility', t => {
     snapshotPublicKey: f.snapshotKeys.publicKey, expectedSnapshotIssuerId: 'viewer-snapshot-issuer', expectedSnapshotKeyId: 'snapshot-key', signer: f.signer,
     authorityId: AUTHORITY_ID, principalId: 'viewer-staging', environment: 'staging', capabilities: f.capabilities,
   }), { code: 'preclaim_snapshot_selection_invalid' });
+});
+
+test('preclaim signer rejects a snapshot after its owning project is inactive', t => {
+  const f = fixture(t);
+  f.processing.database.prepare("UPDATE projects SET status='archived' WHERE id=?").run(f.dataset.projectId);
+  assert.throws(() => createPreclaimSourceAttestation({
+    processing: f.processing, outbox: f.outbox, attemptId: f.attempt.id,
+    snapshotPublicKey: f.snapshotKeys.publicKey, expectedSnapshotIssuerId: 'viewer-snapshot-issuer', expectedSnapshotKeyId: 'snapshot-key', signer: f.signer,
+    authorityId: AUTHORITY_ID, principalId: 'viewer-staging', environment: 'staging', capabilities: f.capabilities,
+  }), { code: 'preclaim_current_source_binding_mismatch' });
 });

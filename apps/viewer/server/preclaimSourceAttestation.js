@@ -145,9 +145,16 @@ function buildPreclaimSourceAttestation({
   const dataset = processing.getDataset(snapshot.datasetId, true);
   const task = processing.getTask(intent.viewerTaskId);
   const attempt = processing.getAttempt(attemptId);
-  if (!dataset || dataset.status !== 'finalized' || dataset.manifestSha256 !== snapshot.datasetManifestSha256
-      || !task || task.activeAttemptId !== attemptId || task.datasetId !== dataset.id
-      || !attempt || attempt.taskId !== task.id || attempt.datasetId !== dataset.id) fail('preclaim_current_source_binding_mismatch');
+  const project = task && processing.getProject(task.projectId);
+  const pendingStorageMutation = dataset && processing.database.prepare(`SELECT 1 FROM storage_mutations
+    WHERE entity_type='dataset' AND entity_id=? AND status IN ('intent','fs_applied','failed') LIMIT 1`).get(dataset.id);
+  if (!dataset || dataset.storageMode !== 'managed' || dataset.rootKey !== 'datasets'
+      || dataset.status !== 'finalized' || dataset.manifestSha256 !== snapshot.datasetManifestSha256 || pendingStorageMutation
+      || !task || task.status === 'archived' || task.purgedAt || task.activeAttemptId !== attemptId
+      || task.datasetId !== dataset.id || task.projectId !== dataset.projectId
+      || !project || project.status !== 'active'
+      || !attempt || attempt.taskId !== task.id || attempt.datasetId !== dataset.id
+      || ['failed', 'cancelled', 'published'].includes(attempt.status)) fail('preclaim_current_source_binding_mismatch');
   let currentSource;
   try { currentSource = dataset.files.map(fileFacts); } catch { fail('preclaim_current_source_invalid'); }
   const snapshotSource = parseFrameRecords(snapshot.sourceFrames);
@@ -201,6 +208,7 @@ function buildPreclaimSourceAttestation({
 function createPreclaimSourceAttestation(input = {}) {
   const database = input.processing?.database;
   if (!database || typeof database.exec !== 'function') fail('preclaim_request_invalid');
+  if (input.outbox?.database !== database) fail('preclaim_database_mismatch');
   if (database.isTransaction) fail('preclaim_transaction_conflict');
   // A single SQLite read view prevents mixing an accepted binding, old
   // snapshot and changed source inventory into one signed statement.
