@@ -140,6 +140,7 @@ internal static class ReservationHandlePrototype
         if (!TryDeleteExact(fixture, directory, directoryId, path, Owned, new(identity.Volume, identity.FileId)))
             throw new IOException("Experimental fixture deletion was not confirmed.");
         recordDisposition();
+        Console.WriteLine("PASS gated experimental owned-source sealing and exact identity cleanup; rename unsupported.");
     }
 #endif
 
