@@ -617,6 +617,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #if LEDGETOP_CACHE_RACE_TEST
     // Isolated coordinator/scanner experiment; not called from hydration or eviction.
     internal static Func<string, bool>? ExperimentalOmitReservationFromWalkTestHook;
+    internal static ManualResetEventSlim? ExperimentalScanStatusEnteredTestSignal, ExperimentalScanStatusReleaseTestSignal;
     internal long ExperimentalCheckMarkerCapacity(HydrationCacheConcurrency.Lease admission, long growth, CancellationToken token = default)
     {
         var result = ExperimentalCapacityDecision(admission, growth, token);
@@ -645,6 +646,8 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     }
     private (long Used, bool Fits) ExperimentalScanUnderQuota(HydrationCacheConcurrency.Lease admission, long growth)
     {
+        var status = admission.ExperimentalStatus; long revision;
+        lock (status.Gate) { if (status.Poisoned) throw new TransferException("Synthetic receipt status is unavailable."); revision = status.Revision; }
         var markers = admission.ExperimentalMarkers;
         var retained = ExperimentalReservationOwner.SnapshotForRoot(root);
         var staged = ExperimentalReservationOwner.SnapshotStagedForRoot(root, admission.Quota);
@@ -665,6 +668,11 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         }
         if (!walked.SetEquals(expected)) throw new TransferException("Retained reservation is missing from the cache walk.");
         var reserved = ExperimentalReservedBytes(Path.Combine(root, ".hydration-reservations-v2"), retained, staged);
+        if (ExperimentalScanStatusEnteredTestSignal is not null) {
+            ExperimentalScanStatusEnteredTestSignal.Set();
+            if (ExperimentalScanStatusReleaseTestSignal is null || !ExperimentalScanStatusReleaseTestSignal.Wait(TimeSpan.FromSeconds(10))) throw new IOException("Synthetic scanner status barrier timed out.");
+        }
+        lock (status.Gate) if (status.Poisoned || status.Revision != revision) throw new TransferException("Synthetic receipt status changed during the scan.");
         return (used, reserved <= maximumCacheBytes && used <= maximumCacheBytes - reserved && growth <= maximumCacheBytes - reserved - used);
     }
     private static long ExperimentalReservedBytes(string directory, Dictionary<string, ExperimentalReservationOwner> retained, Dictionary<string, ExperimentalReservationOwner.StagedSnapshot> staged)

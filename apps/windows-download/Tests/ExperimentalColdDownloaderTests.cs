@@ -1174,6 +1174,30 @@ internal static class ExperimentalColdDownloaderTests
                     finally { PlaceholderHydrationCoordinator.ExperimentalOmitReservationFromWalkTestHook = null; }
                     Check(refused);
                 } finally { scan.Dispose(); }
+                var statusScan = await HydrationCacheConcurrency.AcquireAsync(root, "status-scan", CancellationToken.None);
+                var statusEntered = new ManualResetEventSlim(); var statusRelease = new ManualResetEventSlim(); Task<bool>? statusTask = null;
+                var markerToken = new object(); var injected = false;
+                try {
+                    statusScan.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.Open);
+                    PlaceholderHydrationCoordinator.ExperimentalScanStatusEnteredTestSignal = statusEntered;
+                    PlaceholderHydrationCoordinator.ExperimentalScanStatusReleaseTestSignal = statusRelease;
+                    statusTask = Task.Run(() => {
+                        try { _ = coordinator.ExperimentalCheckMarkerCapacity(statusScan, 0); return false; }
+                        catch (TransferException error) when (error.Message == "Synthetic receipt status changed during the scan.") { return true; }
+                    });
+                    Check(statusEntered.Wait(TimeSpan.FromSeconds(5)));
+                    ExperimentalReservationOwner.ReceiptMarkerFailureTestHook = true; ExperimentalReservationOwner.ReceiptMarkerFailureTokenTestHook = markerToken;
+                    try { _ = first.AccountMarker(root, identityOne.ScopeKey + identityOne.CacheKey, root); }
+                    catch (IOException error) when (error.Message == "Injected receipt marker failure.") { injected = true; }
+                    finally { ExperimentalReservationOwner.ReceiptMarkerFailureTestHook = false; ExperimentalReservationOwner.ReceiptMarkerFailureTokenTestHook = null; }
+                    Check(injected); statusRelease.Set();
+                    Check(await statusTask.WaitAsync(TimeSpan.FromSeconds(10)));
+                    first.SettleInjectedMarkerFailureForTest(markerToken);
+                } finally {
+                    statusRelease.Set(); PlaceholderHydrationCoordinator.ExperimentalScanStatusEnteredTestSignal = null; PlaceholderHydrationCoordinator.ExperimentalScanStatusReleaseTestSignal = null;
+                    if (statusTask is not null && !statusTask.IsCompleted) UncertainTestResources.Add((fixture, statusScan, statusTask, statusEntered, statusRelease));
+                    else { statusScan.Dispose(); statusEntered.Dispose(); statusRelease.Dispose(); }
+                }
                 first.RemoveSyntheticReservationForTest(root, identityOne.ScopeKey + identityOne.CacheKey); Check(!File.Exists(path));
                 first.Dispose(); second.Dispose(); completed = true;
             } finally {

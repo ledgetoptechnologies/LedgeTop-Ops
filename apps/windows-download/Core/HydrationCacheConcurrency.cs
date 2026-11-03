@@ -8,6 +8,9 @@ internal static class HydrationCacheConcurrency
     internal static Action<string>? BeforeEntryWaitTestHook;
     internal static Action? BeforeLegacyAcquireTestHook;
 #endif
+#if LEDGETOP_CACHE_RACE_TEST
+    internal sealed class ExperimentalRootStatus { internal readonly object Gate = new(); internal long Revision; internal bool Poisoned; }
+#endif
     private sealed class Entry { internal readonly SemaphoreSlim Gate = new(1, 1); internal int References; }
     internal const int Capacity = 4;
     private sealed class Root
@@ -19,6 +22,7 @@ internal static class HydrationCacheConcurrency
         internal FileStream? ExclusiveLegacyLease;
 #if LEDGETOP_CACHE_RACE_TEST
         internal ExperimentalRootMarkerOwner? ExperimentalMarkerOwner;
+        internal readonly ExperimentalRootStatus Status = new();
         internal string? ExperimentalLegacyPath;
         internal bool ExperimentalQuarantined;
 #endif
@@ -34,6 +38,7 @@ internal static class HydrationCacheConcurrency
 #if LEDGETOP_CACHE_RACE_TEST
         private readonly Func<ExperimentalRootMarkerOwner> markerOwner;
         private readonly string experimentalRoot, experimentalKey;
+        internal ExperimentalRootStatus ExperimentalStatus { get; }
         private int experimentalEntryBindings;
         internal void RegisterExperimentalEntry() { lock (leaseGate) { ObjectDisposedException.ThrowIf(release is null, this); experimentalEntryBindings = checked(experimentalEntryBindings + 1); } }
         internal void UnregisterExperimentalEntry() { lock (leaseGate) { if (experimentalEntryBindings <= 0) throw new InvalidOperationException("Experimental entry binding missing."); experimentalEntryBindings--; } }
@@ -70,7 +75,7 @@ internal static class HydrationCacheConcurrency
                 ObjectDisposedException.ThrowIf(release is null, this);
                 if (experimentalKey != expectedKey) throw new TransferException("Experimental reservation entry does not match its lease.");
                 if (experimentalEntryBindings != 0) throw new TransferException("Experimental entry binding requires a joint transfer.");
-                var successor = new Lease(Quota, release, acquireLegacy, markerOwner, experimentalRoot, experimentalKey);
+                var successor = new Lease(Quota, release, acquireLegacy, markerOwner, experimentalRoot, experimentalKey, ExperimentalStatus);
                 release = null;
                 return successor;
             }
@@ -81,7 +86,7 @@ internal static class HydrationCacheConcurrency
                 ObjectDisposedException.ThrowIf(release is null, this);
                 if (experimentalKey != expectedKey || experimentalEntryBindings != 1)
                     throw new TransferException("Experimental admission and entry cannot be transferred.");
-                var successor = new Lease(Quota, release, acquireLegacy, markerOwner, experimentalRoot, experimentalKey);
+                var successor = new Lease(Quota, release, acquireLegacy, markerOwner, experimentalRoot, experimentalKey, ExperimentalStatus);
                 var moved = entry.JointMoveTo(this, successor, next => { attach?.Invoke(successor, next); successor.experimentalEntryBindings = 1; experimentalEntryBindings = 0; release = null; });
                 return (successor, moved);
             }
@@ -97,11 +102,11 @@ internal static class HydrationCacheConcurrency
         private readonly Action<string, FileMode> acquireLegacy;
         internal Lease(object quota, Action release, Action<string, FileMode> acquireLegacy
 #if LEDGETOP_CACHE_RACE_TEST
-            , Func<ExperimentalRootMarkerOwner> markerOwner, string experimentalRoot, string experimentalKey
+            , Func<ExperimentalRootMarkerOwner> markerOwner, string experimentalRoot, string experimentalKey, ExperimentalRootStatus experimentalStatus
 #endif
             ) { Quota = quota; this.release = release; this.acquireLegacy = acquireLegacy;
 #if LEDGETOP_CACHE_RACE_TEST
-            this.markerOwner = markerOwner; this.experimentalRoot = Path.GetFullPath(experimentalRoot); this.experimentalKey = experimentalKey;
+            this.markerOwner = markerOwner; this.experimentalRoot = Path.GetFullPath(experimentalRoot); this.experimentalKey = experimentalKey; ExperimentalStatus = experimentalStatus;
 #endif
         }
         internal void AcquireExclusiveLegacy(string path, FileMode mode) {
@@ -186,7 +191,7 @@ internal static class HydrationCacheConcurrency
                     !string.Equals(state.ExperimentalLegacyPath, Path.Combine(Path.GetFullPath(root), ".hydration-cache.lock"), StringComparison.OrdinalIgnoreCase))
                     throw new TransferException("Experimental marker ownership requires the root legacy lease.");
                 return state.ExperimentalMarkerOwner ??= new ExperimentalRootMarkerOwner(root);
-            } }, root, key
+            } }, root, key, state.Status
 #endif
             );
         } catch (OperationCanceledException) when (!token.IsCancellationRequested) {

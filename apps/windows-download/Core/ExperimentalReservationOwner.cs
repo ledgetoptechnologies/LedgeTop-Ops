@@ -57,6 +57,15 @@ internal sealed class ExperimentalReservationOwner
         private object? injectedQuotaToken, injectedMarkerToken;
         private string? injectedMarkerDirectory;
         private bool active, uncertain, executing;
+        private void SetReceiptStatus(bool? newUncertain = null, bool? newQuotaInProgress = null)
+        {
+            var status = heldLease?.ExperimentalStatus ?? throw new InvalidOperationException("Receipt status root unavailable.");
+            lock (status.Gate) {
+                if (newUncertain.HasValue) uncertain = newUncertain.Value;
+                if (newQuotaInProgress.HasValue) quotaInProgress = newQuotaInProgress.Value;
+                if (status.Revision == long.MaxValue) status.Poisoned = true; else status.Revision++;
+            }
+        }
         internal LeaseReceipt(string root, string key, object authority) {
             if (!ReferenceEquals(authority, ReceiptAttachAuthority)) throw new InvalidOperationException("Receipt authority invalid.");
             this.root = root; this.key = key;
@@ -69,7 +78,7 @@ internal sealed class ExperimentalReservationOwner
                 if (!string.Equals(root, Path.GetFullPath(requestedRoot), StringComparison.OrdinalIgnoreCase) || key != requestedKey)
                     throw new TransferException("Experimental receipt does not match its entry.");
                 executing = true; T result = default!;
-                try { heldLease.RunExperimentalForEntry(root, key, () => { try { heldOwnedEntry.Validate(); } catch { uncertain = true; throw; } result = operation(); }); }
+                try { heldLease.RunExperimentalForEntry(root, key, () => { try { heldOwnedEntry.Validate(); } catch { SetReceiptStatus(newUncertain: true); throw; } result = operation(); }); }
                 finally { executing = false; }
                 return result;
             }
@@ -83,7 +92,7 @@ internal sealed class ExperimentalReservationOwner
                     throw new IOException("Injected receipt marker failure.");
                 }
                 return length;
-            } catch { uncertain = true; throw; }
+            } catch { SetReceiptStatus(newUncertain: true); throw; }
         });
         // Read-only observation; a later mutation must repeat admission in its own quota transaction.
         internal bool InspectCapacityForTest(string root, string key, PlaceholderHydrationCoordinator coordinator, long growth, CancellationToken token = default) => Execute(root, key, () => {
@@ -136,8 +145,10 @@ internal sealed class ExperimentalReservationOwner
                 return null;
             }
             if (heldLease is null || !ReferenceEquals(heldLease.Quota, quota)) throw new IOException("Synthetic staged quota root changed.");
-            if ((uncertain && !quotaInProgress) || !stagedVerified || stagedHandle is not null || stagedBytes is null || stagedPath is null)
-                throw new IOException("Synthetic staged reservation remains uncertain.");
+            lock (heldLease.ExperimentalStatus.Gate) {
+                if ((uncertain && !quotaInProgress) || !stagedVerified || stagedHandle is not null || stagedBytes is null || stagedPath is null)
+                    throw new IOException("Synthetic staged reservation remains uncertain.");
+            }
             VerifyStagedRecord(); return new(stagedPath, stagedBytes.Length, stagedGrowth);
         }
         internal static Dictionary<string, StagedSnapshot> SnapshotForRootUnderQuota(string root, object quota)
@@ -179,9 +190,8 @@ internal sealed class ExperimentalReservationOwner
         {
             T result = default!;
             HydrationQuotaGate.Run(heldLease!.Quota, () => {
-                quotaInProgress = true;
+                SetReceiptStatus(newUncertain: true, newQuotaInProgress: true);
                 try {
-                uncertain = true;
                 heldOwnedEntry!.Validate();
                 heldLease.ExperimentalMarkers.ValidateExisting(root, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
                 var path = Path.Combine(root, ".hydration-quota-v2.lock");
@@ -196,8 +206,8 @@ internal sealed class ExperimentalReservationOwner
                 }
                 result = operation(uncertainQuota);
                 heldOwnedEntry.Validate(); InjectQuotaFailureForTest("close");
-                uncertainQuota.Dispose(); uncertainQuota = null; uncertain = false;
-                } finally { quotaInProgress = false; }
+                uncertainQuota.Dispose(); uncertainQuota = null; SetReceiptStatus(newUncertain: false);
+                } finally { SetReceiptStatus(newQuotaInProgress: false); }
             }, token);
             return result;
         }
@@ -209,7 +219,7 @@ internal sealed class ExperimentalReservationOwner
                 heldLease.RunExperimentalForEntry(root, key, () => {
                     heldOwnedEntry.Validate();
                     heldLease.ExperimentalMarkers.ValidateExisting(injectedMarkerDirectory, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
-                    injectedMarkerDirectory = null; injectedMarkerToken = null; uncertain = false;
+                    injectedMarkerDirectory = null; injectedMarkerToken = null; SetReceiptStatus(newUncertain: false);
                 });
             }
         }
@@ -230,7 +240,7 @@ internal sealed class ExperimentalReservationOwner
                     if (ExperimentalOwnedStream.GetIdentity(uncertainQuota) != quotaIdentity ||
                         !string.Equals(ExperimentalOwnedStream.FinalPath(uncertainQuota), Path.Combine(root, ".hydration-quota-v2.lock"), StringComparison.OrdinalIgnoreCase))
                         throw new IOException("Experimental quota binding changed.");
-                    uncertainQuota.Dispose(); uncertainQuota = null; injectedQuotaToken = null; uncertain = false;
+                    uncertainQuota.Dispose(); uncertainQuota = null; injectedQuotaToken = null; SetReceiptStatus(newUncertain: false);
                 });
             }
         }
@@ -247,10 +257,10 @@ internal sealed class ExperimentalReservationOwner
                 if (stagedRecord is not null || stagedHandle is not null || stagedPath is not null || stagedPins is not null) throw new IOException("Synthetic staged record remains owned.");
                 if (executing) throw new InvalidOperationException("Experimental receipt scope is active.");
                 if (uncertain) throw new IOException("Experimental returned lease closure remains uncertain.");
-                uncertain = true;
+                SetReceiptStatus(newUncertain: true);
                 if (heldOwnedEntry is not null) { heldOwnedEntry.Dispose(); heldOwnedEntry = null; }
                 else { heldEntry!.Dispose(); heldEntry = null; }
-                heldLease!.Dispose(); heldLease = null; active = false; uncertain = false;
+                heldLease!.Dispose(); SetReceiptStatus(newUncertain: false); heldLease = null; active = false;
                 lock (RegistryGate) Receipts.Remove(this);
             }
         }
