@@ -1942,9 +1942,11 @@ internal static class ExperimentalColdDownloaderTests
         var reservationDir = Path.Combine(root, ".hydration-reservations-v2"); Directory.CreateDirectory(entryDir); Directory.CreateDirectory(reservationDir);
         File.WriteAllBytes(Path.Combine(reservationDir, ".verified-hydration-owner"), "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
         HydrationCacheConcurrency.Lease? admission = await HydrationCacheConcurrency.AcquireAsync(root, identity.ScopeKey + identity.CacheKey, CancellationToken.None);
+        ExperimentalEntryLease? entry = null; ExperimentalReservationOwner? owner = null; ExperimentalReservationOwner.LeaseReceipt? receipt = null; var completed = false;
+        try {
         admission.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate); var alias = admission;
-        ExperimentalEntryLease? entry = ExperimentalEntryLease.Open(admission, root, identity.ScopeKey, identity.CacheKey);
-        var gate = admission.Quota; ExperimentalReservationOwner? owner = null; ExperimentalReservationOwner.LeaseReceipt? receipt = null;
+        entry = ExperimentalEntryLease.Open(admission, root, identity.ScopeKey, identity.CacheKey);
+        var gate = admission.Quota;
         var growth = spec.Length + Downloader.HydrationStateGrowthBudget(spec) + 1024;
         var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = identity.ScopeKey, Entry = identity.CacheKey, Growth = growth });
         alias.RunExperimentalForRoot(root, () => HydrationQuotaGate.Run(gate, () => {
@@ -1956,14 +1958,15 @@ internal static class ExperimentalColdDownloaderTests
             receipt = owner.ReleaseAndReturn(quota);
         }, CancellationToken.None));
         Check(await coordinator.ExperimentalAuthorizeAndStageAsync(identity, receipt!));
-        foreach (var range in new[] { (Offset: 0L, Length: 4096L), (Offset: 4096L, Length: 905L) }) {
+        foreach (var range in new[] { (Offset: 0L, Length: (long?)4096L), (Offset: 4096L, Length: (long?)905L), (Offset: 4096L, Length: (long?)null) }) {
             var fake = SyntheticReceiptDownloadSource.Create(spec, content); var sink = new TestSink();
             var session = await coordinator.ExperimentalStartReceiptTransferAsync(identity, receipt!, fake, sink, range.Offset, range.Length);
             try {
                 await fake.Entered.WaitAsync(TimeSpan.FromSeconds(10)); fake.Release();
                 await session.WaitAsync().WaitAsync(TimeSpan.FromSeconds(10));
-                Check(sink.Completed == 1 && sink.Failed == 0 && sink.Bytes.Length == range.Offset + range.Length &&
-                    sink.Bytes.ToArray()[(int)range.Offset..].SequenceEqual(content[(int)range.Offset..(int)(range.Offset + range.Length)]));
+                var actualLength = range.Length ?? (content.LongLength - range.Offset);
+                Check(sink.Completed == 1 && sink.Failed == 0 && sink.Bytes.Length == range.Offset + actualLength &&
+                    sink.Bytes.ToArray()[(int)range.Offset..].SequenceEqual(content[(int)range.Offset..(int)(range.Offset + actualLength)]));
             } finally { fake.Release(); }
             File.Delete(Path.Combine(entryDir, identity.FileName));
         }
@@ -1973,7 +1976,13 @@ internal static class ExperimentalColdDownloaderTests
             catch (TransferException) { rejected = true; }
             Check(rejected && !fake.Entered.IsCompleted);
         }
-        receipt!.RemoveSyntheticReservationForTest(root, identity.ScopeKey + identity.CacheKey); receipt.Dispose();
+        receipt!.RemoveSyntheticReservationForTest(root, identity.ScopeKey + identity.CacheKey); receipt.Dispose(); receipt = null;
+        completed = true;
+        } finally {
+            // A failed test may still own a native operation or pre-transfer lease.
+            // Keep every exact reference alive and let WithFixture preserve its files.
+            if (!completed) UncertainTestResources.Add((fixture, admission, entry, owner, receipt));
+        }
     }
     private sealed class TestSink : IPlaceholderTransferSink
     {
