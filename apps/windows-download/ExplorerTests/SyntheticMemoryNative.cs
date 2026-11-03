@@ -96,15 +96,15 @@ internal static class SyntheticMemoryNative {
         var pending = PendingMode(get("LEDGETOP_TEST_PENDING_MARKER"));
         return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}; prewarm={prewarm}; serial={serial}; failFast={failFast}; processInfo={processInfo}; pendingMarker={pending}";
     }
-    private static string PendingMode(string? value) => value switch { null or "off" => "off", "reopen" => "reopen", "retained" => "retained", "mutated" => "mutated", _ => "invalid" };
+    private static string PendingMode(string? value) => value switch { null or "off" => "off", "reopen" => "reopen", "retained" => "retained", "mutated" => "mutated", "mutated-retained" => "mutated-retained", _ => "invalid" };
     internal static bool PendingOptionsValid(int count, bool retryProbe, string marker, string stage, string prewarm, string serial, string failFast, string pending, Func<string, string?> get) =>
-        pending == "off" || (pending is "reopen" or "retained" or "mutated" && count == 2 && !retryProbe && marker == "none" && stage == "none" && prewarm == "off" && serial == "off" && failFast == "off" && RetryOptionsValid(get));
+        pending == "off" || (pending is "reopen" or "retained" or "mutated" or "mutated-retained" && count == 2 && !retryProbe && marker == "none" && stage == "none" && prewarm == "off" && serial == "off" && failFast == "off" && RetryOptionsValid(get));
     internal static bool PendingTraceValid(NativeStallTrace.Event[] events, long attempted, long dropped, string mode = "reopen") {
         if (dropped != 0 || attempted != events.LongLength || events.Count(e => e.Kind == NativeStallTrace.Stage.CallbackArrival) != 2 || events.Count(e => e.Kind == NativeStallTrace.Stage.CallbackQueued) != 2 ||
             events.Any(e => e.Kind == NativeStallTrace.Stage.PendingMarkerInvalid)) return false;
         var mutation = new[] { NativeStallTrace.Stage.PendingMarkerMutateOpenEnter, NativeStallTrace.Stage.PendingMarkerMutateOpenVerified, NativeStallTrace.Stage.PendingMarkerMutateWriteComplete, NativeStallTrace.Stage.PendingMarkerMutateFlushComplete, NativeStallTrace.Stage.PendingMarkerMutateCloseComplete };
-        if (mode != "mutated" && mutation.Any(stage => events.Any(e => e.Kind == stage))) return false;
-        var stages = (mode == "mutated" ? mutation : Array.Empty<NativeStallTrace.Stage>()).Concat(new[] { NativeStallTrace.Stage.PendingMarkerAWaiting, NativeStallTrace.Stage.PendingMarkerBReadEnter, NativeStallTrace.Stage.PendingMarkerBReadVerified, NativeStallTrace.Stage.PendingMarkerBReadExit, NativeStallTrace.Stage.PendingMarkerAReleased }).ToArray();
+        if (mode is not ("mutated" or "mutated-retained") && mutation.Any(stage => events.Any(e => e.Kind == stage))) return false;
+        var stages = (mode is "mutated" or "mutated-retained" ? mutation : Array.Empty<NativeStallTrace.Stage>()).Concat(new[] { NativeStallTrace.Stage.PendingMarkerAWaiting, NativeStallTrace.Stage.PendingMarkerBReadEnter, NativeStallTrace.Stage.PendingMarkerBReadVerified, NativeStallTrace.Stage.PendingMarkerBReadExit, NativeStallTrace.Stage.PendingMarkerAReleased }).ToArray();
         if (stages.Any(stage => events.Count(e => e.Kind == stage) != 1)) return false;
         var positions = stages.Select(stage => events.Single(e => e.Kind == stage).Sequence).ToArray();
         return positions.Zip(positions.Skip(1), (a, b) => a < b).All(ordered => ordered);
@@ -160,7 +160,7 @@ internal static class SyntheticMemoryNative {
             }
             if (!passed) throw new IOException("Synthetic pending control case did not drain.");
         }
-        foreach (var mode in new[] { "reopen", "retained", "mutated" }) {
+        foreach (var mode in new[] { "reopen", "retained", "mutated", "mutated-retained" }) {
             await Case(mode, async scope => {
                 var trace = NativeStallTrace.Enable();
                 try {
@@ -174,7 +174,7 @@ internal static class SyntheticMemoryNative {
                     var missingMutation = events.Where(e => e.Kind != NativeStallTrace.Stage.PendingMarkerMutateFlushComplete).ToArray();
                     if (!scope.EvidenceValid || !PendingTraceValid(events, NativeStallTrace.Attempted(trace), NativeStallTrace.Dropped(trace), mode) ||
                         PendingTraceValid(events, NativeStallTrace.Attempted(trace), 1, mode) || PendingTraceValid(outOfOrder, outOfOrder.LongLength, 0, mode) ||
-                        (mode == "mutated" && PendingTraceValid(missingMutation, missingMutation.LongLength, 0, mode)))
+                        (mode is "mutated" or "mutated-retained" && PendingTraceValid(missingMutation, missingMutation.LongLength, 0, mode)))
                         throw new IOException("Synthetic pending evidence was incorrect.");
                 } finally { NativeStallTrace.Disable(trace); }
             });
@@ -456,6 +456,8 @@ internal static class SyntheticMemoryNative {
     internal static int CleanupEvidenceTests() {
         if (!PendingOptionsValid(2, false, "none", "none", "off", "off", "off", "reopen", _ => null) ||
             !PendingOptionsValid(2, false, "none", "none", "off", "off", "off", "mutated", _ => null) ||
+            !PendingOptionsValid(2, false, "none", "none", "off", "off", "off", "mutated-retained", _ => null) ||
+            PendingOptionsValid(2, false, "none", "none", "off", "on", "off", "mutated-retained", _ => null) ||
             PendingOptionsValid(2, false, "none", "none", "off", "on", "off", "mutated", _ => null) ||
             PendingOptionsValid(1, false, "none", "none", "off", "off", "off", "retained", _ => null) ||
             PendingOptionsValid(2, false, "none", "quota-reservation", "off", "off", "off", "reopen", _ => null) ||

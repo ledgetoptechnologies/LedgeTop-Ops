@@ -39,11 +39,11 @@ internal static class DiagnosticPendingMarkerControl
         private bool aSeen, bSeen, aTransferred, bTransferred, verified, invalid, disposed;
         private int active;
         internal string MarkerPath { get; }
-        internal byte[] CleanupExpected => mode == "mutated" ? Mutated : Expected;
+        internal byte[] CleanupExpected => mode is "mutated" or "mutated-retained" ? Mutated : Expected;
         internal bool EvidenceValid { get { lock (sync) return !invalid && aSeen && bSeen && aTransferred && bTransferred && verified && active == 0; } }
         internal Scope(string cache, string mode, TimeSpan timeout, Func<byte[]>? testRead)
         {
-            if (mode is not ("reopen" or "retained" or "mutated") || timeout <= TimeSpan.Zero || timeout > TimeSpan.FromSeconds(30) ||
+            if (mode is not ("reopen" or "retained" or "mutated" or "mutated-retained") || timeout <= TimeSpan.Zero || timeout > TimeSpan.FromSeconds(30) ||
                 Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") != "1") throw new IOException("Synthetic pending control mode invalid.");
             var artifact = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
             if (string.IsNullOrEmpty(artifact) || !Path.IsPathFullyQualified(artifact) || artifact.StartsWith("\\\\", StringComparison.Ordinal)) throw new IOException("Synthetic artifact root invalid.");
@@ -59,8 +59,8 @@ internal static class DiagnosticPendingMarkerControl
             Directory.CreateDirectory(directory); RequireLocalDirectory(directory);
             MarkerPath = Path.Combine(directory, "fixture.marker");
             using (var output = new FileStream(MarkerPath, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { output.Write(Expected); output.Flush(true); }
-            if (mode == "mutated") { using var identityFile = new FileStream(MarkerPath, FileMode.Open, FileAccess.Read, FileShare.Read); initialIdentity = Identify(identityFile.SafeFileHandle); }
-            if (mode == "retained") retained = new FileStream(MarkerPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (mode is "mutated" or "mutated-retained") { using var identityFile = new FileStream(MarkerPath, FileMode.Open, FileAccess.Read, FileShare.Read); initialIdentity = Identify(identityFile.SafeFileHandle); }
+            if (mode is "retained" or "mutated-retained") retained = new FileStream(MarkerPath, FileMode.Open, FileAccess.Read, mode == "mutated-retained" ? FileShare.ReadWrite : FileShare.Read);
         }
         private static void RequireLocalDirectory(string path) {
             for (string? current = path; current is not null; current = Path.GetDirectoryName(current)) {
@@ -79,7 +79,7 @@ internal static class DiagnosticPendingMarkerControl
         }
         private void MutateMarker() {
             NativeStallTrace.Record(NativeStallTrace.Stage.PendingMarkerMutateOpenEnter);
-            using (var output = new FileStream(MarkerPath, FileMode.Open, FileAccess.Write, FileShare.None)) {
+            using (var output = new FileStream(MarkerPath, FileMode.Open, FileAccess.Write, mode == "mutated-retained" ? FileShare.Read : FileShare.None)) {
                 if (Identify(output.SafeFileHandle) != initialIdentity) throw new IOException("Synthetic marker identity changed before mutation.");
                 NativeStallTrace.Record(NativeStallTrace.Stage.PendingMarkerMutateOpenVerified);
                 output.Write(Mutated); NativeStallTrace.Record(NativeStallTrace.Stage.PendingMarkerMutateWriteComplete);
@@ -91,7 +91,7 @@ internal static class DiagnosticPendingMarkerControl
             if (testRead is not null) return testRead();
             using var opened = mode is "reopen" or "mutated" ? new FileStream(MarkerPath, FileMode.Open, FileAccess.Read, FileShare.Read) : null;
             var stream = opened ?? retained ?? throw new IOException("Synthetic retained marker unavailable.");
-            if (mode == "mutated" && Identify(stream.SafeFileHandle) != initialIdentity) throw new IOException("Synthetic marker identity changed during comparison.");
+            if (mode is "mutated" or "mutated-retained" && Identify(stream.SafeFileHandle) != initialIdentity) throw new IOException("Synthetic marker identity changed during comparison.");
             if (stream.Length != Expected.Length) return [];
             var bytes = new byte[Expected.Length]; var count = RandomAccess.Read(stream.SafeFileHandle, bytes, 0);
             return count == bytes.Length ? bytes : [];
@@ -109,7 +109,7 @@ internal static class DiagnosticPendingMarkerControl
             }
             try {
                 if (a) {
-                    if (mode == "mutated") MutateMarker();
+                    if (mode is "mutated" or "mutated-retained") MutateMarker();
                     NativeStallTrace.Record(NativeStallTrace.Stage.PendingMarkerAWaiting); aWaiting.TrySetResult();
                     if (!await bFinished.Task.WaitAsync(timeout, token).ConfigureAwait(false)) throw new IOException("Synthetic marker read did not verify.");
                     NativeStallTrace.Record(NativeStallTrace.Stage.PendingMarkerAReleased);
@@ -120,7 +120,7 @@ internal static class DiagnosticPendingMarkerControl
                         await aWaiting.Task.WaitAsync(timeout, token).ConfigureAwait(false);
                         if (bFinished.Task.IsCompleted) throw new IOException("Synthetic pending comparison already failed.");
                         NativeStallTrace.Record(NativeStallTrace.Stage.PendingMarkerBReadEnter); entered = true;
-                        if (!ReadMarker().AsSpan().SequenceEqual(mode == "mutated" ? Mutated : Expected)) throw new IOException("Synthetic marker bytes differed.");
+                        if (!ReadMarker().AsSpan().SequenceEqual(mode is "mutated" or "mutated-retained" ? Mutated : Expected)) throw new IOException("Synthetic marker bytes differed.");
                         NativeStallTrace.Record(NativeStallTrace.Stage.PendingMarkerBReadVerified); matched = true;
                         lock (sync) verified = true;
                     } finally {
