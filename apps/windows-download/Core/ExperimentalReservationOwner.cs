@@ -82,16 +82,18 @@ internal sealed class ExperimentalReservationOwner
         internal bool InspectCapacityForTest(string root, string key, PlaceholderHydrationCoordinator coordinator, long growth, CancellationToken token = default) => Execute(root, key, () => {
             ArgumentNullException.ThrowIfNull(coordinator);
             if (growth < 0) throw new ArgumentOutOfRangeException(nameof(growth));
-            try { return coordinator.ExperimentalCanReserve(heldLease!, growth, token); }
-            catch { uncertain = true; throw; }
+            return RunQuota(quota => coordinator.ExperimentalCanReserveUnderOwnedQuota(heldLease!, quota, growth), token);
         });
-        internal long AccountMarkerUnderQuota(string root, string key, string directory, CancellationToken token = default) => Execute(root, key, () => {
-            long result = 0;
+        internal long AccountMarkerUnderQuota(string root, string key, string directory, CancellationToken token = default) => Execute(root, key, () =>
+            RunQuota(_ => heldLease!.ExperimentalMarkers.AccountMarker(Path.Combine(directory, ".verified-hydration-owner")), token));
+        private T RunQuota<T>(Func<SafeFileHandle, T> operation, CancellationToken token)
+        {
+            T result = default!;
             HydrationQuotaGate.Run(heldLease!.Quota, () => {
                 uncertain = true;
                 heldOwnedEntry!.Validate();
-                heldLease.ExperimentalMarkers.ValidateExisting(this.root, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
-                var path = Path.Combine(this.root, ".hydration-quota-v2.lock");
+                heldLease.ExperimentalMarkers.ValidateExisting(root, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+                var path = Path.Combine(root, ".hydration-quota-v2.lock");
                 uncertainQuota = ExperimentalOwnedStream.Open(path, 0xC0000080, 0, 4, 0x00200000);
                 quotaIdentity = ExperimentalOwnedStream.GetIdentity(uncertainQuota);
                 InjectQuotaFailureForTest("validation");
@@ -101,12 +103,12 @@ internal sealed class ExperimentalReservationOwner
                     ReceiptQuotaEnteredTestSignal.Set();
                     if (ReceiptQuotaReleaseTestSignal is null || !ReceiptQuotaReleaseTestSignal.Wait(TimeSpan.FromSeconds(10))) throw new IOException("Synthetic receipt barrier timed out.");
                 }
-                result = heldLease.ExperimentalMarkers.AccountMarker(Path.Combine(directory, ".verified-hydration-owner"));
+                result = operation(uncertainQuota);
                 heldOwnedEntry.Validate(); InjectQuotaFailureForTest("close");
                 uncertainQuota.Dispose(); uncertainQuota = null; uncertain = false;
             }, token);
             return result;
-        });
+        }
         internal void SettleInjectedMarkerFailureForTest(object token) {
             lock (gate) {
                 if (!active || !uncertain || !ReferenceEquals(injectedMarkerToken, token) || token is null || ReceiptMarkerFailureTestHook ||

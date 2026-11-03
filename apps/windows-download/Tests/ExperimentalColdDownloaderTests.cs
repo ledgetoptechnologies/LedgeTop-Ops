@@ -971,11 +971,11 @@ internal static class ExperimentalColdDownloaderTests
                 Check(heldReceipt.InspectCapacityForTest(root, scope + key, capacityCoordinator, 10000 - usedForCapacity - 11));
                 Check(!heldReceipt.InspectCapacityForTest(root, scope + key, capacityCoordinator, 10001 - usedForCapacity - 11));
                 heldReceipt.ValidateEntry(root, scope + key); File.Delete(unknownRecord);
-                foreach (var failureStage in new[] { "validation", "close" }) {
+                foreach (var capacityOperation in new[] { false, true }) foreach (var failureStage in new[] { "validation", "close" }) {
                     var failureToken = new object(); var injected = false;
                     ExperimentalReservationOwner.ReceiptQuotaFailureStageTestHook = failureStage;
                     ExperimentalReservationOwner.ReceiptQuotaFailureTokenTestHook = failureToken;
-                    try { _ = heldReceipt.AccountMarkerUnderQuota(root, scope + key, root); }
+                    try { if (capacityOperation) _ = heldReceipt.InspectCapacityForTest(root, scope + key, capacityCoordinator, 0); else _ = heldReceipt.AccountMarkerUnderQuota(root, scope + key, root); }
                     catch (IOException error) when (error.Message == "Injected receipt quota " + failureStage + " failure.") { injected = true; }
                     finally { ExperimentalReservationOwner.ReceiptQuotaFailureStageTestHook = null; ExperimentalReservationOwner.ReceiptQuotaFailureTokenTestHook = null; }
                     Check(injected && ExperimentalReservationOwner.RetainedCount == 1);

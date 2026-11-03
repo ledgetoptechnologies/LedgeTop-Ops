@@ -608,29 +608,42 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         if (!result.Fits) throw new TransferException("Hydration cache capacity exceeded.");
         return result.Used;
     }
-    internal bool ExperimentalCanReserve(HydrationCacheConcurrency.Lease admission, long growth, CancellationToken token = default) =>
-        ExperimentalCapacityDecision(admission, growth, token).Fits;
     private (long Used, bool Fits) ExperimentalCapacityDecision(HydrationCacheConcurrency.Lease admission, long growth, CancellationToken token)
     {
         if (growth < 0) throw new ArgumentOutOfRangeException(nameof(growth));
-        long used = 0; var fits = false;
-        admission.RunExperimentalForRoot(root, () => WithQuota(admission.Quota, () => {
-            var markers = admission.ExperimentalMarkers;
-            var retained = ExperimentalReservationOwner.SnapshotForRoot(root);
-            var walked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var file in Walk(root)) {
-                RequireSafe(file);
-                if (retained.TryGetValue(file, out var live)) {
-                    if (ExperimentalOmitReservationFromWalkTestHook?.Invoke(file) == true) continue;
-                    if (!walked.Add(file)) throw new TransferException("Retained reservation appears more than once.");
-                    used = checked(used + live.RecordBytes);
-                } else used = checked(used + (string.Equals(Path.GetFileName(file), Marker, StringComparison.OrdinalIgnoreCase) ? markers.AccountMarker(file) : new FileInfo(file).Length));
-            }
-            if (!walked.SetEquals(retained.Keys)) throw new TransferException("Retained reservation is missing from the cache walk.");
-            var reserved = ExperimentalReservedBytes(Path.Combine(root, ".hydration-reservations-v2"), retained);
-            fits = reserved <= maximumCacheBytes && used <= maximumCacheBytes - reserved && growth <= maximumCacheBytes - reserved - used;
-        }, token));
-        return (used, fits);
+        (long Used, bool Fits) result = default;
+        admission.RunExperimentalForRoot(root, () => WithQuota(admission.Quota, () => result = ExperimentalScanUnderQuota(admission, growth), token));
+        return result;
+    }
+    internal bool ExperimentalCanReserveUnderOwnedQuota(HydrationCacheConcurrency.Lease admission, SafeFileHandle quota, long growth)
+    {
+        if (growth < 0) throw new ArgumentOutOfRangeException(nameof(growth));
+        if (!admission.ExperimentalGateHeld || !Monitor.IsEntered(admission.Quota)) throw new InvalidOperationException("Experimental quota transaction is not held.");
+        var result = false;
+        admission.RunExperimentalForRoot(root, () => {
+            ExperimentalOwnedStream.RequireRegularKind(quota, false); ExperimentalOwnedStream.RequireSingleLink(quota);
+            if (!string.Equals(ExperimentalOwnedStream.FinalPath(quota), Path.Combine(root, ".hydration-quota-v2.lock"), StringComparison.OrdinalIgnoreCase))
+                throw new IOException("Experimental quota binding changed.");
+            result = ExperimentalScanUnderQuota(admission, growth).Fits;
+        });
+        return result;
+    }
+    private (long Used, bool Fits) ExperimentalScanUnderQuota(HydrationCacheConcurrency.Lease admission, long growth)
+    {
+        var markers = admission.ExperimentalMarkers;
+        var retained = ExperimentalReservationOwner.SnapshotForRoot(root);
+        var walked = new HashSet<string>(StringComparer.OrdinalIgnoreCase); long used = 0;
+        foreach (var file in Walk(root)) {
+            RequireSafe(file);
+            if (retained.TryGetValue(file, out var live)) {
+                if (ExperimentalOmitReservationFromWalkTestHook?.Invoke(file) == true) continue;
+                if (!walked.Add(file)) throw new TransferException("Retained reservation appears more than once.");
+                used = checked(used + live.RecordBytes);
+            } else used = checked(used + (string.Equals(Path.GetFileName(file), Marker, StringComparison.OrdinalIgnoreCase) ? markers.AccountMarker(file) : new FileInfo(file).Length));
+        }
+        if (!walked.SetEquals(retained.Keys)) throw new TransferException("Retained reservation is missing from the cache walk.");
+        var reserved = ExperimentalReservedBytes(Path.Combine(root, ".hydration-reservations-v2"), retained);
+        return (used, reserved <= maximumCacheBytes && used <= maximumCacheBytes - reserved && growth <= maximumCacheBytes - reserved - used);
     }
     private static long ExperimentalReservedBytes(string directory, Dictionary<string, ExperimentalReservationOwner> retained)
     {
