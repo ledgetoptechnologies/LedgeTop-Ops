@@ -25,6 +25,7 @@ import {
 const instances: Miniflare[] = [];
 const secret = "viewer-event-secret-32-characters-minimum";
 let database: D1Database, env: Env, app: Hono<any>;
+let notificationEmailSend: ReturnType<typeof vi.fn>;
 
 async function setup(): Promise<void> {
   const instance = new Miniflare({ compatibilityDate: "2026-08-06", modules: true,
@@ -49,13 +50,14 @@ async function setup(): Promise<void> {
   await database.exec(machineRateMigration.replace(/--.*$/gm, "").replace(/\s*\n\s*/g, " "));
   const workspaceGrantRateMigration = readFileSync(new URL("../migrations/0030_viewer_client_grant_bridge_rate_limit.sql", import.meta.url), "utf8");
   await database.exec(workspaceGrantRateMigration.replace(/--.*$/gm, "").replace(/\s*\n\s*/g, " "));
+  notificationEmailSend = vi.fn(async () => undefined);
   env = {
     OPS_DB: database, VIEWER_INTEGRATION_ENABLED: "true", VIEWER_PROCESSING_ENABLED: "true",
     PUBLIC_BASE_URL: "https://ops.example.test",
     VIEWER_BASE_URL: "https://viewer.example.test", VIEWER_EVENT_KEY_ID: "viewer-v1",
     VIEWER_EVENT_HMAC_SECRET: secret, NOTIFICATION_FROM: "notify@example.test",
     CLIENT_VIEWER_SHARES_ENABLED: "true", INCOMING_EXPECTED_HOST: "incoming.example.test",
-    NOTIFICATION_EMAIL: { send: vi.fn(async () => undefined) },
+    NOTIFICATION_EMAIL: { send: notificationEmailSend },
   } as unknown as Env;
   app = new Hono(); registerViewerProcessingRoutes(app);
 }
@@ -187,10 +189,10 @@ describe("Viewer processing event callback", () => {
   it("delivers the durable notification and only prunes expired nonces", async () => {
     expect((await request(body("event-ready-000001"), "event-nonce-1234567890")).status).toBe(202);
     expect(await processViewerProcessingNotifications(env)).toBe(1);
-    expect(env.NOTIFICATION_EMAIL?.send).toHaveBeenCalledWith(expect.objectContaining({
+    expect(notificationEmailSend).toHaveBeenCalledWith(expect.objectContaining({
       from: expect.objectContaining({ name: "Ledge Top 3D Processing" }),
     }));
-    expect(JSON.stringify(env.NOTIFICATION_EMAIL?.send.mock.calls)).not.toContain("LTDS");
+    expect(JSON.stringify(notificationEmailSend.mock.calls)).not.toContain("LTDS");
     expect(await database.prepare("SELECT status FROM viewer_processing_notification_outbox").first<string>("status")).toBe("sent");
     await database.prepare("INSERT INTO viewer_event_nonces VALUES('viewer-v1','expired-nonce-12345',datetime('now','-1 minute'),datetime('now'))").run();
     await pruneViewerEventNonces(env);
