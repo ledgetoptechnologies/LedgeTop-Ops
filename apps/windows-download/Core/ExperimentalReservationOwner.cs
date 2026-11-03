@@ -45,7 +45,12 @@ internal sealed class ExperimentalReservationOwner
         private HydrationCacheConcurrency.Lease? heldLease;
         private FileStream? heldEntry;
         private ExperimentalEntryLease? heldOwnedEntry;
-        private SafeFileHandle? uncertainQuota;
+        private SafeFileHandle? uncertainQuota, stagedHandle;
+        private FileStream? stagedRecord;
+        private string? stagedPath;
+        private byte[]? stagedBytes;
+        private ExperimentalOwnedStream.Identity stagedIdentity;
+        private bool stagedVerified;
         private ExperimentalOwnedStream.Identity quotaIdentity;
         private object? injectedQuotaToken, injectedMarkerToken;
         private string? injectedMarkerDirectory;
@@ -82,10 +87,59 @@ internal sealed class ExperimentalReservationOwner
         internal bool InspectCapacityForTest(string root, string key, PlaceholderHydrationCoordinator coordinator, long growth, CancellationToken token = default) => Execute(root, key, () => {
             ArgumentNullException.ThrowIfNull(coordinator);
             if (growth < 0) throw new ArgumentOutOfRangeException(nameof(growth));
+            if (stagedRecord is not null || stagedHandle is not null) throw new InvalidOperationException("Synthetic staged record requires retained accounting.");
             return RunQuota(quota => coordinator.ExperimentalCanReserveUnderOwnedQuota(heldLease!, quota, growth), token);
         });
         internal long AccountMarkerUnderQuota(string root, string key, string directory, CancellationToken token = default) => Execute(root, key, () =>
             RunQuota(_ => heldLease!.ExperimentalMarkers.AccountMarker(Path.Combine(directory, ".verified-hydration-owner")), token));
+        // Mechanics-only: accepts synthetic input, not an authorization proof.
+        // A live staged record cannot yet participate in the coordinator ledger.
+        internal bool StageSyntheticReservationForTest(string root, PlaceholderIdentity identity, DownloadSpec spec, PlaceholderHydrationCoordinator coordinator, CancellationToken token = default) =>
+            Execute(root, identity.ScopeKey + identity.CacheKey, () => {
+                if (stagedRecord is not null || stagedHandle is not null) throw new InvalidOperationException("A synthetic staged record already exists.");
+                identity.Encode(); ArgumentNullException.ThrowIfNull(coordinator);
+                if (!spec.ContentUri.IsAbsoluteUri || spec.ContentUri.Scheme != "https" || spec.ContentUri.UserInfo.Length != 0 || spec.ContentUri.Fragment.Length != 0 || !spec.ContentUri.Host.EndsWith(".invalid", StringComparison.OrdinalIgnoreCase) ||
+                    spec.ContentUri.GetLeftPart(UriPartial.Authority) != identity.Origin || spec.OpaqueIdentity != identity.LogicalFileId + ":" + identity.RemoteVersion ||
+                    spec.FileName != identity.FileName || spec.Length != identity.Length || spec.ETag != identity.ETag || spec.Sha256 != identity.Sha256)
+                    throw new TransferException("Synthetic reservation identity does not match its specification.");
+                var growth = checked(spec.Length + Downloader.HydrationStateGrowthBudget(spec) + 1024);
+                return RunQuota(quota => {
+                    if (!coordinator.ExperimentalCanReserveUnderOwnedQuota(heldLease!, quota, growth)) return false;
+                    var dir = Path.Combine(this.root, ".hydration-reservations-v2");
+                    heldLease!.ExperimentalMarkers.ValidateExisting(dir, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+                    var path = Path.Combine(dir, identity.ScopeKey + "-" + identity.CacheKey + ".json");
+                    var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = identity.ScopeKey, Entry = identity.CacheKey, Growth = growth });
+                    if (bytes.Length > 1024) throw new IOException("Synthetic reservation metadata exceeds its bound.");
+                    try { stagedHandle = ExperimentalOwnedStream.Open(path, 0xC0010080, 1, 1, 0x00200000); }
+                    catch (IOException error) when (error.HResult is 80 or 183) { return false; }
+                    stagedPath = path; stagedBytes = bytes;
+                    stagedRecord = new FileStream(stagedHandle, FileAccess.ReadWrite); stagedHandle = null;
+                    ExperimentalOwnedStream.RequireRegularKind(stagedRecord.SafeFileHandle, false); ExperimentalOwnedStream.RequireSingleLink(stagedRecord.SafeFileHandle);
+                    stagedIdentity = ExperimentalOwnedStream.GetIdentity(stagedRecord.SafeFileHandle);
+                    stagedRecord.Write(bytes); stagedRecord.Flush(true); VerifyStagedRecord(); stagedVerified = true;
+                    return true;
+                }, token);
+            });
+        private void VerifyStagedRecord()
+        {
+            if (stagedRecord is null || stagedBytes is null || stagedPath is null ||
+                ExperimentalOwnedStream.GetIdentity(stagedRecord.SafeFileHandle) != stagedIdentity ||
+                !string.Equals(ExperimentalOwnedStream.FinalPath(stagedRecord.SafeFileHandle), stagedPath, StringComparison.OrdinalIgnoreCase) || stagedRecord.Length != stagedBytes.Length)
+                throw new IOException("Synthetic staged record binding changed.");
+            heldLease!.ExperimentalMarkers.ValidateExisting(Path.GetDirectoryName(stagedPath)!, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+            stagedRecord.Position = 0; var observed = new byte[stagedBytes.Length]; stagedRecord.ReadExactly(observed);
+            if (!observed.AsSpan().SequenceEqual(stagedBytes)) throw new IOException("Synthetic staged record contents changed.");
+        }
+        internal void RemoveSyntheticReservationForTest(string root, string key, CancellationToken token = default) => Execute(root, key, () => RunQuota(_ => {
+            if (!stagedVerified || stagedRecord is null || stagedPath is null) throw new IOException("Synthetic staged record is unavailable.");
+            VerifyStagedRecord(); byte disposition = 1;
+            if (!SetFileInformationByHandle(stagedRecord.SafeFileHandle, 4, ref disposition, 1)) throw new IOException("Synthetic staged record disposition failed.");
+            stagedRecord.Dispose(); stagedRecord = null;
+            try { using var unexpected = ExperimentalOwnedStream.Open(stagedPath, 0x80, 7, 3, 0x00200000); throw new IOException("Synthetic staged record remains present."); }
+            catch (IOException error) when (error.HResult == 2) { }
+            stagedPath = null; stagedBytes = null; stagedVerified = false;
+            return true;
+        }, token));
         private T RunQuota<T>(Func<SafeFileHandle, T> operation, CancellationToken token)
         {
             T result = default!;
@@ -133,6 +187,7 @@ internal sealed class ExperimentalReservationOwner
                 heldLease.RunExperimentalForEntry(root, key, () => {
                     heldOwnedEntry.Validate();
                     heldLease.ExperimentalMarkers.ValidateExisting(root, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+                    if (stagedRecord is not null || stagedHandle is not null) { if (!stagedVerified || stagedHandle is not null) throw new IOException("Synthetic staged record remains uncertain."); VerifyStagedRecord(); }
                     ExperimentalOwnedStream.RequireRegularKind(uncertainQuota, false); ExperimentalOwnedStream.RequireSingleLink(uncertainQuota);
                     if (ExperimentalOwnedStream.GetIdentity(uncertainQuota) != quotaIdentity ||
                         !string.Equals(ExperimentalOwnedStream.FinalPath(uncertainQuota), Path.Combine(root, ".hydration-quota-v2.lock"), StringComparison.OrdinalIgnoreCase))
@@ -151,6 +206,7 @@ internal sealed class ExperimentalReservationOwner
         public void Dispose() {
             lock (gate) {
                 if (!active) return;
+                if (stagedRecord is not null || stagedHandle is not null || stagedPath is not null) throw new IOException("Synthetic staged record remains owned.");
                 if (executing) throw new InvalidOperationException("Experimental receipt scope is active.");
                 if (uncertain) throw new IOException("Experimental returned lease closure remains uncertain.");
                 uncertain = true;
