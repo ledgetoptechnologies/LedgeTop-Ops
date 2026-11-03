@@ -179,3 +179,30 @@ test('fresh empty task details remove deleted sets instead of restoring cached r
   assert.equal(workspace.setId, null);
   assert.deepEqual(context.state.taskDetails.task.gcp.sets, []);
 });
+
+test('late auto-import cannot overwrite a newer authoritative manual-import list', async () => {
+  let releaseImport;
+  const importPending = new Promise(resolve => { releaseImport = resolve; });
+  const { context } = fixture(async path => {
+    if (path.endsWith('/auto-import')) return importPending;
+    if (path === '/api/v1/gcp-sets/manual-set') return { set: { id: 'manual-set' }, points: [{ id: 'manual-point' }] };
+    if (path.endsWith('/gcp-correspondences')) return { correspondences: [] };
+    if (path.includes('/gcp-images?')) return { images: [] };
+    throw new Error(`Unexpected request ${path}`);
+  });
+  const workspace = context.gcpWorkspace('task');
+  const staleScan = context.refreshGcpWorkspace('task');
+  await Promise.resolve();
+  workspace.gcpSetListVersion = 1;
+  workspace.authoritativeGcpSets = true;
+  workspace.autoImportedSetsByDatasetId = { dataset: [{ id: 'manual-set' }] };
+  context.state.taskDetails.task.gcp = { sets: [{ id: 'manual-set' }] };
+  const authoritativeRefresh = context.refreshGcpWorkspace('task');
+  releaseImport({ sets: [{ id: 'old-auto-set' }] });
+  await Promise.all([staleScan, authoritativeRefresh]);
+  assert.equal(workspace.autoScannedDatasetId, 'dataset');
+  assert.equal(workspace.authoritativeGcpSets, true);
+  assert.deepEqual(workspace.autoImportedSetsByDatasetId.dataset.map(set => set.id), ['manual-set']);
+  assert.deepEqual(context.state.taskDetails.task.gcp.sets.map(set => set.id), ['manual-set']);
+  assert.equal(workspace.setId, 'manual-set');
+});

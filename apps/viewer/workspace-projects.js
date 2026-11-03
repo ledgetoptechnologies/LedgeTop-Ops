@@ -576,6 +576,7 @@ async function refreshTaskDetails(taskId,quiet=false){
     if(!quiet&&workspace&&results[2].status==='fulfilled'){
       workspace.autoImportedSetsByDatasetId ||= {};
       workspace.autoImportedSetsByDatasetId[refreshedTask.datasetId]=results[2].value?.sets||[];
+      workspace.gcpSetListVersion=(workspace.gcpSetListVersion||0)+1;
       workspace.authoritativeGcpSets=true;
     }
     if(!quiet){try{await refreshGcpWorkspace(taskId,false)}catch(error){state.taskDetails[taskId].gcp={...(state.taskDetails[taskId].gcp||{sets:[]}),error:error.message}}}
@@ -610,13 +611,16 @@ async function refreshGcpWorkspace(taskId,shouldRender=true){
       const importKey=`${taskId}:${task.datasetId}`;
       let pending=gcpAutoImports.get(importKey);
       if(!pending){
+        const membershipVersion=workspace.gcpSetListVersion||0;
         pending=api(`/api/v1/datasets/${encodeURIComponent(task.datasetId)}/gcp-sets/auto-import`,{method:'POST',body:{}})
-          .then(auto=>{const imported=auto.sets||[];workspace.autoImportedSetsByDatasetId[task.datasetId]=imported;workspace.autoScannedDatasetId=task.datasetId;workspace.authoritativeGcpSets=false;return imported})
+          .then(auto=>{const imported=auto.sets||[],isFresh=(workspace.gcpSetListVersion||0)===membershipVersion;workspace.autoScannedDatasetId=task.datasetId;if(isFresh){workspace.autoImportedSetsByDatasetId[task.datasetId]=imported;workspace.gcpSetListVersion=(workspace.gcpSetListVersion||0)+1;workspace.authoritativeGcpSets=false}return{sets:imported,installedVersion:isFresh?workspace.gcpSetListVersion:null}})
           .finally(()=>{if(gcpAutoImports.get(importKey)===pending)gcpAutoImports.delete(importKey)});
         gcpAutoImports.set(importKey,pending);
       }
-      sets=await pending;
+      const imported=await pending;
       if(!isCurrent())return;
+      sets=imported.installedVersion!==null&&(workspace.gcpSetListVersion||0)===imported.installedVersion
+        ?imported.sets:workspace.authoritativeGcpSets?(detail.gcp?.sets||[]):(workspace.autoImportedSetsByDatasetId[task.datasetId]||detail.gcp?.sets||[]);
     }
   }
   if(!sets.some(set=>set.id===workspace.setId)){workspace.setId=sets[0]?.id||null;workspace.pointId=null;releaseGcpImage(workspace)}
