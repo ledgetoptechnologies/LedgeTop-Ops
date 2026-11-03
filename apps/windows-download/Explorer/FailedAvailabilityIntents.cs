@@ -34,6 +34,7 @@ internal sealed class FailedAvailabilityIntents
         if (intent is AvailabilityIntent.None or AvailabilityIntent.Unknown) throw new ArgumentException("A concrete failed availability intent is required.");
         failed[file] = intent;
     }
+    internal void Clear() => failed.Clear();
     private void Validate(string file, AvailabilityIntent intent)
     {
         if (!known.Contains(file) || !Enum.IsDefined(intent)) throw new ArgumentException("Availability intent is outside the manifest.");

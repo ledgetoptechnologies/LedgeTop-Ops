@@ -8,6 +8,7 @@ internal static class BoundedAvailabilityWorkerTests
         await FourSlotAvailabilityTests.RunAsync();
         await FreshIntentAfterPathWait();
         await FailedIntentGenerations();
+        await ExplicitRetryFencesOldFailures();
         await UnknownObservationDoesNotReleaseFailure();
         await SamePathKeepFreeGate();
         await StopDisconnectsBeforeJoiningBlockingWork();
@@ -35,6 +36,30 @@ internal static class BoundedAvailabilityWorkerTests
             Need(workers.Observe("one", current), "next scanner pass admits actual latest Free"); await Wait(workers.WhenJoinedAsync("one"));
             Need(calls.SequenceEqual([AvailabilityIntent.Free]), "fresh Free executes once with no stale Keep");
         } finally { release.TrySetResult(); await workers.StopAndDrainAsync(() => Task.CompletedTask, () => explicitWork); }
+    }
+
+    private static async Task ExplicitRetryFencesOldFailures()
+    {
+        var current = new AvailabilityObservation(AvailabilityIntent.Keep, true);
+        var entered = Signal(); var release = Signal(); var attempts = 0;
+        var workers = new BoundedAvailabilityWorkers(["photo"], _ => current, async (_, _, _) => {
+            var n = Interlocked.Increment(ref attempts);
+            if (n == 1) { entered.TrySetResult(); await release.Task; throw new IOException("old failed action"); }
+            if (n == 2) throw new IOException("new failed action");
+        }, _ => { });
+        try {
+            Need(workers.Observe("photo", current), "initial intent queued"); await Wait(entered.Task);
+            Need(workers.RetryFailedIntents() && workers.RetryFailedIntents(), "repeated explicit retry accepted while running");
+            release.TrySetResult(); await Wait(workers.WhenJoinedAsync("photo"));
+            Need(workers.Observe("photo", current), "prior in-flight failure cannot suppress explicit retry");
+            await Wait(workers.WhenJoinedAsync("photo"));
+            for (var n = 0; n < 20; n++) Need(!workers.Observe("photo", current), "new failure does not loop automatically");
+            Need(workers.RetryFailedIntents(), "retry clears settled failure");
+            current = new(AvailabilityIntent.Free, true);
+            Need(workers.Observe("photo", current), "retry re-reads changed intent"); await Wait(workers.WhenJoinedAsync("photo"));
+            Need(attempts == 3, "repeated clicks do not create duplicate jobs");
+            workers.StopAdmission(); Need(!workers.RetryFailedIntents(), "stopping rejects retry");
+        } finally { release.TrySetResult(); await workers.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask); }
     }
 
     private static async Task FailedIntentGenerations()

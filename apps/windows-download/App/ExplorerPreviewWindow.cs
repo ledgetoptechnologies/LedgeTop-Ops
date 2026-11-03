@@ -27,6 +27,7 @@ internal sealed class ExplorerPreviewWindow : Window
     internal readonly Button OpenFolderButton = new() { Content = "Open files folder" };
     internal readonly Button PauseButton = new() { Content = "Pause downloads" };
     internal readonly Button ResumeButton = new() { Content = "Resume downloads" };
+    internal readonly Button RetryAvailabilityButton = new() { Content = "Retry file availability", Visibility = Visibility.Collapsed };
     internal readonly Button RemoveButton = new() { Content = "Remove Explorer preview" };
     internal readonly Button FreshFolderButton = new() { Content = "Set up a new files folder", Visibility = Visibility.Collapsed };
     internal const string FreshFolderConfirmation = "Set up a new read-only files folder for your current account?\n\nYour previous folder remains in place. Its online-only files may be unavailable, and partially downloaded or locally changed files may need attention. Back up anything you need first. Changes in the new folder are not uploaded. You may need to sign in again.\n\nContinue?";
@@ -102,6 +103,7 @@ internal sealed class ExplorerPreviewWindow : Window
         ReconnectButton.Click += async (_, _) => await ReconnectPreviewAsync();
         PauseButton.Click += async (_, _) => await PausePreviewAsync();
         ResumeButton.Click += async (_, _) => await ResumePreviewAsync();
+        RetryAvailabilityButton.Click += async (_, _) => await RetryAvailabilityAsync();
         RemoveButton.Click += async (_, _) => await RemovePreviewAsync();
         FreshFolderButton.Click += async (_, _) => await StartFreshFolderAsync();
         OpenFolderButton.Click += (_, _) => OpenFolder();
@@ -211,6 +213,10 @@ internal sealed class ExplorerPreviewWindow : Window
         activityPanel.SetValue(TextBlock.FontWeightProperty, FontWeights.Normal);
         var intro = Body(presentation.Generated ? "Recent preview activity. Your real account and files are not connected." : "Recent connection and download activity.");
         intro.Margin = new Thickness(0, 0, 0, 16); DockPanel.SetDock(intro, Dock.Top); activityPanel.Children.Add(intro);
+        RetryAvailabilityButton.HorizontalAlignment = HorizontalAlignment.Left;
+        RetryAvailabilityButton.Margin = new Thickness(0, 0, 0, 12);
+        RetryAvailabilityButton.ToolTip = "Retry pending Keep or Free actions. Access problems may still need attention.";
+        DockPanel.SetDock(RetryAvailabilityButton, Dock.Top); activityPanel.Children.Add(RetryAvailabilityButton);
         activity.Background = Brush("Surface"); activity.BorderBrush = Brush("Line"); activity.Padding = new Thickness(12);
         activity.HorizontalContentAlignment = HorizontalAlignment.Stretch;
         ScrollViewer.SetHorizontalScrollBarVisibility(activity, ScrollBarVisibility.Disabled);
@@ -284,6 +290,11 @@ internal sealed class ExplorerPreviewWindow : Window
         if (session is ConnectedExplorerSession { FreshReadOnlyActive: true }) return;
         trace.Phase = ConnectionPhase.ProviderResume;
         if (session?.State == ExplorerPreviewState.Paused) await session.ResumeAsync();
+    });
+    internal Task RetryAvailabilityAsync() => OperateAsync(ConnectionAction.RetryAvailability, async trace => {
+        if (session is not IAvailabilityRetry { CanRetryAvailability: true } retry || session.State != ExplorerPreviewState.Running) return;
+        trace.Phase = ConnectionPhase.ExecuteSession;
+        await retry.RetryAvailabilityAsync();
     });
     internal Task RemovePreviewAsync() => OperateAsync(ConnectionAction.Remove, async trace => {
         if (session is ConnectedExplorerSession { RequiresOwnershipReview: true } or ConnectedExplorerSession { FreshReadOnlyActive: true }) return;
@@ -654,6 +665,8 @@ internal sealed class ExplorerPreviewWindow : Window
         PauseButton.Visibility = presentation.Generated && state == ExplorerPreviewState.Running ? Visibility.Visible : Visibility.Collapsed;
         ResumeButton.IsEnabled = enabled && state == ExplorerPreviewState.Paused;
         ResumeButton.Visibility = presentation.Generated && state == ExplorerPreviewState.Paused ? Visibility.Visible : Visibility.Collapsed;
+        RetryAvailabilityButton.Visibility = !presentation.Generated && session is IAvailabilityRetry { CanRetryAvailability: true } && state == ExplorerPreviewState.Running ? Visibility.Visible : Visibility.Collapsed;
+        RetryAvailabilityButton.IsEnabled = enabled && RetryAvailabilityButton.Visibility == Visibility.Visible;
         RemoveButton.IsEnabled = enabled && (session is not null || drainedBinding is not null) && state != ExplorerPreviewState.Removed;
         FreshFolderButton.Visibility = !presentation.Generated && session is not null && (freshFolderForTests is not null || session is ConnectedExplorerSession { CanStartFreshReadOnlyConnection: true }) ? Visibility.Visible : Visibility.Collapsed;
         FreshFolderButton.IsEnabled = enabled && FreshFolderButton.Visibility == Visibility.Visible;

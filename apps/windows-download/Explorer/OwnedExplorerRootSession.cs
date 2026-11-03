@@ -15,7 +15,7 @@ internal sealed record OwnedExplorerRemovalEvidence(Guid Identity, uint ProfileV
 /// Shared owned-root lifecycle for generated and connected Explorer sessions. No browser or catalog capture API.
 /// Connected generations persist an immutable, credentialless manifest before any native registration.
 /// </summary>
-public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
+public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailabilityRetry
 {
     private const string GeneratedOwner = "LedgeTop.Files.ExplorerPreview/1";
     private const string ConnectedOwner = "LedgeTop.Files.ConnectedExplorer/1";
@@ -156,6 +156,13 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
     public ExplorerPreviewState State { get { lock (view) return state; } }
     public IReadOnlyList<string> Activity { get { lock (view) return activity.ToArray(); } }
     public event EventHandler? Changed;
+    public bool CanRetryAvailability => State == ExplorerPreviewState.Running;
+    public Task RetryAvailabilityAsync() => OperateAsync(() => {
+        if (State != ExplorerPreviewState.Running || provider is null || !provider.RetryFailedAvailability())
+            throw new InvalidOperationException("File availability retry is unavailable.");
+        Add("Retrying pending Keep or Free actions. Access problems may still need attention.");
+        return Task.CompletedTask;
+    });
 
     public Task StartAsync() => OperateAsync(StartCoreAsync);
     // Internal generation coordinator only. The supplied proof must re-read the exact leased

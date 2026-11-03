@@ -27,6 +27,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     public string? LastNativeTransferDiagnostic { get; private set; }
     public event Action<string>? Activity;
     internal event Action<HydrationFailureDiagnostic>? HydrationFailureObserved;
+    internal bool RetryFailedAvailability() => availabilityWorkers.RetryFailedIntents();
 
     public NativePlaceholderProvider(IPreviewRootRegistration registration, string cacheDirectory, IQueuedDownloadSource source,
         string channel, string principal, IReadOnlyDictionary<string, PlaceholderIdentity> manifest,

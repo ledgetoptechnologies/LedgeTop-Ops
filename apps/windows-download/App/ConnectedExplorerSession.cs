@@ -36,7 +36,7 @@ internal interface ICachedExplorerReconnect
 }
 
 /// <summary>One trusted selected source. Only explicit Start invokes browser sign-in; construction/removal stay offline.</summary>
-internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICachedExplorerReconnect
+internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICachedExplorerReconnect, IAvailabilityRetry
 {
     private const string Owner = "LedgeTop.Files.ConnectedExplorer.Index/1";
     private sealed record Index(int Schema, string Owner, string Sid, string Channel, string Alias,
@@ -598,6 +598,29 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     internal bool CanRefreshEmptyInventory => ObserveSavedCapability(emptyInventory: true, disconnectedBackend: false);
     public IReadOnlyList<string> Activity { get { lock (view) return activity.Concat(engine?.Session.Activity ?? []).TakeLast(100).ToArray(); } }
     public event EventHandler? Changed;
+
+    public bool CanRetryAvailability {
+        get {
+            IExplorerPreviewSession? current;
+            lock (view) {
+                if (disposed || closeRequested || state != ExplorerPreviewState.Running || freshReadOnlyActive) return false;
+                current = engine?.Session;
+            }
+            try { return current is IAvailabilityRetry { CanRetryAvailability: true }; }
+            catch (Exception error) when (error is IOException or ObjectDisposedException) { return false; }
+        }
+    }
+    public async Task RetryAvailabilityAsync() {
+        CancellationToken token;
+        lock (lifetime) { ObjectDisposedException.ThrowIf(disposed || closeRequested, this); token = cancellation.Token; }
+        await operations.WaitAsync(token).ConfigureAwait(false);
+        try {
+            token.ThrowIfCancellationRequested();
+            if (State != ExplorerPreviewState.Running || FreshReadOnlyActive || engine?.Session is not IAvailabilityRetry { CanRetryAvailability: true } retry)
+                throw new InvalidOperationException("File availability retry is unavailable.");
+            await retry.RetryAvailabilityAsync().ConfigureAwait(false);
+        } finally { operations.Release(); }
+    }
 
     public Task StartAsync() => CanStartPublishedFresh ? ComposeColdFreshRestartAsync(explicitLogin: true, CancellationToken.None) : StartCoreAsync(explicitLogin: true);
     public bool CanReconnectCached => CanStartPublishedFresh || ObserveSavedCapability(emptyInventory: false, disconnectedBackend: true);

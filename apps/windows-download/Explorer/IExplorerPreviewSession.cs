@@ -2,6 +2,13 @@ namespace LedgeTop.Files.Explorer;
 
 public enum ExplorerPreviewState { NotStarted, Starting, Running, Paused, Removed, Failed }
 
+/// <summary>Requests another check of pending file-availability actions; it does not change pin states.</summary>
+public interface IAvailabilityRetry
+{
+    bool CanRetryAvailability { get; }
+    Task RetryAvailabilityAsync();
+}
+
 /// <summary>One owned Windows Explorer connection: generated preview or selected read-only source.
 /// Constructing a session does not register a root or start authentication.</summary>
 public interface IExplorerPreviewSession : IAsyncDisposable

@@ -13,6 +13,7 @@ internal static class ConnectedExplorerSessionTests
     {
         var count = 0;
         await SelectionAndFrozenReopen(); count++;
+        await AvailabilityRetryDelegation(); count++;
         await ForeignPersonAndOfflineRemoval(); count++;
         await OwnershipRefusals(); count++;
         await FailedStartRetainsCleanup(); count++;
@@ -43,7 +44,25 @@ internal static class ConnectedExplorerSessionTests
 #if DEBUG
         await EngineStatusQueueRaces();
 #endif
-        Console.WriteLine($"Connected Explorer coordinator: {count}/28 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+        Console.WriteLine($"Connected Explorer coordinator: {count}/29 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+    }
+
+    private static async Task AvailabilityRetryDelegation()
+    {
+        await using var fixture = new Fixture { Alias = "employee" };
+        var session = fixture.Create();
+        Check(!session.CanRetryAvailability, "retry unavailable before connection");
+        await session.StartAsync();
+        var signIns = fixture.SignIns; var requests = fixture.Requests;
+        Check(session.CanRetryAvailability, "running owner exposes availability retry");
+        await session.RetryAvailabilityAsync();
+        Check(fixture.EngineRetries == 1 && fixture.SignIns == signIns && fixture.Requests == requests, "retry delegates without sign-in or source requests");
+        await session.PauseAsync();
+        Check(!session.CanRetryAvailability, "paused owner hides retry");
+        try { await session.RetryAvailabilityAsync(); throw new Exception("Paused retry unexpectedly succeeded."); }
+        catch (InvalidOperationException) { }
+        Check(fixture.EngineRetries == 1, "paused retry does not reach provider");
+        await session.DisposeAsync();
     }
 
 #if DEBUG
@@ -1130,7 +1149,7 @@ internal static class ConnectedExplorerSessionTests
         internal string LocalSentinel => Path.Combine(root, "Files", "added-local.txt");
         internal string TestRoot => root;
         internal IExplorerPreviewSession CurrentEngine => lastEngine ?? throw new InvalidOperationException();
-        internal int Backends, SignIns, Captures, EngineStarts, EnginePauses, EngineResumes, BackendDisposals, Requests, NativeActivations;
+        internal int Backends, SignIns, Captures, EngineStarts, EnginePauses, EngineResumes, BackendDisposals, Requests, NativeActivations, EngineRetries;
         internal readonly TaskCompletionSource LoginEntered = new(TaskCreationOptions.RunContinuationsAsynchronously), LoginRelease = new(TaskCreationOptions.RunContinuationsAsynchronously),
             CaptureEntered = new(TaskCreationOptions.RunContinuationsAsynchronously), CaptureRelease = new(TaskCreationOptions.RunContinuationsAsynchronously),
             CurrentEntered = new(TaskCreationOptions.RunContinuationsAsynchronously), CurrentRelease = new(TaskCreationOptions.RunContinuationsAsynchronously),
@@ -1261,7 +1280,7 @@ internal static class ConnectedExplorerSessionTests
             public Task<string> GetReferenceAsync(CatalogFile file, CancellationToken cancellationToken = default) => throw new InvalidOperationException();
         }
         private sealed class Saved(ExplorerRootManifest manifest) { internal ExplorerRootManifest Manifest = manifest; internal bool Removed, Failed, Paused; }
-        private sealed class FakeEngine : IExplorerPreviewSession
+        private sealed class FakeEngine : IExplorerPreviewSession, IAvailabilityRetry
         {
             private readonly Fixture fixture; private readonly ConnectedExplorerEngineRequest request; private Saved? saved; private bool disposed;
             private ExplorerPreviewState currentState;
@@ -1285,6 +1304,8 @@ internal static class ConnectedExplorerSessionTests
                 private set => currentState = value;
             }
             public IReadOnlyList<string> Activity => [];
+            public bool CanRetryAvailability => !disposed && State == ExplorerPreviewState.Running;
+            public Task RetryAvailabilityAsync() { if (!CanRetryAvailability) throw new InvalidOperationException(); fixture.EngineRetries++; return Task.CompletedTask; }
             public event EventHandler? Changed;
             public async Task StartAsync()
             {

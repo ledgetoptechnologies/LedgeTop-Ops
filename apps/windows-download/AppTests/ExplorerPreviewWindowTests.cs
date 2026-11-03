@@ -225,6 +225,22 @@ internal static class ExplorerPreviewWindowTests
                 await savedWindow.RemovePreviewAsync();
                 True(savedWindow.ReconnectButton.Visibility == Visibility.Collapsed, "removed saved connection cannot reconnect");
             } finally { savedWindow.Quit(); await Until(() => savedClosed); }
+            var retrySession = new FakeSession(root);
+            var retryWindow = Window(() => Task.FromResult<IExplorerPreviewSession>(retrySession), new FakeTrayIcon(),
+                ExplorerWindowContent.Connected("Pilot", LedgeTop.Files.Backends.AccessMode.Employee), retrySession);
+            var retryClosed = false; retryWindow.Closed += (_, _) => retryClosed = true;
+            try {
+                True(retryWindow.RetryAvailabilityButton.Visibility == Visibility.Collapsed, "retry unavailable before connection");
+                await retrySession.StartAsync(); Pump();
+                True(retryWindow.RetryAvailabilityButton.Visibility == Visibility.Visible && retryWindow.RetryAvailabilityButton.IsEnabled, "running connection offers retry");
+                retrySession.RetryGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                var pendingRetry = retryWindow.RetryAvailabilityAsync();
+                True(retrySession.Retries == 1 && !retryWindow.RetryAvailabilityButton.IsEnabled && !pendingRetry.IsCompleted, "retry serializes controls");
+                retrySession.RetryGate.TrySetResult(); await pendingRetry;
+                True(retrySession.Starts == 1 && retrySession.Reconnects == 0, "retry does not reconnect or sign in");
+                await retrySession.PauseAsync(); Pump();
+                True(retryWindow.RetryAvailabilityButton.Visibility == Visibility.Collapsed, "paused connection does not offer retry");
+            } finally { retrySession.RetryGate?.TrySetResult(); retryWindow.Quit(); await Until(() => retryClosed); }
             var cachedPending = new FakeSession(root) { SavedReady = true, StartGate = new(TaskCreationOptions.RunContinuationsAsynchronously) };
             var cachedWindow = Window(() => throw new InvalidOperationException("No replacement session during cached reconnect."), new FakeTrayIcon(),
                 ExplorerWindowContent.Connected("Pilot", LedgeTop.Files.Backends.AccessMode.Client), cachedPending);
@@ -736,10 +752,12 @@ internal static class ExplorerPreviewWindowTests
     }
     private static void True(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
 
-    private sealed class FakeSession(string root) : IExplorerPreviewSession, ICachedExplorerReconnect
+    private sealed class FakeSession(string root) : IExplorerPreviewSession, ICachedExplorerReconnect, IAvailabilityRetry
     {
         internal int Starts, Pauses, Resumes, Removals, Disposals;
         internal int Reconnects;
+        internal int Retries;
+        internal TaskCompletionSource? RetryGate;
         internal bool SavedReady, ReconnectPaused;
         internal ConnectedExplorerUpdateBinding Binding = new("pilot", "employee", "odqp1_" + new string('1', 64));
         internal int DisposeThread;
@@ -753,6 +771,8 @@ internal static class ExplorerPreviewWindowTests
         public IReadOnlyList<string> Activity => activity.ToArray();
         public event EventHandler? Changed;
         public bool CanReconnectCached => SavedReady && State == ExplorerPreviewState.NotStarted;
+        public bool CanRetryAvailability => State == ExplorerPreviewState.Running;
+        public async Task RetryAvailabilityAsync() { Retries++; if (RetryGate is { } gate) await gate.Task; }
         public async Task ReconnectCachedAsync() { Reconnects++; if (StartGate is { } gate) await gate.Task; Set(ReconnectPaused ? ExplorerPreviewState.Paused : ExplorerPreviewState.Running, "Saved files reconnected with cached authorization."); }
         public async Task StartAsync() { Starts++; if (StartGate is { } gate) await gate.Task; Set(ExplorerPreviewState.Running, "Generated sample files are ready in Explorer."); }
         public Task PauseAsync() { Pauses++; Set(ExplorerPreviewState.Paused, "Preview downloads paused."); return Task.CompletedTask; }
