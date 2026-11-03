@@ -66,12 +66,24 @@ internal sealed class OwnedRootExecutorPrototype
     internal sealed class SyntheticCommitScope(Func<SyntheticCounter, SyntheticGeneration?, long, bool> commit, Func<SyntheticGeneration, long, bool> authorize) {
         // Only a fake in-memory effect is permitted. Never execute arbitrary I/O
         // or native calls while holding the prototype's registry lock.
-        internal bool TryCommit(SyntheticCounter counter) => commit(counter, null, 0);
+        // Generic executor mechanics only: this path has NO source or auth
+        // guarantee and must not be used by the fake cache transaction model.
+        internal bool TryCommitUnscopedForGenericPrototypeOnly(SyntheticCounter counter) => commit(counter, null, 0);
         internal bool TryAuthorize(SyntheticGeneration generation, long version) => authorize(generation, version);
         internal bool TryCommitAuthorized(SyntheticCounter counter, SyntheticGeneration generation, long version) => commit(counter, generation, version);
     }
+    // A separate view prevents fake cache delegates from accidentally calling
+    // the generic, unscoped commit method. It is still only an in-memory model.
+    internal sealed class SyntheticAuthorizedScope(SyntheticCommitScope inner) {
+        internal bool TryAuthorize(SyntheticGeneration generation, long version) => inner.TryAuthorize(generation, version);
+        internal bool TryCommitAuthorized(SyntheticCounter counter, SyntheticGeneration generation, long version) => inner.TryCommitAuthorized(counter, generation, version);
+    }
     private readonly Registry registry;
     private OwnedRootExecutorPrototype(Registry registry) => this.registry = registry;
+    internal Task<Observation> RunAuthorizedAsync(string key, Func<SyntheticAuthorizedScope, Task<bool>> work, TimeSpan timeout, CancellationToken cancellationToken = default) {
+        ArgumentNullException.ThrowIfNull(work);
+        return RunAsync(key, scope => work(new SyntheticAuthorizedScope(scope)), timeout, cancellationToken);
+    }
     private static string CanonicalRoot(string root) {
         if (string.IsNullOrWhiteSpace(root) || !Path.IsPathFullyQualified(root) || root.StartsWith("\\\\", StringComparison.Ordinal))
             throw new ArgumentException("A fully qualified local synthetic root is required.", nameof(root));

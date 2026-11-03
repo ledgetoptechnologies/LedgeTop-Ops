@@ -19,7 +19,7 @@ internal static class OwnedRootExecutorPrototypeTests
         var disposed = 0; var queuedStarted = 0; var lease = new FakeLease();
         var counter = new OwnedRootExecutorPrototype.SyntheticCounter(); bool? lateCommit = null;
         var first = executor.RunAsync(@"C:\synthetic\A", async scope => {
-            try { started.SetResult(); await release.Task; lateCommit = scope.TryCommit(counter); }
+            try { started.SetResult(); await release.Task; lateCommit = scope.TryCommitUnscopedForGenericPrototypeOnly(counter); }
             finally { lease.Dispose(); Interlocked.Increment(ref disposed); finished.SetResult(); }
             return lease.Releases == 1;
         }, TimeSpan.FromSeconds(1));
@@ -51,8 +51,8 @@ internal static class OwnedRootExecutorPrototypeTests
             throw new InvalidOperationException("Late work escaped terminal fencing or lease cleanup was not exact.");
         await Expect<TimeoutException>(first); // Late successful cleanup cannot revise the caller's terminal result.
         OwnedRootExecutorPrototype.SyntheticCommitScope? retiredScope = null;
-        await executor.RunAsync(@"C:\synthetic\A", scope => { retiredScope = scope; if (!scope.TryCommit(counter)) throw new IOException("Active commit rejected."); return Task.FromResult(true); }, TimeSpan.FromSeconds(5));
-        if (retiredScope is null || retiredScope.TryCommit(counter) || counter.Value != 1) throw new InvalidOperationException("Retired work committed.");
+        await executor.RunAsync(@"C:\synthetic\A", scope => { retiredScope = scope; if (!scope.TryCommitUnscopedForGenericPrototypeOnly(counter)) throw new IOException("Active commit rejected."); return Task.FromResult(true); }, TimeSpan.FromSeconds(5));
+        if (retiredScope is null || retiredScope.TryCommitUnscopedForGenericPrototypeOnly(counter) || counter.Value != 1) throw new InvalidOperationException("Retired work committed.");
         await Expect<ArgumentException>(executor.RunAsync(@"\\server\share", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
         await Expect<ArgumentException>(executor.RunAsync("relative", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
         var ordered = new List<int>();
@@ -104,9 +104,9 @@ internal static class OwnedRootExecutorPrototypeTests
         var committedLease = new FakeLease(); bool? duplicate = null;
         var committed = committedExecutor.RunAsync(@"C:\synthetic\committed", async scope => {
             try {
-                if (!scope.TryCommit(committedCounter)) throw new IOException("Commit unexpectedly rejected.");
+                if (!scope.TryCommitUnscopedForGenericPrototypeOnly(committedCounter)) throw new IOException("Commit unexpectedly rejected.");
                 committedStarted.SetResult(); await committedRelease.Task;
-                duplicate = scope.TryCommit(committedCounter);
+                duplicate = scope.TryCommitUnscopedForGenericPrototypeOnly(committedCounter);
             } finally { committedLease.Dispose(); committedFinished.SetResult(); }
             return committedLease.Releases == 1;
         }, TimeSpan.FromSeconds(1));
@@ -123,7 +123,7 @@ internal static class OwnedRootExecutorPrototypeTests
         var failedCommit = new OwnedRootExecutorPrototype.Registry(1, 1).Create();
         var failedCounter = new OwnedRootExecutorPrototype.SyntheticCounter();
         var failureObservation = await failedCommit.RunAsync(@"C:\synthetic\failed-commit", scope => {
-            if (!scope.TryCommit(failedCounter)) throw new IOException("Commit unexpectedly rejected.");
+            if (!scope.TryCommitUnscopedForGenericPrototypeOnly(failedCounter)) throw new IOException("Commit unexpectedly rejected.");
             return Task.FromException<bool>(new IOException("synthetic cleanup failure"));
         }, TimeSpan.FromSeconds(5));
         if (failureObservation != OwnedRootExecutorPrototype.Observation.CommittedCleanupUnverified || failedCounter.Value != 1)
@@ -135,7 +135,7 @@ internal static class OwnedRootExecutorPrototypeTests
         var cancellationFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var postCommitCancel = new CancellationTokenSource();
         var cancellationResult = cancelAfterCommit.RunAsync(@"C:\synthetic\cancel-commit", async scope => {
-            if (!scope.TryCommit(new OwnedRootExecutorPrototype.SyntheticCounter())) throw new IOException("Commit unexpectedly rejected.");
+            if (!scope.TryCommitUnscopedForGenericPrototypeOnly(new OwnedRootExecutorPrototype.SyntheticCounter())) throw new IOException("Commit unexpectedly rejected.");
             cancellationStarted.SetResult(); await cancellationRelease.Task; cancellationFinished.SetResult(); return true;
         }, TimeSpan.FromSeconds(5), postCommitCancel.Token);
         await cancellationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5)); postCommitCancel.Cancel();

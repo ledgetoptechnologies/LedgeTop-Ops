@@ -23,7 +23,43 @@ internal static class FakeCacheTransactionPrototypeTests {
         try { await task; } catch (T) { return; }
         throw new IOException("Expected " + typeof(T).Name);
     }
+    private static void Observe(Task task) => _ = task.ContinueWith(t => _ = t.Exception, CancellationToken.None,
+        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    private static async Task ReleaseAndDrain(OwnedRootExecutorPrototype.Registry registry, TimeSpan timeout, params TaskCompletionSource[] gates) {
+        registry.BeginStop();
+        foreach (var gate in gates) gate.TrySetResult();
+        try { await registry.WaitForDrainAsync(timeout); }
+        catch (TimeoutException) {
+            Console.Error.WriteLine("Synthetic executor drain unverified; fake root remains quarantined.");
+            throw;
+        }
+    }
+    private sealed class InjectedAssertion : Exception { }
+    private static async Task FailurePathReleasesOwner() {
+        var registry = new OwnedRootExecutorPrototype.Registry(1, 1); var ledger = new Ledger();
+        var generation = registry.CreateGeneration(); var version = registry.ReadGeneration(generation);
+        var fakePromotion = new OwnedRootExecutorPrototype.SyntheticCounter(); bool? lateAuthorization = null, latePromotion = null;
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var work = registry.Create().RunAuthorizedAsync(Root, async scope => {
+            ledger.Acquire("same-entry"); entered.SetResult();
+            try { await release.Task; lateAuthorization = scope.TryAuthorize(generation, version); latePromotion = scope.TryCommitAuthorized(fakePromotion, generation, version); }
+            finally { ledger.Release(verified: true); }
+            return ledger.Holds == 0 && ledger.Reservations == 0 && ledger.Releases == 1;
+        }, TimeSpan.FromSeconds(5));
+        Observe(work); var caught = false;
+        try {
+            try { await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); throw new InjectedAssertion(); }
+            finally { await ReleaseAndDrain(registry, TimeSpan.FromSeconds(5), release); }
+        } catch (InjectedAssertion) { caught = true; }
+        if (!caught || await work != OwnedRootExecutorPrototype.Observation.Completed || ledger.Holds != 0 || ledger.Reservations != 0 || ledger.Releases != 1 ||
+            lateAuthorization != false || latePromotion != false || fakePromotion.Value != 0)
+            throw new IOException("Injected assertion did not release and join its fake owner.");
+    }
     internal static async Task RunAsync() {
+        if (typeof(OwnedRootExecutorPrototype.SyntheticAuthorizedScope).GetMethod("TryCommitUnscopedForGenericPrototypeOnly",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic) is not null)
+            throw new IOException("Fake cache scope exposes an unscoped commit.");
         var registry = new OwnedRootExecutorPrototype.Registry(2, 2); var executor = registry.Create();
         var other = registry.Create(); var generation = registry.CreateGeneration(); var version = registry.ReadGeneration(generation);
         var ledger = new Ledger(); var sinklessPromotion = new OwnedRootExecutorPrototype.SyntheticCounter();
@@ -31,7 +67,7 @@ internal static class FakeCacheTransactionPrototypeTests {
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var ownerDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         bool? lateAuthorized = null, lateCommit = null; var duplicateEntered = false;
-        var owner = executor.RunAsync(Root, async scope => {
+        var owner = executor.RunAuthorizedAsync(Root, async scope => {
             ledger.Acquire("same-entry"); entered.SetResult();
             try {
                 await release.Task;
@@ -40,20 +76,23 @@ internal static class FakeCacheTransactionPrototypeTests {
             } finally { ledger.Release(verified: true); ownerDone.SetResult(); }
             return ledger.Holds == 0 && ledger.Reservations == 0 && ledger.Releases == 1;
         }, TimeSpan.FromSeconds(1));
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        var sameEntry = other.RunAsync(@"c:\synthetic\other\..\OWNED-CACHE\", _ => { duplicateEntered = true; return Task.FromResult(true); }, TimeSpan.FromSeconds(5));
-        registry.BeginStop();
-        await Expect<InvalidOperationException>(sameEntry);
-        await Expect<TimeoutException>(owner);
-        await Expect<TimeoutException>(registry.WaitForDrainAsync(TimeSpan.FromMilliseconds(100)));
-        await Expect<InvalidOperationException>(other.RunAsync(Root, _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
-        if (duplicateEntered || ledger.Holds != 1 || ledger.Reservations != 100 || ledger.Releases != 0 || sinklessPromotion.Value != 0)
-            throw new IOException("Timed-out fake preparation released or overlapped its resources.");
-        release.SetResult(); await ownerDone.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await registry.WaitForDrainAsync(TimeSpan.FromSeconds(5));
-        if (lateAuthorized != false || lateCommit != false || ledger.Holds != 0 || ledger.Reservations != 0 || ledger.Releases != 1 || sinklessPromotion.Value != 0)
-            throw new IOException("Late fake authorization or commit escaped the stopped generation.");
-        await Expect<TimeoutException>(owner); // late cleanup cannot change caller result
+        Observe(owner);
+        try {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var sameEntry = other.RunAuthorizedAsync(@"c:\synthetic\other\..\OWNED-CACHE\", _ => { duplicateEntered = true; return Task.FromResult(true); }, TimeSpan.FromSeconds(5));
+            Observe(sameEntry); registry.BeginStop();
+            await Expect<InvalidOperationException>(sameEntry);
+            await Expect<TimeoutException>(owner);
+            await Expect<TimeoutException>(registry.WaitForDrainAsync(TimeSpan.FromMilliseconds(100)));
+            await Expect<InvalidOperationException>(other.RunAuthorizedAsync(Root, _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
+            if (duplicateEntered || ledger.Holds != 1 || ledger.Reservations != 100 || ledger.Releases != 0 || sinklessPromotion.Value != 0)
+                throw new IOException("Timed-out fake preparation released or overlapped its resources.");
+            release.TrySetResult(); await ownerDone.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await registry.WaitForDrainAsync(TimeSpan.FromSeconds(5));
+            if (lateAuthorized != false || lateCommit != false || ledger.Holds != 0 || ledger.Reservations != 0 || ledger.Releases != 1 || sinklessPromotion.Value != 0)
+                throw new IOException("Late fake authorization or commit escaped the stopped generation.");
+            await Expect<TimeoutException>(owner); // late cleanup cannot change caller result
+        } finally { await ReleaseAndDrain(registry, TimeSpan.FromSeconds(5), release); }
 
         // Timeout itself must fence authorization, independently of shutdown.
         var timedRegistry = new OwnedRootExecutorPrototype.Registry(1, 1); var timed = timedRegistry.Create();
@@ -63,19 +102,22 @@ internal static class FakeCacheTransactionPrototypeTests {
         var timedRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var timedDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         bool? timedAuth = null, timedPromotion = null;
-        var timedOwner = timed.RunAsync(Root, async scope => {
+        var timedOwner = timed.RunAuthorizedAsync(Root, async scope => {
             timedLedger.Acquire("same-entry"); timedEntered.SetResult();
             try { await timedRelease.Task; timedAuth = scope.TryAuthorize(timedGeneration, timedVersion); timedPromotion = scope.TryCommitAuthorized(timedCounter, timedGeneration, timedVersion); }
             finally { timedLedger.Release(verified: true); timedDone.SetResult(); }
             return timedLedger.Holds == 0 && timedLedger.Reservations == 0 && timedLedger.Releases == 1;
         }, TimeSpan.FromSeconds(1));
-        await timedEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)); await Expect<TimeoutException>(timedOwner);
-        await Expect<InvalidOperationException>(timed.RunAsync(Root, _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
-        if (timedLedger.Holds != 1 || timedLedger.Reservations != 100 || timedLedger.Releases != 0) throw new IOException("Timed-out owner lost its fake resources.");
-        timedRelease.SetResult(); await timedDone.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        timedRegistry.BeginStop(); await timedRegistry.WaitForDrainAsync(TimeSpan.FromSeconds(5));
-        if (timedAuth != false || timedPromotion != false || timedCounter.Value != 0 || timedLedger.Releases != 1)
-            throw new IOException("A timeout alone did not fence late fake work.");
+        Observe(timedOwner);
+        try {
+            await timedEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)); await Expect<TimeoutException>(timedOwner);
+            await Expect<InvalidOperationException>(timed.RunAuthorizedAsync(Root, _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
+            if (timedLedger.Holds != 1 || timedLedger.Reservations != 100 || timedLedger.Releases != 0) throw new IOException("Timed-out owner lost its fake resources.");
+            timedRelease.TrySetResult(); await timedDone.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            timedRegistry.BeginStop(); await timedRegistry.WaitForDrainAsync(TimeSpan.FromSeconds(5));
+            if (timedAuth != false || timedPromotion != false || timedCounter.Value != 0 || timedLedger.Releases != 1)
+                throw new IOException("A timeout alone did not fence late fake work.");
+        } finally { await ReleaseAndDrain(timedRegistry, TimeSpan.FromSeconds(5), timedRelease); }
 
         // Even an accepted authorization is invalidated if its source changes
         // while fake preparation is awaiting an operation before promotion.
@@ -83,7 +125,7 @@ internal static class FakeCacheTransactionPrototypeTests {
         var nextGeneration = nextRegistry.CreateGeneration(); var nextVersion = nextRegistry.ReadGeneration(nextGeneration);
         var foreignGeneration = new OwnedRootExecutorPrototype.Registry(1, 1).CreateGeneration();
         var goodLedger = new Ledger(); var goodResult = new OwnedRootExecutorPrototype.SyntheticCounter();
-        var good = await next.RunAsync(Root, scope => {
+        var good = await next.RunAuthorizedAsync(Root, scope => {
             goodLedger.Acquire("same-entry");
             try {
                 if (!scope.TryAuthorize(nextGeneration, nextVersion) || !scope.TryCommitAuthorized(goodResult, nextGeneration, nextVersion))
@@ -96,7 +138,7 @@ internal static class FakeCacheTransactionPrototypeTests {
         var authorized = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var nextLedger = new Ledger(); var result = new OwnedRootExecutorPrototype.SyntheticCounter(); bool? promoted = null;
-        var changed = next.RunAsync(Root, async scope => {
+        var changed = next.RunAuthorizedAsync(Root, async scope => {
             nextLedger.Acquire("same-entry");
             try {
                 if (scope.TryCommitAuthorized(result, nextGeneration, nextVersion) || scope.TryAuthorize(foreignGeneration, 0))
@@ -109,17 +151,25 @@ internal static class FakeCacheTransactionPrototypeTests {
             } finally { nextLedger.Release(verified: true); }
             return nextLedger.Holds == 0 && nextLedger.Reservations == 0 && nextLedger.Releases == 1;
         }, TimeSpan.FromSeconds(5));
-        await authorized.Task.WaitAsync(TimeSpan.FromSeconds(5)); nextRegistry.AdvanceGeneration(nextGeneration); resume.SetResult();
-        if (await changed != OwnedRootExecutorPrototype.Observation.Completed || promoted != false || result.Value != 0 || nextLedger.Releases != 1)
-            throw new IOException("Changed synthetic source generation was promoted.");
-        nextRegistry.BeginStop(); await nextRegistry.WaitForDrainAsync(TimeSpan.FromSeconds(5));
+        Observe(changed);
+        try {
+            await authorized.Task.WaitAsync(TimeSpan.FromSeconds(5)); nextRegistry.AdvanceGeneration(nextGeneration); resume.TrySetResult();
+            if (await changed != OwnedRootExecutorPrototype.Observation.Completed || promoted != false || result.Value != 0 || nextLedger.Releases != 1)
+                throw new IOException("Changed synthetic source generation was promoted.");
+        } finally { await ReleaseAndDrain(nextRegistry, TimeSpan.FromSeconds(5), resume); }
 
         // If ownership release cannot be verified, neither capacity nor shutdown
         // is reported recovered merely because the delegate has returned.
         var badRegistry = new OwnedRootExecutorPrototype.Registry(1, 1); var bad = badRegistry.Create(); var retained = new Ledger();
-        await Expect<InvalidOperationException>(bad.RunAsync(Root, _ => { retained.Acquire("same-entry"); return Task.FromResult(retained.Release(verified: false)); }, TimeSpan.FromSeconds(5)));
-        badRegistry.BeginStop(); await Expect<TimeoutException>(badRegistry.WaitForDrainAsync(TimeSpan.FromMilliseconds(100)));
+        var badEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var badRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var badWork = bad.RunAuthorizedAsync(Root, async _ => { retained.Acquire("same-entry"); badEntered.SetResult(); await badRelease.Task; return retained.Release(verified: false); }, TimeSpan.FromSeconds(5));
+        Observe(badWork);
+        try { await badEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
+        finally { await Expect<TimeoutException>(ReleaseAndDrain(badRegistry, TimeSpan.FromMilliseconds(250), badRelease)); }
+        await Expect<InvalidOperationException>(badWork);
         if (retained.Holds != 1 || retained.Reservations != 100 || retained.Releases != 0) throw new IOException("Unverified fake resources were discarded.");
+        await FailurePathReleasesOwner();
         Console.WriteLine("PASS fake cache preparation retains ownership, fences source generations and accounts for shutdown.");
     }
 }
