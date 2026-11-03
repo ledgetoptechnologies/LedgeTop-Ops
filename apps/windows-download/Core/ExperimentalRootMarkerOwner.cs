@@ -12,6 +12,8 @@ internal sealed class ExperimentalRootMarkerOwner : IDisposable
     private readonly string root;
     private readonly Dictionary<string, Marker> markers = new(StringComparer.OrdinalIgnoreCase);
     private bool disposed;
+    internal static Action? BeforeCloseTestHook;
+    internal bool InjectedCloseFailure { get; private set; }
     internal ExperimentalRootMarkerOwner(string root) { this.root = Path.GetFullPath(root); }
     internal void ValidateExisting(string directory, string markerName, byte[] expected)
     {
@@ -19,7 +21,7 @@ internal sealed class ExperimentalRootMarkerOwner : IDisposable
             ObjectDisposedException.ThrowIf(disposed, this);
             var dir = Path.GetFullPath(directory);
             if ((!dir.Equals(root, StringComparison.OrdinalIgnoreCase) && !dir.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) ||
-                Path.GetFileName(markerName) != markerName || expected.Length is 0 or > 128)
+                markerName != ".verified-hydration-owner" || expected.Length is 0 or > 128)
                 throw new IOException("Experimental marker scope invalid.");
             var path = Path.Combine(dir, markerName);
             if (!markers.TryGetValue(path, out var marker)) {
@@ -53,7 +55,9 @@ internal sealed class ExperimentalRootMarkerOwner : IDisposable
     public void Dispose()
     {
         lock (gate) {
-            if (disposed) return; disposed = true;
+            if (disposed) return;
+            try { BeforeCloseTestHook?.Invoke(); } catch { InjectedCloseFailure = true; throw; }
+            InjectedCloseFailure = false; disposed = true;
             foreach (var marker in markers.Values) { marker.File.Dispose(); foreach (var pin in marker.Pins.AsEnumerable().Reverse()) pin.Handle.Dispose(); }
             markers.Clear();
         }
