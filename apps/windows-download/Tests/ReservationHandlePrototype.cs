@@ -17,15 +17,18 @@ internal static class ReservationHandlePrototype
     internal static void Run()
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows-only handle comparison.");
+        AbsenceEvidenceTests();
         var root = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
         if (string.IsNullOrEmpty(root) || !Path.IsPathFullyQualified(root) || root.StartsWith("\\\\", StringComparison.Ordinal))
             throw new IOException("An existing local test artifact root is required.");
         root = Path.GetFullPath(root); CheckAncestors(root);
+        using var parent = Open(root, ReadAttributes, ShareRead | ShareWrite, BackupSemantics | OpenReparsePoint);
+        RequireKind(parent, isDirectory: true); var parentId = Id(parent); VerifyDirectoryBinding(root, parent, parentId);
         var fixture = Path.Combine(root, "reservation-handle-" + Guid.NewGuid().ToString("N"));
         if (!CreateDirectoryW(fixture, 0)) throw new IOException("Cannot create a new test fixture.");
         var record = Path.Combine(fixture, "owned.record"); var foreign = Path.Combine(fixture, "foreign.record");
         var renamed = Path.Combine(fixture, "renamed.record");
-        var verified = false; var cleanupComplete = false;
+        var verified = false; var cleanupComplete = false; var deleteDispositionsApplied = 0;
         try {
             CheckAncestors(fixture);
             using var directory = Open(fixture, ReadAttributes | Delete, ShareRead | ShareWrite, BackupSemantics | OpenReparsePoint);
@@ -60,24 +63,49 @@ internal static class ReservationHandlePrototype
             VerifyDirectoryBinding(fixture, directory, directoryId);
             verified = true;
             // Delete each exact owned file only through the verified file handle.
-            if (!TryDeleteExact(fixture, directory, directoryId, record, Owned, ownerId) || !TryDeleteExact(fixture, directory, directoryId, foreign, Foreign, foreignId))
-                throw new IOException("Exact synthetic file cleanup was not verified.");
+            if (!TryDeleteExact(fixture, directory, directoryId, record, Owned, ownerId)) throw new IOException("Exact synthetic file cleanup was not verified.");
+            deleteDispositionsApplied++;
+            if (!TryDeleteExact(fixture, directory, directoryId, foreign, Foreign, foreignId)) throw new IOException("Exact synthetic file cleanup was not verified.");
+            deleteDispositionsApplied++;
             VerifyDirectoryBinding(fixture, directory, directoryId);
             if (Directory.EnumerateFileSystemEntries(fixture).Any() || Id(directory) != directoryId)
                 throw new IOException("Synthetic fixture is not empty or its identity changed.");
             byte disposition = 1;
             if (!SetFileInformationByHandle(directory, 4, ref disposition, 1)) throw new IOException("Synthetic directory cleanup was not confirmed.");
-            directory.Dispose(); CheckAncestors(root);
-            var absent = false;
-            try { _ = File.GetAttributes(fixture); }
-            catch (FileNotFoundException) { absent = true; }
-            catch (DirectoryNotFoundException) { absent = true; }
-            if (!absent) throw new IOException("Synthetic directory absence was not confirmed.");
+            deleteDispositionsApplied++;
+            directory.Dispose();
+            if (!ConfirmedAbsent(() => File.GetAttributes(fixture), () => VerifyDirectoryBinding(root, parent, parentId)))
+                throw new IOException("Synthetic directory absence and parent identity were not confirmed.");
             cleanupComplete = true;
         } finally {
-            if (!cleanupComplete) Console.Error.WriteLine($"Synthetic reservation handle fixture preserved or cleanup unconfirmed (checksPassed={verified}): {fixture}");
+            if (!cleanupComplete) Console.Error.WriteLine($"Synthetic fixture cleanup unconfirmed; partial cleanup may have occurred (checksPassed={verified}; deleteDispositionsApplied={deleteDispositionsApplied}): {fixture}");
         }
         Console.WriteLine("PASS ordinary Windows retained-handle identity, sharing, exact bytes and handle-bound cleanup. No native provider or crash tested.");
+    }
+
+    private static bool ConfirmedAbsent(Func<FileAttributes> inspect, Action verifyParent)
+    {
+        try { verifyParent(); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.SecurityException) { return false; }
+        try { _ = inspect(); return false; }
+        catch (FileNotFoundException) {
+            try { verifyParent(); return true; }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.SecurityException) { return false; }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.SecurityException) { return false; }
+    }
+    private static void AbsenceEvidenceTests()
+    {
+        var calls = 0;
+        if (!ConfirmedAbsent(() => throw new FileNotFoundException(), () => calls++) || calls != 2 ||
+            ConfirmedAbsent(() => throw new DirectoryNotFoundException(), () => { }) ||
+            ConfirmedAbsent(() => throw new UnauthorizedAccessException(), () => { }) ||
+            ConfirmedAbsent(() => FileAttributes.Directory, () => { }) ||
+            ConfirmedAbsent(() => throw new FileNotFoundException(), () => throw new DirectoryNotFoundException()))
+            throw new IOException("Synthetic absence evidence classification failed.");
+        calls = 0;
+        if (ConfirmedAbsent(() => throw new FileNotFoundException(), () => { if (++calls == 2) throw new IOException("Parent changed."); }))
+            throw new IOException("Synthetic absence accepted after parent changed.");
     }
 
     private static bool ReadExact(FileStream stream, byte[] expected)
