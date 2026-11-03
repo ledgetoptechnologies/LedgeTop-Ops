@@ -15,8 +15,11 @@ test('task GCP workspace selects authoritative sets and points before bounded im
     'Auto radius', 'Fixed radius', 'Nearest images', 'visibility not confirmed',
   ]) assert.ok(source.includes(value), value);
   assert.match(source, /\/api\/v1\/gcp-sets\/\$\{encodeURIComponent\(workspace\.setId\)\}/);
-  assert.match(source, /\/gcp-images\?\$\{query\}/);
+  assert.match(source, /\/gcp-images\?\$\{gcpImageQuery\(workspace,0\)\}/);
   assert.match(source, /limit:'200'/);
+  assert.match(source, /offset:String\(offset\)/);
+  assert.match(source, /gcp-load-more-images/);
+  assert.match(source, /loadMoreGcpCandidates\(id\)/);
   assert.match(source, /query\.set\('radiusM',String\(workspace\.radiusM\)\)/);
   assert.match(source, /mode:'radius',radiusM:15\.24/);
   assert.match(source, /Radius \(feet\)/);
@@ -54,8 +57,8 @@ test('image clicks and numeric fields create update and delete exact corresponde
 test('marking layout is bounded responsive and preserves exact import provenance confirmation', () => {
   for (const selector of ['.gcp-marker-workspace', '.gcp-candidates', '.gcp-image-stage', '.gcp-marker', '.gcp-pixel-fields'])
     assert.ok(css.includes(selector), selector);
-  assert.match(css, /\.gcp-candidates\{[^}]*max-height:360px[^}]*overflow:auto/);
-  assert.match(css, /max-height:min\(62vh,680px\)/);
+  assert.match(css, /\.gcp-candidates\{[^}]*max-height:min\(58vh,720px\)[^}]*overflow:auto/);
+  assert.match(css, /max-height:min\(76vh,960px\)/);
   assert.match(css, /@media\(max-width:1000px\)[\s\S]*\.gcp-marker-workspace/);
   assert.match(css, /@media\(max-width:720px\)[\s\S]*\.gcp-pixel-fields/);
   assert.match(source, /\/gcp-sets\/import-preview/);

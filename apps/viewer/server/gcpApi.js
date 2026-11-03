@@ -114,12 +114,16 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
     const rawLimit = String(req.query.limit || '100');
     if (!/^\d{1,3}$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 200)
       return error(res, 400, 'invalid_limit');
+    const rawOffset = String(req.query.offset || '0');
+    if (!/^\d{1,8}$/.test(rawOffset) || Number(rawOffset) > 10000000)
+      return error(res, 400, 'invalid_offset');
     try {
       const mode = String(req.query.mode || 'auto');
       if (!['auto', 'radius', 'nearest'].includes(mode)) return error(res, 400, 'invalid_candidate_mode');
       const radiusM = req.query.radiusM == null ? (mode === 'radius' ? 15.24 : null) : Number(req.query.radiusM);
       if (radiusM != null && (!Number.isFinite(radiusM) || radiusM <= 0 || radiusM > 100000)) return error(res, 400, 'invalid_radius');
-      const requested = Number(rawLimit), ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, 200);
+      const requested = Number(rawLimit), offset = Number(rawOffset);
+      const ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, requested, offset);
       let images = ranked.images;
       let appliedMode = ranked.selectedPoint ? mode : 'capture_time';
       let appliedRadius = radiusM, reason = 'explicit_mode', confidence = 'user_selected';

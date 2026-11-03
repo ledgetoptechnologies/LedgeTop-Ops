@@ -86,3 +86,21 @@ test('fixed-radius endpoint defaults to 50 feet expressed in metres',async(t)=>{
   const response=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius`,{headers:{authorization:'Bearer admin'}});
   const result=await response.json();assert.equal(response.status,200);assert.equal(result.ranking.radiusM,15.24);assert.deepEqual(result.images.map(image=>image.id),['image-one']);
 });
+
+test('fixed-radius candidates page through every nearby geotagged source image',async(t)=>{
+  const {base,dataset,database}=await fixture(t),headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'radius-pagination-import'};
+  const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers,body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',content:'point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n'})});
+  const pointId=(await imported.json()).points[0].id,timestamp=new Date().toISOString(),sha='c'.repeat(64);
+  database.prepare('UPDATE dataset_files SET latitude=44.50005,longitude=-88.1 WHERE id=?').run('image-one');
+  const insert=database.prepare(`INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,metadata_json,created_at,mime_type,latitude,longitude)
+    VALUES (?,?,?,1,?,'image/jpeg','{}',?,'image/jpeg',?,?)`);
+  for(let index=0;index<205;index+=1)insert.run(`near-${String(index).padStart(3,'0')}`,dataset.id,`near-${index}.jpg`,sha,timestamp,44.5+index*0.0000004,-88.1);
+  const url=`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius&radiusM=15.24&limit=200`;
+  const first=await(await fetch(url,{headers:{authorization:'Bearer admin'}})).json();
+  assert.equal(first.images.length,200);assert.equal(first.hasMore,true);assert.equal(first.nextOffset,200);
+  const second=await(await fetch(`${url}&offset=${first.nextOffset}`,{headers:{authorization:'Bearer admin'}})).json();
+  assert.equal(second.images.length,6);assert.equal(second.hasMore,false);assert.equal(second.nextOffset,206);
+  const ids=[...first.images,...second.images].map(image=>image.id);
+  assert.equal(new Set(ids).size,206);assert.ok(ids.includes('image-one'));assert.equal(ids.length,206);
+  const invalid=await fetch(`${url}&offset=10000001`,{headers:{authorization:'Bearer admin'}});assert.equal(invalid.status,400);assert.equal((await invalid.json()).code,'invalid_offset');
+});
