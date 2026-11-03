@@ -35,6 +35,27 @@ test('operator root identity mismatch fails before creating a generation',linux,
  assert.throws(()=>copySelectedSource(f.p,{...f.options,spoolRoot:f.source,spoolPin:f.options.sourcePin}),{code:'SELECTED_COPY_HELD'});
  assert.equal(fs.existsSync(path.join(f.source,`${f.binding.attemptId}-g1`)),false);
 });
+test('insufficient or invalid free-space observation holds before creating a directory',linux,async t=>{
+ for(const bad of [{bavail:14n,bsize:1n},{bavail:-1n,bsize:1n},{bavail:100n,bsize:0n}])await t.test(String(bad.bavail)+':'+String(bad.bsize),t=>{
+  const f=fixture(t),original=fs.statfsSync;fs.statfsSync=()=>bad;
+  try{assert.throws(()=>copySelectedSource(f.p,{...f.options,minFreeBytes:1}),{code:'SELECTED_COPY_HELD'});}finally{fs.statfsSync=original;}
+  assert.deepEqual(fs.readdirSync(f.spool),[]);
+ });
+});
+test('space pressure after a short write preserves partial bytes without a seal',linux,t=>{
+ const f=fixture(t),statfs=fs.statfsSync,write=fs.writeSync;let pressure=false;
+ fs.statfsSync=(...args)=>pressure?{bavail:0n,bsize:1n}:statfs(...args);
+ fs.writeSync=(fd,buffer,offset,length,position)=>{let target='';try{target=fs.readlinkSync(`/proc/self/fd/${fd}`);}catch{}if(target.endsWith('/photo')&&!pressure){const count=write(fd,buffer,offset,Math.min(3,length),position);pressure=true;return count;}return write(fd,buffer,offset,length,position);};
+ try{assert.throws(()=>copySelectedSource(f.p,f.options),{code:'SELECTED_COPY_HELD'});}finally{fs.statfsSync=statfs;fs.writeSync=write;}
+ const dir=path.join(f.spool,`${f.binding.attemptId}-g1`);assert.equal(fs.statSync(path.join(dir,'photo')).size,3);assert.equal(fs.existsSync(path.join(dir,'sealed.json')),false);
+});
+test('already written bytes are not counted twice against later free space',linux,t=>{
+ const f=fixture(t),statfs=fs.statfsSync,write=fs.writeSync;let written=0;
+ fs.statfsSync=()=>({bavail:BigInt(1+f.body.length-written),bsize:1n});
+ fs.writeSync=(fd,buffer,offset,length,position)=>{let target='';try{target=fs.readlinkSync(`/proc/self/fd/${fd}`);}catch{}if(target.endsWith('/photo')){const n=write(fd,buffer,offset,Math.min(3,length),position);written+=n;return n;}return write(fd,buffer,offset,length,position);};
+ try{assert.equal(copySelectedSource(f.p,{...f.options,minFreeBytes:1}).admissionAvailable,false);}finally{fs.statfsSync=statfs;fs.writeSync=write;}
+ assert.equal(written,f.body.length);
+});
 test('process death after generation directory creation leaves it held and never retries',linux,t=>{
  const f=fixture(t),options={...f.options,binding:{...f.binding,publicKey:f.binding.publicKey.export({type:'spki',format:'pem'})}};
  const script=`const fs=require('node:fs');const {openDatabase}=require('./apps/viewer/server/database');const {ProcessingRepository}=require('./apps/viewer/server/processingRepository');const {copySelectedSource}=require('./apps/viewer/server/selectedSourceCopyCandidate');const o=JSON.parse(process.argv[1]);const db=openDatabase(process.argv[2]);const original=fs.fsyncSync;let n=0;fs.fsyncSync=(fd)=>{original(fd);if(++n===1)process.kill(process.pid,'SIGKILL');};copySelectedSource(new ProcessingRepository(db),o);`;

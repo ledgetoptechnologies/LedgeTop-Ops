@@ -30,7 +30,12 @@ function copySelectedSource(processing,{binding,sourceRoot,sourcePin,spoolRoot,s
   const total=files.reduce((sum,f)=>sum+f.byteSize,0);if(!Number.isSafeInteger(total)||total>maxBytes)fail();
   source=rootOpen(sourceRoot,sourcePin);out=rootOpen(spoolRoot,spoolPin);
   const sourceIdentity=fs.fstatSync(source,{bigint:true}),spoolIdentity=fs.fstatSync(out,{bigint:true});if(sourceIdentity.dev===spoolIdentity.dev&&sourceIdentity.ino===spoolIdentity.ino)fail();
-  const free=()=>{const s=fs.statfsSync(`/proc/self/fd/${out}`,{bigint:true});if(s.bavail*s.bsize<BigInt(minFreeBytes))fail();};
+  // statfs is an observation, not a reservation or a freshness guarantee.
+  let remaining=total;
+  const free=()=>{const current=fs.lstatSync(spoolRoot,{bigint:true}),opened=fs.fstatSync(out,{bigint:true});
+   if(!current.isDirectory()||current.dev!==opened.dev||current.ino!==opened.ino||!Number.isSafeInteger(remaining)||remaining<0||remaining>total)fail();
+   const s=fs.statfsSync(`/proc/self/fd/${out}`,{bigint:true});
+   if(typeof s.bavail!=='bigint'||typeof s.bsize!=='bigint'||s.bavail<0n||s.bsize<=0n||s.bavail*s.bsize<BigInt(minFreeBytes)+BigInt(remaining))fail();};
   const name=`${binding.attemptId}-g${binding.generation}`;if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,160}$/.test(name))fail();free();
   fs.mkdirSync(`/proc/self/fd/${out}/${name}`,{mode:0o700});fs.fsyncSync(out);
   dir=fs.openSync(`/proc/self/fd/${out}/${name}`,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW);
@@ -41,7 +46,7 @@ function copySelectedSource(processing,{binding,sourceRoot,sourcePin,spoolRoot,s
   for(const f of files){let input,output;try{
    input=fileOpen(source,`${dataset.relativePath}/${f.relativePath}`);const before=fs.fstatSync(input,{bigint:true});if(before.size!==BigInt(f.byteSize)||before.nlink!==1n)fail();
    output=fs.openSync(`/proc/self/fd/${dir}/${f.id}`,fs.constants.O_RDWR|fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_NOFOLLOW,0o600);
-   const d=crypto.createHash('sha256');let pos=0;while(pos<f.byteSize){free();const n=fs.readSync(input,buffer,0,Math.min(buffer.length,f.byteSize-pos),pos);if(n<=0)fail();d.update(buffer.subarray(0,n));let written=0;while(written<n){const v=fs.writeSync(output,buffer,written,n-written,pos+written);if(v<=0)fail();written+=v;}pos+=n;}
+   const d=crypto.createHash('sha256');let pos=0;while(pos<f.byteSize){free();const n=fs.readSync(input,buffer,0,Math.min(buffer.length,f.byteSize-pos),pos);if(n<=0)fail();d.update(buffer.subarray(0,n));let written=0;while(written<n){free();const v=fs.writeSync(output,buffer,written,n-written,pos+written);if(v<=0)fail();written+=v;remaining-=v;}pos+=n;}
    if(!same(before,fs.fstatSync(input,{bigint:true}))||d.digest('hex')!==f.sha256)fail();fs.fsyncSync(output);
    const dest=fs.fstatSync(output,{bigint:true}),verify=crypto.createHash('sha256');let n=0;while(n<f.byteSize){const v=fs.readSync(output,buffer,0,Math.min(buffer.length,f.byteSize-n),n);if(v<=0)fail();verify.update(buffer.subarray(0,v));n+=v;}
    if(!same(dest,fs.fstatSync(output,{bigint:true}))||dest.size!==BigInt(f.byteSize)||verify.digest('hex')!==f.sha256)fail();
