@@ -5,7 +5,7 @@ import {readFileSync} from 'node:fs';
 const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
 function fixture(api){
  const task={id:'task',datasetId:'dataset',latestAttempt:{id:'attempt',status:'running',progress:.42}};
- const state={token:'session',tasks:[task],taskDetails:{task:{attempt:task.latestAttempt,logs:[{message:'old tail'}]}},expandedTaskId:null};
+ const state={token:'session',tasks:[task],taskDetails:{task:{attempt:task.latestAttempt,logs:[{message:'old tail'}]}},gcpWorkspaces:{},expandedTaskId:null};
  const context=vm.createContext({state,api,ACTIVE:new Set(['running']),can:()=>true,esc:value=>String(value).replaceAll('<','&lt;'),refreshGcpWorkspace:async()=>{},content:{querySelector:()=>null},render:()=>{},CSS:{escape:x=>x}});
  for(const name of ['taskOutputStage','logPanel'])vm.runInContext(source.split(/\r?\n/).find(line=>line.startsWith(`function ${name}(`)),context);
  vm.runInContext(source.slice(source.indexOf('const taskDetailRefreshes='),source.indexOf('async function refreshGcpWorkspace(')),context);

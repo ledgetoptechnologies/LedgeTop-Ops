@@ -2300,6 +2300,10 @@ const MIGRATIONS = [
             AND OLD.acceptance_receipt_json IS NULL AND NEW.acceptance_receipt_sha256 IS NOT NULL AND NEW.acceptance_receipt_json IS NOT NULL))
       BEGIN SELECT RAISE(ABORT,'Viewer source snapshot payload is immutable'); END;
   `},
+  {version:49,name:'persist_upstream_queue_assignment',sql:`
+    ALTER TABLE processing_attempts ADD COLUMN provider_status_json TEXT
+      CHECK(provider_status_json IS NULL OR json_valid(provider_status_json));
+  `},
 ];
 
 function applyMigrations(database) {
