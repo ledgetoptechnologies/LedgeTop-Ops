@@ -32,6 +32,7 @@ internal sealed class ExperimentalReservationOwner
     internal static Action<string>? BeforeTeardownTestHook;
     internal static ManualResetEventSlim? ReceiptQuotaEnteredTestSignal, ReceiptQuotaReleaseTestSignal;
     internal static ManualResetEventSlim? ReceiptStageBeforeCreateTestSignal, ReceiptStageBeforeCreateReleaseTestSignal;
+    internal static ManualResetEventSlim? ReceiptStageAfterWriteTestSignal, ReceiptStageAfterWriteReleaseTestSignal;
     internal static object? ReceiptStagePreCreateTokenTestHook;
     internal static string? ReceiptQuotaFailureStageTestHook;
     internal static object? ReceiptQuotaFailureTokenTestHook;
@@ -145,6 +146,12 @@ internal sealed class ExperimentalReservationOwner
                     ExperimentalOwnedStream.RequireRegularKind(stagedRecord.SafeFileHandle, false); ExperimentalOwnedStream.RequireSingleLink(stagedRecord.SafeFileHandle);
                     stagedIdentity = ExperimentalOwnedStream.GetIdentity(stagedRecord.SafeFileHandle);
                     stagedRecord.Write(bytes); stagedRecord.Flush(true); VerifyStagedRecord();
+                    if (ReceiptStageAfterWriteTestSignal is not null) {
+                        ReceiptStageAfterWriteTestSignal.Set();
+                        if (ReceiptStageAfterWriteReleaseTestSignal is null || !ReceiptStageAfterWriteReleaseTestSignal.Wait(TimeSpan.FromSeconds(10))) throw new IOException("Synthetic stage write barrier timed out.");
+                    }
+                    // Linearization point: only a matching revision may publish a
+                    // fully flushed record as verified. No filesystem I/O holds this lock.
                     lock (status.Gate) {
                         if (status.Poisoned || status.Revision != capacity.Revision) throw new TransferException("Synthetic receipt status changed during creation.");
                         stagedVerified = true;
