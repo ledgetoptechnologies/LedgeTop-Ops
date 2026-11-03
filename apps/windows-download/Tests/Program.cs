@@ -11,6 +11,10 @@ if (args.Length == 1 && args[0] == "--owned-root-executor-prototype-only") {
     return;
 }
 #if LEDGETOP_NATIVE_DIAGNOSTICS
+if (args.Length == 1 && args[0] == "--synthetic-settlement-observer-only") {
+    await SyntheticNativeSettlementObserverTests.RunAsync();
+    return;
+}
 if (args.Length == 1 && args[0] == "--native-stall-trace-tests") {
     await NativeStallTraceTests.RunAsync();
     return;

@@ -47,6 +47,16 @@ internal static class SyntheticMemoryNative {
         for (string? current = full; current is not null; current = Path.GetDirectoryName(current))
             if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw new IOException("Test directory may not traverse aliases.");
     }
+    private static bool SyntheticReservationsEmpty(string cache) {
+        try {
+            var directory = Path.Combine(cache, "verified-hydration-v1", ".hydration-reservations-v2");
+            RequireLocalDirectory(directory);
+            return SyntheticReservationSnapshotValid(Directory.EnumerateDirectories(directory).Any(), Directory.EnumerateFiles(directory).ToArray(), File.GetAttributes, File.ReadAllText);
+        } catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.SecurityException or ArgumentException or NotSupportedException) { return false; }
+    }
+    internal static bool SyntheticReservationSnapshotValid(bool hasDirectories, string[] files, Func<string, FileAttributes> attributes, Func<string, string> read) =>
+        !hasDirectories && files.Length == 1 && Path.GetFileName(files[0]) == ".verified-hydration-owner" &&
+        (attributes(files[0]) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) == 0 && read(files[0]) == "LedgeTop.VerifiedHydration/1\n";
     internal static bool CleanupVerified(bool registrationAttempted, bool registrationReturned, bool readersJoined, bool disposeCompleted, bool unregisterVerified, bool committedCleanupUncertain = false) =>
         !committedCleanupUncertain && readersJoined && (!registrationAttempted || (registrationReturned && disposeCompleted && unregisterVerified));
     internal static bool MayUnregister(bool registrationReturned, bool readersJoined, bool disposeCompleted, bool committedCleanupUncertain) =>
@@ -68,9 +78,12 @@ internal static class SyntheticMemoryNative {
         var cacheStage = CacheStage(get("LEDGETOP_TEST_MEMORY_CACHE_STAGE"));
         var prewarm = PrewarmMode(get("LEDGETOP_TEST_MEMORY_PREWARM"));
         var serial = SerialMode(get("LEDGETOP_TEST_MEMORY_SERIAL"));
-        return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}; prewarm={prewarm}; serial={serial}";
+        var failFast = SerialMode(get("LEDGETOP_TEST_MEMORY_FAIL_FAST"));
+        return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}; prewarm={prewarm}; serial={serial}; failFast={failFast}";
     }
     private static string SerialMode(string? value) => value switch { null or "0" => "off", "1" => "on", _ => "invalid" };
+    internal static bool FailFastOptionsValid(int count, bool retryProbe, string marker, string stage, string prewarm, string serial, string failFast, Func<string, string?> get) =>
+        failFast == "off" || (failFast == "on" && count == 2 && !retryProbe && marker == "none" && stage == "quota-reservation" && prewarm == "off" && serial == "on" && RetryOptionsValid(get));
     private static string PrewarmMode(string? value) => value switch { null or "0" => "off", "1" => "entries", "2" => "entries+reservation", _ => "invalid" };
     private static string CacheStage(string? value) => value switch { null or "none" => "none", "quota-only" => "quota-only", "quota-ownership" => "quota-ownership", "quota-capacity" => "quota-capacity", "quota-reservation" => "quota-reservation", "quota-reservation-gap" => "quota-reservation-gap", "quota-reservation-precheck" => "quota-reservation-precheck", _ => "invalid" };
     private static async Task PrewarmOwnedAsync(string cache, IReadOnlyCollection<PlaceholderIdentity> identities, bool reservationOwner = false) {
@@ -378,10 +391,25 @@ internal static class SyntheticMemoryNative {
             CleanupVerified(true, true, true, true, false) ||
             !CleanupVerified(true, true, true, true, true) || CleanupVerified(true, true, true, true, true, true) ||
             MayUnregister(true, true, true, true) || !MayUnregister(true, true, true, false)) throw new IOException("Synthetic registration cleanup evidence is incorrect.");
+        if (!FailFastOptionsValid(2, false, "none", "quota-reservation", "off", "on", "on", _ => null) ||
+            FailFastOptionsValid(1, false, "none", "quota-reservation", "off", "on", "on", _ => null) ||
+            FailFastOptionsValid(2, true, "none", "quota-reservation", "off", "on", "on", _ => null) ||
+            FailFastOptionsValid(2, false, "none", "quota-reservation", "entries", "on", "on", _ => null) ||
+            FailFastOptionsValid(2, false, "none", "quota-reservation", "off", "on", "on", name => name == "LEDGETOP_TEST_DISABLE_AVAILABILITY_SCANNER" ? "1" : null))
+            throw new IOException("Unsafe synthetic fail-fast options accepted.");
+        var marker = Path.Combine(Path.GetTempPath(), ".verified-hydration-owner");
+        bool Valid(bool directories, string[] files, FileAttributes attributes, string contents) =>
+            SyntheticReservationSnapshotValid(directories, files, _ => attributes, _ => contents);
+        if (!Valid(false, [marker], FileAttributes.Normal, "LedgeTop.VerifiedHydration/1\n") ||
+            Valid(true, [marker], FileAttributes.Normal, "LedgeTop.VerifiedHydration/1\n") ||
+            Valid(false, [marker, marker + ".json"], FileAttributes.Normal, "LedgeTop.VerifiedHydration/1\n") ||
+            Valid(false, [marker], FileAttributes.ReparsePoint, "LedgeTop.VerifiedHydration/1\n") ||
+            Valid(false, [marker], FileAttributes.Normal, "foreign"))
+            throw new IOException("Synthetic reservation cleanup evidence accepted unsafe contents.");
         var options = DiagnosticSettings(name => name == "LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION" ? "1" : "synthetic-secret");
-        if (options != "Synthetic memory options: blockSelf=True; disableScanner=False; suppressProgress=False; markerIo=invalid; cacheStage=invalid; prewarm=invalid; serial=invalid")
+        if (options != "Synthetic memory options: blockSelf=True; disableScanner=False; suppressProgress=False; markerIo=invalid; cacheStage=invalid; prewarm=invalid; serial=invalid; failFast=invalid")
             throw new IOException("Synthetic diagnostic option reporting is incorrect.");
-        if (DiagnosticSettings(name => name is "LEDGETOP_TEST_MEMORY_MARKER_IO" or "LEDGETOP_TEST_MEMORY_CACHE_STAGE" or "LEDGETOP_TEST_MEMORY_PREWARM" or "LEDGETOP_TEST_MEMORY_SERIAL" ? null : "1") != "Synthetic memory options: blockSelf=True; disableScanner=True; suppressProgress=True; markerIo=none; cacheStage=none; prewarm=off; serial=off")
+        if (DiagnosticSettings(name => name is "LEDGETOP_TEST_MEMORY_MARKER_IO" or "LEDGETOP_TEST_MEMORY_CACHE_STAGE" or "LEDGETOP_TEST_MEMORY_PREWARM" or "LEDGETOP_TEST_MEMORY_SERIAL" or "LEDGETOP_TEST_MEMORY_FAIL_FAST" ? null : "1") != "Synthetic memory options: blockSelf=True; disableScanner=True; suppressProgress=True; markerIo=none; cacheStage=none; prewarm=off; serial=off; failFast=off")
             throw new IOException("Synthetic diagnostic option reporting did not capture opt-ins.");
         var observations = new List<(string, int)>();
         void Capture(string outcome, int code) => observations.Add((outcome, code));
@@ -460,10 +488,12 @@ internal static class SyntheticMemoryNative {
         var cacheStage = CacheStage(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_CACHE_STAGE"));
         var prewarm = PrewarmMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_PREWARM"));
         var serial = SerialMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL"));
-        if (markerMode == "invalid" || cacheStage == "invalid" || prewarm == "invalid" || serial == "invalid" || (markerMode != "none" && cacheStage != "none") ||
+        var failFast = SerialMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_FAIL_FAST"));
+        if (markerMode == "invalid" || cacheStage == "invalid" || prewarm == "invalid" || serial == "invalid" || failFast == "invalid" || (markerMode != "none" && cacheStage != "none") ||
             (serial == "on" && (markerMode != "none" || cacheStage != "quota-reservation")) ||
-            (prewarm != "off" && (markerMode != "none" || cacheStage != "quota-reservation"))) return 2;
-        if (retryProbe && (count != 1 || markerMode != "none" || cacheStage != "none" || prewarm != "off" || serial != "off" || !RetryOptionsValid(Environment.GetEnvironmentVariable))) return 2;
+            (prewarm != "off" && (markerMode != "none" || cacheStage != "quota-reservation")) ||
+            !FailFastOptionsValid(count, retryProbe, markerMode, cacheStage, prewarm, serial, failFast, Environment.GetEnvironmentVariable)) return 2;
+        if (retryProbe && (count != 1 || markerMode != "none" || cacheStage != "none" || prewarm != "off" || serial != "off" || failFast != "off" || !RetryOptionsValid(Environment.GetEnvironmentVariable))) return 2;
         var basePath = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
         if (string.IsNullOrEmpty(basePath) || !Path.IsPathFullyQualified(basePath) || basePath.StartsWith("\\\\", StringComparison.Ordinal)) return 2;
         RequireLocalDirectory(basePath);
@@ -490,9 +520,21 @@ internal static class SyntheticMemoryNative {
         NativeRootRegistration? registration = null; NativePlaceholderProvider? provider = null;
         DiagnosticMemoryMarkerIo.Preopened? preopened = null;
         DiagnosticMemoryMarkerIo.CreateScope? createScope = null;
-        var readers = new List<Process>(); var readyHandles = new List<EventWaitHandle>(); var success = false;
+        var readers = new List<Process>(); var readerFiles = new Dictionary<int, string>(); var readyHandles = new List<EventWaitHandle>(); var success = false;
         var registrationAttempted = false; var readersJoined = true; var disposeCompleted = false;
         var disposeTimedOut = false; var unregisterVerified = false;
+        var loggedSettlements = 0;
+        void ReportSettlements() {
+            if (provider is null || failFast != "on") return;
+            var values = provider.SyntheticFailureSettlements;
+            while (loggedSettlements < values.Length) {
+                var item = values[loggedSettlements++];
+                try {
+                    Console.WriteLine($"Synthetic failure settlement: request={item.RequestKey}; file={item.FileName}; status=0x{item.CompletionStatus:X8}; nativeResult={(item.NativeResult is { } result ? $"0x{result:X8}" : "threw")}");
+                    Console.Out.Flush();
+                } catch (IOException) { }
+            }
+        }
         var startName = "Local\\LedgeTopMemoryProbe-" + id.ToString("N");
         using var start = new EventWaitHandle(false, EventResetMode.ManualReset, startName);
         var trace = NativeStallTrace.Enable();
@@ -555,16 +597,33 @@ internal static class SyntheticMemoryNative {
                 info.ArgumentList.Add(startName); info.ArgumentList.Add(readyName);
                 var reader = Process.Start(info) ?? throw new IOException("Synthetic reader failed to start.");
                 readers.Add(reader);
+                readerFiles.Add(reader.Id, name);
                 Phase($"reader-started-{readyHandles.Count - 1}-pid-{reader.Id}", id);
             }
             Phase("reader-ready-wait", id);
             if (!WaitHandle.WaitAll(readyHandles.ToArray(), TimeSpan.FromSeconds(10))) throw new TimeoutException("Synthetic readers did not reach the start gate.");
             start.Set();
             Phase("reader-exit-wait", id);
-            await Task.WhenAll(readers.Select(p => p.WaitForExitAsync())).WaitAsync(TimeSpan.FromSeconds(25));
+            var clock = Stopwatch.StartNew(); var loggedReaders = new HashSet<int>();
+            while (loggedReaders.Count != readers.Count) {
+                foreach (var reader in readers) if (!loggedReaders.Contains(reader.Id) && reader.HasExited) {
+                    loggedReaders.Add(reader.Id); Phase($"reader-exited-pid-{reader.Id}-code-{reader.ExitCode}", id);
+                }
+                ReportSettlements();
+                if (loggedReaders.Count == readers.Count) break;
+                if (clock.Elapsed >= TimeSpan.FromSeconds(25)) throw new TimeoutException("Synthetic readers did not exit.");
+                await Task.Delay(100).ConfigureAwait(false);
+            }
             Phase("readers-exited", id);
-            foreach (var reader in readers) Phase($"reader-exited-pid-{reader.Id}-code-{reader.ExitCode}", id);
-            success = readers.All(p => p.ExitCode == 0);
+            var settlements = provider.SyntheticFailureSettlements;
+            success = failFast == "on"
+                ? readers.Count(p => p.ExitCode == 0) == 1 && readers.Count(p => p.ExitCode == 1) == 1 &&
+                  provider.SyntheticFailureSettlementsAttempted == 1 && settlements.Length == 1 &&
+                  settlements[0].CompletionStatus == CloudFilesNativeTransfer.Unavailable && settlements[0].NativeResult == 0 &&
+                  Path.GetFileName(readerFiles[readers.Single(p => p.ExitCode == 1).Id]) == settlements[0].FileName &&
+                  NativeStallTrace.Dropped(trace) == 0 &&
+                  NativeStallTrace.Snapshot(trace).Count(e => e.Kind == NativeStallTrace.Stage.SyntheticAdmissionTimedOut) == 1
+                : readers.All(p => p.ExitCode == 0);
             }
         } catch (Exception error) { Console.Error.WriteLine($"Synthetic memory native: {error.GetType().Name}: {error.Message}"); Console.Error.Flush(); }
         finally {
@@ -583,7 +642,15 @@ internal static class SyntheticMemoryNative {
             catch (TimeoutException) { disposeTimedOut = true; }
             catch { }
             var committedCleanupUncertain = provider?.SyntheticCommittedCleanupUncertain == true;
-            if (MayUnregister(registration is not null, readersJoined, disposeCompleted, committedCleanupUncertain))
+            ReportSettlements();
+            if (failFast == "on" && provider is not null)
+                Console.WriteLine($"Synthetic failure settlement totals: attempted={provider.SyntheticFailureSettlementsAttempted}; published={provider.SyntheticFailureSettlements.Length}");
+            // For this deliberate failure, also preserve the registered root
+            // unless the expected loser settled, readers/drain completed, and
+            // the synthetic reservation directory has no outstanding record.
+            var failFastEvidence = failFast != "on" || (success && readersJoined && disposeCompleted && SyntheticReservationsEmpty(cache));
+            if (failFast == "on") Console.WriteLine($"Synthetic fail-fast reservation cleanup verified: {failFastEvidence}");
+            if (failFastEvidence && MayUnregister(registration is not null, readersJoined, disposeCompleted, committedCleanupUncertain))
                 try { registration!.Unregister(); unregisterVerified = true; } catch { }
             // A timed-out provider may still be executing callbacks. Retain its
             // handles instead of closing them while that work may use them.

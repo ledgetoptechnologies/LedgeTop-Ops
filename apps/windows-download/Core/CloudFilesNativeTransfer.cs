@@ -40,8 +40,11 @@ internal static class CloudFilesNativeTransfer {
     // prevalidated bytes and the normal dispatcher has already checked identity.
     internal static Task HydrateSyntheticMemoryAsync(PlaceholderIdentity identity, CloudFilesOperationContext context, byte[] bytes, CancellationToken token) =>
         HydrateSyntheticMemoryAsync(identity, context, bytes, token, new WindowsNative());
-    internal static Task HydrateSyntheticMemorySerialAsync(PlaceholderIdentity identity, CloudFilesOperationContext context, byte[] bytes, CancellationToken token, Func<Func<Task>, CancellationToken, Task> run, Action committedCleanupUncertain) =>
-        HydrateSyntheticMemoryAsync(identity, context, bytes, token, new WindowsNative(), run, committedCleanupUncertain: committedCleanupUncertain);
+    internal static Task HydrateSyntheticMemorySerialAsync(PlaceholderIdentity identity, CloudFilesOperationContext context, byte[] bytes, CancellationToken token, Func<Func<Task>, CancellationToken, Task> run, Action committedCleanupUncertain,
+        SyntheticSettlementLog? settlements = null) =>
+        HydrateSyntheticMemoryAsync(identity, context, bytes, token,
+            settlements is null ? new WindowsNative() : new SyntheticNativeSettlementObserver(new WindowsNative(), context.RequestKey, identity.FileName, settlements),
+            run, committedCleanupUncertain: committedCleanupUncertain);
     internal static async Task HydrateSyntheticMemoryAsync(PlaceholderIdentity identity, CloudFilesOperationContext context, byte[] bytes, CancellationToken token, ICloudFilesTransferNative native, Func<Func<Task>, CancellationToken, Task>? run = null, TimeSpan? progressInterval = null, Action? committedCleanupUncertain = null) {
         if (bytes.Length != identity.Length || !CryptographicOperations.FixedTimeEquals(SHA256.HashData(bytes), Convert.FromHexString(identity.Sha256)) ||
             context.FileSize != bytes.Length || context.RequiredOffset < 0 || context.RequiredLength <= 0 ||

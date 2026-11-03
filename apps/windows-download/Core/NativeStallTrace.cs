@@ -52,7 +52,7 @@ internal static class NativeStallTrace
         ReservedFilesEnumeratorEnter, ReservedFilesEnumeratorExit,
         ReservedFilesMoveEnter, ReservedFilesMoveExit, ReservedFilesDisposeEnter, ReservedFilesDisposeExit,
         ReservedRecordReadEnter, ReservedRecordReadExit,
-        SyntheticSerialTransferEnter, SyntheticSerialTransferExit
+        SyntheticSerialTransferEnter, SyntheticSerialTransferExit, SyntheticAdmissionTimedOut
     }
     internal readonly record struct Event(long Sequence, long Timestamp, int ThreadId, Stage Kind);
     internal sealed class Capture

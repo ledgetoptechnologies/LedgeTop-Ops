@@ -112,10 +112,11 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     // primitives. This does not authorize, download, or transfer data. The
     // reservation stage creates and verifies release of synthetic records only.
     internal static Action? SyntheticBeforeGapReacquire;
-    internal async Task SyntheticCacheStageAsync(PlaceholderIdentity identity, string stage, CancellationToken token, bool exclusive = false, Func<Task>? transfer = null)
+    internal async Task SyntheticCacheStageAsync(PlaceholderIdentity identity, string stage, CancellationToken token, bool exclusive = false, Func<Task>? transfer = null, bool failFastAdmission = false)
     {
         if (Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") != "1" ||
             (exclusive && (Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL") != "1" || stage != "quota-reservation" || transfer is null)) ||
+            (failFastAdmission && (!exclusive || Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_FAIL_FAST") != "1")) ||
             (!exclusive && transfer is not null) ||
             stage is not ("quota-only" or "quota-ownership" or "quota-capacity" or "quota-reservation" or "quota-reservation-gap" or "quota-reservation-precheck" or "reservation-owner-prewarm") || source.Alias != "synthetic" ||
             source.Origin.AbsoluteUri != "https://source.example.invalid/" || channel != "pilot" ||
@@ -136,7 +137,13 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             throw new TransferException("Synthetic cache does not belong to this fixture.");
         RequireSafe(cache); RequireSafe(root);
         NativeStallTrace.Record(NativeStallTrace.Stage.AdmissionEnter);
-        using var admission = await HydrationCacheConcurrency.AcquireAsync(root, identity.ScopeKey + identity.CacheKey, token, exclusive: exclusive).ConfigureAwait(false);
+        HydrationCacheConcurrency.Lease admission;
+        try { admission = await HydrationCacheConcurrency.AcquireAsync(root, identity.ScopeKey + identity.CacheKey, token,
+            exclusive: exclusive, testTimeout: failFastAdmission ? TimeSpan.FromSeconds(2) : null).ConfigureAwait(false); }
+        catch (TransferException error) when (failFastAdmission && error.Reason == TransferFailureReason.Timeout) {
+            NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticAdmissionTimedOut); throw;
+        }
+        using var ownedAdmission = admission;
         NativeStallTrace.Record(NativeStallTrace.Stage.AdmissionAcquired);
         TraceCacheAction(NativeStallTrace.Stage.SyntheticRootPrepareEnter, NativeStallTrace.Stage.SyntheticRootPrepareExit, () => { RequireSafe(root); Owned(root); });
         var quotaLock = Path.Combine(root, ".hydration-cache.lock"); RequireSafe(quotaLock);

@@ -10,6 +10,9 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
 #if LEDGETOP_NATIVE_DIAGNOSTICS
     private int syntheticCommittedCleanupUncertain;
     internal bool SyntheticCommittedCleanupUncertain => Volatile.Read(ref syntheticCommittedCleanupUncertain) != 0;
+    private readonly SyntheticSettlementLog syntheticSettlements = new();
+    internal SyntheticFailureSettlement[] SyntheticFailureSettlements => syntheticSettlements.Snapshot();
+    internal int SyntheticFailureSettlementsAttempted => syntheticSettlements.Attempted;
 #endif
     private readonly string root;
     private readonly IPreviewRootRegistration registration;
@@ -88,12 +91,15 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                     var cacheStage = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_CACHE_STAGE") ?? "none";
                     var bytes = System.Text.Encoding.UTF8.GetBytes(new string('x', 100_000));
                     var serial = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL") ?? "0";
+                    var failFast = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_FAIL_FAST") ?? "0";
+                    if (failFast is not ("0" or "1") || (failFast == "1" && serial != "1"))
+                        throw new IOException("Synthetic admission comparison scope mismatch.");
                     if (serial == "1") {
                         if (cacheStage != "quota-reservation" || DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO")) != "none")
                             throw new IOException("Synthetic serial comparison scope mismatch.");
                         await CloudFilesNativeTransfer.HydrateSyntheticMemorySerialAsync(identity, context, bytes, token,
-                            (transfer, sinkToken) => coordinator.SyntheticCacheStageAsync(identity, cacheStage, sinkToken, exclusive: true, transfer: transfer),
-                            () => Interlocked.Exchange(ref syntheticCommittedCleanupUncertain, 1)).ConfigureAwait(false);
+                            (transfer, sinkToken) => coordinator.SyntheticCacheStageAsync(identity, cacheStage, sinkToken, exclusive: true, transfer: transfer, failFastAdmission: failFast == "1"),
+                            () => Interlocked.Exchange(ref syntheticCommittedCleanupUncertain, 1), failFast == "1" ? syntheticSettlements : null).ConfigureAwait(false);
                     } else {
                         if (serial != "0") throw new IOException("Synthetic serial comparison option invalid.");
                         if (cacheStage != "none") await coordinator.SyntheticCacheStageAsync(identity, cacheStage, token).ConfigureAwait(false);
