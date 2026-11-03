@@ -13,6 +13,7 @@ internal sealed class ExperimentalReservationOwner
     private static readonly object RegistryGate = new();
     private static readonly HashSet<ExperimentalReservationOwner> Registry = [];
     private static readonly HashSet<LeaseReceipt> Receipts = [];
+    private static readonly object ReceiptAttachAuthority = new();
     private readonly object gate = new();
     private HydrationCacheConcurrency.Lease lease;
     private FileStream? entry;
@@ -30,6 +31,8 @@ internal sealed class ExperimentalReservationOwner
     private object? injectedPairToken;
     internal static Action<string>? BeforeTeardownTestHook;
     internal static ManualResetEventSlim? ReceiptQuotaEnteredTestSignal, ReceiptQuotaReleaseTestSignal;
+    internal static string? ReceiptQuotaFailureStageTestHook;
+    internal static object? ReceiptQuotaFailureTokenTestHook;
     private readonly long growth;
     internal long Growth { get { lock (gate) { if (finished || uncertain) throw new IOException("Reservation owner unavailable."); return growth; } } }
     internal static int RetainedCount { get { lock (RegistryGate) return Registry.Count + Receipts.Count; } }
@@ -40,8 +43,14 @@ internal sealed class ExperimentalReservationOwner
         private HydrationCacheConcurrency.Lease? heldLease;
         private FileStream? heldEntry;
         private ExperimentalEntryLease? heldOwnedEntry;
+        private SafeFileHandle? uncertainQuota;
+        private ExperimentalOwnedStream.Identity quotaIdentity;
+        private object? injectedQuotaToken;
         private bool active, uncertain, executing;
-        internal LeaseReceipt(string root, string key) { this.root = root; this.key = key; }
+        internal LeaseReceipt(string root, string key, object authority) {
+            if (!ReferenceEquals(authority, ReceiptAttachAuthority)) throw new InvalidOperationException("Receipt authority invalid.");
+            this.root = root; this.key = key;
+        }
         private T Execute<T>(string requestedRoot, string requestedKey, Func<T> operation)
         {
             lock (gate) {
@@ -50,7 +59,7 @@ internal sealed class ExperimentalReservationOwner
                 if (!string.Equals(root, Path.GetFullPath(requestedRoot), StringComparison.OrdinalIgnoreCase) || key != requestedKey)
                     throw new TransferException("Experimental receipt does not match its entry.");
                 executing = true; T result = default!;
-                try { heldLease.RunExperimentalForEntry(root, key, () => { heldOwnedEntry.Validate(); result = operation(); }); }
+                try { heldLease.RunExperimentalForEntry(root, key, () => { try { heldOwnedEntry.Validate(); } catch { uncertain = true; throw; } result = operation(); }); }
                 finally { executing = false; }
                 return result;
             }
@@ -61,23 +70,52 @@ internal sealed class ExperimentalReservationOwner
         internal long AccountMarkerUnderQuota(string root, string key, string directory, CancellationToken token = default) => Execute(root, key, () => {
             long result = 0;
             HydrationQuotaGate.Run(heldLease!.Quota, () => {
+                uncertain = true;
                 heldOwnedEntry!.Validate();
                 heldLease.ExperimentalMarkers.ValidateExisting(this.root, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
                 var path = Path.Combine(this.root, ".hydration-quota-v2.lock");
-                using var quota = ExperimentalOwnedStream.Open(path, 0xC0000080, 0, 4, 0x00200000);
-                ExperimentalOwnedStream.RequireRegularKind(quota, false); ExperimentalOwnedStream.RequireSingleLink(quota);
-                if (!string.Equals(ExperimentalOwnedStream.FinalPath(quota), path, StringComparison.OrdinalIgnoreCase)) throw new IOException("Experimental quota binding changed.");
+                uncertainQuota = ExperimentalOwnedStream.Open(path, 0xC0000080, 0, 4, 0x00200000);
+                quotaIdentity = ExperimentalOwnedStream.GetIdentity(uncertainQuota);
+                InjectQuotaFailureForTest("validation");
+                ExperimentalOwnedStream.RequireRegularKind(uncertainQuota, false); ExperimentalOwnedStream.RequireSingleLink(uncertainQuota);
+                if (!string.Equals(ExperimentalOwnedStream.FinalPath(uncertainQuota), path, StringComparison.OrdinalIgnoreCase)) throw new IOException("Experimental quota binding changed.");
                 if (ReceiptQuotaEnteredTestSignal is not null) {
                     ReceiptQuotaEnteredTestSignal.Set();
                     if (ReceiptQuotaReleaseTestSignal is null || !ReceiptQuotaReleaseTestSignal.Wait(TimeSpan.FromSeconds(10))) throw new IOException("Synthetic receipt barrier timed out.");
                 }
                 result = heldLease.ExperimentalMarkers.AccountMarker(Path.Combine(directory, ".verified-hydration-owner"));
-                heldOwnedEntry.Validate();
+                heldOwnedEntry.Validate(); InjectQuotaFailureForTest("close");
+                uncertainQuota.Dispose(); uncertainQuota = null; uncertain = false;
             }, token);
             return result;
         });
-        internal void Attach(HydrationCacheConcurrency.Lease value, FileStream file) { heldLease = value; heldEntry = file; active = true; }
-        internal void Attach(HydrationCacheConcurrency.Lease value, ExperimentalEntryLease file) { heldLease = value; heldOwnedEntry = file; active = true; }
+        private void InjectQuotaFailureForTest(string stage) {
+            if (ReceiptQuotaFailureStageTestHook != stage) return;
+            injectedQuotaToken = ReceiptQuotaFailureTokenTestHook;
+            throw new IOException("Injected receipt quota " + stage + " failure.");
+        }
+        internal void SettleInjectedQuotaFailureForTest(object token) {
+            lock (gate) {
+                if (!active || !uncertain || !ReferenceEquals(injectedQuotaToken, token) || token is null || ReceiptQuotaFailureStageTestHook is not null ||
+                    uncertainQuota is null || heldLease is null || heldOwnedEntry is null) throw new InvalidOperationException("Only an injected quota failure can be settled.");
+                heldLease.RunExperimentalForEntry(root, key, () => {
+                    heldOwnedEntry.Validate();
+                    heldLease.ExperimentalMarkers.ValidateExisting(root, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+                    ExperimentalOwnedStream.RequireRegularKind(uncertainQuota, false); ExperimentalOwnedStream.RequireSingleLink(uncertainQuota);
+                    if (ExperimentalOwnedStream.GetIdentity(uncertainQuota) != quotaIdentity ||
+                        !string.Equals(ExperimentalOwnedStream.FinalPath(uncertainQuota), Path.Combine(root, ".hydration-quota-v2.lock"), StringComparison.OrdinalIgnoreCase))
+                        throw new IOException("Experimental quota binding changed.");
+                    uncertainQuota.Dispose(); uncertainQuota = null; injectedQuotaToken = null; uncertain = false;
+                });
+            }
+        }
+        private void CheckAttach(object authority) {
+            if (!ReferenceEquals(authority, ReceiptAttachAuthority) || active || uncertain || heldLease is not null || heldEntry is not null || heldOwnedEntry is not null)
+                throw new InvalidOperationException("Receipt attachment is not permitted.");
+            lock (RegistryGate) if (!Receipts.Contains(this)) throw new InvalidOperationException("Receipt is not registered.");
+        }
+        internal void Attach(HydrationCacheConcurrency.Lease value, FileStream file, object authority) { lock (gate) { CheckAttach(authority); ArgumentNullException.ThrowIfNull(value); ArgumentNullException.ThrowIfNull(file); heldLease = value; heldEntry = file; active = true; } }
+        internal void Attach(HydrationCacheConcurrency.Lease value, ExperimentalEntryLease file, object authority) { lock (gate) { CheckAttach(authority); ArgumentNullException.ThrowIfNull(value); ArgumentNullException.ThrowIfNull(file); heldLease = value; heldOwnedEntry = file; active = true; } }
         public void Dispose() {
             lock (gate) {
                 if (!active) return;
@@ -91,6 +129,7 @@ internal sealed class ExperimentalReservationOwner
             }
         }
     }
+    internal static void ExerciseReceiptReattachGuardForTest(LeaseReceipt receipt) => receipt.Attach(null!, (ExperimentalEntryLease)null!, ReceiptAttachAuthority);
     internal static Dictionary<string, ExperimentalReservationOwner> SnapshotForRoot(string root)
     {
         ExperimentalReservationOwner[] snapshot;
@@ -265,15 +304,15 @@ internal sealed class ExperimentalReservationOwner
         foreach (var pin in pins.AsEnumerable().Reverse()) { BeforeTeardownTestHook?.Invoke("directory"); pin.Handle.Dispose(); } pins.Clear();
         LeaseReceipt? receipt = null;
         if (returnLeases) {
-            receipt = new LeaseReceipt(root, leaseKey);
+            receipt = new LeaseReceipt(root, leaseKey, ReceiptAttachAuthority);
             lock (RegistryGate) Receipts.Add(receipt);
             try {
                 if (ownedEntry is not null) {
-                    _ = lease.TransferExperimentalPair(ownedEntry, leaseKey, (nextLease, nextEntry) => receipt.Attach(nextLease, nextEntry));
+                    _ = lease.TransferExperimentalPair(ownedEntry, leaseKey, (nextLease, nextEntry) => receipt.Attach(nextLease, nextEntry, ReceiptAttachAuthority));
                     ownedEntry = null;
                 } else {
                     var moved = lease.TransferForReservationTest(leaseKey);
-                    receipt.Attach(moved, entry!); entry = null;
+                    receipt.Attach(moved, entry!, ReceiptAttachAuthority); entry = null;
                 }
             } catch { lock (RegistryGate) Receipts.Remove(receipt); throw; }
         } else {

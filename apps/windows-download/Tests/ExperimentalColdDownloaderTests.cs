@@ -928,9 +928,27 @@ internal static class ExperimentalColdDownloaderTests
                 Check(!File.Exists(path)); AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock")); AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
                 rejected = false; try { stale.Dispose(); } catch (ObjectDisposedException) { rejected = true; } Check(rejected);
                 var heldReceipt = receipt!;
+                rejected = false; try { _ = new ExperimentalReservationOwner.LeaseReceipt(root, scope + key, new object()); } catch (InvalidOperationException) { rejected = true; } Check(rejected);
+                rejected = false; try { heldReceipt.Attach(null!, (ExperimentalEntryLease)null!, new object()); } catch (InvalidOperationException) { rejected = true; } Check(rejected);
+                rejected = false; try { ExperimentalReservationOwner.ExerciseReceiptReattachGuardForTest(heldReceipt); } catch (InvalidOperationException) { rejected = true; } Check(rejected);
                 rejected = false; try { heldReceipt.ValidateEntry(Path.Combine(root, "foreign"), scope + key); } catch (TransferException) { rejected = true; } Check(rejected);
                 rejected = false; try { heldReceipt.ValidateEntry(root, scope + new string('c', 64)); } catch (TransferException) { rejected = true; } Check(rejected);
                 heldReceipt.ValidateEntry(root, scope + key);
+                foreach (var failureStage in new[] { "validation", "close" }) {
+                    var failureToken = new object(); var injected = false;
+                    ExperimentalReservationOwner.ReceiptQuotaFailureStageTestHook = failureStage;
+                    ExperimentalReservationOwner.ReceiptQuotaFailureTokenTestHook = failureToken;
+                    try { _ = heldReceipt.AccountMarkerUnderQuota(root, scope + key, root); }
+                    catch (IOException error) when (error.Message == "Injected receipt quota " + failureStage + " failure.") { injected = true; }
+                    finally { ExperimentalReservationOwner.ReceiptQuotaFailureStageTestHook = null; ExperimentalReservationOwner.ReceiptQuotaFailureTokenTestHook = null; }
+                    Check(injected && ExperimentalReservationOwner.RetainedCount == 1);
+                    AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock")); AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
+                    AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-quota-v2.lock"));
+                    rejected = false; try { heldReceipt.Dispose(); } catch (IOException) { rejected = true; } Check(rejected);
+                    rejected = false; try { heldReceipt.SettleInjectedQuotaFailureForTest(new object()); } catch (InvalidOperationException) { rejected = true; } Check(rejected);
+                    heldReceipt.SettleInjectedQuotaFailureForTest(failureToken); heldReceipt.ValidateEntry(root, scope + key);
+                    AssertOtherProcessOpen(Path.Combine(root, ".hydration-quota-v2.lock"), true);
+                }
                 Check(heldReceipt.AccountMarker(root, scope + key, root) == System.Text.Encoding.UTF8.GetByteCount("LedgeTop.VerifiedHydration/1\n"));
                 var exposed = typeof(ExperimentalReservationOwner.LeaseReceipt).GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly).Where(method => method.IsAssembly);
                 Check(exposed.All(method => (method.ReturnType == typeof(void) || method.ReturnType == typeof(long)) && method.GetParameters().All(parameter => !typeof(Delegate).IsAssignableFrom(parameter.ParameterType))));
