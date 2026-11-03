@@ -117,7 +117,7 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
     try {
       const mode = String(req.query.mode || 'auto');
       if (!['auto', 'radius', 'nearest'].includes(mode)) return error(res, 400, 'invalid_candidate_mode');
-      const radiusM = req.query.radiusM == null ? (mode === 'radius' ? 100 : null) : Number(req.query.radiusM);
+      const radiusM = req.query.radiusM == null ? (mode === 'radius' ? 15.24 : null) : Number(req.query.radiusM);
       if (radiusM != null && (!Number.isFinite(radiusM) || radiusM <= 0 || radiusM > 100000)) return error(res, 400, 'invalid_radius');
       const requested = Number(rawLimit), ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, 200);
       let images = ranked.images;

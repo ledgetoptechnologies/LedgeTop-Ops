@@ -76,3 +76,13 @@ test('auto candidates adapt to camera spacing, accuracy and footprint metadata w
   assert.equal(footprint.ranking.reason,'median_camera_footprint_metadata');assert.equal(footprint.ranking.mode,'nearest_fallback');
   assert.equal(footprint.images.length,12);assert.equal(footprint.ranking.visibilityConfirmed,false);
 });
+
+test('fixed-radius endpoint defaults to 50 feet expressed in metres',async(t)=>{
+  const {base,dataset,database}=await fixture(t),headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'radius-default-import'};
+  const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers,body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',content:'point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n'})});
+  const pointId=(await imported.json()).points[0].id;
+  database.prepare('UPDATE dataset_files SET latitude=44.50005,longitude=-88.1 WHERE id=?').run('image-one');
+  database.prepare(`INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,metadata_json,created_at,mime_type,latitude,longitude) VALUES (?,?,?,1,?,'image/jpeg','{}',?,'image/jpeg',44.5002,-88.1)`).run('image-outside',dataset.id,'outside.jpg','b'.repeat(64),new Date().toISOString());
+  const response=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius`,{headers:{authorization:'Bearer admin'}});
+  const result=await response.json();assert.equal(response.status,200);assert.equal(result.ranking.radiusM,15.24);assert.deepEqual(result.images.map(image=>image.id),['image-one']);
+});

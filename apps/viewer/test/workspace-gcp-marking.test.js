@@ -16,8 +16,13 @@ test('task GCP workspace selects authoritative sets and points before bounded im
   ]) assert.ok(source.includes(value), value);
   assert.match(source, /\/api\/v1\/gcp-sets\/\$\{encodeURIComponent\(workspace\.setId\)\}/);
   assert.match(source, /\/gcp-images\?\$\{query\}/);
-  assert.match(source, /limit:'24'/);
+  assert.match(source, /limit:'200'/);
   assert.match(source, /query\.set\('radiusM',String\(workspace\.radiusM\)\)/);
+  assert.match(source, /mode:'radius',radiusM:15\.24/);
+  assert.match(source, /Radius \(feet\)/);
+  assert.match(source, /gcpCameraMap\(selectedPoint,candidates,task\.id,active\?\.id,ranking\?\.radiusM\?\?workspace\.radiusM\)/);
+  assert.match(source, /data-action="gcp-open-image"/);
+  assert.match(css, /\.gcp-map-plot/);
   assert.match(source, /\.slice\(0,100\)/);
 });
 
