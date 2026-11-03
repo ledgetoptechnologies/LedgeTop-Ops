@@ -123,14 +123,13 @@ internal static class ExperimentalColdDownloaderTests
     internal static async Task CrashChildAsync(string root, string checkpoint)
     {
         if (!Path.IsPathFullyQualified(root) || root.StartsWith(@"\\", StringComparison.Ordinal) || !Directory.Exists(root) ||
-            checkpoint is not ("partial" or "state" or "write")) throw new IOException("Invalid synthetic crash fixture.");
+            checkpoint is not ("partial" or "statewrite" or "beforeflush" or "state" or "write" or "eof" or "verified" or "promoted")) throw new IOException("Invalid synthetic crash fixture.");
         Downloader.ExperimentalCrashCheckpointTestHook = reached => {
             if (reached != checkpoint) return;
             Console.WriteLine("READY " + reached); Console.Out.Flush();
             Thread.Sleep(Timeout.Infinite);
         };
-        using var cancel = new CancellationTokenSource();
-        using var downloader = Engine((_, _) => Response(Content, new CancelAfterPrefix(Content, cancel)));
+        using var downloader = Engine((_, _) => Response(Content, new PrefixStream(Content)));
         await downloader.DownloadAsync(Spec, root);
         throw new IOException("Crash checkpoint was not reached.");
     }
@@ -168,6 +167,42 @@ internal static class ExperimentalColdDownloaderTests
     }
     private static async Task AbruptRestartTests()
     {
+        foreach (var checkpoint in new[] { "statewrite", "beforeflush", "eof", "verified", "promoted" }) await WithFixture(async root => {
+            await AbruptChildAsync(root.Path, checkpoint);
+            var states = Directory.EnumerateFiles(root.Path, "*.json", SearchOption.AllDirectories).ToArray();
+            Check(states.Length == 1);
+            var stateBytes = File.ReadAllBytes(states[0]);
+            var final = Path.Combine(root.Path, "output.bin");
+            if (checkpoint == "promoted") {
+                Check(File.Exists(final) && File.ReadAllBytes(final).SequenceEqual(Content));
+                var id = PhysicalId(final); var calls = 0;
+                using var downloader = Engine((_, _) => { calls++; return Response(Content); });
+                await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
+                Check(calls == 0 && PhysicalId(final) == id && File.ReadAllBytes(final).SequenceEqual(Content) && File.ReadAllBytes(states[0]).SequenceEqual(stateBytes));
+                return;
+            }
+            var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single();
+            var idBefore = PhysicalId(part); var bytes = File.ReadAllBytes(part);
+            Check(bytes.Length <= Content.Length && Content.AsSpan(0, bytes.Length).SequenceEqual(bytes));
+            if (checkpoint is "statewrite" or "beforeflush") {
+                var calls = 0;
+                using var downloader = Engine((_, _) => { calls++; return Response(Content); });
+                await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
+                Check(calls == 0 && PhysicalId(part) == idBefore && File.ReadAllBytes(part).SequenceEqual(bytes) && File.ReadAllBytes(states[0]).SequenceEqual(stateBytes));
+                return;
+            }
+            using var resumed = Engine((request, _) => {
+                if (bytes.Length == 0) { Check(request.Headers.Range is null); return Response(Content); }
+                var from = bytes.Length == Content.Length ? bytes.Length - 1 : bytes.Length;
+                Check(request.Headers.Range?.Ranges.Single().From == from);
+                var response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(Content[from..]) };
+                response.Headers.ETag = new EntityTagHeaderValue(Spec.ETag);
+                response.Content.Headers.ContentRange = new ContentRangeHeaderValue(from, Content.Length - 1, Content.Length);
+                return response;
+            });
+            var result = await resumed.DownloadAsync(Spec, root.Path);
+            Check(PhysicalId(result) == idBefore && File.ReadAllBytes(result).SequenceEqual(Content));
+        });
         await WithFixture(async root => {
             var injected = false;
             try { await AbruptChildAsync(root.Path, "state", () => throw new IOException("Injected status failure.")); }
@@ -652,6 +687,11 @@ internal static class ExperimentalColdDownloaderTests
         });
         Check(PendingOwnedResources() == 0);
         Console.WriteLine("PASS gated synthetic Downloader: cold and resumed transfers, validation, collision, cancellation and coordinator recovery.");
+    }
+    private sealed class PrefixStream(byte[] data) : MemoryStream(data)
+    {
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken token = default) =>
+            ValueTask.FromResult(Read(Position == 0 ? buffer.Span[..Math.Min(buffer.Length, 4)] : buffer.Span));
     }
     private sealed class CancelAfterPrefix(byte[] data, CancellationTokenSource source) : MemoryStream(data)
     {

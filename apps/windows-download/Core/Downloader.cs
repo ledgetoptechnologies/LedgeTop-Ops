@@ -322,7 +322,13 @@ public sealed class Downloader : IDisposable
                     var bytes = JsonSerializer.SerializeToUtf8Bytes(ExperimentalPins(expected, experimentalResumeOwner.SourceIdentity));
                     if (bytes.Length > JsonSerializer.SerializeToUtf8Bytes(expected).Length) throw new TransferException("Experimental state exceeds its storage budget.");
                     using var stateStream = new FileStream(statePath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-                    stateStream.Write(bytes); stateStream.Flush(true);
+                    if (ExperimentalCrashCheckpointTestHook is not null) {
+                        stateStream.Write(bytes.AsSpan(0, bytes.Length / 2)); stateStream.Flush(true);
+                        ExperimentalCrashCheckpointTestHook.Invoke("statewrite");
+                        stateStream.Write(bytes.AsSpan(bytes.Length / 2));
+                        ExperimentalCrashCheckpointTestHook.Invoke("beforeflush");
+                    } else stateStream.Write(bytes);
+                    stateStream.Flush(true);
                     ExperimentalCrashCheckpointTestHook?.Invoke("state");
                 }
             }
@@ -418,6 +424,7 @@ public sealed class Downloader : IDisposable
                             if (!experimentalFullRecovery) owner.RestorePrefix(offset);
                             throw new TransferException("The response exceeds the trusted length.");
                         }
+                        ExperimentalCrashCheckpointTestHook?.Invoke("eof");
                         cancellationToken.ThrowIfCancellationRequested(); Report(spec.Length, DownloadPhase.Verifying);
                         byte[] digest;
                         using (DownloadTimingScope.Measure(3)) digest = owner.SealAndHash();
@@ -425,9 +432,11 @@ public sealed class Downloader : IDisposable
                             throw new TransferException("SHA-256 verification failed; experimental partial was preserved.");
                         cancellationToken.ThrowIfCancellationRequested();
                         var promoted = false;
+                        ExperimentalCrashCheckpointTestHook?.Invoke("verified");
                         BeforeExperimentalPromotionTestHook?.Invoke();
                         HydrationMutationScope.Run(() => { cancellationToken.ThrowIfCancellationRequested(); CheckPath(finalPath); CheckPath(partialPath); promoted = owner.RenameNoReplace(root, spec.FileName, Convert.FromHexString(spec.Sha256)); }, cancellationToken);
                         if (!promoted) throw new TransferException("The destination already exists; it will not be overwritten.");
+                        ExperimentalCrashCheckpointTestHook?.Invoke("promoted");
                         Report(spec.Length, DownloadPhase.Completed);
                         try { HydrationMutationScope.Run(() => { RequireRegularFile(statePath); File.Delete(statePath); }, committedCleanup: true); }
                         catch (IOException) { } catch (UnauthorizedAccessException) { } catch (TransferException) { }
