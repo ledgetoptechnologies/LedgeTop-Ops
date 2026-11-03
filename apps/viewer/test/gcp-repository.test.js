@@ -94,7 +94,7 @@ test('manual image correspondences enforce one dataset and preserve stable IDs o
 
 test('each processing attempt snapshots deterministic private ODM correspondences', (t) => {
   const { processing,gcp,project,dataset }=datasetFixture(t);
-  const set=gcp.importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'generic-csv-v1',sourceSha256:GCP_SOURCE_SHA,
+  const set=gcp.importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'generic-csv-v1',sourceFileId:'gcp-file',sourceFilename:'control.csv',sourceSha256:GCP_SOURCE_SHA,
     sourceContent:GCP_SOURCE,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:1',
     points:[{externalId:'A',label:'A',latitude:44.5,longitude:-88.1,elevationM:250,description:null}]});
   const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Model'});
@@ -104,11 +104,36 @@ test('each processing attempt snapshots deterministic private ODM correspondence
   assert.equal(firstSnapshot.correspondenceCount,1);
   assert.equal(firstSnapshot.content,'EPSG:4326\n-88.1 44.5 250 120.5 240.25 near.jpg\n');
   assert.equal(firstSnapshot.sha256,crypto.createHash('sha256').update(firstSnapshot.content).digest('hex'));
+  const evidence=processing.getAttemptGcpEvidence(first.id);
+  assert.equal(evidence.schemaVersion,1);
+  assert.deepEqual(evidence.snapshot.sourceGcpDatasetFileIds,['gcp-file']);
+  assert.deepEqual(evidence.snapshot.imageDatasetFileIds,['near']);
+  assert.deepEqual(evidence.correspondences[0],{
+    correspondenceId:mark.id,gcpPointId:set.points[0].id,gcpSetId:set.id,externalId:'A',label:'A',latitude:44.5,longitude:-88.1,elevationM:250,
+    sourceGcpDatasetFileId:'gcp-file',sourceGcpSha256:GCP_SOURCE_SHA,sourceGcpRelativePath:'control.csv',imageDatasetFileId:'near',imageRelativePath:'near.jpg',
+    imageWidth:6000,imageHeight:4000,pixelX:120.5,pixelY:240.25,
+  });
+  assert.throws(()=>processing.database.prepare('UPDATE processing_attempt_gcp_snapshots SET evidence_json=NULL WHERE attempt_id=?').run(first.id),/gcp_snapshot_immutable/);
 
   gcp.updateCorrespondence(mark.id,{pixelX:121,pixelY:241});
   assert.equal(processing.getAttemptGcpSnapshot(first.id).content,firstSnapshot.content);
+  assert.equal(processing.getAttemptGcpEvidence(first.id).correspondences[0].pixelX,120.5);
   processing.cancelAttempt(first.id);
   const second=processing.retryAttempt(first.id,'ops:1'),secondSnapshot=processing.getAttemptGcpSnapshot(second.id);
   assert.match(secondSnapshot.content,/ 121 241 near\.jpg\n$/);
   assert.notEqual(secondSnapshot.sha256,firstSnapshot.sha256);
+  gcp.deleteSet(set.id);
+  assert.equal(processing.getAttemptGcpEvidence(second.id).correspondences[0].pixelX,121);
+});
+
+test('GCP snapshots without an immutable raw source file are not trusted transfer evidence', (t) => {
+  const { processing,gcp,project,dataset }=datasetFixture(t);
+  const set=gcp.importSet({datasetId:dataset.id,displayName:'Unlinked Control',sourceFormat:'generic-csv-v1',sourceSha256:GCP_SOURCE_SHA,
+    sourceContent:GCP_SOURCE,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:1',
+    points:[{externalId:'A',label:'Target',latitude:44.5,longitude:-88.1,elevationM:250,description:null}]});
+  const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Model'});
+  gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'near',pixelX:120.5,pixelY:240.25,createdBy:'ops:1'});
+  const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
+  const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}});
+  assert.equal(processing.getAttemptGcpEvidence(attempt.id),null);
 });

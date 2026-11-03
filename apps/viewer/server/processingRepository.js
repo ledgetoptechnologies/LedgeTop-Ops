@@ -450,16 +450,33 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       const id=crypto.randomUUID(),t=now(); this.database.prepare(`INSERT INTO processing_attempts(id,task_id,dataset_id,attempt_number,provider_id,provider_task_id,preset_id,options_json,capability_fingerprint,status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?)`).run(id,task.id,dataset.id,n,input.providerId,input.providerTaskId||crypto.randomUUID(),input.presetId||null,JSON.stringify(input.options||{}),input.capabilityFingerprint||null,input.createdBy||null,t,t);
       const markCount=Number(this.database.prepare('SELECT COUNT(*) count FROM gcp_image_correspondences WHERE task_id=?').get(task.id).count);
       if(markCount>100000)throw Object.assign(new Error('task has too many GCP image correspondences'),{code:'too_many_gcp_correspondences'});
-      const marks=this.database.prepare(`SELECT points.longitude,points.latitude,points.elevation_m elevationM,
-        marks.pixel_x pixelX,marks.pixel_y pixelY,files.relative_path relativePath
+      const marks=this.database.prepare(`SELECT marks.id correspondenceId,points.id gcpPointId,points.set_id gcpSetId,
+        points.external_id externalId,points.label,points.longitude,points.latitude,points.elevation_m elevationM,
+        sets.source_file_id sourceGcpDatasetFileId,sets.source_sha256 sourceGcpSha256,source_file.relative_path sourceGcpRelativePath,
+        files.id imageDatasetFileId,files.relative_path relativePath,files.width imageWidth,files.height imageHeight,
+        marks.pixel_x pixelX,marks.pixel_y pixelY
         FROM gcp_image_correspondences marks
         JOIN gcp_points points ON points.id=marks.gcp_point_id
+        JOIN gcp_sets sets ON sets.id=points.set_id
         JOIN dataset_files files ON files.id=marks.dataset_file_id
+        LEFT JOIN dataset_files source_file ON source_file.id=sets.source_file_id
         WHERE marks.task_id=? ORDER BY points.external_id,files.relative_path,marks.id`).all(task.id);
       const gcpList=odmGcpList(marks);
       if(gcpList&&Buffer.byteLength(gcpList)>16*1024*1024)throw Object.assign(new Error('generated ODM GCP input is too large'),{code:'gcp_snapshot_too_large'});
-      if(gcpList)this.database.prepare(`INSERT INTO processing_attempt_gcp_snapshots(attempt_id,sha256,content_text,correspondence_count,created_at)
-        VALUES (?,?,?,?,?)`).run(id,crypto.createHash('sha256').update(gcpList).digest('hex'),gcpList,marks.length,t);
+      if(gcpList){
+        const sha256=crypto.createHash('sha256').update(gcpList).digest('hex');
+        const sourceGcpDatasetFileIds=[...new Set(marks.map((mark)=>mark.sourceGcpDatasetFileId).filter(Boolean))].sort();
+        const imageDatasetFileIds=[...new Set(marks.map((mark)=>mark.imageDatasetFileId))].sort();
+        const evidence={schemaVersion:1,snapshot:{snapshotId:id,byteSize:Buffer.byteLength(gcpList),sha256,sourceGcpDatasetFileIds,imageDatasetFileIds,correspondenceCount:marks.length},correspondences:marks.map((mark)=>({
+          correspondenceId:mark.correspondenceId,gcpPointId:mark.gcpPointId,gcpSetId:mark.gcpSetId,externalId:mark.externalId,label:mark.label,
+          latitude:Number(mark.latitude),longitude:Number(mark.longitude),elevationM:Number(mark.elevationM),sourceGcpDatasetFileId:mark.sourceGcpDatasetFileId,
+          sourceGcpSha256:mark.sourceGcpSha256,sourceGcpRelativePath:mark.sourceGcpRelativePath,imageDatasetFileId:mark.imageDatasetFileId,
+          imageRelativePath:mark.relativePath,imageWidth:mark.imageWidth==null?null:Number(mark.imageWidth),imageHeight:mark.imageHeight==null?null:Number(mark.imageHeight),
+          pixelX:Number(mark.pixelX),pixelY:Number(mark.pixelY),
+        }))};
+        this.database.prepare(`INSERT INTO processing_attempt_gcp_snapshots(attempt_id,sha256,content_text,correspondence_count,created_at,evidence_json)
+          VALUES (?,?,?,?,?,?)`).run(id,sha256,gcpList,marks.length,t,JSON.stringify(evidence));
+      }
       this.captureNewAttemptProvenance(id,provider,t);
       this.database.prepare(`INSERT INTO processing_jobs(id,attempt_id,job_type,status,available_at,created_at,updated_at) VALUES (?,?,'submit','pending',?,?,?)`).run(crypto.randomUUID(),id,t,t,t);
       this.database.prepare("UPDATE processing_tasks SET active_attempt_id=?,status='queued',updated_at=? WHERE id=?").run(id,t,task.id);
@@ -490,6 +507,26 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     this.database.prepare('UPDATE processing_attempt_provenance SET provider_result_json=? WHERE attempt_id=? AND provider_result_json IS NULL').run(JSON.stringify(evidence),attempt.id);return true;
   });}
   getAttemptGcpSnapshot(id){const row=this.database.prepare('SELECT * FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(id);return row?{attemptId:row.attempt_id,sha256:row.sha256,content:row.content_text,correspondenceCount:Number(row.correspondence_count),createdAt:row.created_at}:null;}
+  getAttemptGcpEvidence(id){
+    const row=this.database.prepare('SELECT * FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(id);if(!row?.evidence_json)return null;
+    let evidence;try{evidence=JSON.parse(row.evidence_json);}catch{return null;}
+    if(!evidence||evidence.schemaVersion!==1||!evidence.snapshot||!Array.isArray(evidence.correspondences)
+      ||evidence.snapshot.snapshotId!==id||evidence.snapshot.sha256!==row.sha256
+      ||evidence.snapshot.byteSize!==Buffer.byteLength(row.content_text,'utf8')
+      ||evidence.snapshot.correspondenceCount!==Number(row.correspondence_count)
+      ||evidence.correspondences.length!==Number(row.correspondence_count))return null;
+    const sources=evidence.correspondences.map((mark)=>mark.sourceGcpDatasetFileId),sourceHashes=evidence.correspondences.map((mark)=>mark.sourceGcpSha256);
+    if(sources.some((value)=>typeof value!=='string'||!value)||sourceHashes.some((value)=>typeof value!=='string'||!/^[a-f0-9]{64}$/.test(value))
+      ||evidence.correspondences.some((mark)=>typeof mark.sourceGcpRelativePath!=='string'||!mark.sourceGcpRelativePath
+        ||typeof mark.imageDatasetFileId!=='string'||!mark.imageDatasetFileId||typeof mark.imageRelativePath!=='string'||!mark.imageRelativePath))return null;
+    const sourceIds=[...new Set(sources)].sort(),imageIds=[...new Set(evidence.correspondences.map((mark)=>mark.imageDatasetFileId))].sort();
+    if(JSON.stringify(sourceIds)!==JSON.stringify(evidence.snapshot.sourceGcpDatasetFileIds)||JSON.stringify(imageIds)!==JSON.stringify(evidence.snapshot.imageDatasetFileIds))return null;
+    try{
+      const content=odmGcpList(evidence.correspondences.map((mark)=>({longitude:mark.longitude,latitude:mark.latitude,elevationM:mark.elevationM,pixelX:mark.pixelX,pixelY:mark.pixelY,relativePath:mark.imageRelativePath})));
+      if(content!==row.content_text||crypto.createHash('sha256').update(content).digest('hex')!==row.sha256)return null;
+    }catch{return null;}
+    return evidence;
+  }
   provenanceJob(jobId,owner,type){return this.database.prepare(`SELECT j.* FROM processing_jobs j JOIN processing_attempts a ON a.id=j.attempt_id WHERE j.id=? AND j.job_type=? AND j.status='leased' AND j.lease_owner=? AND j.lease_expires_at>? AND a.status NOT IN ('cancelled','failed','published')`).get(jobId,type,owner,now());}
   getAttemptTransferProvenance(id){const row=this.database.prepare('SELECT initialization_json,archive_json FROM processing_attempt_transfer_provenance WHERE attempt_id=?').get(id);return row?{initialization:json(row.initialization_json,null),archive:json(row.archive_json,null)}:null;}
   validateAttemptInputInventory(jobId,owner,datasetFiles,actualInputFiles){

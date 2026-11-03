@@ -2104,6 +2104,9 @@ const MIGRATIONS = [
       WHEN OLD.state='accepted' AND NEW.remote_binding_json IS NOT OLD.remote_binding_json
       BEGIN SELECT RAISE(ABORT,'accepted prepared submission binding is immutable'); END;
   `},
+  {version:44,name:'attempt_bound_gcp_correspondence_evidence',sql:`
+    ALTER TABLE processing_attempt_gcp_snapshots ADD COLUMN evidence_json TEXT;
+  `},
 ];
 
 function applyMigrations(database) {
