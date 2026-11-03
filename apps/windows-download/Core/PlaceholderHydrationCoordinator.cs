@@ -486,6 +486,20 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
         return receipt.StartSyntheticDownloadForTest(root, identity, resolved.Spec, source, ExperimentalDownloadAuthority);
     }
+    internal async Task<ExperimentalReservationOwner.LeaseReceipt.DownloadSession> ExperimentalStartReceiptTransferAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt receipt, SyntheticReceiptDownloadSource source, IPlaceholderTransferSink sink, CancellationToken token = default)
+    {
+        ExperimentalValidateStagingIdentity(identity); ArgumentNullException.ThrowIfNull(receipt); ArgumentNullException.ThrowIfNull(source); ArgumentNullException.ThrowIfNull(sink);
+        var resolved = await AuthorizeWithRetry(identity, token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        return receipt.StartSyntheticDownloadForTest(root, identity, resolved.Spec, source, ExperimentalDownloadAuthority, this, sink);
+    }
+    internal async Task ExperimentalAuthorizeReceiptTransferAsync(PlaceholderIdentity identity, DownloadSpec expected, CancellationToken token)
+    {
+        ExperimentalValidateStagingIdentity(identity);
+        var resolved = await AuthorizeWithRetry(identity, token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        if (resolved.Spec != expected) throw new ResourceUnavailableException();
+    }
     // No sink or file bytes are exposed by this synthetic observation.
     internal async Task ExperimentalWaitReceiptDownloadAuthorizedAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt.DownloadSession session, CancellationToken token = default)
     {

@@ -91,16 +91,18 @@ internal sealed class ExperimentalReservationOwner
         {
             private readonly LeaseReceipt owner; private readonly DownloadUse use; private readonly Downloader downloader;
             private readonly DownloadSpec spec; private readonly PlaceholderIdentity identity; private readonly string entryDirectory, expectedPath;
+            private readonly PlaceholderHydrationCoordinator? transferCoordinator; private readonly IPlaceholderTransferSink? transferSink;
             private Task? task; private Task? cancellationTask; private int started;
             private readonly object cancellationGate = new(); private readonly CancellationTokenSource workerCancellation = new(); private bool workerFinished;
-            internal DownloadSession(LeaseReceipt owner, DownloadUse use, Downloader downloader, PlaceholderIdentity identity, DownloadSpec spec, string entryDirectory, object authority) {
+            internal DownloadSession(LeaseReceipt owner, DownloadUse use, Downloader downloader, PlaceholderIdentity identity, DownloadSpec spec, string entryDirectory, object authority, PlaceholderHydrationCoordinator? transferCoordinator = null, IPlaceholderTransferSink? transferSink = null) {
                 if (!ReferenceEquals(authority, ReceiptAttachAuthority)) throw new InvalidOperationException("Download session authority invalid.");
                 this.owner = owner; this.use = use; this.downloader = downloader; this.identity = identity; this.spec = spec; this.entryDirectory = entryDirectory;
+                this.transferCoordinator = transferCoordinator; this.transferSink = transferSink;
                 expectedPath = Path.Combine(entryDirectory, spec.FileName);
             }
             internal void Start() { if (Interlocked.Exchange(ref started, 1) != 0) throw new InvalidOperationException("Synthetic download session already started."); task = FinishAsync(Task.Run(RunAsync)); _ = task.ContinueWith(completed => _ = completed.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default); }
             private async Task RunAsync() {
-                VerifiedHydrationDownload? download = null;
+                VerifiedHydrationDownload? download = null; var terminal = false;
                 try {
                     using (HydrationMutationScope.Begin((action, token) => owner.RunDownloadMutation(use, action, token), workerCancellation.Token))
                         download = await downloader.DownloadVerifiedForHydrationAsync(spec, entryDirectory, workerCancellation.Token).ConfigureAwait(false);
@@ -109,6 +111,16 @@ internal sealed class ExperimentalReservationOwner
                     if (!download.IntegrityVerified && !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
                         await System.Security.Cryptography.SHA256.HashDataAsync(download.Stream).ConfigureAwait(false), Convert.FromHexString(spec.Sha256)))
                         throw new IOException("Synthetic download integrity failed.");
+                    if (transferCoordinator is not null && transferSink is not null) {
+                        await transferCoordinator.ExperimentalAuthorizeReceiptTransferAsync(identity, spec, workerCancellation.Token).ConfigureAwait(false);
+                        owner.RunDownloadMutation(use, () => owner.VerifyStagedDuringDownload(identity, spec), workerCancellation.Token);
+                        await PlaceholderHydrationCoordinator.TransferVerifiedRange(download.Stream, 0, identity.Length, transferSink, workerCancellation.Token).ConfigureAwait(false);
+                        workerCancellation.Token.ThrowIfCancellationRequested(); terminal = true;
+                        await transferSink.CompleteAsync(workerCancellation.Token).ConfigureAwait(false);
+                    }
+                } catch (Exception e) {
+                    if (transferSink is not null && !terminal) { terminal = true; try { await transferSink.FailAsync(e is OperationCanceledException ? "cancelled" : "unavailable").ConfigureAwait(false); } catch { } }
+                    throw;
                 } finally {
                     if (download is not null) {
                         try { await download.DisposeAsync().ConfigureAwait(false); }
@@ -154,7 +166,7 @@ internal sealed class ExperimentalReservationOwner
                 await running.WaitAsync(waitToken).ConfigureAwait(false);
             }
         }
-        internal DownloadSession StartSyntheticDownloadForTest(string requestedRoot, PlaceholderIdentity identity, DownloadSpec spec, SyntheticReceiptDownloadSource source, object authority)
+        internal DownloadSession StartSyntheticDownloadForTest(string requestedRoot, PlaceholderIdentity identity, DownloadSpec spec, SyntheticReceiptDownloadSource source, object authority, PlaceholderHydrationCoordinator? transferCoordinator = null, IPlaceholderTransferSink? transferSink = null)
         {
             ArgumentNullException.ThrowIfNull(source);
             if (!PlaceholderHydrationCoordinator.IsExperimentalDownloadAuthority(authority)) throw new InvalidOperationException("Synthetic download authorization is unavailable.");
@@ -163,10 +175,18 @@ internal sealed class ExperimentalReservationOwner
                 var use = BeginSyntheticDownloadUse(requestedRoot, identity.ScopeKey + identity.CacheKey);
                 Downloader downloader;
                 try { downloader = source.Claim(spec); } catch { use.Dispose(); throw; }
-                var session = new DownloadSession(this, use, downloader, identity, spec, Path.Combine(root, identity.ScopeKey, identity.CacheKey), ReceiptAttachAuthority);
+                var session = new DownloadSession(this, use, downloader, identity, spec, Path.Combine(root, identity.ScopeKey, identity.CacheKey), ReceiptAttachAuthority, transferCoordinator, transferSink);
                 lock (RegistryGate) DownloadSessions.Add(session);
                 session.Start(); return session;
             }
+        }
+        private void VerifyStagedDuringDownload(PlaceholderIdentity identity, DownloadSpec spec) {
+            var growth = checked(spec.Length + Downloader.HydrationStateGrowthBudget(spec) + 1024);
+            var expected = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = identity.ScopeKey, Entry = identity.CacheKey, Growth = growth });
+            var path = Path.Combine(root, ".hydration-reservations-v2", identity.ScopeKey + "-" + identity.CacheKey + ".json");
+            if (!stagedVerified || stagedBytes is null || stagedPath is null || !stagedBytes.AsSpan().SequenceEqual(expected) ||
+                !string.Equals(stagedPath, path, StringComparison.OrdinalIgnoreCase)) throw new ResourceUnavailableException();
+            VerifyStagedRecord();
         }
         private void MarkDownloadUncertain(DownloadUse use) { lock (gate) { if (ReferenceEquals(downloadUse, use)) SetReceiptStatus(newUncertain: true); } }
         private void RunDownloadMutation(DownloadUse use, Action action, CancellationToken token)

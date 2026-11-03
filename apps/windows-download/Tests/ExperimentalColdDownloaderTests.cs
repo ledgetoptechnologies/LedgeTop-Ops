@@ -1369,6 +1369,35 @@ internal static class ExperimentalColdDownloaderTests
                         callbackSource.ReleaseCancellationCallback(); callbackSource.Release();
                         if (!callbackSettled) UncertainTestResources.Add((fixture, receipt, callbackWorker, callbackSource));
                     }
+                    foreach (var mode in new[] { "success", "held", "denied", "sinkfailure", "cancelled" }) {
+                        var deliverySource = SyntheticReceiptDownloadSource.Create(spec, Content);
+                        var sink = new TestSink { ThrowOnWrite = mode == "sinkfailure", HoldWrite = mode == "held" };
+                        var delivery = await coordinator.ExperimentalStartReceiptTransferAsync(identity, receipt, deliverySource, sink); var deliverySettled = false;
+                        try {
+                            await deliverySource.Entered.WaitAsync(TimeSpan.FromSeconds(10));
+                            AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock"));
+                            if (mode == "denied") source.ResolveFailureForTest = new AccessDeniedException();
+                            if (mode == "cancelled") Check(await delivery.CancelWorkerAndWaitAsync(TimeSpan.FromSeconds(5)));
+                            else deliverySource.Release();
+                            if (mode == "held") {
+                                await sink.WriteEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                                var inUse = false; try { receipt.Dispose(); } catch (InvalidOperationException) { inUse = true; } catch (IOException) { inUse = true; } Check(inUse);
+                                AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock"));
+                                AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock")); sink.WriteRelease.TrySetResult();
+                            }
+                            var observedDelivery = delivery.WaitAsync();
+                            Check(ReferenceEquals(await Task.WhenAny(observedDelivery, Task.Delay(TimeSpan.FromSeconds(10))), observedDelivery));
+                            Exception? failure = null;
+                            try { await observedDelivery; } catch (Exception error) { failure = error; }
+                            if (mode is "success" or "held") Check(failure is null && sink.Completed == 1 && sink.Failed == 0 && sink.Bytes.ToArray().SequenceEqual(Content));
+                            else Check(failure is not null && sink.Completed == 0 && sink.Failed == 1 && sink.Bytes.Length == 0);
+                            deliverySettled = true;
+                        } finally {
+                            source.ResolveFailureForTest = null; deliverySource.Release(); sink.WriteRelease.TrySetResult();
+                            if (!deliverySettled) UncertainTestResources.Add((fixture, receipt, delivery, deliverySource));
+                        }
+                        if (File.Exists(Path.Combine(entryDir, identity.FileName))) File.Delete(Path.Combine(entryDir, identity.FileName));
+                    }
                 } finally {
                     blocked.Release();
                     if (session is not null && !terminal) UncertainTestResources.Add((fixture, receipt, session, blocked));
@@ -1899,8 +1928,10 @@ internal static class ExperimentalColdDownloaderTests
     private static extern bool GetFileInformationByHandleEx(Microsoft.Win32.SafeHandles.SafeFileHandle handle, int kind, nint data, uint size);
     private sealed class TestSink : IPlaceholderTransferSink
     {
-        internal int Completed, Failed; internal MemoryStream Bytes { get; } = new();
-        public Task WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken token) { token.ThrowIfCancellationRequested(); Bytes.Position = offset; Bytes.Write(data.Span); return Task.CompletedTask; }
+        internal int Completed, Failed; internal bool ThrowOnWrite, HoldWrite; internal MemoryStream Bytes { get; } = new();
+        internal TaskCompletionSource WriteEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource WriteRelease { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async Task WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken token) { token.ThrowIfCancellationRequested(); if (ThrowOnWrite) throw new IOException("Synthetic sink failure."); if (HoldWrite) { WriteEntered.TrySetResult(); await WriteRelease.Task.WaitAsync(token); } Bytes.Position = offset; Bytes.Write(data.Span); }
         public Task CompleteAsync(CancellationToken token) { Completed++; return Task.CompletedTask; }
         public Task FailAsync(string code) { Failed++; return Task.CompletedTask; }
     }
