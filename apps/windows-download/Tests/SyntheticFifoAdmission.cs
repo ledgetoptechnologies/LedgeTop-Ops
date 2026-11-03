@@ -19,27 +19,36 @@ internal sealed class SyntheticFifoAdmission : IDisposable
         internal State State;
         internal LinkedListNode<Ticket>? Node;
         internal Lease? Lease;
-        internal bool Begun;
+        internal bool Begun, Finished, ReleaseRequested;
     }
     internal sealed class Lease : IDisposable
     {
-        private Action? release;
-        private readonly Func<CancellationToken, bool> begin;
-        internal Lease(Action release, Func<CancellationToken, bool> begin) { this.release = release; this.begin = begin; }
+        private readonly Action release;
+        private readonly Func<CancellationToken, IDisposable?> begin;
+        internal Lease(Action release, Func<CancellationToken, IDisposable?> begin) { this.release = release; this.begin = begin; }
         // Caller must win this fence before starting work. A lease granted before
         // close but delivered afterwards cannot begin work once close has won.
-        internal bool TryBegin(CancellationToken token = default) => begin(token);
-        public void Dispose() => Interlocked.Exchange(ref release, null)?.Invoke();
+        // The returned work token must stay owned until all actual work joins.
+        // Disposing this lease first requests release but cannot free an active work token.
+        internal IDisposable? TryBegin(CancellationToken token = default) => begin(token);
+        public void Dispose() => release();
+    }
+    private sealed class Work(Action finish) : IDisposable
+    {
+        private Action? finish = finish;
+        public void Dispose() => Interlocked.Exchange(ref finish, null)?.Invoke();
     }
     private readonly object sync = new();
     private readonly Dictionary<string, Root> roots = new(StringComparer.OrdinalIgnoreCase);
     private readonly int maxRoots, maxWaiting;
     private readonly TimeProvider clock;
+    private readonly Action? beforeGrantCompletion;
     private bool stopped;
-    internal SyntheticFifoAdmission(int maxRoots, int maxWaiting, TimeProvider? clock = null)
+    internal SyntheticFifoAdmission(int maxRoots, int maxWaiting, TimeProvider? clock = null, Action? beforeGrantCompletion = null)
     {
         if (maxRoots <= 0 || maxWaiting <= 0) throw new ArgumentOutOfRangeException();
         this.maxRoots = maxRoots; this.maxWaiting = maxWaiting; this.clock = clock ?? TimeProvider.System;
+        this.beforeGrantCompletion = beforeGrantCompletion;
     }
     internal async Task<Lease> AcquireAsync(string rootName, Guid id, CancellationToken token = default)
     {
@@ -84,18 +93,18 @@ internal sealed class SyntheticFifoAdmission : IDisposable
         if (stopped || root.Active is not null || root.Waiting.First is not { } node) return null;
         root.Waiting.RemoveFirst(); var ticket = node.Value; ticket.Node = null;
         ticket.State = State.Granted; root.Active = ticket;
-        ticket.Lease = new(() => Release(ticket), token => TryBegin(ticket, token)); return ticket;
+        ticket.Lease = new(() => RequestRelease(ticket), token => TryBegin(ticket, token)); return ticket;
     }
-    private bool TryBegin(Ticket ticket, CancellationToken token)
+    private IDisposable? TryBegin(Ticket ticket, CancellationToken token)
     {
         lock (sync) {
-            if (stopped || token.IsCancellationRequested || ticket.Token.IsCancellationRequested || ticket.State != State.Granted || ticket.Begun ||
-                !roots.TryGetValue(ticket.RootName, out var root) || !ReferenceEquals(root.Active, ticket)) return false;
-            ticket.Begun = true; return true;
+            if (stopped || token.IsCancellationRequested || ticket.Token.IsCancellationRequested || ticket.State != State.Granted || ticket.Begun || ticket.ReleaseRequested ||
+                !roots.TryGetValue(ticket.RootName, out var root) || !ReferenceEquals(root.Active, ticket)) return null;
+            ticket.Begun = true; return new Work(() => FinishWork(ticket));
         }
     }
-    private static void CompleteGrant(Ticket? ticket)
-    { if (ticket is not null) ticket.Result.TrySetResult(ticket.Lease!); }
+    private void CompleteGrant(Ticket? ticket)
+    { if (ticket is not null) { beforeGrantCompletion?.Invoke(); ticket.Result.TrySetResult(ticket.Lease!); } }
     private void CancelUnclaimed(Ticket ticket)
     {
         Lease? revoke = null;
@@ -109,16 +118,32 @@ internal sealed class SyntheticFifoAdmission : IDisposable
         }
         revoke?.Dispose();
     }
-    private void Release(Ticket ticket)
+    private void RequestRelease(Ticket ticket)
     {
-        Ticket? grant;
+        Ticket? grant = null;
         lock (sync) {
-            if (!roots.TryGetValue(ticket.RootName, out var root) || ticket.State != State.Granted || !ReferenceEquals(root.Active, ticket))
-                throw new InvalidOperationException("Synthetic lease ownership changed.");
-            ticket.State = State.Retired; root.Active = null; root.Ids.Remove(ticket.Id);
-            grant = GrantLocked(root); RetireRootLocked(ticket.RootName, root);
+            if (ticket.State == State.Retired || ticket.ReleaseRequested) return;
+            if (!roots.TryGetValue(ticket.RootName, out var root) || ticket.State != State.Granted || !ReferenceEquals(root.Active, ticket)) throw new InvalidOperationException("Synthetic lease ownership changed.");
+            ticket.ReleaseRequested = true;
+            if (!ticket.Begun || ticket.Finished) grant = RetireActiveLocked(ticket, root);
         }
         CompleteGrant(grant);
+    }
+    private void FinishWork(Ticket ticket)
+    {
+        Ticket? grant = null;
+        lock (sync) {
+            if (!roots.TryGetValue(ticket.RootName, out var root) || ticket.State != State.Granted || !ReferenceEquals(root.Active, ticket) || !ticket.Begun || ticket.Finished)
+                throw new InvalidOperationException("Synthetic work ownership changed.");
+            ticket.Finished = true;
+            if (ticket.ReleaseRequested) grant = RetireActiveLocked(ticket, root);
+        }
+        CompleteGrant(grant);
+    }
+    private Ticket? RetireActiveLocked(Ticket ticket, Root root)
+    {
+        ticket.State = State.Retired; root.Active = null; root.Ids.Remove(ticket.Id);
+        var grant = GrantLocked(root); RetireRootLocked(ticket.RootName, root); return grant;
     }
     private void RetireRootLocked(string name, Root root)
     { if (root.Active is null && root.Waiting.Count == 0) roots.Remove(name); }
