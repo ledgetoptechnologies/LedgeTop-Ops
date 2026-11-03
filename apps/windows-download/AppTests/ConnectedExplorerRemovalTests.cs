@@ -116,13 +116,15 @@ internal static class ConnectedExplorerRemovalTests
         await using (var f = new Fixture())
         {
             var session = f.Open();
+            if (session.FreshRemovalComplete) throw new Exception("An unremoved published selector reported completed removal.");
             await session.RemoveAsync();
-            if (session.State != ExplorerPreviewState.Removed || f.Registered.Count != 0 ||
+            if (!session.FreshRemovalComplete || session.State != ExplorerPreviewState.Removed || f.Registered.Count != 0 ||
                 f.ReadCurrent().State.Removal != FreshGenerationPlan.RemovalPhase.Complete)
                 throw new Exception("ConnectedExplorerSession did not complete both selector-only removals.");
             await session.DisposeAsync();
             await using var restarted = f.Open();
-            if (restarted.State != ExplorerPreviewState.Removed || restarted.CanStartPublishedFresh || !restarted.CanRemovePublishedFreshForInstaller)
+            if (restarted.State != ExplorerPreviewState.Removed || restarted.CanStartPublishedFresh || !restarted.CanRemovePublishedFreshForInstaller ||
+                !restarted.FreshRemovalComplete)
                 throw new Exception("Completed removal was not safely recognized on restart.");
             await restarted.RemoveAsync();
             f.AssertLocalFilesPreserved();

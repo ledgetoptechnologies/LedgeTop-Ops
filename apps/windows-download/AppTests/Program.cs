@@ -34,7 +34,8 @@ if (args.FirstOrDefault() == "--folder-launcher-exit-helper") return BackgroundF
 // Synthetic UI acceptance for Ledge Top Files: real TransferQueue on temporary folders, demo sources,
 // no network, no sign-in, no installer. Optional first argument: a folder for rendered screenshots
 // (otherwise they go to a new temporary folder, which is printed and kept as evidence).
-var screenshots = args.Length > 0 ? args[0] : Path.Combine(Path.GetTempPath(), "ltfiles-screens-" + Guid.NewGuid().ToString("N"));
+// A leading "--" argument selects test groups and is never a folder.
+var screenshots = args.Length > 0 && !args[0].StartsWith("--", StringComparison.Ordinal) ? args[0] : Path.Combine(Path.GetTempPath(), "ltfiles-screens-" + Guid.NewGuid().ToString("N"));
 // Keep owned filesystem fixtures alongside this harness's explicit screenshots/artifact root.
 if (Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") is null)
     Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", Path.GetFullPath(screenshots));

@@ -92,6 +92,9 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         indexLease is null && backend is null && engine is null && heldFreshSelector is { } saved &&
         saved.State.Phase == FreshGenerationPlan.Phase.Published && saved.State.Removal is null &&
         saved.State.New is { } next && saved.ActiveGeneration == next.Id;
+    // Both registrations are confirmed gone and both folders kept. Connecting again needs a new
+    // root and selector retirement, which this pilot does not implement; it is not a review case.
+    internal bool FreshRemovalComplete { get { lock (view) return !invalidIndex && heldFreshSelector?.State.Removal == FreshGenerationPlan.RemovalPhase.Complete; } }
     internal bool RequiresOwnershipReview { get { lock (view) return !freshReadOnlyActive && !CanStartPublishedFreshLocked() && (invalidIndex || heldFreshSelector is not null || heldFreshAdapter is not null || heldColdRestart is not null || coldPreparationReview || freshPreparationReview); } }
 
     // Installer check only: validate the published staging selector and both
@@ -553,6 +556,8 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                     state = heldFreshSelector.State.Removal == FreshGenerationPlan.RemovalPhase.Complete
                         ? ExplorerPreviewState.Removed : ExplorerPreviewState.Failed;
                     Add(invalidIndex ? "This PC has a fresh-files transition that needs review. Some previous online-only files may be unavailable."
+                        : heldFreshSelector.State.Removal == FreshGenerationPlan.RemovalPhase.Complete
+                        ? "The Explorer connection was removed. Both files folders were kept."
                         : "The current files connection is ready to reconnect.");
                     return;
                 }
