@@ -230,6 +230,9 @@ test('only busy code10 gives tray Quit guidance at both setup checks and uninsta
   assert.match(preflight, /\/SD IDCANCEL IDRETRY preflight_retry IDCANCEL preflight_refused/);
   assert(preflight.includes('LT tray icon') && preflight.includes('choose Quit LedgeTop Files'));
   assert(preflight.includes('Closing Settings does not quit the app.'));
+  const preflightBusy = preflight.slice(0, preflight.indexOf('preflight_review:'));
+  assert.doesNotMatch(preflightBusy, /^\s*(?:ExecShell|Call|WriteReg\w*|Delete|RMDir|CreateDirectory)\b/im);
+  assert.equal((preflightBusy.match(/^\s*ExecWait\b/gm) ?? []).length, 2, 'preflight allows only its check and explicit graceful quit');
   const preflightUnknown = preflight.slice(preflight.indexOf('preflight_review:'), preflight.indexOf('preflight_failed:'));
   assert.match(preflightUnknown, /LedgeTop support[\s\S]*before trying again[\s\S]*Setup code: \$0[\s\S]*SetErrorLevel \$0\n    Abort/);
   assert.doesNotMatch(preflightUnknown, /ExecWait|ExecShell|\bCall\b|WriteReg|Delete|CreateDirectory/);
@@ -239,6 +242,7 @@ test('only busy code10 gives tray Quit guidance at both setup checks and uninsta
   assert(secondBusy.includes('kept this version\'s installation folder for review'));
   assert(secondBusy.includes('ask LedgeTop support'));
   assert.doesNotMatch(secondBusy, /Then run setup again/i);
+  assert.doesNotMatch(secondBusy, /^\s*(?:ExecWait|ExecShell|Call|WriteReg\w*|Delete|RMDir|CreateDirectory)\b/im);
   const lateUnknown = install.slice(install.indexOf('installed_payload_review:'), install.indexOf('installed_payload_pass:'));
   assert.match(lateUnknown, /LedgeTop support[\s\S]*before trying again[\s\S]*Setup code: \$0[\s\S]*SetErrorLevel \$0\n    Abort/);
   assert.doesNotMatch(lateUnknown, /ExecWait|ExecShell|\bCall\b|WriteReg|Delete|CreateDirectory/);
@@ -248,6 +252,7 @@ test('only busy code10 gives tray Quit guidance at both setup checks and uninsta
   assert.match(uninstallBusy, /un_request_stop:[\s\S]*ExecWait '"\$INSTDIR\\LedgeTop\.Files\.exe" --installer-request-quit' \$0\n    IfErrors un_failed\n    StrCmp \$0 0 un_cleanup_retry\n    StrCmp \$0 10 0 un_cleanup_review/);
   assert.match(uninstallBusy, /\/SD IDCANCEL IDRETRY un_cleanup_retry IDCANCEL un_cleanup_refused/);
   assert(uninstallBusy.includes('older LedgeTop Files Preview is still running, quit it from its tray icon first'));
+  assert.doesNotMatch(uninstallBusy, /^\s*(?:ExecShell|Call|WriteReg\w*|Delete|RMDir|CreateDirectory)\b/im);
   const uninstallUnknown = uninstall.slice(uninstall.indexOf('un_cleanup_review:'), uninstall.indexOf('un_legacy_unknown:'));
   assert.match(uninstallUnknown, /LedgeTop support[\s\S]*before trying again[\s\S]*Cleanup code: \$0[\s\S]*SetErrorLevel \$0\n    Abort/);
   assert.doesNotMatch(uninstallUnknown, /ExecWait|ExecShell|\bCall\b|WriteReg|Delete|CreateDirectory/);
