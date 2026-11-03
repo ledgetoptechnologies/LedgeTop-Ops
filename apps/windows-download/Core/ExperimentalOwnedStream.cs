@@ -15,7 +15,7 @@ internal sealed class ExperimentalOwnedStream : IDisposable
     private readonly object gate = new();
     private static readonly object QuarantineGate = new();
     private static readonly HashSet<ExperimentalOwnedStream> Quarantined = [];
-    private sealed record DirectoryPin(string Path, SafeFileHandle Handle, Identity Identity);
+    internal sealed record DirectoryPin(string Path, SafeFileHandle Handle, Identity Identity);
     private readonly List<DirectoryPin> directories = [];
     private FileStream? stream;
     private SafeFileHandle? sourceHandle;
@@ -376,7 +376,7 @@ internal sealed class ExperimentalOwnedStream : IDisposable
         }
     }
 
-    private static void PinDirectories(string path, List<DirectoryPin> pins)
+    internal static void PinDirectories(string path, List<DirectoryPin> pins)
     {
         var ancestors = new Stack<string>();
         for (string? part = path; part is not null; part = Path.GetDirectoryName(part)) ancestors.Push(part);
@@ -389,7 +389,7 @@ internal sealed class ExperimentalOwnedStream : IDisposable
             catch { directory.Dispose(); throw; }
         }
     }
-    private static void VerifyPins(IEnumerable<DirectoryPin> pins)
+    internal static void VerifyPins(IEnumerable<DirectoryPin> pins)
     {
         foreach (var pin in pins)
             if (GetIdentity(pin.Handle) != pin.Identity || !string.Equals(FinalPath(pin.Handle), PinExpectedPathTestHook?.Invoke(pin.Path) ?? pin.Path, StringComparison.OrdinalIgnoreCase))
@@ -413,7 +413,7 @@ internal sealed class ExperimentalOwnedStream : IDisposable
             VerifyPins(directories); return directories.Count;
         }
     }
-    private static string FinalPath(SafeFileHandle handle)
+    internal static string FinalPath(SafeFileHandle handle)
     {
         var needed = GetFinalPathNameByHandleW(handle, null, 0, 0);
         if (needed is 0 or > 32767) throw new IOException("Experimental handle path unavailable.");
@@ -426,13 +426,13 @@ internal sealed class ExperimentalOwnedStream : IDisposable
         return path[4..];
     }
 
-    private static SafeFileHandle Open(string path, uint access, uint share, uint mode, uint flags)
+    internal static SafeFileHandle Open(string path, uint access, uint share, uint mode, uint flags)
     {
         var result = CreateFileW(PlaceholderHydrationCoordinator.NativeCacheFilePath(path), access, share, 0, mode, flags, 0);
         if (!result.IsInvalid) return result;
         var error = Marshal.GetLastWin32Error(); result.Dispose(); throw new IOException("Experimental native open failed.", error);
     }
-    private static void RequireRegularKind(SafeFileHandle handle, bool directory)
+    internal static void RequireRegularKind(SafeFileHandle handle, bool directory)
     {
         var memory = Marshal.AllocHGlobal(8);
         try {
@@ -441,7 +441,7 @@ internal sealed class ExperimentalOwnedStream : IDisposable
             if ((attributes & 0x400) != 0 || ((attributes & 0x10) != 0) != directory) throw new IOException("Experimental path type is unsafe.");
         } finally { Marshal.FreeHGlobal(memory); }
     }
-    private static void RequireSingleLink(SafeFileHandle handle)
+    internal static void RequireSingleLink(SafeFileHandle handle)
     {
         var memory = Marshal.AllocHGlobal(24);
         try {
@@ -450,7 +450,7 @@ internal sealed class ExperimentalOwnedStream : IDisposable
                 throw new IOException("Experimental partial link or type is unsafe.");
         } finally { Marshal.FreeHGlobal(memory); }
     }
-    private static Identity GetIdentity(SafeFileHandle handle)
+    internal static Identity GetIdentity(SafeFileHandle handle)
     {
         var memory = Marshal.AllocHGlobal(24);
         try {

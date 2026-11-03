@@ -338,6 +338,29 @@ internal static class ExperimentalColdDownloaderTests
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         await FixturePolicyTests();
         await ObserverReaperTest();
+        await WithFixture(async fixture => {
+            var root = Path.Combine(fixture.Path, "markers"); Directory.CreateDirectory(root);
+            var marker = Path.Combine(root, "owner"); var expected = "synthetic-owner"u8.ToArray(); File.WriteAllBytes(marker, expected);
+            var first = await HydrationCacheConcurrency.AcquireAsync(root, "one", CancellationToken.None);
+            var second = await HydrationCacheConcurrency.AcquireAsync(root, "two", CancellationToken.None);
+            ExperimentalRootMarkerOwner? owner = null;
+            try {
+                owner = first.ExperimentalMarkers; Check(ReferenceEquals(owner, second.ExperimentalMarkers));
+                File.WriteAllText(Path.Combine(root, "foreign"), "foreign");
+                var invalid = false; try { owner.ValidateExisting(root, "foreign", expected); } catch (IOException) { invalid = true; }
+                Check(invalid && File.ReadAllText(Path.Combine(root, "foreign")) == "foreign");
+                owner.ValidateExisting(root, "owner", expected);
+                var refused = false; try { owner.ValidateExisting(root, "owner", "different"u8.ToArray()); } catch (IOException) { refused = true; }
+                Check(refused); first.Dispose();
+                refused = false; try { _ = first.ExperimentalMarkers; } catch (ObjectDisposedException) { refused = true; }
+                Check(refused);
+                second.ExperimentalMarkers.ValidateExisting(root, "owner", expected);
+                refused = false; try { File.Move(marker, marker + ".moved"); } catch (IOException) { refused = true; } catch (UnauthorizedAccessException) { refused = true; }
+                Check(refused && File.ReadAllBytes(marker).SequenceEqual(expected));
+            } finally { first.Dispose(); second.Dispose(); }
+            var rejected = false; try { owner!.ValidateExisting(root, "owner", expected); } catch (ObjectDisposedException) { rejected = true; }
+            Check(rejected); File.Move(marker, marker + ".moved");
+        });
         await AbruptRestartTests();
         await WithFixture(async root => {
             var etag = "\"" + new string('\\', 510) + "\"";

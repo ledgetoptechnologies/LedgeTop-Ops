@@ -16,6 +16,9 @@ internal static class HydrationCacheConcurrency
         internal readonly object Quota = new();
         internal readonly Dictionary<string, Entry> Entries = new(StringComparer.Ordinal);
         internal FileStream? ExclusiveLegacyLease;
+#if LEDGETOP_CACHE_RACE_TEST
+        internal ExperimentalRootMarkerOwner? ExperimentalMarkerOwner;
+#endif
         internal int References;
     }
     private static readonly object Sync = new();
@@ -24,10 +27,31 @@ internal static class HydrationCacheConcurrency
     {
         private Action? release;
         internal object Quota { get; }
+#if LEDGETOP_CACHE_RACE_TEST
+        private readonly Func<ExperimentalRootMarkerOwner> markerOwner;
+        private readonly object experimentalLeaseGate = new();
+        internal ExperimentalRootMarkerOwner ExperimentalMarkers {
+            get { lock (experimentalLeaseGate) { ObjectDisposedException.ThrowIf(release is null, this); return markerOwner(); } }
+        }
+#endif
         private readonly Action<string, FileMode> acquireLegacy;
-        internal Lease(object quota, Action release, Action<string, FileMode> acquireLegacy) { Quota = quota; this.release = release; this.acquireLegacy = acquireLegacy; }
+        internal Lease(object quota, Action release, Action<string, FileMode> acquireLegacy
+#if LEDGETOP_CACHE_RACE_TEST
+            , Func<ExperimentalRootMarkerOwner> markerOwner
+#endif
+            ) { Quota = quota; this.release = release; this.acquireLegacy = acquireLegacy;
+#if LEDGETOP_CACHE_RACE_TEST
+            this.markerOwner = markerOwner;
+#endif
+        }
         internal void AcquireExclusiveLegacy(string path, FileMode mode) => acquireLegacy(path, mode);
-        public void Dispose() => Interlocked.Exchange(ref release, null)?.Invoke();
+        public void Dispose() {
+#if LEDGETOP_CACHE_RACE_TEST
+            lock (experimentalLeaseGate) Interlocked.Exchange(ref release, null)?.Invoke();
+#else
+            Interlocked.Exchange(ref release, null)?.Invoke();
+#endif
+        }
     }
     internal static async Task<Lease> AcquireAsync(string root, string key, CancellationToken token, bool exclusive = false, TimeSpan? testTimeout = null)
     {
@@ -51,7 +75,11 @@ internal static class HydrationCacheConcurrency
             if (entered) entry.Gate.Release();
             lock (Sync) {
                 if (--entry.References == 0) { state.Entries.Remove(key); entry.Gate.Dispose(); }
-                if (--state.References == 0) { Roots.Remove(root); state.ExclusiveLegacyLease?.Dispose(); state.Slots.Dispose(); state.Admission.Dispose(); }
+                if (--state.References == 0) { Roots.Remove(root);
+#if LEDGETOP_CACHE_RACE_TEST
+                    state.ExperimentalMarkerOwner?.Dispose();
+#endif
+                    state.ExclusiveLegacyLease?.Dispose(); state.Slots.Dispose(); state.Admission.Dispose(); }
             }
         }
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -73,7 +101,11 @@ internal static class HydrationCacheConcurrency
                     if (state.ExclusiveLegacyLease is null)
                         state.ExclusiveLegacyLease = new FileStream(path, mode, FileAccess.ReadWrite, FileShare.None);
                 }
-            });
+            }
+#if LEDGETOP_CACHE_RACE_TEST
+            , () => { lock (state.Quota) return state.ExperimentalMarkerOwner ??= new ExperimentalRootMarkerOwner(root); }
+#endif
+            );
         } catch (OperationCanceledException) when (!token.IsCancellationRequested) {
             Release(); throw new TransferException("Hydration cache admission timed out.", TransferFailureReason.Timeout);
         } catch { Release(); throw; }
