@@ -40,20 +40,26 @@ internal static class CloudFilesNativeTransfer {
     // prevalidated bytes and the normal dispatcher has already checked identity.
     internal static Task HydrateSyntheticMemoryAsync(PlaceholderIdentity identity, CloudFilesOperationContext context, byte[] bytes, CancellationToken token) =>
         HydrateSyntheticMemoryAsync(identity, context, bytes, token, new WindowsNative());
-    internal static async Task HydrateSyntheticMemoryAsync(PlaceholderIdentity identity, CloudFilesOperationContext context, byte[] bytes, CancellationToken token, ICloudFilesTransferNative native) {
+    internal static Task HydrateSyntheticMemorySerialAsync(PlaceholderIdentity identity, CloudFilesOperationContext context, byte[] bytes, CancellationToken token, Func<Func<Task>, Task> run) =>
+        HydrateSyntheticMemoryAsync(identity, context, bytes, token, new WindowsNative(), run);
+    internal static async Task HydrateSyntheticMemoryAsync(PlaceholderIdentity identity, CloudFilesOperationContext context, byte[] bytes, CancellationToken token, ICloudFilesTransferNative native, Func<Func<Task>, Task>? run = null, TimeSpan? progressInterval = null) {
         if (bytes.Length != identity.Length || !CryptographicOperations.FixedTimeEquals(SHA256.HashData(bytes), Convert.FromHexString(identity.Sha256)) ||
             context.FileSize != bytes.Length || context.RequiredOffset < 0 || context.RequiredLength <= 0 ||
             context.RequiredOffset > bytes.Length || context.RequiredLength > bytes.Length - context.RequiredOffset)
             throw new TransferException("Synthetic memory payload is invalid.");
-        AssertAbi(); using var sink = new Sink(context, native, token, TimeSpan.FromSeconds(20));
+        AssertAbi(); using var sink = new Sink(context, native, token, progressInterval ?? TimeSpan.FromSeconds(20));
         try {
             sink.StartProgress();
-            var offset = context.RequiredOffset; var end = checked(offset + context.RequiredLength);
-            while (offset < end) {
-                var count = (int)Math.Min(65536, end - offset);
-                await sink.WriteAsync(offset, bytes.AsMemory((int)offset, count), token).ConfigureAwait(false); offset += count;
+            async Task Transfer() {
+                var offset = context.RequiredOffset; var end = checked(offset + context.RequiredLength);
+                while (offset < end) {
+                    var count = (int)Math.Min(65536, end - offset);
+                    await sink.WriteAsync(offset, bytes.AsMemory((int)offset, count), token).ConfigureAwait(false); offset += count;
+                }
+                await sink.CompleteAsync(token).ConfigureAwait(false);
             }
-            await sink.CompleteAsync(token).ConfigureAwait(false);
+            if (run is null) await Transfer().ConfigureAwait(false);
+            else await run(Transfer).ConfigureAwait(false);
         } catch { await sink.FailAsync(token.IsCancellationRequested ? "cancelled" : "unavailable").ConfigureAwait(false); throw; }
         finally { await sink.StopProgressAsync().ConfigureAwait(false); }
     }

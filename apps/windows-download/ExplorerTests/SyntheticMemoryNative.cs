@@ -65,8 +65,10 @@ internal static class SyntheticMemoryNative {
         var markerIo = DiagnosticMemoryMarkerIo.Mode(get("LEDGETOP_TEST_MEMORY_MARKER_IO"));
         var cacheStage = CacheStage(get("LEDGETOP_TEST_MEMORY_CACHE_STAGE"));
         var prewarm = PrewarmMode(get("LEDGETOP_TEST_MEMORY_PREWARM"));
-        return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}; prewarm={prewarm}";
+        var serial = SerialMode(get("LEDGETOP_TEST_MEMORY_SERIAL"));
+        return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}; prewarm={prewarm}; serial={serial}";
     }
+    private static string SerialMode(string? value) => value switch { null or "0" => "off", "1" => "on", _ => "invalid" };
     private static string PrewarmMode(string? value) => value switch { null or "0" => "off", "1" => "entries", "2" => "entries+reservation", _ => "invalid" };
     private static string CacheStage(string? value) => value switch { null or "none" => "none", "quota-only" => "quota-only", "quota-ownership" => "quota-ownership", "quota-capacity" => "quota-capacity", "quota-reservation" => "quota-reservation", "quota-reservation-gap" => "quota-reservation-gap", "quota-reservation-precheck" => "quota-reservation-precheck", _ => "invalid" };
     private static async Task PrewarmOwnedAsync(string cache, IReadOnlyCollection<PlaceholderIdentity> identities, bool reservationOwner = false) {
@@ -102,6 +104,7 @@ internal static class SyntheticMemoryNative {
         var cache = Path.Combine(owned, "Cache"); Directory.CreateDirectory(cache);
         var previousProbe = Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE");
         var previousBase = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
+        var previousSerial = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL");
         var identity = new PlaceholderIdentity("pilot", "synthetic", "https://source.example.invalid", Principal, "odqr1_0",
             "oef1_" + new string('a', 64), Sha, "sample-0.bin", Bytes.Length, "\"" + Sha + "\"", Sha);
         var root = Path.Combine(cache, "verified-hydration-v1");
@@ -206,6 +209,50 @@ internal static class SyntheticMemoryNative {
             File.WriteAllBytes(ownerMarker, ownedBytes);
             var duplicateRejected = false; try { await PrewarmOwnedAsync(cache, new[] { third, third }); } catch (IOException) { duplicateRejected = true; }
             if (!duplicateRejected) throw new IOException("Synthetic prewarm accepted duplicate fixture entries.");
+            Environment.SetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL", "1");
+            var firstEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var secondStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var secondEntered = false;
+            using (var cancel = new CancellationTokenSource()) {
+                var firstSerial = Task.Run(() => coordinator.SyntheticCacheStageAsync(identity, "quota-reservation", CancellationToken.None, true,
+                    async () => { firstEntered.TrySetResult(); await firstRelease.Task; }));
+                Task? secondSerial = null;
+                try {
+                    await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    secondSerial = Task.Run(async () => { secondStarted.TrySetResult(); await coordinator.SyntheticCacheStageAsync(second, "quota-reservation", cancel.Token, true,
+                        () => { secondEntered = true; return Task.CompletedTask; }); });
+                    await secondStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    if (secondSerial.IsCompleted || secondEntered) throw new IOException("Synthetic exclusive admission overlapped.");
+                    cancel.Cancel();
+                    var cancelled = false; try { await secondSerial.WaitAsync(TimeSpan.FromSeconds(5)); } catch (OperationCanceledException) { cancelled = true; }
+                    if (!cancelled || secondEntered) throw new IOException("Queued synthetic exclusive work was not cancelled.");
+                } finally { firstRelease.TrySetResult(); await firstSerial.WaitAsync(TimeSpan.FromSeconds(5)); }
+                await coordinator.SyntheticCacheStageAsync(second, "quota-reservation", CancellationToken.None, true, () => Task.CompletedTask).WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            var native = new FakeMemoryNative();
+            var waiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var context = new CloudFilesOperationContext(1, 2, 3, Bytes.Length, 0, Bytes.Length);
+            var hydration = CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(identity, context, Bytes, CancellationToken.None, native,
+                async transfer => { waiting.TrySetResult(); await release.Task; await transfer(); }, TimeSpan.FromMilliseconds(20));
+            try {
+                await waiting.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await native.TwoReports.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                if (hydration.IsCompleted || native.Executes != 0) throw new IOException("Synthetic wait transferred before admission.");
+            } finally { release.TrySetResult(); }
+            await hydration.WaitAsync(TimeSpan.FromSeconds(5));
+            if (native.Executes == 0) throw new IOException("Synthetic transfer did not finish after admission.");
+            var cancelledNative = new FakeMemoryNative();
+            using (var cancelledWait = new CancellationTokenSource()) {
+                var queued = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var cancelledHydration = CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(identity, context, Bytes, cancelledWait.Token, cancelledNative,
+                    async _ => { queued.TrySetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, cancelledWait.Token); }, TimeSpan.FromMilliseconds(20));
+                await queued.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancelledWait.Cancel();
+                var stopped = false; try { await cancelledHydration.WaitAsync(TimeSpan.FromSeconds(5)); } catch (OperationCanceledException) { stopped = true; }
+                if (!stopped || cancelledNative.Executes != 1) throw new IOException("Cancelled synthetic native wait was not settled exactly once.");
+            }
+            Environment.SetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL", previousSerial);
             var rejected = false; try { await coordinator.SyntheticCacheStageAsync(identity, "unknown", CancellationToken.None); } catch (TransferException) { rejected = true; }
             if (!rejected) throw new IOException("Invalid synthetic stage accepted.");
             using (var cancellation = new CancellationTokenSource()) {
@@ -232,6 +279,7 @@ internal static class SyntheticMemoryNative {
         } finally {
             Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", previousProbe);
             Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", previousBase);
+            Environment.SetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL", previousSerial);
             if (retainTraceFixture) {
                 Console.Error.WriteLine("Synthetic fixture retained because trace record cleanup was not verified: " + basePath);
             } else {
@@ -247,6 +295,15 @@ internal static class SyntheticMemoryNative {
             }
         }
         Console.WriteLine("PASS synthetic actual cache admission, quota, ownership and scope refusals without native registration."); return 0;
+    }
+    private sealed class FakeMemoryNative : ICloudFilesTransferNative {
+        private int reports, executes;
+        internal readonly TaskCompletionSource TwoReports = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal int Executes => Volatile.Read(ref executes);
+        public int Execute(nint operationInfo, nint parameters) { Interlocked.Increment(ref executes); return 0; }
+        public int ReportProgress(long connectionKey, long transferKey, long total, long completed) {
+            if (Interlocked.Increment(ref reports) >= 2) TwoReports.TrySetResult(); return 0;
+        }
     }
     internal static int CleanupEvidenceTests() {
         if (!TraceRecordAbsent(() => throw new FileNotFoundException()) || TraceRecordAbsent(() => throw new DirectoryNotFoundException()) ||
@@ -289,9 +346,9 @@ internal static class SyntheticMemoryNative {
             CleanupVerified(true, true, true, true, false) ||
             !CleanupVerified(true, true, true, true, true)) throw new IOException("Synthetic registration cleanup evidence is incorrect.");
         var options = DiagnosticSettings(name => name == "LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION" ? "1" : "synthetic-secret");
-        if (options != "Synthetic memory options: blockSelf=True; disableScanner=False; suppressProgress=False; markerIo=invalid; cacheStage=invalid; prewarm=invalid")
+        if (options != "Synthetic memory options: blockSelf=True; disableScanner=False; suppressProgress=False; markerIo=invalid; cacheStage=invalid; prewarm=invalid; serial=invalid")
             throw new IOException("Synthetic diagnostic option reporting is incorrect.");
-        if (DiagnosticSettings(name => name is "LEDGETOP_TEST_MEMORY_MARKER_IO" or "LEDGETOP_TEST_MEMORY_CACHE_STAGE" or "LEDGETOP_TEST_MEMORY_PREWARM" ? null : "1") != "Synthetic memory options: blockSelf=True; disableScanner=True; suppressProgress=True; markerIo=none; cacheStage=none; prewarm=off")
+        if (DiagnosticSettings(name => name is "LEDGETOP_TEST_MEMORY_MARKER_IO" or "LEDGETOP_TEST_MEMORY_CACHE_STAGE" or "LEDGETOP_TEST_MEMORY_PREWARM" or "LEDGETOP_TEST_MEMORY_SERIAL" ? null : "1") != "Synthetic memory options: blockSelf=True; disableScanner=True; suppressProgress=True; markerIo=none; cacheStage=none; prewarm=off; serial=off")
             throw new IOException("Synthetic diagnostic option reporting did not capture opt-ins.");
         var observations = new List<(string, int)>();
         void Capture(string outcome, int code) => observations.Add((outcome, code));
@@ -369,9 +426,11 @@ internal static class SyntheticMemoryNative {
         var markerMode = DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO"));
         var cacheStage = CacheStage(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_CACHE_STAGE"));
         var prewarm = PrewarmMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_PREWARM"));
-        if (markerMode == "invalid" || cacheStage == "invalid" || prewarm == "invalid" || (markerMode != "none" && cacheStage != "none") ||
+        var serial = SerialMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL"));
+        if (markerMode == "invalid" || cacheStage == "invalid" || prewarm == "invalid" || serial == "invalid" || (markerMode != "none" && cacheStage != "none") ||
+            (serial == "on" && (markerMode != "none" || cacheStage != "quota-reservation")) ||
             (prewarm != "off" && (markerMode != "none" || cacheStage != "quota-reservation"))) return 2;
-        if (retryProbe && (count != 1 || markerMode != "none" || cacheStage != "none" || prewarm != "off" || !RetryOptionsValid(Environment.GetEnvironmentVariable))) return 2;
+        if (retryProbe && (count != 1 || markerMode != "none" || cacheStage != "none" || prewarm != "off" || serial != "off" || !RetryOptionsValid(Environment.GetEnvironmentVariable))) return 2;
         var basePath = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
         if (string.IsNullOrEmpty(basePath) || !Path.IsPathFullyQualified(basePath) || basePath.StartsWith("\\\\", StringComparison.Ordinal)) return 2;
         RequireLocalDirectory(basePath);

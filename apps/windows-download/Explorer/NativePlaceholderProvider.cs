@@ -82,9 +82,18 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                         identity.PrincipalId != "odqp1_" + new string('f', 64)) throw new IOException("Synthetic probe scope mismatch.");
                     DiagnosticMemoryMarkerIo.Read(DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO")), cacheDirectory, identity.FileName);
                     var cacheStage = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_CACHE_STAGE") ?? "none";
-                    if (cacheStage != "none") await coordinator.SyntheticCacheStageAsync(identity, cacheStage, token).ConfigureAwait(false);
                     var bytes = System.Text.Encoding.UTF8.GetBytes(new string('x', 100_000));
-                    await CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(identity, context, bytes, token).ConfigureAwait(false);
+                    var serial = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL") ?? "0";
+                    if (serial == "1") {
+                        if (cacheStage != "quota-reservation" || DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO")) != "none")
+                            throw new IOException("Synthetic serial comparison scope mismatch.");
+                        await CloudFilesNativeTransfer.HydrateSyntheticMemorySerialAsync(identity, context, bytes, token,
+                            transfer => coordinator.SyntheticCacheStageAsync(identity, cacheStage, token, exclusive: true, transfer: transfer)).ConfigureAwait(false);
+                    } else {
+                        if (serial != "0") throw new IOException("Synthetic serial comparison option invalid.");
+                        if (cacheStage != "none") await coordinator.SyntheticCacheStageAsync(identity, cacheStage, token).ConfigureAwait(false);
+                        await CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(identity, context, bytes, token).ConfigureAwait(false);
+                    }
                     return;
                 }
 #endif
