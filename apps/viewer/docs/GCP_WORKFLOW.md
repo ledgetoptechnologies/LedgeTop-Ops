@@ -34,13 +34,17 @@ GCP-01,North target,44.500100,-88.100200,243.84,Painted nail
 
 A GeoJSON `FeatureCollection` containing only 3D `Point` features. Coordinates are `[longitude, latitude, elevation_m]`; `properties.point_id` and `properties.label` are required, and `properties.description` is optional.
 
-## Emlid adapter gate
+## Emlid Flow All-columns v1
 
-No Emlid column names, coordinate order, height datum, units, or CRS are inferred. A representative Emlid export and its known coordinate interpretation are required before adding a separately versioned Emlid adapter. Until then, export or transform the data to one of the generic formats above.
+Viewer supports the versioned `emlid-all-columns-v1` adapter for Emlid Flow All-columns CSV exports. The `Name`, `Easting`, `Northing`, and `Elevation` fields are authoritative for point identity and surveyed coordinates. Geographic coordinates and ellipsoidal height are retained as cross-checks; they do not replace the projected survey coordinates or silently override their CRS, vertical datum, or linear units. Ambiguous units require explicit confirmation before import.
+
+When a dataset is finalized, Viewer looks for an unambiguous attached Emlid CSV and imports it automatically only when the file validates. Invalid, ambiguous, or multiple valid CSV candidates are ignored without changing the raw dataset. An administrator can also preview and explicitly confirm an Emlid import in the workspace.
+
+The original CSV remains part of the immutable dataset manifest and is retained with the raw dataset, including when the dataset is recycled. Purge checks refuse to remove a dataset containing a retained GCP source CSV. The source file is marked `gcp_source` and is never uploaded to ODM; each processing attempt uses its own generated `gcp_list.txt` snapshot as described above.
 
 ## Image assistance
 
-Dataset finalization indexes JPEG dimensions, capture time, GPS longitude/latitude, and altitude when those EXIF values exist. Selecting a GCP asks Viewer for up to 200 dataset images ranked by camera-to-GCP great-circle distance. This is only a search suggestion: geographic proximity does not prove that a point is visible in an image. An operator must inspect an image and explicitly save its pixel correspondence.
+Dataset finalization indexes JPEG dimensions, capture time, GPS longitude/latitude, and altitude when those EXIF values exist. The administrative task workspace shows nearby camera positions and images for the selected GCP. Its fixed-radius mode defaults to 50 feet (15.24 metres); the operator can change the radius, use automatic radius, or request nearest images. Viewer returns up to 200 ranked images at a time. The camera-position map is a local schematic plot with no external map tiles. Geographic proximity is only a search suggestion and does not prove that a point is visible in an image. An operator must inspect an image and explicitly save its pixel correspondence.
 
 Raw image bytes flow directly from the Viewer origin to the authenticated Ops browser. They do not pass through the Operations Worker, are sent with private no-store headers, and are never public assets.
 
