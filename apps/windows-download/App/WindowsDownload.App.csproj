@@ -39,6 +39,9 @@
     <Error Text="A developer build can't also be a packaged release; drop LedgeTopDeveloperBuild for package builds." />
   </Target>
   <!-- A package build (-p:LedgeTopPackage=true) must name a known channel; it can never fall back to a developer build. -->
+  <Target Name="RejectPackagedNativeDiagnostics" BeforeTargets="PrepareForBuild;Publish" Condition="'$(LedgeTopPackage)' == 'true' And ('$(LedgeTopNativeDiagnostics)' == 'true' Or $([System.Text.RegularExpressions.Regex]::IsMatch('$(DefineConstants)', '(^|[;,])\s*LEDGETOP_NATIVE_DIAGNOSTICS\s*([;,]|$)')))">
+    <Error Text="Native diagnostic tracing is restricted to isolated test builds and cannot be packaged." />
+  </Target>
   <Target Name="RequireReleaseChannel" BeforeTargets="BeforeBuild"
           Condition="'$(LedgeTopPackage)' == 'true' And !$([System.String]::Equals('$(LedgeTopReleaseChannel)', 'pilot', StringComparison.Ordinal)) And !$([System.String]::Equals('$(LedgeTopReleaseChannel)', 'stable', StringComparison.Ordinal))">
     <Error Text="Package builds need LedgeTopReleaseChannel=pilot or stable (got '$(LedgeTopReleaseChannel)')." />

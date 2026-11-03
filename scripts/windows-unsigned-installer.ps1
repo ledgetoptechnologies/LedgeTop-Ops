@@ -121,6 +121,42 @@ function ApplicationMetadata([string]$AssemblyPath) {
     } finally { $pe.Dispose() }
   } finally { $stream.Dispose() }
 }
+function AssertCoreHasNoNativeDiagnostics([string]$AssemblyPath, [string]$ExpectedSha256) {
+  # Inspect the exact sealed Core bytes, including prebuilt payloads. Never load
+  # or execute the assembly. A receipt or current build flags cannot prove what
+  # an older, already-published DLL actually contains.
+  Add-Type -AssemblyName System.Reflection.Metadata
+  $stream = [IO.File]::Open($AssemblyPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+  try {
+    if ($stream.Length -lt 1 -or $stream.Length -gt 67108864 -or $ExpectedSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'Core assembly size or inventory hash is invalid.' }
+    $actual = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream)).ToLowerInvariant()
+    if ($actual -cne $ExpectedSha256) { throw 'Core assembly differs from the inventory.' }
+    $stream.Position = 0
+    $pe = [Reflection.PortableExecutable.PEReader]::new($stream)
+    try {
+      if (-not $pe.HasMetadata) { throw 'Core assembly is not a managed PE.' }
+      $reader = [Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($pe)
+      if (-not $reader.IsAssembly -or $reader.GetString($reader.GetAssemblyDefinition().Name) -cne 'LedgeTop.WindowsDownload') { throw 'Core assembly identity is invalid.' }
+      foreach ($file in $reader.AssemblyFiles) {
+        if ($reader.GetAssemblyFile($file).ContainsMetadata) { throw 'Multi-module Core assembly is unsupported.' }
+      }
+      $required = [Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+      foreach ($name in @('CloudFilesConnectionOwner','CloudFilesNativeTransfer','PlaceholderHydrationCoordinator')) { $required.Add($name,0) }
+      foreach ($handle in $reader.TypeDefinitions) {
+        $type = $reader.GetTypeDefinition($handle); $name = $reader.GetString($type.Name); $ns = $reader.GetString($type.Namespace)
+        if ($name -ieq 'NativeStallTrace') { throw 'Core assembly contains restricted native diagnostic tracing.' }
+        if ($ns -ceq 'LedgeTop.WindowsDownload' -and $required.ContainsKey($name)) { $required[$name]++ }
+      }
+      foreach ($handle in $reader.TypeReferences) {
+        if ($reader.GetString($reader.GetTypeReference($handle).Name) -ieq 'NativeStallTrace') { throw 'Core assembly references restricted native diagnostic tracing.' }
+      }
+      foreach ($handle in $reader.ExportedTypes) {
+        if ($reader.GetString($reader.GetExportedType($handle).Name) -ieq 'NativeStallTrace') { throw 'Core assembly exports restricted native diagnostic tracing.' }
+      }
+      foreach ($count in $required.Values) { if ($count -ne 1) { throw 'Core assembly has missing or ambiguous required types.' } }
+    } finally { $pe.Dispose() }
+  } finally { $stream.Dispose() }
+}
 if ($AppVersion -cnotmatch '\A(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\z' -or
     @($AppVersion.Split('.') | Where-Object { [int]$_ -gt 65535 }).Count -ne 0) { throw 'Use a canonical four-component unsigned16 version.' }
 $PayloadDirectory = LocalPath $PayloadDirectory
@@ -200,11 +236,12 @@ while ($pending.Count -gt 0) {
   }
 }
 if ($observed -ne $inventory.Count -or $build.payloadFiles -ne $observed -or $build.payloadBytes -ne $total) { throw 'Receipt/inventory counts or lengths differ.' }
-foreach ($required in @('LedgeTop.Files.exe','LedgeTop.Files.dll','LedgeTop.Files.deps.json','LedgeTop.Files.runtimeconfig.json','coreclr.dll','hostfxr.dll','hostpolicy.dll','helper/cloudflared.exe','Notices/LICENSE.cloudflared.txt')) {
+foreach ($required in @('LedgeTop.Files.exe','LedgeTop.Files.dll','LedgeTop.WindowsDownload.dll','LedgeTop.Files.deps.json','LedgeTop.Files.runtimeconfig.json','coreclr.dll','hostfxr.dll','hostpolicy.dll','helper/cloudflared.exe','Notices/LICENSE.cloudflared.txt')) {
   if (-not $listed.ContainsKey($required)) { throw 'Required self-contained payload file is missing.' }
 }
 if ($listed['LedgeTop.Files.dll'].sha256 -cne $build.applicationSha256 -or $listed['helper/cloudflared.exe'].sha256 -cne $helperSha) { throw 'Application/helper receipt pins differ.' }
 ApplicationMetadata (Join-Path $PayloadDirectory 'LedgeTop.Files.dll')
+AssertCoreHasNoNativeDiagnostics (Join-Path $PayloadDirectory 'LedgeTop.WindowsDownload.dll') $listed['LedgeTop.WindowsDownload.dll'].sha256
 $commitType = & git -C $SourceRepository cat-file -t $ReviewedCommit
 if ($LASTEXITCODE -ne 0 -or $commitType -cne 'commit') { throw 'Reviewed commit is unavailable.' }
 $templateBlob = & git -C $SourceRepository rev-parse "${ReviewedCommit}:apps/windows-download/Packaging/UnsignedInstaller.nsi"
