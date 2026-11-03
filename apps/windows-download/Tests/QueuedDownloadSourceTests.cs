@@ -18,6 +18,7 @@ internal static class QueuedDownloadSourceTests
         ("queue authorization timing separates fake token and response header delays", AuthorizationTiming),
         ("Company hydration authoritative HTTP resolve removes only redundant Session probes", CompanyHydrationAuthority),
         ("Company hydration retries only bounded transient HTTP authorization failures", CompanyHydrationAuthorizationRetry),
+        ("Company hydration shared deadline cancels cooperative auth work", CompanyHydrationDeadlineCancellation),
         ("queue bounded auth diagnostics distinguish actual HTTP401 operations", AuthDiagnostics),
         ("queue source employee and portal metadata renews exact identity with human fixed-origin GETs", Metadata),
         ("queue source selection queries encode once and unsafe selectors reject before authentication", Selection),
@@ -356,6 +357,56 @@ internal static class QueuedDownloadSourceTests
             Assert(f.Runner.Logins == 0);
         }
     }
+    private static async Task CompanyHydrationDeadlineCancellation()
+    {
+        foreach (var mode in new[] { "http", "token", "http-second", "token-second", "caller-and-deadline", "generation-and-deadline" }) {
+            using var f = new Fixture(); using var caller = new CancellationTokenSource(); using var generation = new CancellationTokenSource();
+            var clock = new AuthorizationDeadlineClock(); var sink = new AuthoritySink(); var delays = 0;
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            async Task Block(CancellationToken token) {
+                entered.TrySetResult();
+                try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+                catch (OperationCanceledException) { cancelled.TrySetResult(); await release.Task; throw; }
+            }
+            if (mode == "token") f.Runner.Gate = Block;
+            if (mode == "token-second") f.Runner.Gate = token => f.Runner.Calls == 2 ? Block(token) : Task.CompletedTask;
+            var attempts = 0;
+            var handler = new Handler(async (_, token) => {
+                if (mode is "http-second" or "token-second" && Interlocked.Increment(ref attempts) == 1)
+                    return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+                await Block(token); throw new InvalidOperationException("Blocked request unexpectedly completed.");
+            });
+            using var source = f.Source(true, handler);
+            IQueuedDownloadSource selected = mode == "generation-and-deadline" ? new LifetimeQueuedDownloadSource(source, generation.Token) : source;
+            var id = new PlaceholderIdentity("pilot", selected.Alias, f.Session.Origin.GetLeftPart(UriPartial.Authority), Principal, Reference,
+                "oef1_" + new string('b', 64), Sha, "queue.bin", Bytes.Length, "\"" + Sha + "\"", Sha);
+            Task Delay(TimeSpan _, CancellationToken token) { delays++; token.ThrowIfCancellationRequested(); return Task.CompletedTask; }
+            using var coordinator = new PlaceholderHydrationCoordinator(selected, "pilot", f.Root, 64L << 30, 128L << 30, Principal, Delay, clock);
+            var work = coordinator.HydrateAsync(id, 0, id.Length, sink, caller.Token);
+            try {
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                clock.Advance(TimeSpan.FromMinutes(15));
+                await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                if (mode == "caller-and-deadline") caller.Cancel();
+                if (mode == "generation-and-deadline") generation.Cancel();
+                release.TrySetResult();
+                try { await work.WaitAsync(TimeSpan.FromSeconds(5)); throw new Exception("Deadline unexpectedly succeeded."); }
+                catch (OperationCanceledException) when (mode == "caller-and-deadline") { }
+                catch (TransferException error) when (mode != "caller-and-deadline") {
+                    // Caller cancellation has priority; simultaneous generation/deadline
+                    // cancellation can surface either bounded cancellation or timeout.
+                    if (mode == "generation-and-deadline")
+                        Assert(error.Reason == TransferFailureReason.Timeout || error.HydrationFailure?.Category == HydrationFailureCategory.Cancelled);
+                    else Assert(error.Reason == TransferFailureReason.Timeout);
+                }
+                Assert(delays == (mode is "http-second" or "token-second" ? 1 : 0));
+                Assert(handler.Calls == (mode == "token" ? 0 : mode == "http-second" ? 2 : 1));
+                Assert(sink.Written == 0 && sink.Completed == 0 && sink.Failed == 1 && f.Runner.Logins == 0);
+            } finally { caller.Cancel(); generation.Cancel(); release.TrySetResult(); try { await work.WaitAsync(TimeSpan.FromSeconds(5)); } catch { } }
+        }
+    }
     // Minimal deterministic one-shot timer for the linked authorization deadline.
     private sealed class AuthorizationDeadlineClock : TimeProvider
     {
@@ -604,9 +655,10 @@ internal static class QueuedDownloadSourceTests
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken) { Calls++; return action(request,cancellationToken); }
     }
     private sealed class Runner:IAccessCommandRunner {
-        internal int Calls,Logins;internal string Token=""; internal Exception? Error; internal TimeSpan Delay;
+        internal int Calls,Logins;internal string Token=""; internal Exception? Error; internal TimeSpan Delay; internal Func<CancellationToken,Task>? Gate;
         public async Task<AccessCommandResult> RunAsync(string path,IReadOnlyList<string> arguments,CancellationToken ct) {
             Calls++;if(arguments.Contains("login"))Logins++; if (Error is not null) throw Error;
+            if (Gate is { } gate) await gate(ct);
             if (Delay > TimeSpan.Zero) await Task.Delay(Delay, ct);
             Token="eyJhbGciOiJSUzI1NiJ9."+Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(new{sub="synthetic-person",exp=DateTimeOffset.UtcNow.ToUnixTimeSeconds()+3600})).TrimEnd('=').Replace('+','-').Replace('/','_')+".c2ln";
             return new AccessCommandResult(0,Token,"");
