@@ -32,6 +32,26 @@ customer record is required or created.
   `intel_website_not_connected`.
 - `GET /api/intel/:key/search-console?range=7d|28d|90d` returns 404
   `intel_search_console_not_connected`.
+- `GET /api/intel/:key/google-ads?range=7d|28d|90d` returns the existing
+  explicit owner-Ads read projection when the exact reviewed binding and range
+  are available.
+- `GET /api/intel/:key/summary?range=7d|28d|90d` returns the typed
+  `ops.intel.owner-summary.v1` aggregate foundation. The response echoes the
+  exact internal business ID, route key, requested range, and a separate source
+  entry (`google_ads`, `search_console`, `own_site`, or `ga4`) with that same
+  business ID and range. It never combines a managed-client source into an
+  internal owner-business total.
+
+Each summary source is one of `available`, `partial`, `stale`, `unconfigured`,
+`unavailable`. Every unavailable, unconfigured, or stale source has `metrics:null`
+and a bounded reason; current partial data preserves only the values actually
+present in its accepted projection. Google Ads integer metrics remain decimal
+strings, so large values are not rounded, and observed zero remains distinct
+from unconfigured null. Stale source reads are explicitly cleared rather than
+falling back to an earlier projection. GSC and the own-site monitor remain
+separate source IDs; `ga4` is always unconfigured until it has its own reviewed
+binding/read model. The summary does not create source bindings, advertiser
+mappings, OAuth connections, or provider reads.
 
 All responses are private/no-store. Unknown and unauthorized business aliases
 both return 404 `intel_business_not_found`. Missing monitoring returns 404
