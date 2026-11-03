@@ -25,6 +25,12 @@ internal static class SyntheticMemoryNative {
     }
     internal static bool CleanupVerified(bool registrationAttempted, bool registrationReturned, bool readersJoined, bool disposeCompleted, bool unregisterVerified) =>
         readersJoined && (!registrationAttempted || (registrationReturned && disposeCompleted && unregisterVerified));
+    internal static string DiagnosticSettings(Func<string, string?> get) {
+        var blockSelf = get("LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION") == "1";
+        var disableScanner = get("LEDGETOP_TEST_DISABLE_AVAILABILITY_SCANNER") == "1";
+        var suppressProgress = get("LEDGETOP_TEST_SUPPRESS_NATIVE_PROGRESS") == "1";
+        return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}";
+    }
     internal static int CleanupEvidenceTests() {
         if (!CleanupVerified(false, false, true, true, false) ||
             CleanupVerified(true, false, true, true, false) ||
@@ -32,11 +38,17 @@ internal static class SyntheticMemoryNative {
             CleanupVerified(true, true, false, true, true) ||
             CleanupVerified(true, true, true, true, false) ||
             !CleanupVerified(true, true, true, true, true)) throw new IOException("Synthetic registration cleanup evidence is incorrect.");
-        Console.WriteLine("PASS failed registration remains unverified; disposal timeout never permits unregister."); return 0;
+        var options = DiagnosticSettings(name => name == "LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION" ? "1" : "synthetic-secret");
+        if (options != "Synthetic memory options: blockSelf=True; disableScanner=False; suppressProgress=False")
+            throw new IOException("Synthetic diagnostic option reporting is incorrect.");
+        if (DiagnosticSettings(_ => "1") != "Synthetic memory options: blockSelf=True; disableScanner=True; suppressProgress=True")
+            throw new IOException("Synthetic diagnostic option reporting did not capture opt-ins.");
+        Console.WriteLine("PASS diagnostic options and failed-registration/disposal cleanup evidence."); return 0;
     }
     internal static async Task<int> RunAsync(int count) {
         if (!OperatingSystem.IsWindows() || count is < 1 or > 4 ||
             Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") != "1") return 2;
+        Console.WriteLine(DiagnosticSettings(Environment.GetEnvironmentVariable));
         var basePath = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
         if (string.IsNullOrEmpty(basePath) || !Path.IsPathFullyQualified(basePath) || basePath.StartsWith("\\\\", StringComparison.Ordinal)) return 2;
         RequireLocalDirectory(basePath);
