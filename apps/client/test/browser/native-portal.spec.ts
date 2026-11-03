@@ -1313,6 +1313,30 @@ test.describe("unified home without business switching", () => {
     await expect(page.getByText("General requests you’ve sent couldn’t be loaded right now. Try again in a moment.")).toBeVisible();
   });
 
+  test("home offers general requests and counts them even when no account takes service requests online", async ({page}) => {
+    await mock(page, (route, call) => {
+      if (call.path === "/api/client/request-services") return route.fulfill({json: {services: [], unavailable: [], inquiryKinds: ["other"]}});
+      if (call.path === "/api/client/inquiries") return route.fulfill({json: {inquiries: [
+        {id: "inq-2", kind: "other", title: "Office signage", details: "Signs.", location: null, status: "under_review", createdAt: "2026-10-31T12:00:00.000Z"},
+        {id: "inq-1", kind: "website", title: "Booking page", details: "Booking.", location: null, status: "closed", createdAt: "2026-10-20T12:00:00.000Z"},
+      ]}});
+      if (call.path === "/api/client/v2/workspaces") return route.fulfill({json: {workspaces: listed}});
+      // Plain contexts: neither account takes service requests online.
+      const match = call.path.match(/^\/api\/client\/v2\/workspaces\/(workspace-[bc])\/context$/);
+      if (match) return route.fulfill({json: {...context(match[1]!), workspace: listed.find(item => item.id === match[1])}});
+      return undefined;
+    });
+    await page.goto("/portal");
+    await expect(page.locator(".portal-welcome").getByRole("button", {name: "New request"})).toBeVisible();
+    await expect(page.locator(".portal-overview-tile").filter({hasText: "Requests in progress"}).locator(".portal-overview-value")).toHaveText("1");
+    const activity = page.locator(".ltds-card").filter({has: page.getByRole("heading", {name: "Recent activity"})});
+    await expect(activity.locator("li strong")).toHaveText(["Office signage", "Booking page"]);
+    await expect(activity.locator(".status-pill")).toHaveText(["Under review", "Closed"]);
+    await page.locator(".portal-welcome").getByRole("button", {name: "New request"}).click();
+    await expect(page.locator(".quick-request .quick-request-general strong")).toHaveText(["Something else"]);
+    await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies/);
+  });
+
   test("deliveries are one flat list and feedback one neutral card, with no business or division", async ({page}) => {
     const calls = await mockBoth(page); await page.goto("/portal/deliveries");
     const folders = page.locator(".unified-deliveries");
