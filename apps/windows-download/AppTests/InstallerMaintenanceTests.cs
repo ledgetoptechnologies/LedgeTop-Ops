@@ -129,7 +129,8 @@ internal static class InstallerMaintenanceTests
                     Require(!remove && calls++ == 0, "probe is read-only and runs once"); return Task.FromResult(outcome);
                 });
             var expected = outcome == LegacyExplorerPreviewCleanupResult.RecordedProfile ? 0 :
-                outcome is LegacyExplorerPreviewCleanupResult.NoKnownReceipt or LegacyExplorerPreviewCleanupResult.AlreadyRemovedVerified ? 11 :
+                outcome == LegacyExplorerPreviewCleanupResult.AlreadyRemovedVerified ? 11 :
+                outcome == LegacyExplorerPreviewCleanupResult.NoKnownReceipt ? 12 :
                 outcome == LegacyExplorerPreviewCleanupResult.Busy ? 10 : 20;
             Require(code == expected && calls == 1 && probeLog.SequenceEqual(["owner-dispose"]), "probe classifies without removal");
         }

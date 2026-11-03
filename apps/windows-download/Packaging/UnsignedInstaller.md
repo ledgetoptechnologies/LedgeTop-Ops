@@ -114,7 +114,11 @@ this explicit uninstall. It validates both connected sources, then performs one
 singleton-held legacy cleanup before connected removals; partial multi-root
 cleanup is not atomic. A retry verifies recorded physical-root and native/Shell
 absence without repeating unregister. Missing legacy records are not proof that
-an untracked entry is absent. The separate packaged-pilot command
+an untracked entry is absent. The post-activation read-only probe distinguishes
+verified removed (11) from a missing ownership record (12); on the latter the
+interactive installer only logs that it did not check untracked entries. It does
+not claim one exists, prompt for removal, or alter unknown registrations. Silent
+installations still skip the legacy probe entirely. The separate packaged-pilot command
 `--installer-remove-legacy-preview` touches only that recorded old preview and
 refuses missing/unknown ownership. Windows may remove online-only placeholders when a
 connection is detached, as the uninstall confirmation explains.

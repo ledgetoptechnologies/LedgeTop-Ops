@@ -113,7 +113,8 @@ internal static class InstallerMaintenance
                 // all ownership checks. Missing is not proof all entries are absent.
                 return await legacyCleanup(false) switch {
                     LegacyExplorerPreviewCleanupResult.RecordedProfile => 0,
-                    LegacyExplorerPreviewCleanupResult.NoKnownReceipt or LegacyExplorerPreviewCleanupResult.AlreadyRemovedVerified => 11,
+                    LegacyExplorerPreviewCleanupResult.AlreadyRemovedVerified => 11,
+                    LegacyExplorerPreviewCleanupResult.NoKnownReceipt => 12,
                     LegacyExplorerPreviewCleanupResult.Busy => 10,
                     _ => 20
                 };

@@ -62,7 +62,8 @@ test('legacy V2 retirement runs only after successful activation and never rolls
 });
 
 test('legacy retirement requires confirmation, retries only definite busy and silently defers', () => {
-  assert.match(legacyRetirement, /IfErrors retire_legacy_review\n  StrCmp \$0 11 retire_legacy_done\n  StrCmp \$0 0 retire_legacy_confirm\n  StrCmp \$0 10 retire_legacy_busy retire_legacy_review/);
+  assert.match(legacyRetirement, /IfErrors retire_legacy_review\n  StrCmp \$0 11 retire_legacy_done\n  StrCmp \$0 12 retire_legacy_no_receipt\n  StrCmp \$0 0 retire_legacy_confirm\n  StrCmp \$0 10 retire_legacy_busy retire_legacy_review/);
+  assert.match(legacyRetirement, /retire_legacy_no_receipt:\n  DetailPrint "No old Preview ownership record was found\. Setup did not check for untracked Explorer entries\."\n  Goto retire_legacy_done/);
   assert.match(legacyRetirement, /IfErrors retire_legacy_review\n  StrCmp \$0 0 retire_legacy_done\n  StrCmp \$0 10 retire_legacy_busy retire_legacy_review/);
   assert.equal((legacyRetirement.match(/IfSilent retire_legacy_done/g) ?? []).length, 1);
   assert.match(legacyRetirement, /IDRETRY retire_legacy_retry IDCANCEL retire_legacy_done/);
