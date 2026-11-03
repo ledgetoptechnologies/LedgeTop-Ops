@@ -1,10 +1,11 @@
 // Test-only prototype. It is not referenced by the provider or packaged app.
-// Work owns and releases all its resources inside its delegate, before it returns.
+// Work owns its resources inside its delegate and returns true only with an
+// explicit safe-cleanup receipt. Faults or a false receipt quarantine the root.
 internal sealed class OwnedRootExecutorPrototype
 {
-    private sealed class Item(Func<Task> work)
+    private sealed class Item(Func<Task<bool>> work)
     {
-        internal readonly Func<Task> Work = work;
+        internal readonly Func<Task<bool>> Work = work;
         internal readonly TaskCompletionSource Done = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal LinkedListNode<Item>? Node;
         internal bool Running;
@@ -24,10 +25,10 @@ internal sealed class OwnedRootExecutorPrototype
         this.maximumRoots = maximumRoots; this.maximumQueuedPerRoot = maximumQueuedPerRoot;
     }
 
-    internal async Task RunAsync(string key, Func<Task> work, TimeSpan timeout, CancellationToken cancellationToken = default)
+    internal async Task RunAsync(string key, Func<Task<bool>> work, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(key); ArgumentNullException.ThrowIfNull(work);
-        if (timeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
+        if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromMinutes(10)) throw new ArgumentOutOfRangeException(nameof(timeout));
         cancellationToken.ThrowIfCancellationRequested();
         var item = new Item(work); Root root;
         lock (sync) {
@@ -69,14 +70,22 @@ internal sealed class OwnedRootExecutorPrototype
         if (root.Running is not null || root.Queue.First is not { } node) return;
         root.Queue.RemoveFirst(); var item = node.Value; item.Node = null; item.Running = true; root.Running = item;
         _ = Task.Run(async () => {
-            Exception? failure = null;
-            try { await item.Work().ConfigureAwait(false); } catch (Exception error) { failure = error; }
+            Exception? failure = null; var cleaned = false;
+            try { cleaned = await item.Work().ConfigureAwait(false); } catch (Exception error) { failure = error; }
             lock (sync) {
                 item.Running = false; root.Running = null;
-                // A quarantined root is retired only after the running delegate has
-                // returned, including its resource cleanup. Never replay queued work.
-                if (root.Quarantined || root.Queue.Count == 0) roots.Remove(key);
-                else StartNextLocked(key, root);
+                if (!cleaned) {
+                    root.Quarantined = true;
+                    while (root.Queue.First is { } node) {
+                        root.Queue.RemoveFirst(); node.Value.Node = null;
+                        node.Value.Done.TrySetException(new InvalidOperationException("Root cleanup is unverified."));
+                    }
+                }
+                // A quarantined root is retired only with explicit evidence that
+                // the operation and resource cleanup both completed safely.
+                if (cleaned && (root.Quarantined || root.Queue.Count == 0)) roots.Remove(key);
+                else if (!root.Quarantined) StartNextLocked(key, root);
+                if (!cleaned && failure is null) failure = new InvalidOperationException("Root cleanup is unverified.");
                 if (failure is null) item.Done.TrySetResult(); else item.Done.TrySetException(failure);
             }
         });
