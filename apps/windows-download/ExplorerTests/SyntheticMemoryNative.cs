@@ -54,7 +54,55 @@ internal static class SyntheticMemoryNative {
         var disableScanner = get("LEDGETOP_TEST_DISABLE_AVAILABILITY_SCANNER") == "1";
         var suppressProgress = get("LEDGETOP_TEST_SUPPRESS_NATIVE_PROGRESS") == "1";
         var markerIo = DiagnosticMemoryMarkerIo.Mode(get("LEDGETOP_TEST_MEMORY_MARKER_IO"));
-        return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}";
+        var cacheStage = CacheStage(get("LEDGETOP_TEST_MEMORY_CACHE_STAGE"));
+        return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}";
+    }
+    private static string CacheStage(string? value) => value switch { null or "none" => "none", "quota-only" => "quota-only", "quota-ownership" => "quota-ownership", _ => "invalid" };
+    internal static async Task<int> CacheStageTests() {
+        var basePath = Path.Combine(Path.GetTempPath(), "LedgeTop-cache-stage-" + Guid.NewGuid().ToString("N"));
+        var fixtures = Path.Combine(basePath, "memory-native-fixtures");
+        var owned = Path.Combine(fixtures, Guid.NewGuid().ToString("N"));
+        var cache = Path.Combine(owned, "Cache"); Directory.CreateDirectory(cache);
+        var previousProbe = Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE");
+        var previousBase = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
+        var identity = new PlaceholderIdentity("pilot", "synthetic", "https://source.example.invalid", Principal, "odqr1_0",
+            "oef1_" + new string('a', 64), Sha, "sample-0.bin", Bytes.Length, "\"" + Sha + "\"", Sha);
+        var root = Path.Combine(cache, "verified-hydration-v1");
+        var scope = Path.Combine(root, identity.ScopeKey); var entry = Path.Combine(scope, identity.CacheKey);
+        try {
+            Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", "1");
+            Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", basePath);
+            using var coordinator = new PlaceholderHydrationCoordinator(new Source(), "pilot", cache, expectedPrincipal: Principal);
+            var capture = NativeStallTrace.Enable();
+            try {
+                await coordinator.SyntheticCacheStageAsync(identity, "quota-only", CancellationToken.None);
+                if (Directory.Exists(scope)) throw new IOException("Quota-only created ownership entries.");
+                await coordinator.SyntheticCacheStageAsync(identity, "quota-ownership", CancellationToken.None);
+                if (!File.Exists(Path.Combine(scope, ".verified-hydration-owner")) || !File.Exists(Path.Combine(entry, ".verified-hydration-owner")))
+                    throw new IOException("Synthetic ownership stage did not create expected markers.");
+                var events = NativeStallTrace.Snapshot(capture).Select(e => e.Kind).ToArray();
+                if (events.Count(e => e == NativeStallTrace.Stage.CacheQuotaAcquired) != 2 ||
+                    !events.Contains(NativeStallTrace.Stage.OwnedMarkerFlushExit)) throw new IOException("Synthetic cache stages omitted expected trace.");
+            } finally { NativeStallTrace.Disable(capture); }
+            var rejected = false; try { await coordinator.SyntheticCacheStageAsync(identity, "unknown", CancellationToken.None); } catch (TransferException) { rejected = true; }
+            if (!rejected) throw new IOException("Invalid synthetic stage accepted.");
+            Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", Path.GetTempPath());
+            rejected = false; try { await coordinator.SyntheticCacheStageAsync(identity, "quota-only", CancellationToken.None); } catch (TransferException) { rejected = true; }
+            if (!rejected) throw new IOException("Foreign synthetic artifact root accepted.");
+            Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", basePath);
+            Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", null);
+            rejected = false; try { await coordinator.SyntheticCacheStageAsync(identity, "quota-only", CancellationToken.None); } catch (TransferException) { rejected = true; }
+            if (!rejected) throw new IOException("Synthetic cache stage ran without diagnostic opt-in.");
+        } finally {
+            Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", previousProbe);
+            Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", previousBase);
+            File.Delete(Path.Combine(entry, ".verified-hydration-owner")); if (Directory.Exists(entry)) Directory.Delete(entry);
+            File.Delete(Path.Combine(scope, ".verified-hydration-owner")); if (Directory.Exists(scope)) Directory.Delete(scope);
+            File.Delete(Path.Combine(root, ".hydration-cache.lock")); File.Delete(Path.Combine(root, ".hydration-quota-v2.lock"));
+            File.Delete(Path.Combine(root, ".verified-hydration-owner")); if (Directory.Exists(root)) Directory.Delete(root);
+            Directory.Delete(cache); Directory.Delete(owned); Directory.Delete(fixtures); Directory.Delete(basePath);
+        }
+        Console.WriteLine("PASS synthetic actual cache admission, quota, ownership and scope refusals without native registration."); return 0;
     }
     internal static int CleanupEvidenceTests() {
         if (!CleanupVerified(false, false, true, true, false) ||
@@ -64,9 +112,9 @@ internal static class SyntheticMemoryNative {
             CleanupVerified(true, true, true, true, false) ||
             !CleanupVerified(true, true, true, true, true)) throw new IOException("Synthetic registration cleanup evidence is incorrect.");
         var options = DiagnosticSettings(name => name == "LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION" ? "1" : "synthetic-secret");
-        if (options != "Synthetic memory options: blockSelf=True; disableScanner=False; suppressProgress=False; markerIo=invalid")
+        if (options != "Synthetic memory options: blockSelf=True; disableScanner=False; suppressProgress=False; markerIo=invalid; cacheStage=invalid")
             throw new IOException("Synthetic diagnostic option reporting is incorrect.");
-        if (DiagnosticSettings(name => name == "LEDGETOP_TEST_MEMORY_MARKER_IO" ? null : "1") != "Synthetic memory options: blockSelf=True; disableScanner=True; suppressProgress=True; markerIo=none")
+        if (DiagnosticSettings(name => name is "LEDGETOP_TEST_MEMORY_MARKER_IO" or "LEDGETOP_TEST_MEMORY_CACHE_STAGE" ? null : "1") != "Synthetic memory options: blockSelf=True; disableScanner=True; suppressProgress=True; markerIo=none; cacheStage=none")
             throw new IOException("Synthetic diagnostic option reporting did not capture opt-ins.");
         var observations = new List<(string, int)>();
         void Capture(string outcome, int code) => observations.Add((outcome, code));
@@ -142,7 +190,8 @@ internal static class SyntheticMemoryNative {
             Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") != "1") return 2;
         Console.WriteLine(DiagnosticSettings(Environment.GetEnvironmentVariable));
         var markerMode = DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO"));
-        if (markerMode == "invalid") return 2;
+        var cacheStage = CacheStage(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_CACHE_STAGE"));
+        if (markerMode == "invalid" || cacheStage == "invalid" || (markerMode != "none" && cacheStage != "none")) return 2;
         var basePath = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
         if (string.IsNullOrEmpty(basePath) || !Path.IsPathFullyQualified(basePath) || basePath.StartsWith("\\\\", StringComparison.Ordinal)) return 2;
         RequireLocalDirectory(basePath);
@@ -237,7 +286,7 @@ internal static class SyntheticMemoryNative {
             Phase(createScope is null ? "create-scope-released" : "create-scope-retained", id);
             var cleanupVerified = CleanupVerified(registrationAttempted, registration is not null, readersJoined, disposeCompleted, unregisterVerified);
             if (!cleanupVerified) success = false;
-            foreach (var item in NativeStallTrace.Snapshot(trace).Where(e => e.Kind is NativeStallTrace.Stage.SyntheticMarkerReadEnter or NativeStallTrace.Stage.SyntheticMarkerReadExit
+            foreach (var item in NativeStallTrace.Snapshot(trace).Where(e => cacheStage != "none" || e.Kind is NativeStallTrace.Stage.SyntheticMarkerReadEnter or NativeStallTrace.Stage.SyntheticMarkerReadExit
                 or NativeStallTrace.Stage.SyntheticMarkerCreateEnter or NativeStallTrace.Stage.SyntheticMarkerCreateExit
                 or NativeStallTrace.Stage.SyntheticMarkerWriteEnter or NativeStallTrace.Stage.SyntheticMarkerWriteExit
                 or NativeStallTrace.Stage.SyntheticMarkerFlushEnter or NativeStallTrace.Stage.SyntheticMarkerFlushExit

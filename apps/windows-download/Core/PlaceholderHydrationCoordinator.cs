@@ -96,6 +96,48 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     }
     public Task HydrateAsync(PlaceholderIdentity identity, long offset, long length, IPlaceholderTransferSink sink, CancellationToken cancellationToken = default) =>
         HydrateCoreAsync(identity, offset, length, sink, cancellationToken, null);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+    // Incremental synthetic-only comparison of the actual cache coordination
+    // primitives. This does not authorize, download, reserve, or transfer data.
+    internal async Task SyntheticCacheStageAsync(PlaceholderIdentity identity, string stage, CancellationToken token)
+    {
+        if (Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") != "1" ||
+            stage is not ("quota-only" or "quota-ownership") || source.Alias != "synthetic" ||
+            source.Origin.AbsoluteUri != "https://source.example.invalid/" || channel != "pilot" ||
+            principal != "odqp1_" + new string('f', 64) || identity.PrincipalId != principal ||
+            identity.Channel != "pilot" || identity.SourceAlias != "synthetic" || identity.Origin != "https://source.example.invalid" ||
+            !System.Text.RegularExpressions.Regex.IsMatch(identity.FileName, "\\Asample-[0-3]\\.bin\\z"))
+            throw new TransferException("Synthetic cache diagnostic scope is invalid.");
+        identity.Encode();
+        var artifact = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
+        if (string.IsNullOrEmpty(artifact) || !Path.IsPathFullyQualified(artifact) || artifact.StartsWith("\\\\", StringComparison.Ordinal))
+            throw new TransferException("Synthetic artifact root is invalid.");
+        var cache = Path.GetDirectoryName(root) ?? throw new TransferException("Synthetic cache is invalid.");
+        var fixture = Path.GetDirectoryName(cache) ?? throw new TransferException("Synthetic fixture is invalid.");
+        var fixtureId = Path.GetFileName(fixture);
+        if (!Guid.TryParseExact(fixtureId, "N", out var parsed) || fixtureId != parsed.ToString("N") ||
+            !string.Equals(cache, Path.Combine(Path.GetFullPath(artifact), "memory-native-fixtures", fixtureId, "Cache"), StringComparison.OrdinalIgnoreCase))
+            throw new TransferException("Synthetic cache does not belong to this fixture.");
+        RequireSafe(cache); RequireSafe(root);
+        NativeStallTrace.Record(NativeStallTrace.Stage.AdmissionEnter);
+        using var admission = await HydrationCacheConcurrency.AcquireAsync(root, identity.ScopeKey + identity.CacheKey, token, exclusive: false).ConfigureAwait(false);
+        NativeStallTrace.Record(NativeStallTrace.Stage.AdmissionAcquired);
+        var quotaLock = Path.Combine(root, ".hydration-cache.lock"); RequireSafe(quotaLock);
+        NativeStallTrace.Record(NativeStallTrace.Stage.CacheLegacyLeaseEnter);
+        admission.AcquireExclusiveLegacy(quotaLock, FileMode.OpenOrCreate);
+        NativeStallTrace.Record(NativeStallTrace.Stage.CacheLegacyLeaseAcquired);
+        WithQuota(admission.Quota, () => {
+            if (stage == "quota-ownership") {
+                var scope = Path.Combine(root, identity.ScopeKey);
+                var entry = Path.Combine(scope, identity.CacheKey);
+                _ = TraceCacheValue(NativeStallTrace.Stage.CacheScopeCheckEnter, NativeStallTrace.Stage.CacheScopeCheckExit, () => OwnedExisting(scope));
+                _ = TraceCacheValue(NativeStallTrace.Stage.CacheEntryCheckEnter, NativeStallTrace.Stage.CacheEntryCheckExit, () => OwnedExisting(entry));
+                TraceCacheAction(NativeStallTrace.Stage.CacheScopeOwnEnter, NativeStallTrace.Stage.CacheScopeOwnExit, () => Owned(scope));
+                TraceCacheAction(NativeStallTrace.Stage.CacheEntryOwnEnter, NativeStallTrace.Stage.CacheEntryOwnExit, () => Owned(entry));
+            }
+        });
+    }
+#endif
     internal Task HydrateTimedAsync(PlaceholderIdentity identity, long offset, long length, IPlaceholderTransferSink sink, CancellationToken cancellationToken, HydrationTiming timing) =>
         HydrateCoreAsync(identity, offset, length, sink, cancellationToken, timing);
     private async Task HydrateCoreAsync(PlaceholderIdentity identity, long offset, long length, IPlaceholderTransferSink sink, CancellationToken cancellationToken, HydrationTiming? timing)

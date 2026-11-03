@@ -5,6 +5,7 @@ using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
 #if LEDGETOP_NATIVE_DIAGNOSTICS
+if (args.Length == 1 && args[0] == "--synthetic-memory-cache-stage-tests") return await SyntheticMemoryNative.CacheStageTests();
 if (args.Length >= 1 && args[0] == "--synthetic-memory-inspect-tests") return args.Length == 1 ? SyntheticMemoryInspection.Tests() : 2;
 if (args.Length >= 1 && args[0] == "--synthetic-memory-inspect") return args.Length == 2 ? SyntheticMemoryInspection.Run(args[1]) : 2;
 if (args.Length == 1 && args[0] == "--synthetic-memory-native-marker-tests") return SyntheticMemoryNative.MarkerIoTests();
