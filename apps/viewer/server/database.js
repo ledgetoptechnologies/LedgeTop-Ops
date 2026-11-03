@@ -2281,6 +2281,29 @@ const MIGRATIONS = [
       }
     }
   }},
+  // Review-only identity; do not deploy until migration identities are reconciled.
+  {version:70,name:'candidate_selected_source_generation_journal',sql:`
+    CREATE TABLE candidate_selected_source_generations (
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL CHECK(generation>0),
+      snapshot_id TEXT NOT NULL REFERENCES viewer_source_snapshots(snapshot_id) ON DELETE RESTRICT,
+      snapshot_sha256 TEXT NOT NULL CHECK(length(snapshot_sha256)=64),
+      root_ref TEXT NOT NULL,
+      selected_json TEXT NOT NULL CHECK(json_valid(selected_json)),
+      selected_sha256 TEXT NOT NULL CHECK(length(selected_sha256)=64),
+      state TEXT NOT NULL CHECK(state='held'),
+      PRIMARY KEY(attempt_id,generation)
+    );
+    CREATE TRIGGER candidate_generation_insert BEFORE INSERT ON candidate_selected_source_generations
+      WHEN EXISTS(SELECT 1 FROM candidate_selected_source_generations WHERE (attempt_id=NEW.attempt_id AND generation=NEW.generation) OR rowid=NEW.rowid)
+        OR NOT EXISTS(SELECT 1 FROM viewer_source_snapshots WHERE snapshot_id=NEW.snapshot_id AND attempt_id=NEW.attempt_id AND intent_sha256=NEW.snapshot_sha256 AND status='held')
+      BEGIN SELECT RAISE(ABORT,'candidate generation unavailable'); END;
+    CREATE TRIGGER candidate_generation_no_update BEFORE UPDATE ON candidate_selected_source_generations BEGIN SELECT RAISE(ABORT,'candidate generation retained'); END;
+    CREATE TRIGGER candidate_generation_no_delete BEFORE DELETE ON candidate_selected_source_generations BEGIN SELECT RAISE(ABORT,'candidate generation retained'); END;
+    CREATE TRIGGER candidate_generation_snapshot_release BEFORE UPDATE OF status ON viewer_source_snapshots
+      WHEN NEW.status='released' AND EXISTS(SELECT 1 FROM candidate_selected_source_generations WHERE snapshot_id=OLD.snapshot_id)
+      BEGIN SELECT RAISE(ABORT,'candidate generation retained'); END;
+  `},
 ];
 
 function applyMigrations(database) {
