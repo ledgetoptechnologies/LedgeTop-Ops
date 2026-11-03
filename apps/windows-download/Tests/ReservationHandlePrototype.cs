@@ -36,7 +36,9 @@ internal static class ReservationHandlePrototype
         var verified = false; var cleanupComplete = false; var deleteDispositionsApplied = 0;
         try {
             CheckAncestors(fixture);
-            using var directory = Open(fixture, ReadAttributes | Delete, ShareRead | ShareWrite, BackupSemantics | OpenReparsePoint);
+            // Attribute-only observation must not hold DELETE access while an
+            // experimental no-delete-share directory pin is under test.
+            using var directory = Open(fixture, ReadAttributes, ShareRead | ShareWrite, BackupSemantics | OpenReparsePoint);
             RequireKind(directory, isDirectory: true); var directoryId = Id(directory);
             VerifyDirectoryBinding(fixture, directory, directoryId);
             FileId ownerId, foreignId;
@@ -102,10 +104,12 @@ internal static class ReservationHandlePrototype
             VerifyDirectoryBinding(fixture, directory, directoryId);
             if (Directory.EnumerateFileSystemEntries(fixture).Any() || Id(directory) != directoryId)
                 throw new IOException("Synthetic fixture is not empty or its identity changed.");
+            using var deleteDirectory = Open(fixture, ReadAttributes | Delete, ShareRead | ShareWrite, BackupSemantics | OpenReparsePoint);
+            VerifyDirectoryBinding(fixture, deleteDirectory, directoryId);
             byte disposition = 1;
-            if (!SetFileInformationByHandle(directory, 4, ref disposition, 1)) throw new IOException("Synthetic directory cleanup was not confirmed.");
+            if (!SetFileInformationByHandle(deleteDirectory, 4, ref disposition, 1)) throw new IOException("Synthetic directory cleanup was not confirmed.");
             deleteDispositionsApplied++;
-            directory.Dispose();
+            deleteDirectory.Dispose(); directory.Dispose();
             if (!ConfirmedAbsent(() => File.GetAttributes(fixture), () => VerifyDirectoryBinding(root, parent, parentId)))
                 throw new IOException("Synthetic directory absence and parent identity were not confirmed.");
             cleanupComplete = true;
@@ -143,14 +147,41 @@ internal static class ReservationHandlePrototype
         recordDisposition();
         ExperimentalSealFailures(fixture, directory, directoryId, recordDisposition);
         ExperimentalDisposeFailure(fixture, directory, directoryId, recordDisposition);
+        ExperimentalBindingFailureControl(fixture, directory, directoryId, recordDisposition);
         Console.WriteLine("PASS gated experimental owned-source sealing and exact identity cleanup.");
+    }
+
+    private static void ExperimentalBindingFailureControl(string fixture, SafeFileHandle directory, FileId directoryId, Action recordDisposition)
+    {
+        var path = Path.Combine(fixture, "experimental-binding-source.record");
+        var owned = LedgeTop.WindowsDownload.ExperimentalOwnedStream.CreateNew(path); var id = owned.SourceIdentity;
+        owned.Write(Owned);
+        var token = new object(); LedgeTop.WindowsDownload.ExperimentalOwnedStream.BindingInjectionTokenTestHook = token;
+        LedgeTop.WindowsDownload.ExperimentalOwnedStream.PinExpectedPathTestHook = current =>
+            string.Equals(current, fixture, StringComparison.OrdinalIgnoreCase) ? current + ".changed" : current;
+        try {
+            var failed = false; try { owned.Write(Owned); } catch (IOException) { failed = true; }
+            if (!failed) throw new IOException("Simulated binding mismatch was accepted.");
+        } finally { LedgeTop.WindowsDownload.ExperimentalOwnedStream.PinExpectedPathTestHook = null; LedgeTop.WindowsDownload.ExperimentalOwnedStream.BindingInjectionTokenTestHook = null; }
+        if (LedgeTop.WindowsDownload.ExperimentalOwnedStream.QuarantinedCountForTest != 1 || owned.VerifyRetainedPinsForTest() == 0)
+            throw new IOException("Binding mismatch did not retain the owner.");
+        var refused = false; try { owned.Dispose(); } catch (InvalidOperationException) { refused = true; }
+        if (!refused) throw new IOException("Binding mismatch allowed handle release.");
+        // The hook changed only the expected observation, not the filesystem.
+        // Test-only settlement rechecks actual source and directory identities.
+        refused = false; try { owned.ReconcileOriginalSourceBindingForTest(new object()); } catch (InvalidOperationException) { refused = true; }
+        if (!refused) throw new IOException("Unrelated binding settlement token was accepted.");
+        owned.ReconcileOriginalSourceBindingForTest(token); owned.Dispose();
+        if (!TryDeleteExact(fixture, directory, directoryId, path, Owned, new(id.Volume, id.FileId)))
+            throw new IOException("Synthetic binding fixture cleanup failed.");
+        recordDisposition();
     }
 
     private static void ExperimentalRenameControl(string fixture, SafeFileHandle directory, FileId directoryId, Action recordDisposition)
     {
         var destination = Path.Combine(fixture, "experimental-rename-destination");
         if (!CreateDirectoryW(destination, 0)) throw new IOException("Synthetic destination creation failed.");
-        using var targetDirectory = Open(destination, ReadAttributes | Delete, ShareRead | ShareWrite, BackupSemantics | OpenReparsePoint);
+        using var targetDirectory = Open(destination, ReadAttributes, ShareRead | ShareWrite, BackupSemantics | OpenReparsePoint);
         RequireKind(targetDirectory, isDirectory: true); var targetDirectoryId = Id(targetDirectory);
         var source = Path.Combine(fixture, "experimental-rename-source.record");
         var target = Path.Combine(destination, "promoted.record");
@@ -194,9 +225,11 @@ internal static class ReservationHandlePrototype
         recordDisposition();
         VerifyDirectoryBinding(destination, targetDirectory, targetDirectoryId);
         if (Directory.EnumerateFileSystemEntries(destination).Any()) throw new IOException("Synthetic destination not empty.");
+        using var deleteDirectory = Open(destination, ReadAttributes | Delete, ShareRead | ShareWrite, BackupSemantics | OpenReparsePoint);
+        VerifyDirectoryBinding(destination, deleteDirectory, targetDirectoryId);
         byte disposition = 1;
-        if (!SetFileInformationByHandle(targetDirectory, 4, ref disposition, 1)) throw new IOException("Synthetic destination removal failed.");
-        recordDisposition(); targetDirectory.Dispose();
+        if (!SetFileInformationByHandle(deleteDirectory, 4, ref disposition, 1)) throw new IOException("Synthetic destination removal failed.");
+        recordDisposition(); deleteDirectory.Dispose(); targetDirectory.Dispose();
         if (!ConfirmedAbsent(() => File.GetAttributes(destination), () => VerifyDirectoryBinding(fixture, directory, directoryId))) throw new IOException("Synthetic destination absence unverified.");
         Console.WriteLine("PASS gated experimental relative rename, collision preservation, and invalid states.");
     }
@@ -207,16 +240,14 @@ internal static class ReservationHandlePrototype
         if (!CreateDirectoryW(destination, 0)) throw new IOException("Synthetic quarantine destination creation failed.");
         var source = Path.Combine(fixture, "experimental-quarantine-source.record");
         var target = Path.Combine(destination, "promoted.record");
-        var owned = LedgeTop.WindowsDownload.ExperimentalOwnedStream.CreateNew(source); var id = owned.SourceIdentity;
-        owned.Write(Owned); var digest = owned.SealAndHash();
-        LedgeTop.WindowsDownload.ExperimentalOwnedStream.AfterSuccessfulNativeRenameTestHook = () => throw new IOException("Injected post-success verification failure.");
-        var failed = false;
-        try { owned.RenameNoReplace(destination, "promoted.record", digest); } catch (IOException) { failed = true; }
-        finally { LedgeTop.WindowsDownload.ExperimentalOwnedStream.AfterSuccessfulNativeRenameTestHook = null; }
-        if (!failed) throw new IOException("Injected post-success failure was not observed.");
+        var (weak, id, digest) = CreateUncertainOwnerForGc(source, destination);
         if (LedgeTop.WindowsDownload.ExperimentalOwnedStream.QuarantinedCountForTest != 1) throw new IOException("Uncertain owner was not rooted.");
+        GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+        if (!weak.TryGetTarget(out var owned)) throw new IOException("Quarantined owner was collected.");
         var refused = false; try { owned.Dispose(); } catch (InvalidOperationException) { refused = true; }
         if (!refused) throw new IOException("Uncertain owner released its handles.");
+        refused = false; try { owned.ReconcileOriginalSourceBindingForTest(new object()); } catch (InvalidOperationException) { refused = true; }
+        if (!refused) throw new IOException("Native rename uncertainty accepted binding-only settlement.");
         refused = false; try { owned.RenameNoReplace(destination, "again.record", digest); } catch (InvalidOperationException) { refused = true; }
         if (!refused) throw new IOException("Uncertain owner allowed another operation.");
         refused = false;
@@ -238,6 +269,20 @@ internal static class ReservationHandlePrototype
         if (!ConfirmedAbsent(() => File.GetAttributes(destination), () => VerifyDirectoryBinding(fixture, directory, directoryId)))
             throw new IOException("Synthetic quarantine destination absence is uncertain.");
         Console.WriteLine("PASS gated post-success failure retains ownership until verified test settlement.");
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static (WeakReference<LedgeTop.WindowsDownload.ExperimentalOwnedStream>, LedgeTop.WindowsDownload.ExperimentalOwnedStream.Identity, byte[])
+        CreateUncertainOwnerForGc(string source, string destination)
+    {
+        var owned = LedgeTop.WindowsDownload.ExperimentalOwnedStream.CreateNew(source); var id = owned.SourceIdentity;
+        owned.Write(Owned); var digest = owned.SealAndHash();
+        LedgeTop.WindowsDownload.ExperimentalOwnedStream.AfterSuccessfulNativeRenameTestHook = () => throw new IOException("Injected post-success verification failure.");
+        var failed = false;
+        try { owned.RenameNoReplace(destination, "promoted.record", digest); } catch (IOException) { failed = true; }
+        finally { LedgeTop.WindowsDownload.ExperimentalOwnedStream.AfterSuccessfulNativeRenameTestHook = null; }
+        if (!failed) throw new IOException("Injected post-success failure was not observed.");
+        return (new WeakReference<LedgeTop.WindowsDownload.ExperimentalOwnedStream>(owned), id, digest);
     }
 
     private static void ExperimentalPendingControl(string fixture, SafeFileHandle directory, FileId directoryId, string destination, Action recordDisposition)
@@ -313,9 +358,15 @@ internal static class ReservationHandlePrototype
             LedgeTop.WindowsDownload.ExperimentalOwnedStream.AfterStreamDisposeTestHook = () => throw new IOException("Injected synthetic disposal failure.");
             var failed = false; try { owned.Dispose(); } catch (IOException) { failed = true; }
             if (!failed) throw new IOException("Injected disposal failure was not observed.");
-        } finally { LedgeTop.WindowsDownload.ExperimentalOwnedStream.AfterStreamDisposeTestHook = null; owned.Dispose(); }
-        // A successful rename away and back demonstrates the source-parent
-        // handle was released even though disposal reported an error.
+        } finally { LedgeTop.WindowsDownload.ExperimentalOwnedStream.AfterStreamDisposeTestHook = null; }
+        if (LedgeTop.WindowsDownload.ExperimentalOwnedStream.QuarantinedCountForTest != 1) throw new IOException("Failed close owner was not rooted.");
+        if (owned.VerifyRetainedPinsForTest() == 0) throw new IOException("Failed close did not retain parent handles.");
+        var refused = false; try { Directory.Move(child, moved); } catch (IOException) { refused = true; } catch (UnauthorizedAccessException) { refused = true; }
+        if (!refused || Directory.Exists(moved)) throw new IOException("Failed close did not prevent a parent namespace move; fixture preserved.");
+        owned.ReconcileInjectedDisposeFailureForTest();
+        if (LedgeTop.WindowsDownload.ExperimentalOwnedStream.QuarantinedCountForTest != 0) throw new IOException("Test-settled close remained rooted.");
+        owned.Dispose();
+        // After test-only settlement, a rename away/back demonstrates release.
         Directory.Move(child, moved); Directory.Move(moved, child);
         using var childHandle = Open(child, ReadAttributes | Delete, ShareRead | ShareWrite, BackupSemantics | OpenReparsePoint);
         RequireKind(childHandle, isDirectory: true); var childId = Id(childHandle); VerifyDirectoryBinding(child, childHandle, childId);
@@ -727,9 +778,8 @@ internal static class ReservationHandlePrototype
     private static void VerifyDirectoryBinding(string path, SafeFileHandle held, FileId expected)
     {
         CheckAncestors(path);
-        // The held directory has DELETE access; the observation handle must
-        // permit sharing that existing access. The held handle denies anyone
-        // else opening this directory for deletion while the test is running.
+        // Permit sharing DELETE on the observation handle because some held
+        // cleanup handles have DELETE access; check the held identity directly.
         using var current = Open(path, ReadAttributes, ShareRead | ShareWrite | 4, BackupSemantics | OpenReparsePoint);
         RequireKind(current, isDirectory: true);
         if (Id(held) != expected || Id(current) != expected) throw new IOException("Synthetic directory binding changed.");

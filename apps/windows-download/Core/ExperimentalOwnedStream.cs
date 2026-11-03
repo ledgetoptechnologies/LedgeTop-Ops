@@ -9,7 +9,7 @@ namespace LedgeTop.WindowsDownload;
 // Compile-gated experiment only. No production caller, download or resume path.
 internal sealed class ExperimentalOwnedStream : IDisposable
 {
-    private const uint GenericRead = 0x80000000, GenericWrite = 0x40000000, Delete = 0x10000, ReadAttributes = 0x80;
+    private const uint GenericRead = 0x80000000, GenericWrite = 0x40000000, Delete = 0x10000, ReadAttributes = 0x80, ListDirectory = 0x1;
     private const uint ShareReadWrite = 3, CreateNewMode = 1, OpenExisting = 3;
     private const uint BackupSemantics = 0x02000000, OpenReparsePoint = 0x00200000;
     private readonly object gate = new();
@@ -18,8 +18,12 @@ internal sealed class ExperimentalOwnedStream : IDisposable
     private sealed record DirectoryPin(string Path, SafeFileHandle Handle, Identity Identity);
     private readonly List<DirectoryPin> directories = [];
     private FileStream? stream;
+    private SafeFileHandle? sourceHandle;
     private string sourcePath = "";
-    private bool sealedStream, verifiedSeal, moved, renameUncertain;
+    private bool sealedStream, verifiedSeal, moved, renameUncertain, disposeUncertain, sourceCloseReturned, injectedCloseBoundary;
+    private enum QuarantineReason { None, NativeOperation, BindingChange, InjectedBindingCheck, Disposal }
+    private QuarantineReason quarantineReason;
+    private object? bindingInjectionToken;
     private byte[]? sealedDigest;
     private string? successfulRenameTarget;
     internal static Action? BeforeSealFlushTestHook, BeforeSealHashTestHook, AfterStreamDisposeTestHook;
@@ -27,6 +31,8 @@ internal sealed class ExperimentalOwnedStream : IDisposable
     internal static int QuarantinedCountForTest { get { lock (QuarantineGate) return Quarantined.Count; } }
     internal static Func<nint, int>? SimulatedRenameStatusTestHook;
     internal static Func<uint>? SimulatedWaitTestHook;
+    internal static Func<string, string>? PinExpectedPathTestHook;
+    internal static object? BindingInjectionTokenTestHook;
     internal readonly record struct Identity(ulong Volume, Guid FileId);
     internal Identity SourceIdentity { get; private set; }
 
@@ -48,16 +54,23 @@ internal sealed class ExperimentalOwnedStream : IDisposable
                 RequireRegularKind(file, directory: false);
                 owner.SourceIdentity = GetIdentity(file);
                 owner.stream = new FileStream(file, FileAccess.ReadWrite);
+                owner.sourceHandle = file;
                 owner.sourcePath = path;
-            } catch { file.Dispose(); throw; }
+                owner.VerifyOwnedPins();
+                if (!string.Equals(FinalPath(file), path, StringComparison.OrdinalIgnoreCase)) {
+                    owner.EnterQuarantine(QuarantineReason.BindingChange); throw new IOException("Experimental source binding changed.");
+                }
+            } catch { if (owner.stream is null) file.Dispose(); throw; }
             return owner;
-        } catch { owner.Dispose(); throw; }
+        } catch { if (!owner.renameUncertain) owner.Dispose(); throw; }
     }
 
     internal void Write(ReadOnlySpan<byte> bytes)
     {
         lock (gate) {
+            if (renameUncertain || disposeUncertain) throw new InvalidOperationException("Experimental ownership is uncertain.");
             if (sealedStream) throw new InvalidOperationException("Experimental stream is sealed.");
+            VerifyOwnedPins();
             (stream ?? throw new ObjectDisposedException(nameof(ExperimentalOwnedStream))).Write(bytes);
         }
     }
@@ -66,10 +79,12 @@ internal sealed class ExperimentalOwnedStream : IDisposable
     {
         lock (gate) {
             var file = stream ?? throw new ObjectDisposedException(nameof(ExperimentalOwnedStream));
+            if (renameUncertain || disposeUncertain) throw new InvalidOperationException("Experimental ownership is uncertain.");
             if (sealedStream) throw new InvalidOperationException("Experimental stream is already sealed.");
             // Enter quarantine before any flush or hash operation: if either
             // fails, no subsequent write or retry can reuse ambiguous bytes.
             sealedStream = true;
+            VerifyOwnedPins();
             BeforeSealFlushTestHook?.Invoke();
             file.Flush(true); file.Position = 0;
             BeforeSealHashTestHook?.Invoke();
@@ -96,7 +111,7 @@ internal sealed class ExperimentalOwnedStream : IDisposable
             Exception? primary = null;
             try {
                 PinDirectories(destinationDirectory, destinationPins);
-                VerifyPins(directories); VerifyPins(destinationPins);
+                VerifyOwnedPins(); VerifyPins(destinationPins);
                 if (destinationPins[^1].Identity.Volume != SourceIdentity.Volume || GetIdentity(file.SafeFileHandle) != SourceIdentity ||
                     !string.Equals(FinalPath(file.SafeFileHandle), sourcePath, StringComparison.OrdinalIgnoreCase))
                     throw new IOException("Experimental source or directory binding changed.");
@@ -115,7 +130,7 @@ internal sealed class ExperimentalOwnedStream : IDisposable
                     // Root the owner before issuing native I/O. A caller that
                     // drops its reference after an ambiguous result must not
                     // let SafeHandle finalizers close the quarantined handles.
-                    EnterQuarantine(); inFlight = true;
+                    EnterQuarantine(QuarantineReason.NativeOperation); inFlight = true;
                     var status = SimulatedRenameStatusTestHook?.Invoke(io) ?? NtSetInformationFile(file.SafeFileHandle, io, buffer, checked((uint)size), 10);
                     if (unchecked((uint)status) == 0x103) {
                         while (true) {
@@ -171,18 +186,18 @@ internal sealed class ExperimentalOwnedStream : IDisposable
 
     private static void ParkUncertain() { while (true) { try { Thread.Sleep(Timeout.Infinite); } catch (ThreadInterruptedException) { } } }
 
-    private void EnterQuarantine()
+    private void EnterQuarantine(QuarantineReason reason, object? injectionToken = null)
     {
         lock (QuarantineGate) {
             if (!Quarantined.Add(this)) throw new InvalidOperationException("Experimental owner is already quarantined.");
-            renameUncertain = true;
+            renameUncertain = true; quarantineReason = reason; bindingInjectionToken = injectionToken;
         }
     }
     private void LeaveQuarantine()
     {
         lock (QuarantineGate) {
             if (!Quarantined.Remove(this)) throw new InvalidOperationException("Experimental quarantine ownership was lost.");
-            renameUncertain = false;
+            renameUncertain = false; quarantineReason = QuarantineReason.None; bindingInjectionToken = null;
         }
     }
 
@@ -192,7 +207,7 @@ internal sealed class ExperimentalOwnedStream : IDisposable
     {
         lock (gate) {
             var file = stream ?? throw new ObjectDisposedException(nameof(ExperimentalOwnedStream));
-            if (!renameUncertain || !moved || successfulRenameTarget is null || sealedDigest is null)
+            if (!renameUncertain || quarantineReason != QuarantineReason.NativeOperation || !moved || successfulRenameTarget is null || sealedDigest is null)
                 throw new InvalidOperationException("No known-success experimental rename to reconcile.");
             VerifyPins(directories);
             if (GetIdentity(file.SafeFileHandle) != SourceIdentity ||
@@ -205,21 +220,56 @@ internal sealed class ExperimentalOwnedStream : IDisposable
         }
     }
 
+    // Synthetic-only settlement after a simulated binding observation failure.
+    internal void ReconcileOriginalSourceBindingForTest(object injectionToken)
+    {
+        lock (gate) {
+            var file = stream ?? throw new ObjectDisposedException(nameof(ExperimentalOwnedStream));
+            if (!renameUncertain || quarantineReason != QuarantineReason.InjectedBindingCheck ||
+                !ReferenceEquals(bindingInjectionToken, injectionToken) || disposeUncertain || moved)
+                throw new InvalidOperationException("No injected original source binding to settle.");
+            VerifyPins(directories);
+            if (GetIdentity(file.SafeFileHandle) != SourceIdentity || !string.Equals(FinalPath(file.SafeFileHandle), sourcePath, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("Experimental source binding remains uncertain.");
+            LeaveQuarantine();
+        }
+    }
+
     public void Dispose()
     {
         lock (gate) {
-            if (renameUncertain) throw new InvalidOperationException("Experimental rename is uncertain; ownership is retained.");
-            Exception? failure = null;
-            try { if (stream is not null) { stream.Dispose(); AfterStreamDisposeTestHook?.Invoke(); } }
-            catch (Exception error) { failure = error; }
-            finally {
-                stream = null;
-                for (var i = directories.Count - 1; i >= 0; i--) {
-                    try { directories[i].Handle.Dispose(); } catch (Exception error) { failure ??= error; }
+            if (renameUncertain || disposeUncertain) throw new InvalidOperationException("Experimental ownership is uncertain; handles are retained.");
+            if (stream is null && directories.Count == 0) return;
+            EnterQuarantine(QuarantineReason.Disposal);
+            try {
+                if (stream is not null) {
+                    VerifyPins(directories);
+                    stream.Dispose(); sourceCloseReturned = true;
+                    if (AfterStreamDisposeTestHook is not null) { injectedCloseBoundary = true; AfterStreamDisposeTestHook(); }
                 }
-                directories.Clear();
+                for (var i = directories.Count - 1; i >= 0; i--) directories[i].Handle.Dispose();
+                directories.Clear(); stream = null; sourceHandle = null;
+                LeaveQuarantine();
+            } catch {
+                // Do not discard the owner, source reference, or remaining
+                // directory pins when any close result is uncertain.
+                disposeUncertain = true;
+                throw;
             }
-            if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+        }
+    }
+
+    // Only settles the synthetic injection after a successful managed source
+    // Dispose return; it is not a recovery path for a real close exception.
+    internal void ReconcileInjectedDisposeFailureForTest()
+    {
+        lock (gate) {
+            if (!disposeUncertain || quarantineReason != QuarantineReason.Disposal || !injectedCloseBoundary || !sourceCloseReturned || sourceHandle is null || !sourceHandle.IsClosed)
+                throw new InvalidOperationException("Experimental close remains uncertain.");
+            VerifyPins(directories);
+            for (var i = directories.Count - 1; i >= 0; i--) directories[i].Handle.Dispose();
+            directories.Clear(); stream = null; sourceHandle = null; disposeUncertain = false;
+            LeaveQuarantine();
         }
     }
 
@@ -228,7 +278,10 @@ internal sealed class ExperimentalOwnedStream : IDisposable
         var ancestors = new Stack<string>();
         for (string? part = path; part is not null; part = Path.GetDirectoryName(part)) ancestors.Push(part);
         while (ancestors.Count != 0) {
-            var name = ancestors.Pop(); var directory = Open(name, ReadAttributes, ShareReadWrite, OpenExisting, BackupSemantics | OpenReparsePoint);
+            // Attribute-only opens can be exempt from Windows share checks.
+            // Request directory-list access so deny-delete sharing is meaningful;
+            // refuse if existing handles or ACLs do not permit it.
+            var name = ancestors.Pop(); var directory = Open(name, ReadAttributes | ListDirectory, ShareReadWrite, OpenExisting, BackupSemantics | OpenReparsePoint);
             try { RequireRegularKind(directory, directory: true); pins.Add(new(name, directory, GetIdentity(directory))); }
             catch { directory.Dispose(); throw; }
         }
@@ -236,8 +289,26 @@ internal sealed class ExperimentalOwnedStream : IDisposable
     private static void VerifyPins(IEnumerable<DirectoryPin> pins)
     {
         foreach (var pin in pins)
-            if (GetIdentity(pin.Handle) != pin.Identity || !string.Equals(FinalPath(pin.Handle), pin.Path, StringComparison.OrdinalIgnoreCase))
+            if (GetIdentity(pin.Handle) != pin.Identity || !string.Equals(FinalPath(pin.Handle), PinExpectedPathTestHook?.Invoke(pin.Path) ?? pin.Path, StringComparison.OrdinalIgnoreCase))
                 throw new IOException("Experimental directory binding changed.");
+    }
+    private void VerifyOwnedPins()
+    {
+        try { VerifyPins(directories); }
+        catch {
+            if (!renameUncertain) {
+                var token = PinExpectedPathTestHook is not null ? BindingInjectionTokenTestHook : null;
+                EnterQuarantine(token is null ? QuarantineReason.BindingChange : QuarantineReason.InjectedBindingCheck, token);
+            }
+            throw;
+        }
+    }
+    internal int VerifyRetainedPinsForTest()
+    {
+        lock (gate) {
+            if (!renameUncertain && !disposeUncertain) throw new InvalidOperationException("Experimental owner is not quarantined.");
+            VerifyPins(directories); return directories.Count;
+        }
     }
     private static string FinalPath(SafeFileHandle handle)
     {
