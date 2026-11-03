@@ -5,6 +5,8 @@ namespace LedgeTop.WindowsDownload;
 // does not expose the receipt or a cached stream to its callers.
 internal sealed class ExperimentalSharedReceipt : IAsyncDisposable
 {
+    internal const string CleanupUncertainKey = "SyntheticSharedReceiptCleanupUncertain";
+    internal static Action? AfterStageTestHook;
     private readonly object gate = new();
     private readonly PlaceholderHydrationCoordinator coordinator;
     private readonly PlaceholderIdentity identity;
@@ -23,10 +25,13 @@ internal sealed class ExperimentalSharedReceipt : IAsyncDisposable
         try {
             if (!await coordinator.ExperimentalAuthorizeAndStageAsync(identity, receipt, token).ConfigureAwait(false))
                 throw new TransferException("Synthetic shared reservation unavailable.");
+            AfterStageTestHook?.Invoke();
             return new ExperimentalSharedReceipt(coordinator, identity, receipt);
-        } catch {
-            // Receipt retains its own uncertain resources if staging failed.
-            receipt.Dispose();
+        } catch (Exception primary) {
+            // The receipt's registry retains all uncertain ownership. Preserve
+            // the original error and attach a structured cleanup diagnostic.
+            try { receipt.Dispose(); }
+            catch (Exception cleanup) { primary.Data[CleanupUncertainKey] = cleanup; }
             throw;
         }
     }

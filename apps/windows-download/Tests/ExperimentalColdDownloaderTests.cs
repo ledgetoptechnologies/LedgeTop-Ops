@@ -266,9 +266,10 @@ internal static class ExperimentalColdDownloaderTests
     internal static async Task ReservationCloseChildAsync(string root, string stage)
     {
         if (!Path.IsPathFullyQualified(root) || root.StartsWith(@"\\", StringComparison.Ordinal) || !Directory.Exists(root) ||
-            stage is not ("record" or "directory" or "entry" or "lease" or "markerforeign" or "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail" or "factoryfault" or "nativecleanup")) throw new IOException("Synthetic teardown input invalid.");
+            stage is not ("record" or "directory" or "entry" or "lease" or "markerforeign" or "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail" or "factoryfault" or "nativecleanup" or "sharedstage" or "sharedpoststage")) throw new IOException("Synthetic teardown input invalid.");
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         if (stage == "nativecleanup") { await SyntheticReceiptNativeCleanupChildAsync(root); return; }
+        if (stage is "sharedstage" or "sharedpoststage") { await SharedReceiptFailureChildAsync(root, stage); return; }
 #endif
         if (stage == "markerforeign") { await MarkerForeignCloseChildAsync(root); return; }
         if (stage == "postwrite") { await PostWriteStatusChildAsync(root); return; }
@@ -930,11 +931,12 @@ internal static class ExperimentalColdDownloaderTests
         var teardownStages = new List<string> { "record", "directory", "entry", "lease", "markerforeign", "postwrite", "authdispose", "authcancel", "authrace", "authafterstage", "authaftercancel", "authcleanupfail", "cancelcallbackfail", "factoryfault" };
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         teardownStages.Add("nativecleanup");
+        teardownStages.Add("sharedstage"); teardownStages.Add("sharedpoststage");
 #endif
         foreach (var stage in teardownStages) await WithFixture(async fixture => {
             var root = Path.Combine(fixture.Path, "teardown"); Directory.CreateDirectory(root);
             await RunReservationCloseChildAsync(root, stage);
-            var cacheRoot = stage is "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail" or "factoryfault" or "nativecleanup" ? Path.Combine(root, "verified-hydration-v1") : root;
+            var cacheRoot = stage is "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail" or "factoryfault" or "nativecleanup" or "sharedstage" or "sharedpoststage" ? Path.Combine(root, "verified-hydration-v1") : root;
             AssertOtherProcessOpen(Path.Combine(cacheRoot, ".hydration-cache.lock"), true);
             if (stage is "postwrite" or "authcleanupfail") {
                 using var source = new CoordinatorSource(); var identity = source.Identity;
@@ -1478,6 +1480,7 @@ internal static class ExperimentalColdDownloaderTests
         await WithFixture(SyntheticReceiptNativeBoundaryAsync);
         await WithFixture(SyntheticReceiptNativeSplitRangeAsync);
         await WithFixture(SharedReceiptLifetimeAsync);
+        await WithFixture(SharedReceiptJoinCloseRaceAsync);
 #endif
         await WithFixture(ReceiptTransferRangesAsync);
         await WithFixture(async fixture => {
@@ -2061,6 +2064,43 @@ internal static class ExperimentalColdDownloaderTests
         second.Dispose(); await closing.WaitAsync(TimeSpan.FromSeconds(10));
         await shared.DisposeAsync();
         Check(ExperimentalReservationOwner.RetainedCount == 0 && ExperimentalEntryLease.RetainedCount == 0);
+    }
+    private static async Task SharedReceiptFailureChildAsync(string applicationRoot, string stage)
+    {
+        using var source = new CoordinatorSource(); var identity = source.Identity;
+        using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", applicationRoot, maximumFileBytes: Content.Length, maximumCacheBytes: 10000, expectedPrincipal: CoordinatorSource.Principal);
+        var primary = new IOException("Injected shared creation failure.");
+        Action fail = () => throw primary;
+        if (stage == "sharedstage") ExperimentalReservationOwner.ReceiptAfterStageWriteTestHook = fail;
+        else ExperimentalSharedReceipt.AfterStageTestHook = fail;
+        try {
+            try { _ = await ExperimentalSharedReceipt.CreateAsync(coordinator, identity); throw new Exception("Failure not injected."); }
+            catch (IOException actual) {
+                Check(ReferenceEquals(actual, primary) && actual.Data[ExperimentalSharedReceipt.CleanupUncertainKey] is IOException);
+                Check(ExperimentalReservationOwner.RetainedCount > 0);
+                var root = Path.Combine(applicationRoot, "verified-hydration-v1");
+                AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock"));
+                AssertOtherProcessCannotOpen(Path.Combine(root, identity.ScopeKey, identity.CacheKey, ".hydration.lock"));
+            }
+        } finally { ExperimentalReservationOwner.ReceiptAfterStageWriteTestHook = null; ExperimentalSharedReceipt.AfterStageTestHook = null; }
+    }
+    private static async Task SharedReceiptJoinCloseRaceAsync(DirectoryFixture fixture)
+    {
+        using var source = new CoordinatorSource(); var identity = source.Identity;
+        using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", fixture.Path, maximumFileBytes: Content.Length, maximumCacheBytes: 10000, expectedPrincipal: CoordinatorSource.Principal);
+        var shared = await ExperimentalSharedReceipt.CreateAsync(coordinator, identity);
+        using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
+        PlaceholderHydrationCoordinator.ExperimentalAfterAuthorizationTestSignal = entered;
+        PlaceholderHydrationCoordinator.ExperimentalAfterAuthorizationReleaseTestSignal = release;
+        try {
+            var joining = Task.Run(() => shared.JoinAsync(identity));
+            Check(entered.Wait(TimeSpan.FromSeconds(10)));
+            var closing = shared.DisposeAsync().AsTask(); Check(!closing.IsCompleted);
+            release.Set(); using var request = await joining.WaitAsync(TimeSpan.FromSeconds(10));
+            Check(!closing.IsCompleted); request.Dispose(); await closing.WaitAsync(TimeSpan.FromSeconds(10));
+        } finally {
+            release.Set(); PlaceholderHydrationCoordinator.ExperimentalAfterAuthorizationTestSignal = null; PlaceholderHydrationCoordinator.ExperimentalAfterAuthorizationReleaseTestSignal = null;
+        }
     }
     private static async Task SyntheticReceiptNativeSplitRangeAsync(DirectoryFixture fixture)
     {

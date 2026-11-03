@@ -38,6 +38,7 @@ internal sealed class ExperimentalReservationOwner
     internal static string? ReceiptQuotaFailureStageTestHook;
     internal static object? ReceiptQuotaFailureTokenTestHook;
     internal static bool ReceiptMarkerFailureTestHook, ReceiptCleanupFailureTestHook;
+    internal static Action? ReceiptAfterStageWriteTestHook;
     internal static object? ReceiptMarkerFailureTokenTestHook;
     private readonly long growth;
     internal long Growth { get { lock (gate) { if (finished || uncertain) throw new IOException("Reservation owner unavailable."); return growth; } } }
@@ -312,6 +313,7 @@ internal sealed class ExperimentalReservationOwner
                     ExperimentalOwnedStream.RequireRegularKind(stagedRecord.SafeFileHandle, false); ExperimentalOwnedStream.RequireSingleLink(stagedRecord.SafeFileHandle);
                     stagedIdentity = ExperimentalOwnedStream.GetIdentity(stagedRecord.SafeFileHandle);
                     stagedRecord.Write(bytes); stagedRecord.Flush(true); VerifyStagedRecord();
+                    ReceiptAfterStageWriteTestHook?.Invoke();
                     if (ReceiptStageAfterWriteTestSignal is not null) {
                         ReceiptStageAfterWriteTestSignal.Set();
                         if (ReceiptStageAfterWriteReleaseTestSignal is null || !ReceiptStageAfterWriteReleaseTestSignal.Wait(TimeSpan.FromSeconds(10))) throw new IOException("Synthetic stage write barrier timed out.");
