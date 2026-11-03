@@ -707,7 +707,22 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
             Save(profile! with { Phase = Phase.NativeRegisterIntent });
             try
             {
-                registration = await ShellRegistration.RegisterAsync(p.Root, ShellRegistration.CreateId(p.Identity), p.Icon, Context(p), ProfileDisplayName(p));
+                registration = await RegisterWithPreflightRecoveryAsync(
+                    () => {
+                        // This hook is available only through CandidateForTest.
+                        candidateTestHook?.Invoke("native-registration-attempt");
+                        return ShellRegistration.RegisterAsync(p.Root, ShellRegistration.CreateId(p.Identity), p.Icon, Context(p), ProfileDisplayName(p));
+                    },
+                    () => {
+                        // Only an explicit refusal from before the broker call permits this
+                        // transition. The lease and candidate selector must still be held.
+                        if (registration is not null || profile is not { Phase: Phase.NativeRegisterIntent } current ||
+                            current.Identity != p.Identity || current.Root != p.Root || ReadProfile() != current)
+                            throw new IOException("The preflight receipt changed; registration needs review.");
+                        if (reserved) RequireCandidateJournal(reservation);
+                        Save(current with { Phase = Phase.RootCreated });
+                        Add("Windows registration was not attempted. The existing folder was kept.");
+                    });
             }
             catch (ShellRegistrationException error)
             {
@@ -729,6 +744,12 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
         }
         SetState(profile!.Paused ? ExplorerPreviewState.Paused : ExplorerPreviewState.Running);
         if (profile.Paused) Add("The preview remains paused. Existing local files are still available.");
+    }
+
+    internal static async Task<T> RegisterWithPreflightRecoveryAsync<T>(Func<Task<T>> register, Action recover)
+    {
+        try { return await register().ConfigureAwait(false); }
+        catch (ShellRegistrationPreflightRefusedException) { recover(); throw; }
     }
 
     private void RequireCandidateJournal(PreparedConnectedGeneration? reservation)
@@ -779,7 +800,8 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
         }
         if (p.Phase <= Phase.RootCreated)
         {
-            // No registration intent was ever persisted, so no Windows integration was attempted.
+            // Windows integration was never attempted, or a confirmed preflight refusal
+            // durably restored this phase before any broker call.
             // Even a pre-existing conflicting local folder is left completely unchanged.
             Save(p with { Phase = Phase.Removed }); SetState(ExplorerPreviewState.Removed);
             Add("The unused preview setup was removed. Existing local files and folders were kept."); return;
@@ -793,6 +815,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
             throw new IOException("The previously registered preview root is missing; exact reconciliation is required.");
         }
         var shellId = ShellRegistration.CreateId(p.Identity);
+        candidateTestHook?.Invoke("native-absence-check"); // CandidateForTest only.
         if (ShellRegistration.IsAbsent(shellId, p.Root, Context(p), p.NamespaceClsid == Guid.Empty ? null : p.NamespaceClsid, p.Icon, ProfileDisplayName(p)))
         {
             // Early setup did not reach native registration, or a previously journaled removal completed.
