@@ -120,6 +120,18 @@ internal sealed class ExperimentalOwnedStream : IDisposable
         }
     }
 
+    internal byte ReadLastByteForTest()
+    {
+        lock (gate) {
+            if (renameUncertain || disposeUncertain || sealedStream) throw new InvalidOperationException("Experimental source is unavailable.");
+            VerifyOwnedPins(); var file = stream ?? throw new ObjectDisposedException(nameof(ExperimentalOwnedStream));
+            if (file.Length <= 0) throw new IOException("Experimental source is empty.");
+            file.Position = file.Length - 1; var value = file.ReadByte(); file.Position = file.Length;
+            if (value < 0 || GetIdentity(file.SafeFileHandle) != SourceIdentity) throw new IOException("Experimental source identity changed.");
+            return checked((byte)value);
+        }
+    }
+
     internal byte[] SealAndHash()
     {
         lock (gate) {

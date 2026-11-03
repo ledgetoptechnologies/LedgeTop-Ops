@@ -95,6 +95,26 @@ internal static class ExperimentalColdDownloaderTests
         response.Content.Headers.ContentRange = new ContentRangeHeaderValue(start, Content.Length - 1, Content.Length);
         return response;
     }
+    private static HttpResponseMessage TailResponse(byte[] bytes, string etag = "\"v1\"", long? start = null)
+    {
+        var from = start ?? Content.Length - 1;
+        var response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(bytes) };
+        response.Headers.ETag = new EntityTagHeaderValue(etag); response.Content.Headers.ContentLength = 1;
+        response.Content.Headers.ContentRange = new ContentRangeHeaderValue(from, Content.Length - 1, Content.Length);
+        return response;
+    }
+    private static async Task<string> SeedFullPartial(DirectoryFixture root, DownloadSpec spec, byte[] bytes)
+    {
+        using var cancel = new CancellationTokenSource();
+        using var downloader = Engine((_, _) => { var response = Response(bytes); response.Content.Headers.ContentLength = spec.Length; return response; });
+        Downloader.BeforeExperimentalPromotionTestHook = cancel.Cancel;
+        try {
+            var cancelled = false;
+            try { await downloader.DownloadAsync(spec, root.Path, cancel.Token); } catch (OperationCanceledException) { cancelled = true; }
+            var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single();
+            Check(cancelled && File.ReadAllBytes(part).SequenceEqual(bytes)); return part;
+        } finally { Downloader.BeforeExperimentalPromotionTestHook = null; }
+    }
     private static void CheckResumeRequest(HttpRequestMessage request)
     {
         Check(request.Headers.Range?.Ranges.Single().From == 4 && request.Headers.IfRange?.EntityTag?.ToString() == Spec.ETag &&
@@ -187,7 +207,7 @@ internal static class ExperimentalColdDownloaderTests
             var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single();
             Check(!File.Exists(Path.Combine(root.Path, "output.bin")) && File.ReadAllBytes(part).SequenceEqual(corrupt));
             await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
-            Check(calls == 1 && File.ReadAllBytes(part).SequenceEqual(corrupt)); // resume is explicitly unsupported
+            Check(calls == 2 && File.ReadAllBytes(part).SequenceEqual(corrupt)); // a full partial requires a fresh validation response
         });
         await WithFixture(async root => {
             using var cancel = new CancellationTokenSource();
@@ -289,6 +309,68 @@ internal static class ExperimentalColdDownloaderTests
             });
             await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
             Check(!File.Exists(Path.Combine(root.Path, "output.bin")) && File.ReadAllBytes(part).SequenceEqual(prefix));
+        });
+        await WithFixture(async root => {
+            var part = await SeedFullPartial(root, Spec, Content); var id = PhysicalId(part); var calls = 0;
+            using var downloader = Engine((request, _) => {
+                calls++; Check(request.Headers.Range?.Ranges.Single().From == Content.Length - 1 && request.Headers.IfRange?.EntityTag?.ToString() == Spec.ETag && request.Headers.IfMatch.Single().ToString() == Spec.ETag);
+                return TailResponse(Content[^1..]);
+            });
+            var result = await downloader.DownloadAsync(Spec, root.Path);
+            Check(calls == 1 && !File.Exists(part) && PhysicalId(result) == id && File.ReadAllBytes(result).SequenceEqual(Content));
+        });
+        foreach (var fault in new[] { "etag", "status", "range", "tail", "extra", "eof" }) {
+            await WithFixture(async root => {
+                var part = await SeedFullPartial(root, Spec, Content); var id = PhysicalId(part); var before = File.ReadAllBytes(part);
+                using var downloader = Engine((request, _) => {
+                    Check(request.Headers.Range?.Ranges.Single().From == Content.Length - 1);
+                    if (fault == "status") return Response(Content);
+                    var tail = fault == "eof" ? Array.Empty<byte>() : fault == "extra" ? new[] { Content[^1], (byte)42 } :
+                        fault == "tail" ? new[] { (byte)(Content[^1] ^ 1) } : Content[^1..];
+                    return TailResponse(tail, fault == "etag" ? "\"wrong\"" : "\"v1\"", fault == "range" ? Content.Length - 2 : null);
+                });
+                await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
+                Check(!File.Exists(Path.Combine(root.Path, "output.bin")) && PhysicalId(part) == id && File.ReadAllBytes(part).SequenceEqual(before));
+            });
+        }
+        await WithFixture(async root => {
+            var corrupt = Content.ToArray(); corrupt[0] ^= 1;
+            using (var first = Engine((_, _) => Response(corrupt))) await ExpectTransferFailure(first.DownloadAsync(Spec, root.Path));
+            var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single(); var id = PhysicalId(part);
+            using var downloader = Engine((_, _) => TailResponse(Content[^1..]));
+            await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
+            Check(!File.Exists(Path.Combine(root.Path, "output.bin")) && PhysicalId(part) == id && File.ReadAllBytes(part).SequenceEqual(corrupt));
+        });
+        await WithFixture(async root => {
+            var part = await SeedFullPartial(root, Spec, Content); var id = PhysicalId(part); var calls = 0;
+            var state = Directory.EnumerateFiles(root.Path, "*.json", SearchOption.AllDirectories).Single(); File.WriteAllText(state, "{}");
+            using var downloader = Engine((_, _) => { calls++; return TailResponse(Content[^1..]); });
+            await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
+            Check(calls == 0 && !File.Exists(Path.Combine(root.Path, "output.bin")) && PhysicalId(part) == id && File.ReadAllBytes(part).SequenceEqual(Content) && File.ReadAllText(state) == "{}");
+        });
+        await WithFixture(async root => {
+            var empty = Spec with { Length = 0, Sha256 = Convert.ToHexStringLower(SHA256.HashData(Array.Empty<byte>())) };
+            var part = await SeedFullPartial(root, empty, []); var id = PhysicalId(part);
+            using var downloader = Engine((request, _) => { Check(request.Headers.Range is null && request.Headers.IfMatch.Single().ToString() == empty.ETag); var response = Response([]); response.Content.Headers.ContentLength = 0; return response; });
+            var result = await downloader.DownloadAsync(empty, root.Path);
+            Check(!File.Exists(part) && PhysicalId(result) == id && new FileInfo(result).Length == 0);
+        });
+        await WithFixture(async root => {
+            using var source = new CoordinatorSource(); using var cancel = new CancellationTokenSource();
+            using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", root.Path, expectedPrincipal: CoordinatorSource.Principal);
+            var initial = new TestSink(); Downloader.BeforeExperimentalPromotionTestHook = cancel.Cancel;
+            try {
+                var cancelled = false;
+                try { await coordinator.HydrateAsync(source.Identity, 0, Content.Length, initial, cancel.Token); } catch (OperationCanceledException) { cancelled = true; }
+                Check(cancelled && initial.Failed == 1 && initial.Completed == 0 && initial.Bytes.Length == 0);
+            } finally { Downloader.BeforeExperimentalPromotionTestHook = null; }
+            var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single(); var id = PhysicalId(part);
+            source.ResponseFactory = () => TailResponse(Content[^1..]);
+            source.InspectRequest = request => Check(request.Headers.Range?.Ranges.Single().From == Content.Length - 1 && request.Headers.IfRange?.EntityTag?.ToString() == Spec.ETag);
+            var retried = new TestSink(); await coordinator.HydrateAsync(source.Identity, 0, Content.Length, retried);
+            var final = Directory.EnumerateFiles(root.Path, "output.bin", SearchOption.AllDirectories).Single();
+            Check(source.Downloads == 2 && retried.Completed == 1 && retried.Failed == 0 && retried.Bytes.ToArray().SequenceEqual(Content) &&
+                !File.Exists(part) && PhysicalId(final) == id);
         });
         await WithFixture(async root => {
             using var downloader = Engine((_, _) => Response(Content));
@@ -404,8 +486,8 @@ internal static class ExperimentalColdDownloaderTests
         internal static readonly string Principal = "odqp1_" + new string('a', 64);
         internal readonly PlaceholderIdentity Identity = new("pilot", "synthetic", ExperimentalColdDownloaderTests.Origin.GetLeftPart(UriPartial.Authority), Principal,
             "odqr1_test", "oef1_" + new string('b', 64), "v1", Spec.FileName, Spec.Length, Spec.ETag, Spec.Sha256);
-        private readonly Downloader downloader; internal int Downloads; internal Func<HttpResponseMessage>? ResponseFactory;
-        internal CoordinatorSource() => downloader = Engine((_, _) => { Downloads++; return ResponseFactory?.Invoke() ?? Response(Content); });
+        private readonly Downloader downloader; internal int Downloads; internal Func<HttpResponseMessage>? ResponseFactory; internal Action<HttpRequestMessage>? InspectRequest;
+        internal CoordinatorSource() => downloader = Engine((request, _) => { Downloads++; InspectRequest?.Invoke(request); return ResponseFactory?.Invoke() ?? Response(Content); });
         public string Alias => "synthetic"; public Uri Origin => ExperimentalColdDownloaderTests.Origin;
         bool IHydrationMutationAwareSource.CoordinatesHydrationMutations => true;
         public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken token = default) => Task.FromResult(new QueuedDownloadSession(Principal, DateTimeOffset.UtcNow.AddMinutes(5)));

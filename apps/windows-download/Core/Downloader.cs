@@ -263,28 +263,44 @@ public sealed class Downloader : IDisposable
         }
 #if LEDGETOP_CACHE_RACE_TEST
         ExperimentalOwnedStream? experimentalResumeOwner = null;
+        var experimentalFullRecovery = false;
 #endif
         try {
             long offset = File.Exists(partialPath) ? new FileInfo(partialPath).Length : 0;
             if (offset > spec.Length) throw new TransferException("Partial data exceeds the trusted length.");
 #if LEDGETOP_CACHE_RACE_TEST
             if (ExperimentalColdOwnedStreamForTest && File.Exists(partialPath)) {
-                if (offset == spec.Length) throw new TransferException("An experimental full partial has no completed-response receipt; it was preserved.");
+                experimentalFullRecovery = offset == spec.Length;
                 experimentalResumeOwner = ExperimentalOwnedStream.OpenExisting(partialPath, offset);
             }
 #endif
             // A full unpromoted partial may come from cancellation before the overflow probe or an invalid response.
             // Without a durable completed-response receipt, obtain fresh bytes rather than silently accepting it.
-            if (File.Exists(partialPath) && offset == spec.Length) {
+            if (File.Exists(partialPath) && offset == spec.Length
+#if LEDGETOP_CACHE_RACE_TEST
+                && !experimentalFullRecovery
+#endif
+                ) {
                 HydrationMutationScope.Run(() => { RequireRegularFile(partialPath); File.Delete(partialPath); }, cancellationToken); offset = 0;
             }
             Report(offset, DownloadPhase.Receiving);
-            if (offset < spec.Length || !File.Exists(partialPath)) {
+            if (offset < spec.Length || !File.Exists(partialPath)
+#if LEDGETOP_CACHE_RACE_TEST
+                || experimentalFullRecovery
+#endif
+                ) {
                 using var request = new HttpRequestMessage(HttpMethod.Get, spec.ContentUri);
                 request.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(spec.ETag));
                 request.Headers.AcceptEncoding.ParseAdd("identity");
-                if (offset > 0) {
-                    request.Headers.Range = new RangeHeaderValue(offset, null);
+#if LEDGETOP_CACHE_RACE_TEST
+                var requestOffset = experimentalFullRecovery && spec.Length > 0 ? spec.Length - 1 : offset;
+                var requestRange = offset > 0 || (experimentalFullRecovery && spec.Length > 0);
+#else
+                var requestOffset = offset;
+                var requestRange = offset > 0;
+#endif
+                if (requestRange) {
+                    request.Headers.Range = new RangeHeaderValue(requestOffset, null);
                     request.Headers.IfRange = new RangeConditionHeaderValue(EntityTagHeaderValue.Parse(spec.ETag));
                 }
                 if (accessSession is not null)
@@ -298,7 +314,7 @@ public sealed class Downloader : IDisposable
                 if (response.StatusCode == HttpStatusCode.Unauthorized) throw new LoginRequiredException();
                 if (response.StatusCode == HttpStatusCode.Forbidden) throw AccessDeniedException.Forbidden(DenialOperation.FileContent,response);
                 if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Conflict) throw new ResourceUnavailableException();
-                var remaining = spec.Length - offset;
+                var remaining = spec.Length - requestOffset;
                 if ((int)response.StatusCode is < 100 or > 599)
                     throw new TransferException("The response status is unsupported.", TransferFailureReason.InvalidMetadata);
                 if (response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent)) {
@@ -306,15 +322,15 @@ public sealed class Downloader : IDisposable
                         throw new TransferException("The response does not match the supported download contract.", TransferFailureReason.InvalidMetadata);
                     throw new TransferException("The server returned an unexpected download status.", TransferFailureReason.UnexpectedHttpStatus, (int)response.StatusCode);
                 }
-                if ((offset > 0 && response.StatusCode != HttpStatusCode.PartialContent)
-                    || (offset == 0 && response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent)))
+                if ((requestRange && response.StatusCode != HttpStatusCode.PartialContent)
+                    || (!requestRange && response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent)))
                     throw new TransferException("The server did not return the requested file version and range.", TransferFailureReason.InvalidMetadata);
                 if (response.Headers.ETag?.ToString() != spec.ETag || response.Headers.ETag.IsWeak
                     || response.Content.Headers.ContentLength != remaining || response.Content.Headers.ContentEncoding.Count != 0)
                     throw new TransferException("The response version or length does not match trusted metadata.", TransferFailureReason.InvalidMetadata);
                 if (response.StatusCode == HttpStatusCode.PartialContent) {
                     var range = response.Content.Headers.ContentRange;
-                    if (range is null || range.Unit != "bytes" || range.From != offset || range.To != spec.Length - 1 || range.Length != spec.Length)
+                    if (range is null || range.Unit != "bytes" || range.From != requestOffset || range.To != spec.Length - 1 || range.Length != spec.Length)
                         throw new TransferException("The response Content-Range does not match the requested range.", TransferFailureReason.InvalidMetadata);
                 } else if (response.Content.Headers.ContentRange is not null) {
                     throw new TransferException("Unexpected Content-Range on a full response.", TransferFailureReason.InvalidMetadata);
@@ -333,10 +349,17 @@ public sealed class Downloader : IDisposable
                         using (DownloadTimingScope.Measure(1)) while (received < remaining) {
                             var count = await ReadNetworkAsync(input, buffer.AsMemory(0, (int)Math.Min(buffer.Length, remaining - received)));
                             if (count == 0) throw new TransferException("The response ended before the trusted length.");
-                            cancellationToken.ThrowIfCancellationRequested(); owner.Write(buffer.AsSpan(0, count)); received += count;
-                            Report(offset + received, DownloadPhase.Receiving);
+                            cancellationToken.ThrowIfCancellationRequested();
+                            if (experimentalFullRecovery) {
+                                if (count != 1 || received != 0 || buffer[0] != owner.ReadLastByteForTest())
+                                    throw new TransferException("The validation range does not match the preserved partial.");
+                            } else owner.Write(buffer.AsSpan(0, count));
+                            received += count; Report(experimentalFullRecovery ? offset : offset + received, DownloadPhase.Receiving);
                         }
-                        if (await ReadNetworkAsync(input, buffer.AsMemory(0, 1)) != 0) { owner.RestorePrefix(offset); throw new TransferException("The response exceeds the trusted length."); }
+                        if (await ReadNetworkAsync(input, buffer.AsMemory(0, 1)) != 0) {
+                            if (!experimentalFullRecovery) owner.RestorePrefix(offset);
+                            throw new TransferException("The response exceeds the trusted length.");
+                        }
                         cancellationToken.ThrowIfCancellationRequested(); Report(spec.Length, DownloadPhase.Verifying);
                         byte[] digest;
                         using (DownloadTimingScope.Measure(3)) digest = owner.SealAndHash();
