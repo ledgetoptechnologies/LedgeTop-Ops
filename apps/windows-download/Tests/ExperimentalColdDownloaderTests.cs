@@ -21,10 +21,42 @@ internal static class ExperimentalColdDownloaderTests
         try { await task; } catch (TransferException) { return; }
         throw new IOException("Experimental transfer should fail closed.");
     }
+    private static async Task RunOwnedFixtureAsync(Func<Task> body, Func<int> quarantined, Action cleanup, Action preserve)
+    {
+        var completed = false;
+        try { await body(); completed = true; }
+        finally {
+            if (completed && quarantined() == 0) cleanup();
+            else preserve();
+        }
+    }
+    private static Task WithFixture(Func<DirectoryFixture, Task> body)
+    {
+        if (ExperimentalOwnedStream.QuarantinedCountForTest != 0) throw new IOException("An experimental owner is already quarantined; no new fixture was created.");
+        var root = new DirectoryFixture();
+        return RunOwnedFixtureAsync(() => body(root), () => ExperimentalOwnedStream.QuarantinedCountForTest,
+            () => { try { root.Dispose(); } catch { Console.Error.WriteLine("Synthetic experimental Downloader cleanup incomplete: " + root.Path); throw; } },
+            () => Console.Error.WriteLine("Synthetic experimental Downloader fixture preserved: " + root.Path));
+    }
+    private static async Task FixturePolicyTests()
+    {
+        var cleaned = 0; var preserved = 0;
+        void Cleanup() => cleaned++;
+        void Preserve() => preserved++;
+        var rejected = false;
+        try { await RunOwnedFixtureAsync(() => throw new IOException("Injected test failure."), () => 0, Cleanup, Preserve); }
+        catch (IOException) { rejected = true; }
+        Check(rejected && cleaned == 0 && preserved == 1);
+        await RunOwnedFixtureAsync(() => Task.CompletedTask, () => 1, Cleanup, Preserve);
+        Check(cleaned == 0 && preserved == 2);
+        await RunOwnedFixtureAsync(() => Task.CompletedTask, () => 0, Cleanup, Preserve);
+        Check(cleaned == 1 && preserved == 2);
+    }
     internal static async Task RunAsync()
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
-        using (var root = new DirectoryFixture()) {
+        await FixturePolicyTests();
+        await WithFixture(async root => {
             var calls = 0;
             using var downloader = Engine((request, _) => {
                 calls++; Check(request.Method == HttpMethod.Get && request.Headers.IfMatch.Single().ToString() == Spec.ETag && request.Headers.Range is null);
@@ -38,14 +70,14 @@ internal static class ExperimentalColdDownloaderTests
                 Check(blocked && calls == 1);
             }
             Check(File.ReadAllBytes(Path.Combine(root.Path, "output.bin")).SequenceEqual(Content));
-        }
-        using (var root = new DirectoryFixture()) {
+        });
+        await WithFixture(async root => {
             using var downloader = Engine((_, _) => { File.WriteAllBytes(Path.Combine(root.Path, "output.bin"), Foreign); return Response(Content); });
             await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
             Check(File.ReadAllBytes(Path.Combine(root.Path, "output.bin")).SequenceEqual(Foreign));
             Check(Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single() is var part && File.ReadAllBytes(part).SequenceEqual(Content));
-        }
-        using (var root = new DirectoryFixture()) {
+        });
+        await WithFixture(async root => {
             var corrupt = Content.ToArray(); corrupt[0] ^= 1; var calls = 0;
             using var downloader = Engine((_, _) => { calls++; return Response(corrupt); });
             await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
@@ -53,8 +85,8 @@ internal static class ExperimentalColdDownloaderTests
             Check(!File.Exists(Path.Combine(root.Path, "output.bin")) && File.ReadAllBytes(part).SequenceEqual(corrupt));
             await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
             Check(calls == 1 && File.ReadAllBytes(part).SequenceEqual(corrupt)); // resume is explicitly unsupported
-        }
-        using (var root = new DirectoryFixture()) {
+        });
+        await WithFixture(async root => {
             using var cancel = new CancellationTokenSource();
             using var downloader = Engine((_, _) => Response(Content, new CancelAfterPrefix(Content, cancel)));
             var cancelled = false;
@@ -62,41 +94,44 @@ internal static class ExperimentalColdDownloaderTests
             Check(cancelled && !File.Exists(Path.Combine(root.Path, "output.bin")));
             var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single();
             Check(File.ReadAllBytes(part).SequenceEqual(Content[..4]));
-        }
-        using (var root = new DirectoryFixture()) {
+        });
+        await WithFixture(async root => {
             using var downloader = Engine((_, _) => { var response = Response(Content); response.Headers.ETag = new EntityTagHeaderValue("\"wrong\""); return response; });
             await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
             Check(!File.Exists(Path.Combine(root.Path, "output.bin")) && !Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Any());
-        }
-        using (var root = new DirectoryFixture()) {
+        });
+        await WithFixture(async root => {
             var empty = Spec with { Length = 0, Sha256 = Convert.ToHexStringLower(SHA256.HashData(Array.Empty<byte>())) };
             using var downloader = Engine((_, _) => { var response = Response([]); response.Content.Headers.ContentLength = 0; return response; });
             await using var result = await downloader.DownloadVerifiedForHydrationAsync(empty, root.Path);
             Check(result.Stream.Length == 0 && result.IntegrityVerified && !result.Stream.CanWrite);
-        }
+        });
         foreach (var oversized in new[] { false, true }) {
-            using var root = new DirectoryFixture();
-            var body = oversized ? Content.Concat(new byte[] { 42 }).ToArray() : Content[..^1];
-            using var downloader = Engine((_, _) => Response(body));
-            await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
-            var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single();
-            Check(!File.Exists(Path.Combine(root.Path, "output.bin")) && File.ReadAllBytes(part).SequenceEqual(oversized ? Content : body));
+            await WithFixture(async root => {
+                var body = oversized ? Content.Concat(new byte[] { 42 }).ToArray() : Content[..^1];
+                using var downloader = Engine((_, _) => Response(body));
+                await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
+                var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single();
+                Check(!File.Exists(Path.Combine(root.Path, "output.bin")) && File.ReadAllBytes(part).SequenceEqual(oversized ? Content : body));
+            });
         }
         foreach (var cancelAtHash in new[] { true, false }) {
-            using var root = new DirectoryFixture(); using var cancel = new CancellationTokenSource();
-            using var downloader = Engine((_, _) => Response(Content));
-            if (cancelAtHash) ExperimentalOwnedStream.BeforeSealHashTestHook = cancel.Cancel;
-            else Downloader.BeforeExperimentalPromotionTestHook = cancel.Cancel;
-            try {
-                var cancelled = false;
-                try { await downloader.DownloadAsync(Spec, root.Path, cancel.Token); } catch (OperationCanceledException) { cancelled = true; }
-                var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single();
-                Check(cancelled && !File.Exists(Path.Combine(root.Path, "output.bin")) && File.ReadAllBytes(part).SequenceEqual(Content));
-            } finally {
-                ExperimentalOwnedStream.BeforeSealHashTestHook = null; Downloader.BeforeExperimentalPromotionTestHook = null;
-            }
+            await WithFixture(async root => {
+                using var cancel = new CancellationTokenSource();
+                using var downloader = Engine((_, _) => Response(Content));
+                if (cancelAtHash) ExperimentalOwnedStream.BeforeSealHashTestHook = cancel.Cancel;
+                else Downloader.BeforeExperimentalPromotionTestHook = cancel.Cancel;
+                try {
+                    var cancelled = false;
+                    try { await downloader.DownloadAsync(Spec, root.Path, cancel.Token); } catch (OperationCanceledException) { cancelled = true; }
+                    var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single();
+                    Check(cancelled && !File.Exists(Path.Combine(root.Path, "output.bin")) && File.ReadAllBytes(part).SequenceEqual(Content));
+                } finally {
+                    ExperimentalOwnedStream.BeforeSealHashTestHook = null; Downloader.BeforeExperimentalPromotionTestHook = null;
+                }
+            });
         }
-        using (var root = new DirectoryFixture()) {
+        await WithFixture(async root => {
             using var downloader = Engine((_, _) => Response(Content));
             Downloader.BeforeExperimentalHandoffTestHook = () => throw new IOException("Synthetic handoff failure.");
             try {
@@ -104,8 +139,8 @@ internal static class ExperimentalColdDownloaderTests
                 Check(File.ReadAllBytes(Path.Combine(root.Path, "output.bin")).SequenceEqual(Content) &&
                     !Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Any() && ExperimentalOwnedStream.QuarantinedCountForTest == 0);
             } finally { Downloader.BeforeExperimentalHandoffTestHook = null; }
-        }
-        using (var root = new DirectoryFixture()) {
+        });
+        await WithFixture(async root => {
             using var source = new CoordinatorSource();
             using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", root.Path, expectedPrincipal: CoordinatorSource.Principal);
             var failed = new TestSink(); var reached = false;
@@ -123,7 +158,7 @@ internal static class ExperimentalColdDownloaderTests
             try { await coordinator.HydrateAsync(source.Identity, 0, Content.Length, retried); }
             catch (TransferException error) { throw new IOException("Synthetic cache retry failed: " + error.HydrationFailure?.ActivityText, error); }
             Check(retried.Completed == 1 && retried.Failed == 0 && retried.Bytes.ToArray().SequenceEqual(Content) && source.Downloads == 1);
-        }
+        });
         Console.WriteLine("PASS gated synthetic cold Downloader: empty, EOF, overflow, digest, collision, cancellation, handoff and coordinator recovery.");
     }
     private sealed class CancelAfterPrefix(byte[] data, CancellationTokenSource source) : MemoryStream(data)
