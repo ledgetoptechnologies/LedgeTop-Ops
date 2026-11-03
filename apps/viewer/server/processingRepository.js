@@ -453,6 +453,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       const marks=this.database.prepare(`SELECT marks.id correspondenceId,points.id gcpPointId,points.set_id gcpSetId,
         points.external_id externalId,points.label,points.longitude,points.latitude,points.elevation_m elevationM,
         sets.source_file_id sourceGcpDatasetFileId,sets.source_sha256 sourceGcpSha256,source_file.relative_path sourceGcpRelativePath,
+        source_file.sha256 sourceGcpFileSha256,source_file.dataset_id sourceGcpFileDatasetId,
         files.id imageDatasetFileId,files.relative_path relativePath,files.width imageWidth,files.height imageHeight,
         marks.pixel_x pixelX,marks.pixel_y pixelY
         FROM gcp_image_correspondences marks
@@ -464,6 +465,8 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       const gcpList=odmGcpList(marks);
       if(gcpList&&Buffer.byteLength(gcpList)>16*1024*1024)throw Object.assign(new Error('generated ODM GCP input is too large'),{code:'gcp_snapshot_too_large'});
       if(gcpList){
+        if(marks.some((mark)=>mark.sourceGcpDatasetFileId&&(mark.sourceGcpFileSha256!==mark.sourceGcpSha256||mark.sourceGcpFileDatasetId!==dataset.id)))
+          throw Object.assign(new Error('GCP source file no longer matches its retained dataset record'),{code:'gcp_source_snapshot_mismatch'});
         const sha256=crypto.createHash('sha256').update(gcpList).digest('hex');
         const sourceGcpDatasetFileIds=[...new Set(marks.map((mark)=>mark.sourceGcpDatasetFileId).filter(Boolean))].sort();
         const imageDatasetFileIds=[...new Set(marks.map((mark)=>mark.imageDatasetFileId))].sort();
@@ -474,8 +477,10 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
           imageRelativePath:mark.relativePath,imageWidth:mark.imageWidth==null?null:Number(mark.imageWidth),imageHeight:mark.imageHeight==null?null:Number(mark.imageHeight),
           pixelX:Number(mark.pixelX),pixelY:Number(mark.pixelY),
         }))};
+        const evidenceJson=JSON.stringify(evidence);
+        if(Buffer.byteLength(evidenceJson,'utf8')>64*1024*1024)throw Object.assign(new Error('attempt-bound GCP evidence exceeds the retained evidence limit'),{code:'gcp_evidence_too_large'});
         this.database.prepare(`INSERT INTO processing_attempt_gcp_snapshots(attempt_id,sha256,content_text,correspondence_count,created_at,evidence_json)
-          VALUES (?,?,?,?,?,?)`).run(id,sha256,gcpList,marks.length,t,JSON.stringify(evidence));
+          VALUES (?,?,?,?,?,?)`).run(id,sha256,gcpList,marks.length,t,evidenceJson);
       }
       this.captureNewAttemptProvenance(id,provider,t);
       this.database.prepare(`INSERT INTO processing_jobs(id,attempt_id,job_type,status,available_at,created_at,updated_at) VALUES (?,?,'submit','pending',?,?,?)`).run(crypto.randomUUID(),id,t,t,t);
@@ -521,6 +526,21 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
         ||typeof mark.imageDatasetFileId!=='string'||!mark.imageDatasetFileId||typeof mark.imageRelativePath!=='string'||!mark.imageRelativePath))return null;
     const sourceIds=[...new Set(sources)].sort(),imageIds=[...new Set(evidence.correspondences.map((mark)=>mark.imageDatasetFileId))].sort();
     if(JSON.stringify(sourceIds)!==JSON.stringify(evidence.snapshot.sourceGcpDatasetFileIds)||JSON.stringify(imageIds)!==JSON.stringify(evidence.snapshot.imageDatasetFileIds))return null;
+    const correspondenceIds=new Set(),pointImagePairs=new Set(),sourceFacts=new Map(),imageFacts=new Map();
+    for(const mark of evidence.correspondences){
+      const numeric=[mark.latitude,mark.longitude,mark.elevationM,mark.pixelX,mark.pixelY];
+      if(typeof mark.correspondenceId!=='string'||!mark.correspondenceId||correspondenceIds.has(mark.correspondenceId)
+        ||typeof mark.gcpPointId!=='string'||!mark.gcpPointId||typeof mark.gcpSetId!=='string'||!mark.gcpSetId
+        ||typeof mark.externalId!=='string'||!mark.externalId||numeric.some((value)=>typeof value!=='number'||!Number.isFinite(value))
+        ||mark.latitude < -90||mark.latitude > 90||mark.longitude < -180||mark.longitude > 180||mark.elevationM < -12000||mark.elevationM > 100000
+        ||mark.pixelX < 0||mark.pixelY < 0||(mark.imageWidth!=null&&mark.pixelX>=mark.imageWidth)||(mark.imageHeight!=null&&mark.pixelY>=mark.imageHeight))return null;
+      correspondenceIds.add(mark.correspondenceId);
+      const pair=`${mark.gcpPointId}\0${mark.imageDatasetFileId}`;if(pointImagePairs.has(pair))return null;pointImagePairs.add(pair);
+      const sourceFact=JSON.stringify([mark.sourceGcpSha256,mark.sourceGcpRelativePath]);
+      if(sourceFacts.has(mark.sourceGcpDatasetFileId)&&sourceFacts.get(mark.sourceGcpDatasetFileId)!==sourceFact)return null;sourceFacts.set(mark.sourceGcpDatasetFileId,sourceFact);
+      const imageFact=JSON.stringify([mark.imageRelativePath,mark.imageWidth,mark.imageHeight]);
+      if(imageFacts.has(mark.imageDatasetFileId)&&imageFacts.get(mark.imageDatasetFileId)!==imageFact)return null;imageFacts.set(mark.imageDatasetFileId,imageFact);
+    }
     try{
       const content=odmGcpList(evidence.correspondences.map((mark)=>({longitude:mark.longitude,latitude:mark.latitude,elevationM:mark.elevationM,pixelX:mark.pixelX,pixelY:mark.pixelY,relativePath:mark.imageRelativePath})));
       if(content!==row.content_text||crypto.createHash('sha256').update(content).digest('hex')!==row.sha256)return null;
