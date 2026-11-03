@@ -71,6 +71,9 @@ function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit
       const dataset=item.entityType==='dataset'?processing.getDataset(item.entityId):null;
       const output=item.entityType==='output'?processing.getModelOutput(item.entityId):null;
       if(!dataset&&!output){results.push({trashId:item.id,status:'failed',errorCode:'entity_not_found'});continue;}
+      if(dataset?.storageMode!=='external_reference'&&processing.hasRetainedRawCsv(dataset.id)){
+        results.push({trashId:item.id,status:'deferred',errorCode:'gcp_source_retained'});continue;
+      }
       if(dataset?.storageMode==='external_reference'){
         const purged=processing.markTrashPurged(item.id);
         if(!purged){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
