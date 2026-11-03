@@ -88,6 +88,7 @@ internal static class ReservationHandlePrototype
             PhysicalAccountingControl(fixture, directory, directoryId, childRecord, childId, () => deleteDispositionsApplied++);
 #if LEDGETOP_CACHE_RACE_TEST
             ExperimentalOwnedStreamControl(fixture, directory, directoryId, () => deleteDispositionsApplied++);
+            ExperimentalRenameControl(fixture, directory, directoryId, () => deleteDispositionsApplied++);
 #endif
             VerifyDirectoryBinding(fixture, directory, directoryId);
             verified = true;
@@ -130,8 +131,8 @@ internal static class ReservationHandlePrototype
             try { owned.Write(Owned); } catch (InvalidOperationException) { blocked = true; }
             if (!blocked) throw new IOException("Experimental sealed source allowed writes.");
             blocked = false;
-            try { owned.RenameNoReplace(); } catch (NotSupportedException) { blocked = true; }
-            if (!blocked) throw new IOException("Unimplemented rename did not fail closed.");
+            try { owned.RenameNoReplace(fixture, "../bad", System.Security.Cryptography.SHA256.HashData(Owned)); } catch (IOException) { blocked = true; }
+            if (!blocked) throw new IOException("Invalid rename did not fail closed.");
         }
         using (var read = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)) {
             var id = Id(read.SafeFileHandle);
@@ -142,7 +143,95 @@ internal static class ReservationHandlePrototype
         recordDisposition();
         ExperimentalSealFailures(fixture, directory, directoryId, recordDisposition);
         ExperimentalDisposeFailure(fixture, directory, directoryId, recordDisposition);
-        Console.WriteLine("PASS gated experimental owned-source sealing and exact identity cleanup; rename unsupported.");
+        Console.WriteLine("PASS gated experimental owned-source sealing and exact identity cleanup.");
+    }
+
+    private static void ExperimentalRenameControl(string fixture, SafeFileHandle directory, FileId directoryId, Action recordDisposition)
+    {
+        var destination = Path.Combine(fixture, "experimental-rename-destination");
+        if (!CreateDirectoryW(destination, 0)) throw new IOException("Synthetic destination creation failed.");
+        using var targetDirectory = Open(destination, ReadAttributes | Delete, ShareRead | ShareWrite, BackupSemantics | OpenReparsePoint);
+        RequireKind(targetDirectory, isDirectory: true); var targetDirectoryId = Id(targetDirectory);
+        var source = Path.Combine(fixture, "experimental-rename-source.record");
+        var target = Path.Combine(destination, "promoted.record");
+        LedgeTop.WindowsDownload.ExperimentalOwnedStream.Identity sourceId;
+        using (var owned = LedgeTop.WindowsDownload.ExperimentalOwnedStream.CreateNew(source)) {
+            sourceId = owned.SourceIdentity; owned.Write(Owned);
+            var expected = System.Security.Cryptography.SHA256.HashData(Owned);
+            var refused = false; try { owned.RenameNoReplace(destination, "promoted.record", expected); } catch (InvalidOperationException) { refused = true; }
+            if (!refused) throw new IOException("Unsealed source was promoted.");
+            _ = owned.SealAndHash();
+            var wrong = expected.ToArray(); wrong[0] ^= 1;
+            refused = false; try { owned.RenameNoReplace(destination, "promoted.record", wrong); } catch (IOException) { refused = true; }
+            if (!refused) throw new IOException("Wrong digest was accepted.");
+            if (!owned.RenameNoReplace(destination, "promoted.record", expected)) throw new IOException("Synthetic promotion failed.");
+            refused = false; try { owned.RenameNoReplace(destination, "again.record", expected); } catch (InvalidOperationException) { refused = true; }
+            if (!refused) throw new IOException("Source was promoted twice.");
+        }
+        using (var read = new FileStream(target, FileMode.Open, FileAccess.Read, FileShare.Read)) {
+            var observed = Id(read.SafeFileHandle);
+            if (observed.Volume != sourceId.Volume || observed.Id != sourceId.FileId || !ReadExact(read, Owned)) throw new IOException("Promoted identity or bytes changed.");
+        }
+        var collision = Path.Combine(destination, "collision.record"); FileId collisionId;
+        using (var existing = new FileStream(collision, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read)) {
+            existing.Write(Foreign); existing.Flush(true); collisionId = Id(existing.SafeFileHandle);
+        }
+        var second = Path.Combine(fixture, "experimental-collision-source.record");
+        LedgeTop.WindowsDownload.ExperimentalOwnedStream.Identity secondId;
+        using (var owned = LedgeTop.WindowsDownload.ExperimentalOwnedStream.CreateNew(second)) {
+            secondId = owned.SourceIdentity; owned.Write(Owned); _ = owned.SealAndHash();
+            if (owned.RenameNoReplace(destination, "collision.record", System.Security.Cryptography.SHA256.HashData(Owned))) throw new IOException("Collision target was replaced.");
+        }
+        using (var read = new FileStream(collision, FileMode.Open, FileAccess.Read, FileShare.Read))
+            if (Id(read.SafeFileHandle) != collisionId || !ReadExact(read, Foreign)) throw new IOException("Collision target changed.");
+        ExperimentalPendingControl(fixture, directory, directoryId, destination, recordDisposition);
+        if (!TryDeleteExact(fixture, directory, directoryId, second, Owned, new(secondId.Volume, secondId.FileId))) throw new IOException("Collision source cleanup failed.");
+        recordDisposition();
+        if (!TryDeleteExact(destination, targetDirectory, targetDirectoryId, target, Owned, new(sourceId.Volume, sourceId.FileId))) throw new IOException("Promoted file cleanup failed.");
+        recordDisposition();
+        if (!TryDeleteExact(destination, targetDirectory, targetDirectoryId, collision, Foreign, collisionId)) throw new IOException("Collision target cleanup failed.");
+        recordDisposition();
+        VerifyDirectoryBinding(destination, targetDirectory, targetDirectoryId);
+        if (Directory.EnumerateFileSystemEntries(destination).Any()) throw new IOException("Synthetic destination not empty.");
+        byte disposition = 1;
+        if (!SetFileInformationByHandle(targetDirectory, 4, ref disposition, 1)) throw new IOException("Synthetic destination removal failed.");
+        recordDisposition(); targetDirectory.Dispose();
+        if (!ConfirmedAbsent(() => File.GetAttributes(destination), () => VerifyDirectoryBinding(fixture, directory, directoryId))) throw new IOException("Synthetic destination absence unverified.");
+        Console.WriteLine("PASS gated experimental relative rename, collision preservation, and invalid states.");
+    }
+
+    private static void ExperimentalPendingControl(string fixture, SafeFileHandle directory, FileId directoryId, string destination, Action recordDisposition)
+    {
+        var source = Path.Combine(fixture, "experimental-pending-source.record");
+        var owner = LedgeTop.WindowsDownload.ExperimentalOwnedStream.CreateNew(source); var identity = owner.SourceIdentity;
+        using var waitEntered = new ManualResetEventSlim(); using var finish = new ManualResetEventSlim();
+        using var disposalEntered = new ManualResetEventSlim(); nint ioAddress = 0;
+        Task<bool>? rename = null; Task? dispose = null;
+        try {
+            owner.Write(Owned); _ = owner.SealAndHash();
+            LedgeTop.WindowsDownload.ExperimentalOwnedStream.SimulatedRenameStatusTestHook = io => { ioAddress = io; return 0x103; };
+            LedgeTop.WindowsDownload.ExperimentalOwnedStream.SimulatedWaitTestHook = () => {
+                waitEntered.Set(); if (!finish.Wait(TimeSpan.FromSeconds(10))) throw new TimeoutException(); return 0;
+            };
+            rename = Task.Run(() => owner.RenameNoReplace(destination, "simulated-pending.record", System.Security.Cryptography.SHA256.HashData(Owned)));
+            if (!waitEntered.Wait(TimeSpan.FromSeconds(5)) || ioAddress == 0) throw new IOException("Synthetic pending wait was not reached.");
+            dispose = Task.Run(() => { disposalEntered.Set(); owner.Dispose(); });
+            if (!disposalEntered.Wait(TimeSpan.FromSeconds(5)) || dispose.IsCompleted || rename.IsCompleted)
+                throw new IOException("Pending operation did not retain its owner.");
+            Marshal.WriteInt32(ioAddress, unchecked((int)0xc0000035)); finish.Set();
+            if (!rename.Wait(TimeSpan.FromSeconds(10)) || rename.Result || !dispose.Wait(TimeSpan.FromSeconds(10)))
+                throw new IOException("Synthetic pending settlement failed.");
+        } finally {
+            finish.Set();
+            if (rename is not null && !rename.Wait(TimeSpan.FromSeconds(10))) throw new IOException("Synthetic pending worker remains live; fixture preserved.");
+            if (dispose is not null && !dispose.Wait(TimeSpan.FromSeconds(10))) throw new IOException("Synthetic disposer remains live; fixture preserved.");
+            LedgeTop.WindowsDownload.ExperimentalOwnedStream.SimulatedRenameStatusTestHook = null;
+            LedgeTop.WindowsDownload.ExperimentalOwnedStream.SimulatedWaitTestHook = null;
+            owner.Dispose();
+        }
+        if (!TryDeleteExact(fixture, directory, directoryId, source, Owned, new(identity.Volume, identity.FileId))) throw new IOException("Synthetic pending source cleanup failed.");
+        recordDisposition();
+        Console.WriteLine("PASS gated simulated pending ownership retention; no actual pending native operation.");
     }
 
     private static void ExperimentalSealFailures(string fixture, SafeFileHandle directory, FileId directoryId, Action recordDisposition)
