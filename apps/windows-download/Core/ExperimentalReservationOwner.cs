@@ -12,9 +12,11 @@ internal sealed class ExperimentalReservationOwner
 {
     private static readonly object RegistryGate = new();
     private static readonly HashSet<ExperimentalReservationOwner> Registry = [];
+    private static readonly HashSet<LeaseReceipt> Receipts = [];
     private readonly object gate = new();
     private readonly HydrationCacheConcurrency.Lease lease;
-    private readonly FileStream entry;
+    private FileStream? entry;
+    private readonly string leaseKey;
     private readonly List<ExperimentalOwnedStream.DirectoryPin> pins = [];
     private readonly string root, path, quotaPath;
     private FileStream? record;
@@ -26,7 +28,25 @@ internal sealed class ExperimentalReservationOwner
     internal static Action<string>? BeforeTeardownTestHook;
     private readonly long growth;
     internal long Growth { get { lock (gate) { if (finished || uncertain) throw new IOException("Reservation owner unavailable."); return growth; } } }
-    internal static int RetainedCount { get { lock (RegistryGate) return Registry.Count; } }
+    internal static int RetainedCount { get { lock (RegistryGate) return Registry.Count + Receipts.Count; } }
+    internal sealed class LeaseReceipt : IDisposable
+    {
+        private readonly object gate = new();
+        private HydrationCacheConcurrency.Lease? heldLease;
+        private FileStream? heldEntry;
+        private bool active, uncertain;
+        internal void Attach(HydrationCacheConcurrency.Lease value, FileStream file) { heldLease = value; heldEntry = file; active = true; }
+        public void Dispose() {
+            lock (gate) {
+                if (!active) return;
+                if (uncertain) throw new IOException("Experimental returned lease closure remains uncertain.");
+                uncertain = true;
+                heldEntry!.Dispose(); heldEntry = null;
+                heldLease!.Dispose(); heldLease = null; active = false; uncertain = false;
+                lock (RegistryGate) Receipts.Remove(this);
+            }
+        }
+    }
     internal static Dictionary<string, ExperimentalReservationOwner> SnapshotForRoot(string root)
     {
         ExperimentalReservationOwner[] snapshot;
@@ -37,8 +57,8 @@ internal sealed class ExperimentalReservationOwner
     }
     internal long RecordBytes { get { lock (gate) { if (finished || uncertain) throw new IOException("Reservation owner unavailable."); VerifyCore(); return expected.Length; } } }
 
-    private ExperimentalReservationOwner(HydrationCacheConcurrency.Lease lease, FileStream entry, string path, byte[] expected, long growth)
-    { this.lease = lease; this.entry = entry; this.path = path; root = Directory.GetParent(Path.GetDirectoryName(path)!)!.FullName; quotaPath = Path.Combine(Directory.GetParent(Path.GetDirectoryName(path)!)!.FullName, ".hydration-quota-v2.lock"); this.expected = expected; this.growth = growth; }
+    private ExperimentalReservationOwner(HydrationCacheConcurrency.Lease lease, FileStream entry, string path, byte[] expected, long growth, string leaseKey)
+    { this.lease = lease; this.entry = entry; this.path = path; this.leaseKey = leaseKey; root = Directory.GetParent(Path.GetDirectoryName(path)!)!.FullName; quotaPath = Path.Combine(Directory.GetParent(Path.GetDirectoryName(path)!)!.FullName, ".hydration-quota-v2.lock"); this.expected = expected; this.growth = growth; }
 
     internal static ExperimentalReservationOwner Create(string root, string scope, string key, byte[] bytes, DownloadSpec spec,
         ref HydrationCacheConcurrency.Lease? lease, ref FileStream? entry, FileStream quota)
@@ -69,7 +89,7 @@ internal sealed class ExperimentalReservationOwner
         originalLease.RunExperimentalForRoot(root, () => {
             originalLease.ExperimentalMarkers.ValidateExisting(Path.GetDirectoryName(path)!, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
             var moved = originalLease.TransferForReservationTest(scope + key);
-            owner = new ExperimentalReservationOwner(moved, originalEntry, path, bytes.ToArray(), growth);
+            owner = new ExperimentalReservationOwner(moved, originalEntry, path, bytes.ToArray(), growth, scope + key);
         });
         lease = null; entry = null;
         var result = owner!;
@@ -89,7 +109,7 @@ internal sealed class ExperimentalReservationOwner
             if (!result.uncertain) {
                 try {
                     foreach (var pin in result.pins.AsEnumerable().Reverse()) pin.Handle.Dispose(); result.pins.Clear();
-                    result.entry.Dispose(); result.lease.Dispose(); result.finished = true;
+                    result.entry!.Dispose(); result.lease.Dispose(); result.finished = true;
                     lock (RegistryGate) Registry.Remove(result);
                 } catch { result.uncertain = true; }
             }
@@ -108,7 +128,9 @@ internal sealed class ExperimentalReservationOwner
         if (!observed.AsSpan().SequenceEqual(expected)) throw new IOException("Reservation contents changed.");
     }
     internal void RunWithLeaseForTest(Action action) => lease.RunExperimentalForRoot(root, action);
-    internal void Release(FileStream quota)
+    internal void Release(FileStream quota) => ReleaseCore(quota, returnLeases: false);
+    internal LeaseReceipt ReleaseAndReturn(FileStream quota) => ReleaseCore(quota, returnLeases: true)!;
+    private LeaseReceipt? ReleaseCore(FileStream quota, bool returnLeases)
     {
         lock (gate) {
         if (!lease.ExperimentalGateHeld || !Monitor.IsEntered(lease.Quota) || !string.Equals(ExperimentalOwnedStream.FinalPath(quota.SafeFileHandle), quotaPath, StringComparison.OrdinalIgnoreCase))
@@ -121,10 +143,10 @@ internal sealed class ExperimentalReservationOwner
         BeforeTeardownTestHook?.Invoke("record");
         record.Dispose(); record = null;
         try { AfterDispositionCloseTestHook?.Invoke(); } catch { injectedPostDispositionFailure = true; throw; }
-        FinishAfterDisposition();
+        return FinishAfterDisposition(returnLeases);
         }
     }
-    private void FinishAfterDisposition()
+    private LeaseReceipt? FinishAfterDisposition(bool returnLeases = false)
     {
         ExperimentalOwnedStream.VerifyPins(pins);
         using var probe = CreateFileW(PlaceholderHydrationCoordinator.NativeCacheFilePath(path), 0x80, 7, 0, 3, 0x00200000, 0);
@@ -132,9 +154,21 @@ internal sealed class ExperimentalReservationOwner
         if (Marshal.GetLastWin32Error() != 2) throw new IOException("Reservation absence cannot be confirmed.");
         ExperimentalOwnedStream.VerifyPins(pins);
         foreach (var pin in pins.AsEnumerable().Reverse()) { BeforeTeardownTestHook?.Invoke("directory"); pin.Handle.Dispose(); } pins.Clear();
-        BeforeTeardownTestHook?.Invoke("entry"); entry.Dispose();
-        BeforeTeardownTestHook?.Invoke("lease"); lease.Dispose(); finished = true; uncertain = false;
+        LeaseReceipt? receipt = null;
+        if (returnLeases) {
+            receipt = new LeaseReceipt();
+            lock (RegistryGate) Receipts.Add(receipt);
+            try {
+                var moved = lease.TransferForReservationTest(leaseKey);
+                receipt.Attach(moved, entry!); entry = null;
+            } catch { lock (RegistryGate) Receipts.Remove(receipt); throw; }
+        } else {
+            BeforeTeardownTestHook?.Invoke("entry"); entry!.Dispose(); entry = null;
+            BeforeTeardownTestHook?.Invoke("lease"); lease.Dispose();
+        }
+        finished = true; uncertain = false;
         lock (RegistryGate) Registry.Remove(this);
+        return receipt;
     }
     internal void SettleInjectedPostDispositionFailureForTest(FileStream quota)
     {

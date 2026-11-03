@@ -656,7 +656,7 @@ internal static class ExperimentalColdDownloaderTests
                 try {
                     owner.RunWithLeaseForTest(() => HydrationQuotaGate.Run(gate, () => {
                         using var quota = new FileStream(Path.Combine(root, ".hydration-quota-v2.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-                        owner.Release(quota);
+                        _ = owner.ReleaseAndReturn(quota);
                     }, CancellationToken.None));
                 } catch (IOException error) when (error.Message == "Injected disposition failure.") { injected = true; }
                 finally { ExperimentalReservationOwner.BeforeDispositionTestHook = null; }
@@ -772,6 +772,46 @@ internal static class ExperimentalColdDownloaderTests
                 }, CancellationToken.None));
                 try { if (!oneSettled) ReleaseOwner(one); } finally { ReleaseOwner(two); }
             }
+            Check(ExperimentalReservationOwner.RetainedCount == 0);
+        });
+        await WithFixture(async fixture => {
+            var root = Path.Combine(fixture.Path, "return-leases"); Directory.CreateDirectory(root);
+            var scope = new string('a', 64); var key = new string('b', 64); var entryDir = Path.Combine(root, scope, key); Directory.CreateDirectory(entryDir);
+            var reservationDir = Path.Combine(root, ".hydration-reservations-v2"); Directory.CreateDirectory(reservationDir);
+            File.WriteAllBytes(Path.Combine(reservationDir, ".verified-hydration-owner"), "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+            HydrationCacheConcurrency.Lease? admission = await HydrationCacheConcurrency.AcquireAsync(root, scope + key, CancellationToken.None);
+            admission.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate); var alias = admission;
+            FileStream? entry = await PlaceholderHydrationCoordinator.OpenEntryLeaseAsync(Path.Combine(entryDir, ".hydration.lock"), FileMode.OpenOrCreate, CancellationToken.None);
+            var gate = admission.Quota; var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = scope, Entry = key, Growth = Spec.Length + Downloader.HydrationStateGrowthBudget(Spec) + 1024 });
+            ExperimentalReservationOwner? owner = null; ExperimentalReservationOwner.LeaseReceipt? receipt = null;
+            try {
+                alias.RunExperimentalForRoot(root, () => HydrationQuotaGate.Run(gate, () => {
+                    using var quota = new FileStream(Path.Combine(root, ".hydration-quota-v2.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                    owner = ExperimentalReservationOwner.Create(root, scope, key, bytes, Spec, ref admission, ref entry, quota);
+                }, CancellationToken.None));
+                var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                async Task<ExperimentalReservationOwner.LeaseReceipt?> Attempt() {
+                    await start.Task;
+                    try {
+                        ExperimentalReservationOwner.LeaseReceipt? value = null;
+                        owner!.RunWithLeaseForTest(() => HydrationQuotaGate.Run(gate, () => {
+                            using var quota = new FileStream(Path.Combine(root, ".hydration-quota-v2.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                            value = owner.ReleaseAndReturn(quota);
+                        }, CancellationToken.None));
+                        return value;
+                    } catch (ObjectDisposedException) { return null; } catch (IOException) { return null; }
+                }
+                var first = Task.Run(Attempt); var second = Task.Run(Attempt); start.SetResult();
+                var results = await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(10));
+                Check(results.Count(x => x is not null) == 1); receipt = results.Single(x => x is not null);
+                var recordPath = Path.Combine(reservationDir, scope + "-" + key + ".json"); Check(!File.Exists(recordPath));
+                AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock")); AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
+                var refused = false; try { alias.AcquireExclusiveLegacy(Path.Combine(root, "detached"), FileMode.OpenOrCreate); } catch (ObjectDisposedException) { refused = true; } Check(refused);
+                refused = false; try { using var unexpected = await HydrationCacheConcurrency.AcquireAsync(root, scope + key, CancellationToken.None, testTimeout: TimeSpan.FromMilliseconds(100)); }
+                catch (TransferException error) when (error.Reason == TransferFailureReason.Timeout) { refused = true; } Check(refused);
+                receipt!.Dispose(); receipt.Dispose(); receipt = null;
+                AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true); AssertOtherProcessOpen(Path.Combine(entryDir, ".hydration.lock"), true);
+            } finally { receipt?.Dispose(); entry?.Dispose(); admission?.Dispose(); }
             Check(ExperimentalReservationOwner.RetainedCount == 0);
         });
         await AbruptRestartTests();
