@@ -55,7 +55,7 @@ function env(overrides:Partial<Env>={}):Env{return {DELIVERY_DB:database,OPS_DB:
  APPLICATION_KEY:'ltds_ops',...overrides} as Env;}
 
 describe('primary Viewer recipient private-proof configuration',()=>{
- it('uses the existing Operations application key, adds no portal bindings, and enables the direct Viewer gates',()=>{
+ it('uses the existing Operations application key and keeps the production direct Viewer gates disabled',()=>{
   const ops=config(new URL('../wrangler.jsonc',import.meta.url));
   const client=config(new URL('../../client/wrangler.jsonc',import.meta.url));
   expect(client.vars.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED).toBe('false');
@@ -63,8 +63,8 @@ describe('primary Viewer recipient private-proof configuration',()=>{
   expect(ops.vars.APPLICATION_KEY).toBe(client.vars.PROJECT_ALPHA_PORTAL_APPLICATION_KEY);
   expect(ops.vars.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED).toBeUndefined();
   expect(ops.vars.PROJECT_ALPHA_PORTAL_APPLICATION_KEY).toBeUndefined();
-  expect(ops.vars.CLIENT_VIEWER_SESSION_ISSUER_ENABLED).toBe('true');
-  expect(client.vars.CLIENT_VIEWER_ENABLED).toBe('true');
+  expect(ops.vars.CLIENT_VIEWER_SESSION_ISSUER_ENABLED).toBe('false');
+  expect(client.vars.CLIENT_VIEWER_ENABLED).toBe('false');
  });
 
  it('defaults to the matching private authority and denies absent, mismatched, or explicit legacy mode without its key',async()=>{
