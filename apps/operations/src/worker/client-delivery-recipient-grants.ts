@@ -3,6 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { decodeRef, encodeRef, normalizePrefix } from "./delivery";
 import { hasPermission, requirePermission } from "./acl";
 import { authorizeClientRecipientFolder, listClientDeliveryRecipients } from "./client-delivery-recipients";
+import { requireAuthenticatedDeliveryCreation } from "./authenticated-delivery-creation-gate";
 import type { Env, StaffPrincipal } from "./types";
 
 type App = Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>;
@@ -340,6 +341,7 @@ async function preview(env: Env, principal: StaffPrincipal, input: ReturnType<ty
     audienceLabel: "All current and future Client Workspace members", recipientCount: context.workspace.memberCount, expiresAt: input.expiresAt };
 }
 async function createGrant(env: Env, principal: StaffPrincipal, input: ReturnType<typeof parsePreviewBody>, previewVersion: string, key: string) {
+  requireAuthenticatedDeliveryCreation(env);
   const context = await resolve(env, principal, input.folderRef, input.recipientId, input.recipientVersion, true), client = service(env);
   await assertReviewedPreview(context, principal.id, input, previewVersion);
   const operationId = await deterministicUuid(["direct-folder-grant", principal.id, key, "create"]);
