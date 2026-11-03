@@ -633,12 +633,12 @@ const lifecyclePresentation: Record<
   under_review: {
     subject: "Service request under review",
     status: "Under review",
-    introduction: "LTDS is reviewing your service request.",
+    introduction: "Ledge Top is reviewing your service request.",
   },
   accepted_pending_pa_linkage: {
     subject: "Service request approved for quote preparation",
     status: "Approved — Project Alpha draft pending",
-    introduction: "LTDS approved the operational request and is preparing a Project Alpha draft quote.",
+    introduction: "Ledge Top approved the operational request and is preparing a Project Alpha draft quote.",
   },
   accepted_linked: {
     subject: "Project Alpha draft quote created",
@@ -648,7 +648,7 @@ const lifecyclePresentation: Record<
   declined: {
     subject: "Service request declined",
     status: "Declined",
-    introduction: "LTDS cannot proceed with this service request.",
+    introduction: "Ledge Top cannot proceed with this service request.",
   },
   cancelled: {
     subject: "Service request cancelled",
