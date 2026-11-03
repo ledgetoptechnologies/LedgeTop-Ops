@@ -1246,7 +1246,7 @@ internal static class ExperimentalColdDownloaderTests
             ExperimentalEntryLease? entry = ExperimentalEntryLease.Open(admission, root, identity.ScopeKey, identity.CacheKey);
             var gate = admission.Quota; var growth = spec.Length + Downloader.HydrationStateGrowthBudget(spec) + 1024;
             var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = identity.ScopeKey, Entry = identity.CacheKey, Growth = growth });
-            ExperimentalReservationOwner? owner = null; ExperimentalReservationOwner.LeaseReceipt? receipt = null;
+            ExperimentalReservationOwner? owner = null; ExperimentalReservationOwner.LeaseReceipt? receipt = null; Exception? primaryFailure = null;
             var path = Path.Combine(reservationDir, identity.ScopeKey + "-" + identity.CacheKey + ".json");
             try {
                 alias.RunExperimentalForRoot(root, () => HydrationQuotaGate.Run(gate, () => {
@@ -1319,6 +1319,35 @@ internal static class ExperimentalColdDownloaderTests
                             if (!settled) UncertainTestResources.Add((fixture, receipt, worker, cancellationSource));
                         }
                     }
+                    var timeoutSource = SyntheticReceiptDownloadSource.Create(spec, Content, timeoutAfterRelease: true);
+                    var timeoutWorker = await coordinator.ExperimentalStartReceiptDownloadAsync(identity, receipt, timeoutSource); var timeoutSettled = false;
+                    try {
+                        await timeoutSource.Entered.WaitAsync(TimeSpan.FromSeconds(10)); timeoutSource.Release();
+                        var timedOutWorker = false;
+                        try { await timeoutWorker.WaitAsync().WaitAsync(TimeSpan.FromSeconds(10)); } catch (TimeoutException) { timedOutWorker = true; }
+                        Check(timedOutWorker && await timeoutWorker.CancelWorkerAndWaitAsync(TimeSpan.FromSeconds(2)));
+                        timeoutSettled = true;
+                    } finally {
+                        timeoutSource.Release();
+                        if (!timeoutSettled) UncertainTestResources.Add((fixture, receipt, timeoutWorker, timeoutSource));
+                    }
+                    var callbackSource = SyntheticReceiptDownloadSource.Create(spec, Content, blockCancellationCallback: true);
+                    var callbackWorker = await coordinator.ExperimentalStartReceiptDownloadAsync(identity, receipt, callbackSource); var callbackSettled = false;
+                    try {
+                        await callbackSource.Entered.WaitAsync(TimeSpan.FromSeconds(10));
+                        var cancelling = callbackWorker.CancelWorkerAndWaitAsync(TimeSpan.FromMilliseconds(150));
+                        await callbackSource.CallbackEntered.WaitAsync(TimeSpan.FromSeconds(10));
+                        Check(!await cancelling.WaitAsync(TimeSpan.FromSeconds(5)));
+                        var busy = false; try { _ = receipt.BeginSyntheticDownloadUse(root, identity.ScopeKey + identity.CacheKey); } catch (InvalidOperationException) { busy = true; } Check(busy);
+                        AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock")); AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
+                        callbackSource.ReleaseCancellationCallback(); callbackSource.Release();
+                        Check(await callbackWorker.CancelWorkerAndWaitAsync(TimeSpan.FromSeconds(5)));
+                        var callbackCancelled = false; try { await callbackWorker.WaitAsync(); } catch (OperationCanceledException) { callbackCancelled = true; }
+                        Check(callbackCancelled); callbackSettled = true;
+                    } finally {
+                        callbackSource.ReleaseCancellationCallback(); callbackSource.Release();
+                        if (!callbackSettled) UncertainTestResources.Add((fixture, receipt, callbackWorker, callbackSource));
+                    }
                 } finally {
                     blocked.Release();
                     if (session is not null && !terminal) UncertainTestResources.Add((fixture, receipt, session, blocked));
@@ -1338,7 +1367,11 @@ internal static class ExperimentalColdDownloaderTests
                 Check(injected); AssertOtherProcessCannotOpen(path); AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-quota-v2.lock"));
                 receipt.SettleInjectedQuotaFailureForTest(token); receipt.RemoveSyntheticReservationForTest(root, identity.ScopeKey + identity.CacheKey);
                 Check(!File.Exists(path)); receipt.Dispose(); receipt = null;
-            } finally { receipt?.Dispose(); entry?.Dispose(); admission?.Dispose(); }
+            } catch (Exception error) { primaryFailure = error; Console.Error.WriteLine($"Synthetic receipt test failure: {error}"); throw; }
+            finally {
+                try { receipt?.Dispose(); entry?.Dispose(); admission?.Dispose(); }
+                catch (Exception cleanupError) when (primaryFailure is not null) { Console.Error.WriteLine($"Synthetic receipt cleanup remains uncertain: {cleanupError}"); }
+            }
             Check(ExperimentalReservationOwner.RetainedCount == 0 && ExperimentalEntryLease.RetainedCount == 0);
         });
         await WithFixture(async fixture => {

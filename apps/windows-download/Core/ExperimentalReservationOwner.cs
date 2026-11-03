@@ -91,16 +91,16 @@ internal sealed class ExperimentalReservationOwner
         {
             private readonly LeaseReceipt owner; private readonly DownloadUse use; private readonly Downloader downloader;
             private readonly DownloadSpec spec; private readonly PlaceholderIdentity identity; private readonly string entryDirectory, expectedPath;
-            private Task? task; private int started;
+            private Task? task; private Task? cancellationTask; private int started;
             private readonly object cancellationGate = new(); private readonly CancellationTokenSource workerCancellation = new(); private bool workerFinished;
             internal DownloadSession(LeaseReceipt owner, DownloadUse use, Downloader downloader, PlaceholderIdentity identity, DownloadSpec spec, string entryDirectory, object authority) {
                 if (!ReferenceEquals(authority, ReceiptAttachAuthority)) throw new InvalidOperationException("Download session authority invalid.");
                 this.owner = owner; this.use = use; this.downloader = downloader; this.identity = identity; this.spec = spec; this.entryDirectory = entryDirectory;
                 expectedPath = Path.Combine(entryDirectory, spec.FileName);
             }
-            internal void Start() { if (Interlocked.Exchange(ref started, 1) != 0) throw new InvalidOperationException("Synthetic download session already started."); task = Task.Run(RunAsync); _ = task.ContinueWith(completed => _ = completed.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default); }
+            internal void Start() { if (Interlocked.Exchange(ref started, 1) != 0) throw new InvalidOperationException("Synthetic download session already started."); task = FinishAsync(Task.Run(RunAsync)); _ = task.ContinueWith(completed => _ = completed.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default); }
             private async Task RunAsync() {
-                var useReleased = false; VerifiedHydrationDownload? download = null;
+                VerifiedHydrationDownload? download = null;
                 try {
                     using (HydrationMutationScope.Begin((action, token) => owner.RunDownloadMutation(use, action, token), workerCancellation.Token))
                         download = await downloader.DownloadVerifiedForHydrationAsync(spec, entryDirectory, workerCancellation.Token).ConfigureAwait(false);
@@ -114,13 +114,24 @@ internal sealed class ExperimentalReservationOwner
                         try { await download.DisposeAsync().ConfigureAwait(false); }
                         catch { owner.MarkDownloadUncertain(use); throw; }
                     }
-                    try {
-                        downloader.Dispose();
-                        lock (cancellationGate) { workerFinished = true; workerCancellation.Dispose(); }
-                        use.Dispose(); useReleased = true;
-                    } catch { owner.MarkDownloadUncertain(use); throw; }
-                    finally { if (useReleased) lock (RegistryGate) DownloadSessions.Remove(this); }
                 }
+            }
+            // Keep all session ownership until both the worker and any cancellation callbacks
+            // have actually settled. A blocked callback must never release the receipt early.
+            private async Task FinishAsync(Task worker) {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo? failure = null;
+                try { await worker.ConfigureAwait(false); }
+                catch (Exception ex) { failure = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+                Task? pendingCancellation;
+                lock (cancellationGate) { workerFinished = true; pendingCancellation = cancellationTask; }
+                try {
+                    if (pendingCancellation is not null) await pendingCancellation.ConfigureAwait(false);
+                    downloader.Dispose();
+                    lock (cancellationGate) workerCancellation.Dispose();
+                    use.Dispose();
+                } catch { owner.MarkDownloadUncertain(use); throw; }
+                lock (RegistryGate) DownloadSessions.Remove(this);
+                failure?.Throw();
             }
             internal bool Matches(string root, PlaceholderIdentity expectedIdentity, DownloadSpec? expectedSpec = null) =>
                 identity == expectedIdentity && (expectedSpec is null || spec == expectedSpec) &&
@@ -132,9 +143,9 @@ internal sealed class ExperimentalReservationOwner
             internal async Task<bool> CancelWorkerAndWaitAsync(TimeSpan timeout, CancellationToken waitToken = default) {
                 if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromSeconds(10)) throw new ArgumentOutOfRangeException(nameof(timeout));
                 var running = task ?? throw new InvalidOperationException("Synthetic download session did not start.");
-                lock (cancellationGate) { if (!workerFinished) workerCancellation.Cancel(); }
+                lock (cancellationGate) { if (!workerFinished && cancellationTask is null) cancellationTask = Task.Run(() => workerCancellation.Cancel()); }
                 try { await running.WaitAsync(timeout, waitToken).ConfigureAwait(false); return true; }
-                catch (TimeoutException) { return false; }
+                catch (TimeoutException) when (!waitToken.IsCancellationRequested && !running.IsCompleted) { return false; }
                 catch (OperationCanceledException) when (!waitToken.IsCancellationRequested && running.IsCompleted) { return true; }
                 catch (Exception) when (!waitToken.IsCancellationRequested && running.IsCompleted) { return true; }
             }
