@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
 const MIGRATIONS = [
@@ -2197,15 +2198,20 @@ const MIGRATIONS = [
       byte_size INTEGER NOT NULL CHECK(byte_size>0 AND byte_size<=2097152),
       source_content TEXT NOT NULL,
       retention_reason TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      CHECK(length(CAST(source_content AS BLOB))=byte_size)
+      created_at TEXT NOT NULL
     );
     CREATE UNIQUE INDEX retained_gcp_sources_dataset_sha_idx ON retained_gcp_sources(dataset_id,sha256);
-    INSERT INTO retained_gcp_sources(id,dataset_id,source_file_id,source_filename,sha256,byte_size,source_content,retention_reason,created_at)
-      SELECT lower(hex(randomblob(16))),g.dataset_id,g.source_file_id,g.source_filename,g.source_sha256,g.source_byte_size,g.source_content,'gcp_source',g.created_at
-      FROM gcp_sets g WHERE g.source_content IS NOT NULL AND g.source_byte_size>0 AND g.source_byte_size<=2097152
-        AND g.id=(SELECT MIN(g2.id) FROM gcp_sets g2 WHERE g2.dataset_id=g.dataset_id AND g2.source_sha256=g.source_sha256
-          AND g2.source_content IS NOT NULL AND g2.source_byte_size>0 AND g2.source_byte_size<=2097152);
+    CREATE TABLE retained_gcp_source_issues (
+      gcp_set_id TEXT PRIMARY KEY,
+      dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+      issue_code TEXT NOT NULL,
+      expected_sha256 TEXT,
+      observed_sha256 TEXT,
+      expected_byte_size INTEGER,
+      observed_byte_size INTEGER,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX retained_gcp_source_issues_dataset_idx ON retained_gcp_source_issues(dataset_id);
     CREATE TRIGGER retained_gcp_sources_no_insert_replace BEFORE INSERT ON retained_gcp_sources
       WHEN EXISTS(SELECT 1 FROM retained_gcp_sources WHERE id=NEW.id OR (dataset_id=NEW.dataset_id AND sha256=NEW.sha256))
       BEGIN SELECT RAISE(ABORT,'retained GCP source identifiers and content are never reusable or replaceable'); END;
@@ -2213,7 +2219,41 @@ const MIGRATIONS = [
       BEGIN SELECT RAISE(ABORT,'retained GCP source records are immutable'); END;
     CREATE TRIGGER retained_gcp_sources_no_delete BEFORE DELETE ON retained_gcp_sources
       BEGIN SELECT RAISE(ABORT,'retained GCP source records are permanent'); END;
-  `},
+    CREATE TRIGGER retained_gcp_source_issues_no_insert_replace BEFORE INSERT ON retained_gcp_source_issues
+      WHEN EXISTS(SELECT 1 FROM retained_gcp_source_issues WHERE gcp_set_id=NEW.gcp_set_id)
+      BEGIN SELECT RAISE(ABORT,'GCP source issue records are immutable'); END;
+    CREATE TRIGGER retained_gcp_source_issues_no_update BEFORE UPDATE ON retained_gcp_source_issues
+      BEGIN SELECT RAISE(ABORT,'GCP source issue records are immutable'); END;
+    CREATE TRIGGER retained_gcp_source_issues_no_delete BEFORE DELETE ON retained_gcp_source_issues
+      BEGIN SELECT RAISE(ABORT,'GCP source issue records are permanent'); END;
+  `,after(database){
+    const rows=database.prepare(`SELECT id,dataset_id,source_file_id,source_filename,source_sha256,source_content,source_byte_size,created_at
+      FROM gcp_sets ORDER BY dataset_id,source_sha256,id`).all();
+    const hasFile=database.prepare('SELECT 1 FROM dataset_files WHERE id=? AND dataset_id=?');
+    const insertSource=database.prepare(`INSERT INTO retained_gcp_sources
+      (id,dataset_id,source_file_id,source_filename,sha256,byte_size,source_content,retention_reason,created_at)
+      VALUES (?,?,?,?,?,?,?,'gcp_source',?)`);
+    const insertIssue=database.prepare(`INSERT INTO retained_gcp_source_issues
+      (gcp_set_id,dataset_id,issue_code,expected_sha256,observed_sha256,expected_byte_size,observed_byte_size,created_at)
+      VALUES (?,?,?,?,?,?,?,?)`);
+    const existing=database.prepare('SELECT 1 FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?');
+    for(const row of rows){
+      const content=typeof row.source_content==='string'?row.source_content:null;
+      const observedByteSize=content==null?null:Buffer.byteLength(content,'utf8');
+      const observedSha256=content==null?null:crypto.createHash('sha256').update(content,'utf8').digest('hex');
+      if(!content||!Number.isSafeInteger(observedByteSize)||observedByteSize<1||observedByteSize>2097152||observedByteSize!==row.source_byte_size||observedSha256!==row.source_sha256){
+        insertIssue.run(row.id,row.dataset_id,'source_content_checksum_or_size_mismatch',row.source_sha256,observedSha256,row.source_byte_size,observedByteSize,row.created_at);
+        continue;
+      }
+      let sourceFileId=row.source_file_id;
+      if(sourceFileId&&!hasFile.get(sourceFileId,row.dataset_id)){
+        insertIssue.run(row.id,row.dataset_id,'source_file_reference_missing',row.source_sha256,observedSha256,row.source_byte_size,observedByteSize,row.created_at);
+        sourceFileId=null;
+      }
+      if(!existing.get(row.dataset_id,row.source_sha256))
+        insertSource.run(`retained-gcp-${row.id}`,row.dataset_id,sourceFileId,row.source_filename,row.source_sha256,observedByteSize,content,row.created_at);
+    }
+  }},
 ];
 
 function applyMigrations(database) {

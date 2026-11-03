@@ -353,12 +353,14 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   hasRetainedGcpSource(datasetId){return Boolean(this.database.prepare(`SELECT 1 WHERE
     EXISTS(SELECT 1 FROM retained_dataset_files WHERE dataset_id=? LIMIT 1)
     OR EXISTS(SELECT 1 FROM retained_gcp_sources WHERE dataset_id=? LIMIT 1)
-    OR EXISTS(SELECT 1 FROM gcp_sets WHERE dataset_id=? AND source_file_id IS NOT NULL LIMIT 1)`).get(datasetId,datasetId,datasetId));}
+    OR EXISTS(SELECT 1 FROM retained_gcp_source_issues WHERE dataset_id=? LIMIT 1)
+    OR EXISTS(SELECT 1 FROM gcp_sets WHERE dataset_id=? AND source_file_id IS NOT NULL LIMIT 1)`).get(datasetId,datasetId,datasetId,datasetId));}
   hasHeldSourceSnapshot(datasetId){return Boolean(this.database.prepare("SELECT 1 FROM viewer_source_snapshots WHERE dataset_id=? AND status IN ('held','accepted') LIMIT 1").get(datasetId));}
   hasDatasetRetentionHold(datasetId){return this.hasRetainedGcpSource(datasetId)||this.hasHeldSourceSnapshot(datasetId);}
   hasRetainedSourceInProject(projectId){return Boolean(this.database.prepare(`SELECT 1 FROM datasets d WHERE d.project_id=? AND (
     EXISTS(SELECT 1 FROM retained_dataset_files r WHERE r.dataset_id=d.id)
     OR EXISTS(SELECT 1 FROM retained_gcp_sources r WHERE r.dataset_id=d.id)
+    OR EXISTS(SELECT 1 FROM retained_gcp_source_issues r WHERE r.dataset_id=d.id)
     OR EXISTS(SELECT 1 FROM gcp_sets g WHERE g.dataset_id=d.id AND g.source_file_id IS NOT NULL)
     OR EXISTS(SELECT 1 FROM viewer_source_snapshots s WHERE s.dataset_id=d.id AND s.status IN ('held','accepted'))
   ) LIMIT 1`).get(projectId));}

@@ -76,6 +76,13 @@ test('retained raw GCP source blocks dataset, task, project trash and dataset pu
   assert.equal(retainedCsv.source_content,GCP_SOURCE,'original CSV remains in immutable custody after its editable GCP set is deleted');
   assert.throws(()=>database.prepare('UPDATE retained_gcp_sources SET source_content=? WHERE dataset_id=?').run('tampered',dataset.id),/immutable/);
   assert.throws(()=>database.prepare('DELETE FROM retained_gcp_sources WHERE dataset_id=?').run(dataset.id),/permanent/);
+  const reimported=gcp.importSet({datasetId:dataset.id,displayName:'Control retry',sourceFormat:'generic-csv-v1',sourceFileId:'gcp-file',
+    sourceFilename:'control.csv',sourceSha256:GCP_SOURCE_SHA,sourceContent:GCP_SOURCE,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:retention',
+    points:[{externalId:'GCP-01',label:'Target',latitude:44.5,longitude:-88.1,elevationM:243.84,description:null}]});
+  assert.ok(reimported.id,'reimport reuses matching permanent source records after editable GCP-set deletion');
+  assert.equal(database.prepare('SELECT COUNT(*) count FROM retained_dataset_files WHERE dataset_file_id=?').get('gcp-file').count,1);
+  assert.equal(database.prepare('SELECT COUNT(*) count FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(dataset.id,GCP_SOURCE_SHA).count,1);
+  assert.equal(gcp.deleteSet(reimported.id),true);
   const retained=database.prepare('SELECT dataset_file_id,sha256,byte_size,retention_reason FROM retained_dataset_files WHERE dataset_file_id=?').get('gcp-file');
   assert.equal(retained.dataset_file_id,'gcp-file');
   assert.equal(retained.sha256,GCP_SOURCE_SHA);
@@ -105,6 +112,33 @@ test('retained raw GCP source blocks dataset, task, project trash and dataset pu
   database.prepare("INSERT INTO storage_trash(id,entity_type,entity_id,root_key,relative_path,purge_after,created_at) VALUES (?,'dataset',?,'trash','dataset/retained',?,?)")
     .run(trashId,dataset.id,new Date(Date.now()+86400000).toISOString(),createdAt);
   assert.equal(processing.beginPurgeMutation(trashId,'ops:retention'),null);
+});
+
+test('source custody migration verifies legacy CSV bytes and holds corrupt historical evidence', (t) => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'ltds-gcp-backfill-')),file=path.join(root,'viewer.sqlite');
+  let database=openDatabase(file);
+  t.after(()=>{try{database.close();}catch{}fs.rmSync(root,{recursive:true,force:true});});
+  const processing=new ProcessingRepository(database),gcp=new GcpRepository(database),project=processing.createProject({displayName:'Backfill'});
+  const validDataset=processing.createDataset({projectId:project.id,displayName:'Valid CSV',storageMode:'managed',rootKey:'datasets',relativePath:'valid'});
+  const badDataset=processing.createDataset({projectId:project.id,displayName:'Corrupt CSV',storageMode:'managed',rootKey:'datasets',relativePath:'corrupt'});
+  const finalize=(dataset,id)=>processing.finalizeDataset(dataset.id,[{id,relativePath:'photo.jpg',byteSize:0,sha256:crypto.createHash('sha256').digest('hex'),contentType:'image/jpeg'}],crypto.createHash('sha256').digest('hex'));
+  finalize(validDataset,'valid-image');finalize(badDataset,'bad-image');
+  const importSource=(dataset,content,name)=>gcp.importSet({datasetId:dataset.id,displayName:name,sourceFormat:'generic-csv-v1',sourceSha256:crypto.createHash('sha256').update(content).digest('hex'),sourceContent:content,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:test',points:[{externalId:name,label:name,latitude:44.5,longitude:-88.1,elevationM:250,description:null}]});
+  const good=importSource(validDataset,GCP_SOURCE,'Good'),bad=importSource(badDataset,'point_id,label,latitude,longitude,elevation_m\nBAD,Bad,44.5,-88.1,250\n','Bad');
+  database.prepare('UPDATE gcp_sets SET source_content=? WHERE id=?').run('corrupt',bad.id);
+  database.exec(`DROP TRIGGER retained_gcp_sources_no_insert_replace; DROP TRIGGER retained_gcp_sources_no_update; DROP TRIGGER retained_gcp_sources_no_delete;
+    DROP TRIGGER retained_gcp_source_issues_no_insert_replace; DROP TRIGGER retained_gcp_source_issues_no_update; DROP TRIGGER retained_gcp_source_issues_no_delete;
+    DROP INDEX retained_gcp_sources_dataset_sha_idx; DROP INDEX retained_gcp_source_issues_dataset_idx;
+    DROP TABLE retained_gcp_sources; DROP TABLE retained_gcp_source_issues; DELETE FROM schema_migrations WHERE version=47;`);
+  database.close();database=openDatabase(file);
+  assert.equal(database.prepare('SELECT source_content FROM retained_gcp_sources WHERE dataset_id=?').get(validDataset.id).source_content,GCP_SOURCE);
+  assert.equal(database.prepare('SELECT issue_code FROM retained_gcp_source_issues WHERE gcp_set_id=?').get(bad.id).issue_code,'source_content_checksum_or_size_mismatch');
+  const recoveredProcessing=new ProcessingRepository(database);
+  assert.equal(recoveredProcessing.hasDatasetRetentionHold(validDataset.id),true);
+  assert.equal(recoveredProcessing.hasDatasetRetentionHold(badDataset.id),true,'unverified historical bytes remain held for review');
+  assert.equal(recoveredProcessing.beginTrashMutation(badDataset.id,'ops:test'),null);
+  assert.equal(recoveredProcessing.trashProject(project.id,'ops:test'),null);
+  assert.ok(good.id);
 });
 
 test('image suggestions reuse indexed EXIF GPS and rank distance without claiming visibility', (t) => {

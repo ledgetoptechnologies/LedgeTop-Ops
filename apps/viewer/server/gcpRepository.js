@@ -118,7 +118,11 @@ class GcpRepository {
       if(sourceFileId){
         const source=this.database.prepare('SELECT id,sha256,byte_size FROM dataset_files WHERE id=? AND dataset_id=?').get(sourceFileId,datasetId);
         if(!source||source.sha256!==sourceSha256)throw Object.assign(new Error('GCP source file changed during import'),{code:'invalid_source_file'});
-        this.database.prepare(`INSERT INTO retained_dataset_files
+        const retainedFile=this.database.prepare('SELECT dataset_id,sha256,byte_size FROM retained_dataset_files WHERE dataset_file_id=?').get(source.id);
+        if(retainedFile){
+          if(retainedFile.dataset_id!==datasetId||retainedFile.sha256!==source.sha256||retainedFile.byte_size!==source.byte_size)
+            throw Object.assign(new Error('retained GCP source metadata does not match the dataset file'),{code:'invalid_source_file'});
+        }else this.database.prepare(`INSERT INTO retained_dataset_files
           (dataset_file_id,dataset_id,sha256,byte_size,retention_reason,created_at) VALUES (?,?,?,?,'gcp_source',?)`)
           .run(source.id,datasetId,source.sha256,source.byte_size,timestamp);
       }
