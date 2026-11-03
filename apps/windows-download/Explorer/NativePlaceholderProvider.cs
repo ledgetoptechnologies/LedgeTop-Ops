@@ -63,6 +63,15 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         if (directories.Any(files.ContainsKey)) throw new TransferException("A provider path cannot be both a file and a directory.");
         connection = new(new NativeConnection(root), key => new CloudFilesCallbackDispatcher(source, channel, principal, key,
             cacheDirectory, async (coordinator, identity, context, token) => {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                if (Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") == "1") {
+                    if (identity.SourceAlias != "synthetic" || identity.Origin != "https://source.example.invalid" ||
+                        identity.PrincipalId != "odqp1_" + new string('f', 64)) throw new IOException("Synthetic probe scope mismatch.");
+                    var bytes = System.Text.Encoding.UTF8.GetBytes(new string('x', 100_000));
+                    await CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(identity, context, bytes, token).ConfigureAwait(false);
+                    return;
+                }
+#endif
                 Notice("Downloading " + identity.FileName);
                 try {
                     await CloudFilesNativeTransfer.HydrateForCallbackAsync(coordinator, identity, context, token,

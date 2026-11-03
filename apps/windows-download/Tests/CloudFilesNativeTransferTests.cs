@@ -11,6 +11,7 @@ internal static class CloudFilesNativeTransferTests {
     internal static IEnumerable<(string Name,Func<Task> Run)> Groups=>[
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         ("diagnostic-only suppression skips initial and periodic progress but settles native bytes",SuppressedProgress),
+        ("diagnostic memory transfer validates bytes and settles an aligned range",SyntheticMemory),
 #endif
         ("native x64 ABI and pinned verified chunks preserve full keys and EOF range",Transfer),
         ("native malformed and empty callback ranges reject before native calls",Bounds),
@@ -38,6 +39,14 @@ internal static class CloudFilesNativeTransferTests {
         Assert(p.Successes.Single().Data.SequenceEqual(Bytes.Skip(147456)));
     }
 #if LEDGETOP_NATIVE_DIAGNOSTICS
+    private static async Task SyntheticMemory(){
+        var b=new Boundary();await CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(Identity,Context,Bytes,default,b);
+        Assert(b.Successes.SelectMany(x=>x.Data).SequenceEqual(Bytes)&&b.Failures.Count==0);
+        var partial=new Boundary();await CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(Identity,Context with{RequiredOffset=147456,RequiredLength=Bytes.Length-147456},Bytes,default,partial);
+        Assert(partial.Successes.Single().Data.SequenceEqual(Bytes.Skip(147456)));
+        var bad=Bytes.ToArray();bad[0]^=1;var refused=new Boundary();
+        await Reject(()=>CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(Identity,Context,bad,default,refused));Assert(refused.Events.Count==0);
+    }
     private static async Task SuppressedProgress(){
         const string key="LEDGETOP_TEST_SUPPRESS_NATIVE_PROGRESS";
         var previous=Environment.GetEnvironmentVariable(key);
