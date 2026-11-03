@@ -844,6 +844,38 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.equal(await client.evaluate(`getComputedStyle(document.querySelector('.project-no-matches')).display!=='none'`), true, `${viewport.name}: no-match message missing`);
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='Johnson'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
 
+    // If hierarchy metadata is temporarily absent from the loaded page, the
+    // current IDs must remain selectable so a no-op cannot clear the assignment.
+    const unloadedOrganization = runtime.hierarchy.organizations.find(item => item.id === 'org-archived');
+    const unloadedGroup = runtime.hierarchy.groups.find(item => item.id === 'group-archived');
+    runtime.hierarchy.organizations = runtime.hierarchy.organizations.filter(item => item.id !== 'org-archived');
+    runtime.hierarchy.groups = runtime.hierarchy.groups.filter(item => item.id !== 'group-archived');
+    await client.command('Page.reload');
+    await waitFor(client, "document.querySelectorAll('[data-project-name]').length === 3", `${viewport.name}: workspace did not reload without current hierarchy metadata`);
+    await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
+    await waitFor(client, "document.querySelector('.project-page') !== null", `${viewport.name}: project with unloaded hierarchy metadata did not open`);
+    await client.evaluate(`document.querySelector('[data-action="set-project-customer"][data-id="project-quarry"]').click()`);
+    await waitFor(client, `document.querySelector('.workspace-decision[open] h2')?.textContent === 'Set customer for Alpha Quarry'`, `${viewport.name}: unloaded customer assignment dialog did not open`);
+    const unloadedCustomerSelection = await client.evaluate(`(() => { const field=document.querySelector('.workspace-decision[open] form').elements.namedItem('organizationId'); return {value:field.value,labels:[...field.options].map(option=>option.textContent)}; })()`);
+    assert.equal(unloadedCustomerSelection.value, 'org-archived', `${viewport.name}: unloaded current customer must remain selected`);
+    assert.ok(unloadedCustomerSelection.labels.includes('Current customer (not loaded)'), `${viewport.name}: unloaded current customer must be labeled`);
+    const assignmentWritesBeforeUnloadedSave = runtime.requests.filter(item => item.method === 'PATCH' && item.path === '/api/v1/projects/project-quarry/hierarchy').length;
+    await decide('Set customer for Alpha Quarry', { organizationId: 'org-archived' });
+    await waitFor(client, `document.querySelector('.workspace-decision[open] h2')?.textContent === 'Choose a group'`, `${viewport.name}: unloaded current group choice did not open`);
+    const unloadedGroupSelection = await client.evaluate(`(() => { const field=document.querySelector('.workspace-decision[open] form').elements.namedItem('groupId'); return {value:field.value,labels:[...field.options].map(option=>option.textContent)}; })()`);
+    assert.equal(unloadedGroupSelection.value, 'group-archived', `${viewport.name}: unloaded current group must remain selected`);
+    assert.ok(unloadedGroupSelection.labels.includes('Current group (not loaded)'), `${viewport.name}: unloaded current group must be labeled`);
+    await decide('Choose a group', { groupId: 'group-archived' });
+    await waitFor(client, "document.querySelector('#workspace-toast')?.textContent.includes('No change made')", `${viewport.name}: unchanged unloaded assignment must be confirmed`);
+    assert.equal(runtime.requests.filter(item => item.method === 'PATCH' && item.path === '/api/v1/projects/project-quarry/hierarchy').length, assignmentWritesBeforeUnloadedSave, `${viewport.name}: unchanged unloaded assignment must not send a clearing request`);
+    assert.deepEqual(runtime.hierarchy.assignments.get('project-quarry'), { organizationId: 'org-archived', groupId: 'group-archived', hierarchyRevision: 4 }, `${viewport.name}: unloaded assignment must remain intact`);
+    runtime.hierarchy.organizations.push(unloadedOrganization);
+    runtime.hierarchy.groups.push(unloadedGroup);
+    await client.command('Page.reload');
+    await waitFor(client, "document.querySelector('.project-page') !== null", `${viewport.name}: project did not recover after hierarchy metadata returned`);
+    await client.evaluate(`document.querySelector('.workspace-breadcrumb [data-section="dashboard"]').click()`);
+    await waitFor(client, "document.querySelector('#project-filter') !== null", `${viewport.name}: Projects did not return after metadata recovery`);
+
     await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-johnson"]').click()`);
     await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Johnson Road Survey tasks and actions'", `${viewport.name}: project selection failed`);
     assert.equal(await client.evaluate(`(() => { const card=document.querySelector('.project-row.selected'),toggle=card?.querySelector('[data-action="open-project"]'),detail=card?.querySelector(':scope > .project-detail'); return Boolean(detail && toggle?.getAttribute('aria-expanded')==='true' && toggle.getAttribute('aria-controls')===detail.id && !detail.querySelector('.project-title')); })()`), true, `${viewport.name}: selected project tasks must expand inside their own card`);
