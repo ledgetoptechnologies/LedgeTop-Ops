@@ -80,8 +80,12 @@ internal static class SyntheticMemoryNative {
                 await coordinator.SyntheticCacheStageAsync(identity, "quota-ownership", CancellationToken.None);
                 if (!File.Exists(Path.Combine(scope, ".verified-hydration-owner")) || !File.Exists(Path.Combine(entry, ".verified-hydration-owner")))
                     throw new IOException("Synthetic ownership stage did not create expected markers.");
+                await coordinator.SyntheticCacheStageAsync(identity, "quota-ownership", CancellationToken.None);
                 var events = NativeStallTrace.Snapshot(capture).Select(e => e.Kind).ToArray();
-                if (events.Count(e => e == NativeStallTrace.Stage.CacheQuotaAcquired) != 2 ||
+                if (events.Count(e => e == NativeStallTrace.Stage.CacheQuotaAcquired) != 3 ||
+                    events.Count(e => e == NativeStallTrace.Stage.SyntheticRootPrepareExit) != 3 ||
+                    events.Count(e => e == NativeStallTrace.Stage.CacheScopeOwnEnter) != 1 ||
+                    events.Count(e => e == NativeStallTrace.Stage.CacheEntryOwnEnter) != 1 ||
                     !events.Contains(NativeStallTrace.Stage.OwnedMarkerFlushExit)) throw new IOException("Synthetic cache stages omitted expected trace.");
             } finally { NativeStallTrace.Disable(capture); }
             var rejected = false; try { await coordinator.SyntheticCacheStageAsync(identity, "unknown", CancellationToken.None); } catch (TransferException) { rejected = true; }

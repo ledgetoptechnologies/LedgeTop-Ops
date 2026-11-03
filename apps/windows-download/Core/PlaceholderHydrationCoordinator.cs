@@ -122,6 +122,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         NativeStallTrace.Record(NativeStallTrace.Stage.AdmissionEnter);
         using var admission = await HydrationCacheConcurrency.AcquireAsync(root, identity.ScopeKey + identity.CacheKey, token, exclusive: false).ConfigureAwait(false);
         NativeStallTrace.Record(NativeStallTrace.Stage.AdmissionAcquired);
+        TraceCacheAction(NativeStallTrace.Stage.SyntheticRootPrepareEnter, NativeStallTrace.Stage.SyntheticRootPrepareExit, () => { RequireSafe(root); Owned(root); });
         var quotaLock = Path.Combine(root, ".hydration-cache.lock"); RequireSafe(quotaLock);
         NativeStallTrace.Record(NativeStallTrace.Stage.CacheLegacyLeaseEnter);
         admission.AcquireExclusiveLegacy(quotaLock, FileMode.OpenOrCreate);
@@ -130,10 +131,14 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             if (stage == "quota-ownership") {
                 var scope = Path.Combine(root, identity.ScopeKey);
                 var entry = Path.Combine(scope, identity.CacheKey);
-                _ = TraceCacheValue(NativeStallTrace.Stage.CacheScopeCheckEnter, NativeStallTrace.Stage.CacheScopeCheckExit, () => OwnedExisting(scope));
-                _ = TraceCacheValue(NativeStallTrace.Stage.CacheEntryCheckEnter, NativeStallTrace.Stage.CacheEntryCheckExit, () => OwnedExisting(entry));
-                TraceCacheAction(NativeStallTrace.Stage.CacheScopeOwnEnter, NativeStallTrace.Stage.CacheScopeOwnExit, () => Owned(scope));
-                TraceCacheAction(NativeStallTrace.Stage.CacheEntryOwnEnter, NativeStallTrace.Stage.CacheEntryOwnExit, () => Owned(entry));
+                var scopeExists = TraceCacheValue(NativeStallTrace.Stage.CacheScopeCheckEnter, NativeStallTrace.Stage.CacheScopeCheckExit, () => OwnedExisting(scope));
+                var entryExists = TraceCacheValue(NativeStallTrace.Stage.CacheEntryCheckEnter, NativeStallTrace.Stage.CacheEntryCheckExit, () => OwnedExisting(entry));
+                // As in production, only create/verify ownership when missing.
+                // This isolated stage intentionally omits the capacity scan and reservation.
+                if (!scopeExists || !entryExists) {
+                    TraceCacheAction(NativeStallTrace.Stage.CacheScopeOwnEnter, NativeStallTrace.Stage.CacheScopeOwnExit, () => Owned(scope));
+                    TraceCacheAction(NativeStallTrace.Stage.CacheEntryOwnEnter, NativeStallTrace.Stage.CacheEntryOwnExit, () => Owned(entry));
+                }
             }
         });
     }
