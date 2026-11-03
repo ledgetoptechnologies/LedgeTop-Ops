@@ -16,6 +16,7 @@ internal sealed class ExperimentalOwnedStream : IDisposable
     private readonly List<SafeFileHandle> directories = [];
     private FileStream? stream;
     private bool sealedStream;
+    internal static Action? BeforeSealFlushTestHook, BeforeSealHashTestHook, AfterStreamDisposeTestHook;
     internal readonly record struct Identity(ulong Volume, Guid FileId);
     internal Identity SourceIdentity { get; private set; }
 
@@ -60,10 +61,14 @@ internal sealed class ExperimentalOwnedStream : IDisposable
         lock (gate) {
             var file = stream ?? throw new ObjectDisposedException(nameof(ExperimentalOwnedStream));
             if (sealedStream) throw new InvalidOperationException("Experimental stream is already sealed.");
+            // Enter quarantine before any flush or hash operation: if either
+            // fails, no subsequent write or retry can reuse ambiguous bytes.
+            sealedStream = true;
+            BeforeSealFlushTestHook?.Invoke();
             file.Flush(true); file.Position = 0;
+            BeforeSealHashTestHook?.Invoke();
             var digest = SHA256.HashData(file);
             if (GetIdentity(file.SafeFileHandle) != SourceIdentity) throw new IOException("Experimental source identity changed.");
-            sealedStream = true;
             return digest;
         }
     }
@@ -73,9 +78,17 @@ internal sealed class ExperimentalOwnedStream : IDisposable
     public void Dispose()
     {
         lock (gate) {
-            stream?.Dispose(); stream = null;
-            for (var i = directories.Count - 1; i >= 0; i--) directories[i].Dispose();
-            directories.Clear();
+            Exception? failure = null;
+            try { if (stream is not null) { stream.Dispose(); AfterStreamDisposeTestHook?.Invoke(); } }
+            catch (Exception error) { failure = error; }
+            finally {
+                stream = null;
+                for (var i = directories.Count - 1; i >= 0; i--) {
+                    try { directories[i].Dispose(); } catch (Exception error) { failure ??= error; }
+                }
+                directories.Clear();
+            }
+            if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
         }
     }
 

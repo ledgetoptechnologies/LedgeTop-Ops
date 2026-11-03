@@ -140,7 +140,65 @@ internal static class ReservationHandlePrototype
         if (!TryDeleteExact(fixture, directory, directoryId, path, Owned, new(identity.Volume, identity.FileId)))
             throw new IOException("Experimental fixture deletion was not confirmed.");
         recordDisposition();
+        ExperimentalSealFailures(fixture, directory, directoryId, recordDisposition);
+        ExperimentalDisposeFailure(fixture, directory, directoryId, recordDisposition);
         Console.WriteLine("PASS gated experimental owned-source sealing and exact identity cleanup; rename unsupported.");
+    }
+
+    private static void ExperimentalSealFailures(string fixture, SafeFileHandle directory, FileId directoryId, Action recordDisposition)
+    {
+        foreach (var beforeFlush in new[] { true, false }) {
+            var path = Path.Combine(fixture, beforeFlush ? "experimental-flush.record" : "experimental-hash.record");
+            LedgeTop.WindowsDownload.ExperimentalOwnedStream.Identity identity;
+            using (var owned = LedgeTop.WindowsDownload.ExperimentalOwnedStream.CreateNew(path)) {
+                identity = owned.SourceIdentity; owned.Write(Owned);
+                Action fail = () => throw new IOException("Injected synthetic seal failure.");
+                if (beforeFlush) LedgeTop.WindowsDownload.ExperimentalOwnedStream.BeforeSealFlushTestHook = fail;
+                else LedgeTop.WindowsDownload.ExperimentalOwnedStream.BeforeSealHashTestHook = fail;
+                try {
+                    var failed = false; try { owned.SealAndHash(); } catch (IOException) { failed = true; }
+                    if (!failed) throw new IOException("Injected seal failure was not observed.");
+                    var refused = false; try { owned.Write(Owned); } catch (InvalidOperationException) { refused = true; }
+                    if (!refused) throw new IOException("Failed seal allowed subsequent writes.");
+                    refused = false; try { owned.SealAndHash(); } catch (InvalidOperationException) { refused = true; }
+                    if (!refused) throw new IOException("Failed seal allowed an unsafe retry.");
+                } finally {
+                    LedgeTop.WindowsDownload.ExperimentalOwnedStream.BeforeSealFlushTestHook = null;
+                    LedgeTop.WindowsDownload.ExperimentalOwnedStream.BeforeSealHashTestHook = null;
+                }
+            }
+            if (!TryDeleteExact(fixture, directory, directoryId, path, Owned, new(identity.Volume, identity.FileId)))
+                throw new IOException("Failed-seal fixture cleanup was not confirmed.");
+            recordDisposition();
+        }
+    }
+
+    private static void ExperimentalDisposeFailure(string fixture, SafeFileHandle directory, FileId directoryId, Action recordDisposition)
+    {
+        var child = Path.Combine(fixture, "experimental-dispose-dir"); var moved = child + ".moved";
+        if (!CreateDirectoryW(child, 0)) throw new IOException("Synthetic child creation failed.");
+        var path = Path.Combine(child, "source.record");
+        var owned = LedgeTop.WindowsDownload.ExperimentalOwnedStream.CreateNew(path); var identity = owned.SourceIdentity;
+        try {
+            owned.Write(Owned);
+            LedgeTop.WindowsDownload.ExperimentalOwnedStream.AfterStreamDisposeTestHook = () => throw new IOException("Injected synthetic disposal failure.");
+            var failed = false; try { owned.Dispose(); } catch (IOException) { failed = true; }
+            if (!failed) throw new IOException("Injected disposal failure was not observed.");
+        } finally { LedgeTop.WindowsDownload.ExperimentalOwnedStream.AfterStreamDisposeTestHook = null; owned.Dispose(); }
+        // A successful rename away and back demonstrates the source-parent
+        // handle was released even though disposal reported an error.
+        Directory.Move(child, moved); Directory.Move(moved, child);
+        using var childHandle = Open(child, ReadAttributes | Delete, ShareRead | ShareWrite, BackupSemantics | OpenReparsePoint);
+        RequireKind(childHandle, isDirectory: true); var childId = Id(childHandle); VerifyDirectoryBinding(child, childHandle, childId);
+        if (!TryDeleteExact(child, childHandle, childId, path, Owned, new(identity.Volume, identity.FileId)))
+            throw new IOException("Failed-dispose fixture file cleanup was not confirmed.");
+        recordDisposition();
+        if (Directory.EnumerateFileSystemEntries(child).Any()) throw new IOException("Synthetic child is not empty.");
+        byte disposition = 1;
+        if (!SetFileInformationByHandle(childHandle, 4, ref disposition, 1)) throw new IOException("Synthetic child removal failed.");
+        recordDisposition(); childHandle.Dispose();
+        if (!ConfirmedAbsent(() => File.GetAttributes(child), () => VerifyDirectoryBinding(fixture, directory, directoryId)))
+            throw new IOException("Synthetic child absence was not confirmed.");
     }
 #endif
 
