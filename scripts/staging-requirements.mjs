@@ -560,7 +560,7 @@ export const REQUIRED_STAGING_MIGRATION_SHA256 = Object.freeze({
     "0240_viewer_direct_grant_receipt_immutability.sql": "01e72b268ce49b3b7d684a68be2809c972414033a8e60e543d1d8aa442427af2",
     "0241_app_release_pilot.sql": "c93f3549f143bcb7cdfe64131b4ae7616df72c8fb9881562a082534b5f5f5048",
     "0242_client_ops_triage_inquiries.sql": "8f25db33d95c77425a52031d0e4255b133e2a2b91025d427c0d118ee305a4b66",
-    "0244_direct_workspace_folder_grants.sql": "65669e2e562d203aa4498e475f7028c7aef2f8b8759ee29f90d1106859279e55",
+    "0244_direct_workspace_folder_grants.sql": "0699ffbfcd28d827c1cffa7c7688506b5c21013cf9e2c5e9712f4caf30116383",
   }),
   operations: Object.freeze({
     "0123_native_directory_authority_history.sql": "5e36893c738c6a058271db521e4c5e8907009f135c25ee635f2f1ec709b3caf5",
