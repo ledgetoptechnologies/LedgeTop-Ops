@@ -90,6 +90,9 @@ function AssertInventoryUnchanged {
   if ((Get-Item -LiteralPath $PayloadInventoryPath).Length -ne $manifestBytes.Length -or (Hash $PayloadInventoryPath) -cne $manifestHash) { throw 'Payload inventory changed after verified snapshot.' }
 }
 function NsisLiteral([string]$Value) { $Value.Replace('$','$$').Replace('"','$\"') }
+# The publish step must use the same four-part version for Version,
+# AssemblyVersion and FileVersion as AppVersion; the installed app and updater
+# read the assembly's version, not the installer's directory name.
 function ApplicationMetadata([string]$AssemblyPath) {
   Add-Type -AssemblyName System.Reflection.Metadata
   $stream = [IO.File]::OpenRead($AssemblyPath)
@@ -117,6 +120,9 @@ function ApplicationMetadata([string]$AssemblyPath) {
       if ($channels.Count -ne 1 -or $channels[0] -cne 'pilot' -or $modes -ne 0 -or $protocols.Count -ne 1 -or $protocols[0] -cne '1' -or
           $freshQualifications.Count -ne 1 -or $freshQualifications[0] -cne 'true') {
         throw 'Payload must be a staging-qualified pilot, non-developer build with exactly one installer maintenance protocol1 marker.'
+      }
+      if ($reader.GetAssemblyDefinition().Version.ToString() -cne $AppVersion) {
+        throw 'Application assembly version differs from installer version. Publish the app with the matching Version, AssemblyVersion and FileVersion.'
       }
     } finally { $pe.Dispose() }
   } finally { $stream.Dispose() }

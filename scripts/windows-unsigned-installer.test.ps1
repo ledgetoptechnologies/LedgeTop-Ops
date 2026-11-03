@@ -14,6 +14,7 @@ foreach ($directory in @('helper','Notices')) { [IO.Directory]::CreateDirectory(
 $type = 'InstallerFixture'+[Guid]::NewGuid().ToString('N')
 Add-Type -OutputAssembly (Join-Path $payload 'LedgeTop.Files.dll') -TypeDefinition @"
 using System.Reflection;
+[assembly:AssemblyVersion("0.0.0.5")]
 [assembly:AssemblyMetadata("LedgeTop.ReleaseChannel","pilot")]
 [assembly:AssemblyMetadata("LedgeTop.InstallerMaintenanceProtocol","1")]
 [assembly:AssemblyMetadata("LedgeTop.FreshGenerationStagingQualification","true")]
@@ -79,6 +80,7 @@ function Reject([string]$Name,[hashtable]$Changes,[string]$Expected) {
   if (Test-Path -LiteralPath $candidate.OutputDirectory) { throw 'Refused input created output or reached compiler.' }
   $passed.Add($Name)
 }
+Reject 'application assembly version differs from installer' @{AppVersion='0.0.0.6'} 'assembly version differs from installer version'
 # A prebuilt/stale DLL can carry diagnostics despite an ordinary packaged receipt.
 $diagAssembly=BuildCoreFixture 'DiagnosticCore' $true
 $corePath=Join-Path $payload 'LedgeTop.WindowsDownload.dll'; $coreBackup=Join-Path $root 'GoodCore.dll'
