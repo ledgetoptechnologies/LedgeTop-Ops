@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
+const https = require('node:https');
 const { spawn } = require('node:child_process');
 const p = require('../server/referenceProtocol');
 const { CHUNK_BYTES, PREFIX, REQUEST_HEADER, SourceRangeV2Error, SourceRangeV2BrokerCandidate, createSourceRangeV2Handler, canonicalIdentity, requestIdFor } = require('../server/sourceRangeV2Candidate');
@@ -112,11 +113,13 @@ test('Processing Python client resumes an interrupted synthetic transfer after c
   f.transferRequest.sourceVersion = `dataset:interop:${f.manifest.sha256}`;
   const grant = f.mint();
   assert.equal(grant.expiresAt, f.transferRequest.expiresAt);
-  let handler = createSourceRangeV2Handler({ broker: f.broker, enabled: true, isProtectedTransport: () => true });
+  const tlsFixture = path.join(__dirname, 'fixtures', 'source-range-tls');
+  const tlsOptions = { key: fs.readFileSync(path.join(tlsFixture, 'localhost.key')), cert: fs.readFileSync(path.join(tlsFixture, 'localhost.crt')) };
+  let handler = createSourceRangeV2Handler({ broker: f.broker, enabled: true, isProtectedTransport: req => req.socket?.encrypted === true });
   let failSecondRangeOnce = true;
   const ranges = [];
   const secondRange = `bytes=${CHUNK_BYTES}-${f.bytes.length - 1}`;
-  const server = http.createServer(async (req, res) => {
+  const server = https.createServer(tlsOptions, async (req, res) => {
     ranges.push(req.headers.range);
     if (req.headers.range === secondRange && failSecondRangeOnce) {
       failSecondRangeOnce = false;
@@ -136,30 +139,14 @@ test('Processing Python client resumes an interrupted synthetic transfer after c
   const destination = path.join(f.root, 'python-output');
   fs.mkdirSync(destination, { mode: 0o700 });
   const script = String.raw`
-import hashlib, json, pathlib, sys, urllib.parse, urllib.request
+import hashlib, json, pathlib, ssl, sys
 from processing.source_range_transfer import SourceRangeClient, TransferError, validate_source_grant
 
 payload = json.load(sys.stdin)
-class ResponseBridge:
-    def __init__(self, response, original_url): self.response, self.original_url = response, original_url
-    @property
-    def status(self): return self.response.status
-    @property
-    def headers(self): return self.response.headers
-    def geturl(self): return self.original_url
-    def read(self, size=-1): return self.response.read(size)
-    def close(self): return self.response.close()
-
-def test_only_loopback_bridge(request, *, timeout):
-    original = request.full_url
-    parsed = urllib.parse.urlsplit(original)
-    local = urllib.request.Request(payload['loopback'] + parsed.path, headers=dict(request.header_items()), method=request.get_method())
-    response = urllib.request.build_opener().open(local, timeout=timeout)
-    return ResponseBridge(response, original)
-
 try:
     grant = validate_source_grant(payload['grant'], job=payload['job'])
-    client = SourceRangeClient('https://range.invalid', payload['ledger'], opener=test_only_loopback_bridge)
+    tls = ssl.create_default_context(cafile=payload['caFile'])
+    client = SourceRangeClient(payload['origin'], payload['ledger'], ssl_context=tls)
     result = client.download_object(grant=grant, object_id='photo-1', destination=payload['destination'])
     data = pathlib.Path(result).read_bytes()
     print(json.dumps({'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}))
@@ -182,7 +169,8 @@ except TransferError as error:
       child.once('error', error => { clearTimeout(timer); resolve({ error }); });
       child.once('close', (status, signal) => { clearTimeout(timer); resolve({ status, signal }); });
       child.stdin.end(JSON.stringify({
-        grant: clientGrant, job: f.job, loopback: `http://127.0.0.1:${server.address().port}`,
+        grant: clientGrant, job: f.job, origin: `https://127.0.0.1:${server.address().port}`,
+        caFile: path.join(tlsFixture, 'localhost.crt'),
         ledger: path.join(f.root, 'python-ledger.sqlite'), destination: path.join(destination, 'photo.jpg'),
       }));
     });
@@ -201,7 +189,7 @@ except TransferError as error:
     grantTokenKey: grantKey, now: f.getNow, maxGrantTtlMs: 5000 });
   grantKey.fill(0);
   assert.deepEqual(f.mint(), grant);
-  handler = createSourceRangeV2Handler({ broker: f.broker, enabled: true, isProtectedTransport: () => true });
+  handler = createSourceRangeV2Handler({ broker: f.broker, enabled: true, isProtectedTransport: req => req.socket?.encrypted === true });
 
   const resumed = await runClient(grant);
   assert.equal(resumed.timedOut, false, 'restarted Processing subprocess completed within the bounded timeout');
