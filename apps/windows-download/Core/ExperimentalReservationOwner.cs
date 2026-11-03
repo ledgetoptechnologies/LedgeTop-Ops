@@ -36,7 +36,7 @@ internal sealed class ExperimentalReservationOwner
     internal static object? ReceiptStagePreCreateTokenTestHook;
     internal static string? ReceiptQuotaFailureStageTestHook;
     internal static object? ReceiptQuotaFailureTokenTestHook;
-    internal static bool ReceiptMarkerFailureTestHook;
+    internal static bool ReceiptMarkerFailureTestHook, ReceiptCleanupFailureTestHook;
     internal static object? ReceiptMarkerFailureTokenTestHook;
     private readonly long growth;
     internal long Growth { get { lock (gate) { if (finished || uncertain) throw new IOException("Reservation owner unavailable."); return growth; } } }
@@ -220,7 +220,9 @@ internal sealed class ExperimentalReservationOwner
         }
         internal void RemoveSyntheticReservationForTest(string root, string key, CancellationToken token = default) => Execute(root, key, () => RunQuota(_ => {
             if (!stagedVerified || stagedRecord is null || stagedPath is null) throw new IOException("Synthetic staged record is unavailable.");
-            VerifyStagedRecord(); byte disposition = 1;
+            VerifyStagedRecord();
+            if (ReceiptCleanupFailureTestHook) throw new IOException("Injected synthetic cleanup failure.");
+            byte disposition = 1;
             if (!SetFileInformationByHandle(stagedRecord.SafeFileHandle, 4, ref disposition, 1)) throw new IOException("Synthetic staged record disposition failed.");
             stagedRecord.Dispose(); stagedRecord = null;
             try { using var unexpected = ExperimentalOwnedStream.Open(stagedPath, 0x80, 7, 3, 0x00200000); throw new IOException("Synthetic staged record remains present."); }

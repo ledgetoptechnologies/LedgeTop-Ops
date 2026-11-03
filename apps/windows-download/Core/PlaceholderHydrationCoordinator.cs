@@ -454,16 +454,27 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         ExperimentalPauseAfterAuthorizationForTest(); token.ThrowIfCancellationRequested();
         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
         if (!receipt.StageSyntheticReservationForTest(root, identity, resolved.Spec, this, token)) return false;
-        if (ExperimentalAfterStageTestSignal is not null) {
-            ExperimentalAfterStageTestSignal.Set();
-            if (ExperimentalAfterStageReleaseTestSignal is null || !ExperimentalAfterStageReleaseTestSignal.Wait(TimeSpan.FromSeconds(10)))
-                throw new IOException("Synthetic post-stage boundary timed out.");
+        var completed = false;
+        try {
+            if (ExperimentalAfterStageTestSignal is not null) {
+                ExperimentalAfterStageTestSignal.Set();
+                if (ExperimentalAfterStageReleaseTestSignal is null || !ExperimentalAfterStageReleaseTestSignal.Wait(TimeSpan.FromSeconds(10)))
+                    throw new IOException("Synthetic post-stage boundary timed out.");
+            }
+            token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+            // The quota transaction is already closed; fresh authority is required
+            // before this synthetic operation may report success.
+            await ExperimentalReauthorizeStagedAsync(identity, receipt, token).ConfigureAwait(false);
+            completed = true; return true;
+        } finally {
+            if (!completed) {
+                // Preserve the original denial/cancellation. Cleanup uses no caller
+                // cancellation and the exact retained record handle; if it is uncertain,
+                // the receipt keeps its rooted handles and refuses disposal.
+                try { receipt.RemoveSyntheticReservationForTest(root, identity.ScopeKey + identity.CacheKey); receipt.Dispose(); }
+                catch { }
+            }
         }
-        token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
-        // The quota transaction is already closed. A failed fresh authority
-        // check leaves the staged record owned and reports no success.
-        await ExperimentalReauthorizeStagedAsync(identity, receipt, token).ConfigureAwait(false);
-        return true;
     }
     internal async Task ExperimentalReauthorizeStagedAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt receipt, CancellationToken token = default)
     {
