@@ -1337,6 +1337,22 @@ test.describe("unified home without business switching", () => {
     await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies/);
   });
 
+  test("with online requests switched off, home offers no New request and shows no error", async ({page}) => {
+    // What the worker answers while CLIENT_PORTAL_REQUEST_V2_ENABLED and CLIENT_PORTAL_OPS_INQUIRIES_ENABLED are "false".
+    await mock(page, (route, call) => {
+      if (call.path === "/api/client/request-services") return route.fulfill({json: {services: [], unavailable: [], inquiryKinds: []}});
+      if (call.path === "/api/client/inquiries") return route.fulfill({status: 403, json: {error: "Service request access is unavailable"}});
+      if (call.path === "/api/client/v2/workspaces") return route.fulfill({json: {workspaces: listed}});
+      const match = call.path.match(/^\/api\/client\/v2\/workspaces\/(workspace-[bc])\/context$/);
+      if (match) return route.fulfill({json: {...context(match[1]!), workspace: listed.find(item => item.id === match[1])}});
+      return undefined;
+    });
+    await page.goto("/portal");
+    await expect(page.locator(".portal-overview-tile").filter({hasText: "Requests in progress"}).locator(".portal-overview-value")).toHaveText("0");
+    await expect(page.getByRole("button", {name: "New request"})).toHaveCount(0);
+    await expect(page.getByText("General requests you’ve sent couldn’t be loaded right now. Try again in a moment.")).toHaveCount(0);
+  });
+
   test("deliveries are one flat list and feedback one neutral card, with no business or division", async ({page}) => {
     const calls = await mockBoth(page); await page.goto("/portal/deliveries");
     const folders = page.locator(".unified-deliveries");
@@ -1400,6 +1416,73 @@ test.describe("client header matches Operations", () => {
     await again.click();
     await expect.poll(() => logouts).toBe(1);
     await expect(page).toHaveURL(/\/portal$/);
+  });
+
+  test("a sign-in that ends while the menu is open switches to Sign in again without a 401", async ({page}) => {
+    await page.clock.install({time: new Date("2030-01-01T12:00:00Z")});
+    await mock(page, (route, call) => call.path === "/api/client/session/status"
+      ? route.fulfill({json: {serverTime: "2030-01-01T12:00:00.000Z", expiresAt: "2030-01-01T12:00:30.000Z"}}) : undefined);
+    await page.goto("/portal");
+    await page.getByRole("button", {name: /^Account menu for /}).click();
+    const menu = page.getByRole("menu", {name: "Account"});
+    await expect(menu.locator(".account-session-status strong")).toHaveText("Expires Tue, Jan 1, 2030");
+    await page.clock.fastForward(31_000);
+    await expect(menu.locator(".account-session-status strong")).toHaveText("Session expired");
+    await expect(menu.getByRole("menuitem", {name: "Sign in again"})).toHaveAttribute("href", "/cdn-cgi/access/logout");
+  });
+
+  for (const [label, reply] of [
+    ["a server error", {status: 503, json: {error: "Unavailable"}}],
+    ["a malformed expiry", {json: {serverTime: "2030-01-01T12:00:00.000Z", expiresAt: "soon"}}],
+    ["missing times", {json: {}}],
+  ] as const) test(`${label} from session status says the time is unavailable instead of guessing`, async ({page}) => {
+    await mock(page, (route, call) => call.path === "/api/client/session/status" ? route.fulfill(reply) : undefined);
+    await page.goto("/portal");
+    await page.getByRole("button", {name: /^Account menu for /}).click();
+    const menu = page.getByRole("menu", {name: "Account"});
+    await expect(menu.locator(".account-session-status")).toHaveText("Session time unavailable");
+    await expect(menu.locator(".account-session-status strong")).toHaveCount(0);
+    await expect(menu.getByRole("menuitem", {name: "Sign in again"})).toHaveCount(0);
+    await expect(menu.getByRole("menuitem", {name: "Logout"})).toBeVisible();
+  });
+
+  test("the session recheck runs once a minute and skips a hidden tab", async ({page}) => {
+    await page.clock.install({time: new Date("2030-01-01T12:00:00Z")});
+    const calls = await mock(page, (route, call) => call.path === "/api/client/session/status"
+      ? route.fulfill({json: {serverTime: "2030-01-01T12:00:00.000Z", expiresAt: "2030-01-03T16:13:30.000Z"}}) : undefined);
+    const checks = () => calls.filter(call => call.path === "/api/client/session/status").length;
+    await page.goto("/portal");
+    await page.getByRole("button", {name: /^Account menu for /}).click();
+    await expect(page.getByRole("menu", {name: "Account"}).locator(".account-session-status strong")).toHaveText("Expires Thu, Jan 3, 2030");
+    await expect.poll(checks).toBe(1);
+    await page.evaluate(() => Object.defineProperty(document, "visibilityState", {configurable: true, get: () => "hidden"}));
+    await page.clock.fastForward(60_001);
+    await page.evaluate(() => Object.defineProperty(document, "visibilityState", {configurable: true, get: () => "visible"}));
+    await page.clock.fastForward(60_001);
+    // Only the visible minute checks again: a hidden-tab check would make this 3.
+    await expect.poll(checks).toBe(2);
+    await page.waitForTimeout(250);
+    expect(checks()).toBe(2);
+  });
+
+  // America/Chicago is UTC-6 in winter and UTC-5 in summer. Each instant is 05:30 UTC, so the wrong offset shows the wrong day.
+  test.describe("in a browser far from Chicago", () => {
+    test.use({timezoneId: "Asia/Tokyo"});
+    for (const [expiresAt, shown] of [
+      ["2030-01-15T05:30:00.000Z", "Expires Mon, Jan 14, 2030"],
+      ["2030-03-10T05:30:00.000Z", "Expires Sat, Mar 9, 2030"],
+      ["2030-03-11T05:30:00.000Z", "Expires Mon, Mar 11, 2030"],
+      ["2030-07-01T05:30:00.000Z", "Expires Mon, Jul 1, 2030"],
+      ["2030-11-03T05:30:00.000Z", "Expires Sun, Nov 3, 2030"],
+      ["2030-11-04T05:30:00.000Z", "Expires Sun, Nov 3, 2030"],
+    ] as const) test(`the expiry day stays in Chicago time across daylight saving: ${expiresAt}`, async ({page}) => {
+      await page.clock.install({time: new Date("2030-01-01T00:00:00Z")});
+      await mock(page, (route, call) => call.path === "/api/client/session/status"
+        ? route.fulfill({json: {serverTime: "2030-01-01T00:00:00.000Z", expiresAt}}) : undefined);
+      await page.goto("/portal");
+      await page.getByRole("button", {name: /^Account menu for /}).click();
+      await expect(page.getByRole("menu", {name: "Account"}).locator(".account-session-status strong")).toHaveText(shown);
+    });
   });
 
   test("a native account also shows the verified sign-in email, not a workspace contact", async ({page}) => {
