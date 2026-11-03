@@ -75,7 +75,7 @@ var tests = new (string Name, Func<Task> Run)[] {
     ("metadata cleanup cannot undo a committed successful download", LockedMetadata),
 }.Concat(AccessSessionTests.Groups).Concat(PortalClientTests.Groups).Concat(PortalClientDeadlineTests.Groups).Concat(EmployeeClientTests.Groups)
     .Concat(TransferQueueTests.Groups).Concat(DownloadProgressTests.Groups).Concat(QueuedDownloadSourceTests.Groups)
-    .Concat(PlaceholderHydrationTests.Groups).Concat(CloudFilesProbeTests.Groups)
+    .Concat(PlaceholderHydrationTests.Groups).Concat(PreparationOwnershipTests.Groups).Concat(CloudFilesProbeTests.Groups)
     .Concat(CloudFilesNativeTransferTests.Groups).Concat(CloudFilesCallbackTests.Groups).Concat(DownloaderInactivityTests.Groups)
     .Concat(CloudFilesConnectionTests.Groups).Concat(ExplorerDemoSourceTests.Groups).Concat(WindowsAppReleaseClientTests.Groups)
     .Concat(PlaceholderCacheEvictionTests.Groups).Concat(HydrationTimingTests.Groups).Concat(HydrationConcurrencyTests.Groups).Concat(FourSlotAdmissionTests.Groups).Concat(HydrationQuotaGateTests.Groups)
@@ -92,6 +92,7 @@ if (args.Length == 1 && args[0] == "--access-token-coalescing-only")
 if (args.Length == 1 && args[0] == "--portal-deadline-only") tests = PortalClientDeadlineTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--downloader-inactivity-only") tests = DownloaderInactivityTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--hydration-timing-only") tests = HydrationTimingTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--preparation-ownership-only") tests = PreparationOwnershipTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--authorization-timing-only") tests = QueuedDownloadSourceTests.Groups.Where(test => test.Name.StartsWith("queue authorization timing", StringComparison.Ordinal)).ToArray();
 if (args.Length == 1 && args[0] == "--cache-reclamation-only") tests = PlaceholderCacheEvictionTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--cache-admission-timeout-only") tests = PlaceholderCacheEvictionTests.Groups.Where(test => test.Name.StartsWith("cache reclamation admission timeout", StringComparison.Ordinal)).ToArray();
