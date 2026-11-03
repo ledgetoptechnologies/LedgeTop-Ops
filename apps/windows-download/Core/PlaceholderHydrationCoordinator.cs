@@ -627,24 +627,24 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     private (long Used, bool Fits) ExperimentalCapacityDecision(HydrationCacheConcurrency.Lease admission, long growth, CancellationToken token)
     {
         if (growth < 0) throw new ArgumentOutOfRangeException(nameof(growth));
-        (long Used, bool Fits) result = default;
+        (long Used, bool Fits, long Revision) result = default;
         admission.RunExperimentalForRoot(root, () => WithQuota(admission.Quota, () => result = ExperimentalScanUnderQuota(admission, growth), token));
-        return result;
+        return (result.Used, result.Fits);
     }
-    internal bool ExperimentalCanReserveUnderOwnedQuota(HydrationCacheConcurrency.Lease admission, SafeFileHandle quota, long growth)
+    internal (bool Fits, long Revision) ExperimentalCapacityUnderOwnedQuota(HydrationCacheConcurrency.Lease admission, SafeFileHandle quota, long growth)
     {
         if (growth < 0) throw new ArgumentOutOfRangeException(nameof(growth));
         if (!admission.ExperimentalGateHeld || !Monitor.IsEntered(admission.Quota)) throw new InvalidOperationException("Experimental quota transaction is not held.");
-        var result = false;
+        (bool Fits, long Revision) result = default;
         admission.RunExperimentalForRoot(root, () => {
             ExperimentalOwnedStream.RequireRegularKind(quota, false); ExperimentalOwnedStream.RequireSingleLink(quota);
             if (!string.Equals(ExperimentalOwnedStream.FinalPath(quota), Path.Combine(root, ".hydration-quota-v2.lock"), StringComparison.OrdinalIgnoreCase))
                 throw new IOException("Experimental quota binding changed.");
-            result = ExperimentalScanUnderQuota(admission, growth).Fits;
+            var scan = ExperimentalScanUnderQuota(admission, growth); result = (scan.Fits, scan.Revision);
         });
         return result;
     }
-    private (long Used, bool Fits) ExperimentalScanUnderQuota(HydrationCacheConcurrency.Lease admission, long growth)
+    private (long Used, bool Fits, long Revision) ExperimentalScanUnderQuota(HydrationCacheConcurrency.Lease admission, long growth)
     {
         var status = admission.ExperimentalStatus; long revision;
         lock (status.Gate) { if (status.Poisoned) throw new TransferException("Synthetic receipt status is unavailable."); revision = status.Revision; }
@@ -673,7 +673,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             if (ExperimentalScanStatusReleaseTestSignal is null || !ExperimentalScanStatusReleaseTestSignal.Wait(TimeSpan.FromSeconds(10))) throw new IOException("Synthetic scanner status barrier timed out.");
         }
         lock (status.Gate) if (status.Poisoned || status.Revision != revision) throw new TransferException("Synthetic receipt status changed during the scan.");
-        return (used, reserved <= maximumCacheBytes && used <= maximumCacheBytes - reserved && growth <= maximumCacheBytes - reserved - used);
+        return (used, reserved <= maximumCacheBytes && used <= maximumCacheBytes - reserved && growth <= maximumCacheBytes - reserved - used, revision);
     }
     private static long ExperimentalReservedBytes(string directory, Dictionary<string, ExperimentalReservationOwner> retained, Dictionary<string, ExperimentalReservationOwner.StagedSnapshot> staged)
     {

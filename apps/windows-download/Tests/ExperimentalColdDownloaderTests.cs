@@ -1150,6 +1150,38 @@ internal static class ExperimentalColdDownloaderTests
             var entered = new ManualResetEventSlim(); var release = new ManualResetEventSlim(); var secondAttempted = new ManualResetEventSlim();
             Task<bool>? one = null, two = null;
             try {
+                var preCreateEntered = new ManualResetEventSlim(); var preCreateRelease = new ManualResetEventSlim();
+                var stageToken = new object(); var preMarkerToken = new object(); Task<bool>? blockedStage = null;
+                try {
+                    ExperimentalReservationOwner.ReceiptStageBeforeCreateTestSignal = preCreateEntered;
+                    ExperimentalReservationOwner.ReceiptStageBeforeCreateReleaseTestSignal = preCreateRelease;
+                    ExperimentalReservationOwner.ReceiptStagePreCreateTokenTestHook = stageToken;
+                    blockedStage = Task.Run(() => {
+                        try { _ = first.StageSyntheticReservationForTest(root, identityOne, specOne, coordinator); return false; }
+                        catch (TransferException error) when (error.Message == "Synthetic receipt status changed before creation.") { return true; }
+                    });
+                    Check(preCreateEntered.Wait(TimeSpan.FromSeconds(5)));
+                    var preInjected = false; ExperimentalReservationOwner.ReceiptMarkerFailureTestHook = true; ExperimentalReservationOwner.ReceiptMarkerFailureTokenTestHook = preMarkerToken;
+                    try { _ = second.AccountMarker(root, identityTwo.ScopeKey + identityTwo.CacheKey, root); }
+                    catch (IOException error) when (error.Message == "Injected receipt marker failure.") { preInjected = true; }
+                    finally { ExperimentalReservationOwner.ReceiptMarkerFailureTestHook = false; ExperimentalReservationOwner.ReceiptMarkerFailureTokenTestHook = null; }
+                    Check(preInjected); preCreateRelease.Set(); Check(await blockedStage.WaitAsync(TimeSpan.FromSeconds(10)));
+                    var blockedPath = Path.Combine(reservationDir, identityOne.ScopeKey + "-" + identityOne.CacheKey + ".json");
+                    Check(!File.Exists(blockedPath)); AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-quota-v2.lock"));
+                    first.SettleInjectedQuotaFailureForTest(stageToken);
+                    var quarantineScan = await HydrationCacheConcurrency.AcquireAsync(root, "precreate-quarantine-scan", CancellationToken.None);
+                    try {
+                        quarantineScan.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.Open);
+                        var refused = false; try { _ = coordinator.ExperimentalCheckMarkerCapacity(quarantineScan, 0); } catch (IOException) { refused = true; }
+                        Check(refused);
+                    } finally { quarantineScan.Dispose(); }
+                    second.SettleInjectedMarkerFailureForTest(preMarkerToken);
+                } finally {
+                    preCreateRelease.Set(); ExperimentalReservationOwner.ReceiptStageBeforeCreateTestSignal = null;
+                    ExperimentalReservationOwner.ReceiptStageBeforeCreateReleaseTestSignal = null; ExperimentalReservationOwner.ReceiptStagePreCreateTokenTestHook = null;
+                    if (blockedStage is not null && !blockedStage.IsCompleted) UncertainTestResources.Add((fixture, first, second, blockedStage, preCreateEntered, preCreateRelease));
+                    else { preCreateEntered.Dispose(); preCreateRelease.Dispose(); }
+                }
                 ExperimentalReservationOwner.ReceiptQuotaEnteredTestSignal = entered; ExperimentalReservationOwner.ReceiptQuotaReleaseTestSignal = release;
                 one = Task.Run(() => first.StageSyntheticReservationForTest(root, identityOne, specOne, coordinator));
                 Check(entered.Wait(TimeSpan.FromSeconds(5)));

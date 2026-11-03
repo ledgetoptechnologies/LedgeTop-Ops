@@ -31,6 +31,8 @@ internal sealed class ExperimentalReservationOwner
     private object? injectedPairToken;
     internal static Action<string>? BeforeTeardownTestHook;
     internal static ManualResetEventSlim? ReceiptQuotaEnteredTestSignal, ReceiptQuotaReleaseTestSignal;
+    internal static ManualResetEventSlim? ReceiptStageBeforeCreateTestSignal, ReceiptStageBeforeCreateReleaseTestSignal;
+    internal static object? ReceiptStagePreCreateTokenTestHook;
     internal static string? ReceiptQuotaFailureStageTestHook;
     internal static object? ReceiptQuotaFailureTokenTestHook;
     internal static bool ReceiptMarkerFailureTestHook;
@@ -98,7 +100,7 @@ internal sealed class ExperimentalReservationOwner
         internal bool InspectCapacityForTest(string root, string key, PlaceholderHydrationCoordinator coordinator, long growth, CancellationToken token = default) => Execute(root, key, () => {
             ArgumentNullException.ThrowIfNull(coordinator);
             if (growth < 0) throw new ArgumentOutOfRangeException(nameof(growth));
-            return RunQuota(quota => coordinator.ExperimentalCanReserveUnderOwnedQuota(heldLease!, quota, growth), token);
+            return RunQuota(quota => coordinator.ExperimentalCapacityUnderOwnedQuota(heldLease!, quota, growth).Fits, token);
         });
         internal long AccountMarkerUnderQuota(string root, string key, string directory, CancellationToken token = default) => Execute(root, key, () =>
             RunQuota(_ => heldLease!.ExperimentalMarkers.AccountMarker(Path.Combine(directory, ".verified-hydration-owner")), token));
@@ -114,7 +116,19 @@ internal sealed class ExperimentalReservationOwner
                     throw new TransferException("Synthetic reservation identity does not match its specification.");
                 var growth = checked(spec.Length + Downloader.HydrationStateGrowthBudget(spec) + 1024);
                 return RunQuota(quota => {
-                    if (!coordinator.ExperimentalCanReserveUnderOwnedQuota(heldLease!, quota, growth)) return false;
+                    var capacity = coordinator.ExperimentalCapacityUnderOwnedQuota(heldLease!, quota, growth);
+                    if (!capacity.Fits) return false;
+                    if (ReceiptStageBeforeCreateTestSignal is not null) {
+                        ReceiptStageBeforeCreateTestSignal.Set();
+                        if (ReceiptStageBeforeCreateReleaseTestSignal is null || !ReceiptStageBeforeCreateReleaseTestSignal.Wait(TimeSpan.FromSeconds(10))) throw new IOException("Synthetic stage barrier timed out.");
+                    }
+                    var status = heldLease!.ExperimentalStatus;
+                    lock (status.Gate) {
+                        if (status.Poisoned || status.Revision != capacity.Revision) {
+                            if (ReceiptStageBeforeCreateTestSignal is not null) injectedQuotaToken = ReceiptStagePreCreateTokenTestHook;
+                            throw new TransferException("Synthetic receipt status changed before creation.");
+                        }
+                    }
                     var dir = Path.Combine(this.root, ".hydration-reservations-v2");
                     heldLease!.ExperimentalMarkers.ValidateExisting(dir, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
                     var path = Path.Combine(dir, identity.ScopeKey + "-" + identity.CacheKey + ".json");
@@ -130,7 +144,11 @@ internal sealed class ExperimentalReservationOwner
                     stagedRecord = new FileStream(stagedHandle, FileAccess.ReadWrite); stagedHandle = null;
                     ExperimentalOwnedStream.RequireRegularKind(stagedRecord.SafeFileHandle, false); ExperimentalOwnedStream.RequireSingleLink(stagedRecord.SafeFileHandle);
                     stagedIdentity = ExperimentalOwnedStream.GetIdentity(stagedRecord.SafeFileHandle);
-                    stagedRecord.Write(bytes); stagedRecord.Flush(true); VerifyStagedRecord(); stagedVerified = true;
+                    stagedRecord.Write(bytes); stagedRecord.Flush(true); VerifyStagedRecord();
+                    lock (status.Gate) {
+                        if (status.Poisoned || status.Revision != capacity.Revision) throw new TransferException("Synthetic receipt status changed during creation.");
+                        stagedVerified = true;
+                    }
                     return true;
                 }, token);
             });
@@ -140,12 +158,16 @@ internal sealed class ExperimentalReservationOwner
         {
             if (!Monitor.IsEntered(quota)) throw new InvalidOperationException("Synthetic ledger requires the root quota gate.");
             if (!string.Equals(root, requestedRoot, StringComparison.OrdinalIgnoreCase)) return null;
+            var admission = heldLease;
+            if (admission is not null) lock (admission.ExperimentalStatus.Gate) {
+                if (uncertain && !quotaInProgress) throw new IOException("Synthetic receipt remains uncertain.");
+            }
             if (stagedPath is null && stagedRecord is null && stagedHandle is null) {
                 if (stagedPins is not null) throw new IOException("Synthetic staged directory ownership remains uncertain.");
                 return null;
             }
-            if (heldLease is null || !ReferenceEquals(heldLease.Quota, quota)) throw new IOException("Synthetic staged quota root changed.");
-            lock (heldLease.ExperimentalStatus.Gate) {
+            if (admission is null || !ReferenceEquals(admission.Quota, quota)) throw new IOException("Synthetic staged quota root changed.");
+            lock (admission.ExperimentalStatus.Gate) {
                 if ((uncertain && !quotaInProgress) || !stagedVerified || stagedHandle is not null || stagedBytes is null || stagedPath is null)
                     throw new IOException("Synthetic staged reservation remains uncertain.");
             }
