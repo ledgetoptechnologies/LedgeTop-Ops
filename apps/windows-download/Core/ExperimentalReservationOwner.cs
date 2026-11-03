@@ -168,6 +168,10 @@ internal sealed class ExperimentalReservationOwner
                 if (!Matches(root, expectedIdentity, expectedSpec)) throw new ResourceUnavailableException();
                 owner.VerifySyntheticReservationForTest(root, expectedIdentity, expectedSpec, token);
             }
+            internal void VerifyActiveStagedForTest(string root, PlaceholderIdentity expectedIdentity, DownloadSpec expectedSpec, CancellationToken token) {
+                if (!Matches(root, expectedIdentity, expectedSpec)) throw new ResourceUnavailableException();
+                owner.RunDownloadMutation(use, () => owner.VerifyStagedDuringDownload(expectedIdentity, expectedSpec), token);
+            }
             internal async Task<bool> CancelWorkerAndWaitAsync(TimeSpan timeout, CancellationToken waitToken = default) {
                 if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromSeconds(10)) throw new ArgumentOutOfRangeException(nameof(timeout));
                 var running = task ?? throw new InvalidOperationException("Synthetic download session did not start.");

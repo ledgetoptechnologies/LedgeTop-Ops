@@ -1319,6 +1319,13 @@ internal static class ExperimentalColdDownloaderTests
                     Check(startDenied && !blocked.Entered.IsCompleted); source.ResolveFailureForTest = null;
                     session = await coordinator.ExperimentalStartReceiptDownloadAsync(identity, receipt, blocked);
                     await blocked.Entered.WaitAsync(TimeSpan.FromSeconds(10));
+                    await coordinator.ExperimentalAuthorizeActiveReceiptAsync(identity, session);
+                    source.ResolveFailureForTest = new AccessDeniedException(); var activeDenied = false;
+                    try { await coordinator.ExperimentalAuthorizeActiveReceiptAsync(identity, session); } catch (AccessDeniedException) { activeDenied = true; }
+                    source.ResolveFailureForTest = null; Check(activeDenied);
+                    var activeMismatch = false;
+                    try { await coordinator.ExperimentalAuthorizeActiveReceiptAsync(identity with { FileName = "other.bin" }, session); } catch (ResourceUnavailableException) { activeMismatch = true; }
+                    Check(activeMismatch);
                     using var cancelledWait = new CancellationTokenSource(); cancelledWait.Cancel(); var waitCancelled = false;
                     try { await session.WaitAsync(cancelledWait.Token); } catch (OperationCanceledException) { waitCancelled = true; }
                     Check(waitCancelled);
@@ -1328,6 +1335,7 @@ internal static class ExperimentalColdDownloaderTests
                     _ = session.WaitAsync(); // Deliberately abandon one waiter; the owned task continues.
                     blocked.Release();
                     await session.WaitAsync().WaitAsync(TimeSpan.FromSeconds(15)); terminal = true;
+                    var endedRefused = false; try { await coordinator.ExperimentalAuthorizeActiveReceiptAsync(identity, session); } catch (IOException) { endedRefused = true; } catch (ObjectDisposedException) { endedRefused = true; } Check(endedRefused);
                     Check(File.ReadAllBytes(Path.Combine(entryDir, identity.FileName)).SequenceEqual(Content));
                     source.ResolveFailureForTest = new AccessDeniedException(); var afterDenied = false;
                     try { await coordinator.ExperimentalWaitReceiptDownloadAuthorizedAsync(identity, session); } catch (AccessDeniedException) { afterDenied = true; }

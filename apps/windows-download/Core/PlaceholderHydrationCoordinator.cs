@@ -542,6 +542,13 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
         if (resolved.Spec != expected) throw new ResourceUnavailableException();
     }
+    internal async Task ExperimentalAuthorizeActiveReceiptAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt.DownloadSession session, CancellationToken token = default)
+    {
+        ExperimentalValidateStagingIdentity(identity); ArgumentNullException.ThrowIfNull(session);
+        var resolved = await AuthorizeWithRetry(identity, token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        session.VerifyActiveStagedForTest(root, identity, resolved.Spec, token);
+    }
     // No sink or file bytes are exposed by this synthetic observation.
     internal async Task ExperimentalWaitReceiptDownloadAuthorizedAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt.DownloadSession session, CancellationToken token = default)
     {
