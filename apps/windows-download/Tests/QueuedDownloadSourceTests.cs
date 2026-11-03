@@ -17,6 +17,7 @@ internal static class QueuedDownloadSourceTests
         ("Company busy retry uses a bounded monotonic contention budget", BusyBudget),
         ("queue authorization timing separates fake token and response header delays", AuthorizationTiming),
         ("Company hydration authoritative HTTP resolve removes only redundant Session probes", CompanyHydrationAuthority),
+        ("Company hydration retries only bounded transient HTTP authorization failures", CompanyHydrationAuthorizationRetry),
         ("queue bounded auth diagnostics distinguish actual HTTP401 operations", AuthDiagnostics),
         ("queue source employee and portal metadata renews exact identity with human fixed-origin GETs", Metadata),
         ("queue source selection queries encode once and unsafe selectors reject before authentication", Selection),
@@ -292,6 +293,59 @@ internal static class QueuedDownloadSourceTests
                 Assert(sink.Written == 0 && sink.Completed == 0 && sink.Failed == 1 && sessions == 0 && f.Runner.Logins == 0);
                 Assert(downloads == (mode is "before403" or "beforeBusyThen403" ? 0 : 1));
             }
+        }
+    }
+    private static async Task CompanyHydrationAuthorizationRetry()
+    {
+        foreach (var mode in new[] { "before502", "before503-lifetime", "before504", "after503", "after401", "after403", "afterPrincipal", "afterVersion", "persistent", "cancel", "generation-cancel", "other500", "opaque" }) {
+            using var f = new Fixture(); using var cancellation = new CancellationTokenSource(); using var generation = new CancellationTokenSource();
+            var resolves = 0; var downloads = 0; var delays = 0; var faults = 0; var sink = new AuthoritySink();
+            var after = mode.StartsWith("after", StringComparison.Ordinal);
+            using var original = f.Source(true, new Handler((request, _) => {
+                if (request.RequestUri!.AbsolutePath.EndsWith("/session", StringComparison.Ordinal))
+                    return Task.FromResult(Json(new { schemaVersion = 1, principalId = Principal, expiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600 }));
+                resolves++; Assert(sink.Written == 0 && sink.Completed == 0);
+                if ((after && downloads > 0 || !after && downloads == 0) && (faults == 0 || mode == "persistent")) {
+                    faults++;
+                    var status = mode == "before502" ? 502 : mode == "before504" ? 504 : mode == "other500" ? 500 : 503;
+                    return Task.FromResult(new HttpResponseMessage((HttpStatusCode)status));
+                }
+                if (after && downloads > 0 && mode is "after401" or "after403")
+                    return Task.FromResult(new HttpResponseMessage(mode == "after401" ? HttpStatusCode.Unauthorized : HttpStatusCode.Forbidden));
+                var envelope = Envelope(true);
+                if (after && downloads > 0 && mode == "afterPrincipal") envelope["principalId"] = "odqp1_" + new string('f', 64);
+                if (after && downloads > 0 && mode == "afterVersion") {
+                    var sha = new string('e', 64); var manifest = (Dictionary<string, object?>)envelope["manifest"]!;
+                    manifest["sha256"] = sha; manifest["remoteVersion"] = sha; manifest["strongETag"] = "\"" + sha + "\"";
+                }
+                return Task.FromResult(Json(envelope));
+            }), new Handler((_, _) => {
+                downloads++; var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Bytes) };
+                response.Headers.ETag = EntityTagHeaderValue.Parse("\"" + Sha + "\""); return Task.FromResult(response);
+            }));
+            IQueuedDownloadSource selected = mode == "opaque" ? new OpaqueSource(original) : original;
+            if (mode is "before503-lifetime" or "generation-cancel")
+                selected = new LifetimeQueuedDownloadSource(new LifetimeQueuedDownloadSource(selected, generation.Token), CancellationToken.None);
+            var id = new PlaceholderIdentity("pilot", selected.Alias, f.Session.Origin.GetLeftPart(UriPartial.Authority), Principal, Reference,
+                "oef1_" + new string('b', 64), Sha, "queue.bin", Bytes.Length, "\"" + Sha + "\"", Sha);
+            Task Delay(TimeSpan delay, CancellationToken token) {
+                delays++; Assert(delay >= TimeSpan.FromMilliseconds(125) && delay <= TimeSpan.FromMilliseconds(375));
+                if (mode == "cancel") cancellation.Cancel();
+                if (mode == "generation-cancel") generation.Cancel();
+                token.ThrowIfCancellationRequested(); return Task.CompletedTask;
+            }
+            using var coordinator = new PlaceholderHydrationCoordinator(selected, "pilot", f.Root, 64L << 30, 128L << 30, Principal, Delay);
+            if (mode is "before502" or "before503-lifetime" or "before504" or "after503") {
+                await coordinator.HydrateAsync(id, 0, id.Length, sink, cancellation.Token);
+                Assert(delays == 1 && sink.Written == Bytes.Length && sink.Completed == 1 && sink.Failed == 0 && downloads == 1 && resolves == 3);
+            } else {
+                try { await coordinator.HydrateAsync(id, 0, id.Length, sink, cancellation.Token); throw new Exception("Expected retry refusal."); }
+                catch (Exception error) when (error is TransferException or OperationCanceledException) { }
+                Assert(sink.Written == 0 && sink.Completed == 0 && sink.Failed == 1);
+                Assert(delays == (mode is "other500" or "opaque" ? 0 : 1));
+                Assert(resolves == (after ? 3 : mode is "cancel" or "generation-cancel" or "other500" or "opaque" ? 1 : 2));
+            }
+            Assert(f.Runner.Logins == 0);
         }
     }
     private sealed class AuthoritySink : IPlaceholderTransferSink {

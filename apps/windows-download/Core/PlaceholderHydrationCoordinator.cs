@@ -21,6 +21,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     private readonly string channel, root;
     private readonly string? principal;
     private readonly long maximumFileBytes, maximumCacheBytes;
+    private readonly Func<TimeSpan, CancellationToken, Task> authorizationRetryDelay;
     private int disposed;
     private const string Marker = ".verified-hydration-owner";
     private const string Owner = "LedgeTop.VerifiedHydration/1\n";
@@ -32,7 +33,13 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 
     public PlaceholderHydrationCoordinator(IQueuedDownloadSource source, string channel, string applicationStateRoot,
         long maximumFileBytes = 64L << 30, long maximumCacheBytes = 128L << 30, string? expectedPrincipal = null)
+        : this(source, channel, applicationStateRoot, maximumFileBytes, maximumCacheBytes, expectedPrincipal, Task.Delay) { }
+
+    internal PlaceholderHydrationCoordinator(IQueuedDownloadSource source, string channel, string applicationStateRoot,
+        long maximumFileBytes, long maximumCacheBytes, string? expectedPrincipal, Func<TimeSpan, CancellationToken, Task> authorizationRetryDelay)
     {
+        ArgumentNullException.ThrowIfNull(authorizationRetryDelay);
+        this.authorizationRetryDelay = authorizationRetryDelay;
         if (channel is not ("pilot" or "stable") || maximumFileBytes < 0 || maximumCacheBytes < maximumFileBytes || maximumCacheBytes < System.Text.Encoding.UTF8.GetByteCount(Owner)
             || !Path.IsPathFullyQualified(applicationStateRoot) || applicationStateRoot.StartsWith("\\\\", StringComparison.Ordinal))
             throw new TransferException("Hydration configuration is invalid.");
@@ -203,7 +210,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
                 stage = HydrationStage.AuthorizationBefore; timing?.Enter(HydrationTimingStage.AuthorizationBefore);
                 ResolvedQueuedDownload resolved;
-                using (AuthorizationTimingScope.Begin(timing, identity, true)) resolved = await Authorize(identity, cancellationToken);
+                using (AuthorizationTimingScope.Begin(timing, identity, true)) resolved = await AuthorizeWithRetry(identity, cancellationToken);
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                 NativeStallTrace.Record(NativeStallTrace.Stage.AuthorizationExit);
 #endif
@@ -329,7 +336,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 NativeStallTrace.Record(NativeStallTrace.Stage.AuthorizationAfterEnter);
                 try {
 #endif
-                using (AuthorizationTimingScope.Begin(timing, identity, false)) await Authorize(identity, cancellationToken); // Download/hash may be lengthy; never treat cached bytes as authority.
+                using (AuthorizationTimingScope.Begin(timing, identity, false)) await AuthorizeWithRetry(identity, cancellationToken); // Download/hash may be lengthy; never treat cached bytes as authority.
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                 } finally { NativeStallTrace.Record(NativeStallTrace.Stage.AuthorizationAfterExit); }
 #endif
@@ -353,7 +360,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             if (sink is IPlaceholderFailureDiagnostics observer) observer.ObservePrimaryFailure(diagnostic);
             if (!completed) { completed = true; try { await sink.FailAsync(e is OperationCanceledException ? "cancelled" : "unavailable"); } catch { } }
             if (e is OperationCanceledException && cancellationToken.IsCancellationRequested) throw;
-            throw new TransferException("Hydration unavailable; no automatic sign-in or retry was attempted.",
+            throw new TransferException("Hydration unavailable; no automatic sign-in was attempted.",
                 (sink as IPlaceholderFailureDiagnostics)?.PrimaryFailure ?? diagnostic);
         } finally {
             if (freshDownload is not null) await freshDownload.DisposeAsync().ConfigureAwait(false);
@@ -366,6 +373,23 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             var count = (int)Math.Min(buffer.Length, remaining);
             await input.ReadExactlyAsync(buffer.AsMemory(0, count), token);
             await sink.WriteAsync(input.Position - count, buffer.AsMemory(0, count), token); remaining -= count;
+        }
+    }
+    private async Task<ResolvedQueuedDownload> AuthorizeWithRetry(PlaceholderIdentity id, CancellationToken token)
+    {
+        try { return await Authorize(id, token).ConfigureAwait(false); }
+        catch (TransferException error) when (
+            error.Reason == TransferFailureReason.UnexpectedHttpStatus && error.HttpStatus is 502 or 503 or 504 &&
+            (source is EmployeeQueuedDownloadSource || source is LifetimeQueuedDownloadSource { TrustedEmployeeForAuthorizationRetry: true })) {
+            token.ThrowIfCancellationRequested();
+            var delay = TimeSpan.FromMilliseconds(Random.Shared.Next(125, 376));
+            if (source is LifetimeQueuedDownloadSource lifetime)
+                await lifetime.DelayAuthorizationRetryAsync(delay, authorizationRetryDelay, token).ConfigureAwait(false);
+            else await authorizationRetryDelay(delay, token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            // Retry the complete authority check once, before any native transfer.
+            // ServiceBusy, login, denial, malformed and unknown errors do not retry here.
+            return await Authorize(id, token).ConfigureAwait(false);
         }
     }
     private async Task<ResolvedQueuedDownload> Authorize(PlaceholderIdentity id, CancellationToken token)

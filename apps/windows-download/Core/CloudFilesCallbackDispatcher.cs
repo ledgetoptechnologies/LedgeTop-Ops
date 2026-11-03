@@ -143,7 +143,7 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
         } catch (OperationCanceledException) when (entry.Cancellation.IsCancellationRequested) {
             cancelled = true;
         } catch {
-            failure = new TransferException("Callback hydration unavailable; no automatic login or retry was attempted.");
+            failure = new TransferException("Callback hydration unavailable; no automatic login was attempted.");
         }
         // The hydrator's native terminal call and keepalive are now fully joined.
         // Retirement permits a later callback with the same opaque keys to authorize a new range.
