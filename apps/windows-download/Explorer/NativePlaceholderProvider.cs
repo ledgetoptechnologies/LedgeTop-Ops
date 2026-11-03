@@ -413,7 +413,18 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
 
     private sealed class NativeConnection(string root) : ICloudFilesConnectionNative
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        public int Connect(nint table, nint context, out long key)
+        {
+            long captured = 0;
+            var result = DiagnosticConnectionFlags.Connect(flags => Native.CfConnectSyncRoot(root, table, context, flags, out captured),
+                Environment.GetEnvironmentVariable("LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION") == "1");
+            key = captured;
+            return result;
+        }
+#else
         public int Connect(nint table, nint context, out long key) => Native.CfConnectSyncRoot(root, table, context, 4, out key);
+#endif
         public int Disconnect(long key) => Native.CfDisconnectSyncRoot(key);
         public void RejectFetch(CloudFilesOperationContext context, int status)
         {

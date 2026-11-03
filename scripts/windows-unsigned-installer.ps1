@@ -163,6 +163,30 @@ function AssertCoreHasNoNativeDiagnostics([string]$AssemblyPath, [string]$Expect
     } finally { $pe.Dispose() }
   } finally { $stream.Dispose() }
 }
+function AssertExplorerHasNoNativeDiagnostics([string]$AssemblyPath, [string]$ExpectedSha256) {
+  Add-Type -AssemblyName System.Reflection.Metadata
+  $stream = [IO.File]::Open($AssemblyPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+  try {
+    if ($stream.Length -lt 1 -or $stream.Length -gt 67108864 -or $ExpectedSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'Explorer assembly size or inventory hash is invalid.' }
+    if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream)).ToLowerInvariant() -cne $ExpectedSha256) { throw 'Explorer assembly differs from the inventory.' }
+    $stream.Position = 0; $pe = [Reflection.PortableExecutable.PEReader]::new($stream)
+    try {
+      if (-not $pe.HasMetadata) { throw 'Explorer assembly is not a managed PE.' }
+      $reader = [Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($pe)
+      if (-not $reader.IsAssembly -or $reader.GetString($reader.GetAssemblyDefinition().Name) -cne 'LedgeTop.Files.Explorer') { throw 'Explorer assembly identity is invalid.' }
+      foreach ($file in $reader.AssemblyFiles) { if ($reader.GetAssemblyFile($file).ContainsMetadata) { throw 'Multi-module Explorer assembly is unsupported.' } }
+      $providerCount=0
+      foreach ($handle in $reader.TypeDefinitions) {
+        $type=$reader.GetTypeDefinition($handle); $name=$reader.GetString($type.Name)
+        if ($name -ieq 'DiagnosticConnectionFlags') { throw 'Explorer assembly contains restricted native diagnostic connection flags.' }
+        if ($reader.GetString($type.Namespace) -ceq 'LedgeTop.Files.Explorer' -and $name -ceq 'NativePlaceholderProvider') { $providerCount++ }
+      }
+      foreach ($handle in $reader.TypeReferences) { if ($reader.GetString($reader.GetTypeReference($handle).Name) -ieq 'DiagnosticConnectionFlags') { throw 'Explorer assembly references restricted native diagnostic connection flags.' } }
+      foreach ($handle in $reader.ExportedTypes) { if ($reader.GetString($reader.GetExportedType($handle).Name) -ieq 'DiagnosticConnectionFlags') { throw 'Explorer assembly exports restricted native diagnostic connection flags.' } }
+      if ($providerCount -ne 1) { throw 'Explorer assembly has a missing or ambiguous provider.' }
+    } finally { $pe.Dispose() }
+  } finally { $stream.Dispose() }
+}
 if ($AppVersion -cnotmatch '\A(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\z' -or
     @($AppVersion.Split('.') | Where-Object { [int]$_ -gt 65535 }).Count -ne 0) { throw 'Use a canonical four-component unsigned16 version.' }
 $PayloadDirectory = LocalPath $PayloadDirectory
@@ -242,12 +266,13 @@ while ($pending.Count -gt 0) {
   }
 }
 if ($observed -ne $inventory.Count -or $build.payloadFiles -ne $observed -or $build.payloadBytes -ne $total) { throw 'Receipt/inventory counts or lengths differ.' }
-foreach ($required in @('LedgeTop.Files.exe','LedgeTop.Files.dll','LedgeTop.WindowsDownload.dll','LedgeTop.Files.deps.json','LedgeTop.Files.runtimeconfig.json','coreclr.dll','hostfxr.dll','hostpolicy.dll','helper/cloudflared.exe','Notices/LICENSE.cloudflared.txt')) {
+foreach ($required in @('LedgeTop.Files.exe','LedgeTop.Files.dll','LedgeTop.WindowsDownload.dll','LedgeTop.Files.Explorer.dll','LedgeTop.Files.deps.json','LedgeTop.Files.runtimeconfig.json','coreclr.dll','hostfxr.dll','hostpolicy.dll','helper/cloudflared.exe','Notices/LICENSE.cloudflared.txt')) {
   if (-not $listed.ContainsKey($required)) { throw 'Required self-contained payload file is missing.' }
 }
 if ($listed['LedgeTop.Files.dll'].sha256 -cne $build.applicationSha256 -or $listed['helper/cloudflared.exe'].sha256 -cne $helperSha) { throw 'Application/helper receipt pins differ.' }
 ApplicationMetadata (Join-Path $PayloadDirectory 'LedgeTop.Files.dll')
 AssertCoreHasNoNativeDiagnostics (Join-Path $PayloadDirectory 'LedgeTop.WindowsDownload.dll') $listed['LedgeTop.WindowsDownload.dll'].sha256
+AssertExplorerHasNoNativeDiagnostics (Join-Path $PayloadDirectory 'LedgeTop.Files.Explorer.dll') $listed['LedgeTop.Files.Explorer.dll'].sha256
 $commitType = & git -C $SourceRepository cat-file -t $ReviewedCommit
 if ($LASTEXITCODE -ne 0 -or $commitType -cne 'commit') { throw 'Reviewed commit is unavailable.' }
 $templateBlob = & git -C $SourceRepository rev-parse "${ReviewedCommit}:apps/windows-download/Packaging/UnsignedInstaller.nsi"

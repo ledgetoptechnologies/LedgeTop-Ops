@@ -4,6 +4,16 @@ using System.Text.Json;
 using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+if (args.Length == 1 && args[0] == "--diagnostic-connect-flags-tests") {
+    var calls = new List<uint>();
+    int Fake(uint flags) { calls.Add(flags); return 37; }
+    if (DiagnosticConnectionFlags.Connect(Fake, false) != 37 || DiagnosticConnectionFlags.Connect(Fake, true) != 37
+        || !calls.SequenceEqual(new uint[] { 4, 12 })) throw new InvalidOperationException("Diagnostic flags did not preserve native call/result semantics.");
+    Console.WriteLine("PASS diagnostic native connection flag comparison with fake native call.");
+    return 0;
+}
+#endif
 if (args.Length >= 1 && args[0] == "--first-shell-registration-gate-tests") return args.Length == 1 ? FirstShellRegistrationProbe.GateTests() : 2;
 if (args.Length >= 1 && args[0] == "--first-shell-registration-disposable-vm") return args.Length == 1 ? await FirstShellRegistrationProbe.RunAsync() : 2;
 if (args.Length == 1 && args[0] == "--synthetic-busy-native") return await SyntheticBusyNative.RunAsync();
