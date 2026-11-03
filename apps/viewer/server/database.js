@@ -2187,6 +2187,33 @@ const MIGRATIONS = [
     CREATE TRIGGER viewer_source_snapshots_no_delete BEFORE DELETE ON viewer_source_snapshots
       BEGIN SELECT RAISE(ABORT,'Viewer source snapshot identifiers are never reusable'); END;
   `},
+  {version:47,name:'permanent_gcp_source_csv_custody',sql:`
+    CREATE TABLE retained_gcp_sources (
+      id TEXT PRIMARY KEY,
+      dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+      source_file_id TEXT REFERENCES dataset_files(id) ON DELETE RESTRICT,
+      source_filename TEXT,
+      sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+      byte_size INTEGER NOT NULL CHECK(byte_size>0 AND byte_size<=2097152),
+      source_content TEXT NOT NULL,
+      retention_reason TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      CHECK(length(CAST(source_content AS BLOB))=byte_size)
+    );
+    CREATE UNIQUE INDEX retained_gcp_sources_dataset_sha_idx ON retained_gcp_sources(dataset_id,sha256);
+    INSERT INTO retained_gcp_sources(id,dataset_id,source_file_id,source_filename,sha256,byte_size,source_content,retention_reason,created_at)
+      SELECT lower(hex(randomblob(16))),g.dataset_id,g.source_file_id,g.source_filename,g.source_sha256,g.source_byte_size,g.source_content,'gcp_source',g.created_at
+      FROM gcp_sets g WHERE g.source_content IS NOT NULL AND g.source_byte_size>0 AND g.source_byte_size<=2097152
+        AND g.id=(SELECT MIN(g2.id) FROM gcp_sets g2 WHERE g2.dataset_id=g.dataset_id AND g2.source_sha256=g.source_sha256
+          AND g2.source_content IS NOT NULL AND g2.source_byte_size>0 AND g2.source_byte_size<=2097152);
+    CREATE TRIGGER retained_gcp_sources_no_insert_replace BEFORE INSERT ON retained_gcp_sources
+      WHEN EXISTS(SELECT 1 FROM retained_gcp_sources WHERE id=NEW.id OR (dataset_id=NEW.dataset_id AND sha256=NEW.sha256))
+      BEGIN SELECT RAISE(ABORT,'retained GCP source identifiers and content are never reusable or replaceable'); END;
+    CREATE TRIGGER retained_gcp_sources_no_update BEFORE UPDATE ON retained_gcp_sources
+      BEGIN SELECT RAISE(ABORT,'retained GCP source records are immutable'); END;
+    CREATE TRIGGER retained_gcp_sources_no_delete BEFORE DELETE ON retained_gcp_sources
+      BEGIN SELECT RAISE(ABORT,'retained GCP source records are permanent'); END;
+  `},
 ];
 
 function applyMigrations(database) {

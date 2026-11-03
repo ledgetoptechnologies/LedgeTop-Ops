@@ -68,6 +68,14 @@ test('retained raw GCP source blocks dataset, task, project trash and dataset pu
   assert.ok(set.id);
   assert.equal(gcp.deleteSet(set.id),true);
   assert.equal(gcp.getSet(set.id),null);
+  const retainedCsv=database.prepare('SELECT dataset_id,source_file_id,sha256,byte_size,source_content FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(dataset.id,GCP_SOURCE_SHA);
+  assert.equal(retainedCsv.dataset_id,dataset.id);
+  assert.equal(retainedCsv.source_file_id,'gcp-file');
+  assert.equal(retainedCsv.sha256,GCP_SOURCE_SHA);
+  assert.equal(retainedCsv.byte_size,Buffer.byteLength(GCP_SOURCE));
+  assert.equal(retainedCsv.source_content,GCP_SOURCE,'original CSV remains in immutable custody after its editable GCP set is deleted');
+  assert.throws(()=>database.prepare('UPDATE retained_gcp_sources SET source_content=? WHERE dataset_id=?').run('tampered',dataset.id),/immutable/);
+  assert.throws(()=>database.prepare('DELETE FROM retained_gcp_sources WHERE dataset_id=?').run(dataset.id),/permanent/);
   const retained=database.prepare('SELECT dataset_file_id,sha256,byte_size,retention_reason FROM retained_dataset_files WHERE dataset_file_id=?').get('gcp-file');
   assert.equal(retained.dataset_file_id,'gcp-file');
   assert.equal(retained.sha256,GCP_SOURCE_SHA);

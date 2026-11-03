@@ -52,7 +52,30 @@ test('unexpected repository details are not reflected in GCP responses',async(t)
   const {base,dataset}=await fixture(t),source='point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n';
   const response=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers:{authorization:'Bearer admin','content-type':'application/json','idempotency-key':'bad-source'},
     body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',sourceFileId:'missing-file',content:source})});
-  assert.equal(response.status,400);const payload=await response.json();assert.equal(payload.code,'invalid_source_file');assert.doesNotMatch(payload.error,/SELECT|constraint|sqlite/i);
+  assert.equal(response.status,409);const payload=await response.json();assert.equal(payload.code,'invalid_source_file');assert.doesNotMatch(payload.error,/SELECT|constraint|sqlite/i);
+});
+
+test('manual linked GCP import verifies the managed source bytes and keeps an immutable CSV copy',async(t)=>{
+  const {base,dataset,root,database}=await fixture(t),source='point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n';
+  const sha=crypto.createHash('sha256').update(source).digest('hex'),createdAt=new Date().toISOString();
+  database.prepare('INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,created_at) VALUES (?,?,?,?,?,?,?)')
+    .run('linked-gcp',dataset.id,'control.csv',Buffer.byteLength(source),sha,'text/csv',createdAt);
+  const headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'manual-linked-gcp'};
+  const route=`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,body={displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',sourceFileId:'linked-gcp',content:source};
+  const missing=await fetch(route,{method:'POST',headers,body:JSON.stringify(body)});
+  assert.equal(missing.status,409);assert.equal((await missing.json()).code,'invalid_source_file');
+  assert.equal(database.prepare('SELECT COUNT(*) count FROM gcp_sets').get().count,0);
+  const rawPath=path.join(root,'datasets',dataset.relativePath,'control.csv');fs.writeFileSync(rawPath,source);
+  const imported=await fetch(route,{method:'POST',headers,body:JSON.stringify(body)});
+  assert.equal(imported.status,201);
+  const set=(await imported.json()).set;
+  assert.equal(set.sourceFileId,'linked-gcp');
+  assert.equal(database.prepare('SELECT source_content FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(dataset.id,sha).source_content,source);
+  await fetch(`${base}/api/v1/gcp-sets/${set.id}`,{method:'DELETE',headers:{...headers,'idempotency-key':'delete-editable-gcp-set'}});
+  assert.equal(database.prepare('SELECT source_content FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(dataset.id,sha).source_content,source);
+  fs.writeFileSync(rawPath,'tampered');
+  const rejected=await fetch(route,{method:'POST',headers:{...headers,'idempotency-key':'manual-linked-gcp-tampered'},body:JSON.stringify(body)});
+  assert.equal(rejected.status,409);assert.equal((await rejected.json()).code,'invalid_source_file');
 });
 
 test('automatic GCP CSV discovery imports exact Emlid sources idempotently and ignores unrelated CSVs',async(t)=>{

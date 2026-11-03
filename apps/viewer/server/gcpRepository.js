@@ -122,6 +122,13 @@ class GcpRepository {
           (dataset_file_id,dataset_id,sha256,byte_size,retention_reason,created_at) VALUES (?,?,?,?,'gcp_source',?)`)
           .run(source.id,datasetId,source.sha256,source.byte_size,timestamp);
       }
+      const retained=this.database.prepare('SELECT id FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(datasetId,sourceSha256);
+      if(!retained){
+        this.database.prepare(`INSERT INTO retained_gcp_sources
+          (id,dataset_id,source_file_id,source_filename,sha256,byte_size,source_content,retention_reason,created_at)
+          VALUES (?,?,?,?,?,?,?,'gcp_source',?)`)
+          .run(crypto.randomUUID(),datasetId,sourceFileId, bounded(sourceFilename,240)||null,sourceSha256,sourceByteSize,sourceContent,timestamp);
+      }
       this.database.prepare(`INSERT INTO gcp_import_provenance(set_id,adapter,coordinate_system,vertical_datum,linear_unit,elevation_source,geographic_cross_check,source_sha256,confirmed_by,confirmed_at)
         VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id,provenance.adapter,provenance.coordinateSystem,provenance.verticalDatum,provenance.linearUnit,
           provenance.elevationSource||null,provenance.geographicCrossCheck||null,sourceSha256,createdBy||null,timestamp);

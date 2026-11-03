@@ -57,7 +57,7 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
     return res.json({sets:gcp.listSets(dataset.id),scanned,imported,ignoredInvalid,limited:files.length===20});
   });
 
-  router.post('/api/v1/datasets/:datasetId/gcp-sets/import', authorize('viewer.gcp.write'), mutate, (req, res) => {
+  router.post('/api/v1/datasets/:datasetId/gcp-sets/import', authorize('viewer.gcp.write'), mutate, async (req, res) => {
     if (!onlyKeys(req.body, ['displayName', 'format', 'fileName', 'content', 'sourceFileId', 'declarations', 'confirmationToken']))
       return error(res, 400, 'invalid_gcp_import');
     if (typeof req.body.displayName !== 'string' || !req.body.displayName.trim() || req.body.displayName.trim().length > 160)
@@ -72,6 +72,21 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
         return error(res, 409, 'gcp_preview_confirmation_required');
       const sourceFileId = req.body.sourceFileId ||
         gcp.findSourceFile(req.params.datasetId, req.body.fileName, parsed.sourceSha256);
+      if(sourceFileId){
+        const dataset=processing.getDataset(req.params.datasetId);
+        const source=processing.database.prepare('SELECT id,relative_path,byte_size,sha256 FROM dataset_files WHERE id=? AND dataset_id=?').get(sourceFileId,req.params.datasetId);
+        if(!dataset||dataset.status!=='finalized'||dataset.storageMode!=='managed'||dataset.rootKey!=='datasets'||!source||source.sha256!==parsed.sourceSha256)
+          return error(res,409,'invalid_source_file');
+        try{
+          const absolute=storage.resolve(dataset.rootKey,path.posix.join(dataset.relativePath,source.relative_path),{mustExist:true});
+          const stat=fs.statSync(absolute);
+          if(!stat.isFile()||stat.size!==source.byte_size||await hashFile(absolute)!==source.sha256)
+            return error(res,409,'invalid_source_file');
+        }catch(caught){
+          if(caught?.code==='ENOENT'||caught?.code==='invalid_storage_location')return error(res,409,'invalid_source_file');
+          throw caught;
+        }
+      }
       const set = gcp.importSet({
         datasetId: req.params.datasetId,
         displayName: req.body.displayName.trim(),
