@@ -16,6 +16,16 @@ internal static class ExperimentalColdDownloaderTests
     private static int PendingOwnedResources() => ExperimentalOwnedStream.QuarantinedCountForTest + OwnedObservers.Count;
     private static DownloadSpec Spec => new("synthetic-only", new Uri(Origin, "/data"), "output.bin", Content.Length, "\"v1\"", Convert.ToHexStringLower(SHA256.HashData(Content)));
     private static void Check(bool value) { if (!value) throw new IOException("Experimental cold download assertion failed."); }
+    private static (ulong Volume, Guid Id) PhysicalId(string path)
+    {
+        using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        var data = Marshal.AllocHGlobal(24);
+        try {
+            if (!GetFileInformationByHandleEx(file.SafeFileHandle, 18, data, 24)) throw new IOException("Synthetic reservation ID unavailable.");
+            var bytes = new byte[16]; Marshal.Copy(data + 8, bytes, 0, 16);
+            return (unchecked((ulong)Marshal.ReadInt64(data)), new Guid(bytes));
+        } finally { Marshal.FreeHGlobal(data); }
+    }
     private static HttpResponseMessage Response(byte[] bytes, Stream? input = null) {
         var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(input ?? new MemoryStream(bytes)) };
         response.Headers.ETag = new EntityTagHeaderValue("\"v1\""); response.Content.Headers.ContentLength = Content.Length; return response;
@@ -89,10 +99,11 @@ internal static class ExperimentalColdDownloaderTests
         info.ArgumentList.Add("try { $f = [IO.File]::Open($env:LEDGETOP_SYNTHETIC_PART, 'Open', 'ReadWrite', 'ReadWrite'); $f.Dispose(); exit 0 } catch [IO.IOException] { exit 17 } catch { exit 18 }");
         info.Environment["LEDGETOP_SYNTHETIC_PART"] = path;
         var process = Process.Start(info) ?? throw new IOException("Synthetic cross-process test failed to start."); var transferred = false; Task? reaper = null;
+        var pid = process.Id; // Capture before a reaper can observe exit and dispose the Process.
         try {
             var exited = ObserveOrRetain(process, 5000, out reaper); transferred = reaper is not null;
             if (!exited) {
-                throw new IOException("Synthetic open observer remains live; preserve fixture and inspect PID " + process.Id);
+                throw new IOException("Synthetic open observer remains live; preserve fixture and inspect PID " + pid);
             }
             Check(process.ExitCode == 17);
         } catch { if (reaper is not null) transferred = true; throw; }
@@ -312,15 +323,47 @@ internal static class ExperimentalColdDownloaderTests
                 Check(reached && failed.Failed == 1 && failed.Completed == 0 && failed.Bytes.Length == 0 &&
                     Directory.EnumerateFiles(reservationDir, "*.json").Count() == 1 && ExperimentalOwnedStream.QuarantinedCountForTest == 1);
             } finally { ExperimentalOwnedStream.BeforeRestoreFlushTestHook = null; ExperimentalOwnedStream.PrefixRestorationTokenTestHook = null; }
+            var retained = Path.Combine(root.Path, "verified-hydration-v1", ".hydration-reservations-v2");
+            var record = Directory.EnumerateFiles(retained, "*.json").Single(); var recordBytes = File.ReadAllBytes(record); var recordId = PhysicalId(record);
+            using var document = System.Text.Json.JsonDocument.Parse(recordBytes); var growth = document.RootElement.GetProperty("Growth").GetInt64();
+            var reservedBytes = typeof(PlaceholderHydrationCoordinator).GetMethod("ReservedBytes", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static) ?? throw new IOException("Quota scan unavailable.");
+            void CheckReservation() {
+                Check(File.Exists(record) && PhysicalId(record) == recordId && File.ReadAllBytes(record).SequenceEqual(recordBytes) &&
+                    (long)reservedBytes.Invoke(null, [retained])! == growth);
+            }
+            CheckReservation();
+            var other = new TestSink(); await ExpectTransferFailure(coordinator.HydrateAsync(source.Identity, 0, Content.Length, other));
+            Check(other.Failed == 1 && other.Completed == 0 && source.Downloads == 1); CheckReservation();
+            // Simulate a verified cache file appearing while the same entry's
+            // partial owner is still quarantined. Eviction must not remove it
+            // or reinterpret the live reservation as stale.
+            var entry = Path.Combine(root.Path, "verified-hydration-v1", source.Identity.ScopeKey, source.Identity.CacheKey);
+            var cached = Path.Combine(entry, source.Identity.FileName); File.WriteAllBytes(cached, Content);
+            var hit = new TestSink(); await ExpectTransferFailure(coordinator.HydrateAsync(source.Identity, 0, Content.Length, hit));
+            Check(hit.Failed == 1 && hit.Completed == 0 && source.Downloads == 1); CheckReservation();
+            await ExpectTransferFailure(coordinator.EvictVerifiedCacheAsync(source.Identity));
+            Check(File.ReadAllBytes(cached).SequenceEqual(Content)); CheckReservation();
+            // Exercise the coordinator's real capacity check: with this
+            // durable reservation counted, one extra byte is refused.
+            var cacheRoot = Path.Combine(root.Path, "verified-hydration-v1");
+            var used = Directory.EnumerateFiles(cacheRoot, "*", SearchOption.AllDirectories).Sum(path => new FileInfo(path).Length);
+            using (var constrained = new PlaceholderHydrationCoordinator(source, "pilot", root.Path, maximumFileBytes: Content.Length,
+                maximumCacheBytes: checked(used + growth), expectedPrincipal: CoordinatorSource.Principal)) {
+                var capacity = typeof(PlaceholderHydrationCoordinator).GetMethod("RequireCapacity", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance) ?? throw new IOException("Quota admission unavailable.");
+                capacity.Invoke(constrained, [0L, 1L]);
+                var refusedCapacity = false;
+                try { capacity.Invoke(constrained, [growth, 1L]); }
+                catch (System.Reflection.TargetInvocationException error) when (error.InnerException is TransferException) { refusedCapacity = true; }
+                Check(refusedCapacity);
+            }
             var owner = ExperimentalOwnedStream.FindInjectedPrefixOwnerForTest(token);
             var refused = false; try { owner.Dispose(); } catch (InvalidOperationException) { refused = true; }
             Check(refused);
             owner.ReconcileInjectedPrefixForTest(token, []); owner.Dispose();
-            var retained = Path.Combine(root.Path, "verified-hydration-v1", ".hydration-reservations-v2");
             Check(Directory.EnumerateFiles(retained, "*.json").Count() == 1 && ExperimentalOwnedStream.QuarantinedCountForTest == 0);
             source.ResponseFactory = null;
             var retried = new TestSink(); await coordinator.HydrateAsync(source.Identity, 0, Content.Length, retried);
-            Check(retried.Completed == 1 && retried.Failed == 0 && retried.Bytes.ToArray().SequenceEqual(Content) && source.Downloads == 2 &&
+            Check(retried.Completed == 1 && retried.Failed == 0 && retried.Bytes.ToArray().SequenceEqual(Content) && source.Downloads == 1 &&
                 !Directory.EnumerateFiles(retained, "*.json").Any());
         });
         Check(PendingOwnedResources() == 0);
@@ -337,6 +380,10 @@ internal static class ExperimentalColdDownloaderTests
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CreateHardLinkW(string newName, string existingName, nint security);
+    [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandleEx(Microsoft.Win32.SafeHandles.SafeFileHandle handle, int kind, nint data, uint size);
     private sealed class TestSink : IPlaceholderTransferSink
     {
         internal int Completed, Failed; internal MemoryStream Bytes { get; } = new();

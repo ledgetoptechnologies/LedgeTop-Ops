@@ -487,6 +487,14 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     // Caller owns this entry exclusively and holds the appropriate root quota/legacy lease.
     private void RemoveExactStaleReservation(PlaceholderIdentity identity)
     {
+#if LEDGETOP_CACHE_RACE_TEST
+        // All callers hold the same-entry admission/lease before the quota
+        // gate. Never interpret a rooted experimental owner as stale; the
+        // guard applies to fresh fetch, cache-hit and offline eviction alike.
+        var guardedEntry = Path.Combine(root, identity.ScopeKey, identity.CacheKey);
+        if (ExperimentalOwnedStream.HasQuarantineForEntryForTest(guardedEntry))
+            throw new TransferException("Experimental owner remains quarantined; reservation preserved.");
+#endif
         var directory = Path.Combine(root, ".hydration-reservations-v2");
         if (!OwnedExisting(directory)) return;
         var path = Path.Combine(directory, identity.ScopeKey + "-" + identity.CacheKey + ".json"); RequireSafe(path);
