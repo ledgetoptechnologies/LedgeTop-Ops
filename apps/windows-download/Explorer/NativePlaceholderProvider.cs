@@ -7,6 +7,10 @@ namespace LedgeTop.Files.Explorer;
 /// The caller owns shell registration and the lifetime of the authorized source.</summary>
 public sealed class NativePlaceholderProvider : IAsyncDisposable
 {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+    private int syntheticCommittedCleanupUncertain;
+    internal bool SyntheticCommittedCleanupUncertain => Volatile.Read(ref syntheticCommittedCleanupUncertain) != 0;
+#endif
     private readonly string root;
     private readonly IPreviewRootRegistration registration;
     private readonly CloudFilesConnectionOwner connection;
@@ -88,7 +92,8 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                         if (cacheStage != "quota-reservation" || DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO")) != "none")
                             throw new IOException("Synthetic serial comparison scope mismatch.");
                         await CloudFilesNativeTransfer.HydrateSyntheticMemorySerialAsync(identity, context, bytes, token,
-                            (transfer, sinkToken) => coordinator.SyntheticCacheStageAsync(identity, cacheStage, sinkToken, exclusive: true, transfer: transfer)).ConfigureAwait(false);
+                            (transfer, sinkToken) => coordinator.SyntheticCacheStageAsync(identity, cacheStage, sinkToken, exclusive: true, transfer: transfer),
+                            () => Interlocked.Exchange(ref syntheticCommittedCleanupUncertain, 1)).ConfigureAwait(false);
                     } else {
                         if (serial != "0") throw new IOException("Synthetic serial comparison option invalid.");
                         if (cacheStage != "none") await coordinator.SyntheticCacheStageAsync(identity, cacheStage, token).ConfigureAwait(false);

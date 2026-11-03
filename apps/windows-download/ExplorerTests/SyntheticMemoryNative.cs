@@ -47,8 +47,10 @@ internal static class SyntheticMemoryNative {
         for (string? current = full; current is not null; current = Path.GetDirectoryName(current))
             if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw new IOException("Test directory may not traverse aliases.");
     }
-    internal static bool CleanupVerified(bool registrationAttempted, bool registrationReturned, bool readersJoined, bool disposeCompleted, bool unregisterVerified) =>
-        readersJoined && (!registrationAttempted || (registrationReturned && disposeCompleted && unregisterVerified));
+    internal static bool CleanupVerified(bool registrationAttempted, bool registrationReturned, bool readersJoined, bool disposeCompleted, bool unregisterVerified, bool committedCleanupUncertain = false) =>
+        !committedCleanupUncertain && readersJoined && (!registrationAttempted || (registrationReturned && disposeCompleted && unregisterVerified));
+    internal static bool MayUnregister(bool registrationReturned, bool readersJoined, bool disposeCompleted, bool committedCleanupUncertain) =>
+        registrationReturned && readersJoined && disposeCompleted && !committedCleanupUncertain;
     internal static async Task<byte[]> TrackReadAsync(Task<byte[]> read, TimeSpan timeout, Action<bool> setJoined) {
         setJoined(false);
         try { return await read.WaitAsync(timeout).ConfigureAwait(false); }
@@ -257,20 +259,25 @@ internal static class SyntheticMemoryNative {
             var heartbeatWait = CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(identity, context, Bytes, CancellationToken.None, failedHeartbeat,
                 async (_, sinkToken) => { heartbeatQueued.TrySetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, sinkToken); }, TimeSpan.FromMilliseconds(20));
             await heartbeatQueued.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            var heartbeatStopped = false; try { await heartbeatWait.WaitAsync(TimeSpan.FromSeconds(5)); } catch (OperationCanceledException) { heartbeatStopped = true; }
+            var heartbeatStopped = false;
+            try { await heartbeatWait.WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch (TransferException error) { heartbeatStopped = error.HydrationFailure is { Stage: HydrationStage.NativeProgress, Category: HydrationFailureCategory.Native }; }
             if (!heartbeatStopped || failedHeartbeat.Executes != 1 || failedHeartbeat.LastStatus != CloudFilesNativeTransfer.Unavailable)
                 throw new IOException("Heartbeat failure did not cancel and settle the queued synthetic request.");
             var reportsAfterStop = failedHeartbeat.Reports; await Task.Delay(80);
             if (failedHeartbeat.Reports != reportsAfterStop) throw new IOException("Failed synthetic heartbeat did not drain.");
-            var committed = new FakeMemoryNative();
+            var committed = new FakeMemoryNative(); var committedCleanupUncertain = false;
             await CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(identity, context, Bytes, CancellationToken.None, committed,
-                async (transfer, _) => { await transfer(); throw new IOException("Synthetic cleanup failure after commit."); });
-            if (committed.Executes != 2 || committed.LastStatus != 0) throw new IOException("Committed synthetic transfer was failed again during cleanup.");
+                async (transfer, _) => { await transfer(); throw new IOException("Synthetic cleanup failure after commit."); },
+                committedCleanupUncertain: () => committedCleanupUncertain = true);
+            if (committed.Executes != 2 || committed.LastStatus != 0 || !committedCleanupUncertain ||
+                CleanupVerified(true, true, true, true, true, committedCleanupUncertain))
+                throw new IOException("Committed synthetic cleanup uncertainty was not retained.");
             var beforeCommit = new FakeMemoryNative();
             var refused = false;
             try { await CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(identity, context, Bytes, CancellationToken.None, beforeCommit,
                 (_, _) => throw new IOException("Synthetic failure before commit.")); }
-            catch (IOException) { refused = true; }
+            catch (TransferException error) { refused = error.HydrationFailure?.Category == HydrationFailureCategory.LocalIO; }
             if (!refused || beforeCommit.Executes != 1 || beforeCommit.LastStatus != CloudFilesNativeTransfer.Unavailable)
                 throw new IOException("Uncommitted synthetic failure was not settled exactly once.");
             Environment.SetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL", previousSerial);
@@ -369,7 +376,8 @@ internal static class SyntheticMemoryNative {
             CleanupVerified(true, true, true, false, false) ||
             CleanupVerified(true, true, false, true, true) ||
             CleanupVerified(true, true, true, true, false) ||
-            !CleanupVerified(true, true, true, true, true)) throw new IOException("Synthetic registration cleanup evidence is incorrect.");
+            !CleanupVerified(true, true, true, true, true) || CleanupVerified(true, true, true, true, true, true) ||
+            MayUnregister(true, true, true, true) || !MayUnregister(true, true, true, false)) throw new IOException("Synthetic registration cleanup evidence is incorrect.");
         var options = DiagnosticSettings(name => name == "LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION" ? "1" : "synthetic-secret");
         if (options != "Synthetic memory options: blockSelf=True; disableScanner=False; suppressProgress=False; markerIo=invalid; cacheStage=invalid; prewarm=invalid; serial=invalid")
             throw new IOException("Synthetic diagnostic option reporting is incorrect.");
@@ -574,15 +582,16 @@ internal static class SyntheticMemoryNative {
             else try { await provider.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(20)); disposeCompleted = true; }
             catch (TimeoutException) { disposeTimedOut = true; }
             catch { }
-            if (registration is not null && readersJoined && disposeCompleted)
-                try { registration.Unregister(); unregisterVerified = true; } catch { }
+            var committedCleanupUncertain = provider?.SyntheticCommittedCleanupUncertain == true;
+            if (MayUnregister(registration is not null, readersJoined, disposeCompleted, committedCleanupUncertain))
+                try { registration!.Unregister(); unregisterVerified = true; } catch { }
             // A timed-out provider may still be executing callbacks. Retain its
             // handles instead of closing them while that work may use them.
             if (disposeCompleted) { preopened?.Dispose(); preopened = null; }
             if (disposeCompleted) { createScope?.Dispose(); createScope = null; }
             Phase(preopened is null ? "preopened-handles-released" : "preopened-handles-retained", id);
             Phase(createScope is null ? "create-scope-released" : "create-scope-retained", id);
-            var cleanupVerified = CleanupVerified(registrationAttempted, registration is not null, readersJoined, disposeCompleted, unregisterVerified);
+            var cleanupVerified = CleanupVerified(registrationAttempted, registration is not null, readersJoined, disposeCompleted, unregisterVerified, committedCleanupUncertain);
             if (!cleanupVerified) success = false;
             foreach (var item in NativeStallTrace.Snapshot(trace).Where(e => cacheStage != "none" || e.Kind is NativeStallTrace.Stage.SyntheticMarkerReadEnter or NativeStallTrace.Stage.SyntheticMarkerReadExit
                 or NativeStallTrace.Stage.SyntheticMarkerCreateEnter or NativeStallTrace.Stage.SyntheticMarkerCreateExit
@@ -592,7 +601,7 @@ internal static class SyntheticMemoryNative {
                 Console.WriteLine($"Synthetic marker trace: seq={item.Sequence}; thread={item.ThreadId}; stage={item.Kind}");
             Console.WriteLine($"Synthetic marker trace: attempted={NativeStallTrace.Attempted(trace)}; dropped={NativeStallTrace.Dropped(trace)}");
             NativeStallTrace.Disable(trace);
-            Console.WriteLine($"Synthetic memory native: count={count}; success={success}; nativeRegistrationCleanupVerified={cleanupVerified}; fixtureDirectoriesRemoved=False; disposeTimedOut={disposeTimedOut}; registrationAttempted={registrationAttempted}; registrationReturned={registration is not null}; root={root}; registrationContext=LedgeTop.Files.MemoryNativeTest.v1:{id}");
+            Console.WriteLine($"Synthetic memory native: count={count}; success={success}; nativeRegistrationCleanupVerified={cleanupVerified}; committedCleanupUncertain={committedCleanupUncertain}; fixtureDirectoriesRemoved=False; disposeTimedOut={disposeTimedOut}; registrationAttempted={registrationAttempted}; registrationReturned={registration is not null}; root={root}; registrationContext=LedgeTop.Files.MemoryNativeTest.v1:{id}");
             Console.Out.Flush();
         }
         return success ? 0 : 1;
