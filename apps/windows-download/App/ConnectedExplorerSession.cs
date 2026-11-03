@@ -818,6 +818,8 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     }
     public Task RemoveAsync() => OperateAsync(ConnectionAction.Remove, async (token, trace) => {
         token.ThrowIfCancellationRequested();
+        if (FreshReadOnlyActive)
+            throw new IOException("The active fresh-files connection is read-only and cannot be removed from this session.");
         _ = ValidatePreviousRemoval();
         // Never retain a signed-in backend for removal: the cleanup engine's source always denies network operations.
         trace.Phase = ConnectionPhase.LocalOwnership;
