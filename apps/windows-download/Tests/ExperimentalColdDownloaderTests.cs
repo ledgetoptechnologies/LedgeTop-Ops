@@ -385,6 +385,40 @@ internal static class ExperimentalColdDownloaderTests
             HydrationCacheConcurrency.SettleInjectedMarkerCloseForTest(root);
             AssertOtherProcessOpen(lockPath, true);
         });
+        await WithFixture(async fixture => {
+            var root = Path.Combine(fixture.Path, "created"); Directory.CreateDirectory(root);
+            var first = await HydrationCacheConcurrency.AcquireAsync(root, "one", CancellationToken.None);
+            var second = await HydrationCacheConcurrency.AcquireAsync(root, "two", CancellationToken.None);
+            var marker = Path.Combine(root, ".verified-hydration-owner"); var expected = "LedgeTop.VerifiedHydration/1\n"u8.ToArray();
+            try {
+                first.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate);
+                var owner = first.ExperimentalMarkers;
+                var foreignDir = Path.Combine(root, "foreign"); Directory.CreateDirectory(foreignDir);
+                var foreignPath = Path.Combine(foreignDir, ".verified-hydration-owner"); File.WriteAllBytes(foreignPath, Foreign);
+                var refused = false; try { owner.CreateNew(foreignDir); } catch (IOException) { refused = true; }
+                Check(refused && File.ReadAllBytes(foreignPath).SequenceEqual(Foreign));
+                var results = await Task.WhenAll(Task.Run(() => { try { owner.CreateNew(root); return true; } catch (IOException) { return false; } }),
+                    Task.Run(() => { try { second.ExperimentalMarkers.CreateNew(root); return true; } catch (IOException) { return false; } }));
+                Check(results.Count(x => x) == 1); second.ExperimentalMarkers.ValidateExisting(root, ".verified-hydration-owner", expected);
+                AssertOtherProcessCannotOpen(marker);
+            } finally { first.Dispose(); second.Dispose(); }
+            Check(File.ReadAllBytes(marker).SequenceEqual(expected));
+        });
+        await WithFixture(async fixture => {
+            var root = Path.Combine(fixture.Path, "create-failure"); Directory.CreateDirectory(root);
+            var lease = await HydrationCacheConcurrency.AcquireAsync(root, "one", CancellationToken.None);
+            var lockPath = Path.Combine(root, ".hydration-cache.lock"); lease.AcquireExclusiveLegacy(lockPath, FileMode.OpenOrCreate);
+            var owner = lease.ExperimentalMarkers; var failed = false;
+            ExperimentalRootMarkerOwner.AfterCreateTestHook = () => throw new IOException("Injected creation failure.");
+            try { owner.CreateNew(root); } catch (IOException error) when (error.Message == "Injected creation failure.") { failed = true; }
+            finally { ExperimentalRootMarkerOwner.AfterCreateTestHook = null; }
+            Check(failed); var refused = false;
+            try { lease.Dispose(); } catch (IOException) { refused = true; }
+            Check(refused); AssertOtherProcessCannotOpen(lockPath);
+            refused = false; try { await HydrationCacheConcurrency.AcquireAsync(root, "other", CancellationToken.None); } catch (TransferException) { refused = true; }
+            Check(refused && File.Exists(Path.Combine(root, ".verified-hydration-owner")));
+            HydrationCacheConcurrency.SettleInjectedMarkerCreateForTest(root); AssertOtherProcessOpen(lockPath, true);
+        });
         await AbruptRestartTests();
         await WithFixture(async root => {
             var etag = "\"" + new string('\\', 510) + "\"";

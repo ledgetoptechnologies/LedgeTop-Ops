@@ -3,7 +3,7 @@ using System.Text;
 
 namespace LedgeTop.WindowsDownload;
 
-// Synthetic experiment: existing markers only. No production coordinator uses this.
+// Synthetic experiment only. No production coordinator uses this.
 // The caller must hold a live root admission lease while using this object.
 internal sealed class ExperimentalRootMarkerOwner : IDisposable
 {
@@ -12,13 +12,19 @@ internal sealed class ExperimentalRootMarkerOwner : IDisposable
     private readonly string root;
     private readonly Dictionary<string, Marker> markers = new(StringComparer.OrdinalIgnoreCase);
     private bool disposed;
-    internal static Action? BeforeCloseTestHook;
+    internal static Action? BeforeCloseTestHook, AfterCreateTestHook;
+    private FileStream? uncertainFile;
+    private Microsoft.Win32.SafeHandles.SafeFileHandle? uncertainHandle;
+    private List<ExperimentalOwnedStream.DirectoryPin>? uncertainPins;
+    private ExperimentalOwnedStream.Identity uncertainId;
+    private bool uncertain, injectedCreateFailure;
     internal bool InjectedCloseFailure { get; private set; }
     internal ExperimentalRootMarkerOwner(string root) { this.root = Path.GetFullPath(root); }
     internal void ValidateExisting(string directory, string markerName, byte[] expected)
     {
         lock (gate) {
             ObjectDisposedException.ThrowIf(disposed, this);
+            if (uncertain) throw new IOException("Experimental marker creation is uncertain.");
             var dir = Path.GetFullPath(directory);
             if ((!dir.Equals(root, StringComparison.OrdinalIgnoreCase) && !dir.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) ||
                 markerName != ".verified-hydration-owner" || expected.Length is 0 or > 128)
@@ -43,6 +49,45 @@ internal sealed class ExperimentalRootMarkerOwner : IDisposable
             }
         }
     }
+    internal void CreateNew(string directory)
+    {
+        lock (gate) {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (uncertain) throw new IOException("Experimental marker creation is uncertain.");
+            var dir = Path.GetFullPath(directory);
+            if (!dir.Equals(root, StringComparison.OrdinalIgnoreCase) && !dir.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("Experimental marker scope invalid.");
+            var path = Path.Combine(dir, ".verified-hydration-owner");
+            if (markers.ContainsKey(path)) throw new IOException("Experimental marker already owned.");
+            var pins = new List<ExperimentalOwnedStream.DirectoryPin>();
+            try {
+                ExperimentalOwnedStream.PinDirectories(dir, pins); ExperimentalOwnedStream.VerifyPins(pins);
+                var handle = ExperimentalOwnedStream.Open(path, 0xC0000080, 1, 1, 0x00200000);
+                uncertainHandle = handle; uncertainPins = pins; pins = []; uncertain = true;
+                uncertainFile = new FileStream(handle, FileAccess.ReadWrite); uncertainHandle = null;
+                ExperimentalOwnedStream.RequireRegularKind(uncertainFile.SafeFileHandle, directory: false);
+                ExperimentalOwnedStream.RequireSingleLink(uncertainFile.SafeFileHandle);
+                uncertainId = ExperimentalOwnedStream.GetIdentity(uncertainFile.SafeFileHandle);
+                try { AfterCreateTestHook?.Invoke(); } catch { injectedCreateFailure = true; throw; }
+                var expected = System.Text.Encoding.UTF8.GetBytes("LedgeTop.VerifiedHydration/1\n");
+                uncertainFile.Write(expected); uncertainFile.Flush(true);
+                var marker = new Marker(path, uncertainFile, uncertainId, expected, uncertainPins);
+                Verify(marker); markers.Add(path, marker);
+                uncertainFile = null; uncertainPins = null; uncertain = false;
+            } finally { foreach (var pin in pins.AsEnumerable().Reverse()) pin.Handle.Dispose(); }
+        }
+    }
+    internal void SettleInjectedCreateFailureForTest()
+    {
+        lock (gate) {
+            if (!uncertain || !injectedCreateFailure || AfterCreateTestHook is not null || uncertainFile is null || uncertainPins is null ||
+                uncertainFile.Length != 0 || ExperimentalOwnedStream.GetIdentity(uncertainFile.SafeFileHandle) != uncertainId)
+                throw new IOException("Experimental creation cannot be settled.");
+            ExperimentalOwnedStream.VerifyPins(uncertainPins);
+            uncertainFile.Dispose(); foreach (var pin in uncertainPins.AsEnumerable().Reverse()) pin.Handle.Dispose();
+            uncertainFile = null; uncertainPins = null; uncertain = false; injectedCreateFailure = false;
+        }
+    }
     private static void Verify(Marker marker)
     {
         ExperimentalOwnedStream.VerifyPins(marker.Pins);
@@ -56,6 +101,7 @@ internal sealed class ExperimentalRootMarkerOwner : IDisposable
     {
         lock (gate) {
             if (disposed) return;
+            if (uncertain) throw new IOException("Experimental marker creation remains uncertain.");
             try { BeforeCloseTestHook?.Invoke(); } catch { InjectedCloseFailure = true; throw; }
             InjectedCloseFailure = false; disposed = true;
             foreach (var marker in markers.Values) { marker.File.Dispose(); foreach (var pin in marker.Pins.AsEnumerable().Reverse()) pin.Handle.Dispose(); }

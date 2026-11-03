@@ -129,6 +129,16 @@ internal static class HydrationCacheConcurrency
         } catch { Release(); throw; }
     }
 #if LEDGETOP_CACHE_RACE_TEST
+    internal static void SettleInjectedMarkerCreateForTest(string root)
+    {
+        lock (Sync) {
+            if (!Roots.TryGetValue(root, out var state) || !state.ExperimentalQuarantined || state.References != 0 || state.ExperimentalMarkerOwner is null)
+                throw new InvalidOperationException("Experimental root is not quarantined.");
+            state.ExperimentalMarkerOwner.SettleInjectedCreateFailureForTest();
+            state.ExperimentalMarkerOwner.Dispose(); state.ExclusiveLegacyLease?.Dispose();
+            state.Slots.Dispose(); state.Admission.Dispose(); Roots.Remove(root);
+        }
+    }
     internal static void SettleInjectedMarkerCloseForTest(string root)
     {
         lock (Sync) {
