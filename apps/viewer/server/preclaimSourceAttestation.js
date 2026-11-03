@@ -9,6 +9,7 @@ const { canonicalEnvelope, canonicalizeJcs } = require('./preparedSubmissionOutb
 const { PreparedSubmissionOutbox } = require('./preparedSubmissionOutbox');
 const { ProcessingRepository } = require('./processingRepository');
 const { getHeldSourceSnapshot, verifyHeldSourceSnapshot } = require('./heldSourceSnapshot');
+const { captureHeldSourceExport } = require('./viewerPagedSourceExport');
 const { fileFacts } = require('./viewerPagedSourceExport');
 
 const PROTOCOL = 'ltds-preclaim-source-attestation-v1';
@@ -24,9 +25,9 @@ const PROOF_FIELDS = Object.freeze([
 ]);
 const SNAPSHOT_FIELDS = Object.freeze([
   'protocol', 'snapshotId', 'issuerId', 'keyId', 'createdAt', 'datasetId',
-  'datasetManifestSha256', 'taskId', 'attemptId', 'inputManifestSha256',
+  'datasetManifestSha256', 'taskId', 'attemptId', 'inputManifestSha256', 'datasetFileCount',
   'sourceCount', 'sourcePageHashes', 'sourceFrameBytes', 'selectedCount',
-  'selectedPageHashes', 'selectedFrameBytes',
+  'selectedPageHashes', 'selectedFrameBytes', 'gcp',
 ]);
 
 function fail(code) { throw Object.assign(new Error(code), { code }); }
@@ -60,24 +61,42 @@ function validateSnapshotSelection(snapshot, submission) {
   const selected = parseFrameRecords(snapshot.selectedFrames);
   const source = parseFrameRecords(snapshot.sourceFrames);
   if (!Array.isArray(source) || !Array.isArray(selected) || !selected.length) fail('preclaim_snapshot_selection_invalid');
+  const generatedGcpRecords = source.filter(record => record?.type === 'attempt_generated_gcp');
+  const generatedGcp = snapshot.intent.gcp?.generatedGcp || null;
+  if (generatedGcpRecords.length > 1 || Boolean(generatedGcpRecords.length) !== Boolean(generatedGcp)
+      || Boolean(snapshot.gcpEvidenceFrames) !== Boolean(generatedGcp)
+      || Boolean(snapshot.gcpFileFrames) !== Boolean(generatedGcp)) fail('preclaim_gcp_extension_incomplete');
   const byId = new Map();
   for (const record of source) {
-    if (!record || record.type !== 'dataset_file' || typeof record.datasetFileId !== 'string'
-        || byId.has(record.datasetFileId)) fail('preclaim_snapshot_source_invalid');
+    if (record?.type === 'attempt_generated_gcp') continue;
+    if (!record || record.type !== 'dataset_file' || typeof record.datasetFileId !== 'string' || byId.has(record.datasetFileId)) fail('preclaim_snapshot_source_invalid');
     byId.set(record.datasetFileId, record);
   }
-  // This v1 proof intentionally holds any dataset containing raw GCP inputs.
-  if (source.some(record => record.processingRole === 'gcp_source')) fail('preclaim_gcp_extension_unavailable');
-  const eligible = source.filter(record => record.type === 'dataset_file'
+  const datasetRecords = source.filter(record => record?.type === 'dataset_file');
+  if (datasetRecords.length !== snapshot.intent.datasetFileCount
+      || datasetRecords.length + generatedGcpRecords.length !== source.length) fail('preclaim_snapshot_source_invalid');
+  if (datasetRecords.some(record => record.processingRole === 'gcp_source') && !generatedGcp) fail('preclaim_gcp_extension_unavailable');
+  if (generatedGcp && (generatedGcp.attemptId !== snapshot.attemptId
+      || !isHash(generatedGcp.sha256) || !Number.isSafeInteger(generatedGcp.byteSize) || generatedGcp.byteSize < 1
+      || !Array.isArray(generatedGcp.sourceFiles) || !generatedGcp.sourceFiles.length)) fail('preclaim_gcp_extension_invalid');
+  const gcpSourceIds = new Set(datasetRecords.filter(record => record.processingRole === 'gcp_source').map(record => record.datasetFileId));
+  if (generatedGcp && generatedGcp.sourceFiles.some(file => !file || !gcpSourceIds.has(file.datasetFileId)
+      || byId.get(file.datasetFileId)?.relativePath !== file.relativePath
+      || byId.get(file.datasetFileId)?.sha256 !== file.sha256)) fail('preclaim_gcp_source_binding_mismatch');
+  const eligible = datasetRecords.filter(record => record.type === 'dataset_file'
     && !['gcp_source', 'administrative'].includes(record.processingRole)
     && (record.processingRole !== 'auto' || PHOTO.test(record.relativePath)));
+  const filteredEligible = generatedGcp
+    ? eligible.filter(record => path.posix.basename(record.relativePath).toLowerCase() !== 'gcp_list.txt') : eligible;
   const orderedEligible = [
-    ...eligible.filter(record => PHOTO.test(record.relativePath)),
-    ...eligible.filter(record => !PHOTO.test(record.relativePath)),
+    ...filteredEligible.filter(record => PHOTO.test(record.relativePath)),
+    ...filteredEligible.filter(record => !PHOTO.test(record.relativePath)),
   ];
   const expectedSelection = orderedEligible.map((record, ordinal) => ({
     type: 'dataset_file', ordinal, pageObjectId: record.datasetFileId, datasetFileId: record.datasetFileId,
   }));
+  if (generatedGcp) expectedSelection.push({ type: 'attempt_generated_gcp', ordinal: expectedSelection.length,
+    pageObjectId: `gcp_${snapshot.attemptId}`, attemptId: snapshot.attemptId, mediaType: 'text/plain' });
   const comparisonLimits = { maxBytes: MAX_SOURCE_STREAM_BYTES };
   if (!canonicalizeJcs(selected, comparisonLimits).equals(canonicalizeJcs(expectedSelection, comparisonLimits))) fail('preclaim_snapshot_selection_incomplete');
   const mapped = [];
@@ -85,8 +104,15 @@ function validateSnapshotSelection(snapshot, submission) {
   let hasImage = false;
   for (let index = 0; index < selected.length; index++) {
     const mark = selected[index];
-    if (!mark || mark.type !== 'dataset_file' || mark.ordinal !== index
-        || mark.pageObjectId !== mark.datasetFileId) fail('preclaim_snapshot_selection_invalid');
+    if (generatedGcp && mark?.type === 'attempt_generated_gcp') {
+      if (mark.ordinal !== index || mark.pageObjectId !== `gcp_${snapshot.attemptId}` || mark.attemptId !== snapshot.attemptId
+          || mark.mediaType !== 'text/plain' || index !== selected.length - 1) fail('preclaim_snapshot_selection_invalid');
+      mapped.push({ id: mark.pageObjectId, name: 'gcp_list.txt', byteSize: generatedGcp.byteSize,
+        sha256: generatedGcp.sha256, kind: 'auxiliary', mediaType: 'text/plain' });
+      inputFiles.push({ relativePath: 'gcp_list.txt', byteSize: generatedGcp.byteSize, sha256: generatedGcp.sha256 });
+      continue;
+    }
+    if (!mark || mark.type !== 'dataset_file' || mark.ordinal !== index || mark.pageObjectId !== mark.datasetFileId) fail('preclaim_snapshot_selection_invalid');
     const file = byId.get(mark.datasetFileId);
     if (!file || ['gcp_source', 'administrative'].includes(file.processingRole)
         || (file.processingRole === 'auto' && file.kind !== 'image')
@@ -157,9 +183,34 @@ function buildPreclaimSourceAttestation({
       || ['failed', 'cancelled', 'published'].includes(attempt.status)) fail('preclaim_current_source_binding_mismatch');
   let currentSource;
   try { currentSource = dataset.files.map(fileFacts); } catch { fail('preclaim_current_source_invalid'); }
-  const snapshotSource = parseFrameRecords(snapshot.sourceFrames);
+  const snapshotSource = parseFrameRecords(snapshot.sourceFrames).filter(record => record?.type === 'dataset_file');
   const sourceComparisonLimits = { maxBytes: MAX_SOURCE_STREAM_BYTES };
   if (!canonicalizeJcs(snapshotSource, sourceComparisonLimits).equals(canonicalizeJcs(currentSource, sourceComparisonLimits))) fail('preclaim_source_inventory_mismatch');
+  let currentExport;
+  try { currentExport = captureHeldSourceExport(processing, { datasetId: dataset.id, taskId: task.id, attemptId, joinTransaction: true }); }
+  catch { fail('preclaim_current_source_export_unavailable'); }
+  const sameBytes = (left, right) => Buffer.isBuffer(left) && Buffer.isBuffer(right) && left.equals(right);
+  const currentGcp = currentExport.generatedGcp ? {
+    evidenceVersion: currentExport.gcpEvidenceVersion,
+    evidencePageHashes: currentExport.gcpEvidencePageHashes,
+    evidencePageBytes: currentExport.gcpEvidencePageBytes,
+    evidencePageCount: currentExport.gcpEvidencePageCount,
+    evidenceByteCount: currentExport.gcpEvidenceByteCount,
+    evidenceSha256: currentExport.gcpEvidenceSha256,
+    fileVersion: currentExport.gcpFileVersion,
+    filePageHashes: currentExport.gcpFilePageHashes,
+    filePageBytes: currentExport.gcpFilePageBytes,
+    filePageCount: currentExport.gcpFilePageCount,
+    fileByteCount: currentExport.gcpFileByteCount,
+    fileSha256: currentExport.gcpFileSha256,
+    generatedGcp: { byteSize: currentExport.generatedGcp.byteSize, sha256: currentExport.generatedGcp.sha256,
+      attemptId: currentExport.generatedGcp.attemptId, correspondenceSha256: currentExport.generatedGcp.correspondenceSha256,
+      sourceFiles: currentExport.generatedGcp.sourceFiles },
+  } : null;
+  if (!sameBytes(currentExport.sourceFrames, snapshot.sourceFrames)
+      || (currentExport.gcpEvidenceFrames ? !sameBytes(currentExport.gcpEvidenceFrames, snapshot.gcpEvidenceFrames) : snapshot.gcpEvidenceFrames !== null)
+      || (currentExport.gcpFileFrames ? !sameBytes(currentExport.gcpFileFrames, snapshot.gcpFileFrames) : snapshot.gcpFileFrames !== null)
+      || !canonicalizeJcs(snapshot.intent.gcp).equals(canonicalizeJcs(currentGcp))) fail('preclaim_snapshot_export_mismatch');
 
   const envelopeBytes = Buffer.from(intent.envelopeCanonical, 'utf8');
   let envelope;

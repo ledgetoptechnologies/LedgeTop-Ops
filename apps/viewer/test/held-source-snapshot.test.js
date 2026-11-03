@@ -13,7 +13,7 @@ const {
   acceptHeldSourceSnapshot, releaseHeldSourceSnapshot,
 } = require('../server/heldSourceSnapshot');
 
-function fixture(t, { withGcp = false } = {}) {
+function fixture(t, { withGcp = false, correspondGcp = true } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'held-viewer-source-'));
   const database = openDatabase(path.join(root, 'viewer.sqlite'));
   const processing = new ProcessingRepository(database);
@@ -33,7 +33,8 @@ function fixture(t, { withGcp = false } = {}) {
     const set = gcp.importSet({ datasetId: dataset.id, displayName: 'Control', sourceFormat: 'generic-csv-v1', sourceFileId: 'gcp-file',
       sourceFilename: 'control.csv', sourceSha256: gcpSha256, sourceContent: content, crs: 'EPSG:4326', elevationUnits: 'm',
       createdBy: 'ops:test', points: [{ externalId: 'A', label: 'Target', latitude: 44.5, longitude: -88.1, elevationM: 244, description: null }] });
-    gcp.createCorrespondence({ taskId: processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'ODM task' }).id,
+    const task = processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'ODM task' });
+    if (correspondGcp) gcp.createCorrespondence({ taskId: task.id,
       pointId: set.points[0].id, imageFileId: 'photo-1', pixelX: 10, pixelY: 20, createdBy: 'ops:test' });
   }
   const task = withGcp
@@ -120,12 +121,40 @@ test('source snapshot creation rejects a dataset with an in-flight filesystem li
   assert.equal(database.prepare('SELECT COUNT(*) AS n FROM viewer_source_snapshots').get().n, 0);
 });
 
-test('snapshot export refuses the incomplete GCP extension instead of silently omitting its evidence', (t) => {
+test('snapshot binds raw GCP evidence and generated NodeODM file into the held source proof', (t) => {
   const { processing, dataset, task, attempt } = fixture(t, { withGcp: true });
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
+  const signer = { issuerId: 'viewer-test-issuer', keyId: 'test-key-1', sign: (bytes) => crypto.sign(null, bytes, privateKey) };
+  const snapshot = createHeldSourceSnapshot(processing, {
+    datasetId: dataset.id, taskId: task.id, attemptId: attempt.id, signer,
+  });
+  assert.equal(snapshot.status, 'held');
+  const sourceCount = processing.getDataset(dataset.id, true).fileCount;
+  assert.equal(snapshot.intent.datasetFileCount, sourceCount);
+  assert.equal(snapshot.intent.sourceCount, sourceCount + 1, 'the signed source stream includes its generated GCP file');
+  assert.ok(snapshot.intent.gcp.evidenceSha256);
+  assert.ok(snapshot.intent.gcp.fileSha256);
+  assert.equal(snapshot.intent.gcp.generatedGcp.attemptId, attempt.id);
+  assert.equal(snapshot.intent.gcp.generatedGcp.sha256, snapshot.intent.gcp.fileSha256);
+  assert.ok(snapshot.gcpEvidenceFrames.length > 0);
+  assert.ok(snapshot.gcpFileFrames.length > 0);
+  assert.ok(verifyHeldSourceSnapshot(snapshot, publicKey));
+  const changedEvidence = { ...snapshot, gcpEvidenceFrames: Buffer.from(snapshot.gcpEvidenceFrames) };
+  changedEvidence.gcpEvidenceFrames[0] ^= 1;
+  assert.equal(verifyHeldSourceSnapshot(changedEvidence, publicKey), false, 'GCP evidence bytes are signed and immutable');
+  const changedFile = { ...snapshot, gcpFileFrames: Buffer.from(snapshot.gcpFileFrames) };
+  changedFile.gcpFileFrames[0] ^= 1;
+  assert.equal(verifyHeldSourceSnapshot(changedFile, publicKey), false, 'generated GCP bytes are signed and immutable');
+  assert.equal(processing.hasHeldSourceSnapshot(dataset.id), true);
+});
+
+test('raw GCP source without task correspondences cannot be silently omitted from the signed snapshot', (t) => {
+  const { processing, dataset, task, attempt } = fixture(t, { withGcp: true, correspondGcp: false });
   const { privateKey } = crypto.generateKeyPairSync('ed25519');
   const signer = { issuerId: 'viewer-test-issuer', keyId: 'test-key-1', sign: (bytes) => crypto.sign(null, bytes, privateKey) };
   assert.throws(() => createHeldSourceSnapshot(processing, {
     datasetId: dataset.id, taskId: task.id, attemptId: attempt.id, signer,
-  }), { code: 'snapshot_gcp_extension_unavailable' });
-  assert.equal(processing.database.prepare('SELECT COUNT(*) AS n FROM viewer_source_snapshots').get().n, 0);
+  }), { code: 'snapshot_gcp_evidence_required' });
+  assert.equal(processing.hasRetainedGcpSource(dataset.id), true, 'the original GCP CSV remains in permanent custody');
+  assert.equal(processing.hasHeldSourceSnapshot(dataset.id), false);
 });

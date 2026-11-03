@@ -2281,6 +2281,25 @@ const MIGRATIONS = [
       }
     }
   }},
+  {version:48,name:'held_viewer_gcp_snapshot_streams',sql:`
+    ALTER TABLE viewer_source_snapshots ADD COLUMN gcp_evidence_frames BLOB;
+    ALTER TABLE viewer_source_snapshots ADD COLUMN gcp_file_frames BLOB;
+    DROP TRIGGER viewer_source_snapshots_payload_immutable;
+    CREATE TRIGGER viewer_source_snapshots_payload_immutable BEFORE UPDATE ON viewer_source_snapshots
+      WHEN NEW.snapshot_id IS NOT OLD.snapshot_id OR NEW.dataset_id IS NOT OLD.dataset_id OR NEW.task_id IS NOT OLD.task_id
+        OR NEW.attempt_id IS NOT OLD.attempt_id OR NEW.dataset_manifest_sha256 IS NOT OLD.dataset_manifest_sha256
+        OR NEW.input_manifest_sha256 IS NOT OLD.input_manifest_sha256 OR NEW.intent_json IS NOT OLD.intent_json
+        OR NEW.intent_sha256 IS NOT OLD.intent_sha256 OR NEW.issuer_id IS NOT OLD.issuer_id OR NEW.key_id IS NOT OLD.key_id
+        OR NEW.signature IS NOT OLD.signature OR NEW.source_frames IS NOT OLD.source_frames OR NEW.selected_frames IS NOT OLD.selected_frames
+        OR NEW.source_page_hashes_json IS NOT OLD.source_page_hashes_json OR NEW.selected_page_hashes_json IS NOT OLD.selected_page_hashes_json
+        OR NEW.source_frame_bytes IS NOT OLD.source_frame_bytes OR NEW.selected_frame_bytes IS NOT OLD.selected_frame_bytes
+        OR NEW.gcp_evidence_frames IS NOT OLD.gcp_evidence_frames OR NEW.gcp_file_frames IS NOT OLD.gcp_file_frames
+        OR NEW.created_at IS NOT OLD.created_at
+        OR ((NEW.acceptance_receipt_sha256 IS NOT OLD.acceptance_receipt_sha256 OR NEW.acceptance_receipt_json IS NOT OLD.acceptance_receipt_json)
+          AND NOT (OLD.status='held' AND NEW.status='accepted' AND OLD.acceptance_receipt_sha256 IS NULL
+            AND OLD.acceptance_receipt_json IS NULL AND NEW.acceptance_receipt_sha256 IS NOT NULL AND NEW.acceptance_receipt_json IS NOT NULL))
+      BEGIN SELECT RAISE(ABORT,'Viewer source snapshot payload is immutable'); END;
+  `},
 ];
 
 function applyMigrations(database) {
