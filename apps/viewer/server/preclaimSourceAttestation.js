@@ -108,6 +108,15 @@ function validateSnapshotSelection(snapshot, submission) {
   if (inputDigest !== snapshot.intent.inputManifestSha256) fail('preclaim_input_manifest_mismatch');
 }
 
+// Caller must hold its database transaction while reading dataset and snapshot.
+function assertCurrentSnapshotSource(dataset, snapshot) {
+  let currentSource;
+  try { currentSource = dataset.files.map(fileFacts); } catch { fail('preclaim_current_source_invalid'); }
+  const snapshotSource = parseFrameRecords(snapshot.sourceFrames);
+  const sourceComparisonLimits = { maxBytes: MAX_SOURCE_STREAM_BYTES };
+  if (!canonicalizeJcs(snapshotSource, sourceComparisonLimits).equals(canonicalizeJcs(currentSource, sourceComparisonLimits))) fail('preclaim_source_inventory_mismatch');
+}
+
 function buildPreclaimSourceAttestation({
   processing, outbox, attemptId, snapshotPublicKey, expectedSnapshotIssuerId, expectedSnapshotKeyId, signer,
   authorityId, principalId, environment, capabilities, trustedLidarEvidence = null,
@@ -155,11 +164,7 @@ function buildPreclaimSourceAttestation({
       || !project || project.status !== 'active'
       || !attempt || attempt.taskId !== task.id || attempt.datasetId !== dataset.id
       || ['failed', 'cancelled', 'published'].includes(attempt.status)) fail('preclaim_current_source_binding_mismatch');
-  let currentSource;
-  try { currentSource = dataset.files.map(fileFacts); } catch { fail('preclaim_current_source_invalid'); }
-  const snapshotSource = parseFrameRecords(snapshot.sourceFrames);
-  const sourceComparisonLimits = { maxBytes: MAX_SOURCE_STREAM_BYTES };
-  if (!canonicalizeJcs(snapshotSource, sourceComparisonLimits).equals(canonicalizeJcs(currentSource, sourceComparisonLimits))) fail('preclaim_source_inventory_mismatch');
+  assertCurrentSnapshotSource(dataset, snapshot);
 
   const envelopeBytes = Buffer.from(intent.envelopeCanonical, 'utf8');
   let envelope;
@@ -223,4 +228,4 @@ function createPreclaimSourceAttestation(input = {}) {
   }
 }
 
-module.exports = { DOMAIN, MAX_PROOF_BYTES, PROOF_FIELDS, PROTOCOL, createPreclaimSourceAttestation };
+module.exports = { DOMAIN, MAX_PROOF_BYTES, PROOF_FIELDS, PROTOCOL, createPreclaimSourceAttestation, assertCurrentSnapshotSource };

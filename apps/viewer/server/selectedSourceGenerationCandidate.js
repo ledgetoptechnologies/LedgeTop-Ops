@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { canonicalBytes } = require('./referenceProtocol');
 const { getHeldSourceSnapshot, verifyHeldSourceSnapshot } = require('./heldSourceSnapshot');
 const { fileFacts } = require('./viewerPagedSourceExport');
+const { assertCurrentSnapshotSource } = require('./preclaimSourceAttestation');
 const fail = () => { throw Object.assign(new Error('generation held'), { code: 'GENERATION_HELD' }); };
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const records = bytes => Buffer.from(bytes).toString('utf8').trimEnd().split('\n').flatMap(line => JSON.parse(line).records);
@@ -27,6 +28,7 @@ function prepareSelectedGeneration(processing, { attemptId, generation, snapshot
         AND NOT EXISTS(SELECT 1 FROM storage_mutations m WHERE m.entity_type='dataset' AND m.entity_id=d.id AND m.status IN ('intent','fs_applied','failed'))`)
       .get(attemptId, snapshot.taskId, snapshot.datasetId, snapshot.datasetManifestSha256);
     if (!current) fail();
+    try { assertCurrentSnapshotSource(processing.getDataset(snapshot.datasetId, true), snapshot); } catch { fail(); }
     let source, marks;
     try { source = records(snapshot.sourceFrames); marks = records(snapshot.selectedFrames); } catch { fail(); }
     const photo=/\.(?:jpe?g|png|tiff?|dng|raw|heic)$/i,auxiliary=/\.(?:txt|geojson|json|zip|las|laz)$/i;

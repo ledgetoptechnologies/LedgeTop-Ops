@@ -3,7 +3,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),crypto=requ
 const {openDatabase}=require('../server/database');
 const {ProcessingRepository}=require('../server/processingRepository');
 const {createHeldSourceSnapshot,getHeldSourceSnapshot,verifyHeldSourceSnapshot,acceptHeldSourceSnapshot,releaseHeldSourceSnapshot,SNAPSHOT_DOMAIN}=require('../server/heldSourceSnapshot');
-const {frameStream,SELECTED_VERSION,SELECTED_DOMAIN}=require('../server/viewerPagedSourceExport');
+const {frameStream,SELECTED_VERSION,SELECTED_DOMAIN,SOURCE_VERSION,SOURCE_DOMAIN}=require('../server/viewerPagedSourceExport');
 const {canonicalBytes}=require('../server/referenceProtocol');
 const {prepareSelectedGeneration}=require('../server/selectedSourceGenerationCandidate');
 
@@ -32,6 +32,20 @@ test('held generation binds exact signed selection and survives reopen without a
   assert.equal(verifyHeldSourceSnapshot(getHeldSourceSnapshot(p,snapshot.snapshotId),keys.publicKey),true);
   assert.throws(()=>prepareSelectedGeneration(p,{...args,snapshotSha256:sha,selected:subset}),{code:'GENERATION_HELD'});
  }
+ // Re-sign both source and selection with an entire real dataset file omitted.
+ const sourceRecords=snapshot.sourceFrames.toString('utf8').trim().split('\n').flatMap(line=>JSON.parse(line).records);
+ const source=frameStream(sourceRecords.filter(f=>f.datasetFileId==='one'),SOURCE_VERSION,SOURCE_DOMAIN);
+ const selection=frameStream([{type:'dataset_file',ordinal:0,pageObjectId:'one',datasetFileId:'one'}],SELECTED_VERSION,SELECTED_DOMAIN);
+ const subset=[selected[0]],input=subset.map(f=>({relativePath:f.relativePath,byteSize:f.byteSize,sha256:f.sha256}));
+ const intent={...snapshot.intent,sourceCount:1,sourcePageHashes:source.pageHashes,sourceFrameBytes:source.bytes.length,
+  selectedCount:1,selectedPageHashes:selection.pageHashes,selectedFrameBytes:selection.bytes.length,inputManifestSha256:crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex')};
+ const raw=canonicalBytes(intent),sha=crypto.createHash('sha256').update(raw).digest('hex'),signature=crypto.sign(null,Buffer.concat([SNAPSHOT_DOMAIN,raw]),keys.privateKey);
+ const putSource=db.prepare('UPDATE viewer_source_snapshots SET source_frames=?,source_page_hashes_json=?,source_frame_bytes=? WHERE snapshot_id=?');
+ putSource.run(source.bytes,JSON.stringify(source.pageHashes),source.bytes.length,snapshot.snapshotId);
+ put.run(intent.inputManifestSha256,raw.toString('utf8'),sha,signature,selection.bytes,JSON.stringify(selection.pageHashes),selection.bytes.length,snapshot.snapshotId);
+ assert.equal(verifyHeldSourceSnapshot(getHeldSourceSnapshot(p,snapshot.snapshotId),keys.publicKey),true);
+ assert.throws(()=>prepareSelectedGeneration(p,{...args,snapshotSha256:sha,selected:subset}),{code:'GENERATION_HELD'});
+ putSource.run(snapshot.sourceFrames,JSON.stringify(snapshot.sourcePageHashes),snapshot.sourceFrameBytes,snapshot.snapshotId);
  put.run(snapshot.inputManifestSha256,canonicalBytes(snapshot.intent).toString('utf8'),snapshot.intentSha256,snapshot.signature,snapshot.selectedFrames,JSON.stringify(snapshot.selectedPageHashes),snapshot.selectedFrameBytes,snapshot.snapshotId);
  assert.throws(()=>prepareSelectedGeneration(p,{...args,selected:[...selected].reverse()}),{code:'GENERATION_HELD'});
  assert.throws(()=>prepareSelectedGeneration(p,{...args,selected:[{...selected[0],byteSize:4},selected[1]]}),{code:'GENERATION_HELD'});
