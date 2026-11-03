@@ -10,13 +10,13 @@ const { openDatabase } = require('../server/database');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { GcpRepository } = require('../server/gcpRepository');
 const { canonicalBytes } = require('../server/referenceProtocol');
-const { captureHeldSourceExport, HeldSourceExport, SOURCE_DOMAIN, SELECTED_DOMAIN } = require('../server/viewerPagedSourceExport');
+const { captureHeldSourceExport, HeldSourceExport, frameStream, MAX_FRAME_BYTES, SOURCE_VERSION, SOURCE_DOMAIN, SELECTED_DOMAIN } = require('../server/viewerPagedSourceExport');
 
 const rawGcp = 'point_id,label,latitude,longitude,elevation_m\nA,Target,44.5,-88.1,244\n';
 const rawGcpSha = crypto.createHash('sha256').update(rawGcp).digest('hex');
 const sha = (value) => crypto.createHash('sha256').update(value).digest('hex');
 
-function fixture(t, { dng = false, imageCount = 1 } = {}) {
+function fixture(t, { dng = false, imageCount = 1, mixedCaseSourceIds = false, badPath = null } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-paged-source-'));
   const database = openDatabase(path.join(root, 'viewer.sqlite'));
   const processing = new ProcessingRepository(database);
@@ -28,11 +28,12 @@ function fixture(t, { dng = false, imageCount = 1 } = {}) {
   const photoType = dng ? 'image/x-adobe-dng' : 'image/jpeg';
   const files = [
     ...Array.from({ length: imageCount }, (_, index) => ({
-      id: `photo-${index + 1}`, relativePath: dng ? photoPath : `flight/IMG_${String(index + 1).padStart(5, '0')}.jpg`,
+      id: `photo-${index + 1}`, relativePath: index === 0 && badPath ? badPath : dng ? photoPath : `flight/IMG_${String(index + 1).padStart(5, '0')}.jpg`,
       byteSize: 10, sha256: 'a'.repeat(64), contentType: photoType,
       metadata: { width: 4000, height: 3000 },
     })),
     { id: 'control', relativePath: 'control/raw.csv', byteSize: Buffer.byteLength(rawGcp), sha256: rawGcpSha, contentType: 'text/csv' },
+    ...(mixedCaseSourceIds ? [{ id: 'Control', relativePath: 'control/second.csv', byteSize: Buffer.byteLength(rawGcp), sha256: rawGcpSha, contentType: 'text/csv' }] : []),
     { id: 'lidar', relativePath: 'survey/site.las', byteSize: 11, sha256: 'b'.repeat(64), contentType: 'application/vnd.las', processingRole: 'provider_input' },
     { id: 'old-gcp', relativePath: 'legacy/gcp_list.txt', byteSize: 9, sha256: 'c'.repeat(64), contentType: 'text/plain', processingRole: 'provider_input' },
   ];
@@ -44,6 +45,12 @@ function fixture(t, { dng = false, imageCount = 1 } = {}) {
     points: [{ externalId: 'A', label: 'Target', latitude: 44.5, longitude: -88.1, elevationM: 244, description: null }],
   });
   if (!dng) gcp.createCorrespondence({ taskId: task.id, pointId: set.points[0].id, imageFileId: 'photo-1', pixelX: 100, pixelY: 200, createdBy: 'ops:test' });
+  if (mixedCaseSourceIds) {
+    const second = gcp.importSet({ datasetId: dataset.id, displayName: 'Control B', sourceFormat: 'generic-csv-v1', sourceFileId: 'Control',
+      sourceFilename: 'second.csv', sourceSha256: rawGcpSha, sourceContent: rawGcp, crs: 'EPSG:4326', elevationUnits: 'm', createdBy: 'ops:test',
+      points: [{ externalId: 'B', label: 'Target B', latitude: 44.6, longitude: -88.2, elevationM: 245, description: null }] });
+    gcp.createCorrespondence({ taskId: task.id, pointId: second.points[0].id, imageFileId: 'photo-1', pixelX: 101, pixelY: 201, createdBy: 'ops:test' });
+  }
   const provider = processing.upsertProvider({ type: 'nodeodm', displayName: 'ODM', endpoint: 'http://127.0.0.1:3000', enabled: true });
   const attempt = processing.createAttempt({ taskId: task.id, providerId: provider.id, options: {} });
   return { database, processing, project, dataset, task, attempt };
@@ -126,9 +133,35 @@ test('source export refuses to roll back a caller-owned SQLite transaction', (t)
   f.database.exec('ROLLBACK');
 });
 
+test('frame writer accepts an exact 256 KiB canonical page and rejects one byte over', () => {
+  const version = SOURCE_VERSION;
+  const emptyFrameBytes = canonicalBytes({ version, index: 0, records: [] }).length;
+  const emptyRecordBytes = canonicalBytes({ value: '' }).length;
+  const textLength = MAX_FRAME_BYTES - emptyFrameBytes - emptyRecordBytes;
+  const exact = frameStream([{ value: 'x'.repeat(textLength) }], version, SOURCE_DOMAIN);
+  assert.equal(exact.frames.length, 1);
+  assert.equal(exact.frames[0].bytes.length, MAX_FRAME_BYTES + 1, 'the LF delimiter is additional to the exact raw-frame limit');
+  assert.throws(() => frameStream([{ value: 'x'.repeat(textLength + 1) }], version, SOURCE_DOMAIN),
+    (error) => error instanceof HeldSourceExport && error.code === 'source_record_limit');
+});
+
 test('source export holds unsupported image media rather than relabeling bytes', (t) => {
   const f = fixture(t, { dng: true });
   assert.throws(() => captureHeldSourceExport(f.processing, { datasetId: f.dataset.id, taskId: f.task.id, attemptId: f.attempt.id }),
     (error) => error instanceof HeldSourceExport && error.code === 'unsupported_image_media_type');
   assert.equal(f.database.isTransaction, false);
+});
+
+test('source GCP references use protocol code-point ordering for mixed-case file IDs', (t) => {
+  const f = fixture(t, { mixedCaseSourceIds: true });
+  const value = captureHeldSourceExport(f.processing, { datasetId: f.dataset.id, taskId: f.task.id, attemptId: f.attempt.id });
+  const generated = assertFrames(value.sourceFrames, SOURCE_DOMAIN, value.sourcePageHashes)
+    .flatMap((frame) => frame.records).find((record) => record.type === 'attempt_generated_gcp');
+  assert.deepEqual(generated.sourceFiles.map((file) => file.datasetFileId), ['Control', 'control']);
+});
+
+test('source export rejects drive-rooted paths that Processing will not accept', (t) => {
+  const f = fixture(t, { badPath: 'C:/flight/IMG_00001.jpg' });
+  assert.throws(() => captureHeldSourceExport(f.processing, { datasetId: f.dataset.id, taskId: f.task.id, attemptId: f.attempt.id }),
+    (error) => error instanceof HeldSourceExport && error.code === 'unsupported_source_file');
 });

@@ -18,8 +18,11 @@ const MAX_TOTAL_BYTES = 12 * 1024 * 1024;
 const MAX_FRAMES = 64;
 const MAX_ITEMS_PER_FRAME = 512;
 const MAX_ITEMS = 20_000;
+const MAX_PREFLIGHT_BYTES = 32 * 1024 * 1024;
+const MAX_GCP_EVIDENCE_BYTES = 8 * 1024 * 1024;
+const MAX_GCP_CONTENT_BYTES = 16 * 1024 * 1024;
 const PHOTO = /\.(?:jpe?g|png|tiff?|dng|raw|heic)$/i;
-const CONTROL = /[\x00-\x1f\x7f]/u;
+const CONTROL_OR_UNICODE_CATEGORY_C = /\p{C}/u;
 
 class HeldSourceExport extends Error {
   constructor(code = 'source_export_held') {
@@ -35,9 +38,10 @@ function sha256(bytes) {
 
 function fileFacts(file) {
   if (!file || typeof file.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(file.id)
-    || typeof file.relativePath !== 'string' || !file.relativePath || CONTROL.test(file.relativePath)
-    || file.relativePath.startsWith('/') || file.relativePath.includes('\\')
-    || file.relativePath.split('/').some((part) => !part || part === '.' || part === '..')
+    || typeof file.relativePath !== 'string' || !file.relativePath || file.relativePath.length > 4096
+    || Buffer.byteLength(file.relativePath, 'utf8') > 4096 || CONTROL_OR_UNICODE_CATEGORY_C.test(file.relativePath)
+    || file.relativePath.startsWith('/') || /^[A-Za-z]:/.test(file.relativePath) || file.relativePath.includes('\\')
+    || file.relativePath.split('/').some((part) => !part || part === '.' || part === '..' || Buffer.byteLength(part, 'utf8') > 255)
     || !Number.isSafeInteger(file.byteSize) || file.byteSize <= 0
     || typeof file.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(file.sha256)
     || !['auto', 'image', 'gcp_source', 'provider_input', 'administrative'].includes(file.processingRole)) {
@@ -59,6 +63,7 @@ function fileFacts(file) {
   } else if (!['application/octet-stream', 'application/json', 'text/plain', 'text/csv'].includes(mediaType)) {
     throw new HeldSourceExport('unsupported_auxiliary_media_type');
   }
+  if (mediaType.length > 127 || CONTROL_OR_UNICODE_CATEGORY_C.test(mediaType)) throw new HeldSourceExport('unsupported_media_type');
   return {
     type: 'dataset_file', datasetFileId: file.id, relativePath: file.relativePath,
     byteSize: file.byteSize, sha256: file.sha256, processingRole: file.processingRole,
@@ -92,14 +97,15 @@ function frameStream(records, version, domain) {
     if (encoded.length + 2 > MAX_FRAME_BYTES) throw new HeldSourceExport('source_record_limit');
     const nextCount = current.length + 1;
     const nextRecordBytes = currentRecordBytes + encoded.length + (current.length ? 1 : 0);
-    // The empty canonical frame contributes its fixed fields and [] delimiters.
+    // The empty canonical frame contributes fixed fields and the unchanged []
+    // delimiters; record bytes and commas are added between those brackets.
     const empty = canonicalBytes({ version, index: frames.length, records: [] }).length;
-    const nextFrameBytes = empty - 2 + nextRecordBytes;
+    const nextFrameBytes = empty + nextRecordBytes;
     if (current.length && (nextCount > MAX_ITEMS_PER_FRAME || nextFrameBytes > MAX_FRAME_BYTES)) flush();
     if (current.length >= MAX_ITEMS_PER_FRAME) flush();
     const freshEmpty = canonicalBytes({ version, index: frames.length, records: [] }).length;
     const addedBytes = encoded.length + (current.length ? 1 : 0);
-    if (freshEmpty - 2 + currentRecordBytes + addedBytes > MAX_FRAME_BYTES) throw new HeldSourceExport('source_record_limit');
+    if (freshEmpty + currentRecordBytes + addedBytes > MAX_FRAME_BYTES) throw new HeldSourceExport('source_record_limit');
     current.push(record);
     currentRecordBytes += addedBytes;
   }
@@ -124,7 +130,7 @@ function assertGcpEvidence(evidence, filesById) {
     || evidence.snapshot.imageDatasetFileIds.some((id) => !filesById.has(id))) {
     throw new HeldSourceExport('gcp_evidence_file_set_mismatch');
   }
-  const sourceFiles = [...refs.values()].sort((a, b) => a.datasetFileId.localeCompare(b.datasetFileId));
+  const sourceFiles = [...refs.values()].sort((a, b) => a.datasetFileId < b.datasetFileId ? -1 : a.datasetFileId > b.datasetFileId ? 1 : 0);
   return {
     type: 'attempt_generated_gcp', attemptId: evidence.snapshot.snapshotId,
     byteSize: evidence.snapshot.byteSize, sha256: evidence.snapshot.sha256,
@@ -140,6 +146,20 @@ function captureHeldSourceExport(processing, { datasetId, taskId, attemptId } = 
   if (!db || typeof db.exec !== 'function' || db.isTransaction) throw new HeldSourceExport('read_transaction_unavailable');
   db.exec('BEGIN');
   try {
+    // Preflight before repository helpers materialize and parse the full row
+    // arrays. Both this preflight and the subsequent reads share one SQLite
+    // snapshot; an oversized legacy record is held before large allocation.
+    const indexed = db.prepare(`SELECT COUNT(*) AS file_count,
+      COALESCE(SUM(length(CAST(relative_path AS BLOB)) + length(CAST(metadata_json AS BLOB))
+        + length(CAST(COALESCE(content_type,'') AS BLOB)) + length(CAST(COALESCE(mime_type,'') AS BLOB)) + 128),0) AS row_bytes,
+      COALESCE(SUM(byte_size),0) AS byte_size FROM dataset_files WHERE dataset_id=?`).get(datasetId);
+    if (!indexed || indexed.file_count > MAX_ITEMS - 1 || indexed.row_bytes > MAX_PREFLIGHT_BYTES
+      || indexed.byte_size > Number.MAX_SAFE_INTEGER) throw new HeldSourceExport('dataset_preflight_limit');
+    const storedGcp = db.prepare(`SELECT length(CAST(evidence_json AS BLOB)) AS evidence_bytes,
+      length(CAST(content_text AS BLOB)) AS content_bytes FROM processing_attempt_gcp_snapshots WHERE attempt_id=?`).get(attemptId);
+    if (storedGcp && ((storedGcp.evidence_bytes || 0) > MAX_GCP_EVIDENCE_BYTES
+      || (storedGcp.content_bytes || 0) > MAX_GCP_CONTENT_BYTES)) throw new HeldSourceExport('gcp_preflight_limit');
+
     const dataset = processing.getDataset(datasetId, true);
     const task = processing.getTask(taskId);
     const attempt = processing.getAttempt(attemptId);
@@ -150,7 +170,7 @@ function captureHeldSourceExport(processing, { datasetId, taskId, attemptId } = 
       || ['failed', 'cancelled', 'published'].includes(attempt.status)) {
       throw new HeldSourceExport('current_attempt_unavailable');
     }
-    if (!Array.isArray(dataset.files) || dataset.files.length !== dataset.fileCount || dataset.files.length > MAX_ITEMS - 1
+    if (!Array.isArray(dataset.files) || dataset.files.length !== dataset.fileCount || dataset.files.length !== indexed.file_count
       || dataset.files.reduce((sum, file) => sum + file.byteSize, 0) !== dataset.byteSize) {
       throw new HeldSourceExport('dataset_inventory_inconsistent');
     }
@@ -227,4 +247,4 @@ function captureHeldSourceExport(processing, { datasetId, taskId, attemptId } = 
   }
 }
 
-module.exports = { captureHeldSourceExport, HeldSourceExport, SOURCE_VERSION, SELECTED_VERSION, SOURCE_DOMAIN, SELECTED_DOMAIN, BINDING_DOMAIN };
+module.exports = { captureHeldSourceExport, HeldSourceExport, frameStream, MAX_FRAME_BYTES, SOURCE_VERSION, SELECTED_VERSION, SOURCE_DOMAIN, SELECTED_DOMAIN, BINDING_DOMAIN };
