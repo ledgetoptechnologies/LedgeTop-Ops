@@ -9,20 +9,26 @@ internal sealed class SyntheticFifoAdmission : IDisposable
         internal readonly HashSet<Guid> Ids = [];
         internal Ticket? Active;
     }
-    private sealed class Ticket(string root, Guid id, long timestamp)
+    private sealed class Ticket(string root, Guid id, long timestamp, CancellationToken token)
     {
         internal readonly string RootName = root;
         internal readonly Guid Id = id;
         internal readonly long Timestamp = timestamp;
+        internal readonly CancellationToken Token = token;
         internal readonly TaskCompletionSource<Lease> Result = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal State State;
         internal LinkedListNode<Ticket>? Node;
         internal Lease? Lease;
+        internal bool Begun;
     }
     internal sealed class Lease : IDisposable
     {
         private Action? release;
-        internal Lease(Action release) => this.release = release;
+        private readonly Func<CancellationToken, bool> begin;
+        internal Lease(Action release, Func<CancellationToken, bool> begin) { this.release = release; this.begin = begin; }
+        // Caller must win this fence before starting work. A lease granted before
+        // close but delivered afterwards cannot begin work once close has won.
+        internal bool TryBegin(CancellationToken token = default) => begin(token);
         public void Dispose() => Interlocked.Exchange(ref release, null)?.Invoke();
     }
     private readonly object sync = new();
@@ -39,6 +45,8 @@ internal sealed class SyntheticFifoAdmission : IDisposable
     {
         if (string.IsNullOrWhiteSpace(rootName) || id == Guid.Empty) throw new ArgumentException("Synthetic identity required.");
         token.ThrowIfCancellationRequested();
+        // A failing clock is an observation failure, not permission to reserve a root.
+        var timestamp = clock.GetTimestamp();
         Ticket ticket; Ticket? grant;
         lock (sync) {
             if (stopped) throw new ObjectDisposedException(nameof(SyntheticFifoAdmission));
@@ -48,7 +56,7 @@ internal sealed class SyntheticFifoAdmission : IDisposable
             }
             if (root.Ids.Contains(id)) throw new InvalidOperationException("Duplicate synthetic request.");
             if (root.Active is not null && root.Waiting.Count >= maxWaiting) throw new InvalidOperationException("Synthetic queue is full.");
-            ticket = new(rootName, id, clock.GetTimestamp()); root.Ids.Add(id);
+            ticket = new(rootName, id, timestamp, token); root.Ids.Add(id);
             ticket.Node = root.Waiting.AddLast(ticket);
             grant = GrantLocked(root);
         }
@@ -76,7 +84,15 @@ internal sealed class SyntheticFifoAdmission : IDisposable
         if (stopped || root.Active is not null || root.Waiting.First is not { } node) return null;
         root.Waiting.RemoveFirst(); var ticket = node.Value; ticket.Node = null;
         ticket.State = State.Granted; root.Active = ticket;
-        ticket.Lease = new(() => Release(ticket)); return ticket;
+        ticket.Lease = new(() => Release(ticket), token => TryBegin(ticket, token)); return ticket;
+    }
+    private bool TryBegin(Ticket ticket, CancellationToken token)
+    {
+        lock (sync) {
+            if (stopped || token.IsCancellationRequested || ticket.Token.IsCancellationRequested || ticket.State != State.Granted || ticket.Begun ||
+                !roots.TryGetValue(ticket.RootName, out var root) || !ReferenceEquals(root.Active, ticket)) return false;
+            ticket.Begun = true; return true;
+        }
     }
     private static void CompleteGrant(Ticket? ticket)
     { if (ticket is not null) ticket.Result.TrySetResult(ticket.Lease!); }
