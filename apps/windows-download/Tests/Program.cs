@@ -5,6 +5,10 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using LedgeTop.WindowsDownload;
 
+if (args.Length == 1 && args[0] == "--owned-root-executor-prototype-only") {
+    await OwnedRootExecutorPrototypeTests.RunAsync();
+    return;
+}
 #if LEDGETOP_NATIVE_DIAGNOSTICS
 if (args.Length == 1 && args[0] == "--native-stall-trace-tests") {
     await NativeStallTraceTests.RunAsync();
