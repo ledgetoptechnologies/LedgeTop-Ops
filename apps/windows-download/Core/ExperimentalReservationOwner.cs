@@ -12,6 +12,7 @@ internal sealed class ExperimentalReservationOwner
 {
     private static readonly object RegistryGate = new();
     private static readonly HashSet<ExperimentalReservationOwner> Registry = [];
+    private readonly object gate = new();
     private readonly HydrationCacheConcurrency.Lease lease;
     private readonly FileStream entry;
     private readonly List<ExperimentalOwnedStream.DirectoryPin> pins = [];
@@ -20,13 +21,14 @@ internal sealed class ExperimentalReservationOwner
     private SafeFileHandle? uncertainHandle;
     private ExperimentalOwnedStream.Identity recordId;
     private readonly byte[] expected;
-    private bool finished, uncertain, injectedDispositionFailure;
-    internal static Action? BeforeDispositionTestHook;
-    internal long Growth { get; }
+    private bool finished, uncertain, injectedDispositionFailure, injectedPostDispositionFailure;
+    internal static Action? BeforeDispositionTestHook, AfterDispositionCloseTestHook;
+    private readonly long growth;
+    internal long Growth { get { lock (gate) { if (finished || uncertain) throw new IOException("Reservation owner unavailable."); return growth; } } }
     internal static int RetainedCount { get { lock (RegistryGate) return Registry.Count; } }
 
     private ExperimentalReservationOwner(HydrationCacheConcurrency.Lease lease, FileStream entry, string path, byte[] expected, long growth)
-    { this.lease = lease; this.entry = entry; this.path = path; root = Directory.GetParent(Path.GetDirectoryName(path)!)!.FullName; quotaPath = Path.Combine(Directory.GetParent(Path.GetDirectoryName(path)!)!.FullName, ".hydration-quota-v2.lock"); this.expected = expected; Growth = growth; }
+    { this.lease = lease; this.entry = entry; this.path = path; root = Directory.GetParent(Path.GetDirectoryName(path)!)!.FullName; quotaPath = Path.Combine(Directory.GetParent(Path.GetDirectoryName(path)!)!.FullName, ".hydration-quota-v2.lock"); this.expected = expected; this.growth = growth; }
 
     internal static ExperimentalReservationOwner Create(string root, string scope, string key, byte[] bytes,
         ref HydrationCacheConcurrency.Lease? lease, ref FileStream? entry, FileStream quota)
@@ -69,7 +71,7 @@ internal sealed class ExperimentalReservationOwner
             ExperimentalOwnedStream.RequireRegularKind(result.record.SafeFileHandle, false);
             ExperimentalOwnedStream.RequireSingleLink(result.record.SafeFileHandle);
             result.recordId = ExperimentalOwnedStream.GetIdentity(result.record.SafeFileHandle);
-            result.record.Write(bytes); result.record.Flush(true); result.Verify(); result.uncertain = false;
+            result.record.Write(bytes); result.record.Flush(true); result.VerifyCore(); result.uncertain = false;
             return result;
         } catch {
             if (!result.uncertain) {
@@ -82,7 +84,8 @@ internal sealed class ExperimentalReservationOwner
             throw;
         }
     }
-    internal void Verify()
+    internal void Verify() { lock (gate) { if (uncertain) throw new IOException("Reservation owner unavailable."); VerifyCore(); } }
+    private void VerifyCore()
     {
         if (finished || record is null) throw new IOException("Reservation owner unavailable.");
         ExperimentalOwnedStream.VerifyPins(pins);
@@ -95,6 +98,7 @@ internal sealed class ExperimentalReservationOwner
     internal void RunWithLeaseForTest(Action action) => lease.RunExperimentalForRoot(root, action);
     internal void Release(FileStream quota)
     {
+        lock (gate) {
         if (!lease.ExperimentalGateHeld || !Monitor.IsEntered(lease.Quota) || !string.Equals(ExperimentalOwnedStream.FinalPath(quota.SafeFileHandle), quotaPath, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Reservation release requires its quota transaction.");
         if (uncertain) throw new IOException("Reservation ownership remains uncertain.");
@@ -103,18 +107,44 @@ internal sealed class ExperimentalReservationOwner
         byte disposition = 1;
         if (!SetFileInformationByHandle(record!.SafeFileHandle, 4, ref disposition, 1)) throw new IOException("Reservation disposition not confirmed.");
         record.Dispose(); record = null;
+        try { AfterDispositionCloseTestHook?.Invoke(); } catch { injectedPostDispositionFailure = true; throw; }
+        FinishAfterDisposition();
+        }
+    }
+    private void FinishAfterDisposition()
+    {
+        ExperimentalOwnedStream.VerifyPins(pins);
+        using var probe = CreateFileW(PlaceholderHydrationCoordinator.NativeCacheFilePath(path), 0x80, 7, 0, 3, 0x00200000, 0);
+        if (!probe.IsInvalid) throw new IOException("Reservation remains present after disposition.");
+        if (Marshal.GetLastWin32Error() != 2) throw new IOException("Reservation absence cannot be confirmed.");
+        ExperimentalOwnedStream.VerifyPins(pins);
         foreach (var pin in pins.AsEnumerable().Reverse()) pin.Handle.Dispose(); pins.Clear();
         entry.Dispose(); lease.Dispose(); finished = true; uncertain = false;
         lock (RegistryGate) Registry.Remove(this);
     }
+    internal void SettleInjectedPostDispositionFailureForTest(FileStream quota)
+    {
+        lock (gate) {
+            if (!lease.ExperimentalGateHeld || !Monitor.IsEntered(lease.Quota) || !injectedPostDispositionFailure ||
+                AfterDispositionCloseTestHook is not null || record is not null ||
+                !string.Equals(ExperimentalOwnedStream.FinalPath(quota.SafeFileHandle), quotaPath, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Only an injected post-disposition failure can be settled.");
+            FinishAfterDisposition(); injectedPostDispositionFailure = false;
+        }
+    }
     internal void SettleInjectedDispositionFailureForTest(FileStream quota)
     {
+        lock (gate) {
         if (!lease.ExperimentalGateHeld || !Monitor.IsEntered(lease.Quota) || !injectedDispositionFailure || BeforeDispositionTestHook is not null ||
             !string.Equals(ExperimentalOwnedStream.FinalPath(quota.SafeFileHandle), quotaPath, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Only an injected pre-disposition failure can be settled.");
-        Verify(); injectedDispositionFailure = false; uncertain = false;
+        VerifyCore(); injectedDispositionFailure = false; uncertain = false;
         Release(quota);
+        }
     }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, nint security, uint mode, uint flags, nint template);
     [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     [return: MarshalAs(UnmanagedType.Bool)]

@@ -561,9 +561,29 @@ internal static class ExperimentalColdDownloaderTests
                 finally { ExperimentalReservationOwner.BeforeDispositionTestHook = null; }
                 Check(injected && ExperimentalReservationOwner.RetainedCount == 1); AssertOtherProcessCannotOpen(path);
                 AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock")); AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
+                using var pendingDeleteReader = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                var postInjected = false; ExperimentalReservationOwner.AfterDispositionCloseTestHook = () => throw new IOException("Injected post-disposition failure.");
+                try {
+                    owner.RunWithLeaseForTest(() => HydrationQuotaGate.Run(gate, () => {
+                        using var quota = new FileStream(Path.Combine(root, ".hydration-quota-v2.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                        owner.SettleInjectedDispositionFailureForTest(quota);
+                    }, CancellationToken.None));
+                } catch (IOException error) when (error.Message == "Injected post-disposition failure.") { postInjected = true; }
+                finally { ExperimentalReservationOwner.AfterDispositionCloseTestHook = null; }
+                Check(postInjected && ExperimentalReservationOwner.RetainedCount == 1);
+                AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock")); AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
+                var denied = false; try { _ = owner.Growth; } catch (IOException) { denied = true; } Check(denied);
+                denied = false; try { owner.Verify(); } catch (IOException) { denied = true; } Check(denied);
+                var pendingRefused = false;
+                try { owner.RunWithLeaseForTest(() => HydrationQuotaGate.Run(gate, () => {
+                    using var quota = new FileStream(Path.Combine(root, ".hydration-quota-v2.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                    owner.SettleInjectedPostDispositionFailureForTest(quota);
+                }, CancellationToken.None)); } catch (IOException) { pendingRefused = true; }
+                Check(pendingRefused && ExperimentalReservationOwner.RetainedCount == 1);
+                pendingDeleteReader.Dispose();
                 owner.RunWithLeaseForTest(() => HydrationQuotaGate.Run(gate, () => {
                     using var quota = new FileStream(Path.Combine(root, ".hydration-quota-v2.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-                    owner.SettleInjectedDispositionFailureForTest(quota);
+                    owner.SettleInjectedPostDispositionFailureForTest(quota);
                 }, CancellationToken.None));
                 Check(!File.Exists(path) && ExperimentalReservationOwner.RetainedCount == 0);
                 AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true);
