@@ -553,7 +553,7 @@ async function toggleGlobalAttemptDiagnostics(attemptId){if(state.selectedDiagno
 async function loadDiagnosticRuns(reset=false){if(state.diagnosticRunsLoading)return;state.diagnosticRunsLoading=true;state.diagnosticRunsError=null;if(reset){state.diagnosticRuns=[];state.diagnosticRunsCursor=null;state.selectedDiagnosticRunId=null}render();try{const cursor=reset?null:state.diagnosticRunsCursor,result=await api(`/api/v1/diagnostics/runs?limit=20${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`),known=new Set(state.diagnosticRuns.map(item=>item.attemptId));state.diagnosticRuns.push(...(result.runs||[]).filter(item=>!known.has(item.attemptId)));state.diagnosticRunsCursor=result.nextCursor||null}catch(error){state.diagnosticRunsError=error.message}finally{state.diagnosticRunsLoading=false;if(state.section==='diagnostics')render()}}
 async function loadMoreAttempts(taskId){const detail=state.taskDetails[taskId],cursor=detail?.nextAttemptCursor;if(!cursor||detail.loadingMoreAttempts)return;detail.loadingMoreAttempts=true;render();try{const result=await api(`/api/v1/tasks/${encodeURIComponent(taskId)}/attempts?limit=20&cursor=${encodeURIComponent(cursor)}`),known=new Set(detail.attempts.map(item=>item.id));detail.attempts.push(...(result.attempts||[]).filter(item=>!known.has(item.id)));detail.nextAttemptCursor=result.nextCursor||null}catch(error){toast(`Older runs could not be loaded: ${error.message}`,true)}finally{detail.loadingMoreAttempts=false;if(state.expandedTaskId===taskId)render()}}
 const taskDetailRefreshes=new Set();
-const gcpWorkspaceRefreshes=new Map();
+const gcpAutoImports=new Map();
 async function refreshTaskDetails(taskId,quiet=false){
   const task=state.tasks.find(item=>item.id===taskId),attemptId=task?.latestAttempt?.id,previous=state.taskDetails[taskId],authorization=state.token;
   if(!task||taskDetailRefreshes.has(taskId))return;
@@ -588,33 +588,40 @@ async function refreshTaskDetails(taskId,quiet=false){
 
 function releaseGcpImage(workspace){if(workspace?.imageUrl){URL.revokeObjectURL(workspace.imageUrl);workspace.imageUrl=null}if(workspace){workspace.activeImage=null;workspace.imageLoading=false;workspace.draftPixel=null;workspace.editingId=null}}
 function releaseAllGcpImages(){Object.values(state.gcpWorkspaces).forEach(releaseGcpImage)}
-function refreshGcpWorkspace(taskId,shouldRender=true){
-  const pending=gcpWorkspaceRefreshes.get(taskId);if(pending)return pending;
-  const refresh=(async()=>{
-    const task=state.tasks.find(item=>item.id===taskId),detail=state.taskDetails[taskId],workspace=gcpWorkspace(taskId);
-    if(!task||!detail||detail.loading)return;
-    const project=state.projects.find(item=>item.id===task.projectId),dataset=state.datasets.find(item=>item.id===task.datasetId);
-    const shouldAutoImport=state.taskPage==='gcp'&&state.expandedTaskId===taskId&&task.status!=='archived'
-      &&project?.status==='active'&&dataset?.status==='finalized'&&can('viewer.gcp.write');
-    let sets=detail.gcp?.sets||[];
-    if(shouldAutoImport&&workspace.autoScannedDatasetId!==task.datasetId){
-      const auto=await api(`/api/v1/datasets/${encodeURIComponent(task.datasetId)}/gcp-sets/auto-import`,{method:'POST',body:{}});
-      sets=auto.sets||sets;
+async function refreshGcpWorkspace(taskId,shouldRender=true){
+  const task=state.tasks.find(item=>item.id===taskId),detail=state.taskDetails[taskId],workspace=gcpWorkspace(taskId);
+  if(!task||!detail||detail.loading)return;
+  const requestVersion=(workspace.refreshVersion||0)+1;workspace.refreshVersion=requestVersion;
+  const isCurrent=()=>workspace.refreshVersion===requestVersion;
+  const project=state.projects.find(item=>item.id===task.projectId),dataset=state.datasets.find(item=>item.id===task.datasetId);
+  const shouldAutoImport=state.taskPage==='gcp'&&state.expandedTaskId===taskId&&task.status!=='archived'
+    &&project?.status==='active'&&dataset?.status==='finalized'&&can('viewer.gcp.write');
+  let sets=detail.gcp?.sets||[];
+  if(shouldAutoImport){
+    workspace.autoImportedSetsByDatasetId ||= {};
+    if(workspace.autoScannedDatasetId===task.datasetId)sets=workspace.autoImportedSetsByDatasetId[task.datasetId]||sets;
+    else{
+      const importKey=`${taskId}:${task.datasetId}`;
+      let pending=gcpAutoImports.get(importKey);
+      if(!pending){
+        pending=api(`/api/v1/datasets/${encodeURIComponent(task.datasetId)}/gcp-sets/auto-import`,{method:'POST',body:{}})
+          .then(auto=>{const imported=auto.sets||[];workspace.autoImportedSetsByDatasetId[task.datasetId]=imported;workspace.autoScannedDatasetId=task.datasetId;return imported})
+          .finally(()=>{if(gcpAutoImports.get(importKey)===pending)gcpAutoImports.delete(importKey)});
+        gcpAutoImports.set(importKey,pending);
+      }
+      sets=await pending;
+      if(!isCurrent())return;
     }
-    if(!sets.some(set=>set.id===workspace.setId)){workspace.setId=sets[0]?.id||null;workspace.pointId=null;releaseGcpImage(workspace)}
-    let points=[];
-    if(workspace.setId){const setPayload=await api(`/api/v1/gcp-sets/${encodeURIComponent(workspace.setId)}`);points=setPayload.points||[];workspace.pointCache[workspace.setId]=points;sets=sets.map(set=>set.id===workspace.setId?{...set,...setPayload.set}:set);if(!points.some(point=>point.id===workspace.pointId)){workspace.pointId=points[0]?.id||null;releaseGcpImage(workspace)}}
-    const correspondences=(await api(`/api/v1/tasks/${encodeURIComponent(taskId)}/gcp-correspondences`)).correspondences||[];
-    let candidates=[],ranking=null,pagination=null;
-    if(workspace.pointId){const query=new URLSearchParams({pointId:workspace.pointId,mode:workspace.mode,limit:'200'});if(workspace.mode==='radius')query.set('radiusM',String(workspace.radiusFeet*0.3048));const response=await api(`/api/v1/datasets/${encodeURIComponent(task.datasetId)}/gcp-images?${query}`);candidates=response.images||[];ranking=response.ranking||null;pagination=response.pagination||null}
-    detail.gcp={sets,points,correspondences,candidates,ranking,pagination,error:null};
-    // A later read failure must leave the scan retryable, and its POST result
-    // must not be discarded behind a completed marker.
-    if(shouldAutoImport)workspace.autoScannedDatasetId=task.datasetId;
-    if(shouldRender&&state.expandedTaskId===taskId)render();
-  })();
-  gcpWorkspaceRefreshes.set(taskId,refresh);
-  return refresh.finally(()=>{if(gcpWorkspaceRefreshes.get(taskId)===refresh)gcpWorkspaceRefreshes.delete(taskId)});
+  }
+  if(!sets.some(set=>set.id===workspace.setId)){workspace.setId=sets[0]?.id||null;workspace.pointId=null;releaseGcpImage(workspace)}
+  let points=[];
+  if(workspace.setId){const setId=workspace.setId,setPayload=await api(`/api/v1/gcp-sets/${encodeURIComponent(setId)}`);if(!isCurrent())return;points=setPayload.points||[];workspace.pointCache[setId]=points;sets=sets.map(set=>set.id===setId?{...set,...setPayload.set}:set);if(!points.some(point=>point.id===workspace.pointId)){workspace.pointId=points[0]?.id||null;releaseGcpImage(workspace)}}
+  const correspondencePayload=await api(`/api/v1/tasks/${encodeURIComponent(taskId)}/gcp-correspondences`);if(!isCurrent())return;
+  const correspondences=correspondencePayload.correspondences||[];
+  let candidates=[],ranking=null,pagination=null;
+  if(workspace.pointId){const pointId=workspace.pointId,query=new URLSearchParams({pointId,mode:workspace.mode,limit:'200'});if(workspace.mode==='radius')query.set('radiusM',String(workspace.radiusFeet*0.3048));const response=await api(`/api/v1/datasets/${encodeURIComponent(task.datasetId)}/gcp-images?${query}`);if(!isCurrent())return;candidates=response.images||[];ranking=response.ranking||null;pagination=response.pagination||null}
+  detail.gcp={sets,points,correspondences,candidates,ranking,pagination,error:null};
+  if(shouldRender&&state.expandedTaskId===taskId)render();
 }
 async function changeGcpSet(taskId,setId){const workspace=gcpWorkspace(taskId);workspace.setId=setId;workspace.pointId=null;releaseGcpImage(workspace);try{await refreshGcpWorkspace(taskId)}catch(error){toast(error.message,true)}}
 async function changeGcpPoint(taskId,pointId){const workspace=gcpWorkspace(taskId);workspace.pointId=pointId;releaseGcpImage(workspace);try{await refreshGcpWorkspace(taskId)}catch(error){toast(error.message,true)}}

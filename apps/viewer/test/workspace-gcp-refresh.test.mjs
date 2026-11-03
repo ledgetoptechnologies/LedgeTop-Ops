@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 const source = readFileSync(new URL('../workspace-projects.js', import.meta.url), 'utf8');
 const hydrateSource = source.split(/\r?\n/).find(line => line.startsWith('function hydrateExpandedTask('));
 const workspaceSource = source.split(/\r?\n/).find(line => line.startsWith('function gcpWorkspace('));
-const refreshStart = source.indexOf('function refreshGcpWorkspace(');
+const refreshStart = source.indexOf('async function refreshGcpWorkspace(');
 const refreshEnd = source.indexOf('\nasync function changeGcpSet', refreshStart);
 const refreshSource = source.slice(refreshStart, refreshEnd);
 
@@ -22,7 +22,7 @@ function fixture(api = async () => ({}), { projectStatus = 'active', taskStatus 
     state, api, can: () => true, URLSearchParams, encodeURIComponent,
     render() {}, releaseGcpImage() {}, toast() {}, refreshTaskDetails() {},
   });
-  vm.runInContext(`const gcpWorkspaceRefreshes=new Map();${workspaceSource}\n${refreshSource}`, context);
+  vm.runInContext(`const gcpAutoImports=new Map();${workspaceSource}\n${refreshSource}`, context);
   return { state, context };
 }
 
@@ -62,7 +62,7 @@ test('concurrent GCP page refreshes share one auto-import request', async () => 
   assert.equal(context.state.gcpWorkspaces.task.autoScannedDatasetId, 'dataset');
 });
 
-test('failed dependent reads leave auto-import eligible for retry', async () => {
+test('failed dependent reads retry with the successfully imported set list', async () => {
   let importCalls = 0, failSetRead = true;
   const { context } = fixture(async (path, options) => {
     if (path.endsWith('/auto-import')) { importCalls++; return { sets: [{ id: 'set', pointCount: 1 }] }; }
@@ -75,9 +75,9 @@ test('failed dependent reads leave auto-import eligible for retry', async () => 
     throw new Error(`Unexpected request ${path}`);
   });
   await assert.rejects(context.refreshGcpWorkspace('task'), /temporary set read failure/);
-  assert.equal(context.state.gcpWorkspaces.task.autoScannedDatasetId, undefined);
+  assert.equal(context.state.gcpWorkspaces.task.autoScannedDatasetId, 'dataset');
   await context.refreshGcpWorkspace('task');
-  assert.equal(importCalls, 2);
+  assert.equal(importCalls, 1);
   assert.equal(context.state.taskDetails.task.gcp.sets[0].id, 'set');
 });
 
@@ -90,4 +90,58 @@ test('direct archived task routes never auto-import raw GCP sources', async () =
   }, { projectStatus: 'archived' });
   await context.refreshGcpWorkspace('task');
   assert.equal(calls.some(([, method]) => method === 'POST'), false);
+});
+
+test('a late response for a previous set cannot replace the latest selected set', async () => {
+  let releaseSetA;
+  const setAPending = new Promise(resolve => { releaseSetA = resolve; });
+  const { context } = fixture(async path => {
+    if (path === '/api/v1/gcp-sets/set-a') return setAPending;
+    if (path === '/api/v1/gcp-sets/set-b') return { set: { id: 'set-b' }, points: [{ id: 'point-b' }] };
+    if (path.endsWith('/gcp-correspondences')) return { correspondences: [] };
+    if (path.includes('/gcp-images?')) return { images: [{ id: 'photo-b' }] };
+    throw new Error(`Unexpected request ${path}`);
+  });
+  const workspace = context.gcpWorkspace('task');
+  workspace.autoScannedDatasetId = 'dataset';
+  workspace.autoImportedSetsByDatasetId = { dataset: [{ id: 'set-a' }, { id: 'set-b' }] };
+  workspace.setId = 'set-a';
+  const stale = context.refreshGcpWorkspace('task');
+  workspace.setId = 'set-b';
+  workspace.pointId = null;
+  const latest = context.refreshGcpWorkspace('task');
+  await latest;
+  releaseSetA({ set: { id: 'set-a' }, points: [{ id: 'point-a' }] });
+  await stale;
+  assert.equal(workspace.setId, 'set-b');
+  assert.equal(workspace.pointId, 'point-b');
+  assert.deepEqual(context.state.taskDetails.task.gcp.points.map(point => point.id), ['point-b']);
+  assert.deepEqual(context.state.taskDetails.task.gcp.candidates.map(image => image.id), ['photo-b']);
+});
+
+test('a late candidate response for an old point cannot replace current point results', async () => {
+  let releasePointA;
+  const pointAPending = new Promise(resolve => { releasePointA = resolve; });
+  const { context } = fixture(async path => {
+    if (path === '/api/v1/gcp-sets/set') return { set: { id: 'set' }, points: [{ id: 'point-a' }, { id: 'point-b' }] };
+    if (path.endsWith('/gcp-correspondences')) return { correspondences: [] };
+    if (path.includes('/gcp-images?pointId=point-a')) return pointAPending;
+    if (path.includes('/gcp-images?pointId=point-b')) return { images: [{ id: 'photo-b' }] };
+    throw new Error(`Unexpected request ${path}`);
+  });
+  const workspace = context.gcpWorkspace('task');
+  workspace.autoScannedDatasetId = 'dataset';
+  workspace.autoImportedSetsByDatasetId = { dataset: [{ id: 'set' }] };
+  workspace.setId = 'set';
+  workspace.pointId = 'point-a';
+  const stale = context.refreshGcpWorkspace('task');
+  await Promise.resolve();
+  await Promise.resolve();
+  workspace.pointId = 'point-b';
+  const latest = context.refreshGcpWorkspace('task');
+  await latest;
+  releasePointA({ images: [{ id: 'photo-a' }] });
+  await stale;
+  assert.equal(workspace.pointId, 'point-b');
+  assert.deepEqual(context.state.taskDetails.task.gcp.candidates.map(image => image.id), ['photo-b']);
 });

@@ -14,7 +14,7 @@ test('task GCP workspace selects authoritative sets and points before bounded im
     'gcp-set-select', 'gcp-point-select', 'Control-point set', 'Control point',
     'Auto radius', 'Fixed radius', 'Nearest images', 'visibility not confirmed', 'Nearby geotagged photos', 'radiusFeet:50',
   ]) assert.ok(source.includes(value), value);
-  assert.match(source, /\/api\/v1\/gcp-sets\/\$\{encodeURIComponent\(workspace\.setId\)\}/);
+  assert.match(source, /\/api\/v1\/gcp-sets\/\$\{encodeURIComponent\(setId\)\}/);
   assert.match(source, /\/gcp-images\?\$\{query\}/);
   assert.match(source, /limit:'200'/);
   assert.match(source, /query\.set\('radiusM',String\(workspace\.radiusFeet\*0\.3048\)\)/);
