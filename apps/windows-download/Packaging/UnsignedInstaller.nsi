@@ -64,6 +64,7 @@ Var StartupNew
 Var StartupFailed
 Var FinishLaunchReady
 Var ActivationStarted
+Var UninstallStopAttempted
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_RUN "${TARGET}\LedgeTop.Files.exe"
@@ -748,14 +749,27 @@ Section "Uninstall"
   un_user_confirmed:
   Call un.CheckFixedPath
   !insertmacro ValidatePayloadPaths
+  StrCpy $UninstallStopAttempted 0
+  un_cleanup_retry:
   ClearErrors
   ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-remove-connections' $0
   IfErrors un_failed
   StrCmp $0 0 un_cleanup_pass
   StrCmp $0 12 un_legacy_unknown
     StrCmp $0 10 0 un_cleanup_review
-    MessageBox MB_ICONSTOP "A LedgeTop Files app is still running.$\r$\n$\r$\nNear the Windows clock, open the LT tray icon and choose Quit LedgeTop Files. Also quit any old LedgeTop Files Preview tray icon. Closing Settings does not quit the app.$\r$\n$\r$\nThen run uninstall again." /SD IDOK
-    Goto un_cleanup_refused
+    StrCmp $UninstallStopAttempted 1 un_after_stop
+    MessageBox MB_YESNO|MB_ICONQUESTION "LedgeTop Files or an older Preview is still running. Ask the installed app to stop safely and continue uninstalling?$\r$\n$\r$\nUninstall will wait for active downloads to stop." /SD IDNO IDYES un_request_stop IDNO un_cleanup_refused
+  un_request_stop:
+    StrCpy $UninstallStopAttempted 1
+    ClearErrors
+    ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-request-quit' $0
+    IfErrors un_failed
+    StrCmp $0 0 un_cleanup_retry
+    StrCmp $0 10 0 un_cleanup_review
+  un_after_stop:
+    ; Code 10 can also mean the old portable Preview is busy. The verified
+    ; pilot quit protocol cannot stop that different owner; never spin or kill.
+    MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "If LedgeTop Files has stopped, choose Retry to continue. If an older LedgeTop Files Preview is still running, quit it from its tray icon first.$\r$\n$\r$\nIf the app cannot stop safely, choose Cancel and ask LedgeTop support for help." /SD IDCANCEL IDRETRY un_cleanup_retry IDCANCEL un_cleanup_refused
   un_cleanup_review:
     MessageBox MB_ICONSTOP "Uninstall could not verify this PC's file connections. No installed app files were deleted; connection cleanup may be incomplete. Check the old folders and ask LedgeTop support before trying again. Cleanup code: $0" /SD IDOK
   un_cleanup_refused:
