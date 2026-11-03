@@ -18,10 +18,28 @@ internal static class SyntheticMemoryNative {
         } catch (IOException) { /* A closed log must not interrupt native cleanup. */ }
     }
     internal static int Reader(string path, string startName, string readyName) {
-        using var start = EventWaitHandle.OpenExisting(startName); using var ready = EventWaitHandle.OpenExisting(readyName);
-        ready.Set(); if (!start.WaitOne(TimeSpan.FromSeconds(15))) return 1;
-        var bytes = File.ReadAllBytes(path);
-        return CryptographicOperations.FixedTimeEquals(SHA256.HashData(bytes), SHA256.HashData(Bytes)) ? 0 : 1;
+        return ReaderOperation(() => {
+            using var start = EventWaitHandle.OpenExisting(startName); using var ready = EventWaitHandle.OpenExisting(readyName);
+            ready.Set(); if (!start.WaitOne(TimeSpan.FromSeconds(15))) throw new TimeoutException("Reader start gate timed out.");
+            return File.ReadAllBytes(path);
+        }, (outcome, code) => ReaderReport(Path.GetFileName(path), outcome, code));
+    }
+    private static int ReaderOperation(Func<byte[]> read, Action<string, int> report) {
+        try {
+            var bytes = read();
+            var matches = CryptographicOperations.FixedTimeEquals(SHA256.HashData(bytes), SHA256.HashData(Bytes));
+            report(matches ? "matched" : "hash-mismatch", 0);
+            return matches ? 0 : 1;
+        } catch (Exception error) when (error is IOException or UnauthorizedAccessException or TimeoutException or WaitHandleCannotBeOpenedException) {
+            report(error.GetType().Name, error.HResult);
+            return 1;
+        }
+    }
+    private static void ReaderReport(string name, string outcome, int code) {
+        try {
+            Console.WriteLine($"Synthetic reader: pid={Environment.ProcessId}; file={name}; outcome={outcome}; hresult=0x{code:X8}");
+            Console.Out.Flush();
+        } catch (IOException) { }
     }
     private static void RequireLocalDirectory(string path) {
         var full = Path.GetFullPath(path);
@@ -50,6 +68,13 @@ internal static class SyntheticMemoryNative {
             throw new IOException("Synthetic diagnostic option reporting is incorrect.");
         if (DiagnosticSettings(name => name == "LEDGETOP_TEST_MEMORY_MARKER_IO" ? null : "1") != "Synthetic memory options: blockSelf=True; disableScanner=True; suppressProgress=True; markerIo=none")
             throw new IOException("Synthetic diagnostic option reporting did not capture opt-ins.");
+        var observations = new List<(string, int)>();
+        void Capture(string outcome, int code) => observations.Add((outcome, code));
+        if (ReaderOperation(() => Bytes, Capture) != 0 || ReaderOperation(() => [], Capture) != 1 ||
+            ReaderOperation(() => throw new IOException("synthetic"), Capture) != 1 ||
+            observations.Count != 3 || observations[0].Item1 != "matched" || observations[1].Item1 != "hash-mismatch" ||
+            observations[2].Item1 != "IOException" || observations[2].Item2 == 0)
+            throw new IOException("Synthetic reader outcome reporting is incorrect.");
         Console.WriteLine("PASS diagnostic options and failed-registration/disposal cleanup evidence."); return 0;
     }
     internal static int MarkerIoTests() {
@@ -128,7 +153,9 @@ internal static class SyntheticMemoryNative {
                 readyHandles.Add(new EventWaitHandle(false, EventResetMode.ManualReset, readyName));
                 info.ArgumentList.Add("--synthetic-memory-native-reader"); info.ArgumentList.Add(Path.Combine(root, name));
                 info.ArgumentList.Add(startName); info.ArgumentList.Add(readyName);
-                readers.Add(Process.Start(info) ?? throw new IOException("Synthetic reader failed to start."));
+                var reader = Process.Start(info) ?? throw new IOException("Synthetic reader failed to start.");
+                readers.Add(reader);
+                Phase($"reader-started-{readyHandles.Count - 1}-pid-{reader.Id}", id);
             }
             Phase("reader-ready-wait", id);
             if (!WaitHandle.WaitAll(readyHandles.ToArray(), TimeSpan.FromSeconds(10))) throw new TimeoutException("Synthetic readers did not reach the start gate.");
@@ -136,12 +163,16 @@ internal static class SyntheticMemoryNative {
             Phase("reader-exit-wait", id);
             await Task.WhenAll(readers.Select(p => p.WaitForExitAsync())).WaitAsync(TimeSpan.FromSeconds(25));
             Phase("readers-exited", id);
+            foreach (var reader in readers) Phase($"reader-exited-pid-{reader.Id}-code-{reader.ExitCode}", id);
             success = readers.All(p => p.ExitCode == 0);
         } catch (Exception error) { Console.Error.WriteLine($"Synthetic memory native: {error.GetType().Name}: {error.Message}"); Console.Error.Flush(); }
         finally {
             Phase("cleanup-start", id);
             foreach (var reader in readers) {
-                try { if (!reader.HasExited) { reader.Kill(); await reader.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)); } }
+                try {
+                    if (!reader.HasExited) { Phase($"reader-stop-pid-{reader.Id}", id); reader.Kill(); await reader.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)); }
+                    Phase($"reader-joined-pid-{reader.Id}-code-{reader.ExitCode}", id);
+                }
                 catch { readersJoined = false; }
                 reader.Dispose();
             }
