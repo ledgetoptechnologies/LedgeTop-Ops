@@ -172,6 +172,8 @@ class PreparedSubmissionOutbox {
         || response.authorityId !== intent.coordinatorAuthorityId || !UUID.test(response.authorityId || '')
         || typeof response.jobId !== 'string' || !ID.test(response.jobId)
         || !Number.isSafeInteger(response.generation) || response.generation < 1
+        || typeof response.manifestSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(response.manifestSha256)
+        || typeof response.pipelineDigest !== 'string' || !/^[a-f0-9]{64}$/.test(response.pipelineDigest)
         || response.environment !== environment || response.submissionId !== intent.submissionId
         || response.envelopeSha256 !== intent.envelopeSha256 || response.viewerTaskId !== intent.viewerTaskId
         || response.viewerAttemptId !== intent.viewerAttemptId || response.activationId !== JSON.parse(intent.envelopeCanonical).activationId) {
@@ -182,6 +184,8 @@ class PreparedSubmissionOutbox {
       jobId: response.jobId,
       generation: response.generation,
       environment: response.environment,
+      manifestSha256: response.manifestSha256,
+      pipelineDigest: response.pipelineDigest,
       submissionId: response.submissionId,
       envelopeSha256: response.envelopeSha256,
       viewerTaskId: response.viewerTaskId,
