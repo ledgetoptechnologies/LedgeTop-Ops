@@ -12,8 +12,8 @@ const { GcpRepository } = require('../server/gcpRepository');
 const { canonicalBytes } = require('../server/referenceProtocol');
 const {
   captureHeldSourceExport, HeldSourceExport, frameStream, gcpEvidenceStream,
-  MAX_FRAME_BYTES, MAX_GCP_EVIDENCE_BYTES, MAX_GCP_EVIDENCE_CHUNK_BYTES,
-  GCP_EVIDENCE_DOMAIN, GCP_EVIDENCE_VERSION, SOURCE_VERSION, SOURCE_DOMAIN, SELECTED_DOMAIN,
+  generatedGcpFileStream, MAX_FRAME_BYTES, MAX_GCP_EVIDENCE_BYTES, MAX_GCP_CONTENT_BYTES, MAX_GCP_EVIDENCE_CHUNK_BYTES,
+  GCP_EVIDENCE_DOMAIN, GCP_EVIDENCE_VERSION, GCP_FILE_DOMAIN, GCP_FILE_VERSION, SOURCE_VERSION, SOURCE_DOMAIN, SELECTED_DOMAIN,
 } = require('../server/viewerPagedSourceExport');
 
 const rawGcp = 'point_id,label,latitude,longitude,elevation_m\nA,Target,44.5,-88.1,244\n';
@@ -121,6 +121,56 @@ function assertGcpEvidenceFrames(buffer, pageHashes, pageBytes, expectedAttemptI
   return { frames, decodedBytes };
 }
 
+function assertGcpFileFrames(buffer, pageHashes, pageBytes, expectedAttemptId, expectedEvidenceSha256, expectedBytes) {
+  const wire = buffer.toString('utf8');
+  assert.ok(wire.endsWith('\n'));
+  const lines = wire.slice(0, -1).split('\n');
+  assert.equal(lines.length, pageHashes.length);
+  assert.equal(lines.length, pageBytes.length);
+  const frames = lines.map((line, index) => {
+    const frame = JSON.parse(line);
+    const raw = canonicalBytes(frame);
+    assert.equal(Buffer.compare(Buffer.from(line, 'utf8'), raw), 0, 'each GCP file page is canonical JCS');
+    assert.equal(Buffer.byteLength(line, 'utf8'), pageBytes[index], 'signed page bytes exclude LF');
+    assert.equal(sha(Buffer.concat([GCP_FILE_DOMAIN, raw])), pageHashes[index]);
+    assert.ok(pageBytes[index] <= 65_535);
+    assert.equal(frame.version, GCP_FILE_VERSION);
+    assert.equal(frame.attemptId, expectedAttemptId);
+    assert.equal(frame.evidenceSha256, expectedEvidenceSha256);
+    return frame;
+  });
+  const dataFrames = frames.slice(0, -1);
+  const trailer = frames.at(-1);
+  assert.deepEqual(Object.keys(trailer).sort(), ['attemptId', 'complete', 'evidenceSha256', 'fileSha256', 'index', 'offset', 'totalBytes', 'version'].sort());
+  assert.equal(trailer.complete, true);
+  assert.equal(trailer.index, dataFrames.length);
+  assert.equal(trailer.offset, expectedBytes.length);
+  assert.equal(trailer.totalBytes, expectedBytes.length);
+  const chunks = [];
+  let offset = 0;
+  let digest = null;
+  dataFrames.forEach((frame, index) => {
+    assert.deepEqual(Object.keys(frame).sort(), ['attemptId', 'data', 'decodedByteCount', 'evidenceSha256', 'fileSha256', 'index', 'offset', 'version'].sort());
+    assert.equal(frame.index, index);
+    assert.equal(frame.offset, offset);
+    assert.match(frame.data, /^[A-Za-z0-9_-]+$/);
+    const decoded = Buffer.from(frame.data, 'base64url');
+    assert.equal(decoded.toString('base64url'), frame.data, 'base64url spelling is canonical and unpadded');
+    assert.ok(decoded.length > 0 && decoded.length <= MAX_GCP_EVIDENCE_CHUNK_BYTES);
+    assert.equal(frame.decodedByteCount, decoded.length);
+    assert.equal(frame.fileSha256, trailer.fileSha256);
+    chunks.push(decoded);
+    offset += decoded.length;
+    digest = frame.fileSha256;
+  });
+  assert.equal(offset, trailer.totalBytes);
+  assert.equal(digest, sha(expectedBytes));
+  const decodedBytes = Buffer.concat(chunks);
+  assert.deepEqual(decodedBytes, expectedBytes);
+  assert.equal(new TextDecoder('utf-8', { fatal: true }).decode(decodedBytes).length > 0, true);
+  return { frames, decodedBytes };
+}
+
 test('source export binds real Viewer rows and attempt GCP evidence in one held read transaction', (t) => {
   const f = fixture(t);
   const expectedInputHash = f.processing.getAttemptProvenance(f.attempt.id).submission.inputManifestSha256;
@@ -166,6 +216,19 @@ test('source export binds real Viewer rows and attempt GCP evidence in one held 
   assert.equal(evidence.frames.length, value.gcpEvidencePageCount);
   assert.equal(value.generatedGcp.sha256, JSON.parse(evidence.decodedBytes.toString('utf8')).snapshot.sha256,
     'the generated ODM file digest is distinct from the full evidence JSON digest');
+  const storedGcpContent = f.database.prepare('SELECT content_text FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(f.attempt.id).content_text;
+  const generatedFileBytes = Buffer.from(storedGcpContent, 'utf8');
+  assert.equal(value.gcpFileVersion, GCP_FILE_VERSION);
+  assert.equal(value.gcpFileByteCount, generatedFileBytes.length);
+  assert.equal(value.gcpFileSha256, sha(generatedFileBytes));
+  assert.equal(value.gcpFileSha256, value.generatedGcp.sha256);
+  assert.equal(value.gcpFilePageCount, value.gcpFilePageHashes.length);
+  assert.equal(value.gcpFilePageCount, value.gcpFilePageBytes.length);
+  const generatedFile = assertGcpFileFrames(value.gcpFileFrames, value.gcpFilePageHashes, value.gcpFilePageBytes,
+    f.attempt.id, value.gcpEvidenceSha256, generatedFileBytes);
+  assert.deepEqual(generatedFile.decodedBytes, generatedFileBytes, 'the actual stored ODM file bytes are transported separately from evidence_json');
+  assert.equal(value.totalStreamBytes, value.sourceFrames.length + value.selectedFrames.length
+    + value.gcpEvidenceFrames.length + value.gcpFileFrames.length);
 });
 
 test('source export frames 16,832 photos with raw and generated GCP records inside the configured bounds', (t) => {
@@ -192,6 +255,21 @@ test('attempt without immutable GCP snapshot emits all-null evidence pins', (t) 
   assert.equal(value.gcpEvidenceByteCount, null);
   assert.equal(value.gcpEvidenceSha256, null);
   assert.equal(value.gcpEvidenceFrames, null);
+  assert.equal(value.gcpFileVersion, null);
+  assert.equal(value.gcpFilePageHashes, null);
+  assert.equal(value.gcpFilePageBytes, null);
+  assert.equal(value.gcpFilePageCount, null);
+  assert.equal(value.gcpFileByteCount, null);
+  assert.equal(value.gcpFileSha256, null);
+  assert.equal(value.gcpFileFrames, null);
+});
+
+test('source export rejects generated GCP content that no longer matches the attempt input inventory', (t) => {
+  const f = fixture(t);
+  const readSnapshot = f.processing.getAttemptGcpSnapshot.bind(f.processing);
+  f.processing.getAttemptGcpSnapshot = (attemptId) => ({ ...readSnapshot(attemptId), content: 'EPSG:4326\ntampered\n' });
+  assert.throws(() => captureHeldSourceExport(f.processing, { datasetId: f.dataset.id, taskId: f.task.id, attemptId: f.attempt.id }),
+    (error) => error instanceof HeldSourceExport && error.code === 'attempt_input_inventory_changed');
 });
 
 test('GCP evidence stream reaches its exact byte limit and rejects overflow and invalid UTF-8', () => {
@@ -209,6 +287,21 @@ test('GCP evidence stream reaches its exact byte limit and rejects overflow and 
     (error) => error instanceof HeldSourceExport && error.code === 'gcp_evidence_stream_invalid');
   assert.throws(() => gcpEvidenceStream(Buffer.from([0xff]), 'attempt-1'),
     (error) => error instanceof HeldSourceExport && error.code === 'gcp_evidence_utf8_invalid');
+});
+
+test('generated ODM GCP file stream pins exact file bytes to its evidence snapshot and fails closed on invalid inputs', () => {
+  const fileBytes = Buffer.from('EPSG:4326\n-88.1 44.5 244 100 200 IMG_01.jpg\n', 'utf8');
+  const evidenceSha256 = 'e'.repeat(64);
+  const stream = generatedGcpFileStream(fileBytes, 'attempt-1', evidenceSha256);
+  assert.equal(stream.sha256, sha(fileBytes));
+  assert.equal(stream.evidenceSha256, evidenceSha256);
+  assert.equal(stream.bytes.length, stream.streamBytes);
+  assert.ok(stream.streamBytes <= 24 * 1024 * 1024);
+  assertGcpFileFrames(stream.bytes, stream.pageHashes, stream.pageBytes, 'attempt-1', evidenceSha256, fileBytes);
+  assert.throws(() => generatedGcpFileStream(Buffer.alloc(MAX_GCP_CONTENT_BYTES + 1, 0x20), 'attempt-1', evidenceSha256),
+    (error) => error instanceof HeldSourceExport && error.code === 'gcp_file_stream_invalid');
+  assert.throws(() => generatedGcpFileStream(Buffer.from([0xff]), 'attempt-1', evidenceSha256),
+    (error) => error instanceof HeldSourceExport && error.code === 'gcp_file_utf8_invalid');
 });
 
 test('source export rejects a stale, missing, or non-current attempt without creating a route', (t) => {

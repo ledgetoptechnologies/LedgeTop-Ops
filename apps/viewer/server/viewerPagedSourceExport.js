@@ -15,6 +15,8 @@ const SELECTED_DOMAIN = Buffer.from('ltds-viewer-selected-frame-v1\0', 'ascii');
 const BINDING_DOMAIN = Buffer.from('ltds-viewer-selected-binding-v1\0', 'ascii');
 const GCP_EVIDENCE_VERSION = 'ltds-viewer-gcp-evidence-chunks-v1';
 const GCP_EVIDENCE_DOMAIN = Buffer.from('ltds-viewer-gcp-evidence-frame-v1\0', 'ascii');
+const GCP_FILE_VERSION = 'ltds-viewer-generated-gcp-file-chunks-v1';
+const GCP_FILE_DOMAIN = Buffer.from('ltds-viewer-generated-gcp-file-frame-v1\0', 'ascii');
 const MAX_FRAME_BYTES = 256 * 1024;
 const MAX_TOTAL_BYTES = 12 * 1024 * 1024;
 const MAX_FRAMES = 64;
@@ -27,6 +29,8 @@ const MAX_GCP_EVIDENCE_PAGE_BYTES = 65_535;
 const MAX_GCP_EVIDENCE_CHUNK_BYTES = 46_080;
 const MAX_GCP_EVIDENCE_PAGES = 512;
 const MAX_GCP_EVIDENCE_STREAM_BYTES = 24 * 1024 * 1024;
+const MAX_GCP_FILE_STREAM_BYTES = 24 * 1024 * 1024;
+const MAX_TOTAL_EXPORT_STREAM_BYTES = 72 * 1024 * 1024;
 const PHOTO = /\.(?:jpe?g|png|tiff?|dng|raw|heic)$/i;
 const CONTROL_OR_UNICODE_CATEGORY_C = /\p{C}/u;
 
@@ -180,6 +184,70 @@ function gcpEvidenceStream(evidenceBytes, attemptId) {
   };
 }
 
+function generatedGcpFileStream(fileBytes, attemptId, evidenceSha256) {
+  if (!Buffer.isBuffer(fileBytes) || fileBytes.length < 1 || fileBytes.length > MAX_GCP_CONTENT_BYTES
+    || typeof attemptId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(attemptId)
+    || typeof evidenceSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(evidenceSha256)) {
+    throw new HeldSourceExport('gcp_file_stream_invalid');
+  }
+  try { new TextDecoder('utf-8', { fatal: true }).decode(fileBytes); }
+  catch { throw new HeldSourceExport('gcp_file_utf8_invalid'); }
+
+  const fileSha256 = sha256(fileBytes);
+  const frames = [];
+  let offset = 0;
+  let streamBytes = 0;
+  const append = (value) => {
+    const raw = canonicalBytes(value);
+    if (raw.length > MAX_GCP_EVIDENCE_PAGE_BYTES) throw new HeldSourceExport('gcp_file_page_limit');
+    const line = Buffer.concat([raw, Buffer.from('\n')]);
+    streamBytes += line.length;
+    if (streamBytes > MAX_GCP_FILE_STREAM_BYTES || frames.length >= MAX_GCP_EVIDENCE_PAGES) {
+      throw new HeldSourceExport('gcp_file_stream_limit');
+    }
+    frames.push({ bytes: line, pageBytes: raw.length, sha256: sha256(Buffer.concat([GCP_FILE_DOMAIN, raw])) });
+  };
+
+  for (let start = 0, index = 0; start < fileBytes.length; start += MAX_GCP_EVIDENCE_CHUNK_BYTES, index++) {
+    const chunk = fileBytes.subarray(start, Math.min(start + MAX_GCP_EVIDENCE_CHUNK_BYTES, fileBytes.length));
+    append({
+      version: GCP_FILE_VERSION,
+      attemptId,
+      evidenceSha256,
+      fileSha256,
+      index,
+      offset,
+      decodedByteCount: chunk.length,
+      data: chunk.toString('base64url'),
+    });
+    offset += chunk.length;
+  }
+  if (offset !== fileBytes.length || !frames.length) throw new HeldSourceExport('gcp_file_stream_invalid');
+
+  append({
+    version: GCP_FILE_VERSION,
+    attemptId,
+    evidenceSha256,
+    fileSha256,
+    index: frames.length,
+    offset,
+    totalBytes: fileBytes.length,
+    complete: true,
+  });
+  if (frames.length < 2 || frames.length > MAX_GCP_EVIDENCE_PAGES) throw new HeldSourceExport('gcp_file_stream_limit');
+  return {
+    frames,
+    bytes: Buffer.concat(frames.map((frame) => frame.bytes)),
+    pageHashes: frames.map((frame) => frame.sha256),
+    pageBytes: frames.map((frame) => frame.pageBytes),
+    pageCount: frames.length,
+    byteCount: fileBytes.length,
+    sha256: fileSha256,
+    evidenceSha256,
+    streamBytes,
+  };
+}
+
 function assertGcpEvidence(evidence, filesById) {
   if (!evidence || evidence.schemaVersion !== 1 || !Array.isArray(evidence.correspondences)) throw new HeldSourceExport('gcp_evidence_unavailable');
   const refs = new Map();
@@ -250,9 +318,12 @@ function captureHeldSourceExport(processing, { datasetId, taskId, attemptId } = 
     const gcpSnapshot = processing.getAttemptGcpSnapshot(attempt.id);
     const gcpEvidence = processing.getAttemptGcpEvidence(attempt.id);
     if (gcpSnapshot && !gcpEvidence) throw new HeldSourceExport('gcp_evidence_unavailable');
-    const gcpEvidenceRow = db.prepare('SELECT evidence_json FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(attempt.id);
+    const gcpEvidenceRow = db.prepare('SELECT evidence_json,content_text,sha256 FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(attempt.id);
     const gcpEvidenceBytes = gcpEvidenceRow?.evidence_json == null ? null : Buffer.from(gcpEvidenceRow.evidence_json, 'utf8');
-    if (Boolean(gcpEvidence) !== Boolean(gcpEvidenceBytes)) throw new HeldSourceExport('gcp_evidence_unavailable');
+    const gcpFileBytes = gcpEvidenceRow?.content_text == null ? null : Buffer.from(gcpEvidenceRow.content_text, 'utf8');
+    if (Boolean(gcpEvidence) !== Boolean(gcpEvidenceBytes) || Boolean(gcpSnapshot) !== Boolean(gcpFileBytes)) {
+      throw new HeldSourceExport('gcp_evidence_unavailable');
+    }
     const inventory = inputInventory(dataset.files, gcpSnapshot);
     if (inventory.sourceFilesSha256 !== snapshot.sourceFilesSha256
       || inventory.inputManifestSha256 !== snapshot.inputManifestSha256
@@ -265,6 +336,15 @@ function captureHeldSourceExport(processing, { datasetId, taskId, attemptId } = 
     const filesById = new Map(dataset.files.map((file) => [file.id, file]));
     let generatedGcp = null;
     if (gcpEvidence) generatedGcp = assertGcpEvidence(gcpEvidence, filesById);
+    if (generatedGcp) {
+      const decodedFile = new TextDecoder('utf-8', { fatal: true }).decode(gcpFileBytes);
+      if (decodedFile !== gcpSnapshot.content || gcpEvidenceRow.sha256 !== gcpSnapshot.sha256
+        || gcpEvidence.snapshot.sha256 !== gcpSnapshot.sha256
+        || gcpEvidence.snapshot.byteSize !== gcpFileBytes.length
+        || generatedGcp.sha256 !== gcpSnapshot.sha256 || generatedGcp.byteSize !== gcpFileBytes.length) {
+        throw new HeldSourceExport('gcp_file_snapshot_mismatch');
+      }
+    }
     if (generatedGcp) sourceRecords.push(generatedGcp);
     if (sourceRecords.length > MAX_ITEMS) throw new HeldSourceExport('source_item_limit');
 
@@ -297,6 +377,9 @@ function captureHeldSourceExport(processing, { datasetId, taskId, attemptId } = 
     const source = frameStream(sourceRecords, SOURCE_VERSION, SOURCE_DOMAIN);
     const selection = frameStream(selectedRecords, SELECTED_VERSION, SELECTED_DOMAIN);
     const evidence = gcpEvidenceBytes ? gcpEvidenceStream(gcpEvidenceBytes, attempt.id) : null;
+    const generatedFile = gcpFileBytes ? generatedGcpFileStream(gcpFileBytes, attempt.id, evidence.sha256) : null;
+    const totalStreamBytes = source.totalBytes + selection.totalBytes + (evidence?.streamBytes || 0) + (generatedFile?.streamBytes || 0);
+    if (totalStreamBytes > MAX_TOTAL_EXPORT_STREAM_BYTES) throw new HeldSourceExport('total_export_stream_limit');
     const result = {
       state: 'held_authenticated_source_unavailable',
       datasetId: dataset.id, datasetManifestSha256: dataset.manifestSha256,
@@ -310,6 +393,14 @@ function captureHeldSourceExport(processing, { datasetId, taskId, attemptId } = 
       gcpEvidenceByteCount: evidence?.byteCount ?? null,
       gcpEvidenceSha256: evidence?.sha256 || null,
       gcpEvidenceFrames: evidence?.bytes || null,
+      gcpFileVersion: generatedFile ? GCP_FILE_VERSION : null,
+      gcpFilePageHashes: generatedFile?.pageHashes || null,
+      gcpFilePageBytes: generatedFile?.pageBytes || null,
+      gcpFilePageCount: generatedFile?.pageCount ?? null,
+      gcpFileByteCount: generatedFile?.byteCount ?? null,
+      gcpFileSha256: generatedFile?.sha256 || null,
+      gcpFileFrames: generatedFile?.bytes || null,
+      totalStreamBytes,
       generatedGcp: generatedGcp ? { byteSize: generatedGcp.byteSize, sha256: generatedGcp.sha256,
         correspondenceSha256: generatedGcp.correspondenceSha256, sourceFiles: generatedGcp.sourceFiles } : null,
       authority: null, principal: null, revocationEpoch: null,
@@ -325,8 +416,9 @@ function captureHeldSourceExport(processing, { datasetId, taskId, attemptId } = 
 }
 
 module.exports = {
-  captureHeldSourceExport, HeldSourceExport, frameStream, gcpEvidenceStream,
+  captureHeldSourceExport, HeldSourceExport, frameStream, gcpEvidenceStream, generatedGcpFileStream,
   MAX_FRAME_BYTES, MAX_GCP_EVIDENCE_BYTES, MAX_GCP_EVIDENCE_CHUNK_BYTES,
-  GCP_EVIDENCE_VERSION, GCP_EVIDENCE_DOMAIN, SOURCE_VERSION, SELECTED_VERSION,
+  MAX_GCP_CONTENT_BYTES, MAX_TOTAL_EXPORT_STREAM_BYTES,
+  GCP_EVIDENCE_VERSION, GCP_EVIDENCE_DOMAIN, GCP_FILE_VERSION, GCP_FILE_DOMAIN, SOURCE_VERSION, SELECTED_VERSION,
   SOURCE_DOMAIN, SELECTED_DOMAIN, BINDING_DOMAIN,
 };
