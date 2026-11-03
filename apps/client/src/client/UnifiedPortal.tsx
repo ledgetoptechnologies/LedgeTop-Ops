@@ -180,6 +180,8 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
       <button type="button" className="button-ghost button-small" onClick={() => openInAccount(item.account.workspace.id, "/portal/requests")}>View</button></div>
   </li>;
   // General requests have no page of their own yet, so they show where they stand and nothing to open.
+  const historyProblem = !loading && !historyComplete && <p className="unified-portal-request-note">{failed.length > 0
+    ? "Some request history couldn’t be loaded, so this list may be incomplete." : "Requests for some of your work aren’t listed here yet."}</p>;
   const inquiryProblem = inquiries === "error" && <p className="unified-portal-request-note" role="status">General requests you’ve sent couldn’t be loaded right now. Try again in a moment.</p>;
   const inquiryRow = (item: ClientInquiry) => <li key={`inquiry:${item.id}`}>
     <div><strong>{item.title}</strong><small>{`Sent ${new Date(item.createdAt).toLocaleDateString()}`}</small></div>
@@ -246,8 +248,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
         : <EmptyState title="No requests yet" detail="Requests you submit will appear here." />
         : failed.length > 0 ? <EmptyState title="Request history couldn’t be loaded" detail="Some of your work didn’t load, so requests may be missing. Try again above." />
         : <EmptyState title="Request history isn’t shown here yet" detail="Past requests for your account aren’t listed here yet." />
-      : <>{requestRows(requests)}{!loading && !historyComplete && <p className="unified-portal-request-note">{failed.length > 0
-        ? "Some request history couldn’t be loaded, so this list may be incomplete." : "Requests for some of your work aren’t listed here yet."}</p>}</>}</Card>
+      : <>{requestRows(requests)}{historyProblem}</>}</Card>
     {Array.isArray(inquiries) && inquiries.length > 0 && <Card title="General requests">
       <ul className="unified-portal-requests">{inquiries.map(inquiryRow)}</ul>
     </Card>}
@@ -288,8 +289,8 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     <Card className="portal-home-activity" title="Recent activity" action={canStart ? <button type="button" className="button-ghost button-small" onClick={startRequest}>New request</button> : undefined}>
       {activity.length > 0 ? <ul className="unified-portal-requests">{activity.map(item => item.row)}</ul>
         : loading || inquiries === "loading" ? <p className="unified-portal-quiet" role="status">{CHECKING_REQUESTS}</p>
-        : inquiries !== "error" && <p className="unified-portal-quiet">No requests yet. When you ask us for something, you’ll follow it here.</p>}
-      {inquiryProblem}</Card>
+        : historyComplete && inquiries !== "error" && <p className="unified-portal-quiet">No requests yet. When you ask us for something, you’ll follow it here.</p>}
+      {historyProblem}{inquiryProblem}</Card>
   </div>;
 }
 

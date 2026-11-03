@@ -1338,12 +1338,14 @@ test.describe("unified home without business switching", () => {
   });
 
   // Accounts with no service requests, so home's only open question is the general request lookup.
-  const mockHomeInquiries = (page: Page, answer: (route: Route) => Promise<void>) => mock(page, (route, call) => {
+  const mockHomeInquiries = (page: Page, answer: (route: Route) => Promise<void>, accountContext: (id: string) => unknown = requestContext, failing?: string) => mock(page, (route, call) => {
     if (call.path === "/api/client/request-services") return route.fulfill({json: {services: [], unavailable: [], inquiryKinds: ["other"]}});
     if (call.path === "/api/client/inquiries") return answer(route);
     if (call.path === "/api/client/v2/workspaces") return route.fulfill({json: {workspaces: listed}});
-    const match = call.path.match(/^\/api\/client\/v2\/workspaces\/(workspace-[bc])\/context$/);
-    if (match) return route.fulfill({json: {...context(match[1]!), workspace: listed.find(item => item.id === match[1])}});
+    const match = call.path.match(/^\/api\/client\/v2\/workspaces\/(workspace-[bc])\/(context|hierarchy)$/);
+    if (match && match[1] === failing) return route.fulfill({status: 503, json: {error: "Unavailable"}});
+    if (match?.[2] === "hierarchy") return route.fulfill({json: {...hierarchy(match[1]!), sourceId: sources[match[1]!]}});
+    if (match) return route.fulfill({json: {...accountContext(match[1]!) as object, workspace: listed.find(item => item.id === match[1])}});
     return undefined;
   });
   const inProgress = (page: Page) => page.locator(".portal-overview-tile").filter({hasText: "Requests in progress"}).locator(".portal-overview-value");
@@ -1371,6 +1373,23 @@ test.describe("unified home without business switching", () => {
     await expect(activity.getByRole("status")).toHaveText("General requests you’ve sent couldn’t be loaded right now. Try again in a moment.");
     await expect(activity).not.toContainText("No requests yet");
     await expect(activity).not.toContainText("Checking your requests…");
+  });
+
+  test("home doesn't call activity empty when an account's request history is hidden", async ({page}) => {
+    // Plain contexts: these accounts don't load request history, so an empty list isn't an answer.
+    await mockHomeInquiries(page, route => route.fulfill({json: {inquiries: []}}), context);
+    await page.goto("/portal");
+    const activity = recentActivity(page);
+    await expect(activity).toContainText("Requests for some of your work aren’t listed here yet.");
+    await expect(activity).not.toContainText("No requests yet");
+  });
+
+  test("home doesn't call activity empty when an account's request history failed", async ({page}) => {
+    await mockHomeInquiries(page, route => route.fulfill({json: {inquiries: []}}), requestContext, "workspace-c");
+    await page.goto("/portal");
+    const activity = recentActivity(page);
+    await expect(activity).toContainText("Some request history couldn’t be loaded, so this list may be incomplete.");
+    await expect(activity).not.toContainText("No requests yet");
   });
 
   test("with online requests switched off, home offers no New request and shows no error", async ({page}) => {
