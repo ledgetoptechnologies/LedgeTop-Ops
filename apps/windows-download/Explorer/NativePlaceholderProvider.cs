@@ -6,7 +6,10 @@ namespace LedgeTop.Files.Explorer;
 #if LEDGETOP_NATIVE_DIAGNOSTICS && LEDGETOP_CACHE_RACE_TEST
 // Test assembly supplies a strictly synthetic in-memory handler; packaging is
 // rejected by the diagnostic/race build gates.
-internal interface IDiagnosticOwnedDownloaderSource { }
+internal interface IDiagnosticOwnedDownloaderSource {
+    SyntheticReceiptDownloadSource CreateReceiptSource(PlaceholderIdentity identity);
+    void ReceiptCompleted(PlaceholderIdentity identity, CloudFilesOperationContext context);
+}
 #endif
 
 /// <summary>Connects a registered, completely enumerated preview root to the verified transfer pipeline.
@@ -17,7 +20,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     private int syntheticCommittedCleanupUncertain;
     internal bool SyntheticCommittedCleanupUncertain => Volatile.Read(ref syntheticCommittedCleanupUncertain) != 0
 #if LEDGETOP_CACHE_RACE_TEST
-        || ExperimentalOwnedStream.QuarantinedCountForTest != 0
+        || ExperimentalOwnedStream.QuarantinedCountForTest != 0 || ExperimentalReservationOwner.RetainedCount != 0 || ExperimentalEntryLease.RetainedCount != 0
 #endif
         ;
     private readonly SyntheticSettlementLog syntheticSettlements = new();
@@ -105,11 +108,23 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                     var pendingMarker = Environment.GetEnvironmentVariable("LEDGETOP_TEST_PENDING_MARKER") ?? "off";
 #if LEDGETOP_CACHE_RACE_TEST
                     var ownedDownloader = Environment.GetEnvironmentVariable("LEDGETOP_TEST_SYNTHETIC_OWNED_DOWNLOADER") ?? "0";
+                    var receiptTransfer = Environment.GetEnvironmentVariable("LEDGETOP_TEST_SYNTHETIC_RECEIPT_TRANSFER") ?? "0";
                     if (ownedDownloader is not ("0" or "1")) throw new IOException("Synthetic owned downloader option invalid.");
+                    if (receiptTransfer is not ("0" or "1") || (receiptTransfer == "1" && ownedDownloader != "1")) throw new IOException("Synthetic receipt option invalid.");
                     if (ownedDownloader == "1") {
-                        if (source is not IDiagnosticOwnedDownloaderSource || serial != "0" || failFast != "0" || cacheStage != "none" || pendingMarker != "off" ||
+                        if (source is not IDiagnosticOwnedDownloaderSource diagnosticSource || serial != "0" || failFast != "0" || cacheStage != "none" || pendingMarker != "off" ||
                             DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO")) != "none")
                             throw new IOException("Synthetic owned downloader scope mismatch.");
+                        if (receiptTransfer == "1") {
+                            var fake = diagnosticSource.CreateReceiptSource(identity); fake.Release();
+                            await HydrationActivity.TrackFetchAsync(identity.FileName, () =>
+                                CloudFilesNativeTransfer.HydrateSyntheticReceiptForCallbackAsync(coordinator, identity, context, token, fake,
+                                    new TransferNative(value => LastNativeTransferDiagnostic = value), TimeSpan.FromSeconds(20),
+                                    () => Interlocked.Exchange(ref syntheticCommittedCleanupUncertain, 1)), Notice);
+                            try { diagnosticSource.ReceiptCompleted(identity, context); }
+                            catch { Interlocked.Exchange(ref syntheticCommittedCleanupUncertain, 1); throw; }
+                            return;
+                        }
                         await HydrationActivity.TrackFetchAsync(identity.FileName, () =>
                             CloudFilesNativeTransfer.HydrateForCallbackAsync(coordinator, identity, context, token,
                                 new TransferNative(value => LastNativeTransferDiagnostic = value), TimeSpan.FromSeconds(20), summary => Notice(summary.ActivityText), null,

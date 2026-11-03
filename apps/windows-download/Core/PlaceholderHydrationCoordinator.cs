@@ -27,6 +27,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     private const string Marker = ".verified-hydration-owner";
     private const string Owner = "LedgeTop.VerifiedHydration/1\n";
 #if LEDGETOP_CACHE_RACE_TEST
+    internal string ExperimentalRootForTest => root;
     // Synthetic-only deterministic barrier; excluded from normal and staging builds.
     internal static Action<string>? CacheWalkTestHook;
     internal static Action<string>? CreatedMarkerTestHook;

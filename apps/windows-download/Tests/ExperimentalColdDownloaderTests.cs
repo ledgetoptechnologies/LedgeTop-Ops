@@ -266,7 +266,10 @@ internal static class ExperimentalColdDownloaderTests
     internal static async Task ReservationCloseChildAsync(string root, string stage)
     {
         if (!Path.IsPathFullyQualified(root) || root.StartsWith(@"\\", StringComparison.Ordinal) || !Directory.Exists(root) ||
-            stage is not ("record" or "directory" or "entry" or "lease" or "markerforeign" or "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail" or "factoryfault")) throw new IOException("Synthetic teardown input invalid.");
+            stage is not ("record" or "directory" or "entry" or "lease" or "markerforeign" or "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail" or "factoryfault" or "nativecleanup")) throw new IOException("Synthetic teardown input invalid.");
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        if (stage == "nativecleanup") { await SyntheticReceiptNativeCleanupChildAsync(root); return; }
+#endif
         if (stage == "markerforeign") { await MarkerForeignCloseChildAsync(root); return; }
         if (stage == "postwrite") { await PostWriteStatusChildAsync(root); return; }
         if (stage is "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail" or "factoryfault") { await AuthorizationBoundaryChildAsync(root, stage); return; }
@@ -924,10 +927,14 @@ internal static class ExperimentalColdDownloaderTests
                 AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true);
             } finally { entry?.Dispose(); admission?.Dispose(); }
         });
-        foreach (var stage in new[] { "record", "directory", "entry", "lease", "markerforeign", "postwrite", "authdispose", "authcancel", "authrace", "authafterstage", "authaftercancel", "authcleanupfail", "cancelcallbackfail", "factoryfault" }) await WithFixture(async fixture => {
+        var teardownStages = new List<string> { "record", "directory", "entry", "lease", "markerforeign", "postwrite", "authdispose", "authcancel", "authrace", "authafterstage", "authaftercancel", "authcleanupfail", "cancelcallbackfail", "factoryfault" };
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        teardownStages.Add("nativecleanup");
+#endif
+        foreach (var stage in teardownStages) await WithFixture(async fixture => {
             var root = Path.Combine(fixture.Path, "teardown"); Directory.CreateDirectory(root);
             await RunReservationCloseChildAsync(root, stage);
-            var cacheRoot = stage is "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail" or "factoryfault" ? Path.Combine(root, "verified-hydration-v1") : root;
+            var cacheRoot = stage is "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail" or "factoryfault" or "nativecleanup" ? Path.Combine(root, "verified-hydration-v1") : root;
             AssertOtherProcessOpen(Path.Combine(cacheRoot, ".hydration-cache.lock"), true);
             if (stage is "postwrite" or "authcleanupfail") {
                 using var source = new CoordinatorSource(); var identity = source.Identity;
@@ -1467,6 +1474,10 @@ internal static class ExperimentalColdDownloaderTests
             var refused = false; try { _ = await coordinator.ExperimentalPrepareReceiptAsync(identity); } catch (TransferException) { refused = true; }
             Check(refused && File.ReadAllBytes(marker).SequenceEqual(Foreign));
         });
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        await WithFixture(SyntheticReceiptNativeBoundaryAsync);
+        await WithFixture(SyntheticReceiptNativeSplitRangeAsync);
+#endif
         await WithFixture(ReceiptTransferRangesAsync);
         await WithFixture(async fixture => {
             using var source = new CoordinatorSource(); var identityOne = source.Identity;
@@ -1970,6 +1981,89 @@ internal static class ExperimentalColdDownloaderTests
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetFileInformationByHandleEx(Microsoft.Win32.SafeHandles.SafeFileHandle handle, int kind, nint data, uint size);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+    // Exercises the actual adapter against a fake native boundary. It does not
+    // register a Cloud Files root or call CfExecute.
+    private static async Task SyntheticReceiptNativeBoundaryAsync(DirectoryFixture fixture)
+    {
+        using var source = new CoordinatorSource(); var identity = source.Identity;
+        using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", fixture.Path, maximumFileBytes: Content.Length, maximumCacheBytes: 10000, expectedPrincipal: CoordinatorSource.Principal);
+        var spec = (await source.ResolveAsync(identity.ResourceReference)).Spec;
+        var context = new CloudFilesOperationContext(11, 22, 33, identity.Length, 0, identity.Length);
+        var root = Path.Combine(fixture.Path, "verified-hydration-v1"); var entry = Path.Combine(root, identity.ScopeKey, identity.CacheKey);
+        foreach (var mode in new[] { "success", "denied", "cancelled" }) {
+            var fake = SyntheticReceiptDownloadSource.Create(spec, Content); var native = new SyntheticNativeBoundary(); var uncertain = false;
+            using var cancel = new CancellationTokenSource();
+            var task = CloudFilesNativeTransfer.HydrateSyntheticReceiptForCallbackAsync(coordinator, identity, context, cancel.Token, fake, native, TimeSpan.FromSeconds(20), () => uncertain = true);
+            try {
+                await fake.Entered.WaitAsync(TimeSpan.FromSeconds(10));
+                if (mode == "denied") source.ResolveFailureForTest = new AccessDeniedException();
+                if (mode == "cancelled") cancel.Cancel(); else fake.Release();
+                Check(ReferenceEquals(await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(15))), task));
+                Exception? failure = null; try { await task; } catch (Exception error) { failure = error; }
+                if (mode == "success") Check(failure is null && native.Successes == 1 && native.Failures == 0 && native.Bytes.ToArray().SequenceEqual(Content));
+                else Check(failure is not null && native.Successes == 0 && native.Failures == 1 && native.Bytes.Length == 0);
+                Check(!uncertain && ExperimentalReservationOwner.RetainedCount == 0 && ExperimentalEntryLease.RetainedCount == 0);
+                AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true);
+            } finally { fake.Release(); source.ResolveFailureForTest = null; if (!task.IsCompleted) UncertainTestResources.Add((fixture, task, fake)); }
+            var output = Path.Combine(entry, identity.FileName); if (File.Exists(output)) File.Delete(output);
+        }
+    }
+    private sealed class SyntheticNativeBoundary : ICloudFilesTransferNative
+    {
+        private readonly object gate = new(); internal int Successes, Failures; internal MemoryStream Bytes { get; } = new();
+        public int Execute(nint info, nint parameters) {
+            var data = Marshal.PtrToStructure<CloudOperationParameters>(parameters).TransferData;
+            lock (gate) {
+                if (data.CompletionStatus == 0) { var bytes = new byte[checked((int)data.Length)]; Marshal.Copy(data.Buffer, bytes, 0, bytes.Length); Bytes.Position = data.Offset; Bytes.Write(bytes); Successes++; }
+                else Failures++;
+            }
+            return 0;
+        }
+        public int ReportProgress(long connectionKey, long transferKey, long total, long completed) => 0;
+    }
+    private static async Task SyntheticReceiptNativeCleanupChildAsync(string applicationRoot)
+    {
+        using var source = new CoordinatorSource(); var identity = source.Identity;
+        using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", applicationRoot, maximumFileBytes: Content.Length, maximumCacheBytes: 10000, expectedPrincipal: CoordinatorSource.Principal);
+        var spec = (await source.ResolveAsync(identity.ResourceReference)).Spec; var fake = SyntheticReceiptDownloadSource.Create(spec, Content); fake.Release();
+        var native = new SyntheticNativeBoundary(); var uncertain = false;
+        ExperimentalReservationOwner.ReceiptCleanupFailureTestHook = true;
+        try {
+            await CloudFilesNativeTransfer.HydrateSyntheticReceiptForCallbackAsync(coordinator, identity, new(11, 22, 33, identity.Length, 0, identity.Length), default,
+                fake, native, TimeSpan.FromSeconds(20), () => uncertain = true);
+        } finally { ExperimentalReservationOwner.ReceiptCleanupFailureTestHook = false; }
+        var root = Path.Combine(applicationRoot, "verified-hydration-v1");
+        Check(uncertain && native.Successes == 1 && native.Failures == 0 && native.Bytes.ToArray().SequenceEqual(Content) && ExperimentalReservationOwner.RetainedCount > 0);
+        AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock"));
+        AssertOtherProcessCannotOpen(Path.Combine(root, identity.ScopeKey, identity.CacheKey, ".hydration.lock"));
+        AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-quota-v2.lock"));
+        // A committed transfer with uncertain cleanup stays rooted until child exit.
+    }
+    private static async Task SyntheticReceiptNativeSplitRangeAsync(DirectoryFixture fixture)
+    {
+        var content = Enumerable.Range(0, 5001).Select(i => (byte)(i % 251)).ToArray();
+        using var source = new CoordinatorSource(content); var identity = source.Identity;
+        using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", fixture.Path, maximumFileBytes: content.Length, maximumCacheBytes: 100000, expectedPrincipal: CoordinatorSource.Principal);
+        var spec = (await source.ResolveAsync(identity.ResourceReference)).Spec; var first = new SyntheticNativeBoundary(); var uncertain = false;
+        var firstSource = SyntheticReceiptDownloadSource.Create(spec, content); firstSource.Release();
+        await CloudFilesNativeTransfer.HydrateSyntheticReceiptForCallbackAsync(coordinator, identity, new(11, 22, 1, identity.Length, 0, 4096), default,
+            firstSource, first, TimeSpan.FromSeconds(20), () => uncertain = true);
+        Check(first.Successes == 1 && first.Failures == 0 && first.Bytes.ToArray().SequenceEqual(content[..4096]) && !uncertain);
+        var second = new SyntheticNativeBoundary(); var secondSource = SyntheticReceiptDownloadSource.Create(spec, content); secondSource.Release();
+        await CloudFilesNativeTransfer.HydrateSyntheticReceiptForCallbackAsync(coordinator, identity, new(11, 22, 2, identity.Length, 4096, 905), default,
+            secondSource, second, TimeSpan.FromSeconds(20), () => uncertain = true);
+        var output = Path.Combine(fixture.Path, "verified-hydration-v1", identity.ScopeKey, identity.CacheKey, identity.FileName);
+        Check(!uncertain && second.Successes == 1 && second.Failures == 0 && second.Bytes.Length == content.Length &&
+            second.Bytes.ToArray()[4096..].SequenceEqual(content[4096..]) && File.ReadAllBytes(output).SequenceEqual(content));
+        var corrupted = content.ToArray(); corrupted[0] ^= 1; File.WriteAllBytes(output, corrupted);
+        var third = new SyntheticNativeBoundary(); var thirdSource = SyntheticReceiptDownloadSource.Create(spec, content); thirdSource.Release(); var refused = false;
+        try { await CloudFilesNativeTransfer.HydrateSyntheticReceiptForCallbackAsync(coordinator, identity, new(11, 22, 3, identity.Length, 4096, 905), default,
+            thirdSource, third, TimeSpan.FromSeconds(20), () => uncertain = true); } catch (TransferException) { refused = true; }
+        Check(refused && !uncertain && third.Successes == 0 && third.Failures == 1 && third.Bytes.Length == 0 && File.ReadAllBytes(output).SequenceEqual(corrupted));
+        Check(ExperimentalReservationOwner.RetainedCount == 0 && ExperimentalEntryLease.RetainedCount == 0);
+    }
+#endif
     private static async Task ReceiptTransferRangesAsync(DirectoryFixture fixture)
     {
         var content = Enumerable.Range(0, 5001).Select(i => (byte)(i % 251)).ToArray();

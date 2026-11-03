@@ -105,9 +105,11 @@ internal static class SyntheticMemoryNative {
 #if LEDGETOP_CACHE_RACE_TEST
     internal static bool OwnedOptionsValid(string option, int count, bool retry, string marker, string cache, string prewarm, string serial, string failFast, string pending, Func<string, string?> get) =>
         option == "0" || (option == "1" && count is >= 1 and <= 2 && !retry && marker == "none" && cache == "none" && prewarm == "off" && serial == "off" && failFast == "off" && pending == "off" && RetryOptionsValid(get));
+    internal static bool ReceiptOptionsValid(string receipt, string owned) => receipt == "0" || (receipt == "1" && owned == "1");
     internal static async Task<int> OwnedSourceContractTests() {
         string? Off(string _) => null;
-        if (!OwnedOptionsValid("1", 2, false, "none", "none", "off", "off", "off", "off", Off) ||
+        if (!ReceiptOptionsValid("1", "1") || ReceiptOptionsValid("1", "0") || ReceiptOptionsValid("bad", "1") ||
+            !OwnedOptionsValid("1", 2, false, "none", "none", "off", "off", "off", "off", Off) ||
             OwnedOptionsValid("1", 3, false, "none", "none", "off", "off", "off", "off", Off) ||
             OwnedOptionsValid("1", 1, true, "none", "none", "off", "off", "off", "off", Off) ||
             OwnedOptionsValid("1", 1, false, "none", "quota-only", "off", "off", "off", "off", Off) ||
@@ -120,6 +122,12 @@ internal static class SyntheticMemoryNative {
             throw new IOException("Synthetic owned source changed manifest pins.");
         var refused = false; try { await source.ResolveAsync("odqr1_unknown"); } catch (ResourceUnavailableException) { refused = true; }
         if (!refused) throw new IOException("Synthetic source accepted unknown reference.");
+        _ = source.CreateReceiptSource(id);
+        refused = false; try { _ = source.CreateReceiptSource(id with { FileName = "other.bin" }); } catch (ResourceUnavailableException) { refused = true; }
+        if (!refused) throw new IOException("Synthetic receipt source accepted changed identity.");
+        var context = new CloudFilesOperationContext(1, 2, 3, id.Length, 0, id.Length);
+        source.ReceiptCompleted(id, context); source.ReceiptCompleted(id, context with { RequestKey = 4 });
+        if (source.ReceiptCompletions != 2 || !source.CompletedExactly([id])) throw new IOException("Synthetic receipt completion evidence was invalid.");
         await OwnedDownloaderSource.VerifyHandlerForTest();
         Console.WriteLine("PASS synthetic owned source manifest and scope controls; no native root or network."); return 0;
     }
@@ -655,12 +663,15 @@ internal static class SyntheticMemoryNative {
         var processInfo = SerialMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_REQUIRE_PROCESS_INFO"));
         var pending = PendingMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_PENDING_MARKER"));
         var ownedDownloader = Environment.GetEnvironmentVariable("LEDGETOP_TEST_SYNTHETIC_OWNED_DOWNLOADER") ?? "0";
+        var receiptTransfer = Environment.GetEnvironmentVariable("LEDGETOP_TEST_SYNTHETIC_RECEIPT_TRANSFER") ?? "0";
 #if LEDGETOP_CACHE_RACE_TEST
-        if (!OwnedOptionsValid(ownedDownloader, count, retryProbe, markerMode, cacheStage, prewarm, serial, failFast, pending, Environment.GetEnvironmentVariable)) return 2;
+        if (!ReceiptOptionsValid(receiptTransfer, ownedDownloader) || !OwnedOptionsValid(ownedDownloader, count, retryProbe, markerMode, cacheStage, prewarm, serial, failFast, pending, Environment.GetEnvironmentVariable)) return 2;
 #else
-        if (ownedDownloader != "0") return 2;
+        if (ownedDownloader != "0" || receiptTransfer != "0") return 2;
 #endif
         Console.WriteLine($"Synthetic owned downloader: {(ownedDownloader == "1" ? "on" : "off")}");
+        Console.WriteLine($"Synthetic receipt transfer: {(receiptTransfer == "1" ? "on" : "off")}");
+        if (receiptTransfer == "1") Console.WriteLine("Synthetic receipt transfer uses a verified cache-hit open for later ranges; callback overlap and stall behavior require trace review.");
         if (markerMode == "invalid" || cacheStage == "invalid" || prewarm == "invalid" || serial == "invalid" || failFast == "invalid" || processInfo == "invalid" || pending == "invalid" || (markerMode != "none" && cacheStage != "none") ||
             (serial == "on" && (markerMode != "none" || cacheStage != "quota-reservation")) ||
             (prewarm != "off" && (markerMode != "none" || cacheStage != "quota-reservation")) ||
@@ -891,6 +902,8 @@ internal static class SyntheticMemoryNative {
                 ownedSource.CompletedExactly(manifest.Values) && SyntheticReservationsEmpty(cache) && NativeStallTrace.Dropped(trace) == 0 &&
                 NativeStallTrace.Attempted(trace) == ownedTrace.LongLength);
             if (ownedDownloader == "1") Console.WriteLine($"Synthetic owned downloader evidence verified: {ownedEvidence}");
+            if (receiptTransfer == "1" && ownedSource is not null)
+                foreach (var line in ownedSource.ReceiptEvidence()) Console.WriteLine(line);
 #else
             const bool ownedEvidence = true;
 #endif
@@ -933,6 +946,7 @@ internal static class SyntheticMemoryNative {
         private readonly Dictionary<string, PlaceholderIdentity> identities;
         private readonly Downloader downloader;
         private readonly ConcurrentDictionary<string, byte> completed = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<(string File, long Request, long Offset, long Length), int> receiptCompletions = new();
         internal OwnedDownloaderSource(IEnumerable<PlaceholderIdentity> manifest) {
             identities = manifest.ToDictionary(value => value.ResourceReference, StringComparer.Ordinal);
             downloader = new Downloader(new SyntheticHandler(), [Origin]) { ExperimentalColdOwnedStreamForTest = true };
@@ -957,6 +971,22 @@ internal static class SyntheticMemoryNative {
         }
         internal bool CompletedExactly(IEnumerable<PlaceholderIdentity> manifest) =>
             completed.Keys.Order(StringComparer.Ordinal).SequenceEqual(manifest.Select(item => item.FileName).Order(StringComparer.Ordinal));
+        public SyntheticReceiptDownloadSource CreateReceiptSource(PlaceholderIdentity identity) {
+            if (!identities.TryGetValue(identity.ResourceReference, out var expected) || expected != identity) throw new ResourceUnavailableException();
+            var spec = new DownloadSpec(identity.LogicalFileId + ":" + identity.RemoteVersion, new Uri(Origin, "/synthetic-content"), identity.FileName, identity.Length, identity.ETag, identity.Sha256);
+            return SyntheticReceiptDownloadSource.Create(spec, Bytes);
+        }
+        internal int ReceiptCompletions => receiptCompletions.Values.Sum();
+        internal string[] ReceiptEvidence() => receiptCompletions.OrderBy(pair => pair.Key.File, StringComparer.Ordinal).ThenBy(pair => pair.Key.Request).Select(pair =>
+            $"Synthetic receipt range: file={pair.Key.File}; request={pair.Key.Request}; offset={pair.Key.Offset}; length={pair.Key.Length}; count={pair.Value}").ToArray();
+        public void ReceiptCompleted(PlaceholderIdentity identity, CloudFilesOperationContext context) {
+            if (!identities.TryGetValue(identity.ResourceReference, out var expected) || expected != identity || context.FileSize != identity.Length ||
+                context.RequiredOffset < 0 || context.RequiredLength <= 0 || context.RequiredOffset > identity.Length || context.RequiredLength > identity.Length - context.RequiredOffset)
+                throw new IOException("Synthetic receipt completion changed identity or range.");
+            receiptCompletions.AddOrUpdate((identity.FileName, context.RequestKey, context.RequiredOffset, context.RequiredLength), 1, (_, count) => checked(count + 1));
+            if (receiptCompletions.Count > 1000 || ReceiptCompletions > 1000) throw new IOException("Synthetic receipt completion evidence overflow.");
+            completed.TryAdd(identity.FileName, 0);
+        }
         public void Dispose() => downloader.Dispose();
         internal static async Task VerifyHandlerForTest() {
             using var client = new HttpMessageInvoker(new SyntheticHandler());

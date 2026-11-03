@@ -106,8 +106,21 @@ internal sealed class ExperimentalReservationOwner
             private async Task RunAsync() {
                 VerifiedHydrationDownload? download = null; var terminal = false;
                 try {
-                    using (HydrationMutationScope.Begin((action, token) => owner.RunDownloadMutation(use, action, token), workerCancellation.Token))
-                        download = await downloader.DownloadVerifiedForHydrationAsync(spec, entryDirectory, workerCancellation.Token).ConfigureAwait(false);
+                    use.ValidateEntry();
+                    if (transferSink is not null && File.Exists(expectedPath)) {
+                        // Cache hits remain independently hashed through the same
+                        // no-follow, read-only handle that will feed the sink.
+                        var handle = ExperimentalOwnedStream.Open(expectedPath, 0x80000080, 1, 3, 0x00200000);
+                        try {
+                            ExperimentalOwnedStream.RequireRegularKind(handle, false); ExperimentalOwnedStream.RequireSingleLink(handle);
+                            if (!string.Equals(ExperimentalOwnedStream.FinalPath(handle), expectedPath, StringComparison.OrdinalIgnoreCase)) throw new IOException("Synthetic cache path changed.");
+                            var input = new FileStream(handle, FileAccess.Read, 65536, isAsync: false);
+                            download = new VerifiedHydrationDownload(expectedPath, input, integrityVerified: false);
+                        } catch { handle.Dispose(); throw; }
+                    } else {
+                        using (HydrationMutationScope.Begin((action, token) => owner.RunDownloadMutation(use, action, token), workerCancellation.Token))
+                            download = await downloader.DownloadVerifiedForHydrationAsync(spec, entryDirectory, workerCancellation.Token).ConfigureAwait(false);
+                    }
                     if (!string.Equals(Path.GetFullPath(download.Path), expectedPath, StringComparison.OrdinalIgnoreCase) || download.Stream.CanWrite || download.Stream.Length != spec.Length)
                         throw new IOException("Synthetic download result changed.");
                     if (!download.IntegrityVerified && !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(

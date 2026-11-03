@@ -80,6 +80,62 @@ internal static class CloudFilesNativeTransfer {
         CloudFilesOperationContext context, CancellationToken token) =>
         HydrateForCallbackAsync(coordinator, identity, context, token, new WindowsNative(), TimeSpan.FromSeconds(20));
 
+#if LEDGETOP_NATIVE_DIAGNOSTICS && LEDGETOP_CACHE_RACE_TEST
+    // Synthetic-only receipt path. Native sink and request range are real, but
+    // authority and response data come exclusively from the generated fixture.
+    internal static async Task HydrateSyntheticReceiptForCallbackAsync(PlaceholderHydrationCoordinator coordinator, PlaceholderIdentity identity,
+        CloudFilesOperationContext context, CancellationToken token, SyntheticReceiptDownloadSource source, ICloudFilesTransferNative native,
+        TimeSpan heartbeatInterval, Action committedCleanupUncertain)
+    {
+        AssertAbi();
+        if (identity.SourceAlias != "synthetic" || !Uri.TryCreate(identity.Origin, UriKind.Absolute, out var origin) ||
+            origin.Scheme != "https" || !origin.Host.EndsWith(".invalid", StringComparison.OrdinalIgnoreCase) ||
+            context.FileSize != identity.Length || context.RequiredOffset < 0 || context.RequiredLength <= 0 ||
+            context.RequiredOffset > context.FileSize || context.RequiredLength > context.FileSize - context.RequiredOffset ||
+            context.RequiredOffset % 4096 != 0 || (context.RequiredLength % 4096 != 0 && context.RequiredLength != context.FileSize - context.RequiredOffset) ||
+            heartbeatInterval <= TimeSpan.Zero || heartbeatInterval >= TimeSpan.FromSeconds(60))
+            throw new TransferException("Synthetic receipt context is unsupported.");
+        using var sink = new Sink(context, native, token, heartbeatInterval);
+        try {
+            sink.StartProgress();
+            ExperimentalReservationOwner.LeaseReceipt? receipt = null; var staged = false; Exception? primary = null;
+            try {
+                receipt = await coordinator.ExperimentalPrepareReceiptAsync(identity, sink.Token).ConfigureAwait(false);
+                if (!await coordinator.ExperimentalAuthorizeAndStageAsync(identity, receipt, sink.Token).ConfigureAwait(false))
+                    throw new TransferException("Synthetic receipt reservation unavailable.");
+                staged = true;
+                var session = await coordinator.ExperimentalStartReceiptTransferAsync(identity, receipt, source, sink,
+                    context.RequiredOffset, context.RequiredLength, sink.Token).ConfigureAwait(false);
+                try { await session.WaitAsync(sink.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (sink.Token.IsCancellationRequested) {
+                    // A waiter cancellation does not settle the owned worker. If it
+                    // ignores cancellation, keep this callback and its receipt alive.
+                    try { _ = await session.CancelWorkerAndWaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false); } catch { }
+                    finally { try { await session.WaitAsync().ConfigureAwait(false); } catch { } }
+                    throw;
+                }
+            } catch (Exception error) { primary = error; throw; }
+            finally {
+                if (receipt is not null) {
+                    try {
+                        if (staged) receipt.RemoveSyntheticReservationForTest(coordinator.ExperimentalRootForTest, identity.ScopeKey + identity.CacheKey);
+                        receipt.Dispose();
+                    } catch {
+                        committedCleanupUncertain();
+                        if (primary is null) throw;
+                    }
+                }
+            }
+        } catch (Exception error) {
+            sink.ObservePrimaryFailure(HydrationFailureDiagnostic.FromException(HydrationStage.Context, error));
+            await sink.FailAsync(token.IsCancellationRequested ? "cancelled" : "unavailable").ConfigureAwait(false);
+            if (sink.Committed) { committedCleanupUncertain(); return; }
+            if (token.IsCancellationRequested) throw new OperationCanceledException(token);
+            throw new TransferException("Synthetic receipt hydration unavailable.", sink.PrimaryFailure!);
+        } finally { await sink.StopProgressAsync().ConfigureAwait(false); }
+    }
+#endif
+
     internal static async Task HydrateForCallbackAsync(PlaceholderHydrationCoordinator coordinator, PlaceholderIdentity identity,
         CloudFilesOperationContext context, CancellationToken token, ICloudFilesTransferNative native, TimeSpan heartbeatInterval, Action<HydrationTimingSummary>? observeTiming = null, TimeProvider? timingClock = null
 #if LEDGETOP_NATIVE_DIAGNOSTICS && LEDGETOP_CACHE_RACE_TEST
