@@ -1491,6 +1491,7 @@ internal static class ExperimentalColdDownloaderTests
         await WithFixture(SharedReceiptJoinCloseRaceAsync);
 #endif
         await WithFixture(ReceiptTransferRangesAsync);
+        await WithFixture(HeldVerifiedWorkerAsync);
         await WithFixture(async fixture => {
             using var source = new CoordinatorSource(); var identityOne = source.Identity;
             var specOne = (await source.ResolveAsync(identityOne.ResourceReference)).Spec;
@@ -2134,6 +2135,27 @@ internal static class ExperimentalColdDownloaderTests
         Check(ExperimentalReservationOwner.RetainedCount == 0 && ExperimentalEntryLease.RetainedCount == 0);
     }
 #endif
+    private static async Task HeldVerifiedWorkerAsync(DirectoryFixture fixture)
+    {
+        using var source = new CoordinatorSource(); var identity = source.Identity;
+        using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", fixture.Path, maximumFileBytes: Content.Length, maximumCacheBytes: 10000, expectedPrincipal: CoordinatorSource.Principal);
+        var spec = (await source.ResolveAsync(identity.ResourceReference)).Spec;
+        var receipt = await coordinator.ExperimentalPrepareReceiptAsync(identity);
+        Check(await coordinator.ExperimentalAuthorizeAndStageAsync(identity, receipt));
+        var fake = SyntheticReceiptDownloadSource.Create(spec, Content); fake.Release();
+        var session = await coordinator.ExperimentalStartHeldReceiptDownloadAsync(identity, receipt, fake);
+        await session.WaitVerifiedAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        await coordinator.ExperimentalAuthorizeActiveReceiptAsync(identity, session);
+        var root = Path.Combine(fixture.Path, "verified-hydration-v1");
+        AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock"));
+        AssertOtherProcessCannotOpen(Path.Combine(root, identity.ScopeKey, identity.CacheKey, ".hydration.lock"));
+        using var cancelWait = new CancellationTokenSource(); cancelWait.Cancel();
+        try { await session.WaitAsync(cancelWait.Token); throw new Exception("Canceled waiter completed."); } catch (OperationCanceledException) { }
+        await coordinator.ExperimentalAuthorizeActiveReceiptAsync(identity, session);
+        session.ReleaseVerified(); await session.WaitAsync().WaitAsync(TimeSpan.FromSeconds(10)); session.ReleaseVerified();
+        receipt.RemoveSyntheticReservationForTest(root, identity.ScopeKey + identity.CacheKey); receipt.Dispose();
+        Check(ExperimentalReservationOwner.RetainedCount == 0 && ExperimentalEntryLease.RetainedCount == 0);
+    }
     private static async Task ReceiptTransferRangesAsync(DirectoryFixture fixture)
     {
         var content = Enumerable.Range(0, 5001).Select(i => (byte)(i % 251)).ToArray();

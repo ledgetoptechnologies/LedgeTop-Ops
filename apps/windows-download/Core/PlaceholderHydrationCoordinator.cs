@@ -524,6 +524,13 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
         return receipt.StartSyntheticDownloadForTest(root, identity, resolved.Spec, source, ExperimentalDownloadAuthority);
     }
+    internal async Task<ExperimentalReservationOwner.LeaseReceipt.DownloadSession> ExperimentalStartHeldReceiptDownloadAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt receipt, SyntheticReceiptDownloadSource source, CancellationToken token = default)
+    {
+        ExperimentalValidateStagingIdentity(identity); ArgumentNullException.ThrowIfNull(receipt); ArgumentNullException.ThrowIfNull(source);
+        var resolved = await AuthorizeWithRetry(identity, token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        return receipt.StartSyntheticDownloadForTest(root, identity, resolved.Spec, source, ExperimentalDownloadAuthority, holdVerified: true);
+    }
     internal async Task<ExperimentalReservationOwner.LeaseReceipt.DownloadSession> ExperimentalStartReceiptTransferAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt receipt, SyntheticReceiptDownloadSource source, IPlaceholderTransferSink sink, long offset = 0, long? length = null, CancellationToken token = default)
     {
         ExperimentalValidateStagingIdentity(identity); ArgumentNullException.ThrowIfNull(receipt); ArgumentNullException.ThrowIfNull(source); ArgumentNullException.ThrowIfNull(sink);
