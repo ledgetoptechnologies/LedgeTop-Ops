@@ -19,7 +19,9 @@ internal sealed class ExperimentalOwnedStream : IDisposable
     private string sourcePath = "";
     private bool sealedStream, verifiedSeal, moved, renameUncertain;
     private byte[]? sealedDigest;
+    private string? successfulRenameTarget;
     internal static Action? BeforeSealFlushTestHook, BeforeSealHashTestHook, AfterStreamDisposeTestHook;
+    internal static Action? AfterSuccessfulNativeRenameTestHook;
     internal static Func<nint, int>? SimulatedRenameStatusTestHook;
     internal static Func<uint>? SimulatedWaitTestHook;
     internal readonly record struct Identity(ulong Volume, Guid FileId);
@@ -130,15 +132,19 @@ internal sealed class ExperimentalOwnedStream : IDisposable
                         return false;
                     }
                     if (status != 0) { renameUncertain = true; throw new IOException("Experimental rename was refused."); }
-                    moved = true;
+                    // From the successful kernel return until every binding is
+                    // checked, retain all handles and refuse normal disposal.
+                    moved = true; renameUncertain = true;
+                    successfulRenameTarget = Path.Combine(destinationDirectory, leaf);
+                    AfterSuccessfulNativeRenameTestHook?.Invoke();
                     VerifyPins(directories); VerifyPins(destinationPins);
                     if (GetIdentity(file.SafeFileHandle) != SourceIdentity ||
-                        !string.Equals(FinalPath(file.SafeFileHandle), Path.Combine(destinationDirectory, leaf), StringComparison.OrdinalIgnoreCase)) {
-                        renameUncertain = true; throw new IOException("Experimental rename outcome is uncertain.");
-                    }
+                        !string.Equals(FinalPath(file.SafeFileHandle), successfulRenameTarget, StringComparison.OrdinalIgnoreCase))
+                        throw new IOException("Experimental rename outcome is uncertain.");
                     // The promoted source remains owned by this object. Keep
                     // destination ancestry pinned until the owner is disposed.
                     directories.AddRange(destinationPins); destinationPins.Clear();
+                    renameUncertain = false;
                     return true;
                 } finally {
                     if (inFlight) ParkUncertain();
@@ -146,6 +152,9 @@ internal sealed class ExperimentalOwnedStream : IDisposable
                 }
             } catch (Exception error) { primary = error; throw; }
             finally {
+                if (renameUncertain && destinationPins.Count != 0) {
+                    directories.AddRange(destinationPins); destinationPins.Clear();
+                }
                 Exception? failure = null;
                 for (var i = destinationPins.Count - 1; i >= 0; i--) {
                     try { destinationPins[i].Handle.Dispose(); } catch (Exception error) { failure ??= error; }
@@ -157,9 +166,29 @@ internal sealed class ExperimentalOwnedStream : IDisposable
 
     private static void ParkUncertain() { while (true) { try { Thread.Sleep(Timeout.Infinite); } catch (ThreadInterruptedException) { } } }
 
+    // Test-only recovery of a known-success return. Never reconstructs ownership
+    // from a path or settles any unknown status; no production caller exists.
+    internal void ReconcileSuccessfulRenameForTest()
+    {
+        lock (gate) {
+            var file = stream ?? throw new ObjectDisposedException(nameof(ExperimentalOwnedStream));
+            if (!renameUncertain || !moved || successfulRenameTarget is null || sealedDigest is null)
+                throw new InvalidOperationException("No known-success experimental rename to reconcile.");
+            VerifyPins(directories);
+            if (GetIdentity(file.SafeFileHandle) != SourceIdentity ||
+                !string.Equals(FinalPath(file.SafeFileHandle), successfulRenameTarget, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("Experimental rename identity remains uncertain.");
+            file.Position = 0;
+            if (!CryptographicOperations.FixedTimeEquals(SHA256.HashData(file), sealedDigest))
+                throw new IOException("Experimental rename content remains uncertain.");
+            renameUncertain = false;
+        }
+    }
+
     public void Dispose()
     {
         lock (gate) {
+            if (renameUncertain) throw new InvalidOperationException("Experimental rename is uncertain; ownership is retained.");
             Exception? failure = null;
             try { if (stream is not null) { stream.Dispose(); AfterStreamDisposeTestHook?.Invoke(); } }
             catch (Exception error) { failure = error; }

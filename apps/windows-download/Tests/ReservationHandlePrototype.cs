@@ -185,6 +185,7 @@ internal static class ReservationHandlePrototype
         using (var read = new FileStream(collision, FileMode.Open, FileAccess.Read, FileShare.Read))
             if (Id(read.SafeFileHandle) != collisionId || !ReadExact(read, Foreign)) throw new IOException("Collision target changed.");
         ExperimentalPendingControl(fixture, directory, directoryId, destination, recordDisposition);
+        ExperimentalPostSuccessFailureControl(fixture, directory, directoryId, recordDisposition);
         if (!TryDeleteExact(fixture, directory, directoryId, second, Owned, new(secondId.Volume, secondId.FileId))) throw new IOException("Collision source cleanup failed.");
         recordDisposition();
         if (!TryDeleteExact(destination, targetDirectory, targetDirectoryId, target, Owned, new(sourceId.Volume, sourceId.FileId))) throw new IOException("Promoted file cleanup failed.");
@@ -198,6 +199,43 @@ internal static class ReservationHandlePrototype
         recordDisposition(); targetDirectory.Dispose();
         if (!ConfirmedAbsent(() => File.GetAttributes(destination), () => VerifyDirectoryBinding(fixture, directory, directoryId))) throw new IOException("Synthetic destination absence unverified.");
         Console.WriteLine("PASS gated experimental relative rename, collision preservation, and invalid states.");
+    }
+
+    private static void ExperimentalPostSuccessFailureControl(string fixture, SafeFileHandle directory, FileId directoryId, Action recordDisposition)
+    {
+        var destination = Path.Combine(fixture, "experimental-quarantine-destination"); var moved = destination + ".moved";
+        if (!CreateDirectoryW(destination, 0)) throw new IOException("Synthetic quarantine destination creation failed.");
+        var source = Path.Combine(fixture, "experimental-quarantine-source.record");
+        var target = Path.Combine(destination, "promoted.record");
+        var owned = LedgeTop.WindowsDownload.ExperimentalOwnedStream.CreateNew(source); var id = owned.SourceIdentity;
+        owned.Write(Owned); var digest = owned.SealAndHash();
+        LedgeTop.WindowsDownload.ExperimentalOwnedStream.AfterSuccessfulNativeRenameTestHook = () => throw new IOException("Injected post-success verification failure.");
+        var failed = false;
+        try { owned.RenameNoReplace(destination, "promoted.record", digest); } catch (IOException) { failed = true; }
+        finally { LedgeTop.WindowsDownload.ExperimentalOwnedStream.AfterSuccessfulNativeRenameTestHook = null; }
+        if (!failed) throw new IOException("Injected post-success failure was not observed.");
+        var refused = false; try { owned.Dispose(); } catch (InvalidOperationException) { refused = true; }
+        if (!refused) throw new IOException("Uncertain owner released its handles.");
+        refused = false; try { owned.RenameNoReplace(destination, "again.record", digest); } catch (InvalidOperationException) { refused = true; }
+        if (!refused) throw new IOException("Uncertain owner allowed another operation.");
+        refused = false;
+        try { Directory.Move(destination, moved); } catch (IOException) { refused = true; } catch (UnauthorizedAccessException) { refused = true; }
+        if (!refused || Directory.Exists(moved)) throw new IOException("Uncertain destination ancestry was not held.");
+        // Only the test-specific verified settlement may clear quarantine.
+        owned.ReconcileSuccessfulRenameForTest(); owned.Dispose();
+        Directory.Move(destination, moved); Directory.Move(moved, destination);
+        using var targetDirectory = Open(destination, ReadAttributes | Delete, ShareRead | ShareWrite, BackupSemantics | OpenReparsePoint);
+        RequireKind(targetDirectory, isDirectory: true); var targetDirectoryId = Id(targetDirectory);
+        if (!TryDeleteExact(destination, targetDirectory, targetDirectoryId, target, Owned, new(id.Volume, id.FileId)))
+            throw new IOException("Reconciled synthetic target cleanup failed.");
+        recordDisposition(); VerifyDirectoryBinding(destination, targetDirectory, targetDirectoryId);
+        if (Directory.EnumerateFileSystemEntries(destination).Any()) throw new IOException("Synthetic quarantine destination is not empty.");
+        byte disposition = 1;
+        if (!SetFileInformationByHandle(targetDirectory, 4, ref disposition, 1)) throw new IOException("Synthetic destination cleanup failed.");
+        recordDisposition(); targetDirectory.Dispose();
+        if (!ConfirmedAbsent(() => File.GetAttributes(destination), () => VerifyDirectoryBinding(fixture, directory, directoryId)))
+            throw new IOException("Synthetic quarantine destination absence is uncertain.");
+        Console.WriteLine("PASS gated post-success failure retains ownership until verified test settlement.");
     }
 
     private static void ExperimentalPendingControl(string fixture, SafeFileHandle directory, FileId directoryId, string destination, Action recordDisposition)
