@@ -85,8 +85,7 @@ internal static class ReservationHandlePrototype
                 if (watchdogId == ownerId || watchdogId == foreignId || watchdogId == childId || Id(reopened.SafeFileHandle) != watchdogId || !ReadExact(reopened, Watchdog))
                     throw new IOException("Watchdog child record did not retain its exact identity and bytes.");
             }
-            PhysicalAccountingControl(fixture, directory, directoryId, childRecord, childId);
-            deleteDispositionsApplied += 2; // active test record and recovered child record
+            PhysicalAccountingControl(fixture, directory, directoryId, childRecord, childId, () => deleteDispositionsApplied++);
             VerifyDirectoryBinding(fixture, directory, directoryId);
             verified = true;
             // Delete each exact owned file only through the verified file handle.
@@ -115,7 +114,7 @@ internal static class ReservationHandlePrototype
     // Isolated feasibility control, not used by the provider. The caller must
     // already own a stable root directory and an exclusive interprocess lease.
     // No cancellation, crash-atomic registry, or product recovery is implied.
-    private sealed class PhysicalAccounting(string root, SafeFileHandle directory, FileId directoryId)
+    private sealed class PhysicalAccounting(string root, SafeFileHandle directory, FileId directoryId, Action recordDisposition)
     {
         private sealed record Row(FileStream Handle, FileId Identity, byte[] Bytes, long Growth);
         private readonly object gate = new();
@@ -152,7 +151,7 @@ internal static class ReservationHandlePrototype
                 return result;
             }
         }
-        internal bool Release(string path, byte[] expected, bool simulateBeforeDeleteFailure = false)
+        internal bool Release(string path, byte[] expected, bool simulateBeforeDeleteFailure = false, bool simulateAfterDispositionFailure = false)
         {
             lock (gate) {
                 if (!rows.TryGetValue(path, out var row) || !row.Bytes.AsSpan().SequenceEqual(expected) ||
@@ -161,9 +160,11 @@ internal static class ReservationHandlePrototype
                 if (simulateBeforeDeleteFailure) return false;
                 byte disposition = 1;
                 if (!SetFileInformationByHandle(row.Handle.SafeFileHandle, 4, ref disposition, 1)) return false;
+                recordDisposition(); // report a real disposition even if later observation fails
                 // Keep its charge until confirmed absent. If observation fails,
                 // the caller must quarantine the registry rather than reuse it.
                 row.Handle.Dispose();
+                if (simulateAfterDispositionFailure) throw new IOException("Injected post-disposition observation failure.");
                 if (!ConfirmedAbsent(() => File.GetAttributes(path), () => VerifyDirectoryBinding(root, directory, directoryId)))
                     throw new IOException("Delete outcome uncertain; registry remains charged.");
                 rows.Remove(path); return true;
@@ -171,12 +172,14 @@ internal static class ReservationHandlePrototype
         }
     }
 
-    private static void PhysicalAccountingControl(string root, SafeFileHandle directory, FileId directoryId, string childRecord, FileId childId)
+    private static void PhysicalAccountingControl(string root, SafeFileHandle directory, FileId directoryId, string childRecord, FileId childId, Action recordDisposition)
     {
+        var recorded = 0;
+        void Record() { recorded++; recordDisposition(); }
         var path = Path.Combine(root, "accounting.record");
         FileId createdId;
         using (var created = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read)) { created.Write(Owned); created.Flush(true); createdId = Id(created.SafeFileHandle); }
-        var registry = new PhysicalAccounting(root, directory, directoryId);
+        var registry = new PhysicalAccounting(root, directory, directoryId, Record);
         var mismatchRejected = false;
         try { registry.Register(path, Owned, 100, childId); } catch (IOException) { mismatchRejected = true; }
         if (!mismatchRejected) throw new IOException("Foreign record identity was accepted.");
@@ -196,10 +199,25 @@ internal static class ReservationHandlePrototype
             throw new IOException("Confirmed delete remained charged.");
         // The existing separate child process wrote this record and exited
         // abruptly; rebuild a fresh registry after the child's handle closed.
-        var recovered = new PhysicalAccounting(root, directory, directoryId);
+        var recovered = new PhysicalAccounting(root, directory, directoryId, Record);
         recovered.Register(childRecord, Abrupt, 80, childId);
         if (recovered.Count(new[] { childRecord }, _ => throw new IOException("Unexpected record.")) != 80 ||
             !recovered.Release(childRecord, Abrupt)) throw new IOException("Child record recovery failed.");
+
+        // Test that a successful OS disposition is reported even when the
+        // following verification fails. Quarantine this test registry, then
+        // independently confirm the fixture file is absent before proceeding.
+        var faultPath = Path.Combine(root, "accounting-fault.record"); FileId faultId;
+        using (var created = new FileStream(faultPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read)) {
+            created.Write(Owned); created.Flush(true); faultId = Id(created.SafeFileHandle);
+        }
+        var faulted = new PhysicalAccounting(root, directory, directoryId, Record);
+        faulted.Register(faultPath, Owned, 100, faultId);
+        var before = recorded;
+        var failed = false;
+        try { faulted.Release(faultPath, Owned, simulateAfterDispositionFailure: true); } catch (IOException) { failed = true; }
+        if (!failed || recorded != before + 1 || !ConfirmedAbsent(() => File.GetAttributes(faultPath), () => VerifyDirectoryBinding(root, directory, directoryId)))
+            throw new IOException("Injected post-disposition failure was not contained.");
     }
 
     // Narrow test-only accounting model. It deliberately accepts a supplied
