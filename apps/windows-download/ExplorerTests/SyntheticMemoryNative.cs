@@ -49,6 +49,11 @@ internal static class SyntheticMemoryNative {
     }
     internal static bool CleanupVerified(bool registrationAttempted, bool registrationReturned, bool readersJoined, bool disposeCompleted, bool unregisterVerified) =>
         readersJoined && (!registrationAttempted || (registrationReturned && disposeCompleted && unregisterVerified));
+    internal static async Task<byte[]> TrackReadAsync(Task<byte[]> read, TimeSpan timeout, Action<bool> setJoined) {
+        setJoined(false);
+        try { return await read.WaitAsync(timeout).ConfigureAwait(false); }
+        finally { if (read.IsCompleted) setJoined(true); }
+    }
     internal static bool RetryOptionsValid(Func<string, string?> get) =>
         get("LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION") != "1" &&
         get("LEDGETOP_TEST_DISABLE_AVAILABILITY_SCANNER") != "1" &&
@@ -139,6 +144,15 @@ internal static class SyntheticMemoryNative {
         Console.WriteLine("PASS synthetic actual cache admission, quota, ownership and scope refusals without native registration."); return 0;
     }
     internal static int CleanupEvidenceTests() {
+        var joined = true;
+        var pendingRead = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        try { TrackReadAsync(pendingRead.Task, TimeSpan.FromMilliseconds(20), value => joined = value).GetAwaiter().GetResult(); throw new IOException("Timed read unexpectedly completed."); }
+        catch (TimeoutException) { }
+        if (joined || CleanupVerified(true, true, joined, true, true)) throw new IOException("Pending read incorrectly authorized cleanup.");
+        pendingRead.SetResult([1]);
+        if (joined) throw new IOException("Late read completion silently changed cleanup evidence.");
+        var immediate = TrackReadAsync(Task.FromResult(new byte[] { 2 }), TimeSpan.FromSeconds(1), value => joined = value).GetAwaiter().GetResult();
+        if (!joined || immediate.Length != 1 || immediate[0] != 2) throw new IOException("Completed read did not produce joined evidence.");
         var syntheticBase = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "synthetic-retry-scope"));
         var syntheticRoot = Path.Combine(syntheticBase, "memory-native-fixtures", "12345678123412341234123456789abc", "Files");
         var principal = "odqp1_" + new string('f', 64);
@@ -312,11 +326,8 @@ internal static class SyntheticMemoryNative {
                 var keptAttributes = (uint)provider.InspectAttributes("Retry\\sample-0.bin");
                 if (provider.SyntheticKeepAttempts != 2 || (keptAttributes & 0x80000) == 0 || (keptAttributes & (0x1000u | 0x40000u | 0x400000u)) != 0)
                     throw new IOException("Synthetic retry did not produce a pinned local file in exactly two attempts.");
-                readersJoined = false;
                 var contentTask = File.ReadAllBytesAsync(Path.Combine(root, "Retry", "sample-0.bin"));
-                byte[] content;
-                try { content = await contentTask.WaitAsync(TimeSpan.FromSeconds(15)); }
-                finally { if (contentTask.IsCompleted) readersJoined = true; }
+                var content = await TrackReadAsync(contentTask, TimeSpan.FromSeconds(15), joined => readersJoined = joined);
                 if (!CryptographicOperations.FixedTimeEquals(SHA256.HashData(content), SHA256.HashData(Bytes)))
                     throw new IOException("Synthetic retry content hash differed.");
                 Phase("simulated-keep-failure-retry-verified", id);
