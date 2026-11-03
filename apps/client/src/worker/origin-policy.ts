@@ -25,7 +25,7 @@ function exactOrigin(value: string | undefined, requireHttps: boolean): URL | nu
 }
 
 export function requestNamespace(path: string): RequestNamespace {
-  if (path === "/" || path === "/health") return "shared";
+  if (path === "/" || path === "/health" || path === "/ops-sign-in-help") return "shared";
   if (path === "/_ui" || path.startsWith("/_ui/")) return "ui-release";
   if (path === "/assets" || path.startsWith("/assets/")) return "assets";
   if (path === "/s" || path.startsWith("/s/")
@@ -217,6 +217,10 @@ export function requestHostAllowed(requestUrl: string, env: OriginEnv): boolean 
   const publicOrigin = configuredPublicShareOrigin(env);
   const publicRequestOrigins = configuredPublicRequestOrigins(env);
   if (!publicRequestOrigins) return false;
+  // Sign-in recovery is intentionally hosted only on the separate public
+  // delivery origin so an Access denial can reach it without opening a second
+  // route on private portal aliases.
+  if (request.pathname === "/ops-sign-in-help") return publicOrigin !== null && request.origin === publicOrigin;
   const legacyOrigins = configuredLegacyClientOrigins(env);
   if (!legacyOrigins) return false;
   if (namespace === "public") return publicRequestOrigins.includes(request.origin);

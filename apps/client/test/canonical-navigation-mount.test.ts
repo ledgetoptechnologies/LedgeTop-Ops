@@ -18,6 +18,23 @@ function fixture(enabled?:string) {
   return {env,request,fetch,prepare};
 }
 describe("real Client entrypoint canonical navigation mount",()=>{
+  it("serves a static, non-caching Operations sign-in recovery page on the public delivery host",async()=>{
+    const f=fixture();
+    const response=await f.request(`${DELIVERY}/ops-sign-in-help`);
+    const html=await response.text();
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toContain("text/html");
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(response.headers.get("Cloudflare-CDN-Cache-Control")).toBe("no-store");
+    expect(response.headers.get("X-Robots-Tag")).toContain("noindex");
+    expect(html).toContain("Having trouble signing in?");
+    expect(html).toContain("https://ledgetoptechnologies.cloudflareaccess.com/cdn-cgi/access/logout");
+    expect(html).toContain("https://ops.ledgetop.app/");
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("info@ledgetopdroneservices.com");
+    expect(f.prepare).not.toHaveBeenCalled();
+    expect((await f.request(`${PORTAL}/ops-sign-in-help`)).status).toBe(404);
+  });
   it.each([undefined,"false","TRUE","1"])("keeps the active mixed host local when the opt-in is %s",async enabled=>{
     const f=fixture(enabled);
     for(const path of ["/portal/projects?view=list","/s/synthetic-id?folder=opaque%2Fref"]) {
