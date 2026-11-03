@@ -104,6 +104,11 @@ internal static class CloudFilesNativeTransfer {
         }
         internal void StartProgress() {
             Token.ThrowIfCancellationRequested();
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            // Short, isolated synthetic comparison only: without progress Windows
+            // can time out the callback. This branch is forbidden in packages.
+            if (Environment.GetEnvironmentVariable("LEDGETOP_TEST_SUPPRESS_NATIVE_PROGRESS") == "1") return;
+#endif
             Report();
             progress = PumpAsync();
         }
