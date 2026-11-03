@@ -38,6 +38,9 @@ internal static class HydrationCacheConcurrency
             internal void ValidateExisting(string directory, string name, byte[] expected) =>
                 lease.UseExperimentalMarkers(owner => owner.ValidateExisting(directory, name, expected));
             internal void CreateNew(string directory) => lease.UseExperimentalMarkers(owner => owner.CreateNew(directory));
+            internal long AccountMarker(string path) {
+                long length = 0; lease.UseExperimentalMarkers(owner => length = owner.AccountMarker(path)); return length;
+            }
         }
         private void UseExperimentalMarkers(Action<ExperimentalRootMarkerOwner> operation)
         {

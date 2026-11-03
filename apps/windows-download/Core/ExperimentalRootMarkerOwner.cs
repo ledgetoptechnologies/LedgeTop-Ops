@@ -49,6 +49,15 @@ internal sealed class ExperimentalRootMarkerOwner : IDisposable
             }
         }
     }
+    internal long AccountMarker(string path)
+    {
+        var full = Path.GetFullPath(path);
+        if (Path.GetFileName(full) != ".verified-hydration-owner") throw new IOException("Experimental marker name invalid.");
+        var directory = Path.GetDirectoryName(full) ?? throw new IOException("Experimental marker directory invalid.");
+        var expected = System.Text.Encoding.UTF8.GetBytes("LedgeTop.VerifiedHydration/1\n");
+        ValidateExisting(directory, ".verified-hydration-owner", expected);
+        return expected.Length;
+    }
     internal void CreateNew(string directory)
     {
         lock (gate) {

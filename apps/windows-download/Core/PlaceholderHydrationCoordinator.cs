@@ -589,12 +589,32 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         try {
 #endif
         var used = CacheBytes();
-        if (reserved > maximumCacheBytes || used > maximumCacheBytes - reserved || growth > maximumCacheBytes - reserved - used)
-            throw new TransferException("Hydration cache capacity exceeded.");
+        RequireCapacityForUsed(used, reserved, growth);
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheCapacityExit); }
 #endif
     }
+    private void RequireCapacityForUsed(long used, long reserved, long growth)
+    {
+        if (reserved > maximumCacheBytes || used > maximumCacheBytes - reserved || growth > maximumCacheBytes - reserved - used)
+            throw new TransferException("Hydration cache capacity exceeded.");
+    }
+#if LEDGETOP_CACHE_RACE_TEST
+    // Isolated coordinator/scanner experiment; not called from hydration or eviction.
+    internal long ExperimentalCheckMarkerCapacity(HydrationCacheConcurrency.Lease admission, long reserved, long growth, CancellationToken token = default)
+    {
+        long used = 0;
+        WithQuota(admission.Quota, () => {
+            var markers = admission.ExperimentalMarkers;
+            foreach (var file in Walk(root)) {
+                RequireSafe(file);
+                used = checked(used + (string.Equals(Path.GetFileName(file), Marker, StringComparison.OrdinalIgnoreCase) ? markers.AccountMarker(file) : new FileInfo(file).Length));
+            }
+            RequireCapacityForUsed(used, reserved, growth);
+        }, token);
+        return used;
+    }
+#endif
     private static long ReservedBytes(string directory)
     {
 #if LEDGETOP_NATIVE_DIAGNOSTICS

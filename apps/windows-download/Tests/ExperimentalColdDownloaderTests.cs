@@ -478,6 +478,35 @@ internal static class ExperimentalColdDownloaderTests
                 }
             }
         });
+        await WithFixture(async fixture => {
+            using var source = new CoordinatorSource();
+            using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", fixture.Path, maximumFileBytes: Content.Length,
+                maximumCacheBytes: 128, expectedPrincipal: CoordinatorSource.Principal);
+            var root = Path.Combine(fixture.Path, "verified-hydration-v1");
+            var lease = await HydrationCacheConcurrency.AcquireAsync(root, "scan", CancellationToken.None);
+            try {
+                lease.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate);
+                var scope = Path.Combine(root, "synthetic-scope"); Directory.CreateDirectory(scope);
+                lease.ExperimentalMarkers.CreateNew(scope);
+                var marker = Path.Combine(scope, ".verified-hydration-owner"); AssertOtherProcessCannotOpen(marker);
+                var ownerLength = System.Text.Encoding.UTF8.GetByteCount("LedgeTop.VerifiedHydration/1\n");
+                var used = coordinator.ExperimentalCheckMarkerCapacity(lease, 0, 0);
+                Check(used == 2 * ownerLength && coordinator.ExperimentalCheckMarkerCapacity(lease, 0, 128 - used) == used);
+                var rejected = false; try { coordinator.ExperimentalCheckMarkerCapacity(lease, 0, 129 - used); } catch (TransferException) { rejected = true; }
+                Check(rejected);
+                var foreign = Path.Combine(root, "foreign"); Directory.CreateDirectory(foreign);
+                var foreignMarker = Path.Combine(foreign, ".verified-hydration-owner"); File.WriteAllBytes(foreignMarker, Foreign);
+                rejected = false; try { coordinator.ExperimentalCheckMarkerCapacity(lease, 0, 0); } catch (IOException) { rejected = true; }
+                Check(rejected && File.ReadAllBytes(foreignMarker).SequenceEqual(Foreign));
+                File.Delete(foreignMarker);
+                var variantMarker = Path.Combine(foreign, ".VERIFIED-HYDRATION-OWNER"); File.WriteAllBytes(variantMarker, "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+                rejected = false; try { coordinator.ExperimentalCheckMarkerCapacity(lease, 0, 0); } catch (IOException) { rejected = true; }
+                Check(rejected && File.Exists(variantMarker));
+            } finally { lease.Dispose(); }
+            var disposedRejected = false;
+            try { coordinator.ExperimentalCheckMarkerCapacity(lease, 0, 0); } catch (ObjectDisposedException) { disposedRejected = true; }
+            Check(disposedRejected);
+        });
         await AbruptRestartTests();
         await WithFixture(async root => {
             var etag = "\"" + new string('\\', 510) + "\"";
