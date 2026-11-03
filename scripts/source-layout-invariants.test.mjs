@@ -509,13 +509,15 @@ test("the deployed Operations Worker preserves native production transport and e
   // Preserve the current native production transport. Deferred catalog/legacy
   // mutation paths stay disabled and have no production service/workflow binding.
   // New settings are disabled onboarding mail controls and isolated mail/activation crons.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "8374c00d0ad789249550b934c67eb98e53960a4d8dfa74a09d2a8dd8d795bf5a");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "63f9ecc8712613480aa625e2bbb231672cb6b9a67328d0490eca34a50058bb81");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.equal(config.vars.PUBLIC_BASE_URL,"https://ops.ledgetop.app");
   assert.equal(config.vars.EXPECTED_HOST,"ops.ledgetop.app");
   assert.equal(Object.hasOwn(config.vars,"CANONICAL_BROWSER_NAVIGATION_ENABLED"),false,"existing canonical origins activate Ops pages without a new scalar binding");
   assert.equal(config.vars.OPERATIONS_ORIGINS,"https://ops.ledgetop.app,https://ops.ledgetopdroneservices.com,https://ops.ledgetoptechnologies.com");
   assert.deepEqual(config.routes.map(route=>route.pattern),["ops.ledgetop.app","ops.ledgetopdroneservices.com","ops.ledgetoptechnologies.com","incoming.ledgetopdroneservices.com"]);
+  assert.deepEqual(config.services.find(service=>service.binding==="CLIENT_PORTAL_AUTHORITY_V2"),
+    {binding:"CLIENT_PORTAL_AUTHORITY_V2",service:"ledgetop-clients",entrypoint:"ClientPortalAuthorityV2Ingress"});
   assert.deepEqual(config.assets.run_worker_first,["/api/*","/health","/r/*","/","/dashboard","/airspace","/operations","/clients","/clients/*","/delivery","/team","/administration",
     "/viewer","/viewer/models","/viewer/sharing","/viewer/processing","/operations/processing",
     "/intel","/account","/configurations","/notifications","/jobs","/projects","/tasks","/sops",
@@ -579,6 +581,7 @@ test("the deployed Operations Worker preserves native production transport and e
     { binding: "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY", service: "ledgetop-clients", entrypoint: "OperationsPortalNativeDeliveryAuthorityIngress" },
     { binding: "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION", service: "ledgetop-clients", entrypoint: "OperationsPortalWorkspacePublicationIngress" },
     { binding: "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY", service: "ledgetop-clients", entrypoint: "OperationsPortalNativeRecipientAuthorityIngress" },
+    { binding: "CLIENT_PORTAL_AUTHORITY_V2", service: "ledgetop-clients", entrypoint: "ClientPortalAuthorityV2Ingress" },
   ]);
   assert.equal(config.workflows?.find(workflow => workflow.binding === "OPS_CATALOG_PROMOTION_WORKFLOW"), undefined);
   assert.equal(config.workflows?.find((workflow) => workflow.binding === "OPS_CATALOG_PROMOTION_WORKFLOW")?.schedules, undefined);
