@@ -14,7 +14,7 @@ internal static class SyntheticBusyNative {
     static readonly string Principal = "odqp1_" + new string('f', 64);
     static void Need(bool b, string message) { if (!b) throw new IOException(message); }
     static async Task<bool> Denied(Task<byte[]> t) { try { await t.WaitAsync(TimeSpan.FromSeconds(20)); return false; } catch (IOException) { return true; } }
-    internal static async Task<int> RunAsync() {
+    internal static async Task<int> RunAsync(bool dedicatedReaders = false) {
         var basePath = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") ?? throw new IOException("Need task artifact root.");
         var id = Guid.NewGuid(); var owned = Path.Combine(basePath, "busy-fixtures", id.ToString("N"));
         var root = Path.Combine(owned, "Files"); var cache = Path.Combine(owned, "Cache");
@@ -37,7 +37,10 @@ internal static class SyntheticBusyNative {
             provider.Activity += message => Console.WriteLine(message);
             await provider.ConnectAndPopulateAsync();
             state.Mode = "timed"; state.BusyClock = System.Diagnostics.Stopwatch.StartNew();
-            var reads = entries.Select(e => Task.Run(() => File.ReadAllBytesAsync(Path.Combine(root,e.FileName)))).ToArray();
+            if (dedicatedReaders) Console.WriteLine("Using four dedicated threads to start file reads.");
+            var reads = entries.Select(e => dedicatedReaders
+                ? StartDedicated(() => File.ReadAllBytesAsync(Path.Combine(root,e.FileName)))
+                : Task.Run(() => File.ReadAllBytesAsync(Path.Combine(root,e.FileName)))).ToArray();
             var contents = await Task.WhenAll(reads).WaitAsync(TimeSpan.FromSeconds(25));
             Need(contents.All(x => SHA256.HashData(x).SequenceEqual(SHA256.HashData(Bytes))), "Busy retry changed content.");
             Need(state.BusyClock.Elapsed >= TimeSpan.FromSeconds(3), "Expected a three-second busy interval.");
@@ -68,6 +71,20 @@ internal static class SyntheticBusyNative {
         }
         Console.WriteLine(JsonSerializer.Serialize(new { passed = failures.Count==0, phases, failures, receipt=Path.Combine(owned,"receipt.json") }));
         return failures.Count == 0 ? 0 : 1;
+    }
+    private static Task<T> StartDedicated<T>(Func<Task<T>> operation) =>
+        Task.Factory.StartNew(operation, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
+    internal static async Task<int> RunDedicatedReaderTestsAsync() {
+        using var barrier = new Barrier(4);
+        var readers = Enumerable.Range(0, 4).Select(_ => StartDedicated(() => {
+            var id = Environment.CurrentManagedThreadId;
+            if (!barrier.SignalAndWait(TimeSpan.FromSeconds(10))) throw new TimeoutException("Dedicated readers did not start together.");
+            return Task.FromResult(id);
+        })).ToArray();
+        var ids = await Task.WhenAll(readers).WaitAsync(TimeSpan.FromSeconds(15));
+        Need(ids.Distinct().Count() == 4, "Four independent dedicated reader threads are required.");
+        Console.WriteLine("Synthetic dedicated readers: four distinct concurrent thread starts passed; no native registration.");
+        return 0;
     }
     internal static int RunBusyWindowTests() {
         var now = TimeSpan.Zero;

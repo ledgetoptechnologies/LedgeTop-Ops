@@ -5,6 +5,8 @@ using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
 if (args.Length == 1 && args[0] == "--synthetic-busy-native") return await SyntheticBusyNative.RunAsync();
+if (args.Length == 1 && args[0] == "--synthetic-busy-native-dedicated") return await SyntheticBusyNative.RunAsync(dedicatedReaders: true);
+if (args.Length == 1 && args[0] == "--synthetic-dedicated-reader-tests") return await SyntheticBusyNative.RunDedicatedReaderTestsAsync();
 if (args.Length == 1 && args[0] == "--synthetic-busy-window-tests") return SyntheticBusyNative.RunBusyWindowTests();
 if (args.Length == 1 && args[0] == "--preflight-recovery-tests") return await PreflightRecoveryBoundaryTests.RunAsync();
 
