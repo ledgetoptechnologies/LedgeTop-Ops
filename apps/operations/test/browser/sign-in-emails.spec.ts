@@ -80,6 +80,18 @@ test("the account page lists the main email and active linked emails", async ({ 
   await expect(card.getByRole("button", { name: "Add a sign-in email" })).toBeVisible();
 });
 
+test("a sign-in email service failure offers retry and a safe return to Access sign-in", async ({ page }) => {
+  const seen = await mockOps(page, { linksStatus: 503 });
+  const card = await openAccount(page);
+  await expect(card.getByRole("alert")).toContainText("Your account is still signed in");
+  await expect(card.getByRole("link", { name: "Sign in with a different email" }))
+    .toHaveAttribute("href", "/cdn-cgi/access/logout");
+  await card.getByRole("button", { name: "Try again" }).click();
+  await expect(card.getByRole("alert")).toBeVisible();
+  await card.getByRole("link", { name: "Sign in with a different email" }).click();
+  await expect.poll(() => seen.logouts).toBe(1);
+});
+
 test("removing a linked email confirms first and sends its version with the staff CSRF token", async ({ page }) => {
   const seen = await mockOps(page);
   const card = await openAccount(page);

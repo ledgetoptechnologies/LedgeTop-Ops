@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Card, Skeleton, StatusPill, requestText } from "@ltds/ui";
+import { Card, SignInRecovery, Skeleton, StatusPill, requestText } from "@ltds/ui";
 import { ApiError } from "./api";
 import { ACCESS_LOGOUT, useAccessSignOut } from "./access-session";
 import { confirmAction } from "./confirm-action";
@@ -105,7 +105,10 @@ function SignInEmails() {
   if (state.kind === "hidden") return null;
   return <Card title="Sign-in emails" className="account-sign-in-emails">
     {state.kind === "loading" && <Skeleton lines={3} />}
-    {state.kind === "error" && <div className="notice error">Sign-in emails couldn't be loaded. <button type="button" className="button-ghost" onClick={() => { setState({ kind: "loading" }); void load(); }}>Try again</button></div>}
+    {state.kind === "error" && <>
+      <div className="notice error" role="alert">Sign-in emails couldn't be loaded. Your account is still signed in; you can retry or return to sign-in with another email.</div>
+      <SignInRecovery returnTo="/" lead="retry" onRetry={() => { setState({ kind: "loading" }); void load(); }} />
+    </>}
     {state.kind === "ready" && (() => {
       const { links } = state, active = links.bindings.filter(binding => binding.status === "active");
       const onLinkedEmail = links.currentEmail.toLowerCase() !== links.canonicalEmail.toLowerCase();
