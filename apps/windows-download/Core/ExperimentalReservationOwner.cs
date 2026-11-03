@@ -35,15 +35,57 @@ internal sealed class ExperimentalReservationOwner
     internal sealed class LeaseReceipt : IDisposable
     {
         private readonly object gate = new();
+        private readonly string root, key;
         private HydrationCacheConcurrency.Lease? heldLease;
         private FileStream? heldEntry;
         private ExperimentalEntryLease? heldOwnedEntry;
-        private bool active, uncertain;
+        private bool active, uncertain, executing;
+        internal LeaseReceipt(string root, string key) { this.root = root; this.key = key; }
+        internal sealed class Scope
+        {
+            private readonly LeaseReceipt owner;
+            private readonly int thread = Environment.CurrentManagedThreadId;
+            private bool active = true;
+            internal Scope(LeaseReceipt owner) { this.owner = owner; }
+            private void Check() { if (!active || Environment.CurrentManagedThreadId != thread) throw new ObjectDisposedException(nameof(Scope)); }
+            internal void Invalidate() => active = false;
+            internal void ValidateEntry() { Check(); owner.heldOwnedEntry!.Validate(); }
+            internal long AccountMarker(string directory) {
+                Check(); return owner.heldLease!.ExperimentalMarkers.AccountMarker(Path.Combine(directory, ".verified-hydration-owner"));
+            }
+            internal void WithQuota(Action action, CancellationToken token = default) {
+                Check(); ArgumentNullException.ThrowIfNull(action);
+                HydrationQuotaGate.Run(owner.heldLease!.Quota, () => {
+                    Check(); ValidateEntry();
+                    owner.heldLease.ExperimentalMarkers.ValidateExisting(owner.root, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+                    var path = Path.Combine(owner.root, ".hydration-quota-v2.lock");
+                    using var quota = ExperimentalOwnedStream.Open(path, 0xC0000080, 0, 4, 0x00200000);
+                    ExperimentalOwnedStream.RequireRegularKind(quota, false); ExperimentalOwnedStream.RequireSingleLink(quota);
+                    if (!string.Equals(ExperimentalOwnedStream.FinalPath(quota), path, StringComparison.OrdinalIgnoreCase)) throw new IOException("Experimental quota binding changed.");
+                    action(); Check(); ValidateEntry();
+                }, token);
+            }
+        }
+        internal void RunScoped(string root, string key, Action<Scope> action) {
+            ArgumentNullException.ThrowIfNull(action);
+            lock (gate) {
+                if (!active || uncertain || heldLease is null || heldOwnedEntry is null) throw new ObjectDisposedException(nameof(LeaseReceipt));
+                if (executing) throw new InvalidOperationException("Experimental receipt scope is already active.");
+                if (!string.Equals(this.root, Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase) || this.key != key)
+                    throw new TransferException("Experimental receipt scope does not match its entry.");
+                executing = true;
+                try { heldLease.RunExperimentalForEntry(this.root, this.key, () => {
+                    heldOwnedEntry.Validate(); var scope = new Scope(this);
+                    try { action(scope); } finally { scope.Invalidate(); }
+                }); } finally { executing = false; }
+            }
+        }
         internal void Attach(HydrationCacheConcurrency.Lease value, FileStream file) { heldLease = value; heldEntry = file; active = true; }
         internal void Attach(HydrationCacheConcurrency.Lease value, ExperimentalEntryLease file) { heldLease = value; heldOwnedEntry = file; active = true; }
         public void Dispose() {
             lock (gate) {
                 if (!active) return;
+                if (executing) throw new InvalidOperationException("Experimental receipt scope is active.");
                 if (uncertain) throw new IOException("Experimental returned lease closure remains uncertain.");
                 uncertain = true;
                 if (heldOwnedEntry is not null) { heldOwnedEntry.Dispose(); heldOwnedEntry = null; }
@@ -227,7 +269,7 @@ internal sealed class ExperimentalReservationOwner
         foreach (var pin in pins.AsEnumerable().Reverse()) { BeforeTeardownTestHook?.Invoke("directory"); pin.Handle.Dispose(); } pins.Clear();
         LeaseReceipt? receipt = null;
         if (returnLeases) {
-            receipt = new LeaseReceipt();
+            receipt = new LeaseReceipt(root, leaseKey);
             lock (RegistryGate) Receipts.Add(receipt);
             try {
                 if (ownedEntry is not null) {

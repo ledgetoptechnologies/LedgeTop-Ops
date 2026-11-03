@@ -870,6 +870,7 @@ internal static class ExperimentalColdDownloaderTests
         });
         await WithFixture(async fixture => {
             var root = Path.Combine(fixture.Path, "joint-reservation"); Directory.CreateDirectory(root);
+            File.WriteAllBytes(Path.Combine(root, ".verified-hydration-owner"), "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
             var scope = new string('a', 64); var key = new string('b', 64); var entryDir = Path.Combine(root, scope, key); Directory.CreateDirectory(entryDir);
             var reservationDir = Path.Combine(root, ".hydration-reservations-v2"); Directory.CreateDirectory(reservationDir);
             File.WriteAllBytes(Path.Combine(reservationDir, ".verified-hydration-owner"), "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
@@ -878,7 +879,7 @@ internal static class ExperimentalColdDownloaderTests
             HydrationCacheConcurrency.Lease? admission = await HydrationCacheConcurrency.AcquireAsync(root, scope + key, CancellationToken.None);
             admission.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate);
             ExperimentalEntryLease? entry = ExperimentalEntryLease.Open(admission, root, scope, key); var stale = entry; var current = entry.Move();
-            var alias = admission; var gate = admission.Quota; ExperimentalReservationOwner? owner = null; ExperimentalReservationOwner.LeaseReceipt? receipt = null;
+            var alias = admission; var gate = admission.Quota; ExperimentalReservationOwner? owner = null; ExperimentalReservationOwner.LeaseReceipt? receipt = null; var receiptUncertain = false;
             try {
                 entry = stale; var rejected = false;
                 try { alias.RunExperimentalForRoot(root, () => HydrationQuotaGate.Run(gate, () => {
@@ -926,9 +927,41 @@ internal static class ExperimentalColdDownloaderTests
                 Check(results.Count(item => item is not null) == 1); receipt = results.Single(item => item is not null);
                 Check(!File.Exists(path)); AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock")); AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
                 rejected = false; try { stale.Dispose(); } catch (ObjectDisposedException) { rejected = true; } Check(rejected);
-                receipt!.Dispose(); receipt = null;
+                var heldReceipt = receipt!; ExperimentalReservationOwner.LeaseReceipt.Scope? escaped = null;
+                rejected = false; try { heldReceipt.RunScoped(Path.Combine(root, "foreign"), scope + key, _ => { }); } catch (TransferException) { rejected = true; } Check(rejected);
+                rejected = false; try { heldReceipt.RunScoped(root, scope + new string('c', 64), _ => { }); } catch (TransferException) { rejected = true; } Check(rejected);
+                heldReceipt.RunScoped(root, scope + key, access => {
+                    escaped = access; access.ValidateEntry();
+                    Check(access.AccountMarker(root) == System.Text.Encoding.UTF8.GetByteCount("LedgeTop.VerifiedHydration/1\n"));
+                    access.WithQuota(() => { AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-quota-v2.lock")); access.ValidateEntry(); });
+                    var wrongThread = false; Exception? threadError = null;
+                    var thread = new Thread(() => { try { access.ValidateEntry(); } catch (ObjectDisposedException) { wrongThread = true; } catch (Exception error) { threadError = error; } });
+                    thread.Start();
+                    if (!thread.Join(TimeSpan.FromSeconds(5))) { receiptUncertain = true; UncertainTestResources.Add((fixture, heldReceipt, access, thread)); throw new IOException("Synthetic scope thread remains uncertain."); }
+                    Check(wrongThread && threadError is null);
+                    var reentrant = false; try { heldReceipt.Dispose(); } catch (InvalidOperationException) { reentrant = true; } Check(reentrant);
+                });
+                rejected = false; try { escaped!.ValidateEntry(); } catch (ObjectDisposedException) { rejected = true; } Check(rejected);
+                var entered = new ManualResetEventSlim(); var release = new ManualResetEventSlim(); var disposing = new ManualResetEventSlim();
+                Task? operation = null; Task? close = null;
+                try {
+                    operation = Task.Run(() => heldReceipt.RunScoped(root, scope + key, access => { entered.Set(); if (!release.Wait(TimeSpan.FromSeconds(10))) throw new IOException("Synthetic receipt barrier timed out."); access.ValidateEntry(); }));
+                    Check(entered.Wait(TimeSpan.FromSeconds(5)));
+                    close = Task.Run(() => { disposing.Set(); heldReceipt.Dispose(); });
+                    Check(disposing.Wait(TimeSpan.FromSeconds(5)) && !close.Wait(TimeSpan.FromMilliseconds(150)));
+                    release.Set(); await Task.WhenAll(operation, close).WaitAsync(TimeSpan.FromSeconds(10));
+                } finally {
+                    release.Set(); var pending = new[] { operation, close }.Where(task => task is not null).Cast<Task>().ToArray();
+                    try { await Task.WhenAll(pending).WaitAsync(TimeSpan.FromSeconds(10)); }
+                    finally {
+                        if (pending.All(task => task.IsCompleted)) { entered.Dispose(); release.Dispose(); disposing.Dispose(); }
+                        else { receiptUncertain = true; UncertainTestResources.Add((fixture, heldReceipt, pending, entered, release, disposing)); }
+                    }
+                }
+                if (!receiptUncertain) receipt = null;
+                rejected = false; try { heldReceipt.RunScoped(root, scope + key, _ => { }); } catch (ObjectDisposedException) { rejected = true; } Check(rejected);
                 AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true); AssertOtherProcessOpen(Path.Combine(entryDir, ".hydration.lock"), true);
-            } finally { receipt?.Dispose(); entry?.Dispose(); admission?.Dispose(); }
+            } finally { if (!receiptUncertain) receipt?.Dispose(); entry?.Dispose(); admission?.Dispose(); }
             Check(ExperimentalReservationOwner.RetainedCount == 0 && ExperimentalEntryLease.RetainedCount == 0);
         });
         await WithFixture(async fixture => {
