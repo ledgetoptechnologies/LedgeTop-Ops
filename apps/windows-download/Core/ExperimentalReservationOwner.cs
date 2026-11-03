@@ -78,6 +78,13 @@ internal sealed class ExperimentalReservationOwner
                 return length;
             } catch { uncertain = true; throw; }
         });
+        // Read-only observation; a later mutation must repeat admission in its own quota transaction.
+        internal bool InspectCapacityForTest(string root, string key, PlaceholderHydrationCoordinator coordinator, long growth, CancellationToken token = default) => Execute(root, key, () => {
+            ArgumentNullException.ThrowIfNull(coordinator);
+            if (growth < 0) throw new ArgumentOutOfRangeException(nameof(growth));
+            try { return coordinator.ExperimentalCanReserve(heldLease!, growth, token); }
+            catch { uncertain = true; throw; }
+        });
         internal long AccountMarkerUnderQuota(string root, string key, string directory, CancellationToken token = default) => Execute(root, key, () => {
             long result = 0;
             HydrationQuotaGate.Run(heldLease!.Quota, () => {

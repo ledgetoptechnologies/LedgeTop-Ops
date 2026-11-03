@@ -604,7 +604,16 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     internal static Func<string, bool>? ExperimentalOmitReservationFromWalkTestHook;
     internal long ExperimentalCheckMarkerCapacity(HydrationCacheConcurrency.Lease admission, long growth, CancellationToken token = default)
     {
-        long used = 0;
+        var result = ExperimentalCapacityDecision(admission, growth, token);
+        if (!result.Fits) throw new TransferException("Hydration cache capacity exceeded.");
+        return result.Used;
+    }
+    internal bool ExperimentalCanReserve(HydrationCacheConcurrency.Lease admission, long growth, CancellationToken token = default) =>
+        ExperimentalCapacityDecision(admission, growth, token).Fits;
+    private (long Used, bool Fits) ExperimentalCapacityDecision(HydrationCacheConcurrency.Lease admission, long growth, CancellationToken token)
+    {
+        if (growth < 0) throw new ArgumentOutOfRangeException(nameof(growth));
+        long used = 0; var fits = false;
         admission.RunExperimentalForRoot(root, () => WithQuota(admission.Quota, () => {
             var markers = admission.ExperimentalMarkers;
             var retained = ExperimentalReservationOwner.SnapshotForRoot(root);
@@ -619,9 +628,9 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             }
             if (!walked.SetEquals(retained.Keys)) throw new TransferException("Retained reservation is missing from the cache walk.");
             var reserved = ExperimentalReservedBytes(Path.Combine(root, ".hydration-reservations-v2"), retained);
-            RequireCapacityForUsed(used, reserved, growth);
+            fits = reserved <= maximumCacheBytes && used <= maximumCacheBytes - reserved && growth <= maximumCacheBytes - reserved - used;
         }, token));
-        return used;
+        return (used, fits);
     }
     private static long ExperimentalReservedBytes(string directory, Dictionary<string, ExperimentalReservationOwner> retained)
     {

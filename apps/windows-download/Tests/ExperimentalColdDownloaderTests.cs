@@ -898,8 +898,9 @@ internal static class ExperimentalColdDownloaderTests
             Check(ExperimentalEntryLease.RetainedCount == 0);
         });
         await WithFixture(async fixture => {
-            var root = Path.Combine(fixture.Path, "joint-reservation"); Directory.CreateDirectory(root);
-            File.WriteAllBytes(Path.Combine(root, ".verified-hydration-owner"), "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+            using var capacitySource = new CoordinatorSource();
+            using var capacityCoordinator = new PlaceholderHydrationCoordinator(capacitySource, "pilot", fixture.Path, maximumFileBytes: Content.Length, maximumCacheBytes: 10000, expectedPrincipal: CoordinatorSource.Principal);
+            var root = Path.Combine(fixture.Path, "verified-hydration-v1");
             var scope = new string('a', 64); var key = new string('b', 64); var entryDir = Path.Combine(root, scope, key); Directory.CreateDirectory(entryDir);
             var reservationDir = Path.Combine(root, ".hydration-reservations-v2"); Directory.CreateDirectory(reservationDir);
             File.WriteAllBytes(Path.Combine(reservationDir, ".verified-hydration-owner"), "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
@@ -963,6 +964,13 @@ internal static class ExperimentalColdDownloaderTests
                 rejected = false; try { heldReceipt.ValidateEntry(Path.Combine(root, "foreign"), scope + key); } catch (TransferException) { rejected = true; } Check(rejected);
                 rejected = false; try { heldReceipt.ValidateEntry(root, scope + new string('c', 64)); } catch (TransferException) { rejected = true; } Check(rejected);
                 heldReceipt.ValidateEntry(root, scope + key);
+                var unknownKey = new string('d', 64); var unknownRecord = Path.Combine(reservationDir, scope + "-" + unknownKey + ".json");
+                var unknownBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = scope, Entry = unknownKey, Growth = 11L });
+                File.WriteAllBytes(unknownRecord, unknownBytes);
+                var usedForCapacity = 2L * System.Text.Encoding.UTF8.GetByteCount("LedgeTop.VerifiedHydration/1\n") + unknownBytes.Length;
+                Check(heldReceipt.InspectCapacityForTest(root, scope + key, capacityCoordinator, 10000 - usedForCapacity - 11));
+                Check(!heldReceipt.InspectCapacityForTest(root, scope + key, capacityCoordinator, 10001 - usedForCapacity - 11));
+                heldReceipt.ValidateEntry(root, scope + key); File.Delete(unknownRecord);
                 foreach (var failureStage in new[] { "validation", "close" }) {
                     var failureToken = new object(); var injected = false;
                     ExperimentalReservationOwner.ReceiptQuotaFailureStageTestHook = failureStage;
@@ -989,7 +997,7 @@ internal static class ExperimentalColdDownloaderTests
                 rejected = false; try { heldReceipt.SettleInjectedMarkerFailureForTest(new object()); } catch (InvalidOperationException) { rejected = true; } Check(rejected);
                 heldReceipt.SettleInjectedMarkerFailureForTest(markerToken); heldReceipt.ValidateEntry(root, scope + key);
                 var exposed = typeof(ExperimentalReservationOwner.LeaseReceipt).GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly).Where(method => method.IsAssembly);
-                Check(exposed.All(method => (method.ReturnType == typeof(void) || method.ReturnType == typeof(long)) && method.GetParameters().All(parameter => !typeof(Delegate).IsAssignableFrom(parameter.ParameterType))));
+                Check(exposed.All(method => (method.ReturnType == typeof(void) || method.ReturnType == typeof(long) || method.ReturnType == typeof(bool)) && method.GetParameters().All(parameter => !typeof(Delegate).IsAssignableFrom(parameter.ParameterType))));
                 var entered = new ManualResetEventSlim(); var release = new ManualResetEventSlim(); var disposing = new ManualResetEventSlim();
                 Task? operation = null; Task? close = null;
                 try {
