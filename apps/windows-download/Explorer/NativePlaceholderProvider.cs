@@ -28,6 +28,16 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     public event Action<string>? Activity;
     internal event Action<HydrationFailureDiagnostic>? HydrationFailureObserved;
     internal bool RetryFailedAvailability() => availabilityWorkers.RetryFailedIntents();
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+    private bool syntheticRetryScope;
+    private int syntheticKeepFailOnce;
+    private int syntheticKeepAttempts;
+    internal int SyntheticKeepAttempts => Volatile.Read(ref syntheticKeepAttempts);
+    internal void ArmSyntheticKeepFailure() {
+        if (!syntheticRetryScope || Interlocked.CompareExchange(ref syntheticKeepFailOnce, 1, 0) != 0)
+            throw new InvalidOperationException("Synthetic Keep fault scope is unavailable.");
+    }
+#endif
 
     public NativePlaceholderProvider(IPreviewRootRegistration registration, string cacheDirectory, IQueuedDownloadSource source,
         string channel, string principal, IReadOnlyDictionary<string, PlaceholderIdentity> manifest,
@@ -43,6 +53,16 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         this.registration = registration;
         registration.VerifyOwned();
         root = registration.Root;
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        var diagnosticBase = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
+        var diagnosticFixture = Path.GetFileName(Path.GetDirectoryName(root));
+        syntheticRetryScope = Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") == "1" &&
+            !string.IsNullOrEmpty(diagnosticBase) && Path.IsPathFullyQualified(diagnosticBase) && !diagnosticBase.StartsWith("\\\\", StringComparison.Ordinal) &&
+            Guid.TryParseExact(diagnosticFixture, "N", out var diagnosticId) && diagnosticFixture == diagnosticId.ToString("N") &&
+            string.Equals(Path.GetFullPath(root), Path.Combine(Path.GetFullPath(diagnosticBase), "memory-native-fixtures", diagnosticFixture, "Files"), StringComparison.OrdinalIgnoreCase) &&
+            source.Alias == "synthetic" && source.Origin.AbsoluteUri == "https://source.example.invalid/" && channel == "pilot" &&
+            principal == "odqp1_" + new string('f', 64) && manifest.Count == 1 && manifest.ContainsKey("Retry\\sample-0.bin");
+#endif
         if (!Directory.Exists(cacheDirectory)) throw new IOException("The application cache directory must exist before connecting a provider.");
         files = new(StringComparer.OrdinalIgnoreCase);
         if (manifest.Count > 1000 || channel is not ("pilot" or "stable") ||
@@ -88,7 +108,16 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
             }), notice => Notice("Provider: " + notice), normalizeNativeRanges: true);
         availabilityWorkers = new(files.Keys, InspectAvailability, async (relative, intent, token) => {
             if (intent == AvailabilityIntent.Keep) {
-                try { await BlockingHydrationCall.RunAsync(() => HydrateCore(relative), token).ConfigureAwait(false); }
+                try {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    if (syntheticRetryScope && relative == "Retry\\sample-0.bin") {
+                        Interlocked.Increment(ref syntheticKeepAttempts);
+                        if (Interlocked.Exchange(ref syntheticKeepFailOnce, 0) == 1)
+                            throw new IOException("Simulated synthetic Keep worker failure before native hydration.");
+                    }
+#endif
+                    await BlockingHydrationCall.RunAsync(() => HydrateCore(relative), token).ConfigureAwait(false);
+                }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
                 catch (Exception error) { throw LocalAvailabilityException.FromException(LocalAvailabilityStage.Hydrate, error); }
                 Notice("Kept on this device: " + Path.GetFileName(relative));

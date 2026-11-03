@@ -200,13 +200,14 @@ internal static class SyntheticMemoryNative {
         } finally { NativeStallTrace.Disable(capture); }
         Console.WriteLine("PASS shared/distinct marker routing and refusals without native registration."); return 0;
     }
-    internal static async Task<int> RunAsync(int count) {
+    internal static async Task<int> RunAsync(int count, bool retryProbe = false) {
         if (!OperatingSystem.IsWindows() || count is < 1 or > 4 ||
             Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") != "1") return 2;
         Console.WriteLine(DiagnosticSettings(Environment.GetEnvironmentVariable));
         var markerMode = DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO"));
         var cacheStage = CacheStage(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_CACHE_STAGE"));
         if (markerMode == "invalid" || cacheStage == "invalid" || (markerMode != "none" && cacheStage != "none")) return 2;
+        if (retryProbe && (count != 1 || markerMode != "none" || cacheStage != "none")) return 2;
         var basePath = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
         if (string.IsNullOrEmpty(basePath) || !Path.IsPathFullyQualified(basePath) || basePath.StartsWith("\\\\", StringComparison.Ordinal)) return 2;
         RequireLocalDirectory(basePath);
@@ -219,7 +220,7 @@ internal static class SyntheticMemoryNative {
         var root = Path.Combine(owned, "Files"); var cache = Path.Combine(owned, "Cache");
         Directory.CreateDirectory(root); Directory.CreateDirectory(cache);
         RequireLocalDirectory(root); RequireLocalDirectory(cache);
-        var manifest = Enumerable.Range(0, count).ToDictionary(i => $"sample-{i}.bin", i => new PlaceholderIdentity(
+        var manifest = Enumerable.Range(0, count).ToDictionary(i => retryProbe ? $"Retry\\sample-{i}.bin" : $"sample-{i}.bin", i => new PlaceholderIdentity(
             "pilot", "synthetic", "https://source.example.invalid", Principal, "odqr1_" + i,
             "oef1_" + new string((char)('a' + i), 64), Sha, $"sample-{i}.bin", Bytes.Length, "\"" + Sha + "\"", Sha), StringComparer.OrdinalIgnoreCase);
         if (markerMode != "none") {
@@ -251,8 +252,35 @@ internal static class SyntheticMemoryNative {
             registration = NativeRootRegistration.Register(root, Encoding.UTF8.GetBytes("LedgeTop.Files.MemoryNativeTest.v1:" + id));
             Phase("registration-returned", id);
             provider = new NativePlaceholderProvider(registration, cache, new Source(), "pilot", Principal, manifest, []);
+            var failedKeep = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var kept = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (retryProbe) provider.Activity += message => {
+                if (message.StartsWith("Could not change local availability.", StringComparison.Ordinal)) failedKeep.TrySetResult();
+                if (message == "Kept on this device: sample-0.bin") kept.TrySetResult();
+            };
+            if (retryProbe) provider.ArmSyntheticKeepFailure();
             await provider.ConnectAndPopulateAsync();
             Phase("provider-connected", id);
+            if (retryProbe) {
+                Phase("simulated-keep-failure-test-start", id);
+                provider.SetFolderAvailabilityIntent("Retry", true);
+                await failedKeep.Task.WaitAsync(TimeSpan.FromSeconds(25));
+                // Allow multiple scanner cycles; the same failed intent must remain suppressed.
+                await Task.Delay(TimeSpan.FromSeconds(6));
+                var failedAttributes = (uint)provider.InspectAttributes("Retry\\sample-0.bin");
+                if (provider.SyntheticKeepAttempts != 1 || (failedAttributes & 0x80000) == 0 || (failedAttributes & 0x1000) == 0)
+                    throw new IOException("Simulated Keep failure did not remain pinned, online-only and suppressed.");
+                if (!provider.RetryFailedAvailability()) throw new IOException("Synthetic retry request was refused.");
+                await kept.Task.WaitAsync(TimeSpan.FromSeconds(30));
+                var keptAttributes = (uint)provider.InspectAttributes("Retry\\sample-0.bin");
+                if (provider.SyntheticKeepAttempts != 2 || (keptAttributes & 0x80000) == 0 || (keptAttributes & (0x1000u | 0x40000u | 0x400000u)) != 0)
+                    throw new IOException("Synthetic retry did not produce a pinned local file in exactly two attempts.");
+                var content = await File.ReadAllBytesAsync(Path.Combine(root, "Retry", "sample-0.bin")).WaitAsync(TimeSpan.FromSeconds(15));
+                if (!CryptographicOperations.FixedTimeEquals(SHA256.HashData(content), SHA256.HashData(Bytes)))
+                    throw new IOException("Synthetic retry content hash differed.");
+                Phase("simulated-keep-failure-retry-verified", id);
+                success = true;
+            } else {
             var executable = Environment.ProcessPath ?? throw new IOException("Self-contained test apphost required.");
             if (Path.GetFileNameWithoutExtension(executable).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
                 throw new IOException("Use the self-contained test apphost.");
@@ -275,6 +303,7 @@ internal static class SyntheticMemoryNative {
             Phase("readers-exited", id);
             foreach (var reader in readers) Phase($"reader-exited-pid-{reader.Id}-code-{reader.ExitCode}", id);
             success = readers.All(p => p.ExitCode == 0);
+            }
         } catch (Exception error) { Console.Error.WriteLine($"Synthetic memory native: {error.GetType().Name}: {error.Message}"); Console.Error.Flush(); }
         finally {
             Phase("cleanup-start", id);

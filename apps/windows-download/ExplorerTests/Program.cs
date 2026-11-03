@@ -13,6 +13,7 @@ if (args.Length == 1 && args[0] == "--synthetic-memory-native-marker-tests") ret
 if (args.Length == 1 && args[0] == "--synthetic-memory-native-cleanup-tests") return SyntheticMemoryNative.CleanupEvidenceTests();
 if (args.Length == 4 && args[0] == "--synthetic-memory-native-reader" && Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") == "1") return SyntheticMemoryNative.Reader(args[1], args[2], args[3]);
 if (args.Length == 2 && args[0] == "--synthetic-memory-native" && int.TryParse(args[1], out var memoryProbeCount)) return await SyntheticMemoryNative.RunAsync(memoryProbeCount);
+if (args.Length == 1 && args[0] == "--synthetic-memory-native-retry") return await SyntheticMemoryNative.RunAsync(1, retryProbe: true);
 if (args.Length == 1 && args[0] == "--diagnostic-connect-flags-tests") {
     var calls = new List<uint>();
     int Fake(uint flags) { calls.Add(flags); return 37; }
