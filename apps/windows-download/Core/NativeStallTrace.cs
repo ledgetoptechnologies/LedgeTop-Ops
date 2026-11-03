@@ -33,7 +33,11 @@ internal static class NativeStallTrace
         CacheEntryLeaseEnter, CacheEntryLeaseAcquired,
         CacheReserveEnter, CacheReserveAcquired, CacheReleaseEnter, CacheReleaseExit,
         CacheDownloadEnter, CacheDownloadExit, CacheVerifyEnter, CacheVerifyExit,
-        CacheMutationEnter, CacheMutationExit
+        CacheMutationEnter, CacheMutationExit,
+        SyntheticMarkerCreateEnter, SyntheticMarkerCreateExit,
+        SyntheticMarkerWriteEnter, SyntheticMarkerWriteExit,
+        SyntheticMarkerFlushEnter, SyntheticMarkerFlushExit,
+        SyntheticMarkerCloseEnter, SyntheticMarkerCloseExit
     }
     internal readonly record struct Event(long Sequence, long Timestamp, int ThreadId, Stage Kind);
     internal sealed class Capture

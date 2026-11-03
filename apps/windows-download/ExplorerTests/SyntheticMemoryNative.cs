@@ -95,6 +95,7 @@ internal static class SyntheticMemoryNative {
         var fixture = Path.Combine(Path.GetTempPath(), "LedgeTop-marker-test-" + Guid.NewGuid().ToString("N"));
         var directory = Path.Combine(fixture, "synthetic-memory-markers");
         var one = Path.Combine(directory, "sample-0.bin.marker"); var two = Path.Combine(directory, "sample-1.bin.marker");
+        var created = Path.Combine(directory, "sample-0.bin.created");
         Directory.CreateDirectory(directory);
         try {
             File.WriteAllText(one, DiagnosticMemoryMarkerIo.Marker); File.WriteAllText(two, DiagnosticMemoryMarkerIo.Marker);
@@ -108,7 +109,25 @@ internal static class SyntheticMemoryNative {
             }
             rejected = false; try { DiagnosticMemoryMarkerIo.Read("preopened-distinct", fixture, "sample-0.bin"); } catch (IOException) { rejected = true; }
             if (!rejected) throw new IOException("Disposed synthetic binding remained active.");
-        } finally { File.Delete(one); File.Delete(two); Directory.Delete(directory); Directory.Delete(fixture); }
+            using var createScope = new DiagnosticMemoryMarkerIo.CreateScope(fixture);
+            var createCapture = NativeStallTrace.Enable();
+            try {
+                DiagnosticMemoryMarkerIo.Read("create-flush-distinct", fixture, "sample-0.bin");
+                var events = NativeStallTrace.Snapshot(createCapture).Select(e => e.Kind).ToArray();
+                if (!events.SequenceEqual(new[] { NativeStallTrace.Stage.SyntheticMarkerCreateEnter, NativeStallTrace.Stage.SyntheticMarkerCreateExit,
+                    NativeStallTrace.Stage.SyntheticMarkerWriteEnter, NativeStallTrace.Stage.SyntheticMarkerWriteExit,
+                    NativeStallTrace.Stage.SyntheticMarkerFlushEnter, NativeStallTrace.Stage.SyntheticMarkerFlushExit,
+                    NativeStallTrace.Stage.SyntheticMarkerCloseEnter, NativeStallTrace.Stage.SyntheticMarkerCloseExit }))
+                    throw new IOException("Synthetic create/write/flush trace was not balanced.");
+            } finally { NativeStallTrace.Disable(createCapture); }
+            if (File.ReadAllText(created) != DiagnosticMemoryMarkerIo.Marker) throw new IOException("Created synthetic marker differs.");
+            rejected = false; try { DiagnosticMemoryMarkerIo.Read("create-flush-distinct", fixture, "sample-0.bin"); } catch (IOException) { rejected = true; }
+            if (!rejected || File.ReadAllText(created) != DiagnosticMemoryMarkerIo.Marker) throw new IOException("Repeated synthetic create replaced existing data.");
+            rejected = false; try { DiagnosticMemoryMarkerIo.Read("create-flush-distinct", fixture, "../escape"); } catch (IOException) { rejected = true; }
+            if (!rejected) throw new IOException("Synthetic create escaped fixture.");
+            rejected = false; try { DiagnosticMemoryMarkerIo.Read("create-flush-distinct", Path.GetTempPath(), "sample-1.bin"); } catch (IOException) { rejected = true; }
+            if (!rejected) throw new IOException("Foreign synthetic create fixture accepted.");
+        } finally { File.Delete(created); File.Delete(one); File.Delete(two); Directory.Delete(directory); Directory.Delete(fixture); }
         var capture = NativeStallTrace.Enable();
         try {
             DiagnosticMemoryMarkerIo.Read("shared-marker", "C:\\fixture", "sample-0.bin", Fake);
@@ -141,7 +160,7 @@ internal static class SyntheticMemoryNative {
             "oef1_" + new string((char)('a' + i), 64), Sha, $"sample-{i}.bin", Bytes.Length, "\"" + Sha + "\"", Sha), StringComparer.OrdinalIgnoreCase);
         if (markerMode != "none") {
             var markerDirectory = Path.Combine(cache, "synthetic-memory-markers"); Directory.CreateDirectory(markerDirectory); RequireLocalDirectory(markerDirectory);
-            IEnumerable<string> markerNames = markerMode == "shared-marker" ? new[] { "shared.marker" } : manifest.Keys.Select(name => name + ".marker");
+            IEnumerable<string> markerNames = markerMode == "shared-marker" ? new[] { "shared.marker" } : markerMode == "create-flush-distinct" ? [] : manifest.Keys.Select(name => name + ".marker");
             foreach (var markerName in markerNames) {
                 using var marker = new FileStream(Path.Combine(markerDirectory, markerName), FileMode.CreateNew, FileAccess.Write, FileShare.None);
                 marker.Write(Encoding.UTF8.GetBytes(DiagnosticMemoryMarkerIo.Marker)); marker.Flush(true);
@@ -149,6 +168,7 @@ internal static class SyntheticMemoryNative {
         }
         NativeRootRegistration? registration = null; NativePlaceholderProvider? provider = null;
         DiagnosticMemoryMarkerIo.Preopened? preopened = null;
+        DiagnosticMemoryMarkerIo.CreateScope? createScope = null;
         var readers = new List<Process>(); var readyHandles = new List<EventWaitHandle>(); var success = false;
         var registrationAttempted = false; var readersJoined = true; var disposeCompleted = false;
         var disposeTimedOut = false; var unregisterVerified = false;
@@ -161,6 +181,7 @@ internal static class SyntheticMemoryNative {
                 preopened = new DiagnosticMemoryMarkerIo.Preopened(cache, manifest.Keys);
                 Phase("marker-preopen-complete", id);
             }
+            if (markerMode == "create-flush-distinct") createScope = new DiagnosticMemoryMarkerIo.CreateScope(cache);
             Phase("registration-start", id);
             registrationAttempted = true;
             registration = NativeRootRegistration.Register(root, Encoding.UTF8.GetBytes("LedgeTop.Files.MemoryNativeTest.v1:" + id));
@@ -211,10 +232,16 @@ internal static class SyntheticMemoryNative {
             // A timed-out provider may still be executing callbacks. Retain its
             // handles instead of closing them while that work may use them.
             if (disposeCompleted) { preopened?.Dispose(); preopened = null; }
+            if (disposeCompleted) { createScope?.Dispose(); createScope = null; }
             Phase(preopened is null ? "preopened-handles-released" : "preopened-handles-retained", id);
+            Phase(createScope is null ? "create-scope-released" : "create-scope-retained", id);
             var cleanupVerified = CleanupVerified(registrationAttempted, registration is not null, readersJoined, disposeCompleted, unregisterVerified);
             if (!cleanupVerified) success = false;
-            foreach (var item in NativeStallTrace.Snapshot(trace).Where(e => e.Kind is NativeStallTrace.Stage.SyntheticMarkerReadEnter or NativeStallTrace.Stage.SyntheticMarkerReadExit))
+            foreach (var item in NativeStallTrace.Snapshot(trace).Where(e => e.Kind is NativeStallTrace.Stage.SyntheticMarkerReadEnter or NativeStallTrace.Stage.SyntheticMarkerReadExit
+                or NativeStallTrace.Stage.SyntheticMarkerCreateEnter or NativeStallTrace.Stage.SyntheticMarkerCreateExit
+                or NativeStallTrace.Stage.SyntheticMarkerWriteEnter or NativeStallTrace.Stage.SyntheticMarkerWriteExit
+                or NativeStallTrace.Stage.SyntheticMarkerFlushEnter or NativeStallTrace.Stage.SyntheticMarkerFlushExit
+                or NativeStallTrace.Stage.SyntheticMarkerCloseEnter or NativeStallTrace.Stage.SyntheticMarkerCloseExit))
                 Console.WriteLine($"Synthetic marker trace: seq={item.Sequence}; thread={item.ThreadId}; stage={item.Kind}");
             Console.WriteLine($"Synthetic marker trace: attempted={NativeStallTrace.Attempted(trace)}; dropped={NativeStallTrace.Dropped(trace)}");
             NativeStallTrace.Disable(trace);
