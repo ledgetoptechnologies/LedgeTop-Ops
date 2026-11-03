@@ -132,10 +132,14 @@ Organization / customer        (new; optional grouping)
                  └─ Outputs / versions
 ```
 
-- Groups or subcategories are an **optional** extra level inside an organization. They are a heading,
-  never a required step.
+- Groups remain optional staff metadata for workflows that need them. They are not a second level
+  in the default Projects list or breadcrumbs.
 - Legacy projects with no `organizationId` appear under **Unassigned**, in its own group, at the end.
 - Grouping is display only. It never merges clients by display name and never grants access.
+
+**Superseding navigation decision — 2026-11-02:** The default path is customer → Viewer Project →
+tasks. Projects stay directly under their customer; Group must not add another visible navigation
+step. The earlier optional Group heading described above has been withdrawn for the default UI.
 
 ### Routes
 
@@ -367,6 +371,9 @@ its corrections are applied in §4, §5 and below.
 
 **Decided 2026-10-27 — Beau approved all three, verbatim:** "Yes to all three: rename Dashboard to
 Projects with a Processing page, use the slim status strip, and group projects by customer."
+
+The later 2026-11-02 navigation decision keeps the customer grouping and removes Group as a visible
+subheading or breadcrumb level. Group remains staff metadata only where the workflow needs it.
 
 1. Rename **Dashboard → Projects** and add a **Processing** page that absorbs Background work?
    (Recommended.)

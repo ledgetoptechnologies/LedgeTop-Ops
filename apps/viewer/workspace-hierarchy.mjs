@@ -1,6 +1,6 @@
 // Display-only customer grouping for the workspace project list.
-// Grouping never grants access and never matches clients by name: a project joins an
-// organization or group only through its exact organizationId / groupId.
+// Grouping never grants access and never matches clients by name: a project joins a
+// customer only through its exact organizationId. Group remains staff metadata.
 
 const byName = (a, b) => String(a.displayName || '').localeCompare(String(b.displayName || ''), 'en-US', { sensitivity: 'base' });
 
@@ -26,29 +26,22 @@ export async function loadHierarchy(fetchPage, { maxPages = 100 } = {}) {
  */
 export function groupProjects(projects, hierarchy) {
   const organizations = new Map((hierarchy?.organizations || []).map(organization => [organization.id, organization]));
-  const groups = new Map((hierarchy?.groups || []).map(group => [group.id, group]));
   const sections = new Map();
   const unassigned = [];
   for (const project of projects) {
     const organization = project.organizationId ? organizations.get(project.organizationId) : null;
     if (!organization) { unassigned.push(project); continue; }
-    if (!sections.has(organization.id)) sections.set(organization.id, { organization, ungrouped: [], groups: new Map() });
-    const section = sections.get(organization.id);
-    const group = project.groupId ? groups.get(project.groupId) : null;
-    if (group && group.organizationId === organization.id) {
-      if (!section.groups.has(group.id)) section.groups.set(group.id, { group, projects: [] });
-      section.groups.get(group.id).projects.push(project);
-    } else section.ungrouped.push(project);
+    if (!sections.has(organization.id)) sections.set(organization.id, { organization, projects: [] });
+    sections.get(organization.id).projects.push(project);
   }
   if (!sections.size) return null;
   const ordered = [...sections.values()].sort((a, b) => byName(a.organization, b.organization)).map(section => ({
     id: section.organization.id,
     label: section.organization.displayName || 'Unnamed customer',
     archived: section.organization.status === 'archived',
-    ungrouped: section.ungrouped,
-    groups: [...section.groups.values()].sort((a, b) => byName(a.group, b.group)).map(entry => ({ id: entry.group.id, label: entry.group.displayName || 'Unnamed group', projects: entry.projects })),
-    count: section.ungrouped.length + [...section.groups.values()].reduce((total, entry) => total + entry.projects.length, 0),
+    projects: section.projects,
+    count: section.projects.length,
   }));
-  if (unassigned.length) ordered.push({ id: null, label: 'Unassigned', archived: false, ungrouped: unassigned, groups: [], count: unassigned.length });
+  if (unassigned.length) ordered.push({ id: null, label: 'Unassigned', archived: false, projects: unassigned, count: unassigned.length });
   return ordered;
 }

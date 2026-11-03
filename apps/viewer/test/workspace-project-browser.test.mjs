@@ -150,6 +150,37 @@ async function removeBrowserProfile(profile, t) {
   throw lastError;
 }
 
+async function stopBrowserTree(browser, profile) {
+  if (!browser) return;
+  if (process.platform === 'win32' && browser.pid && browser.exitCode === null) {
+    const exited = new Promise(resolve => browser.once('exit', resolve));
+    await Promise.race([
+      new Promise(resolve => {
+        const killer = spawn('taskkill.exe', ['/PID', String(browser.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+        killer.once('error', () => { browser.kill(); resolve(); });
+        killer.once('close', resolve);
+      }),
+      new Promise(resolve => setTimeout(resolve, 5_000)),
+    ]);
+    await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
+    if (browser.exitCode === null) browser.kill();
+  } else if (browser.exitCode === null) browser.kill();
+
+  // Edge can hand a temporary profile off to a compatibility-layer process
+  // that is no longer a child of the original launcher. Scope this final
+  // cleanup to the unique profile created by this test, never to all browsers.
+  if (process.platform === 'win32' && profile) {
+    const quotedProfile = profile.replace(/'/g, "''");
+    const script = `$profilePath='${quotedProfile}'; $deadline=(Get-Date).AddSeconds(5); do { $roots=Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($profilePath) -and $_.CommandLine -notmatch '--type=' }; foreach($root in $roots){ & taskkill.exe /PID $root.ProcessId /T /F | Out-Null }; if(-not $roots){ break }; Start-Sleep -Milliseconds 200 } while((Get-Date) -lt $deadline)`;
+    await new Promise(resolve => {
+      const cleanup = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, stdio: 'ignore' });
+      const timeout = setTimeout(() => { cleanup.kill(); resolve(); }, 7_000);
+      cleanup.once('error', () => { clearTimeout(timeout); resolve(); });
+      cleanup.once('close', () => { clearTimeout(timeout); resolve(); });
+    });
+  }
+}
+
 function json(response, status = 200) {
   return { status, body: Buffer.from(JSON.stringify(response)), type: 'application/json; charset=utf-8' };
 }
@@ -737,10 +768,12 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, `[...document.querySelectorAll('.workspace-breadcrumb li')].map(item=>item.textContent).join('|') === 'Projects|Greenleaf Fire Department|Alpha Quarry'`, `${viewport.name}: breadcrumb did not move to the new customer`);
     await client.evaluate(`document.querySelector('.workspace-breadcrumb [data-section="dashboard"]').click()`);
     await waitFor(client, "document.querySelector('#project-filter') !== null", `${viewport.name}: Projects did not return`);
-    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.project-group')].map(group=>[group.querySelector('h2').textContent,[...group.querySelectorAll('.project-subgroup h3')].map(item=>item.textContent).join(','),[...group.querySelectorAll('.project-row')].map(row=>row.dataset.projectName).join(',')])`), [
-      ['Adams County', '', 'johnson road survey'],
-      ['Greenleaf Fire Department', 'Field Sites', 'new build,alpha quarry'],
-    ], `${viewport.name}: project did not regroup under its customer and group`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.project-group')].map(group=>[group.querySelector('h2').textContent,[...group.querySelectorAll('.project-row')].map(row=>row.dataset.projectName).join(',')])`), [
+      ['Adams County', 'johnson road survey'],
+      ['Greenleaf Fire Department', 'alpha quarry,new build'],
+    ], `${viewport.name}: projects did not appear directly under their customer`);
+    assert.equal(await client.evaluate(`document.querySelectorAll('.project-subgroup').length`), 0, `${viewport.name}: group must not create a second Projects navigation tier`);
+    assert.equal(runtime.hierarchy.assignments.get('project-quarry').groupId, newBuild, `${viewport.name}: flattening the list must retain group metadata`);
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: grouped Projects overflows`);
 
     runtime.forceHierarchyConflict = true;
@@ -757,6 +790,31 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('.workspace-breadcrumb [data-section="dashboard"]').click()`);
     await waitFor(client, "document.querySelector('#project-filter') !== null", `${viewport.name}: Projects did not return after restoring the customer`);
 
+    runtime.hierarchy.organizations.push({ id: 'org-archived', displayName: 'Old Customer', status: 'archived', revision: 2 });
+    runtime.hierarchy.groups.push({ id: 'group-archived', organizationId: 'org-archived', displayName: 'Old Region', status: 'archived', revision: 3 });
+    runtime.hierarchy.assignments.set('project-quarry', { organizationId: 'org-archived', groupId: 'group-archived', hierarchyRevision: 4 });
+    await client.command('Page.reload');
+    await waitFor(client, "document.querySelectorAll('[data-project-name]').length === 3", `${viewport.name}: archived assignment fixture did not reload`);
+    await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
+    await waitFor(client, "document.querySelector('.project-page') !== null", `${viewport.name}: archived project page did not open`);
+    await client.evaluate(`document.querySelector('[data-action="set-project-customer"][data-id="project-quarry"]').click()`);
+    await waitFor(client, `document.querySelector('.workspace-decision[open] h2')?.textContent === 'Set customer for Alpha Quarry'`, `${viewport.name}: archived customer dialog did not open`);
+    const archivedCustomerSelection = await client.evaluate(`(() => { const field=document.querySelector('.workspace-decision[open] form').elements.namedItem('organizationId'); return {value:field.value,labels:[...field.options].map(option=>option.textContent)}; })()`);
+    assert.equal(archivedCustomerSelection.value, 'org-archived', `${viewport.name}: opening assignment must retain its archived customer`);
+    assert.ok(archivedCustomerSelection.labels.includes('Old Customer (archived current assignment)'), `${viewport.name}: archived customer must be clearly marked`);
+    const assignmentWritesBeforeArchivedSave = runtime.requests.filter(item => item.method === 'PATCH' && item.path === '/api/v1/projects/project-quarry/hierarchy').length;
+    await decide('Set customer for Alpha Quarry', { organizationId: 'org-archived' });
+    await waitFor(client, `document.querySelector('.workspace-decision[open] h2')?.textContent === 'Choose a group'`, `${viewport.name}: current archived group choice did not open`);
+    const archivedGroupSelection = await client.evaluate(`(() => { const field=document.querySelector('.workspace-decision[open] form').elements.namedItem('groupId'); return {value:field.value,labels:[...field.options].map(option=>option.textContent)}; })()`);
+    assert.equal(archivedGroupSelection.value, 'group-archived', `${viewport.name}: opening assignment must retain its archived group`);
+    assert.ok(archivedGroupSelection.labels.includes('Old Region (archived current assignment)'), `${viewport.name}: archived group must be clearly marked`);
+    await decide('Choose a group', { groupId: 'group-archived' });
+    await waitFor(client, "!document.querySelector('.workspace-decision[open]')", `${viewport.name}: unchanged archived assignment did not close`);
+    assert.equal(runtime.requests.filter(item => item.method === 'PATCH' && item.path === '/api/v1/projects/project-quarry/hierarchy').length, assignmentWritesBeforeArchivedSave, `${viewport.name}: saving an unchanged archived assignment must not send a clearing request`);
+    assert.deepEqual(runtime.hierarchy.assignments.get('project-quarry'), { organizationId: 'org-archived', groupId: 'group-archived', hierarchyRevision: 4 }, `${viewport.name}: archived assignment must remain intact`);
+
+    await client.evaluate(`document.querySelector('.workspace-breadcrumb [data-section="dashboard"]').click()`);
+    await waitFor(client, "document.querySelector('#project-filter') !== null", `${viewport.name}: Projects did not return after checking archived assignments`);
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='Johnson'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('[data-project-name]')].map(row=>({name:row.dataset.projectName,hidden:row.hidden}))`), [
       { name: 'johnson road survey', hidden: false },
@@ -767,7 +825,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.deepEqual(await client.evaluate(groupVisibility), [
       { label: 'Adams County', shown: true },
       { label: 'Greenleaf Fire Department', shown: false },
-      { label: 'Zenith Materials', shown: false },
+      { label: 'Old Customer', shown: false },
     ], `${viewport.name}: empty customer group heading stayed visible during search`);
     await client.evaluate(`document.querySelector('[data-project-status="ready"]').click()`);
     await client.evaluate(`document.querySelector('[data-project-status="all"]').click()`);
@@ -777,9 +835,9 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.deepEqual(await client.evaluate(groupVisibility), [
       { label: 'Adams County', shown: true },
       { label: 'Greenleaf Fire Department', shown: true },
-      { label: 'Zenith Materials', shown: true },
+      { label: 'Old Customer', shown: true },
     ], `${viewport.name}: customer headings did not return after clearing search`);
-    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='zenith'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='Old Customer'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('[data-project-name]')].map(row=>row.hidden)`), [true, true, false],
       `${viewport.name}: customer-name search did not find its project`);
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='no such project'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
@@ -1121,9 +1179,7 @@ test('project-first workspace is interactive and overflow-free in real desktop a
   } finally {
     try {
       if (browser) {
-        const exited = new Promise(resolve => browser.once('exit', resolve));
-        browser.kill();
-        await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
+        await stopBrowserTree(browser, profile);
       }
     } finally {
       releaseBrowserLock();
@@ -1183,9 +1239,7 @@ test('orthophoto preview settles on the mounted task after navigation during dec
   } finally {
     releaseResponse?.();
     if (browser) {
-      const exited = new Promise(resolve => browser.once('exit', resolve));
-      browser.kill();
-      await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
+      await stopBrowserTree(browser, profile);
     }
     releaseBrowserLock();
     if (server) await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); });
@@ -1324,9 +1378,7 @@ test('companion product restore is explicit, immutable-version scoped, and permi
   } finally {
     try {
       if (browser) {
-        const exited = new Promise(resolve => browser.once('exit', resolve));
-        browser.kill();
-        await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
+        await stopBrowserTree(browser, profile);
       }
     } finally { releaseBrowserLock(); }
     if (server) await new Promise(resolve => server.close(resolve));

@@ -56,13 +56,11 @@
 .project-group-heading h2{margin:0;font-size:15px;letter-spacing:.01em}
 .project-group-heading span{color:var(--muted);font-size:12px}
 .project-group.unassigned .project-group-heading h2{color:var(--text-2)}
-.project-subgroup{display:grid;gap:10px;padding-left:12px;border-left:2px solid var(--border)}
-.project-subgroup h3{margin:4px 0 0;color:var(--text-2);font-size:13px;font-weight:600}
 @media(max-width:720px){.status-strip{display:flex;overflow-x:auto;scrollbar-width:none;margin:0 -16px;padding:0 16px}.status-strip::-webkit-scrollbar{display:none}.mobile-new-project{display:block;min-height:44px}.status-chip{flex:0 0 auto;min-width:118px;padding:10px 12px}.status-chip strong{font-size:18px}}
 @media(prefers-reduced-motion:reduce){.status-chip{transition:none}}
 
 /* Native hidden must win over the grid display used by project groups and rows. */
-.project-group[hidden],.project-subgroup[hidden],.project-row[hidden],.project-no-matches[hidden]{display:none}
+.project-group[hidden],.project-row[hidden],.project-no-matches[hidden]{display:none}
 
 /* PR 4: breadcrumbs, project page and task tabs. */
 .workspace-breadcrumb{margin:0 0 14px}
