@@ -40,9 +40,9 @@ internal static class CloudFilesNativeTransfer {
     // prevalidated bytes and the normal dispatcher has already checked identity.
     internal static Task HydrateSyntheticMemoryAsync(PlaceholderIdentity identity, CloudFilesOperationContext context, byte[] bytes, CancellationToken token) =>
         HydrateSyntheticMemoryAsync(identity, context, bytes, token, new WindowsNative());
-    internal static Task HydrateSyntheticMemorySerialAsync(PlaceholderIdentity identity, CloudFilesOperationContext context, byte[] bytes, CancellationToken token, Func<Func<Task>, Task> run) =>
+    internal static Task HydrateSyntheticMemorySerialAsync(PlaceholderIdentity identity, CloudFilesOperationContext context, byte[] bytes, CancellationToken token, Func<Func<Task>, CancellationToken, Task> run) =>
         HydrateSyntheticMemoryAsync(identity, context, bytes, token, new WindowsNative(), run);
-    internal static async Task HydrateSyntheticMemoryAsync(PlaceholderIdentity identity, CloudFilesOperationContext context, byte[] bytes, CancellationToken token, ICloudFilesTransferNative native, Func<Func<Task>, Task>? run = null, TimeSpan? progressInterval = null) {
+    internal static async Task HydrateSyntheticMemoryAsync(PlaceholderIdentity identity, CloudFilesOperationContext context, byte[] bytes, CancellationToken token, ICloudFilesTransferNative native, Func<Func<Task>, CancellationToken, Task>? run = null, TimeSpan? progressInterval = null) {
         if (bytes.Length != identity.Length || !CryptographicOperations.FixedTimeEquals(SHA256.HashData(bytes), Convert.FromHexString(identity.Sha256)) ||
             context.FileSize != bytes.Length || context.RequiredOffset < 0 || context.RequiredLength <= 0 ||
             context.RequiredOffset > bytes.Length || context.RequiredLength > bytes.Length - context.RequiredOffset)
@@ -54,13 +54,19 @@ internal static class CloudFilesNativeTransfer {
                 var offset = context.RequiredOffset; var end = checked(offset + context.RequiredLength);
                 while (offset < end) {
                     var count = (int)Math.Min(65536, end - offset);
-                    await sink.WriteAsync(offset, bytes.AsMemory((int)offset, count), token).ConfigureAwait(false); offset += count;
+                    await sink.WriteAsync(offset, bytes.AsMemory((int)offset, count), sink.Token).ConfigureAwait(false); offset += count;
                 }
-                await sink.CompleteAsync(token).ConfigureAwait(false);
+                await sink.CompleteAsync(sink.Token).ConfigureAwait(false);
             }
             if (run is null) await Transfer().ConfigureAwait(false);
-            else await run(Transfer).ConfigureAwait(false);
-        } catch { await sink.FailAsync(token.IsCancellationRequested ? "cancelled" : "unavailable").ConfigureAwait(false); throw; }
+            else await run(Transfer, sink.Token).ConfigureAwait(false);
+        } catch {
+            await sink.FailAsync(token.IsCancellationRequested ? "cancelled" : "unavailable").ConfigureAwait(false);
+            // Match the production adapter: a terminal transfer cannot be
+            // failed again because later synthetic cleanup throws.
+            if (sink.Committed) return;
+            throw;
+        }
         finally { await sink.StopProgressAsync().ConfigureAwait(false); }
     }
 #endif

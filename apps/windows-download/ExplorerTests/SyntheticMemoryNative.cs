@@ -235,7 +235,7 @@ internal static class SyntheticMemoryNative {
             var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var context = new CloudFilesOperationContext(1, 2, 3, Bytes.Length, 0, Bytes.Length);
             var hydration = CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(identity, context, Bytes, CancellationToken.None, native,
-                async transfer => { waiting.TrySetResult(); await release.Task; await transfer(); }, TimeSpan.FromMilliseconds(20));
+                async (transfer, _) => { waiting.TrySetResult(); await release.Task; await transfer(); }, TimeSpan.FromMilliseconds(20));
             try {
                 await waiting.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 await native.TwoReports.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -247,11 +247,32 @@ internal static class SyntheticMemoryNative {
             using (var cancelledWait = new CancellationTokenSource()) {
                 var queued = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 var cancelledHydration = CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(identity, context, Bytes, cancelledWait.Token, cancelledNative,
-                    async _ => { queued.TrySetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, cancelledWait.Token); }, TimeSpan.FromMilliseconds(20));
+                    async (_, sinkToken) => { queued.TrySetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, sinkToken); }, TimeSpan.FromMilliseconds(20));
                 await queued.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancelledWait.Cancel();
                 var stopped = false; try { await cancelledHydration.WaitAsync(TimeSpan.FromSeconds(5)); } catch (OperationCanceledException) { stopped = true; }
                 if (!stopped || cancelledNative.Executes != 1) throw new IOException("Cancelled synthetic native wait was not settled exactly once.");
             }
+            var failedHeartbeat = new FakeMemoryNative { FailAfterFirstReport = true };
+            var heartbeatQueued = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var heartbeatWait = CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(identity, context, Bytes, CancellationToken.None, failedHeartbeat,
+                async (_, sinkToken) => { heartbeatQueued.TrySetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, sinkToken); }, TimeSpan.FromMilliseconds(20));
+            await heartbeatQueued.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var heartbeatStopped = false; try { await heartbeatWait.WaitAsync(TimeSpan.FromSeconds(5)); } catch (OperationCanceledException) { heartbeatStopped = true; }
+            if (!heartbeatStopped || failedHeartbeat.Executes != 1 || failedHeartbeat.LastStatus != CloudFilesNativeTransfer.Unavailable)
+                throw new IOException("Heartbeat failure did not cancel and settle the queued synthetic request.");
+            var reportsAfterStop = failedHeartbeat.Reports; await Task.Delay(80);
+            if (failedHeartbeat.Reports != reportsAfterStop) throw new IOException("Failed synthetic heartbeat did not drain.");
+            var committed = new FakeMemoryNative();
+            await CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(identity, context, Bytes, CancellationToken.None, committed,
+                async (transfer, _) => { await transfer(); throw new IOException("Synthetic cleanup failure after commit."); });
+            if (committed.Executes != 2 || committed.LastStatus != 0) throw new IOException("Committed synthetic transfer was failed again during cleanup.");
+            var beforeCommit = new FakeMemoryNative();
+            var refused = false;
+            try { await CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(identity, context, Bytes, CancellationToken.None, beforeCommit,
+                (_, _) => throw new IOException("Synthetic failure before commit.")); }
+            catch (IOException) { refused = true; }
+            if (!refused || beforeCommit.Executes != 1 || beforeCommit.LastStatus != CloudFilesNativeTransfer.Unavailable)
+                throw new IOException("Uncommitted synthetic failure was not settled exactly once.");
             Environment.SetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL", previousSerial);
             var rejected = false; try { await coordinator.SyntheticCacheStageAsync(identity, "unknown", CancellationToken.None); } catch (TransferException) { rejected = true; }
             if (!rejected) throw new IOException("Invalid synthetic stage accepted.");
@@ -297,12 +318,16 @@ internal static class SyntheticMemoryNative {
         Console.WriteLine("PASS synthetic actual cache admission, quota, ownership and scope refusals without native registration."); return 0;
     }
     private sealed class FakeMemoryNative : ICloudFilesTransferNative {
-        private int reports, executes;
+        private int reports, executes, lastStatus;
+        internal bool FailAfterFirstReport;
         internal readonly TaskCompletionSource TwoReports = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal int Executes => Volatile.Read(ref executes);
-        public int Execute(nint operationInfo, nint parameters) { Interlocked.Increment(ref executes); return 0; }
+        internal int Reports => Volatile.Read(ref reports);
+        internal int LastStatus => Volatile.Read(ref lastStatus);
+        public int Execute(nint operationInfo, nint parameters) { Volatile.Write(ref lastStatus, System.Runtime.InteropServices.Marshal.ReadInt32(parameters, 12)); Interlocked.Increment(ref executes); return 0; }
         public int ReportProgress(long connectionKey, long transferKey, long total, long completed) {
-            if (Interlocked.Increment(ref reports) >= 2) TwoReports.TrySetResult(); return 0;
+            var count = Interlocked.Increment(ref reports); if (count >= 2) TwoReports.TrySetResult();
+            return FailAfterFirstReport && count >= 2 ? unchecked((int)0x80004005) : 0;
         }
     }
     internal static int CleanupEvidenceTests() {

@@ -88,7 +88,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                         if (cacheStage != "quota-reservation" || DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO")) != "none")
                             throw new IOException("Synthetic serial comparison scope mismatch.");
                         await CloudFilesNativeTransfer.HydrateSyntheticMemorySerialAsync(identity, context, bytes, token,
-                            transfer => coordinator.SyntheticCacheStageAsync(identity, cacheStage, token, exclusive: true, transfer: transfer)).ConfigureAwait(false);
+                            (transfer, sinkToken) => coordinator.SyntheticCacheStageAsync(identity, cacheStage, sinkToken, exclusive: true, transfer: transfer)).ConfigureAwait(false);
                     } else {
                         if (serial != "0") throw new IOException("Synthetic serial comparison option invalid.");
                         if (cacheStage != "none") await coordinator.SyntheticCacheStageAsync(identity, cacheStage, token).ConfigureAwait(false);
