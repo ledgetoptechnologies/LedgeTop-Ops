@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 import worker from "../src/worker/index";
 import type { Env } from "../src/worker/types";
@@ -20,6 +21,7 @@ function fixture(enabled?:string) {
 describe("real Client entrypoint canonical navigation mount",()=>{
   it("serves a static, non-caching Operations sign-in recovery page on the public delivery host",async()=>{
     const f=fixture();
+    const workerConfig=JSON.parse(readFileSync(new URL("../wrangler.jsonc",import.meta.url),"utf8"));
     const response=await f.request(`${DELIVERY}/ops-sign-in-help`);
     const html=await response.text();
     expect(response.status).toBe(200);
@@ -32,6 +34,7 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     expect(html).toContain("https://ops.ledgetop.app/");
     expect(html).not.toContain("<script");
     expect(html).not.toContain("info@ledgetopdroneservices.com");
+    expect(workerConfig.assets.run_worker_first).toContain("/ops-sign-in-help");
     expect(f.prepare).not.toHaveBeenCalled();
     expect((await f.request(`${PORTAL}/ops-sign-in-help`)).status).toBe(404);
   });
