@@ -6,10 +6,18 @@ using System.Security.Cryptography;
 using LedgeTop.WindowsDownload;
 
 if (args.FirstOrDefault() == "--reservation-handle-prototype-child") {
-    if (args.Length != 4) { Environment.ExitCode = 2; return; }
-    try { ReservationHandlePrototype.RunChild(args[1], args[2], args[3]); }
+    if (args.Length != 5) { Environment.ExitCode = 2; return; }
+    try { ReservationHandlePrototype.RunChild(args[1], args[2], args[3], args[4]); }
     catch (Exception error) when (error is IOException or UnauthorizedAccessException or PlatformNotSupportedException or ArgumentException) {
         Console.Error.WriteLine("Synthetic reservation child refused."); Environment.ExitCode = 2;
+    }
+    return;
+}
+if (args.FirstOrDefault() == "--reservation-handle-watchdog-supervisor") {
+    if (args.Length != 4) { Environment.ExitCode = 2; return; }
+    try { ReservationHandlePrototype.RunWatchdogSupervisor(args[1], args[2], args[3]); }
+    catch (Exception error) when (error is IOException or UnauthorizedAccessException or PlatformNotSupportedException or ArgumentException or TimeoutException or InvalidOperationException) {
+        Console.Error.WriteLine("Synthetic reservation watchdog supervisor refused."); Environment.ExitCode = 2;
     }
     return;
 }

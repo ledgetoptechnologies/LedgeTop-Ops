@@ -14,6 +14,7 @@ internal static class ReservationHandlePrototype
     private static readonly byte[] Owned = "synthetic-owned-reservation-v1\n"u8.ToArray();
     private static readonly byte[] Foreign = "synthetic-foreign-reservation\n"u8.ToArray();
     private static readonly byte[] Abrupt = "synthetic-abrupt-child-reservation\n"u8.ToArray();
+    private static readonly byte[] Watchdog = "synthetic-watchdog-child-reservation\n"u8.ToArray();
 
     internal static void Run()
     {
@@ -29,6 +30,7 @@ internal static class ReservationHandlePrototype
         if (!CreateDirectoryW(fixture, 0)) throw new IOException("Cannot create a new test fixture.");
         var record = Path.Combine(fixture, "owned.record"); var foreign = Path.Combine(fixture, "foreign.record");
         var childRecord = Path.Combine(fixture, "abrupt-child.record");
+        var watchdogRecord = Path.Combine(fixture, "watchdog-child.record");
         var renamed = Path.Combine(fixture, "renamed.record");
         var verified = false; var cleanupComplete = false; var deleteDispositionsApplied = 0;
         try {
@@ -74,6 +76,13 @@ internal static class ReservationHandlePrototype
             if (TryDeleteExact(fixture, directory, directoryId, childRecord, wrongAbrupt, childId) ||
                 TryDeleteExact(fixture, directory, directoryId, childRecord, Abrupt, ownerId))
                 throw new IOException("Foreign abrupt-child cleanup evidence was accepted.");
+            var watchdogId = RunParentDeathTest(fixture, directoryId);
+            VerifyDirectoryBinding(fixture, directory, directoryId);
+            using (var reopened = new FileStream(watchdogRecord, FileMode.Open, FileAccess.Read, FileShare.Read)) {
+                RequireKind(reopened.SafeFileHandle, isDirectory: false);
+                if (watchdogId == ownerId || watchdogId == foreignId || watchdogId == childId || Id(reopened.SafeFileHandle) != watchdogId || !ReadExact(reopened, Watchdog))
+                    throw new IOException("Watchdog child record did not retain its exact identity and bytes.");
+            }
             VerifyDirectoryBinding(fixture, directory, directoryId);
             verified = true;
             // Delete each exact owned file only through the verified file handle.
@@ -82,6 +91,8 @@ internal static class ReservationHandlePrototype
             if (!TryDeleteExact(fixture, directory, directoryId, foreign, Foreign, foreignId)) throw new IOException("Exact synthetic file cleanup was not verified.");
             deleteDispositionsApplied++;
             if (!TryDeleteExact(fixture, directory, directoryId, childRecord, Abrupt, childId)) throw new IOException("Exact synthetic child record cleanup was not verified.");
+            deleteDispositionsApplied++;
+            if (!TryDeleteExact(fixture, directory, directoryId, watchdogRecord, Watchdog, watchdogId)) throw new IOException("Exact synthetic watchdog record cleanup was not verified.");
             deleteDispositionsApplied++;
             VerifyDirectoryBinding(fixture, directory, directoryId);
             if (Directory.EnumerateFileSystemEntries(fixture).Any() || Id(directory) != directoryId)
@@ -96,12 +107,22 @@ internal static class ReservationHandlePrototype
         } finally {
             if (!cleanupComplete) Console.Error.WriteLine($"Synthetic fixture cleanup unconfirmed; partial cleanup may have occurred (checksPassed={verified}; deleteDispositionsApplied={deleteDispositionsApplied}): {fixture}");
         }
-        Console.WriteLine("PASS ordinary Windows retained-handle identity, sharing, abrupt child termination/reopen and exact handle-bound cleanup. No native provider or OS crash tested.");
+        Console.WriteLine("PASS ordinary Windows retained-handle identity, abrupt child termination, watchdog after parent death, and exact cleanup. No native provider or OS crash tested.");
     }
 
-    internal static void RunChild(string fixture, string volumeText, string idText)
+    internal static void RunChild(string fixture, string volumeText, string idText, string recordName)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
+        var watchdogValue = Environment.GetEnvironmentVariable("LEDGETOP_TEST_HANDLE_WATCHDOG_SECONDS") ?? "15";
+        if (!int.TryParse(watchdogValue, out var seconds) || seconds is < 2 or > 30) throw new IOException("Invalid synthetic watchdog duration.");
+        // Start before filesystem operations: a blocked file open/flush must not
+        // bypass the deadline after a test parent dies. The parent tests wait on
+        // the process handle and never assume TerminateProcess has completed.
+        var watchdog = new Thread(() => {
+            Thread.Sleep(TimeSpan.FromSeconds(seconds));
+            if (!TerminateProcess(GetCurrentProcess(), 3)) Environment.Exit(3);
+        }) { IsBackground = true, Name = "synthetic-reservation-watchdog" };
+        watchdog.Start();
         var root = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
         if (string.IsNullOrEmpty(root) || !Path.IsPathFullyQualified(root) || root.StartsWith("\\\\", StringComparison.Ordinal) ||
             !Path.IsPathFullyQualified(fixture) || fixture.StartsWith("\\\\", StringComparison.Ordinal) ||
@@ -117,16 +138,17 @@ internal static class ReservationHandlePrototype
         using var directory = Open(fixture, ReadAttributes, ShareRead | ShareWrite | 4, BackupSemantics | OpenReparsePoint);
         RequireKind(directory, isDirectory: true);
         if (Id(directory) != new FileId(volume, id)) throw new IOException("Synthetic child directory identity changed.");
-        using var record = new FileStream(Path.Combine(fixture, "abrupt-child.record"), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
-        record.Write(Abrupt); record.Flush(true); RequireKind(record.SafeFileHandle, isDirectory: false);
-        if (!ReadExact(record, Abrupt)) throw new IOException("Synthetic child record did not flush.");
+        if (recordName is not ("abrupt-child.record" or "watchdog-child.record")) throw new IOException("Invalid synthetic record name.");
+        var payload = recordName == "abrupt-child.record" ? Abrupt : Watchdog;
+        using var record = new FileStream(Path.Combine(fixture, recordName), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
+        record.Write(payload); record.Flush(true); RequireKind(record.SafeFileHandle, isDirectory: false);
+        if (!ReadExact(record, payload)) throw new IOException("Synthetic child record did not flush.");
         var recordId = Id(record.SafeFileHandle);
         Console.WriteLine($"READY {recordId.Volume:X16} {recordId.Id:N}"); Console.Out.Flush();
         Thread.Sleep(Timeout.Infinite);
-        throw new IOException("Synthetic child was not terminated by its owner.");
     }
 
-    private static FileId RunAbruptChild(string fixture, FileId directoryId)
+    private static System.Diagnostics.ProcessStartInfo OwnProcessStart(params string[] args)
     {
         var executable = Environment.ProcessPath ?? throw new IOException("Test executable path unavailable.");
         var start = new System.Diagnostics.ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
@@ -135,30 +157,103 @@ internal static class ReservationHandlePrototype
             if (string.IsNullOrEmpty(assembly)) throw new IOException("Test assembly path unavailable.");
             start.ArgumentList.Add(assembly);
         }
-        start.ArgumentList.Add("--reservation-handle-prototype-child"); start.ArgumentList.Add(fixture);
-        start.ArgumentList.Add(directoryId.Volume.ToString("X16", System.Globalization.CultureInfo.InvariantCulture)); start.ArgumentList.Add(directoryId.Id.ToString("N"));
+        foreach (var arg in args) start.ArgumentList.Add(arg);
+        return start;
+    }
+    private static FileId ParseReady(string? line)
+    {
+        var parts = line?.Split(' ', StringSplitOptions.None);
+        if (parts is not { Length: 3 } || parts[0] != "READY" || parts[1].Length != 16 ||
+            !ulong.TryParse(parts[1], System.Globalization.NumberStyles.AllowHexSpecifier, System.Globalization.CultureInfo.InvariantCulture, out var volume) ||
+            !Guid.TryParseExact(parts[2], "N", out var id) || parts[2] != id.ToString("N") || id == Guid.Empty)
+            throw new IOException("Synthetic child readiness evidence was invalid.");
+        return new FileId(volume, id);
+    }
+    private static bool DrainOutput(Task<string?> firstLine, StreamReader output, ref Task<string>? remainder, Task<string> errors)
+    {
+        if (!firstLine.Wait(TimeSpan.FromSeconds(3))) return false;
+        remainder ??= output.ReadToEndAsync();
+        return remainder.Wait(TimeSpan.FromSeconds(3)) && errors.Wait(TimeSpan.FromSeconds(3));
+    }
+    private static FileId RunAbruptChild(string fixture, FileId directoryId)
+    {
+        var start = OwnProcessStart("--reservation-handle-prototype-child", fixture,
+            directoryId.Volume.ToString("X16", System.Globalization.CultureInfo.InvariantCulture), directoryId.Id.ToString("N"), "abrupt-child.record");
+        start.Environment["LEDGETOP_TEST_HANDLE_WATCHDOG_SECONDS"] = "15";
         using var child = System.Diagnostics.Process.Start(start) ?? throw new IOException("Synthetic child did not start.");
-        var stdout = child.StandardOutput.ReadLineAsync(); var stderr = child.StandardError.ReadToEndAsync();
+        var stdout = child.StandardOutput.ReadLineAsync(); var stderr = child.StandardError.ReadToEndAsync(); Task<string>? tail = null;
         try {
-            var line = stdout.WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
-            var parts = line?.Split(' ', StringSplitOptions.None);
-            if (parts is not { Length: 3 } || parts[0] != "READY" || parts[1].Length != 16 ||
-                !ulong.TryParse(parts[1], System.Globalization.NumberStyles.AllowHexSpecifier, System.Globalization.CultureInfo.InvariantCulture, out var volume) ||
-                !Guid.TryParseExact(parts[2], "N", out var id) || parts[2] != id.ToString("N") || id == Guid.Empty)
-                throw new IOException("Synthetic child readiness evidence was invalid.");
+            var id = ParseReady(stdout.WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult());
             if (child.HasExited) throw new IOException("Synthetic child exited before controlled termination.");
             child.Kill();
             if (!child.WaitForExit(10_000) || child.ExitCode == 0) throw new IOException("Synthetic child termination was not verified.");
-            if (!stderr.Wait(TimeSpan.FromSeconds(3))) throw new IOException("Synthetic child output did not drain.");
-            return new FileId(volume, id);
+            return id;
         } finally {
+            var joined = false;
             try {
                 if (!child.HasExited) child.Kill();
-                if (!child.WaitForExit(10_000)) Console.Error.WriteLine($"Synthetic owned child exit unconfirmed; process ID {child.Id}.");
-                _ = stdout.Wait(TimeSpan.FromSeconds(3)); _ = stderr.Wait(TimeSpan.FromSeconds(3));
+                joined = child.WaitForExit(10_000) && DrainOutput(stdout, child.StandardOutput, ref tail, stderr);
             } catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or AggregateException) {
-                Console.Error.WriteLine("Synthetic owned child cleanup could not be confirmed.");
+                joined = false;
             }
+            if (!joined) throw new IOException("Synthetic owned child exit or stream drain was not confirmed.");
+        }
+    }
+
+    internal static void RunWatchdogSupervisor(string fixture, string volumeText, string idText)
+    {
+        var start = OwnProcessStart("--reservation-handle-prototype-child", fixture, volumeText, idText, "watchdog-child.record");
+        start.Environment["LEDGETOP_TEST_HANDLE_WATCHDOG_SECONDS"] = "5";
+        using var child = System.Diagnostics.Process.Start(start) ?? throw new IOException("Synthetic watchdog child did not start.");
+        var stdout = child.StandardOutput.ReadLineAsync(); var stderr = child.StandardError.ReadToEndAsync(); Task<string>? tail = null;
+        try {
+            var identity = ParseReady(stdout.WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult());
+            if (child.HasExited) throw new IOException("Synthetic watchdog child exited before parent-death test.");
+            Console.WriteLine($"WORKER {child.Id} {child.StartTime.ToUniversalTime().Ticks} {identity.Volume:X16} {identity.Id:N}"); Console.Out.Flush();
+            if (!child.WaitForExit(15_000)) throw new IOException("Synthetic watchdog did not finish.");
+        } finally {
+            var joined = false;
+            try {
+                if (!child.HasExited) child.Kill();
+                joined = child.WaitForExit(10_000) && DrainOutput(stdout, child.StandardOutput, ref tail, stderr);
+            } catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or AggregateException) { joined = false; }
+            if (!joined) throw new IOException("Synthetic watchdog child exit or streams were not confirmed.");
+        }
+    }
+
+    private static FileId RunParentDeathTest(string fixture, FileId directoryId)
+    {
+        var start = OwnProcessStart("--reservation-handle-watchdog-supervisor", fixture,
+            directoryId.Volume.ToString("X16", System.Globalization.CultureInfo.InvariantCulture), directoryId.Id.ToString("N"));
+        using var supervisor = System.Diagnostics.Process.Start(start) ?? throw new IOException("Synthetic supervisor did not start.");
+        var stdout = supervisor.StandardOutput.ReadLineAsync(); var stderr = supervisor.StandardError.ReadToEndAsync(); Task<string>? tail = null;
+        SafeWaitHandle? worker = null;
+        try {
+            var parts = stdout.WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult()?.Split(' ', StringSplitOptions.None);
+            if (parts is not { Length: 5 } || parts[0] != "WORKER" || !uint.TryParse(parts[1], out var pid) || pid == 0 ||
+                !long.TryParse(parts[2], out var startTicks) || parts[3].Length != 16 || !ulong.TryParse(parts[3], System.Globalization.NumberStyles.AllowHexSpecifier, System.Globalization.CultureInfo.InvariantCulture, out var volume) ||
+                !Guid.TryParseExact(parts[4], "N", out var id) || parts[4] != id.ToString("N") || id == Guid.Empty)
+                throw new IOException("Synthetic watchdog readiness evidence was invalid.");
+            worker = OpenProcess(0x00101000, false, pid); // SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION
+            if (worker.IsInvalid || GetProcessId(worker) != pid || !GetProcessTimes(worker, out var creation, out _, out _, out _) ||
+                DateTime.FromFileTimeUtc(creation).Ticks != startTicks || WaitForSingleObject(worker, 0) != 258)
+                throw new IOException("Synthetic watchdog worker identity or live state was not confirmed.");
+            if (supervisor.HasExited) throw new IOException("Synthetic supervisor exited before controlled termination.");
+            supervisor.Kill();
+            if (!supervisor.WaitForExit(10_000) || supervisor.ExitCode == 0) throw new IOException("Synthetic supervisor termination was not confirmed.");
+            if (WaitForSingleObject(worker, 15_000) != 0 || !GetExitCodeProcess(worker, out var exitCode) || exitCode != 3)
+                throw new IOException("Synthetic worker watchdog exit was not confirmed.");
+            return new FileId(volume, id);
+        } finally {
+            var supervisorJoined = false; var workerJoined = worker is null;
+            try {
+                if (!supervisor.HasExited) supervisor.Kill();
+                supervisorJoined = supervisor.WaitForExit(10_000) && DrainOutput(stdout, supervisor.StandardOutput, ref tail, stderr);
+                if (worker is not null && !worker.IsInvalid) workerJoined = WaitForSingleObject(worker, 15_000) == 0;
+            } catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or AggregateException) {
+                supervisorJoined = false;
+            } finally { worker?.Dispose(); }
+            if (!supervisorJoined || !workerJoined) throw new IOException("Synthetic supervisor, worker, or stream drain was not confirmed.");
         }
     }
 
@@ -260,4 +355,18 @@ internal static class ReservationHandlePrototype
     private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int informationClass, nint information, uint size);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int informationClass, ref byte information, uint size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeWaitHandle OpenProcess(uint desiredAccess, bool inheritHandle, uint processId);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint GetProcessId(SafeWaitHandle process);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(SafeWaitHandle handle, uint milliseconds);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetExitCodeProcess(SafeWaitHandle process, out uint exitCode);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetProcessTimes(SafeWaitHandle process, out long creationTime, out long exitTime, out long kernelTime, out long userTime);
+    [DllImport("kernel32.dll")]
+    private static extern nint GetCurrentProcess();
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool TerminateProcess(nint process, uint exitCode);
 }
