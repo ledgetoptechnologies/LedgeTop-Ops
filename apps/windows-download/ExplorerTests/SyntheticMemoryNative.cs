@@ -3,6 +3,11 @@ using System.Diagnostics;
 using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Text;
+#if LEDGETOP_CACHE_RACE_TEST
+using System.Net;
+using System.Net.Http.Headers;
+using System.Collections.Concurrent;
+#endif
 using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
@@ -97,6 +102,28 @@ internal static class SyntheticMemoryNative {
         return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}; prewarm={prewarm}; serial={serial}; failFast={failFast}; processInfo={processInfo}; pendingMarker={pending}";
     }
     private static string PendingMode(string? value) => value switch { null or "off" => "off", "reopen" => "reopen", "retained" => "retained", "mutated" => "mutated", "mutated-retained" => "mutated-retained", "mutated-shared-reopen" => "mutated-shared-reopen", _ => "invalid" };
+#if LEDGETOP_CACHE_RACE_TEST
+    internal static bool OwnedOptionsValid(string option, int count, bool retry, string marker, string cache, string prewarm, string serial, string failFast, string pending, Func<string, string?> get) =>
+        option == "0" || (option == "1" && count is >= 1 and <= 2 && !retry && marker == "none" && cache == "none" && prewarm == "off" && serial == "off" && failFast == "off" && pending == "off" && RetryOptionsValid(get));
+    internal static async Task<int> OwnedSourceContractTests() {
+        string? Off(string _) => null;
+        if (!OwnedOptionsValid("1", 2, false, "none", "none", "off", "off", "off", "off", Off) ||
+            OwnedOptionsValid("1", 3, false, "none", "none", "off", "off", "off", "off", Off) ||
+            OwnedOptionsValid("1", 1, true, "none", "none", "off", "off", "off", "off", Off) ||
+            OwnedOptionsValid("1", 1, false, "none", "quota-only", "off", "off", "off", "off", Off) ||
+            OwnedOptionsValid("bad", 1, false, "none", "none", "off", "off", "off", "off", Off)) throw new IOException("Owned source scope options accepted unsafe combination.");
+        var id = new PlaceholderIdentity("pilot", "synthetic", "https://source.example.invalid", Principal, "odqr1_0", "oef1_" + new string('a', 64), Sha, "sample-0.bin", Bytes.Length, "\"" + Sha + "\"", Sha);
+        using var source = new OwnedDownloaderSource([id]); var session = await source.GetSessionAsync(); var resolved = await source.ResolveAsync(id.ResourceReference);
+        if (session.PrincipalId != Principal || resolved.PrincipalId != Principal || resolved.LogicalFileId != id.LogicalFileId || resolved.RemoteVersion != id.RemoteVersion ||
+            resolved.Spec.OpaqueIdentity != id.LogicalFileId + ":" + id.RemoteVersion || resolved.Spec.FileName != id.FileName || resolved.Spec.Length != id.Length ||
+            resolved.Spec.ETag != id.ETag || resolved.Spec.Sha256 != id.Sha256 || resolved.Spec.ContentUri.AbsoluteUri != "https://source.example.invalid/synthetic-content")
+            throw new IOException("Synthetic owned source changed manifest pins.");
+        var refused = false; try { await source.ResolveAsync("odqr1_unknown"); } catch (ResourceUnavailableException) { refused = true; }
+        if (!refused) throw new IOException("Synthetic source accepted unknown reference.");
+        await OwnedDownloaderSource.VerifyHandlerForTest();
+        Console.WriteLine("PASS synthetic owned source manifest and scope controls; no native root or network."); return 0;
+    }
+#endif
     internal static bool PendingOptionsValid(int count, bool retryProbe, string marker, string stage, string prewarm, string serial, string failFast, string pending, Func<string, string?> get) =>
         pending == "off" || (pending is "reopen" or "retained" or "mutated" or "mutated-retained" or "mutated-shared-reopen" && count == 2 && !retryProbe && marker == "none" && stage == "none" && prewarm == "off" && serial == "off" && failFast == "off" && RetryOptionsValid(get));
     internal static bool PendingTraceValid(NativeStallTrace.Event[] events, long attempted, long dropped, string mode = "reopen") {
@@ -627,6 +654,13 @@ internal static class SyntheticMemoryNative {
         var failFast = SerialMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_FAIL_FAST"));
         var processInfo = SerialMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_REQUIRE_PROCESS_INFO"));
         var pending = PendingMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_PENDING_MARKER"));
+        var ownedDownloader = Environment.GetEnvironmentVariable("LEDGETOP_TEST_SYNTHETIC_OWNED_DOWNLOADER") ?? "0";
+#if LEDGETOP_CACHE_RACE_TEST
+        if (!OwnedOptionsValid(ownedDownloader, count, retryProbe, markerMode, cacheStage, prewarm, serial, failFast, pending, Environment.GetEnvironmentVariable)) return 2;
+#else
+        if (ownedDownloader != "0") return 2;
+#endif
+        Console.WriteLine($"Synthetic owned downloader: {(ownedDownloader == "1" ? "on" : "off")}");
         if (markerMode == "invalid" || cacheStage == "invalid" || prewarm == "invalid" || serial == "invalid" || failFast == "invalid" || processInfo == "invalid" || pending == "invalid" || (markerMode != "none" && cacheStage != "none") ||
             (serial == "on" && (markerMode != "none" || cacheStage != "quota-reservation")) ||
             (prewarm != "off" && (markerMode != "none" || cacheStage != "quota-reservation")) ||
@@ -658,6 +692,9 @@ internal static class SyntheticMemoryNative {
             }
         }
         NativeRootRegistration? registration = null; NativePlaceholderProvider? provider = null;
+#if LEDGETOP_CACHE_RACE_TEST
+        OwnedDownloaderSource? ownedSource = null;
+#endif
         DiagnosticMemoryMarkerIo.Preopened? preopened = null;
         DiagnosticMemoryMarkerIo.CreateScope? createScope = null;
         DiagnosticPendingMarkerControl.Scope? pendingScope = null;
@@ -702,7 +739,17 @@ internal static class SyntheticMemoryNative {
             registrationAttempted = true;
             registration = NativeRootRegistration.Register(root, Encoding.UTF8.GetBytes("LedgeTop.Files.MemoryNativeTest.v1:" + id));
             Phase("registration-returned", id);
-            provider = new NativePlaceholderProvider(registration, cache, new Source(), "pilot", Principal, manifest, []);
+#if LEDGETOP_CACHE_RACE_TEST
+            IQueuedDownloadSource selectedSource = ownedDownloader == "1" ? (ownedSource = new OwnedDownloaderSource(manifest.Values)) : new Source();
+#else
+            IQueuedDownloadSource selectedSource = new Source();
+#endif
+            provider = new NativePlaceholderProvider(registration, cache, selectedSource, "pilot", Principal, manifest, []);
+#if LEDGETOP_CACHE_RACE_TEST
+            if (ownedDownloader == "1") provider.Activity += message => {
+                if (message.StartsWith("Hydration timing:", StringComparison.Ordinal)) { Console.WriteLine(message); Console.Out.Flush(); }
+            };
+#endif
             var failedKeep = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var kept = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             if (retryProbe) provider.Activity += message => {
@@ -834,6 +881,19 @@ internal static class SyntheticMemoryNative {
             // the synthetic reservation directory has no outstanding record.
             var failFastEvidence = failFast != "on" || (success && readersJoined && disposeCompleted && SyntheticReservationsEmpty(cache));
             if (failFast == "on") Console.WriteLine($"Synthetic fail-fast reservation cleanup verified: {failFastEvidence}");
+#if LEDGETOP_CACHE_RACE_TEST
+            var sourceClosed = ownedSource is null;
+            if (ownedSource is not null && (provider is null || (disposeCompleted && readersJoined))) {
+                try { ownedSource.Dispose(); sourceClosed = true; } catch { sourceClosed = false; }
+            }
+            var ownedTrace = NativeStallTrace.Snapshot(trace);
+            var ownedEvidence = ownedDownloader != "1" || (success && readersJoined && disposeCompleted && sourceClosed && ownedSource is not null &&
+                ownedSource.CompletedExactly(manifest.Values) && SyntheticReservationsEmpty(cache) && NativeStallTrace.Dropped(trace) == 0 &&
+                NativeStallTrace.Attempted(trace) == ownedTrace.LongLength);
+            if (ownedDownloader == "1") Console.WriteLine($"Synthetic owned downloader evidence verified: {ownedEvidence}");
+#else
+            const bool ownedEvidence = true;
+#endif
             var finalPendingTrace = NativeStallTrace.Snapshot(trace);
             var pendingEvidence = pending == "off" || (success && readersJoined && disposeCompleted && pendingScope?.EvidenceValid == true &&
                 PendingTraceValid(finalPendingTrace, NativeStallTrace.Attempted(trace), NativeStallTrace.Dropped(trace), pending));
@@ -841,7 +901,7 @@ internal static class SyntheticMemoryNative {
                 try { pendingScope.Dispose(); pendingScope = null; } catch { pendingEvidence = false; }
             }
             if (pending != "off") Console.WriteLine($"Synthetic pending-marker evidence verified: {pendingEvidence}; control={pending}");
-            if (failFastEvidence && pendingEvidence && MayUnregister(registration is not null, readersJoined, disposeCompleted, committedCleanupUncertain))
+            if (failFastEvidence && pendingEvidence && ownedEvidence && MayUnregister(registration is not null, readersJoined, disposeCompleted, committedCleanupUncertain))
                 try { registration!.Unregister(); unregisterVerified = true; } catch { }
             // A timed-out provider may still be executing callbacks. Retain its
             // handles instead of closing them while that work may use them.
@@ -849,9 +909,9 @@ internal static class SyntheticMemoryNative {
             if (disposeCompleted) { createScope?.Dispose(); createScope = null; }
             Phase(preopened is null ? "preopened-handles-released" : "preopened-handles-retained", id);
             Phase(createScope is null ? "create-scope-released" : "create-scope-retained", id);
-            var cleanupVerified = pendingEvidence && CleanupVerified(registrationAttempted, registration is not null, readersJoined, disposeCompleted, unregisterVerified, committedCleanupUncertain);
+            var cleanupVerified = pendingEvidence && ownedEvidence && CleanupVerified(registrationAttempted, registration is not null, readersJoined, disposeCompleted, unregisterVerified, committedCleanupUncertain);
             if (!cleanupVerified) success = false;
-            foreach (var item in NativeStallTrace.Snapshot(trace).Where(e => pending != "off" || cacheStage != "none" || (processInfo == "on" && e.Kind == NativeStallTrace.Stage.WorkerStart && e.CallbackId != 0) || e.Kind is NativeStallTrace.Stage.SyntheticCallbackProcess or NativeStallTrace.Stage.SyntheticMarkerReadEnter or NativeStallTrace.Stage.SyntheticMarkerReadExit
+            foreach (var item in NativeStallTrace.Snapshot(trace).Where(e => ownedDownloader == "1" || pending != "off" || cacheStage != "none" || (processInfo == "on" && e.Kind == NativeStallTrace.Stage.WorkerStart && e.CallbackId != 0) || e.Kind is NativeStallTrace.Stage.SyntheticCallbackProcess or NativeStallTrace.Stage.SyntheticMarkerReadEnter or NativeStallTrace.Stage.SyntheticMarkerReadExit
                 or NativeStallTrace.Stage.SyntheticMarkerCreateEnter or NativeStallTrace.Stage.SyntheticMarkerCreateExit
                 or NativeStallTrace.Stage.SyntheticMarkerWriteEnter or NativeStallTrace.Stage.SyntheticMarkerWriteExit
                 or NativeStallTrace.Stage.SyntheticMarkerFlushEnter or NativeStallTrace.Stage.SyntheticMarkerFlushExit
@@ -866,6 +926,60 @@ internal static class SyntheticMemoryNative {
         }
         return success ? 0 : 1;
     }
+#if LEDGETOP_CACHE_RACE_TEST
+    // No credentials, DNS, or network: this source is bound to the exact
+    // generated manifest and an in-memory HttpMessageHandler only.
+    private sealed class OwnedDownloaderSource : IQueuedDownloadSource, IVerifiedHydrationDownloadSource, IHydrationMutationAwareSource, IDiagnosticOwnedDownloaderSource, IDisposable {
+        private readonly Dictionary<string, PlaceholderIdentity> identities;
+        private readonly Downloader downloader;
+        private readonly ConcurrentDictionary<string, byte> completed = new(StringComparer.Ordinal);
+        internal OwnedDownloaderSource(IEnumerable<PlaceholderIdentity> manifest) {
+            identities = manifest.ToDictionary(value => value.ResourceReference, StringComparer.Ordinal);
+            downloader = new Downloader(new SyntheticHandler(), [Origin]) { ExperimentalColdOwnedStreamForTest = true };
+        }
+        public string Alias => "synthetic";
+        public Uri Origin => new("https://source.example.invalid");
+        bool IHydrationMutationAwareSource.CoordinatesHydrationMutations => true;
+        public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken token = default) {
+            token.ThrowIfCancellationRequested(); return Task.FromResult(new QueuedDownloadSession(Principal, DateTimeOffset.UtcNow.AddMinutes(10)));
+        }
+        public Task<ResolvedQueuedDownload> ResolveAsync(string reference, CancellationToken token = default) {
+            token.ThrowIfCancellationRequested();
+            if (!identities.TryGetValue(reference, out var id)) throw new ResourceUnavailableException();
+            var spec = new DownloadSpec(id.LogicalFileId + ":" + id.RemoteVersion, new Uri(Origin, "/synthetic-content"), id.FileName, id.Length, id.ETag, id.Sha256);
+            return Task.FromResult(new ResolvedQueuedDownload(Principal, id.LogicalFileId, id.RemoteVersion, spec));
+        }
+        public Task<string> DownloadAsync(DownloadSpec spec, string destination, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default) =>
+            downloader.DownloadAsync(spec, destination, cancellationToken, progress);
+        async Task<VerifiedHydrationDownload> IVerifiedHydrationDownloadSource.DownloadForHydrationAsync(DownloadSpec spec, string destination, CancellationToken token) {
+            var result = await downloader.DownloadVerifiedForHydrationAsync(spec, destination, token).ConfigureAwait(false);
+            completed.TryAdd(spec.FileName, 0); return result;
+        }
+        internal bool CompletedExactly(IEnumerable<PlaceholderIdentity> manifest) =>
+            completed.Keys.Order(StringComparer.Ordinal).SequenceEqual(manifest.Select(item => item.FileName).Order(StringComparer.Ordinal));
+        public void Dispose() => downloader.Dispose();
+        internal static async Task VerifyHandlerForTest() {
+            using var client = new HttpMessageInvoker(new SyntheticHandler());
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://source.example.invalid/synthetic-content");
+            request.Headers.IfMatch.Add(new EntityTagHeaderValue("\"" + Sha + "\""));
+            using var response = await client.SendAsync(request, CancellationToken.None).ConfigureAwait(false);
+            if (response.StatusCode != HttpStatusCode.OK || response.Headers.ETag?.ToString() != "\"" + Sha + "\"" ||
+                !(await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false)).SequenceEqual(Bytes)) throw new IOException("Synthetic handler returned invalid bytes.");
+        }
+        private sealed class SyntheticHandler : HttpMessageHandler {
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) {
+                token.ThrowIfCancellationRequested();
+                if (request.Method != HttpMethod.Get || request.RequestUri?.AbsoluteUri != "https://source.example.invalid/synthetic-content" ||
+                    request.Headers.IfMatch.Count != 1 || request.Headers.IfMatch.Single().ToString() != "\"" + Sha + "\"" ||
+                    request.Headers.Range is not null || request.Headers.Authorization is not null || request.Headers.Contains("Cookie") || request.Headers.Contains("Cf-Access-Token"))
+                    throw new IOException("Synthetic request scope mismatch.");
+                var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Bytes) };
+                response.Headers.ETag = new EntityTagHeaderValue("\"" + Sha + "\"");
+                return Task.FromResult(response);
+            }
+        }
+    }
+#endif
     private sealed class Source : IQueuedDownloadSource {
         public string Alias => "synthetic";
         public Uri Origin => new("https://source.example.invalid");

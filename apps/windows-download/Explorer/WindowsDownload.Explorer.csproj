@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup Condition="'$(LedgeTopNativeDiagnostics)' == 'true'"><DefineConstants>$(DefineConstants);LEDGETOP_NATIVE_DIAGNOSTICS</DefineConstants></PropertyGroup>
+  <PropertyGroup Condition="'$(LedgeTopCacheRaceTest)' == 'true'"><DefineConstants>$(DefineConstants);LEDGETOP_CACHE_RACE_TEST</DefineConstants></PropertyGroup>
   <Target Name="RejectPackagedNativeDiagnostics" BeforeTargets="PrepareForBuild" Condition="'$(LedgeTopPackage)' == 'true' And ('$(LedgeTopNativeDiagnostics)' == 'true' Or $([System.Text.RegularExpressions.Regex]::IsMatch('$(DefineConstants)', '(^|[;,])\s*LEDGETOP_NATIVE_DIAGNOSTICS\s*([;,]|$)')))">
     <Error Text="Native diagnostic tracing is restricted to isolated test builds and cannot be packaged." />
   </Target>

@@ -3,13 +3,23 @@ using LedgeTop.WindowsDownload;
 
 namespace LedgeTop.Files.Explorer;
 
+#if LEDGETOP_NATIVE_DIAGNOSTICS && LEDGETOP_CACHE_RACE_TEST
+// Test assembly supplies a strictly synthetic in-memory handler; packaging is
+// rejected by the diagnostic/race build gates.
+internal interface IDiagnosticOwnedDownloaderSource { }
+#endif
+
 /// <summary>Connects a registered, completely enumerated preview root to the verified transfer pipeline.
 /// The caller owns shell registration and the lifetime of the authorized source.</summary>
 public sealed class NativePlaceholderProvider : IAsyncDisposable
 {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
     private int syntheticCommittedCleanupUncertain;
-    internal bool SyntheticCommittedCleanupUncertain => Volatile.Read(ref syntheticCommittedCleanupUncertain) != 0;
+    internal bool SyntheticCommittedCleanupUncertain => Volatile.Read(ref syntheticCommittedCleanupUncertain) != 0
+#if LEDGETOP_CACHE_RACE_TEST
+        || ExperimentalOwnedStream.QuarantinedCountForTest != 0
+#endif
+        ;
     private readonly SyntheticSettlementLog syntheticSettlements = new();
     internal SyntheticFailureSettlement[] SyntheticFailureSettlements => syntheticSettlements.Snapshot();
     internal int SyntheticFailureSettlementsAttempted => syntheticSettlements.Attempted;
@@ -93,6 +103,20 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                     var serial = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL") ?? "0";
                     var failFast = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_FAIL_FAST") ?? "0";
                     var pendingMarker = Environment.GetEnvironmentVariable("LEDGETOP_TEST_PENDING_MARKER") ?? "off";
+#if LEDGETOP_CACHE_RACE_TEST
+                    var ownedDownloader = Environment.GetEnvironmentVariable("LEDGETOP_TEST_SYNTHETIC_OWNED_DOWNLOADER") ?? "0";
+                    if (ownedDownloader is not ("0" or "1")) throw new IOException("Synthetic owned downloader option invalid.");
+                    if (ownedDownloader == "1") {
+                        if (source is not IDiagnosticOwnedDownloaderSource || serial != "0" || failFast != "0" || cacheStage != "none" || pendingMarker != "off" ||
+                            DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO")) != "none")
+                            throw new IOException("Synthetic owned downloader scope mismatch.");
+                        await HydrationActivity.TrackFetchAsync(identity.FileName, () =>
+                            CloudFilesNativeTransfer.HydrateForCallbackAsync(coordinator, identity, context, token,
+                                new TransferNative(value => LastNativeTransferDiagnostic = value), TimeSpan.FromSeconds(20), summary => Notice(summary.ActivityText), null,
+                                () => Interlocked.Exchange(ref syntheticCommittedCleanupUncertain, 1)), Notice);
+                        return;
+                    }
+#endif
                     if (failFast is not ("0" or "1") || (failFast == "1" && serial != "1"))
                         throw new IOException("Synthetic admission comparison scope mismatch.");
                     if (pendingMarker is "reopen" or "retained" or "mutated" or "mutated-retained" or "mutated-shared-reopen") {

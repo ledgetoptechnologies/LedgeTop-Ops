@@ -81,7 +81,11 @@ internal static class CloudFilesNativeTransfer {
         HydrateForCallbackAsync(coordinator, identity, context, token, new WindowsNative(), TimeSpan.FromSeconds(20));
 
     internal static async Task HydrateForCallbackAsync(PlaceholderHydrationCoordinator coordinator, PlaceholderIdentity identity,
-        CloudFilesOperationContext context, CancellationToken token, ICloudFilesTransferNative native, TimeSpan heartbeatInterval, Action<HydrationTimingSummary>? observeTiming = null, TimeProvider? timingClock = null) {
+        CloudFilesOperationContext context, CancellationToken token, ICloudFilesTransferNative native, TimeSpan heartbeatInterval, Action<HydrationTimingSummary>? observeTiming = null, TimeProvider? timingClock = null
+#if LEDGETOP_NATIVE_DIAGNOSTICS && LEDGETOP_CACHE_RACE_TEST
+        , Action? syntheticCommittedCleanupUncertain = null
+#endif
+        ) {
         using var timing = observeTiming is null ? null : new HydrationTiming(observeTiming, timingClock);
         var timingOutcome = HydrationTimingOutcome.Failed;
         AssertAbi();
@@ -102,7 +106,12 @@ internal static class CloudFilesNativeTransfer {
         } catch (Exception error) {
             sink.ObservePrimaryFailure(HydrationFailureDiagnostic.FromException(HydrationStage.Context, error));
             await sink.FailAsync(token.IsCancellationRequested ? "cancelled" : "unavailable");
-            if (sink.Committed) { timingOutcome = HydrationTimingOutcome.Completed; return; }
+            if (sink.Committed) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS && LEDGETOP_CACHE_RACE_TEST
+                syntheticCommittedCleanupUncertain?.Invoke();
+#endif
+                timingOutcome = HydrationTimingOutcome.Completed; return;
+            }
             if (token.IsCancellationRequested) { timingOutcome = HydrationTimingOutcome.Cancelled; throw new OperationCanceledException(token); }
             throw new TransferException("Native hydration unavailable.", sink.PrimaryFailure!);
         } finally { await sink.StopProgressAsync(); timing?.Complete(timingOutcome); }

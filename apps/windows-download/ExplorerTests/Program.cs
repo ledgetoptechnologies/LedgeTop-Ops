@@ -6,6 +6,9 @@ using LedgeTop.WindowsDownload;
 
 if (args.Length == 1 && args[0] == "--hydration-activity-tests") return await HydrationActivityTests.RunAsync();
 #if LEDGETOP_NATIVE_DIAGNOSTICS
+#if LEDGETOP_CACHE_RACE_TEST
+if (args.Length == 1 && args[0] == "--synthetic-owned-source-contract-tests") return await SyntheticMemoryNative.OwnedSourceContractTests();
+#endif
 if (args.Length == 1 && args[0] == "--synthetic-reader-evidence-tests") return await SyntheticReaderEvidence.SelfTestsAsync();
 if (args.Length == 3 && args[0] == "--synthetic-reader-evidence-child")
     return await SyntheticReaderEvidence.SendAsync(args[1], args[2], "sample-1.bin", "IOException", unchecked((int)0x80070185)) ? 1 : 2;
