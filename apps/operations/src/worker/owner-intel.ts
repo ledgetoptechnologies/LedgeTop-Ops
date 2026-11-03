@@ -130,12 +130,18 @@ function summarySource(id:OwnerIntelSummarySourceId,businessId:string,range:Owne
 }
 async function ownerIntelSummary(db:D1Database,selected:Business,range:OwnerIntelSummaryRange):Promise<{view:OwnerIntelSummary;evidence:OwnerIntelSummaryEvidence[]}>{
  const businessId=selected.businessId,evidence:OwnerIntelSummaryEvidence[]=[],sources:OwnerIntelSummarySource[]=[];
+ const lttNoDedicatedAdvertiser=selected.name==='Ledge Top Technologies';
  if(!selected.bindingId||selected.configurationRevision===null){
-  sources.push(summarySource('google_ads',businessId,range,'unconfigured','source_binding_not_configured',null));
+  sources.push(summarySource('google_ads',businessId,range,'unconfigured',lttNoDedicatedAdvertiser?'owner_advertiser_not_confirmed':'source_binding_not_configured',null));
   sources.push(summarySource('search_console',businessId,range,'unconfigured','source_binding_not_configured',null));
   sources.push(summarySource('own_site',businessId,range,'unconfigured','source_binding_not_configured',null));
  }else{
-  const adsState=await ownerGoogleAdsReadState(db,selected.bindingId,selected.configurationRevision);
+  if(lttNoDedicatedAdvertiser){
+   // Beau confirmed LTT has no dedicated Ads advertiser. A manager/MCC
+   // projection must never be presented as the company's own campaign totals.
+   sources.push(summarySource('google_ads',businessId,range,'unconfigured','owner_advertiser_not_confirmed',null));
+  }else{
+   const adsState=await ownerGoogleAdsReadState(db,selected.bindingId,selected.configurationRevision);
   if(adsState==='schema_missing')sources.push(summarySource('google_ads',businessId,range,'unavailable','source_schema_unavailable',null));
   else if(adsState==='disabled')sources.push(summarySource('google_ads',businessId,range,'unconfigured','source_disabled',null));
   else if(adsState==='binding_missing')sources.push(summarySource('google_ads',businessId,range,'unconfigured','source_binding_not_configured',null));
@@ -150,9 +156,10 @@ async function ownerIntelSummary(db:D1Database,selected:Business,range:OwnerInte
     const totals=ads.observation.payload.totals;
     if(totals.state==='source_stale')sources.push(summarySource('google_ads',businessId,range,'stale','source_stale',null));
     else if(totals.state==='observed')sources.push(summarySource('google_ads',businessId,range,'available',null,{currencyCode:ads.observation.payload.currencyCode,costMicros:totals.costMicros,impressions:totals.impressions,clicks:totals.clicks,conversions:totals.conversions}));
-    else if(totals.state==='no_account')sources.push(summarySource('google_ads',businessId,range,'available','no_account',null));
+    else if(totals.state==='no_account')sources.push(summarySource('google_ads',businessId,range,'unconfigured','no_account',null));
     else sources.push(summarySource('google_ads',businessId,range,'partial',totals.reason??totals.state,null));
    }
+  }
   }
   const tableCount=await db.withSession('first-primary').prepare(`SELECT COUNT(*) count FROM sqlite_schema WHERE type='table' AND name IN(${ownerSourceTables.map(()=>'?').join(',')})`).bind(...ownerSourceTables).first<number>('count');
   if(tableCount!==ownerSourceTables.length){
