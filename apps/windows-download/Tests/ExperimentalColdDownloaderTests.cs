@@ -1429,6 +1429,7 @@ internal static class ExperimentalColdDownloaderTests
             }
             Check(ExperimentalReservationOwner.RetainedCount == 0 && ExperimentalEntryLease.RetainedCount == 0);
         });
+        await WithFixture(ReceiptTransferRangesAsync);
         await WithFixture(async fixture => {
             using var source = new CoordinatorSource(); var identityOne = source.Identity;
             var specOne = (await source.ResolveAsync(identityOne.ResourceReference)).Spec;
@@ -1931,6 +1932,49 @@ internal static class ExperimentalColdDownloaderTests
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetFileInformationByHandleEx(Microsoft.Win32.SafeHandles.SafeFileHandle handle, int kind, nint data, uint size);
+    private static async Task ReceiptTransferRangesAsync(DirectoryFixture fixture)
+    {
+        var content = Enumerable.Range(0, 5001).Select(i => (byte)(i % 251)).ToArray();
+        using var source = new CoordinatorSource(content); var identity = source.Identity;
+        using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", fixture.Path, maximumFileBytes: content.Length, maximumCacheBytes: 100000, expectedPrincipal: CoordinatorSource.Principal);
+        var spec = (await source.ResolveAsync(identity.ResourceReference)).Spec;
+        var root = Path.Combine(fixture.Path, "verified-hydration-v1"); var entryDir = Path.Combine(root, identity.ScopeKey, identity.CacheKey);
+        var reservationDir = Path.Combine(root, ".hydration-reservations-v2"); Directory.CreateDirectory(entryDir); Directory.CreateDirectory(reservationDir);
+        File.WriteAllBytes(Path.Combine(reservationDir, ".verified-hydration-owner"), "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+        HydrationCacheConcurrency.Lease? admission = await HydrationCacheConcurrency.AcquireAsync(root, identity.ScopeKey + identity.CacheKey, CancellationToken.None);
+        admission.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate); var alias = admission;
+        ExperimentalEntryLease? entry = ExperimentalEntryLease.Open(admission, root, identity.ScopeKey, identity.CacheKey);
+        var gate = admission.Quota; ExperimentalReservationOwner? owner = null; ExperimentalReservationOwner.LeaseReceipt? receipt = null;
+        var growth = spec.Length + Downloader.HydrationStateGrowthBudget(spec) + 1024;
+        var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = identity.ScopeKey, Entry = identity.CacheKey, Growth = growth });
+        alias.RunExperimentalForRoot(root, () => HydrationQuotaGate.Run(gate, () => {
+            using var quota = new FileStream(Path.Combine(root, ".hydration-quota-v2.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            owner = ExperimentalReservationOwner.CreateWithOwnedEntry(root, identity.ScopeKey, identity.CacheKey, bytes, spec, ref admission, ref entry, quota);
+        }, CancellationToken.None));
+        owner!.RunWithLeaseForTest(() => HydrationQuotaGate.Run(gate, () => {
+            using var quota = new FileStream(Path.Combine(root, ".hydration-quota-v2.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            receipt = owner.ReleaseAndReturn(quota);
+        }, CancellationToken.None));
+        Check(await coordinator.ExperimentalAuthorizeAndStageAsync(identity, receipt!));
+        foreach (var range in new[] { (Offset: 0L, Length: 4096L), (Offset: 4096L, Length: 905L) }) {
+            var fake = SyntheticReceiptDownloadSource.Create(spec, content); var sink = new TestSink();
+            var session = await coordinator.ExperimentalStartReceiptTransferAsync(identity, receipt!, fake, sink, range.Offset, range.Length);
+            try {
+                await fake.Entered.WaitAsync(TimeSpan.FromSeconds(10)); fake.Release();
+                await session.WaitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+                Check(sink.Completed == 1 && sink.Failed == 0 && sink.Bytes.Length == range.Offset + range.Length &&
+                    sink.Bytes.ToArray()[(int)range.Offset..].SequenceEqual(content[(int)range.Offset..(int)(range.Offset + range.Length)]));
+            } finally { fake.Release(); }
+            File.Delete(Path.Combine(entryDir, identity.FileName));
+        }
+        foreach (var range in new[] { (Offset: -1L, Length: 1L), (Offset: 1L, Length: 4096L), (Offset: 0L, Length: 0L), (Offset: 0L, Length: 4095L), (Offset: 4096L, Length: 906L), (Offset: long.MaxValue, Length: 1L) }) {
+            var fake = SyntheticReceiptDownloadSource.Create(spec, content); var rejected = false;
+            try { _ = await coordinator.ExperimentalStartReceiptTransferAsync(identity, receipt!, fake, new TestSink(), range.Offset, range.Length); }
+            catch (TransferException) { rejected = true; }
+            Check(rejected && !fake.Entered.IsCompleted);
+        }
+        receipt!.RemoveSyntheticReservationForTest(root, identity.ScopeKey + identity.CacheKey); receipt.Dispose();
+    }
     private sealed class TestSink : IPlaceholderTransferSink
     {
         internal int Completed, Failed; internal bool ThrowOnWrite, HoldWrite, PartialThenThrow, ThrowOnComplete, CancelOnComplete, ThrowOnFail; internal MemoryStream Bytes { get; } = new();
@@ -1943,10 +1987,16 @@ internal static class ExperimentalColdDownloaderTests
     private sealed class CoordinatorSource : IQueuedDownloadSource, IHydrationMutationAwareSource, IVerifiedHydrationDownloadSource, IDisposable
     {
         internal static readonly string Principal = "odqp1_" + new string('a', 64);
-        internal readonly PlaceholderIdentity Identity = new("pilot", "synthetic", ExperimentalColdDownloaderTests.Origin.GetLeftPart(UriPartial.Authority), Principal,
-            "odqr1_test", "oef1_" + new string('b', 64), "v1", Spec.FileName, Spec.Length, Spec.ETag, Spec.Sha256);
+        internal readonly PlaceholderIdentity Identity;
+        private readonly DownloadSpec resolvedSpec;
         private readonly Downloader downloader; internal int Downloads, Resolves; internal Func<ResolvedQueuedDownload, ResolvedQueuedDownload>? RewriteResolutionForTest; internal Exception? ResolveFailureForTest; internal Func<HttpResponseMessage>? ResponseFactory; internal Action<HttpRequestMessage>? InspectRequest;
-        internal CoordinatorSource() => downloader = Engine((request, _) => { Downloads++; InspectRequest?.Invoke(request); return ResponseFactory?.Invoke() ?? Response(Content); });
+        internal CoordinatorSource(byte[]? content = null) {
+            var body = content ?? Content;
+            resolvedSpec = Spec with { Length = body.Length, Sha256 = Convert.ToHexStringLower(SHA256.HashData(body)) };
+            Identity = new("pilot", "synthetic", ExperimentalColdDownloaderTests.Origin.GetLeftPart(UriPartial.Authority), Principal,
+                "odqr1_test", "oef1_" + new string('b', 64), "v1", resolvedSpec.FileName, resolvedSpec.Length, resolvedSpec.ETag, resolvedSpec.Sha256);
+            downloader = Engine((request, _) => { Downloads++; InspectRequest?.Invoke(request); return ResponseFactory?.Invoke() ?? Response(body); });
+        }
         public string Alias => "synthetic"; public Uri Origin => ExperimentalColdDownloaderTests.Origin;
         bool IHydrationMutationAwareSource.CoordinatesHydrationMutations => true;
         public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken token = default) => Task.FromResult(new QueuedDownloadSession(Principal, DateTimeOffset.UtcNow.AddMinutes(5)));
@@ -1955,7 +2005,7 @@ internal static class ExperimentalColdDownloaderTests
             Resolves++;
             if (ResolveFailureForTest is not null) return Task.FromException<ResolvedQueuedDownload>(ResolveFailureForTest);
             var resolved = new ResolvedQueuedDownload(Principal, Identity.LogicalFileId, Identity.RemoteVersion,
-                Spec with { OpaqueIdentity = Identity.LogicalFileId + ":" + Identity.RemoteVersion });
+                resolvedSpec with { OpaqueIdentity = Identity.LogicalFileId + ":" + Identity.RemoteVersion });
             return Task.FromResult(RewriteResolutionForTest?.Invoke(resolved) ?? resolved);
         }
         public Task<string> DownloadAsync(DownloadSpec spec, string destination, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default) => downloader.DownloadAsync(spec, destination, cancellationToken, progress);

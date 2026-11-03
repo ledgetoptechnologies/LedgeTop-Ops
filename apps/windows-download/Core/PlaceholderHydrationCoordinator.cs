@@ -486,12 +486,15 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
         return receipt.StartSyntheticDownloadForTest(root, identity, resolved.Spec, source, ExperimentalDownloadAuthority);
     }
-    internal async Task<ExperimentalReservationOwner.LeaseReceipt.DownloadSession> ExperimentalStartReceiptTransferAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt receipt, SyntheticReceiptDownloadSource source, IPlaceholderTransferSink sink, CancellationToken token = default)
+    internal async Task<ExperimentalReservationOwner.LeaseReceipt.DownloadSession> ExperimentalStartReceiptTransferAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt receipt, SyntheticReceiptDownloadSource source, IPlaceholderTransferSink sink, long offset = 0, long? length = null, CancellationToken token = default)
     {
         ExperimentalValidateStagingIdentity(identity); ArgumentNullException.ThrowIfNull(receipt); ArgumentNullException.ThrowIfNull(source); ArgumentNullException.ThrowIfNull(sink);
+        var count = length ?? identity.Length;
+        if (offset < 0 || count <= 0 || offset > identity.Length || count > identity.Length - offset || offset % 4096 != 0 || (count % 4096 != 0 && count != identity.Length - offset))
+            throw new TransferException("Synthetic native transfer range is unsupported.");
         var resolved = await AuthorizeWithRetry(identity, token).ConfigureAwait(false);
         token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
-        return receipt.StartSyntheticDownloadForTest(root, identity, resolved.Spec, source, ExperimentalDownloadAuthority, this, sink);
+        return receipt.StartSyntheticDownloadForTest(root, identity, resolved.Spec, source, ExperimentalDownloadAuthority, this, sink, offset, count);
     }
     internal async Task ExperimentalAuthorizeReceiptTransferAsync(PlaceholderIdentity identity, DownloadSpec expected, CancellationToken token)
     {
