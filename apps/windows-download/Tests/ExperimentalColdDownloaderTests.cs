@@ -362,6 +362,54 @@ internal static class ExperimentalColdDownloaderTests
         catch (Exception error) { Console.Error.WriteLine("Synthetic observer exit remains uncertain: " + error.GetType().Name); return; }
         if (OwnedObservers.TryRemove(key, out var owned)) owned.Dispose();
     }
+    internal static async Task DrainRetainedObserversAsync(bool signal = false)
+    {
+        if (signal && !OwnedObservers.IsEmpty) { Console.WriteLine("DRAINING"); Console.Out.Flush(); }
+        while (!OwnedObservers.IsEmpty) await Task.Delay(250);
+    }
+    internal static void StartNestedObserverForDrainTest(string eventName)
+    {
+        if (!eventName.StartsWith("Local\\LedgeTopSyntheticDrain-", StringComparison.Ordinal)) throw new IOException("Synthetic drain event invalid.");
+        var info = new ProcessStartInfo("powershell.exe") { UseShellExecute = false, CreateNoWindow = true };
+        info.ArgumentList.Add("-NoProfile"); info.ArgumentList.Add("-NonInteractive"); info.ArgumentList.Add("-Command");
+        info.ArgumentList.Add("$e = [Threading.EventWaitHandle]::OpenExisting($env:LEDGETOP_SYNTHETIC_OBSERVER_EVENT); try { $e.WaitOne() | Out-Null } finally { $e.Dispose() }");
+        info.Environment["LEDGETOP_SYNTHETIC_OBSERVER_EVENT"] = eventName;
+        var process = Process.Start(info) ?? throw new IOException("Synthetic nested observer failed to start.");
+        Task? reaper = null; var transferred = false;
+        try {
+            var exited = ObserveTransferred(process, 0, ref reaper, ref transferred);
+            if (exited) throw new IOException("Synthetic nested observer exited early.");
+            Check(reaper is not null && transferred);
+            Console.WriteLine("RETAINED"); Console.Out.Flush();
+        } finally { if (!transferred) process.Dispose(); }
+    }
+    private static async Task ObserverDrainLifecycleTest()
+    {
+        var name = "Local\\LedgeTopSyntheticDrain-" + Guid.NewGuid().ToString("N");
+        var release = new EventWaitHandle(false, EventResetMode.ManualReset, name);
+        var executable = Environment.ProcessPath ?? throw new IOException("Synthetic executable unavailable.");
+        var info = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+        if (string.Equals(Path.GetFileNameWithoutExtension(executable), "dotnet", StringComparison.OrdinalIgnoreCase)) info.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
+        info.ArgumentList.Add("--experimental-observer-drain-child"); info.ArgumentList.Add(name);
+        var process = Process.Start(info) ?? throw new IOException("Synthetic drain child failed to start.");
+        Task? reaper = null; var transferred = false; var confirmed = false;
+        try {
+            Check(await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)) == "RETAINED");
+            Check(await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)) == "DRAINING");
+            Check(!process.WaitForExit(150));
+            release.Set();
+            confirmed = ObserveTransferred(process, 10000, ref reaper, ref transferred);
+            if (!confirmed) throw new IOException("Synthetic drain child remains live; preserve resources.");
+            Check(process.ExitCode == 0);
+        } finally {
+            release.Set();
+            try { if (!confirmed && !transferred) confirmed = ObserveTransferred(process, 10000, ref reaper, ref transferred); }
+            finally {
+                if (transferred) UncertainTestResources.Add(release);
+                else { process.Dispose(); release.Dispose(); }
+            }
+        }
+    }
     private static async Task ObserverReaperTest()
     {
         var eventName = "Local\\LedgeTopSyntheticObserver-" + Guid.NewGuid().ToString("N");
@@ -386,6 +434,7 @@ internal static class ExperimentalColdDownloaderTests
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         await FixturePolicyTests();
         await ObserverReaperTest();
+        await ObserverDrainLifecycleTest();
         await WithFixture(async fixture => {
             var root = Path.Combine(fixture.Path, "markers"); Directory.CreateDirectory(root);
             const string markerName = ".verified-hydration-owner";

@@ -47,6 +47,13 @@ if (args.Length == 1 && args[0] == "--native-stall-trace-tests") {
 if (args.Length == 3 && args[0] == "--experimental-reservation-close-child") {
     try { await ExperimentalColdDownloaderTests.ReservationCloseChildAsync(args[1], args[2]); }
     catch (Exception error) { Console.Error.WriteLine("Synthetic reservation close child failed: " + error.GetType().Name); Environment.ExitCode = 1; }
+    finally { await ExperimentalColdDownloaderTests.DrainRetainedObserversAsync(); }
+    return;
+}
+if (args.Length == 2 && args[0] == "--experimental-observer-drain-child") {
+    try { ExperimentalColdDownloaderTests.StartNestedObserverForDrainTest(args[1]); }
+    catch (Exception error) { Console.Error.WriteLine("Synthetic observer drain child failed: " + error.GetType().Name); Environment.ExitCode = 1; }
+    finally { await ExperimentalColdDownloaderTests.DrainRetainedObserversAsync(signal: true); }
     return;
 }
 if (args.Length == 3 && args[0] == "--experimental-crash-child") {
