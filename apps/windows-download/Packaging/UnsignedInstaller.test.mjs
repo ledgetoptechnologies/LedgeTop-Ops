@@ -205,7 +205,7 @@ test('cleanup refusal cannot fall through to payload deletion', () => {
   before(uninstall, 'StrCmp $0 0', '!insertmacro DeletePayload');
   assert.match(uninstall, /StrCmp \$0 0 un_cleanup_pass\n  StrCmp \$0 12 un_legacy_unknown\n    StrCmp \$0 10 0 un_cleanup_review/);
   assert.match(uninstall, /un_cleanup_refused:\n    SetErrorLevel \$0\n    Abort\n  un_legacy_unknown:/);
-  assert.match(uninstall, /un_legacy_unknown:[\s\S]*could not verify whether an older LedgeTop Files Preview entry exists[\s\S]*contact LedgeTop support[\s\S]*Goto un_cleanup_pass/);
+  assert.match(uninstall, /un_legacy_unknown:[\s\S]*No saved old Preview ownership record was found; an old Explorer entry may remain\.[\s\S]*If you previously used LedgeTop Files Preview, its entry may remain in File Explorer\. Contact LedgeTop support[\s\S]*Goto un_cleanup_pass/);
   before(uninstall, '"InstallLocation"', '!insertmacro DeletePayload');
 });
 test('uninstall invokes the maintenance helper in its own fixed version directory', () => {
@@ -223,32 +223,44 @@ test('temporary full-payload check precedes fixed-directory creation and permits
 });
 
 test('only busy code10 gives tray Quit guidance at both setup checks and uninstall', () => {
-  for (const [section, pass, review, refused] of [
-    [install, 'installed_payload_pass', 'installed_payload_review', 'installed_payload_refused'],
-    [uninstall, 'un_cleanup_pass', 'un_cleanup_review', 'un_cleanup_refused'],
-  ]) {
-    const start = section.indexOf(`StrCmp $0 0 ${pass}`);
-    const stop = section.indexOf('SetErrorLevel $0\n    Abort', start);
-    assert(start >= 0 && stop > start, 'nonzero maintenance result must still abort with its original code');
-    const block = section.slice(start, stop);
-    const split = block.indexOf(`${review}:`);
-    assert.match(block, new RegExp(`StrCmp \\$0 10 0 ${review}`));
-    const busy = block.slice(0, split), unknown = block.slice(split);
-    assert(busy.includes('LT tray icon') && busy.includes('choose Quit LedgeTop Files'));
-    assert(busy.includes('Closing Settings does not quit the app.'));
-    assert(busy.includes(`Goto ${refused}`));
-    assert(unknown.includes('LedgeTop support') && unknown.includes('before trying again'));
-    assert(unknown.includes('code: $0'));
-    assert.doesNotMatch(unknown, /Then run (?:setup|uninstall) again/);
-    assert.doesNotMatch(block, /ExecWait|ExecShell|\bCall\b|WriteReg|Delete|CreateDirectory/);
-  }
+  const preflight = install.slice(install.indexOf('preflight_retry:'), install.indexOf('preflight_pass:'));
+  assert.match(preflight, /StrCmp \$0 0 preflight_pass\n    StrCmp \$0 10 0 preflight_review\n    IfSilent preflight_refused/);
+  assert.match(preflight, /\/SD IDNO IDYES preflight_stop IDNO preflight_refused/);
+  assert.match(preflight, /preflight_stop:[\s\S]*ExecWait '"\$INSTDIR\\LedgeTop\.Files\.exe" --installer-request-quit' \$0\n    IfErrors preflight_failed\n    StrCmp \$0 0 preflight_retry\n    StrCmp \$0 10 0 preflight_review/);
+  assert.match(preflight, /\/SD IDCANCEL IDRETRY preflight_retry IDCANCEL preflight_refused/);
+  assert(preflight.includes('LT tray icon') && preflight.includes('choose Quit LedgeTop Files'));
+  assert(preflight.includes('Closing Settings does not quit the app.'));
+  const preflightUnknown = preflight.slice(preflight.indexOf('preflight_review:'), preflight.indexOf('preflight_failed:'));
+  assert.match(preflightUnknown, /LedgeTop support[\s\S]*before trying again[\s\S]*Setup code: \$0[\s\S]*SetErrorLevel \$0\n    Abort/);
+  assert.doesNotMatch(preflightUnknown, /ExecWait|ExecShell|\bCall\b|WriteReg|Delete|CreateDirectory/);
   const secondBusy = install.slice(install.indexOf('StrCmp $0 10 0 installed_payload_review'), install.indexOf('installed_payload_review:'));
+  assert(secondBusy.includes('LT tray icon') && secondBusy.includes('choose Quit LedgeTop Files'));
+  assert(secondBusy.includes('Closing Settings does not quit the app.'));
   assert(secondBusy.includes('kept this version\'s installation folder for review'));
   assert(secondBusy.includes('ask LedgeTop support'));
   assert.doesNotMatch(secondBusy, /Then run setup again/i);
-  const uninstallBusy = uninstall.slice(0, uninstall.indexOf('un_cleanup_review:'));
-  assert(uninstallBusy.includes('Also quit any old LedgeTop Files Preview tray icon.'));
-  assert.equal((active.match(/ExecWait/g) ?? []).length, 6, 'graceful quit, legacy read-only probe and confirmed retirement');
+  const lateUnknown = install.slice(install.indexOf('installed_payload_review:'), install.indexOf('installed_payload_pass:'));
+  assert.match(lateUnknown, /LedgeTop support[\s\S]*before trying again[\s\S]*Setup code: \$0[\s\S]*SetErrorLevel \$0\n    Abort/);
+  assert.doesNotMatch(lateUnknown, /ExecWait|ExecShell|\bCall\b|WriteReg|Delete|CreateDirectory/);
+  const uninstallBusy = uninstall.slice(uninstall.indexOf('StrCmp $0 0 un_cleanup_pass'), uninstall.indexOf('un_cleanup_review:'));
+  assert.match(uninstallBusy, /StrCmp \$0 12 un_legacy_unknown\n    StrCmp \$0 10 0 un_cleanup_review/);
+  assert.match(uninstallBusy, /\/SD IDNO IDYES un_request_stop IDNO un_cleanup_refused/);
+  assert.match(uninstallBusy, /un_request_stop:[\s\S]*ExecWait '"\$INSTDIR\\LedgeTop\.Files\.exe" --installer-request-quit' \$0\n    IfErrors un_failed\n    StrCmp \$0 0 un_cleanup_retry\n    StrCmp \$0 10 0 un_cleanup_review/);
+  assert.match(uninstallBusy, /\/SD IDCANCEL IDRETRY un_cleanup_retry IDCANCEL un_cleanup_refused/);
+  assert(uninstallBusy.includes('older LedgeTop Files Preview is still running, quit it from its tray icon first'));
+  const uninstallUnknown = uninstall.slice(uninstall.indexOf('un_cleanup_review:'), uninstall.indexOf('un_legacy_unknown:'));
+  assert.match(uninstallUnknown, /LedgeTop support[\s\S]*before trying again[\s\S]*Cleanup code: \$0[\s\S]*SetErrorLevel \$0\n    Abort/);
+  assert.doesNotMatch(uninstallUnknown, /ExecWait|ExecShell|\bCall\b|WriteReg|Delete|CreateDirectory/);
+  assert.equal((uninstallBusy.match(/ExecWait/g) ?? []).length, 1, 'only the explicit graceful quit is allowed in the uninstall busy branch');
+  assert.deepEqual((active.match(/^\s*ExecWait .*$/gm) ?? []).map(line => line.trim()), [
+    `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-check' $0`,
+    `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-request-quit' $0`,
+    `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-check' $0`,
+    `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-probe-legacy-preview' $0`,
+    `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-retire-legacy-preview' $0`,
+    `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-remove-connections' $0`,
+    `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-request-quit' $0`,
+  ]);
 });
 test('late busy retains fixed target and directs to support instead of an impossible retry', () => {
   before(install, 'CreateDirectory "$INSTDIR"', 'StrCmp $0 10 0 installed_payload_review');
@@ -264,7 +276,7 @@ test('late busy retains fixed target and directs to support instead of an imposs
 });
 test('silent refusal has safe default dialog and nonzero explicit exit status', () => {
   for (const line of active.split('\n').filter(s => s.trimStart().startsWith('MessageBox ')))
-    assert(line.endsWith('/SD IDOK') || line.includes('/SD IDNO IDYES preflight_stop IDNO preflight_refused') || line.includes('/SD IDCANCEL IDRETRY preflight_retry IDCANCEL preflight_refused') || line.includes('/SD IDCANCEL IDRETRY retire_legacy_retry IDCANCEL retire_legacy_done') || line.includes('/SD IDNO IDYES retire_legacy_remove IDNO retire_legacy_done') || line.includes('/SD IDNO IDYES un_user_confirmed IDNO un_user_refused'));
+    assert(line.endsWith('/SD IDOK') || line.includes('/SD IDNO IDYES preflight_stop IDNO preflight_refused') || line.includes('/SD IDCANCEL IDRETRY preflight_retry IDCANCEL preflight_refused') || line.includes('/SD IDCANCEL IDRETRY retire_legacy_retry IDCANCEL retire_legacy_done') || line.includes('/SD IDNO IDYES retire_legacy_remove IDNO retire_legacy_done') || line.includes('/SD IDNO IDYES un_user_confirmed IDNO un_user_refused') || line.includes('/SD IDNO IDYES un_request_stop IDNO un_cleanup_refused') || line.includes('/SD IDCANCEL IDRETRY un_cleanup_retry IDCANCEL un_cleanup_refused'));
   for (const [index, line] of active.split('\n').entries()) if (line.trim() === 'Abort')
     assert(active.split('\n')[index - 1].trim().startsWith('SetErrorLevel '));
 });
