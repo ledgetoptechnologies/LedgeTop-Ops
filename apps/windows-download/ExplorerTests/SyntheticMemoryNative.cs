@@ -49,6 +49,10 @@ internal static class SyntheticMemoryNative {
     }
     internal static bool CleanupVerified(bool registrationAttempted, bool registrationReturned, bool readersJoined, bool disposeCompleted, bool unregisterVerified) =>
         readersJoined && (!registrationAttempted || (registrationReturned && disposeCompleted && unregisterVerified));
+    internal static bool RetryOptionsValid(Func<string, string?> get) =>
+        get("LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION") != "1" &&
+        get("LEDGETOP_TEST_DISABLE_AVAILABILITY_SCANNER") != "1" &&
+        get("LEDGETOP_TEST_SUPPRESS_NATIVE_PROGRESS") != "1";
     internal static string DiagnosticSettings(Func<string, string?> get) {
         var blockSelf = get("LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION") == "1";
         var disableScanner = get("LEDGETOP_TEST_DISABLE_AVAILABILITY_SCANNER") == "1";
@@ -135,6 +139,23 @@ internal static class SyntheticMemoryNative {
         Console.WriteLine("PASS synthetic actual cache admission, quota, ownership and scope refusals without native registration."); return 0;
     }
     internal static int CleanupEvidenceTests() {
+        var syntheticBase = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "synthetic-retry-scope"));
+        var syntheticRoot = Path.Combine(syntheticBase, "memory-native-fixtures", "12345678123412341234123456789abc", "Files");
+        var principal = "odqp1_" + new string('f', 64);
+        bool InScope(string root, bool enabled, string alias) => SyntheticKeepFault.IsScope(root, syntheticBase, enabled, alias, "https://source.example.invalid/", "pilot", principal, 1, true);
+        if (!InScope(syntheticRoot, true, "synthetic") || InScope(syntheticRoot, false, "synthetic") ||
+            InScope(syntheticRoot, true, "company") || InScope(Path.Combine(syntheticBase, "foreign"), true, "synthetic"))
+            throw new IOException("Synthetic Keep fault scope validation failed.");
+        var fault = new SyntheticKeepFault();
+        var refused = false; try { fault.Arm(false); } catch (InvalidOperationException) { refused = true; }
+        if (!refused || fault.Attempts != 0) throw new IOException("Unscoped synthetic fault was accepted.");
+        fault.Arm(true);
+        if (!fault.ShouldFail() || fault.ShouldFail() || fault.Attempts != 2) throw new IOException("Synthetic Keep fault did not fire exactly once.");
+        refused = false; try { fault.Arm(true); } catch (InvalidOperationException) { refused = true; }
+        if (!refused) throw new IOException("Synthetic Keep fault could be rearmed.");
+        if (!RetryOptionsValid(_ => null) || RetryOptionsValid(name => name == "LEDGETOP_TEST_DISABLE_AVAILABILITY_SCANNER" ? "1" : null) ||
+            RetryOptionsValid(name => name == "LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION" ? "1" : null))
+            throw new IOException("Unsafe synthetic retry options accepted.");
         if (!CleanupVerified(false, false, true, true, false) ||
             CleanupVerified(true, false, true, true, false) ||
             CleanupVerified(true, true, true, false, false) ||
@@ -222,7 +243,7 @@ internal static class SyntheticMemoryNative {
         var markerMode = DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO"));
         var cacheStage = CacheStage(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_CACHE_STAGE"));
         if (markerMode == "invalid" || cacheStage == "invalid" || (markerMode != "none" && cacheStage != "none")) return 2;
-        if (retryProbe && (count != 1 || markerMode != "none" || cacheStage != "none")) return 2;
+        if (retryProbe && (count != 1 || markerMode != "none" || cacheStage != "none" || !RetryOptionsValid(Environment.GetEnvironmentVariable))) return 2;
         var basePath = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
         if (string.IsNullOrEmpty(basePath) || !Path.IsPathFullyQualified(basePath) || basePath.StartsWith("\\\\", StringComparison.Ordinal)) return 2;
         RequireLocalDirectory(basePath);
@@ -290,7 +311,11 @@ internal static class SyntheticMemoryNative {
                 var keptAttributes = (uint)provider.InspectAttributes("Retry\\sample-0.bin");
                 if (provider.SyntheticKeepAttempts != 2 || (keptAttributes & 0x80000) == 0 || (keptAttributes & (0x1000u | 0x40000u | 0x400000u)) != 0)
                     throw new IOException("Synthetic retry did not produce a pinned local file in exactly two attempts.");
-                var content = await File.ReadAllBytesAsync(Path.Combine(root, "Retry", "sample-0.bin")).WaitAsync(TimeSpan.FromSeconds(15));
+                readersJoined = false;
+                var contentTask = File.ReadAllBytesAsync(Path.Combine(root, "Retry", "sample-0.bin"));
+                byte[] content;
+                try { content = await contentTask.WaitAsync(TimeSpan.FromSeconds(15)); }
+                finally { if (contentTask.IsCompleted) readersJoined = true; }
                 if (!CryptographicOperations.FixedTimeEquals(SHA256.HashData(content), SHA256.HashData(Bytes)))
                     throw new IOException("Synthetic retry content hash differed.");
                 Phase("simulated-keep-failure-retry-verified", id);
