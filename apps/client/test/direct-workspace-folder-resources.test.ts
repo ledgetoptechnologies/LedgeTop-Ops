@@ -187,6 +187,20 @@ describe('direct Operations workspace folder resources',()=>{
       clientAuthorityId:authority,sourceId:source,folderRef,expectedWorkspaceVersion:state.workspaceVersion,
       expectedMembershipVersion:state.membershipVersion});
     expect(grants).toMatchObject({ok:true,grants:[{status:'expired',canRevoke:true}]});
+    const common={protocolVersion:1,workspaceId:workspace,targetId:target,clientAuthorityId:authority,sourceId:source,
+      folderRef,recipientRecordId:recipient,expectedWorkspaceVersion:state.workspaceVersion,
+      expectedMembershipVersion:state.membershipVersion};
+    const revoked=await applyDirectWorkspaceFolderGrant(env,{...common,action:'grant.revoke',operationId:'df-revoke-expired',
+      grantId:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',expectedGrantVersion:1});
+    expect(revoked).toMatchObject({ok:true,state:'revoked',version:2});
+    const replacement=await applyDirectWorkspaceFolderGrant(env,{...common,action:'grant.create',operationId:'df-replace-expired',
+      grantId:'cccccccc-cccc-4ccc-8ccc-cccccccccccc',expiresAt:null});
+    expect(replacement).toMatchObject({ok:true,state:'active',version:1});
+    const after=await listDirectWorkspaceFolderGrants(env,{protocolVersion:1,workspaceId:workspace,targetId:target,
+      clientAuthorityId:authority,sourceId:source,folderRef,expectedWorkspaceVersion:state.workspaceVersion,
+      expectedMembershipVersion:state.membershipVersion});
+    expect(after.ok&&after.grants.find(item=>item.grantId==='cccccccc-cccc-4ccc-8ccc-cccccccccccc'))
+      .toMatchObject({status:'active',canRevoke:true});
   });
 
   it('allows an explicit operational opt-out',async()=>{
