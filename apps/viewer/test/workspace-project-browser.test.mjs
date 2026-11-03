@@ -813,6 +813,35 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.equal(runtime.requests.filter(item => item.method === 'PATCH' && item.path === '/api/v1/projects/project-quarry/hierarchy').length, assignmentWritesBeforeArchivedSave, `${viewport.name}: saving an unchanged archived assignment must not send a clearing request`);
     assert.deepEqual(runtime.hierarchy.assignments.get('project-quarry'), { organizationId: 'org-archived', groupId: 'group-archived', hierarchyRevision: 4 }, `${viewport.name}: archived assignment must remain intact`);
 
+    const archivedAssignment = structuredClone(runtime.hierarchy.assignments.get('project-quarry'));
+    runtime.hierarchy.groups.push({ id: 'group-archived-active-customer', organizationId: 'org-zenith', displayName: 'Old Zenith Group', status: 'archived', revision: 2 });
+    runtime.hierarchy.assignments.set('project-quarry', { organizationId: 'org-zenith', groupId: 'group-archived-active-customer', hierarchyRevision: 5 });
+    await client.command('Page.reload');
+    await waitFor(client, "document.querySelector('.project-page') !== null", `${viewport.name}: active customer with archived group did not reload`);
+    await client.evaluate(`document.querySelector('[data-action="set-project-customer"][data-id="project-quarry"]').click()`);
+    await decide('Set customer for Alpha Quarry', { organizationId: 'org-zenith' });
+    await waitFor(client, `document.querySelector('.workspace-decision[open] h2')?.textContent === 'Choose a group'`, `${viewport.name}: archived group under active customer was unavailable`);
+    const activeCustomerArchivedGroup = await client.evaluate(`(() => { const field=document.querySelector('.workspace-decision[open] form').elements.namedItem('groupId'); return {value:field.value,labels:[...field.options].map(option=>option.textContent)}; })()`);
+    assert.equal(activeCustomerArchivedGroup.value, 'group-archived-active-customer', `${viewport.name}: archived group assignment must remain selected`);
+    assert.ok(activeCustomerArchivedGroup.labels.includes('Old Zenith Group (archived current assignment)'), `${viewport.name}: archived group assignment must be labeled`);
+    const writesBeforeActiveArchivedGroup = runtime.requests.filter(item => item.method === 'PATCH' && item.path === '/api/v1/projects/project-quarry/hierarchy').length;
+    await decide('Choose a group', { groupId: 'group-archived-active-customer' });
+    await waitFor(client, "document.querySelector('#workspace-toast')?.textContent.includes('No change made')", `${viewport.name}: unchanged archived group must be acknowledged`);
+    assert.equal(runtime.requests.filter(item => item.method === 'PATCH' && item.path === '/api/v1/projects/project-quarry/hierarchy').length, writesBeforeActiveArchivedGroup, `${viewport.name}: unchanged archived group must not send a clearing request`);
+
+    runtime.hierarchy.groups = runtime.hierarchy.groups.filter(item => item.id !== 'group-archived-active-customer');
+    runtime.hierarchy.assignments.set('project-quarry', { organizationId: 'org-archived', groupId: null, hierarchyRevision: 5 });
+    await client.command('Page.reload');
+    await waitFor(client, "document.querySelector('.project-page') !== null", `${viewport.name}: archived customer without a group did not reload`);
+    await client.evaluate(`document.querySelector('[data-action="set-project-customer"][data-id="project-quarry"]').click()`);
+    const writesBeforeArchivedCustomerNoGroup = runtime.requests.filter(item => item.method === 'PATCH' && item.path === '/api/v1/projects/project-quarry/hierarchy').length;
+    await decide('Set customer for Alpha Quarry', { organizationId: 'org-archived' });
+    await waitFor(client, "document.querySelector('#workspace-toast')?.textContent.includes('No change made')", `${viewport.name}: unchanged archived customer without a group must be acknowledged`);
+    assert.equal(runtime.requests.filter(item => item.method === 'PATCH' && item.path === '/api/v1/projects/project-quarry/hierarchy').length, writesBeforeArchivedCustomerNoGroup, `${viewport.name}: unchanged archived customer without a group must not send a clearing request`);
+    runtime.hierarchy.assignments.set('project-quarry', archivedAssignment);
+    await client.command('Page.reload');
+    await waitFor(client, "document.querySelector('.project-page') !== null", `${viewport.name}: archived assignment did not restore after edge-case checks`);
+
     await client.evaluate(`document.querySelector('.workspace-breadcrumb [data-section="dashboard"]').click()`);
     await waitFor(client, "document.querySelector('#project-filter') !== null", `${viewport.name}: Projects did not return after checking archived assignments`);
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='Johnson'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
