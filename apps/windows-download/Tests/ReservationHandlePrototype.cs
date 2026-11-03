@@ -148,7 +148,40 @@ internal static class ReservationHandlePrototype
         ExperimentalSealFailures(fixture, directory, directoryId, recordDisposition);
         ExperimentalDisposeFailure(fixture, directory, directoryId, recordDisposition);
         ExperimentalBindingFailureControl(fixture, directory, directoryId, recordDisposition);
+        ExperimentalPrefixFailureControl(fixture, directory, directoryId, recordDisposition);
         Console.WriteLine("PASS gated experimental owned-source sealing and exact identity cleanup.");
+    }
+
+    private static void ExperimentalPrefixFailureControl(string fixture, SafeFileHandle directory, FileId directoryId, Action recordDisposition)
+    {
+        foreach (var beforeLength in new[] { true, false }) {
+            var path = Path.Combine(fixture, beforeLength ? "experimental-prefix-length.record" : "experimental-prefix-flush.record");
+            var owner = LedgeTop.WindowsDownload.ExperimentalOwnedStream.CreateNew(path); var id = owner.SourceIdentity;
+            owner.Write(Owned); var token = new object();
+            LedgeTop.WindowsDownload.ExperimentalOwnedStream.PrefixRestorationTokenTestHook = token;
+            Action fail = () => throw new IOException("Synthetic prefix restoration failure.");
+            if (beforeLength) LedgeTop.WindowsDownload.ExperimentalOwnedStream.BeforeRestoreLengthTestHook = fail;
+            else LedgeTop.WindowsDownload.ExperimentalOwnedStream.BeforeRestoreFlushTestHook = fail;
+            try {
+                var failed = false; try { owner.RestorePrefix(5); } catch (IOException) { failed = true; }
+                if (!failed || LedgeTop.WindowsDownload.ExperimentalOwnedStream.QuarantinedCountForTest != 1)
+                    throw new IOException("Failed prefix restoration did not retain the owner.");
+            } finally {
+                LedgeTop.WindowsDownload.ExperimentalOwnedStream.BeforeRestoreLengthTestHook = null;
+                LedgeTop.WindowsDownload.ExperimentalOwnedStream.BeforeRestoreFlushTestHook = null;
+                LedgeTop.WindowsDownload.ExperimentalOwnedStream.PrefixRestorationTokenTestHook = null;
+            }
+            var refused = false; try { owner.Dispose(); } catch (InvalidOperationException) { refused = true; }
+            if (!refused) throw new IOException("Uncertain prefix allowed owner disposal.");
+            var expected = beforeLength ? Owned : Owned[..5];
+            refused = false; try { owner.ReconcileInjectedPrefixForTest(new object(), expected); } catch (InvalidOperationException) { refused = true; }
+            if (!refused) throw new IOException("Wrong prefix settlement token was accepted.");
+            owner.ReconcileInjectedPrefixForTest(token, expected); owner.Dispose();
+            if (!TryDeleteExact(fixture, directory, directoryId, path, expected, new(id.Volume, id.FileId)))
+                throw new IOException("Synthetic prefix fixture cleanup failed.");
+            recordDisposition();
+        }
+        Console.WriteLine("PASS gated injected prefix restoration failures retain ownership until verified test settlement.");
     }
 
     private static void ExperimentalBindingFailureControl(string fixture, SafeFileHandle directory, FileId directoryId, Action recordDisposition)

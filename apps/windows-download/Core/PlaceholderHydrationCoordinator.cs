@@ -343,6 +343,14 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                                 NativeStallTrace.Record(NativeStallTrace.Stage.CacheReleaseEnter);
                                 try {
 #endif
+#if LEDGETOP_CACHE_RACE_TEST
+                                // A synthetic owned rollback may still have
+                                // uncertain bytes. Keep this entry's durable
+                                // reservation rather than claiming cleanup.
+                                if (ExperimentalOwnedStream.HasQuarantineForEntryForTest(entry)) {
+                                    if (primary is null) throw new TransferException("Experimental owner remains quarantined; reservation preserved.");
+                                } else
+#endif
                                 if (primary is null) reservation.Dispose();
                                 else { try { reservation.Dispose(); } catch { } }
 #if LEDGETOP_NATIVE_DIAGNOSTICS

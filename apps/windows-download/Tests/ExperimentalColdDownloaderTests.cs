@@ -3,6 +3,8 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Runtime.InteropServices;
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using LedgeTop.WindowsDownload;
 
 internal static class ExperimentalColdDownloaderTests
@@ -10,6 +12,8 @@ internal static class ExperimentalColdDownloaderTests
     private static readonly byte[] Content = "experimental-synthetic-download"u8.ToArray();
     private static readonly byte[] Foreign = "do-not-replace"u8.ToArray();
     private static readonly Uri Origin = new("https://experimental.example.invalid");
+    private static readonly ConcurrentDictionary<Guid, Process> OwnedObservers = new();
+    private static int PendingOwnedResources() => ExperimentalOwnedStream.QuarantinedCountForTest + OwnedObservers.Count;
     private static DownloadSpec Spec => new("synthetic-only", new Uri(Origin, "/data"), "output.bin", Content.Length, "\"v1\"", Convert.ToHexStringLower(SHA256.HashData(Content)));
     private static void Check(bool value) { if (!value) throw new IOException("Experimental cold download assertion failed."); }
     private static HttpResponseMessage Response(byte[] bytes, Stream? input = null) {
@@ -34,9 +38,9 @@ internal static class ExperimentalColdDownloaderTests
     }
     private static Task WithFixture(Func<DirectoryFixture, Task> body)
     {
-        if (ExperimentalOwnedStream.QuarantinedCountForTest != 0) throw new IOException("An experimental owner is already quarantined; no new fixture was created.");
+        if (PendingOwnedResources() != 0) throw new IOException("An experimental owner or observer is still retained; no new fixture was created.");
         var root = new DirectoryFixture();
-        return RunOwnedFixtureAsync(() => body(root), () => ExperimentalOwnedStream.QuarantinedCountForTest,
+        return RunOwnedFixtureAsync(() => body(root), PendingOwnedResources,
             () => { try { root.Dispose(); } catch { Console.Error.WriteLine("Synthetic experimental Downloader cleanup incomplete: " + root.Path); throw; } },
             () => Console.Error.WriteLine("Synthetic experimental Downloader fixture preserved: " + root.Path));
     }
@@ -80,18 +84,62 @@ internal static class ExperimentalColdDownloaderTests
     }
     private static void AssertOtherProcessCannotOpen(string path)
     {
-        var info = new System.Diagnostics.ProcessStartInfo("powershell.exe") { UseShellExecute = false, CreateNoWindow = true };
+        var info = new ProcessStartInfo("powershell.exe") { UseShellExecute = false, CreateNoWindow = true };
         info.ArgumentList.Add("-NoProfile"); info.ArgumentList.Add("-NonInteractive"); info.ArgumentList.Add("-Command");
         info.ArgumentList.Add("try { $f = [IO.File]::Open($env:LEDGETOP_SYNTHETIC_PART, 'Open', 'ReadWrite', 'ReadWrite'); $f.Dispose(); exit 0 } catch [IO.IOException] { exit 17 } catch { exit 18 }");
         info.Environment["LEDGETOP_SYNTHETIC_PART"] = path;
-        using var process = System.Diagnostics.Process.Start(info) ?? throw new IOException("Synthetic cross-process test failed to start.");
-        if (!process.WaitForExit(5000)) throw new IOException("Synthetic open observer remains live; preserve fixture and inspect PID " + process.Id);
-        Check(process.ExitCode == 17);
+        var process = Process.Start(info) ?? throw new IOException("Synthetic cross-process test failed to start."); var transferred = false; Task? reaper = null;
+        try {
+            var exited = ObserveOrRetain(process, 5000, out reaper); transferred = reaper is not null;
+            if (!exited) {
+                throw new IOException("Synthetic open observer remains live; preserve fixture and inspect PID " + process.Id);
+            }
+            Check(process.ExitCode == 17);
+        } catch { if (reaper is not null) transferred = true; throw; }
+        finally { if (!transferred) process.Dispose(); }
+    }
+    private static bool ObserveOrRetain(Process process, int timeoutMilliseconds, out Task? reaper)
+    {
+        reaper = null;
+        try { if (process.WaitForExit(timeoutMilliseconds)) return true; }
+        catch { reaper = TrackOwnedObserver(process); throw; }
+        reaper = TrackOwnedObserver(process); return false;
+    }
+    private static Task TrackOwnedObserver(Process process)
+    {
+        Guid key;
+        do { key = Guid.NewGuid(); } while (!OwnedObservers.TryAdd(key, process));
+        return ReapOwnedObserverAsync(key, process);
+    }
+    private static async Task ReapOwnedObserverAsync(Guid key, Process process)
+    {
+        try { await process.WaitForExitAsync(); }
+        catch (Exception error) { Console.Error.WriteLine("Synthetic observer exit remains uncertain: " + error.GetType().Name); return; }
+        if (OwnedObservers.TryRemove(key, out var owned)) owned.Dispose();
+    }
+    private static async Task ObserverReaperTest()
+    {
+        var eventName = "Local\\LedgeTopSyntheticObserver-" + Guid.NewGuid().ToString("N");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, eventName);
+        var info = new ProcessStartInfo("powershell.exe") { UseShellExecute = false, CreateNoWindow = true };
+        info.ArgumentList.Add("-NoProfile"); info.ArgumentList.Add("-NonInteractive"); info.ArgumentList.Add("-Command");
+        info.ArgumentList.Add("$e = [Threading.EventWaitHandle]::OpenExisting($env:LEDGETOP_SYNTHETIC_OBSERVER_EVENT); try { if (-not $e.WaitOne(5000)) { exit 3 } } finally { $e.Dispose() }");
+        info.Environment["LEDGETOP_SYNTHETIC_OBSERVER_EVENT"] = eventName;
+        var process = Process.Start(info) ?? throw new IOException("Synthetic observer test failed to start.");
+        Task? reaped = null;
+        try {
+            var exited = ObserveOrRetain(process, 0, out reaped);
+            if (exited) { process.Dispose(); throw new IOException("Synthetic observer exited before the timeout check."); }
+            Check(reaped is not null && OwnedObservers.Count == 1);
+        } finally { release.Set(); }
+        await reaped!.WaitAsync(TimeSpan.FromSeconds(7));
+        Check(OwnedObservers.IsEmpty);
     }
     internal static async Task RunAsync()
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         await FixturePolicyTests();
+        await ObserverReaperTest();
         await WithFixture(async root => {
             var calls = 0;
             using var downloader = Engine((request, _) => {
@@ -251,7 +299,31 @@ internal static class ExperimentalColdDownloaderTests
             catch (TransferException error) { throw new IOException("Synthetic cache retry failed: " + error.HydrationFailure?.ActivityText, error); }
             Check(retried.Completed == 1 && retried.Failed == 0 && retried.Bytes.ToArray().SequenceEqual(Content) && source.Downloads == 1);
         });
-        Check(ExperimentalOwnedStream.QuarantinedCountForTest == 0);
+        await WithFixture(async root => {
+            using var source = new CoordinatorSource();
+            using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", root.Path, expectedPrincipal: CoordinatorSource.Principal);
+            source.ResponseFactory = () => Response(Content.Concat(new byte[] { 42 }).ToArray());
+            var token = new object(); var reached = false; var failed = new TestSink();
+            ExperimentalOwnedStream.PrefixRestorationTokenTestHook = token;
+            ExperimentalOwnedStream.BeforeRestoreFlushTestHook = () => { reached = true; throw new IOException("Synthetic rollback flush failure."); };
+            try {
+                await ExpectTransferFailure(coordinator.HydrateAsync(source.Identity, 0, Content.Length, failed));
+                var reservationDir = Path.Combine(root.Path, "verified-hydration-v1", ".hydration-reservations-v2");
+                Check(reached && failed.Failed == 1 && failed.Completed == 0 && failed.Bytes.Length == 0 &&
+                    Directory.EnumerateFiles(reservationDir, "*.json").Count() == 1 && ExperimentalOwnedStream.QuarantinedCountForTest == 1);
+            } finally { ExperimentalOwnedStream.BeforeRestoreFlushTestHook = null; ExperimentalOwnedStream.PrefixRestorationTokenTestHook = null; }
+            var owner = ExperimentalOwnedStream.FindInjectedPrefixOwnerForTest(token);
+            var refused = false; try { owner.Dispose(); } catch (InvalidOperationException) { refused = true; }
+            Check(refused);
+            owner.ReconcileInjectedPrefixForTest(token, []); owner.Dispose();
+            var retained = Path.Combine(root.Path, "verified-hydration-v1", ".hydration-reservations-v2");
+            Check(Directory.EnumerateFiles(retained, "*.json").Count() == 1 && ExperimentalOwnedStream.QuarantinedCountForTest == 0);
+            source.ResponseFactory = null;
+            var retried = new TestSink(); await coordinator.HydrateAsync(source.Identity, 0, Content.Length, retried);
+            Check(retried.Completed == 1 && retried.Failed == 0 && retried.Bytes.ToArray().SequenceEqual(Content) && source.Downloads == 2 &&
+                !Directory.EnumerateFiles(retained, "*.json").Any());
+        });
+        Check(PendingOwnedResources() == 0);
         Console.WriteLine("PASS gated synthetic Downloader: cold and resumed transfers, validation, collision, cancellation and coordinator recovery.");
     }
     private sealed class CancelAfterPrefix(byte[] data, CancellationTokenSource source) : MemoryStream(data)
@@ -277,8 +349,8 @@ internal static class ExperimentalColdDownloaderTests
         internal static readonly string Principal = "odqp1_" + new string('a', 64);
         internal readonly PlaceholderIdentity Identity = new("pilot", "synthetic", ExperimentalColdDownloaderTests.Origin.GetLeftPart(UriPartial.Authority), Principal,
             "odqr1_test", "oef1_" + new string('b', 64), "v1", Spec.FileName, Spec.Length, Spec.ETag, Spec.Sha256);
-        private readonly Downloader downloader; internal int Downloads;
-        internal CoordinatorSource() => downloader = Engine((_, _) => { Downloads++; return Response(Content); });
+        private readonly Downloader downloader; internal int Downloads; internal Func<HttpResponseMessage>? ResponseFactory;
+        internal CoordinatorSource() => downloader = Engine((_, _) => { Downloads++; return ResponseFactory?.Invoke() ?? Response(Content); });
         public string Alias => "synthetic"; public Uri Origin => ExperimentalColdDownloaderTests.Origin;
         bool IHydrationMutationAwareSource.CoordinatesHydrationMutations => true;
         public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken token = default) => Task.FromResult(new QueuedDownloadSession(Principal, DateTimeOffset.UtcNow.AddMinutes(5)));

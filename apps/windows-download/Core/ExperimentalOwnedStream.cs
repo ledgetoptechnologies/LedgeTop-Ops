@@ -21,7 +21,7 @@ internal sealed class ExperimentalOwnedStream : IDisposable
     private SafeFileHandle? sourceHandle;
     private string sourcePath = "";
     private bool sealedStream, verifiedSeal, moved, renameUncertain, disposeUncertain, sourceCloseReturned, injectedCloseBoundary, handedOff;
-    private enum QuarantineReason { None, NativeOperation, BindingChange, InjectedBindingCheck, Disposal }
+    private enum QuarantineReason { None, NativeOperation, BindingChange, InjectedBindingCheck, Disposal, PrefixRestoration, InjectedPrefixRestoration }
     private QuarantineReason quarantineReason;
     private object? bindingInjectionToken;
     private byte[]? sealedDigest;
@@ -29,10 +29,26 @@ internal sealed class ExperimentalOwnedStream : IDisposable
     internal static Action? BeforeSealFlushTestHook, BeforeSealHashTestHook, AfterStreamDisposeTestHook;
     internal static Action? AfterSuccessfulNativeRenameTestHook;
     internal static int QuarantinedCountForTest { get { lock (QuarantineGate) return Quarantined.Count; } }
+    internal static bool HasQuarantineForEntryForTest(string entry)
+    {
+        var prefix = Path.TrimEndingDirectorySeparator(Path.GetFullPath(entry)) + Path.DirectorySeparatorChar;
+        lock (QuarantineGate) return Quarantined.Any(owner => owner.sourcePath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+    }
+    internal static ExperimentalOwnedStream FindInjectedPrefixOwnerForTest(object token)
+    {
+        lock (QuarantineGate) {
+            var matches = Quarantined.Where(owner => owner.quarantineReason == QuarantineReason.InjectedPrefixRestoration &&
+                ReferenceEquals(owner.bindingInjectionToken, token)).ToArray();
+            if (matches.Length != 1) throw new InvalidOperationException("Synthetic prefix owner is not unique.");
+            return matches[0];
+        }
+    }
     internal static Func<nint, int>? SimulatedRenameStatusTestHook;
     internal static Func<uint>? SimulatedWaitTestHook;
     internal static Func<string, string>? PinExpectedPathTestHook;
     internal static object? BindingInjectionTokenTestHook;
+    internal static object? PrefixRestorationTokenTestHook;
+    internal static Action? BeforeRestoreLengthTestHook, BeforeRestoreFlushTestHook;
     internal readonly record struct Identity(ulong Volume, Guid FileId);
     internal Identity SourceIdentity { get; private set; }
 
@@ -92,8 +108,15 @@ internal sealed class ExperimentalOwnedStream : IDisposable
             if (renameUncertain || disposeUncertain || sealedStream || length < 0) throw new InvalidOperationException("Experimental prefix restoration is unavailable.");
             VerifyOwnedPins(); var file = stream ?? throw new ObjectDisposedException(nameof(ExperimentalOwnedStream));
             if (length > file.Length) throw new IOException("Experimental prefix length changed.");
-            file.SetLength(length); file.Flush(true);
-            if (GetIdentity(file.SafeFileHandle) != SourceIdentity) { EnterQuarantine(QuarantineReason.BindingChange); throw new IOException("Experimental partial identity changed."); }
+            var token = (BeforeRestoreLengthTestHook is not null || BeforeRestoreFlushTestHook is not null) ? PrefixRestorationTokenTestHook : null;
+            EnterQuarantine(token is null ? QuarantineReason.PrefixRestoration : QuarantineReason.InjectedPrefixRestoration, token);
+            BeforeRestoreLengthTestHook?.Invoke(); file.SetLength(length);
+            BeforeRestoreFlushTestHook?.Invoke(); file.Flush(true);
+            VerifyPins(directories);
+            if (file.Length != length || GetIdentity(file.SafeFileHandle) != SourceIdentity ||
+                !string.Equals(FinalPath(file.SafeFileHandle), sourcePath, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("Experimental partial restoration is uncertain.");
+            LeaveQuarantine();
         }
     }
 
@@ -282,6 +305,23 @@ internal sealed class ExperimentalOwnedStream : IDisposable
             VerifyPins(directories);
             if (GetIdentity(file.SafeFileHandle) != SourceIdentity || !string.Equals(FinalPath(file.SafeFileHandle), sourcePath, StringComparison.OrdinalIgnoreCase))
                 throw new IOException("Experimental source binding remains uncertain.");
+            LeaveQuarantine();
+        }
+    }
+    // Only for deliberately injected fixture failures, not real rollback I/O.
+    internal void ReconcileInjectedPrefixForTest(object injectionToken, byte[] expectedBytes)
+    {
+        lock (gate) {
+            var file = stream ?? throw new ObjectDisposedException(nameof(ExperimentalOwnedStream));
+            if (!renameUncertain || quarantineReason != QuarantineReason.InjectedPrefixRestoration ||
+                !ReferenceEquals(bindingInjectionToken, injectionToken) || sealedStream || disposeUncertain)
+                throw new InvalidOperationException("No injected prefix restoration to settle.");
+            VerifyPins(directories); file.Flush(true);
+            if (GetIdentity(file.SafeFileHandle) != SourceIdentity || file.Length != expectedBytes.Length ||
+                !string.Equals(FinalPath(file.SafeFileHandle), sourcePath, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("Experimental partial restoration remains uncertain.");
+            file.Position = 0; var actual = new byte[expectedBytes.Length]; file.ReadExactly(actual);
+            if (!actual.AsSpan().SequenceEqual(expectedBytes)) throw new IOException("Experimental prefix bytes changed.");
             LeaveQuarantine();
         }
     }
