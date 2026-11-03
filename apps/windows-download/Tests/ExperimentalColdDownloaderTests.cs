@@ -1477,6 +1477,7 @@ internal static class ExperimentalColdDownloaderTests
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         await WithFixture(SyntheticReceiptNativeBoundaryAsync);
         await WithFixture(SyntheticReceiptNativeSplitRangeAsync);
+        await WithFixture(SharedReceiptLifetimeAsync);
 #endif
         await WithFixture(ReceiptTransferRangesAsync);
         await WithFixture(async fixture => {
@@ -2039,6 +2040,27 @@ internal static class ExperimentalColdDownloaderTests
         AssertOtherProcessCannotOpen(Path.Combine(root, identity.ScopeKey, identity.CacheKey, ".hydration.lock"));
         AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-quota-v2.lock"));
         // A committed transfer with uncertain cleanup stays rooted until child exit.
+    }
+    private static async Task SharedReceiptLifetimeAsync(DirectoryFixture fixture)
+    {
+        using var source = new CoordinatorSource(); var identity = source.Identity;
+        using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", fixture.Path, maximumFileBytes: Content.Length, maximumCacheBytes: 10000, expectedPrincipal: CoordinatorSource.Principal);
+        var shared = await ExperimentalSharedReceipt.CreateAsync(coordinator, identity);
+        var first = await shared.JoinAsync(identity); var second = await shared.JoinAsync(identity);
+        var rejected = false;
+        try { _ = await shared.JoinAsync(identity with { FileName = "foreign.bin" }); } catch (ResourceUnavailableException) { rejected = true; }
+        Check(rejected);
+        source.ResolveFailureForTest = new ResourceUnavailableException(); rejected = false;
+        try { _ = await shared.JoinAsync(identity); } catch (ResourceUnavailableException) { rejected = true; }
+        source.ResolveFailureForTest = null; Check(rejected);
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+        try { _ = await shared.JoinAsync(identity, cancelled.Token); throw new Exception("Canceled request joined."); } catch (OperationCanceledException) { }
+        var closing = shared.DisposeAsync().AsTask(); Check(!closing.IsCompleted);
+        rejected = false; try { _ = await shared.JoinAsync(identity); } catch (ObjectDisposedException) { rejected = true; } Check(rejected);
+        first.Dispose(); first.Dispose(); Check(!closing.IsCompleted);
+        second.Dispose(); await closing.WaitAsync(TimeSpan.FromSeconds(10));
+        await shared.DisposeAsync();
+        Check(ExperimentalReservationOwner.RetainedCount == 0 && ExperimentalEntryLease.RetainedCount == 0);
     }
     private static async Task SyntheticReceiptNativeSplitRangeAsync(DirectoryFixture fixture)
     {
