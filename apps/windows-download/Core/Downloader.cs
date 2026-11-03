@@ -46,6 +46,10 @@ public sealed class Downloader : IDisposable
     private readonly long maximumBytes;
     private readonly CloudflareAccessSession? accessSession;
     private readonly TimeSpan networkInactivityTimeout;
+#if LEDGETOP_CACHE_RACE_TEST
+    // Synthetic-only gate; the project rejects packaging this symbol.
+    internal bool ExperimentalColdOwnedStreamForTest { get; set; }
+#endif
     private sealed record State(int Version, string Descriptor, long Length, string ETag, string Sha256);
     // Exact serialized state/marker growth for the existing bounded downloader format. The
     // descriptor is always 64 lowercase hex; its value cannot affect its serialized length.
@@ -205,6 +209,10 @@ public sealed class Downloader : IDisposable
         CancellationToken cancellationToken, IProgress<DownloadProgress>? progress)
     {
         cancellationToken.ThrowIfCancellationRequested(); Validate(spec);
+#if LEDGETOP_CACHE_RACE_TEST
+        if (ExperimentalColdOwnedStreamForTest && (accessSession is not null || !spec.ContentUri.Host.EndsWith(".invalid", StringComparison.OrdinalIgnoreCase)))
+            throw new TransferException("Experimental cold transfer requires a synthetic source.");
+#endif
         // This is a per-network-await budget, not a total download deadline.
         // Rearm for headers/stream creation/each read, and stop it during local
         // disk writes, hashing and flushes. Active large transfers may continue.
@@ -255,6 +263,10 @@ public sealed class Downloader : IDisposable
         try {
             long offset = File.Exists(partialPath) ? new FileInfo(partialPath).Length : 0;
             if (offset > spec.Length) throw new TransferException("Partial data exceeds the trusted length.");
+#if LEDGETOP_CACHE_RACE_TEST
+            if (ExperimentalColdOwnedStreamForTest && File.Exists(partialPath))
+                throw new TransferException("Experimental owned-stream resume is unsupported.");
+#endif
             // A full unpromoted partial may come from cancellation before the overflow probe or an invalid response.
             // Without a durable completed-response receipt, obtain fresh bytes rather than silently accepting it.
             if (File.Exists(partialPath) && offset == spec.Length) {
@@ -301,6 +313,44 @@ public sealed class Downloader : IDisposable
                 } else if (response.Content.Headers.ContentRange is not null) {
                     throw new TransferException("Unexpected Content-Range on a full response.", TransferFailureReason.InvalidMetadata);
                 }
+#if LEDGETOP_CACHE_RACE_TEST
+                if (ExperimentalColdOwnedStreamForTest) {
+                    // Synthetic-only cold path. Request authentication and all
+                    // response validation above are the real downloader path.
+                    // Existing partial/resume is explicitly unsupported.
+                    RequireRegularFile(partialPath);
+                    var owner = ExperimentalOwnedStream.CreateNew(partialPath); var transferred = false; Exception? primary = null;
+                    try {
+                        network.CancelAfter(networkInactivityTimeout);
+                        await using var input = await response.Content.ReadAsStreamAsync(network.Token);
+                        network.CancelAfter(Timeout.InfiniteTimeSpan); network.Token.ThrowIfCancellationRequested();
+                        var buffer = new byte[65536]; long received = 0;
+                        using (DownloadTimingScope.Measure(1)) while (received < remaining) {
+                            var count = await ReadNetworkAsync(input, buffer.AsMemory(0, (int)Math.Min(buffer.Length, remaining - received)));
+                            if (count == 0) throw new TransferException("The response ended before the trusted length.");
+                            cancellationToken.ThrowIfCancellationRequested(); owner.Write(buffer.AsSpan(0, count)); received += count;
+                            Report(received, DownloadPhase.Receiving);
+                        }
+                        if (await ReadNetworkAsync(input, buffer.AsMemory(0, 1)) != 0) throw new TransferException("The response exceeds the trusted length.");
+                        cancellationToken.ThrowIfCancellationRequested(); Report(spec.Length, DownloadPhase.Verifying);
+                        byte[] digest;
+                        using (DownloadTimingScope.Measure(3)) digest = owner.SealAndHash();
+                        if (!CryptographicOperations.FixedTimeEquals(digest, Convert.FromHexString(spec.Sha256)))
+                            throw new TransferException("SHA-256 verification failed; experimental partial was preserved.");
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var promoted = false;
+                        HydrationMutationScope.Run(() => { CheckPath(finalPath); CheckPath(partialPath); promoted = owner.RenameNoReplace(root, spec.FileName, Convert.FromHexString(spec.Sha256)); }, cancellationToken);
+                        if (!promoted) throw new TransferException("The destination already exists; it will not be overwritten.");
+                        Report(spec.Length, DownloadPhase.Completed);
+                        try { HydrationMutationScope.Run(() => { RequireRegularFile(statePath); File.Delete(statePath); }, committedCleanup: true); }
+                        catch (IOException) { } catch (UnauthorizedAccessException) { } catch (TransferException) { }
+                        var readOnly = owner.OpenReadOnlyHandoff();
+                        try { var result = new VerifiedHydrationDownload(finalPath, readOnly, integrityVerified: true); transferred = true; return result; }
+                        catch { readOnly.Dispose(); throw; }
+                    } catch (Exception error) { primary = error; throw; }
+                    finally { if (!transferred) { if (primary is null) owner.Dispose(); else { try { owner.Dispose(); } catch { } } } }
+                }
+#endif
                 RequireRegularFile(partialPath);
                 await using (var output = new FileStream(partialPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, 65536, FileOptions.Asynchronous)) {
                     if (output.Length != offset) throw new TransferException("Partial data changed during the request.");

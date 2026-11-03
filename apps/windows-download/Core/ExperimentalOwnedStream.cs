@@ -20,7 +20,7 @@ internal sealed class ExperimentalOwnedStream : IDisposable
     private FileStream? stream;
     private SafeFileHandle? sourceHandle;
     private string sourcePath = "";
-    private bool sealedStream, verifiedSeal, moved, renameUncertain, disposeUncertain, sourceCloseReturned, injectedCloseBoundary;
+    private bool sealedStream, verifiedSeal, moved, renameUncertain, disposeUncertain, sourceCloseReturned, injectedCloseBoundary, handedOff;
     private enum QuarantineReason { None, NativeOperation, BindingChange, InjectedBindingCheck, Disposal }
     private QuarantineReason quarantineReason;
     private object? bindingInjectionToken;
@@ -182,6 +182,35 @@ internal sealed class ExperimentalOwnedStream : IDisposable
                 if (failure is not null && primary is null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
             }
         }
+    }
+
+    // Test-only handoff: the facade never exposes the writable native handle.
+    // Its disposal transfers to the whole owner, including directory pins.
+    internal Stream OpenReadOnlyHandoff()
+    {
+        lock (gate) {
+            if (!moved || handedOff || renameUncertain || disposeUncertain || stream is null) throw new InvalidOperationException("Experimental promotion is unavailable.");
+            stream.Position = 0; handedOff = true; return new ReadOnlyHandoff(this);
+        }
+    }
+    private sealed class ReadOnlyHandoff(ExperimentalOwnedStream owner) : Stream
+    {
+        private ExperimentalOwnedStream? current = owner;
+        private ExperimentalOwnedStream Owner => current ?? throw new ObjectDisposedException(nameof(ReadOnlyHandoff));
+        public override bool CanRead => current is not null;
+        public override bool CanSeek => current is not null;
+        public override bool CanWrite => false;
+        public override long Length { get { var o = Owner; lock (o.gate) { o.VerifyOwnedPins(); return (o.stream ?? throw new ObjectDisposedException(nameof(ExperimentalOwnedStream))).Length; } } }
+        public override long Position {
+            get { var o = Owner; lock (o.gate) { o.VerifyOwnedPins(); return (o.stream ?? throw new ObjectDisposedException(nameof(ExperimentalOwnedStream))).Position; } }
+            set { var o = Owner; lock (o.gate) { o.VerifyOwnedPins(); (o.stream ?? throw new ObjectDisposedException(nameof(ExperimentalOwnedStream))).Position = value; } }
+        }
+        public override int Read(byte[] buffer, int offset, int count) { var o = Owner; lock (o.gate) { o.VerifyOwnedPins(); return (o.stream ?? throw new ObjectDisposedException(nameof(ExperimentalOwnedStream))).Read(buffer, offset, count); } }
+        public override long Seek(long offset, SeekOrigin origin) { var o = Owner; lock (o.gate) { o.VerifyOwnedPins(); return (o.stream ?? throw new ObjectDisposedException(nameof(ExperimentalOwnedStream))).Seek(offset, origin); } }
+        public override void Flush() { }
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing) { if (disposing) Interlocked.Exchange(ref current, null)?.Dispose(); base.Dispose(disposing); }
     }
 
     private static void ParkUncertain() { while (true) { try { Thread.Sleep(Timeout.Infinite); } catch (ThreadInterruptedException) { } } }

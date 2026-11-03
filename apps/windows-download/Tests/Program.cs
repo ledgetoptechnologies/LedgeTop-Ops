@@ -43,6 +43,9 @@ if (args.Length == 1 && args[0] == "--native-stall-trace-tests") {
     return;
 }
 #endif
+#if LEDGETOP_CACHE_RACE_TEST
+if (args.Length == 1 && args[0] == "--experimental-cold-downloader-only") { await ExperimentalColdDownloaderTests.RunAsync(); return; }
+#endif
 if (args.Length == 1 && args[0] == "--observe-cross-thread-rejection") {
     await CloudFilesConnectionTests.ObserveCrossThreadRejectionAsync();
     return;
