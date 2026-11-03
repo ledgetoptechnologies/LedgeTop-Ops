@@ -41,7 +41,9 @@ internal static class SyntheticBusyNative {
             var contents = await Task.WhenAll(reads).WaitAsync(TimeSpan.FromSeconds(25));
             Need(contents.All(x => SHA256.HashData(x).SequenceEqual(SHA256.HashData(Bytes))), "Busy retry changed content.");
             Need(state.BusyClock.Elapsed >= TimeSpan.FromSeconds(3), "Expected a three-second busy interval.");
-            Need(entries.All(e => state.Attempts.GetValueOrDefault(e.ResourceReference) >= 5), "Expected multiple bounded busy retries per file.");
+            Need(entries.All(e => state.BusyResponses.GetValueOrDefault(e.ResourceReference) >= 1 &&
+                state.Attempts.GetValueOrDefault(e.ResourceReference) > state.BusyResponses.GetValueOrDefault(e.ResourceReference)),
+                "Each file must receive a busy response and a later successful retry.");
             phases.Add("four native files opened after a three-second 503 busy interval and passed SHA-256 checks");
             await provider.FreeSpaceAsync(entries[0].FileName);
             state.Attempts.Clear(); state.Downloaded = 0; state.Mode = "revoke";
@@ -67,12 +69,43 @@ internal static class SyntheticBusyNative {
         Console.WriteLine(JsonSerializer.Serialize(new { passed = failures.Count==0, phases, failures, receipt=Path.Combine(owned,"receipt.json") }));
         return failures.Count == 0 ? 0 : 1;
     }
-    sealed class State { internal Dictionary<string,PlaceholderIdentity> Entries = []; internal ConcurrentDictionary<string,int> Attempts = new(); internal volatile string Mode = "success"; internal int Downloaded; internal System.Diagnostics.Stopwatch BusyClock = new(); internal TaskCompletionSource BusySeen = new(TaskCreationOptions.RunContinuationsAsynchronously); }
+    internal static int RunBusyWindowTests() {
+        var now = TimeSpan.Zero;
+        var window = new TimedBusyWindow(() => now);
+        Need(window.IsBusy("early"), "The first request must be busy.");
+        now = TimeSpan.FromMilliseconds(2900);
+        Need(window.IsBusy("early") && window.IsBusy("late"), "A late file needs its own busy window.");
+        now = TimeSpan.FromSeconds(3);
+        Need(!window.IsBusy("early") && window.IsBusy("late"), "The first file expires independently.");
+        now = TimeSpan.FromMilliseconds(5900);
+        Need(!window.IsBusy("late"), "The late file expires three seconds after its first request.");
+        Console.WriteLine("Synthetic busy windows: late-start and independent expiry passed; no native registration.");
+        return 0;
+    }
+    private sealed class TimedBusyWindow(Func<TimeSpan> elapsed) {
+        private readonly ConcurrentDictionary<string, TimeSpan> starts = new(StringComparer.Ordinal);
+        internal bool IsBusy(string reference) {
+            var now = elapsed();
+            var started = starts.GetOrAdd(reference, now);
+            return now - started < TimeSpan.FromSeconds(3);
+        }
+    }
+    sealed class State {
+        internal Dictionary<string,PlaceholderIdentity> Entries = [];
+        internal ConcurrentDictionary<string,int> Attempts = new(), BusyResponses = new();
+        internal volatile string Mode = "success";
+        internal int Downloaded;
+        internal System.Diagnostics.Stopwatch BusyClock = new();
+        internal readonly TimedBusyWindow TimedBusy;
+        internal TaskCompletionSource BusySeen = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal State() { TimedBusy = new(() => BusyClock.Elapsed); }
+    }
     sealed class Metadata(State s) : HttpMessageHandler {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage r,CancellationToken ct) {
             var reference = Uri.UnescapeDataString(r.RequestUri!.Query["?resourceRef=".Length..]); var e = s.Entries[reference];
             int n = s.Attempts.AddOrUpdate(reference, 1, (_,old) => old+1); string mode=s.Mode;
-            if (mode == "cancel" || (mode == "timed" && s.BusyClock.Elapsed < TimeSpan.FromSeconds(3)) || (mode != "timed" && n == 1) || (mode == "revoke" && n == 3)) {
+            if (mode == "cancel" || (mode == "timed" && s.TimedBusy.IsBusy(reference)) || (mode != "timed" && n == 1) || (mode == "revoke" && n == 3)) {
+                if (mode == "timed") s.BusyResponses.AddOrUpdate(reference, 1, (_, old) => old + 1);
                 s.BusySeen.TrySetResult(); var busy = new HttpResponseMessage(HttpStatusCode.ServiceUnavailable) { Content = new StringContent("{\"error\":\"employee_gateway_busy\"}",Encoding.UTF8,"application/json") };
                 busy.Headers.CacheControl = new CacheControlHeaderValue { NoStore=true }; return Task.FromResult(busy);
             }

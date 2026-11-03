@@ -5,6 +5,7 @@ using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
 if (args.Length == 1 && args[0] == "--synthetic-busy-native") return await SyntheticBusyNative.RunAsync();
+if (args.Length == 1 && args[0] == "--synthetic-busy-window-tests") return SyntheticBusyNative.RunBusyWindowTests();
 if (args.Length == 1 && args[0] == "--preflight-recovery-tests") return await PreflightRecoveryBoundaryTests.RunAsync();
 
 if (args.Length >= 1 && args[0] == "--identity-refresh-transaction-tests")
