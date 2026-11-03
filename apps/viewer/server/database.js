@@ -2232,10 +2232,12 @@ const MIGRATIONS = [
       WHEN EXISTS(SELECT 1 FROM retained_gcp_source_issues WHERE gcp_set_id=OLD.id)
       BEGIN SELECT RAISE(ABORT,'GCP source set is held for source-custody review'); END;
   `,after(database){
+    const malformedSet=database.prepare("SELECT rowid FROM gcp_sets WHERE id IS NULL OR length(CAST(id AS TEXT))=0 LIMIT 1").get();
+    if(malformedSet)throw Object.assign(new Error(`legacy GCP set has an empty identity at rowid ${malformedSet.rowid}; repair it before migration`),{code:'invalid_legacy_gcp_set_id'});
     const readPage=database.prepare(`SELECT id,dataset_id,source_file_id,source_filename,source_sha256,
       typeof(source_content) AS content_type,length(CAST(source_content AS BLOB)) AS content_byte_size,source_byte_size,created_at
       FROM gcp_sets WHERE id>? ORDER BY id LIMIT 100`);
-    const readContent=database.prepare('SELECT source_content FROM gcp_sets WHERE id=?');
+    const readContent=database.prepare('SELECT CAST(source_content AS BLOB) AS source_bytes FROM gcp_sets WHERE id=?');
     const getFile=database.prepare('SELECT sha256,byte_size FROM dataset_files WHERE id=? AND dataset_id=?');
     const insertSource=database.prepare(`INSERT INTO retained_gcp_sources
       (id,dataset_id,source_file_id,source_filename,sha256,byte_size,source_content,retention_reason,created_at)
@@ -2251,9 +2253,17 @@ const MIGRATIONS = [
       for(const row of rows){
       lastId=row.id;
       const observedByteSize=Number.isSafeInteger(row.content_byte_size)?row.content_byte_size:null;
-      const content=row.content_type==='text'&&observedByteSize!==null&&observedByteSize>0&&observedByteSize<=2097152
-        ?readContent.get(row.id)?.source_content:null;
-      const observedSha256=content==null?null:crypto.createHash('sha256').update(content,'utf8').digest('hex');
+      const sourceBytes=row.content_type==='text'&&observedByteSize!==null&&observedByteSize>0&&observedByteSize<=2097152
+        ?readContent.get(row.id)?.source_bytes:null;
+      const rawBytes=sourceBytes==null?null:Buffer.from(sourceBytes);
+      let content=null;
+      if(rawBytes){
+        try{
+          const decoded=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(rawBytes);
+          if(Buffer.from(decoded,'utf8').equals(rawBytes))content=decoded;
+        }catch{}
+      }
+      const observedSha256=rawBytes==null?null:crypto.createHash('sha256').update(rawBytes).digest('hex');
       if(typeof content!=='string'||!Number.isSafeInteger(observedByteSize)||observedByteSize<1||observedByteSize>2097152||observedByteSize!==row.source_byte_size||observedSha256!==row.source_sha256){
         insertIssue.run(row.id,row.dataset_id,'source_content_checksum_or_size_mismatch',row.source_sha256,observedSha256,row.source_byte_size,observedByteSize,null,null,row.created_at);
         continue;
