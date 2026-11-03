@@ -185,10 +185,19 @@ internal static class ExperimentalColdDownloaderTests
             var idBefore = PhysicalId(part); var bytes = File.ReadAllBytes(part);
             Check(bytes.Length <= Content.Length && Content.AsSpan(0, bytes.Length).SequenceEqual(bytes));
             if (checkpoint is "statewrite" or "beforeflush") {
+                var complete = false;
+                try { using var document = System.Text.Json.JsonDocument.Parse(stateBytes); complete = document.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object; }
+                catch (System.Text.Json.JsonException) { }
+                if (checkpoint == "statewrite") Check(!complete);
                 var calls = 0;
-                using var downloader = Engine((_, _) => { calls++; return Response(Content); });
-                await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
-                Check(calls == 0 && PhysicalId(part) == idBefore && File.ReadAllBytes(part).SequenceEqual(bytes) && File.ReadAllBytes(states[0]).SequenceEqual(stateBytes));
+                using var downloader = Engine((request, _) => { calls++; Check(request.Headers.Range is null); return Response(Content); });
+                if (complete) {
+                    var recovered = await downloader.DownloadAsync(Spec, root.Path);
+                    Check(calls == 1 && PhysicalId(recovered) == idBefore && File.ReadAllBytes(recovered).SequenceEqual(Content));
+                } else {
+                    await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
+                    Check(calls == 0 && PhysicalId(part) == idBefore && File.ReadAllBytes(part).SequenceEqual(bytes) && File.ReadAllBytes(states[0]).SequenceEqual(stateBytes));
+                }
                 return;
             }
             using var resumed = Engine((request, _) => {
