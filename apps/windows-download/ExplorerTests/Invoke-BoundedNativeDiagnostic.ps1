@@ -5,7 +5,9 @@ param(
     [ValidateRange(1, 3600)][int]$ObserveSeconds = 90
 )
 
-# A timeout is observation only: do not stop the child or unregister its root.
+# A timeout is observation only: this script does not stop the child or unregister
+# its root. A task scheduler or job object may still terminate descendants when
+# this wrapper exits; verify the host's process-lifetime policy before use.
 # Each invocation requires a fresh, caller-owned output directory.
 $ErrorActionPreference = 'Stop'
 $directory = [IO.Path]::GetFullPath($OutputDirectory)
@@ -41,7 +43,7 @@ $result = [ordered]@{
 }
 $result | ConvertTo-Json | Set-Content -LiteralPath $receipt -Encoding UTF8
 if (-not $exited) {
-    Write-Warning "Observation timed out; process $($child.Id) was left running. Preserve its fixture and reconcile before further tests."
+    Write-Warning "Observation timed out; no stop was requested by this wrapper for process $($child.Id). Verify its state, preserve its fixture, and reconcile before further tests."
     exit 124
 }
 exit $child.ExitCode
