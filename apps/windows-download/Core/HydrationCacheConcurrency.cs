@@ -75,14 +75,14 @@ internal static class HydrationCacheConcurrency
                 return successor;
             }
         }
-        internal (Lease Admission, ExperimentalEntryLease Entry) TransferExperimentalPair(ExperimentalEntryLease entry, string expectedKey)
+        internal (Lease Admission, ExperimentalEntryLease Entry) TransferExperimentalPair(ExperimentalEntryLease entry, string expectedKey, Action<Lease, ExperimentalEntryLease>? attach = null)
         {
             lock (leaseGate) {
                 ObjectDisposedException.ThrowIf(release is null, this);
                 if (experimentalKey != expectedKey || experimentalEntryBindings != 1)
                     throw new TransferException("Experimental admission and entry cannot be transferred.");
                 var successor = new Lease(Quota, release, acquireLegacy, markerOwner, experimentalRoot, experimentalKey);
-                var moved = entry.JointMoveTo(this, successor, () => { successor.experimentalEntryBindings = 1; experimentalEntryBindings = 0; release = null; });
+                var moved = entry.JointMoveTo(this, successor, next => { attach?.Invoke(successor, next); successor.experimentalEntryBindings = 1; experimentalEntryBindings = 0; release = null; });
                 return (successor, moved);
             }
         }

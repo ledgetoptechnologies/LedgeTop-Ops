@@ -14,7 +14,7 @@ internal sealed class ExperimentalReservationOwner
     private static readonly HashSet<ExperimentalReservationOwner> Registry = [];
     private static readonly HashSet<LeaseReceipt> Receipts = [];
     private readonly object gate = new();
-    private readonly HydrationCacheConcurrency.Lease lease;
+    private HydrationCacheConcurrency.Lease lease;
     private FileStream? entry;
     private ExperimentalEntryLease? ownedEntry;
     private readonly string leaseKey;
@@ -25,7 +25,9 @@ internal sealed class ExperimentalReservationOwner
     private ExperimentalOwnedStream.Identity recordId;
     private readonly byte[] expected;
     private bool finished, uncertain, injectedDispositionFailure, injectedPostDispositionFailure;
-    internal static Action? BeforeDispositionTestHook, AfterDispositionCloseTestHook;
+    internal static Action? BeforeDispositionTestHook, AfterDispositionCloseTestHook, AfterPairTransferTestHook;
+    internal static object? PairTransferTokenTestHook;
+    private object? injectedPairToken;
     internal static Action<string>? BeforeTeardownTestHook;
     private readonly long growth;
     internal long Growth { get { lock (gate) { if (finished || uncertain) throw new IOException("Reservation owner unavailable."); return growth; } } }
@@ -59,6 +61,26 @@ internal sealed class ExperimentalReservationOwner
         foreach (var owner in snapshot) { owner.Verify(); _ = owner.Growth; if (!result.TryAdd(owner.path, owner)) throw new IOException("Duplicate retained reservation."); }
         return result;
     }
+    internal static ExperimentalReservationOwner FindInjectedPairFailureForTest(object token)
+    {
+        lock (RegistryGate) {
+            var matches = Registry.Where(owner => ReferenceEquals(owner.injectedPairToken, token)).ToArray();
+            if (matches.Length != 1) throw new InvalidOperationException("Injected pair failure is not unique.");
+            return matches[0];
+        }
+    }
+    internal void SettleInjectedPairFailureForTest(object token)
+    {
+        lease.RunExperimentalForRoot(root, () => {
+            lock (gate) {
+                if (!ReferenceEquals(injectedPairToken, token) || token is null || AfterPairTransferTestHook is not null ||
+                    record is not null || uncertainHandle is not null || pins.Count != 0 || ownedEntry is null)
+                    throw new InvalidOperationException("Only an injected pre-record pair handoff can be settled.");
+                ownedEntry.Dispose(); ownedEntry = null; lease.Dispose(); finished = true; uncertain = false; injectedPairToken = null;
+                lock (RegistryGate) Registry.Remove(this);
+            }
+        });
+    }
     internal long RecordBytes { get { lock (gate) { if (finished || uncertain) throw new IOException("Reservation owner unavailable."); VerifyCore(); return expected.Length; } } }
 
     private ExperimentalReservationOwner(HydrationCacheConcurrency.Lease lease, FileStream entry, string path, byte[] expected, long growth, string leaseKey)
@@ -84,14 +106,24 @@ internal sealed class ExperimentalReservationOwner
         }
         if (growth != checked(spec.Length + Downloader.HydrationStateGrowthBudget(spec) + 1024)) throw new IOException("Reservation growth does not match its download specification.");
         var path = Path.Combine(root, ".hydration-reservations-v2", scope + "-" + key + ".json");
-        ExperimentalReservationOwner? owner = null; var originalLease = lease; var originalEntry = entry;
-        originalLease.RunExperimentalForRoot(root, () => {
-            originalLease.ExperimentalMarkers.ValidateExisting(Path.GetDirectoryName(path)!, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
-            var pair = originalLease.TransferExperimentalPair(originalEntry, scope + key);
-            owner = new ExperimentalReservationOwner(pair.Admission, pair.Entry, path, bytes.ToArray(), growth, scope + key);
-        });
-        lease = null; entry = null;
-        return CreateRecord(owner!, bytes);
+        var originalLease = lease; var originalEntry = entry;
+        var owner = new ExperimentalReservationOwner(originalLease, originalEntry, path, bytes.ToArray(), growth, scope + key);
+        lock (RegistryGate) Registry.Add(owner);
+        var transferred = false;
+        try {
+            originalLease.RunExperimentalForRoot(root, () => {
+                originalLease.ExperimentalMarkers.ValidateExisting(Path.GetDirectoryName(path)!, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+                _ = originalLease.TransferExperimentalPair(originalEntry, scope + key, (nextLease, nextEntry) => { owner.lease = nextLease; owner.ownedEntry = nextEntry; });
+                transferred = true;
+            });
+            lease = null; entry = null;
+            try { AfterPairTransferTestHook?.Invoke(); }
+            catch { owner.injectedPairToken = PairTransferTokenTestHook; owner.uncertain = true; throw; }
+            return CreateRecord(owner, bytes);
+        } catch {
+            if (!transferred) lock (RegistryGate) Registry.Remove(owner);
+            throw;
+        }
     }
 
     internal static ExperimentalReservationOwner Create(string root, string scope, string key, byte[] bytes, DownloadSpec spec,
@@ -199,8 +231,8 @@ internal sealed class ExperimentalReservationOwner
             lock (RegistryGate) Receipts.Add(receipt);
             try {
                 if (ownedEntry is not null) {
-                    var pair = lease.TransferExperimentalPair(ownedEntry, leaseKey);
-                    receipt.Attach(pair.Admission, pair.Entry); ownedEntry = null;
+                    _ = lease.TransferExperimentalPair(ownedEntry, leaseKey, (nextLease, nextEntry) => receipt.Attach(nextLease, nextEntry));
+                    ownedEntry = null;
                 } else {
                     var moved = lease.TransferForReservationTest(leaseKey);
                     receipt.Attach(moved, entry!); entry = null;

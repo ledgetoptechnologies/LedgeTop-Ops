@@ -931,6 +931,35 @@ internal static class ExperimentalColdDownloaderTests
             } finally { receipt?.Dispose(); entry?.Dispose(); admission?.Dispose(); }
             Check(ExperimentalReservationOwner.RetainedCount == 0 && ExperimentalEntryLease.RetainedCount == 0);
         });
+        await WithFixture(async fixture => {
+            var root = Path.Combine(fixture.Path, "joint-handoff-failure"); Directory.CreateDirectory(root);
+            var scope = new string('a', 64); var key = new string('b', 64); var entryDir = Path.Combine(root, scope, key); Directory.CreateDirectory(entryDir);
+            var reservationDir = Path.Combine(root, ".hydration-reservations-v2"); Directory.CreateDirectory(reservationDir);
+            File.WriteAllBytes(Path.Combine(reservationDir, ".verified-hydration-owner"), "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+            HydrationCacheConcurrency.Lease? admission = await HydrationCacheConcurrency.AcquireAsync(root, scope + key, CancellationToken.None);
+            admission.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate);
+            ExperimentalEntryLease? entry = ExperimentalEntryLease.Open(admission, root, scope, key);
+            var oldEntry = entry; var oldAdmission = admission; var gate = admission.Quota; var token = new object();
+            var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = scope, Entry = key, Growth = Spec.Length + Downloader.HydrationStateGrowthBudget(Spec) + 1024 });
+            var injected = false; ExperimentalReservationOwner.PairTransferTokenTestHook = token;
+            ExperimentalReservationOwner.AfterPairTransferTestHook = () => throw new IOException("Injected pair handoff failure.");
+            try {
+                oldAdmission.RunExperimentalForRoot(root, () => HydrationQuotaGate.Run(gate, () => {
+                    using var quota = new FileStream(Path.Combine(root, ".hydration-quota-v2.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                    _ = ExperimentalReservationOwner.CreateWithOwnedEntry(root, scope, key, bytes, Spec, ref admission, ref entry, quota);
+                }, CancellationToken.None));
+            } catch (IOException error) when (error.Message == "Injected pair handoff failure.") { injected = true; }
+            finally { ExperimentalReservationOwner.AfterPairTransferTestHook = null; ExperimentalReservationOwner.PairTransferTokenTestHook = null; }
+            Check(injected && admission is null && entry is null && ExperimentalReservationOwner.RetainedCount == 1 && ExperimentalEntryLease.RetainedCount == 1);
+            var held = ExperimentalReservationOwner.FindInjectedPairFailureForTest(token);
+            var rejected = false; try { oldEntry.Validate(); } catch (ObjectDisposedException) { rejected = true; } Check(rejected);
+            rejected = false; try { oldAdmission.AcquireExclusiveLegacy(Path.Combine(root, "detached"), FileMode.OpenOrCreate); } catch (ObjectDisposedException) { rejected = true; } Check(rejected);
+            AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock")); AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
+            rejected = false; try { held.SettleInjectedPairFailureForTest(new object()); } catch (InvalidOperationException) { rejected = true; } Check(rejected);
+            held.SettleInjectedPairFailureForTest(token);
+            Check(ExperimentalReservationOwner.RetainedCount == 0 && ExperimentalEntryLease.RetainedCount == 0);
+            AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true); AssertOtherProcessOpen(Path.Combine(entryDir, ".hydration.lock"), true);
+        });
         await AbruptRestartTests();
         await WithFixture(async root => {
             var etag = "\"" + new string('\\', 510) + "\"";
