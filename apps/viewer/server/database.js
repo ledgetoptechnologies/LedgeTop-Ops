@@ -2209,6 +2209,8 @@ const MIGRATIONS = [
       observed_sha256 TEXT,
       expected_byte_size INTEGER,
       observed_byte_size INTEGER,
+      observed_file_sha256 TEXT,
+      observed_file_byte_size INTEGER,
       created_at TEXT NOT NULL
     );
     CREATE INDEX retained_gcp_source_issues_dataset_idx ON retained_gcp_source_issues(dataset_id);
@@ -2226,29 +2228,35 @@ const MIGRATIONS = [
       BEGIN SELECT RAISE(ABORT,'GCP source issue records are immutable'); END;
     CREATE TRIGGER retained_gcp_source_issues_no_delete BEFORE DELETE ON retained_gcp_source_issues
       BEGIN SELECT RAISE(ABORT,'GCP source issue records are permanent'); END;
+    CREATE TRIGGER gcp_sets_source_issue_delete_guard BEFORE DELETE ON gcp_sets
+      WHEN EXISTS(SELECT 1 FROM retained_gcp_source_issues WHERE gcp_set_id=OLD.id)
+      BEGIN SELECT RAISE(ABORT,'GCP source set is held for source-custody review'); END;
   `,after(database){
     const rows=database.prepare(`SELECT id,dataset_id,source_file_id,source_filename,source_sha256,source_content,source_byte_size,created_at
       FROM gcp_sets ORDER BY dataset_id,source_sha256,id`).all();
-    const hasFile=database.prepare('SELECT 1 FROM dataset_files WHERE id=? AND dataset_id=?');
+    const getFile=database.prepare('SELECT sha256,byte_size FROM dataset_files WHERE id=? AND dataset_id=?');
     const insertSource=database.prepare(`INSERT INTO retained_gcp_sources
       (id,dataset_id,source_file_id,source_filename,sha256,byte_size,source_content,retention_reason,created_at)
       VALUES (?,?,?,?,?,?,?,'gcp_source',?)`);
     const insertIssue=database.prepare(`INSERT INTO retained_gcp_source_issues
-      (gcp_set_id,dataset_id,issue_code,expected_sha256,observed_sha256,expected_byte_size,observed_byte_size,created_at)
-      VALUES (?,?,?,?,?,?,?,?)`);
+      (gcp_set_id,dataset_id,issue_code,expected_sha256,observed_sha256,expected_byte_size,observed_byte_size,observed_file_sha256,observed_file_byte_size,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`);
     const existing=database.prepare('SELECT 1 FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?');
     for(const row of rows){
       const content=typeof row.source_content==='string'?row.source_content:null;
       const observedByteSize=content==null?null:Buffer.byteLength(content,'utf8');
       const observedSha256=content==null?null:crypto.createHash('sha256').update(content,'utf8').digest('hex');
       if(!content||!Number.isSafeInteger(observedByteSize)||observedByteSize<1||observedByteSize>2097152||observedByteSize!==row.source_byte_size||observedSha256!==row.source_sha256){
-        insertIssue.run(row.id,row.dataset_id,'source_content_checksum_or_size_mismatch',row.source_sha256,observedSha256,row.source_byte_size,observedByteSize,row.created_at);
+        insertIssue.run(row.id,row.dataset_id,'source_content_checksum_or_size_mismatch',row.source_sha256,observedSha256,row.source_byte_size,observedByteSize,null,null,row.created_at);
         continue;
       }
       let sourceFileId=row.source_file_id;
-      if(sourceFileId&&!hasFile.get(sourceFileId,row.dataset_id)){
-        insertIssue.run(row.id,row.dataset_id,'source_file_reference_missing',row.source_sha256,observedSha256,row.source_byte_size,observedByteSize,row.created_at);
-        sourceFileId=null;
+      if(sourceFileId){
+        const file=getFile.get(sourceFileId,row.dataset_id);
+        if(!file||file.sha256!==row.source_sha256||file.byte_size!==observedByteSize){
+          insertIssue.run(row.id,row.dataset_id,file?'source_file_metadata_mismatch':'source_file_reference_missing',row.source_sha256,observedSha256,row.source_byte_size,observedByteSize,file?.sha256||null,file?.byte_size??null,row.created_at);
+          sourceFileId=null;
+        }
       }
       if(!existing.get(row.dataset_id,row.source_sha256))
         insertSource.run(`retained-gcp-${row.id}`,row.dataset_id,sourceFileId,row.source_filename,row.source_sha256,observedByteSize,content,row.created_at);

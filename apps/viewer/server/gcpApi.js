@@ -127,7 +127,8 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
   router.delete('/api/v1/gcp-sets/:id', authorize('viewer.gcp.write'), mutate, (req, res) => {
     const current = gcp.getSet(req.params.id);
     if (!current) return error(res, 404, 'gcp_set_not_found');
-    gcp.deleteSet(current.id);
+    try { gcp.deleteSet(current.id); }
+    catch (caught) { if(caught?.code==='gcp_source_requires_review')return error(res,409,'gcp_source_requires_review'); throw caught; }
     repository.audit({ actorType: 'admin', actorId: req.actorId, action: 'gcp.set_deleted', entityType: 'gcp_set', entityId: current.id,
       details: { datasetId: current.datasetId, pointCount: current.pointCount } });
     return res.status(204).end();

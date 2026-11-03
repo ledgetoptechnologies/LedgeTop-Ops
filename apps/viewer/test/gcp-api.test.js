@@ -78,6 +78,18 @@ test('manual linked GCP import verifies the managed source bytes and keeps an im
   assert.equal(rejected.status,409);assert.equal((await rejected.json()).code,'invalid_source_file');
 });
 
+test('legacy source custody issues block GCP-set deletion with a safe conflict',async(t)=>{
+  const {base,dataset,database}=await fixture(t),source='point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n';
+  const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers:{authorization:'Bearer admin','content-type':'application/json','idempotency-key':'legacy-issue-import'},
+    body:JSON.stringify({displayName:'Legacy',format:'generic-csv-v1',fileName:'legacy.csv',content:source})});
+  assert.equal(imported.status,201);const set=(await imported.json()).set;
+  database.prepare(`INSERT INTO retained_gcp_source_issues(gcp_set_id,dataset_id,issue_code,expected_sha256,observed_sha256,expected_byte_size,observed_byte_size,created_at)
+    VALUES (?,?,?,NULL,NULL,NULL,NULL,?)`).run(set.id,dataset.id,'legacy_source_review_required',new Date().toISOString());
+  const removed=await fetch(`${base}/api/v1/gcp-sets/${set.id}`,{method:'DELETE',headers:{authorization:'Bearer admin','idempotency-key':'blocked-delete'}});
+  assert.equal(removed.status,409);assert.equal((await removed.json()).code,'gcp_source_requires_review');
+  assert.equal(database.prepare('SELECT source_content FROM gcp_sets WHERE id=?').get(set.id).source_content,source);
+});
+
 test('automatic GCP CSV discovery imports exact Emlid sources idempotently and ignores unrelated CSVs',async(t)=>{
   const {base,dataset,root,database}=await fixture(t),directory=path.join(root,'datasets',dataset.relativePath),createdAt=new Date().toISOString();
   const valid='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nCP-01,500000,4900000,250,44.5,-88.1,230,Projected (m) + vertical (m)\n';

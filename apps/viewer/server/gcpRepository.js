@@ -110,7 +110,28 @@ class GcpRepository {
       const currentDataset=this.dataset(datasetId),pendingStorage=this.database.prepare("SELECT 1 FROM storage_mutations WHERE entity_type='dataset' AND entity_id=? AND status IN ('intent','fs_applied','failed') LIMIT 1").get(datasetId);
       if(!currentDataset||currentDataset.status!=='finalized'||pendingStorage)
         throw Object.assign(new Error('dataset is not available for GCP import'), { code: 'dataset_not_available' });
-      if(sourceFileId){const prior=this.database.prepare('SELECT id FROM gcp_sets WHERE dataset_id=? AND source_file_id=? AND source_sha256=? ORDER BY created_at,id LIMIT 1').get(datasetId,sourceFileId,sourceSha256);if(prior)return this.getSet(prior.id,true);}
+      if(sourceFileId){
+        const prior=this.database.prepare('SELECT id,source_content,source_byte_size FROM gcp_sets WHERE dataset_id=? AND source_file_id=? AND source_sha256=? ORDER BY created_at,id LIMIT 1').get(datasetId,sourceFileId,sourceSha256);
+        if(prior&&prior.source_content===sourceContent&&prior.source_byte_size===sourceByteSize){
+          const source=this.database.prepare('SELECT sha256,byte_size FROM dataset_files WHERE id=? AND dataset_id=?').get(sourceFileId,datasetId);
+          if(!source||source.sha256!==sourceSha256||source.byte_size!==sourceByteSize)
+            throw Object.assign(new Error('GCP source file metadata does not match the verified input'),{code:'invalid_source_file'});
+          const retainedFile=this.database.prepare('SELECT dataset_id,sha256,byte_size FROM retained_dataset_files WHERE dataset_file_id=?').get(sourceFileId);
+          if(retainedFile&&(retainedFile.dataset_id!==datasetId||retainedFile.sha256!==source.sha256||retainedFile.byte_size!==source.byte_size))
+            throw Object.assign(new Error('retained GCP source metadata does not match the dataset file'),{code:'invalid_source_file'});
+          if(!retainedFile)this.database.prepare(`INSERT INTO retained_dataset_files
+            (dataset_file_id,dataset_id,sha256,byte_size,retention_reason,created_at) VALUES (?,?,?,?,'gcp_source',?)`)
+            .run(sourceFileId,datasetId,source.sha256,source.byte_size,timestamp);
+          const retained=this.database.prepare('SELECT source_content,byte_size FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(datasetId,sourceSha256);
+          if(retained&&(retained.source_content!==sourceContent||retained.byte_size!==sourceByteSize))
+            throw Object.assign(new Error('retained GCP source content does not match the verified input'),{code:'gcp_source_requires_review'});
+          if(!retained)this.database.prepare(`INSERT INTO retained_gcp_sources
+            (id,dataset_id,source_file_id,source_filename,sha256,byte_size,source_content,retention_reason,created_at)
+            VALUES (?,?,?,?,?,?,?,'gcp_source',?)`)
+            .run(crypto.randomUUID(),datasetId,sourceFileId,bounded(sourceFilename,240)||null,sourceSha256,sourceByteSize,sourceContent,timestamp);
+          return this.getSet(prior.id,true);
+        }
+      }
       this.database.prepare(`INSERT INTO gcp_sets(id,dataset_id,display_name,source_format,source_file_id,source_filename,
         source_sha256,source_content,source_byte_size,crs,elevation_units,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
         .run(id, datasetId, bounded(displayName, 160), sourceFormat === 'emlid-all-columns-v1' ? 'generic-csv-v1' : sourceFormat, sourceFileId,
@@ -165,7 +186,11 @@ class GcpRepository {
   }
 
   deletePoint(id) { return this.database.prepare('DELETE FROM gcp_points WHERE id=?').run(id).changes === 1; }
-  deleteSet(id) { return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1; }
+  deleteSet(id) {
+    if(this.database.prepare('SELECT 1 FROM retained_gcp_source_issues WHERE gcp_set_id=?').get(id))
+      throw Object.assign(new Error('GCP source is held for custody review'),{code:'gcp_source_requires_review'});
+    return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1;
+  }
 
   listRankedImages(datasetId, selectedPointId, limit = 100, offset = 0) {
     const point = selectedPointId ? this.database.prepare(`SELECT points.* FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id

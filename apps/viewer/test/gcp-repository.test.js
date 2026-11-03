@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -19,7 +20,7 @@ function fixture(t) {
   const processing = new ProcessingRepository(database);
   const gcp = new GcpRepository(database);
   t.after(() => { database.close(); fs.rmSync(root, { recursive: true, force: true }); });
-  return { database, processing, gcp };
+  return { root, database, processing, gcp };
 }
 
 function datasetFixture(t) {
@@ -123,11 +124,15 @@ test('source custody migration verifies legacy CSV bytes and holds corrupt histo
   const badDataset=processing.createDataset({projectId:project.id,displayName:'Corrupt CSV',storageMode:'managed',rootKey:'datasets',relativePath:'corrupt'});
   const finalize=(dataset,id)=>processing.finalizeDataset(dataset.id,[{id,relativePath:'photo.jpg',byteSize:0,sha256:crypto.createHash('sha256').digest('hex'),contentType:'image/jpeg'}],crypto.createHash('sha256').digest('hex'));
   finalize(validDataset,'valid-image');finalize(badDataset,'bad-image');
-  const importSource=(dataset,content,name)=>gcp.importSet({datasetId:dataset.id,displayName:name,sourceFormat:'generic-csv-v1',sourceSha256:crypto.createHash('sha256').update(content).digest('hex'),sourceContent:content,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:test',points:[{externalId:name,label:name,latitude:44.5,longitude:-88.1,elevationM:250,description:null}]});
-  const good=importSource(validDataset,GCP_SOURCE,'Good'),bad=importSource(badDataset,'point_id,label,latitude,longitude,elevation_m\nBAD,Bad,44.5,-88.1,250\n','Bad');
+  const importSource=(dataset,content,name,sourceFileId=null)=>gcp.importSet({datasetId:dataset.id,displayName:name,sourceFormat:'generic-csv-v1',sourceFileId,sourceFilename:sourceFileId?'control.csv':null,sourceSha256:crypto.createHash('sha256').update(content).digest('hex'),sourceContent:content,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:test',points:[{externalId:name,label:name,latitude:44.5,longitude:-88.1,elevationM:250,description:null}]});
+  const badSource='point_id,label,latitude,longitude,elevation_m\nBAD,Bad,44.5,-88.1,250\n',badSha=crypto.createHash('sha256').update(badSource).digest('hex');
+  database.prepare('INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,created_at) VALUES (?,?,?,?,?,?,?)')
+    .run('bad-csv',badDataset.id,'control.csv',Buffer.byteLength(badSource),badSha,'text/csv',new Date().toISOString());
+  const good=importSource(validDataset,GCP_SOURCE,'Good'),bad=importSource(badDataset,badSource,'Bad','bad-csv');
   database.prepare('UPDATE gcp_sets SET source_content=? WHERE id=?').run('corrupt',bad.id);
   database.exec(`DROP TRIGGER retained_gcp_sources_no_insert_replace; DROP TRIGGER retained_gcp_sources_no_update; DROP TRIGGER retained_gcp_sources_no_delete;
     DROP TRIGGER retained_gcp_source_issues_no_insert_replace; DROP TRIGGER retained_gcp_source_issues_no_update; DROP TRIGGER retained_gcp_source_issues_no_delete;
+    DROP TRIGGER gcp_sets_source_issue_delete_guard;
     DROP INDEX retained_gcp_sources_dataset_sha_idx; DROP INDEX retained_gcp_source_issues_dataset_idx;
     DROP TABLE retained_gcp_sources; DROP TABLE retained_gcp_source_issues; DELETE FROM schema_migrations WHERE version=47;`);
   database.close();database=openDatabase(file);
@@ -138,7 +143,27 @@ test('source custody migration verifies legacy CSV bytes and holds corrupt histo
   assert.equal(recoveredProcessing.hasDatasetRetentionHold(badDataset.id),true,'unverified historical bytes remain held for review');
   assert.equal(recoveredProcessing.beginTrashMutation(badDataset.id,'ops:test'),null);
   assert.equal(recoveredProcessing.trashProject(project.id,'ops:test'),null);
+  const recoveredGcp=new GcpRepository(database);
+  assert.throws(()=>recoveredGcp.deleteSet(bad.id),{code:'gcp_source_requires_review'});
+  assert.equal(recoveredGcp.database.prepare('SELECT source_content FROM gcp_sets WHERE id=?').get(bad.id).source_content,'corrupt');
+  const repaired=recoveredGcp.importSet({datasetId:badDataset.id,displayName:'Corrected source',sourceFormat:'generic-csv-v1',sourceFileId:'bad-csv',sourceFilename:'control.csv',sourceSha256:badSha,sourceContent:badSource,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:repair',points:[{externalId:'Corrected',label:'Corrected',latitude:44.5,longitude:-88.1,elevationM:250,description:null}]});
+  assert.notEqual(repaired.id,bad.id,'reimport does not return a corrupt matching legacy set');
+  assert.equal(recoveredGcp.database.prepare('SELECT source_content FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(badDataset.id,badSha).source_content,badSource);
   assert.ok(good.id);
+});
+
+test('two SQLite writers converge concurrent duplicate source imports on one immutable custody record',async(t)=>{
+  const {root,database,processing,dataset}=datasetFixture(t),sourcePath=path.join(root,'viewer.sqlite'),payload={datasetId:dataset.id,displayName:'Concurrent control',sourceFormat:'generic-csv-v1',sourceFileId:'gcp-file',sourceFilename:'control.csv',
+    sourceSha256:GCP_SOURCE_SHA,sourceContent:GCP_SOURCE,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:concurrency',
+    points:[{externalId:'GCP-01',label:'Target',latitude:44.5,longitude:-88.1,elevationM:243.84,description:null}]};
+  assert.ok(processing.getDataset(dataset.id));
+  const childSource=`const {openDatabase}=require(process.argv[1]);const {GcpRepository}=require(process.argv[2]);const db=openDatabase(process.argv[3]);try{const set=new GcpRepository(db).importSet(JSON.parse(process.argv[4]));process.stdout.write(set.id);}finally{db.close();}`;
+  const run=()=>new Promise((resolve,reject)=>{const child=spawn(process.execPath,['-e',childSource,path.resolve(__dirname,'../server/database.js'),path.resolve(__dirname,'../server/gcpRepository.js'),sourcePath,JSON.stringify(payload)],{stdio:['ignore','pipe','pipe']});const out=[],err=[];child.stdout.on('data',(chunk)=>out.push(chunk));child.stderr.on('data',(chunk)=>err.push(chunk));child.once('error',reject);child.once('close',(code)=>code===0?resolve(Buffer.concat(out).toString()):reject(new Error(Buffer.concat(err).toString()||`child exited ${code}`)));});
+  const ids=await Promise.all([run(),run()]);
+  assert.equal(ids[0],ids[1]);
+  assert.equal(database.prepare('SELECT COUNT(*) count FROM gcp_sets WHERE dataset_id=? AND source_file_id=? AND source_sha256=?').get(dataset.id,'gcp-file',GCP_SOURCE_SHA).count,1);
+  assert.equal(database.prepare('SELECT COUNT(*) count FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(dataset.id,GCP_SOURCE_SHA).count,1);
+  assert.equal(database.prepare('SELECT COUNT(*) count FROM retained_dataset_files WHERE dataset_file_id=?').get('gcp-file').count,1);
 });
 
 test('image suggestions reuse indexed EXIF GPS and rank distance without claiming visibility', (t) => {
