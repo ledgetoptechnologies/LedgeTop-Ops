@@ -418,6 +418,21 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             if (freshDownload is not null) await freshDownload.DisposeAsync().ConfigureAwait(false);
         }
     }
+#if LEDGETOP_CACHE_RACE_TEST
+    // Synthetic observation only: the result is not a reusable authorization
+    // and cannot authorize a later reservation or mutation.
+    internal async Task<long> ExperimentalObserveAuthorizedGrowthAsync(PlaceholderIdentity identity, CancellationToken token = default)
+    {
+        identity.Encode();
+        if (principal is null || identity.PrincipalId != principal || identity.Channel != channel || identity.SourceAlias != source.Alias ||
+            identity.Origin != source.Origin.GetLeftPart(UriPartial.Authority) || identity.Length > maximumFileBytes)
+            throw new TransferException("Hydration identity is unavailable.");
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        var resolved = await AuthorizeWithRetry(identity, token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        return checked(resolved.Spec.Length + Downloader.HydrationStateGrowthBudget(resolved.Spec) + 1024);
+    }
+#endif
     internal static async Task TransferVerifiedRange(Stream input, long offset, long length, IPlaceholderTransferSink sink, CancellationToken token) {
         input.Position = offset; var remaining = length; var buffer = new byte[65536];
         while (remaining > 0) {

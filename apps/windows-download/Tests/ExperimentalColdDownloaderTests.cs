@@ -1052,6 +1052,26 @@ internal static class ExperimentalColdDownloaderTests
             Check(ExperimentalReservationOwner.RetainedCount == 0 && ExperimentalEntryLease.RetainedCount == 0);
             AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true); AssertOtherProcessOpen(Path.Combine(entryDir, ".hydration.lock"), true);
         });
+        await WithFixture(async fixture => {
+            using var source = new CoordinatorSource();
+            using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", fixture.Path, expectedPrincipal: CoordinatorSource.Principal);
+            var observed = await coordinator.ExperimentalObserveAuthorizedGrowthAsync(source.Identity);
+            Check(observed == Spec.Length + Downloader.HydrationStateGrowthBudget(Spec) + 1024 && source.Resolves == 1 && source.Downloads == 0);
+            var refused = false;
+            try { _ = await coordinator.ExperimentalObserveAuthorizedGrowthAsync(source.Identity with { PrincipalId = "odqp1_" + new string('c', 64) }); }
+            catch (TransferException) { refused = true; }
+            Check(refused && source.Resolves == 1);
+            foreach (var change in new Func<ResolvedQueuedDownload, ResolvedQueuedDownload>[] {
+                value => value with { PrincipalId = "odqp1_" + new string('c', 64) },
+                value => value with { Spec = value.Spec with { ETag = "\"changed\"" } },
+                value => value with { Spec = value.Spec with { Length = value.Spec.Length + 1 } },
+                value => value with { Spec = value.Spec with { ContentUri = new Uri("https://foreign.example.invalid/data") } }
+            }) {
+                source.RewriteResolutionForTest = change; refused = false;
+                try { _ = await coordinator.ExperimentalObserveAuthorizedGrowthAsync(source.Identity); } catch (ResourceUnavailableException) { refused = true; }
+                Check(refused && source.Downloads == 0);
+            }
+        });
         await AbruptRestartTests();
         await WithFixture(async root => {
             var etag = "\"" + new string('\\', 510) + "\"";
@@ -1443,15 +1463,17 @@ internal static class ExperimentalColdDownloaderTests
         internal static readonly string Principal = "odqp1_" + new string('a', 64);
         internal readonly PlaceholderIdentity Identity = new("pilot", "synthetic", ExperimentalColdDownloaderTests.Origin.GetLeftPart(UriPartial.Authority), Principal,
             "odqr1_test", "oef1_" + new string('b', 64), "v1", Spec.FileName, Spec.Length, Spec.ETag, Spec.Sha256);
-        private readonly Downloader downloader; internal int Downloads; internal Func<HttpResponseMessage>? ResponseFactory; internal Action<HttpRequestMessage>? InspectRequest;
+        private readonly Downloader downloader; internal int Downloads, Resolves; internal Func<ResolvedQueuedDownload, ResolvedQueuedDownload>? RewriteResolutionForTest; internal Func<HttpResponseMessage>? ResponseFactory; internal Action<HttpRequestMessage>? InspectRequest;
         internal CoordinatorSource() => downloader = Engine((request, _) => { Downloads++; InspectRequest?.Invoke(request); return ResponseFactory?.Invoke() ?? Response(Content); });
         public string Alias => "synthetic"; public Uri Origin => ExperimentalColdDownloaderTests.Origin;
         bool IHydrationMutationAwareSource.CoordinatesHydrationMutations => true;
         public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken token = default) => Task.FromResult(new QueuedDownloadSession(Principal, DateTimeOffset.UtcNow.AddMinutes(5)));
         public Task<ResolvedQueuedDownload> ResolveAsync(string reference, CancellationToken token = default) {
             if (reference != Identity.ResourceReference) throw new ResourceUnavailableException();
-            return Task.FromResult(new ResolvedQueuedDownload(Principal, Identity.LogicalFileId, Identity.RemoteVersion,
-                Spec with { OpaqueIdentity = Identity.LogicalFileId + ":" + Identity.RemoteVersion }));
+            Resolves++;
+            var resolved = new ResolvedQueuedDownload(Principal, Identity.LogicalFileId, Identity.RemoteVersion,
+                Spec with { OpaqueIdentity = Identity.LogicalFileId + ":" + Identity.RemoteVersion });
+            return Task.FromResult(RewriteResolutionForTest?.Invoke(resolved) ?? resolved);
         }
         public Task<string> DownloadAsync(DownloadSpec spec, string destination, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default) => downloader.DownloadAsync(spec, destination, cancellationToken, progress);
         Task<VerifiedHydrationDownload> IVerifiedHydrationDownloadSource.DownloadForHydrationAsync(DownloadSpec spec, string destination, CancellationToken token) => downloader.DownloadVerifiedForHydrationAsync(spec, destination, token);
