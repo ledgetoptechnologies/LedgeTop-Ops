@@ -95,7 +95,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                     var pendingMarker = Environment.GetEnvironmentVariable("LEDGETOP_TEST_PENDING_MARKER") ?? "off";
                     if (failFast is not ("0" or "1") || (failFast == "1" && serial != "1"))
                         throw new IOException("Synthetic admission comparison scope mismatch.");
-                    if (pendingMarker is "reopen" or "retained" or "mutated" or "mutated-retained") {
+                    if (pendingMarker is "reopen" or "retained" or "mutated" or "mutated-retained" or "mutated-shared-reopen") {
                         if (serial != "0" || failFast != "0" || cacheStage != "none" || DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO")) != "none")
                             throw new IOException("Synthetic pending comparison scope mismatch.");
                         await CloudFilesNativeTransfer.HydrateSyntheticMemorySerialAsync(identity, context, bytes, token,
