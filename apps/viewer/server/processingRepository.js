@@ -355,14 +355,14 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     OR EXISTS(SELECT 1 FROM retained_gcp_sources WHERE dataset_id=? LIMIT 1)
     OR EXISTS(SELECT 1 FROM retained_gcp_source_issues WHERE dataset_id=? LIMIT 1)
     OR EXISTS(SELECT 1 FROM gcp_sets WHERE dataset_id=? AND source_file_id IS NOT NULL LIMIT 1)`).get(datasetId,datasetId,datasetId,datasetId));}
-  hasHeldSourceSnapshot(datasetId){return Boolean(this.database.prepare("SELECT 1 FROM viewer_source_snapshots WHERE dataset_id=? AND status IN ('held','accepted') LIMIT 1").get(datasetId));}
-  hasDatasetRetentionHold(datasetId){return this.hasRetainedGcpSource(datasetId)||this.hasHeldSourceSnapshot(datasetId);}
+  hasRetainedSourceSnapshot(datasetId){return Boolean(this.database.prepare('SELECT 1 FROM viewer_source_snapshots WHERE dataset_id=? LIMIT 1').get(datasetId));}
+  hasDatasetRetentionHold(datasetId){return this.hasRetainedGcpSource(datasetId)||this.hasRetainedSourceSnapshot(datasetId);}
   hasRetainedSourceInProject(projectId){return Boolean(this.database.prepare(`SELECT 1 FROM datasets d WHERE d.project_id=? AND (
     EXISTS(SELECT 1 FROM retained_dataset_files r WHERE r.dataset_id=d.id)
     OR EXISTS(SELECT 1 FROM retained_gcp_sources r WHERE r.dataset_id=d.id)
     OR EXISTS(SELECT 1 FROM retained_gcp_source_issues r WHERE r.dataset_id=d.id)
     OR EXISTS(SELECT 1 FROM gcp_sets g WHERE g.dataset_id=d.id AND g.source_file_id IS NOT NULL)
-    OR EXISTS(SELECT 1 FROM viewer_source_snapshots s WHERE s.dataset_id=d.id AND s.status IN ('held','accepted'))
+    OR EXISTS(SELECT 1 FROM viewer_source_snapshots s WHERE s.dataset_id=d.id)
   ) LIMIT 1`).get(projectId));}
   beginTrashMutation(datasetId,actor){return this.transaction(()=>{const dataset=this.getDataset(datasetId);if(!dataset||this.hasDatasetRetentionHold(datasetId))return null;const existing=this.database.prepare("SELECT * FROM storage_mutations WHERE entity_type='dataset' AND entity_id=? AND status IN ('intent','fs_applied') ORDER BY created_at LIMIT 1").get(datasetId);if(existing)return existing.mutation_type==='trash'?this.storageMutation(existing):null;if(dataset.storageMode==='external_reference'||dataset.rootKey!=='datasets'||dataset.status==='trashed'||this.datasetReferences(datasetId)>0||this.activeDatasetOperations(datasetId)>0)return null;const id=crypto.randomUUID(),trashId=crypto.randomUUID(),t=now(),trashRelative=`dataset/${datasetId}-${trashId}`,allowAbsent=dataset.status==='draft'&&dataset.fileCount===0;this.database.prepare("INSERT INTO storage_mutations(id,mutation_type,entity_type,entity_id,trash_id,source_root_key,source_relative_path,destination_root_key,destination_relative_path,allow_absent_source,status,actor,created_at,updated_at,original_status) VALUES (?,'trash','dataset',?,?,?,?,'trash',?,?,'intent',?,?,?,?)").run(id,datasetId,trashId,dataset.rootKey,dataset.relativePath,trashRelative,allowAbsent?1:0,actor||null,t,t,dataset.status);return this.getStorageMutation(id);});}
   beginOutputTrashMutation(outputId,actor,originalStatus='archived',{archiveInactiveReady=false,validate=null}={}){return this.transaction(()=>{

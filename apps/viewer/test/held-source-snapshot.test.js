@@ -69,7 +69,7 @@ test('source snapshot is signed, immutable, nonreusable, and holds its dataset u
     'snapshot identity must equal the signed attempt identity');
   assert.throws(() => database.prepare('INSERT OR REPLACE INTO viewer_source_snapshots SELECT * FROM viewer_source_snapshots WHERE snapshot_id=?').run(snapshotId),
     /never reusable or replaceable/);
-  assert.equal(processing.hasHeldSourceSnapshot(dataset.id), true);
+  assert.equal(processing.hasRetainedSourceSnapshot(dataset.id), true);
   assert.equal(processing.beginTrashMutation(dataset.id, 'ops:test'), null);
   assert.equal(processing.trashProject(project.id, 'ops:test'), null);
   assert.equal(processing.trashTask(task.id, 'ops:test'), null);
@@ -92,7 +92,7 @@ test('source snapshot is signed, immutable, nonreusable, and holds its dataset u
   });
   assert.equal(accepted.status, 'accepted');
   assert.deepEqual(accepted.acceptanceReceipt, receipt);
-  assert.equal(processing.hasHeldSourceSnapshot(dataset.id), true, 'acceptance alone keeps the source held');
+  assert.equal(processing.hasRetainedSourceSnapshot(dataset.id), true, 'acceptance alone keeps the source retained');
   assert.equal(releaseHeldSourceSnapshot(processing, snapshotId, {
     verifyAcceptance: () => false,
   }), null, 'the release receipt must match the accepted receipt');
@@ -100,7 +100,11 @@ test('source snapshot is signed, immutable, nonreusable, and holds its dataset u
     verifyAcceptance: (snapshot, observedReceipt) => snapshot.snapshotId === snapshotId && observedReceipt.downstreamJobId === 'job-1',
   });
   assert.equal(released.status, 'released');
-  assert.equal(processing.hasHeldSourceSnapshot(dataset.id), false);
+  assert.equal(processing.hasRetainedSourceSnapshot(dataset.id), true, 'release records a verified handoff but keeps the Viewer source permanently retained');
+  assert.equal(processing.hasDatasetRetentionHold(dataset.id), true);
+  assert.equal(processing.trashTask(task.id, 'ops:test'), null, 'released snapshots continue blocking task trash');
+  assert.equal(processing.trashProject(project.id, 'ops:test'), null, 'released snapshots continue blocking project trash');
+  assert.equal(processing.beginPurgeMutation(trashId, 'ops:test'), null, 'pre-existing trash rows cannot purge a released snapshot source');
   assert.throws(() => database.prepare('DELETE FROM viewer_source_snapshots WHERE snapshot_id=?').run(snapshotId), /never reusable/);
   assert.throws(() => database.prepare("UPDATE viewer_source_snapshots SET status='held' WHERE snapshot_id=?").run(snapshotId), /lifecycle transition/);
 });
@@ -145,7 +149,7 @@ test('snapshot binds raw GCP evidence and generated NodeODM file into the held s
   const changedFile = { ...snapshot, gcpFileFrames: Buffer.from(snapshot.gcpFileFrames) };
   changedFile.gcpFileFrames[0] ^= 1;
   assert.equal(verifyHeldSourceSnapshot(changedFile, publicKey), false, 'generated GCP bytes are signed and immutable');
-  assert.equal(processing.hasHeldSourceSnapshot(dataset.id), true);
+  assert.equal(processing.hasRetainedSourceSnapshot(dataset.id), true);
 });
 
 test('raw GCP source without task correspondences cannot be silently omitted from the signed snapshot', (t) => {
@@ -156,5 +160,5 @@ test('raw GCP source without task correspondences cannot be silently omitted fro
     datasetId: dataset.id, taskId: task.id, attemptId: attempt.id, signer,
   }), { code: 'snapshot_gcp_evidence_required' });
   assert.equal(processing.hasRetainedGcpSource(dataset.id), true, 'the original GCP CSV remains in permanent custody');
-  assert.equal(processing.hasHeldSourceSnapshot(dataset.id), false);
+  assert.equal(processing.hasRetainedSourceSnapshot(dataset.id), false);
 });
