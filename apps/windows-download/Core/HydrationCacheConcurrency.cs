@@ -34,7 +34,18 @@ internal static class HydrationCacheConcurrency
 #if LEDGETOP_CACHE_RACE_TEST
         private readonly Func<ExperimentalRootMarkerOwner> markerOwner;
         private readonly string experimentalRoot, experimentalKey;
+        private int experimentalEntryBindings;
+        internal void RegisterExperimentalEntry() { lock (leaseGate) { ObjectDisposedException.ThrowIf(release is null, this); experimentalEntryBindings = checked(experimentalEntryBindings + 1); } }
+        internal void UnregisterExperimentalEntry() { lock (leaseGate) { if (experimentalEntryBindings <= 0) throw new InvalidOperationException("Experimental entry binding missing."); experimentalEntryBindings--; } }
         internal bool ExperimentalGateHeld => Monitor.IsEntered(leaseGate);
+        internal void RunExperimentalForEntry(string path, string key, Action operation) {
+            lock (leaseGate) {
+                ObjectDisposedException.ThrowIf(release is null, this);
+                if (!string.Equals(experimentalRoot, Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase) || experimentalKey != key)
+                    throw new TransferException("Experimental entry lease does not match admission.");
+                operation();
+            }
+        }
         internal void RunExperimentalForRoot(string path, Action operation) {
             lock (leaseGate) {
                 ObjectDisposedException.ThrowIf(release is null, this);
@@ -58,6 +69,7 @@ internal static class HydrationCacheConcurrency
             lock (leaseGate) {
                 ObjectDisposedException.ThrowIf(release is null, this);
                 if (experimentalKey != expectedKey) throw new TransferException("Experimental reservation entry does not match its lease.");
+                if (experimentalEntryBindings != 0) throw new TransferException("Experimental entry binding requires a joint transfer.");
                 var successor = new Lease(Quota, release, acquireLegacy, markerOwner, experimentalRoot, experimentalKey);
                 release = null;
                 return successor;
@@ -90,7 +102,12 @@ internal static class HydrationCacheConcurrency
                 acquireLegacy(path, mode);
             }
         }
-        public void Dispose() { lock (leaseGate) Interlocked.Exchange(ref release, null)?.Invoke(); }
+        public void Dispose() { lock (leaseGate) {
+#if LEDGETOP_CACHE_RACE_TEST
+            if (experimentalEntryBindings != 0) throw new IOException("Experimental entry binding remains active.");
+#endif
+            Interlocked.Exchange(ref release, null)?.Invoke();
+        } }
     }
     internal static async Task<Lease> AcquireAsync(string root, string key, CancellationToken token, bool exclusive = false, TimeSpan? testTimeout = null)
     {

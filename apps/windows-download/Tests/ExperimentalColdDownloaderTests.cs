@@ -14,7 +14,7 @@ internal static class ExperimentalColdDownloaderTests
     private static readonly Uri Origin = new("https://experimental.example.invalid");
     private static readonly ConcurrentDictionary<Guid, Process> OwnedObservers = new();
     private static readonly ConcurrentBag<object> UncertainTestResources = new();
-    private static int PendingOwnedResources() => ExperimentalOwnedStream.QuarantinedCountForTest + ExperimentalReservationOwner.RetainedCount + OwnedObservers.Count + UncertainTestResources.Count;
+    private static int PendingOwnedResources() => ExperimentalOwnedStream.QuarantinedCountForTest + ExperimentalEntryLease.RetainedCount + ExperimentalReservationOwner.RetainedCount + OwnedObservers.Count + UncertainTestResources.Count;
     private static DownloadSpec Spec => new("synthetic-only", new Uri(Origin, "/data"), "output.bin", Content.Length, "\"v1\"", Convert.ToHexStringLower(SHA256.HashData(Content)));
     private static void Check(bool value) { if (!value) throw new IOException("Experimental cold download assertion failed."); }
     private static (ulong Volume, Guid Id) PhysicalId(string path)
@@ -831,6 +831,42 @@ internal static class ExperimentalColdDownloaderTests
                 AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true); AssertOtherProcessOpen(Path.Combine(entryDir, ".hydration.lock"), true);
             } finally { receipt?.Dispose(); entry?.Dispose(); admission?.Dispose(); }
             Check(ExperimentalReservationOwner.RetainedCount == 0);
+        });
+        await WithFixture(async fixture => {
+            var root = Path.Combine(fixture.Path, "owned-entry"); Directory.CreateDirectory(root);
+            var scope = new string('a', 64); var key = new string('b', 64); var entryDir = Path.Combine(root, scope, key); Directory.CreateDirectory(entryDir);
+            var admission = await HydrationCacheConcurrency.AcquireAsync(root, scope + key, CancellationToken.None);
+            ExperimentalEntryLease? original = null; ExperimentalEntryLease? winner = null; var raceUncertain = false;
+            try {
+                var rejected = false; try { _ = ExperimentalEntryLease.Open(admission, root, scope, key); } catch (TransferException) { rejected = true; } Check(rejected);
+                admission.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate);
+                rejected = false; try { _ = ExperimentalEntryLease.Open(admission, root, scope, new string('c', 64)); } catch (TransferException) { rejected = true; } Check(rejected);
+                using (var blocker = new FileStream(Path.Combine(entryDir, ".hydration.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)) {
+                    rejected = false; try { _ = ExperimentalEntryLease.Open(admission, root, scope, key); } catch (IOException) { rejected = true; } Check(rejected);
+                }
+                original = ExperimentalEntryLease.Open(admission, root, scope, key); var alias = original;
+                rejected = false; try { admission.Dispose(); } catch (IOException) { rejected = true; } Check(rejected);
+                rejected = false; try { _ = admission.TransferForReservationTest(scope + key); } catch (TransferException) { rejected = true; } Check(rejected);
+                AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
+                var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                async Task<ExperimentalEntryLease?> Move() { await start.Task; try { return alias.Move(); } catch (ObjectDisposedException) { return null; } }
+                var first = Task.Run(Move); var second = Task.Run(Move); start.SetResult();
+                var moved = await AwaitRaceOrRetain(new[] { first, second }, TimeSpan.FromSeconds(10), tasks => { raceUncertain = true; UncertainTestResources.Add((fixture, admission, alias, tasks)); });
+                Check(moved.Count(item => item is not null) == 1); winner = moved.Single(item => item is not null);
+                rejected = false; try { alias.Validate(); } catch (ObjectDisposedException) { rejected = true; } Check(rejected);
+                rejected = false; try { alias.Dispose(); } catch (ObjectDisposedException) { rejected = true; } Check(rejected);
+                winner!.Validate(); AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
+                var active = winner; var nextStart = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                async Task<(ExperimentalEntryLease? Moved, bool Disposed)> MoveAgain() { await nextStart.Task; try { return (active.Move(), false); } catch (ObjectDisposedException) { return (null, false); } }
+                async Task<(ExperimentalEntryLease? Moved, bool Disposed)> DisposeRace() { await nextStart.Task; try { active.Dispose(); return (null, true); } catch (ObjectDisposedException) { return (null, false); } }
+                var moving = Task.Run(MoveAgain); var disposing = Task.Run(DisposeRace); nextStart.SetResult();
+                var race = await AwaitRaceOrRetain(new[] { moving, disposing }, TimeSpan.FromSeconds(10), tasks => { raceUncertain = true; UncertainTestResources.Add((fixture, admission, active, tasks)); });
+                var next = race[0].Moved; Check((next is not null) != race[1].Disposed);
+                if (next is not null) { next.Validate(); next.Dispose(); }
+                winner = null; original = null;
+                AssertOtherProcessOpen(Path.Combine(entryDir, ".hydration.lock"), true);
+            } finally { if (!raceUncertain) { winner?.Dispose(); if (original is not null) { try { original.Dispose(); } catch (ObjectDisposedException) { } } admission.Dispose(); } }
+            Check(ExperimentalEntryLease.RetainedCount == 0);
         });
         await AbruptRestartTests();
         await WithFixture(async root => {
