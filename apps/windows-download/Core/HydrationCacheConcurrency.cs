@@ -32,8 +32,18 @@ internal static class HydrationCacheConcurrency
 #if LEDGETOP_CACHE_RACE_TEST
         private readonly Func<ExperimentalRootMarkerOwner> markerOwner;
         private readonly object experimentalLeaseGate = new();
-        internal ExperimentalRootMarkerOwner ExperimentalMarkers {
-            get { lock (experimentalLeaseGate) { ObjectDisposedException.ThrowIf(release is null, this); return markerOwner(); } }
+        internal sealed class MarkerFacade(Lease lease)
+        {
+            internal void ValidateExisting(string directory, string name, byte[] expected) =>
+                lease.UseExperimentalMarkers(owner => owner.ValidateExisting(directory, name, expected));
+            internal void CreateNew(string directory) => lease.UseExperimentalMarkers(owner => owner.CreateNew(directory));
+        }
+        private void UseExperimentalMarkers(Action<ExperimentalRootMarkerOwner> operation)
+        {
+            lock (experimentalLeaseGate) { ObjectDisposedException.ThrowIf(release is null, this); operation(markerOwner()); }
+        }
+        internal MarkerFacade ExperimentalMarkers {
+            get { lock (experimentalLeaseGate) { ObjectDisposedException.ThrowIf(release is null, this); _ = markerOwner(); return new(this); } }
         }
 #endif
         private readonly Action<string, FileMode> acquireLegacy;

@@ -348,11 +348,11 @@ internal static class ExperimentalColdDownloaderTests
             var lockPath = Path.Combine(root, ".hydration-cache.lock");
             var first = await HydrationCacheConcurrency.AcquireAsync(root, "one", CancellationToken.None);
             var second = await HydrationCacheConcurrency.AcquireAsync(root, "two", CancellationToken.None);
-            ExperimentalRootMarkerOwner? owner = null;
+            HydrationCacheConcurrency.Lease.MarkerFacade? owner = null;
             try {
                 var refused = false; try { _ = first.ExperimentalMarkers; } catch (TransferException) { refused = true; } Check(refused);
                 first.AcquireExclusiveLegacy(lockPath, FileMode.OpenOrCreate); AssertOtherProcessCannotOpen(lockPath);
-                owner = first.ExperimentalMarkers; Check(ReferenceEquals(owner, second.ExperimentalMarkers));
+                owner = first.ExperimentalMarkers; _ = second.ExperimentalMarkers;
                 var invalid = false; try { owner.ValidateExisting(foreignDir, markerName, expected); } catch (IOException) { invalid = true; }
                 Check(invalid && File.ReadAllText(Path.Combine(foreignDir, markerName)) == "foreign");
                 foreach (var bad in new[] { "CON", "owner:stream", markerName + ":stream" }) {
@@ -418,6 +418,31 @@ internal static class ExperimentalColdDownloaderTests
             refused = false; try { await HydrationCacheConcurrency.AcquireAsync(root, "other", CancellationToken.None); } catch (TransferException) { refused = true; }
             Check(refused && File.Exists(Path.Combine(root, ".verified-hydration-owner")));
             HydrationCacheConcurrency.SettleInjectedMarkerCreateForTest(root); AssertOtherProcessOpen(lockPath, true);
+        });
+        await WithFixture(async fixture => {
+            var root = Path.Combine(fixture.Path, "lease-race"); Directory.CreateDirectory(root);
+            var first = await HydrationCacheConcurrency.AcquireAsync(root, "one", CancellationToken.None);
+            var second = await HydrationCacheConcurrency.AcquireAsync(root, "two", CancellationToken.None);
+            first.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate);
+            var facade = first.ExperimentalMarkers; var other = second.ExperimentalMarkers;
+            using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim(); using var disposing = new ManualResetEventSlim();
+            Task? create = null; Task? close = null;
+            try {
+                ExperimentalRootMarkerOwner.AfterCreateTestHook = () => { entered.Set(); if (!release.Wait(TimeSpan.FromSeconds(10))) throw new IOException("Synthetic lease barrier timed out."); };
+                create = Task.Run(() => facade.CreateNew(root));
+                Check(entered.Wait(TimeSpan.FromSeconds(5)));
+                close = Task.Run(() => { disposing.Set(); first.Dispose(); });
+                Check(disposing.Wait(TimeSpan.FromSeconds(5)) && !close.Wait(TimeSpan.FromMilliseconds(150)));
+                release.Set(); await Task.WhenAll(create, close).WaitAsync(TimeSpan.FromSeconds(10));
+                var rejected = false; try { facade.ValidateExisting(root, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray()); } catch (ObjectDisposedException) { rejected = true; }
+                Check(rejected); rejected = false;
+                try { facade.CreateNew(root); } catch (ObjectDisposedException) { rejected = true; }
+                Check(rejected); other.ValidateExisting(root, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+            } finally {
+                release.Set(); ExperimentalRootMarkerOwner.AfterCreateTestHook = null;
+                if (create is not null && close is not null) await Task.WhenAll(create, close).WaitAsync(TimeSpan.FromSeconds(10));
+                first.Dispose(); second.Dispose();
+            }
         });
         await AbruptRestartTests();
         await WithFixture(async root => {
