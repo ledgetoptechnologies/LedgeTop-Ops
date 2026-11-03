@@ -93,6 +93,9 @@ test('HTTPS handler returns canonical 206 headers and exact bytes', async t => {
 
 test('Processing Python client downloads synthetic bytes through the Node handler over a loopback test bridge', { skip: !process.env.PROCESSING_CLIENT_ROOT }, async t => {
   const f = fixture(t);
+  // Make the broker's maximum grant TTL meet the reservation lease exactly.
+  // This exercises the boundary that the Processing validator previously rejected.
+  f.transferRequest.expiresAt = '2035-01-01T00:00:05.000Z';
   // The Processing client requires its canonical dataset:<id>:<manifest-sha256> identity.
   f.manifest.id = 'dataset-interop';
   f.manifest.sha256 = p.manifestSha256(f.manifest);
@@ -100,6 +103,7 @@ test('Processing Python client downloads synthetic bytes through the Node handle
   f.transferRequest.manifestSha256 = f.manifest.sha256;
   f.transferRequest.sourceVersion = `dataset:interop:${f.manifest.sha256}`;
   const grant = f.mint();
+  assert.equal(grant.expiresAt, f.transferRequest.expiresAt);
   const handler = createSourceRangeV2Handler({ broker: f.broker, enabled: true, isProtectedTransport: () => true });
   const server = http.createServer(async (req, res) => { if (!await handler(req, res)) { res.statusCode = 404; res.end(); } });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
