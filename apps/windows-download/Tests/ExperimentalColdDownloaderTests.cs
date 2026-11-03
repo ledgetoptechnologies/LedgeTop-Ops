@@ -355,6 +355,28 @@ internal static class ExperimentalColdDownloaderTests
             var result = await downloader.DownloadAsync(empty, root.Path);
             Check(!File.Exists(part) && PhysicalId(result) == id && new FileInfo(result).Length == 0);
         });
+        foreach (var mode in new[] { "success", "status", "tail" }) {
+            await WithFixture(async root => {
+                byte[] oneByte = [0x5a];
+                var one = Spec with { Length = 1, Sha256 = Convert.ToHexStringLower(SHA256.HashData(oneByte)) };
+                var part = await SeedFullPartial(root, one, oneByte); var id = PhysicalId(part);
+                using var downloader = Engine((request, _) => {
+                    Check(request.Headers.Range?.Ranges.Single().From == 0 && request.Headers.IfRange?.EntityTag?.ToString() == one.ETag && request.Headers.IfMatch.Single().ToString() == one.ETag);
+                    var bytes = mode == "tail" ? new byte[] { 0x5b } : oneByte;
+                    var response = new HttpResponseMessage(mode == "status" ? HttpStatusCode.OK : HttpStatusCode.PartialContent) { Content = new ByteArrayContent(bytes) };
+                    response.Headers.ETag = new EntityTagHeaderValue(one.ETag);
+                    if (mode != "status") response.Content.Headers.ContentRange = new ContentRangeHeaderValue(0, 0, 1);
+                    return response;
+                });
+                if (mode == "success") {
+                    var result = await downloader.DownloadAsync(one, root.Path);
+                    Check(!File.Exists(part) && PhysicalId(result) == id && File.ReadAllBytes(result).SequenceEqual(oneByte));
+                } else {
+                    await ExpectTransferFailure(downloader.DownloadAsync(one, root.Path));
+                    Check(!File.Exists(Path.Combine(root.Path, one.FileName)) && PhysicalId(part) == id && File.ReadAllBytes(part).SequenceEqual(oneByte));
+                }
+            });
+        }
         await WithFixture(async root => {
             using var source = new CoordinatorSource(); using var cancel = new CancellationTokenSource();
             using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", root.Path, expectedPrincipal: CoordinatorSource.Principal);
