@@ -81,9 +81,11 @@ describe("incoming upload owner notification digests", () => {
     expect(await processIncomingUploadNotifications(env)).toBe(1);
     expect(mailer.sendNotificationMail).toHaveBeenCalledTimes(1);
     const mail = mailer.sendNotificationMail.mock.calls[0]![1] as {
-      to: string; subject: string; text: string; html: string; messageIdKey: string;
+      to: string; fromName: string; subject: string; text: string; html: string; messageIdKey: string;
     };
     expect(mail.to).toBe("owner@example.test");
+    expect(mail.fromName).toBe("Ledge Top Incoming Uploads");
+    expect(mail.fromName).not.toContain("LTDS");
     expect(mail.subject).toBe("2 new files received and pending verification");
     expect(mail.text).toContain("Taylor <Pilot> uploaded 2 new files (10 bytes)");
     expect(mail.text).toContain("received and are pending verification");
