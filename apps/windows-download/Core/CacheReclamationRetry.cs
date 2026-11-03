@@ -12,6 +12,7 @@ internal static class CacheReclamationRetry
 {
     internal static CacheReclamationFailureKind Classify(Exception error) => error switch {
         CacheLeaseContentionTimeoutException => CacheReclamationFailureKind.Busy,
+        TransferException { Reason: TransferFailureReason.LocalCacheBusy } => CacheReclamationFailureKind.Busy,
         IOException io when unchecked((uint)io.HResult) is 0x80070020 or 0x80070021 => CacheReclamationFailureKind.Busy,
         IOException io when unchecked((uint)io.HResult) == 0x80070005 => CacheReclamationFailureKind.AccessDenied,
         UnauthorizedAccessException => CacheReclamationFailureKind.AccessDenied,

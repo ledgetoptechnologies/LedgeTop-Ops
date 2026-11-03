@@ -21,6 +21,7 @@ internal static class HydrationConcurrencyTests
         ("custom source exclusively drains local hydration slots and remains compatible", UnknownSource),
         ("custom-source admission drains active slots and cancels queued exclusive requests", UnknownDrain),
         ("custom admission releases cancelled waiters and completes other queued requests", UnknownWaiters),
+        ("quota timeout retains exact reservation and retry safely recovers", ReservationReleaseTimeout),
 #endif
         ("hydration concurrency shares four distinct slots across coordinators and cancels queued work", Distinct),
         ("hydration concurrency excludes duplicate entries but independently authorizes and settles sinks", SameEntry),
@@ -42,6 +43,35 @@ internal static class HydrationConcurrencyTests
     private static async Task Cancelled(Task task) { try { await task.WaitAsync(TimeSpan.FromSeconds(5)); } catch (OperationCanceledException) { return; } throw new InvalidOperationException("Expected cancellation."); }
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 #if LEDGETOP_CACHE_RACE_TEST
+    private static async Task ReservationReleaseTimeout()
+    {
+        using var f = new Fixture(); var reached = Signal(); using var resume = new ManualResetEventSlim();
+        using var releaseOwner = new ManualResetEventSlim(); Task? owner = null;
+        PlaceholderHydrationCoordinator.BeforeReservationReleaseTestHook = () => { reached.TrySetResult(); if (!resume.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException(); };
+        var sink = new Sink(); var first = Task.Run(() => f.Run(0, sink: sink));
+        try {
+            await reached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            using var holder = await HydrationCacheConcurrency.AcquireAsync(Path.Combine(f.Root, "verified-hydration-v1"), "test-other", default);
+            var ownerEntered = Signal();
+            owner = Task.Run(() => { lock (holder.Quota) { ownerEntered.TrySetResult(); if (!releaseOwner.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException(); } });
+            await ownerEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            HydrationQuotaGate.TestWait = TimeSpan.FromMilliseconds(120); resume.Set();
+            try { await first.WaitAsync(TimeSpan.FromSeconds(3)); throw new InvalidOperationException("Expected quota refusal."); }
+            catch (TransferException error) { Check(error.HydrationFailure?.Reason == TransferFailureReason.LocalCacheBusy); }
+            var id = Identity(0); var reservation = Path.Combine(f.Root, "verified-hydration-v1", ".hydration-reservations-v2", id.ScopeKey + "-" + id.CacheKey + ".json");
+            Check(File.Exists(reservation) && File.ReadAllText(reservation).Contains(id.CacheKey, StringComparison.Ordinal));
+            Check(sink.Failed == 1 && sink.Complete == 0 && !owner.IsCompleted);
+            PlaceholderHydrationCoordinator.BeforeReservationReleaseTestHook = null;
+            HydrationQuotaGate.TestWait = null; releaseOwner.Set(); await owner.WaitAsync(TimeSpan.FromSeconds(5));
+            await f.Run(0).WaitAsync(TimeSpan.FromSeconds(5));
+            Check(!File.Exists(reservation));
+        } finally {
+            PlaceholderHydrationCoordinator.BeforeReservationReleaseTestHook = null; HydrationQuotaGate.TestWait = null;
+            resume.Set(); releaseOwner.Set();
+            if (owner is not null) await owner.WaitAsync(TimeSpan.FromSeconds(5));
+            try { await first.WaitAsync(TimeSpan.FromSeconds(5)); } catch (TransferException) { }
+        }
+    }
     private static async Task CreatedMarkerExclusive()
     {
         if (!OperatingSystem.IsWindows()) return;

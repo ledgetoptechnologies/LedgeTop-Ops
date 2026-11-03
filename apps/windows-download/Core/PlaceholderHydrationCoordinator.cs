@@ -30,6 +30,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     // Synthetic-only deterministic barrier; excluded from normal and staging builds.
     internal static Action<string>? CacheWalkTestHook;
     internal static Action<string>? CreatedMarkerTestHook;
+    internal static Action? BeforeReservationReleaseTestHook;
 #endif
 
     public PlaceholderHydrationCoordinator(IQueuedDownloadSource source, string channel, string applicationStateRoot,
@@ -510,7 +511,12 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
             output.Write(bytes); output.Flush(true);
         }, cancellationToken);
-        return new Release(() => WithQuota(gate, () => DeleteReservation(path, bytes)));
+        return new Release(() => {
+#if LEDGETOP_CACHE_RACE_TEST
+            BeforeReservationReleaseTestHook?.Invoke();
+#endif
+            WithQuota(gate, () => DeleteReservation(path, bytes));
+        });
     }
     private void RequireCapacity(long reserved, long growth)
     {

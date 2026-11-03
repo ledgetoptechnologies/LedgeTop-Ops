@@ -8,6 +8,9 @@ internal static class PlaceholderCacheEvictionTests
     private static PlaceholderIdentity Identity => new("pilot", "portal", "https://cache.example.invalid", Principal,
         "odqr1_cache", "ondf1_" + new string('b', 64), "v1", "sample.bin", Bytes.Length, "\"v1\"", Convert.ToHexStringLower(SHA256.HashData(Bytes)));
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
+#if LEDGETOP_CACHE_RACE_TEST
+        ("cache reclamation quota timeout reports busy preserves bytes and cancellation", QuotaBusy),
+#endif
         ("cache reclamation retries only bounded transient sharing failures", RetryPolicy),
         ("cache reclamation admission timeout reports busy without retry", AdmissionTimeout),
         ("cache reclamation evicts exact verified bytes offline and rehydrates from source", ExactAndRetry),
@@ -19,6 +22,35 @@ internal static class PlaceholderCacheEvictionTests
         ("cache reclamation connection owner forwards only active scoped requests", Owner),
         ("cache reclamation handles installed-profile-length paths without weakening ownership", LongPaths)
     ];
+#if LEDGETOP_CACHE_RACE_TEST
+    private static async Task QuotaBusy()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var f = new Fixture(); await f.Hydrate(); var calls = f.Source.Calls;
+        using var holder = await HydrationCacheConcurrency.AcquireAsync(f.CacheRoot, "test-other", default);
+        using var release = new ManualResetEventSlim();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var owner = Task.Run(() => { lock (holder.Quota) { entered.TrySetResult(); if (!release.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException(); } });
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        try {
+            HydrationQuotaGate.TestWait = TimeSpan.FromMilliseconds(120); var attempts = 0;
+            try {
+                await Task.Run(() => CacheReclamationRetry.RunAsync(ct => { attempts++; return f.Coordinator.EvictVerifiedCacheAsync(Identity, ct); }, default)).WaitAsync(TimeSpan.FromSeconds(4));
+                throw new InvalidOperationException("Expected quota busy.");
+            } catch (CacheReclamationException error) { Check(error.Kind == CacheReclamationFailureKind.Busy); }
+            Check(attempts == 1 && File.ReadAllBytes(f.File).SequenceEqual(Bytes) && f.Source.Calls == calls && !owner.IsCompleted);
+            HydrationQuotaGate.TestWait = TimeSpan.FromSeconds(5);
+            using var cancellation = new CancellationTokenSource();
+            var waiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            HydrationQuotaGate.BeforeWaitTestHook = () => waiting.TrySetResult();
+            var cancelled = Task.Run(() => f.Coordinator.EvictVerifiedCacheAsync(Identity, cancellation.Token));
+            await waiting.Task.WaitAsync(TimeSpan.FromSeconds(4)); cancellation.Cancel(); await Cancelled(cancelled);
+            Check(File.ReadAllBytes(f.File).SequenceEqual(Bytes) && !owner.IsCompleted);
+        } finally { HydrationQuotaGate.BeforeWaitTestHook = null; HydrationQuotaGate.TestWait = null; release.Set(); await owner.WaitAsync(TimeSpan.FromSeconds(5)); }
+        await CacheReclamationRetry.RunAsync(ct => f.Coordinator.EvictVerifiedCacheAsync(Identity, ct), default);
+        Check(!File.Exists(f.File) && f.Source.Calls == calls);
+    }
+#endif
     private static async Task RetryPolicy()
     {
         var attempts = 0; var delays = 0;
