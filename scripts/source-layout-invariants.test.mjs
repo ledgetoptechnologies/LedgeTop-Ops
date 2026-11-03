@@ -335,7 +335,7 @@ test("the checked-in Client deployment keeps reviewed resources, hosts, and port
   // gates, route namespaces, no-email guards and resource checks stay exact.
   // Portal origin retirement changes only the reviewed host/profile bundle;
   // public compatibility hosts and existing resources remain pinned.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "7dd86b42d6723842efcd65780bb1112a7dfdde1281af4585877c19159cfedcfc");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "6c5c912a29b9ceb864e5f362b2591bb44f0ba91177a3c812aca8eb826a8df312");
   assert.equal("CLIENT_PORTAL_INVITATION_FROM_NAME" in readJson("apps/client/wrangler.jsonc").vars, false);
   const config = readJson("apps/client/wrangler.jsonc");
   assert.deepEqual(config.services.filter(service => service.binding === "SHARED_PROFILE_PORTAL"), [{
