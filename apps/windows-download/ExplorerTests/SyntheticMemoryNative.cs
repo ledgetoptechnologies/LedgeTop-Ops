@@ -67,13 +67,18 @@ internal static class SyntheticMemoryNative {
         var prewarm = PrewarmMode(get("LEDGETOP_TEST_MEMORY_PREWARM"));
         return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}; prewarm={prewarm}";
     }
-    private static string PrewarmMode(string? value) => value switch { null or "0" => "off", "1" => "on", _ => "invalid" };
+    private static string PrewarmMode(string? value) => value switch { null or "0" => "off", "1" => "entries", "2" => "entries+reservation", _ => "invalid" };
     private static string CacheStage(string? value) => value switch { null or "none" => "none", "quota-only" => "quota-only", "quota-ownership" => "quota-ownership", "quota-capacity" => "quota-capacity", "quota-reservation" => "quota-reservation", "quota-reservation-gap" => "quota-reservation-gap", "quota-reservation-precheck" => "quota-reservation-precheck", _ => "invalid" };
-    private static async Task PrewarmOwnedAsync(string cache, IReadOnlyCollection<PlaceholderIdentity> identities) {
+    private static async Task PrewarmOwnedAsync(string cache, IReadOnlyCollection<PlaceholderIdentity> identities, bool reservationOwner = false) {
         if (identities.Count is < 1 or > 4 || identities.Select(identity => identity.FileName).Distinct(StringComparer.Ordinal).Count() != identities.Count)
             throw new IOException("Synthetic prewarm identity count is invalid.");
         using var coordinator = new PlaceholderHydrationCoordinator(new Source(), "pilot", cache, expectedPrincipal: Principal);
         foreach (var identity in identities) await coordinator.SyntheticCacheStageAsync(identity, "quota-capacity", CancellationToken.None);
+        if (reservationOwner) {
+            NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticReservationOwnerPrewarmStart);
+            await coordinator.SyntheticCacheStageAsync(identities.First(), "reservation-owner-prewarm", CancellationToken.None);
+            NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticReservationOwnerPrewarmComplete);
+        }
     }
     internal static async Task<int> CacheStageTests() {
         var basePath = Path.Combine(Path.GetTempPath(), "LedgeTop-cache-stage-" + Guid.NewGuid().ToString("N"));
@@ -121,12 +126,34 @@ internal static class SyntheticMemoryNative {
                     Array.IndexOf(events, NativeStallTrace.Stage.SyntheticEntryLeaseGapOpen) >= Array.IndexOf(events, NativeStallTrace.Stage.SyntheticEntryLeaseGapClosed) ||
                     !events.Contains(NativeStallTrace.Stage.SyntheticEntryLeaseGapOpen) || !events.Contains(NativeStallTrace.Stage.SyntheticEntryLeaseGapClosed) ||
                     !events.Contains(NativeStallTrace.Stage.CacheReserveAcquired) || !events.Contains(NativeStallTrace.Stage.CacheReleaseExit) ||
+                    !events.Contains(NativeStallTrace.Stage.ReserveOwnerExistsEnter) || !events.Contains(NativeStallTrace.Stage.ReserveOwnerExistsExit) ||
+                    !events.Contains(NativeStallTrace.Stage.ReservePathSafeExit) || !events.Contains(NativeStallTrace.Stage.ReserveStaleExit) ||
                     !events.Contains(NativeStallTrace.Stage.OwnedMarkerFlushExit)) throw new IOException("Synthetic cache stages omitted expected trace.");
             } finally { NativeStallTrace.Disable(capture); }
             var scopeMarker = Path.Combine(scope, ".verified-hydration-owner"); var originalScope = File.ReadAllBytes(scopeMarker);
             await PrewarmOwnedAsync(cache, new[] { third });
             if (!File.Exists(Path.Combine(thirdEntry, ".verified-hydration-owner")) || !File.ReadAllBytes(scopeMarker).SequenceEqual(originalScope))
                 throw new IOException("Synthetic prewarm did not preserve existing ownership.");
+            var reservationOwnerDirectory = Path.Combine(root, ".hydration-reservations-v2");
+            if (Directory.EnumerateFiles(reservationOwnerDirectory).Any(path => Path.GetFileName(path) != ".verified-hydration-owner"))
+                throw new IOException("Synthetic reservation fixture is not empty.");
+            File.Delete(Path.Combine(reservationOwnerDirectory, ".verified-hydration-owner")); Directory.Delete(reservationOwnerDirectory);
+            var warmTrace = NativeStallTrace.Enable();
+            try {
+                await PrewarmOwnedAsync(cache, new[] { third }, reservationOwner: true);
+                var warmEvents = NativeStallTrace.Snapshot(warmTrace).Select(e => e.Kind).ToArray();
+                if (Array.IndexOf(warmEvents, NativeStallTrace.Stage.SyntheticReservationOwnerPrewarmStart) < 0 ||
+                    Array.IndexOf(warmEvents, NativeStallTrace.Stage.SyntheticReservationOwnerPrewarmComplete) <= Array.IndexOf(warmEvents, NativeStallTrace.Stage.SyntheticReservationOwnerPrewarmStart))
+                    throw new IOException("Synthetic reservation-owner prewarm trace is incomplete.");
+            } finally { NativeStallTrace.Disable(warmTrace); }
+            if (!File.Exists(Path.Combine(reservationOwnerDirectory, ".verified-hydration-owner")) ||
+                Directory.EnumerateFiles(reservationOwnerDirectory).Count() != 1 || !File.ReadAllBytes(scopeMarker).SequenceEqual(originalScope))
+                throw new IOException("Synthetic reservation-owner prewarm failed or changed other ownership.");
+            var ownerMarker = Path.Combine(reservationOwnerDirectory, ".verified-hydration-owner"); var ownedBytes = File.ReadAllBytes(ownerMarker);
+            File.WriteAllText(ownerMarker, "foreign synthetic owner");
+            var foreignRejected = false; try { await PrewarmOwnedAsync(cache, new[] { third }, reservationOwner: true); } catch (TransferException) { foreignRejected = true; }
+            if (!foreignRejected || File.ReadAllText(ownerMarker) != "foreign synthetic owner") throw new IOException("Foreign reservation owner was overwritten.");
+            File.WriteAllBytes(ownerMarker, ownedBytes);
             var duplicateRejected = false; try { await PrewarmOwnedAsync(cache, new[] { third, third }); } catch (IOException) { duplicateRejected = true; }
             if (!duplicateRejected) throw new IOException("Synthetic prewarm accepted duplicate fixture entries.");
             var rejected = false; try { await coordinator.SyntheticCacheStageAsync(identity, "unknown", CancellationToken.None); } catch (TransferException) { rejected = true; }
@@ -168,7 +195,7 @@ internal static class SyntheticMemoryNative {
         Console.WriteLine("PASS synthetic actual cache admission, quota, ownership and scope refusals without native registration."); return 0;
     }
     internal static int CleanupEvidenceTests() {
-        if (PrewarmMode(null) != "off" || PrewarmMode("0") != "off" || PrewarmMode("1") != "on" || PrewarmMode("unexpected") != "invalid")
+        if (PrewarmMode(null) != "off" || PrewarmMode("0") != "off" || PrewarmMode("1") != "entries" || PrewarmMode("2") != "entries+reservation" || PrewarmMode("unexpected") != "invalid")
             throw new IOException("Synthetic prewarm option validation failed.");
         var joined = true;
         var pendingRead = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -285,7 +312,7 @@ internal static class SyntheticMemoryNative {
         var cacheStage = CacheStage(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_CACHE_STAGE"));
         var prewarm = PrewarmMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_PREWARM"));
         if (markerMode == "invalid" || cacheStage == "invalid" || prewarm == "invalid" || (markerMode != "none" && cacheStage != "none") ||
-            (prewarm == "on" && (markerMode != "none" || cacheStage != "quota-reservation"))) return 2;
+            (prewarm != "off" && (markerMode != "none" || cacheStage != "quota-reservation"))) return 2;
         if (retryProbe && (count != 1 || markerMode != "none" || cacheStage != "none" || prewarm != "off" || !RetryOptionsValid(Environment.GetEnvironmentVariable))) return 2;
         var basePath = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
         if (string.IsNullOrEmpty(basePath) || !Path.IsPathFullyQualified(basePath) || basePath.StartsWith("\\\\", StringComparison.Ordinal)) return 2;
@@ -320,9 +347,9 @@ internal static class SyntheticMemoryNative {
         using var start = new EventWaitHandle(false, EventResetMode.ManualReset, startName);
         var trace = NativeStallTrace.Enable();
         try {
-            if (prewarm == "on") {
+            if (prewarm != "off") {
                 Phase("prewarm-start", id); NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticPrewarmStart);
-                await PrewarmOwnedAsync(cache, manifest.Values.ToArray());
+                await PrewarmOwnedAsync(cache, manifest.Values.ToArray(), prewarm == "entries+reservation");
                 NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticPrewarmComplete); Phase("prewarm-complete", id);
             }
             if (markerMode == "preopened-distinct") {

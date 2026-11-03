@@ -115,7 +115,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     internal async Task SyntheticCacheStageAsync(PlaceholderIdentity identity, string stage, CancellationToken token)
     {
         if (Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") != "1" ||
-            stage is not ("quota-only" or "quota-ownership" or "quota-capacity" or "quota-reservation" or "quota-reservation-gap" or "quota-reservation-precheck") || source.Alias != "synthetic" ||
+            stage is not ("quota-only" or "quota-ownership" or "quota-capacity" or "quota-reservation" or "quota-reservation-gap" or "quota-reservation-precheck" or "reservation-owner-prewarm") || source.Alias != "synthetic" ||
             source.Origin.AbsoluteUri != "https://source.example.invalid/" || channel != "pilot" ||
             principal != "odqp1_" + new string('f', 64) || identity.PrincipalId != principal ||
             identity.Channel != "pilot" || identity.SourceAlias != "synthetic" || identity.Origin != "https://source.example.invalid" ||
@@ -155,7 +155,14 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             } finally { NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticOutsidePrecheckExit); }
         }
         WithQuota(admission.Quota, () => {
-            if (stage != "quota-only") {
+            if (stage == "reservation-owner-prewarm") {
+                var directory = Path.Combine(root, ".hydration-reservations-v2");
+                var exists = OwnedExisting(directory);
+                if (!exists) {
+                    RequireCapacity(ReservedBytes(directory), System.Text.Encoding.UTF8.GetByteCount(Owner));
+                    Owned(directory);
+                }
+            } else if (stage != "quota-only") {
                 var scopeExists = stage == "quota-reservation-precheck" ? outsideScopeExists : TraceCacheValue(NativeStallTrace.Stage.CacheScopeCheckEnter, NativeStallTrace.Stage.CacheScopeCheckExit, () => OwnedExisting(scope));
                 var entryExists = stage == "quota-reservation-precheck" ? outsideEntryExists : TraceCacheValue(NativeStallTrace.Stage.CacheEntryCheckEnter, NativeStallTrace.Stage.CacheEntryCheckExit, () => OwnedExisting(entry));
                 // The ownership-only comparison intentionally omits capacity;
@@ -514,8 +521,14 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         var bytes = JsonSerializer.SerializeToUtf8Bytes(new Reservation(2, identity.ScopeKey, identity.CacheKey, growth));
         if (bytes.Length > 1024) throw new TransferException("Hydration reservation is outside its storage bound.");
         WithQuota(gate, () => {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            var directoryExists = TraceCacheValue(NativeStallTrace.Stage.ReserveOwnerExistsEnter, NativeStallTrace.Stage.ReserveOwnerExistsExit, () => OwnedExisting(directory));
+            TraceCacheAction(NativeStallTrace.Stage.ReservePathSafeEnter, NativeStallTrace.Stage.ReservePathSafeExit, () => RequireSafe(path));
+            TraceCacheAction(NativeStallTrace.Stage.ReserveStaleEnter, NativeStallTrace.Stage.ReserveStaleExit, () => RemoveExactStaleReservation(identity));
+#else
             var directoryExists = OwnedExisting(directory); RequireSafe(path);
             RemoveExactStaleReservation(identity);
+#endif
             RequireCapacity(ReservedBytes(directory), checked(growth + (directoryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner))));
             Owned(directory);
             using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
