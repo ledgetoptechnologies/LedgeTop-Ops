@@ -98,7 +98,7 @@ export async function authorizeClientRecipientFolder(env: Env, principal: StaffP
   return { prefix, projectFolder: mappings.length > 0, divisionIds: divisions };
 }
 
-async function readRoots(env: Env, q: string, limit: number): Promise<RootRow[]> {
+async function readRoots(env: Env, q: string, limit: number, exactRecordId?: string): Promise<RootRow[]> {
   const rows = await db(env.OPS_DB).prepare(`SELECT record.record_id,record.record_kind,record.current_version,
       json_extract(revision.profile_json,'$.name') display_name,relation.organization_record_id,
       parent_revision.profile_json parent_profile_json,parent.current_version organization_version,record.updated_at
@@ -111,10 +111,12 @@ async function readRoots(env: Env, q: string, limit: number): Promise<RootRow[]>
     LEFT JOIN operations_directory_lifecycle_state parent_lifecycle ON parent_lifecycle.record_id=parent.record_id
     WHERE record.record_kind IN ('client','organization') AND coalesce(lifecycle.status,'active')='active'
       AND (relation.organization_record_id IS NULL OR (parent.record_id IS NOT NULL AND coalesce(parent_lifecycle.status,'active')='active'))
+      AND (? IS NULL OR record.record_id=?)
       AND (?='' OR instr(lower(json_extract(revision.profile_json,'$.name')),lower(?))>0
         OR instr(lower(json_extract(parent_revision.profile_json,'$.name')),lower(?))>0)
     ORDER BY CASE WHEN ?='' THEN record.updated_at END DESC,lower(json_extract(revision.profile_json,'$.name')),record.record_id
-    LIMIT ?`).bind(q, q, q, q, limit).all<Omit<RootRow, "organization_name"> & { parent_profile_json: string | null }>();
+    LIMIT ?`).bind(exactRecordId ?? null, exactRecordId ?? null, q, q, q, q, limit)
+    .all<Omit<RootRow, "organization_name"> & { parent_profile_json: string | null }>();
   return rows.results.map(row => {
     const displayName = normalizeDisplayName(row.display_name);
     let organizationName: string | null = null;
@@ -221,12 +223,14 @@ async function readWorkspaceState(env: Env, authority: AuthorityRow | undefined)
   } catch { return unavailable(); }
 }
 
-export async function listClientDeliveryRecipients(env: Env, principal: StaffPrincipal, input: { folderRef: string; q?: string; limit?: number }) {
+export async function listClientDeliveryRecipients(env: Env, principal: StaffPrincipal, input: { folderRef: string; q?: string; limit?: number; exactRecordId?: string }) {
   const q = input.q ?? "", limit = input.limit ?? MAX_RECIPIENTS;
-  if (typeof q !== "string" || q.length > MAX_QUERY || q.trim() !== q || !Number.isInteger(limit) || limit < 1 || limit > MAX_RECIPIENTS) badRequest();
+  if (typeof q !== "string" || q.length > MAX_QUERY || q.trim() !== q || !Number.isInteger(limit) || limit < 1 || limit > MAX_RECIPIENTS
+    || input.exactRecordId !== undefined && (typeof input.exactRecordId !== "string" || !input.exactRecordId || input.exactRecordId.length > 200
+      || /[\u0000-\u001f\u007f]/u.test(input.exactRecordId))) badRequest();
   const folder = await authorizeClientRecipientFolder(env, principal, input.folderRef);
   let roots: RootRow[];
-  try { roots = await readRoots(env, q, limit); } catch { return unavailable(); }
+  try { roots = await readRoots(env, q, limit, input.exactRecordId); } catch { return unavailable(); }
   let pins: Map<string, AuthorityRow>;
   try { pins = await readAuthorityPins(env, roots); } catch (error) {
     if (error instanceof HTTPException && error.status === 503) throw error;

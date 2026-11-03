@@ -208,10 +208,10 @@ export function ClientRecipientSharePanel({ folder, creationEnabled, onUnavailab
           : <ul className="client-recipient-grants">{grants.map(item => <li key={item.grantId}>
             <strong>{item.recipientLabel}</strong> <small>{item.audienceLabel}{item.recipientCount === null ? "" : ` · ${item.recipientCount} ${item.recipientCount === 1 ? "person" : "people"}`}
               {" · "}{item.status === "active" ? item.expiresAt ? `until ${when(item.expiresAt)}` : "until revoked" : item.status === "revoked" ? "revoked" : "expired"}</small>
-            {item.status === "active" && item.canRevoke && (confirmRevoke?.grantId === item.grantId
-              ? <span className="actions"><button type="button" className="button-danger button-small" disabled={locked} onClick={() => revoke(item)}>Revoke access</button>
+            {(item.status === "active" || item.status === "expired") && item.canRevoke && (confirmRevoke?.grantId === item.grantId
+              ? <span className="actions"><button type="button" className="button-danger button-small" disabled={locked} onClick={() => revoke(item)}>{item.status === "expired" ? "Clear expired share" : "Revoke access"}</button>
                 <button type="button" className="button-ghost button-small" disabled={locked} onClick={() => setConfirmRevoke(null)}>Keep access</button></span>
-              : <button type="button" className="button-ghost button-small" disabled={locked} onClick={() => setConfirmRevoke(item)}>Revoke…</button>)}
+              : <button type="button" className="button-ghost button-small" disabled={locked} onClick={() => setConfirmRevoke(item)}>{item.status === "expired" ? "Clear expired share…" : "Revoke…"}</button>)}
           </li>)}</ul>}
     </section>
   </section>;

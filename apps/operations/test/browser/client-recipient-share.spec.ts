@@ -228,3 +228,15 @@ test("revoking asks first, can be cancelled without a request, and sends the exa
   const revoke = calls.find(call => call.path.endsWith("/grant-lori/revoke"));
   expect(revoke!.body).toEqual({ expectedVersion: 1 }); expect(revoke!.key).toBeTruthy();
 });
+
+test("a naturally expired share can be cleared so it can be shared again", async ({ page }) => {
+  const calls = await mock(page, { grants: [grant({ status: "expired", expiresAt: "2020-01-01T00:00:00.000Z" })] });
+  await openClientTab(page);
+  const access = page.getByRole("region", { name: "Client access to this folder" });
+  await expect(access).toContainText("expired");
+  await access.getByRole("button", { name: "Clear expired share…" }).click();
+  await access.getByRole("button", { name: "Clear expired share" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Access for Lori Koschnick was revoked." })).toBeVisible();
+  const revoke = calls.find(call => call.path.endsWith("/grant-lori/revoke"));
+  expect(revoke!.body).toEqual({ expectedVersion: 1 });
+});

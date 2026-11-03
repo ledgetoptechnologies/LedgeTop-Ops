@@ -4,7 +4,7 @@ import {Hono} from 'hono';
 import {readFileSync} from 'node:fs';
 import {Buffer} from 'node:buffer';
 import {splitD1MigrationStatements} from './helpers/d1-migrations';
-import {createDirectWorkspaceFolderResourceRouter} from '../src/worker/client-portal/direct-workspace-folder-resources';
+import {createDirectWorkspaceFolderResourceRouter,directWorkspaceFolderCoordinate} from '../src/worker/client-portal/direct-workspace-folder-resources';
 import {readDirectFolderWorkspaceState,listDirectWorkspaceFolderGrants,applyDirectWorkspaceFolderGrant} from '../src/worker/operations-portal-direct-folder-grants';
 import type {Env} from '../src/worker/types';
 import type {ClientPortalSession,VerifiedClientPrincipal} from '../src/worker/client-portal/types';
@@ -102,12 +102,16 @@ describe('direct Operations workspace folder resources',()=>{
     expect(JSON.stringify(result)).not.toContain('Jobs/Clients/Example Org/');
     expect(JSON.stringify(result)).not.toContain('df-binding');folderHandle=result.items[0]!.id;
     expect(folderHandle).toMatch(/^df1_[A-Za-z0-9_-]+$/u);
+    expect(await directWorkspaceFolderCoordinate(env,folderHandle,'folder')).toEqual({workspaceId:workspace});
+    expect(await directWorkspaceFolderCoordinate(env,folderHandle,'file')).toBeNull();
     const files=await app.request(`https://client.test/api/client/direct-workspace-folders/${encodeURIComponent(folderHandle)}/files`,{},env);
     expect(files.status,await files.clone().text()).toBe(200);
     const page=await files.json() as {files:Array<{id:string;name:string;previewPath:string;downloadPath:string}>;folders:Array<{id:string;name:string}>};
     expect(page.files.map(file=>file.name)).toEqual(['map.txt']);expect(page.folders.map(folder=>folder.name)).toEqual(['sub']);
     expect(JSON.stringify(page)).not.toContain('Jobs/Clients/Example Org/');fileHandle=page.files[0]!.id;
     expect(fileHandle).toMatch(/^df1_[A-Za-z0-9_-]+$/u);
+    expect(await directWorkspaceFolderCoordinate(env,fileHandle,'file')).toEqual({workspaceId:workspace});
+    expect(await directWorkspaceFolderCoordinate(env,`${fileHandle.slice(0,-1)}x`,'file')).toBeNull();
     const metadata=await app.request(`https://client.test/api/client/direct-workspace-folders/files/${encodeURIComponent(fileHandle)}`,{},env);
     expect(metadata.status).toBe(200);
     const preview=await app.request(`https://client.test${page.files[0]!.previewPath}`,{},env);
@@ -168,6 +172,21 @@ describe('direct Operations workspace folder resources',()=>{
     const revoked=await applyDirectWorkspaceFolderGrant(env,{...common,recipientRecordId:recipient,action:'grant.revoke',operationId:'df-revoke-after-removal',
       grantId:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',expectedGrantVersion:1});
     expect(revoked).toMatchObject({ok:true,state:'revoked',version:2});
+  });
+
+  it('marks a naturally expired active grant as cleanup eligible without reviving it',async()=>{
+    // Expiration is time-derived; bypass the immutable-authority trigger only
+    // to model the passage of time on the already-created grant.
+    await db.prepare('DROP TRIGGER operations_portal_direct_folder_grant_authority_immutable').run();
+    await db.prepare(`UPDATE operations_portal_direct_folder_grants SET expires_at='2000-01-01T00:00:00.000Z'
+      WHERE grant_id='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'`).run();
+    const state=await readDirectFolderWorkspaceState(env,{protocolVersion:1,workspaceId:workspace,targetId:target,
+      clientAuthorityId:authority,sourceId:source});
+    expect(state.ok).toBe(true);if(!state.ok)throw new Error(state.code);
+    const grants=await listDirectWorkspaceFolderGrants(env,{protocolVersion:1,workspaceId:workspace,targetId:target,
+      clientAuthorityId:authority,sourceId:source,folderRef,expectedWorkspaceVersion:state.workspaceVersion,
+      expectedMembershipVersion:state.membershipVersion});
+    expect(grants).toMatchObject({ok:true,grants:[{status:'expired',canRevoke:true}]});
   });
 
   it('allows an explicit operational opt-out',async()=>{

@@ -159,10 +159,11 @@ function requestFingerprint(value: Record<string,unknown>,fields:readonly string
 }
 function grantView(row: GrantRow) {
   const r2Prefix=folderRefPrefix(row.folder_ref);if(!r2Prefix)throw new Error("direct-folder-reference-invalid");
+  const elapsed=row.status==="active"&&row.expires_at!==null&&Date.parse(row.expires_at)<=Date.now();
   return { grantId:row.grant_id,version:row.grant_version,workspaceId:row.workspace_id,
   r2Prefix,recipientRecordId:row.recipient_record_id,ownerScopeType:row.owner_scope_type,
   ownerRecordId:row.owner_record_id,
-  audience:"all_members" as const,status:row.status,expiresAt:row.expires_at,
+  audience:"all_members" as const,status:elapsed?"expired":row.status,expiresAt:row.expires_at,
   createdAt:row.created_at,revokedAt:row.revoked_at,canRevoke:row.status==="active" }; }
 
 /** Read-only, private service-binding method. It returns no identity details or paths. */
@@ -203,8 +204,7 @@ export async function listDirectWorkspaceFolderGrants(env:DatabaseEnv,raw:unknow
     if(rows.results.length>100)return fail("temporarily_unavailable");
     if(rows.results.some(row=>row.owner_scope_type!==ownerScopeType||row.owner_record_id!==state.rootPublicId
       ||!matchingDirectory(state.snapshot,{rootKind:state.rootKind,rootRecordId:state.rootRecordId,recipientRecordId:row.recipient_record_id})))return fail("conflict");
-    const now=Date.now(),grants=rows.results.map(row=>grantView({...row,
-      status:row.status==="active"&&row.expires_at&&Date.parse(row.expires_at)<=now?"expired":row.status}));
+    const grants=rows.results.map(row=>grantView(row));
     const fresh=await workspaceState(env,commonState(value));
     if(!fresh||fresh.workspaceVersion!==state.workspaceVersion||fresh.membershipVersion!==state.membershipVersion)return fail("conflict");
     return {ok:true as const,protocolVersion:1 as const,workspaceVersion:state.workspaceVersion,
