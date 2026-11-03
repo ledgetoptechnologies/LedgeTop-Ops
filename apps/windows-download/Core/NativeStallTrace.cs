@@ -57,7 +57,10 @@ internal static class NativeStallTrace
         PendingMarkerMutateOpenEnter, PendingMarkerMutateOpenVerified, PendingMarkerMutateWriteComplete,
         PendingMarkerMutateFlushComplete, PendingMarkerMutateCloseComplete,
         PendingMarkerAWaiting, PendingMarkerBReadEnter, PendingMarkerBReadVerified,
-        PendingMarkerBReadExit, PendingMarkerAReleased, PendingMarkerInvalid
+        PendingMarkerBReadExit, PendingMarkerAReleased, PendingMarkerInvalid,
+        CacheEntryPathSafeEnter, CacheEntryPathSafeExit,
+        CacheFilePathSafeEnter, CacheFilePathSafeExit,
+        CacheEntryLeaseOpenExit
     }
     internal readonly record struct Event(long Sequence, long Timestamp, int ThreadId, Stage Kind, long CallbackId = 0, uint ProcessId = 0, byte ProcessInfoStatus = 0);
     internal sealed class Capture

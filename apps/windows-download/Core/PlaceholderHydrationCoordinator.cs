@@ -193,9 +193,12 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             }
         }, token);
         if (stage is "quota-reservation" or "quota-reservation-gap" or "quota-reservation-precheck") {
-            var lockPath = Path.Combine(entry, ".hydration.lock"); RequireSafe(lockPath);
+            var lockPath = Path.Combine(entry, ".hydration.lock");
+            TraceCacheAction(NativeStallTrace.Stage.CacheEntryPathSafeEnter, NativeStallTrace.Stage.CacheEntryPathSafeExit, () => RequireSafe(lockPath));
             NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseEnter);
-            FileStream? held = await OpenEntryLeaseAsync(lockPath, FileMode.OpenOrCreate, token).ConfigureAwait(false);
+            FileStream? held;
+            try { held = await OpenEntryLeaseAsync(lockPath, FileMode.OpenOrCreate, token).ConfigureAwait(false); }
+            finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseOpenExit); }
             NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseAcquired);
             try {
                 // Comparison only: deliberately drop the physical entry lease while
@@ -207,7 +210,10 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 if (held is null) {
                     // If reacquisition fails or is cancelled, preserve the record.
                     SyntheticBeforeGapReacquire?.Invoke();
-                    held = await OpenEntryLeaseAsync(lockPath, FileMode.Open, token).ConfigureAwait(false);
+                    NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseEnter);
+                    try { held = await OpenEntryLeaseAsync(lockPath, FileMode.Open, token).ConfigureAwait(false); }
+                    finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseOpenExit); }
+                    NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseAcquired);
                     NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticEntryLeaseGapClosed);
                 }
                 TraceCacheAction(NativeStallTrace.Stage.CacheReleaseEnter, NativeStallTrace.Stage.CacheReleaseExit, reservation.Dispose);
@@ -300,16 +306,27 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                         } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheDirectoryExit); }
 #endif
                     }, cancellationToken);
-                    var lockPath = Path.Combine(entry, ".hydration.lock"); RequireSafe(lockPath);
+                    var lockPath = Path.Combine(entry, ".hydration.lock");
 #if LEDGETOP_NATIVE_DIAGNOSTICS
+                    TraceCacheAction(NativeStallTrace.Stage.CacheEntryPathSafeEnter, NativeStallTrace.Stage.CacheEntryPathSafeExit, () => RequireSafe(lockPath));
                     NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseEnter);
-#endif
+                    FileStream held;
+                    try { held = await OpenEntryLeaseAsync(lockPath, FileMode.OpenOrCreate, cancellationToken); }
+                    finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseOpenExit); }
+#else
+                    RequireSafe(lockPath);
                     var held = await OpenEntryLeaseAsync(lockPath, FileMode.OpenOrCreate, cancellationToken);
+#endif
                     try {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                         NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseAcquired);
 #endif
-                        var file = Path.Combine(entry, identity.FileName); RequireSafe(file);
+                        var file = Path.Combine(entry, identity.FileName);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                        TraceCacheAction(NativeStallTrace.Stage.CacheFilePathSafeEnter, NativeStallTrace.Stage.CacheFilePathSafeExit, () => RequireSafe(file));
+#else
+                        RequireSafe(file);
+#endif
                         if (!File.Exists(file)) {
                             timing?.SetCacheHit(false);
                             stage = HydrationStage.Download; timing?.Enter(HydrationTimingStage.Download);

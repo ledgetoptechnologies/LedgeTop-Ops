@@ -96,7 +96,9 @@ internal static class NativeStallTraceTests
             NativeStallTrace.Stage.OwnedVerifyExistsEnter, NativeStallTrace.Stage.OwnedVerifyExistsExit,
             NativeStallTrace.Stage.OwnedVerifyLengthEnter, NativeStallTrace.Stage.OwnedVerifyLengthExit,
             NativeStallTrace.Stage.OwnedVerifyReadEnter, NativeStallTrace.Stage.OwnedVerifyReadExit,
-            NativeStallTrace.Stage.CacheEntryLeaseEnter, NativeStallTrace.Stage.CacheEntryLeaseAcquired,
+            NativeStallTrace.Stage.CacheEntryPathSafeEnter, NativeStallTrace.Stage.CacheEntryPathSafeExit,
+            NativeStallTrace.Stage.CacheFilePathSafeEnter, NativeStallTrace.Stage.CacheFilePathSafeExit,
+            NativeStallTrace.Stage.CacheEntryLeaseEnter, NativeStallTrace.Stage.CacheEntryLeaseOpenExit, NativeStallTrace.Stage.CacheEntryLeaseAcquired,
             NativeStallTrace.Stage.CacheReserveEnter, NativeStallTrace.Stage.CacheReserveAcquired,
             NativeStallTrace.Stage.CacheReleaseEnter, NativeStallTrace.Stage.CacheReleaseExit,
             NativeStallTrace.Stage.CacheDownloadEnter, NativeStallTrace.Stage.CacheDownloadExit,
@@ -169,10 +171,16 @@ internal static class NativeStallTraceTests
         var capture = NativeStallTrace.Enable();
         try {
             await operation().WaitAsync(TimeSpan.FromSeconds(30));
-            var stages = NativeStallTrace.Snapshot(capture).Select(e => e.Kind).ToHashSet();
+            var events = NativeStallTrace.Snapshot(capture).Select(e => e.Kind).ToArray();
+            var stages = events.ToHashSet();
             foreach (var stage in expected)
                 if (!stages.Contains(stage)) throw new Exception("Missing fake diagnostic stage: " + stage);
             if (NativeStallTrace.Dropped(capture) != 0) throw new Exception("Synthetic stage test exceeded trace capacity.");
+            foreach (var (enter, exit) in new[] {
+                (NativeStallTrace.Stage.CacheEntryPathSafeEnter, NativeStallTrace.Stage.CacheEntryPathSafeExit),
+                (NativeStallTrace.Stage.CacheFilePathSafeEnter, NativeStallTrace.Stage.CacheFilePathSafeExit),
+                (NativeStallTrace.Stage.CacheEntryLeaseEnter, NativeStallTrace.Stage.CacheEntryLeaseOpenExit) })
+                if (events.Count(x => x == enter) != events.Count(x => x == exit)) throw new Exception("Unbalanced fake diagnostic stages: " + enter);
         } finally { NativeStallTrace.Disable(capture); }
     }
 }
