@@ -45,7 +45,13 @@ internal static class NativeStallTrace
         ReserveOwnerExistsEnter, ReserveOwnerExistsExit,
         ReservePathSafeEnter, ReservePathSafeExit,
         ReserveStaleEnter, ReserveStaleExit,
-        SyntheticReservationOwnerPrewarmStart, SyntheticReservationOwnerPrewarmComplete
+        SyntheticReservationOwnerPrewarmStart, SyntheticReservationOwnerPrewarmComplete,
+        // These Exit events mean the operation returned or threw, not success.
+        ReservedOwnerCheckEnter, ReservedOwnerCheckExit,
+        ReservedDirectoriesCheckEnter, ReservedDirectoriesCheckExit,
+        ReservedFilesEnumeratorEnter, ReservedFilesEnumeratorExit,
+        ReservedFilesMoveEnter, ReservedFilesMoveExit, ReservedFilesDisposeEnter, ReservedFilesDisposeExit,
+        ReservedRecordReadEnter, ReservedRecordReadExit
     }
     internal readonly record struct Event(long Sequence, long Timestamp, int ThreadId, Stage Kind);
     internal sealed class Capture

@@ -130,6 +130,33 @@ internal static class SyntheticMemoryNative {
                     !events.Contains(NativeStallTrace.Stage.ReservePathSafeExit) || !events.Contains(NativeStallTrace.Stage.ReserveStaleExit) ||
                     !events.Contains(NativeStallTrace.Stage.OwnedMarkerFlushExit)) throw new IOException("Synthetic cache stages omitted expected trace.");
             } finally { NativeStallTrace.Disable(capture); }
+            // A distinct, exact synthetic record makes ReservedBytes enumerate
+            // and read a record without the current identity's stale cleanup
+            // removing it. No record contents enter the trace.
+            var traceRecordDirectory = Path.Combine(root, ".hydration-reservations-v2");
+            var traceRecord = Path.Combine(traceRecordDirectory, second.ScopeKey + "-" + second.CacheKey + ".json");
+            var traceSpec = new DownloadSpec(second.ResourceReference, new Uri("https://source.example.invalid/content"), second.FileName, second.Length, second.ETag, second.Sha256);
+            var traceBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = second.ScopeKey, Entry = second.CacheKey,
+                Growth = checked(second.Length + Downloader.HydrationStateGrowthBudget(traceSpec) + 1024) });
+            using (var output = new FileStream(traceRecord, FileMode.CreateNew, FileAccess.Write, FileShare.None)) output.Write(traceBytes);
+            try {
+                var scanTrace = NativeStallTrace.Enable();
+                try {
+                    await coordinator.SyntheticCacheStageAsync(identity, "quota-reservation", CancellationToken.None);
+                    var events = NativeStallTrace.Snapshot(scanTrace).Select(e => e.Kind).ToArray();
+                    foreach (var (enter, exit) in new[] {
+                        (NativeStallTrace.Stage.ReservedOwnerCheckEnter, NativeStallTrace.Stage.ReservedOwnerCheckExit),
+                        (NativeStallTrace.Stage.ReservedDirectoriesCheckEnter, NativeStallTrace.Stage.ReservedDirectoriesCheckExit),
+                        (NativeStallTrace.Stage.ReservedFilesEnumeratorEnter, NativeStallTrace.Stage.ReservedFilesEnumeratorExit),
+                        (NativeStallTrace.Stage.ReservedFilesMoveEnter, NativeStallTrace.Stage.ReservedFilesMoveExit),
+                        (NativeStallTrace.Stage.ReservedFilesDisposeEnter, NativeStallTrace.Stage.ReservedFilesDisposeExit),
+                        (NativeStallTrace.Stage.ReservedRecordReadEnter, NativeStallTrace.Stage.ReservedRecordReadExit) })
+                        if (!events.Contains(enter) || events.Count(e => e == enter) != events.Count(e => e == exit))
+                            throw new IOException("Synthetic reservation scan trace is incomplete.");
+                    if (NativeStallTrace.Dropped(scanTrace) != 0) throw new IOException("Synthetic reservation scan trace dropped events.");
+                } finally { NativeStallTrace.Disable(scanTrace); }
+                if (!File.ReadAllBytes(traceRecord).SequenceEqual(traceBytes)) throw new IOException("Unrelated synthetic reservation changed.");
+            } finally { File.Delete(traceRecord); }
             var scopeMarker = Path.Combine(scope, ".verified-hydration-owner"); var originalScope = File.ReadAllBytes(scopeMarker);
             await PrewarmOwnedAsync(cache, new[] { third });
             if (!File.Exists(Path.Combine(thirdEntry, ".verified-hydration-owner")) || !File.ReadAllBytes(scopeMarker).SequenceEqual(originalScope))

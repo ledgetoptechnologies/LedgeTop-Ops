@@ -560,14 +560,29 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         NativeStallTrace.Record(NativeStallTrace.Stage.CacheReservedBytesEnter);
         try {
 #endif
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        if (!TraceCacheValue(NativeStallTrace.Stage.ReservedOwnerCheckEnter, NativeStallTrace.Stage.ReservedOwnerCheckExit, () => OwnedExisting(directory))) return 0;
+#else
         if (!OwnedExisting(directory)) return 0;
+#endif
         long reserved = 0; var count = 0;
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        if (TraceCacheValue(NativeStallTrace.Stage.ReservedDirectoriesCheckEnter, NativeStallTrace.Stage.ReservedDirectoriesCheckExit, () => Directory.EnumerateDirectories(directory).Any())) throw new TransferException("Hydration reservation tree is unknown.");
+        var enumerator = TraceCacheValue(NativeStallTrace.Stage.ReservedFilesEnumeratorEnter, NativeStallTrace.Stage.ReservedFilesEnumeratorExit, () => Directory.EnumerateFiles(directory).GetEnumerator());
+        try {
+        while (TraceCacheValue(NativeStallTrace.Stage.ReservedFilesMoveEnter, NativeStallTrace.Stage.ReservedFilesMoveExit, enumerator.MoveNext)) {
+            var item = enumerator.Current;
+#else
         if (Directory.EnumerateDirectories(directory).Any()) throw new TransferException("Hydration reservation tree is unknown.");
         foreach (var item in Directory.EnumerateFiles(directory)) {
+#endif
             if (Path.GetFileName(item) == Marker) continue;
             if (++count > 4096) throw new TransferException("Hydration reservation capacity exceeded.");
             reserved = checked(reserved + ReadReservation(item).Value.Growth);
         }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        } finally { TraceCacheAction(NativeStallTrace.Stage.ReservedFilesDisposeEnter, NativeStallTrace.Stage.ReservedFilesDisposeExit, enumerator.Dispose); }
+#endif
         return reserved;
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheReservedBytesExit); }
@@ -575,6 +590,10 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     }
     private static (Reservation Value, byte[] Bytes) ReadReservation(string path)
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.ReservedRecordReadEnter);
+        try {
+#endif
         RequireSafe(path);
         using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
         if (input.Length is <= 0 or > 1024) throw new TransferException("Hydration reservation is unavailable.");
@@ -591,6 +610,9 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             Path.GetFileName(path) != row.Scope + "-" + row.Entry + ".json")
             throw new TransferException("Hydration reservation ownership is unknown.");
         return (row, bytes);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        } finally { NativeStallTrace.Record(NativeStallTrace.Stage.ReservedRecordReadExit); }
+#endif
     }
     private static void DeleteReservation(string path, byte[] expected)
     {
