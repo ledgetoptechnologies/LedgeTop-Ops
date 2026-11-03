@@ -161,6 +161,8 @@ print(json.dumps({'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 0, stderr);
   assert.deepEqual(JSON.parse(stdout), { size: f.bytes.length, sha256: hash(f.bytes) });
+  assert.deepEqual({ ...f.broker.db.prepare('SELECT requests_used,bytes_used,attempts_used FROM source_range_usage').get() },
+    { requests_used: 1, bytes_used: f.bytes.length, attempts_used: 1 });
 });
 
 test('HTTP route rejects missing or malformed range identity headers and wrong methods', async t => {
