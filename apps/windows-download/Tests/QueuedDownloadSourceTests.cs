@@ -297,8 +297,9 @@ internal static class QueuedDownloadSourceTests
     }
     private static async Task CompanyHydrationAuthorizationRetry()
     {
-        foreach (var mode in new[] { "before502", "before503-lifetime", "before504", "after503", "after401", "after403", "afterPrincipal", "afterVersion", "persistent", "cancel", "generation-cancel", "other500", "opaque" }) {
+        foreach (var mode in new[] { "before502", "before503-lifetime", "before504", "after503", "after401", "after403", "afterPrincipal", "afterVersion", "persistent", "cancel", "generation-cancel", "deadline-before-retry", "deadline-during-delay", "deadline-second-attempt", "other500", "opaque" }) {
             using var f = new Fixture(); using var cancellation = new CancellationTokenSource(); using var generation = new CancellationTokenSource();
+            var clock = new AuthorizationDeadlineClock();
             var resolves = 0; var downloads = 0; var delays = 0; var faults = 0; var sink = new AuthoritySink();
             var after = mode.StartsWith("after", StringComparison.Ordinal);
             using var original = f.Source(true, new Handler((request, _) => {
@@ -307,9 +308,12 @@ internal static class QueuedDownloadSourceTests
                 resolves++; Assert(sink.Written == 0 && sink.Completed == 0);
                 if ((after && downloads > 0 || !after && downloads == 0) && (faults == 0 || mode == "persistent")) {
                     faults++;
+                    if (mode == "deadline-before-retry") clock.Advance(TimeSpan.FromMinutes(15));
+                    if (mode is "deadline-second-attempt" or "deadline-during-delay") clock.Advance(TimeSpan.FromMinutes(14));
                     var status = mode == "before502" ? 502 : mode == "before504" ? 504 : mode == "other500" ? 500 : 503;
                     return Task.FromResult(new HttpResponseMessage((HttpStatusCode)status));
                 }
+                if (mode == "deadline-second-attempt") clock.Advance(TimeSpan.FromMinutes(1));
                 if (after && downloads > 0 && mode is "after401" or "after403")
                     return Task.FromResult(new HttpResponseMessage(mode == "after401" ? HttpStatusCode.Unauthorized : HttpStatusCode.Forbidden));
                 var envelope = Envelope(true);
@@ -332,20 +336,49 @@ internal static class QueuedDownloadSourceTests
                 delays++; Assert(delay >= TimeSpan.FromMilliseconds(125) && delay <= TimeSpan.FromMilliseconds(375));
                 if (mode == "cancel") cancellation.Cancel();
                 if (mode == "generation-cancel") generation.Cancel();
+                if (mode == "deadline-during-delay") clock.Advance(TimeSpan.FromMinutes(1));
                 token.ThrowIfCancellationRequested(); return Task.CompletedTask;
             }
-            using var coordinator = new PlaceholderHydrationCoordinator(selected, "pilot", f.Root, 64L << 30, 128L << 30, Principal, Delay);
+            using var coordinator = new PlaceholderHydrationCoordinator(selected, "pilot", f.Root, 64L << 30, 128L << 30, Principal, Delay, clock);
             if (mode is "before502" or "before503-lifetime" or "before504" or "after503") {
                 await coordinator.HydrateAsync(id, 0, id.Length, sink, cancellation.Token);
                 Assert(delays == 1 && sink.Written == Bytes.Length && sink.Completed == 1 && sink.Failed == 0 && downloads == 1 && resolves == 3);
             } else {
                 try { await coordinator.HydrateAsync(id, 0, id.Length, sink, cancellation.Token); throw new Exception("Expected retry refusal."); }
-                catch (Exception error) when (error is TransferException or OperationCanceledException) { }
+                catch (TransferException error) {
+                    if (mode.StartsWith("deadline-", StringComparison.Ordinal)) Assert(error.Reason == TransferFailureReason.Timeout);
+                }
+                catch (OperationCanceledException) when (mode is "cancel" or "generation-cancel") { }
                 Assert(sink.Written == 0 && sink.Completed == 0 && sink.Failed == 1);
-                Assert(delays == (mode is "other500" or "opaque" ? 0 : 1));
-                Assert(resolves == (after ? 3 : mode is "cancel" or "generation-cancel" or "other500" or "opaque" ? 1 : 2));
+                Assert(delays == (mode is "other500" or "opaque" or "deadline-before-retry" ? 0 : 1));
+                Assert(resolves == (after ? 3 : mode is "cancel" or "generation-cancel" or "deadline-before-retry" or "deadline-during-delay" or "other500" or "opaque" ? 1 : 2));
             }
             Assert(f.Runner.Logins == 0);
+        }
+    }
+    // Minimal deterministic one-shot timer for the linked authorization deadline.
+    private sealed class AuthorizationDeadlineClock : TimeProvider
+    {
+        private long now; private DeadlineTimer? timer;
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => now;
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period) =>
+            timer = new DeadlineTimer(this, callback, state, dueTime, period);
+        internal void Advance(TimeSpan amount) { now += amount.Ticks; timer?.FireIfDue(); }
+        private sealed class DeadlineTimer : ITimer
+        {
+            private readonly AuthorizationDeadlineClock clock; private readonly TimerCallback callback; private readonly object? state;
+            private long due; private bool disposed;
+            internal DeadlineTimer(AuthorizationDeadlineClock clock, TimerCallback callback, object? state, TimeSpan due, TimeSpan period) {
+                this.clock = clock; this.callback = callback; this.state = state; Change(due, period);
+            }
+            public bool Change(TimeSpan delay, TimeSpan period) {
+                if (disposed || period != Timeout.InfiniteTimeSpan) return false;
+                due = delay == Timeout.InfiniteTimeSpan ? long.MaxValue : clock.now + delay.Ticks; return true;
+            }
+            internal void FireIfDue() { if (!disposed && clock.now >= due) { due = long.MaxValue; callback(state); } }
+            public void Dispose() => disposed = true;
+            public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
         }
     }
     private sealed class AuthoritySink : IPlaceholderTransferSink {

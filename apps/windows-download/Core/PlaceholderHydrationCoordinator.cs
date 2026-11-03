@@ -22,6 +22,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     private readonly string? principal;
     private readonly long maximumFileBytes, maximumCacheBytes;
     private readonly Func<TimeSpan, CancellationToken, Task> authorizationRetryDelay;
+    private readonly TimeProvider authorizationRetryClock;
     private int disposed;
     private const string Marker = ".verified-hydration-owner";
     private const string Owner = "LedgeTop.VerifiedHydration/1\n";
@@ -36,10 +37,12 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         : this(source, channel, applicationStateRoot, maximumFileBytes, maximumCacheBytes, expectedPrincipal, Task.Delay) { }
 
     internal PlaceholderHydrationCoordinator(IQueuedDownloadSource source, string channel, string applicationStateRoot,
-        long maximumFileBytes, long maximumCacheBytes, string? expectedPrincipal, Func<TimeSpan, CancellationToken, Task> authorizationRetryDelay)
+        long maximumFileBytes, long maximumCacheBytes, string? expectedPrincipal, Func<TimeSpan, CancellationToken, Task> authorizationRetryDelay,
+        TimeProvider? authorizationRetryClock = null)
     {
         ArgumentNullException.ThrowIfNull(authorizationRetryDelay);
         this.authorizationRetryDelay = authorizationRetryDelay;
+        this.authorizationRetryClock = authorizationRetryClock ?? TimeProvider.System;
         if (channel is not ("pilot" or "stable") || maximumFileBytes < 0 || maximumCacheBytes < maximumFileBytes || maximumCacheBytes < System.Text.Encoding.UTF8.GetByteCount(Owner)
             || !Path.IsPathFullyQualified(applicationStateRoot) || applicationStateRoot.StartsWith("\\\\", StringComparison.Ordinal))
             throw new TransferException("Hydration configuration is invalid.");
@@ -377,19 +380,30 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     }
     private async Task<ResolvedQueuedDownload> AuthorizeWithRetry(PlaceholderIdentity id, CancellationToken token)
     {
-        try { return await Authorize(id, token).ConfigureAwait(false); }
-        catch (TransferException error) when (
-            error.Reason == TransferFailureReason.UnexpectedHttpStatus && error.HttpStatus is 502 or 503 or 504 &&
-            (source is EmployeeQueuedDownloadSource || source is LifetimeQueuedDownloadSource { TrustedEmployeeForAuthorizationRetry: true })) {
-            token.ThrowIfCancellationRequested();
-            var delay = TimeSpan.FromMilliseconds(Random.Shared.Next(125, 376));
-            if (source is LifetimeQueuedDownloadSource lifetime)
-                await lifetime.DelayAuthorizationRetryAsync(delay, authorizationRetryDelay, token).ConfigureAwait(false);
-            else await authorizationRetryDelay(delay, token).ConfigureAwait(false);
-            token.ThrowIfCancellationRequested();
-            // Retry the complete authority check once, before any native transfer.
-            // ServiceBusy, login, denial, malformed and unknown errors do not retry here.
+        if (source is not EmployeeQueuedDownloadSource && source is not LifetimeQueuedDownloadSource { TrustedEmployeeForAuthorizationRetry: true })
             return await Authorize(id, token).ConfigureAwait(false);
+        // Both attempts share one deadline, so the second Resolve cannot restart
+        // the first attempt's 15-minute budget. The caller still owns cancellation.
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(15), authorizationRetryClock);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, deadline.Token);
+        try {
+            try {
+                var result = await Authorize(id, linked.Token).ConfigureAwait(false);
+                linked.Token.ThrowIfCancellationRequested(); return result;
+            } catch (TransferException error) when (error.Reason == TransferFailureReason.UnexpectedHttpStatus && error.HttpStatus is 502 or 503 or 504) {
+                linked.Token.ThrowIfCancellationRequested();
+                var delay = TimeSpan.FromMilliseconds(Random.Shared.Next(125, 376));
+                if (source is LifetimeQueuedDownloadSource lifetime)
+                    await lifetime.DelayAuthorizationRetryAsync(delay, authorizationRetryDelay, linked.Token).ConfigureAwait(false);
+                else await authorizationRetryDelay(delay, linked.Token).ConfigureAwait(false);
+                linked.Token.ThrowIfCancellationRequested();
+                // Retry the complete authority check once, before native transfer.
+                // ServiceBusy, login, denial, malformed and unknown errors do not retry here.
+                var result = await Authorize(id, linked.Token).ConfigureAwait(false);
+                linked.Token.ThrowIfCancellationRequested(); return result;
+            }
+        } catch (OperationCanceledException) when (deadline.IsCancellationRequested && !token.IsCancellationRequested) {
+            throw new TransferException("Hydration authorization timed out.", TransferFailureReason.Timeout);
         }
     }
     private async Task<ResolvedQueuedDownload> Authorize(PlaceholderIdentity id, CancellationToken token)
