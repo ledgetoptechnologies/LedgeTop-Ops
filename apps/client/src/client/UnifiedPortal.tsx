@@ -18,6 +18,7 @@ export type OpenInAccount = (workspaceId: string, path: string) => void;
 
 const CLOSED_REQUEST = new Set(["completed", "cancelled", "declined"]);
 const CLOSED_INQUIRY = new Set(["declined", "closed"]);
+const CHECKING_REQUESTS = "Checking your requests…";
 const INQUIRY_STATUS: Record<string, { label: string; tone: "neutral" | "success" | "warning" | "danger" }> = {
   received: { label: "Received", tone: "neutral" }, under_review: { label: "Under review", tone: "warning" },
   declined: { label: "Declined", tone: "danger" }, closed: { label: "Closed", tone: "success" },
@@ -51,8 +52,9 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   const [quickRequest, setQuickRequest] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
   // General requests aren't tied to an account, so they're read once for the client, not per account.
-  // null: not offered here (or not loaded yet); "error": offered but couldn't be read.
-  const [inquiries, setInquiries] = useState<ClientInquiry[] | null | "error">(null);
+  // "loading": not answered yet; null: not offered here; "error": offered but couldn't be read. Only a list or
+  // null is a real answer, so neither of the others may be shown as "no requests".
+  const [inquiries, setInquiries] = useState<ClientInquiry[] | null | "loading" | "error">("loading");
   // What the one-step form offers this client, read once like general requests: a client can have services or
   // general choices even when none of their accounts takes requests online. null: not offered here (an older
   // portal, or no access); "error": couldn't be checked.
@@ -64,6 +66,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   useEffect(() => {
     if (!requestPage) return;
     const controller = new AbortController();
+    setInquiries(current => current === "error" ? "loading" : current);
     loadInquiries(controller.signal).then(value => { if (!controller.signal.aborted) setInquiries(value); },
       () => { if (!controller.signal.aborted) setInquiries("error"); });
     return () => controller.abort();
@@ -177,6 +180,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
       <button type="button" className="button-ghost button-small" onClick={() => openInAccount(item.account.workspace.id, "/portal/requests")}>View</button></div>
   </li>;
   // General requests have no page of their own yet, so they show where they stand and nothing to open.
+  const inquiryProblem = inquiries === "error" && <p className="unified-portal-request-note" role="status">General requests you’ve sent couldn’t be loaded right now. Try again in a moment.</p>;
   const inquiryRow = (item: ClientInquiry) => <li key={`inquiry:${item.id}`}>
     <div><strong>{item.title}</strong><small>{`Sent ${new Date(item.createdAt).toLocaleDateString()}`}</small></div>
     <div className="unified-portal-request-actions"><StatusPill tone={inquiryStatus(item.status).tone}>{inquiryStatus(item.status).label}</StatusPill></div>
@@ -236,7 +240,8 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     {requestChooser}{problems}{loadingNote}
     {requests.length > 0 && <RequestProgress requests={requests} />}
     <Card title="Request history">{!loading && requests.length === 0
-      ? historyComplete ? Array.isArray(inquiries) && inquiries.length > 0
+      ? historyComplete ? inquiries === "loading" ? <p className="unified-portal-quiet" role="status">{CHECKING_REQUESTS}</p>
+        : inquiries === "error" || Array.isArray(inquiries) && inquiries.length > 0
         ? <EmptyState title="No service requests yet" detail="Service requests you submit will appear here." />
         : <EmptyState title="No requests yet" detail="Requests you submit will appear here." />
         : failed.length > 0 ? <EmptyState title="Request history couldn’t be loaded" detail="Some of your work didn’t load, so requests may be missing. Try again above." />
@@ -246,7 +251,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     {Array.isArray(inquiries) && inquiries.length > 0 && <Card title="General requests">
       <ul className="unified-portal-requests">{inquiries.map(inquiryRow)}</ul>
     </Card>}
-    {inquiries === "error" && <p className="unified-portal-request-note" role="status">General requests you’ve sent couldn’t be loaded right now. Try again in a moment.</p>}
+    {inquiryProblem}
   </>;
 
   const general = Array.isArray(inquiries) ? inquiries : [];
@@ -254,6 +259,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     + general.filter(item => !CLOSED_INQUIRY.has(item.status)).length;
   const completed = requests.filter(item => item.request.status === "completed");
   const counting = loading && !ready.length;
+  const countingRequests = counting || inquiries === "loading";
   // Service and general requests in one list, newest first: a client never sorts their work by kind either.
   const activity = [
     ...requests.map(item => ({ at: item.request.updatedAt, row: requestRow(item) })),
@@ -271,7 +277,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     {problems}{requestChooser}
     <div className="portal-overview-tiles">
       <OverviewTile icon="projects" value={counting ? "…" : String(projects.length)} label="Projects" action="View projects" onClick={() => navigate("projects")} />
-      <OverviewTile icon="progress" value={counting ? "…" : String(openRequests)} label="Requests in progress" action="View requests" onClick={() => navigate("requests")} />
+      <OverviewTile icon="progress" value={countingRequests ? "…" : String(openRequests)} label="Requests in progress" action="View requests" onClick={() => navigate("requests")} />
       <OverviewTile icon="done" value={counting ? "…" : String(completed.length)} label="Completed requests" action="See history" onClick={() => navigate("requests")} />
       <OverviewTile icon="files" value="Files" label="Deliveries" action="Open deliveries" onClick={() => navigate("deliveries")} />
     </div>
@@ -280,8 +286,10 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     <Card className="portal-home-projects" title="Your projects" action={projects.length > 6 ? <button type="button" className="button-ghost button-small" onClick={() => navigate("projects")}>All projects</button> : undefined}>
       {loadingNote}{!loading && projects.length === 0 ? <EmptyState title="No projects available" detail="No projects are shared with you yet." /> : projectCards(projects.slice(0, 6))}</Card>
     <Card className="portal-home-activity" title="Recent activity" action={canStart ? <button type="button" className="button-ghost button-small" onClick={startRequest}>New request</button> : undefined}>
-      {activity.length === 0 ? <p className="unified-portal-quiet">No requests yet. When you ask us for something, you’ll follow it here.</p>
-        : <ul className="unified-portal-requests">{activity.map(item => item.row)}</ul>}</Card>
+      {activity.length > 0 ? <ul className="unified-portal-requests">{activity.map(item => item.row)}</ul>
+        : loading || inquiries === "loading" ? <p className="unified-portal-quiet" role="status">{CHECKING_REQUESTS}</p>
+        : inquiries !== "error" && <p className="unified-portal-quiet">No requests yet. When you ask us for something, you’ll follow it here.</p>}
+      {inquiryProblem}</Card>
   </div>;
 }
 

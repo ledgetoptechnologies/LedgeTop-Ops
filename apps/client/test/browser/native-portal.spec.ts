@@ -1337,6 +1337,42 @@ test.describe("unified home without business switching", () => {
     await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies/);
   });
 
+  // Accounts with no service requests, so home's only open question is the general request lookup.
+  const mockHomeInquiries = (page: Page, answer: (route: Route) => Promise<void>) => mock(page, (route, call) => {
+    if (call.path === "/api/client/request-services") return route.fulfill({json: {services: [], unavailable: [], inquiryKinds: ["other"]}});
+    if (call.path === "/api/client/inquiries") return answer(route);
+    if (call.path === "/api/client/v2/workspaces") return route.fulfill({json: {workspaces: listed}});
+    const match = call.path.match(/^\/api\/client\/v2\/workspaces\/(workspace-[bc])\/context$/);
+    if (match) return route.fulfill({json: {...context(match[1]!), workspace: listed.find(item => item.id === match[1])}});
+    return undefined;
+  });
+  const inProgress = (page: Page) => page.locator(".portal-overview-tile").filter({hasText: "Requests in progress"}).locator(".portal-overview-value");
+  const recentActivity = (page: Page) => page.locator(".ltds-card").filter({has: page.getByRole("heading", {name: "Recent activity"})});
+
+  test("home says it's checking, not that there are no requests, while general requests load", async ({page}) => {
+    const held: Route[] = [];
+    await mockHomeInquiries(page, route => (held.push(route), Promise.resolve()));
+    await page.goto("/portal");
+    const activity = recentActivity(page);
+    await expect(activity.getByRole("status")).toHaveText("Checking your requests…");
+    await expect(activity).not.toContainText("No requests yet");
+    await expect(inProgress(page)).toHaveText("…");
+    await expect.poll(() => held.length).toBeGreaterThan(0);
+    await Promise.all(held.map(route => route.fulfill({json: {inquiries: []}})));
+    await expect(activity).toContainText("No requests yet. When you ask us for something, you’ll follow it here.");
+    await expect(activity.getByRole("status")).toHaveCount(0);
+    await expect(inProgress(page)).toHaveText("0");
+  });
+
+  test("home says general requests couldn't load instead of claiming there are none", async ({page}) => {
+    await mockHomeInquiries(page, route => route.fulfill({status: 503, json: {error: "Unavailable"}}));
+    await page.goto("/portal");
+    const activity = recentActivity(page);
+    await expect(activity.getByRole("status")).toHaveText("General requests you’ve sent couldn’t be loaded right now. Try again in a moment.");
+    await expect(activity).not.toContainText("No requests yet");
+    await expect(activity).not.toContainText("Checking your requests…");
+  });
+
   test("with online requests switched off, home offers no New request and shows no error", async ({page}) => {
     // What the worker answers while CLIENT_PORTAL_REQUEST_V2_ENABLED and CLIENT_PORTAL_OPS_INQUIRIES_ENABLED are "false".
     await mock(page, (route, call) => {
@@ -1653,6 +1689,34 @@ test("no requests yet only when every account's history loaded and is empty", as
   await expect(page.getByRole("button", {name: "New request"})).toBeEnabled();
   await expect(page.getByText("No requests yet")).toBeVisible();
   await expect(page.locator(".unified-portal-request-unavailable")).toHaveCount(0);
+});
+
+test("the requests page waits for general requests before saying there are none", async ({page}) => {
+  const held: Route[] = [];
+  await mock(page, (route, call) => {
+    if (call.path === "/api/client/inquiries") return (held.push(route), Promise.resolve());
+    return /\/api\/client\/v2\/workspaces\/workspace-[bc]\/context$/.test(call.path)
+      ? route.fulfill({json: requestContext(call.path.includes("workspace-c") ? "workspace-c" : "workspace-b")}) : undefined;
+  });
+  await page.goto("/portal/requests");
+  await expect(page.getByRole("status").filter({hasText: "Checking your requests…"})).toBeVisible();
+  await expect(page.getByText("No requests yet")).toHaveCount(0);
+  await expect.poll(() => held.length).toBeGreaterThan(0);
+  await Promise.all(held.map(route => route.fulfill({json: {inquiries: []}})));
+  await expect(page.getByText("No requests yet")).toBeVisible();
+  await expect(page.getByText("Checking your requests…")).toHaveCount(0);
+});
+
+test("the requests page keeps failed general requests apart from an empty service history", async ({page}) => {
+  await mock(page, (route, call) => {
+    if (call.path === "/api/client/inquiries") return route.fulfill({status: 503, json: {error: "Unavailable"}});
+    return /\/api\/client\/v2\/workspaces\/workspace-[bc]\/context$/.test(call.path)
+      ? route.fulfill({json: requestContext(call.path.includes("workspace-c") ? "workspace-c" : "workspace-b")}) : undefined;
+  });
+  await page.goto("/portal/requests");
+  await expect(page.getByText("General requests you’ve sent couldn’t be loaded right now. Try again in a moment.")).toBeVisible();
+  await expect(page.getByText("No service requests yet")).toBeVisible();
+  await expect(page.getByText("No requests yet")).toHaveCount(0);
 });
 
 test("while accounts are still loading the requests page shows a disabled Checking button, not a missing one", async ({page}) => {
