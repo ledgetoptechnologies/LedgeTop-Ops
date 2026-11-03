@@ -40,7 +40,8 @@ internal static class NativeStallTrace
         SyntheticMarkerCloseEnter, SyntheticMarkerCloseExit,
         SyntheticRootPrepareEnter, SyntheticRootPrepareExit,
         SyntheticEntryLeaseGapOpen, SyntheticEntryLeaseGapClosed,
-        SyntheticOutsidePrecheckEnter, SyntheticOutsidePrecheckExit
+        SyntheticOutsidePrecheckEnter, SyntheticOutsidePrecheckExit,
+        SyntheticPrewarmStart, SyntheticPrewarmComplete
     }
     internal readonly record struct Event(long Sequence, long Timestamp, int ThreadId, Stage Kind);
     internal sealed class Capture

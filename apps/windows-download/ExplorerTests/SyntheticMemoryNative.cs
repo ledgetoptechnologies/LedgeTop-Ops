@@ -64,9 +64,17 @@ internal static class SyntheticMemoryNative {
         var suppressProgress = get("LEDGETOP_TEST_SUPPRESS_NATIVE_PROGRESS") == "1";
         var markerIo = DiagnosticMemoryMarkerIo.Mode(get("LEDGETOP_TEST_MEMORY_MARKER_IO"));
         var cacheStage = CacheStage(get("LEDGETOP_TEST_MEMORY_CACHE_STAGE"));
-        return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}";
+        var prewarm = PrewarmMode(get("LEDGETOP_TEST_MEMORY_PREWARM"));
+        return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}; prewarm={prewarm}";
     }
+    private static string PrewarmMode(string? value) => value switch { null or "0" => "off", "1" => "on", _ => "invalid" };
     private static string CacheStage(string? value) => value switch { null or "none" => "none", "quota-only" => "quota-only", "quota-ownership" => "quota-ownership", "quota-capacity" => "quota-capacity", "quota-reservation" => "quota-reservation", "quota-reservation-gap" => "quota-reservation-gap", "quota-reservation-precheck" => "quota-reservation-precheck", _ => "invalid" };
+    private static async Task PrewarmOwnedAsync(string cache, IReadOnlyCollection<PlaceholderIdentity> identities) {
+        if (identities.Count is < 1 or > 4 || identities.Select(identity => identity.FileName).Distinct(StringComparer.Ordinal).Count() != identities.Count)
+            throw new IOException("Synthetic prewarm identity count is invalid.");
+        using var coordinator = new PlaceholderHydrationCoordinator(new Source(), "pilot", cache, expectedPrincipal: Principal);
+        foreach (var identity in identities) await coordinator.SyntheticCacheStageAsync(identity, "quota-capacity", CancellationToken.None);
+    }
     internal static async Task<int> CacheStageTests() {
         var basePath = Path.Combine(Path.GetTempPath(), "LedgeTop-cache-stage-" + Guid.NewGuid().ToString("N"));
         var fixtures = Path.Combine(basePath, "memory-native-fixtures");
@@ -80,6 +88,8 @@ internal static class SyntheticMemoryNative {
         var scope = Path.Combine(root, identity.ScopeKey); var entry = Path.Combine(scope, identity.CacheKey);
         var second = identity with { ResourceReference = "odqr1_1", LogicalFileId = "oef1_" + new string('b', 64), FileName = "sample-1.bin" };
         var secondEntry = Path.Combine(scope, second.CacheKey);
+        var third = identity with { ResourceReference = "odqr1_2", LogicalFileId = "oef1_" + new string('c', 64), FileName = "sample-2.bin" };
+        var thirdEntry = Path.Combine(scope, third.CacheKey);
         try {
             Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", "1");
             Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", basePath);
@@ -113,6 +123,12 @@ internal static class SyntheticMemoryNative {
                     !events.Contains(NativeStallTrace.Stage.CacheReserveAcquired) || !events.Contains(NativeStallTrace.Stage.CacheReleaseExit) ||
                     !events.Contains(NativeStallTrace.Stage.OwnedMarkerFlushExit)) throw new IOException("Synthetic cache stages omitted expected trace.");
             } finally { NativeStallTrace.Disable(capture); }
+            var scopeMarker = Path.Combine(scope, ".verified-hydration-owner"); var originalScope = File.ReadAllBytes(scopeMarker);
+            await PrewarmOwnedAsync(cache, new[] { third });
+            if (!File.Exists(Path.Combine(thirdEntry, ".verified-hydration-owner")) || !File.ReadAllBytes(scopeMarker).SequenceEqual(originalScope))
+                throw new IOException("Synthetic prewarm did not preserve existing ownership.");
+            var duplicateRejected = false; try { await PrewarmOwnedAsync(cache, new[] { third, third }); } catch (IOException) { duplicateRejected = true; }
+            if (!duplicateRejected) throw new IOException("Synthetic prewarm accepted duplicate fixture entries.");
             var rejected = false; try { await coordinator.SyntheticCacheStageAsync(identity, "unknown", CancellationToken.None); } catch (TransferException) { rejected = true; }
             if (!rejected) throw new IOException("Invalid synthetic stage accepted.");
             using (var cancellation = new CancellationTokenSource()) {
@@ -141,6 +157,7 @@ internal static class SyntheticMemoryNative {
             Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", previousBase);
             File.Delete(Path.Combine(entry, ".hydration.lock")); File.Delete(Path.Combine(entry, ".verified-hydration-owner")); if (Directory.Exists(entry)) Directory.Delete(entry);
             File.Delete(Path.Combine(secondEntry, ".hydration.lock")); File.Delete(Path.Combine(secondEntry, ".verified-hydration-owner")); if (Directory.Exists(secondEntry)) Directory.Delete(secondEntry);
+            File.Delete(Path.Combine(thirdEntry, ".hydration.lock")); File.Delete(Path.Combine(thirdEntry, ".verified-hydration-owner")); if (Directory.Exists(thirdEntry)) Directory.Delete(thirdEntry);
             File.Delete(Path.Combine(scope, ".verified-hydration-owner")); if (Directory.Exists(scope)) Directory.Delete(scope);
             var reservationDirectory = Path.Combine(root, ".hydration-reservations-v2");
             File.Delete(Path.Combine(reservationDirectory, ".verified-hydration-owner")); if (Directory.Exists(reservationDirectory)) Directory.Delete(reservationDirectory);
@@ -151,6 +168,8 @@ internal static class SyntheticMemoryNative {
         Console.WriteLine("PASS synthetic actual cache admission, quota, ownership and scope refusals without native registration."); return 0;
     }
     internal static int CleanupEvidenceTests() {
+        if (PrewarmMode(null) != "off" || PrewarmMode("0") != "off" || PrewarmMode("1") != "on" || PrewarmMode("unexpected") != "invalid")
+            throw new IOException("Synthetic prewarm option validation failed.");
         var joined = true;
         var pendingRead = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         try { TrackReadAsync(pendingRead.Task, TimeSpan.FromMilliseconds(20), value => joined = value).GetAwaiter().GetResult(); throw new IOException("Timed read unexpectedly completed."); }
@@ -185,9 +204,9 @@ internal static class SyntheticMemoryNative {
             CleanupVerified(true, true, true, true, false) ||
             !CleanupVerified(true, true, true, true, true)) throw new IOException("Synthetic registration cleanup evidence is incorrect.");
         var options = DiagnosticSettings(name => name == "LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION" ? "1" : "synthetic-secret");
-        if (options != "Synthetic memory options: blockSelf=True; disableScanner=False; suppressProgress=False; markerIo=invalid; cacheStage=invalid")
+        if (options != "Synthetic memory options: blockSelf=True; disableScanner=False; suppressProgress=False; markerIo=invalid; cacheStage=invalid; prewarm=invalid")
             throw new IOException("Synthetic diagnostic option reporting is incorrect.");
-        if (DiagnosticSettings(name => name is "LEDGETOP_TEST_MEMORY_MARKER_IO" or "LEDGETOP_TEST_MEMORY_CACHE_STAGE" ? null : "1") != "Synthetic memory options: blockSelf=True; disableScanner=True; suppressProgress=True; markerIo=none; cacheStage=none")
+        if (DiagnosticSettings(name => name is "LEDGETOP_TEST_MEMORY_MARKER_IO" or "LEDGETOP_TEST_MEMORY_CACHE_STAGE" or "LEDGETOP_TEST_MEMORY_PREWARM" ? null : "1") != "Synthetic memory options: blockSelf=True; disableScanner=True; suppressProgress=True; markerIo=none; cacheStage=none; prewarm=off")
             throw new IOException("Synthetic diagnostic option reporting did not capture opt-ins.");
         var observations = new List<(string, int)>();
         void Capture(string outcome, int code) => observations.Add((outcome, code));
@@ -264,8 +283,10 @@ internal static class SyntheticMemoryNative {
         Console.WriteLine(DiagnosticSettings(Environment.GetEnvironmentVariable));
         var markerMode = DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO"));
         var cacheStage = CacheStage(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_CACHE_STAGE"));
-        if (markerMode == "invalid" || cacheStage == "invalid" || (markerMode != "none" && cacheStage != "none")) return 2;
-        if (retryProbe && (count != 1 || markerMode != "none" || cacheStage != "none" || !RetryOptionsValid(Environment.GetEnvironmentVariable))) return 2;
+        var prewarm = PrewarmMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_PREWARM"));
+        if (markerMode == "invalid" || cacheStage == "invalid" || prewarm == "invalid" || (markerMode != "none" && cacheStage != "none") ||
+            (prewarm == "on" && (markerMode != "none" || cacheStage != "quota-reservation"))) return 2;
+        if (retryProbe && (count != 1 || markerMode != "none" || cacheStage != "none" || prewarm != "off" || !RetryOptionsValid(Environment.GetEnvironmentVariable))) return 2;
         var basePath = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
         if (string.IsNullOrEmpty(basePath) || !Path.IsPathFullyQualified(basePath) || basePath.StartsWith("\\\\", StringComparison.Ordinal)) return 2;
         RequireLocalDirectory(basePath);
@@ -299,6 +320,11 @@ internal static class SyntheticMemoryNative {
         using var start = new EventWaitHandle(false, EventResetMode.ManualReset, startName);
         var trace = NativeStallTrace.Enable();
         try {
+            if (prewarm == "on") {
+                Phase("prewarm-start", id); NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticPrewarmStart);
+                await PrewarmOwnedAsync(cache, manifest.Values.ToArray());
+                NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticPrewarmComplete); Phase("prewarm-complete", id);
+            }
             if (markerMode == "preopened-distinct") {
                 Phase("marker-preopen-start", id);
                 preopened = new DiagnosticMemoryMarkerIo.Preopened(cache, manifest.Keys);
