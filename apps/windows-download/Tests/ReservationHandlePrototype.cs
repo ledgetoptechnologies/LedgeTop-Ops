@@ -1,0 +1,156 @@
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+// Ordinary-file feasibility only. This never calls the production cache or a
+// Cloud Files provider. Its explicit local artifact root and random directory
+// contain only fixed synthetic bytes. Failure retains the fixture.
+internal static class ReservationHandlePrototype
+{
+    private const uint ReadAttributes = 0x80, Delete = 0x10000, GenericRead = 0x80000000;
+    private const uint ShareRead = 1, ShareWrite = 2, OpenExisting = 3;
+    private const uint BackupSemantics = 0x02000000, OpenReparsePoint = 0x00200000;
+    private const uint DirectoryAttribute = 0x10, ReparseAttribute = 0x400;
+    private readonly record struct FileId(ulong Volume, Guid Id);
+    private static readonly byte[] Owned = "synthetic-owned-reservation-v1\n"u8.ToArray();
+    private static readonly byte[] Foreign = "synthetic-foreign-reservation\n"u8.ToArray();
+
+    internal static void Run()
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows-only handle comparison.");
+        var root = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
+        if (string.IsNullOrEmpty(root) || !Path.IsPathFullyQualified(root) || root.StartsWith("\\\\", StringComparison.Ordinal))
+            throw new IOException("An existing local test artifact root is required.");
+        root = Path.GetFullPath(root); CheckAncestors(root);
+        var fixture = Path.Combine(root, "reservation-handle-" + Guid.NewGuid().ToString("N"));
+        if (!CreateDirectoryW(fixture, 0)) throw new IOException("Cannot create a new test fixture.");
+        var record = Path.Combine(fixture, "owned.record"); var foreign = Path.Combine(fixture, "foreign.record");
+        var renamed = Path.Combine(fixture, "renamed.record");
+        var verified = false; var cleanupComplete = false;
+        try {
+            CheckAncestors(fixture);
+            using var directory = Open(fixture, ReadAttributes | Delete, ShareRead | ShareWrite, BackupSemantics | OpenReparsePoint);
+            RequireKind(directory, isDirectory: true); var directoryId = Id(directory);
+            VerifyDirectoryBinding(fixture, directory, directoryId);
+            FileId ownerId, foreignId;
+            using (var stream = new FileStream(record, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read)) {
+                stream.Write(Owned); stream.Flush(true); ownerId = Id(stream.SafeFileHandle);
+                RequireKind(stream.SafeFileHandle, isDirectory: false);
+                if (!ReadExact(stream, Owned) || Id(stream.SafeFileHandle) != ownerId) throw new IOException("Retained-handle verification failed.");
+                using (var other = new FileStream(foreign, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read)) {
+                    other.Write(Foreign); other.Flush(true); foreignId = Id(other.SafeFileHandle);
+                    if (!ReadExact(other, Foreign) || foreignId == ownerId) throw new IOException("Foreign fixture identity is ambiguous.");
+                }
+                var readRefused = false;
+                try { using var unexpected = new FileStream(record, FileMode.Open, FileAccess.Read, FileShare.Read); }
+                catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33) { readRefused = true; }
+                if (!readRefused) throw new IOException("Incompatible second open was not refused.");
+                var renameRefused = false; try { File.Move(record, renamed); } catch (IOException) { renameRefused = true; } catch (UnauthorizedAccessException) { renameRefused = true; }
+                if (!renameRefused || File.Exists(renamed)) throw new IOException("Retained record rename was not refused.");
+                var replaceRefused = false; try { File.Move(foreign, record, true); } catch (IOException) { replaceRefused = true; } catch (UnauthorizedAccessException) { replaceRefused = true; }
+                if (!replaceRefused || !File.ReadAllBytes(foreign).SequenceEqual(Foreign) || !ReadExact(stream, Owned) || Id(stream.SafeFileHandle) != ownerId)
+                    throw new IOException("Retained record replacement was not refused safely.");
+            }
+            // Simulates handle close only, not a process crash. The subsequent
+            // path reopen must resolve to the original identity and exact bytes.
+            using (var reopened = new FileStream(record, FileMode.Open, FileAccess.Read, FileShare.Read)) {
+                if (Id(reopened.SafeFileHandle) != ownerId || !ReadExact(reopened, Owned)) throw new IOException("Reopened record did not match.");
+            }
+            if (TryDeleteExact(fixture, directory, directoryId, record, Foreign, ownerId) || TryDeleteExact(fixture, directory, directoryId, record, Owned, foreignId) ||
+                !File.ReadAllBytes(record).SequenceEqual(Owned)) throw new IOException("Foreign identity or contents were accepted.");
+            VerifyDirectoryBinding(fixture, directory, directoryId);
+            verified = true;
+            // Delete each exact owned file only through the verified file handle.
+            if (!TryDeleteExact(fixture, directory, directoryId, record, Owned, ownerId) || !TryDeleteExact(fixture, directory, directoryId, foreign, Foreign, foreignId))
+                throw new IOException("Exact synthetic file cleanup was not verified.");
+            VerifyDirectoryBinding(fixture, directory, directoryId);
+            if (Directory.EnumerateFileSystemEntries(fixture).Any() || Id(directory) != directoryId)
+                throw new IOException("Synthetic fixture is not empty or its identity changed.");
+            byte disposition = 1;
+            if (!SetFileInformationByHandle(directory, 4, ref disposition, 1)) throw new IOException("Synthetic directory cleanup was not confirmed.");
+            directory.Dispose(); CheckAncestors(root);
+            var absent = false;
+            try { _ = File.GetAttributes(fixture); }
+            catch (FileNotFoundException) { absent = true; }
+            catch (DirectoryNotFoundException) { absent = true; }
+            if (!absent) throw new IOException("Synthetic directory absence was not confirmed.");
+            cleanupComplete = true;
+        } finally {
+            if (!cleanupComplete) Console.Error.WriteLine($"Synthetic reservation handle fixture preserved or cleanup unconfirmed (checksPassed={verified}): {fixture}");
+        }
+        Console.WriteLine("PASS ordinary Windows retained-handle identity, sharing, exact bytes and handle-bound cleanup. No native provider or crash tested.");
+    }
+
+    private static bool ReadExact(FileStream stream, byte[] expected)
+    {
+        if (stream.Length != expected.Length) return false;
+        var bytes = new byte[expected.Length]; var read = RandomAccess.Read(stream.SafeFileHandle, bytes, 0);
+        return read == bytes.Length && bytes.AsSpan().SequenceEqual(expected);
+    }
+    private static bool TryDeleteExact(string fixture, SafeFileHandle directory, FileId directoryId, string path, byte[] expected, FileId identity)
+    {
+        try {
+            if (!string.Equals(Path.GetDirectoryName(path), fixture, StringComparison.OrdinalIgnoreCase)) return false;
+            VerifyDirectoryBinding(fixture, directory, directoryId);
+            using var handle = Open(path, GenericRead | Delete, ShareRead, OpenReparsePoint);
+            RequireKind(handle, isDirectory: false);
+            if (Id(handle) != identity) return false;
+            using var input = new FileStream(handle, FileAccess.Read);
+            if (!ReadExact(input, expected)) return false;
+            VerifyDirectoryBinding(fixture, directory, directoryId);
+            byte disposition = 1;
+            return SetFileInformationByHandle(handle, 4, ref disposition, 1);
+        } catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.SecurityException) { return false; }
+    }
+    private static void VerifyDirectoryBinding(string path, SafeFileHandle held, FileId expected)
+    {
+        CheckAncestors(path);
+        // The held directory has DELETE access; the observation handle must
+        // permit sharing that existing access. The held handle denies anyone
+        // else opening this directory for deletion while the test is running.
+        using var current = Open(path, ReadAttributes, ShareRead | ShareWrite | 4, BackupSemantics | OpenReparsePoint);
+        RequireKind(current, isDirectory: true);
+        if (Id(held) != expected || Id(current) != expected) throw new IOException("Synthetic directory binding changed.");
+    }
+    private static void CheckAncestors(string path)
+    {
+        for (string? current = path; current is not null; current = Path.GetDirectoryName(current)) {
+            var attributes = File.GetAttributes(current);
+            if ((attributes & FileAttributes.ReparsePoint) != 0 || (attributes & FileAttributes.Directory) == 0)
+                throw new IOException("Synthetic path has an unsafe ancestor.");
+        }
+    }
+    private static SafeFileHandle Open(string path, uint access, uint share, uint flags)
+    {
+        var handle = CreateFileW(path, access, share, 0, OpenExisting, flags, 0);
+        if (!handle.IsInvalid) return handle;
+        handle.Dispose(); throw new IOException("Synthetic handle open failed.");
+    }
+    private static void RequireKind(SafeFileHandle handle, bool isDirectory)
+    {
+        var memory = Marshal.AllocHGlobal(8);
+        try {
+            if (!GetFileInformationByHandleEx(handle, 9, memory, 8)) throw new IOException("Synthetic handle attributes unavailable.");
+            var attributes = unchecked((uint)Marshal.ReadInt32(memory));
+            if ((attributes & ReparseAttribute) != 0 || ((attributes & DirectoryAttribute) != 0) != isDirectory)
+                throw new IOException("Synthetic handle type is unsafe.");
+        } finally { Marshal.FreeHGlobal(memory); }
+    }
+    private static FileId Id(SafeFileHandle handle)
+    {
+        var memory = Marshal.AllocHGlobal(24);
+        try {
+            if (!GetFileInformationByHandleEx(handle, 18, memory, 24)) throw new IOException("Synthetic file identity unavailable.");
+            var volume = unchecked((ulong)Marshal.ReadInt64(memory)); var idBytes = new byte[16]; Marshal.Copy(memory + 8, idBytes, 0, 16);
+            var id = new Guid(idBytes); if (id == Guid.Empty) throw new IOException("Synthetic file identity is empty.");
+            return new(volume, id);
+        } finally { Marshal.FreeHGlobal(memory); }
+    }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateDirectoryW(string path, nint securityAttributes);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, nint security, uint disposition, uint flags, nint template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int informationClass, nint information, uint size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int informationClass, ref byte information, uint size);
+}
