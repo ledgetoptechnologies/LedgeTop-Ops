@@ -52,6 +52,8 @@ if (args.Length == 3 && args[0] == "--windows-release-offer-fixture") {
 }
 
 if (args.FirstOrDefault() == "--company-hydration-authority-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
+if (args.FirstOrDefault() == "--preparation-ownership-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
+if (args.FirstOrDefault() == "--preparation-base-refusal-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
 if (args.FirstOrDefault() == "--access-token-coalescing-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
 if (args.FirstOrDefault() == "--portal-deadline-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
 
@@ -75,7 +77,7 @@ var tests = new (string Name, Func<Task> Run)[] {
     ("metadata cleanup cannot undo a committed successful download", LockedMetadata),
 }.Concat(AccessSessionTests.Groups).Concat(PortalClientTests.Groups).Concat(PortalClientDeadlineTests.Groups).Concat(EmployeeClientTests.Groups)
     .Concat(TransferQueueTests.Groups).Concat(DownloadProgressTests.Groups).Concat(QueuedDownloadSourceTests.Groups)
-    .Concat(PlaceholderHydrationTests.Groups).Concat(PreparationOwnershipTests.Groups).Concat(CloudFilesProbeTests.Groups)
+    .Concat(PlaceholderHydrationTests.Groups).Concat(CloudFilesProbeTests.Groups)
     .Concat(CloudFilesNativeTransferTests.Groups).Concat(CloudFilesCallbackTests.Groups).Concat(DownloaderInactivityTests.Groups)
     .Concat(CloudFilesConnectionTests.Groups).Concat(ExplorerDemoSourceTests.Groups).Concat(WindowsAppReleaseClientTests.Groups)
     .Concat(PlaceholderCacheEvictionTests.Groups).Concat(HydrationTimingTests.Groups).Concat(HydrationConcurrencyTests.Groups).Concat(FourSlotAdmissionTests.Groups).Concat(HydrationQuotaGateTests.Groups)
@@ -93,6 +95,8 @@ if (args.Length == 1 && args[0] == "--portal-deadline-only") tests = PortalClien
 if (args.Length == 1 && args[0] == "--downloader-inactivity-only") tests = DownloaderInactivityTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--hydration-timing-only") tests = HydrationTimingTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--preparation-ownership-only") tests = PreparationOwnershipTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--preparation-base-refusal-only")
+    tests = PreparationOwnershipTests.Groups.Where(test => test.Name.StartsWith("preparation artifact bases", StringComparison.Ordinal)).ToArray();
 if (args.Length == 1 && args[0] == "--authorization-timing-only") tests = QueuedDownloadSourceTests.Groups.Where(test => test.Name.StartsWith("queue authorization timing", StringComparison.Ordinal)).ToArray();
 if (args.Length == 1 && args[0] == "--cache-reclamation-only") tests = PlaceholderCacheEvictionTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--cache-admission-timeout-only") tests = PlaceholderCacheEvictionTests.Groups.Where(test => test.Name.StartsWith("cache reclamation admission timeout", StringComparison.Ordinal)).ToArray();

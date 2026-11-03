@@ -1,8 +1,9 @@
 using System.Security.Cryptography;
 using LedgeTop.WindowsDownload;
 
-// Synthetic local fixtures only. These checks characterize the existing
-// callback's ownership order; they do not create a Cloud Files connection.
+// Explicit opt-in only: these checks retain synthetic fixtures under the
+// dedicated artifact directory, because this test does not establish the
+// physical identities needed to authorize recursive cleanup.
 internal static class PreparationOwnershipTests {
     private static readonly byte[] Bytes = Enumerable.Range(0, 8192).Select(i => (byte)(i % 251)).ToArray();
     private static readonly string Sha = Convert.ToHexStringLower(SHA256.HashData(Bytes));
@@ -13,7 +14,9 @@ internal static class PreparationOwnershipTests {
         ("prepared stream and entry remain owned through authorization and transfer", Success),
         ("denied or cancelled post-authorization disposes input and leases before settlement", DeniedAndCancelled),
         ("transfer cancellation and terminal completion preserve ownership and settle once", TransferBoundaries),
-        ("failed cache validation preserves outer fresh owner until failure settlement", FailedPreparation)
+        ("failed cache validation preserves outer fresh owner until failure settlement", FailedPreparation),
+        ("preparation fixtures retain synthetic data rather than guessing cleanup ownership", Retention),
+        ("preparation artifact bases refuse aliases and unsafe paths", ArtifactBaseRefusal)
     ];
     private static void Check(bool value) { if (!value) throw new InvalidOperationException("Preparation ownership assertion failed."); }
     private static string CacheRoot(string root) => Path.Combine(root, "verified-hydration-v1");
@@ -98,6 +101,31 @@ internal static class PreparationOwnershipTests {
             await AssertAdmissionFree(f.Root);
         }
     }
+    private static Task ArtifactBaseRefusal() {
+        var synthetic = Path.Combine(Path.GetTempPath(), "ltfiles-synthetic-alias-check");
+        try {
+            Fixture.ValidateArtifactBase(synthetic, path => string.Equals(path, synthetic, StringComparison.OrdinalIgnoreCase)
+                ? FileAttributes.Directory | FileAttributes.ReparsePoint : FileAttributes.Directory);
+            throw new InvalidOperationException("Alias artifact base was accepted.");
+        } catch (IOException) { }
+        foreach (var invalid in new[] { "relative", @"\\server\share", Path.GetPathRoot(synthetic)! }) {
+            try { Fixture.ValidateArtifactBase(invalid, _ => FileAttributes.Directory); throw new InvalidOperationException("Invalid artifact base was accepted."); }
+            catch (IOException) { }
+        }
+        try {
+            Fixture.ValidateArtifactBase(synthetic, path => string.Equals(path, synthetic, StringComparison.OrdinalIgnoreCase)
+                ? FileAttributes.Normal : FileAttributes.Directory);
+            throw new InvalidOperationException("File artifact base was accepted.");
+        } catch (IOException) { }
+        return Task.CompletedTask;
+    }
+    private static Task Retention() {
+        var fixture = new Fixture("normal");
+        var sentinel = Path.Combine(fixture.Root, "synthetic-retention-sentinel.txt");
+        File.WriteAllText(sentinel, "synthetic only"); fixture.Dispose();
+        Check(File.ReadAllText(sentinel) == "synthetic only" && Directory.Exists(fixture.Root));
+        return Task.CompletedTask;
+    }
     private sealed class Sink : IPlaceholderTransferSink {
         internal int Bytes, Complete, Failed; internal Func<Task>? OnComplete, OnFailure; internal Action? OnWrite;
         public Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) { token.ThrowIfCancellationRequested(); Bytes += bytes.Length; OnWrite?.Invoke(); return Task.CompletedTask; }
@@ -134,9 +162,38 @@ internal static class PreparationOwnershipTests {
         public void Dispose() => Stop.Dispose();
     }
     private sealed class Fixture : IDisposable {
-        internal readonly string Root = Path.Combine(Path.GetTempPath(), "ltfiles-prep-ownership-" + Guid.NewGuid().ToString("N"));
+        internal readonly string Root;
         internal readonly Source Source; internal readonly PlaceholderHydrationCoordinator Core;
-        internal Fixture(string mode) { Directory.CreateDirectory(Root); Source = new(mode); Core = new(Source, "pilot", Root, expectedPrincipal: Principal); }
-        public void Dispose() { Core.Dispose(); Source.Dispose(); Directory.Delete(Root, true); }
+        internal Fixture(string mode) {
+            var selected = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") ??
+                Path.Combine(AppContext.BaseDirectory, "test-artifacts", "preparation-ownership");
+            var parent = ValidateArtifactBase(selected, Attributes);
+            Directory.CreateDirectory(parent); ValidateArtifactBase(parent, Attributes);
+            Root = Path.Combine(parent, "prep-ownership-" + Guid.NewGuid().ToString("N"));
+            if (Directory.Exists(Root) || File.Exists(Root)) throw new IOException("A fresh synthetic fixture is required.");
+            Directory.CreateDirectory(Root); Source = new(mode); Core = new(Source, "pilot", Root, expectedPrincipal: Principal);
+        }
+        internal static string ValidateArtifactBase(string selected, Func<string, FileAttributes?> attributes) {
+            if (!Path.IsPathFullyQualified(selected) || selected.StartsWith("\\\\", StringComparison.Ordinal)) throw new IOException("A dedicated local artifact base is required.");
+            var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(selected));
+            if (full == Path.TrimEndingDirectorySeparator(Path.GetPathRoot(full)!)) throw new IOException("A dedicated artifact base is required.");
+            for (string? path = full; path is not null; path = Path.GetDirectoryName(path)) {
+                var value = attributes(path);
+                if (value is { } actual && ((actual & FileAttributes.ReparsePoint) != 0 || (actual & FileAttributes.Directory) == 0))
+                    throw new IOException("Artifact base cannot pass through aliases or files.");
+            }
+            return full;
+        }
+        private static FileAttributes? Attributes(string path) {
+            try { return File.GetAttributes(path); }
+            catch (FileNotFoundException) { return null; }
+            catch (DirectoryNotFoundException) { return null; }
+        }
+        public void Dispose() {
+            Core.Dispose(); Source.Dispose();
+            // No delete or path-based cleanup is safe without physical root and
+            // descendant identity evidence. Report retained synthetic evidence.
+            Console.WriteLine("Retained synthetic preparation fixture: " + Root);
+        }
     }
 }
