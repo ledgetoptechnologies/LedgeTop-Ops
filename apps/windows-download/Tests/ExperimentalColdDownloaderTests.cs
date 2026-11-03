@@ -1115,6 +1115,15 @@ internal static class ExperimentalColdDownloaderTests
                 rejected = false; try { heldReceipt.ValidateEntry(Path.Combine(root, "foreign"), scope + key); } catch (TransferException) { rejected = true; } Check(rejected);
                 rejected = false; try { heldReceipt.ValidateEntry(root, scope + new string('c', 64)); } catch (TransferException) { rejected = true; } Check(rejected);
                 heldReceipt.ValidateEntry(root, scope + key);
+                rejected = false; try { _ = heldReceipt.BeginSyntheticDownloadUse(Path.Combine(root, "wrong"), scope + key); } catch (TransferException) { rejected = true; } Check(rejected);
+                rejected = false; try { _ = heldReceipt.BeginSyntheticDownloadUse(root, scope + new string('c', 64)); } catch (TransferException) { rejected = true; } Check(rejected);
+                var downloadUse = heldReceipt.BeginSyntheticDownloadUse(root, scope + key); await Task.Yield(); downloadUse.ValidateEntry();
+                rejected = false; try { heldReceipt.ValidateEntry(root, scope + key); } catch (InvalidOperationException) { rejected = true; } Check(rejected);
+                var disposeRefused = await Task.Run(() => { try { heldReceipt.Dispose(); return false; } catch (InvalidOperationException) { return true; } }); Check(disposeRefused);
+                AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock")); AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
+                downloadUse.Dispose(); rejected = false; try { downloadUse.ValidateEntry(); } catch (ObjectDisposedException) { rejected = true; } Check(rejected);
+                rejected = false; try { downloadUse.Dispose(); } catch (ObjectDisposedException) { rejected = true; } Check(rejected);
+                heldReceipt.ValidateEntry(root, scope + key);
                 var unknownKey = new string('d', 64); var unknownRecord = Path.Combine(reservationDir, scope + "-" + unknownKey + ".json");
                 var unknownBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = scope, Entry = unknownKey, Growth = 11L });
                 File.WriteAllBytes(unknownRecord, unknownBytes);
@@ -1148,7 +1157,7 @@ internal static class ExperimentalColdDownloaderTests
                 rejected = false; try { heldReceipt.SettleInjectedMarkerFailureForTest(new object()); } catch (InvalidOperationException) { rejected = true; } Check(rejected);
                 heldReceipt.SettleInjectedMarkerFailureForTest(markerToken); heldReceipt.ValidateEntry(root, scope + key);
                 var exposed = typeof(ExperimentalReservationOwner.LeaseReceipt).GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly).Where(method => method.IsAssembly);
-                Check(exposed.All(method => (method.ReturnType == typeof(void) || method.ReturnType == typeof(long) || method.ReturnType == typeof(bool)) && method.GetParameters().All(parameter => !typeof(Delegate).IsAssignableFrom(parameter.ParameterType))));
+                Check(exposed.All(method => (method.ReturnType == typeof(void) || method.ReturnType == typeof(long) || method.ReturnType == typeof(bool) || method.ReturnType == typeof(ExperimentalReservationOwner.LeaseReceipt.DownloadUse)) && method.GetParameters().All(parameter => !typeof(Delegate).IsAssignableFrom(parameter.ParameterType))));
                 var entered = new ManualResetEventSlim(); var release = new ManualResetEventSlim(); var disposing = new ManualResetEventSlim();
                 Task? operation = null; Task? close = null;
                 try {

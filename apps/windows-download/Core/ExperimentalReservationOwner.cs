@@ -60,6 +60,7 @@ internal sealed class ExperimentalReservationOwner
         private object? injectedQuotaToken, injectedMarkerToken;
         private string? injectedMarkerDirectory;
         private bool active, uncertain, executing;
+        private DownloadUse? downloadUse;
         private void SetReceiptStatus(bool? newUncertain = null, bool? newQuotaInProgress = null)
         {
             var status = heldLease?.ExperimentalStatus ?? throw new InvalidOperationException("Receipt status root unavailable.");
@@ -73,11 +74,50 @@ internal sealed class ExperimentalReservationOwner
             if (!ReferenceEquals(authority, ReceiptAttachAuthority)) throw new InvalidOperationException("Receipt authority invalid.");
             this.root = root; this.key = key;
         }
+        // Lifetime guard for a future synthetic async download. It exposes no
+        // stream, admission, entry handle, callback, or authorization result.
+        internal sealed class DownloadUse : IDisposable
+        {
+            private readonly LeaseReceipt owner;
+            internal DownloadUse(LeaseReceipt owner, object authority) {
+                if (!ReferenceEquals(authority, ReceiptAttachAuthority)) throw new InvalidOperationException("Download use authority invalid.");
+                this.owner = owner;
+            }
+            internal void ValidateEntry() => owner.ValidateDownloadUse(this);
+            public void Dispose() => owner.EndDownloadUse(this);
+        }
+        internal DownloadUse BeginSyntheticDownloadUse(string requestedRoot, string requestedKey)
+        {
+            lock (gate) {
+                if (!active || uncertain || heldLease is null || heldOwnedEntry is null) throw new ObjectDisposedException(nameof(LeaseReceipt));
+                if (executing || downloadUse is not null) throw new InvalidOperationException("Receipt already has an active operation.");
+                if (!string.Equals(root, Path.GetFullPath(requestedRoot), StringComparison.OrdinalIgnoreCase) || key != requestedKey)
+                    throw new TransferException("Experimental receipt does not match its entry.");
+                heldLease.RunExperimentalForEntry(root, key, () => { try { heldOwnedEntry.Validate(); } catch { SetReceiptStatus(newUncertain: true); throw; } });
+                var use = new DownloadUse(this, ReceiptAttachAuthority); downloadUse = use; return use;
+            }
+        }
+        private void ValidateDownloadUse(DownloadUse use)
+        {
+            lock (gate) {
+                if (!active || uncertain || !ReferenceEquals(downloadUse, use) || heldLease is null || heldOwnedEntry is null)
+                    throw new ObjectDisposedException(nameof(DownloadUse));
+                heldLease.RunExperimentalForEntry(root, key, () => { try { heldOwnedEntry.Validate(); } catch { SetReceiptStatus(newUncertain: true); throw; } });
+            }
+        }
+        private void EndDownloadUse(DownloadUse use)
+        {
+            lock (gate) {
+                if (!ReferenceEquals(downloadUse, use)) throw new ObjectDisposedException(nameof(DownloadUse));
+                if (uncertain) throw new IOException("Experimental download use remains uncertain.");
+                downloadUse = null;
+            }
+        }
         private T Execute<T>(string requestedRoot, string requestedKey, Func<T> operation)
         {
             lock (gate) {
                 if (!active || uncertain || heldLease is null || heldOwnedEntry is null) throw new ObjectDisposedException(nameof(LeaseReceipt));
-                if (executing) throw new InvalidOperationException("Experimental receipt operation is already active.");
+                if (executing || downloadUse is not null) throw new InvalidOperationException("Experimental receipt operation is already active.");
                 if (!string.Equals(root, Path.GetFullPath(requestedRoot), StringComparison.OrdinalIgnoreCase) || key != requestedKey)
                     throw new TransferException("Experimental receipt does not match its entry.");
                 executing = true; T result = default!;
@@ -301,7 +341,7 @@ internal sealed class ExperimentalReservationOwner
             lock (gate) {
                 if (!active) return;
                 if (stagedRecord is not null || stagedHandle is not null || stagedPath is not null || stagedPins is not null) throw new IOException("Synthetic staged record remains owned.");
-                if (executing) throw new InvalidOperationException("Experimental receipt scope is active.");
+                if (executing || downloadUse is not null) throw new InvalidOperationException("Experimental receipt operation is active.");
                 if (uncertain) throw new IOException("Experimental returned lease closure remains uncertain.");
                 SetReceiptStatus(newUncertain: true);
                 if (heldOwnedEntry is not null) { heldOwnedEntry.Dispose(); heldOwnedEntry = null; }
