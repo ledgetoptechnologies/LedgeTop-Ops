@@ -266,10 +266,10 @@ internal static class ExperimentalColdDownloaderTests
     internal static async Task ReservationCloseChildAsync(string root, string stage)
     {
         if (!Path.IsPathFullyQualified(root) || root.StartsWith(@"\\", StringComparison.Ordinal) || !Directory.Exists(root) ||
-            stage is not ("record" or "directory" or "entry" or "lease" or "markerforeign" or "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail")) throw new IOException("Synthetic teardown input invalid.");
+            stage is not ("record" or "directory" or "entry" or "lease" or "markerforeign" or "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail")) throw new IOException("Synthetic teardown input invalid.");
         if (stage == "markerforeign") { await MarkerForeignCloseChildAsync(root); return; }
         if (stage == "postwrite") { await PostWriteStatusChildAsync(root); return; }
-        if (stage is "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail") { await AuthorizationBoundaryChildAsync(root, stage); return; }
+        if (stage is "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail") { await AuthorizationBoundaryChildAsync(root, stage); return; }
         var scope = new string('a', 64); var key = new string('b', 64);
         var entryDir = Path.Combine(root, scope, key); Directory.CreateDirectory(entryDir);
         var reservationDir = Path.Combine(root, ".hydration-reservations-v2"); Directory.CreateDirectory(reservationDir);
@@ -324,6 +324,26 @@ internal static class ExperimentalColdDownloaderTests
         var entered = new ManualResetEventSlim(); var release = new ManualResetEventSlim(); var quotaHeld = new ManualResetEventSlim(); var quotaAttempt = new ManualResetEventSlim();
         Task<string>? stageTask = null; Task? blocker = null;
         try {
+            if (stage == "cancelcallbackfail") {
+                Check(await coordinator.ExperimentalAuthorizeAndStageAsync(identity, receipt!));
+                var fake = SyntheticReceiptDownloadSource.Create(spec, Content, blockCancellationCallback: true, throwCancellationCallback: true);
+                var session = await coordinator.ExperimentalStartReceiptDownloadAsync(identity, receipt!, fake);
+                try {
+                    await fake.Entered.WaitAsync(TimeSpan.FromSeconds(10));
+                    var cancellationWait = session.CancelWorkerAndWaitAsync(TimeSpan.FromSeconds(5));
+                    await fake.CallbackEntered.WaitAsync(TimeSpan.FromSeconds(10));
+                    fake.ReleaseCancellationCallback(); fake.Release();
+                    Check(await cancellationWait.WaitAsync(TimeSpan.FromSeconds(10)));
+                    var observed = session.WaitAsync();
+                    Check(ReferenceEquals(await Task.WhenAny(observed, Task.Delay(TimeSpan.FromSeconds(10))), observed));
+                    Check(observed.IsFaulted && observed.Exception!.Flatten().InnerExceptions.Any(e => e is InvalidOperationException && e.Message == "Synthetic cancellation callback failed."));
+                    AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock"));
+                    AssertOtherProcessCannotOpen(Path.Combine(root, identity.ScopeKey, identity.CacheKey, ".hydration.lock"));
+                    var refused = false; try { receipt!.Dispose(); } catch (IOException) { refused = true; } Check(refused && ExperimentalReservationOwner.RetainedCount > 0);
+                    receipt = null; // The uncertain receipt stays rooted until this owned child exits.
+                } finally { fake.ReleaseCancellationCallback(); fake.Release(); }
+                return;
+            }
             if (stage == "authrace") {
                 blocker = Task.Run(() => { lock (gate) { quotaHeld.Set(); if (!release.Wait(TimeSpan.FromSeconds(10))) throw new IOException("Synthetic quota blocker timed out."); } });
                 Check(quotaHeld.Wait(TimeSpan.FromSeconds(5)));
@@ -891,10 +911,10 @@ internal static class ExperimentalColdDownloaderTests
                 AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true);
             } finally { entry?.Dispose(); admission?.Dispose(); }
         });
-        foreach (var stage in new[] { "record", "directory", "entry", "lease", "markerforeign", "postwrite", "authdispose", "authcancel", "authrace", "authafterstage", "authaftercancel", "authcleanupfail" }) await WithFixture(async fixture => {
+        foreach (var stage in new[] { "record", "directory", "entry", "lease", "markerforeign", "postwrite", "authdispose", "authcancel", "authrace", "authafterstage", "authaftercancel", "authcleanupfail", "cancelcallbackfail" }) await WithFixture(async fixture => {
             var root = Path.Combine(fixture.Path, "teardown"); Directory.CreateDirectory(root);
             await RunReservationCloseChildAsync(root, stage);
-            var cacheRoot = stage is "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" ? Path.Combine(root, "verified-hydration-v1") : root;
+            var cacheRoot = stage is "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail" ? Path.Combine(root, "verified-hydration-v1") : root;
             AssertOtherProcessOpen(Path.Combine(cacheRoot, ".hydration-cache.lock"), true);
             if (stage is "postwrite" or "authcleanupfail") {
                 using var source = new CoordinatorSource(); var identity = source.Identity;
@@ -1323,9 +1343,10 @@ internal static class ExperimentalColdDownloaderTests
                     var timeoutWorker = await coordinator.ExperimentalStartReceiptDownloadAsync(identity, receipt, timeoutSource); var timeoutSettled = false;
                     try {
                         await timeoutSource.Entered.WaitAsync(TimeSpan.FromSeconds(10)); timeoutSource.Release();
-                        var timedOutWorker = false;
-                        try { await timeoutWorker.WaitAsync().WaitAsync(TimeSpan.FromSeconds(10)); } catch (TimeoutException) { timedOutWorker = true; }
-                        Check(timedOutWorker && await timeoutWorker.CancelWorkerAndWaitAsync(TimeSpan.FromSeconds(2)));
+                        var observed = timeoutWorker.WaitAsync();
+                        Check(ReferenceEquals(await Task.WhenAny(observed, Task.Delay(TimeSpan.FromSeconds(10))), observed));
+                        Check(observed.IsFaulted && observed.Exception!.Flatten().InnerExceptions.Any(e => e is TimeoutException && e.Message == "Synthetic source timeout."));
+                        Check(await timeoutWorker.CancelWorkerAndWaitAsync(TimeSpan.FromSeconds(2)));
                         timeoutSettled = true;
                     } finally {
                         timeoutSource.Release();

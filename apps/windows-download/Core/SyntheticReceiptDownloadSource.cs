@@ -11,21 +11,21 @@ internal sealed class SyntheticReceiptDownloadSource
 {
     private readonly DownloadSpec spec;
     private readonly byte[] bytes;
-    private readonly bool ignoreCancellation, timeoutAfterRelease, blockCancellationCallback;
+    private readonly bool ignoreCancellation, timeoutAfterRelease, blockCancellationCallback, throwCancellationCallback;
     private int claimed;
     private readonly TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource released = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource callbackEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource callbackReleased = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private SyntheticReceiptDownloadSource(DownloadSpec spec, byte[] bytes, bool ignoreCancellation, bool timeoutAfterRelease, bool blockCancellationCallback) { this.spec = spec; this.bytes = bytes; this.ignoreCancellation = ignoreCancellation; this.timeoutAfterRelease = timeoutAfterRelease; this.blockCancellationCallback = blockCancellationCallback; }
-    internal static SyntheticReceiptDownloadSource Create(DownloadSpec spec, byte[] bytes, bool ignoreCancellation = false, bool timeoutAfterRelease = false, bool blockCancellationCallback = false)
+    private SyntheticReceiptDownloadSource(DownloadSpec spec, byte[] bytes, bool ignoreCancellation, bool timeoutAfterRelease, bool blockCancellationCallback, bool throwCancellationCallback) { this.spec = spec; this.bytes = bytes; this.ignoreCancellation = ignoreCancellation; this.timeoutAfterRelease = timeoutAfterRelease; this.blockCancellationCallback = blockCancellationCallback; this.throwCancellationCallback = throwCancellationCallback; }
+    internal static SyntheticReceiptDownloadSource Create(DownloadSpec spec, byte[] bytes, bool ignoreCancellation = false, bool timeoutAfterRelease = false, bool blockCancellationCallback = false, bool throwCancellationCallback = false)
     {
         ArgumentNullException.ThrowIfNull(bytes);
         if (!spec.ContentUri.IsAbsoluteUri || spec.ContentUri.Scheme != "https" || spec.ContentUri.UserInfo.Length != 0 || spec.ContentUri.Fragment.Length != 0 ||
             !spec.ContentUri.Host.EndsWith(".invalid", StringComparison.OrdinalIgnoreCase) || spec.Length != bytes.LongLength ||
             !CryptographicOperations.FixedTimeEquals(SHA256.HashData(bytes), Convert.FromHexString(spec.Sha256)))
             throw new IOException("Synthetic receipt source is invalid.");
-        return new(spec, bytes.ToArray(), ignoreCancellation, timeoutAfterRelease, blockCancellationCallback);
+        return new(spec, bytes.ToArray(), ignoreCancellation, timeoutAfterRelease, blockCancellationCallback, throwCancellationCallback);
     }
     internal Task Entered => entered.Task;
     internal void Release() => released.TrySetResult();
@@ -51,7 +51,7 @@ internal sealed class SyntheticReceiptDownloadSource
     private sealed class HeldStream(SyntheticReceiptDownloadSource source) : MemoryStream(source.bytes, writable: false)
     {
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken token = default) {
-            using var registration = source.blockCancellationCallback ? token.Register(() => { source.callbackEntered.TrySetResult(); source.callbackReleased.Task.GetAwaiter().GetResult(); }) : default;
+            using var registration = source.blockCancellationCallback ? token.Register(() => { source.callbackEntered.TrySetResult(); source.callbackReleased.Task.GetAwaiter().GetResult(); if (source.throwCancellationCallback) throw new InvalidOperationException("Synthetic cancellation callback failed."); }) : default;
             source.entered.TrySetResult();
             // Keep the callback registered until the test explicitly releases the read;
             // WaitAsync(token) can otherwise complete first and dispose the registration.
