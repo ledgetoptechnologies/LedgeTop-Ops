@@ -53,7 +53,9 @@ internal static class NativeStallTrace
         ReservedFilesMoveEnter, ReservedFilesMoveExit, ReservedFilesDisposeEnter, ReservedFilesDisposeExit,
         ReservedRecordReadEnter, ReservedRecordReadExit,
         SyntheticSerialTransferEnter, SyntheticSerialTransferExit, SyntheticAdmissionTimedOut,
-        SyntheticCallbackProcess
+        SyntheticCallbackProcess,
+        PendingMarkerAWaiting, PendingMarkerBReadEnter, PendingMarkerBReadVerified,
+        PendingMarkerBReadExit, PendingMarkerAReleased, PendingMarkerInvalid
     }
     internal readonly record struct Event(long Sequence, long Timestamp, int ThreadId, Stage Kind, long CallbackId = 0, uint ProcessId = 0, byte ProcessInfoStatus = 0);
     internal sealed class Capture

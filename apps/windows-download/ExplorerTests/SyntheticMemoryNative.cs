@@ -93,7 +93,19 @@ internal static class SyntheticMemoryNative {
         var serial = SerialMode(get("LEDGETOP_TEST_MEMORY_SERIAL"));
         var failFast = SerialMode(get("LEDGETOP_TEST_MEMORY_FAIL_FAST"));
         var processInfo = SerialMode(get("LEDGETOP_TEST_REQUIRE_PROCESS_INFO"));
-        return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}; prewarm={prewarm}; serial={serial}; failFast={failFast}; processInfo={processInfo}";
+        var pending = PendingMode(get("LEDGETOP_TEST_PENDING_MARKER"));
+        return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}; prewarm={prewarm}; serial={serial}; failFast={failFast}; processInfo={processInfo}; pendingMarker={pending}";
+    }
+    private static string PendingMode(string? value) => value switch { null or "off" => "off", "reopen" => "reopen", "retained" => "retained", _ => "invalid" };
+    internal static bool PendingOptionsValid(int count, bool retryProbe, string marker, string stage, string prewarm, string serial, string failFast, string pending, Func<string, string?> get) =>
+        pending == "off" || (pending is "reopen" or "retained" && count == 2 && !retryProbe && marker == "none" && stage == "none" && prewarm == "off" && serial == "off" && failFast == "off" && RetryOptionsValid(get));
+    internal static bool PendingTraceValid(NativeStallTrace.Event[] events, long attempted, long dropped) {
+        if (dropped != 0 || attempted != events.LongLength || events.Count(e => e.Kind == NativeStallTrace.Stage.CallbackArrival) != 2 || events.Count(e => e.Kind == NativeStallTrace.Stage.CallbackQueued) != 2 ||
+            events.Any(e => e.Kind == NativeStallTrace.Stage.PendingMarkerInvalid)) return false;
+        var stages = new[] { NativeStallTrace.Stage.PendingMarkerAWaiting, NativeStallTrace.Stage.PendingMarkerBReadEnter, NativeStallTrace.Stage.PendingMarkerBReadVerified, NativeStallTrace.Stage.PendingMarkerBReadExit, NativeStallTrace.Stage.PendingMarkerAReleased };
+        if (stages.Any(stage => events.Count(e => e.Kind == stage) != 1)) return false;
+        var positions = stages.Select(stage => events.Single(e => e.Kind == stage).Sequence).ToArray();
+        return positions.Zip(positions.Skip(1), (a, b) => a < b).All(ordered => ordered);
     }
     private static string SerialMode(string? value) => value switch { null or "0" => "off", "1" => "on", _ => "invalid" };
     internal static bool FailFastOptionsValid(int count, bool retryProbe, string marker, string stage, string prewarm, string serial, string failFast, Func<string, string?> get) =>
@@ -125,6 +137,78 @@ internal static class SyntheticMemoryNative {
         if (delete is null) return false;
         try { delete.Invoke(null, new object[] { path, expected }); return TraceRecordAbsent(() => File.GetAttributes(path)); }
         catch (Exception error) when (error is System.Reflection.TargetInvocationException or ArgumentException or UnauthorizedAccessException) { return false; }
+    }
+    private static async Task PendingControlTests(string cache, Action<bool> retainFixture)
+    {
+        async Task Case(string mode, Func<DiagnosticPendingMarkerControl.Scope, Task> test, Func<byte[]>? read = null, TimeSpan? timeout = null) {
+            DiagnosticPendingMarkerControl.Scope? scope = null; var passed = false; retainFixture(true);
+            try {
+                scope = DiagnosticPendingMarkerControl.Begin(cache, mode, timeout ?? TimeSpan.FromSeconds(2), read);
+                await test(scope); passed = true;
+            } finally {
+                if (scope is not null) {
+                    try { scope.Dispose(); }
+                    catch { passed = false; }
+                    if (passed) {
+                        if (TryDeleteTraceRecord(scope.MarkerPath, DiagnosticPendingMarkerControl.Expected, true)) {
+                            Directory.Delete(Path.GetDirectoryName(scope.MarkerPath)!); retainFixture(false);
+                        } else passed = false;
+                    }
+                }
+            }
+            if (!passed) throw new IOException("Synthetic pending control case did not drain.");
+        }
+        foreach (var mode in new[] { "reopen", "retained" }) {
+            await Case(mode, async scope => {
+                var trace = NativeStallTrace.Enable();
+                try {
+                    NativeStallTrace.Record(NativeStallTrace.Stage.CallbackArrival); NativeStallTrace.Record(NativeStallTrace.Stage.CallbackQueued);
+                    var b = scope.RunAsync(cache, "sample-1.bin", () => Task.CompletedTask, CancellationToken.None);
+                    NativeStallTrace.Record(NativeStallTrace.Stage.CallbackArrival); NativeStallTrace.Record(NativeStallTrace.Stage.CallbackQueued);
+                    var a = scope.RunAsync(cache, "sample-0.bin", () => Task.CompletedTask, CancellationToken.None);
+                    await Task.WhenAll(a, b).WaitAsync(TimeSpan.FromSeconds(2));
+                    var events = NativeStallTrace.Snapshot(trace);
+                    var outOfOrder = events.Select(e => e.Kind == NativeStallTrace.Stage.PendingMarkerAReleased ? e with { Sequence = 0 } : e).ToArray();
+                    if (!scope.EvidenceValid || !PendingTraceValid(events, NativeStallTrace.Attempted(trace), NativeStallTrace.Dropped(trace)) ||
+                        PendingTraceValid(events, NativeStallTrace.Attempted(trace), 1) || PendingTraceValid(outOfOrder, outOfOrder.LongLength, 0))
+                        throw new IOException("Synthetic pending evidence was incorrect.");
+                } finally { NativeStallTrace.Disable(trace); }
+            });
+        }
+        await Case("retained", async scope => {
+            var a = scope.RunAsync(cache, "sample-0.bin", () => Task.CompletedTask, CancellationToken.None);
+            var refused = false; try { scope.Dispose(); } catch (IOException) { refused = true; }
+            var b = scope.RunAsync(cache, "sample-1.bin", () => Task.CompletedTask, CancellationToken.None);
+            await Task.WhenAll(a, b).WaitAsync(TimeSpan.FromSeconds(2));
+            if (!refused || !scope.EvidenceValid) throw new IOException("Active synthetic callback allowed handle disposal.");
+        });
+        await Case("reopen", async scope => {
+            var a = scope.RunAsync(cache, "sample-0.bin", () => Task.CompletedTask, CancellationToken.None);
+            var duplicate = scope.RunAsync(cache, "sample-0.bin", () => Task.CompletedTask, CancellationToken.None);
+            var rejected = 0; try { await duplicate; } catch (IOException) { rejected++; }
+            try { await a; } catch (IOException) { rejected++; }
+            if (rejected != 2 || scope.EvidenceValid) throw new IOException("Duplicate synthetic callback was accepted.");
+        });
+        await Case("retained", async scope => {
+            using var cancellation = new CancellationTokenSource();
+            var b = scope.RunAsync(cache, "sample-1.bin", () => Task.CompletedTask, cancellation.Token); cancellation.Cancel();
+            var cancelled = false; try { await b; } catch (OperationCanceledException) { cancelled = true; }
+            var a = scope.RunAsync(cache, "sample-0.bin", () => Task.CompletedTask, CancellationToken.None);
+            var rejected = false; try { await a; } catch (IOException) { rejected = true; }
+            if (!cancelled || !rejected || scope.EvidenceValid) throw new IOException("Synthetic pending cancellation was not drained.");
+        });
+        await Case("reopen", async scope => {
+            var a = scope.RunAsync(cache, "sample-0.bin", () => Task.CompletedTask, CancellationToken.None);
+            var timedOut = false; try { await a; } catch (TimeoutException) { timedOut = true; }
+            if (!timedOut || scope.EvidenceValid) throw new IOException("Synthetic missing callback did not time out.");
+        }, timeout: TimeSpan.FromMilliseconds(50));
+        await Case("retained", async scope => {
+            var a = scope.RunAsync(cache, "sample-0.bin", () => Task.CompletedTask, CancellationToken.None);
+            var b = scope.RunAsync(cache, "sample-1.bin", () => Task.CompletedTask, CancellationToken.None);
+            var rejected = 0; try { await a; } catch (IOException) { rejected++; }
+            try { await b; } catch (IOException) { rejected++; }
+            if (rejected != 2 || scope.EvidenceValid) throw new IOException("Synthetic marker mismatch was not drained.");
+        }, () => [0]);
     }
     internal static async Task<int> CacheStageTests() {
         var basePath = Path.Combine(Path.GetTempPath(), "LedgeTop-cache-stage-" + Guid.NewGuid().ToString("N"));
@@ -212,6 +296,7 @@ internal static class SyntheticMemoryNative {
                 tracePassed = true;
             } finally { if (TryDeleteTraceRecord(traceRecord, traceBytes, tracePassed)) retainTraceFixture = false; }
             if (retainTraceFixture) throw new IOException("Synthetic trace record cleanup was not verified; fixture retained.");
+            await PendingControlTests(cache, value => retainTraceFixture = value);
             var scopeMarker = Path.Combine(scope, ".verified-hydration-owner"); var originalScope = File.ReadAllBytes(scopeMarker);
             await PrewarmOwnedAsync(cache, new[] { third });
             if (!File.Exists(Path.Combine(thirdEntry, ".verified-hydration-owner")) || !File.ReadAllBytes(scopeMarker).SequenceEqual(originalScope))
@@ -336,7 +421,7 @@ internal static class SyntheticMemoryNative {
             Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", previousBase);
             Environment.SetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL", previousSerial);
             if (retainTraceFixture) {
-                Console.Error.WriteLine("Synthetic fixture retained because trace record cleanup was not verified: " + basePath);
+                Console.Error.WriteLine("Synthetic fixture retained because trace-record or pending-marker cleanup was not verified: " + basePath);
             } else {
             File.Delete(Path.Combine(entry, ".hydration.lock")); File.Delete(Path.Combine(entry, ".verified-hydration-owner")); if (Directory.Exists(entry)) Directory.Delete(entry);
             File.Delete(Path.Combine(secondEntry, ".hydration.lock")); File.Delete(Path.Combine(secondEntry, ".verified-hydration-owner")); if (Directory.Exists(secondEntry)) Directory.Delete(secondEntry);
@@ -365,6 +450,11 @@ internal static class SyntheticMemoryNative {
         }
     }
     internal static int CleanupEvidenceTests() {
+        if (!PendingOptionsValid(2, false, "none", "none", "off", "off", "off", "reopen", _ => null) ||
+            PendingOptionsValid(1, false, "none", "none", "off", "off", "off", "retained", _ => null) ||
+            PendingOptionsValid(2, false, "none", "quota-reservation", "off", "off", "off", "reopen", _ => null) ||
+            PendingOptionsValid(2, false, "none", "none", "off", "off", "off", "retained", key => key == "LEDGETOP_TEST_SUPPRESS_NATIVE_PROGRESS" ? "1" : null))
+            throw new IOException("Synthetic pending options were not constrained.");
         if (!TraceRecordAbsent(() => throw new FileNotFoundException()) || TraceRecordAbsent(() => throw new DirectoryNotFoundException()) ||
             TraceRecordAbsent(() => throw new UnauthorizedAccessException()) || TraceRecordAbsent(() => throw new IOException()) ||
             TraceRecordAbsent(() => FileAttributes.Normal))
@@ -443,9 +533,9 @@ internal static class SyntheticMemoryNative {
             SyntheticReaderEvidence.Classify(Encoding.UTF8.GetBytes("{\"Version\":1,\"Version\":1}"), 123, "sample-1.bin", receiptNonce, 1) != SyntheticReaderEvidence.Classification.Invalid)
             throw new IOException("Synthetic reader evidence accepted an ambiguous outcome.");
         var options = DiagnosticSettings(name => name == "LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION" ? "1" : "synthetic-secret");
-        if (options != "Synthetic memory options: blockSelf=True; disableScanner=False; suppressProgress=False; markerIo=invalid; cacheStage=invalid; prewarm=invalid; serial=invalid; failFast=invalid; processInfo=invalid")
+        if (options != "Synthetic memory options: blockSelf=True; disableScanner=False; suppressProgress=False; markerIo=invalid; cacheStage=invalid; prewarm=invalid; serial=invalid; failFast=invalid; processInfo=invalid; pendingMarker=invalid")
             throw new IOException("Synthetic diagnostic option reporting is incorrect.");
-        if (DiagnosticSettings(name => name is "LEDGETOP_TEST_MEMORY_MARKER_IO" or "LEDGETOP_TEST_MEMORY_CACHE_STAGE" or "LEDGETOP_TEST_MEMORY_PREWARM" or "LEDGETOP_TEST_MEMORY_SERIAL" or "LEDGETOP_TEST_MEMORY_FAIL_FAST" or "LEDGETOP_TEST_REQUIRE_PROCESS_INFO" ? null : "1") != "Synthetic memory options: blockSelf=True; disableScanner=True; suppressProgress=True; markerIo=none; cacheStage=none; prewarm=off; serial=off; failFast=off; processInfo=off")
+        if (DiagnosticSettings(name => name is "LEDGETOP_TEST_MEMORY_MARKER_IO" or "LEDGETOP_TEST_MEMORY_CACHE_STAGE" or "LEDGETOP_TEST_MEMORY_PREWARM" or "LEDGETOP_TEST_MEMORY_SERIAL" or "LEDGETOP_TEST_MEMORY_FAIL_FAST" or "LEDGETOP_TEST_REQUIRE_PROCESS_INFO" or "LEDGETOP_TEST_PENDING_MARKER" ? null : "1") != "Synthetic memory options: blockSelf=True; disableScanner=True; suppressProgress=True; markerIo=none; cacheStage=none; prewarm=off; serial=off; failFast=off; processInfo=off; pendingMarker=off")
             throw new IOException("Synthetic diagnostic option reporting did not capture opt-ins.");
         var observations = new List<(string, int)>();
         void Capture(string outcome, int code) => observations.Add((outcome, code));
@@ -526,10 +616,12 @@ internal static class SyntheticMemoryNative {
         var serial = SerialMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL"));
         var failFast = SerialMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_FAIL_FAST"));
         var processInfo = SerialMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_REQUIRE_PROCESS_INFO"));
-        if (markerMode == "invalid" || cacheStage == "invalid" || prewarm == "invalid" || serial == "invalid" || failFast == "invalid" || processInfo == "invalid" || (markerMode != "none" && cacheStage != "none") ||
+        var pending = PendingMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_PENDING_MARKER"));
+        if (markerMode == "invalid" || cacheStage == "invalid" || prewarm == "invalid" || serial == "invalid" || failFast == "invalid" || processInfo == "invalid" || pending == "invalid" || (markerMode != "none" && cacheStage != "none") ||
             (serial == "on" && (markerMode != "none" || cacheStage != "quota-reservation")) ||
             (prewarm != "off" && (markerMode != "none" || cacheStage != "quota-reservation")) ||
-            !FailFastOptionsValid(count, retryProbe, markerMode, cacheStage, prewarm, serial, failFast, Environment.GetEnvironmentVariable)) return 2;
+            !FailFastOptionsValid(count, retryProbe, markerMode, cacheStage, prewarm, serial, failFast, Environment.GetEnvironmentVariable) ||
+            !PendingOptionsValid(count, retryProbe, markerMode, cacheStage, prewarm, serial, failFast, pending, Environment.GetEnvironmentVariable)) return 2;
         if (retryProbe && (count != 1 || markerMode != "none" || cacheStage != "none" || prewarm != "off" || serial != "off" || failFast != "off" || !RetryOptionsValid(Environment.GetEnvironmentVariable))) return 2;
         if (failFast == "on") Console.WriteLine("Synthetic fail-fast bounds admission semaphore waiting only; the initial global Sync lock and filesystem/native calls are not hard-bounded. Reader evidence uses current-user pipes, which can perturb timing.");
         var basePath = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
@@ -558,6 +650,7 @@ internal static class SyntheticMemoryNative {
         NativeRootRegistration? registration = null; NativePlaceholderProvider? provider = null;
         DiagnosticMemoryMarkerIo.Preopened? preopened = null;
         DiagnosticMemoryMarkerIo.CreateScope? createScope = null;
+        DiagnosticPendingMarkerControl.Scope? pendingScope = null;
         var readers = new List<Process>(); var readerFiles = new Dictionary<int, string>(); var readyHandles = new List<EventWaitHandle>(); var success = false;
         var readerPipes = new List<ReaderPipe>(); var readerEvidence = new Dictionary<int, SyntheticReaderEvidence.Classification>();
         var evidenceStop = new CancellationTokenSource();
@@ -579,6 +672,11 @@ internal static class SyntheticMemoryNative {
         using var start = new EventWaitHandle(false, EventResetMode.ManualReset, startName);
         var trace = NativeStallTrace.Enable();
         try {
+            if (pending != "off") {
+                Phase("pending-marker-setup-start", id);
+                pendingScope = DiagnosticPendingMarkerControl.Begin(cache, pending);
+                Phase("pending-marker-setup-complete", id);
+            }
             if (prewarm != "off") {
                 Phase("prewarm-start", id); NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticPrewarmStart);
                 await PrewarmOwnedAsync(cache, manifest.Values.ToArray(), prewarm == "entries+reservation");
@@ -726,7 +824,14 @@ internal static class SyntheticMemoryNative {
             // the synthetic reservation directory has no outstanding record.
             var failFastEvidence = failFast != "on" || (success && readersJoined && disposeCompleted && SyntheticReservationsEmpty(cache));
             if (failFast == "on") Console.WriteLine($"Synthetic fail-fast reservation cleanup verified: {failFastEvidence}");
-            if (failFastEvidence && MayUnregister(registration is not null, readersJoined, disposeCompleted, committedCleanupUncertain))
+            var finalPendingTrace = NativeStallTrace.Snapshot(trace);
+            var pendingEvidence = pending == "off" || (success && readersJoined && disposeCompleted && pendingScope?.EvidenceValid == true &&
+                PendingTraceValid(finalPendingTrace, NativeStallTrace.Attempted(trace), NativeStallTrace.Dropped(trace)));
+            if (pendingScope is not null && disposeCompleted) {
+                try { pendingScope.Dispose(); pendingScope = null; } catch { pendingEvidence = false; }
+            }
+            if (pending != "off") Console.WriteLine($"Synthetic pending-marker evidence verified: {pendingEvidence}; control={pending}");
+            if (failFastEvidence && pendingEvidence && MayUnregister(registration is not null, readersJoined, disposeCompleted, committedCleanupUncertain))
                 try { registration!.Unregister(); unregisterVerified = true; } catch { }
             // A timed-out provider may still be executing callbacks. Retain its
             // handles instead of closing them while that work may use them.
@@ -734,9 +839,9 @@ internal static class SyntheticMemoryNative {
             if (disposeCompleted) { createScope?.Dispose(); createScope = null; }
             Phase(preopened is null ? "preopened-handles-released" : "preopened-handles-retained", id);
             Phase(createScope is null ? "create-scope-released" : "create-scope-retained", id);
-            var cleanupVerified = CleanupVerified(registrationAttempted, registration is not null, readersJoined, disposeCompleted, unregisterVerified, committedCleanupUncertain);
+            var cleanupVerified = pendingEvidence && CleanupVerified(registrationAttempted, registration is not null, readersJoined, disposeCompleted, unregisterVerified, committedCleanupUncertain);
             if (!cleanupVerified) success = false;
-            foreach (var item in NativeStallTrace.Snapshot(trace).Where(e => cacheStage != "none" || (processInfo == "on" && e.Kind == NativeStallTrace.Stage.WorkerStart && e.CallbackId != 0) || e.Kind is NativeStallTrace.Stage.SyntheticCallbackProcess or NativeStallTrace.Stage.SyntheticMarkerReadEnter or NativeStallTrace.Stage.SyntheticMarkerReadExit
+            foreach (var item in NativeStallTrace.Snapshot(trace).Where(e => pending != "off" || cacheStage != "none" || (processInfo == "on" && e.Kind == NativeStallTrace.Stage.WorkerStart && e.CallbackId != 0) || e.Kind is NativeStallTrace.Stage.SyntheticCallbackProcess or NativeStallTrace.Stage.SyntheticMarkerReadEnter or NativeStallTrace.Stage.SyntheticMarkerReadExit
                 or NativeStallTrace.Stage.SyntheticMarkerCreateEnter or NativeStallTrace.Stage.SyntheticMarkerCreateExit
                 or NativeStallTrace.Stage.SyntheticMarkerWriteEnter or NativeStallTrace.Stage.SyntheticMarkerWriteExit
                 or NativeStallTrace.Stage.SyntheticMarkerFlushEnter or NativeStallTrace.Stage.SyntheticMarkerFlushExit

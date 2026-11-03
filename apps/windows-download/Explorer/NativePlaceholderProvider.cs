@@ -92,9 +92,17 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                     var bytes = System.Text.Encoding.UTF8.GetBytes(new string('x', 100_000));
                     var serial = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL") ?? "0";
                     var failFast = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_FAIL_FAST") ?? "0";
+                    var pendingMarker = Environment.GetEnvironmentVariable("LEDGETOP_TEST_PENDING_MARKER") ?? "off";
                     if (failFast is not ("0" or "1") || (failFast == "1" && serial != "1"))
                         throw new IOException("Synthetic admission comparison scope mismatch.");
-                    if (serial == "1") {
+                    if (pendingMarker is "reopen" or "retained") {
+                        if (serial != "0" || failFast != "0" || cacheStage != "none" || DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO")) != "none")
+                            throw new IOException("Synthetic pending comparison scope mismatch.");
+                        await CloudFilesNativeTransfer.HydrateSyntheticMemorySerialAsync(identity, context, bytes, token,
+                            (transfer, sinkToken) => DiagnosticPendingMarkerControl.RunAsync(cacheDirectory, identity.FileName, transfer, sinkToken),
+                            () => Interlocked.Exchange(ref syntheticCommittedCleanupUncertain, 1)).ConfigureAwait(false);
+                    } else if (pendingMarker != "off") throw new IOException("Synthetic pending comparison option invalid.");
+                    else if (serial == "1") {
                         if (cacheStage != "quota-reservation" || DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO")) != "none")
                             throw new IOException("Synthetic serial comparison scope mismatch.");
                         await CloudFilesNativeTransfer.HydrateSyntheticMemorySerialAsync(identity, context, bytes, token,
