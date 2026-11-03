@@ -115,7 +115,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     internal async Task SyntheticCacheStageAsync(PlaceholderIdentity identity, string stage, CancellationToken token)
     {
         if (Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") != "1" ||
-            stage is not ("quota-only" or "quota-ownership" or "quota-capacity" or "quota-reservation" or "quota-reservation-gap") || source.Alias != "synthetic" ||
+            stage is not ("quota-only" or "quota-ownership" or "quota-capacity" or "quota-reservation" or "quota-reservation-gap" or "quota-reservation-precheck") || source.Alias != "synthetic" ||
             source.Origin.AbsoluteUri != "https://source.example.invalid/" || channel != "pilot" ||
             principal != "odqp1_" + new string('f', 64) || identity.PrincipalId != principal ||
             identity.Channel != "pilot" || identity.SourceAlias != "synthetic" || identity.Origin != "https://source.example.invalid" ||
@@ -144,14 +144,24 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         var scope = Path.Combine(root, identity.ScopeKey);
         var entry = Path.Combine(scope, identity.CacheKey);
         var spec = new DownloadSpec(identity.ResourceReference, new Uri("https://source.example.invalid/content"), identity.FileName, identity.Length, identity.ETag, identity.Sha256);
+        bool outsideScopeExists = false, outsideEntryExists = false;
+        if (stage == "quota-reservation-precheck") {
+            // Diagnostic comparison only. These observations may go stale before
+            // the quota lock; never use this ordering as a production cache check.
+            NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticOutsidePrecheckEnter);
+            try {
+                outsideScopeExists = TraceCacheValue(NativeStallTrace.Stage.CacheScopeCheckEnter, NativeStallTrace.Stage.CacheScopeCheckExit, () => OwnedExisting(scope));
+                outsideEntryExists = TraceCacheValue(NativeStallTrace.Stage.CacheEntryCheckEnter, NativeStallTrace.Stage.CacheEntryCheckExit, () => OwnedExisting(entry));
+            } finally { NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticOutsidePrecheckExit); }
+        }
         WithQuota(admission.Quota, () => {
             if (stage != "quota-only") {
-                var scopeExists = TraceCacheValue(NativeStallTrace.Stage.CacheScopeCheckEnter, NativeStallTrace.Stage.CacheScopeCheckExit, () => OwnedExisting(scope));
-                var entryExists = TraceCacheValue(NativeStallTrace.Stage.CacheEntryCheckEnter, NativeStallTrace.Stage.CacheEntryCheckExit, () => OwnedExisting(entry));
+                var scopeExists = stage == "quota-reservation-precheck" ? outsideScopeExists : TraceCacheValue(NativeStallTrace.Stage.CacheScopeCheckEnter, NativeStallTrace.Stage.CacheScopeCheckExit, () => OwnedExisting(scope));
+                var entryExists = stage == "quota-reservation-precheck" ? outsideEntryExists : TraceCacheValue(NativeStallTrace.Stage.CacheEntryCheckEnter, NativeStallTrace.Stage.CacheEntryCheckExit, () => OwnedExisting(entry));
                 // The ownership-only comparison intentionally omits capacity;
                 // later stages run the production capacity path first.
                 if (!scopeExists || !entryExists) {
-                    if (stage is "quota-capacity" or "quota-reservation" or "quota-reservation-gap") {
+                    if (stage is "quota-capacity" or "quota-reservation" or "quota-reservation-gap" or "quota-reservation-precheck") {
                         var directory = Path.Combine(root, ".hydration-reservations-v2");
                         var reservationDirectoryExists = TraceCacheValue(NativeStallTrace.Stage.CacheReservationDirCheckEnter, NativeStallTrace.Stage.CacheReservationDirCheckExit, () => OwnedExisting(directory));
                         var metadata = checked((scopeExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
@@ -164,7 +174,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 }
             }
         }, token);
-        if (stage is "quota-reservation" or "quota-reservation-gap") {
+        if (stage is "quota-reservation" or "quota-reservation-gap" or "quota-reservation-precheck") {
             var lockPath = Path.Combine(entry, ".hydration.lock"); RequireSafe(lockPath);
             NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseEnter);
             FileStream? held = await OpenEntryLeaseAsync(lockPath, FileMode.OpenOrCreate, token).ConfigureAwait(false);

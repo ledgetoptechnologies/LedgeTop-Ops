@@ -66,7 +66,7 @@ internal static class SyntheticMemoryNative {
         var cacheStage = CacheStage(get("LEDGETOP_TEST_MEMORY_CACHE_STAGE"));
         return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}";
     }
-    private static string CacheStage(string? value) => value switch { null or "none" => "none", "quota-only" => "quota-only", "quota-ownership" => "quota-ownership", "quota-capacity" => "quota-capacity", "quota-reservation" => "quota-reservation", "quota-reservation-gap" => "quota-reservation-gap", _ => "invalid" };
+    private static string CacheStage(string? value) => value switch { null or "none" => "none", "quota-only" => "quota-only", "quota-ownership" => "quota-ownership", "quota-capacity" => "quota-capacity", "quota-reservation" => "quota-reservation", "quota-reservation-gap" => "quota-reservation-gap", "quota-reservation-precheck" => "quota-reservation-precheck", _ => "invalid" };
     internal static async Task<int> CacheStageTests() {
         var basePath = Path.Combine(Path.GetTempPath(), "LedgeTop-cache-stage-" + Guid.NewGuid().ToString("N"));
         var fixtures = Path.Combine(basePath, "memory-native-fixtures");
@@ -78,6 +78,8 @@ internal static class SyntheticMemoryNative {
             "oef1_" + new string('a', 64), Sha, "sample-0.bin", Bytes.Length, "\"" + Sha + "\"", Sha);
         var root = Path.Combine(cache, "verified-hydration-v1");
         var scope = Path.Combine(root, identity.ScopeKey); var entry = Path.Combine(scope, identity.CacheKey);
+        var second = identity with { ResourceReference = "odqr1_1", LogicalFileId = "oef1_" + new string('b', 64), FileName = "sample-1.bin" };
+        var secondEntry = Path.Combine(scope, second.CacheKey);
         try {
             Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", "1");
             Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", basePath);
@@ -96,12 +98,16 @@ internal static class SyntheticMemoryNative {
                     throw new IOException("Synthetic reservation was not released.");
                 await coordinator.SyntheticCacheStageAsync(identity, "quota-ownership", CancellationToken.None);
                 await coordinator.SyntheticCacheStageAsync(identity, "quota-ownership", CancellationToken.None);
+                await coordinator.SyntheticCacheStageAsync(second, "quota-reservation-precheck", CancellationToken.None);
+                if (!File.Exists(Path.Combine(secondEntry, ".verified-hydration-owner"))) throw new IOException("Precheck control did not create its synthetic entry.");
                 var events = NativeStallTrace.Snapshot(capture).Select(e => e.Kind).ToArray();
-                if (events.Count(e => e == NativeStallTrace.Stage.CacheQuotaAcquired) != 10 ||
-                    events.Count(e => e == NativeStallTrace.Stage.SyntheticRootPrepareExit) != 6 ||
-                    events.Count(e => e == NativeStallTrace.Stage.CacheScopeOwnEnter) != 1 ||
-                    events.Count(e => e == NativeStallTrace.Stage.CacheEntryOwnEnter) != 1 ||
-                    events.Count(e => e == NativeStallTrace.Stage.CacheCapacityExit) != 3 ||
+                var outsideEnd = Array.IndexOf(events, NativeStallTrace.Stage.SyntheticOutsidePrecheckExit);
+                if (events.Count(e => e == NativeStallTrace.Stage.CacheQuotaAcquired) != 13 ||
+                    events.Count(e => e == NativeStallTrace.Stage.SyntheticRootPrepareExit) != 7 ||
+                    events.Count(e => e == NativeStallTrace.Stage.CacheScopeOwnEnter) != 2 ||
+                    events.Count(e => e == NativeStallTrace.Stage.CacheEntryOwnEnter) != 2 ||
+                    events.Count(e => e == NativeStallTrace.Stage.CacheCapacityExit) != 5 ||
+                    outsideEnd < 0 || Array.IndexOf(events, NativeStallTrace.Stage.CacheQuotaEnter, outsideEnd) <= outsideEnd ||
                     Array.IndexOf(events, NativeStallTrace.Stage.SyntheticEntryLeaseGapOpen) >= Array.IndexOf(events, NativeStallTrace.Stage.SyntheticEntryLeaseGapClosed) ||
                     !events.Contains(NativeStallTrace.Stage.SyntheticEntryLeaseGapOpen) || !events.Contains(NativeStallTrace.Stage.SyntheticEntryLeaseGapClosed) ||
                     !events.Contains(NativeStallTrace.Stage.CacheReserveAcquired) || !events.Contains(NativeStallTrace.Stage.CacheReleaseExit) ||
@@ -134,6 +140,7 @@ internal static class SyntheticMemoryNative {
             Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", previousProbe);
             Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", previousBase);
             File.Delete(Path.Combine(entry, ".hydration.lock")); File.Delete(Path.Combine(entry, ".verified-hydration-owner")); if (Directory.Exists(entry)) Directory.Delete(entry);
+            File.Delete(Path.Combine(secondEntry, ".hydration.lock")); File.Delete(Path.Combine(secondEntry, ".verified-hydration-owner")); if (Directory.Exists(secondEntry)) Directory.Delete(secondEntry);
             File.Delete(Path.Combine(scope, ".verified-hydration-owner")); if (Directory.Exists(scope)) Directory.Delete(scope);
             var reservationDirectory = Path.Combine(root, ".hydration-reservations-v2");
             File.Delete(Path.Combine(reservationDirectory, ".verified-hydration-owner")); if (Directory.Exists(reservationDirectory)) Directory.Delete(reservationDirectory);
