@@ -145,3 +145,37 @@ test('a late candidate response for an old point cannot replace current point re
   assert.equal(workspace.pointId, 'point-b');
   assert.deepEqual(context.state.taskDetails.task.gcp.candidates.map(image => image.id), ['photo-b']);
 });
+
+test('fresh task details replace the cached auto-import set list after a manual import', async () => {
+  const { context } = fixture(async path => {
+    if (path === '/api/v1/gcp-sets/new-manual-set') return { set: { id: 'new-manual-set' }, points: [{ id: 'point-new' }] };
+    if (path.endsWith('/gcp-correspondences')) return { correspondences: [] };
+    if (path.includes('/gcp-images?')) return { images: [] };
+    throw new Error(`Unexpected request ${path}`);
+  });
+  const workspace = context.gcpWorkspace('task');
+  workspace.autoScannedDatasetId = 'dataset';
+  workspace.authoritativeGcpSets = true;
+  workspace.autoImportedSetsByDatasetId = { dataset: [{ id: 'old-auto-set' }] };
+  workspace.setId = 'old-auto-set';
+  context.state.taskDetails.task.gcp = { sets: [{ id: 'new-manual-set' }] };
+  await context.refreshGcpWorkspace('task');
+  assert.equal(workspace.setId, 'new-manual-set');
+  assert.deepEqual(context.state.taskDetails.task.gcp.points.map(point => point.id), ['point-new']);
+});
+
+test('fresh empty task details remove deleted sets instead of restoring cached rows', async () => {
+  const { context } = fixture(async path => {
+    if (path.endsWith('/gcp-correspondences')) return { correspondences: [] };
+    throw new Error(`Unexpected request ${path}`);
+  });
+  const workspace = context.gcpWorkspace('task');
+  workspace.autoScannedDatasetId = 'dataset';
+  workspace.authoritativeGcpSets = true;
+  workspace.autoImportedSetsByDatasetId = { dataset: [{ id: 'deleted-set' }] };
+  workspace.setId = 'deleted-set';
+  context.state.taskDetails.task.gcp = { sets: [] };
+  await context.refreshGcpWorkspace('task');
+  assert.equal(workspace.setId, null);
+  assert.deepEqual(context.state.taskDetails.task.gcp.sets, []);
+});

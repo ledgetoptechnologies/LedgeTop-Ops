@@ -572,6 +572,12 @@ async function refreshTaskDetails(taskId,quiet=false){
     const attemptPage=results[3].value||{},freshAttempts=attemptPage.attempts||previous?.attempts||[],attempts=quiet&&previous?.attempts?.length>freshAttempts.length?[...freshAttempts,...previous.attempts.filter(item=>!freshAttempts.some(fresh=>fresh.id===item.id))]:freshAttempts,sameAttempt=previous?.attempt?.id===freshAttemptId;
     state.tasks=state.tasks.map(item=>item.id===taskId?refreshedTask:item);
     state.taskDetails[taskId]={task:refreshedTask,storage:results[1].value||previous?.storage||null,gcp:quiet&&previous?.gcp?previous.gcp:(results[2].value||{sets:[]}),attempts,nextAttemptCursor:quiet&&previous?.attempts?.length>freshAttempts.length?previous.nextAttemptCursor:(attemptPage.nextCursor||null),attemptDiagnostics:previous?.attemptDiagnostics||{},selectedAttemptId:previous?.selectedAttemptId||null,attempt:attemptResult?.attempt||refreshedTask.latestAttempt,logs:(attemptResult?.logs||(sameAttempt?previous?.logs:[])||[]).slice(-100),logsError};
+    const workspace=state.gcpWorkspaces[taskId];
+    if(!quiet&&workspace&&results[2].status==='fulfilled'){
+      workspace.autoImportedSetsByDatasetId ||= {};
+      workspace.autoImportedSetsByDatasetId[refreshedTask.datasetId]=results[2].value?.sets||[];
+      workspace.authoritativeGcpSets=true;
+    }
     if(!quiet){try{await refreshGcpWorkspace(taskId,false)}catch(error){state.taskDetails[taskId].gcp={...(state.taskDetails[taskId].gcp||{sets:[]}),error:error.message}}}
     if(state.token!==authorization)return;
     if(state.expandedTaskId===taskId){
@@ -599,13 +605,13 @@ async function refreshGcpWorkspace(taskId,shouldRender=true){
   let sets=detail.gcp?.sets||[];
   if(shouldAutoImport){
     workspace.autoImportedSetsByDatasetId ||= {};
-    if(workspace.autoScannedDatasetId===task.datasetId)sets=workspace.autoImportedSetsByDatasetId[task.datasetId]||sets;
+    if(workspace.autoScannedDatasetId===task.datasetId)sets=workspace.authoritativeGcpSets?sets:(workspace.autoImportedSetsByDatasetId[task.datasetId]||sets);
     else{
       const importKey=`${taskId}:${task.datasetId}`;
       let pending=gcpAutoImports.get(importKey);
       if(!pending){
         pending=api(`/api/v1/datasets/${encodeURIComponent(task.datasetId)}/gcp-sets/auto-import`,{method:'POST',body:{}})
-          .then(auto=>{const imported=auto.sets||[];workspace.autoImportedSetsByDatasetId[task.datasetId]=imported;workspace.autoScannedDatasetId=task.datasetId;return imported})
+          .then(auto=>{const imported=auto.sets||[];workspace.autoImportedSetsByDatasetId[task.datasetId]=imported;workspace.autoScannedDatasetId=task.datasetId;workspace.authoritativeGcpSets=false;return imported})
           .finally(()=>{if(gcpAutoImports.get(importKey)===pending)gcpAutoImports.delete(importKey)});
         gcpAutoImports.set(importKey,pending);
       }
