@@ -117,6 +117,39 @@ internal static class ExplorerPreviewWindowTests
             } finally {
                 stopGate.Set(); responsive.Quit(); await Until(() => responsiveClosed);
             }
+            // A delayed native drain must explain the wait without detaching or starting another stop.
+            using var delayedGate = new ManualResetEventSlim(false);
+            var delayedSession = new FakeSession(root) { DisposeGate = delayedGate };
+            var delayed = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(),
+                ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), delayedSession);
+            delayed.ShutdownNoticeDelayForTests = TimeSpan.FromMilliseconds(40);
+            var delayedClosed = false; delayed.Closed += (_, _) => delayedClosed = true;
+            delayed.Quit();
+            try {
+                await delayedSession.DisposeEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                await Until(() => delayed.DetailText.Contains("Still waiting for Windows", StringComparison.Ordinal));
+                delayed.Quit(); Pump();
+                True(delayed.IsVisible && !delayedClosed && delayedSession.Disposals == 1,
+                    "delayed message retains owner and does not launch a second disconnect");
+            } finally { delayedGate.Set(); await Until(() => delayedClosed); }
+
+            using var delayedFailureGate = new ManualResetEventSlim(false);
+            var delayedFailureSession = new FakeSession(root) { DisposeGate = delayedFailureGate, RefuseFirstDispose = true };
+            var delayedFailure = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(),
+                ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), delayedFailureSession);
+            delayedFailure.ShutdownNoticeDelayForTests = TimeSpan.FromMilliseconds(40);
+            var delayedFailureClosed = false; delayedFailure.Closed += (_, _) => delayedFailureClosed = true;
+            delayedFailure.Quit();
+            try {
+                await delayedFailureSession.DisposeEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                await Until(() => delayedFailure.DetailText.Contains("Still waiting for Windows", StringComparison.Ordinal));
+                delayedFailureGate.Set();
+                await Until(() => delayedFailure.StatusText == "Connection needs attention");
+                True(delayedFailure.IsVisible && !delayedFailureClosed && delayedFailureSession.Disposals == 1,
+                    "a delayed failure retains the existing retryable failure behavior");
+                delayedFailure.Quit(); await Until(() => delayedFailureClosed);
+                True(delayedFailureSession.Disposals == 2, "retry begins only after prior stop failed");
+            } finally { delayedFailureGate.Set(); delayedFailure.Quit(); await Until(() => delayedFailureClosed); }
             var prepared = new FakeSession(root);
             var connectedFactoryCalls = 0;
             var connected = Window(() => { connectedFactoryCalls++; throw new InvalidOperationException("Offline removal must not prepare a sign-in."); },

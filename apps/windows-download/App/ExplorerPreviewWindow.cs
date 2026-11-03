@@ -60,10 +60,14 @@ internal sealed class ExplorerPreviewWindow : Window
     private ITrayIcon? tray;
     private Task operation = Task.CompletedTask;
     private Task? shutdown;
+    private DispatcherTimer? shutdownNoticeTimer;
+    private bool shutdownDelayed;
+    internal TimeSpan ShutdownNoticeDelayForTests { get; set; } = TimeSpan.FromSeconds(10);
     private readonly DispatcherTimer? sessionCheck;
     private bool busy, quitting, readyToClose;
     private string problem = "";
     internal string StatusText => status.Text;
+    internal string DetailText => detail.Text;
     internal IReadOnlyList<string> ActivityLines => (session?.Activity ?? []).Concat(localActivity).TakeLast(100).ToArray();
     internal string UpdateStatusText => updateStatus.Text;
     internal bool UpdateMaintenanceOwned => updateMaintenance;
@@ -600,7 +604,8 @@ internal sealed class ExplorerPreviewWindow : Window
             _ => "Start a simulated sign-in to try generated files in an isolated folder. No real account or files are connected."
         };
         if (!presentation.Generated && problem.Length == 0) detail.Text = quitting
-            ? "Stopping downloads and disconnecting. Files already on this PC stay here."
+            ? shutdownDelayed ? "Still waiting for Windows to finish a file operation. LedgeTop Files will remain open until it can disconnect safely."
+                : "Stopping downloads and disconnecting. Files already on this PC stay here."
             : state switch {
                 ExplorerPreviewState.Running => "Open your files folder in Explorer. You can close this window while downloads continue in the tray.",
                 ExplorerPreviewState.Paused => "Online-only files cannot download while paused. Files already on this device remain available.",
@@ -735,7 +740,15 @@ internal sealed class ExplorerPreviewWindow : Window
         if (!quitting && tray?.IsAvailable == true) { Hide(); return; }
         if (updateApplying || updateHelperUncertain) { Quit(); return; }
         if (shutdown is not null) return;
-        quitting = true; Refresh(); shutdown = FinishCloseAsync();
+        quitting = true; shutdownDelayed = false;
+        var noticeTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher) { Interval = ShutdownNoticeDelayForTests };
+        shutdownNoticeTimer = noticeTimer;
+        noticeTimer.Tick += (_, _) => {
+            noticeTimer.Stop();
+            if (!ReferenceEquals(shutdownNoticeTimer, noticeTimer)) return;
+            if (quitting && !readyToClose) { shutdownDelayed = true; Refresh(); }
+        };
+        noticeTimer.Start(); Refresh(); shutdown = FinishCloseAsync();
     }
 
     private async Task FinishCloseAsync()
@@ -753,11 +766,13 @@ internal sealed class ExplorerPreviewWindow : Window
             if (disconnect is not null) await disconnect;
             else if (session is not null) await DisposeOnWorkerAsync(session);
         } catch (Exception) {
+            shutdownNoticeTimer?.Stop(); shutdownNoticeTimer = null; shutdownDelayed = false;
             shutdown = null; quitting = false;
             problem = "The preview couldn't stop safely. Keep the app open and try quitting again.";
             RestoreFromTray(); Refresh(); return;
         }
         await Dispatcher.Yield(DispatcherPriority.Background);
+        shutdownNoticeTimer?.Stop(); shutdownNoticeTimer = null; shutdownDelayed = false;
         readyToClose = true; Close();
     }
 
