@@ -44,6 +44,11 @@ if (args.Length == 1 && args[0] == "--native-stall-trace-tests") {
 }
 #endif
 #if LEDGETOP_CACHE_RACE_TEST
+if (args.Length == 3 && args[0] == "--experimental-reservation-close-child") {
+    try { await ExperimentalColdDownloaderTests.ReservationCloseChildAsync(args[1], args[2]); }
+    catch (Exception error) { Console.Error.WriteLine("Synthetic reservation close child failed: " + error.GetType().Name); Environment.ExitCode = 1; }
+    return;
+}
 if (args.Length == 3 && args[0] == "--experimental-crash-child") {
     try { await ExperimentalColdDownloaderTests.CrashChildAsync(args[1], args[2]); }
     catch (Exception error) { Console.Error.WriteLine("Synthetic crash child failed: " + error.GetType().Name); Environment.ExitCode = 1; }

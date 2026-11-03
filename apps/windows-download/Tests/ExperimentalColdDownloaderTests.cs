@@ -247,6 +247,52 @@ internal static class ExperimentalColdDownloaderTests
             Check(PhysicalId(result) == id && File.ReadAllBytes(result).SequenceEqual(Content) && state.Length > 0);
         });
     }
+    internal static async Task ReservationCloseChildAsync(string root, string stage)
+    {
+        if (!Path.IsPathFullyQualified(root) || root.StartsWith(@"\\", StringComparison.Ordinal) || !Directory.Exists(root) ||
+            stage is not ("record" or "directory" or "entry" or "lease")) throw new IOException("Synthetic teardown input invalid.");
+        var scope = new string('a', 64); var key = new string('b', 64);
+        var entryDir = Path.Combine(root, scope, key); Directory.CreateDirectory(entryDir);
+        var reservationDir = Path.Combine(root, ".hydration-reservations-v2"); Directory.CreateDirectory(reservationDir);
+        File.WriteAllBytes(Path.Combine(reservationDir, ".verified-hydration-owner"), "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+        HydrationCacheConcurrency.Lease? admission = await HydrationCacheConcurrency.AcquireAsync(root, scope + key, CancellationToken.None);
+        admission.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate);
+        var alias = admission; FileStream? entry = await PlaceholderHydrationCoordinator.OpenEntryLeaseAsync(Path.Combine(entryDir, ".hydration.lock"), FileMode.OpenOrCreate, CancellationToken.None);
+        var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = scope, Entry = key, Growth = 11L });
+        var gate = admission.Quota; ExperimentalReservationOwner? owner = null;
+        alias.RunExperimentalForRoot(root, () => HydrationQuotaGate.Run(gate, () => {
+            using var quota = new FileStream(Path.Combine(root, ".hydration-quota-v2.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            owner = ExperimentalReservationOwner.Create(root, scope, key, bytes, ref admission, ref entry, quota);
+        }, CancellationToken.None));
+        var injected = false; ExperimentalReservationOwner.BeforeTeardownTestHook = current => { if (current == stage) throw new IOException("Injected teardown failure."); };
+        try {
+            owner!.RunWithLeaseForTest(() => HydrationQuotaGate.Run(gate, () => {
+                using var quota = new FileStream(Path.Combine(root, ".hydration-quota-v2.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                owner.Release(quota);
+            }, CancellationToken.None));
+        } catch (IOException error) when (error.Message == "Injected teardown failure.") { injected = true; }
+        finally { ExperimentalReservationOwner.BeforeTeardownTestHook = null; }
+        Check(injected && ExperimentalReservationOwner.RetainedCount == 1);
+        var refused = false; try { _ = owner!.Growth; } catch (IOException) { refused = true; } Check(refused);
+        AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock"));
+        if (stage != "lease") AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
+        // Intentionally retain the owner until this synthetic child exits.
+    }
+    private static async Task RunReservationCloseChildAsync(string root, string stage)
+    {
+        var executable = Environment.ProcessPath ?? throw new IOException("Synthetic test executable unavailable.");
+        var info = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true };
+        if (string.Equals(Path.GetFileNameWithoutExtension(executable), "dotnet", StringComparison.OrdinalIgnoreCase)) info.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
+        info.ArgumentList.Add("--experimental-reservation-close-child"); info.ArgumentList.Add(root); info.ArgumentList.Add(stage);
+        var process = Process.Start(info) ?? throw new IOException("Synthetic teardown child failed to start.");
+        Task? reaper = null; var transferred = false; var pid = process.Id;
+        try {
+            var exited = ObserveTransferred(process, 20000, ref reaper, ref transferred);
+            if (!exited) throw new IOException("Synthetic teardown child remains live; preserve fixture and inspect PID " + pid);
+            Check(process.ExitCode == 0);
+        } finally { if (!transferred) process.Dispose(); }
+        await Task.CompletedTask;
+    }
     internal static async Task ResumeChildAsync(string root)
     {
         if (!Path.IsPathFullyQualified(root) || root.StartsWith(@"\\", StringComparison.Ordinal) || !Directory.Exists(root)) throw new IOException("Synthetic child root invalid.");
@@ -601,6 +647,11 @@ internal static class ExperimentalColdDownloaderTests
                 Check(collision && admission is null && entry is null && ExperimentalReservationOwner.RetainedCount == 0 && File.ReadAllBytes(path).SequenceEqual(Foreign));
                 AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true);
             } finally { entry?.Dispose(); admission?.Dispose(); }
+        });
+        foreach (var stage in new[] { "record", "directory", "entry", "lease" }) await WithFixture(async fixture => {
+            var root = Path.Combine(fixture.Path, "teardown"); Directory.CreateDirectory(root);
+            await RunReservationCloseChildAsync(root, stage);
+            AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true);
         });
         await AbruptRestartTests();
         await WithFixture(async root => {

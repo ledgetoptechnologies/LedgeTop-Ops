@@ -23,6 +23,7 @@ internal sealed class ExperimentalReservationOwner
     private readonly byte[] expected;
     private bool finished, uncertain, injectedDispositionFailure, injectedPostDispositionFailure;
     internal static Action? BeforeDispositionTestHook, AfterDispositionCloseTestHook;
+    internal static Action<string>? BeforeTeardownTestHook;
     private readonly long growth;
     internal long Growth { get { lock (gate) { if (finished || uncertain) throw new IOException("Reservation owner unavailable."); return growth; } } }
     internal static int RetainedCount { get { lock (RegistryGate) return Registry.Count; } }
@@ -106,6 +107,7 @@ internal sealed class ExperimentalReservationOwner
         try { BeforeDispositionTestHook?.Invoke(); } catch { injectedDispositionFailure = true; throw; }
         byte disposition = 1;
         if (!SetFileInformationByHandle(record!.SafeFileHandle, 4, ref disposition, 1)) throw new IOException("Reservation disposition not confirmed.");
+        BeforeTeardownTestHook?.Invoke("record");
         record.Dispose(); record = null;
         try { AfterDispositionCloseTestHook?.Invoke(); } catch { injectedPostDispositionFailure = true; throw; }
         FinishAfterDisposition();
@@ -118,8 +120,9 @@ internal sealed class ExperimentalReservationOwner
         if (!probe.IsInvalid) throw new IOException("Reservation remains present after disposition.");
         if (Marshal.GetLastWin32Error() != 2) throw new IOException("Reservation absence cannot be confirmed.");
         ExperimentalOwnedStream.VerifyPins(pins);
-        foreach (var pin in pins.AsEnumerable().Reverse()) pin.Handle.Dispose(); pins.Clear();
-        entry.Dispose(); lease.Dispose(); finished = true; uncertain = false;
+        foreach (var pin in pins.AsEnumerable().Reverse()) { BeforeTeardownTestHook?.Invoke("directory"); pin.Handle.Dispose(); } pins.Clear();
+        BeforeTeardownTestHook?.Invoke("entry"); entry.Dispose();
+        BeforeTeardownTestHook?.Invoke("lease"); lease.Dispose(); finished = true; uncertain = false;
         lock (RegistryGate) Registry.Remove(this);
     }
     internal void SettleInjectedPostDispositionFailureForTest(FileStream quota)
