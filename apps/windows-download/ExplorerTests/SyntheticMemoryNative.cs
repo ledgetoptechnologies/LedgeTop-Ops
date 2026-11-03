@@ -23,6 +23,17 @@ internal static class SyntheticMemoryNative {
         for (string? current = full; current is not null; current = Path.GetDirectoryName(current))
             if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw new IOException("Test directory may not traverse aliases.");
     }
+    internal static bool CleanupVerified(bool registrationAttempted, bool registrationReturned, bool readersJoined, bool disposeCompleted, bool unregisterVerified) =>
+        readersJoined && (!registrationAttempted || (registrationReturned && disposeCompleted && unregisterVerified));
+    internal static int CleanupEvidenceTests() {
+        if (!CleanupVerified(false, false, true, true, false) ||
+            CleanupVerified(true, false, true, true, false) ||
+            CleanupVerified(true, true, true, false, false) ||
+            CleanupVerified(true, true, false, true, true) ||
+            CleanupVerified(true, true, true, true, false) ||
+            !CleanupVerified(true, true, true, true, true)) throw new IOException("Synthetic registration cleanup evidence is incorrect.");
+        Console.WriteLine("PASS failed registration remains unverified; disposal timeout never permits unregister."); return 0;
+    }
     internal static async Task<int> RunAsync(int count) {
         if (!OperatingSystem.IsWindows() || count is < 1 or > 4 ||
             Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") != "1") return 2;
@@ -41,10 +52,13 @@ internal static class SyntheticMemoryNative {
             "pilot", "synthetic", "https://source.example.invalid", Principal, "odqr1_" + i,
             "oef1_" + new string((char)('a' + i), 64), Sha, $"sample-{i}.bin", Bytes.Length, "\"" + Sha + "\"", Sha), StringComparer.OrdinalIgnoreCase);
         NativeRootRegistration? registration = null; NativePlaceholderProvider? provider = null;
-        var readers = new List<Process>(); var readyHandles = new List<EventWaitHandle>(); var safe = true; var success = false;
+        var readers = new List<Process>(); var readyHandles = new List<EventWaitHandle>(); var success = false;
+        var registrationAttempted = false; var readersJoined = true; var disposeCompleted = false;
+        var disposeTimedOut = false; var unregisterVerified = false;
         var startName = "Local\\LedgeTopMemoryProbe-" + id.ToString("N");
         using var start = new EventWaitHandle(false, EventResetMode.ManualReset, startName);
         try {
+            registrationAttempted = true;
             registration = NativeRootRegistration.Register(root, Encoding.UTF8.GetBytes("LedgeTop.Files.MemoryNativeTest.v1:" + id));
             provider = new NativePlaceholderProvider(registration, cache, new Source(), "pilot", Principal, manifest, []);
             await provider.ConnectAndPopulateAsync();
@@ -67,15 +81,21 @@ internal static class SyntheticMemoryNative {
         finally {
             foreach (var reader in readers) {
                 try { if (!reader.HasExited) { reader.Kill(); await reader.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)); } }
-                catch { safe = false; }
+                catch { readersJoined = false; }
                 reader.Dispose();
             }
             foreach (var ready in readyHandles) ready.Dispose();
-            if (provider is not null) try { await provider.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(20)); } catch { safe = false; }
-            if (registration is not null && safe) try { registration.Unregister(); } catch { safe = false; }
-            Console.WriteLine($"Synthetic memory native: count={count}; success={success}; cleanupVerified={safe}; root={root}");
+            if (provider is null) disposeCompleted = true;
+            else try { await provider.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(20)); disposeCompleted = true; }
+            catch (TimeoutException) { disposeTimedOut = true; }
+            catch { }
+            if (registration is not null && readersJoined && disposeCompleted)
+                try { registration.Unregister(); unregisterVerified = true; } catch { }
+            var cleanupVerified = CleanupVerified(registrationAttempted, registration is not null, readersJoined, disposeCompleted, unregisterVerified);
+            Console.WriteLine($"Synthetic memory native: count={count}; success={success}; cleanupVerified={cleanupVerified}; disposeTimedOut={disposeTimedOut}; registrationAttempted={registrationAttempted}; registrationReturned={registration is not null}; root={root}; registrationContext=LedgeTop.Files.MemoryNativeTest.v1:{id}");
+            if (!cleanupVerified) success = false;
         }
-        return success && safe ? 0 : 1;
+        return success ? 0 : 1;
     }
     private sealed class Source : IQueuedDownloadSource {
         public string Alias => "synthetic";

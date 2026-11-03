@@ -5,6 +5,7 @@ using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
 #if LEDGETOP_NATIVE_DIAGNOSTICS
+if (args.Length == 1 && args[0] == "--synthetic-memory-native-cleanup-tests") return SyntheticMemoryNative.CleanupEvidenceTests();
 if (args.Length == 4 && args[0] == "--synthetic-memory-native-reader" && Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") == "1") return SyntheticMemoryNative.Reader(args[1], args[2], args[3]);
 if (args.Length == 2 && args[0] == "--synthetic-memory-native" && int.TryParse(args[1], out var memoryProbeCount)) return await SyntheticMemoryNative.RunAsync(memoryProbeCount);
 if (args.Length == 1 && args[0] == "--diagnostic-connect-flags-tests") {
