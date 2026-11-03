@@ -17,8 +17,15 @@ import proxy_generator as app
 
 
 def media(height=2160, fps="30000/1001", timecode="01:00:00:00", duration=1, audio=1):
-    return {"video": {"height": height, "width": height * 16 // 9, "codec_name": "prores", "profile": "Proxy", "pix_fmt": "yuv422p10le", "time_base": "1/30000", "start_time": "0"},
+    return {"video": {"height": height, "width": height * 16 // 9, "codec_name": "h264", "profile": "High", "pix_fmt": "yuv420p", "time_base": "1/30000", "start_time": "0"},
         "fps": app.fractions.Fraction(fps), "timecode": timecode, "duration": duration, "audio": audio}
+
+
+def sony_xml(ltc):
+    """A trailing MP4 free box holding the shape of Sony's NonRealTimeMeta timecode table."""
+    xml = (f'<?xml version="1.0" encoding="UTF-8"?>\n<NonRealTimeMeta>\n\t<LtcChangeTable tcFps="30" halfStep="true">\n'
+        f'\t\t<LtcChange frameCount="0" value="{ltc}" status="increment"/>\n\t</LtcChangeTable>\n</NonRealTimeMeta>\n').encode()
+    return (len(xml) + 8).to_bytes(4, "big") + b"free" + xml
 
 
 class RuntimeTests(unittest.TestCase):
@@ -77,7 +84,7 @@ class RuntimeTests(unittest.TestCase):
             for now in (2002, 2005, 2008, 2011, 2014):
                 self.generator.scan(now=now)
             self.assertEqual(render.call_count, 3)
-            self.generator.config = dataclasses.replace(self.config, version="7")
+            self.generator.config = dataclasses.replace(self.config, version="8")
             self.generator.scan(now=2017)
             self.assertEqual(render.call_count, 4)
             self.generator.scan(now=2018)
@@ -91,6 +98,38 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(args[args.index("-timecode") + 1], "01:00:00:00")
         self.assertIn("0:a?", args)
         self.assertEqual(args[args.index("-r") + 1], "30000/1001")
+
+    def test_encode_is_all_intra_h264_420(self):
+        args = app.encode_args(self.path, self.path.with_suffix(".tmp.mov"), media(), self.config)
+        self.assertEqual(args[args.index("-c:v") + 1], "libx264")
+        self.assertEqual(args[args.index("-g") + 1], "1")
+        self.assertIn("scale=-2:720,format=yuv420p", args)
+        self.assertEqual(self.config.render_version, "7-h264-intra-h720")
+
+    def test_sony_drop_frame_flag_is_read_from_trailing_metadata(self):
+        # FX30 C2852: 01:53:56;18 at 59.94p is stored as frames 0x49 (0x40 drop flag, 9 x2 half-step).
+        self.path.write_bytes(b"\0" * 4096 + sony_xml("49565301"))
+        self.assertTrue(app.sony_drop_frame(self.path, "01:53:56:18"))
+        self.assertFalse(app.sony_drop_frame(self.path, "01:53:57:18"), "metadata for another time is ignored")
+        self.path.write_bytes(sony_xml("09565301"))
+        self.assertFalse(app.sony_drop_frame(self.path, "01:53:56:18"), "non-drop Sony clips stay non-drop")
+        self.path.write_bytes(b"no metadata")
+        self.assertFalse(app.sony_drop_frame(self.path, "01:53:56:18"))
+
+    def test_probe_marks_sony_drop_frame_only_at_drop_frame_rates(self):
+        self.path.write_bytes(sony_xml("49565301"))
+        for fps, expected in (("60000/1001", "01:53:56;18"), ("30000/1001", "01:53:56;18"), ("25/1", "01:53:56:18"), ("24000/1001", "01:53:56:18")):
+            report = {"streams": [{"codec_type": "video", "width": 3840, "height": 2160, "r_frame_rate": fps, "avg_frame_rate": fps, "duration": "1"},
+                {"codec_type": "data", "tags": {"timecode": "01:53:56:18"}}], "format": {"duration": "1"}}
+            with self.subTest(fps=fps), mock.patch.object(app, "run_process", return_value=json.dumps(report).encode()):
+                self.assertEqual(app.probe(self.path, self.config)["timecode"], expected)
+
+    def test_explicit_timecode_notation_and_missing_timecode_are_kept(self):
+        self.path.write_bytes(sony_xml("09565301"))
+        for tags, expected in (({"timecode": "01:00:00;00"}, "01:00:00;00"), ({}, None)):
+            report = {"streams": [{"codec_type": "video", "width": 1920, "height": 1080, "r_frame_rate": "30000/1001", "avg_frame_rate": "30000/1001", "duration": "1", "tags": tags}], "format": {"duration": "1"}}
+            with self.subTest(tags=tags), mock.patch.object(app, "run_process", return_value=json.dumps(report).encode()):
+                self.assertEqual(app.probe(self.path, self.config)["timecode"], expected)
 
     def test_changed_source_preserves_old_proxy_and_cleans_temporary(self):
         output = self.folder / "Proxy" / "clip.mov"
@@ -111,7 +150,7 @@ class RuntimeTests(unittest.TestCase):
         output = self.folder / "Proxy" / "clip.mov"
         output.parent.mkdir()
         output.write_bytes(b"healthy legacy proxy")
-        (output.parent / ".proxy-gen-v6").touch()
+        (output.parent / ".proxy-gen-v7").touch()
         self.generator.scan(now=2000)
         with mock.patch.object(app, "probe", side_effect=[media(), media(height=720)]), mock.patch.object(app, "run_process") as run:
             counts = self.generator.scan(now=2002)
@@ -128,7 +167,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(app.validate_proxy(source, media(height=720, duration=10)))
         self.assertFalse(app.validate_proxy(source, media(height=720, timecode="02:00:00:00")))
         wrong = media(height=720)
-        wrong["video"]["codec_name"] = "h264"
+        wrong["video"]["codec_name"] = "prores"
         self.assertFalse(app.validate_proxy(source, wrong))
         wrong = media(height=720)
         wrong["video"]["start_time"] = "12"
@@ -137,7 +176,7 @@ class RuntimeTests(unittest.TestCase):
         wrong["video"]["width"] = 1920
         self.assertFalse(app.validate_proxy(source, wrong))
         wrong = media(height=720)
-        wrong["video"]["pix_fmt"] = "yuv420p"
+        wrong["video"]["pix_fmt"] = "yuv422p10le"
         self.assertFalse(app.validate_proxy(source, wrong))
 
     def test_known_source_replacement_cannot_adopt_old_proxy(self):
@@ -279,8 +318,8 @@ class RealMediaSmokeTests(unittest.TestCase):
             self.assertTrue(app.validate_proxy(source, result, config))
             self.assertEqual(result["video"]["height"], height)
             self.assertEqual(result["video"]["width"], height * 16 // 9)
-            self.assertEqual(result["video"]["codec_name"], "prores")
-            self.assertEqual(result["video"]["profile"], "Proxy")
+            self.assertEqual(result["video"]["codec_name"], "h264")
+            self.assertEqual(result["video"]["pix_fmt"], "yuv420p")
             self.assertEqual(result["timecode"], "01:00:00:00")
             sizes[height] = output.stat().st_size
         self.assertLess(sizes[720], sizes[1080])
@@ -317,6 +356,24 @@ class RealMediaSmokeTests(unittest.TestCase):
         self.assertEqual(self.generator.scan(now=2002)["generated"], 1)
         output = app.probe(self.folder / "Proxy" / "clip.mov", self.config)
         self.assertEqual(output["timecode"], "01:00:00;00")
+
+    def test_real_sony_style_drop_frame_proxy_is_all_intra(self):
+        # Like XAVC: timecode FFprobe reports with ":" and the drop flag only in trailing Sony XML.
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=60000/1001", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+            "-t", "1", "-c:v", "libx264", "-g", "30", "-c:a", "aac", "-timecode", "01:53:56:18", "-f", "mp4", str(self.path)], check=True, timeout=30)
+        with self.path.open("ab") as file:
+            file.write(sony_xml("49565301"))
+        os.utime(self.path, (1000, 1000))
+        self.generator.scan(now=2000)
+        self.assertEqual(self.generator.scan(now=2002)["generated"], 1)
+        output = self.folder / "Proxy" / "clip.mov"
+        result = app.probe(output, self.config)
+        self.assertEqual(result["timecode"], "01:53:56;18")
+        self.assertEqual((result["video"]["codec_name"], result["video"]["pix_fmt"]), ("h264", "yuv420p"))
+        frames = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "frame=pict_type", "-of", "csv=p=0", str(output)],
+            check=True, capture_output=True, text=True, timeout=30).stdout.split()
+        self.assertEqual({frame.strip(",") for frame in frames}, {"I"})
+        self.assertEqual(self.generator.scan(now=2004)["current"], 1)
 
 
 if __name__ == "__main__":
