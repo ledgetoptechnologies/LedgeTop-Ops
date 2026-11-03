@@ -27,11 +27,20 @@ internal sealed class ExperimentalReservationOwner
     private readonly long growth;
     internal long Growth { get { lock (gate) { if (finished || uncertain) throw new IOException("Reservation owner unavailable."); return growth; } } }
     internal static int RetainedCount { get { lock (RegistryGate) return Registry.Count; } }
+    internal static Dictionary<string, ExperimentalReservationOwner> SnapshotForRoot(string root)
+    {
+        ExperimentalReservationOwner[] snapshot;
+        lock (RegistryGate) snapshot = Registry.Where(owner => string.Equals(owner.root, root, StringComparison.OrdinalIgnoreCase)).ToArray();
+        var result = new Dictionary<string, ExperimentalReservationOwner>(StringComparer.OrdinalIgnoreCase);
+        foreach (var owner in snapshot) { owner.Verify(); _ = owner.Growth; if (!result.TryAdd(owner.path, owner)) throw new IOException("Duplicate retained reservation."); }
+        return result;
+    }
+    internal long RecordBytes { get { lock (gate) { if (finished || uncertain) throw new IOException("Reservation owner unavailable."); VerifyCore(); return expected.Length; } } }
 
     private ExperimentalReservationOwner(HydrationCacheConcurrency.Lease lease, FileStream entry, string path, byte[] expected, long growth)
     { this.lease = lease; this.entry = entry; this.path = path; root = Directory.GetParent(Path.GetDirectoryName(path)!)!.FullName; quotaPath = Path.Combine(Directory.GetParent(Path.GetDirectoryName(path)!)!.FullName, ".hydration-quota-v2.lock"); this.expected = expected; this.growth = growth; }
 
-    internal static ExperimentalReservationOwner Create(string root, string scope, string key, byte[] bytes,
+    internal static ExperimentalReservationOwner Create(string root, string scope, string key, byte[] bytes, DownloadSpec spec,
         ref HydrationCacheConcurrency.Lease? lease, ref FileStream? entry, FileStream quota)
     {
         if (lease is null || entry is null || !lease.ExperimentalGateHeld || !Monitor.IsEntered(lease.Quota)) throw new InvalidOperationException("Reservation requires its quota transaction and entry owner.");
@@ -52,6 +61,8 @@ internal sealed class ExperimentalReservationOwner
                 node.GetProperty("Entry").GetString() != key || (growth = node.GetProperty("Growth").GetInt64()) < 0)
                 throw new IOException("Reservation metadata invalid.");
         }
+        if (growth != checked(spec.Length + Downloader.HydrationStateGrowthBudget(spec) + 1024))
+            throw new IOException("Reservation growth does not match its download specification.");
         var path = Path.Combine(root, ".hydration-reservations-v2", scope + "-" + key + ".json");
         ExperimentalReservationOwner? owner = null;
         var originalLease = lease; var originalEntry = entry;
