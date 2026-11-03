@@ -147,13 +147,17 @@ internal static class ExperimentalColdDownloaderTests
             var line = await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(15));
             Check(line == "READY " + checkpoint && !process.HasExited);
             process.Kill();
-            var exited = ObserveOrRetain(process, 10000, out reaper); transferred = reaper is not null;
+            var exited = ObserveTransferred(process, 10000, ref reaper, ref transferred);
             if (!exited) throw new IOException("Synthetic crash child remains live; preserve fixture and inspect PID " + pid);
             Check(process.ExitCode != 0);
         } catch {
-            if (reaper is null && !process.HasExited) {
-                try { process.Kill(); } catch (InvalidOperationException) { }
-                finally { ObserveOrRetain(process, 10000, out reaper); transferred = reaper is not null; }
+            try {
+                if (reaper is null && !process.HasExited) {
+                    try { process.Kill(); } catch (InvalidOperationException) { }
+                    finally { ObserveTransferred(process, 10000, ref reaper, ref transferred); }
+                }
+            } catch (Exception cleanupError) {
+                Console.Error.WriteLine("Synthetic crash child cleanup was uncertain: " + cleanupError.GetType().Name + "; PID " + pid);
             }
             throw;
         } finally { if (!transferred) process.Dispose(); }
@@ -227,6 +231,14 @@ internal static class ExperimentalColdDownloaderTests
         } catch { if (reaper is not null) transferred = true; throw; }
         finally { if (!transferred) process.Dispose(); }
     }
+    private static bool ObserveTransferred(Process process, int timeoutMilliseconds, ref Task? reaper, ref bool transferred, Action? afterObservation = null)
+    {
+        try {
+            var exited = ObserveOrRetain(process, timeoutMilliseconds, out reaper);
+            afterObservation?.Invoke();
+            return exited;
+        } finally { transferred |= reaper is not null; }
+    }
     private static bool ObserveOrRetain(Process process, int timeoutMilliseconds, out Task? reaper)
     {
         reaper = null;
@@ -255,12 +267,13 @@ internal static class ExperimentalColdDownloaderTests
         info.ArgumentList.Add("$e = [Threading.EventWaitHandle]::OpenExisting($env:LEDGETOP_SYNTHETIC_OBSERVER_EVENT); try { if (-not $e.WaitOne(5000)) { exit 3 } } finally { $e.Dispose() }");
         info.Environment["LEDGETOP_SYNTHETIC_OBSERVER_EVENT"] = eventName;
         var process = Process.Start(info) ?? throw new IOException("Synthetic observer test failed to start.");
-        Task? reaped = null;
+        Task? reaped = null; var transferred = false; var injected = false;
         try {
-            var exited = ObserveOrRetain(process, 0, out reaped);
-            if (exited) { process.Dispose(); throw new IOException("Synthetic observer exited before the timeout check."); }
-            Check(reaped is not null && OwnedObservers.Count == 1);
-        } finally { release.Set(); }
+            try {
+                ObserveTransferred(process, 0, ref reaped, ref transferred, () => throw new IOException("Injected observation failure."));
+            } catch (IOException error) when (error.Message == "Injected observation failure.") { injected = true; }
+            Check(injected && transferred && reaped is not null && OwnedObservers.Count == 1);
+        } finally { release.Set(); if (!transferred) process.Dispose(); }
         await reaped!.WaitAsync(TimeSpan.FromSeconds(7));
         Check(OwnedObservers.IsEmpty);
     }
