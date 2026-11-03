@@ -33,6 +33,14 @@ internal static class HydrationCacheConcurrency
         internal object Quota { get; }
 #if LEDGETOP_CACHE_RACE_TEST
         private readonly Func<ExperimentalRootMarkerOwner> markerOwner;
+        private readonly string experimentalRoot;
+        internal void RunExperimentalForRoot(string path, Action operation) {
+            lock (leaseGate) {
+                ObjectDisposedException.ThrowIf(release is null, this);
+                if (!string.Equals(experimentalRoot, Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase)) throw new TransferException("Experimental quota lease belongs to a different root.");
+                operation();
+            }
+        }
         internal sealed class MarkerFacade(Lease lease)
         {
             internal void ValidateExisting(string directory, string name, byte[] expected) =>
@@ -53,11 +61,11 @@ internal static class HydrationCacheConcurrency
         private readonly Action<string, FileMode> acquireLegacy;
         internal Lease(object quota, Action release, Action<string, FileMode> acquireLegacy
 #if LEDGETOP_CACHE_RACE_TEST
-            , Func<ExperimentalRootMarkerOwner> markerOwner
+            , Func<ExperimentalRootMarkerOwner> markerOwner, string experimentalRoot
 #endif
             ) { Quota = quota; this.release = release; this.acquireLegacy = acquireLegacy;
 #if LEDGETOP_CACHE_RACE_TEST
-            this.markerOwner = markerOwner;
+            this.markerOwner = markerOwner; this.experimentalRoot = Path.GetFullPath(experimentalRoot);
 #endif
         }
         internal void AcquireExclusiveLegacy(string path, FileMode mode) {
@@ -137,7 +145,7 @@ internal static class HydrationCacheConcurrency
                     !string.Equals(state.ExperimentalLegacyPath, Path.Combine(Path.GetFullPath(root), ".hydration-cache.lock"), StringComparison.OrdinalIgnoreCase))
                     throw new TransferException("Experimental marker ownership requires the root legacy lease.");
                 return state.ExperimentalMarkerOwner ??= new ExperimentalRootMarkerOwner(root);
-            } }
+            } }, root
 #endif
             );
         } catch (OperationCanceledException) when (!token.IsCancellationRequested) {
