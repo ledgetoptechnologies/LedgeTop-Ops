@@ -33,7 +33,8 @@ internal static class HydrationCacheConcurrency
         internal object Quota { get; }
 #if LEDGETOP_CACHE_RACE_TEST
         private readonly Func<ExperimentalRootMarkerOwner> markerOwner;
-        private readonly string experimentalRoot;
+        private readonly string experimentalRoot, experimentalKey;
+        internal bool ExperimentalGateHeld => Monitor.IsEntered(leaseGate);
         internal void RunExperimentalForRoot(string path, Action operation) {
             lock (leaseGate) {
                 ObjectDisposedException.ThrowIf(release is null, this);
@@ -50,6 +51,18 @@ internal static class HydrationCacheConcurrency
                 long length = 0; lease.UseExperimentalMarkers(owner => length = owner.AccountMarker(path)); return length;
             }
         }
+        // Move this admission to an experimental reservation owner without
+        // releasing its root/entry reference. The old lease becomes unusable.
+        internal Lease TransferForReservationTest(string expectedKey)
+        {
+            lock (leaseGate) {
+                ObjectDisposedException.ThrowIf(release is null, this);
+                if (experimentalKey != expectedKey) throw new TransferException("Experimental reservation entry does not match its lease.");
+                var successor = new Lease(Quota, release, acquireLegacy, markerOwner, experimentalRoot, experimentalKey);
+                release = null;
+                return successor;
+            }
+        }
         private void UseExperimentalMarkers(Action<ExperimentalRootMarkerOwner> operation)
         {
             lock (leaseGate) { ObjectDisposedException.ThrowIf(release is null, this); operation(markerOwner()); }
@@ -61,11 +74,11 @@ internal static class HydrationCacheConcurrency
         private readonly Action<string, FileMode> acquireLegacy;
         internal Lease(object quota, Action release, Action<string, FileMode> acquireLegacy
 #if LEDGETOP_CACHE_RACE_TEST
-            , Func<ExperimentalRootMarkerOwner> markerOwner, string experimentalRoot
+            , Func<ExperimentalRootMarkerOwner> markerOwner, string experimentalRoot, string experimentalKey
 #endif
             ) { Quota = quota; this.release = release; this.acquireLegacy = acquireLegacy;
 #if LEDGETOP_CACHE_RACE_TEST
-            this.markerOwner = markerOwner; this.experimentalRoot = Path.GetFullPath(experimentalRoot);
+            this.markerOwner = markerOwner; this.experimentalRoot = Path.GetFullPath(experimentalRoot); this.experimentalKey = experimentalKey;
 #endif
         }
         internal void AcquireExclusiveLegacy(string path, FileMode mode) {
@@ -145,7 +158,7 @@ internal static class HydrationCacheConcurrency
                     !string.Equals(state.ExperimentalLegacyPath, Path.Combine(Path.GetFullPath(root), ".hydration-cache.lock"), StringComparison.OrdinalIgnoreCase))
                     throw new TransferException("Experimental marker ownership requires the root legacy lease.");
                 return state.ExperimentalMarkerOwner ??= new ExperimentalRootMarkerOwner(root);
-            } }, root
+            } }, root, key
 #endif
             );
         } catch (OperationCanceledException) when (!token.IsCancellationRequested) {
