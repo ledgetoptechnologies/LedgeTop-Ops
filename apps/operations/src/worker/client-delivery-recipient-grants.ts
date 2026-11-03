@@ -210,7 +210,7 @@ async function resolve(env: Env, principal: StaffPrincipal, folderRef: string, r
   expectedVersion: string, mustBeReady: boolean): Promise<Resolved> {
   const folderAuthorization = await authorizeClientRecipientFolder(env, principal, folderRef), prefix = folderAuthorization.prefix;
   const record = await readRecord(env, recipientId);
-  const listed = await listClientDeliveryRecipients(env, principal, { folderRef, q: record.display_name, limit: 20 });
+  const listed = await listClientDeliveryRecipients(env, principal, { folderRef, exactRecordId: recipientId, limit: 20 });
   const recipient = listed.recipients.find(row => row.recipientId === recipientId) as Recipient | undefined;
   if (!recipient) return conflict();
   if (recipient.recipientVersion !== expectedVersion || recipient.type !== record.record_kind
@@ -272,7 +272,7 @@ export function grantView(row: DirectGrant, recipient: Recipient, canRevoke: boo
   return { grantId: row.grantId, version: row.version, recipientId: row.recipientRecordId, recipientLabel: recipient.displayName,
     recipientType: recipient.type, audienceLabel: "All current and future Client Workspace members",
     recipientCount: recipient.memberCount, status, expiresAt, updatedAt: iso(row.revokedAt) ?? iso(row.createdAt)!,
-    canRevoke: canRevoke && status === "active" };
+    canRevoke: canRevoke && (status === "active" || status === "expired" && row.canRevoke) };
 }
 async function workspacesForFolder(env: Env, folderRef: string): Promise<Array<{ workspace_id: string; root_record_id: string; target_id: string; client_authority_id: string }>> {
   try {
@@ -299,7 +299,7 @@ async function listAll(env: Env, principal: StaffPrincipal, folderRef: string) {
     if (authority.workspaceId !== locator.workspace_id || authority.targetId !== locator.target_id
       || authority.clientAuthorityId !== locator.client_authority_id) conflict();
     const rootId = locator.root_record_id, record = await readRecord(env, rootId);
-    const rows = await listClientDeliveryRecipients(env, principal, { folderRef, q: record.display_name, limit: 20 });
+    const rows = await listClientDeliveryRecipients(env, principal, { folderRef, exactRecordId: rootId, limit: 20 });
     const recipient = rows.recipients.find(value => value.recipientId === rootId) as Recipient | undefined;
     if (!recipient || !publicationContains(authority, parseSnapshot(authority.snapshotJson), record)) return conflict();
     const context = await resolve(env, principal, folderRef, rootId, recipient.recipientVersion, false);
@@ -311,7 +311,7 @@ async function listAll(env: Env, principal: StaffPrincipal, folderRef: string) {
     for (const grant of result.grants) {
       const target = await readRecord(env, grant.recipientRecordId);
       if (!publicationContains(authority, parseSnapshot(authority.snapshotJson), target)) conflict("A shared client is no longer in the current published workspace.");
-      const targetRows = await listClientDeliveryRecipients(env, principal, { folderRef, q: target.display_name, limit: 20 });
+      const targetRows = await listClientDeliveryRecipients(env, principal, { folderRef, exactRecordId: grant.recipientRecordId, limit: 20 });
       const targetRecipient = targetRows.recipients.find(value => value.recipientId === grant.recipientRecordId) as Recipient | undefined;
       if (!targetRecipient) return conflict("A shared client is no longer available.");
       grants.push(grantView(grant, targetRecipient, canRevoke));
@@ -383,15 +383,17 @@ async function revokeGrant(env: Env, principal: StaffPrincipal, grantId: string,
   const folder = parseFolderRef(folderRef);
   if (encodeRef(folder.prefix.slice(0, -1)) !== folderRef) conflict();
   const record = await readRecord(env, locator.recipient_record_id);
-  const rows = await listClientDeliveryRecipients(env, principal, { folderRef, q: record.display_name, limit: 20 });
+  const rows = await listClientDeliveryRecipients(env, principal, { folderRef, exactRecordId: locator.recipient_record_id, limit: 20 });
   const recipient = rows.recipients.find(value => value.recipientId === locator.recipient_record_id) as Recipient | undefined;
   if (!recipient) return conflict("The Client Workspace recipient is no longer available.");
   const context = await resolve(env, principal, folderRef, locator.recipient_record_id, recipient.recipientVersion, false);
   const client = service(env), input = listInput(context);
   if(context.folderRef!==folderRef)conflict();
   const current = parseGrantList(await client.listDirectWorkspaceFolderGrants(input),context).grants.find(value => value.grantId === grantId);
+  const expiredStoredActive = current?.status === "expired" && current.canRevoke && current.expiresAt !== null
+    && Date.parse(current.expiresAt) <= Date.now();
   if (!current || current.recipientRecordId !== locator.recipient_record_id || current.workspaceId !== locator.workspace_id
-    || current.version !== locator.grant_version || current.version !== version || current.status !== "active") conflict();
+    || current.version !== locator.grant_version || current.version !== version || current.status !== "active" && !expiredStoredActive) conflict();
   if (context.divisionIds.length) {
     for (const divisionId of context.divisionIds)
       await requirePermission(env, principal, "delivery.share.revoke", { divisionId }, true);

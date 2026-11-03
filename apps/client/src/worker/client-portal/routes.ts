@@ -21,7 +21,7 @@ import {
 import { clientFeedbackSchemaAvailable, createClientFeedbackRouter } from "./feedback-routes";
 import {createClientNotificationHistoryRouter,mutateNativeDeliveryNotification,mutateAuthenticatedDeliveryNotification} from './notification-history';
 import {createAuthenticatedDeliveryResourceRouter} from './authenticated-delivery-resources';
-import {createDirectWorkspaceFolderResourceRouter} from './direct-workspace-folder-resources';
+import {createDirectWorkspaceFolderResourceRouter,directWorkspaceFolderCoordinate} from './direct-workspace-folder-resources';
 import { createClientAppReleaseRouter } from './app-release-routes';
 import {decodeAuthenticatedDeliveryHandle} from './authenticated-delivery-handles';
 import type {
@@ -462,6 +462,20 @@ export function createClientPortalRouter(
           throw new HTTPException(404,{message:'Shared delivery is unavailable'});
         selectedWorkspace=coordinate.workspaceId;
       }
+      // Direct Viewer folder media and navigation handles also need to select
+      // their native workspace for browser initiated requests. Such requests
+      // cannot attach PORTAL_WORKSPACE_HEADER; the encrypted handle supplies
+      // only the workspace coordinate, while the resource router rechecks the
+      // active identity, membership, grant and object on every use.
+      const directFolderResource=/^(?:\/api\/client)?\/direct-workspace-folders(?:\/files\/([A-Za-z0-9_-]+)|\/([A-Za-z0-9_-]+)\/files|\/(preview|download))$/.exec(c.req.path);
+      if(directFolderResource&&['GET','HEAD'].includes(c.req.method)){
+        const expectedKind=directFolderResource[1]||directFolderResource[3]?'file':'folder';
+        const handle=directFolderResource[1]??directFolderResource[2]??c.req.query('file');
+        const coordinate=handle?await directWorkspaceFolderCoordinate(c.env,handle,expectedKind):null;
+        if(!coordinate||(selectedWorkspace&&selectedWorkspace!==coordinate.workspaceId))
+          throw new HTTPException(404,{message:'Shared folder is unavailable'});
+        selectedWorkspace=coordinate.workspaceId;
+      }
       const sessionBootstrap = c.req.path.endsWith("/session") && !selectedWorkspace;
       if (!sessionBootstrap) {
         workspace = selectedWorkspace
@@ -485,7 +499,7 @@ export function createClientPortalRouter(
           const notificationHistoryRequest=/^(?:\/api\/client)?\/notification-history(?:\/authenticated-delivery\/[A-Za-z0-9_-]+)?$/.test(c.req.path);
           // Only an already decoded resource coordinate can select a native
           // delivery workspace; the resource router still proves the live grant.
-          const nativeDeliveryResource=Boolean(deliveryResource)&&['GET','HEAD'].includes(c.req.method);
+          const nativeDeliveryResource=Boolean(deliveryResource||directFolderResource)&&['GET','HEAD'].includes(c.req.method);
           const native = selectedWorkspace && (nativeDeliveryResource || nativeRequestPath && (notificationHistoryRequest||nativeServiceRequestsEnabled(c.env)))
             ? await resolveNativePortalWorkspaceReadContext(c.env, principal, selectedWorkspace)
             : null;

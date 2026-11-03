@@ -66,6 +66,13 @@ describe("client delivery recipient grants contract", () => {
       expect(serialized).not.toContain(secret);
   });
 
+  it("keeps a naturally expired active grant explicitly revocable for cleanup", () => {
+    const view = grantView({ grantId: "grant-expired", version: 1, recipientRecordId: "ops-recipient-id", status: "active",
+      expiresAt: "2020-01-01T00:00:00.000Z", createdAt: "2019-01-01T00:00:00.000Z", revokedAt: null, canRevoke: true } as never,
+    { recipientId: "ops-recipient-id", type: "client", displayName: "Example Client", memberCount: 1 } as never, true);
+    expect(view).toMatchObject({ status: "expired", canRevoke: true });
+  });
+
   it("rejects a stale review pin before the write adapter can be called", async () => {
     const input = { folderRef: "Zm9sZGVy", recipientId: "ops-recipient", recipientVersion: "crv_" + "d".repeat(43),
       audience: "all_members" as const, expiresAt: null };

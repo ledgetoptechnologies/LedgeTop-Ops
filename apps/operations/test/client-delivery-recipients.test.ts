@@ -16,12 +16,12 @@ const record = { record_id: "client-record-1", record_kind: "client", current_ve
   display_name: "Example Client", organization_record_id: null, organization_version: null, parent_profile_json: null,
   updated_at: "2026-10-30 12:00:00" };
 
-function d1(options: { fail?: boolean } = {}): D1Database {
+function d1(options: { fail?: boolean; queries?: Array<{ sql: string; values: unknown[] }> } = {}): D1Database {
   return {
     withSession() { return this; },
     prepare(sql: string) {
       if (options.fail) throw new Error("schema unavailable");
-      return { bind() { return {
+      return { bind(...values: unknown[]) { options.queries?.push({ sql, values }); return {
         all: async () => ({ results: sql.includes("FROM project_folders") ? []
           : sql.includes("FROM operations_directory_records record") ? [record]
             : [] }),
@@ -31,7 +31,7 @@ function d1(options: { fail?: boolean } = {}): D1Database {
   } as unknown as D1Database;
 }
 
-function env(options: { fail?: boolean } = {}): Env {
+function env(options: { fail?: boolean; queries?: Array<{ sql: string; values: unknown[] }> } = {}): Env {
   return { OPS_DB: d1(options), DELIVERY_DB: d1(), DATA_BUCKET: { list: async () => ({ objects: [{ key: "Jobs/Clients/Example/photo.jpg" }], delimitedPrefixes: [] }) } } as unknown as Env;
 }
 
@@ -58,6 +58,18 @@ describe("client delivery recipient list", () => {
     const serialized = JSON.stringify(result);
     for (const forbidden of ["email", "division", "workspace_id", "identity_id", "sourceId", "pa_"]) expect(serialized).not.toContain(forbidden);
     expect(mock.requirePermission).toHaveBeenCalledWith(expect.anything(), principal, "delivery.share.create", undefined, true);
+  });
+
+  it("resolves internal mutations by exact record ID instead of a capped display-name search", async () => {
+    mock.requirePermission.mockResolvedValue(undefined);
+    mock.authorize.mockResolvedValue(undefined);
+    const queries: Array<{ sql: string; values: unknown[] }> = [];
+    const result = await listClientDeliveryRecipients(env({ queries }), principal,
+      { folderRef: "folder-ref", exactRecordId: "client-record-1", limit: 20 });
+    expect(result.recipients).toHaveLength(1);
+    const roots = queries.find(query => query.sql.includes("FROM operations_directory_records record"));
+    expect(roots?.sql).toContain("(? IS NULL OR record.record_id=?)");
+    expect(roots?.values.slice(0, 2)).toEqual(["client-record-1", "client-record-1"]);
   });
 
   it("pins the record and roster without disclosing the hashed inputs", async () => {

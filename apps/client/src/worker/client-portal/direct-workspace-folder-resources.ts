@@ -52,11 +52,19 @@ async function encode(c:Ctx,claims:Claims){
     await encryptionKey(c.env.DELIVERY_SESSION_SECRET),new TextEncoder().encode(JSON.stringify(parsed))));
   const bytes=new Uint8Array(iv.length+cipher.length);bytes.set(iv);bytes.set(cipher,iv.length);return `df1_${b64(bytes)}`;
 }
-async function decode(c:Ctx,raw:string):Promise<Claims|null>{
+async function decode(env:Pick<Env,'DELIVERY_SESSION_SECRET'>,raw:string):Promise<Claims|null>{
   if(raw.length>8192||!/^df1_[A-Za-z0-9_-]+$/u.test(raw))return null;
   let bytes:Uint8Array;try{const value=raw.slice(4);bytes=Uint8Array.from(atob(value.replace(/-/gu,'+').replace(/_/gu,'/')),ch=>ch.charCodeAt(0));if(b64(bytes)!==value||bytes.length<29)return null;}catch{return null;}
   try{return strictClaims(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:bytes.slice(0,12)},
-    await encryptionKey(c.env.DELIVERY_SESSION_SECRET),bytes.slice(12)))));}catch{return null;}
+    await encryptionKey(env.DELIVERY_SESSION_SECRET),bytes.slice(12)))));}catch{return null;}
+}
+/** Decode only the workspace coordinate needed by the outer portal router.
+ * The selected workspace is still checked against the signed-in identity, and
+ * the resource router independently revalidates the current grant on use. */
+export async function directWorkspaceFolderCoordinate(env:Pick<Env,'DELIVERY_SESSION_SECRET'>,raw:string,expectedKind:'folder'|'file'){
+  const claims=await decode(env,raw);
+  if(!claims||claims.kind!==expectedKind)return null;
+  return {workspaceId:claims.workspaceId};
 }
 function claimsFor(folder:DirectWorkspaceFolderResource,principal:VerifiedClientPrincipal,path='',kind:Kind='folder'):Claims{
   return {v:1,kind,workspaceId:folder.workspaceId,issuer:principal.issuer,subject:principal.subject,grantId:folder.grantId,
@@ -107,9 +115,9 @@ export function createDirectWorkspaceFolderResourceRouter(){
     return c.json({resourceMode:'direct_workspace_folders',items});
   });
   router.get('/:folderHandle/files',async c=>{
-    const parent=await decode(c,c.req.param('folderHandle'));if(!parent||parent.kind!=='folder')return unavailable();
+    const parent=await decode(c.env,c.req.param('folderHandle'));if(!parent||parent.kind!=='folder')return unavailable();
     const folder=await currentFolder(c,parent),parentPath=relative(parent.path,true),prefix=folder.r2Prefix+parentPath;
-    const rawCursor=c.req.query('cursor'),cursor=rawCursor?await decode(c,rawCursor):null;
+    const rawCursor=c.req.query('cursor'),cursor=rawCursor?await decode(c.env,rawCursor):null;
     if(rawCursor&&(!cursor||cursor.kind!=='cursor'||cursor.grantId!==parent.grantId||cursor.grantVersion!==parent.grantVersion
       ||cursor.workspaceId!==parent.workspaceId||cursor.issuer!==parent.issuer||cursor.subject!==parent.subject
       ||cursor.sourceId!==parent.sourceId||cursor.targetId!==parent.targetId
@@ -144,7 +152,7 @@ export function createDirectWorkspaceFolderResourceRouter(){
     const result:ClientFilePage={files,folders,breadcrumbs,folderId:c.req.param('folderHandle'),prefix:'',cursor:next};return c.json(result);
   });
   async function fileFor(c:Ctx,raw:string):Promise<{claims:Claims;folder:DirectWorkspaceFolderResource;row:FileRow;key:string}>{
-    const claims=await decode(c,raw);if(!claims||claims.kind!=='file')return unavailable();
+    const claims=await decode(c.env,raw);if(!claims||claims.kind!=='file')return unavailable();
     const folder=await currentFolder(c,claims),path=relative(claims.path,false),key=folder.r2Prefix+path;
     const row=await db(c).prepare(`SELECT f.r2_key,f.etag,f.size,f.uploaded_at,f.content_type,f.media_kind FROM file_index f
       WHERE f.r2_key=? AND ${visibleSql}`).bind(key).first<FileRow>();
