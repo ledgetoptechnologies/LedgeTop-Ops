@@ -154,7 +154,8 @@ internal static class SyntheticMemoryNative {
         refused = false; try { fault.Arm(true); } catch (InvalidOperationException) { refused = true; }
         if (!refused) throw new IOException("Synthetic Keep fault could be rearmed.");
         if (!RetryOptionsValid(_ => null) || RetryOptionsValid(name => name == "LEDGETOP_TEST_DISABLE_AVAILABILITY_SCANNER" ? "1" : null) ||
-            RetryOptionsValid(name => name == "LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION" ? "1" : null))
+            RetryOptionsValid(name => name == "LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION" ? "1" : null) ||
+            RetryOptionsValid(name => name == "LEDGETOP_TEST_SUPPRESS_NATIVE_PROGRESS" ? "1" : null))
             throw new IOException("Unsafe synthetic retry options accepted.");
         if (!CleanupVerified(false, false, true, true, false) ||
             CleanupVerified(true, false, true, true, false) ||
