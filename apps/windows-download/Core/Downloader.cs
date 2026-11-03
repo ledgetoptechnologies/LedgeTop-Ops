@@ -261,12 +261,17 @@ public sealed class Downloader : IDisposable
             using var stateStream = new FileStream(statePath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
             stateStream.Write(JsonSerializer.SerializeToUtf8Bytes(expected)); stateStream.Flush(true);
         }
+#if LEDGETOP_CACHE_RACE_TEST
+        ExperimentalOwnedStream? experimentalResumeOwner = null;
+#endif
         try {
             long offset = File.Exists(partialPath) ? new FileInfo(partialPath).Length : 0;
             if (offset > spec.Length) throw new TransferException("Partial data exceeds the trusted length.");
 #if LEDGETOP_CACHE_RACE_TEST
-            if (ExperimentalColdOwnedStreamForTest && File.Exists(partialPath))
-                throw new TransferException("Experimental owned-stream resume is unsupported.");
+            if (ExperimentalColdOwnedStreamForTest && File.Exists(partialPath)) {
+                if (offset == spec.Length) throw new TransferException("An experimental full partial has no completed-response receipt; it was preserved.");
+                experimentalResumeOwner = ExperimentalOwnedStream.OpenExisting(partialPath, offset);
+            }
 #endif
             // A full unpromoted partial may come from cancellation before the overflow probe or an invalid response.
             // Without a durable completed-response receipt, obtain fresh bytes rather than silently accepting it.
@@ -316,11 +321,10 @@ public sealed class Downloader : IDisposable
                 }
 #if LEDGETOP_CACHE_RACE_TEST
                 if (ExperimentalColdOwnedStreamForTest) {
-                    // Synthetic-only cold path. Request authentication and all
+                    // Synthetic-only owned path. Request authentication and all
                     // response validation above are the real downloader path.
-                    // Existing partial/resume is explicitly unsupported.
                     RequireRegularFile(partialPath);
-                    var owner = ExperimentalOwnedStream.CreateNew(partialPath); var transferred = false; Exception? primary = null;
+                    var owner = experimentalResumeOwner ?? ExperimentalOwnedStream.CreateNew(partialPath); var transferred = false; Exception? primary = null;
                     try {
                         network.CancelAfter(networkInactivityTimeout);
                         await using var input = await response.Content.ReadAsStreamAsync(network.Token);
@@ -330,9 +334,9 @@ public sealed class Downloader : IDisposable
                             var count = await ReadNetworkAsync(input, buffer.AsMemory(0, (int)Math.Min(buffer.Length, remaining - received)));
                             if (count == 0) throw new TransferException("The response ended before the trusted length.");
                             cancellationToken.ThrowIfCancellationRequested(); owner.Write(buffer.AsSpan(0, count)); received += count;
-                            Report(received, DownloadPhase.Receiving);
+                            Report(offset + received, DownloadPhase.Receiving);
                         }
-                        if (await ReadNetworkAsync(input, buffer.AsMemory(0, 1)) != 0) throw new TransferException("The response exceeds the trusted length.");
+                        if (await ReadNetworkAsync(input, buffer.AsMemory(0, 1)) != 0) { owner.RestorePrefix(offset); throw new TransferException("The response exceeds the trusted length."); }
                         cancellationToken.ThrowIfCancellationRequested(); Report(spec.Length, DownloadPhase.Verifying);
                         byte[] digest;
                         using (DownloadTimingScope.Measure(3)) digest = owner.SealAndHash();
@@ -351,7 +355,10 @@ public sealed class Downloader : IDisposable
                         try { var result = new VerifiedHydrationDownload(finalPath, readOnly, integrityVerified: true); transferred = true; return result; }
                         catch { readOnly.Dispose(); throw; }
                     } catch (Exception error) { primary = error; throw; }
-                    finally { if (!transferred) { if (primary is null) owner.Dispose(); else { try { owner.Dispose(); } catch { } } } }
+                    finally {
+                        if (ReferenceEquals(experimentalResumeOwner, owner)) experimentalResumeOwner = null;
+                        if (!transferred) { if (primary is null) owner.Dispose(); else { try { owner.Dispose(); } catch { } } }
+                    }
                 }
 #endif
                 RequireRegularFile(partialPath);
@@ -410,6 +417,9 @@ public sealed class Downloader : IDisposable
         catch (TransferException) { throw; }
         catch (HttpRequestException) { throw new TransferException("Download transport failed; authenticated content URLs are never logged.", TransferFailureReason.Network); }
         catch (IOException) { throw new TransferException("Download interrupted or destination unavailable; owned partial data can be retried.", TransferFailureReason.ResponseRead); }
+#if LEDGETOP_CACHE_RACE_TEST
+        finally { if (experimentalResumeOwner is not null) { try { experimentalResumeOwner.Dispose(); } catch { } } }
+#endif
     }
 
     public void Dispose() => client.Dispose();

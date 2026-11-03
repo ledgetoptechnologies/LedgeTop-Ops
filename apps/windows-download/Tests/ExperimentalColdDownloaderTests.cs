@@ -2,6 +2,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 using LedgeTop.WindowsDownload;
 
 internal static class ExperimentalColdDownloaderTests
@@ -54,6 +55,38 @@ internal static class ExperimentalColdDownloaderTests
         Check(rejected && cleaned == 0 && preserved == 2);
         await RunOwnedFixtureAsync(() => Task.CompletedTask, () => 0, Cleanup, Preserve);
         Check(cleaned == 1 && preserved == 2);
+    }
+    private static async Task<string> SeedPartial(DirectoryFixture root)
+    {
+        using var cancel = new CancellationTokenSource();
+        using var downloader = Engine((_, _) => Response(Content, new CancelAfterPrefix(Content, cancel)));
+        var cancelled = false;
+        try { await downloader.DownloadAsync(Spec, root.Path, cancel.Token); } catch (OperationCanceledException) { cancelled = true; }
+        var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single();
+        Check(cancelled && File.ReadAllBytes(part).SequenceEqual(Content[..4])); return part;
+    }
+    private static HttpResponseMessage PartialResponse(string etag = "\"v1\"", long start = 4)
+    {
+        var remaining = Content[4..];
+        var response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(remaining) };
+        response.Headers.ETag = new EntityTagHeaderValue(etag);
+        response.Content.Headers.ContentRange = new ContentRangeHeaderValue(start, Content.Length - 1, Content.Length);
+        return response;
+    }
+    private static void CheckResumeRequest(HttpRequestMessage request)
+    {
+        Check(request.Headers.Range?.Ranges.Single().From == 4 && request.Headers.IfRange?.EntityTag?.ToString() == Spec.ETag &&
+            request.Headers.IfMatch.Single().ToString() == Spec.ETag);
+    }
+    private static void AssertOtherProcessCannotOpen(string path)
+    {
+        var info = new System.Diagnostics.ProcessStartInfo("powershell.exe") { UseShellExecute = false, CreateNoWindow = true };
+        info.ArgumentList.Add("-NoProfile"); info.ArgumentList.Add("-NonInteractive"); info.ArgumentList.Add("-Command");
+        info.ArgumentList.Add("try { $f = [IO.File]::Open($env:LEDGETOP_SYNTHETIC_PART, 'Open', 'ReadWrite', 'ReadWrite'); $f.Dispose(); exit 0 } catch [IO.IOException] { exit 17 } catch { exit 18 }");
+        info.Environment["LEDGETOP_SYNTHETIC_PART"] = path;
+        using var process = System.Diagnostics.Process.Start(info) ?? throw new IOException("Synthetic cross-process test failed to start.");
+        if (!process.WaitForExit(5000)) throw new IOException("Synthetic open observer remains live; preserve fixture and inspect PID " + process.Id);
+        Check(process.ExitCode == 17);
     }
     internal static async Task RunAsync()
     {
@@ -115,7 +148,7 @@ internal static class ExperimentalColdDownloaderTests
                 using var downloader = Engine((_, _) => Response(body));
                 await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
                 var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single();
-                Check(!File.Exists(Path.Combine(root.Path, "output.bin")) && File.ReadAllBytes(part).SequenceEqual(oversized ? Content : body));
+                Check(!File.Exists(Path.Combine(root.Path, "output.bin")) && File.ReadAllBytes(part).SequenceEqual(oversized ? [] : body));
             });
         }
         foreach (var cancelAtHash in new[] { true, false }) {
@@ -134,6 +167,62 @@ internal static class ExperimentalColdDownloaderTests
                 }
             });
         }
+        await WithFixture(async root => {
+            var part = await SeedPartial(root); var foreign = part + ".moved"; var calls = 0;
+            using var downloader = Engine((request, _) => {
+                calls++; CheckResumeRequest(request);
+                var blocked = false; try { File.Move(part, foreign); } catch (IOException) { blocked = true; } catch (UnauthorizedAccessException) { blocked = true; }
+                Check(blocked && File.Exists(part) && !File.Exists(foreign));
+                AssertOtherProcessCannotOpen(part);
+                return PartialResponse();
+            });
+            var result = await downloader.DownloadAsync(Spec, root.Path);
+            Check(calls == 1 && !File.Exists(part) && File.ReadAllBytes(result).SequenceEqual(Content));
+        });
+        foreach (var fault in new[] { "etag", "status", "range" }) {
+            await WithFixture(async root => {
+                var part = await SeedPartial(root); var prefix = File.ReadAllBytes(part);
+                using var downloader = Engine((request, _) => {
+                    CheckResumeRequest(request);
+                    return fault == "status" ? Response(Content) : PartialResponse(fault == "etag" ? "\"wrong\"" : "\"v1\"", fault == "range" ? 3 : 4);
+                });
+                await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
+                Check(!File.Exists(Path.Combine(root.Path, "output.bin")) && File.ReadAllBytes(part).SequenceEqual(prefix));
+            });
+        }
+        await WithFixture(async root => {
+            var part = await SeedPartial(root); var prefix = File.ReadAllBytes(part);
+            var state = Directory.EnumerateFiles(root.Path, "*.json", SearchOption.AllDirectories).Single(); File.WriteAllText(state, "{}"); var calls = 0;
+            using var downloader = Engine((_, _) => { calls++; return PartialResponse(); });
+            await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
+            Check(calls == 0 && File.ReadAllBytes(part).SequenceEqual(prefix) && File.ReadAllText(state) == "{}");
+        });
+        await WithFixture(async root => {
+            var part = await SeedPartial(root); var prefix = File.ReadAllBytes(part); var extraLink = part + ".link"; var calls = 0;
+            if (!CreateHardLinkW(extraLink, part, 0)) throw new IOException("Synthetic hard-link setup failed.", Marshal.GetLastWin32Error());
+            using var downloader = Engine((_, _) => { calls++; return PartialResponse(); });
+            await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
+            Check(calls == 0 && File.ReadAllBytes(part).SequenceEqual(prefix) && File.ReadAllBytes(extraLink).SequenceEqual(prefix));
+        });
+        await WithFixture(async root => {
+            var part = await SeedPartial(root); var prefix = File.ReadAllBytes(part); prefix[0] ^= 1; File.WriteAllBytes(part, prefix);
+            using var downloader = Engine((request, _) => { CheckResumeRequest(request); return PartialResponse(); });
+            await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
+            Check(!File.Exists(Path.Combine(root.Path, "output.bin")) && File.ReadAllBytes(part).SequenceEqual(prefix.Concat(Content[4..])));
+        });
+        await WithFixture(async root => {
+            var part = await SeedPartial(root); var prefix = File.ReadAllBytes(part);
+            using var downloader = Engine((request, _) => {
+                CheckResumeRequest(request);
+                var response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(Content[4..].Concat(new byte[] { 42 }).ToArray()) };
+                response.Headers.ETag = new EntityTagHeaderValue("\"v1\"");
+                response.Content.Headers.ContentLength = Content.Length - 4;
+                response.Content.Headers.ContentRange = new ContentRangeHeaderValue(4, Content.Length - 1, Content.Length);
+                return response;
+            });
+            await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
+            Check(!File.Exists(Path.Combine(root.Path, "output.bin")) && File.ReadAllBytes(part).SequenceEqual(prefix));
+        });
         await WithFixture(async root => {
             using var downloader = Engine((_, _) => Response(Content));
             Downloader.BeforeExperimentalHandoffTestHook = () => throw new IOException("Synthetic handoff failure.");
@@ -163,7 +252,7 @@ internal static class ExperimentalColdDownloaderTests
             Check(retried.Completed == 1 && retried.Failed == 0 && retried.Bytes.ToArray().SequenceEqual(Content) && source.Downloads == 1);
         });
         Check(ExperimentalOwnedStream.QuarantinedCountForTest == 0);
-        Console.WriteLine("PASS gated synthetic cold Downloader: empty, EOF, overflow, digest, collision, cancellation, handoff and coordinator recovery.");
+        Console.WriteLine("PASS gated synthetic Downloader: cold and resumed transfers, validation, collision, cancellation and coordinator recovery.");
     }
     private sealed class CancelAfterPrefix(byte[] data, CancellationTokenSource source) : MemoryStream(data)
     {
@@ -172,6 +261,10 @@ internal static class ExperimentalColdDownloaderTests
             source.Cancel(); throw new OperationCanceledException(token);
         }
     }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateHardLinkW(string newName, string existingName, nint security);
     private sealed class TestSink : IPlaceholderTransferSink
     {
         internal int Completed, Failed; internal MemoryStream Bytes { get; } = new();

@@ -6,11 +6,11 @@ using Microsoft.Win32.SafeHandles;
 
 namespace LedgeTop.WindowsDownload;
 
-// Compile-gated experiment only. No production caller, download or resume path.
+// Compile-gated experiment only. No production caller.
 internal sealed class ExperimentalOwnedStream : IDisposable
 {
     private const uint GenericRead = 0x80000000, GenericWrite = 0x40000000, Delete = 0x10000, ReadAttributes = 0x80, ListDirectory = 0x1;
-    private const uint ShareReadWrite = 3, CreateNewMode = 1, OpenExisting = 3;
+    private const uint ShareReadWrite = 3, CreateNewMode = 1, OpenExistingMode = 3;
     private const uint BackupSemantics = 0x02000000, OpenReparsePoint = 0x00200000;
     private readonly object gate = new();
     private static readonly object QuarantineGate = new();
@@ -38,7 +38,13 @@ internal sealed class ExperimentalOwnedStream : IDisposable
 
     private ExperimentalOwnedStream() { }
 
-    internal static ExperimentalOwnedStream CreateNew(string path)
+    internal static ExperimentalOwnedStream CreateNew(string path) => OpenOwned(path, CreateNewMode, null);
+    internal static ExperimentalOwnedStream OpenExisting(string path, long expectedLength)
+    {
+        if (expectedLength < 0) throw new ArgumentOutOfRangeException(nameof(expectedLength));
+        return OpenOwned(path, OpenExistingMode, expectedLength);
+    }
+    private static ExperimentalOwnedStream OpenOwned(string path, uint mode, long? expectedLength)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         if (!Path.IsPathFullyQualified(path) || path.StartsWith(@"\\", StringComparison.Ordinal) ||
@@ -49,9 +55,10 @@ internal sealed class ExperimentalOwnedStream : IDisposable
             var parent = Path.GetDirectoryName(path) ?? throw new IOException("Missing parent.");
             PinDirectories(parent, owner.directories);
             VerifyPins(owner.directories);
-            var file = Open(path, GenericRead | GenericWrite | Delete, 0, CreateNewMode, OpenReparsePoint);
+            var file = Open(path, GenericRead | GenericWrite | Delete, 0, mode, OpenReparsePoint);
             try {
                 RequireRegularKind(file, directory: false);
+                if (expectedLength is not null) RequireSingleLink(file);
                 owner.SourceIdentity = GetIdentity(file);
                 owner.stream = new FileStream(file, FileAccess.ReadWrite);
                 owner.sourceHandle = file;
@@ -59,6 +66,10 @@ internal sealed class ExperimentalOwnedStream : IDisposable
                 owner.VerifyOwnedPins();
                 if (!string.Equals(FinalPath(file), path, StringComparison.OrdinalIgnoreCase)) {
                     owner.EnterQuarantine(QuarantineReason.BindingChange); throw new IOException("Experimental source binding changed.");
+                }
+                if (expectedLength is { } length) {
+                    if (owner.stream.Length != length) throw new IOException("Experimental partial length changed.");
+                    owner.stream.Position = length;
                 }
             } catch { if (owner.stream is null) file.Dispose(); throw; }
             return owner;
@@ -72,6 +83,17 @@ internal sealed class ExperimentalOwnedStream : IDisposable
             if (sealedStream) throw new InvalidOperationException("Experimental stream is sealed.");
             VerifyOwnedPins();
             (stream ?? throw new ObjectDisposedException(nameof(ExperimentalOwnedStream))).Write(bytes);
+        }
+    }
+
+    internal void RestorePrefix(long length)
+    {
+        lock (gate) {
+            if (renameUncertain || disposeUncertain || sealedStream || length < 0) throw new InvalidOperationException("Experimental prefix restoration is unavailable.");
+            VerifyOwnedPins(); var file = stream ?? throw new ObjectDisposedException(nameof(ExperimentalOwnedStream));
+            if (length > file.Length) throw new IOException("Experimental prefix length changed.");
+            file.SetLength(length); file.Flush(true);
+            if (GetIdentity(file.SafeFileHandle) != SourceIdentity) { EnterQuarantine(QuarantineReason.BindingChange); throw new IOException("Experimental partial identity changed."); }
         }
     }
 
@@ -310,7 +332,7 @@ internal sealed class ExperimentalOwnedStream : IDisposable
             // Attribute-only opens can be exempt from Windows share checks.
             // Request directory-list access so deny-delete sharing is meaningful;
             // refuse if existing handles or ACLs do not permit it.
-            var name = ancestors.Pop(); var directory = Open(name, ReadAttributes | ListDirectory, ShareReadWrite, OpenExisting, BackupSemantics | OpenReparsePoint);
+            var name = ancestors.Pop(); var directory = Open(name, ReadAttributes | ListDirectory, ShareReadWrite, OpenExistingMode, BackupSemantics | OpenReparsePoint);
             try { RequireRegularKind(directory, directory: true); pins.Add(new(name, directory, GetIdentity(directory))); }
             catch { directory.Dispose(); throw; }
         }
@@ -365,6 +387,15 @@ internal sealed class ExperimentalOwnedStream : IDisposable
             if (!GetFileInformationByHandleEx(handle, 9, memory, 8)) throw new IOException("Experimental attributes unavailable.");
             var attributes = unchecked((uint)Marshal.ReadInt32(memory));
             if ((attributes & 0x400) != 0 || ((attributes & 0x10) != 0) != directory) throw new IOException("Experimental path type is unsafe.");
+        } finally { Marshal.FreeHGlobal(memory); }
+    }
+    private static void RequireSingleLink(SafeFileHandle handle)
+    {
+        var memory = Marshal.AllocHGlobal(24);
+        try {
+            if (!GetFileInformationByHandleEx(handle, 1, memory, 24)) throw new IOException("Experimental partial metadata unavailable.");
+            if (Marshal.ReadInt32(memory, 16) != 1 || Marshal.ReadByte(memory, 20) != 0 || Marshal.ReadByte(memory, 21) != 0)
+                throw new IOException("Experimental partial link or type is unsafe.");
         } finally { Marshal.FreeHGlobal(memory); }
     }
     private static Identity GetIdentity(SafeFileHandle handle)
