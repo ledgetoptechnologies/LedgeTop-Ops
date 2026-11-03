@@ -55,6 +55,20 @@ test('unexpected repository details are not reflected in GCP responses',async(t)
   assert.equal(response.status,400);const payload=await response.json();assert.equal(payload.code,'invalid_source_file');assert.doesNotMatch(payload.error,/SELECT|constraint|sqlite/i);
 });
 
+test('GCP source CSV attached to raw dataset cannot be deleted through the GCP API',async(t)=>{
+  const {base,dataset,database}=await fixture(t),source='point_id,label,latitude,longitude,elevation_m\nGCP-01,GCP-01,44.5,-88.1,250\n',sha=crypto.createHash('sha256').update(source).digest('hex');
+  database.prepare(`INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,metadata_json,created_at,
+    mime_type,captured_at,latitude,longitude,altitude_m,width,height,processing_role) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run('raw-gcp-csv',dataset.id,'raw/gcp_points.csv',Buffer.byteLength(source),sha,'text/csv','{}',new Date().toISOString(),'text/csv',null,null,null,null,null,null,'gcp_source');
+  const headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'raw-gcp-import'};
+  const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers,body:JSON.stringify({displayName:'Emlid GCP',format:'generic-csv-v1',fileName:'gcp_points.csv',sourceFileId:'raw-gcp-csv',content:source})});
+  assert.equal(imported.status,201,await imported.clone().text());const {set}=await imported.json();
+  const removed=await fetch(`${base}/api/v1/gcp-sets/${set.id}`,{method:'DELETE',headers:{authorization:'Bearer admin','idempotency-key':'delete-retained-source'}});
+  assert.equal(removed.status,409);assert.equal((await removed.json()).code,'gcp_source_retained');
+  const retained=database.prepare('SELECT source_content,source_sha256,source_file_id FROM gcp_sets WHERE id=?').get(set.id);
+  assert.equal(retained.source_content,source);assert.equal(retained.source_sha256,sha);assert.equal(retained.source_file_id,'raw-gcp-csv');
+});
+
 test('auto candidates adapt to camera spacing, accuracy and footprint metadata without claiming visibility',async(t)=>{
   const {base,dataset,database}=await fixture(t),headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'rank-import'};
   const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers,body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',content:'point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n'})});

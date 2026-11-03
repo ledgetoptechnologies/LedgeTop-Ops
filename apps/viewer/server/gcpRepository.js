@@ -143,7 +143,13 @@ class GcpRepository {
   }
 
   deletePoint(id) { return this.database.prepare('DELETE FROM gcp_points WHERE id=?').run(id).changes === 1; }
-  deleteSet(id) { return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1; }
+  deleteSet(id) {
+    // A GCP set linked to a raw dataset file is the durable, byte-for-byte
+    // retention copy of that source. Do not allow an API/UI deletion to erase it.
+    const row = this.database.prepare('SELECT source_file_id FROM gcp_sets WHERE id=?').get(id);
+    if (!row || row.source_file_id) return false;
+    return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1;
+  }
 
   listRankedImages(datasetId, selectedPointId, limit = 100, offset = 0) {
     const point = selectedPointId ? this.database.prepare(`SELECT points.* FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id
