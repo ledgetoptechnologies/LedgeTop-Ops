@@ -1369,9 +1369,9 @@ internal static class ExperimentalColdDownloaderTests
                         callbackSource.ReleaseCancellationCallback(); callbackSource.Release();
                         if (!callbackSettled) UncertainTestResources.Add((fixture, receipt, callbackWorker, callbackSource));
                     }
-                    foreach (var mode in new[] { "success", "held", "denied", "sinkfailure", "cancelled" }) {
+                    foreach (var mode in new[] { "success", "held", "denied", "sinkfailure", "partialfail", "heldcancel", "completefail", "completecancel", "failfail", "cancelled" }) {
                         var deliverySource = SyntheticReceiptDownloadSource.Create(spec, Content);
-                        var sink = new TestSink { ThrowOnWrite = mode == "sinkfailure", HoldWrite = mode == "held" };
+                        var sink = new TestSink { ThrowOnWrite = mode is "sinkfailure" or "failfail", HoldWrite = mode is "held" or "heldcancel", PartialThenThrow = mode == "partialfail", ThrowOnComplete = mode == "completefail", CancelOnComplete = mode == "completecancel", ThrowOnFail = mode == "failfail" };
                         var delivery = await coordinator.ExperimentalStartReceiptTransferAsync(identity, receipt, deliverySource, sink); var deliverySettled = false;
                         try {
                             await deliverySource.Entered.WaitAsync(TimeSpan.FromSeconds(10));
@@ -1379,17 +1379,22 @@ internal static class ExperimentalColdDownloaderTests
                             if (mode == "denied") source.ResolveFailureForTest = new AccessDeniedException();
                             if (mode == "cancelled") Check(await delivery.CancelWorkerAndWaitAsync(TimeSpan.FromSeconds(5)));
                             else deliverySource.Release();
-                            if (mode == "held") {
+                            if (mode is "held" or "heldcancel") {
                                 await sink.WriteEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
                                 var inUse = false; try { receipt.Dispose(); } catch (InvalidOperationException) { inUse = true; } catch (IOException) { inUse = true; } Check(inUse);
                                 AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock"));
-                                AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock")); sink.WriteRelease.TrySetResult();
+                                AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
+                                if (mode == "heldcancel") Check(await delivery.CancelWorkerAndWaitAsync(TimeSpan.FromSeconds(5)));
+                                else sink.WriteRelease.TrySetResult();
                             }
                             var observedDelivery = delivery.WaitAsync();
                             Check(ReferenceEquals(await Task.WhenAny(observedDelivery, Task.Delay(TimeSpan.FromSeconds(10))), observedDelivery));
                             Exception? failure = null;
                             try { await observedDelivery; } catch (Exception error) { failure = error; }
                             if (mode is "success" or "held") Check(failure is null && sink.Completed == 1 && sink.Failed == 0 && sink.Bytes.ToArray().SequenceEqual(Content));
+                            else if (mode == "partialfail") Check(failure is IOException && sink.Completed == 0 && sink.Failed == 1 && sink.Bytes.ToArray().SequenceEqual(Content[..1]));
+                            else if (mode is "completefail" or "completecancel") Check(failure is not null && sink.Completed == 1 && sink.Failed == 0 && sink.Bytes.ToArray().SequenceEqual(Content));
+                            else if (mode == "failfail") Check(failure is IOException { Message: "Synthetic sink failure." } && sink.Completed == 0 && sink.Failed == 1 && sink.Bytes.Length == 0);
                             else Check(failure is not null && sink.Completed == 0 && sink.Failed == 1 && sink.Bytes.Length == 0);
                             deliverySettled = true;
                         } finally {
@@ -1928,12 +1933,12 @@ internal static class ExperimentalColdDownloaderTests
     private static extern bool GetFileInformationByHandleEx(Microsoft.Win32.SafeHandles.SafeFileHandle handle, int kind, nint data, uint size);
     private sealed class TestSink : IPlaceholderTransferSink
     {
-        internal int Completed, Failed; internal bool ThrowOnWrite, HoldWrite; internal MemoryStream Bytes { get; } = new();
+        internal int Completed, Failed; internal bool ThrowOnWrite, HoldWrite, PartialThenThrow, ThrowOnComplete, CancelOnComplete, ThrowOnFail; internal MemoryStream Bytes { get; } = new();
         internal TaskCompletionSource WriteEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal TaskCompletionSource WriteRelease { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public async Task WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken token) { token.ThrowIfCancellationRequested(); if (ThrowOnWrite) throw new IOException("Synthetic sink failure."); if (HoldWrite) { WriteEntered.TrySetResult(); await WriteRelease.Task.WaitAsync(token); } Bytes.Position = offset; Bytes.Write(data.Span); }
-        public Task CompleteAsync(CancellationToken token) { Completed++; return Task.CompletedTask; }
-        public Task FailAsync(string code) { Failed++; return Task.CompletedTask; }
+        public async Task WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken token) { token.ThrowIfCancellationRequested(); if (ThrowOnWrite) throw new IOException("Synthetic sink failure."); if (HoldWrite) { WriteEntered.TrySetResult(); await WriteRelease.Task.WaitAsync(token); } Bytes.Position = offset; if (PartialThenThrow) { Bytes.Write(data.Span[..1]); throw new IOException("Synthetic partial sink failure."); } Bytes.Write(data.Span); }
+        public Task CompleteAsync(CancellationToken token) { Completed++; if (ThrowOnComplete) throw new IOException("Synthetic completion failure."); if (CancelOnComplete) throw new OperationCanceledException(token); return Task.CompletedTask; }
+        public Task FailAsync(string code) { Failed++; if (ThrowOnFail) throw new IOException("Synthetic failure callback failed."); return Task.CompletedTask; }
     }
     private sealed class CoordinatorSource : IQueuedDownloadSource, IHydrationMutationAwareSource, IVerifiedHydrationDownloadSource, IDisposable
     {
