@@ -354,7 +354,7 @@ internal sealed class ExperimentalOwnedStream : IDisposable
 
     private static SafeFileHandle Open(string path, uint access, uint share, uint mode, uint flags)
     {
-        var result = CreateFileW(path, access, share, 0, mode, flags, 0);
+        var result = CreateFileW(PlaceholderHydrationCoordinator.NativeCacheFilePath(path), access, share, 0, mode, flags, 0);
         if (!result.IsInvalid) return result;
         var error = Marshal.GetLastWin32Error(); result.Dispose(); throw new IOException("Experimental native open failed.", error);
     }

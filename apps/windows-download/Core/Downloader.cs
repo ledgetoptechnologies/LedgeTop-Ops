@@ -49,6 +49,7 @@ public sealed class Downloader : IDisposable
 #if LEDGETOP_CACHE_RACE_TEST
     // Synthetic-only gate; the project rejects packaging this symbol.
     internal bool ExperimentalColdOwnedStreamForTest { get; set; }
+    internal static Action? BeforeExperimentalPromotionTestHook, BeforeExperimentalHandoffTestHook;
 #endif
     private sealed record State(int Version, string Descriptor, long Length, string ETag, string Sha256);
     // Exact serialized state/marker growth for the existing bounded downloader format. The
@@ -339,11 +340,13 @@ public sealed class Downloader : IDisposable
                             throw new TransferException("SHA-256 verification failed; experimental partial was preserved.");
                         cancellationToken.ThrowIfCancellationRequested();
                         var promoted = false;
-                        HydrationMutationScope.Run(() => { CheckPath(finalPath); CheckPath(partialPath); promoted = owner.RenameNoReplace(root, spec.FileName, Convert.FromHexString(spec.Sha256)); }, cancellationToken);
+                        BeforeExperimentalPromotionTestHook?.Invoke();
+                        HydrationMutationScope.Run(() => { cancellationToken.ThrowIfCancellationRequested(); CheckPath(finalPath); CheckPath(partialPath); promoted = owner.RenameNoReplace(root, spec.FileName, Convert.FromHexString(spec.Sha256)); }, cancellationToken);
                         if (!promoted) throw new TransferException("The destination already exists; it will not be overwritten.");
                         Report(spec.Length, DownloadPhase.Completed);
                         try { HydrationMutationScope.Run(() => { RequireRegularFile(statePath); File.Delete(statePath); }, committedCleanup: true); }
                         catch (IOException) { } catch (UnauthorizedAccessException) { } catch (TransferException) { }
+                        BeforeExperimentalHandoffTestHook?.Invoke();
                         var readOnly = owner.OpenReadOnlyHandoff();
                         try { var result = new VerifiedHydrationDownload(finalPath, readOnly, integrityVerified: true); transferred = true; return result; }
                         catch { readOnly.Dispose(); throw; }

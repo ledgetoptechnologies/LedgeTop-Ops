@@ -68,7 +68,63 @@ internal static class ExperimentalColdDownloaderTests
             await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
             Check(!File.Exists(Path.Combine(root.Path, "output.bin")) && !Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Any());
         }
-        Console.WriteLine("PASS gated synthetic cold Downloader success, read-only handoff, collision, corrupt/resume refusal, and cancellation.");
+        using (var root = new DirectoryFixture()) {
+            var empty = Spec with { Length = 0, Sha256 = Convert.ToHexStringLower(SHA256.HashData(Array.Empty<byte>())) };
+            using var downloader = Engine((_, _) => { var response = Response([]); response.Content.Headers.ContentLength = 0; return response; });
+            await using var result = await downloader.DownloadVerifiedForHydrationAsync(empty, root.Path);
+            Check(result.Stream.Length == 0 && result.IntegrityVerified && !result.Stream.CanWrite);
+        }
+        foreach (var oversized in new[] { false, true }) {
+            using var root = new DirectoryFixture();
+            var body = oversized ? Content.Concat(new byte[] { 42 }).ToArray() : Content[..^1];
+            using var downloader = Engine((_, _) => Response(body));
+            await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
+            var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single();
+            Check(!File.Exists(Path.Combine(root.Path, "output.bin")) && File.ReadAllBytes(part).SequenceEqual(oversized ? Content : body));
+        }
+        foreach (var cancelAtHash in new[] { true, false }) {
+            using var root = new DirectoryFixture(); using var cancel = new CancellationTokenSource();
+            using var downloader = Engine((_, _) => Response(Content));
+            if (cancelAtHash) ExperimentalOwnedStream.BeforeSealHashTestHook = cancel.Cancel;
+            else Downloader.BeforeExperimentalPromotionTestHook = cancel.Cancel;
+            try {
+                var cancelled = false;
+                try { await downloader.DownloadAsync(Spec, root.Path, cancel.Token); } catch (OperationCanceledException) { cancelled = true; }
+                var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single();
+                Check(cancelled && !File.Exists(Path.Combine(root.Path, "output.bin")) && File.ReadAllBytes(part).SequenceEqual(Content));
+            } finally {
+                ExperimentalOwnedStream.BeforeSealHashTestHook = null; Downloader.BeforeExperimentalPromotionTestHook = null;
+            }
+        }
+        using (var root = new DirectoryFixture()) {
+            using var downloader = Engine((_, _) => Response(Content));
+            Downloader.BeforeExperimentalHandoffTestHook = () => throw new IOException("Synthetic handoff failure.");
+            try {
+                await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
+                Check(File.ReadAllBytes(Path.Combine(root.Path, "output.bin")).SequenceEqual(Content) &&
+                    !Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Any() && ExperimentalOwnedStream.QuarantinedCountForTest == 0);
+            } finally { Downloader.BeforeExperimentalHandoffTestHook = null; }
+        }
+        using (var root = new DirectoryFixture()) {
+            using var source = new CoordinatorSource();
+            using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", root.Path, expectedPrincipal: CoordinatorSource.Principal);
+            var failed = new TestSink(); var reached = false;
+            Downloader.BeforeExperimentalHandoffTestHook = () => { reached = true; throw new IOException("Synthetic handoff failure."); };
+            try {
+                await ExpectTransferFailure(coordinator.HydrateAsync(source.Identity, 0, Content.Length, failed));
+                Check(reached && failed.Failed == 1 && failed.Completed == 0 && failed.Bytes.Length == 0);
+            } finally { Downloader.BeforeExperimentalHandoffTestHook = null; }
+            var reservationDir = Path.Combine(root.Path, "verified-hydration-v1", ".hydration-reservations-v2");
+            Check(!Directory.EnumerateFiles(reservationDir, "*.json").Any() && ExperimentalOwnedStream.QuarantinedCountForTest == 0);
+            var commandLock = Directory.EnumerateFiles(root.Path, "*.lock", SearchOption.AllDirectories)
+                .Single(path => Path.GetFileName(Path.GetDirectoryName(path)) == ".ltds-downloads-v1");
+            Check(Path.GetFullPath(commandLock).Length > 260); // same hierarchy/name length as the experimental partial
+            var retried = new TestSink();
+            try { await coordinator.HydrateAsync(source.Identity, 0, Content.Length, retried); }
+            catch (TransferException error) { throw new IOException("Synthetic cache retry failed: " + error.HydrationFailure?.ActivityText, error); }
+            Check(retried.Completed == 1 && retried.Failed == 0 && retried.Bytes.ToArray().SequenceEqual(Content) && source.Downloads == 1);
+        }
+        Console.WriteLine("PASS gated synthetic cold Downloader: empty, EOF, overflow, digest, collision, cancellation, handoff and coordinator recovery.");
     }
     private sealed class CancelAfterPrefix(byte[] data, CancellationTokenSource source) : MemoryStream(data)
     {
@@ -76,6 +132,32 @@ internal static class ExperimentalColdDownloaderTests
             if (Position == 0) return ValueTask.FromResult(Read(buffer.Span[..Math.Min(buffer.Length, 4)]));
             source.Cancel(); throw new OperationCanceledException(token);
         }
+    }
+    private sealed class TestSink : IPlaceholderTransferSink
+    {
+        internal int Completed, Failed; internal MemoryStream Bytes { get; } = new();
+        public Task WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken token) { token.ThrowIfCancellationRequested(); Bytes.Position = offset; Bytes.Write(data.Span); return Task.CompletedTask; }
+        public Task CompleteAsync(CancellationToken token) { Completed++; return Task.CompletedTask; }
+        public Task FailAsync(string code) { Failed++; return Task.CompletedTask; }
+    }
+    private sealed class CoordinatorSource : IQueuedDownloadSource, IHydrationMutationAwareSource, IVerifiedHydrationDownloadSource, IDisposable
+    {
+        internal static readonly string Principal = "odqp1_" + new string('a', 64);
+        internal readonly PlaceholderIdentity Identity = new("pilot", "synthetic", ExperimentalColdDownloaderTests.Origin.GetLeftPart(UriPartial.Authority), Principal,
+            "odqr1_test", "oef1_" + new string('b', 64), "v1", Spec.FileName, Spec.Length, Spec.ETag, Spec.Sha256);
+        private readonly Downloader downloader; internal int Downloads;
+        internal CoordinatorSource() => downloader = Engine((_, _) => { Downloads++; return Response(Content); });
+        public string Alias => "synthetic"; public Uri Origin => ExperimentalColdDownloaderTests.Origin;
+        bool IHydrationMutationAwareSource.CoordinatesHydrationMutations => true;
+        public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken token = default) => Task.FromResult(new QueuedDownloadSession(Principal, DateTimeOffset.UtcNow.AddMinutes(5)));
+        public Task<ResolvedQueuedDownload> ResolveAsync(string reference, CancellationToken token = default) {
+            if (reference != Identity.ResourceReference) throw new ResourceUnavailableException();
+            return Task.FromResult(new ResolvedQueuedDownload(Principal, Identity.LogicalFileId, Identity.RemoteVersion,
+                Spec with { OpaqueIdentity = Identity.LogicalFileId + ":" + Identity.RemoteVersion }));
+        }
+        public Task<string> DownloadAsync(DownloadSpec spec, string destination, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default) => downloader.DownloadAsync(spec, destination, cancellationToken, progress);
+        Task<VerifiedHydrationDownload> IVerifiedHydrationDownloadSource.DownloadForHydrationAsync(DownloadSpec spec, string destination, CancellationToken token) => downloader.DownloadVerifiedForHydrationAsync(spec, destination, token);
+        public void Dispose() => downloader.Dispose();
     }
 }
 #endif
