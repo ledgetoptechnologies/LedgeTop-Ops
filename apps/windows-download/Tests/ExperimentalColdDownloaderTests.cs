@@ -927,26 +927,20 @@ internal static class ExperimentalColdDownloaderTests
                 Check(results.Count(item => item is not null) == 1); receipt = results.Single(item => item is not null);
                 Check(!File.Exists(path)); AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock")); AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
                 rejected = false; try { stale.Dispose(); } catch (ObjectDisposedException) { rejected = true; } Check(rejected);
-                var heldReceipt = receipt!; ExperimentalReservationOwner.LeaseReceipt.Scope? escaped = null;
-                rejected = false; try { heldReceipt.RunScoped(Path.Combine(root, "foreign"), scope + key, _ => { }); } catch (TransferException) { rejected = true; } Check(rejected);
-                rejected = false; try { heldReceipt.RunScoped(root, scope + new string('c', 64), _ => { }); } catch (TransferException) { rejected = true; } Check(rejected);
-                heldReceipt.RunScoped(root, scope + key, access => {
-                    escaped = access; access.ValidateEntry();
-                    Check(access.AccountMarker(root) == System.Text.Encoding.UTF8.GetByteCount("LedgeTop.VerifiedHydration/1\n"));
-                    access.WithQuota(() => { AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-quota-v2.lock")); access.ValidateEntry(); });
-                    var wrongThread = false; Exception? threadError = null;
-                    var thread = new Thread(() => { try { access.ValidateEntry(); } catch (ObjectDisposedException) { wrongThread = true; } catch (Exception error) { threadError = error; } });
-                    thread.Start();
-                    if (!thread.Join(TimeSpan.FromSeconds(5))) { receiptUncertain = true; UncertainTestResources.Add((fixture, heldReceipt, access, thread)); throw new IOException("Synthetic scope thread remains uncertain."); }
-                    Check(wrongThread && threadError is null);
-                    var reentrant = false; try { heldReceipt.Dispose(); } catch (InvalidOperationException) { reentrant = true; } Check(reentrant);
-                });
-                rejected = false; try { escaped!.ValidateEntry(); } catch (ObjectDisposedException) { rejected = true; } Check(rejected);
+                var heldReceipt = receipt!;
+                rejected = false; try { heldReceipt.ValidateEntry(Path.Combine(root, "foreign"), scope + key); } catch (TransferException) { rejected = true; } Check(rejected);
+                rejected = false; try { heldReceipt.ValidateEntry(root, scope + new string('c', 64)); } catch (TransferException) { rejected = true; } Check(rejected);
+                heldReceipt.ValidateEntry(root, scope + key);
+                Check(heldReceipt.AccountMarker(root, scope + key, root) == System.Text.Encoding.UTF8.GetByteCount("LedgeTop.VerifiedHydration/1\n"));
+                var exposed = typeof(ExperimentalReservationOwner.LeaseReceipt).GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly).Where(method => method.IsAssembly);
+                Check(exposed.All(method => (method.ReturnType == typeof(void) || method.ReturnType == typeof(long)) && method.GetParameters().All(parameter => !typeof(Delegate).IsAssignableFrom(parameter.ParameterType))));
                 var entered = new ManualResetEventSlim(); var release = new ManualResetEventSlim(); var disposing = new ManualResetEventSlim();
                 Task? operation = null; Task? close = null;
                 try {
-                    operation = Task.Run(() => heldReceipt.RunScoped(root, scope + key, access => { entered.Set(); if (!release.Wait(TimeSpan.FromSeconds(10))) throw new IOException("Synthetic receipt barrier timed out."); access.ValidateEntry(); }));
+                    ExperimentalReservationOwner.ReceiptQuotaEnteredTestSignal = entered; ExperimentalReservationOwner.ReceiptQuotaReleaseTestSignal = release;
+                    operation = Task.Run(() => heldReceipt.AccountMarkerUnderQuota(root, scope + key, root));
                     Check(entered.Wait(TimeSpan.FromSeconds(5)));
+                    AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-quota-v2.lock"));
                     close = Task.Run(() => { disposing.Set(); heldReceipt.Dispose(); });
                     Check(disposing.Wait(TimeSpan.FromSeconds(5)) && !close.Wait(TimeSpan.FromMilliseconds(150)));
                     release.Set(); await Task.WhenAll(operation, close).WaitAsync(TimeSpan.FromSeconds(10));
@@ -954,12 +948,13 @@ internal static class ExperimentalColdDownloaderTests
                     release.Set(); var pending = new[] { operation, close }.Where(task => task is not null).Cast<Task>().ToArray();
                     try { await Task.WhenAll(pending).WaitAsync(TimeSpan.FromSeconds(10)); }
                     finally {
+                        ExperimentalReservationOwner.ReceiptQuotaEnteredTestSignal = null; ExperimentalReservationOwner.ReceiptQuotaReleaseTestSignal = null;
                         if (pending.All(task => task.IsCompleted)) { entered.Dispose(); release.Dispose(); disposing.Dispose(); }
                         else { receiptUncertain = true; UncertainTestResources.Add((fixture, heldReceipt, pending, entered, release, disposing)); }
                     }
                 }
                 if (!receiptUncertain) receipt = null;
-                rejected = false; try { heldReceipt.RunScoped(root, scope + key, _ => { }); } catch (ObjectDisposedException) { rejected = true; } Check(rejected);
+                rejected = false; try { heldReceipt.ValidateEntry(root, scope + key); } catch (ObjectDisposedException) { rejected = true; } Check(rejected);
                 AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true); AssertOtherProcessOpen(Path.Combine(entryDir, ".hydration.lock"), true);
             } finally { if (!receiptUncertain) receipt?.Dispose(); entry?.Dispose(); admission?.Dispose(); }
             Check(ExperimentalReservationOwner.RetainedCount == 0 && ExperimentalEntryLease.RetainedCount == 0);
