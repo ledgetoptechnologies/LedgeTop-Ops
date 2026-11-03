@@ -57,10 +57,17 @@ test('source snapshot is signed, immutable, nonreusable, and holds its dataset u
 
   assert.equal(created.status, 'held');
   const stored = getHeldSourceSnapshot(processing, snapshotId);
+  assert.ok(verifyHeldSourceSnapshot(created, publicKey));
   assert.ok(verifyHeldSourceSnapshot(stored, publicKey));
   const changedFrames = { ...stored, sourceFrames: Buffer.from(stored.sourceFrames) };
   changedFrames.sourceFrames[0] ^= 1;
   assert.equal(verifyHeldSourceSnapshot(changedFrames, publicKey), false, 'persisted frame tampering invalidates the snapshot');
+  assert.equal(verifyHeldSourceSnapshot({ ...stored, sourcePageHashes: ['0'.repeat(64)] }, publicKey), false,
+    'frame hashes must equal the descriptors covered by the signed intent');
+  assert.equal(verifyHeldSourceSnapshot({ ...stored, attemptId: 'another-attempt' }, publicKey), false,
+    'snapshot identity must equal the signed attempt identity');
+  assert.throws(() => database.prepare('INSERT OR REPLACE INTO viewer_source_snapshots SELECT * FROM viewer_source_snapshots WHERE snapshot_id=?').run(snapshotId),
+    /never reusable or replaceable/);
   assert.equal(processing.hasHeldSourceSnapshot(dataset.id), true);
   assert.equal(processing.beginTrashMutation(dataset.id, 'ops:test'), null);
   assert.equal(processing.trashProject(project.id, 'ops:test'), null);
@@ -95,6 +102,22 @@ test('source snapshot is signed, immutable, nonreusable, and holds its dataset u
   assert.equal(processing.hasHeldSourceSnapshot(dataset.id), false);
   assert.throws(() => database.prepare('DELETE FROM viewer_source_snapshots WHERE snapshot_id=?').run(snapshotId), /never reusable/);
   assert.throws(() => database.prepare("UPDATE viewer_source_snapshots SET status='held' WHERE snapshot_id=?").run(snapshotId), /lifecycle transition/);
+});
+
+test('source snapshot creation rejects a dataset with an in-flight filesystem lifecycle journal', (t) => {
+  const { database, processing, dataset, task, attempt } = fixture(t);
+  const timestamp = new Date().toISOString();
+  database.prepare(`INSERT INTO storage_mutations
+    (id,mutation_type,entity_type,entity_id,trash_id,source_root_key,source_relative_path,
+     destination_root_key,destination_relative_path,status,actor,created_at,updated_at)
+    VALUES (?,'trash','dataset',?,?,'datasets',?,'trash',?,'fs_applied','ops:test',?,?)`)
+    .run(crypto.randomUUID(), dataset.id, crypto.randomUUID(), dataset.relativePath, 'dataset/in-flight', timestamp, timestamp);
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  assert.throws(() => createHeldSourceSnapshot(processing, {
+    datasetId: dataset.id, taskId: task.id, attemptId: attempt.id,
+    signer: { issuerId: 'viewer-test-issuer', keyId: 'test-key-1', sign: (bytes) => crypto.sign(null, bytes, privateKey) },
+  }), { code: 'current_attempt_unavailable' });
+  assert.equal(database.prepare('SELECT COUNT(*) AS n FROM viewer_source_snapshots').get().n, 0);
 });
 
 test('snapshot export refuses the incomplete GCP extension instead of silently omitting its evidence', (t) => {

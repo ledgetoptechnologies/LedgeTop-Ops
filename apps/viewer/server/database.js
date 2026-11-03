@@ -2123,6 +2123,9 @@ const MIGRATIONS = [
     INSERT OR IGNORE INTO retained_dataset_files(dataset_file_id,dataset_id,sha256,byte_size,retention_reason,created_at)
       SELECT f.id,f.dataset_id,f.sha256,f.byte_size,'gcp_source',g.created_at
       FROM gcp_sets g JOIN dataset_files f ON f.id=g.source_file_id AND f.dataset_id=g.dataset_id;
+    CREATE TRIGGER retained_dataset_files_no_insert_replace BEFORE INSERT ON retained_dataset_files
+      WHEN EXISTS(SELECT 1 FROM retained_dataset_files WHERE dataset_file_id=NEW.dataset_file_id)
+      BEGIN SELECT RAISE(ABORT,'retained source file identifiers are never reusable or replaceable'); END;
     CREATE TRIGGER retained_dataset_files_no_update BEFORE UPDATE ON retained_dataset_files
       BEGIN SELECT RAISE(ABORT,'retained source file records are immutable'); END;
     CREATE TRIGGER retained_dataset_files_no_delete BEFORE DELETE ON retained_dataset_files
@@ -2151,6 +2154,9 @@ const MIGRATIONS = [
     );
     CREATE INDEX viewer_source_snapshots_dataset_idx ON viewer_source_snapshots(dataset_id,status);
     CREATE UNIQUE INDEX viewer_source_snapshots_attempt_idx ON viewer_source_snapshots(attempt_id);
+    CREATE TRIGGER viewer_source_snapshots_no_insert_replace BEFORE INSERT ON viewer_source_snapshots
+      WHEN EXISTS(SELECT 1 FROM viewer_source_snapshots WHERE snapshot_id=NEW.snapshot_id OR attempt_id=NEW.attempt_id)
+      BEGIN SELECT RAISE(ABORT,'Viewer source snapshot identifiers are never reusable or replaceable'); END;
     CREATE TRIGGER viewer_source_snapshots_payload_immutable BEFORE UPDATE ON viewer_source_snapshots
       WHEN NEW.snapshot_id IS NOT OLD.snapshot_id OR NEW.dataset_id IS NOT OLD.dataset_id OR NEW.task_id IS NOT OLD.task_id
         OR NEW.attempt_id IS NOT OLD.attempt_id OR NEW.dataset_manifest_sha256 IS NOT OLD.dataset_manifest_sha256

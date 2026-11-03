@@ -107,7 +107,7 @@ class GcpRepository {
       throw Object.assign(new Error('GCP source checksum does not match its content'),{code:'invalid_gcp_input'});
     const id = crypto.randomUUID(), timestamp = now();
     return this.transaction(() => {
-      const currentDataset=this.dataset(datasetId),pendingStorage=this.database.prepare("SELECT 1 FROM storage_mutations WHERE entity_type='dataset' AND entity_id=? AND status IN ('intent','fs_applied') LIMIT 1").get(datasetId);
+      const currentDataset=this.dataset(datasetId),pendingStorage=this.database.prepare("SELECT 1 FROM storage_mutations WHERE entity_type='dataset' AND entity_id=? AND status IN ('intent','fs_applied','failed') LIMIT 1").get(datasetId);
       if(!currentDataset||currentDataset.status!=='finalized'||pendingStorage)
         throw Object.assign(new Error('dataset is not available for GCP import'), { code: 'dataset_not_available' });
       if(sourceFileId){const prior=this.database.prepare('SELECT id FROM gcp_sets WHERE dataset_id=? AND source_file_id=? AND source_sha256=? ORDER BY created_at,id LIMIT 1').get(datasetId,sourceFileId,sourceSha256);if(prior)return this.getSet(prior.id,true);}
@@ -118,7 +118,7 @@ class GcpRepository {
       if(sourceFileId){
         const source=this.database.prepare('SELECT id,sha256,byte_size FROM dataset_files WHERE id=? AND dataset_id=?').get(sourceFileId,datasetId);
         if(!source||source.sha256!==sourceSha256)throw Object.assign(new Error('GCP source file changed during import'),{code:'invalid_source_file'});
-        this.database.prepare(`INSERT OR IGNORE INTO retained_dataset_files
+        this.database.prepare(`INSERT INTO retained_dataset_files
           (dataset_file_id,dataset_id,sha256,byte_size,retention_reason,created_at) VALUES (?,?,?,?,'gcp_source',?)`)
           .run(source.id,datasetId,source.sha256,source.byte_size,timestamp);
       }

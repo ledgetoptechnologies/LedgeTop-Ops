@@ -5,7 +5,7 @@
 const crypto = require('node:crypto');
 const { canonicalBytes } = require('./referenceProtocol');
 const {
-  captureHeldSourceExport, HeldSourceExport, SOURCE_DOMAIN, SELECTED_DOMAIN,
+  captureHeldSourceExport, HeldSourceExport, SOURCE_DOMAIN, SELECTED_DOMAIN, SOURCE_VERSION, SELECTED_VERSION,
 } = require('./viewerPagedSourceExport');
 
 const SNAPSHOT_PROTOCOL = 'ltds-viewer-held-source-snapshot-v1';
@@ -13,17 +13,21 @@ const SNAPSHOT_DOMAIN = Buffer.from('ltds-viewer-held-source-snapshot-v1\0', 'as
 const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
 const fail = (code) => { throw new HeldSourceExport(code); };
 
-function verifyFrameStream(bytes, pageHashes, domain) {
+function verifyFrameStream(bytes, pageHashes, domain, expectedVersion) {
   if (!Buffer.isBuffer(bytes) || !Array.isArray(pageHashes) || !pageHashes.length || !bytes.length || bytes.at(-1) !== 0x0a) return false;
   const lines = bytes.subarray(0, -1).toString('utf8').split('\n');
   if (lines.length !== pageHashes.length) return false;
-  return lines.every((line, index) => {
+  let recordCount = 0;
+  const valid = lines.every((line, index) => {
     try {
       const frame = JSON.parse(line), canonical = canonicalBytes(frame);
+      if (!Array.isArray(frame.records) || frame.version !== expectedVersion || frame.index !== index) return false;
+      recordCount += frame.records.length;
       return Buffer.compare(Buffer.from(line, 'utf8'), canonical) === 0
         && sha256(Buffer.concat([domain, canonical])) === pageHashes[index];
     } catch { return false; }
   });
+  return valid ? recordCount : false;
 }
 
 function validateSigner(signer) {
@@ -89,11 +93,7 @@ function createHeldSourceSnapshot(processing, {
       JSON.stringify(exported.sourcePageHashes), JSON.stringify(exported.selectedPageHashes),
       exported.sourceFrames.length, exported.selectedFrames.length, createdAt,
     );
-    return {
-      snapshotId, status: 'held', intent, intentSha256,
-      signature: signature.toString('base64url'),
-      sourceFrames: exported.sourceFrames, selectedFrames: exported.selectedFrames,
-    };
+    return getHeldSourceSnapshot(processing, snapshotId);
   });
 }
 
@@ -102,6 +102,8 @@ function getHeldSourceSnapshot(processing, snapshotId) {
   if (!row) return null;
   return {
     snapshotId: row.snapshot_id, datasetId: row.dataset_id, taskId: row.task_id, attemptId: row.attempt_id,
+    datasetManifestSha256: row.dataset_manifest_sha256, inputManifestSha256: row.input_manifest_sha256,
+    createdAt: row.created_at,
     status: row.status, intent: JSON.parse(row.intent_json), intentSha256: row.intent_sha256,
     issuerId: row.issuer_id, keyId: row.key_id, signature: Buffer.from(row.signature),
     sourceFrames: Buffer.from(row.source_frames), selectedFrames: Buffer.from(row.selected_frames),
@@ -113,14 +115,27 @@ function getHeldSourceSnapshot(processing, snapshotId) {
 }
 
 function verifyHeldSourceSnapshot(snapshot, publicKey) {
-  if (!snapshot || !publicKey || snapshot.intent.protocol !== SNAPSHOT_PROTOCOL) return false;
-  const intentBytes = canonicalBytes(snapshot.intent);
-  return sha256(intentBytes) === snapshot.intentSha256
-    && crypto.verify(null, Buffer.concat([SNAPSHOT_DOMAIN, intentBytes]), publicKey, snapshot.signature)
-    && snapshot.sourceFrames.length === snapshot.sourceFrameBytes
-    && snapshot.selectedFrames.length === snapshot.selectedFrameBytes
-    && verifyFrameStream(snapshot.sourceFrames, snapshot.sourcePageHashes, SOURCE_DOMAIN)
-    && verifyFrameStream(snapshot.selectedFrames, snapshot.selectedPageHashes, SELECTED_DOMAIN);
+  try {
+    if (!snapshot || !publicKey || !snapshot.intent || snapshot.intent.protocol !== SNAPSHOT_PROTOCOL) return false;
+    const intentBytes = canonicalBytes(snapshot.intent);
+    const sourceRecords = verifyFrameStream(snapshot.sourceFrames, snapshot.sourcePageHashes, SOURCE_DOMAIN, SOURCE_VERSION);
+    const selectedRecords = verifyFrameStream(snapshot.selectedFrames, snapshot.selectedPageHashes, SELECTED_DOMAIN, SELECTED_VERSION);
+    return snapshot.snapshotId === snapshot.intent.snapshotId
+      && snapshot.issuerId === snapshot.intent.issuerId && snapshot.keyId === snapshot.intent.keyId
+      && snapshot.createdAt === snapshot.intent.createdAt
+      && snapshot.datasetId === snapshot.intent.datasetId && snapshot.datasetManifestSha256 === snapshot.intent.datasetManifestSha256
+      && snapshot.taskId === snapshot.intent.taskId && snapshot.attemptId === snapshot.intent.attemptId
+      && snapshot.inputManifestSha256 === snapshot.intent.inputManifestSha256
+      && JSON.stringify(snapshot.sourcePageHashes) === JSON.stringify(snapshot.intent.sourcePageHashes)
+      && JSON.stringify(snapshot.selectedPageHashes) === JSON.stringify(snapshot.intent.selectedPageHashes)
+      && snapshot.sourceFrameBytes === snapshot.intent.sourceFrameBytes
+      && snapshot.selectedFrameBytes === snapshot.intent.selectedFrameBytes
+      && sourceRecords === snapshot.intent.sourceCount && selectedRecords === snapshot.intent.selectedCount
+      && sha256(intentBytes) === snapshot.intentSha256
+      && crypto.verify(null, Buffer.concat([SNAPSHOT_DOMAIN, intentBytes]), publicKey, snapshot.signature)
+      && snapshot.sourceFrames.length === snapshot.sourceFrameBytes
+      && snapshot.selectedFrames.length === snapshot.selectedFrameBytes;
+  } catch { return false; }
 }
 
 function acceptHeldSourceSnapshot(processing, snapshotId, { receipt, verifyAcceptance } = {}) {

@@ -73,6 +73,19 @@ test('retained raw GCP source blocks dataset, task, project trash and dataset pu
   assert.equal(retained.sha256,GCP_SOURCE_SHA);
   assert.equal(retained.byte_size,Buffer.byteLength(GCP_SOURCE));
   assert.equal(retained.retention_reason,'gcp_source');
+  assert.throws(()=>database.prepare('INSERT OR REPLACE INTO retained_dataset_files SELECT * FROM retained_dataset_files WHERE dataset_file_id=?').run('gcp-file'),
+    /never reusable or replaceable/);
+  const failedAt=new Date().toISOString();
+  database.prepare(`INSERT INTO storage_mutations
+    (id,mutation_type,entity_type,entity_id,trash_id,source_root_key,source_relative_path,
+     destination_root_key,destination_relative_path,status,actor,created_at,updated_at)
+    VALUES (?,'trash','dataset',?,?,'datasets',?,'trash',?,'failed','ops:retention',?,?)`)
+    .run(crypto.randomUUID(),dataset.id,crypto.randomUUID(),dataset.relativePath,'dataset/failed-trash',failedAt,failedAt);
+  assert.throws(()=>gcp.importSet({
+    datasetId:dataset.id,displayName:'Control retry',sourceFormat:'generic-csv-v1',sourceFileId:'gcp-file',
+    sourceFilename:'control.csv',sourceSha256:GCP_SOURCE_SHA,sourceContent:GCP_SOURCE,crs:'EPSG:4326',elevationUnits:'m',
+    createdBy:'ops:retention',points:[{externalId:'GCP-01',label:'Target',latitude:44.5,longitude:-88.1,elevationM:243.84,description:null}],
+  }),{code:'dataset_not_available'});
   assert.equal(processing.beginTrashMutation(dataset.id,'ops:retention'),null);
   assert.equal(processing.trashProject(project.id,'ops:retention'),null);
   assert.throws(()=>trashTaskTree(processing,{},task.id,'ops:retention'),{code:'task_not_trashable'});
