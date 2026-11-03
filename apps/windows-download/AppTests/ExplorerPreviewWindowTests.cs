@@ -233,6 +233,8 @@ internal static class ExplorerPreviewWindowTests
                 True(retryWindow.RetryAvailabilityButton.Visibility == Visibility.Collapsed, "retry unavailable before connection");
                 await retrySession.StartAsync(); Pump();
                 True(retryWindow.RetryAvailabilityButton.Visibility == Visibility.Visible && retryWindow.RetryAvailabilityButton.IsEnabled, "running connection offers retry");
+                True((string)retryWindow.RetryAvailabilityButton.Content == "Check file availability actions" &&
+                    ((string)retryWindow.RetryAvailabilityButton.ToolTip).Contains("if needed", StringComparison.Ordinal), "action describes a check rather than promising work");
                 retrySession.RetryGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
                 var pendingRetry = retryWindow.RetryAvailabilityAsync();
                 True(retrySession.Retries == 1 && !retryWindow.RetryAvailabilityButton.IsEnabled && !pendingRetry.IsCompleted, "retry serializes controls");

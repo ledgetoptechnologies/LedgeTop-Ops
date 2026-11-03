@@ -160,7 +160,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     public Task RetryAvailabilityAsync() => OperateAsync(() => {
         if (State != ExplorerPreviewState.Running || provider is null || !provider.RetryFailedAvailability())
             throw new InvalidOperationException("File availability retry is unavailable.");
-        Add("Retrying pending Keep or Free actions. Access problems may still need attention.");
+        Add("Will check for pending Keep or Free actions. Access problems may still need attention.");
         return Task.CompletedTask;
     });
 
