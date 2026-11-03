@@ -4,6 +4,9 @@
   <Target Name="RejectPackagedNativeDiagnostics" BeforeTargets="PrepareForBuild" Condition="'$(LedgeTopPackage)' == 'true' And ('$(LedgeTopNativeDiagnostics)' == 'true' Or $([System.Text.RegularExpressions.Regex]::IsMatch('$(DefineConstants)', '(^|[;,])\s*LEDGETOP_NATIVE_DIAGNOSTICS\s*([;,]|$)')))">
     <Error Text="Native diagnostic tracing is restricted to isolated test builds and cannot be packaged." />
   </Target>
+  <Target Name="RejectPackagedCacheRaceTests" BeforeTargets="PrepareForBuild" Condition="'$(LedgeTopPackage)' == 'true' And ('$(LedgeTopCacheRaceTest)' == 'true' Or $([System.Text.RegularExpressions.Regex]::IsMatch('$(DefineConstants)', '(^|[;,])\s*LEDGETOP_CACHE_RACE_TEST\s*([;,]|$)')))">
+    <Error Text="Cache race test hooks are restricted to isolated test builds and cannot be packaged." />
+  </Target>
   <PropertyGroup><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors><AssemblyName>LedgeTop.WindowsDownload</AssemblyName></PropertyGroup>
   <PropertyGroup Condition="'$(LedgeTopFreshStaging)' == 'true'"><DefineConstants>$(DefineConstants);LEDGETOP_AUTH_TIMING_STAGING</DefineConstants></PropertyGroup>
 </Project>
