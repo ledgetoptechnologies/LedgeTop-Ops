@@ -6,12 +6,16 @@ using LedgeTop.WindowsDownload;
 
 if (args.Length == 1 && args[0] == "--hydration-activity-tests") return await HydrationActivityTests.RunAsync();
 #if LEDGETOP_NATIVE_DIAGNOSTICS
+if (args.Length == 1 && args[0] == "--synthetic-reader-evidence-tests") return await SyntheticReaderEvidence.SelfTestsAsync();
+if (args.Length == 3 && args[0] == "--synthetic-reader-evidence-child")
+    return await SyntheticReaderEvidence.SendAsync(args[1], args[2], "sample-1.bin", "IOException", unchecked((int)0x80070185)) ? 1 : 2;
 if (args.Length == 1 && args[0] == "--synthetic-memory-cache-stage-tests") return await SyntheticMemoryNative.CacheStageTests();
 if (args.Length >= 1 && args[0] == "--synthetic-memory-inspect-tests") return args.Length == 1 ? SyntheticMemoryInspection.Tests() : 2;
 if (args.Length >= 1 && args[0] == "--synthetic-memory-inspect") return args.Length == 2 ? SyntheticMemoryInspection.Run(args[1]) : 2;
 if (args.Length == 1 && args[0] == "--synthetic-memory-native-marker-tests") return SyntheticMemoryNative.MarkerIoTests();
 if (args.Length == 1 && args[0] == "--synthetic-memory-native-cleanup-tests") return SyntheticMemoryNative.CleanupEvidenceTests();
-if (args.Length == 4 && args[0] == "--synthetic-memory-native-reader" && Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") == "1") return SyntheticMemoryNative.Reader(args[1], args[2], args[3]);
+if (args.Length is 4 or 6 && args[0] == "--synthetic-memory-native-reader" && Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") == "1")
+    return await SyntheticMemoryNative.Reader(args[1], args[2], args[3], args.Length == 6 ? args[4] : null, args.Length == 6 ? args[5] : null);
 if (args.Length == 2 && args[0] == "--synthetic-memory-native" && int.TryParse(args[1], out var memoryProbeCount)) return await SyntheticMemoryNative.RunAsync(memoryProbeCount);
 if (args.Length == 1 && args[0] == "--synthetic-memory-native-retry") return await SyntheticMemoryNative.RunAsync(1, retryProbe: true);
 if (args.Length == 1 && args[0] == "--diagnostic-connect-flags-tests") {

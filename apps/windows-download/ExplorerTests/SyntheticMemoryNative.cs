@@ -1,5 +1,6 @@
 #if LEDGETOP_NATIVE_DIAGNOSTICS
 using System.Diagnostics;
+using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Text;
 using LedgeTop.Files.Explorer;
@@ -8,6 +9,7 @@ using LedgeTop.WindowsDownload;
 // Diagnostic only: distinct external readers against a fresh synthetic native
 // root. Never selects production sources or uses cache I/O in FETCH_DATA.
 internal static class SyntheticMemoryNative {
+    private sealed record ReaderPipe(Process Process, string File, string Nonce, NamedPipeServerStream Server, Task<byte[]?> Evidence);
     internal static readonly byte[] Bytes = Encoding.UTF8.GetBytes(new string('x', 100_000));
     private static readonly string Sha = Convert.ToHexStringLower(SHA256.HashData(Bytes));
     private static readonly string Principal = "odqp1_" + new string('f', 64);
@@ -17,12 +19,17 @@ internal static class SyntheticMemoryNative {
             Console.Out.Flush();
         } catch (IOException) { /* A closed log must not interrupt native cleanup. */ }
     }
-    internal static int Reader(string path, string startName, string readyName) {
-        return ReaderOperation(() => {
+    internal static async Task<int> Reader(string path, string startName, string readyName, string? pipeName = null, string? nonce = null) {
+        string? outcome = null; var hresult = 0;
+        var exit = ReaderOperation(() => {
             using var start = EventWaitHandle.OpenExisting(startName); using var ready = EventWaitHandle.OpenExisting(readyName);
             ready.Set(); if (!start.WaitOne(TimeSpan.FromSeconds(15))) throw new TimeoutException("Reader start gate timed out.");
             return File.ReadAllBytes(path);
-        }, (outcome, code) => ReaderReport(Path.GetFileName(path), outcome, code));
+        }, (value, code) => { outcome = value; hresult = code; ReaderReport(Path.GetFileName(path), value, code); });
+        if (pipeName is null && nonce is null) return exit;
+        if (pipeName is null || nonce is null || outcome is null ||
+            !await SyntheticReaderEvidence.SendAsync(pipeName, nonce, Path.GetFileName(path), outcome, hresult).ConfigureAwait(false)) return 2;
+        return exit;
     }
     private static int ReaderOperation(Func<byte[]> read, Action<string, int> report) {
         try {
@@ -57,6 +64,12 @@ internal static class SyntheticMemoryNative {
     internal static bool SyntheticReservationSnapshotValid(bool hasDirectories, string[] files, Func<string, FileAttributes> attributes, Func<string, string> read) =>
         !hasDirectories && files.Length == 1 && Path.GetFileName(files[0]) == ".verified-hydration-owner" &&
         (attributes(files[0]) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) == 0 && read(files[0]) == "LedgeTop.VerifiedHydration/1\n";
+    internal static bool SyntheticFailFastTraceValid(NativeStallTrace.Event[] events, long attempted, long dropped, bool requireTransfer) =>
+        dropped == 0 && attempted == events.LongLength && events.Count(e => e.Kind == NativeStallTrace.Stage.CallbackArrival) == 2 &&
+        events.Count(e => e.Kind == NativeStallTrace.Stage.CallbackQueued) == 2 &&
+        events.Count(e => e.Kind == NativeStallTrace.Stage.SyntheticAdmissionTimedOut) == 1 &&
+        (!requireTransfer || (events.Count(e => e.Kind == NativeStallTrace.Stage.SyntheticSerialTransferEnter) == 1 &&
+            events.Count(e => e.Kind == NativeStallTrace.Stage.SyntheticSerialTransferExit) == 1));
     internal static bool CleanupVerified(bool registrationAttempted, bool registrationReturned, bool readersJoined, bool disposeCompleted, bool unregisterVerified, bool committedCleanupUncertain = false) =>
         !committedCleanupUncertain && readersJoined && (!registrationAttempted || (registrationReturned && disposeCompleted && unregisterVerified));
     internal static bool MayUnregister(bool registrationReturned, bool readersJoined, bool disposeCompleted, bool committedCleanupUncertain) =>
@@ -406,6 +419,28 @@ internal static class SyntheticMemoryNative {
             Valid(false, [marker], FileAttributes.ReparsePoint, "LedgeTop.VerifiedHydration/1\n") ||
             Valid(false, [marker], FileAttributes.Normal, "foreign"))
             throw new IOException("Synthetic reservation cleanup evidence accepted unsafe contents.");
+        var stages = new[] { NativeStallTrace.Stage.CallbackArrival, NativeStallTrace.Stage.CallbackArrival,
+            NativeStallTrace.Stage.CallbackQueued, NativeStallTrace.Stage.CallbackQueued, NativeStallTrace.Stage.SyntheticAdmissionTimedOut,
+            NativeStallTrace.Stage.SyntheticSerialTransferEnter, NativeStallTrace.Stage.SyntheticSerialTransferExit };
+        var cleanTrace = stages.Select((stage, index) => new NativeStallTrace.Event(index, 0, 1, stage)).ToArray();
+        if (!SyntheticFailFastTraceValid(cleanTrace, cleanTrace.Length, 0, true) || SyntheticFailFastTraceValid(cleanTrace, cleanTrace.Length, 1, true) ||
+            SyntheticFailFastTraceValid(cleanTrace, cleanTrace.Length + 1, 0, true) ||
+            SyntheticFailFastTraceValid(cleanTrace.Append(cleanTrace[0]).ToArray(), cleanTrace.Length + 1, 0, true) ||
+            SyntheticFailFastTraceValid(cleanTrace[..^1], cleanTrace.Length - 1, 0, true)) throw new IOException("Synthetic callback trace accepted ambiguous evidence.");
+        var receiptNonce = "12345678123412341234123456789abc";
+        byte[] Receipt(int pid, string file, string nonce, string outcome, int code) => System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new SyntheticReaderEvidence.Receipt(1, pid, file, nonce, outcome, code));
+        var cloud = unchecked((int)0x80070185);
+        if (SyntheticReaderEvidence.Classify(Receipt(123, "sample-1.bin", receiptNonce, "IOException", cloud), 123, "sample-1.bin", receiptNonce, 1) != SyntheticReaderEvidence.Classification.CloudUnavailable ||
+            SyntheticReaderEvidence.Classify(Receipt(123, "sample-1.bin", receiptNonce, "matched", 0), 123, "sample-1.bin", receiptNonce, 0) != SyntheticReaderEvidence.Classification.Matched ||
+            SyntheticReaderEvidence.Classify(Receipt(124, "sample-1.bin", receiptNonce, "IOException", cloud), 123, "sample-1.bin", receiptNonce, 1) != SyntheticReaderEvidence.Classification.Invalid ||
+            SyntheticReaderEvidence.Classify(Receipt(123, "sample-1.bin", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "IOException", cloud), 123, "sample-1.bin", receiptNonce, 1) != SyntheticReaderEvidence.Classification.Invalid ||
+            SyntheticReaderEvidence.Classify(Receipt(123, "sample-0.bin", receiptNonce, "IOException", cloud), 123, "sample-1.bin", receiptNonce, 1) != SyntheticReaderEvidence.Classification.Invalid ||
+            SyntheticReaderEvidence.Classify(Receipt(123, "sample-1.bin", receiptNonce, "TimeoutException", cloud), 123, "sample-1.bin", receiptNonce, 1) != SyntheticReaderEvidence.Classification.Invalid ||
+            SyntheticReaderEvidence.Classify(Receipt(123, "sample-1.bin", receiptNonce, "hash-mismatch", 0), 123, "sample-1.bin", receiptNonce, 1) != SyntheticReaderEvidence.Classification.Invalid ||
+            SyntheticReaderEvidence.Classify(Receipt(123, "sample-1.bin", receiptNonce, "IOException", 5), 123, "sample-1.bin", receiptNonce, 1) != SyntheticReaderEvidence.Classification.Invalid ||
+            SyntheticReaderEvidence.Classify(Receipt(123, "sample-1.bin", receiptNonce, "IOException", cloud), 123, "sample-1.bin", receiptNonce, 0) != SyntheticReaderEvidence.Classification.Invalid ||
+            SyntheticReaderEvidence.Classify(Encoding.UTF8.GetBytes("{\"Version\":1,\"Version\":1}"), 123, "sample-1.bin", receiptNonce, 1) != SyntheticReaderEvidence.Classification.Invalid)
+            throw new IOException("Synthetic reader evidence accepted an ambiguous outcome.");
         var options = DiagnosticSettings(name => name == "LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION" ? "1" : "synthetic-secret");
         if (options != "Synthetic memory options: blockSelf=True; disableScanner=False; suppressProgress=False; markerIo=invalid; cacheStage=invalid; prewarm=invalid; serial=invalid; failFast=invalid")
             throw new IOException("Synthetic diagnostic option reporting is incorrect.");
@@ -494,6 +529,7 @@ internal static class SyntheticMemoryNative {
             (prewarm != "off" && (markerMode != "none" || cacheStage != "quota-reservation")) ||
             !FailFastOptionsValid(count, retryProbe, markerMode, cacheStage, prewarm, serial, failFast, Environment.GetEnvironmentVariable)) return 2;
         if (retryProbe && (count != 1 || markerMode != "none" || cacheStage != "none" || prewarm != "off" || serial != "off" || failFast != "off" || !RetryOptionsValid(Environment.GetEnvironmentVariable))) return 2;
+        if (failFast == "on") Console.WriteLine("Synthetic fail-fast bounds admission semaphore waiting only; the initial global Sync lock and filesystem/native calls are not hard-bounded. Reader evidence uses current-user pipes, which can perturb timing.");
         var basePath = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
         if (string.IsNullOrEmpty(basePath) || !Path.IsPathFullyQualified(basePath) || basePath.StartsWith("\\\\", StringComparison.Ordinal)) return 2;
         RequireLocalDirectory(basePath);
@@ -521,8 +557,10 @@ internal static class SyntheticMemoryNative {
         DiagnosticMemoryMarkerIo.Preopened? preopened = null;
         DiagnosticMemoryMarkerIo.CreateScope? createScope = null;
         var readers = new List<Process>(); var readerFiles = new Dictionary<int, string>(); var readyHandles = new List<EventWaitHandle>(); var success = false;
+        var readerPipes = new List<ReaderPipe>(); var readerEvidence = new Dictionary<int, SyntheticReaderEvidence.Classification>();
+        var evidenceStop = new CancellationTokenSource();
         var registrationAttempted = false; var readersJoined = true; var disposeCompleted = false;
-        var disposeTimedOut = false; var unregisterVerified = false;
+        var disposeTimedOut = false; var unregisterVerified = false; var readerPipeTasksJoined = true;
         var loggedSettlements = 0;
         void ReportSettlements() {
             if (provider is null || failFast != "on") return;
@@ -595,22 +633,42 @@ internal static class SyntheticMemoryNative {
                 readyHandles.Add(new EventWaitHandle(false, EventResetMode.ManualReset, readyName));
                 info.ArgumentList.Add("--synthetic-memory-native-reader"); info.ArgumentList.Add(Path.Combine(root, name));
                 info.ArgumentList.Add(startName); info.ArgumentList.Add(readyName);
-                var reader = Process.Start(info) ?? throw new IOException("Synthetic reader failed to start.");
+                string? nonce = null; NamedPipeServerStream? pipe = null;
+                if (failFast == "on") {
+                    nonce = Guid.NewGuid().ToString("N"); pipe = SyntheticReaderEvidence.CreateServer(nonce);
+                    info.ArgumentList.Add(SyntheticReaderEvidence.PipeName(nonce)); info.ArgumentList.Add(nonce);
+                }
+                Process reader;
+                try { reader = Process.Start(info) ?? throw new IOException("Synthetic reader failed to start."); }
+                catch { pipe?.Dispose(); throw; }
                 readers.Add(reader);
                 readerFiles.Add(reader.Id, name);
+                if (pipe is not null && nonce is not null)
+                    readerPipes.Add(new(reader, name, nonce, pipe, SyntheticReaderEvidence.ReceiveAsync(pipe, reader.Id, evidenceStop.Token)));
                 Phase($"reader-started-{readyHandles.Count - 1}-pid-{reader.Id}", id);
             }
             Phase("reader-ready-wait", id);
             if (!WaitHandle.WaitAll(readyHandles.ToArray(), TimeSpan.FromSeconds(10))) throw new TimeoutException("Synthetic readers did not reach the start gate.");
             start.Set();
             Phase("reader-exit-wait", id);
-            var clock = Stopwatch.StartNew(); var loggedReaders = new HashSet<int>();
-            while (loggedReaders.Count != readers.Count) {
+            var clock = Stopwatch.StartNew(); var loggedReaders = new HashSet<int>(); TimeSpan? allExited = null;
+            while (true) {
                 foreach (var reader in readers) if (!loggedReaders.Contains(reader.Id) && reader.HasExited) {
                     loggedReaders.Add(reader.Id); Phase($"reader-exited-pid-{reader.Id}-code-{reader.ExitCode}", id);
                 }
+                foreach (var ticket in readerPipes) if (ticket.Process.HasExited && ticket.Evidence.IsCompleted && !readerEvidence.ContainsKey(ticket.Process.Id)) {
+                    byte[]? data = null; try { data = await ticket.Evidence.ConfigureAwait(false); } catch { }
+                    var value = data is null ? SyntheticReaderEvidence.Classification.Invalid :
+                        SyntheticReaderEvidence.Classify(data, ticket.Process.Id, Path.GetFileName(ticket.File), ticket.Nonce, ticket.Process.ExitCode);
+                    readerEvidence.Add(ticket.Process.Id, value);
+                    Phase($"reader-evidence-pid-{ticket.Process.Id}-{value}", id);
+                }
                 ReportSettlements();
-                if (loggedReaders.Count == readers.Count) break;
+                if (loggedReaders.Count == readers.Count) {
+                    allExited ??= clock.Elapsed;
+                    if (failFast != "on" || (readerEvidence.Count == readers.Count && provider.SyntheticFailureSettlementsAttempted > 0 &&
+                        provider.SyntheticFailureSettlements.Length == provider.SyntheticFailureSettlementsAttempted) || clock.Elapsed - allExited.Value >= TimeSpan.FromSeconds(3)) break;
+                }
                 if (clock.Elapsed >= TimeSpan.FromSeconds(25)) throw new TimeoutException("Synthetic readers did not exit.");
                 await Task.Delay(100).ConfigureAwait(false);
             }
@@ -621,8 +679,9 @@ internal static class SyntheticMemoryNative {
                   provider.SyntheticFailureSettlementsAttempted == 1 && settlements.Length == 1 &&
                   settlements[0].CompletionStatus == CloudFilesNativeTransfer.Unavailable && settlements[0].NativeResult == 0 &&
                   Path.GetFileName(readerFiles[readers.Single(p => p.ExitCode == 1).Id]) == settlements[0].FileName &&
-                  NativeStallTrace.Dropped(trace) == 0 &&
-                  NativeStallTrace.Snapshot(trace).Count(e => e.Kind == NativeStallTrace.Stage.SyntheticAdmissionTimedOut) == 1
+                  readerEvidence.Count == 2 && readerEvidence[readers.Single(p => p.ExitCode == 0).Id] == SyntheticReaderEvidence.Classification.Matched &&
+                  readerEvidence[readers.Single(p => p.ExitCode == 1).Id] == SyntheticReaderEvidence.Classification.CloudUnavailable &&
+                  SyntheticFailFastTraceValid(NativeStallTrace.Snapshot(trace), NativeStallTrace.Attempted(trace), NativeStallTrace.Dropped(trace), false)
                 : readers.All(p => p.ExitCode == 0);
             }
         } catch (Exception error) { Console.Error.WriteLine($"Synthetic memory native: {error.GetType().Name}: {error.Message}"); Console.Error.Flush(); }
@@ -637,14 +696,29 @@ internal static class SyntheticMemoryNative {
                 reader.Dispose();
             }
             foreach (var ready in readyHandles) ready.Dispose();
+            evidenceStop.Cancel();
+            foreach (var ticket in readerPipes) ticket.Server.Dispose();
+            var evidenceDrain = Task.WhenAll(readerPipes.Select(ticket => ticket.Evidence));
+            try { await evidenceDrain.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); }
+            catch { if (!evidenceDrain.IsCompleted) { readerPipeTasksJoined = false; readersJoined = false; } }
+            if (evidenceDrain.IsCompleted) evidenceStop.Dispose();
             if (provider is null) disposeCompleted = true;
             else try { await provider.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(20)); disposeCompleted = true; }
             catch (TimeoutException) { disposeTimedOut = true; }
             catch { }
             var committedCleanupUncertain = provider?.SyntheticCommittedCleanupUncertain == true;
             ReportSettlements();
-            if (failFast == "on" && provider is not null)
+            if (failFast == "on" && provider is not null) {
                 Console.WriteLine($"Synthetic failure settlement totals: attempted={provider.SyntheticFailureSettlementsAttempted}; published={provider.SyntheticFailureSettlements.Length}");
+                // Recheck after provider drain: a late duplicate callback or
+                // settlement invalidates any provisional success evidence.
+                var finalTrace = NativeStallTrace.Snapshot(trace);
+                var finalSettlements = provider.SyntheticFailureSettlements;
+                Console.WriteLine($"Synthetic final audit: callbackArrivals={finalTrace.Count(e => e.Kind == NativeStallTrace.Stage.CallbackArrival)}; queued={finalTrace.Count(e => e.Kind == NativeStallTrace.Stage.CallbackQueued)}; admissionTimeouts={finalTrace.Count(e => e.Kind == NativeStallTrace.Stage.SyntheticAdmissionTimedOut)}; transfersStarted={finalTrace.Count(e => e.Kind == NativeStallTrace.Stage.SyntheticSerialTransferEnter)}; transfersExited={finalTrace.Count(e => e.Kind == NativeStallTrace.Stage.SyntheticSerialTransferExit)}; readerPipeTasksJoined={readerPipeTasksJoined}");
+                success = success && SyntheticFailFastTraceValid(finalTrace, NativeStallTrace.Attempted(trace), NativeStallTrace.Dropped(trace), true) &&
+                    provider.SyntheticFailureSettlementsAttempted == 1 && finalSettlements.Length == 1 &&
+                    finalSettlements[0].CompletionStatus == CloudFilesNativeTransfer.Unavailable && finalSettlements[0].NativeResult == 0;
+            }
             // For this deliberate failure, also preserve the registered root
             // unless the expected loser settled, readers/drain completed, and
             // the synthetic reservation directory has no outstanding record.
