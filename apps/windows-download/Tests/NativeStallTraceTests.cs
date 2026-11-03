@@ -5,6 +5,7 @@ internal static class NativeStallTraceTests
 {
     internal static async Task RunAsync()
     {
+        ProcessInfoTests();
         NativeStallTrace.Record(NativeStallTrace.Stage.CallbackArrival);
         var capture = NativeStallTrace.Enable();
         try {
@@ -67,6 +68,7 @@ internal static class NativeStallTraceTests
                 throw new Exception("A released mutation must publish its exit.");
         } finally { NativeStallTrace.Disable(blockedCapture); }
         await CloudFilesConnectionTests.TraceFakeCallbackAsync();
+        await CloudFilesConnectionTests.TraceSyntheticCallbackProcessAsync();
         await AssertStageCoverageAsync(CloudFilesNativeTransferTests.Groups.First(g => g.Name.StartsWith("native x64 ABI", StringComparison.Ordinal)).Run,
             NativeStallTrace.Stage.ProgressEnter, NativeStallTrace.Stage.ProgressExit,
             NativeStallTrace.Stage.AdmissionEnter, NativeStallTrace.Stage.AdmissionAcquired,
@@ -115,6 +117,51 @@ internal static class NativeStallTraceTests
             NativeStallTrace.Stage.MetadataAttemptEnter, NativeStallTrace.Stage.MetadataAttemptExit,
             NativeStallTrace.Stage.MetadataBusy, NativeStallTrace.Stage.RetryDelayEnter, NativeStallTrace.Stage.RetryDelayExit);
         Console.WriteLine("PASS bounded diagnostic capture, disabled state and fake callback markers; no native API or network.");
+    }
+    private static void ProcessInfoTests()
+    {
+        CloudFilesConnectionOwner.AssertAbi();
+        var ptr = System.Runtime.InteropServices.Marshal.AllocHGlobal(8);
+        var capture = NativeStallTrace.Enable();
+        SyntheticCallbackProcessInfo.Observation copy;
+        try {
+            if (SyntheticCallbackProcessInfo.CopyPrefix(0).Status != SyntheticCallbackProcessInfo.Status.Missing) throw new Exception("Null process info was not missing.");
+            System.Runtime.InteropServices.Marshal.WriteInt32(ptr, 0, 7);
+            System.Runtime.InteropServices.Marshal.WriteInt32(ptr, 4, 12345);
+            if (SyntheticCallbackProcessInfo.CopyPrefix(ptr) != new SyntheticCallbackProcessInfo.Observation(SyntheticCallbackProcessInfo.Status.TooShort, 0))
+                throw new Exception("Short process info was accepted.");
+            System.Runtime.InteropServices.Marshal.WriteInt32(ptr, 0, 8);
+            copy = SyntheticCallbackProcessInfo.CopyPrefix(ptr);
+            NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticCallbackProcess, 23, copy.ProcessId, (byte)copy.Status);
+        } finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(ptr); NativeStallTrace.Disable(capture); }
+        var saved = NativeStallTrace.Snapshot(capture).Single();
+        if (copy.Status != SyntheticCallbackProcessInfo.Status.Present || copy.ProcessId != 12345 || saved.CallbackId != 23 || saved.ProcessId != 12345 ||
+            saved.ProcessInfoStatus != (byte)SyntheticCallbackProcessInfo.Status.Present)
+            throw new Exception("Process prefix was not copied before its allocation ended.");
+        if (typeof(NativeStallTrace.Event).GetProperties().Any(p => p.PropertyType == typeof(string) || p.PropertyType == typeof(nint)))
+            throw new Exception("Trace events must not retain pointers or strings.");
+        var probe = Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE");
+        var process = Environment.GetEnvironmentVariable("LEDGETOP_TEST_REQUIRE_PROCESS_INFO");
+        try {
+            var sha = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(new string('x', 100_000))));
+            var id = new PlaceholderIdentity("pilot", "synthetic", "https://source.example.invalid", "odqp1_" + new string('f', 64), "odqr1_0",
+                "oef1_" + new string('a', 64), sha, "sample-0.bin", 100_000, "\"" + sha + "\"", sha);
+            Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", "1");
+            Environment.SetEnvironmentVariable("LEDGETOP_TEST_REQUIRE_PROCESS_INFO", "1");
+            if (!SyntheticCallbackProcessInfo.Eligible(id.Encode()) || SyntheticCallbackProcessInfo.Eligible((id with { FileName = "other.bin" }).Encode()) ||
+                SyntheticCallbackProcessInfo.Eligible([1, 2, 3])) throw new Exception("Synthetic identity filter is incorrect.");
+            Environment.SetEnvironmentVariable("LEDGETOP_TEST_REQUIRE_PROCESS_INFO", null);
+            if (SyntheticCallbackProcessInfo.Eligible(id.Encode())) throw new Exception("Process capture did not require explicit opt-in.");
+        } finally {
+            Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", probe);
+            Environment.SetEnvironmentVariable("LEDGETOP_TEST_REQUIRE_PROCESS_INFO", process);
+        }
+        var capped = NativeStallTrace.Enable();
+        try {
+            for (var i = 0; i < 2050; i++) NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticCallbackProcess, i + 1, 12345, (byte)SyntheticCallbackProcessInfo.Status.Present);
+            if (NativeStallTrace.Snapshot(capped).Length != 2048 || NativeStallTrace.Dropped(capped) != 2)
+                throw new Exception("Process observations bypassed trace capacity.");
+        } finally { NativeStallTrace.Disable(capped); }
     }
 
     private static async Task AssertStageCoverageAsync(Func<Task> operation, params NativeStallTrace.Stage[] expected)

@@ -50,6 +50,9 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
     private enum Phase { New, Connecting, Connected, Stopping, Closed, Quarantined }
     private sealed record Snapshot(bool Cancel, long Connection, nint Cookie, CloudFilesOperationContext Context, byte[]? Identity,
         long RequestedOffset, long RequestedLength) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        internal long SyntheticCallbackId;
+#endif
         internal bool Settled;
         internal bool CancellationAmbiguous;
         internal Snapshot? DeferredFetch;
@@ -170,6 +173,15 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
                 Marshal.Copy(info.FileIdentity, identity, 0, identity.Length);
             }
             var snapshot = new Snapshot(isCancel, info.ConnectionKey, info.CallbackContext, context, identity, requestedOffset, requestedLength);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            bool syntheticMapped;
+            lock (sync) syntheticMapped = info.CallbackContext == cookie && (phase == Phase.Connecting || (phase == Phase.Connected && info.ConnectionKey == connection));
+            if (!isCancel && syntheticMapped && SyntheticCallbackProcessInfo.Eligible(identity)) {
+                var copied = SyntheticCallbackProcessInfo.CopyPrefix(info.ProcessInfo);
+                snapshot.SyntheticCallbackId = NativeStallTrace.NextSyntheticCallbackId();
+                NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticCallbackProcess, snapshot.SyntheticCallbackId, copied.ProcessId, (byte)copied.Status);
+            }
+#endif
             Handle(snapshot, copyIdentity);
         } catch {
             // No managed exception may cross a void unmanaged callback. Shape failures that lack
@@ -282,7 +294,7 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
     private async void RunAsync(Snapshot snapshot, TaskCompletionSource completion)
     {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
-        NativeStallTrace.Record(NativeStallTrace.Stage.WorkerStart);
+        NativeStallTrace.Record(NativeStallTrace.Stage.WorkerStart, snapshot.SyntheticCallbackId);
 #endif
         try {
             CloudFilesCallbackDispatcher? provider; Phase current;
@@ -427,6 +439,10 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
     public async ValueTask DisposeAsync() => await StopAsync();
 
     internal static void AssertAbi() {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        if (Marshal.OffsetOf<CloudCallbackInfo>(nameof(CloudCallbackInfo.ProcessInfo)).ToInt32() != 136)
+            throw new TransferException("Cloud Files diagnostic callback ABI is unsupported.");
+#endif
         if (IntPtr.Size != 8 || Marshal.SizeOf<CloudCallbackInfo>() != 152 || Marshal.SizeOf<CloudCallbackRegistration>() != 16
             || Marshal.SizeOf<CloudCallbackParameters>() != 64
             || Marshal.OffsetOf<CloudCallbackInfo>(nameof(CloudCallbackInfo.ConnectionKey)).ToInt32() != 8

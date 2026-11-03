@@ -21,8 +21,9 @@ if (args.Length == 1 && args[0] == "--synthetic-memory-native-retry") return awa
 if (args.Length == 1 && args[0] == "--diagnostic-connect-flags-tests") {
     var calls = new List<uint>();
     int Fake(uint flags) { calls.Add(flags); return 37; }
-    if (DiagnosticConnectionFlags.Connect(Fake, false) != 37 || DiagnosticConnectionFlags.Connect(Fake, true) != 37
-        || !calls.SequenceEqual(new uint[] { 4, 12 })) throw new InvalidOperationException("Diagnostic flags did not preserve native call/result semantics.");
+    if (DiagnosticConnectionFlags.Connect(Fake, false) != 37 || DiagnosticConnectionFlags.Connect(Fake, true) != 37 ||
+        DiagnosticConnectionFlags.Connect(Fake, false, true) != 37 || DiagnosticConnectionFlags.Connect(Fake, true, true) != 37
+        || !calls.SequenceEqual(new uint[] { 4, 12, 6, 14 })) throw new InvalidOperationException("Diagnostic flags did not preserve native call/result semantics.");
     var starts = 0;
     DiagnosticConnectionFlags.StartScanner(() => starts++, false);
     DiagnosticConnectionFlags.StartScanner(() => starts++, true);

@@ -478,7 +478,8 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         {
             long captured = 0;
             var result = DiagnosticConnectionFlags.Connect(flags => Native.CfConnectSyncRoot(root, table, context, flags, out captured),
-                Environment.GetEnvironmentVariable("LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION") == "1");
+                Environment.GetEnvironmentVariable("LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION") == "1",
+                Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") == "1" && Environment.GetEnvironmentVariable("LEDGETOP_TEST_REQUIRE_PROCESS_INFO") == "1");
             key = captured;
             return result;
         }

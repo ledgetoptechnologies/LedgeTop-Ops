@@ -52,9 +52,10 @@ internal static class NativeStallTrace
         ReservedFilesEnumeratorEnter, ReservedFilesEnumeratorExit,
         ReservedFilesMoveEnter, ReservedFilesMoveExit, ReservedFilesDisposeEnter, ReservedFilesDisposeExit,
         ReservedRecordReadEnter, ReservedRecordReadExit,
-        SyntheticSerialTransferEnter, SyntheticSerialTransferExit, SyntheticAdmissionTimedOut
+        SyntheticSerialTransferEnter, SyntheticSerialTransferExit, SyntheticAdmissionTimedOut,
+        SyntheticCallbackProcess
     }
-    internal readonly record struct Event(long Sequence, long Timestamp, int ThreadId, Stage Kind);
+    internal readonly record struct Event(long Sequence, long Timestamp, int ThreadId, Stage Kind, long CallbackId = 0, uint ProcessId = 0, byte ProcessInfoStatus = 0);
     internal sealed class Capture
     {
         internal readonly Event[] Events = new Event[2048];
@@ -62,6 +63,8 @@ internal static class NativeStallTrace
         internal long Count;
     }
     private static Capture? active;
+    private static long syntheticCallbackSequence;
+    internal static long NextSyntheticCallbackId() => Interlocked.Increment(ref syntheticCallbackSequence);
     internal static Capture Enable()
     {
         var capture = new Capture();
@@ -74,12 +77,12 @@ internal static class NativeStallTrace
     // reservations beyond capacity, not slots a preempted writer has yet to publish.
     internal static long Attempted(Capture capture) => Math.Max(0L, Volatile.Read(ref capture.Count));
     internal static long Dropped(Capture capture) => Math.Max(0L, Attempted(capture) - capture.Events.Length);
-    internal static void Record(Stage kind)
+    internal static void Record(Stage kind, long callbackId = 0, uint processId = 0, byte processInfoStatus = 0)
     {
         var capture = Volatile.Read(ref active);
         if (capture is null) return;
         var slot = ReserveSlot(capture);
-        if (slot >= 0) PublishSlot(capture, slot, kind);
+        if (slot >= 0) PublishSlot(capture, slot, kind, callbackId, processId, processInfoStatus);
     }
     // Separated primitives also let the test deterministically model a writer
     // preempted between reserving a slot and publishing it. Neither invokes
@@ -89,9 +92,9 @@ internal static class NativeStallTrace
         var index = Interlocked.Increment(ref capture.Count) - 1;
         return (ulong)index >= (ulong)capture.Events.Length ? -1 : (int)index;
     }
-    internal static void PublishSlot(Capture capture, int slot, Stage kind)
+    internal static void PublishSlot(Capture capture, int slot, Stage kind, long callbackId = 0, uint processId = 0, byte processInfoStatus = 0)
     {
-        capture.Events[slot] = new(slot + 1L, Stopwatch.GetTimestamp(), Environment.CurrentManagedThreadId, kind);
+        capture.Events[slot] = new(slot + 1L, Stopwatch.GetTimestamp(), Environment.CurrentManagedThreadId, kind, callbackId, processId, processInfoStatus);
         Volatile.Write(ref capture.Published[slot], 1);
     }
     // Publications can arrive out of sequence. A consumer must track each seen

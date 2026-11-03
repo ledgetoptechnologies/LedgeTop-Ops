@@ -88,6 +88,39 @@ internal static class CloudFilesConnectionTests
             finally { NativeStallTrace.Disable(capture); }
         }
     }
+    internal static async Task TraceSyntheticCallbackProcessAsync()
+    {
+        var previousProbe = Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE");
+        var previousInfo = Environment.GetEnvironmentVariable("LEDGETOP_TEST_REQUIRE_PROCESS_INFO");
+        Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", "1");
+        Environment.SetEnvironmentVariable("LEDGETOP_TEST_REQUIRE_PROCESS_INFO", "1");
+        using var f = new Fixture(); var owner = f.Owner((_, _, _, _) => Task.CompletedTask);
+        var capture = NativeStallTrace.Enable(); var connected = false; var processInfo = Marshal.AllocHGlobal(8);
+        try {
+            Marshal.WriteInt32(processInfo, 0, 8); Marshal.WriteInt32(processInfo, 4, 4321);
+            var sha = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(new string('x', 100_000))));
+            var identity = new PlaceholderIdentity("pilot", "synthetic", "https://source.example.invalid", "odqp1_" + new string('f', 64), "odqr1_0",
+                "oef1_" + new string('a', 64), sha, "sample-0.bin", 100_000, "\"" + sha + "\"", sha);
+            owner.Connect(); connected = true;
+            f.Native.Invoke(false, identity.Encode(), request: 1, fileSize: 100_000, processInfo: processInfo);
+            Marshal.FreeHGlobal(processInfo); processInfo = 0;
+            // The worker runs after the callback-owned process-info buffer has gone.
+            await Until(() => NativeStallTrace.Snapshot(capture).Any(e => e.Kind == NativeStallTrace.Stage.WorkerStart && e.CallbackId != 0));
+            var events = NativeStallTrace.Snapshot(capture);
+            var copied = events.Single(e => e.Kind == NativeStallTrace.Stage.SyntheticCallbackProcess);
+            if (copied.ProcessId != 4321 || copied.ProcessInfoStatus != (byte)SyntheticCallbackProcessInfo.Status.Present ||
+                !events.Any(e => e.Kind == NativeStallTrace.Stage.WorkerStart && e.CallbackId == copied.CallbackId))
+                throw new Exception("Callback process prefix was not copied and correlated before return.");
+        } finally {
+            if (processInfo != 0) Marshal.FreeHGlobal(processInfo);
+            try { if (connected) await owner.StopAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
+            finally {
+                NativeStallTrace.Disable(capture);
+                Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", previousProbe);
+                Environment.SetEnvironmentVariable("LEDGETOP_TEST_REQUIRE_PROCESS_INFO", previousInfo);
+            }
+        }
+    }
 #endif
 
     // Diagnostic only: emulate a synchronous native rejection which asks a different
@@ -519,7 +552,7 @@ internal static class CloudFilesConnectionTests
         public int Disconnect(long key) { Check(key == 123); Disconnects++; OnDisconnect?.Invoke(); disconnected = true; return DisconnectStatus; }
         public void RejectFetch(CloudFilesOperationContext context, int status) { if (disconnected) Interlocked.Increment(ref RejectionsAfterDisconnect); Rejections.Add(context); RejectionStatuses.Add(status); OnReject?.Invoke(); }
         internal void Invoke(bool isCancel, byte[] identity, long? connection = null, nint? cookie = null, long request = 0,
-            long length = -1, uint? identityLength = null, uint parameterSize = 32, long offset = 0, long fileSize = 8192)
+            long length = -1, uint? identityLength = null, uint parameterSize = 32, long offset = 0, long fileSize = 8192, nint processInfo = 0)
         {
             var data = Marshal.AllocHGlobal(Math.Max(1, identity.Length));
             var info = Marshal.AllocHGlobal(152); var parameters = Marshal.AllocHGlobal(32);
@@ -527,7 +560,7 @@ internal static class CloudFilesConnectionTests
                 if (identity.Length > 0) Marshal.Copy(identity, 0, data, identity.Length);
                 Marshal.StructureToPtr(new CloudCallbackInfo { StructSize = 152, ConnectionKey = connection ?? 123, CallbackContext = cookie ?? Cookie,
                     FileSize = fileSize, FileIdentity = data, FileIdentityLength = identityLength ?? (uint)identity.Length,
-                    TransferKey = 456, RequestKey = request }, info, false);
+                    TransferKey = 456, ProcessInfo = processInfo, RequestKey = request }, info, false);
                 Marshal.WriteInt32(parameters, unchecked((int)parameterSize));
                 Marshal.WriteInt32(parameters, 8, 0); Marshal.WriteInt64(parameters, 16, offset); Marshal.WriteInt64(parameters, 24, length);
                 Check((isCancel ? cancel! : fetch!).TryGetTarget(out var callback));

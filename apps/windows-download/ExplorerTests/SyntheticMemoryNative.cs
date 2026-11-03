@@ -92,7 +92,8 @@ internal static class SyntheticMemoryNative {
         var prewarm = PrewarmMode(get("LEDGETOP_TEST_MEMORY_PREWARM"));
         var serial = SerialMode(get("LEDGETOP_TEST_MEMORY_SERIAL"));
         var failFast = SerialMode(get("LEDGETOP_TEST_MEMORY_FAIL_FAST"));
-        return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}; prewarm={prewarm}; serial={serial}; failFast={failFast}";
+        var processInfo = SerialMode(get("LEDGETOP_TEST_REQUIRE_PROCESS_INFO"));
+        return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}; prewarm={prewarm}; serial={serial}; failFast={failFast}; processInfo={processInfo}";
     }
     private static string SerialMode(string? value) => value switch { null or "0" => "off", "1" => "on", _ => "invalid" };
     internal static bool FailFastOptionsValid(int count, bool retryProbe, string marker, string stage, string prewarm, string serial, string failFast, Func<string, string?> get) =>
@@ -442,9 +443,9 @@ internal static class SyntheticMemoryNative {
             SyntheticReaderEvidence.Classify(Encoding.UTF8.GetBytes("{\"Version\":1,\"Version\":1}"), 123, "sample-1.bin", receiptNonce, 1) != SyntheticReaderEvidence.Classification.Invalid)
             throw new IOException("Synthetic reader evidence accepted an ambiguous outcome.");
         var options = DiagnosticSettings(name => name == "LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION" ? "1" : "synthetic-secret");
-        if (options != "Synthetic memory options: blockSelf=True; disableScanner=False; suppressProgress=False; markerIo=invalid; cacheStage=invalid; prewarm=invalid; serial=invalid; failFast=invalid")
+        if (options != "Synthetic memory options: blockSelf=True; disableScanner=False; suppressProgress=False; markerIo=invalid; cacheStage=invalid; prewarm=invalid; serial=invalid; failFast=invalid; processInfo=invalid")
             throw new IOException("Synthetic diagnostic option reporting is incorrect.");
-        if (DiagnosticSettings(name => name is "LEDGETOP_TEST_MEMORY_MARKER_IO" or "LEDGETOP_TEST_MEMORY_CACHE_STAGE" or "LEDGETOP_TEST_MEMORY_PREWARM" or "LEDGETOP_TEST_MEMORY_SERIAL" or "LEDGETOP_TEST_MEMORY_FAIL_FAST" ? null : "1") != "Synthetic memory options: blockSelf=True; disableScanner=True; suppressProgress=True; markerIo=none; cacheStage=none; prewarm=off; serial=off; failFast=off")
+        if (DiagnosticSettings(name => name is "LEDGETOP_TEST_MEMORY_MARKER_IO" or "LEDGETOP_TEST_MEMORY_CACHE_STAGE" or "LEDGETOP_TEST_MEMORY_PREWARM" or "LEDGETOP_TEST_MEMORY_SERIAL" or "LEDGETOP_TEST_MEMORY_FAIL_FAST" or "LEDGETOP_TEST_REQUIRE_PROCESS_INFO" ? null : "1") != "Synthetic memory options: blockSelf=True; disableScanner=True; suppressProgress=True; markerIo=none; cacheStage=none; prewarm=off; serial=off; failFast=off; processInfo=off")
             throw new IOException("Synthetic diagnostic option reporting did not capture opt-ins.");
         var observations = new List<(string, int)>();
         void Capture(string outcome, int code) => observations.Add((outcome, code));
@@ -524,7 +525,8 @@ internal static class SyntheticMemoryNative {
         var prewarm = PrewarmMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_PREWARM"));
         var serial = SerialMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL"));
         var failFast = SerialMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_FAIL_FAST"));
-        if (markerMode == "invalid" || cacheStage == "invalid" || prewarm == "invalid" || serial == "invalid" || failFast == "invalid" || (markerMode != "none" && cacheStage != "none") ||
+        var processInfo = SerialMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_REQUIRE_PROCESS_INFO"));
+        if (markerMode == "invalid" || cacheStage == "invalid" || prewarm == "invalid" || serial == "invalid" || failFast == "invalid" || processInfo == "invalid" || (markerMode != "none" && cacheStage != "none") ||
             (serial == "on" && (markerMode != "none" || cacheStage != "quota-reservation")) ||
             (prewarm != "off" && (markerMode != "none" || cacheStage != "quota-reservation")) ||
             !FailFastOptionsValid(count, retryProbe, markerMode, cacheStage, prewarm, serial, failFast, Environment.GetEnvironmentVariable)) return 2;
@@ -734,12 +736,14 @@ internal static class SyntheticMemoryNative {
             Phase(createScope is null ? "create-scope-released" : "create-scope-retained", id);
             var cleanupVerified = CleanupVerified(registrationAttempted, registration is not null, readersJoined, disposeCompleted, unregisterVerified, committedCleanupUncertain);
             if (!cleanupVerified) success = false;
-            foreach (var item in NativeStallTrace.Snapshot(trace).Where(e => cacheStage != "none" || e.Kind is NativeStallTrace.Stage.SyntheticMarkerReadEnter or NativeStallTrace.Stage.SyntheticMarkerReadExit
+            foreach (var item in NativeStallTrace.Snapshot(trace).Where(e => cacheStage != "none" || (processInfo == "on" && e.Kind == NativeStallTrace.Stage.WorkerStart && e.CallbackId != 0) || e.Kind is NativeStallTrace.Stage.SyntheticCallbackProcess or NativeStallTrace.Stage.SyntheticMarkerReadEnter or NativeStallTrace.Stage.SyntheticMarkerReadExit
                 or NativeStallTrace.Stage.SyntheticMarkerCreateEnter or NativeStallTrace.Stage.SyntheticMarkerCreateExit
                 or NativeStallTrace.Stage.SyntheticMarkerWriteEnter or NativeStallTrace.Stage.SyntheticMarkerWriteExit
                 or NativeStallTrace.Stage.SyntheticMarkerFlushEnter or NativeStallTrace.Stage.SyntheticMarkerFlushExit
                 or NativeStallTrace.Stage.SyntheticMarkerCloseEnter or NativeStallTrace.Stage.SyntheticMarkerCloseExit))
-                Console.WriteLine($"Synthetic marker trace: seq={item.Sequence}; thread={item.ThreadId}; stage={item.Kind}");
+                if (item.Kind == NativeStallTrace.Stage.SyntheticCallbackProcess)
+                    Console.WriteLine($"Synthetic callback trace: seq={item.Sequence}; thread={item.ThreadId}; callback={item.CallbackId}; processInfo={(SyntheticCallbackProcessInfo.Status)item.ProcessInfoStatus}; pid={item.ProcessId}");
+                else Console.WriteLine($"Synthetic marker trace: seq={item.Sequence}; thread={item.ThreadId}; stage={item.Kind}; callback={item.CallbackId}");
             Console.WriteLine($"Synthetic marker trace: attempted={NativeStallTrace.Attempted(trace)}; dropped={NativeStallTrace.Dropped(trace)}");
             NativeStallTrace.Disable(trace);
             Console.WriteLine($"Synthetic memory native: count={count}; success={success}; nativeRegistrationCleanupVerified={cleanupVerified}; committedCleanupUncertain={committedCleanupUncertain}; fixtureDirectoriesRemoved=False; disposeTimedOut={disposeTimedOut}; registrationAttempted={registrationAttempted}; registrationReturned={registration is not null}; root={root}; registrationContext=LedgeTop.Files.MemoryNativeTest.v1:{id}");
