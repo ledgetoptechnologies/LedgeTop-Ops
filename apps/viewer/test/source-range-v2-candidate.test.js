@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
+const { spawn } = require('node:child_process');
 const p = require('../server/referenceProtocol');
 const { CHUNK_BYTES, PREFIX, REQUEST_HEADER, SourceRangeV2Error, SourceRangeV2BrokerCandidate, createSourceRangeV2Handler, canonicalIdentity, requestIdFor } = require('../server/sourceRangeV2Candidate');
 
@@ -88,6 +89,74 @@ test('HTTPS handler returns canonical 206 headers and exact bytes', async t => {
   assert.equal(response.status, 206); assert.equal(response.headers.get('content-range'), 'bytes 0-9/10');
   assert.equal(response.headers.get('content-length'), '10'); assert.equal(response.headers.get('etag'), request.ifMatch);
   assert.equal(response.headers.get(REQUEST_HEADER), request.requestId); assert.deepEqual(Buffer.from(await response.arrayBuffer()), f.bytes);
+});
+
+test('Processing Python client downloads synthetic bytes through the Node handler over a loopback test bridge', { skip: !process.env.PROCESSING_CLIENT_ROOT }, async t => {
+  const f = fixture(t);
+  // The Processing client requires its canonical dataset:<id>:<manifest-sha256> identity.
+  f.manifest.id = 'dataset-interop';
+  f.manifest.sha256 = p.manifestSha256(f.manifest);
+  f.job.manifestSha256 = f.manifest.sha256;
+  f.transferRequest.manifestSha256 = f.manifest.sha256;
+  f.transferRequest.sourceVersion = `dataset:interop:${f.manifest.sha256}`;
+  const grant = f.mint();
+  const handler = createSourceRangeV2Handler({ broker: f.broker, enabled: true, isProtectedTransport: () => true });
+  const server = http.createServer(async (req, res) => { if (!await handler(req, res)) { res.statusCode = 404; res.end(); } });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+
+  const destination = path.join(f.root, 'python-output');
+  fs.mkdirSync(destination, { mode: 0o700 });
+  const script = String.raw`
+import hashlib, json, pathlib, sys, urllib.parse, urllib.request
+from processing.source_range_transfer import SourceRangeClient, validate_source_grant
+
+payload = json.load(sys.stdin)
+class ResponseBridge:
+    def __init__(self, response, original_url): self.response, self.original_url = response, original_url
+    @property
+    def status(self): return self.response.status
+    @property
+    def headers(self): return self.response.headers
+    def geturl(self): return self.original_url
+    def read(self, size=-1): return self.response.read(size)
+    def close(self): return self.response.close()
+
+def test_only_loopback_bridge(request, *, timeout):
+    original = request.full_url
+    parsed = urllib.parse.urlsplit(original)
+    local = urllib.request.Request(payload['loopback'] + parsed.path, headers=dict(request.header_items()), method=request.get_method())
+    response = urllib.request.build_opener().open(local, timeout=timeout)
+    return ResponseBridge(response, original)
+
+grant = validate_source_grant(payload['grant'], job=payload['job'])
+client = SourceRangeClient('https://range.invalid', payload['ledger'], opener=test_only_loopback_bridge)
+result = client.download_object(grant=grant, object_id='photo-1', destination=payload['destination'])
+data = pathlib.Path(result).read_bytes()
+print(json.dumps({'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}))
+`;
+  const python = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+  const child = spawn(python, ['-c', script], {
+    cwd: process.env.PROCESSING_CLIENT_ROOT,
+    env: { ...process.env, PYTHONPATH: process.env.PROCESSING_CLIENT_ROOT },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let stdout = '', stderr = '', timedOut = false;
+  child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+  child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+  const result = await new Promise(resolve => {
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, 15000);
+    child.once('error', error => { clearTimeout(timer); resolve({ error }); });
+    child.once('close', (status, signal) => { clearTimeout(timer); resolve({ status, signal }); });
+    child.stdin.end(JSON.stringify({
+      grant, job: f.job, loopback: `http://127.0.0.1:${server.address().port}`,
+      ledger: path.join(f.root, 'python-ledger.sqlite'), destination: path.join(destination, 'photo.jpg'),
+    }));
+  });
+  assert.equal(timedOut, false, 'Processing subprocess completed within the bounded timeout');
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 0, stderr);
+  assert.deepEqual(JSON.parse(stdout), { size: f.bytes.length, sha256: hash(f.bytes) });
 });
 
 test('HTTP route rejects missing or malformed range identity headers and wrong methods', async t => {
