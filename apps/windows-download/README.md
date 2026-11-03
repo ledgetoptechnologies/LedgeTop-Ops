@@ -1,18 +1,49 @@
-# LedgeTop Files Windows read-only pilot
+# LedgeTop Files Windows pilot
 
-This contains the .NET 10 transfer library, Windows settings/activity app,
-system tray, branded Explorer connection and files-on-demand provider, with
-human Cloudflare Access and separate portal and employee read adapters.
+The Windows app provides a settings/activity window, a system-tray lifecycle,
+branded File Explorer navigation, and a read-only Cloud Files provider for
+employee Company files. Local additions and edits are not uploaded. Client
+routing is unavailable in this release; two-way NAS/R2 sync is not implemented.
 
-The unsigned per-user pilot installer is available in
-`S:\LedgeTop Operations\Sync App`. Start with `CURRENT-STAGING-STATUS.txt`;
-versioned receipts preserve their original build-time observations. Code signing
-is intentionally off. Local edits/additions do not upload. Automatic catalog
-refresh, automatic account/source selection and NAS/R2 two-way sync are not
-implemented. Scheduled update checks exist, but the update feed is off and
-replacement through that feed is not accepted end to end.
+Unsigned, per-user test packages are staged in `S:\LedgeTop Operations\Sync App`.
+Use `CURRENT-STAGING-STATUS.txt` for current package and test status; versioned
+receipts retain historical observations. Authenticode signing is off. The
+in-app update feed is disabled in candidate 0.5.34, so this build updates only
+through its installer.
 
-## Current verification — October 28, 2026
+## Current verification — November 2, 2026
+
+- Candidate **0.5.34.0** is built from source commit
+  `0c1fc1f1ed9f8edc496e3481620f37f49a66d716`. ZIP SHA-256 is
+  `310ada59054aeb398f8ea8cb173549b60d494f89604aee95ccf4e480922bad5a`;
+  installer SHA-256 is
+  `011a84e50838638cdd730bc33a85b3dc37af42aaeb003036b30971e0780c3e09`.
+- A clean-source build completed with zero warnings and errors. Synthetic
+  verification passed: Core 188/188 groups, desktop app 87/87, employee-only
+  startup/source isolation 5/5, plus six non-native Explorer policy suites.
+  These checks do not exercise live sign-in, native Explorer registration, or
+  real-file hydration.
+- On November 2, 0.5.34 was installed on the main PC after approval to preserve
+  the existing connection and files. The 0.5.34 process is running and Settings
+  opens, but Settings says **Reconnect your files folder**. Explorer shows
+  `LedgeTop Files — Company files`; the old Preview folder still exists. The
+  app’s saved connection was not reconnected, and no files were downloaded or
+  changed during this check.
+- The read-only Test Data grant could not be confirmed: the Operations MCP
+  connection check failed at Cloudflare Access authentication. Therefore the
+  0.5.34 live hydration, Keep, Free, and batch-speed checks remain pending.
+- The existing Windows test VM was found on staging host `192.168.50.90` and
+  started through `ledgetop-sync-vm.service` on November 2. Its Windows 11
+  Enterprise Evaluation desktop opened the branded LedgeTop Files settings
+  window; **Start with Windows** was checked. The app is not connected: Activity
+  says “Waiting for browser sign-in to finish.” Edge's first-run setup stopped
+  the flow at privacy choices; no choice was made, no sign-in completed, and no
+  files were accessed. Tray lifecycle and File Explorer acceptance were not
+  verified. The VM console uses a restricted Unix socket; its temporary SSH/VNC
+  relay was stopped after the session, while the VM itself was left running.
+  The SanDisk archive volume was left untouched.
+
+## Historical verification — October 28, 2026
 
 - Shared candidate **0.5.10.0**, source `d4d2cabeeed418724a4077816d4f744a2c2d66d2`,
   passed Windows CI `40725723008`. Its 524 payload files and 288 source entries
