@@ -26,8 +26,9 @@ internal static class ExperimentalColdDownloaderTests
         var completed = false;
         try { await body(); completed = true; }
         finally {
-            if (completed && quarantined() == 0) cleanup();
-            else preserve();
+            if (!completed) preserve();
+            else if (quarantined() == 0) cleanup();
+            else { preserve(); throw new IOException("Experimental owner remains quarantined; fixture preserved."); }
         }
     }
     private static Task WithFixture(Func<DirectoryFixture, Task> body)
@@ -47,8 +48,10 @@ internal static class ExperimentalColdDownloaderTests
         try { await RunOwnedFixtureAsync(() => throw new IOException("Injected test failure."), () => 0, Cleanup, Preserve); }
         catch (IOException) { rejected = true; }
         Check(rejected && cleaned == 0 && preserved == 1);
-        await RunOwnedFixtureAsync(() => Task.CompletedTask, () => 1, Cleanup, Preserve);
-        Check(cleaned == 0 && preserved == 2);
+        rejected = false;
+        try { await RunOwnedFixtureAsync(() => Task.CompletedTask, () => 1, Cleanup, Preserve); }
+        catch (IOException) { rejected = true; }
+        Check(rejected && cleaned == 0 && preserved == 2);
         await RunOwnedFixtureAsync(() => Task.CompletedTask, () => 0, Cleanup, Preserve);
         Check(cleaned == 1 && preserved == 2);
     }
@@ -159,6 +162,7 @@ internal static class ExperimentalColdDownloaderTests
             catch (TransferException error) { throw new IOException("Synthetic cache retry failed: " + error.HydrationFailure?.ActivityText, error); }
             Check(retried.Completed == 1 && retried.Failed == 0 && retried.Bytes.ToArray().SequenceEqual(Content) && source.Downloads == 1);
         });
+        Check(ExperimentalOwnedStream.QuarantinedCountForTest == 0);
         Console.WriteLine("PASS gated synthetic cold Downloader: empty, EOF, overflow, digest, collision, cancellation, handoff and coordinator recovery.");
     }
     private sealed class CancelAfterPrefix(byte[] data, CancellationTokenSource source) : MemoryStream(data)
