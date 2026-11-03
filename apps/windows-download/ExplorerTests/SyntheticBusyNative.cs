@@ -30,6 +30,15 @@ internal static class SyntheticBusyNative {
         state.Entries = entries.ToDictionary(e => e.ResourceReference, StringComparer.Ordinal);
         using var source = new EmployeeQueuedDownloadSource("staff", session, new Metadata(state), new Downloader(new Data(state), [session.Origin], session:session));
         IPreviewRootRegistration? registration = null; NativePlaceholderProvider? provider = null; var phases = new List<string>(); var failures = new List<string>();
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        var trace = NativeStallTrace.Enable(); var seenTrace = new HashSet<long>();
+        void DumpTrace() {
+            foreach (var item in NativeStallTrace.Snapshot(trace))
+                if (seenTrace.Add(item.Sequence)) Console.WriteLine($"Native trace: seq={item.Sequence}; timestamp={item.Timestamp}; thread={item.ThreadId}; stage={item.Kind}");
+            var attempted = NativeStallTrace.Attempted(trace); var dropped = NativeStallTrace.Dropped(trace);
+            Console.WriteLine($"Native trace snapshot: attempted={attempted}; observed={seenTrace.Count}; dropped={dropped}; counts are sampled separately and in-flight publications may be missing");
+        }
+#endif
         try {
             registration = NativeRootRegistration.Register(root, Encoding.UTF8.GetBytes("LedgeTop.Files.BusyNativeTest.v1:" + id));
             var manifest = entries.ToDictionary(e => e.FileName, StringComparer.OrdinalIgnoreCase);
@@ -46,10 +55,18 @@ internal static class SyntheticBusyNative {
             var reads = entries.Select(e => dedicatedReaders
                 ? StartDedicated(() => Read(e)) : Task.Run(() => Read(e))).ToArray();
             var allReads = Task.WhenAll(reads);
-            diagnostics.Start(() => !allReads.IsCompleted);
+            diagnostics.Start(() => !allReads.IsCompleted
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                , DumpTrace
+#endif
+            );
             byte[][] contents;
             try { contents = await allReads.WaitAsync(TimeSpan.FromSeconds(25)); }
-            finally { await diagnostics.StopAsync(); }
+            finally { await diagnostics.StopAsync();
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                DumpTrace();
+#endif
+            }
             Need(contents.All(x => SHA256.HashData(x).SequenceEqual(SHA256.HashData(Bytes))), "Busy retry changed content.");
             Need(state.BusyClock.Elapsed >= TimeSpan.FromSeconds(3), "Expected a three-second busy interval.");
             Need(entries.All(e => state.BusyResponses.GetValueOrDefault(e.ResourceReference) >= 1 &&
@@ -72,6 +89,9 @@ internal static class SyntheticBusyNative {
             phases.Add("provider stop cancels an outstanding busy retry and joins callback work");
         } catch (Exception e) { failures.Add(e.GetType().Name + ": " + e.Message); Console.Error.WriteLine(e); }
         finally {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Disable(trace); // Late in-flight publications may not appear in the final snapshot.
+#endif
             var safe = true;
             if (provider != null) try { await provider.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(20)); } catch (Exception e) { safe=false; failures.Add("Dispose: " + e.Message); }
             if (registration != null && safe) try { registration.Unregister(); phases.Add("exact owned registration removed and absence verified"); } catch(Exception e) { failures.Add("Unregister: " + e.Message); }
@@ -93,7 +113,7 @@ internal static class SyntheticBusyNative {
             report($"Busy diagnostics: {phase}; elapsedMs={elapsed.ElapsedMilliseconds}; thread={Environment.CurrentManagedThreadId}; workerMin={minimum}; workerAvailable={available}");
         }
         internal void RecordReadStart(string fileName) => Sample("read-start " + fileName);
-        internal void Start(Func<bool> readsPending) {
+        internal void Start(Func<bool> readsPending, Action? onWatchdogSample = null) {
             var limit = maximumLifetime ?? TimeSpan.FromSeconds(30);
             if (watchdog is not null || interval <= TimeSpan.Zero || maxSamples is < 1 or > 60 ||
                 limit <= TimeSpan.Zero || limit > TimeSpan.FromSeconds(30))
@@ -105,6 +125,7 @@ internal static class SyntheticBusyNative {
                     if (remaining <= TimeSpan.Zero || stop.Token.WaitHandle.WaitOne(remaining < interval ? remaining : interval) ||
                         lifetime.Elapsed >= limit || !readsPending()) return;
                     Sample("watchdog");
+                    onWatchdogSample?.Invoke();
                 }
             }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         }

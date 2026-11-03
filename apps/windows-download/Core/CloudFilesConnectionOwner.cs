@@ -138,6 +138,9 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
 
     private void Callback(bool isCancel, nint infoPointer, nint parametersPointer)
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.CallbackArrival);
+#endif
         bool accepted, copyIdentity;
         lock (sync) {
             accepted = phase is Phase.Connecting or Phase.Connected or Phase.Stopping;
@@ -202,6 +205,9 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
     }
     private void Handle(Snapshot snapshot, bool copyIdentity)
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.CallbackHandling);
+#endif
         CloudFilesConnectionNotice? notice = null; bool reject = false;
         lock (settlementGate) lock (sync) {
             if (snapshot.Cookie != cookie || (phase != Phase.Connecting && snapshot.Connection != connection))
@@ -265,6 +271,9 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
 
     private void QueueLocked(Snapshot snapshot)
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.CallbackQueued);
+#endif
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         work.Add(completion.Task, snapshot);
         // Queue before releasing sync; no async work or native call executes under that lock.
@@ -272,6 +281,9 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
     }
     private async void RunAsync(Snapshot snapshot, TaskCompletionSource completion)
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.WorkerStart);
+#endif
         try {
             CloudFilesCallbackDispatcher? provider; Phase current;
             lock (sync) { provider = dispatcher; current = phase; }

@@ -112,11 +112,17 @@ internal static class CloudFilesNativeTransfer {
                 if (terminal) throw new TransferException("Native transfer is terminal.");
                 // Truthful indeterminate progress: temporary download bytes are not yet verified hydration.
                 int status;
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.ProgressEnter);
+#endif
                 try { status = native.ReportProgress(context.ConnectionKey, context.TransferKey, 1, 0); }
                 catch (Exception error) {
                     primaryFailure ??= HydrationFailureDiagnostic.FromException(HydrationStage.NativeProgress, error);
                     throw new TransferException("Native progress unavailable.", primaryFailure);
                 }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                finally { NativeStallTrace.Record(NativeStallTrace.Stage.ProgressExit); }
+#endif
                 if (status != 0) {
                     primaryFailure ??= new(HydrationStage.NativeProgress, HydrationFailureCategory.Native, nativeHResult: status);
                     throw new TransferException("Native progress unavailable.", primaryFailure);

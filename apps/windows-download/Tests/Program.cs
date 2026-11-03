@@ -5,6 +5,12 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using LedgeTop.WindowsDownload;
 
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+if (args.Length == 1 && args[0] == "--native-stall-trace-tests") {
+    await NativeStallTraceTests.RunAsync();
+    return;
+}
+#endif
 if (args.Length == 1 && args[0] == "--observe-cross-thread-rejection") {
     await CloudFilesConnectionTests.ObserveCrossThreadRejectionAsync();
     return;

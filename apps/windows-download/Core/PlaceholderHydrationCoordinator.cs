@@ -109,13 +109,23 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 throw new TransferException("Hydration identity or range is unavailable.");
             timing?.Enter(HydrationTimingStage.QueueWait);
             ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.AdmissionEnter);
+#endif
             using var admission = await HydrationCacheConcurrency.AcquireAsync(root, identity.ScopeKey + identity.CacheKey, cancellationToken,
                 exclusive: source is not IHydrationMutationAwareSource { CoordinatesHydrationMutations: true });
             {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.AdmissionAcquired);
+                NativeStallTrace.Record(NativeStallTrace.Stage.AuthorizationEnter);
+#endif
                 ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
                 stage = HydrationStage.AuthorizationBefore; timing?.Enter(HydrationTimingStage.AuthorizationBefore);
                 ResolvedQueuedDownload resolved;
                 using (AuthorizationTimingScope.Begin(timing, identity, true)) resolved = await Authorize(identity, cancellationToken);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.AuthorizationExit);
+#endif
                 stage = HydrationStage.CachePreparation; timing?.Enter(HydrationTimingStage.CachePreparation);
                 RequireSafe(root); Owned(root);
                 var quotaLock = Path.Combine(root, ".hydration-cache.lock"); RequireSafe(quotaLock);

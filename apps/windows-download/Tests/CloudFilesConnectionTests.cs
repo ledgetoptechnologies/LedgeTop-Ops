@@ -69,6 +69,27 @@ internal static class CloudFilesConnectionTests
         Check(f.Native.Rejections.All(value => value.ConnectionKey == 123 && value.RequiredLength > 0));
     }
 
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+    internal static async Task TraceFakeCallbackAsync()
+    {
+        using var f = new Fixture(); var entered = Gate();
+        var owner = f.Owner((_, _, _, _) => { entered.TrySetResult(); return Task.CompletedTask; });
+        var capture = NativeStallTrace.Enable(); var connected = false;
+        try {
+            owner.Connect(); connected = true; f.Native.Invoke(false, Identity.Encode());
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await owner.StopAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            var stages = NativeStallTrace.Snapshot(capture).Select(e => e.Kind).ToArray();
+            foreach (var stage in new[] { NativeStallTrace.Stage.CallbackArrival, NativeStallTrace.Stage.CallbackHandling,
+                NativeStallTrace.Stage.CallbackQueued, NativeStallTrace.Stage.WorkerStart })
+                if (!stages.Contains(stage)) throw new Exception("Missing fake callback diagnostic stage: " + stage);
+        } finally {
+            try { if (connected) await owner.StopAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
+            finally { NativeStallTrace.Disable(capture); }
+        }
+    }
+#endif
+
     // Diagnostic only: emulate a synchronous native rejection which asks a different
     // callback thread to finish before it returns. Both waits are strictly bounded.
     internal static async Task ObserveCrossThreadRejectionAsync()
