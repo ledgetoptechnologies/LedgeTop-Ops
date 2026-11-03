@@ -268,7 +268,7 @@ class PreparedSubmissionClient {
     try {
       response = await this.fetch(`${this.origin}${path}`, {
         method,
-        headers: { Authorization: `Bearer ${this.bearerToken}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+        headers: { Authorization: `Bearer ${this.bearerToken}`, 'X-LTDS-Expected-Coordinator-Authority': this.authorityId, ...(body ? { 'Content-Type': 'application/json' } : {}) },
         ...(body ? { body } : {}),
         redirect: 'error',
         cache: 'no-store',

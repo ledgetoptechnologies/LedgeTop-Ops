@@ -187,6 +187,7 @@ test('successful POST still requires the authenticated GET binding before accept
   const client = new PreparedSubmissionClient({ origin: 'https://processing.example', authorityId: AUTHORITY_ID, bearerToken: 'synthetic-test-bearer-token-0001', principalId: 'viewer-staging', environment: 'staging', outbox,
     fetchImpl: async (_url, options) => {
       calls.push(options.method);
+      assert.equal(options.headers['X-LTDS-Expected-Coordinator-Authority'], AUTHORITY_ID);
       return options.method === 'POST' ? responseJson({}, 201) : responseJson(remoteBinding(intent));
     },
   });

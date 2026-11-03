@@ -9,6 +9,7 @@ const test = require('node:test');
 const { openDatabase } = require('../server/database');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { GcpRepository, haversineMeters } = require('../server/gcpRepository');
+const { trashTaskTree } = require('../server/containerLifecycle');
 const GCP_SOURCE='point_id,label,latitude,longitude,elevation_m\nGCP-01,Target,44.5,-88.1,243.84\n';
 const GCP_SOURCE_SHA=crypto.createHash('sha256').update(GCP_SOURCE).digest('hex');
 
@@ -54,6 +55,28 @@ test('GCP sets retain stable canonical points and source-file association', (t) 
   const updated = gcp.updatePoint(originalId, { label: 'Painted target', elevationM: 244 });
   assert.equal(updated.id, originalId);
   assert.equal(updated.elevationM, 244);
+});
+
+test('retained raw GCP source blocks dataset, task, project trash and dataset purge', (t) => {
+  const { database, processing, gcp, project, dataset } = datasetFixture(t);
+  const set = gcp.importSet({
+    datasetId: dataset.id, displayName: 'Control', sourceFormat: 'generic-csv-v1', sourceFileId: 'gcp-file',
+    sourceFilename: 'control.csv', sourceSha256: GCP_SOURCE_SHA, sourceContent: GCP_SOURCE, crs: 'EPSG:4326', elevationUnits: 'm', createdBy: 'ops:retention',
+    points: [{ externalId: 'GCP-01', label: 'Target', latitude: 44.5, longitude: -88.1, elevationM: 243.84, description: null }],
+  });
+  const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Retained GCP task'});
+  assert.ok(set.id);
+  assert.equal(processing.beginTrashMutation(dataset.id,'ops:retention'),null);
+  assert.equal(processing.trashProject(project.id,'ops:retention'),null);
+  assert.throws(()=>trashTaskTree(processing,{},task.id,'ops:retention'),{code:'task_not_trashable'});
+  assert.equal(processing.getTask(task.id).status,'draft');
+
+  // Exercise recovery of a pre-existing trash record created before this guard existed.
+  const trashId=crypto.randomUUID(),createdAt=new Date().toISOString();
+  database.prepare("UPDATE datasets SET status='trashed',trashed_at=?,updated_at=? WHERE id=?").run(createdAt,createdAt,dataset.id);
+  database.prepare("INSERT INTO storage_trash(id,entity_type,entity_id,root_key,relative_path,purge_after,created_at) VALUES (?,'dataset',?,'trash','dataset/retained',?,?)")
+    .run(trashId,dataset.id,new Date(Date.now()+86400000).toISOString(),createdAt);
+  assert.equal(processing.beginPurgeMutation(trashId,'ops:retention'),null);
 });
 
 test('image suggestions reuse indexed EXIF GPS and rank distance without claiming visibility', (t) => {
