@@ -603,7 +603,7 @@ internal sealed class ExplorerPreviewWindow : Window
             ExplorerPreviewState.Failed => "The Explorer preview couldn't start or complete an operation. Check Activity before trying again.",
             _ => "Start a simulated sign-in to try generated files in an isolated folder. No real account or files are connected."
         };
-        if (!presentation.Generated && problem.Length == 0) detail.Text = quitting
+        if (!presentation.Generated && (quitting || problem.Length == 0)) detail.Text = quitting
             ? shutdownDelayed ? "Still waiting for Windows to finish a file operation. LedgeTop Files will remain open until it can disconnect safely."
                 : "Stopping downloads and disconnecting. Files already on this PC stay here."
             : state switch {

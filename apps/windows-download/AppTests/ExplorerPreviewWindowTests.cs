@@ -136,9 +136,10 @@ internal static class ExplorerPreviewWindowTests
             using var delayedFailureGate = new ManualResetEventSlim(false);
             var delayedFailureSession = new FakeSession(root) { DisposeGate = delayedFailureGate, RefuseFirstDispose = true };
             var delayedFailure = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(),
-                ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), delayedFailureSession);
+                ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), delayedFailureSession, setupProblem: "Earlier connection problem.");
             delayedFailure.ShutdownNoticeDelayForTests = TimeSpan.FromMilliseconds(40);
             var delayedFailureClosed = false; delayedFailure.Closed += (_, _) => delayedFailureClosed = true;
+            True(delayedFailure.DetailText == "Earlier connection problem.", "pre-existing connection problem is visible before quit");
             delayedFailure.Quit();
             try {
                 await delayedFailureSession.DisposeEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
@@ -147,6 +148,7 @@ internal static class ExplorerPreviewWindowTests
                 await Until(() => delayedFailure.StatusText == "Connection needs attention");
                 True(delayedFailure.IsVisible && !delayedFailureClosed && delayedFailureSession.Disposals == 1,
                     "a delayed failure retains the existing retryable failure behavior");
+                True(delayedFailure.DetailText.Contains("couldn't stop safely", StringComparison.Ordinal), "shutdown failure remains visible for retry");
                 delayedFailure.Quit(); await Until(() => delayedFailureClosed);
                 True(delayedFailureSession.Disposals == 2, "retry begins only after prior stop failed");
             } finally { delayedFailureGate.Set(); delayedFailure.Quit(); await Until(() => delayedFailureClosed); }
@@ -704,9 +706,10 @@ internal static class ExplorerPreviewWindowTests
 
     private static ExplorerPreviewWindow Window(Func<Task<IExplorerPreviewSession>> factory, FakeTrayIcon tray,
         ExplorerWindowContent? presentation = null, IExplorerPreviewSession? prepared = null, ExplorerUpdateActions? updates = null,
-        Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? binding = null, FreshFolderUiTestActions? fresh = null)
+        Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? binding = null, FreshFolderUiTestActions? fresh = null,
+        string? setupProblem = null)
     {
-        var window = new ExplorerPreviewWindow(factory, _ => tray, presentation, prepared, readUpdateBindingForTests: binding, freshFolderForTests: fresh) { ShowInTaskbar = false, Left = -20000, Top = -20000,
+        var window = new ExplorerPreviewWindow(factory, _ => tray, presentation, prepared, setupProblem: setupProblem, readUpdateBindingForTests: binding, freshFolderForTests: fresh) { ShowInTaskbar = false, Left = -20000, Top = -20000,
             WindowStartupLocation = WindowStartupLocation.Manual };
         if (updates is not null) window.SetUpdateActions(updates);
         window.Show(); Pump(); return window;
