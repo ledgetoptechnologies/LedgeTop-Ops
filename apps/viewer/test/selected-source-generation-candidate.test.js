@@ -2,7 +2,9 @@
 const test=require('node:test'),assert=require('node:assert/strict'),crypto=require('node:crypto'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {openDatabase}=require('../server/database');
 const {ProcessingRepository}=require('../server/processingRepository');
-const {createHeldSourceSnapshot,acceptHeldSourceSnapshot,releaseHeldSourceSnapshot}=require('../server/heldSourceSnapshot');
+const {createHeldSourceSnapshot,getHeldSourceSnapshot,verifyHeldSourceSnapshot,acceptHeldSourceSnapshot,releaseHeldSourceSnapshot,SNAPSHOT_DOMAIN}=require('../server/heldSourceSnapshot');
+const {frameStream,SELECTED_VERSION,SELECTED_DOMAIN}=require('../server/viewerPagedSourceExport');
+const {canonicalBytes}=require('../server/referenceProtocol');
 const {prepareSelectedGeneration}=require('../server/selectedSourceGenerationCandidate');
 
 test('held generation binds exact signed selection and survives reopen without adopting partial bytes',t=>{
@@ -16,6 +18,21 @@ test('held generation binds exact signed selection and survives reopen without a
  const keys=crypto.generateKeyPairSync('ed25519');const snapshot=createHeldSourceSnapshot(p,{datasetId:dataset.id,taskId:task.id,attemptId:attempt.id,signer:{issuerId:'issuer',keyId:'key',sign:v=>crypto.sign(null,v,keys.privateKey)}});
  const selected=files.map(f=>({id:f.id,relativePath:f.relativePath,byteSize:f.byteSize,sha256:f.sha256}));
  const args={attemptId:attempt.id,generation:1,snapshotId:snapshot.snapshotId,snapshotSha256:snapshot.intentSha256,publicKey:keys.publicKey,rootRef:'operator-root',selected};
+ // Test-only corrupt database fixture: replace the signed payload with a
+ // coherently re-signed omission or duplicate, including all dependent hashes.
+ db.exec('DROP TRIGGER viewer_source_snapshots_payload_immutable; DROP TRIGGER viewer_source_snapshots_lifecycle_guard');
+ const put=db.prepare('UPDATE viewer_source_snapshots SET input_manifest_sha256=?,intent_json=?,intent_sha256=?,signature=?,selected_frames=?,selected_page_hashes_json=?,selected_frame_bytes=? WHERE snapshot_id=?');
+ for(const ids of [['one'],['one','one']]){
+  const marks=ids.map((id,ordinal)=>({type:'dataset_file',ordinal,pageObjectId:id,datasetFileId:id}));
+  const frames=frameStream(marks,SELECTED_VERSION,SELECTED_DOMAIN),subset=ids.map(id=>selected.find(f=>f.id===id));
+  const input=subset.map(f=>({relativePath:f.relativePath,byteSize:f.byteSize,sha256:f.sha256}));
+  const intent={...snapshot.intent,selectedCount:ids.length,selectedPageHashes:frames.pageHashes,selectedFrameBytes:frames.bytes.length,inputManifestSha256:crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex')};
+  const raw=canonicalBytes(intent),sha=crypto.createHash('sha256').update(raw).digest('hex'),signature=crypto.sign(null,Buffer.concat([SNAPSHOT_DOMAIN,raw]),keys.privateKey);
+  put.run(intent.inputManifestSha256,raw.toString('utf8'),sha,signature,frames.bytes,JSON.stringify(frames.pageHashes),frames.bytes.length,snapshot.snapshotId);
+  assert.equal(verifyHeldSourceSnapshot(getHeldSourceSnapshot(p,snapshot.snapshotId),keys.publicKey),true);
+  assert.throws(()=>prepareSelectedGeneration(p,{...args,snapshotSha256:sha,selected:subset}),{code:'GENERATION_HELD'});
+ }
+ put.run(snapshot.inputManifestSha256,canonicalBytes(snapshot.intent).toString('utf8'),snapshot.intentSha256,snapshot.signature,snapshot.selectedFrames,JSON.stringify(snapshot.selectedPageHashes),snapshot.selectedFrameBytes,snapshot.snapshotId);
  assert.throws(()=>prepareSelectedGeneration(p,{...args,selected:[...selected].reverse()}),{code:'GENERATION_HELD'});
  assert.throws(()=>prepareSelectedGeneration(p,{...args,selected:[{...selected[0],byteSize:4},selected[1]]}),{code:'GENERATION_HELD'});
  assert.throws(()=>prepareSelectedGeneration(p,{...args,snapshotSha256:'0'.repeat(64)}),{code:'GENERATION_HELD'});

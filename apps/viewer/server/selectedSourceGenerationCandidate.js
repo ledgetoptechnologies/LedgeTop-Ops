@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { canonicalBytes } = require('./referenceProtocol');
 const { getHeldSourceSnapshot, verifyHeldSourceSnapshot } = require('./heldSourceSnapshot');
+const { fileFacts } = require('./viewerPagedSourceExport');
 const fail = () => { throw Object.assign(new Error('generation held'), { code: 'GENERATION_HELD' }); };
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const records = bytes => Buffer.from(bytes).toString('utf8').trimEnd().split('\n').flatMap(line => JSON.parse(line).records);
@@ -28,9 +29,20 @@ function prepareSelectedGeneration(processing, { attemptId, generation, snapshot
     if (!current) fail();
     let source, marks;
     try { source = records(snapshot.sourceFrames); marks = records(snapshot.selectedFrames); } catch { fail(); }
-    if (source.some(f => f.type !== 'dataset_file' || f.processingRole === 'gcp_source')) fail();
+    const photo=/\.(?:jpe?g|png|tiff?|dng|raw|heic)$/i,auxiliary=/\.(?:txt|geojson|json|zip|las|laz)$/i;
+    for (const f of source) {
+      if (f.type !== 'dataset_file' || f.processingRole === 'gcp_source'
+          || (f.processingRole === 'image' && !photo.test(f.relativePath))
+          || (f.processingRole === 'provider_input' && !auxiliary.test(f.relativePath))) fail();
+      let checked;try { checked=fileFacts({id:f.datasetFileId,relativePath:f.relativePath,byteSize:f.byteSize,sha256:f.sha256,processingRole:f.processingRole,contentType:f.mediaType}); } catch { fail(); }
+      if (!canonicalBytes(checked).equals(canonicalBytes(f))) fail();
+    }
     const byId = new Map(source.map(f => [f.datasetFileId, f]));
     if (byId.size !== source.length || marks.length !== selected.length) fail();
+    const eligible=source.filter(f=>!['gcp_source','administrative'].includes(f.processingRole)
+      && (f.processingRole!=='auto' || photo.test(f.relativePath)));
+    const ordered=[...eligible.filter(f=>photo.test(f.relativePath)),...eligible.filter(f=>!photo.test(f.relativePath))];
+    if (marks.length!==ordered.length || marks.some((m,i)=>m.datasetFileId!==ordered[i].datasetFileId)) fail();
     const expected = marks.map((m, index) => {
       const f = byId.get(m.datasetFileId);
       if (!f || m.type !== 'dataset_file' || m.ordinal !== index || m.pageObjectId !== m.datasetFileId
