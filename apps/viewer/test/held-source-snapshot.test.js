@@ -1,0 +1,108 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const test = require('node:test');
+const { openDatabase } = require('../server/database');
+const { ProcessingRepository } = require('../server/processingRepository');
+const {
+  createHeldSourceSnapshot, getHeldSourceSnapshot, verifyHeldSourceSnapshot,
+  acceptHeldSourceSnapshot, releaseHeldSourceSnapshot,
+} = require('../server/heldSourceSnapshot');
+
+function fixture(t, { withGcp = false } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'held-viewer-source-'));
+  const database = openDatabase(path.join(root, 'viewer.sqlite'));
+  const processing = new ProcessingRepository(database);
+  t.after(() => { database.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const project = processing.createProject({ displayName: 'Held source fixture' });
+  const dataset = processing.createDataset({
+    projectId: project.id, displayName: 'Flight', storageMode: 'managed', rootKey: 'datasets', relativePath: crypto.randomUUID(),
+  });
+  const content = 'point_id,label,latitude,longitude,elevation_m\nA,Target,44.5,-88.1,244\n';
+  const gcpSha256 = crypto.createHash('sha256').update(content).digest('hex');
+  const files = [{ id: 'photo-1', relativePath: 'flight/photo.jpg', byteSize: 12, sha256: 'a'.repeat(64), contentType: 'image/jpeg' }];
+  if (withGcp) files.push({ id: 'gcp-file', relativePath: 'control.csv', byteSize: Buffer.byteLength(content), sha256: gcpSha256, contentType: 'text/csv' });
+  processing.finalizeDataset(dataset.id, files, 'b'.repeat(64));
+  if (withGcp) {
+    const { GcpRepository } = require('../server/gcpRepository');
+    const gcp = new GcpRepository(database);
+    const set = gcp.importSet({ datasetId: dataset.id, displayName: 'Control', sourceFormat: 'generic-csv-v1', sourceFileId: 'gcp-file',
+      sourceFilename: 'control.csv', sourceSha256: gcpSha256, sourceContent: content, crs: 'EPSG:4326', elevationUnits: 'm',
+      createdBy: 'ops:test', points: [{ externalId: 'A', label: 'Target', latitude: 44.5, longitude: -88.1, elevationM: 244, description: null }] });
+    gcp.createCorrespondence({ taskId: processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'ODM task' }).id,
+      pointId: set.points[0].id, imageFileId: 'photo-1', pixelX: 10, pixelY: 20, createdBy: 'ops:test' });
+  }
+  const task = withGcp
+    ? processing.database.prepare('SELECT id FROM processing_tasks WHERE dataset_id=?').get(dataset.id).id
+    : processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'ODM task' }).id;
+  const taskRecord = processing.getTask(task);
+  const provider = processing.upsertProvider({ type: 'nodeodm', displayName: 'ODM', endpoint: 'http://127.0.0.1:3000', enabled: true });
+  const attempt = processing.createAttempt({ taskId: taskRecord.id, providerId: provider.id, options: {} });
+  return { database, processing, project, dataset, task: taskRecord, attempt };
+}
+
+test('source snapshot is signed, immutable, nonreusable, and holds its dataset until verified downstream acceptance', (t) => {
+  const { database, processing, project, dataset, task, attempt } = fixture(t);
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
+  const signer = { issuerId: 'viewer-test-issuer', keyId: 'test-key-1', sign: (bytes) => crypto.sign(null, bytes, privateKey) };
+  const snapshotId = 'b7c3e491-d0b9-4a1a-9d0c-f0d52b622377';
+  const created = createHeldSourceSnapshot(processing, {
+    datasetId: dataset.id, taskId: task.id, attemptId: attempt.id, snapshotId, signer,
+    now: () => '2026-11-03T12:00:00.000Z',
+  });
+
+  assert.equal(created.status, 'held');
+  const stored = getHeldSourceSnapshot(processing, snapshotId);
+  assert.ok(verifyHeldSourceSnapshot(stored, publicKey));
+  const changedFrames = { ...stored, sourceFrames: Buffer.from(stored.sourceFrames) };
+  changedFrames.sourceFrames[0] ^= 1;
+  assert.equal(verifyHeldSourceSnapshot(changedFrames, publicKey), false, 'persisted frame tampering invalidates the snapshot');
+  assert.equal(processing.hasHeldSourceSnapshot(dataset.id), true);
+  assert.equal(processing.beginTrashMutation(dataset.id, 'ops:test'), null);
+  assert.equal(processing.trashProject(project.id, 'ops:test'), null);
+  assert.equal(processing.trashTask(task.id, 'ops:test'), null);
+  const trashId = crypto.randomUUID(), timestamp = new Date().toISOString();
+  database.prepare("UPDATE datasets SET status='trashed',trashed_at=?,updated_at=? WHERE id=?").run(timestamp, timestamp, dataset.id);
+  database.prepare("INSERT INTO storage_trash(id,entity_type,entity_id,root_key,relative_path,purge_after,created_at) VALUES (?,'dataset',?,'trash','dataset/source-held',?,?)")
+    .run(trashId, dataset.id, new Date(Date.now() + 60_000).toISOString(), timestamp);
+  assert.equal(processing.beginPurgeMutation(trashId, 'ops:test'), null, 'a pre-existing trash row cannot purge held source data');
+  assert.throws(() => createHeldSourceSnapshot(processing, {
+    datasetId: dataset.id, taskId: task.id, attemptId: attempt.id,
+    snapshotId: 'f3f4a9f2-11a2-4864-aa5c-b2060accc39c', signer,
+  }), { code: 'snapshot_identity_reused' });
+  const receipt = { snapshotId, downstreamJobId: 'job-1', signature: 'test-receipt-signature' };
+  assert.equal(releaseHeldSourceSnapshot(processing, snapshotId, { verifyAcceptance: () => true }), null,
+    'a snapshot cannot release before acceptance');
+  assert.equal(acceptHeldSourceSnapshot(processing, snapshotId, { receipt }), null,
+    'an unverified downstream receipt cannot lift the source hold');
+  const accepted = acceptHeldSourceSnapshot(processing, snapshotId, {
+    receipt, verifyAcceptance: (snapshot, observedReceipt) => snapshot.snapshotId === snapshotId && observedReceipt === receipt,
+  });
+  assert.equal(accepted.status, 'accepted');
+  assert.deepEqual(accepted.acceptanceReceipt, receipt);
+  assert.equal(processing.hasHeldSourceSnapshot(dataset.id), true, 'acceptance alone keeps the source held');
+  assert.equal(releaseHeldSourceSnapshot(processing, snapshotId, {
+    verifyAcceptance: () => false,
+  }), null, 'the release receipt must match the accepted receipt');
+  const released = releaseHeldSourceSnapshot(processing, snapshotId, {
+    verifyAcceptance: (snapshot, observedReceipt) => snapshot.snapshotId === snapshotId && observedReceipt.downstreamJobId === 'job-1',
+  });
+  assert.equal(released.status, 'released');
+  assert.equal(processing.hasHeldSourceSnapshot(dataset.id), false);
+  assert.throws(() => database.prepare('DELETE FROM viewer_source_snapshots WHERE snapshot_id=?').run(snapshotId), /never reusable/);
+  assert.throws(() => database.prepare("UPDATE viewer_source_snapshots SET status='held' WHERE snapshot_id=?").run(snapshotId), /lifecycle transition/);
+});
+
+test('snapshot export refuses the incomplete GCP extension instead of silently omitting its evidence', (t) => {
+  const { processing, dataset, task, attempt } = fixture(t, { withGcp: true });
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const signer = { issuerId: 'viewer-test-issuer', keyId: 'test-key-1', sign: (bytes) => crypto.sign(null, bytes, privateKey) };
+  assert.throws(() => createHeldSourceSnapshot(processing, {
+    datasetId: dataset.id, taskId: task.id, attemptId: attempt.id, signer,
+  }), { code: 'snapshot_gcp_extension_unavailable' });
+  assert.equal(processing.database.prepare('SELECT COUNT(*) AS n FROM viewer_source_snapshots').get().n, 0);
+});

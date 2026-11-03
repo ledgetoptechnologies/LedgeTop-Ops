@@ -21,8 +21,8 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
   if(faultAt==='after_intent')throw Object.assign(new Error('injected failure after lifecycle intent'),{code:'fault_injected'});
   try{
     if(mutation.status==='intent'){
-      if(mutation.entityType==='dataset'&&mutation.type!=='restore'&&processing.hasRetainedGcpSource(mutation.entityId))
-        throw conflict('dataset contains a retained GCP source file');
+      if(mutation.entityType==='dataset'&&mutation.type!=='restore'&&processing.hasDatasetRetentionHold(mutation.entityId))
+        throw conflict('dataset contains a retained source file or an active downstream snapshot hold');
       if(mutation.type==='trash'||mutation.type==='restore'){
         const sourceExists=exists(storage,mutation.sourceRootKey,mutation.sourceRelativePath),destinationExists=exists(storage,mutation.destinationRootKey,mutation.destinationRelativePath);
         if(sourceExists&&destinationExists)throw conflict('lifecycle source and destination both exist');

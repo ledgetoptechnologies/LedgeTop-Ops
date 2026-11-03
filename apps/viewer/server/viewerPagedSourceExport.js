@@ -275,10 +275,11 @@ function assertGcpEvidence(evidence, filesById) {
   };
 }
 
-function captureHeldSourceExport(processing, { datasetId, taskId, attemptId } = {}) {
+function captureHeldSourceExport(processing, { datasetId, taskId, attemptId, joinTransaction = false } = {}) {
   const db = processing?.database;
-  if (!db || typeof db.exec !== 'function' || db.isTransaction) throw new HeldSourceExport('read_transaction_unavailable');
-  db.exec('BEGIN');
+  if (!db || typeof db.exec !== 'function' || (db.isTransaction && !joinTransaction)) throw new HeldSourceExport('read_transaction_unavailable');
+  const ownsTransaction = !db.isTransaction;
+  if (ownsTransaction) db.exec('BEGIN');
   try {
     // Preflight before repository helpers materialize and parse the full row
     // arrays. Both this preflight and the subsequent reads share one SQLite
@@ -298,7 +299,10 @@ function captureHeldSourceExport(processing, { datasetId, taskId, attemptId } = 
     const task = processing.getTask(taskId);
     const attempt = processing.getAttempt(attemptId);
     const project = task && processing.getProject(task.projectId);
-    if (!dataset || dataset.status !== 'finalized' || !task || task.status === 'archived' || task.purgedAt
+    const pendingStorageMutation = dataset && db.prepare(`SELECT 1 FROM storage_mutations
+      WHERE entity_type='dataset' AND entity_id=? AND status IN ('intent','fs_applied','failed') LIMIT 1`).get(dataset.id);
+    if (!dataset || dataset.storageMode !== 'managed' || dataset.rootKey !== 'datasets' || pendingStorageMutation
+      || dataset.status !== 'finalized' || !task || task.status === 'archived' || task.purgedAt
       || !project || project.status !== 'active' || task.datasetId !== dataset.id || task.activeAttemptId !== attemptId
       || !attempt || attempt.taskId !== task.id || attempt.datasetId !== dataset.id
       || ['failed', 'cancelled', 'published'].includes(attempt.status)) {
@@ -406,10 +410,10 @@ function captureHeldSourceExport(processing, { datasetId, taskId, attemptId } = 
       authority: null, principal: null, revocationEpoch: null,
       enabled: false,
     };
-    db.exec('COMMIT');
+    if (ownsTransaction) db.exec('COMMIT');
     return result;
   } catch (error) {
-    if (db.isTransaction) db.exec('ROLLBACK');
+    if (ownsTransaction && db.isTransaction) db.exec('ROLLBACK');
     if (error instanceof HeldSourceExport) throw error;
     throw new HeldSourceExport('source_export_held');
   }

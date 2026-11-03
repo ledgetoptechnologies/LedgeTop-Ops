@@ -97,7 +97,7 @@ class GcpRepository {
     if (!dataset || dataset.status !== 'finalized')
       throw Object.assign(new Error('dataset is not available for GCP import'), { code: 'dataset_not_available' });
     if (sourceFileId) {
-      const source = this.database.prepare('SELECT id,relative_path,sha256 FROM dataset_files WHERE id=? AND dataset_id=?').get(sourceFileId, datasetId);
+      const source = this.database.prepare('SELECT id,relative_path,sha256,byte_size FROM dataset_files WHERE id=? AND dataset_id=?').get(sourceFileId, datasetId);
       if (!source || source.sha256 !== sourceSha256 || (sourceFilename&&pathBasename(source.relative_path).toLocaleLowerCase('en-US')!==pathBasename(sourceFilename).toLocaleLowerCase('en-US')))
         throw Object.assign(new Error('GCP source file does not match this dataset and input'), { code: 'invalid_source_file' });
     }
@@ -115,6 +115,13 @@ class GcpRepository {
         source_sha256,source_content,source_byte_size,crs,elevation_units,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
         .run(id, datasetId, bounded(displayName, 160), sourceFormat === 'emlid-all-columns-v1' ? 'generic-csv-v1' : sourceFormat, sourceFileId,
           bounded(sourceFilename, 240) || null, sourceSha256,sourceContent,sourceByteSize,crs, elevationUnits, createdBy || null, timestamp, timestamp);
+      if(sourceFileId){
+        const source=this.database.prepare('SELECT id,sha256,byte_size FROM dataset_files WHERE id=? AND dataset_id=?').get(sourceFileId,datasetId);
+        if(!source||source.sha256!==sourceSha256)throw Object.assign(new Error('GCP source file changed during import'),{code:'invalid_source_file'});
+        this.database.prepare(`INSERT OR IGNORE INTO retained_dataset_files
+          (dataset_file_id,dataset_id,sha256,byte_size,retention_reason,created_at) VALUES (?,?,?,?,'gcp_source',?)`)
+          .run(source.id,datasetId,source.sha256,source.byte_size,timestamp);
+      }
       this.database.prepare(`INSERT INTO gcp_import_provenance(set_id,adapter,coordinate_system,vertical_datum,linear_unit,elevation_source,geographic_cross_check,source_sha256,confirmed_by,confirmed_at)
         VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id,provenance.adapter,provenance.coordinateSystem,provenance.verticalDatum,provenance.linearUnit,
           provenance.elevationSource||null,provenance.geographicCrossCheck||null,sourceSha256,createdBy||null,timestamp);

@@ -2113,6 +2113,74 @@ const MIGRATIONS = [
       BEFORE UPDATE OF coordinator_authority_id ON viewer_prepared_submission_outbox
       BEGIN SELECT RAISE(ABORT,'prepared submission authority is immutable'); END;
   `},
+  {version:46,name:'durable_viewer_source_snapshot_holds',sql:`
+    CREATE TABLE retained_dataset_files (
+      dataset_file_id TEXT PRIMARY KEY REFERENCES dataset_files(id) ON DELETE RESTRICT,
+      dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+      sha256 TEXT NOT NULL CHECK(length(sha256)=64), byte_size INTEGER NOT NULL CHECK(byte_size>=0),
+      retention_reason TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    INSERT OR IGNORE INTO retained_dataset_files(dataset_file_id,dataset_id,sha256,byte_size,retention_reason,created_at)
+      SELECT f.id,f.dataset_id,f.sha256,f.byte_size,'gcp_source',g.created_at
+      FROM gcp_sets g JOIN dataset_files f ON f.id=g.source_file_id AND f.dataset_id=g.dataset_id;
+    CREATE TRIGGER retained_dataset_files_no_update BEFORE UPDATE ON retained_dataset_files
+      BEGIN SELECT RAISE(ABORT,'retained source file records are immutable'); END;
+    CREATE TRIGGER retained_dataset_files_no_delete BEFORE DELETE ON retained_dataset_files
+      BEGIN SELECT RAISE(ABORT,'retained source file records are permanent'); END;
+    CREATE INDEX retained_dataset_files_dataset_idx ON retained_dataset_files(dataset_id);
+
+    CREATE TABLE viewer_source_snapshots (
+      snapshot_id TEXT PRIMARY KEY,
+      dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+      task_id TEXT NOT NULL, attempt_id TEXT NOT NULL,
+      dataset_manifest_sha256 TEXT NOT NULL CHECK(length(dataset_manifest_sha256)=64),
+      input_manifest_sha256 TEXT NOT NULL CHECK(length(input_manifest_sha256)=64),
+      intent_json TEXT NOT NULL CHECK(json_valid(intent_json)),
+      intent_sha256 TEXT NOT NULL CHECK(length(intent_sha256)=64),
+      issuer_id TEXT NOT NULL, key_id TEXT NOT NULL,
+      signature BLOB NOT NULL,
+      source_frames BLOB NOT NULL, selected_frames BLOB NOT NULL,
+      source_page_hashes_json TEXT NOT NULL CHECK(json_valid(source_page_hashes_json)),
+      selected_page_hashes_json TEXT NOT NULL CHECK(json_valid(selected_page_hashes_json)),
+      source_frame_bytes INTEGER NOT NULL CHECK(source_frame_bytes>0),
+      selected_frame_bytes INTEGER NOT NULL CHECK(selected_frame_bytes>0),
+      status TEXT NOT NULL CHECK(status IN ('held','accepted','released')),
+      acceptance_receipt_sha256 TEXT CHECK(acceptance_receipt_sha256 IS NULL OR length(acceptance_receipt_sha256)=64),
+      acceptance_receipt_json TEXT CHECK(acceptance_receipt_json IS NULL OR json_valid(acceptance_receipt_json)),
+      created_at TEXT NOT NULL, accepted_at TEXT, released_at TEXT
+    );
+    CREATE INDEX viewer_source_snapshots_dataset_idx ON viewer_source_snapshots(dataset_id,status);
+    CREATE UNIQUE INDEX viewer_source_snapshots_attempt_idx ON viewer_source_snapshots(attempt_id);
+    CREATE TRIGGER viewer_source_snapshots_payload_immutable BEFORE UPDATE ON viewer_source_snapshots
+      WHEN NEW.snapshot_id IS NOT OLD.snapshot_id OR NEW.dataset_id IS NOT OLD.dataset_id OR NEW.task_id IS NOT OLD.task_id
+        OR NEW.attempt_id IS NOT OLD.attempt_id OR NEW.dataset_manifest_sha256 IS NOT OLD.dataset_manifest_sha256
+        OR NEW.input_manifest_sha256 IS NOT OLD.input_manifest_sha256 OR NEW.intent_json IS NOT OLD.intent_json
+        OR NEW.intent_sha256 IS NOT OLD.intent_sha256 OR NEW.issuer_id IS NOT OLD.issuer_id OR NEW.key_id IS NOT OLD.key_id
+        OR NEW.signature IS NOT OLD.signature OR NEW.source_frames IS NOT OLD.source_frames OR NEW.selected_frames IS NOT OLD.selected_frames
+        OR NEW.source_page_hashes_json IS NOT OLD.source_page_hashes_json OR NEW.selected_page_hashes_json IS NOT OLD.selected_page_hashes_json
+        OR NEW.source_frame_bytes IS NOT OLD.source_frame_bytes OR NEW.selected_frame_bytes IS NOT OLD.selected_frame_bytes
+        OR NEW.created_at IS NOT OLD.created_at
+        OR ((NEW.acceptance_receipt_sha256 IS NOT OLD.acceptance_receipt_sha256 OR NEW.acceptance_receipt_json IS NOT OLD.acceptance_receipt_json)
+          AND NOT (OLD.status='held' AND NEW.status='accepted' AND OLD.acceptance_receipt_sha256 IS NULL
+            AND OLD.acceptance_receipt_json IS NULL AND NEW.acceptance_receipt_sha256 IS NOT NULL AND NEW.acceptance_receipt_json IS NOT NULL))
+      BEGIN SELECT RAISE(ABORT,'Viewer source snapshot payload is immutable'); END;
+    CREATE TRIGGER viewer_source_snapshots_lifecycle_guard BEFORE UPDATE ON viewer_source_snapshots
+      WHEN NOT (
+        (OLD.status='held' AND NEW.status='accepted' AND OLD.acceptance_receipt_sha256 IS NULL
+          AND NEW.acceptance_receipt_sha256 IS NOT NULL AND length(NEW.acceptance_receipt_sha256)=64
+          AND NEW.acceptance_receipt_sha256 NOT GLOB '*[^a-f0-9]*'
+          AND OLD.acceptance_receipt_json IS NULL AND NEW.acceptance_receipt_json IS NOT NULL
+          AND OLD.accepted_at IS NULL AND NEW.accepted_at IS NOT NULL AND NEW.released_at IS NULL)
+        OR
+        (OLD.status='accepted' AND NEW.status='released' AND OLD.acceptance_receipt_sha256 IS NOT NULL
+          AND NEW.acceptance_receipt_sha256 IS OLD.acceptance_receipt_sha256
+          AND NEW.acceptance_receipt_json IS OLD.acceptance_receipt_json
+          AND NEW.accepted_at IS OLD.accepted_at AND OLD.released_at IS NULL AND NEW.released_at IS NOT NULL)
+      )
+      BEGIN SELECT RAISE(ABORT,'invalid Viewer source snapshot lifecycle transition'); END;
+    CREATE TRIGGER viewer_source_snapshots_no_delete BEFORE DELETE ON viewer_source_snapshots
+      BEGIN SELECT RAISE(ABORT,'Viewer source snapshot identifiers are never reusable'); END;
+  `},
 ];
 
 function applyMigrations(database) {

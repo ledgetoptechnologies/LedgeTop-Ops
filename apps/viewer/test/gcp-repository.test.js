@@ -66,6 +66,13 @@ test('retained raw GCP source blocks dataset, task, project trash and dataset pu
   });
   const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Retained GCP task'});
   assert.ok(set.id);
+  assert.equal(gcp.deleteSet(set.id),true);
+  assert.equal(gcp.getSet(set.id),null);
+  const retained=database.prepare('SELECT dataset_file_id,sha256,byte_size,retention_reason FROM retained_dataset_files WHERE dataset_file_id=?').get('gcp-file');
+  assert.equal(retained.dataset_file_id,'gcp-file');
+  assert.equal(retained.sha256,GCP_SOURCE_SHA);
+  assert.equal(retained.byte_size,Buffer.byteLength(GCP_SOURCE));
+  assert.equal(retained.retention_reason,'gcp_source');
   assert.equal(processing.beginTrashMutation(dataset.id,'ops:retention'),null);
   assert.equal(processing.trashProject(project.id,'ops:retention'),null);
   assert.throws(()=>trashTaskTree(processing,{},task.id,'ops:retention'),{code:'task_not_trashable'});
