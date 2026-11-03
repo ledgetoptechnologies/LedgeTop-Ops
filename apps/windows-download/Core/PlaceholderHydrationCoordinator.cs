@@ -517,7 +517,10 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         }
         var path = Path.Combine(directory, Marker);
         TraceCacheAction(NativeStallTrace.Stage.OwnedMarkerSafeEnter, NativeStallTrace.Stage.OwnedMarkerSafeExit, () => RequireSafe(path));
-        if (!TraceCacheValue(NativeStallTrace.Stage.OwnedMarkerVerifyEnter, NativeStallTrace.Stage.OwnedMarkerVerifyExit, () => File.Exists(path) && new FileInfo(path).Length <= 128 && File.ReadAllText(path) == Owner)) throw new TransferException("Hydration cache is not owned by this application.");
+        if (!TraceCacheValue(NativeStallTrace.Stage.OwnedMarkerVerifyEnter, NativeStallTrace.Stage.OwnedMarkerVerifyExit, () =>
+            TraceCacheValue(NativeStallTrace.Stage.OwnedVerifyExistsEnter, NativeStallTrace.Stage.OwnedVerifyExistsExit, () => File.Exists(path)) &&
+            TraceCacheValue(NativeStallTrace.Stage.OwnedVerifyLengthEnter, NativeStallTrace.Stage.OwnedVerifyLengthExit, () => new FileInfo(path).Length) <= 128 &&
+            TraceCacheValue(NativeStallTrace.Stage.OwnedVerifyReadEnter, NativeStallTrace.Stage.OwnedVerifyReadExit, () => File.ReadAllText(path)) == Owner)) throw new TransferException("Hydration cache is not owned by this application.");
 #else
         RequireSafe(directory);
         if (!Directory.Exists(directory)) {

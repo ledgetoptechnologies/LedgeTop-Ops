@@ -27,6 +27,8 @@ internal static class NativeStallTrace
         OwnedMarkerOpenEnter, OwnedMarkerOpenExit, OwnedMarkerWriteEnter, OwnedMarkerWriteExit,
         OwnedMarkerFlushEnter, OwnedMarkerFlushExit, OwnedMarkerSafeEnter, OwnedMarkerSafeExit,
         OwnedMarkerVerifyEnter, OwnedMarkerVerifyExit,
+        OwnedVerifyExistsEnter, OwnedVerifyExistsExit, OwnedVerifyLengthEnter, OwnedVerifyLengthExit,
+        OwnedVerifyReadEnter, OwnedVerifyReadExit,
         CacheEntryLeaseEnter, CacheEntryLeaseAcquired,
         CacheReserveEnter, CacheReserveAcquired, CacheReleaseEnter, CacheReleaseExit,
         CacheDownloadEnter, CacheDownloadExit, CacheVerifyEnter, CacheVerifyExit,
