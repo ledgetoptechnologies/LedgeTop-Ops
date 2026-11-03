@@ -33,6 +33,8 @@ internal sealed class ExperimentalReservationOwner
     internal static ManualResetEventSlim? ReceiptQuotaEnteredTestSignal, ReceiptQuotaReleaseTestSignal;
     internal static string? ReceiptQuotaFailureStageTestHook;
     internal static object? ReceiptQuotaFailureTokenTestHook;
+    internal static bool ReceiptMarkerFailureTestHook;
+    internal static object? ReceiptMarkerFailureTokenTestHook;
     private readonly long growth;
     internal long Growth { get { lock (gate) { if (finished || uncertain) throw new IOException("Reservation owner unavailable."); return growth; } } }
     internal static int RetainedCount { get { lock (RegistryGate) return Registry.Count + Receipts.Count; } }
@@ -45,7 +47,8 @@ internal sealed class ExperimentalReservationOwner
         private ExperimentalEntryLease? heldOwnedEntry;
         private SafeFileHandle? uncertainQuota;
         private ExperimentalOwnedStream.Identity quotaIdentity;
-        private object? injectedQuotaToken;
+        private object? injectedQuotaToken, injectedMarkerToken;
+        private string? injectedMarkerDirectory;
         private bool active, uncertain, executing;
         internal LeaseReceipt(string root, string key, object authority) {
             if (!ReferenceEquals(authority, ReceiptAttachAuthority)) throw new InvalidOperationException("Receipt authority invalid.");
@@ -65,8 +68,16 @@ internal sealed class ExperimentalReservationOwner
             }
         }
         internal void ValidateEntry(string root, string key) => Execute(root, key, () => true);
-        internal long AccountMarker(string root, string key, string directory) =>
-            Execute(root, key, () => heldLease!.ExperimentalMarkers.AccountMarker(Path.Combine(directory, ".verified-hydration-owner")));
+        internal long AccountMarker(string root, string key, string directory) => Execute(root, key, () => {
+            try {
+                var length = heldLease!.ExperimentalMarkers.AccountMarker(Path.Combine(directory, ".verified-hydration-owner"));
+                if (ReceiptMarkerFailureTestHook) {
+                    injectedMarkerToken = ReceiptMarkerFailureTokenTestHook; injectedMarkerDirectory = Path.GetFullPath(directory);
+                    throw new IOException("Injected receipt marker failure.");
+                }
+                return length;
+            } catch { uncertain = true; throw; }
+        });
         internal long AccountMarkerUnderQuota(string root, string key, string directory, CancellationToken token = default) => Execute(root, key, () => {
             long result = 0;
             HydrationQuotaGate.Run(heldLease!.Quota, () => {
@@ -89,6 +100,18 @@ internal sealed class ExperimentalReservationOwner
             }, token);
             return result;
         });
+        internal void SettleInjectedMarkerFailureForTest(object token) {
+            lock (gate) {
+                if (!active || !uncertain || !ReferenceEquals(injectedMarkerToken, token) || token is null || ReceiptMarkerFailureTestHook ||
+                    injectedMarkerDirectory is null || uncertainQuota is not null || heldLease is null || heldOwnedEntry is null)
+                    throw new InvalidOperationException("Only an injected marker failure can be settled.");
+                heldLease.RunExperimentalForEntry(root, key, () => {
+                    heldOwnedEntry.Validate();
+                    heldLease.ExperimentalMarkers.ValidateExisting(injectedMarkerDirectory, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+                    injectedMarkerDirectory = null; injectedMarkerToken = null; uncertain = false;
+                });
+            }
+        }
         private void InjectQuotaFailureForTest(string stage) {
             if (ReceiptQuotaFailureStageTestHook != stage) return;
             injectedQuotaToken = ReceiptQuotaFailureTokenTestHook;

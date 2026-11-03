@@ -266,7 +266,8 @@ internal static class ExperimentalColdDownloaderTests
     internal static async Task ReservationCloseChildAsync(string root, string stage)
     {
         if (!Path.IsPathFullyQualified(root) || root.StartsWith(@"\\", StringComparison.Ordinal) || !Directory.Exists(root) ||
-            stage is not ("record" or "directory" or "entry" or "lease")) throw new IOException("Synthetic teardown input invalid.");
+            stage is not ("record" or "directory" or "entry" or "lease" or "markerforeign")) throw new IOException("Synthetic teardown input invalid.");
+        if (stage == "markerforeign") { await MarkerForeignCloseChildAsync(root); return; }
         var scope = new string('a', 64); var key = new string('b', 64);
         var entryDir = Path.Combine(root, scope, key); Directory.CreateDirectory(entryDir);
         var reservationDir = Path.Combine(root, ".hydration-reservations-v2"); Directory.CreateDirectory(reservationDir);
@@ -293,6 +294,34 @@ internal static class ExperimentalColdDownloaderTests
         AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock"));
         if (stage != "lease") AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
         // Intentionally retain the owner until this synthetic child exits.
+    }
+    private static async Task MarkerForeignCloseChildAsync(string root)
+    {
+        var scope = new string('a', 64); var key = new string('b', 64); var entryDir = Path.Combine(root, scope, key); Directory.CreateDirectory(entryDir);
+        var reservationDir = Path.Combine(root, ".hydration-reservations-v2"); Directory.CreateDirectory(reservationDir);
+        File.WriteAllBytes(Path.Combine(root, ".verified-hydration-owner"), "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+        File.WriteAllBytes(Path.Combine(reservationDir, ".verified-hydration-owner"), "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+        var foreignDir = Path.Combine(root, "foreign"); Directory.CreateDirectory(foreignDir);
+        var foreign = Path.Combine(foreignDir, ".verified-hydration-owner"); File.WriteAllBytes(foreign, Foreign);
+        HydrationCacheConcurrency.Lease? admission = await HydrationCacheConcurrency.AcquireAsync(root, scope + key, CancellationToken.None);
+        admission.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate);
+        ExperimentalEntryLease? entry = ExperimentalEntryLease.Open(admission, root, scope, key); var alias = admission; var gate = admission.Quota;
+        var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = scope, Entry = key, Growth = Spec.Length + Downloader.HydrationStateGrowthBudget(Spec) + 1024 });
+        ExperimentalReservationOwner? owner = null; ExperimentalReservationOwner.LeaseReceipt? receipt = null;
+        alias.RunExperimentalForRoot(root, () => HydrationQuotaGate.Run(gate, () => {
+            using var quota = new FileStream(Path.Combine(root, ".hydration-quota-v2.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            owner = ExperimentalReservationOwner.CreateWithOwnedEntry(root, scope, key, bytes, Spec, ref admission, ref entry, quota);
+        }, CancellationToken.None));
+        owner!.RunWithLeaseForTest(() => HydrationQuotaGate.Run(gate, () => {
+            using var quota = new FileStream(Path.Combine(root, ".hydration-quota-v2.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            receipt = owner.ReleaseAndReturn(quota);
+        }, CancellationToken.None));
+        var rejected = false; try { _ = receipt!.AccountMarker(root, scope + key, foreignDir); } catch (IOException) { rejected = true; } Check(rejected);
+        rejected = false; try { receipt!.Dispose(); } catch (IOException) { rejected = true; } Check(rejected);
+        rejected = false; try { receipt!.SettleInjectedMarkerFailureForTest(new object()); } catch (InvalidOperationException) { rejected = true; } Check(rejected);
+        Check(File.ReadAllBytes(foreign).SequenceEqual(Foreign) && ExperimentalReservationOwner.RetainedCount == 1);
+        AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock")); AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
+        // A real foreign marker is not auto-settled; retain this synthetic child until it exits.
     }
     private static async Task RunReservationCloseChildAsync(string root, string stage)
     {
@@ -720,7 +749,7 @@ internal static class ExperimentalColdDownloaderTests
                 AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true);
             } finally { entry?.Dispose(); admission?.Dispose(); }
         });
-        foreach (var stage in new[] { "record", "directory", "entry", "lease" }) await WithFixture(async fixture => {
+        foreach (var stage in new[] { "record", "directory", "entry", "lease", "markerforeign" }) await WithFixture(async fixture => {
             var root = Path.Combine(fixture.Path, "teardown"); Directory.CreateDirectory(root);
             await RunReservationCloseChildAsync(root, stage);
             AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true);
@@ -950,6 +979,15 @@ internal static class ExperimentalColdDownloaderTests
                     AssertOtherProcessOpen(Path.Combine(root, ".hydration-quota-v2.lock"), true);
                 }
                 Check(heldReceipt.AccountMarker(root, scope + key, root) == System.Text.Encoding.UTF8.GetByteCount("LedgeTop.VerifiedHydration/1\n"));
+                var markerToken = new object(); var markerInjected = false;
+                ExperimentalReservationOwner.ReceiptMarkerFailureTestHook = true; ExperimentalReservationOwner.ReceiptMarkerFailureTokenTestHook = markerToken;
+                try { _ = heldReceipt.AccountMarker(root, scope + key, root); } catch (IOException error) when (error.Message == "Injected receipt marker failure.") { markerInjected = true; }
+                finally { ExperimentalReservationOwner.ReceiptMarkerFailureTestHook = false; ExperimentalReservationOwner.ReceiptMarkerFailureTokenTestHook = null; }
+                Check(markerInjected && ExperimentalReservationOwner.RetainedCount == 1);
+                AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock")); AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
+                rejected = false; try { heldReceipt.Dispose(); } catch (IOException) { rejected = true; } Check(rejected);
+                rejected = false; try { heldReceipt.SettleInjectedMarkerFailureForTest(new object()); } catch (InvalidOperationException) { rejected = true; } Check(rejected);
+                heldReceipt.SettleInjectedMarkerFailureForTest(markerToken); heldReceipt.ValidateEntry(root, scope + key);
                 var exposed = typeof(ExperimentalReservationOwner.LeaseReceipt).GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly).Where(method => method.IsAssembly);
                 Check(exposed.All(method => (method.ReturnType == typeof(void) || method.ReturnType == typeof(long)) && method.GetParameters().All(parameter => !typeof(Delegate).IsAssignableFrom(parameter.ParameterType))));
                 var entered = new ManualResetEventSlim(); var release = new ManualResetEventSlim(); var disposing = new ManualResetEventSlim();
