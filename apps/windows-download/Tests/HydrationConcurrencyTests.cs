@@ -22,6 +22,7 @@ internal static class HydrationConcurrencyTests
         ("custom-source admission drains active slots and cancels queued exclusive requests", UnknownDrain),
         ("custom admission releases cancelled waiters and completes other queued requests", UnknownWaiters),
         ("quota timeout retains exact reservation and retry safely recovers", ReservationReleaseTimeout),
+        ("active reservation survives queued same-entry hydration and eviction while legacy lease remains held", ActiveReservationExcludesStaleRemoval),
 #endif
         ("hydration concurrency shares four distinct slots across coordinators and cancels queued work", Distinct),
         ("hydration concurrency excludes duplicate entries but independently authorizes and settles sinks", SameEntry),
@@ -44,6 +45,42 @@ internal static class HydrationConcurrencyTests
     private static async Task Cancelled(Task task) { try { await task.WaitAsync(TimeSpan.FromSeconds(5)); } catch (OperationCanceledException) { return; } throw new InvalidOperationException("Expected cancellation."); }
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 #if LEDGETOP_CACHE_RACE_TEST
+    private static async Task ActiveReservationExcludesStaleRemoval()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var f = new Fixture(); using var other = f.Coordinator();
+        var reached = Signal(); using var resume = new ManualResetEventSlim();
+        using var cancelHydration = new CancellationTokenSource(); using var cancelEviction = new CancellationTokenSource();
+        PlaceholderHydrationCoordinator.BeforeReservationReleaseTestHook = () => {
+            reached.TrySetResult(); if (!resume.Wait(TimeSpan.FromSeconds(20))) throw new TimeoutException();
+        };
+        var first = Task.Run(() => f.Run(0)); Task? second = null, eviction = null;
+        var root = Path.Combine(f.Root, "verified-hydration-v1"); var id = Identity(0);
+        var reservation = Path.Combine(root, ".hydration-reservations-v2", id.ScopeKey + "-" + id.CacheKey + ".json");
+        try {
+            await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Check(File.Exists(reservation)); var bytes = File.ReadAllBytes(reservation);
+            second = f.Run(0, other, token: cancelHydration.Token);
+            eviction = other.EvictVerifiedCacheAsync(id, cancelEviction.Token);
+            Check(!second.IsCompleted && !eviction.IsCompleted);
+            Check(await LegacyChild(Path.Combine(root, ".hydration-cache.lock"), "ReadWrite") == 17);
+            Check(File.ReadAllBytes(reservation).SequenceEqual(bytes));
+            cancelHydration.Cancel(); cancelEviction.Cancel();
+            await Cancelled(second); await Cancelled(eviction);
+            Check(File.ReadAllBytes(reservation).SequenceEqual(bytes));
+            PlaceholderHydrationCoordinator.BeforeReservationReleaseTestHook = null;
+            resume.Set(); await first.WaitAsync(TimeSpan.FromSeconds(10));
+            Check(!File.Exists(reservation));
+            Check(await LegacyChild(Path.Combine(root, ".hydration-cache.lock"), "ReadWrite") == 0);
+            await f.Run(0, other); // normal cache hit remains usable after teardown
+        } finally {
+            PlaceholderHydrationCoordinator.BeforeReservationReleaseTestHook = null;
+            cancelHydration.Cancel(); cancelEviction.Cancel(); resume.Set();
+            if (second is not null) { try { await second.WaitAsync(TimeSpan.FromSeconds(10)); } catch (OperationCanceledException) { } }
+            if (eviction is not null) { try { await eviction.WaitAsync(TimeSpan.FromSeconds(10)); } catch (OperationCanceledException) { } }
+            await first.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+    }
     private static async Task ReservationReleaseTimeout()
     {
         using var f = new Fixture(); var reached = Signal(); using var resume = new ManualResetEventSlim();
