@@ -6,6 +6,7 @@ internal static class HydrationCacheConcurrency
 {
 #if LEDGETOP_CACHE_RACE_TEST
     internal static Action<string>? BeforeEntryWaitTestHook;
+    internal static Action? BeforeLegacyAcquireTestHook;
 #endif
     private sealed class Entry { internal readonly SemaphoreSlim Gate = new(1, 1); internal int References; }
     internal const int Capacity = 4;
@@ -28,10 +29,10 @@ internal static class HydrationCacheConcurrency
     internal sealed class Lease : IDisposable
     {
         private Action? release;
+        private readonly object leaseGate = new();
         internal object Quota { get; }
 #if LEDGETOP_CACHE_RACE_TEST
         private readonly Func<ExperimentalRootMarkerOwner> markerOwner;
-        private readonly object experimentalLeaseGate = new();
         internal sealed class MarkerFacade(Lease lease)
         {
             internal void ValidateExisting(string directory, string name, byte[] expected) =>
@@ -40,10 +41,10 @@ internal static class HydrationCacheConcurrency
         }
         private void UseExperimentalMarkers(Action<ExperimentalRootMarkerOwner> operation)
         {
-            lock (experimentalLeaseGate) { ObjectDisposedException.ThrowIf(release is null, this); operation(markerOwner()); }
+            lock (leaseGate) { ObjectDisposedException.ThrowIf(release is null, this); operation(markerOwner()); }
         }
         internal MarkerFacade ExperimentalMarkers {
-            get { lock (experimentalLeaseGate) { ObjectDisposedException.ThrowIf(release is null, this); _ = markerOwner(); return new(this); } }
+            get { lock (leaseGate) { ObjectDisposedException.ThrowIf(release is null, this); _ = markerOwner(); return new(this); } }
         }
 #endif
         private readonly Action<string, FileMode> acquireLegacy;
@@ -56,14 +57,16 @@ internal static class HydrationCacheConcurrency
             this.markerOwner = markerOwner;
 #endif
         }
-        internal void AcquireExclusiveLegacy(string path, FileMode mode) => acquireLegacy(path, mode);
-        public void Dispose() {
+        internal void AcquireExclusiveLegacy(string path, FileMode mode) {
+            lock (leaseGate) {
+                ObjectDisposedException.ThrowIf(release is null, this);
 #if LEDGETOP_CACHE_RACE_TEST
-            lock (experimentalLeaseGate) Interlocked.Exchange(ref release, null)?.Invoke();
-#else
-            Interlocked.Exchange(ref release, null)?.Invoke();
+                BeforeLegacyAcquireTestHook?.Invoke();
 #endif
+                acquireLegacy(path, mode);
+            }
         }
+        public void Dispose() { lock (leaseGate) Interlocked.Exchange(ref release, null)?.Invoke(); }
     }
     internal static async Task<Lease> AcquireAsync(string root, string key, CancellationToken token, bool exclusive = false, TimeSpan? testTimeout = null)
     {

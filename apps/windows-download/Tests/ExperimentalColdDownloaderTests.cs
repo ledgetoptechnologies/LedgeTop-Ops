@@ -13,7 +13,8 @@ internal static class ExperimentalColdDownloaderTests
     private static readonly byte[] Foreign = "do-not-replace"u8.ToArray();
     private static readonly Uri Origin = new("https://experimental.example.invalid");
     private static readonly ConcurrentDictionary<Guid, Process> OwnedObservers = new();
-    private static int PendingOwnedResources() => ExperimentalOwnedStream.QuarantinedCountForTest + OwnedObservers.Count;
+    private static readonly ConcurrentBag<object> UncertainTestResources = new();
+    private static int PendingOwnedResources() => ExperimentalOwnedStream.QuarantinedCountForTest + OwnedObservers.Count + UncertainTestResources.Count;
     private static DownloadSpec Spec => new("synthetic-only", new Uri(Origin, "/data"), "output.bin", Content.Length, "\"v1\"", Convert.ToHexStringLower(SHA256.HashData(Content)));
     private static void Check(bool value) { if (!value) throw new IOException("Experimental cold download assertion failed."); }
     private static (ulong Volume, Guid Id) PhysicalId(string path)
@@ -425,7 +426,7 @@ internal static class ExperimentalColdDownloaderTests
             var second = await HydrationCacheConcurrency.AcquireAsync(root, "two", CancellationToken.None);
             first.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate);
             var facade = first.ExperimentalMarkers; var other = second.ExperimentalMarkers;
-            using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim(); using var disposing = new ManualResetEventSlim();
+            var entered = new ManualResetEventSlim(); var release = new ManualResetEventSlim(); var disposing = new ManualResetEventSlim();
             Task? create = null; Task? close = null;
             try {
                 ExperimentalRootMarkerOwner.AfterCreateTestHook = () => { entered.Set(); if (!release.Wait(TimeSpan.FromSeconds(10))) throw new IOException("Synthetic lease barrier timed out."); };
@@ -437,11 +438,44 @@ internal static class ExperimentalColdDownloaderTests
                 var rejected = false; try { facade.ValidateExisting(root, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray()); } catch (ObjectDisposedException) { rejected = true; }
                 Check(rejected); rejected = false;
                 try { facade.CreateNew(root); } catch (ObjectDisposedException) { rejected = true; }
-                Check(rejected); other.ValidateExisting(root, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+                Check(rejected); rejected = false;
+                var detached = Path.Combine(root, "detached.lock");
+                try { first.AcquireExclusiveLegacy(detached, FileMode.OpenOrCreate); } catch (ObjectDisposedException) { rejected = true; }
+                Check(rejected && !File.Exists(detached));
+                other.ValidateExisting(root, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
             } finally {
                 release.Set(); ExperimentalRootMarkerOwner.AfterCreateTestHook = null;
-                if (create is not null && close is not null) await Task.WhenAll(create, close).WaitAsync(TimeSpan.FromSeconds(10));
-                first.Dispose(); second.Dispose();
+                var pending = new[] { create, close }.Where(task => task is not null).Cast<Task>().ToArray();
+                try { await Task.WhenAll(pending).WaitAsync(TimeSpan.FromSeconds(10)); }
+                finally {
+                    if (pending.All(task => task.IsCompleted)) { try { try { first.Dispose(); } finally { second.Dispose(); } } finally { entered.Dispose(); release.Dispose(); disposing.Dispose(); } }
+                    else { UncertainTestResources.Add((first, second, pending, entered, release, disposing)); Console.Error.WriteLine("Synthetic lease test resources remain uncertain; preserve fixture."); }
+                }
+            }
+        });
+        await WithFixture(async fixture => {
+            var root = Path.Combine(fixture.Path, "legacy-race"); Directory.CreateDirectory(root);
+            var lease = await HydrationCacheConcurrency.AcquireAsync(root, "one", CancellationToken.None);
+            var entered = new ManualResetEventSlim(); var release = new ManualResetEventSlim(); var disposing = new ManualResetEventSlim();
+            Task? acquisition = null; Task? close = null;
+            try {
+                HydrationCacheConcurrency.BeforeLegacyAcquireTestHook = () => { entered.Set(); if (!release.Wait(TimeSpan.FromSeconds(10))) throw new IOException("Synthetic legacy barrier timed out."); };
+                acquisition = Task.Run(() => lease.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate));
+                Check(entered.Wait(TimeSpan.FromSeconds(5)));
+                close = Task.Run(() => { disposing.Set(); lease.Dispose(); });
+                Check(disposing.Wait(TimeSpan.FromSeconds(5)) && !close.Wait(TimeSpan.FromMilliseconds(150)));
+                release.Set(); await Task.WhenAll(acquisition, close).WaitAsync(TimeSpan.FromSeconds(10));
+                var refused = false; try { lease.AcquireExclusiveLegacy(Path.Combine(root, "detached.lock"), FileMode.OpenOrCreate); } catch (ObjectDisposedException) { refused = true; }
+                Check(refused && !File.Exists(Path.Combine(root, "detached.lock")));
+                AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true);
+            } finally {
+                release.Set(); HydrationCacheConcurrency.BeforeLegacyAcquireTestHook = null;
+                var pending = new[] { acquisition, close }.Where(task => task is not null).Cast<Task>().ToArray();
+                try { await Task.WhenAll(pending).WaitAsync(TimeSpan.FromSeconds(10)); }
+                finally {
+                    if (pending.All(task => task.IsCompleted)) { try { lease.Dispose(); } finally { entered.Dispose(); release.Dispose(); disposing.Dispose(); } }
+                    else { UncertainTestResources.Add((lease, pending, entered, release, disposing)); Console.Error.WriteLine("Synthetic legacy test resources remain uncertain; preserve fixture."); }
+                }
             }
         });
         await AbruptRestartTests();
