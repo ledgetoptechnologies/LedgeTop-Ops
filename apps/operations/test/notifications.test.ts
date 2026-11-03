@@ -452,6 +452,9 @@ describe("client notifications", () => {
       expect(rendered.text).toContain("Location: Near 44.5132, -88.0831");
       expect(rendered.text).toContain(`Status: ${status}`);
       expect(rendered.text).not.toContain("accepted_pending_pa_linkage");
+      expect(rendered.text).not.toContain("LTDS");
+      if (["under_review", "accepted_pending_pa_linkage", "declined"].includes(lifecycle))
+        expect(rendered.text).toContain("Ledge Top");
     }
   });
 
