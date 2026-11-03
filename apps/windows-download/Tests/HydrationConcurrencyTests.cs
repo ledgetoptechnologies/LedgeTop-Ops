@@ -25,6 +25,7 @@ internal static class HydrationConcurrencyTests
 #endif
         ("hydration concurrency shares four distinct slots across coordinators and cancels queued work", Distinct),
         ("hydration concurrency excludes duplicate entries but independently authorizes and settles sinks", SameEntry),
+        ("failed cache preparation releases entry lease before sink failure and permits retry", PreparationFailureReleasesLease),
         ("hydration concurrency reserves capacity before network and releases exact records after cancellation", Quota),
         ("hydration concurrency rejected distinct admissions do not consume marker bytes beyond quota", DeniedMetadata),
         ("hydration concurrency reclaims only exact stale records under the exclusive entry lease", Stale),
@@ -210,6 +211,23 @@ internal static class HydrationConcurrencyTests
         release.SetResult(); await Task.WhenAll(first, duplicate).WaitAsync(TimeSpan.FromSeconds(5));
         Check(f.Source.Downloads == 1 && f.Source.Resolves == 4 && s1.Complete == 1 && s2.Complete == 1 && s1.Failed + s2.Failed == 0);
     }
+    private static async Task PreparationFailureReleasesLease()
+    {
+        using var f = new Fixture(); var id = Identity(0); var observed = false;
+        f.Source.BeforeDownload = (_, _) => Task.FromException(new ResourceUnavailableException());
+        var lockPath = Path.Combine(f.Root, "verified-hydration-v1", id.ScopeKey, id.CacheKey, ".hydration.lock");
+        var sink = new Sink { OnFailure = () => {
+            // The exact physical entry lease must be gone before the failure is
+            // settled, even when preparation exits after acquiring the lease.
+            using var probe = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            observed = true;
+        } };
+        await Reject(f.Run(0, sink: sink));
+        Check(observed && sink.Failed == 1 && sink.Complete == 0);
+        f.Source.BeforeDownload = null;
+        var retried = new Sink(); await f.Run(0, sink: retried).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(retried.Complete == 1 && retried.Failed == 0);
+    }
     private static async Task Quota()
     {
         using var f = new Fixture(); using var small1 = f.Coordinator(18000); using var small2 = f.Coordinator(18000);
@@ -370,10 +388,10 @@ internal static class HydrationConcurrencyTests
     }
     private sealed class Sink : IPlaceholderTransferSink
     {
-        internal int Complete, Failed; internal Func<Task>? BeforeWrite;
+        internal int Complete, Failed; internal Func<Task>? BeforeWrite; internal Action? OnFailure;
         public async Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) { token.ThrowIfCancellationRequested(); if (BeforeWrite is not null) await BeforeWrite(); }
         public Task CompleteAsync(CancellationToken token) { Complete++; return Task.CompletedTask; }
-        public Task FailAsync(string code) { Failed++; return Task.CompletedTask; }
+        public Task FailAsync(string code) { Failed++; OnFailure?.Invoke(); return Task.CompletedTask; }
     }
     private sealed class Source : IQueuedDownloadSource, IDisposable, IHydrationMutationAwareSource
     {

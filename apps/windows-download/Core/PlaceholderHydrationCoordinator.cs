@@ -235,109 +235,117 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                 NativeStallTrace.Record(NativeStallTrace.Stage.AuthorizationExit);
 #endif
-                stage = HydrationStage.CachePreparation; timing?.Enter(HydrationTimingStage.CachePreparation);
-                RequireSafe(root); Owned(root);
-                var quotaLock = Path.Combine(root, ".hydration-cache.lock"); RequireSafe(quotaLock);
-                // One process owns the legacy lease through all its active and queued work;
-                // its two local slots still run concurrently. Other versions/processes refuse.
+                async Task<(FileStream Held, string File)> PrepareCacheAsync() {
+                    stage = HydrationStage.CachePreparation; timing?.Enter(HydrationTimingStage.CachePreparation);
+                    RequireSafe(root); Owned(root);
+                    var quotaLock = Path.Combine(root, ".hydration-cache.lock"); RequireSafe(quotaLock);
+                    // One process owns the legacy lease through all its active and queued work;
+                    // its two local slots still run concurrently. Other versions/processes refuse.
 #if LEDGETOP_NATIVE_DIAGNOSTICS
-                NativeStallTrace.Record(NativeStallTrace.Stage.CacheLegacyLeaseEnter);
+                    NativeStallTrace.Record(NativeStallTrace.Stage.CacheLegacyLeaseEnter);
 #endif
-                admission.AcquireExclusiveLegacy(quotaLock, FileMode.OpenOrCreate);
+                    admission.AcquireExclusiveLegacy(quotaLock, FileMode.OpenOrCreate);
 #if LEDGETOP_NATIVE_DIAGNOSTICS
-                NativeStallTrace.Record(NativeStallTrace.Stage.CacheLegacyLeaseAcquired);
+                    NativeStallTrace.Record(NativeStallTrace.Stage.CacheLegacyLeaseAcquired);
 #endif
-                var scope = Path.Combine(root, identity.ScopeKey);
-                var entry = Path.Combine(scope, identity.CacheKey);
-                WithQuota(admission.Quota, () => {
+                    var scope = Path.Combine(root, identity.ScopeKey);
+                    var entry = Path.Combine(scope, identity.CacheKey);
+                    WithQuota(admission.Quota, () => {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
-                    NativeStallTrace.Record(NativeStallTrace.Stage.CacheDirectoryEnter);
-                    try {
-#endif
-#if LEDGETOP_NATIVE_DIAGNOSTICS
-                    var scopeExists = TraceCacheValue(NativeStallTrace.Stage.CacheScopeCheckEnter, NativeStallTrace.Stage.CacheScopeCheckExit, () => OwnedExisting(scope));
-                    var entryExists = TraceCacheValue(NativeStallTrace.Stage.CacheEntryCheckEnter, NativeStallTrace.Stage.CacheEntryCheckExit, () => OwnedExisting(entry));
-#else
-                    var scopeExists = OwnedExisting(scope); var entryExists = OwnedExisting(entry);
-#endif
-                    if (!scopeExists || !entryExists) {
-                        var directory = Path.Combine(root, ".hydration-reservations-v2");
-                        var reservationDirectoryExists =
-#if LEDGETOP_NATIVE_DIAGNOSTICS
-                            TraceCacheValue(NativeStallTrace.Stage.CacheReservationDirCheckEnter, NativeStallTrace.Stage.CacheReservationDirCheckExit, () => OwnedExisting(directory));
-#else
-                            OwnedExisting(directory);
-#endif
-                        var metadata = checked((scopeExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
-                            (entryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
-                            (reservationDirectoryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)));
-                        RequireCapacity(ReservedBytes(directory), checked(identity.Length + Downloader.HydrationStateGrowthBudget(resolved.Spec) + 1024 + metadata));
-#if LEDGETOP_NATIVE_DIAGNOSTICS
-                        TraceCacheAction(NativeStallTrace.Stage.CacheScopeOwnEnter, NativeStallTrace.Stage.CacheScopeOwnExit, () => Owned(scope));
-                        TraceCacheAction(NativeStallTrace.Stage.CacheEntryOwnEnter, NativeStallTrace.Stage.CacheEntryOwnExit, () => Owned(entry));
-#else
-                        Owned(scope); Owned(entry);
-#endif
-                    }
-#if LEDGETOP_NATIVE_DIAGNOSTICS
-                    } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheDirectoryExit); }
-#endif
-                }, cancellationToken);
-                var lockPath = Path.Combine(entry, ".hydration.lock"); RequireSafe(lockPath);
-#if LEDGETOP_NATIVE_DIAGNOSTICS
-                NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseEnter);
-#endif
-                using var held = await OpenEntryLeaseAsync(lockPath, FileMode.OpenOrCreate, cancellationToken);
-#if LEDGETOP_NATIVE_DIAGNOSTICS
-                NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseAcquired);
-#endif
-                var file = Path.Combine(entry, identity.FileName); RequireSafe(file);
-                if (!File.Exists(file)) {
-                    timing?.SetCacheHit(false);
-                    stage = HydrationStage.Download; timing?.Enter(HydrationTimingStage.Download);
-#if LEDGETOP_NATIVE_DIAGNOSTICS
-                    NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveEnter);
-#endif
-                    var reservation = Reserve(admission.Quota, identity, resolved.Spec, cancellationToken); Exception? primary = null;
-#if LEDGETOP_NATIVE_DIAGNOSTICS
-                    NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveAcquired);
-#endif
-                    try {
-                        string downloaded;
-                        using (DownloadTimingScope.Begin(timing, identity))
-                        using (HydrationMutationScope.Begin((action, waitToken) => WithQuota(admission.Quota, action, waitToken), cancellationToken)) {
-#if LEDGETOP_NATIVE_DIAGNOSTICS
-                            NativeStallTrace.Record(NativeStallTrace.Stage.CacheDownloadEnter);
-                            try {
-#endif
-                            if (source is IVerifiedHydrationDownloadSource verifiedSource) {
-                                freshDownload = await verifiedSource.DownloadForHydrationAsync(resolved.Spec, entry, cancellationToken).ConfigureAwait(false);
-                                downloaded = freshDownload.Path;
-                            } else downloaded = await source.DownloadAsync(resolved.Spec, entry, cancellationToken: cancellationToken);
-#if LEDGETOP_NATIVE_DIAGNOSTICS
-                            } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheDownloadExit); }
-#endif
-                        }
-                        if (Path.GetFullPath(downloaded) != file) throw new TransferException("Hydration source returned an unexpected cache path.");
-                    } catch (Exception error) { primary = error; throw; }
-                    finally {
-                        // A cleanup failure retains the durable record. Never replace caller
-                        // cancellation or the primary source/integrity diagnostic during unwind.
-#if LEDGETOP_NATIVE_DIAGNOSTICS
-                        NativeStallTrace.Record(NativeStallTrace.Stage.CacheReleaseEnter);
+                        NativeStallTrace.Record(NativeStallTrace.Stage.CacheDirectoryEnter);
                         try {
 #endif
-                        if (primary is null) reservation.Dispose();
-                        else { try { reservation.Dispose(); } catch { } }
 #if LEDGETOP_NATIVE_DIAGNOSTICS
-                        } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheReleaseExit); }
+                        var scopeExists = TraceCacheValue(NativeStallTrace.Stage.CacheScopeCheckEnter, NativeStallTrace.Stage.CacheScopeCheckExit, () => OwnedExisting(scope));
+                        var entryExists = TraceCacheValue(NativeStallTrace.Stage.CacheEntryCheckEnter, NativeStallTrace.Stage.CacheEntryCheckExit, () => OwnedExisting(entry));
+#else
+                        var scopeExists = OwnedExisting(scope); var entryExists = OwnedExisting(entry);
 #endif
-                    } // Source writes have fully joined; remaining bytes are now measured on disk.
+                        if (!scopeExists || !entryExists) {
+                            var directory = Path.Combine(root, ".hydration-reservations-v2");
+                            var reservationDirectoryExists =
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                                TraceCacheValue(NativeStallTrace.Stage.CacheReservationDirCheckEnter, NativeStallTrace.Stage.CacheReservationDirCheckExit, () => OwnedExisting(directory));
+#else
+                                OwnedExisting(directory);
+#endif
+                            var metadata = checked((scopeExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
+                                (entryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
+                                (reservationDirectoryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)));
+                            RequireCapacity(ReservedBytes(directory), checked(identity.Length + Downloader.HydrationStateGrowthBudget(resolved.Spec) + 1024 + metadata));
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                            TraceCacheAction(NativeStallTrace.Stage.CacheScopeOwnEnter, NativeStallTrace.Stage.CacheScopeOwnExit, () => Owned(scope));
+                            TraceCacheAction(NativeStallTrace.Stage.CacheEntryOwnEnter, NativeStallTrace.Stage.CacheEntryOwnExit, () => Owned(entry));
+#else
+                            Owned(scope); Owned(entry);
+#endif
+                        }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                        } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheDirectoryExit); }
+#endif
+                    }, cancellationToken);
+                    var lockPath = Path.Combine(entry, ".hydration.lock"); RequireSafe(lockPath);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseEnter);
+#endif
+                    var held = await OpenEntryLeaseAsync(lockPath, FileMode.OpenOrCreate, cancellationToken);
+                    try {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                        NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseAcquired);
+#endif
+                        var file = Path.Combine(entry, identity.FileName); RequireSafe(file);
+                        if (!File.Exists(file)) {
+                            timing?.SetCacheHit(false);
+                            stage = HydrationStage.Download; timing?.Enter(HydrationTimingStage.Download);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                            NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveEnter);
+#endif
+                            var reservation = Reserve(admission.Quota, identity, resolved.Spec, cancellationToken); Exception? primary = null;
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                            NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveAcquired);
+#endif
+                            try {
+                                string downloaded;
+                                using (DownloadTimingScope.Begin(timing, identity))
+                                using (HydrationMutationScope.Begin((action, waitToken) => WithQuota(admission.Quota, action, waitToken), cancellationToken)) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                                    NativeStallTrace.Record(NativeStallTrace.Stage.CacheDownloadEnter);
+                                    try {
+#endif
+                                    if (source is IVerifiedHydrationDownloadSource verifiedSource) {
+                                        freshDownload = await verifiedSource.DownloadForHydrationAsync(resolved.Spec, entry, cancellationToken).ConfigureAwait(false);
+                                        downloaded = freshDownload.Path;
+                                    } else downloaded = await source.DownloadAsync(resolved.Spec, entry, cancellationToken: cancellationToken);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                                    } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheDownloadExit); }
+#endif
+                                }
+                                if (Path.GetFullPath(downloaded) != file) throw new TransferException("Hydration source returned an unexpected cache path.");
+                            } catch (Exception error) { primary = error; throw; }
+                            finally {
+                                // A cleanup failure retains the durable record. Never replace caller
+                                // cancellation or the primary source/integrity diagnostic during unwind.
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                                NativeStallTrace.Record(NativeStallTrace.Stage.CacheReleaseEnter);
+                                try {
+#endif
+                                if (primary is null) reservation.Dispose();
+                                else { try { reservation.Dispose(); } catch { } }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                                } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheReleaseExit); }
+#endif
+                            } // Source writes have fully joined; remaining bytes are now measured on disk.
+                        }
+                        else {
+                            timing?.SetCacheHit(true);
+                            WithQuota(admission.Quota, () => RemoveExactStaleReservation(identity), cancellationToken);
+                        }
+                        return (held, file);
+                    } catch { held.Dispose(); throw; }
                 }
-                else {
-                    timing?.SetCacheHit(true);
-                    WithQuota(admission.Quota, () => RemoveExactStaleReservation(identity), cancellationToken);
-                }
+                var prepared = await PrepareCacheAsync();
+                using var held = prepared.Held;
+                var file = prepared.File;
                 stage = HydrationStage.CacheVerification; timing?.Enter(HydrationTimingStage.CacheVerification);
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                 NativeStallTrace.Record(NativeStallTrace.Stage.CacheVerifyEnter);
