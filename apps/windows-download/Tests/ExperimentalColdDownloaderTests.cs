@@ -120,6 +120,72 @@ internal static class ExperimentalColdDownloaderTests
         Check(request.Headers.Range?.Ranges.Single().From == 4 && request.Headers.IfRange?.EntityTag?.ToString() == Spec.ETag &&
             request.Headers.IfMatch.Single().ToString() == Spec.ETag);
     }
+    internal static async Task CrashChildAsync(string root, string checkpoint)
+    {
+        if (!Path.IsPathFullyQualified(root) || root.StartsWith(@"\\", StringComparison.Ordinal) || !Directory.Exists(root) ||
+            checkpoint is not ("partial" or "state" or "write")) throw new IOException("Invalid synthetic crash fixture.");
+        Downloader.ExperimentalCrashCheckpointTestHook = reached => {
+            if (reached != checkpoint) return;
+            Console.WriteLine("READY " + reached); Console.Out.Flush();
+            Thread.Sleep(Timeout.Infinite);
+        };
+        using var cancel = new CancellationTokenSource();
+        using var downloader = Engine((_, _) => Response(Content, new CancelAfterPrefix(Content, cancel)));
+        await downloader.DownloadAsync(Spec, root);
+        throw new IOException("Crash checkpoint was not reached.");
+    }
+    private static async Task AbruptChildAsync(string root, string checkpoint)
+    {
+        var executable = Environment.ProcessPath ?? throw new IOException("Synthetic test executable unavailable.");
+        var info = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        if (string.Equals(Path.GetFileNameWithoutExtension(executable), "dotnet", StringComparison.OrdinalIgnoreCase))
+            info.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
+        info.ArgumentList.Add("--experimental-crash-child"); info.ArgumentList.Add(root); info.ArgumentList.Add(checkpoint);
+        var process = Process.Start(info) ?? throw new IOException("Synthetic crash child failed to start.");
+        var pid = process.Id; Task? reaper = null; var transferred = false;
+        try {
+            var line = await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(15));
+            Check(line == "READY " + checkpoint && !process.HasExited);
+            process.Kill();
+            var exited = ObserveOrRetain(process, 10000, out reaper); transferred = reaper is not null;
+            if (!exited) throw new IOException("Synthetic crash child remains live; preserve fixture and inspect PID " + pid);
+            Check(process.ExitCode != 0);
+        } catch {
+            if (reaper is null && !process.HasExited) {
+                try { process.Kill(); } catch (InvalidOperationException) { }
+                finally { ObserveOrRetain(process, 10000, out reaper); transferred = reaper is not null; }
+            }
+            throw;
+        } finally { if (!transferred) process.Dispose(); }
+    }
+    private static async Task AbruptRestartTests()
+    {
+        foreach (var checkpoint in new[] { "partial", "state", "write" }) await WithFixture(async root => {
+            await AbruptChildAsync(root.Path, checkpoint);
+            var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single();
+            var bytes = File.ReadAllBytes(part); var id = PhysicalId(part);
+            var states = Directory.EnumerateFiles(root.Path, "*.json", SearchOption.AllDirectories).ToArray();
+            if (checkpoint == "partial") {
+                Check(bytes.Length == 0 && states.Length == 0);
+                using var downloader = Engine((_, _) => throw new IOException("Unexpected network request."));
+                await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
+                Check(PhysicalId(part) == id && File.ReadAllBytes(part).SequenceEqual(bytes));
+                return;
+            }
+            Check(states.Length == 1 && bytes.Length <= 4 && Content.AsSpan(0, bytes.Length).SequenceEqual(bytes));
+            var state = File.ReadAllBytes(states[0]);
+            using var resumed = Engine((request, _) => {
+                if (bytes.Length == 0) { Check(request.Headers.Range is null); return Response(Content); }
+                Check(request.Headers.Range?.Ranges.Single().From == bytes.Length);
+                var response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(Content[bytes.Length..]) };
+                response.Headers.ETag = new EntityTagHeaderValue(Spec.ETag);
+                response.Content.Headers.ContentRange = new ContentRangeHeaderValue(bytes.Length, Content.Length - 1, Content.Length);
+                return response;
+            });
+            var result = await resumed.DownloadAsync(Spec, root.Path);
+            Check(PhysicalId(result) == id && File.ReadAllBytes(result).SequenceEqual(Content) && state.Length > 0);
+        });
+    }
     internal static async Task ResumeChildAsync(string root)
     {
         if (!Path.IsPathFullyQualified(root) || root.StartsWith(@"\\", StringComparison.Ordinal) || !Directory.Exists(root)) throw new IOException("Synthetic child root invalid.");
@@ -203,6 +269,20 @@ internal static class ExperimentalColdDownloaderTests
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         await FixturePolicyTests();
         await ObserverReaperTest();
+        await AbruptRestartTests();
+        await WithFixture(async root => {
+            var etag = "\"" + new string('\\', 510) + "\"";
+            var spec = Spec with { ETag = etag };
+            using var cancel = new CancellationTokenSource();
+            using var downloader = Engine((_, _) => {
+                var response = Response(Content, new CancelAfterPrefix(Content, cancel));
+                response.Headers.ETag = new EntityTagHeaderValue(etag); return response;
+            });
+            try { await downloader.DownloadAsync(spec, root.Path, cancel.Token); throw new IOException("Expected cancellation."); }
+            catch (OperationCanceledException) { }
+            var state = Directory.EnumerateFiles(root.Path, "*.json", SearchOption.AllDirectories).Single();
+            Check(new FileInfo(state).Length <= Downloader.HydrationStateGrowthBudget(spec) - System.Text.Encoding.UTF8.GetByteCount("LedgeTop.WindowsDownload/1\n"));
+        });
         await WithFixture(async root => {
             var calls = 0;
             using var downloader = Engine((request, _) => {

@@ -50,6 +50,7 @@ public sealed class Downloader : IDisposable
     // Synthetic-only gate; the project rejects packaging this symbol.
     internal bool ExperimentalColdOwnedStreamForTest { get; set; }
     internal static Action? BeforeExperimentalPromotionTestHook, BeforeExperimentalHandoffTestHook;
+    internal static Action<string>? ExperimentalCrashCheckpointTestHook;
 #endif
     private sealed record State(int Version, string Descriptor, long Length, string ETag, string Sha256);
 #if LEDGETOP_CACHE_RACE_TEST
@@ -317,10 +318,12 @@ public sealed class Downloader : IDisposable
                 } else {
                     if (File.Exists(partialPath)) throw new TransferException("Unowned experimental partial data cannot be resumed.");
                     experimentalResumeOwner = ExperimentalOwnedStream.CreateNew(partialPath); experimentalCreated = true;
+                    ExperimentalCrashCheckpointTestHook?.Invoke("partial");
                     var bytes = JsonSerializer.SerializeToUtf8Bytes(ExperimentalPins(expected, experimentalResumeOwner.SourceIdentity));
                     if (bytes.Length > JsonSerializer.SerializeToUtf8Bytes(expected).Length) throw new TransferException("Experimental state exceeds its storage budget.");
                     using var stateStream = new FileStream(statePath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
                     stateStream.Write(bytes); stateStream.Flush(true);
+                    ExperimentalCrashCheckpointTestHook?.Invoke("state");
                 }
             }
 #endif
@@ -408,7 +411,7 @@ public sealed class Downloader : IDisposable
                             if (experimentalFullRecovery) {
                                 if (count != 1 || received != 0 || buffer[0] != owner.ReadLastByteForTest())
                                     throw new TransferException("The validation range does not match the preserved partial.");
-                            } else owner.Write(buffer.AsSpan(0, count));
+                            } else { owner.Write(buffer.AsSpan(0, count)); ExperimentalCrashCheckpointTestHook?.Invoke("write"); }
                             received += count; Report(experimentalFullRecovery ? offset : offset + received, DownloadPhase.Receiving);
                         }
                         if (await ReadNetworkAsync(input, buffer.AsMemory(0, 1)) != 0) {
