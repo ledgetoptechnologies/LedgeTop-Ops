@@ -123,17 +123,23 @@ test('source custody migration verifies legacy CSV bytes and holds corrupt histo
   const validDataset=processing.createDataset({projectId:project.id,displayName:'Valid CSV',storageMode:'managed',rootKey:'datasets',relativePath:'valid'});
   const badDataset=processing.createDataset({projectId:project.id,displayName:'Corrupt CSV',storageMode:'managed',rootKey:'datasets',relativePath:'corrupt'});
   const invalidUtf8Dataset=processing.createDataset({projectId:project.id,displayName:'Invalid UTF-8 CSV',storageMode:'managed',rootKey:'datasets',relativePath:'invalid-utf8'});
+  const unicodeDataset=processing.createDataset({projectId:project.id,displayName:'Unicode CSV',storageMode:'managed',rootKey:'datasets',relativePath:'unicode'});
   const finalize=(dataset,id)=>processing.finalizeDataset(dataset.id,[{id,relativePath:'photo.jpg',byteSize:0,sha256:crypto.createHash('sha256').digest('hex'),contentType:'image/jpeg'}],crypto.createHash('sha256').digest('hex'));
-  finalize(validDataset,'valid-image');finalize(badDataset,'bad-image');finalize(invalidUtf8Dataset,'invalid-utf8-image');
+  finalize(validDataset,'valid-image');finalize(badDataset,'bad-image');finalize(invalidUtf8Dataset,'invalid-utf8-image');finalize(unicodeDataset,'unicode-image');
   const importSource=(dataset,content,name,sourceFileId=null)=>gcp.importSet({datasetId:dataset.id,displayName:name,sourceFormat:'generic-csv-v1',sourceFileId,sourceFilename:sourceFileId?'control.csv':null,sourceSha256:crypto.createHash('sha256').update(content).digest('hex'),sourceContent:content,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:test',points:[{externalId:name,label:name,latitude:44.5,longitude:-88.1,elevationM:250,description:null}]});
   const badSource='point_id,label,latitude,longitude,elevation_m\nBAD,Bad,44.5,-88.1,250\n',badSha=crypto.createHash('sha256').update(badSource).digest('hex');
   database.prepare('INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,created_at) VALUES (?,?,?,?,?,?,?)')
     .run('bad-csv',badDataset.id,'control.csv',Buffer.byteLength(badSource),badSha,'text/csv',new Date().toISOString());
   const good=importSource(validDataset,GCP_SOURCE,'Good'),bad=importSource(badDataset,badSource,'Bad','bad-csv');
   const invalidUtf8=importSource(invalidUtf8Dataset,GCP_SOURCE,'Invalid UTF-8');
-  const replacementSha=crypto.createHash('sha256').update('\uFFFD(').digest('hex');
-  database.prepare("UPDATE gcp_sets SET source_content=CAST(x'C328' AS TEXT),source_byte_size=?,source_sha256=? WHERE id=?")
-    .run(Buffer.byteLength('\uFFFD('),replacementSha,invalidUtf8.id);
+  const unicodeSource='\uFEFFpoint_id,label,latitude,longitude\nUNICODE,Café,44.5,-88.1\n';
+  importSource(unicodeDataset,unicodeSource,'Unicode');
+  const replacementSha=crypto.createHash('sha256').update('\uFFFD').digest('hex');
+  // This metadata matches the raw three-byte SQLite TEXT value while its hash
+  // matches Node's replacement-decoded three-byte string. A string-based
+  // migration would accept the wrong bytes under the claimed digest.
+  database.prepare("UPDATE gcp_sets SET source_content=CAST(x'F09080' AS TEXT),source_byte_size=?,source_sha256=? WHERE id=?")
+    .run(3,replacementSha,invalidUtf8.id);
   const largeCorruptSource='x'.repeat(2097153);
   database.prepare('UPDATE gcp_sets SET source_content=? WHERE id=?').run(largeCorruptSource,bad.id);
   database.exec(`DROP TRIGGER retained_gcp_sources_no_insert_replace; DROP TRIGGER retained_gcp_sources_no_update; DROP TRIGGER retained_gcp_sources_no_delete;
@@ -150,12 +156,14 @@ test('source custody migration verifies legacy CSV bytes and holds corrupt histo
   database.exec('PRAGMA foreign_keys=ON');
   database.close();database=openDatabase(file);
   assert.equal(database.prepare('SELECT source_content FROM retained_gcp_sources WHERE dataset_id=?').get(validDataset.id).source_content,GCP_SOURCE);
+  assert.equal(database.prepare('SELECT source_content FROM retained_gcp_sources WHERE dataset_id=?').get(unicodeDataset.id).source_content,unicodeSource,
+    'valid UTF-8 including a BOM and multibyte text is retained byte-for-byte');
   assert.equal(database.prepare('SELECT issue_code FROM retained_gcp_source_issues WHERE gcp_set_id=?').get(bad.id).issue_code,'source_content_checksum_or_size_mismatch');
   assert.equal(database.prepare('SELECT observed_byte_size FROM retained_gcp_source_issues WHERE gcp_set_id=?').get(bad.id).observed_byte_size,2097153);
   const invalidUtf8Issue=database.prepare('SELECT issue_code,observed_byte_size,observed_sha256 FROM retained_gcp_source_issues WHERE gcp_set_id=?').get(invalidUtf8.id);
   assert.equal(invalidUtf8Issue.issue_code,'source_content_checksum_or_size_mismatch');
-  assert.equal(invalidUtf8Issue.observed_byte_size,2);
-  assert.equal(invalidUtf8Issue.observed_sha256,crypto.createHash('sha256').update(Buffer.from([0xc3,0x28])).digest('hex'));
+  assert.equal(invalidUtf8Issue.observed_byte_size,3);
+  assert.equal(invalidUtf8Issue.observed_sha256,crypto.createHash('sha256').update(Buffer.from([0xf0,0x90,0x80])).digest('hex'));
   const recoveredProcessing=new ProcessingRepository(database);
   assert.equal(recoveredProcessing.hasDatasetRetentionHold(validDataset.id),true);
   assert.equal(recoveredProcessing.hasDatasetRetentionHold(badDataset.id),true,'unverified historical bytes remain held for review');
