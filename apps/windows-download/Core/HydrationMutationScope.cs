@@ -7,10 +7,11 @@ internal sealed class HydrationMutationScope : IDisposable
 {
     private static readonly AsyncLocal<HydrationMutationScope?> Current = new();
     private readonly HydrationMutationScope? previous;
-    private readonly Action<Action> gate;
+    private readonly Action<Action, CancellationToken> gate;
     private readonly CancellationToken cancellationToken;
-    private HydrationMutationScope(Action<Action> gate, CancellationToken cancellationToken) { this.gate = gate; this.cancellationToken = cancellationToken; previous = Current.Value; Current.Value = this; }
-    internal static IDisposable Begin(Action<Action> gate, CancellationToken cancellationToken) => new HydrationMutationScope(gate, cancellationToken);
+    private HydrationMutationScope(Action<Action, CancellationToken> gate, CancellationToken cancellationToken) { this.gate = gate; this.cancellationToken = cancellationToken; previous = Current.Value; Current.Value = this; }
+    internal static IDisposable Begin(Action<Action> gate, CancellationToken cancellationToken) => new HydrationMutationScope((action, _) => gate(action), cancellationToken);
+    internal static IDisposable Begin(Action<Action, CancellationToken> gate, CancellationToken cancellationToken) => new HydrationMutationScope(gate, cancellationToken);
 #if LEDGETOP_CACHE_RACE_TEST
     internal static Action? BeforeGateTestHook;
 #endif
@@ -24,7 +25,10 @@ internal sealed class HydrationMutationScope : IDisposable
             NativeStallTrace.Record(NativeStallTrace.Stage.CacheMutationEnter);
             try {
 #endif
-            scope.gate(() => { if (!committedCleanup) { scope.cancellationToken.ThrowIfCancellationRequested(); token.ThrowIfCancellationRequested(); } mutation(); });
+            // Post-commit cleanup deliberately ignores cancellation; failure to
+            // acquire the bounded gate retains its durable cleanup evidence.
+            using var linked = committedCleanup ? null : CancellationTokenSource.CreateLinkedTokenSource(scope.cancellationToken, token);
+            scope.gate(() => { if (!committedCleanup) { scope.cancellationToken.ThrowIfCancellationRequested(); token.ThrowIfCancellationRequested(); } mutation(); }, linked?.Token ?? CancellationToken.None);
 #if LEDGETOP_NATIVE_DIAGNOSTICS
             } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheMutationExit); }
 #endif

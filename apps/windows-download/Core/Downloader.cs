@@ -17,7 +17,7 @@ public sealed record DownloadSpec(string OpaqueIdentity, Uri ContentUri, string 
 public enum DownloadPhase { Receiving, Verifying, Completed }
 /// <summary>Received bytes include an existing partial; integrity is established only at Completed.</summary>
 public sealed record DownloadProgress(long BytesTransferred, long TotalBytes, DownloadPhase Phase);
-public enum TransferFailureReason { Unknown, UnexpectedHttpStatus, InvalidMetadata, Network, Timeout, ResponseRead, ServiceBusy }
+public enum TransferFailureReason { Unknown, UnexpectedHttpStatus, InvalidMetadata, Network, Timeout, ResponseRead, ServiceBusy, LocalCacheBusy }
 public sealed class TransferException : Exception
 {
     public TransferFailureReason Reason { get; }

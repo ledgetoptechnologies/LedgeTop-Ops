@@ -74,11 +74,12 @@ var tests = new (string Name, Func<Task> Run)[] {
     .Concat(PlaceholderHydrationTests.Groups).Concat(CloudFilesProbeTests.Groups)
     .Concat(CloudFilesNativeTransferTests.Groups).Concat(CloudFilesCallbackTests.Groups).Concat(DownloaderInactivityTests.Groups)
     .Concat(CloudFilesConnectionTests.Groups).Concat(ExplorerDemoSourceTests.Groups).Concat(WindowsAppReleaseClientTests.Groups)
-    .Concat(PlaceholderCacheEvictionTests.Groups).Concat(HydrationTimingTests.Groups).Concat(HydrationConcurrencyTests.Groups).Concat(FourSlotAdmissionTests.Groups)
+    .Concat(PlaceholderCacheEvictionTests.Groups).Concat(HydrationTimingTests.Groups).Concat(HydrationConcurrencyTests.Groups).Concat(FourSlotAdmissionTests.Groups).Concat(HydrationQuotaGateTests.Groups)
     .Concat(EmployeeReferenceTransitionPreviewTests.Groups).ToArray();
 if (args.Length == 1 && args[0] == "--reference-transition-preview-only") tests = EmployeeReferenceTransitionPreviewTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--hydration-concurrency-only") tests = HydrationConcurrencyTests.Groups.Concat(FourSlotAdmissionTests.Groups).ToArray();
 if (args.Length == 1 && args[0] == "--four-slot-only") tests = FourSlotAdmissionTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--hydration-quota-gate-only") tests = HydrationQuotaGateTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--queue-source-only") tests = QueuedDownloadSourceTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--company-hydration-authority-only")
     tests = QueuedDownloadSourceTests.Groups.Where(test => test.Name.StartsWith("Company hydration", StringComparison.Ordinal)).ToArray();

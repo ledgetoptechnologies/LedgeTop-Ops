@@ -91,13 +91,13 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                     throw new TransferException("Cache ownership changed during eviction.");
                 // FILE_DISPOSITION_INFO is one BOOLEAN byte, not a four-byte Win32 BOOL.
                 // https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_disposition_info
-                lock (admission.Quota) {
+                HydrationQuotaGate.Run(admission.Quota, () => {
                     using var quota = modernQuota ? new FileStream(newQuota, FileMode.Open, FileAccess.ReadWrite, FileShare.None) : null;
                     RemoveExactStaleReservation(identity); // Offline immutable pins only; no source/auth call.
                     byte disposition = 1;
                     if (!CacheNative.SetFileInformationByHandle(handle, 4, ref disposition, 1))
                         throw new IOException("Verified cache deletion was not confirmed.", System.Runtime.InteropServices.Marshal.GetHRForLastWin32Error());
-                }
+                }, cancellationToken);
             }
         }
     }
@@ -159,7 +159,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                     TraceCacheAction(NativeStallTrace.Stage.CacheEntryOwnEnter, NativeStallTrace.Stage.CacheEntryOwnExit, () => Owned(entry));
                 }
             }
-        });
+        }, token);
         if (stage is "quota-reservation" or "quota-reservation-gap") {
             var lockPath = Path.Combine(entry, ".hydration.lock"); RequireSafe(lockPath);
             NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseEnter);
@@ -170,7 +170,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 // reserving. This must never be used as the production lock order.
                 if (stage == "quota-reservation-gap") { held.Dispose(); held = null; NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticEntryLeaseGapOpen); }
                 NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveEnter);
-                var reservation = Reserve(admission.Quota, identity, spec);
+                var reservation = Reserve(admission.Quota, identity, spec, token);
                 NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveAcquired);
                 if (held is null) {
                     // If reacquisition fails or is cancelled, preserve the record.
@@ -261,7 +261,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                     } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheDirectoryExit); }
 #endif
-                });
+                }, cancellationToken);
                 var lockPath = Path.Combine(entry, ".hydration.lock"); RequireSafe(lockPath);
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                 NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseEnter);
@@ -277,14 +277,14 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                     NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveEnter);
 #endif
-                    var reservation = Reserve(admission.Quota, identity, resolved.Spec); Exception? primary = null;
+                    var reservation = Reserve(admission.Quota, identity, resolved.Spec, cancellationToken); Exception? primary = null;
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                     NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveAcquired);
 #endif
                     try {
                         string downloaded;
                         using (DownloadTimingScope.Begin(timing, identity))
-                        using (HydrationMutationScope.Begin(action => WithQuota(admission.Quota, action), cancellationToken)) {
+                        using (HydrationMutationScope.Begin((action, waitToken) => WithQuota(admission.Quota, action, waitToken), cancellationToken)) {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                             NativeStallTrace.Record(NativeStallTrace.Stage.CacheDownloadEnter);
                             try {
@@ -315,7 +315,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 }
                 else {
                     timing?.SetCacheHit(true);
-                    WithQuota(admission.Quota, () => RemoveExactStaleReservation(identity));
+                    WithQuota(admission.Quota, () => RemoveExactStaleReservation(identity), cancellationToken);
                 }
                 stage = HydrationStage.CacheVerification; timing?.Enter(HydrationTimingStage.CacheVerification);
 #if LEDGETOP_NATIVE_DIAGNOSTICS
@@ -456,12 +456,12 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         private Action? action = release;
         public void Dispose() => Interlocked.Exchange(ref action, null)?.Invoke();
     }
-    private void WithQuota(object gate, Action action)
+    private void WithQuota(object gate, Action action, CancellationToken cancellationToken = default)
     {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         NativeStallTrace.Record(NativeStallTrace.Stage.CacheQuotaEnter);
 #endif
-        lock (gate) {
+        HydrationQuotaGate.Run(gate, () => {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
             NativeStallTrace.Record(NativeStallTrace.Stage.CacheQuotaAcquired);
             try {
@@ -474,9 +474,9 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #if LEDGETOP_NATIVE_DIAGNOSTICS
             } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheQuotaExit); }
 #endif
-        }
+        }, cancellationToken);
     }
-    private IDisposable Reserve(object gate, PlaceholderIdentity identity, DownloadSpec spec)
+    private IDisposable Reserve(object gate, PlaceholderIdentity identity, DownloadSpec spec, CancellationToken cancellationToken)
     {
         var directory = Path.Combine(root, ".hydration-reservations-v2");
         var name = identity.ScopeKey + "-" + identity.CacheKey + ".json";
@@ -495,7 +495,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             Owned(directory);
             using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
             output.Write(bytes); output.Flush(true);
-        });
+        }, cancellationToken);
         return new Release(() => WithQuota(gate, () => DeleteReservation(path, bytes)));
     }
     private void RequireCapacity(long reserved, long growth)
