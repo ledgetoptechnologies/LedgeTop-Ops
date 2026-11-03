@@ -301,7 +301,11 @@ describe("native PA draft notification history — migrated D1", { timeout: 240_
     expect((await contextResponse.json() as { capabilities: { requestV2: boolean } }).capabilities.requestV2).toBe(false);
     const available = await portalRequest(app, "/request-services", {}, disabledEnv);
     expect(available.status).toBe(200);
-    expect(await available.json()).toMatchObject({ services: [], unavailable: [expect.objectContaining({ code: "service_catalog_unavailable" })] });
+    if (_flag === "CLIENT_PORTAL_REQUEST_V2_ENABLED") {
+      expect(await available.json()).toMatchObject({ services: [], inquiryKinds: [], unavailable: [] });
+    } else {
+      expect(await available.json()).toMatchObject({ services: [], unavailable: [expect.objectContaining({ code: "service_catalog_unavailable" })] });
+    }
     const beforeMutation = await requestMutationFootprint(mine);
     const response = await portalRequest(app, "/requests", { method: "POST", headers: {
       Origin: origin, "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID(),
