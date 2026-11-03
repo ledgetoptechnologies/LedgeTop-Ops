@@ -63,6 +63,22 @@ internal static class ExperimentalColdDownloaderTests
             () => { try { root.Dispose(); } catch { Console.Error.WriteLine("Synthetic experimental Downloader cleanup incomplete: " + root.Path); throw; } },
             () => Console.Error.WriteLine("Synthetic experimental Downloader fixture preserved: " + root.Path));
     }
+    private static async Task<T[]> AwaitRaceOrRetain<T>(Task<T>[] tasks, TimeSpan timeout, Action<Task<T>[]> retain)
+    {
+        try { return await Task.WhenAll(tasks).WaitAsync(timeout); }
+        catch { if (tasks.Any(task => !task.IsCompleted)) retain(tasks); throw; }
+    }
+    private static async Task RaceRetentionPolicyTest()
+    {
+        var first = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var second = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<int>[]? retained = null; var timedOut = false;
+        try { await AwaitRaceOrRetain(new[] { first.Task, second.Task }, TimeSpan.FromMilliseconds(20), tasks => retained = tasks); }
+        catch (TimeoutException) { timedOut = true; }
+        Check(timedOut && retained is not null && retained.Length == 2 && ReferenceEquals(retained[0], first.Task) && ReferenceEquals(retained[1], second.Task));
+        first.SetResult(1); second.SetResult(2);
+        Check((await Task.WhenAll(retained!)).SequenceEqual(new[] { 1, 2 }));
+    }
     private static async Task FixturePolicyTests()
     {
         var cleaned = 0; var preserved = 0;
@@ -433,6 +449,7 @@ internal static class ExperimentalColdDownloaderTests
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         await FixturePolicyTests();
+        await RaceRetentionPolicyTest();
         await ObserverReaperTest();
         await ObserverDrainLifecycleTest();
         await WithFixture(async fixture => {
@@ -802,7 +819,8 @@ internal static class ExperimentalColdDownloaderTests
                     } catch (ObjectDisposedException) { return null; } catch (IOException) { return null; }
                 }
                 var first = Task.Run(Attempt); var second = Task.Run(Attempt); start.SetResult();
-                var results = await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(10));
+                var results = await AwaitRaceOrRetain(new[] { first, second }, TimeSpan.FromSeconds(10),
+                    tasks => { UncertainTestResources.Add((fixture, owner!, tasks)); Console.Error.WriteLine("Synthetic return race remains uncertain; fixture and both tasks retained: " + fixture.Path); });
                 Check(results.Count(x => x is not null) == 1); receipt = results.Single(x => x is not null);
                 var recordPath = Path.Combine(reservationDir, scope + "-" + key + ".json"); Check(!File.Exists(recordPath));
                 AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock")); AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
