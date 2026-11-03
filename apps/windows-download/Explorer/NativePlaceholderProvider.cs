@@ -76,7 +76,8 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
             }), notice => Notice("Provider: " + notice), normalizeNativeRanges: true);
         availabilityWorkers = new(files.Keys, InspectAvailability, async (relative, intent, token) => {
             if (intent == AvailabilityIntent.Keep) {
-                try { HydrateCore(relative); }
+                try { await BlockingHydrationCall.RunAsync(() => HydrateCore(relative), token).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
                 catch (Exception error) { throw LocalAvailabilityException.FromException(LocalAvailabilityStage.Hydrate, error); }
                 Notice("Kept on this device: " + Path.GetFileName(relative));
             } else await FreeSpaceCoreAsync(relative, token).ConfigureAwait(false);
