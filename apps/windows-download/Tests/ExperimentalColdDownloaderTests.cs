@@ -120,6 +120,30 @@ internal static class ExperimentalColdDownloaderTests
         Check(request.Headers.Range?.Ranges.Single().From == 4 && request.Headers.IfRange?.EntityTag?.ToString() == Spec.ETag &&
             request.Headers.IfMatch.Single().ToString() == Spec.ETag);
     }
+    internal static async Task ResumeChildAsync(string root)
+    {
+        if (!Path.IsPathFullyQualified(root) || root.StartsWith(@"\\", StringComparison.Ordinal) || !Directory.Exists(root)) throw new IOException("Synthetic child root invalid.");
+        using var downloader = Engine((request, _) => { CheckResumeRequest(request); return PartialResponse(); });
+        var result = await downloader.DownloadAsync(Spec, root);
+        Check(File.ReadAllBytes(result).SequenceEqual(Content) && PendingOwnedResources() == 0);
+    }
+    private static async Task RunResumeChildAsync(string root)
+    {
+        var executable = Environment.ProcessPath ?? throw new IOException("Synthetic test executable unavailable.");
+        var info = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true };
+        if (string.Equals(Path.GetFileNameWithoutExtension(executable), "dotnet", StringComparison.OrdinalIgnoreCase))
+            info.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
+        info.ArgumentList.Add("--experimental-resume-child"); info.ArgumentList.Add(root);
+        var process = Process.Start(info) ?? throw new IOException("Synthetic resume child failed to start."); var pid = process.Id;
+        Task? reaper = null; var transferred = false;
+        try {
+            var exited = ObserveOrRetain(process, 10000, out reaper); transferred = reaper is not null;
+            if (!exited) throw new IOException("Synthetic resume child remains live; preserve fixture and inspect PID " + pid);
+            Check(process.ExitCode == 0);
+        } catch { if (reaper is not null) transferred = true; throw; }
+        finally { if (!transferred) process.Dispose(); }
+        await Task.CompletedTask;
+    }
     private static void AssertOtherProcessCannotOpen(string path)
     {
         var info = new ProcessStartInfo("powershell.exe") { UseShellExecute = false, CreateNoWindow = true };
@@ -221,7 +245,8 @@ internal static class ExperimentalColdDownloaderTests
         await WithFixture(async root => {
             using var downloader = Engine((_, _) => { var response = Response(Content); response.Headers.ETag = new EntityTagHeaderValue("\"wrong\""); return response; });
             await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
-            Check(!File.Exists(Path.Combine(root.Path, "output.bin")) && !Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Any());
+            var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single();
+            Check(!File.Exists(Path.Combine(root.Path, "output.bin")) && new FileInfo(part).Length == 0 && Directory.EnumerateFiles(root.Path, "*.json", SearchOption.AllDirectories).Count() == 1);
         });
         await WithFixture(async root => {
             var empty = Spec with { Length = 0, Sha256 = Convert.ToHexStringLower(SHA256.HashData(Array.Empty<byte>())) };
@@ -283,6 +308,48 @@ internal static class ExperimentalColdDownloaderTests
             using var downloader = Engine((_, _) => { calls++; return PartialResponse(); });
             await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
             Check(calls == 0 && File.ReadAllBytes(part).SequenceEqual(prefix) && File.ReadAllText(state) == "{}");
+        });
+        await WithFixture(async root => {
+            var part = await SeedPartial(root); var originalId = PhysicalId(part); var prefix = File.ReadAllBytes(part);
+            var state = Directory.EnumerateFiles(root.Path, "*.json", SearchOption.AllDirectories).Single(); var stateBytes = File.ReadAllBytes(state);
+            Check(stateBytes.Length <= Downloader.HydrationStateGrowthBudget(Spec) - System.Text.Encoding.UTF8.GetByteCount("LedgeTop.WindowsDownload/1\n"));
+            var saved = part + ".original"; File.Move(part, saved); File.WriteAllBytes(part, prefix); var replacementId = PhysicalId(part); var calls = 0;
+            Check(replacementId != originalId);
+            using var downloader = Engine((_, _) => { calls++; return PartialResponse(); });
+            await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
+            Check(calls == 0 && PhysicalId(part) == replacementId && PhysicalId(saved) == originalId &&
+                File.ReadAllBytes(part).SequenceEqual(prefix) && File.ReadAllBytes(saved).SequenceEqual(prefix) && File.ReadAllBytes(state).SequenceEqual(stateBytes));
+        });
+        foreach (var missingState in new[] { true, false }) {
+            await WithFixture(async root => {
+                var part = await SeedPartial(root); var id = PhysicalId(part); var prefix = File.ReadAllBytes(part);
+                var state = Directory.EnumerateFiles(root.Path, "*.json", SearchOption.AllDirectories).Single(); var stateBytes = File.ReadAllBytes(state);
+                var saved = part + ".saved";
+                if (missingState) File.Delete(state); else File.Move(part, saved);
+                var calls = 0; using var downloader = Engine((_, _) => { calls++; return PartialResponse(); });
+                await ExpectTransferFailure(downloader.DownloadAsync(Spec, root.Path));
+                if (missingState) Check(!File.Exists(state) && PhysicalId(part) == id && File.ReadAllBytes(part).SequenceEqual(prefix));
+                else Check(!File.Exists(part) && PhysicalId(saved) == id && File.ReadAllBytes(saved).SequenceEqual(prefix) && File.ReadAllBytes(state).SequenceEqual(stateBytes));
+                Check(calls == 0);
+            });
+        }
+        await WithFixture(async root => {
+            var part = await SeedPartial(root); var id = PhysicalId(part);
+            await RunResumeChildAsync(root.Path);
+            var result = Path.Combine(root.Path, "output.bin");
+            Check(!File.Exists(part) && PhysicalId(result) == id && File.ReadAllBytes(result).SequenceEqual(Content));
+        });
+        await WithFixture(async root => {
+            using var cancel = new CancellationTokenSource();
+            using (var legacy = new Downloader(new FakeHandler((_, _) => Response(Content, new CancelAfterPrefix(Content, cancel))), [Origin])) {
+                var cancelled = false; try { await legacy.DownloadAsync(Spec, root.Path, cancel.Token); } catch (OperationCanceledException) { cancelled = true; }
+                Check(cancelled);
+            }
+            var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single(); var partId = PhysicalId(part); var prefix = File.ReadAllBytes(part);
+            var state = Directory.EnumerateFiles(root.Path, "*.json", SearchOption.AllDirectories).Single(); var stateBytes = File.ReadAllBytes(state); var calls = 0;
+            using var experimental = Engine((_, _) => { calls++; return PartialResponse(); });
+            await ExpectTransferFailure(experimental.DownloadAsync(Spec, root.Path));
+            Check(calls == 0 && PhysicalId(part) == partId && File.ReadAllBytes(part).SequenceEqual(prefix) && File.ReadAllBytes(state).SequenceEqual(stateBytes));
         });
         await WithFixture(async root => {
             var part = await SeedPartial(root); var prefix = File.ReadAllBytes(part); var extraLink = part + ".link"; var calls = 0;

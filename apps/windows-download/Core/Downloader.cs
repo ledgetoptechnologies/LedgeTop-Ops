@@ -52,6 +52,40 @@ public sealed class Downloader : IDisposable
     internal static Action? BeforeExperimentalPromotionTestHook, BeforeExperimentalHandoffTestHook;
 #endif
     private sealed record State(int Version, string Descriptor, long Length, string ETag, string Sha256);
+#if LEDGETOP_CACHE_RACE_TEST
+    // Compact synthetic-only v2 state fits the existing v1 byte budget. It
+    // binds the next exclusive open to the volume/file ID captured before any
+    // content bytes are written. Legacy v1 state is refused and preserved.
+    private sealed record ExperimentalState(int v, string d, long n, string e, string h, string i);
+    private static string Compact(byte[] bytes) => Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    private static string CompactIdentity(ExperimentalOwnedStream.Identity identity) {
+        var bytes = new byte[24]; System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(bytes, identity.Volume);
+        if (!identity.FileId.TryWriteBytes(bytes.AsSpan(8))) throw new TransferException("Experimental identity is unavailable.");
+        return Compact(bytes);
+    }
+    private static ExperimentalState ExperimentalPins(State state, ExperimentalOwnedStream.Identity identity) =>
+        new(2, Compact(Convert.FromHexString(state.Descriptor)), state.Length, state.ETag,
+            Compact(Convert.FromHexString(state.Sha256)), CompactIdentity(identity));
+    private static ExperimentalState ReadExperimentalState(string path, State expected)
+    {
+        RequireRegularFile(path);
+        var maximum = JsonSerializer.SerializeToUtf8Bytes(expected).Length;
+        using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+        if (input.Length is <= 0 || input.Length > maximum) throw new TransferException("Experimental transfer state is unsupported.");
+        var bytes = new byte[(int)input.Length]; input.ReadExactly(bytes);
+        try {
+            using var document = JsonDocument.Parse(bytes);
+            var keys = new[] { "d", "e", "h", "i", "n", "v" };
+            if (document.RootElement.ValueKind != JsonValueKind.Object || !document.RootElement.EnumerateObject().Select(x => x.Name).Order(StringComparer.Ordinal).SequenceEqual(keys))
+                throw new TransferException("Experimental transfer state is unsupported.");
+            var value = JsonSerializer.Deserialize<ExperimentalState>(bytes) ?? throw new TransferException("Experimental transfer state is unsupported.");
+            if (value.v != 2 || value.d != Compact(Convert.FromHexString(expected.Descriptor)) || value.n != expected.Length || value.e != expected.ETag ||
+                value.h != Compact(Convert.FromHexString(expected.Sha256)) || value.i is null || !Regex.IsMatch(value.i, "\\A[A-Za-z0-9_-]{32}\\z"))
+                throw new TransferException("Experimental transfer state does not match this version.");
+            return value;
+        } catch (JsonException) { throw new TransferException("Experimental transfer state is unsupported."); }
+    }
+#endif
     // Exact serialized state/marker growth for the existing bounded downloader format. The
     // descriptor is always 64 lowercase hex; its value cannot affect its serialized length.
     internal static long HydrationStateGrowthBudget(DownloadSpec spec) => HydrationStateGrowthBudget(spec.Length, spec.ETag, spec.Sha256);
@@ -254,31 +288,52 @@ public sealed class Downloader : IDisposable
         using var commandLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         var expected = new State(1, descriptor, spec.Length, spec.ETag, spec.Sha256.ToLowerInvariant());
         RequireRegularFile(partialPath); RequireRegularFile(statePath);
-        if (File.Exists(statePath)) {
-            if (ReadState(statePath) != expected) throw new TransferException("Transfer metadata does not match this version.");
-        } else {
-            if (File.Exists(partialPath)) throw new TransferException("Unowned partial data cannot be resumed.");
-            using var stateStream = new FileStream(statePath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-            stateStream.Write(JsonSerializer.SerializeToUtf8Bytes(expected)); stateStream.Flush(true);
-        }
 #if LEDGETOP_CACHE_RACE_TEST
+        if (!ExperimentalColdOwnedStreamForTest) {
+#endif
+            if (File.Exists(statePath)) {
+                if (ReadState(statePath) != expected) throw new TransferException("Transfer metadata does not match this version.");
+            } else {
+                if (File.Exists(partialPath)) throw new TransferException("Unowned partial data cannot be resumed.");
+                using var stateStream = new FileStream(statePath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                stateStream.Write(JsonSerializer.SerializeToUtf8Bytes(expected)); stateStream.Flush(true);
+            }
+#if LEDGETOP_CACHE_RACE_TEST
+        }
         ExperimentalOwnedStream? experimentalResumeOwner = null;
-        var experimentalFullRecovery = false;
+        var experimentalFullRecovery = false; var experimentalCreated = false;
 #endif
         try {
+#if LEDGETOP_CACHE_RACE_TEST
+            if (ExperimentalColdOwnedStreamForTest) {
+                if (File.Exists(statePath)) {
+                    var pins = ReadExperimentalState(statePath, expected);
+                    if (!File.Exists(partialPath)) throw new TransferException("Experimental partial is unavailable; state was preserved.");
+                    var length = new FileInfo(partialPath).Length;
+                    if (length > spec.Length) throw new TransferException("Partial data exceeds the trusted length.");
+                    experimentalResumeOwner = ExperimentalOwnedStream.OpenExisting(partialPath, length);
+                    if (pins.i != CompactIdentity(experimentalResumeOwner.SourceIdentity))
+                        throw new TransferException("Experimental partial identity changed; data was preserved.");
+                } else {
+                    if (File.Exists(partialPath)) throw new TransferException("Unowned experimental partial data cannot be resumed.");
+                    experimentalResumeOwner = ExperimentalOwnedStream.CreateNew(partialPath); experimentalCreated = true;
+                    var bytes = JsonSerializer.SerializeToUtf8Bytes(ExperimentalPins(expected, experimentalResumeOwner.SourceIdentity));
+                    if (bytes.Length > JsonSerializer.SerializeToUtf8Bytes(expected).Length) throw new TransferException("Experimental state exceeds its storage budget.");
+                    using var stateStream = new FileStream(statePath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                    stateStream.Write(bytes); stateStream.Flush(true);
+                }
+            }
+#endif
             long offset = File.Exists(partialPath) ? new FileInfo(partialPath).Length : 0;
             if (offset > spec.Length) throw new TransferException("Partial data exceeds the trusted length.");
 #if LEDGETOP_CACHE_RACE_TEST
-            if (ExperimentalColdOwnedStreamForTest && File.Exists(partialPath)) {
-                experimentalFullRecovery = offset == spec.Length;
-                experimentalResumeOwner = ExperimentalOwnedStream.OpenExisting(partialPath, offset);
-            }
+            if (ExperimentalColdOwnedStreamForTest) experimentalFullRecovery = !experimentalCreated && offset == spec.Length;
 #endif
             // A full unpromoted partial may come from cancellation before the overflow probe or an invalid response.
             // Without a durable completed-response receipt, obtain fresh bytes rather than silently accepting it.
             if (File.Exists(partialPath) && offset == spec.Length
 #if LEDGETOP_CACHE_RACE_TEST
-                && !experimentalFullRecovery
+                && !experimentalFullRecovery && !(ExperimentalColdOwnedStreamForTest && experimentalCreated)
 #endif
                 ) {
                 HydrationMutationScope.Run(() => { RequireRegularFile(partialPath); File.Delete(partialPath); }, cancellationToken); offset = 0;
@@ -286,7 +341,7 @@ public sealed class Downloader : IDisposable
             Report(offset, DownloadPhase.Receiving);
             if (offset < spec.Length || !File.Exists(partialPath)
 #if LEDGETOP_CACHE_RACE_TEST
-                || experimentalFullRecovery
+                || experimentalFullRecovery || (ExperimentalColdOwnedStreamForTest && experimentalCreated)
 #endif
                 ) {
                 using var request = new HttpRequestMessage(HttpMethod.Get, spec.ContentUri);
