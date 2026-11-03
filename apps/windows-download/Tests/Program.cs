@@ -5,9 +5,14 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using LedgeTop.WindowsDownload;
 
+if (args.FirstOrDefault() == "--fake-cache-transaction-prototype-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
 if (args.Length == 1 && args[0] == "--synthetic-fifo-admission-only") { await SyntheticFifoAdmissionTests.RunAsync(); return; }
 if (args.Length == 1 && args[0] == "--owned-root-executor-prototype-only") {
     await OwnedRootExecutorPrototypeTests.RunAsync();
+    return;
+}
+if (args.Length == 1 && args[0] == "--fake-cache-transaction-prototype-only") {
+    await FakeCacheTransactionPrototypeTests.RunAsync();
     return;
 }
 #if LEDGETOP_NATIVE_DIAGNOSTICS

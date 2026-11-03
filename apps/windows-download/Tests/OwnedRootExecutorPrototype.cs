@@ -11,6 +11,8 @@ internal sealed class OwnedRootExecutorPrototype
         internal bool Running;
         internal bool Abandoned;
         internal bool Committed;
+        internal SyntheticGeneration? AuthorizedGeneration;
+        internal long AuthorizedVersion;
     }
     internal sealed class Root
     {
@@ -25,20 +27,48 @@ internal sealed class OwnedRootExecutorPrototype
         internal readonly object sync = new();
         internal readonly Dictionary<string, Root> roots = new(StringComparer.OrdinalIgnoreCase);
         internal readonly int maximumRoots, maximumQueuedPerRoot;
+        internal bool stopping;
+        internal readonly TaskCompletionSource drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal Registry(int maximumRoots, int maximumQueuedPerRoot) {
             if (maximumRoots < 1 || maximumQueuedPerRoot < 1) throw new ArgumentOutOfRangeException();
             this.maximumRoots = maximumRoots; this.maximumQueuedPerRoot = maximumQueuedPerRoot;
         }
         internal OwnedRootExecutorPrototype Create() => new(this);
+        internal SyntheticGeneration CreateGeneration() => new(this);
+        internal long ReadGeneration(SyntheticGeneration generation) {
+            lock (sync) { if (!ReferenceEquals(generation.Owner, this)) throw new ArgumentException("Foreign generation."); return generation.Value; }
+        }
+        internal void AdvanceGeneration(SyntheticGeneration generation) {
+            lock (sync) { if (!ReferenceEquals(generation.Owner, this)) throw new ArgumentException("Foreign generation."); checked { generation.Value++; } }
+        }
+        internal void BeginStop() {
+            lock (sync) {
+                stopping = true;
+                foreach (var root in roots.Values) while (root.Queue.First is { } node) {
+                    root.Queue.RemoveFirst(); node.Value.Node = null;
+                    node.Value.Done.TrySetException(new InvalidOperationException("Executor is stopping."));
+                }
+                if (roots.Count == 0) drained.TrySetResult();
+            }
+        }
+        internal Task WaitForDrainAsync(TimeSpan timeout) {
+            if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromMinutes(10)) throw new ArgumentOutOfRangeException(nameof(timeout));
+            lock (sync) { if (!stopping) throw new InvalidOperationException("Stop has not begun."); }
+            return drained.Task.WaitAsync(timeout);
+        }
     }
+    internal sealed class SyntheticGeneration(Registry owner) { internal readonly Registry Owner = owner; internal long Value; }
     internal sealed class SyntheticCounter { internal int Value; }
-    // CommittedPending is neither a cleanup success nor a definitive failure.
-    // This synthetic model does not map it to any Cloud Files status.
+    // Completed means only that the fake delegate returned with its asserted
+    // cleanup receipt; it is not proof that bytes were transferred. Pending is
+    // neither cleanup success nor definitive failure. No Cloud Files mapping.
     internal enum Observation { Completed, CommittedPending, CommittedCleanupUnverified }
-    internal sealed class SyntheticCommitScope(Func<SyntheticCounter, bool> commit) {
+    internal sealed class SyntheticCommitScope(Func<SyntheticCounter, SyntheticGeneration?, long, bool> commit, Func<SyntheticGeneration, long, bool> authorize) {
         // Only a fake in-memory effect is permitted. Never execute arbitrary I/O
         // or native calls while holding the prototype's registry lock.
-        internal bool TryCommit(SyntheticCounter counter) => commit(counter);
+        internal bool TryCommit(SyntheticCounter counter) => commit(counter, null, 0);
+        internal bool TryAuthorize(SyntheticGeneration generation, long version) => authorize(generation, version);
+        internal bool TryCommitAuthorized(SyntheticCounter counter, SyntheticGeneration generation, long version) => commit(counter, generation, version);
     }
     private readonly Registry registry;
     private OwnedRootExecutorPrototype(Registry registry) => this.registry = registry;
@@ -56,6 +86,7 @@ internal sealed class OwnedRootExecutorPrototype
         cancellationToken.ThrowIfCancellationRequested();
         var item = new Item(work); Root root;
         lock (registry.sync) {
+            if (registry.stopping) throw new InvalidOperationException("Executor is stopping.");
             if (!registry.roots.TryGetValue(key, out root!)) {
                 if (registry.roots.Count >= registry.maximumRoots) throw new InvalidOperationException("Root capacity reached.");
                 registry.roots.Add(key, root = new());
@@ -99,13 +130,23 @@ internal sealed class OwnedRootExecutorPrototype
         root.Queue.RemoveFirst(); var item = node.Value; item.Node = null; item.Running = true; root.Running = item;
         _ = Task.Run(async () => {
             Exception? failure = null; var cleaned = false;
-            var scope = new SyntheticCommitScope(counter => {
+            bool Active() => item.Running && !item.Abandoned && !item.Committed && !root.Quarantined && !registry.stopping &&
+                registry.roots.TryGetValue(key, out var current) && ReferenceEquals(root, current) && ReferenceEquals(root.Running, item);
+            var scope = new SyntheticCommitScope((counter, generation, version) => {
                 lock (registry.sync) {
-                    if (counter is null || !item.Running || item.Abandoned || item.Committed || root.Quarantined ||
-                        !registry.roots.TryGetValue(key, out var current) || !ReferenceEquals(root, current) || !ReferenceEquals(root.Running, item)) return false;
+                    if (counter is null || !Active() || (generation is not null && (!ReferenceEquals(generation.Owner, registry) ||
+                        !ReferenceEquals(item.AuthorizedGeneration, generation) || item.AuthorizedVersion != version || generation.Value != version))) return false;
                     checked { counter.Value++; }
                     item.Committed = true;
                     return true;
+                }
+            }, (generation, version) => {
+                lock (registry.sync) {
+                    // A failed new authorization cannot reuse a previously
+                    // accepted synthetic authorization observation.
+                    item.AuthorizedGeneration = null;
+                    if (generation is null || !Active() || !ReferenceEquals(generation.Owner, registry) || generation.Value != version) return false;
+                    item.AuthorizedGeneration = generation; item.AuthorizedVersion = version; return true;
                 }
             });
             try { cleaned = await item.Work(scope).ConfigureAwait(false); } catch (Exception error) { failure = error; }
@@ -122,6 +163,7 @@ internal sealed class OwnedRootExecutorPrototype
                 // the operation and resource cleanup both completed safely.
                 if (cleaned && (root.Quarantined || root.Queue.Count == 0)) registry.roots.Remove(key);
                 else if (!root.Quarantined) StartNextLocked(key, root);
+                if (registry.stopping && registry.roots.Count == 0) registry.drained.TrySetResult();
                 if (!cleaned && failure is null) failure = new InvalidOperationException("Root cleanup is unverified.");
                 if (item.Committed && !cleaned) item.Done.TrySetResult(Observation.CommittedCleanupUnverified);
                 else if (failure is null) item.Done.TrySetResult(Observation.Completed); else item.Done.TrySetException(failure);
