@@ -134,7 +134,7 @@ internal static class ExperimentalColdDownloaderTests
         await downloader.DownloadAsync(Spec, root);
         throw new IOException("Crash checkpoint was not reached.");
     }
-    private static async Task AbruptChildAsync(string root, string checkpoint)
+    private static async Task AbruptChildAsync(string root, string checkpoint, Action? beforeStatus = null)
     {
         var executable = Environment.ProcessPath ?? throw new IOException("Synthetic test executable unavailable.");
         var info = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
@@ -145,14 +145,18 @@ internal static class ExperimentalColdDownloaderTests
         var pid = process.Id; Task? reaper = null; var transferred = false;
         try {
             var line = await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(15));
-            Check(line == "READY " + checkpoint && !process.HasExited);
+            Check(line == "READY " + checkpoint);
+            beforeStatus?.Invoke();
+            Check(!process.HasExited);
             process.Kill();
             var exited = ObserveTransferred(process, 10000, ref reaper, ref transferred);
             if (!exited) throw new IOException("Synthetic crash child remains live; preserve fixture and inspect PID " + pid);
             Check(process.ExitCode != 0);
         } catch {
             try {
-                if (reaper is null && !process.HasExited) {
+                if (reaper is null) {
+                    // Kill is scoped to the Process object we started. Even if it
+                    // already exited or status access fails, observe or retain it.
                     try { process.Kill(); } catch (InvalidOperationException) { }
                     finally { ObserveTransferred(process, 10000, ref reaper, ref transferred); }
                 }
@@ -164,6 +168,14 @@ internal static class ExperimentalColdDownloaderTests
     }
     private static async Task AbruptRestartTests()
     {
+        await WithFixture(async root => {
+            var injected = false;
+            try { await AbruptChildAsync(root.Path, "state", () => throw new IOException("Injected status failure.")); }
+            catch (IOException error) when (error.Message == "Injected status failure.") { injected = true; }
+            Check(injected && PendingOwnedResources() == 0);
+            Check(Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Count() == 1 &&
+                Directory.EnumerateFiles(root.Path, "*.json", SearchOption.AllDirectories).Count() == 1);
+        });
         foreach (var checkpoint in new[] { "partial", "state", "write" }) await WithFixture(async root => {
             await AbruptChildAsync(root.Path, checkpoint);
             var part = Directory.EnumerateFiles(root.Path, "*.part", SearchOption.AllDirectories).Single();
