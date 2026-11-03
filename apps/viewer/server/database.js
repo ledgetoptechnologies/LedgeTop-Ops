@@ -2232,8 +2232,10 @@ const MIGRATIONS = [
       WHEN EXISTS(SELECT 1 FROM retained_gcp_source_issues WHERE gcp_set_id=OLD.id)
       BEGIN SELECT RAISE(ABORT,'GCP source set is held for source-custody review'); END;
   `,after(database){
-    const rows=database.prepare(`SELECT id,dataset_id,source_file_id,source_filename,source_sha256,source_content,source_byte_size,created_at
-      FROM gcp_sets ORDER BY dataset_id,source_sha256,id`).all();
+    const readPage=database.prepare(`SELECT id,dataset_id,source_file_id,source_filename,source_sha256,
+      typeof(source_content) AS content_type,length(CAST(source_content AS BLOB)) AS content_byte_size,source_byte_size,created_at
+      FROM gcp_sets WHERE id>? ORDER BY id LIMIT 100`);
+    const readContent=database.prepare('SELECT source_content FROM gcp_sets WHERE id=?');
     const getFile=database.prepare('SELECT sha256,byte_size FROM dataset_files WHERE id=? AND dataset_id=?');
     const insertSource=database.prepare(`INSERT INTO retained_gcp_sources
       (id,dataset_id,source_file_id,source_filename,sha256,byte_size,source_content,retention_reason,created_at)
@@ -2242,11 +2244,17 @@ const MIGRATIONS = [
       (gcp_set_id,dataset_id,issue_code,expected_sha256,observed_sha256,expected_byte_size,observed_byte_size,observed_file_sha256,observed_file_byte_size,created_at)
       VALUES (?,?,?,?,?,?,?,?,?,?)`);
     const existing=database.prepare('SELECT 1 FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?');
-    for(const row of rows){
-      const content=typeof row.source_content==='string'?row.source_content:null;
-      const observedByteSize=content==null?null:Buffer.byteLength(content,'utf8');
+    let lastId='';
+    while(true){
+      const rows=readPage.all(lastId);
+      if(!rows.length)break;
+      for(const row of rows){
+      lastId=row.id;
+      const observedByteSize=Number.isSafeInteger(row.content_byte_size)?row.content_byte_size:null;
+      const content=row.content_type==='text'&&observedByteSize!==null&&observedByteSize>0&&observedByteSize<=2097152
+        ?readContent.get(row.id)?.source_content:null;
       const observedSha256=content==null?null:crypto.createHash('sha256').update(content,'utf8').digest('hex');
-      if(!content||!Number.isSafeInteger(observedByteSize)||observedByteSize<1||observedByteSize>2097152||observedByteSize!==row.source_byte_size||observedSha256!==row.source_sha256){
+      if(typeof content!=='string'||!Number.isSafeInteger(observedByteSize)||observedByteSize<1||observedByteSize>2097152||observedByteSize!==row.source_byte_size||observedSha256!==row.source_sha256){
         insertIssue.run(row.id,row.dataset_id,'source_content_checksum_or_size_mismatch',row.source_sha256,observedSha256,row.source_byte_size,observedByteSize,null,null,row.created_at);
         continue;
       }
@@ -2260,6 +2268,7 @@ const MIGRATIONS = [
       }
       if(!existing.get(row.dataset_id,row.source_sha256))
         insertSource.run(`retained-gcp-${row.id}`,row.dataset_id,sourceFileId,row.source_filename,row.source_sha256,observedByteSize,content,row.created_at);
+      }
     }
   }},
 ];

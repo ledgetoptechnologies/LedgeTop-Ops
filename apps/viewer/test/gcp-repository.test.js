@@ -129,7 +129,8 @@ test('source custody migration verifies legacy CSV bytes and holds corrupt histo
   database.prepare('INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,created_at) VALUES (?,?,?,?,?,?,?)')
     .run('bad-csv',badDataset.id,'control.csv',Buffer.byteLength(badSource),badSha,'text/csv',new Date().toISOString());
   const good=importSource(validDataset,GCP_SOURCE,'Good'),bad=importSource(badDataset,badSource,'Bad','bad-csv');
-  database.prepare('UPDATE gcp_sets SET source_content=? WHERE id=?').run('corrupt',bad.id);
+  const largeCorruptSource='x'.repeat(2097153);
+  database.prepare('UPDATE gcp_sets SET source_content=? WHERE id=?').run(largeCorruptSource,bad.id);
   database.exec(`DROP TRIGGER retained_gcp_sources_no_insert_replace; DROP TRIGGER retained_gcp_sources_no_update; DROP TRIGGER retained_gcp_sources_no_delete;
     DROP TRIGGER retained_gcp_source_issues_no_insert_replace; DROP TRIGGER retained_gcp_source_issues_no_update; DROP TRIGGER retained_gcp_source_issues_no_delete;
     DROP TRIGGER gcp_sets_source_issue_delete_guard;
@@ -138,6 +139,7 @@ test('source custody migration verifies legacy CSV bytes and holds corrupt histo
   database.close();database=openDatabase(file);
   assert.equal(database.prepare('SELECT source_content FROM retained_gcp_sources WHERE dataset_id=?').get(validDataset.id).source_content,GCP_SOURCE);
   assert.equal(database.prepare('SELECT issue_code FROM retained_gcp_source_issues WHERE gcp_set_id=?').get(bad.id).issue_code,'source_content_checksum_or_size_mismatch');
+  assert.equal(database.prepare('SELECT observed_byte_size FROM retained_gcp_source_issues WHERE gcp_set_id=?').get(bad.id).observed_byte_size,2097153);
   const recoveredProcessing=new ProcessingRepository(database);
   assert.equal(recoveredProcessing.hasDatasetRetentionHold(validDataset.id),true);
   assert.equal(recoveredProcessing.hasDatasetRetentionHold(badDataset.id),true,'unverified historical bytes remain held for review');
@@ -145,7 +147,7 @@ test('source custody migration verifies legacy CSV bytes and holds corrupt histo
   assert.equal(recoveredProcessing.trashProject(project.id,'ops:test'),null);
   const recoveredGcp=new GcpRepository(database);
   assert.throws(()=>recoveredGcp.deleteSet(bad.id),{code:'gcp_source_requires_review'});
-  assert.equal(recoveredGcp.database.prepare('SELECT source_content FROM gcp_sets WHERE id=?').get(bad.id).source_content,'corrupt');
+  assert.equal(recoveredGcp.database.prepare('SELECT length(CAST(source_content AS BLOB)) size FROM gcp_sets WHERE id=?').get(bad.id).size,2097153);
   const repaired=recoveredGcp.importSet({datasetId:badDataset.id,displayName:'Corrected source',sourceFormat:'generic-csv-v1',sourceFileId:'bad-csv',sourceFilename:'control.csv',sourceSha256:badSha,sourceContent:badSource,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:repair',points:[{externalId:'Corrected',label:'Corrected',latitude:44.5,longitude:-88.1,elevationM:250,description:null}]});
   assert.notEqual(repaired.id,bad.id,'reimport does not return a corrupt matching legacy set');
   assert.equal(recoveredGcp.database.prepare('SELECT source_content FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(badDataset.id,badSha).source_content,badSource);
@@ -164,6 +166,17 @@ test('two SQLite writers converge concurrent duplicate source imports on one imm
   assert.equal(database.prepare('SELECT COUNT(*) count FROM gcp_sets WHERE dataset_id=? AND source_file_id=? AND source_sha256=?').get(dataset.id,'gcp-file',GCP_SOURCE_SHA).count,1);
   assert.equal(database.prepare('SELECT COUNT(*) count FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(dataset.id,GCP_SOURCE_SHA).count,1);
   assert.equal(database.prepare('SELECT COUNT(*) count FROM retained_dataset_files WHERE dataset_file_id=?').get('gcp-file').count,1);
+});
+
+test('first GCP import rejects a source-file byte size that differs from verified CSV bytes', (t) => {
+  const {database,processing,dataset}=datasetFixture(t);
+  database.prepare('UPDATE dataset_files SET byte_size=byte_size+1 WHERE id=?').run('gcp-file');
+  const gcp=new GcpRepository(database);
+  assert.throws(()=>gcp.importSet({datasetId:dataset.id,displayName:'Bad metadata',sourceFormat:'generic-csv-v1',sourceFileId:'gcp-file',sourceFilename:'control.csv',
+    sourceSha256:GCP_SOURCE_SHA,sourceContent:GCP_SOURCE,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:test',
+    points:[{externalId:'GCP-01',label:'Target',latitude:44.5,longitude:-88.1,elevationM:243.84,description:null}]}),{code:'invalid_source_file'});
+  assert.equal(database.prepare('SELECT COUNT(*) count FROM gcp_sets WHERE dataset_id=?').get(dataset.id).count,0);
+  assert.equal(database.prepare('SELECT COUNT(*) count FROM retained_gcp_sources WHERE dataset_id=?').get(dataset.id).count,0);
 });
 
 test('image suggestions reuse indexed EXIF GPS and rank distance without claiming visibility', (t) => {

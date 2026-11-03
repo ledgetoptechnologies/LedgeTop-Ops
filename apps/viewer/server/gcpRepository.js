@@ -138,7 +138,7 @@ class GcpRepository {
           bounded(sourceFilename, 240) || null, sourceSha256,sourceContent,sourceByteSize,crs, elevationUnits, createdBy || null, timestamp, timestamp);
       if(sourceFileId){
         const source=this.database.prepare('SELECT id,sha256,byte_size FROM dataset_files WHERE id=? AND dataset_id=?').get(sourceFileId,datasetId);
-        if(!source||source.sha256!==sourceSha256)throw Object.assign(new Error('GCP source file changed during import'),{code:'invalid_source_file'});
+        if(!source||source.sha256!==sourceSha256||source.byte_size!==sourceByteSize)throw Object.assign(new Error('GCP source file metadata changed during import'),{code:'invalid_source_file'});
         const retainedFile=this.database.prepare('SELECT dataset_id,sha256,byte_size FROM retained_dataset_files WHERE dataset_file_id=?').get(source.id);
         if(retainedFile){
           if(retainedFile.dataset_id!==datasetId||retainedFile.sha256!==source.sha256||retainedFile.byte_size!==source.byte_size)
