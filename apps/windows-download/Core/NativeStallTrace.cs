@@ -54,6 +54,8 @@ internal static class NativeStallTrace
         ReservedRecordReadEnter, ReservedRecordReadExit,
         SyntheticSerialTransferEnter, SyntheticSerialTransferExit, SyntheticAdmissionTimedOut,
         SyntheticCallbackProcess,
+        PendingMarkerMutateOpenEnter, PendingMarkerMutateOpenVerified, PendingMarkerMutateWriteComplete,
+        PendingMarkerMutateFlushComplete, PendingMarkerMutateCloseComplete,
         PendingMarkerAWaiting, PendingMarkerBReadEnter, PendingMarkerBReadVerified,
         PendingMarkerBReadExit, PendingMarkerAReleased, PendingMarkerInvalid
     }
