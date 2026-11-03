@@ -478,6 +478,43 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     }
     private static readonly object ExperimentalDownloadAuthority = new();
     internal static bool IsExperimentalDownloadAuthority(object value) => ReferenceEquals(value, ExperimentalDownloadAuthority);
+    // Gated prerequisite for a native synthetic callback. It performs the same
+    // metadata budget checks as hydration before adopting the real entry lease.
+    // It does not stage a record, start a download, or authorize future delivery.
+    internal async Task<ExperimentalReservationOwner.LeaseReceipt> ExperimentalPrepareReceiptAsync(PlaceholderIdentity identity, CancellationToken token = default)
+    {
+        ExperimentalValidateStagingIdentity(identity);
+        if (identity.SourceAlias != "synthetic" || !source.Origin.Host.EndsWith(".invalid", StringComparison.OrdinalIgnoreCase))
+            throw new TransferException("Synthetic receipt source is unsupported.");
+        var resolved = await AuthorizeWithRetry(identity, token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        HydrationCacheConcurrency.Lease? admission = null; ExperimentalEntryLease? entry = null; Exception? primary = null;
+        try {
+            admission = await HydrationCacheConcurrency.AcquireAsync(root, identity.ScopeKey + identity.CacheKey, token).ConfigureAwait(false);
+            admission.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate);
+            var scope = Path.Combine(root, identity.ScopeKey); var entryPath = Path.Combine(scope, identity.CacheKey);
+            var reservations = Path.Combine(root, ".hydration-reservations-v2");
+            WithQuota(admission.Quota, () => {
+                var scopeExists = OwnedExisting(scope); var entryExists = OwnedExisting(entryPath); var reservationsExist = OwnedExisting(reservations);
+                if (!scopeExists || !entryExists || !reservationsExist) {
+                    var metadata = checked((scopeExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
+                        (entryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
+                        (reservationsExist ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)));
+                    RequireCapacity(ReservedBytes(reservations), checked(identity.Length + Downloader.HydrationStateGrowthBudget(resolved.Spec) + 1024 + metadata));
+                    Owned(scope); Owned(entryPath); Owned(reservations);
+                }
+            }, token);
+            entry = ExperimentalEntryLease.Open(admission, root, identity.ScopeKey, identity.CacheKey);
+            token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+            return ExperimentalReservationOwner.CreateReceiptForAdmissionForTest(root, identity, ref admission, ref entry);
+        } catch (Exception error) { primary = error; throw; }
+        finally {
+            // Moved tokens are nulled by the factory; uncertain owners remain
+            // rooted by their gated registries if an injected failure occurs.
+            try { try { entry?.Dispose(); } finally { admission?.Dispose(); } }
+            catch when (primary is not null) { }
+        }
+    }
     // Synthetic downloader session only; it never returns file bytes or writes to a sink.
     internal async Task<ExperimentalReservationOwner.LeaseReceipt.DownloadSession> ExperimentalStartReceiptDownloadAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt receipt, SyntheticReceiptDownloadSource source, CancellationToken token = default)
     {

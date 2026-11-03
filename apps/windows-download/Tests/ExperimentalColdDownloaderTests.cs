@@ -1442,6 +1442,31 @@ internal static class ExperimentalColdDownloaderTests
             }
             Check(ExperimentalReservationOwner.RetainedCount == 0 && ExperimentalEntryLease.RetainedCount == 0);
         });
+        await WithFixture(async fixture => {
+            using var source = new CoordinatorSource(); var identity = source.Identity;
+            using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", fixture.Path, maximumFileBytes: Content.Length, maximumCacheBytes: 10000, expectedPrincipal: CoordinatorSource.Principal);
+            using var constrained = new PlaceholderHydrationCoordinator(source, "pilot", fixture.Path, maximumFileBytes: Content.Length, maximumCacheBytes: 100, expectedPrincipal: CoordinatorSource.Principal);
+            var root = Path.Combine(fixture.Path, "verified-hydration-v1"); var scope = Path.Combine(root, identity.ScopeKey); var entryPath = Path.Combine(scope, identity.CacheKey);
+            source.ResolveFailureForTest = new AccessDeniedException(); var denied = false;
+            try { _ = await coordinator.ExperimentalPrepareReceiptAsync(identity); } catch (AccessDeniedException) { denied = true; }
+            Check(denied && !Directory.Exists(scope)); source.ResolveFailureForTest = null;
+            var exceeded = false; try { _ = await constrained.ExperimentalPrepareReceiptAsync(identity); } catch (TransferException) { exceeded = true; }
+            Check(exceeded && !Directory.Exists(scope) && !Directory.Exists(Path.Combine(root, ".hydration-reservations-v2")));
+            var receipt = await coordinator.ExperimentalPrepareReceiptAsync(identity);
+            Check(Directory.Exists(entryPath) && Directory.Exists(Path.Combine(root, ".hydration-reservations-v2")));
+            AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock")); AssertOtherProcessCannotOpen(Path.Combine(entryPath, ".hydration.lock"));
+            Check(await coordinator.ExperimentalAuthorizeAndStageAsync(identity, receipt));
+            receipt.RemoveSyntheticReservationForTest(root, identity.ScopeKey + identity.CacheKey); receipt.Dispose();
+            AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true);
+        });
+        await WithFixture(async fixture => {
+            using var source = new CoordinatorSource(); var identity = source.Identity;
+            using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", fixture.Path, maximumFileBytes: Content.Length, maximumCacheBytes: 10000, expectedPrincipal: CoordinatorSource.Principal);
+            var scope = Path.Combine(fixture.Path, "verified-hydration-v1", identity.ScopeKey); Directory.CreateDirectory(scope);
+            var marker = Path.Combine(scope, ".verified-hydration-owner"); File.WriteAllBytes(marker, Foreign);
+            var refused = false; try { _ = await coordinator.ExperimentalPrepareReceiptAsync(identity); } catch (TransferException) { refused = true; }
+            Check(refused && File.ReadAllBytes(marker).SequenceEqual(Foreign));
+        });
         await WithFixture(ReceiptTransferRangesAsync);
         await WithFixture(async fixture => {
             using var source = new CoordinatorSource(); var identityOne = source.Identity;
