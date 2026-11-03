@@ -522,10 +522,11 @@ test('direct client sharing leads the Share dialog and keeps Operations project 
   assert.match(html,/The whole project, including tasks published later/);
   assert.equal(f.calls.some(call=>call.options.method==='POST'),false);
 });
-test('without direct client sharing the Share dialog is unchanged',async()=>{
+test('direct lookup failure stays visible while legacy client sharing remains secondary',async()=>{
   const f=fixture();await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
   const html=f.html()+f.clientPanel.innerHTML;
-  assert.doesNotMatch(html,/Share with a client|Share through an Operations project instead/);
+  assert.match(html,/Direct client sharing could not be loaded/);
+  assert.match(html,/<details[^>]*class="share-legacy"[\s\S]*Use older Operations project sharing/);
 });
 
 for(const directAvailable of [false,true])for(const legacyFailed of [false,true])test(`direct availability ${directAvailable} is independent of legacy failure ${legacyFailed}`,async()=>{
@@ -537,6 +538,9 @@ for(const directAvailable of [false,true])for(const legacyFailed of [false,true]
   const html=f.context.clientSharePanel(f.output,null);
   assert.equal(html.includes('id="direct-client-grant-form"'),directAvailable);
   assert.equal(html.includes('Operations client access could not be loaded'),legacyFailed);
+  assert.equal(html.includes('Direct client sharing could not be loaded'),!directAvailable,
+    'A failed direct lookup must remain visible instead of silently selecting legacy sharing');
+  if(!directAvailable&&legacyFailed)assert.match(html,/<details[^>]*class="share-legacy"[\s\S]*Use older Operations project sharing[\s\S]*Operations client access could not be loaded/);
   if(directAvailable&&legacyFailed)assert.match(html,/<details[^>]*class="share-legacy"[\s\S]*Operations client access could not be loaded[\s\S]*<\/details>/);
   assert.equal(f.calls.some(call=>call.options.method==='POST'),false);
 });
