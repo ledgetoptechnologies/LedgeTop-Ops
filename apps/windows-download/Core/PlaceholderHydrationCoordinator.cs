@@ -647,6 +647,9 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     {
         var markers = admission.ExperimentalMarkers;
         var retained = ExperimentalReservationOwner.SnapshotForRoot(root);
+        var staged = ExperimentalReservationOwner.SnapshotStagedForRoot(root, admission.Quota);
+        if (staged.Keys.Any(retained.ContainsKey)) throw new TransferException("Reservation is retained by two owners.");
+        var expected = new HashSet<string>(retained.Keys, StringComparer.OrdinalIgnoreCase); expected.UnionWith(staged.Keys);
         var walked = new HashSet<string>(StringComparer.OrdinalIgnoreCase); long used = 0;
         foreach (var file in Walk(root)) {
             RequireSafe(file);
@@ -654,16 +657,20 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 if (ExperimentalOmitReservationFromWalkTestHook?.Invoke(file) == true) continue;
                 if (!walked.Add(file)) throw new TransferException("Retained reservation appears more than once.");
                 used = checked(used + live.RecordBytes);
+            } else if (staged.TryGetValue(file, out var stagedRecord)) {
+                if (ExperimentalOmitReservationFromWalkTestHook?.Invoke(file) == true) continue;
+                if (!walked.Add(file)) throw new TransferException("Staged reservation appears more than once.");
+                used = checked(used + stagedRecord.Bytes);
             } else used = checked(used + (string.Equals(Path.GetFileName(file), Marker, StringComparison.OrdinalIgnoreCase) ? markers.AccountMarker(file) : new FileInfo(file).Length));
         }
-        if (!walked.SetEquals(retained.Keys)) throw new TransferException("Retained reservation is missing from the cache walk.");
-        var reserved = ExperimentalReservedBytes(Path.Combine(root, ".hydration-reservations-v2"), retained);
+        if (!walked.SetEquals(expected)) throw new TransferException("Retained reservation is missing from the cache walk.");
+        var reserved = ExperimentalReservedBytes(Path.Combine(root, ".hydration-reservations-v2"), retained, staged);
         return (used, reserved <= maximumCacheBytes && used <= maximumCacheBytes - reserved && growth <= maximumCacheBytes - reserved - used);
     }
-    private static long ExperimentalReservedBytes(string directory, Dictionary<string, ExperimentalReservationOwner> retained)
+    private static long ExperimentalReservedBytes(string directory, Dictionary<string, ExperimentalReservationOwner> retained, Dictionary<string, ExperimentalReservationOwner.StagedSnapshot> staged)
     {
         if (!OwnedExisting(directory)) {
-            if (retained.Count != 0) throw new TransferException("Retained reservation directory is missing.");
+            if (retained.Count != 0 || staged.Count != 0) throw new TransferException("Retained reservation directory is missing.");
             return 0;
         }
         if (Directory.EnumerateDirectories(directory).Any()) throw new TransferException("Hydration reservation tree is unknown.");
@@ -672,9 +679,11 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             if (Path.GetFileName(file) == Marker) continue;
             if (++count > 4096 || !seen.Add(file)) throw new TransferException("Hydration reservation capacity exceeded.");
             if (retained.TryGetValue(file, out var live)) { live.Verify(); reserved = checked(reserved + live.Growth); }
+            else if (staged.TryGetValue(file, out var stagedRecord)) reserved = checked(reserved + stagedRecord.Growth);
             else reserved = checked(reserved + ReadReservation(file).Value.Growth);
         }
         foreach (var path in retained.Keys) if (!seen.Contains(path)) throw new TransferException("Retained reservation is missing from the directory.");
+        foreach (var path in staged.Keys) if (!seen.Contains(path)) throw new TransferException("Staged reservation is missing from the directory.");
         return reserved;
     }
 #endif

@@ -50,7 +50,9 @@ internal sealed class ExperimentalReservationOwner
         private string? stagedPath;
         private byte[]? stagedBytes;
         private ExperimentalOwnedStream.Identity stagedIdentity;
-        private bool stagedVerified;
+        private bool stagedVerified, quotaInProgress;
+        private long stagedGrowth;
+        private List<ExperimentalOwnedStream.DirectoryPin>? stagedPins;
         private ExperimentalOwnedStream.Identity quotaIdentity;
         private object? injectedQuotaToken, injectedMarkerToken;
         private string? injectedMarkerDirectory;
@@ -87,7 +89,6 @@ internal sealed class ExperimentalReservationOwner
         internal bool InspectCapacityForTest(string root, string key, PlaceholderHydrationCoordinator coordinator, long growth, CancellationToken token = default) => Execute(root, key, () => {
             ArgumentNullException.ThrowIfNull(coordinator);
             if (growth < 0) throw new ArgumentOutOfRangeException(nameof(growth));
-            if (stagedRecord is not null || stagedHandle is not null) throw new InvalidOperationException("Synthetic staged record requires retained accounting.");
             return RunQuota(quota => coordinator.ExperimentalCanReserveUnderOwnedQuota(heldLease!, quota, growth), token);
         });
         internal long AccountMarkerUnderQuota(string root, string key, string directory, CancellationToken token = default) => Execute(root, key, () =>
@@ -110,9 +111,13 @@ internal sealed class ExperimentalReservationOwner
                     var path = Path.Combine(dir, identity.ScopeKey + "-" + identity.CacheKey + ".json");
                     var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = identity.ScopeKey, Entry = identity.CacheKey, Growth = growth });
                     if (bytes.Length > 1024) throw new IOException("Synthetic reservation metadata exceeds its bound.");
+                    stagedPins = [];
+                    ExperimentalOwnedStream.PinDirectories(dir, stagedPins); ExperimentalOwnedStream.VerifyPins(stagedPins);
                     try { stagedHandle = ExperimentalOwnedStream.Open(path, 0xC0010080, 1, 1, 0x00200000); }
-                    catch (IOException error) when (error.HResult is 80 or 183) { return false; }
-                    stagedPath = path; stagedBytes = bytes;
+                    catch (IOException error) when (error.HResult is 80 or 183) {
+                        foreach (var pin in stagedPins.AsEnumerable().Reverse()) pin.Handle.Dispose(); stagedPins = null; return false;
+                    }
+                    stagedPath = path; stagedBytes = bytes; stagedGrowth = growth;
                     stagedRecord = new FileStream(stagedHandle, FileAccess.ReadWrite); stagedHandle = null;
                     ExperimentalOwnedStream.RequireRegularKind(stagedRecord.SafeFileHandle, false); ExperimentalOwnedStream.RequireSingleLink(stagedRecord.SafeFileHandle);
                     stagedIdentity = ExperimentalOwnedStream.GetIdentity(stagedRecord.SafeFileHandle);
@@ -120,13 +125,41 @@ internal sealed class ExperimentalReservationOwner
                     return true;
                 }, token);
             });
+        // Caller holds the root quota monitor; deliberately does not acquire the
+        // receipt gate because another receipt may hold it while waiting for quota.
+        private StagedSnapshot? SnapshotStagedUnderQuota(string requestedRoot, object quota)
+        {
+            if (!Monitor.IsEntered(quota)) throw new InvalidOperationException("Synthetic ledger requires the root quota gate.");
+            if (!string.Equals(root, requestedRoot, StringComparison.OrdinalIgnoreCase)) return null;
+            if (stagedPath is null && stagedRecord is null && stagedHandle is null) {
+                if (stagedPins is not null) throw new IOException("Synthetic staged directory ownership remains uncertain.");
+                return null;
+            }
+            if (heldLease is null || !ReferenceEquals(heldLease.Quota, quota)) throw new IOException("Synthetic staged quota root changed.");
+            if ((uncertain && !quotaInProgress) || !stagedVerified || stagedHandle is not null || stagedBytes is null || stagedPath is null)
+                throw new IOException("Synthetic staged reservation remains uncertain.");
+            VerifyStagedRecord(); return new(stagedPath, stagedBytes.Length, stagedGrowth);
+        }
+        internal static Dictionary<string, StagedSnapshot> SnapshotForRootUnderQuota(string root, object quota)
+        {
+            if (!Monitor.IsEntered(quota)) throw new InvalidOperationException("Synthetic ledger requires the root quota gate.");
+            LeaseReceipt[] receipts;
+            lock (RegistryGate) receipts = Receipts.ToArray();
+            var result = new Dictionary<string, StagedSnapshot>(StringComparer.OrdinalIgnoreCase);
+            foreach (var receipt in receipts) {
+                var snapshot = receipt.SnapshotStagedUnderQuota(root, quota);
+                if (snapshot is { } value && !result.TryAdd(value.Path, value)) throw new IOException("Duplicate synthetic staged reservation.");
+            }
+            return result;
+        }
         private void VerifyStagedRecord()
         {
             if (stagedRecord is null || stagedBytes is null || stagedPath is null ||
                 ExperimentalOwnedStream.GetIdentity(stagedRecord.SafeFileHandle) != stagedIdentity ||
                 !string.Equals(ExperimentalOwnedStream.FinalPath(stagedRecord.SafeFileHandle), stagedPath, StringComparison.OrdinalIgnoreCase) || stagedRecord.Length != stagedBytes.Length)
                 throw new IOException("Synthetic staged record binding changed.");
-            heldLease!.ExperimentalMarkers.ValidateExisting(Path.GetDirectoryName(stagedPath)!, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
+            if (stagedPins is null) throw new IOException("Synthetic staged directory pins are unavailable.");
+            ExperimentalOwnedStream.VerifyPins(stagedPins);
             stagedRecord.Position = 0; var observed = new byte[stagedBytes.Length]; stagedRecord.ReadExactly(observed);
             if (!observed.AsSpan().SequenceEqual(stagedBytes)) throw new IOException("Synthetic staged record contents changed.");
         }
@@ -137,13 +170,17 @@ internal sealed class ExperimentalReservationOwner
             stagedRecord.Dispose(); stagedRecord = null;
             try { using var unexpected = ExperimentalOwnedStream.Open(stagedPath, 0x80, 7, 3, 0x00200000); throw new IOException("Synthetic staged record remains present."); }
             catch (IOException error) when (error.HResult == 2) { }
-            stagedPath = null; stagedBytes = null; stagedVerified = false;
+            ExperimentalOwnedStream.VerifyPins(stagedPins!);
+            foreach (var pin in stagedPins!.AsEnumerable().Reverse()) pin.Handle.Dispose(); stagedPins = null;
+            stagedPath = null; stagedBytes = null; stagedVerified = false; stagedGrowth = 0;
             return true;
         }, token));
         private T RunQuota<T>(Func<SafeFileHandle, T> operation, CancellationToken token)
         {
             T result = default!;
             HydrationQuotaGate.Run(heldLease!.Quota, () => {
+                quotaInProgress = true;
+                try {
                 uncertain = true;
                 heldOwnedEntry!.Validate();
                 heldLease.ExperimentalMarkers.ValidateExisting(root, ".verified-hydration-owner", "LedgeTop.VerifiedHydration/1\n"u8.ToArray());
@@ -160,6 +197,7 @@ internal sealed class ExperimentalReservationOwner
                 result = operation(uncertainQuota);
                 heldOwnedEntry.Validate(); InjectQuotaFailureForTest("close");
                 uncertainQuota.Dispose(); uncertainQuota = null; uncertain = false;
+                } finally { quotaInProgress = false; }
             }, token);
             return result;
         }
@@ -206,7 +244,7 @@ internal sealed class ExperimentalReservationOwner
         public void Dispose() {
             lock (gate) {
                 if (!active) return;
-                if (stagedRecord is not null || stagedHandle is not null || stagedPath is not null) throw new IOException("Synthetic staged record remains owned.");
+                if (stagedRecord is not null || stagedHandle is not null || stagedPath is not null || stagedPins is not null) throw new IOException("Synthetic staged record remains owned.");
                 if (executing) throw new InvalidOperationException("Experimental receipt scope is active.");
                 if (uncertain) throw new IOException("Experimental returned lease closure remains uncertain.");
                 uncertain = true;
@@ -218,6 +256,11 @@ internal sealed class ExperimentalReservationOwner
         }
     }
     internal static void ExerciseReceiptReattachGuardForTest(LeaseReceipt receipt) => receipt.Attach(null!, (ExperimentalEntryLease)null!, ReceiptAttachAuthority);
+    internal readonly record struct StagedSnapshot(string Path, long Bytes, long Growth);
+    // Called only while the root quota monitor is held. Do not acquire another
+    // receipt/admission gate here: another caller may hold it while waiting for quota.
+    internal static Dictionary<string, StagedSnapshot> SnapshotStagedForRoot(string root, object quota) =>
+        LeaseReceipt.SnapshotForRootUnderQuota(root, quota);
     internal static Dictionary<string, ExperimentalReservationOwner> SnapshotForRoot(string root)
     {
         ExperimentalReservationOwner[] snapshot;
