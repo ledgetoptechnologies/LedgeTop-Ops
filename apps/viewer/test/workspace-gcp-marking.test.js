@@ -18,6 +18,9 @@ test('task GCP workspace selects authoritative sets and points before bounded im
   assert.match(source, /\/gcp-images\?\$\{query\}/);
   assert.match(source, /limit:'200'/);
   assert.match(source, /query\.set\('radiusM',String\(workspace\.radiusFeet\*0\.3048\)\)/);
+  assert.match(source, /gcp-load-more/);
+  assert.match(source, /loadMoreGcpCandidates\(taskId\)/);
+  assert.match(source, /offset:String\(gcp\.pagination\.nextOffset\)/);
   assert.match(source, /gcp-sets\/auto-import/);
   assert.match(source, /bindTooltip\(tooltip\(/);
   assert.match(source, /marker\.on\('click',\(\)=>void openGcpImage/);

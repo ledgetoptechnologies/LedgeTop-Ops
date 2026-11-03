@@ -143,13 +143,18 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
     const rawLimit = String(req.query.limit || '100');
     if (!/^\d{1,3}$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 200)
       return error(res, 400, 'invalid_limit');
+    const rawOffset = String(req.query.offset || '0');
+    if (!/^\d{1,7}$/.test(rawOffset) || Number(rawOffset) > 1000000)
+      return error(res, 400, 'invalid_offset');
     try {
       const mode = String(req.query.mode || 'auto');
       if (!['auto', 'radius', 'nearest'].includes(mode)) return error(res, 400, 'invalid_candidate_mode');
       const radiusM = req.query.radiusM == null ? (mode === 'radius' ? 50*0.3048 : null) : Number(req.query.radiusM);
       if (radiusM != null && (!Number.isFinite(radiusM) || radiusM <= 0 || radiusM > 100000)) return error(res, 400, 'invalid_radius');
-      const requested = Number(rawLimit), ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, 200);
-      let images = ranked.images;
+      const requested = Number(rawLimit), offset = Number(rawOffset);
+      const ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, requested + 1, offset);
+      const hasMore = ranked.images.length > requested;
+      let images = ranked.images.slice(0, requested);
       let appliedMode = ranked.selectedPoint ? mode : 'capture_time';
       let appliedRadius = radiusM, reason = 'explicit_mode', confidence = 'user_selected';
       if (ranked.selectedPoint && mode === 'auto') {
@@ -174,6 +179,7 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
       const result = { ...ranked, images };
       return res.json({
         ...result,
+        pagination: { hasMore, nextOffset: hasMore ? offset + requested : null },
         ranking: {
           basis: result.selectedPoint ? 'adaptive_camera_proximity' : 'capture_time', mode: appliedMode,
           radiusM: appliedRadius, reason, confidence,

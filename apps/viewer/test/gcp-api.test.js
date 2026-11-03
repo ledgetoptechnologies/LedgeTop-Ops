@@ -86,6 +86,11 @@ test('auto candidates adapt to camera spacing, accuracy and footprint metadata w
   assert.equal(dense.ranking.reason,'adaptive_camera_spacing');assert.equal(dense.ranking.visibilityConfirmed,false);
   const fixed=await(await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius`,{headers:auth})).json();
   assert.ok(Math.abs(fixed.ranking.radiusM-15.24)<1e-9,'fixed-radius default is 50 feet expressed in meters');
+  const firstPage=await(await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius&radiusM=1000&limit=10`,{headers:auth})).json();
+  assert.equal(firstPage.images.length,10);assert.deepEqual(firstPage.pagination,{hasMore:true,nextOffset:10});
+  const secondPage=await(await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius&radiusM=1000&limit=10&offset=10`,{headers:auth})).json();
+  assert.equal(secondPage.images.length,5);assert.deepEqual(secondPage.pagination,{hasMore:false,nextOffset:null});
+  assert.equal((await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&limit=10&offset=1000001`,{headers:auth})).status,400);
   database.prepare("UPDATE dataset_files SET latitude=44.5+(CAST(substr(id,6) AS INTEGER)+1)*0.001 WHERE id LIKE 'rank-%'").run();
   const sparse=await (await fetch(route,{headers:auth})).json();
   assert.ok(sparse.ranking.radiusM>dense.ranking.radiusM);

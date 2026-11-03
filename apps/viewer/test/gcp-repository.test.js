@@ -89,6 +89,7 @@ test('image suggestions reuse indexed EXIF GPS and rank distance without claimin
   const ranked = gcp.listRankedImages(dataset.id, set.points[0].id, 10);
   assert.deepEqual(ranked.images.map((image) => image.id), ['near', 'far']);
   assert.ok(ranked.images[0].distanceM < ranked.images[1].distanceM);
+  assert.deepEqual(gcp.listRankedImages(dataset.id,set.points[0].id,1,1).images.map((image)=>image.id),['far']);
   assert.ok(haversineMeters(44.5, -88.1, 44.5001, -88.1001) < 20);
 });
 

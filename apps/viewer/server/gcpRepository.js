@@ -153,15 +153,16 @@ class GcpRepository {
     const point = selectedPointId ? this.database.prepare(`SELECT points.* FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id
       WHERE points.id=? AND sets.dataset_id=?`).get(selectedPointId, datasetId) : null;
     if (selectedPointId && !point) throw Object.assign(new Error('GCP point is not in this dataset'), { code: 'invalid_gcp_point' });
-    const count = Math.max(1, Math.min(200, Number(limit) || 100));
+    const count = Math.max(1, Math.min(201, Number(limit) || 100));
+    const start = Math.max(0, Math.min(1000000, Number(offset) || 0));
     let rows;
     if (point) {
       const longitudeScale = Math.max(0.01, Math.cos(Number(point.latitude) * Math.PI / 180));
       rows = this.database.prepare(`SELECT files.*,ranking.horizontal_accuracy_m,ranking.footprint_radius_m FROM dataset_files files
         LEFT JOIN gcp_image_ranking_metadata ranking ON ranking.dataset_file_id=files.id
         WHERE files.dataset_id=? AND latitude IS NOT NULL AND longitude IS NOT NULL
-        AND COALESCE(mime_type,content_type) LIKE 'image/%' ORDER BY ((latitude-?)*(latitude-?))+(((longitude-?)*?)*((longitude-?)*?)) ASC,files.id ASC LIMIT ?`)
-        .all(datasetId, point.latitude, point.latitude, point.longitude, longitudeScale, point.longitude, longitudeScale, count);
+        AND COALESCE(mime_type,content_type) LIKE 'image/%' ORDER BY ((latitude-?)*(latitude-?))+(((longitude-?)*?)*((longitude-?)*?)) ASC,files.id ASC LIMIT ? OFFSET ?`)
+        .all(datasetId, point.latitude, point.latitude, point.longitude, longitudeScale, point.longitude, longitudeScale, count, start);
     } else {
       rows = this.database.prepare(`SELECT * FROM dataset_files WHERE dataset_id=? AND latitude IS NOT NULL AND longitude IS NOT NULL
           AND COALESCE(mime_type,content_type) LIKE 'image/%' ORDER BY captured_at,relative_path,id LIMIT ? OFFSET ?`).all(datasetId, count, start);
