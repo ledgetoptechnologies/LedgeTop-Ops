@@ -57,7 +57,7 @@ internal static class SyntheticMemoryNative {
         var cacheStage = CacheStage(get("LEDGETOP_TEST_MEMORY_CACHE_STAGE"));
         return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}";
     }
-    private static string CacheStage(string? value) => value switch { null or "none" => "none", "quota-only" => "quota-only", "quota-ownership" => "quota-ownership", _ => "invalid" };
+    private static string CacheStage(string? value) => value switch { null or "none" => "none", "quota-only" => "quota-only", "quota-ownership" => "quota-ownership", "quota-capacity" => "quota-capacity", "quota-reservation" => "quota-reservation", _ => "invalid" };
     internal static async Task<int> CacheStageTests() {
         var basePath = Path.Combine(Path.GetTempPath(), "LedgeTop-cache-stage-" + Guid.NewGuid().ToString("N"));
         var fixtures = Path.Combine(basePath, "memory-native-fixtures");
@@ -77,19 +77,28 @@ internal static class SyntheticMemoryNative {
             try {
                 await coordinator.SyntheticCacheStageAsync(identity, "quota-only", CancellationToken.None);
                 if (Directory.Exists(scope)) throw new IOException("Quota-only created ownership entries.");
-                await coordinator.SyntheticCacheStageAsync(identity, "quota-ownership", CancellationToken.None);
+                await coordinator.SyntheticCacheStageAsync(identity, "quota-capacity", CancellationToken.None);
                 if (!File.Exists(Path.Combine(scope, ".verified-hydration-owner")) || !File.Exists(Path.Combine(entry, ".verified-hydration-owner")))
                     throw new IOException("Synthetic ownership stage did not create expected markers.");
+                await coordinator.SyntheticCacheStageAsync(identity, "quota-reservation", CancellationToken.None);
+                var reservations = Path.Combine(root, ".hydration-reservations-v2");
+                if (Directory.EnumerateFiles(reservations).Any(path => Path.GetFileName(path) != ".verified-hydration-owner"))
+                    throw new IOException("Synthetic reservation was not released.");
+                await coordinator.SyntheticCacheStageAsync(identity, "quota-ownership", CancellationToken.None);
                 await coordinator.SyntheticCacheStageAsync(identity, "quota-ownership", CancellationToken.None);
                 var events = NativeStallTrace.Snapshot(capture).Select(e => e.Kind).ToArray();
-                if (events.Count(e => e == NativeStallTrace.Stage.CacheQuotaAcquired) != 3 ||
-                    events.Count(e => e == NativeStallTrace.Stage.SyntheticRootPrepareExit) != 3 ||
+                if (events.Count(e => e == NativeStallTrace.Stage.CacheQuotaAcquired) != 7 ||
+                    events.Count(e => e == NativeStallTrace.Stage.SyntheticRootPrepareExit) != 5 ||
                     events.Count(e => e == NativeStallTrace.Stage.CacheScopeOwnEnter) != 1 ||
                     events.Count(e => e == NativeStallTrace.Stage.CacheEntryOwnEnter) != 1 ||
+                    events.Count(e => e == NativeStallTrace.Stage.CacheCapacityExit) != 2 ||
+                    !events.Contains(NativeStallTrace.Stage.CacheReserveAcquired) || !events.Contains(NativeStallTrace.Stage.CacheReleaseExit) ||
                     !events.Contains(NativeStallTrace.Stage.OwnedMarkerFlushExit)) throw new IOException("Synthetic cache stages omitted expected trace.");
             } finally { NativeStallTrace.Disable(capture); }
             var rejected = false; try { await coordinator.SyntheticCacheStageAsync(identity, "unknown", CancellationToken.None); } catch (TransferException) { rejected = true; }
             if (!rejected) throw new IOException("Invalid synthetic stage accepted.");
+            rejected = false; try { await coordinator.SyntheticCacheStageAsync(identity with { Length = 1 }, "quota-reservation", CancellationToken.None); } catch (TransferException) { rejected = true; }
+            if (!rejected) throw new IOException("Non-fixture synthetic size accepted.");
             Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", Path.GetTempPath());
             rejected = false; try { await coordinator.SyntheticCacheStageAsync(identity, "quota-only", CancellationToken.None); } catch (TransferException) { rejected = true; }
             if (!rejected) throw new IOException("Foreign synthetic artifact root accepted.");
@@ -100,8 +109,10 @@ internal static class SyntheticMemoryNative {
         } finally {
             Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", previousProbe);
             Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", previousBase);
-            File.Delete(Path.Combine(entry, ".verified-hydration-owner")); if (Directory.Exists(entry)) Directory.Delete(entry);
+            File.Delete(Path.Combine(entry, ".hydration.lock")); File.Delete(Path.Combine(entry, ".verified-hydration-owner")); if (Directory.Exists(entry)) Directory.Delete(entry);
             File.Delete(Path.Combine(scope, ".verified-hydration-owner")); if (Directory.Exists(scope)) Directory.Delete(scope);
+            var reservationDirectory = Path.Combine(root, ".hydration-reservations-v2");
+            File.Delete(Path.Combine(reservationDirectory, ".verified-hydration-owner")); if (Directory.Exists(reservationDirectory)) Directory.Delete(reservationDirectory);
             File.Delete(Path.Combine(root, ".hydration-cache.lock")); File.Delete(Path.Combine(root, ".hydration-quota-v2.lock"));
             File.Delete(Path.Combine(root, ".verified-hydration-owner")); if (Directory.Exists(root)) Directory.Delete(root);
             Directory.Delete(cache); Directory.Delete(owned); Directory.Delete(fixtures); Directory.Delete(basePath);

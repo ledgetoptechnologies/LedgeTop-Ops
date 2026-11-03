@@ -98,15 +98,17 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         HydrateCoreAsync(identity, offset, length, sink, cancellationToken, null);
 #if LEDGETOP_NATIVE_DIAGNOSTICS
     // Incremental synthetic-only comparison of the actual cache coordination
-    // primitives. This does not authorize, download, reserve, or transfer data.
+    // primitives. This does not authorize, download, or transfer data. The
+    // reservation stage creates and verifies release of synthetic records only.
     internal async Task SyntheticCacheStageAsync(PlaceholderIdentity identity, string stage, CancellationToken token)
     {
         if (Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") != "1" ||
-            stage is not ("quota-only" or "quota-ownership") || source.Alias != "synthetic" ||
+            stage is not ("quota-only" or "quota-ownership" or "quota-capacity" or "quota-reservation") || source.Alias != "synthetic" ||
             source.Origin.AbsoluteUri != "https://source.example.invalid/" || channel != "pilot" ||
             principal != "odqp1_" + new string('f', 64) || identity.PrincipalId != principal ||
             identity.Channel != "pilot" || identity.SourceAlias != "synthetic" || identity.Origin != "https://source.example.invalid" ||
-            !System.Text.RegularExpressions.Regex.IsMatch(identity.FileName, "\\Asample-[0-3]\\.bin\\z"))
+            !System.Text.RegularExpressions.Regex.IsMatch(identity.FileName, "\\Asample-[0-3]\\.bin\\z") || identity.Length != 100_000 ||
+            identity.Sha256 != Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(new string('x', 100_000)))))
             throw new TransferException("Synthetic cache diagnostic scope is invalid.");
         identity.Encode();
         var artifact = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
@@ -127,20 +129,39 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         NativeStallTrace.Record(NativeStallTrace.Stage.CacheLegacyLeaseEnter);
         admission.AcquireExclusiveLegacy(quotaLock, FileMode.OpenOrCreate);
         NativeStallTrace.Record(NativeStallTrace.Stage.CacheLegacyLeaseAcquired);
+        var scope = Path.Combine(root, identity.ScopeKey);
+        var entry = Path.Combine(scope, identity.CacheKey);
+        var spec = new DownloadSpec(identity.ResourceReference, new Uri("https://source.example.invalid/content"), identity.FileName, identity.Length, identity.ETag, identity.Sha256);
         WithQuota(admission.Quota, () => {
-            if (stage == "quota-ownership") {
-                var scope = Path.Combine(root, identity.ScopeKey);
-                var entry = Path.Combine(scope, identity.CacheKey);
+            if (stage != "quota-only") {
                 var scopeExists = TraceCacheValue(NativeStallTrace.Stage.CacheScopeCheckEnter, NativeStallTrace.Stage.CacheScopeCheckExit, () => OwnedExisting(scope));
                 var entryExists = TraceCacheValue(NativeStallTrace.Stage.CacheEntryCheckEnter, NativeStallTrace.Stage.CacheEntryCheckExit, () => OwnedExisting(entry));
-                // As in production, only create/verify ownership when missing.
-                // This isolated stage intentionally omits the capacity scan and reservation.
+                // The ownership-only comparison intentionally omits capacity;
+                // later stages run the production capacity path first.
                 if (!scopeExists || !entryExists) {
+                    if (stage is "quota-capacity" or "quota-reservation") {
+                        var directory = Path.Combine(root, ".hydration-reservations-v2");
+                        var reservationDirectoryExists = TraceCacheValue(NativeStallTrace.Stage.CacheReservationDirCheckEnter, NativeStallTrace.Stage.CacheReservationDirCheckExit, () => OwnedExisting(directory));
+                        var metadata = checked((scopeExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
+                            (entryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
+                            (reservationDirectoryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)));
+                        RequireCapacity(ReservedBytes(directory), checked(identity.Length + Downloader.HydrationStateGrowthBudget(spec) + 1024 + metadata));
+                    }
                     TraceCacheAction(NativeStallTrace.Stage.CacheScopeOwnEnter, NativeStallTrace.Stage.CacheScopeOwnExit, () => Owned(scope));
                     TraceCacheAction(NativeStallTrace.Stage.CacheEntryOwnEnter, NativeStallTrace.Stage.CacheEntryOwnExit, () => Owned(entry));
                 }
             }
         });
+        if (stage == "quota-reservation") {
+            var lockPath = Path.Combine(entry, ".hydration.lock"); RequireSafe(lockPath);
+            NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseEnter);
+            using var held = await OpenEntryLeaseAsync(lockPath, FileMode.OpenOrCreate, token).ConfigureAwait(false);
+            NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseAcquired);
+            NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveEnter);
+            var reservation = Reserve(admission.Quota, identity, spec);
+            NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveAcquired);
+            TraceCacheAction(NativeStallTrace.Stage.CacheReleaseEnter, NativeStallTrace.Stage.CacheReleaseExit, reservation.Dispose);
+        }
     }
 #endif
     internal Task HydrateTimedAsync(PlaceholderIdentity identity, long offset, long length, IPlaceholderTransferSink sink, CancellationToken cancellationToken, HydrationTiming timing) =>
