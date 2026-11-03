@@ -266,10 +266,10 @@ internal static class ExperimentalColdDownloaderTests
     internal static async Task ReservationCloseChildAsync(string root, string stage)
     {
         if (!Path.IsPathFullyQualified(root) || root.StartsWith(@"\\", StringComparison.Ordinal) || !Directory.Exists(root) ||
-            stage is not ("record" or "directory" or "entry" or "lease" or "markerforeign" or "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail")) throw new IOException("Synthetic teardown input invalid.");
+            stage is not ("record" or "directory" or "entry" or "lease" or "markerforeign" or "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail" or "factoryfault")) throw new IOException("Synthetic teardown input invalid.");
         if (stage == "markerforeign") { await MarkerForeignCloseChildAsync(root); return; }
         if (stage == "postwrite") { await PostWriteStatusChildAsync(root); return; }
-        if (stage is "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail") { await AuthorizationBoundaryChildAsync(root, stage); return; }
+        if (stage is "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail" or "factoryfault") { await AuthorizationBoundaryChildAsync(root, stage); return; }
         var scope = new string('a', 64); var key = new string('b', 64);
         var entryDir = Path.Combine(root, scope, key); Directory.CreateDirectory(entryDir);
         var reservationDir = Path.Combine(root, ".hydration-reservations-v2"); Directory.CreateDirectory(reservationDir);
@@ -308,6 +308,19 @@ internal static class ExperimentalColdDownloaderTests
         HydrationCacheConcurrency.Lease? admission = await HydrationCacheConcurrency.AcquireAsync(root, identity.ScopeKey + identity.CacheKey, CancellationToken.None);
         admission.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate); var alias = admission;
         ExperimentalEntryLease? entry = ExperimentalEntryLease.Open(admission, root, identity.ScopeKey, identity.CacheKey); var gate = admission.Quota;
+        if (stage == "factoryfault") {
+            var oldEntry = entry; var injected = false;
+            ExperimentalReservationOwner.ReceiptFactoryAfterTransferTestHook = () => throw new IOException("Injected receipt factory failure.");
+            try { _ = ExperimentalReservationOwner.CreateReceiptForAdmissionForTest(root, identity, ref admission, ref entry); }
+            catch (IOException error) when (error.Message == "Injected receipt factory failure.") { injected = true; }
+            finally { ExperimentalReservationOwner.ReceiptFactoryAfterTransferTestHook = null; }
+            var stale = false; try { alias.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.Open); } catch (ObjectDisposedException) { stale = true; } Check(stale);
+            stale = false; try { oldEntry.Validate(); } catch (ObjectDisposedException) { stale = true; } Check(stale);
+            Check(injected && ExperimentalReservationOwner.RetainedCount > 0 && !Directory.EnumerateFiles(reservationDir, "*.json").Any());
+            AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock"));
+            AssertOtherProcessCannotOpen(Path.Combine(root, identity.ScopeKey, identity.CacheKey, ".hydration.lock"));
+            return; // The pre-registered receipt stays rooted until this owned child exits.
+        }
         var growth = spec.Length + Downloader.HydrationStateGrowthBudget(spec) + 1024;
         var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = identity.ScopeKey, Entry = identity.CacheKey, Growth = growth });
         ExperimentalReservationOwner? owner = null; ExperimentalReservationOwner.LeaseReceipt? receipt = null;
@@ -911,10 +924,10 @@ internal static class ExperimentalColdDownloaderTests
                 AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true);
             } finally { entry?.Dispose(); admission?.Dispose(); }
         });
-        foreach (var stage in new[] { "record", "directory", "entry", "lease", "markerforeign", "postwrite", "authdispose", "authcancel", "authrace", "authafterstage", "authaftercancel", "authcleanupfail", "cancelcallbackfail" }) await WithFixture(async fixture => {
+        foreach (var stage in new[] { "record", "directory", "entry", "lease", "markerforeign", "postwrite", "authdispose", "authcancel", "authrace", "authafterstage", "authaftercancel", "authcleanupfail", "cancelcallbackfail", "factoryfault" }) await WithFixture(async fixture => {
             var root = Path.Combine(fixture.Path, "teardown"); Directory.CreateDirectory(root);
             await RunReservationCloseChildAsync(root, stage);
-            var cacheRoot = stage is "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail" ? Path.Combine(root, "verified-hydration-v1") : root;
+            var cacheRoot = stage is "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" or "authcleanupfail" or "cancelcallbackfail" or "factoryfault" ? Path.Combine(root, "verified-hydration-v1") : root;
             AssertOtherProcessOpen(Path.Combine(cacheRoot, ".hydration-cache.lock"), true);
             if (stage is "postwrite" or "authcleanupfail") {
                 using var source = new CoordinatorSource(); var identity = source.Identity;
@@ -1946,17 +1959,24 @@ internal static class ExperimentalColdDownloaderTests
         try {
         admission.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate); var alias = admission;
         entry = ExperimentalEntryLease.Open(admission, root, identity.ScopeKey, identity.CacheKey);
-        var gate = admission.Quota;
-        var growth = spec.Length + Downloader.HydrationStateGrowthBudget(spec) + 1024;
-        var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = identity.ScopeKey, Entry = identity.CacheKey, Growth = growth });
-        alias.RunExperimentalForRoot(root, () => HydrationQuotaGate.Run(gate, () => {
-            using var quota = new FileStream(Path.Combine(root, ".hydration-quota-v2.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-            owner = ExperimentalReservationOwner.CreateWithOwnedEntry(root, identity.ScopeKey, identity.CacheKey, bytes, spec, ref admission, ref entry, quota);
-        }, CancellationToken.None));
-        owner!.RunWithLeaseForTest(() => HydrationQuotaGate.Run(gate, () => {
-            using var quota = new FileStream(Path.Combine(root, ".hydration-quota-v2.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-            receipt = owner.ReleaseAndReturn(quota);
-        }, CancellationToken.None));
+        var oldEntry = entry; var rejectedRoot = false;
+        try { _ = ExperimentalReservationOwner.CreateReceiptForAdmissionForTest(Path.Combine(fixture.Path, "wrong-root"), identity, ref admission, ref entry); }
+        catch (TransferException) { rejectedRoot = true; }
+        Check(rejectedRoot && admission is not null && entry is not null);
+        var rejectedEntry = false;
+        try { _ = ExperimentalReservationOwner.CreateReceiptForAdmissionForTest(root, identity with { RemoteVersion = "v2" }, ref admission, ref entry); }
+        catch (TransferException) { rejectedEntry = true; }
+        Check(rejectedEntry && admission is not null && entry is not null);
+        var rejectedSource = false;
+        try { _ = ExperimentalReservationOwner.CreateReceiptForAdmissionForTest(root, identity with { SourceAlias = "company" }, ref admission, ref entry); }
+        catch (IOException) { rejectedSource = true; }
+        Check(rejectedSource && admission is not null && entry is not null);
+        receipt = ExperimentalReservationOwner.CreateReceiptForAdmissionForTest(root, identity, ref admission, ref entry);
+        Check(admission is null && entry is null && !Directory.EnumerateFiles(reservationDir, "*.json").Any());
+        var stale = false; try { alias.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.Open); } catch (ObjectDisposedException) { stale = true; } Check(stale);
+        stale = false; try { oldEntry.Validate(); } catch (ObjectDisposedException) { stale = true; } Check(stale);
+        AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock"));
+        AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
         Check(await coordinator.ExperimentalAuthorizeAndStageAsync(identity, receipt!));
         foreach (var range in new[] { (Offset: 0L, Length: (long?)4096L), (Offset: 4096L, Length: (long?)905L), (Offset: 4096L, Length: (long?)null) }) {
             var fake = SyntheticReceiptDownloadSource.Create(spec, content); var sink = new TestSink();

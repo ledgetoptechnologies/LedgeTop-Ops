@@ -464,6 +464,38 @@ internal sealed class ExperimentalReservationOwner
             }
         }
     }
+    internal static Action? ReceiptFactoryAfterTransferTestHook;
+    // Synthetic coordinator bootstrap only: the receipt is rooted before either
+    // lease moves. This does not create a reservation or grant file access.
+    internal static LeaseReceipt CreateReceiptForAdmissionForTest(string requestedRoot, PlaceholderIdentity identity,
+        ref HydrationCacheConcurrency.Lease? admission, ref ExperimentalEntryLease? entry)
+    {
+        identity.Encode();
+        if (admission is null || entry is null || identity.SourceAlias != "synthetic" ||
+            !Uri.TryCreate(identity.Origin, UriKind.Absolute, out var origin) || origin.Scheme != "https" ||
+            !origin.Host.EndsWith(".invalid", StringComparison.OrdinalIgnoreCase))
+            throw new IOException("Synthetic receipt input invalid.");
+        var root = Path.GetFullPath(requestedRoot); var key = identity.ScopeKey + identity.CacheKey;
+        var originalAdmission = admission; var originalEntry = entry;
+        var receipt = new LeaseReceipt(root, key, ReceiptAttachAuthority); var attached = false;
+        lock (RegistryGate) Receipts.Add(receipt);
+        try {
+            originalAdmission.RunExperimentalForEntry(root, key, () => {
+                // Accessing this facade verifies that this root holds its legacy lock.
+                _ = originalAdmission.ExperimentalMarkers; originalEntry.Validate();
+                _ = originalAdmission.TransferExperimentalPair(originalEntry, key, (nextAdmission, nextEntry) => {
+                    receipt.Attach(nextAdmission, nextEntry, ReceiptAttachAuthority); attached = true;
+                });
+            });
+            ReceiptFactoryAfterTransferTestHook?.Invoke();
+            admission = null; entry = null; return receipt;
+        } catch {
+            // If attachment ever happened, preserve the pre-registered receipt and
+            // all of its resources for investigation rather than guessing ownership.
+            if (!attached) lock (RegistryGate) Receipts.Remove(receipt);
+            throw;
+        }
+    }
     internal static void ExerciseReceiptReattachGuardForTest(LeaseReceipt receipt) => receipt.Attach(null!, (ExperimentalEntryLease)null!, ReceiptAttachAuthority);
     internal readonly record struct StagedSnapshot(string Path, long Bytes, long Growth);
     // Called only while the root quota monitor is held. Do not acquire another
