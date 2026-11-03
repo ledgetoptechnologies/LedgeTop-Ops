@@ -437,6 +437,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
     }
     internal static ManualResetEventSlim? ExperimentalAfterAuthorizationTestSignal, ExperimentalAfterAuthorizationReleaseTestSignal;
+    internal static ManualResetEventSlim? ExperimentalAfterStageTestSignal, ExperimentalAfterStageReleaseTestSignal;
     private static void ExperimentalPauseAfterAuthorizationForTest()
     {
         if (ExperimentalAfterAuthorizationTestSignal is null) return;
@@ -452,7 +453,17 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         var resolved = await AuthorizeWithRetry(identity, token).ConfigureAwait(false);
         ExperimentalPauseAfterAuthorizationForTest(); token.ThrowIfCancellationRequested();
         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
-        return receipt.StageSyntheticReservationForTest(root, identity, resolved.Spec, this, token);
+        if (!receipt.StageSyntheticReservationForTest(root, identity, resolved.Spec, this, token)) return false;
+        if (ExperimentalAfterStageTestSignal is not null) {
+            ExperimentalAfterStageTestSignal.Set();
+            if (ExperimentalAfterStageReleaseTestSignal is null || !ExperimentalAfterStageReleaseTestSignal.Wait(TimeSpan.FromSeconds(10)))
+                throw new IOException("Synthetic post-stage boundary timed out.");
+        }
+        token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        // The quota transaction is already closed. A failed fresh authority
+        // check leaves the staged record owned and reports no success.
+        await ExperimentalReauthorizeStagedAsync(identity, receipt, token).ConfigureAwait(false);
+        return true;
     }
     internal async Task ExperimentalReauthorizeStagedAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt receipt, CancellationToken token = default)
     {

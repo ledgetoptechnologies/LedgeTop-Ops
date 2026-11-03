@@ -266,10 +266,10 @@ internal static class ExperimentalColdDownloaderTests
     internal static async Task ReservationCloseChildAsync(string root, string stage)
     {
         if (!Path.IsPathFullyQualified(root) || root.StartsWith(@"\\", StringComparison.Ordinal) || !Directory.Exists(root) ||
-            stage is not ("record" or "directory" or "entry" or "lease" or "markerforeign" or "postwrite" or "authdispose" or "authcancel" or "authrace")) throw new IOException("Synthetic teardown input invalid.");
+            stage is not ("record" or "directory" or "entry" or "lease" or "markerforeign" or "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel")) throw new IOException("Synthetic teardown input invalid.");
         if (stage == "markerforeign") { await MarkerForeignCloseChildAsync(root); return; }
         if (stage == "postwrite") { await PostWriteStatusChildAsync(root); return; }
-        if (stage is "authdispose" or "authcancel" or "authrace") { await AuthorizationBoundaryChildAsync(root, stage); return; }
+        if (stage is "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel") { await AuthorizationBoundaryChildAsync(root, stage); return; }
         var scope = new string('a', 64); var key = new string('b', 64);
         var entryDir = Path.Combine(root, scope, key); Directory.CreateDirectory(entryDir);
         var reservationDir = Path.Combine(root, ".hydration-reservations-v2"); Directory.CreateDirectory(reservationDir);
@@ -328,20 +328,29 @@ internal static class ExperimentalColdDownloaderTests
                 blocker = Task.Run(() => { lock (gate) { quotaHeld.Set(); if (!release.Wait(TimeSpan.FromSeconds(10))) throw new IOException("Synthetic quota blocker timed out."); } });
                 Check(quotaHeld.Wait(TimeSpan.FromSeconds(5)));
                 HydrationQuotaGate.BeforeWaitTestHook = () => quotaAttempt.Set();
+            } else if (stage is "authafterstage" or "authaftercancel") {
+                PlaceholderHydrationCoordinator.ExperimentalAfterStageTestSignal = entered;
+                PlaceholderHydrationCoordinator.ExperimentalAfterStageReleaseTestSignal = release;
             } else {
                 PlaceholderHydrationCoordinator.ExperimentalAfterAuthorizationTestSignal = entered;
                 PlaceholderHydrationCoordinator.ExperimentalAfterAuthorizationReleaseTestSignal = release;
             }
             stageTask = Task.Run(async () => {
                 try { return await coordinator.ExperimentalAuthorizeAndStageAsync(identity, receipt!, cancellation.Token) ? "staged" : "capacity"; }
-                catch (ObjectDisposedException) { return "disposed"; } catch (OperationCanceledException) { return "cancelled"; }
+                catch (ObjectDisposedException) { return "disposed"; } catch (OperationCanceledException) { return "cancelled"; } catch (AccessDeniedException) { return "denied"; }
             });
             if (stage == "authrace") {
                 Check(quotaAttempt.Wait(TimeSpan.FromSeconds(5)) && !stageTask.Wait(TimeSpan.FromMilliseconds(150)));
                 source.ResolveFailureForTest = new AccessDeniedException(); release.Set();
-                Check(await stageTask.WaitAsync(TimeSpan.FromSeconds(10)) == "staged");
+                Check(await stageTask.WaitAsync(TimeSpan.FromSeconds(10)) == "denied"); AssertOtherProcessCannotOpen(recordPath);
                 var denied = false; try { await coordinator.ExperimentalReauthorizeStagedAsync(identity, receipt!); } catch (AccessDeniedException) { denied = true; }
                 Check(denied); receipt!.RemoveSyntheticReservationForTest(root, identity.ScopeKey + identity.CacheKey);
+            } else if (stage is "authafterstage" or "authaftercancel") {
+                Check(entered.Wait(TimeSpan.FromSeconds(5))); AssertOtherProcessCannotOpen(recordPath);
+                AssertOtherProcessOpen(Path.Combine(root, ".hydration-quota-v2.lock"), true);
+                if (stage == "authafterstage") source.ResolveFailureForTest = new AccessDeniedException(); else cancellation.Cancel();
+                release.Set(); Check(await stageTask.WaitAsync(TimeSpan.FromSeconds(10)) == (stage == "authafterstage" ? "denied" : "cancelled"));
+                AssertOtherProcessCannotOpen(recordPath); receipt!.RemoveSyntheticReservationForTest(root, identity.ScopeKey + identity.CacheKey);
             } else {
                 Check(entered.Wait(TimeSpan.FromSeconds(5)));
                 if (stage == "authdispose") coordinator.Dispose(); else cancellation.Cancel();
@@ -351,6 +360,7 @@ internal static class ExperimentalColdDownloaderTests
         } finally {
             release.Set(); PlaceholderHydrationCoordinator.ExperimentalAfterAuthorizationTestSignal = null; PlaceholderHydrationCoordinator.ExperimentalAfterAuthorizationReleaseTestSignal = null;
             HydrationQuotaGate.BeforeWaitTestHook = null;
+            PlaceholderHydrationCoordinator.ExperimentalAfterStageTestSignal = null; PlaceholderHydrationCoordinator.ExperimentalAfterStageReleaseTestSignal = null;
             // Do not let this synthetic child exit while a started operation is unconfirmed.
             if (stageTask is not null) await stageTask;
             if (blocker is not null) await blocker;
@@ -873,10 +883,10 @@ internal static class ExperimentalColdDownloaderTests
                 AssertOtherProcessOpen(Path.Combine(root, ".hydration-cache.lock"), true);
             } finally { entry?.Dispose(); admission?.Dispose(); }
         });
-        foreach (var stage in new[] { "record", "directory", "entry", "lease", "markerforeign", "postwrite", "authdispose", "authcancel", "authrace" }) await WithFixture(async fixture => {
+        foreach (var stage in new[] { "record", "directory", "entry", "lease", "markerforeign", "postwrite", "authdispose", "authcancel", "authrace", "authafterstage", "authaftercancel" }) await WithFixture(async fixture => {
             var root = Path.Combine(fixture.Path, "teardown"); Directory.CreateDirectory(root);
             await RunReservationCloseChildAsync(root, stage);
-            var cacheRoot = stage is "postwrite" or "authdispose" or "authcancel" or "authrace" ? Path.Combine(root, "verified-hydration-v1") : root;
+            var cacheRoot = stage is "postwrite" or "authdispose" or "authcancel" or "authrace" or "authafterstage" or "authaftercancel" ? Path.Combine(root, "verified-hydration-v1") : root;
             AssertOtherProcessOpen(Path.Combine(cacheRoot, ".hydration-cache.lock"), true);
             if (stage == "postwrite") {
                 using var source = new CoordinatorSource(); var identity = source.Identity;
