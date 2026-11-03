@@ -505,6 +505,20 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     }
     private static void Owned(string directory)
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        TraceCacheAction(NativeStallTrace.Stage.OwnedSafeEnter, NativeStallTrace.Stage.OwnedSafeExit, () => RequireSafe(directory));
+        var exists = TraceCacheValue(NativeStallTrace.Stage.OwnedDirectoryExistsEnter, NativeStallTrace.Stage.OwnedDirectoryExistsExit, () => Directory.Exists(directory));
+        if (!exists) {
+            if (TraceCacheValue(NativeStallTrace.Stage.OwnedFileExistsEnter, NativeStallTrace.Stage.OwnedFileExistsExit, () => File.Exists(directory))) throw new TransferException("Hydration cache is unavailable.");
+            TraceCacheAction(NativeStallTrace.Stage.OwnedCreateEnter, NativeStallTrace.Stage.OwnedCreateExit, () => Directory.CreateDirectory(directory));
+            using var marker = TraceCacheValue(NativeStallTrace.Stage.OwnedMarkerOpenEnter, NativeStallTrace.Stage.OwnedMarkerOpenExit, () => new FileStream(Path.Combine(directory, Marker), FileMode.CreateNew, FileAccess.Write, FileShare.None));
+            TraceCacheAction(NativeStallTrace.Stage.OwnedMarkerWriteEnter, NativeStallTrace.Stage.OwnedMarkerWriteExit, () => marker.Write(System.Text.Encoding.UTF8.GetBytes(Owner)));
+            TraceCacheAction(NativeStallTrace.Stage.OwnedMarkerFlushEnter, NativeStallTrace.Stage.OwnedMarkerFlushExit, () => marker.Flush(true));
+        }
+        var path = Path.Combine(directory, Marker);
+        TraceCacheAction(NativeStallTrace.Stage.OwnedMarkerSafeEnter, NativeStallTrace.Stage.OwnedMarkerSafeExit, () => RequireSafe(path));
+        if (!TraceCacheValue(NativeStallTrace.Stage.OwnedMarkerVerifyEnter, NativeStallTrace.Stage.OwnedMarkerVerifyExit, () => File.Exists(path) && new FileInfo(path).Length <= 128 && File.ReadAllText(path) == Owner)) throw new TransferException("Hydration cache is not owned by this application.");
+#else
         RequireSafe(directory);
         if (!Directory.Exists(directory)) {
             if (File.Exists(directory)) throw new TransferException("Hydration cache is unavailable.");
@@ -514,6 +528,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         }
         var path = Path.Combine(directory, Marker); RequireSafe(path);
         if (!File.Exists(path) || new FileInfo(path).Length > 128 || File.ReadAllText(path) != Owner) throw new TransferException("Hydration cache is not owned by this application.");
+#endif
     }
     private static bool OwnedExisting(string directory)
     {
