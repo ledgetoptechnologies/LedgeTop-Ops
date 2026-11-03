@@ -86,6 +86,9 @@ internal static class ReservationHandlePrototype
                     throw new IOException("Watchdog child record did not retain its exact identity and bytes.");
             }
             PhysicalAccountingControl(fixture, directory, directoryId, childRecord, childId, () => deleteDispositionsApplied++);
+#if LEDGETOP_CACHE_RACE_TEST
+            ExperimentalOwnedStreamControl(fixture, directory, directoryId, () => deleteDispositionsApplied++);
+#endif
             VerifyDirectoryBinding(fixture, directory, directoryId);
             verified = true;
             // Delete each exact owned file only through the verified file handle.
@@ -110,6 +113,35 @@ internal static class ReservationHandlePrototype
         }
         Console.WriteLine("PASS ordinary Windows retained-handle identity, abrupt child termination, watchdog after parent death, and exact cleanup. No native provider or OS crash tested.");
     }
+
+#if LEDGETOP_CACHE_RACE_TEST
+    private static void ExperimentalOwnedStreamControl(string fixture, SafeFileHandle directory, FileId directoryId, Action recordDisposition)
+    {
+        var path = Path.Combine(fixture, "experimental-stream.record");
+        LedgeTop.WindowsDownload.ExperimentalOwnedStream.Identity identity;
+        using (var owned = LedgeTop.WindowsDownload.ExperimentalOwnedStream.CreateNew(path)) {
+            identity = owned.SourceIdentity;
+            owned.Write(Owned);
+            var blocked = false;
+            try { File.Move(path, path + ".unexpected"); } catch (IOException) { blocked = true; } catch (UnauthorizedAccessException) { blocked = true; }
+            if (!blocked || File.Exists(path + ".unexpected")) throw new IOException("Experimental source was replaceable.");
+            if (!owned.SealAndHash().SequenceEqual(System.Security.Cryptography.SHA256.HashData(Owned))) throw new IOException("Experimental digest changed.");
+            blocked = false;
+            try { owned.Write(Owned); } catch (InvalidOperationException) { blocked = true; }
+            if (!blocked) throw new IOException("Experimental sealed source allowed writes.");
+            blocked = false;
+            try { owned.RenameNoReplace(); } catch (NotSupportedException) { blocked = true; }
+            if (!blocked) throw new IOException("Unimplemented rename did not fail closed.");
+        }
+        using (var read = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)) {
+            var id = Id(read.SafeFileHandle);
+            if (id.Volume != identity.Volume || id.Id != identity.FileId || !ReadExact(read, Owned)) throw new IOException("Experimental source identity changed after release.");
+        }
+        if (!TryDeleteExact(fixture, directory, directoryId, path, Owned, new(identity.Volume, identity.FileId)))
+            throw new IOException("Experimental fixture deletion was not confirmed.");
+        recordDisposition();
+    }
+#endif
 
     // Isolated feasibility control, not used by the provider. The caller must
     // already own a stable root directory and an exclusive interprocess lease.
