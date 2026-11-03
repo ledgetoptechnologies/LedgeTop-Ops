@@ -100,10 +100,11 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     // Incremental synthetic-only comparison of the actual cache coordination
     // primitives. This does not authorize, download, or transfer data. The
     // reservation stage creates and verifies release of synthetic records only.
+    internal static Action? SyntheticBeforeGapReacquire;
     internal async Task SyntheticCacheStageAsync(PlaceholderIdentity identity, string stage, CancellationToken token)
     {
         if (Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") != "1" ||
-            stage is not ("quota-only" or "quota-ownership" or "quota-capacity" or "quota-reservation") || source.Alias != "synthetic" ||
+            stage is not ("quota-only" or "quota-ownership" or "quota-capacity" or "quota-reservation" or "quota-reservation-gap") || source.Alias != "synthetic" ||
             source.Origin.AbsoluteUri != "https://source.example.invalid/" || channel != "pilot" ||
             principal != "odqp1_" + new string('f', 64) || identity.PrincipalId != principal ||
             identity.Channel != "pilot" || identity.SourceAlias != "synthetic" || identity.Origin != "https://source.example.invalid" ||
@@ -139,7 +140,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 // The ownership-only comparison intentionally omits capacity;
                 // later stages run the production capacity path first.
                 if (!scopeExists || !entryExists) {
-                    if (stage is "quota-capacity" or "quota-reservation") {
+                    if (stage is "quota-capacity" or "quota-reservation" or "quota-reservation-gap") {
                         var directory = Path.Combine(root, ".hydration-reservations-v2");
                         var reservationDirectoryExists = TraceCacheValue(NativeStallTrace.Stage.CacheReservationDirCheckEnter, NativeStallTrace.Stage.CacheReservationDirCheckExit, () => OwnedExisting(directory));
                         var metadata = checked((scopeExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
@@ -152,15 +153,26 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 }
             }
         });
-        if (stage == "quota-reservation") {
+        if (stage is "quota-reservation" or "quota-reservation-gap") {
             var lockPath = Path.Combine(entry, ".hydration.lock"); RequireSafe(lockPath);
             NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseEnter);
-            using var held = await OpenEntryLeaseAsync(lockPath, FileMode.OpenOrCreate, token).ConfigureAwait(false);
+            FileStream? held = await OpenEntryLeaseAsync(lockPath, FileMode.OpenOrCreate, token).ConfigureAwait(false);
             NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseAcquired);
-            NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveEnter);
-            var reservation = Reserve(admission.Quota, identity, spec);
-            NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveAcquired);
-            TraceCacheAction(NativeStallTrace.Stage.CacheReleaseEnter, NativeStallTrace.Stage.CacheReleaseExit, reservation.Dispose);
+            try {
+                // Comparison only: deliberately drop the physical entry lease while
+                // reserving. This must never be used as the production lock order.
+                if (stage == "quota-reservation-gap") { held.Dispose(); held = null; NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticEntryLeaseGapOpen); }
+                NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveEnter);
+                var reservation = Reserve(admission.Quota, identity, spec);
+                NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveAcquired);
+                if (held is null) {
+                    // If reacquisition fails or is cancelled, preserve the record.
+                    SyntheticBeforeGapReacquire?.Invoke();
+                    held = await OpenEntryLeaseAsync(lockPath, FileMode.Open, token).ConfigureAwait(false);
+                    NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticEntryLeaseGapClosed);
+                }
+                TraceCacheAction(NativeStallTrace.Stage.CacheReleaseEnter, NativeStallTrace.Stage.CacheReleaseExit, reservation.Dispose);
+            } finally { held?.Dispose(); }
         }
     }
 #endif

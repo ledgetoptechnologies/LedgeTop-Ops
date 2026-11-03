@@ -57,7 +57,7 @@ internal static class SyntheticMemoryNative {
         var cacheStage = CacheStage(get("LEDGETOP_TEST_MEMORY_CACHE_STAGE"));
         return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}";
     }
-    private static string CacheStage(string? value) => value switch { null or "none" => "none", "quota-only" => "quota-only", "quota-ownership" => "quota-ownership", "quota-capacity" => "quota-capacity", "quota-reservation" => "quota-reservation", _ => "invalid" };
+    private static string CacheStage(string? value) => value switch { null or "none" => "none", "quota-only" => "quota-only", "quota-ownership" => "quota-ownership", "quota-capacity" => "quota-capacity", "quota-reservation" => "quota-reservation", "quota-reservation-gap" => "quota-reservation-gap", _ => "invalid" };
     internal static async Task<int> CacheStageTests() {
         var basePath = Path.Combine(Path.GetTempPath(), "LedgeTop-cache-stage-" + Guid.NewGuid().ToString("N"));
         var fixtures = Path.Combine(basePath, "memory-native-fixtures");
@@ -81,22 +81,37 @@ internal static class SyntheticMemoryNative {
                 if (!File.Exists(Path.Combine(scope, ".verified-hydration-owner")) || !File.Exists(Path.Combine(entry, ".verified-hydration-owner")))
                     throw new IOException("Synthetic ownership stage did not create expected markers.");
                 await coordinator.SyntheticCacheStageAsync(identity, "quota-reservation", CancellationToken.None);
+                await coordinator.SyntheticCacheStageAsync(identity, "quota-reservation-gap", CancellationToken.None);
                 var reservations = Path.Combine(root, ".hydration-reservations-v2");
                 if (Directory.EnumerateFiles(reservations).Any(path => Path.GetFileName(path) != ".verified-hydration-owner"))
                     throw new IOException("Synthetic reservation was not released.");
                 await coordinator.SyntheticCacheStageAsync(identity, "quota-ownership", CancellationToken.None);
                 await coordinator.SyntheticCacheStageAsync(identity, "quota-ownership", CancellationToken.None);
                 var events = NativeStallTrace.Snapshot(capture).Select(e => e.Kind).ToArray();
-                if (events.Count(e => e == NativeStallTrace.Stage.CacheQuotaAcquired) != 7 ||
-                    events.Count(e => e == NativeStallTrace.Stage.SyntheticRootPrepareExit) != 5 ||
+                if (events.Count(e => e == NativeStallTrace.Stage.CacheQuotaAcquired) != 10 ||
+                    events.Count(e => e == NativeStallTrace.Stage.SyntheticRootPrepareExit) != 6 ||
                     events.Count(e => e == NativeStallTrace.Stage.CacheScopeOwnEnter) != 1 ||
                     events.Count(e => e == NativeStallTrace.Stage.CacheEntryOwnEnter) != 1 ||
-                    events.Count(e => e == NativeStallTrace.Stage.CacheCapacityExit) != 2 ||
+                    events.Count(e => e == NativeStallTrace.Stage.CacheCapacityExit) != 3 ||
+                    Array.IndexOf(events, NativeStallTrace.Stage.SyntheticEntryLeaseGapOpen) >= Array.IndexOf(events, NativeStallTrace.Stage.SyntheticEntryLeaseGapClosed) ||
+                    !events.Contains(NativeStallTrace.Stage.SyntheticEntryLeaseGapOpen) || !events.Contains(NativeStallTrace.Stage.SyntheticEntryLeaseGapClosed) ||
                     !events.Contains(NativeStallTrace.Stage.CacheReserveAcquired) || !events.Contains(NativeStallTrace.Stage.CacheReleaseExit) ||
                     !events.Contains(NativeStallTrace.Stage.OwnedMarkerFlushExit)) throw new IOException("Synthetic cache stages omitted expected trace.");
             } finally { NativeStallTrace.Disable(capture); }
             var rejected = false; try { await coordinator.SyntheticCacheStageAsync(identity, "unknown", CancellationToken.None); } catch (TransferException) { rejected = true; }
             if (!rejected) throw new IOException("Invalid synthetic stage accepted.");
+            using (var cancellation = new CancellationTokenSource()) {
+                PlaceholderHydrationCoordinator.SyntheticBeforeGapReacquire = cancellation.Cancel;
+                var cancelled = false;
+                try { await coordinator.SyntheticCacheStageAsync(identity, "quota-reservation-gap", cancellation.Token); }
+                catch (OperationCanceledException) { cancelled = true; }
+                finally { PlaceholderHydrationCoordinator.SyntheticBeforeGapReacquire = null; }
+                var record = Path.Combine(root, ".hydration-reservations-v2", identity.ScopeKey + "-" + identity.CacheKey + ".json");
+                if (!cancelled || !File.Exists(record)) throw new IOException("Cancelled synthetic gap did not preserve its reservation.");
+                // This is the exact synthetic record just created in this test's
+                // isolated fixture; the production path never removes it here.
+                File.Delete(record);
+            }
             rejected = false; try { await coordinator.SyntheticCacheStageAsync(identity with { Length = 1 }, "quota-reservation", CancellationToken.None); } catch (TransferException) { rejected = true; }
             if (!rejected) throw new IOException("Non-fixture synthetic size accepted.");
             Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", Path.GetTempPath());
