@@ -420,7 +420,7 @@ function captureHeldSourceExport(processing, { datasetId, taskId, attemptId, joi
 }
 
 module.exports = {
-  captureHeldSourceExport, HeldSourceExport, frameStream, gcpEvidenceStream, generatedGcpFileStream,
+  captureHeldSourceExport, fileFacts, HeldSourceExport, frameStream, gcpEvidenceStream, generatedGcpFileStream,
   MAX_FRAME_BYTES, MAX_GCP_EVIDENCE_BYTES, MAX_GCP_EVIDENCE_CHUNK_BYTES,
   MAX_GCP_CONTENT_BYTES, MAX_TOTAL_EXPORT_STREAM_BYTES,
   GCP_EVIDENCE_VERSION, GCP_EVIDENCE_DOMAIN, GCP_FILE_VERSION, GCP_FILE_DOMAIN, SOURCE_VERSION, SELECTED_VERSION,

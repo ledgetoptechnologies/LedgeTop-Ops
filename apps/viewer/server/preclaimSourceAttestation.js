@@ -9,10 +9,14 @@ const { canonicalEnvelope, canonicalizeJcs } = require('./preparedSubmissionOutb
 const { PreparedSubmissionOutbox } = require('./preparedSubmissionOutbox');
 const { ProcessingRepository } = require('./processingRepository');
 const { getHeldSourceSnapshot, verifyHeldSourceSnapshot } = require('./heldSourceSnapshot');
+const { fileFacts } = require('./viewerPagedSourceExport');
 
 const PROTOCOL = 'ltds-preclaim-source-attestation-v1';
 const DOMAIN = Buffer.from(`${PROTOCOL}\0`, 'ascii');
 const MAX_PROOF_BYTES = 8192;
+const MAX_SOURCE_STREAM_BYTES = 12 * 1024 * 1024;
+const PHOTO = /\.(?:jpe?g|png|tiff?|dng|raw|heic)$/i;
+const PROVIDER_INPUT = /\.(?:txt|geojson|json|zip|las|laz)$/i;
 const PROOF_FIELDS = Object.freeze([
   'schemaVersion', 'protocol', 'issuerId', 'keyId', 'authorityId', 'principalId',
   'environment', 'submissionId', 'viewerTaskId', 'viewerAttemptId', 'activationId',
@@ -64,6 +68,18 @@ function validateSnapshotSelection(snapshot, submission) {
   }
   // This v1 proof intentionally holds any dataset containing raw GCP inputs.
   if (source.some(record => record.processingRole === 'gcp_source')) fail('preclaim_gcp_extension_unavailable');
+  const eligible = source.filter(record => record.type === 'dataset_file'
+    && !['gcp_source', 'administrative'].includes(record.processingRole)
+    && (record.processingRole !== 'auto' || PHOTO.test(record.relativePath)));
+  const orderedEligible = [
+    ...eligible.filter(record => PHOTO.test(record.relativePath)),
+    ...eligible.filter(record => !PHOTO.test(record.relativePath)),
+  ];
+  const expectedSelection = orderedEligible.map((record, ordinal) => ({
+    type: 'dataset_file', ordinal, pageObjectId: record.datasetFileId, datasetFileId: record.datasetFileId,
+  }));
+  const comparisonLimits = { maxBytes: MAX_SOURCE_STREAM_BYTES };
+  if (!canonicalizeJcs(selected, comparisonLimits).equals(canonicalizeJcs(expectedSelection, comparisonLimits))) fail('preclaim_snapshot_selection_incomplete');
   const mapped = [];
   const inputFiles = [];
   let hasImage = false;
@@ -73,7 +89,9 @@ function validateSnapshotSelection(snapshot, submission) {
         || mark.pageObjectId !== mark.datasetFileId) fail('preclaim_snapshot_selection_invalid');
     const file = byId.get(mark.datasetFileId);
     if (!file || ['gcp_source', 'administrative'].includes(file.processingRole)
-        || (file.processingRole === 'auto' && file.kind !== 'image')) fail('preclaim_snapshot_selection_invalid');
+        || (file.processingRole === 'auto' && file.kind !== 'image')
+        || (file.processingRole === 'image' && !PHOTO.test(file.relativePath))
+        || (file.processingRole === 'provider_input' && !PROVIDER_INPUT.test(file.relativePath))) fail('preclaim_snapshot_selection_invalid');
     hasImage ||= file.kind === 'image';
     inputFiles.push({ relativePath: file.relativePath, byteSize: file.byteSize, sha256: file.sha256 });
     mapped.push({
@@ -90,13 +108,14 @@ function validateSnapshotSelection(snapshot, submission) {
   if (inputDigest !== snapshot.intent.inputManifestSha256) fail('preclaim_input_manifest_mismatch');
 }
 
-function createPreclaimSourceAttestation({
-  processing, outbox, attemptId, snapshotPublicKey, signer,
+function buildPreclaimSourceAttestation({
+  processing, outbox, attemptId, snapshotPublicKey, expectedSnapshotIssuerId, expectedSnapshotKeyId, signer,
   authorityId, principalId, environment, capabilities, trustedLidarEvidence = null,
 } = {}) {
   if (!(processing instanceof ProcessingRepository) || !(outbox instanceof PreparedSubmissionOutbox)
       || !isUuid(attemptId) || !isUuid(authorityId) || !isId(principalId)
       || !['staging', 'production'].includes(environment)) fail('preclaim_request_invalid');
+  if (!isId(expectedSnapshotIssuerId) || !isId(expectedSnapshotKeyId)) fail('preclaim_snapshot_pin_unavailable');
   if (!capabilities || capabilities.environment !== environment) fail('preclaim_policy_unavailable');
   if (!signer || !isId(signer.issuerId) || !isId(signer.keyId) || typeof signer.sign !== 'function' || !signer.publicKey) fail('preclaim_signer_unavailable');
   const signerPublicBytes = publicRawEd25519(signer.publicKey);
@@ -116,11 +135,24 @@ function createPreclaimSourceAttestation({
   if (!snapshotRow) fail('preclaim_snapshot_unavailable');
   const snapshot = getHeldSourceSnapshot(processing, snapshotRow.snapshot_id);
   if (!snapshot || snapshot.status !== 'held' || !verifyHeldSourceSnapshot(snapshot, snapshotPublicKey)) fail('preclaim_snapshot_invalid');
+  if (snapshot.issuerId !== expectedSnapshotIssuerId || snapshot.keyId !== expectedSnapshotKeyId) fail('preclaim_snapshot_signer_mismatch');
   if (Object.keys(snapshot.intent).sort().join(',') !== [...SNAPSHOT_FIELDS].sort().join(',')
       || snapshot.intent.sourceCount < 1 || snapshot.intent.selectedCount < 1
       || snapshot.datasetId !== snapshot.intent.datasetId || snapshot.taskId !== intent.viewerTaskId
       || snapshot.attemptId !== attemptId || snapshot.intent.taskId !== intent.viewerTaskId
       || snapshot.intent.attemptId !== attemptId) fail('preclaim_snapshot_binding_mismatch');
+
+  const dataset = processing.getDataset(snapshot.datasetId, true);
+  const task = processing.getTask(intent.viewerTaskId);
+  const attempt = processing.getAttempt(attemptId);
+  if (!dataset || dataset.status !== 'finalized' || dataset.manifestSha256 !== snapshot.datasetManifestSha256
+      || !task || task.activeAttemptId !== attemptId || task.datasetId !== dataset.id
+      || !attempt || attempt.taskId !== task.id || attempt.datasetId !== dataset.id) fail('preclaim_current_source_binding_mismatch');
+  let currentSource;
+  try { currentSource = dataset.files.map(fileFacts); } catch { fail('preclaim_current_source_invalid'); }
+  const snapshotSource = parseFrameRecords(snapshot.sourceFrames);
+  const sourceComparisonLimits = { maxBytes: MAX_SOURCE_STREAM_BYTES };
+  if (!canonicalizeJcs(snapshotSource, sourceComparisonLimits).equals(canonicalizeJcs(currentSource, sourceComparisonLimits))) fail('preclaim_source_inventory_mismatch');
 
   const envelopeBytes = Buffer.from(intent.envelopeCanonical, 'utf8');
   let envelope;
@@ -164,6 +196,23 @@ function createPreclaimSourceAttestation({
   const signature = Buffer.from(signer.sign(message));
   if (signature.length !== 64 || !crypto.verify(null, message, signer.publicKey, signature)) fail('preclaim_signature_invalid');
   return { proof, raw, signature, attestationSha256: crypto.createHash('sha256').update(message).digest('hex') };
+}
+
+function createPreclaimSourceAttestation(input = {}) {
+  const database = input.processing?.database;
+  if (!database || typeof database.exec !== 'function') fail('preclaim_request_invalid');
+  if (database.isTransaction) fail('preclaim_transaction_conflict');
+  // A single SQLite read view prevents mixing an accepted binding, old
+  // snapshot and changed source inventory into one signed statement.
+  database.exec('BEGIN');
+  try {
+    const result = buildPreclaimSourceAttestation(input);
+    database.exec('COMMIT');
+    return result;
+  } catch (error) {
+    if (database.isTransaction) database.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 module.exports = { DOMAIN, MAX_PROOF_BYTES, PROOF_FIELDS, PROTOCOL, createPreclaimSourceAttestation };
