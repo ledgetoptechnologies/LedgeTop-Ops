@@ -20,7 +20,14 @@ internal sealed class HydrationMutationScope : IDisposable
 #if LEDGETOP_CACHE_RACE_TEST
             BeforeGateTestHook?.Invoke();
 #endif
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.CacheMutationEnter);
+            try {
+#endif
             scope.gate(() => { if (!committedCleanup) { scope.cancellationToken.ThrowIfCancellationRequested(); token.ThrowIfCancellationRequested(); } mutation(); });
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheMutationExit); }
+#endif
         } else mutation();
     }
     public void Dispose() { if (ReferenceEquals(Current.Value, this)) Current.Value = previous; }

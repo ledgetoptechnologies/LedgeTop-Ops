@@ -40,11 +40,45 @@ internal static class NativeStallTraceTests
             if (newEvents.Length != 1 || newEvents[0].Sequence != 1 || !seen.SetEquals([1L, 2L]))
                 throw new Exception("Per-slot tracking must include a late publication after Disable.");
         } finally { NativeStallTrace.Disable(delayed); }
+        var mutationCapture = NativeStallTrace.Enable();
+        try {
+            var changed = false;
+            using (HydrationMutationScope.Begin(action => action(), CancellationToken.None))
+                HydrationMutationScope.Run(() => changed = true);
+            var stages = NativeStallTrace.Snapshot(mutationCapture).Select(e => e.Kind).ToArray();
+            if (!changed || !stages.SequenceEqual([NativeStallTrace.Stage.CacheMutationEnter, NativeStallTrace.Stage.CacheMutationExit]))
+                throw new Exception("Mutation trace must surround the gated action.");
+        } finally { NativeStallTrace.Disable(mutationCapture); }
+        var blockedCapture = NativeStallTrace.Enable();
+        using var releaseMutation = new ManualResetEventSlim();
+        var mutationEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        try {
+            var worker = Task.Run(() => {
+                using (HydrationMutationScope.Begin(action => { mutationEntered.TrySetResult(); releaseMutation.Wait(); action(); }, CancellationToken.None))
+                    HydrationMutationScope.Run(() => { });
+            });
+            try {
+                await mutationEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                var waiting = NativeStallTrace.Snapshot(blockedCapture).Select(e => e.Kind).ToArray();
+                if (!waiting.SequenceEqual([NativeStallTrace.Stage.CacheMutationEnter]))
+                    throw new Exception("A blocked mutation must show an entry without an exit.");
+            } finally { releaseMutation.Set(); await worker.WaitAsync(TimeSpan.FromSeconds(10)); }
+            if (!NativeStallTrace.Snapshot(blockedCapture).Select(e => e.Kind).SequenceEqual([NativeStallTrace.Stage.CacheMutationEnter, NativeStallTrace.Stage.CacheMutationExit]))
+                throw new Exception("A released mutation must publish its exit.");
+        } finally { NativeStallTrace.Disable(blockedCapture); }
         await CloudFilesConnectionTests.TraceFakeCallbackAsync();
         await AssertStageCoverageAsync(CloudFilesNativeTransferTests.Groups.First(g => g.Name.StartsWith("native x64 ABI", StringComparison.Ordinal)).Run,
             NativeStallTrace.Stage.ProgressEnter, NativeStallTrace.Stage.ProgressExit,
             NativeStallTrace.Stage.AdmissionEnter, NativeStallTrace.Stage.AdmissionAcquired,
             NativeStallTrace.Stage.AuthorizationEnter, NativeStallTrace.Stage.AuthorizationExit,
+            NativeStallTrace.Stage.CacheLegacyLeaseEnter, NativeStallTrace.Stage.CacheLegacyLeaseAcquired,
+            NativeStallTrace.Stage.CacheQuotaEnter, NativeStallTrace.Stage.CacheQuotaAcquired, NativeStallTrace.Stage.CacheQuotaExit,
+            NativeStallTrace.Stage.CacheDirectoryEnter, NativeStallTrace.Stage.CacheDirectoryExit,
+            NativeStallTrace.Stage.CacheEntryLeaseEnter, NativeStallTrace.Stage.CacheEntryLeaseAcquired,
+            NativeStallTrace.Stage.CacheReserveEnter, NativeStallTrace.Stage.CacheReserveAcquired,
+            NativeStallTrace.Stage.CacheReleaseEnter, NativeStallTrace.Stage.CacheReleaseExit,
+            NativeStallTrace.Stage.CacheDownloadEnter, NativeStallTrace.Stage.CacheDownloadExit,
+            NativeStallTrace.Stage.CacheVerifyEnter, NativeStallTrace.Stage.CacheVerifyExit,
             NativeStallTrace.Stage.AuthorizationAfterEnter, NativeStallTrace.Stage.AuthorizationAfterExit,
             NativeStallTrace.Stage.TransferEnter, NativeStallTrace.Stage.TransferExit,
             NativeStallTrace.Stage.ExecuteEnter, NativeStallTrace.Stage.ExecuteExit);

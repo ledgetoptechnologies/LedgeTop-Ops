@@ -131,10 +131,20 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 var quotaLock = Path.Combine(root, ".hydration-cache.lock"); RequireSafe(quotaLock);
                 // One process owns the legacy lease through all its active and queued work;
                 // its two local slots still run concurrently. Other versions/processes refuse.
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.CacheLegacyLeaseEnter);
+#endif
                 admission.AcquireExclusiveLegacy(quotaLock, FileMode.OpenOrCreate);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.CacheLegacyLeaseAcquired);
+#endif
                 var scope = Path.Combine(root, identity.ScopeKey);
                 var entry = Path.Combine(scope, identity.CacheKey);
                 WithQuota(admission.Quota, () => {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.CacheDirectoryEnter);
+                    try {
+#endif
                     var scopeExists = OwnedExisting(scope); var entryExists = OwnedExisting(entry);
                     if (!scopeExists || !entryExists) {
                         var directory = Path.Combine(root, ".hydration-reservations-v2");
@@ -144,30 +154,59 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                         RequireCapacity(ReservedBytes(directory), checked(identity.Length + Downloader.HydrationStateGrowthBudget(resolved.Spec) + 1024 + metadata));
                         Owned(scope); Owned(entry);
                     }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheDirectoryExit); }
+#endif
                 });
                 var lockPath = Path.Combine(entry, ".hydration.lock"); RequireSafe(lockPath);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseEnter);
+#endif
                 using var held = await OpenEntryLeaseAsync(lockPath, FileMode.OpenOrCreate, cancellationToken);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.CacheEntryLeaseAcquired);
+#endif
                 var file = Path.Combine(entry, identity.FileName); RequireSafe(file);
                 if (!File.Exists(file)) {
                     timing?.SetCacheHit(false);
                     stage = HydrationStage.Download; timing?.Enter(HydrationTimingStage.Download);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveEnter);
+#endif
                     var reservation = Reserve(admission.Quota, identity, resolved.Spec); Exception? primary = null;
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveAcquired);
+#endif
                     try {
                         string downloaded;
                         using (DownloadTimingScope.Begin(timing, identity))
                         using (HydrationMutationScope.Begin(action => WithQuota(admission.Quota, action), cancellationToken)) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                            NativeStallTrace.Record(NativeStallTrace.Stage.CacheDownloadEnter);
+                            try {
+#endif
                             if (source is IVerifiedHydrationDownloadSource verifiedSource) {
                                 freshDownload = await verifiedSource.DownloadForHydrationAsync(resolved.Spec, entry, cancellationToken).ConfigureAwait(false);
                                 downloaded = freshDownload.Path;
                             } else downloaded = await source.DownloadAsync(resolved.Spec, entry, cancellationToken: cancellationToken);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                            } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheDownloadExit); }
+#endif
                         }
                         if (Path.GetFullPath(downloaded) != file) throw new TransferException("Hydration source returned an unexpected cache path.");
                     } catch (Exception error) { primary = error; throw; }
                     finally {
                         // A cleanup failure retains the durable record. Never replace caller
                         // cancellation or the primary source/integrity diagnostic during unwind.
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                        NativeStallTrace.Record(NativeStallTrace.Stage.CacheReleaseEnter);
+                        try {
+#endif
                         if (primary is null) reservation.Dispose();
                         else { try { reservation.Dispose(); } catch { } }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                        } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheReleaseExit); }
+#endif
                     } // Source writes have fully joined; remaining bytes are now measured on disk.
                 }
                 else {
@@ -175,6 +214,9 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                     WithQuota(admission.Quota, () => RemoveExactStaleReservation(identity));
                 }
                 stage = HydrationStage.CacheVerification; timing?.Enter(HydrationTimingStage.CacheVerification);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.CacheVerifyEnter);
+#endif
                 RequireSafe(file);
                 // On a cold cache, the production downloader hands off the exact still-open stream
                 // it hashed before promotion. Cache hits and untrusted adapters are fully rehashed.
@@ -182,6 +224,9 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 if (input.Length != identity.Length || (freshDownload?.IntegrityVerified != true
                     && !CryptographicOperations.FixedTimeEquals(await SHA256.HashDataAsync(input, cancellationToken), Convert.FromHexString(identity.Sha256))))
                     throw new TransferException("Hydration cache integrity check failed.");
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.CacheVerifyExit);
+#endif
                 stage = HydrationStage.AuthorizationAfter; timing?.Enter(HydrationTimingStage.AuthorizationAfter);
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                 NativeStallTrace.Record(NativeStallTrace.Stage.AuthorizationAfterEnter);
@@ -292,12 +337,22 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     }
     private void WithQuota(object gate, Action action)
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.CacheQuotaEnter);
+#endif
         lock (gate) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.CacheQuotaAcquired);
+            try {
+#endif
             RequireSafe(root); _ = OwnedExisting(root);
             var path = Path.Combine(root, ".hydration-quota-v2.lock"); RequireSafe(path);
             // Cross-process contention is a conservative failure, never an ignored reservation.
             using var held = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
             action();
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheQuotaExit); }
+#endif
         }
     }
     private IDisposable Reserve(object gate, PlaceholderIdentity identity, DownloadSpec spec)

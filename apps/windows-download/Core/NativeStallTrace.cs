@@ -14,7 +14,14 @@ internal static class NativeStallTrace
         AuthorizationEnter, AuthorizationExit, MetadataAttemptEnter,
         MetadataAttemptExit, MetadataBusy, RetryDelayEnter, RetryDelayExit,
         AuthorizationAfterEnter, AuthorizationAfterExit, TransferEnter, TransferExit,
-        ExecuteEnter, ExecuteExit, RejectEnter, RejectExit
+        ExecuteEnter, ExecuteExit, RejectEnter, RejectExit,
+        CacheLegacyLeaseEnter, CacheLegacyLeaseAcquired,
+        CacheQuotaEnter, CacheQuotaAcquired, CacheQuotaExit,
+        CacheDirectoryEnter, CacheDirectoryExit,
+        CacheEntryLeaseEnter, CacheEntryLeaseAcquired,
+        CacheReserveEnter, CacheReserveAcquired, CacheReleaseEnter, CacheReleaseExit,
+        CacheDownloadEnter, CacheDownloadExit, CacheVerifyEnter, CacheVerifyExit,
+        CacheMutationEnter, CacheMutationExit
     }
     internal readonly record struct Event(long Sequence, long Timestamp, int ThreadId, Stage Kind);
     internal sealed class Capture
