@@ -36,6 +36,14 @@ internal static class ExperimentalColdDownloaderTests
         try { await task; } catch (TransferException) { return; }
         throw new IOException("Experimental transfer should fail closed.");
     }
+    private static async Task ExpectQuarantineStaleGuard(Func<Task> operation, string expectedEntry)
+    {
+        var hits = new List<string>();
+        PlaceholderHydrationCoordinator.QuarantineStaleGuardTestHook = hits.Add;
+        try { await ExpectTransferFailure(operation()); }
+        finally { PlaceholderHydrationCoordinator.QuarantineStaleGuardTestHook = null; }
+        Check(hits.Count == 1 && string.Equals(hits[0], expectedEntry, StringComparison.OrdinalIgnoreCase));
+    }
     private static async Task RunOwnedFixtureAsync(Func<Task> body, Func<int> quarantined, Action cleanup, Action preserve)
     {
         var completed = false;
@@ -332,16 +340,16 @@ internal static class ExperimentalColdDownloaderTests
                     (long)reservedBytes.Invoke(null, [retained])! == growth);
             }
             CheckReservation();
-            var other = new TestSink(); await ExpectTransferFailure(coordinator.HydrateAsync(source.Identity, 0, Content.Length, other));
+            var entry = Path.Combine(root.Path, "verified-hydration-v1", source.Identity.ScopeKey, source.Identity.CacheKey);
+            var other = new TestSink(); await ExpectQuarantineStaleGuard(() => coordinator.HydrateAsync(source.Identity, 0, Content.Length, other), entry);
             Check(other.Failed == 1 && other.Completed == 0 && source.Downloads == 1); CheckReservation();
             // Simulate a verified cache file appearing while the same entry's
             // partial owner is still quarantined. Eviction must not remove it
             // or reinterpret the live reservation as stale.
-            var entry = Path.Combine(root.Path, "verified-hydration-v1", source.Identity.ScopeKey, source.Identity.CacheKey);
             var cached = Path.Combine(entry, source.Identity.FileName); File.WriteAllBytes(cached, Content);
-            var hit = new TestSink(); await ExpectTransferFailure(coordinator.HydrateAsync(source.Identity, 0, Content.Length, hit));
+            var hit = new TestSink(); await ExpectQuarantineStaleGuard(() => coordinator.HydrateAsync(source.Identity, 0, Content.Length, hit), entry);
             Check(hit.Failed == 1 && hit.Completed == 0 && source.Downloads == 1); CheckReservation();
-            await ExpectTransferFailure(coordinator.EvictVerifiedCacheAsync(source.Identity));
+            await ExpectQuarantineStaleGuard(() => coordinator.EvictVerifiedCacheAsync(source.Identity), entry);
             Check(File.ReadAllBytes(cached).SequenceEqual(Content)); CheckReservation();
             // Exercise the coordinator's real capacity check: with this
             // durable reservation counted, one extra byte is refused.

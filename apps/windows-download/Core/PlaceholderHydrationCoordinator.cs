@@ -31,6 +31,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     internal static Action<string>? CacheWalkTestHook;
     internal static Action<string>? CreatedMarkerTestHook;
     internal static Action? BeforeReservationReleaseTestHook;
+    internal static Action<string>? QuarantineStaleGuardTestHook;
 #endif
 
     public PlaceholderHydrationCoordinator(IQueuedDownloadSource source, string channel, string applicationStateRoot,
@@ -492,8 +493,10 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         // gate. Never interpret a rooted experimental owner as stale; the
         // guard applies to fresh fetch, cache-hit and offline eviction alike.
         var guardedEntry = Path.Combine(root, identity.ScopeKey, identity.CacheKey);
-        if (ExperimentalOwnedStream.HasQuarantineForEntryForTest(guardedEntry))
+        if (ExperimentalOwnedStream.HasQuarantineForEntryForTest(guardedEntry)) {
+            QuarantineStaleGuardTestHook?.Invoke(guardedEntry);
             throw new TransferException("Experimental owner remains quarantined; reservation preserved.");
+        }
 #endif
         var directory = Path.Combine(root, ".hydration-reservations-v2");
         if (!OwnedExisting(directory)) return;
