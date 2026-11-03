@@ -80,6 +80,16 @@ internal static class SyntheticMemoryNative {
             NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticReservationOwnerPrewarmComplete);
         }
     }
+    // Test-only use of the production handle-bound primitive: it verifies the
+    // exact expected bytes on the deletion handle and refuses unsafe paths.
+    // An assertion failure or any uncertainty keeps the fixture intact.
+    private static bool TryDeleteTraceRecord(string path, byte[] expected, bool checksPassed) {
+        if (!checksPassed || !OperatingSystem.IsWindows()) return false;
+        var delete = typeof(PlaceholderHydrationCoordinator).GetMethod("DeleteReservation", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+        if (delete is null) return false;
+        try { delete.Invoke(null, new object[] { path, expected }); return !File.Exists(path); }
+        catch (Exception error) when (error is System.Reflection.TargetInvocationException or ArgumentException or UnauthorizedAccessException) { return false; }
+    }
     internal static async Task<int> CacheStageTests() {
         var basePath = Path.Combine(Path.GetTempPath(), "LedgeTop-cache-stage-" + Guid.NewGuid().ToString("N"));
         var fixtures = Path.Combine(basePath, "memory-native-fixtures");
@@ -95,6 +105,7 @@ internal static class SyntheticMemoryNative {
         var secondEntry = Path.Combine(scope, second.CacheKey);
         var third = identity with { ResourceReference = "odqr1_2", LogicalFileId = "oef1_" + new string('c', 64), FileName = "sample-2.bin" };
         var thirdEntry = Path.Combine(scope, third.CacheKey);
+        var retainFixture = false;
         try {
             Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", "1");
             Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", basePath);
@@ -138,8 +149,13 @@ internal static class SyntheticMemoryNative {
             var traceSpec = new DownloadSpec(second.ResourceReference, new Uri("https://source.example.invalid/content"), second.FileName, second.Length, second.ETag, second.Sha256);
             var traceBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = second.ScopeKey, Entry = second.CacheKey,
                 Growth = checked(second.Length + Downloader.HydrationStateGrowthBudget(traceSpec) + 1024) });
-            using (var output = new FileStream(traceRecord, FileMode.CreateNew, FileAccess.Write, FileShare.None)) output.Write(traceBytes);
+            using (var output = new FileStream(traceRecord, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { retainFixture = true; output.Write(traceBytes); }
+            var tracePassed = false;
             try {
+                if (TryDeleteTraceRecord(traceRecord, traceBytes, false) || !File.Exists(traceRecord)) throw new IOException("Failed-check cleanup removed a synthetic record.");
+                var wrongBytes = traceBytes.ToArray(); wrongBytes[0] ^= 1;
+                if (TryDeleteTraceRecord(traceRecord, wrongBytes, true) || !File.ReadAllBytes(traceRecord).SequenceEqual(traceBytes))
+                    throw new IOException("Mismatched cleanup removed or changed a synthetic record.");
                 var scanTrace = NativeStallTrace.Enable();
                 try {
                     await coordinator.SyntheticCacheStageAsync(identity, "quota-reservation", CancellationToken.None);
@@ -156,7 +172,9 @@ internal static class SyntheticMemoryNative {
                     if (NativeStallTrace.Dropped(scanTrace) != 0) throw new IOException("Synthetic reservation scan trace dropped events.");
                 } finally { NativeStallTrace.Disable(scanTrace); }
                 if (!File.ReadAllBytes(traceRecord).SequenceEqual(traceBytes)) throw new IOException("Unrelated synthetic reservation changed.");
-            } finally { File.Delete(traceRecord); }
+                tracePassed = true;
+            } finally { if (TryDeleteTraceRecord(traceRecord, traceBytes, tracePassed)) retainFixture = false; }
+            if (retainFixture) throw new IOException("Synthetic record cleanup was not verified; fixture retained.");
             var scopeMarker = Path.Combine(scope, ".verified-hydration-owner"); var originalScope = File.ReadAllBytes(scopeMarker);
             await PrewarmOwnedAsync(cache, new[] { third });
             if (!File.Exists(Path.Combine(thirdEntry, ".verified-hydration-owner")) || !File.ReadAllBytes(scopeMarker).SequenceEqual(originalScope))
@@ -209,6 +227,9 @@ internal static class SyntheticMemoryNative {
         } finally {
             Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", previousProbe);
             Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", previousBase);
+            if (retainFixture) {
+                Console.Error.WriteLine("Synthetic fixture retained because record cleanup was not verified: " + basePath);
+            } else {
             File.Delete(Path.Combine(entry, ".hydration.lock")); File.Delete(Path.Combine(entry, ".verified-hydration-owner")); if (Directory.Exists(entry)) Directory.Delete(entry);
             File.Delete(Path.Combine(secondEntry, ".hydration.lock")); File.Delete(Path.Combine(secondEntry, ".verified-hydration-owner")); if (Directory.Exists(secondEntry)) Directory.Delete(secondEntry);
             File.Delete(Path.Combine(thirdEntry, ".hydration.lock")); File.Delete(Path.Combine(thirdEntry, ".verified-hydration-owner")); if (Directory.Exists(thirdEntry)) Directory.Delete(thirdEntry);
@@ -218,6 +239,7 @@ internal static class SyntheticMemoryNative {
             File.Delete(Path.Combine(root, ".hydration-cache.lock")); File.Delete(Path.Combine(root, ".hydration-quota-v2.lock"));
             File.Delete(Path.Combine(root, ".verified-hydration-owner")); if (Directory.Exists(root)) Directory.Delete(root);
             Directory.Delete(cache); Directory.Delete(owned); Directory.Delete(fixtures); Directory.Delete(basePath);
+            }
         }
         Console.WriteLine("PASS synthetic actual cache admission, quota, ownership and scope refusals without native registration."); return 0;
     }
