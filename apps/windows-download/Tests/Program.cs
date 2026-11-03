@@ -5,6 +5,10 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using LedgeTop.WindowsDownload;
 
+if (args.Length == 1 && args[0] == "--observe-cross-thread-rejection") {
+    await CloudFilesConnectionTests.ObserveCrossThreadRejectionAsync();
+    return;
+}
 if (args.Length > 1 && args[0] == "--hydration-concurrency-only") { Environment.ExitCode = 2; return; }
 if (args.FirstOrDefault() == "--reference-preview-consume-fixture") {
     if (args.Length != 2) { Environment.ExitCode = 2; return; }

@@ -68,6 +68,42 @@ internal static class CloudFilesConnectionTests
         Check(f.Native.RejectionStatuses.All(value => value == CloudFilesNativeTransfer.Unavailable));
         Check(f.Native.Rejections.All(value => value.ConnectionKey == 123 && value.RequiredLength > 0));
     }
+
+    // Diagnostic only: emulate a synchronous native rejection which asks a different
+    // callback thread to finish before it returns. Both waits are strictly bounded.
+    internal static async Task ObserveCrossThreadRejectionAsync()
+    {
+        using var f = new Fixture();
+        using var nestedStarted = new ManualResetEventSlim();
+        using var nestedReturned = new ManualResetEventSlim();
+        Task? nested = null; var waitedForNested = false; var rejectionDone = Gate();
+        var owner = f.Owner((_, _, _, _) => Task.CompletedTask);
+        f.Native.OnReject = () => {
+            nested = Task.Factory.StartNew(() => {
+                nestedStarted.Set();
+                try { f.Native.Invoke(false, Identity.Encode(), request: 2); }
+                finally { nestedReturned.Set(); }
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            try {
+                if (!nestedStarted.Wait(TimeSpan.FromSeconds(2))) throw new TimeoutException("Nested callback did not start.");
+                waitedForNested = !nestedReturned.Wait(TimeSpan.FromMilliseconds(500));
+            } finally { rejectionDone.TrySetResult(); }
+        };
+        owner.Connect();
+        try {
+            f.Native.Invoke(false, "bad"u8.ToArray(), request: 1);
+            await rejectionDone.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(f.Native.Rejections.Count == 1);
+            Check(nested is not null);
+            await nested!.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(waitedForNested && nestedReturned.IsSet);
+            Console.WriteLine("Observed: a cross-thread callback was blocked until RejectFetch returned and released settlementGate. Fake native only; no Windows API calls.");
+        } finally {
+            f.Native.OnReject = null;
+            if (nested is not null) await nested.WaitAsync(TimeSpan.FromSeconds(5));
+            await owner.StopAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
     private static async Task Cancellation()
     {
         using var f = new Fixture(); var entered = Gate(); var stopped = Gate(); var terminal = Gate();
@@ -445,7 +481,7 @@ internal static class CloudFilesConnectionTests
         internal int Connects, Disconnects, ConnectStatus, DisconnectStatus, RejectionsAfterDisconnect;
         private bool disconnected;
         internal nint Cookie;
-        internal Action? OnConnect, OnDisconnect;
+        internal Action? OnConnect, OnDisconnect, OnReject;
         internal readonly System.Collections.Concurrent.ConcurrentBag<CloudFilesOperationContext> Rejections = [];
         internal readonly System.Collections.Concurrent.ConcurrentBag<int> RejectionStatuses = [];
         private WeakReference<CloudFilesNativeCallback>? fetch, cancel;
@@ -460,7 +496,7 @@ internal static class CloudFilesConnectionTests
             OnConnect?.Invoke(); key = 123; return ConnectStatus;
         }
         public int Disconnect(long key) { Check(key == 123); Disconnects++; OnDisconnect?.Invoke(); disconnected = true; return DisconnectStatus; }
-        public void RejectFetch(CloudFilesOperationContext context, int status) { if (disconnected) Interlocked.Increment(ref RejectionsAfterDisconnect); Rejections.Add(context); RejectionStatuses.Add(status); }
+        public void RejectFetch(CloudFilesOperationContext context, int status) { if (disconnected) Interlocked.Increment(ref RejectionsAfterDisconnect); Rejections.Add(context); RejectionStatuses.Add(status); OnReject?.Invoke(); }
         internal void Invoke(bool isCancel, byte[] identity, long? connection = null, nint? cookie = null, long request = 0,
             long length = -1, uint? identityLength = null, uint parameterSize = 32, long offset = 0, long fileSize = 8192)
         {
