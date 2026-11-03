@@ -2043,6 +2043,31 @@ const MIGRATIONS = [
   }},
   {version:40,name:'direct_client_session_source_authorizations',sql:'SELECT 1;',
     after(database){require('./directClientSourceMigration').migrateDirectClientSources(database);}},
+  {version:41,name:'durable_provider_cancellation_requests',sql:`
+    CREATE TABLE processing_cancellation_requests (
+      id TEXT PRIMARY KEY,
+      attempt_id TEXT NOT NULL UNIQUE REFERENCES processing_attempts(id) ON DELETE CASCADE,
+      status TEXT NOT NULL CHECK(status IN ('pending','leased','complete')),
+      requested_by TEXT,
+      attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count>=0),
+      available_at TEXT NOT NULL,
+      lease_owner TEXT,
+      lease_expires_at TEXT,
+      last_error_code TEXT,
+      last_error_message TEXT,
+      outcome TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT
+    );
+    CREATE INDEX processing_cancellation_claim_idx
+      ON processing_cancellation_requests(status,available_at,lease_expires_at,created_at,id);
+    CREATE TRIGGER processing_cancellation_requests_keep_unsettled_attempts
+      BEFORE DELETE ON processing_attempts
+      WHEN EXISTS(SELECT 1 FROM processing_cancellation_requests r
+        WHERE r.attempt_id=OLD.id AND r.status IN ('pending','leased'))
+      BEGIN SELECT RAISE(ABORT,'unsettled provider cancellation must be retained'); END;
+  `},
 ];
 
 function applyMigrations(database) {
