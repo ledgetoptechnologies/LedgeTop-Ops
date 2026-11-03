@@ -325,7 +325,7 @@ export async function processViewerProcessingNotifications(env: Env): Promise<nu
       : `Project ${projectLabel}\nTask ${taskLabel}, attempt ${row.attempt_id} is ready for review.${row.review_url ? `\n\nReview: ${row.review_url}` : ""}`;
     try {
       await sendNotificationMail(env, {
-        to: recipient, fromName: "LTDS 3D Processing", subject, text,
+        to: recipient, fromName: "Ledge Top 3D Processing", subject, text,
         html: `<p>${text.replace(/[&<>]/g, value => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[value]!)
           .replace(/\n\n/g, "</p><p>")}</p>`,
         messageIdKey: row.id,

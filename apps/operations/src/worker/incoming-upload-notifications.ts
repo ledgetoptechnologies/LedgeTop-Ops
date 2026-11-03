@@ -195,7 +195,7 @@ export async function processIncomingUploadNotifications(env: Env): Promise<numb
     try {
       await sendNotificationMail(env, {
         to: owner.email,
-        fromName: "LTDS Incoming Uploads",
+        fromName: "Ledge Top Incoming Uploads",
         subject: `${count} received and pending verification`,
         text,
         html: `<p><strong>${escapeHtml(contributor)}</strong> uploaded ${escapeHtml(count)} (${escapeHtml(bytes)}) for <strong>${escapeHtml(title)}</strong>.</p><p>The files were received and are pending verification. They will remain quarantined until verification is complete.</p>`,

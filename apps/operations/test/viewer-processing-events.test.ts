@@ -187,6 +187,10 @@ describe("Viewer processing event callback", () => {
   it("delivers the durable notification and only prunes expired nonces", async () => {
     expect((await request(body("event-ready-000001"), "event-nonce-1234567890")).status).toBe(202);
     expect(await processViewerProcessingNotifications(env)).toBe(1);
+    expect(env.NOTIFICATION_EMAIL?.send).toHaveBeenCalledWith(expect.objectContaining({
+      from: expect.objectContaining({ name: "Ledge Top 3D Processing" }),
+    }));
+    expect(JSON.stringify(env.NOTIFICATION_EMAIL?.send.mock.calls)).not.toContain("LTDS");
     expect(await database.prepare("SELECT status FROM viewer_processing_notification_outbox").first<string>("status")).toBe("sent");
     await database.prepare("INSERT INTO viewer_event_nonces VALUES('viewer-v1','expired-nonce-12345',datetime('now','-1 minute'),datetime('now'))").run();
     await pruneViewerEventNonces(env);
