@@ -29,7 +29,8 @@ internal static class SyntheticMemoryNative {
         var blockSelf = get("LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION") == "1";
         var disableScanner = get("LEDGETOP_TEST_DISABLE_AVAILABILITY_SCANNER") == "1";
         var suppressProgress = get("LEDGETOP_TEST_SUPPRESS_NATIVE_PROGRESS") == "1";
-        return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}";
+        var markerIo = DiagnosticMemoryMarkerIo.Mode(get("LEDGETOP_TEST_MEMORY_MARKER_IO"));
+        return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}";
     }
     internal static int CleanupEvidenceTests() {
         if (!CleanupVerified(false, false, true, true, false) ||
@@ -39,16 +40,40 @@ internal static class SyntheticMemoryNative {
             CleanupVerified(true, true, true, true, false) ||
             !CleanupVerified(true, true, true, true, true)) throw new IOException("Synthetic registration cleanup evidence is incorrect.");
         var options = DiagnosticSettings(name => name == "LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION" ? "1" : "synthetic-secret");
-        if (options != "Synthetic memory options: blockSelf=True; disableScanner=False; suppressProgress=False")
+        if (options != "Synthetic memory options: blockSelf=True; disableScanner=False; suppressProgress=False; markerIo=invalid")
             throw new IOException("Synthetic diagnostic option reporting is incorrect.");
-        if (DiagnosticSettings(_ => "1") != "Synthetic memory options: blockSelf=True; disableScanner=True; suppressProgress=True")
+        if (DiagnosticSettings(name => name == "LEDGETOP_TEST_MEMORY_MARKER_IO" ? null : "1") != "Synthetic memory options: blockSelf=True; disableScanner=True; suppressProgress=True; markerIo=none")
             throw new IOException("Synthetic diagnostic option reporting did not capture opt-ins.");
         Console.WriteLine("PASS diagnostic options and failed-registration/disposal cleanup evidence."); return 0;
+    }
+    internal static int MarkerIoTests() {
+        var seen = new List<string>();
+        string Fake(string path) { seen.Add(path); return DiagnosticMemoryMarkerIo.Marker; }
+        DiagnosticMemoryMarkerIo.Read("none", "C:\\fixture", "ignored", Fake);
+        DiagnosticMemoryMarkerIo.Read("shared-marker", "C:\\fixture", "sample-0.bin", Fake);
+        DiagnosticMemoryMarkerIo.Read("shared-marker", "C:\\fixture", "sample-1.bin", Fake);
+        DiagnosticMemoryMarkerIo.Read("distinct-marker", "C:\\fixture", "sample-0.bin", Fake);
+        DiagnosticMemoryMarkerIo.Read("distinct-marker", "C:\\fixture", "sample-1.bin", Fake);
+        if (seen.Count != 4 || seen[0] != seen[1] || seen[2] == seen[3] || DiagnosticMemoryMarkerIo.Mode("secret-value") != "invalid") throw new IOException("Synthetic marker routing is incorrect.");
+        var rejected = false; try { DiagnosticMemoryMarkerIo.Read("distinct-marker", "C:\\fixture", "../other", Fake); } catch (IOException) { rejected = true; }
+        if (!rejected) throw new IOException("Synthetic marker name escaped the fixture.");
+        rejected = false; try { DiagnosticMemoryMarkerIo.Read("shared-marker", "C:\\fixture", "sample-0.bin", _ => "foreign"); } catch (IOException) { rejected = true; }
+        if (!rejected) throw new IOException("Foreign synthetic marker was accepted.");
+        var capture = NativeStallTrace.Enable();
+        try {
+            DiagnosticMemoryMarkerIo.Read("shared-marker", "C:\\fixture", "sample-0.bin", Fake);
+            var events = NativeStallTrace.Snapshot(capture).Select(value => value.Kind).ToArray();
+            if (!events.SequenceEqual(new[] { NativeStallTrace.Stage.SyntheticMarkerReadEnter, NativeStallTrace.Stage.SyntheticMarkerReadExit }))
+                throw new IOException("Synthetic marker trace was not balanced.");
+        } finally { NativeStallTrace.Disable(capture); }
+        Console.WriteLine("PASS shared/distinct marker routing and refusals without native registration."); return 0;
     }
     internal static async Task<int> RunAsync(int count) {
         if (!OperatingSystem.IsWindows() || count is < 1 or > 4 ||
             Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") != "1") return 2;
         Console.WriteLine(DiagnosticSettings(Environment.GetEnvironmentVariable));
+        var markerMode = DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO"));
+        if (markerMode == "invalid") return 2;
         var basePath = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
         if (string.IsNullOrEmpty(basePath) || !Path.IsPathFullyQualified(basePath) || basePath.StartsWith("\\\\", StringComparison.Ordinal)) return 2;
         RequireLocalDirectory(basePath);
@@ -63,12 +88,21 @@ internal static class SyntheticMemoryNative {
         var manifest = Enumerable.Range(0, count).ToDictionary(i => $"sample-{i}.bin", i => new PlaceholderIdentity(
             "pilot", "synthetic", "https://source.example.invalid", Principal, "odqr1_" + i,
             "oef1_" + new string((char)('a' + i), 64), Sha, $"sample-{i}.bin", Bytes.Length, "\"" + Sha + "\"", Sha), StringComparer.OrdinalIgnoreCase);
+        if (markerMode != "none") {
+            var markerDirectory = Path.Combine(cache, "synthetic-memory-markers"); Directory.CreateDirectory(markerDirectory); RequireLocalDirectory(markerDirectory);
+            IEnumerable<string> markerNames = markerMode == "shared-marker" ? new[] { "shared.marker" } : manifest.Keys.Select(name => name + ".marker");
+            foreach (var markerName in markerNames) {
+                using var marker = new FileStream(Path.Combine(markerDirectory, markerName), FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                marker.Write(Encoding.UTF8.GetBytes(DiagnosticMemoryMarkerIo.Marker)); marker.Flush(true);
+            }
+        }
         NativeRootRegistration? registration = null; NativePlaceholderProvider? provider = null;
         var readers = new List<Process>(); var readyHandles = new List<EventWaitHandle>(); var success = false;
         var registrationAttempted = false; var readersJoined = true; var disposeCompleted = false;
         var disposeTimedOut = false; var unregisterVerified = false;
         var startName = "Local\\LedgeTopMemoryProbe-" + id.ToString("N");
         using var start = new EventWaitHandle(false, EventResetMode.ManualReset, startName);
+        var trace = NativeStallTrace.Enable();
         try {
             registrationAttempted = true;
             registration = NativeRootRegistration.Register(root, Encoding.UTF8.GetBytes("LedgeTop.Files.MemoryNativeTest.v1:" + id));
@@ -104,6 +138,10 @@ internal static class SyntheticMemoryNative {
             if (registration is not null && readersJoined && disposeCompleted)
                 try { registration.Unregister(); unregisterVerified = true; } catch { }
             var cleanupVerified = CleanupVerified(registrationAttempted, registration is not null, readersJoined, disposeCompleted, unregisterVerified);
+            foreach (var item in NativeStallTrace.Snapshot(trace).Where(e => e.Kind is NativeStallTrace.Stage.SyntheticMarkerReadEnter or NativeStallTrace.Stage.SyntheticMarkerReadExit))
+                Console.WriteLine($"Synthetic marker trace: seq={item.Sequence}; thread={item.ThreadId}; stage={item.Kind}");
+            Console.WriteLine($"Synthetic marker trace: attempted={NativeStallTrace.Attempted(trace)}; dropped={NativeStallTrace.Dropped(trace)}");
+            NativeStallTrace.Disable(trace);
             Console.WriteLine($"Synthetic memory native: count={count}; success={success}; cleanupVerified={cleanupVerified}; disposeTimedOut={disposeTimedOut}; registrationAttempted={registrationAttempted}; registrationReturned={registration is not null}; root={root}; registrationContext=LedgeTop.Files.MemoryNativeTest.v1:{id}");
             if (!cleanupVerified) success = false;
         }

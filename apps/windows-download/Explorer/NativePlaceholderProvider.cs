@@ -67,6 +67,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                 if (Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") == "1") {
                     if (identity.SourceAlias != "synthetic" || identity.Origin != "https://source.example.invalid" ||
                         identity.PrincipalId != "odqp1_" + new string('f', 64)) throw new IOException("Synthetic probe scope mismatch.");
+                    DiagnosticMemoryMarkerIo.Read(DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO")), cacheDirectory, identity.FileName);
                     var bytes = System.Text.Encoding.UTF8.GetBytes(new string('x', 100_000));
                     await CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(identity, context, bytes, token).ConfigureAwait(false);
                     return;

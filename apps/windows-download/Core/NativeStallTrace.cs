@@ -15,6 +15,7 @@ internal static class NativeStallTrace
         MetadataAttemptExit, MetadataBusy, RetryDelayEnter, RetryDelayExit,
         AuthorizationAfterEnter, AuthorizationAfterExit, TransferEnter, TransferExit,
         ExecuteEnter, ExecuteExit, RejectEnter, RejectExit,
+        SyntheticMarkerReadEnter, SyntheticMarkerReadExit,
         CacheLegacyLeaseEnter, CacheLegacyLeaseAcquired,
         CacheQuotaEnter, CacheQuotaAcquired, CacheQuotaExit,
         CacheDirectoryEnter, CacheDirectoryExit,
