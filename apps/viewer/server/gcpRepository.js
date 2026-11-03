@@ -110,6 +110,7 @@ class GcpRepository {
       const currentDataset=this.dataset(datasetId),pendingStorage=this.database.prepare("SELECT 1 FROM storage_mutations WHERE entity_type='dataset' AND entity_id=? AND status IN ('intent','fs_applied') LIMIT 1").get(datasetId);
       if(!currentDataset||currentDataset.status!=='finalized'||pendingStorage)
         throw Object.assign(new Error('dataset is not available for GCP import'), { code: 'dataset_not_available' });
+      if(sourceFileId){const prior=this.database.prepare('SELECT id FROM gcp_sets WHERE dataset_id=? AND source_file_id=? AND source_sha256=? ORDER BY created_at,id LIMIT 1').get(datasetId,sourceFileId,sourceSha256);if(prior)return this.getSet(prior.id,true);}
       this.database.prepare(`INSERT INTO gcp_sets(id,dataset_id,display_name,source_format,source_file_id,source_filename,
         source_sha256,source_content,source_byte_size,crs,elevation_units,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
         .run(id, datasetId, bounded(displayName, 160), sourceFormat === 'emlid-all-columns-v1' ? 'generic-csv-v1' : sourceFormat, sourceFileId,
@@ -148,7 +149,7 @@ class GcpRepository {
   deletePoint(id) { return this.database.prepare('DELETE FROM gcp_points WHERE id=?').run(id).changes === 1; }
   deleteSet(id) { return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1; }
 
-  listRankedImages(datasetId, selectedPointId, limit = 100) {
+  listRankedImages(datasetId, selectedPointId, limit = 100, offset = 0) {
     const point = selectedPointId ? this.database.prepare(`SELECT points.* FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id
       WHERE points.id=? AND sets.dataset_id=?`).get(selectedPointId, datasetId) : null;
     if (selectedPointId && !point) throw Object.assign(new Error('GCP point is not in this dataset'), { code: 'invalid_gcp_point' });
@@ -163,7 +164,7 @@ class GcpRepository {
         .all(datasetId, point.latitude, point.latitude, point.longitude, longitudeScale, point.longitude, longitudeScale, count);
     } else {
       rows = this.database.prepare(`SELECT * FROM dataset_files WHERE dataset_id=? AND latitude IS NOT NULL AND longitude IS NOT NULL
-        AND COALESCE(mime_type,content_type) LIKE 'image/%' ORDER BY captured_at,relative_path,id LIMIT ?`).all(datasetId, count);
+          AND COALESCE(mime_type,content_type) LIKE 'image/%' ORDER BY captured_at,relative_path,id LIMIT ? OFFSET ?`).all(datasetId, count, start);
     }
     const images = rows.map((row) => ({
       id: row.id, datasetId: row.dataset_id, relativePath: row.relative_path,

@@ -135,6 +135,18 @@ function parseCsvRows(source) {
   return rows;
 }
 
+function detectGcpCsvFormat(source) {
+  if (typeof source !== 'string' || !source.trim()) return null;
+  let rows;
+  try { rows = parseCsvRows(source.replace(/^\uFEFF/, '')); } catch { return null; }
+  if (!rows.length) return null;
+  const headers=normalizedHeaders(rows[0]),set=new Set(headers);
+  if(new Set(headers).size!==headers.length)return null;
+  if(EMLID_REQUIRED.every((header)=>set.has(header)))return 'emlid-all-columns-v1';
+  if(CSV_REQUIRED.every((header)=>set.has(header))&&headers.every((header)=>[...CSV_REQUIRED,'description'].includes(header)))return 'generic-csv-v1';
+  return null;
+}
+
 function parseCsv(source) {
   const rows = parseCsvRows(source.replace(/^\uFEFF/, ''));
   if (rows.length < 2) throw invalid('CSV must include a header and at least one point');
@@ -209,6 +221,7 @@ module.exports = {
   MAX_POINTS,
   MAX_SOURCE_BYTES,
   EMLID_REQUIRED,
+  detectGcpCsvFormat,
   parseGcpInterchange,
   confirmationToken,
 };

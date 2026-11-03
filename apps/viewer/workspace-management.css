@@ -98,3 +98,5 @@
 .recovery-current-tab-actions{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
 .recovery-current-tab-actions small{color:var(--muted)}
 .recovery-current-tab-status:empty{display:none}
+
+.gcp-nearby-map-wrap{margin:12px 0 16px;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--surface-1)}.gcp-nearby-map{width:100%;height:min(48vh,460px);min-height:320px;border-radius:8px;background:#171a1f}.gcp-nearby-map-wrap .form-note{margin:8px 2px 0}.gcp-image-stage{max-height:min(78vh,900px)}.gcp-mark-image{max-height:min(78vh,900px)}@media(max-width:1000px){.gcp-nearby-map{height:360px;min-height:280px}}

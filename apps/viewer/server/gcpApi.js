@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { GcpRepository } = require('./gcpRepository');
-const { parseGcpInterchange, confirmationToken } = require('./gcpImport');
+const { parseGcpInterchange, confirmationToken, detectGcpCsvFormat, MAX_SOURCE_BYTES } = require('./gcpImport');
 const { hashFile } = require('./storageManager');
 
 function onlyKeys(value, allowed) {
@@ -26,6 +26,35 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
   router.get('/api/v1/datasets/:datasetId/gcp-sets', authorize('viewer.gcp.read'), (req, res) => {
     if (!gcp.dataset(req.params.datasetId)) return error(res, 404, 'dataset_not_found');
     res.json({ sets: gcp.listSets(req.params.datasetId) });
+  });
+
+  router.post('/api/v1/datasets/:datasetId/gcp-sets/auto-import', authorize('viewer.gcp.write'), mutate, async (req, res) => {
+    if(!onlyKeys(req.body,[]))return error(res,400,'invalid_gcp_auto_import');
+    const dataset=processing.getDataset(req.params.datasetId);
+    if(!dataset)return error(res,404,'dataset_not_found');
+    if(dataset.status!=='finalized'||dataset.storageMode!=='managed'||dataset.rootKey!=='datasets')return error(res,409,'dataset_not_available');
+    const files=processing.database.prepare("SELECT id,relative_path,byte_size,sha256 FROM dataset_files WHERE dataset_id=? AND lower(relative_path) LIKE '%.csv' ORDER BY relative_path,id LIMIT 20").all(dataset.id);
+    let scanned=0,imported=0,ignoredInvalid=0,totalBytes=0;
+    for(const file of files){
+      if(gcp.database.prepare('SELECT 1 FROM gcp_sets WHERE dataset_id=? AND source_file_id=? AND source_sha256=? LIMIT 1').get(dataset.id,file.id,file.sha256))continue;
+      if(!Number.isSafeInteger(file.byte_size)||file.byte_size<1||file.byte_size>MAX_SOURCE_BYTES||totalBytes+file.byte_size>10*MAX_SOURCE_BYTES){ignoredInvalid+=1;continue;}
+      try{
+        const relativePath=path.posix.join(dataset.relativePath,file.relative_path),absolute=storage.resolve(dataset.rootKey,relativePath,{mustExist:true}),stat=fs.statSync(absolute);
+        if(!stat.isFile()||stat.size!==file.byte_size||await hashFile(absolute)!==file.sha256){ignoredInvalid+=1;continue;}
+        const content=fs.readFileSync(absolute,'utf8'),format=detectGcpCsvFormat(content);
+        if(!format){ignoredInvalid+=1;continue;}
+        const parsed=parseGcpInterchange({format,content});
+        if(parsed.sourceSha256!==file.sha256){ignoredInvalid+=1;continue;}
+        const name=path.posix.basename(file.relative_path,path.posix.extname(file.relative_path)).trim().slice(0,160)||'Imported GCP points';
+        const set=gcp.importSet({datasetId:dataset.id,displayName:name,sourceFormat:format,sourceFileId:file.id,sourceFilename:path.posix.basename(file.relative_path),sourceSha256:parsed.sourceSha256,sourceContent:content,crs:parsed.crs,elevationUnits:parsed.elevationUnits,provenance:parsed.provenance,points:parsed.points,createdBy:req.actorId});
+        scanned+=1;totalBytes+=file.byte_size;imported+=1;
+        repository.audit({actorType:'admin',actorId:req.actorId,action:'gcp.set_auto_imported',entityType:'gcp_set',entityId:set.id,details:{datasetId:dataset.id,sourceFileId:file.id,format,pointCount:set.pointCount}});
+      }catch(caught){
+        if(['ENOENT','invalid_gcp_input','gcp_input_too_large','unsupported_gcp_format','invalid_gcp_point'].includes(caught?.code)){ignoredInvalid+=1;continue;}
+        return error(res,500,'gcp_auto_import_failed');
+      }
+    }
+    return res.json({sets:gcp.listSets(dataset.id),scanned,imported,ignoredInvalid,limited:files.length===20});
   });
 
   router.post('/api/v1/datasets/:datasetId/gcp-sets/import', authorize('viewer.gcp.write'), mutate, (req, res) => {
@@ -117,7 +146,7 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
     try {
       const mode = String(req.query.mode || 'auto');
       if (!['auto', 'radius', 'nearest'].includes(mode)) return error(res, 400, 'invalid_candidate_mode');
-      const radiusM = req.query.radiusM == null ? (mode === 'radius' ? 100 : null) : Number(req.query.radiusM);
+      const radiusM = req.query.radiusM == null ? (mode === 'radius' ? 50*0.3048 : null) : Number(req.query.radiusM);
       if (radiusM != null && (!Number.isFinite(radiusM) || radiusM <= 0 || radiusM > 100000)) return error(res, 400, 'invalid_radius');
       const requested = Number(rawLimit), ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, 200);
       let images = ranked.images;

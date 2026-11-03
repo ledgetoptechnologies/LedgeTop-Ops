@@ -34,13 +34,15 @@ GCP-01,North target,44.500100,-88.100200,243.84,Painted nail
 
 A GeoJSON `FeatureCollection` containing only 3D `Point` features. Coordinates are `[longitude, latitude, elevation_m]`; `properties.point_id` and `properties.label` are required, and `properties.description` is optional.
 
-## Emlid adapter gate
+## Emlid Flow adapter
 
-No Emlid column names, coordinate order, height datum, units, or CRS are inferred. A representative Emlid export and its known coordinate interpretation are required before adding a separately versioned Emlid adapter. Until then, export or transform the data to one of the generic formats above.
+The versioned `emlid-all-columns-v1` adapter recognizes the exact Emlid Flow all-columns schema, requires one consistent `CS name`, and uses `Name`, `Easting`, `Northing`, and `Elevation` as the survey values. `Latitude`, `Longitude`, and `Ellipsoidal height` are retained as geographic/vertical cross-checks. Explicit `(m)` or `(ftUS)` declarations in `CS name` determine unit conversion; otherwise the administrative preview requires an explicit unit declaration. Unknown or malformed CSVs are ignored by automatic discovery. The original CSV bytes are retained and linked to the GCP set; no file is rewritten.
+
+When an administrator opens a task's GCP page, Viewer scans up to 20 attached CSV manifest files (bounded to 2 MiB per file and 20 MiB aggregate per request). It imports recognized generic GCP CSV or Emlid Flow CSV sources automatically and idempotently. Unrecognized, checksum-mismatched, malformed, or ambiguous files are ignored and remain untouched in raw data. The scan can be repeated when the raw dataset changes.
 
 ## Image assistance
 
-Dataset finalization indexes JPEG dimensions, capture time, GPS longitude/latitude, and altitude when those EXIF values exist. Selecting a GCP asks Viewer for up to 200 dataset images ranked by camera-to-GCP great-circle distance. This is only a search suggestion: geographic proximity does not prove that a point is visible in an image. An operator must inspect an image and explicitly save its pixel correspondence.
+Dataset finalization indexes JPEG dimensions, capture time, GPS longitude/latitude, and altitude when those EXIF values exist. Selecting a GCP asks Viewer for up to 200 dataset images ranked by camera-to-GCP great-circle distance. The fixed-radius picker defaults to 50 feet (15.24 m), plots the GCP and matching camera GPS positions on a large map, and opens an image when its camera marker is selected. This is only a search suggestion: geographic proximity does not prove that a point is visible in an image. An operator must inspect an image and explicitly save its pixel correspondence.
 
 Raw image bytes flow directly from the Viewer origin to the authenticated Ops browser. They do not pass through the Operations Worker, are sent with private no-store headers, and are never public assets.
 
@@ -49,6 +51,7 @@ Raw image bytes flow directly from the Viewer origin to the authenticated Ops br
 | Route | Permission | Purpose |
 | --- | --- | --- |
 | `GET /api/v1/datasets/:datasetId/gcp-sets` | `viewer.gcp.read` | List dataset GCP sets |
+| `POST /api/v1/datasets/:datasetId/gcp-sets/auto-import` | `viewer.gcp.write` | Idempotently discover and import recognized raw CSV sources |
 | `POST /api/v1/datasets/:datasetId/gcp-sets/import` | `viewer.gcp.write` | Parse and import a versioned generic file |
 | `GET /api/v1/gcp-sets/:id` | `viewer.gcp.read` | Read canonical points |
 | `DELETE /api/v1/gcp-sets/:id` | `viewer.gcp.write` | Remove a set and its marks |

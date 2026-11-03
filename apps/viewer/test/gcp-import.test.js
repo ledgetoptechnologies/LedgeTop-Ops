@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { parseGcpInterchange, confirmationToken } = require('../server/gcpImport');
+const { parseGcpInterchange, confirmationToken, detectGcpCsvFormat } = require('../server/gcpImport');
 
 test('generic CSV GCP interchange normalizes EPSG:4326 coordinates and metric elevations', () => {
   const parsed = parseGcpInterchange({
@@ -70,6 +70,15 @@ test('Emlid All-columns preserves exact Name and authoritative projected ftUS pr
   assert.match(confirmationToken(parsed), /^[a-f0-9]{64}$/);
   assert.throws(() => parseGcpInterchange({ format: 'emlid-all-columns-v1', declarations: {}, content:
     'Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,1,2,3,44,-88,2,CRS one (ftUS) + height (ftUS)\nB,1,2,3,44,-88,2,CRS two (ftUS) + height (ftUS)\n' }), /consistent CS name/);
+});
+
+test('automatic CSV format detection accepts only complete supported schemas',()=>{
+  const emlid='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nCP-1,1,2,3,44,-88,2,Projected (m) + vertical (m)\n';
+  const generic='point_id,label,latitude,longitude,elevation_m\nA,A,44,-88,1\n';
+  assert.equal(detectGcpCsvFormat(emlid),'emlid-all-columns-v1');
+  assert.equal(detectGcpCsvFormat(`\uFEFF${generic}`),'generic-csv-v1');
+  assert.equal(detectGcpCsvFormat('date,temperature\n2026-01-01,12\n'),null);
+  assert.equal(detectGcpCsvFormat('Name,Latitude,Longitude\nCP-1,44,-88\n'),null);
 });
 
 test('Emlid metric projected systems remain metric and ambiguous units require confirmation', () => {
