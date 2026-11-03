@@ -11,6 +11,12 @@ internal static class SyntheticMemoryNative {
     internal static readonly byte[] Bytes = Encoding.UTF8.GetBytes(new string('x', 100_000));
     private static readonly string Sha = Convert.ToHexStringLower(SHA256.HashData(Bytes));
     private static readonly string Principal = "odqp1_" + new string('f', 64);
+    private static void Phase(string phase, Guid id) {
+        try {
+            Console.WriteLine($"Synthetic memory phase: probe={id:N}; phase={phase}");
+            Console.Out.Flush();
+        } catch (IOException) { /* A closed log must not interrupt native cleanup. */ }
+    }
     internal static int Reader(string path, string startName, string readyName) {
         using var start = EventWaitHandle.OpenExisting(startName); using var ready = EventWaitHandle.OpenExisting(readyName);
         ready.Set(); if (!start.WaitOne(TimeSpan.FromSeconds(15))) return 1;
@@ -81,6 +87,7 @@ internal static class SyntheticMemoryNative {
         if (!Directory.Exists(fixtureBase)) Directory.CreateDirectory(fixtureBase);
         RequireLocalDirectory(fixtureBase);
         var id = Guid.NewGuid(); var owned = Path.Combine(fixtureBase, id.ToString("N"));
+        Phase("fixture-setup-start", id);
         if (Directory.Exists(owned) || File.Exists(owned)) throw new IOException("Test fixture already exists.");
         var root = Path.Combine(owned, "Files"); var cache = Path.Combine(owned, "Cache");
         Directory.CreateDirectory(root); Directory.CreateDirectory(cache);
@@ -104,13 +111,17 @@ internal static class SyntheticMemoryNative {
         using var start = new EventWaitHandle(false, EventResetMode.ManualReset, startName);
         var trace = NativeStallTrace.Enable();
         try {
+            Phase("registration-start", id);
             registrationAttempted = true;
             registration = NativeRootRegistration.Register(root, Encoding.UTF8.GetBytes("LedgeTop.Files.MemoryNativeTest.v1:" + id));
+            Phase("registration-returned", id);
             provider = new NativePlaceholderProvider(registration, cache, new Source(), "pilot", Principal, manifest, []);
             await provider.ConnectAndPopulateAsync();
+            Phase("provider-connected", id);
             var executable = Environment.ProcessPath ?? throw new IOException("Self-contained test apphost required.");
             if (Path.GetFileNameWithoutExtension(executable).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
                 throw new IOException("Use the self-contained test apphost.");
+            Phase("reader-start", id);
             foreach (var name in manifest.Keys) {
                 var info = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true };
                 var readyName = startName + "-" + readyHandles.Count;
@@ -119,12 +130,16 @@ internal static class SyntheticMemoryNative {
                 info.ArgumentList.Add(startName); info.ArgumentList.Add(readyName);
                 readers.Add(Process.Start(info) ?? throw new IOException("Synthetic reader failed to start."));
             }
+            Phase("reader-ready-wait", id);
             if (!WaitHandle.WaitAll(readyHandles.ToArray(), TimeSpan.FromSeconds(10))) throw new TimeoutException("Synthetic readers did not reach the start gate.");
             start.Set();
+            Phase("reader-exit-wait", id);
             await Task.WhenAll(readers.Select(p => p.WaitForExitAsync())).WaitAsync(TimeSpan.FromSeconds(25));
+            Phase("readers-exited", id);
             success = readers.All(p => p.ExitCode == 0);
-        } catch (Exception error) { Console.Error.WriteLine($"Synthetic memory native: {error.GetType().Name}: {error.Message}"); }
+        } catch (Exception error) { Console.Error.WriteLine($"Synthetic memory native: {error.GetType().Name}: {error.Message}"); Console.Error.Flush(); }
         finally {
+            Phase("cleanup-start", id);
             foreach (var reader in readers) {
                 try { if (!reader.HasExited) { reader.Kill(); await reader.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)); } }
                 catch { readersJoined = false; }
@@ -138,12 +153,13 @@ internal static class SyntheticMemoryNative {
             if (registration is not null && readersJoined && disposeCompleted)
                 try { registration.Unregister(); unregisterVerified = true; } catch { }
             var cleanupVerified = CleanupVerified(registrationAttempted, registration is not null, readersJoined, disposeCompleted, unregisterVerified);
+            if (!cleanupVerified) success = false;
             foreach (var item in NativeStallTrace.Snapshot(trace).Where(e => e.Kind is NativeStallTrace.Stage.SyntheticMarkerReadEnter or NativeStallTrace.Stage.SyntheticMarkerReadExit))
                 Console.WriteLine($"Synthetic marker trace: seq={item.Sequence}; thread={item.ThreadId}; stage={item.Kind}");
             Console.WriteLine($"Synthetic marker trace: attempted={NativeStallTrace.Attempted(trace)}; dropped={NativeStallTrace.Dropped(trace)}");
             NativeStallTrace.Disable(trace);
-            Console.WriteLine($"Synthetic memory native: count={count}; success={success}; cleanupVerified={cleanupVerified}; disposeTimedOut={disposeTimedOut}; registrationAttempted={registrationAttempted}; registrationReturned={registration is not null}; root={root}; registrationContext=LedgeTop.Files.MemoryNativeTest.v1:{id}");
-            if (!cleanupVerified) success = false;
+            Console.WriteLine($"Synthetic memory native: count={count}; success={success}; nativeRegistrationCleanupVerified={cleanupVerified}; fixtureDirectoriesRemoved=False; disposeTimedOut={disposeTimedOut}; registrationAttempted={registrationAttempted}; registrationReturned={registration is not null}; root={root}; registrationContext=LedgeTop.Files.MemoryNativeTest.v1:{id}");
+            Console.Out.Flush();
         }
         return success ? 0 : 1;
     }
