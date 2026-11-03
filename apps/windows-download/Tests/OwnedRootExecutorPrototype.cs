@@ -29,6 +29,8 @@ internal sealed class OwnedRootExecutorPrototype
         internal readonly int maximumRoots, maximumQueuedPerRoot;
         internal bool stopping;
         internal readonly TaskCompletionSource drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource ownersJoined = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly HashSet<Task> ownerWorkers = [];
         internal Registry(int maximumRoots, int maximumQueuedPerRoot) {
             if (maximumRoots < 1 || maximumQueuedPerRoot < 1) throw new ArgumentOutOfRangeException();
             this.maximumRoots = maximumRoots; this.maximumQueuedPerRoot = maximumQueuedPerRoot;
@@ -49,12 +51,18 @@ internal sealed class OwnedRootExecutorPrototype
                     node.Value.Done.TrySetException(new InvalidOperationException("Executor is stopping."));
                 }
                 if (roots.Count == 0) drained.TrySetResult();
+                if (ownerWorkers.Count == 0) ownersJoined.TrySetResult();
             }
         }
         internal Task WaitForDrainAsync(TimeSpan timeout) {
             if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromMinutes(10)) throw new ArgumentOutOfRangeException(nameof(timeout));
             lock (sync) { if (!stopping) throw new InvalidOperationException("Stop has not begun."); }
             return drained.Task.WaitAsync(timeout);
+        }
+        internal Task WaitForOwnersAsync(TimeSpan timeout) {
+            if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromMinutes(10)) throw new ArgumentOutOfRangeException(nameof(timeout));
+            lock (sync) { if (!stopping) throw new InvalidOperationException("Stop has not begun."); }
+            return ownersJoined.Task.WaitAsync(timeout);
         }
     }
     internal sealed class SyntheticGeneration(Registry owner) { internal readonly Registry Owner = owner; internal long Value; }
@@ -140,7 +148,7 @@ internal sealed class OwnedRootExecutorPrototype
     {
         if (root.Running is not null || root.Queue.First is not { } node) return;
         root.Queue.RemoveFirst(); var item = node.Value; item.Node = null; item.Running = true; root.Running = item;
-        _ = Task.Run(async () => {
+        var worker = Task.Run(async () => {
             Exception? failure = null; var cleaned = false;
             bool Active() => item.Running && !item.Abandoned && !item.Committed && !root.Quarantined && !registry.stopping &&
                 registry.roots.TryGetValue(key, out var current) && ReferenceEquals(root, current) && ReferenceEquals(root.Running, item);
@@ -181,5 +189,15 @@ internal sealed class OwnedRootExecutorPrototype
                 else if (failure is null) item.Done.TrySetResult(Observation.Completed); else item.Done.TrySetException(failure);
             }
         });
+        // `StartNextLocked` runs under registry.sync, so completion cannot pass
+        // its own final lock before this exact task has been registered.
+        registry.ownerWorkers.Add(worker);
+        _ = worker.ContinueWith(completed => {
+            _ = completed.Exception;
+            lock (registry.sync) {
+                registry.ownerWorkers.Remove(completed);
+                if (registry.stopping && registry.ownerWorkers.Count == 0) registry.ownersJoined.TrySetResult();
+            }
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 }
