@@ -115,6 +115,7 @@ class PreparedSubmissionOutbox {
       const now = new Date().toISOString();
       const leased = this.database.prepare(`SELECT j.id,j.attempt_id,a.task_id,j.lease_expires_at
         FROM processing_jobs j JOIN processing_attempts a ON a.id=j.attempt_id
+        JOIN processing_tasks t ON t.id=a.task_id AND t.active_attempt_id=a.id
         WHERE j.id=? AND j.attempt_id=? AND j.job_type='submit' AND j.status='leased'
           AND j.lease_owner=? AND j.lease_expires_at>? AND a.status NOT IN ('cancelled','failed','published')`).get(localJobId, attemptId, owner, now);
       if (!liveLease(leased) || leased.task_id !== envelope.viewerTaskId) fail('prepared_outbox_lease_lost');
@@ -152,6 +153,7 @@ class PreparedSubmissionOutbox {
     if (!intent || intent.localJobId !== localJobId) fail('prepared_outbox_intent_missing');
     const leased = this.database.prepare(`SELECT j.id,j.attempt_id,a.task_id,j.lease_expires_at
       FROM processing_jobs j JOIN processing_attempts a ON a.id=j.attempt_id
+      JOIN processing_tasks t ON t.id=a.task_id AND t.active_attempt_id=a.id
       WHERE j.id=? AND j.attempt_id=? AND j.job_type='submit' AND j.status='leased'
         AND j.lease_owner=? AND j.lease_expires_at>? AND a.status NOT IN ('cancelled','failed','published')`).get(localJobId, attemptId, owner, new Date().toISOString());
     if (!liveLease(leased) || leased.task_id !== intent.viewerTaskId) fail('prepared_outbox_lease_lost');
@@ -162,6 +164,7 @@ class PreparedSubmissionOutbox {
     const row = this.database.prepare('SELECT * FROM viewer_prepared_submission_outbox WHERE viewer_attempt_id=?').get(attemptId);
     const intent = readIntent(row);
     if (!intent) fail('prepared_outbox_intent_missing');
+    if (localJobId !== intent.localJobId) fail('prepared_outbox_intent_mismatch');
     if (!response || Object.getPrototypeOf(response) !== Object.prototype
         || typeof response.jobId !== 'string' || !ID.test(response.jobId)
         || !Number.isSafeInteger(response.generation) || response.generation < 1
@@ -187,6 +190,7 @@ class PreparedSubmissionOutbox {
       if (!current) fail('prepared_outbox_intent_missing');
       const leased = this.database.prepare(`SELECT j.id,j.attempt_id,a.task_id,j.lease_expires_at
         FROM processing_jobs j JOIN processing_attempts a ON a.id=j.attempt_id
+        JOIN processing_tasks t ON t.id=a.task_id AND t.active_attempt_id=a.id
         WHERE j.id=? AND j.attempt_id=? AND j.job_type='submit' AND j.status='leased'
           AND j.lease_owner=? AND j.lease_expires_at>? AND a.status NOT IN ('cancelled','failed','published')`).get(localJobId, attemptId, owner, new Date().toISOString());
       if (!liveLease(leased) || leased.task_id !== intent.viewerTaskId) fail('prepared_outbox_lease_lost');

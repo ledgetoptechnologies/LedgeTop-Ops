@@ -94,6 +94,17 @@ test('outbox requires an unexpired matching submit lease and exact local task an
   assert.throws(() => outbox.persistIntent({ ...context, owner: f.job.lease_owner, envelope: envelope(f.task.id, f.attempt.id) }), { code: 'prepared_outbox_lease_lost' });
 });
 
+test('acceptance cannot use another submit job lease for the same attempt', t => {
+  const f = fixture(t), outbox = new PreparedSubmissionOutbox(f.database);
+  const intent = outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner, origin: 'https://processing.example', principalId: 'viewer-staging', environment: 'staging', envelope: envelope(f.task.id, f.attempt.id) });
+  const otherJobId = crypto.randomUUID(), owner = 'second-submit-owner', now = new Date().toISOString();
+  f.database.prepare("UPDATE processing_jobs SET status='complete',lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=?").run(now, f.job.id);
+  f.database.prepare(`INSERT INTO processing_jobs(id,attempt_id,job_type,status,lease_owner,lease_expires_at,heartbeat_at,attempt_count,available_at,created_at,updated_at)
+    VALUES (?,?,'submit','leased',?,?,NULL,1,?,?,?)`).run(otherJobId, f.attempt.id, owner, new Date(Date.now() + 60_000).toISOString(), now, now, now);
+  assert.throws(() => outbox.acceptRemoteBinding(f.attempt.id, remoteBinding(intent), { environment: 'staging', localJobId: otherJobId, owner }), { code: 'prepared_outbox_intent_mismatch' });
+  assert.equal(outbox.getIntent(f.attempt.id).state, 'prepared');
+});
+
 test('uncertain POST is recovered only by authenticated exact GET and preserves stored bytes', async t => {
   const f = fixture(t), outbox = new PreparedSubmissionOutbox(f.database);
   const intent = outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner, origin: 'https://processing.example', principalId: 'viewer-staging', environment: 'staging', envelope: envelope(f.task.id, f.attempt.id) });
@@ -128,6 +139,20 @@ test('authority changes and lease loss after the network read leave the outbox p
     fetchImpl: async (_url, options) => {
       if (options.method === 'POST') return responseJson({}, 201);
       f.database.prepare("UPDATE processing_jobs SET status='pending',lease_owner=NULL,lease_expires_at=NULL WHERE id=?").run(f.job.id);
+      return responseJson(remoteBinding(intent));
+    },
+  });
+  await assert.rejects(client.dispatch(intent, { owner: f.job.lease_owner }), { code: 'prepared_outbox_lease_lost' });
+  assert.equal(outbox.getIntent(f.attempt.id).state, 'prepared');
+});
+
+test('superseded attempt cannot accept a remote binding after the lookup returns', async t => {
+  const f = fixture(t), outbox = new PreparedSubmissionOutbox(f.database);
+  const intent = outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner, origin: 'https://processing.example', principalId: 'viewer-staging', environment: 'staging', envelope: envelope(f.task.id, f.attempt.id) });
+  const client = new PreparedSubmissionClient({ origin: 'https://processing.example', bearerToken: 'synthetic-test-bearer-token-0001', principalId: 'viewer-staging', environment: 'staging', outbox,
+    fetchImpl: async (_url, options) => {
+      if (options.method === 'POST') return responseJson({}, 201);
+      f.database.prepare('UPDATE processing_tasks SET active_attempt_id=NULL WHERE id=?').run(f.task.id);
       return responseJson(remoteBinding(intent));
     },
   });
