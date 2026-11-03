@@ -60,7 +60,8 @@ internal static class ReservationHandlePrototype
             using (var reopened = new FileStream(record, FileMode.Open, FileAccess.Read, FileShare.Read)) {
                 if (Id(reopened.SafeFileHandle) != ownerId || !ReadExact(reopened, Owned)) throw new IOException("Reopened record did not match.");
             }
-            if (TryDeleteExact(fixture, directory, directoryId, record, Foreign, ownerId) || TryDeleteExact(fixture, directory, directoryId, record, Owned, foreignId) ||
+            var wrongOwned = Owned.ToArray(); wrongOwned[0] ^= 1;
+            if (TryDeleteExact(fixture, directory, directoryId, record, wrongOwned, ownerId) || TryDeleteExact(fixture, directory, directoryId, record, Owned, foreignId) ||
                 !File.ReadAllBytes(record).SequenceEqual(Owned)) throw new IOException("Foreign identity or contents were accepted.");
             var childId = RunAbruptChild(fixture, directoryId);
             VerifyDirectoryBinding(fixture, directory, directoryId);
@@ -69,7 +70,8 @@ internal static class ReservationHandlePrototype
                 if (childId == ownerId || childId == foreignId || Id(reopened.SafeFileHandle) != childId || !ReadExact(reopened, Abrupt))
                     throw new IOException("Abrupt child record did not retain its exact identity and bytes.");
             }
-            if (TryDeleteExact(fixture, directory, directoryId, childRecord, Owned, childId) ||
+            var wrongAbrupt = Abrupt.ToArray(); wrongAbrupt[0] ^= 1;
+            if (TryDeleteExact(fixture, directory, directoryId, childRecord, wrongAbrupt, childId) ||
                 TryDeleteExact(fixture, directory, directoryId, childRecord, Abrupt, ownerId))
                 throw new IOException("Foreign abrupt-child cleanup evidence was accepted.");
             VerifyDirectoryBinding(fixture, directory, directoryId);
