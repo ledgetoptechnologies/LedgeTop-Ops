@@ -48,6 +48,7 @@ internal static class ReservationHandlePrototype
                     other.Write(Foreign); other.Flush(true); foreignId = Id(other.SafeFileHandle);
                     if (!ReadExact(other, Foreign) || foreignId == ownerId) throw new IOException("Foreign fixture identity is ambiguous.");
                 }
+                ActiveAccountingControl(record, stream, ownerId, foreign, foreignId);
                 var readRefused = false;
                 try { using var unexpected = new FileStream(record, FileMode.Open, FileAccess.Read, FileShare.Read); }
                 catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33) { readRefused = true; }
@@ -109,6 +110,66 @@ internal static class ReservationHandlePrototype
             if (!cleanupComplete) Console.Error.WriteLine($"Synthetic fixture cleanup unconfirmed; partial cleanup may have occurred (checksPassed={verified}; deleteDispositionsApplied={deleteDispositionsApplied}): {fixture}");
         }
         Console.WriteLine("PASS ordinary Windows retained-handle identity, abrupt child termination, watchdog after parent death, and exact cleanup. No native provider or OS crash tested.");
+    }
+
+    // Narrow test-only accounting model. It deliberately accepts a supplied
+    // enumeration and verified stream; it does not implement durable deletion,
+    // a quota lock, concurrent processes, or production reconciliation.
+    private sealed class ActiveAccounting
+    {
+        private readonly Dictionary<string, (FileStream Handle, FileId Id, long Growth)> active = new(StringComparer.OrdinalIgnoreCase);
+        internal void Register(string path, FileStream handle, FileId expected, long growth) {
+            if (growth <= 0 || Id(handle.SafeFileHandle) != expected || !active.TryAdd(path, (handle, expected, growth)))
+                throw new IOException("Unverified or duplicate active reservation.");
+        }
+        internal long Count(IEnumerable<string> paths, Func<string, long> readUnknown) {
+            long total = 0; var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in paths) {
+                if (!seen.Add(path)) throw new IOException("Duplicate reservation path.");
+                if (active.TryGetValue(path, out var row)) {
+                    if (Id(row.Handle.SafeFileHandle) != row.Id) throw new IOException("Active handle identity changed.");
+                    total = checked(total + row.Growth);
+                } else total = checked(total + readUnknown(path));
+            }
+            if (active.Keys.Any(path => !seen.Contains(path))) throw new IOException("Active reservation missing from enumeration.");
+            return total;
+        }
+        internal void Release(string path, FileId expected, bool exactDeleteConfirmed) {
+            if (!active.TryGetValue(path, out var row) || row.Id != expected || Id(row.Handle.SafeFileHandle) != expected)
+                throw new IOException("Reservation identity mismatch.");
+            if (exactDeleteConfirmed) active.Remove(path);
+        }
+    }
+
+    private static void ActiveAccountingControl(string record, FileStream retained, FileId ownerId, string foreign, FileId foreignId)
+    {
+        var shared = new ActiveAccounting(); var coordinatorA = shared; var coordinatorB = shared;
+        coordinatorA.Register(record, retained, ownerId, 100);
+        var unknownReads = 0;
+        long ReadUnknown(string path) {
+            unknownReads++;
+            using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (path != foreign || Id(file.SafeFileHandle) != foreignId || !ReadExact(file, Foreign))
+                throw new IOException("Unknown reservation cannot be verified.");
+            return 50;
+        }
+        var paths = new[] { record, foreign };
+        if (coordinatorB.Count(paths, ReadUnknown) != 150 || unknownReads != 1)
+            throw new IOException("Active and unknown records were not conservatively counted.");
+        coordinatorA.Release(record, ownerId, exactDeleteConfirmed: false);
+        if (coordinatorB.Count(paths, ReadUnknown) != 150) throw new IOException("Failed release discarded accounting.");
+        var rejected = false;
+        try { coordinatorB.Release(record, foreignId, exactDeleteConfirmed: true); } catch (IOException) { rejected = true; }
+        if (!rejected || coordinatorA.Count(paths, ReadUnknown) != 150) throw new IOException("Foreign identity released accounting.");
+        rejected = false;
+        try { coordinatorB.Count(new[] { foreign }, ReadUnknown); } catch (IOException) { rejected = true; }
+        if (!rejected) throw new IOException("A missing active path was ignored.");
+        rejected = false;
+        try { coordinatorB.Count(paths, _ => throw new IOException("Unknown record")); } catch (IOException) { rejected = true; }
+        if (!rejected || coordinatorA.Count(paths, ReadUnknown) != 150) throw new IOException("Unknown record failure discarded accounting.");
+        // A fake receipt exercises state transitions only; no file is removed.
+        coordinatorA.Release(record, ownerId, exactDeleteConfirmed: true);
+        if (coordinatorB.Count(new[] { foreign }, ReadUnknown) != 50) throw new IOException("Confirmed release remained charged.");
     }
 
     internal static void RunChild(string fixture, string volumeText, string idText, string recordName)
