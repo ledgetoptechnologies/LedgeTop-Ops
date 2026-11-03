@@ -61,6 +61,16 @@ internal sealed class ExperimentalEntryLease : IDisposable
             throw new IOException("Experimental entry binding changed.");
         ExperimentalOwnedStream.VerifyPins(state.Pins);
     }
+    internal ExperimentalEntryLease JointMoveTo(HydrationCacheConcurrency.Lease original, HydrationCacheConcurrency.Lease successor, Action commit)
+    {
+        lock (state.Gate) {
+            if (!ReferenceEquals(state.Current, this) || state.Uncertain || !ReferenceEquals(state.Admission, original))
+                throw new ObjectDisposedException(nameof(ExperimentalEntryLease));
+            Verify(state); var next = new ExperimentalEntryLease(state);
+            commit(); state.Admission = successor; state.Current = next;
+            return next;
+        }
+    }
     internal ExperimentalEntryLease Move()
     {
         ExperimentalEntryLease? result = null;

@@ -75,6 +75,17 @@ internal static class HydrationCacheConcurrency
                 return successor;
             }
         }
+        internal (Lease Admission, ExperimentalEntryLease Entry) TransferExperimentalPair(ExperimentalEntryLease entry, string expectedKey)
+        {
+            lock (leaseGate) {
+                ObjectDisposedException.ThrowIf(release is null, this);
+                if (experimentalKey != expectedKey || experimentalEntryBindings != 1)
+                    throw new TransferException("Experimental admission and entry cannot be transferred.");
+                var successor = new Lease(Quota, release, acquireLegacy, markerOwner, experimentalRoot, experimentalKey);
+                var moved = entry.JointMoveTo(this, successor, () => { successor.experimentalEntryBindings = 1; experimentalEntryBindings = 0; release = null; });
+                return (successor, moved);
+            }
+        }
         private void UseExperimentalMarkers(Action<ExperimentalRootMarkerOwner> operation)
         {
             lock (leaseGate) { ObjectDisposedException.ThrowIf(release is null, this); operation(markerOwner()); }
