@@ -20,6 +20,7 @@ internal static class ReservationHandlePrototype
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows-only handle comparison.");
         AbsenceEvidenceTests();
+        SupervisorEvidenceTests();
         var root = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
         if (string.IsNullOrEmpty(root) || !Path.IsPathFullyQualified(root) || root.StartsWith("\\\\", StringComparison.Ordinal))
             throw new IOException("An existing local test artifact root is required.");
@@ -169,11 +170,43 @@ internal static class ReservationHandlePrototype
             throw new IOException("Synthetic child readiness evidence was invalid.");
         return new FileId(volume, id);
     }
-    private static bool DrainOutput(Task<string?> firstLine, StreamReader output, ref Task<string>? remainder, Task<string> errors)
+    private static bool DrainOutput(Task<string?> firstLine, StreamReader output, ref Task<string>? remainder, Task<string> errors, TimeSpan? timeout = null)
     {
-        if (!firstLine.Wait(TimeSpan.FromSeconds(3))) return false;
+        var limit = timeout ?? TimeSpan.FromSeconds(3);
+        if (!firstLine.Wait(limit)) return false;
         remainder ??= output.ReadToEndAsync();
-        return remainder.Wait(TimeSpan.FromSeconds(3)) && errors.Wait(TimeSpan.FromSeconds(3));
+        return remainder.Wait(limit) && errors.Wait(limit);
+    }
+    private readonly record struct WorkerReady(uint Pid, long StartTicks, FileId RecordId);
+    private static WorkerReady ParseWorkerReady(string? line)
+    {
+        var parts = line?.Split(' ', StringSplitOptions.None);
+        if (parts is not { Length: 5 } || parts[0] != "WORKER" || !uint.TryParse(parts[1], out var pid) || pid == 0 ||
+            !long.TryParse(parts[2], out var startTicks) || startTicks <= 0 || parts[3].Length != 16 ||
+            !ulong.TryParse(parts[3], System.Globalization.NumberStyles.AllowHexSpecifier, System.Globalization.CultureInfo.InvariantCulture, out var volume) ||
+            !Guid.TryParseExact(parts[4], "N", out var id) || parts[4] != id.ToString("N") || id == Guid.Empty)
+            throw new IOException("Synthetic watchdog readiness evidence was invalid.");
+        return new WorkerReady(pid, startTicks, new FileId(volume, id));
+    }
+    private static bool WorkerIsLive(uint waitResult) => waitResult == 258;
+    private static bool WorkerExitProven(bool identified, uint waitResult) => identified && waitResult == 0;
+    private static void SupervisorEvidenceTests()
+    {
+        foreach (var bad in new string?[] { null, "", "WORKER", "WORKER 0 1 0000000000000000 00000000000000000000000000000001", "WORKER 1 1 bad invalid" }) {
+            var rejected = false; try { _ = ParseWorkerReady(bad); } catch (IOException) { rejected = true; }
+            if (!rejected) throw new IOException("Invalid supervisor readiness was accepted.");
+        }
+        var parsed = ParseWorkerReady("WORKER 42 123 0000000000000001 00000000000000000000000000000001");
+        if (parsed.Pid != 42 || parsed.StartTicks != 123 || !WorkerIsLive(258) || WorkerIsLive(0) || WorkerIsLive(uint.MaxValue) ||
+            WorkerExitProven(false, 0) || WorkerExitProven(true, 258) || !WorkerExitProven(true, 0))
+            throw new IOException("Late or unidentified worker evidence was accepted.");
+        var late = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var output = new StreamReader(new MemoryStream()); Task<string>? remainder = null;
+        if (DrainOutput(late.Task, output, ref remainder, Task.FromResult(""), TimeSpan.FromMilliseconds(20)))
+            throw new IOException("A pending readiness stream was considered drained.");
+        late.SetResult("late");
+        if (!DrainOutput(late.Task, output, ref remainder, Task.FromResult(""), TimeSpan.FromSeconds(1)))
+            throw new IOException("A completed synthetic stream did not drain.");
     }
     private static FileId RunAbruptChild(string fixture, FileId directoryId)
     {
@@ -227,33 +260,32 @@ internal static class ReservationHandlePrototype
             directoryId.Volume.ToString("X16", System.Globalization.CultureInfo.InvariantCulture), directoryId.Id.ToString("N"));
         using var supervisor = System.Diagnostics.Process.Start(start) ?? throw new IOException("Synthetic supervisor did not start.");
         var stdout = supervisor.StandardOutput.ReadLineAsync(); var stderr = supervisor.StandardError.ReadToEndAsync(); Task<string>? tail = null;
-        SafeWaitHandle? worker = null;
+        SafeWaitHandle? worker = null; var workerIdentityVerified = false;
         try {
-            var parts = stdout.WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult()?.Split(' ', StringSplitOptions.None);
-            if (parts is not { Length: 5 } || parts[0] != "WORKER" || !uint.TryParse(parts[1], out var pid) || pid == 0 ||
-                !long.TryParse(parts[2], out var startTicks) || parts[3].Length != 16 || !ulong.TryParse(parts[3], System.Globalization.NumberStyles.AllowHexSpecifier, System.Globalization.CultureInfo.InvariantCulture, out var volume) ||
-                !Guid.TryParseExact(parts[4], "N", out var id) || parts[4] != id.ToString("N") || id == Guid.Empty)
-                throw new IOException("Synthetic watchdog readiness evidence was invalid.");
-            worker = OpenProcess(0x00101000, false, pid); // SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION
-            if (worker.IsInvalid || GetProcessId(worker) != pid || !GetProcessTimes(worker, out var creation, out _, out _, out _) ||
-                DateTime.FromFileTimeUtc(creation).Ticks != startTicks || WaitForSingleObject(worker, 0) != 258)
+            var ready = ParseWorkerReady(stdout.WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult());
+            worker = OpenProcess(0x00101000, false, ready.Pid); // SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION
+            if (worker.IsInvalid || GetProcessId(worker) != ready.Pid || !GetProcessTimes(worker, out var creation, out _, out _, out _) ||
+                DateTime.FromFileTimeUtc(creation).Ticks != ready.StartTicks || !WorkerIsLive(WaitForSingleObject(worker, 0)))
                 throw new IOException("Synthetic watchdog worker identity or live state was not confirmed.");
+            workerIdentityVerified = true;
             if (supervisor.HasExited) throw new IOException("Synthetic supervisor exited before controlled termination.");
             supervisor.Kill();
             if (!supervisor.WaitForExit(10_000) || supervisor.ExitCode == 0) throw new IOException("Synthetic supervisor termination was not confirmed.");
-            if (WaitForSingleObject(worker, 15_000) != 0 || !GetExitCodeProcess(worker, out var exitCode) || exitCode != 3)
+            if (!WorkerExitProven(workerIdentityVerified, WaitForSingleObject(worker, 15_000)) || !GetExitCodeProcess(worker, out var exitCode) || exitCode != 3)
                 throw new IOException("Synthetic worker watchdog exit was not confirmed.");
-            return new FileId(volume, id);
+            return ready.RecordId;
         } finally {
-            var supervisorJoined = false; var workerJoined = worker is null;
+            // Once the supervisor has started, an unidentified worker is
+            // uncertain even if readiness failed or arrived too late.
+            var supervisorJoined = false; var workerJoined = false;
             try {
                 if (!supervisor.HasExited) supervisor.Kill();
                 supervisorJoined = supervisor.WaitForExit(10_000) && DrainOutput(stdout, supervisor.StandardOutput, ref tail, stderr);
-                if (worker is not null && !worker.IsInvalid) workerJoined = WaitForSingleObject(worker, 15_000) == 0;
+                if (worker is not null && !worker.IsInvalid && workerIdentityVerified) workerJoined = WorkerExitProven(true, WaitForSingleObject(worker, 15_000));
             } catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or AggregateException) {
                 supervisorJoined = false;
             } finally { worker?.Dispose(); }
-            if (!supervisorJoined || !workerJoined) throw new IOException("Synthetic supervisor, worker, or stream drain was not confirmed.");
+            if (!supervisorJoined || !workerJoined) throw new IOException("Synthetic supervisor, worker, or stream drain was not confirmed; an unidentified worker may remain. Its watchdog is configured to trigger after managed startup.");
         }
     }
 
