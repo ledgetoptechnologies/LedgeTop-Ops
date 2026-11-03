@@ -2066,6 +2066,37 @@ const MIGRATIONS = [
     CREATE INDEX viewer_project_groups_org_idx ON viewer_project_groups(organization_id);
     CREATE INDEX viewer_project_hierarchy_org_idx ON viewer_project_hierarchy(organization_id,group_id);
   `},
+  {version:43,name:'prepared_submission_exact_envelope_outbox',sql:`
+    CREATE TABLE viewer_prepared_submission_outbox (
+      submission_id TEXT PRIMARY KEY,
+      viewer_task_id TEXT NOT NULL,
+      viewer_attempt_id TEXT NOT NULL,
+      local_job_id TEXT NOT NULL,
+      protocol TEXT NOT NULL CHECK(protocol='ltds-viewer-prepared-envelope-jcs-v3'),
+      envelope_canonical TEXT NOT NULL CHECK(json_valid(envelope_canonical)),
+      envelope_sha256 TEXT NOT NULL CHECK(length(envelope_sha256)=64 AND envelope_sha256 NOT GLOB '*[^0-9a-f]*'),
+      state TEXT NOT NULL CHECK(state IN ('prepared','accepted','held')),
+      remote_binding_json TEXT CHECK(remote_binding_json IS NULL OR json_valid(remote_binding_json)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(viewer_attempt_id),
+      UNIQUE(local_job_id),
+      CHECK((state='accepted' AND remote_binding_json IS NOT NULL) OR (state<>'accepted' AND remote_binding_json IS NULL))
+    );
+    CREATE INDEX viewer_prepared_submission_outbox_state_idx
+      ON viewer_prepared_submission_outbox(state,updated_at);
+    CREATE TRIGGER viewer_prepared_submission_outbox_identity_immutable
+      BEFORE UPDATE OF submission_id,viewer_task_id,viewer_attempt_id,local_job_id,protocol,envelope_canonical,envelope_sha256,created_at
+      ON viewer_prepared_submission_outbox
+      BEGIN SELECT RAISE(ABORT,'prepared submission envelope is immutable'); END;
+    CREATE TRIGGER viewer_prepared_submission_outbox_no_delete
+      BEFORE DELETE ON viewer_prepared_submission_outbox
+      BEGIN SELECT RAISE(ABORT,'prepared submission outbox is retained'); END;
+    CREATE TRIGGER viewer_prepared_submission_outbox_state_monotonic
+      BEFORE UPDATE OF state ON viewer_prepared_submission_outbox
+      WHEN NOT (OLD.state='prepared' AND NEW.state='accepted')
+      BEGIN SELECT RAISE(ABORT,'prepared submission outbox state cannot be reset'); END;
+  `},
 ];
 
 function applyMigrations(database) {
