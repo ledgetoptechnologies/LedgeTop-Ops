@@ -82,12 +82,17 @@ internal static class SyntheticMemoryNative {
     }
     // Test-only use of the production handle-bound primitive: it verifies the
     // exact expected bytes on the deletion handle and refuses unsafe paths.
-    // An assertion failure or any uncertainty keeps the fixture intact.
+    // An assertion failure or uncertainty about this trace record keeps the fixture intact.
+    private static bool TraceRecordAbsent(Func<FileAttributes> inspect) {
+        try { _ = inspect(); return false; }
+        catch (FileNotFoundException) { return true; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.SecurityException or ArgumentException or NotSupportedException) { return false; }
+    }
     private static bool TryDeleteTraceRecord(string path, byte[] expected, bool checksPassed) {
         if (!checksPassed || !OperatingSystem.IsWindows()) return false;
         var delete = typeof(PlaceholderHydrationCoordinator).GetMethod("DeleteReservation", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
         if (delete is null) return false;
-        try { delete.Invoke(null, new object[] { path, expected }); return !File.Exists(path); }
+        try { delete.Invoke(null, new object[] { path, expected }); return TraceRecordAbsent(() => File.GetAttributes(path)); }
         catch (Exception error) when (error is System.Reflection.TargetInvocationException or ArgumentException or UnauthorizedAccessException) { return false; }
     }
     internal static async Task<int> CacheStageTests() {
@@ -105,7 +110,7 @@ internal static class SyntheticMemoryNative {
         var secondEntry = Path.Combine(scope, second.CacheKey);
         var third = identity with { ResourceReference = "odqr1_2", LogicalFileId = "oef1_" + new string('c', 64), FileName = "sample-2.bin" };
         var thirdEntry = Path.Combine(scope, third.CacheKey);
-        var retainFixture = false;
+        var retainTraceFixture = false;
         try {
             Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", "1");
             Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", basePath);
@@ -149,7 +154,7 @@ internal static class SyntheticMemoryNative {
             var traceSpec = new DownloadSpec(second.ResourceReference, new Uri("https://source.example.invalid/content"), second.FileName, second.Length, second.ETag, second.Sha256);
             var traceBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = second.ScopeKey, Entry = second.CacheKey,
                 Growth = checked(second.Length + Downloader.HydrationStateGrowthBudget(traceSpec) + 1024) });
-            using (var output = new FileStream(traceRecord, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { retainFixture = true; output.Write(traceBytes); }
+            using (var output = new FileStream(traceRecord, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { retainTraceFixture = true; output.Write(traceBytes); }
             var tracePassed = false;
             try {
                 if (TryDeleteTraceRecord(traceRecord, traceBytes, false) || !File.Exists(traceRecord)) throw new IOException("Failed-check cleanup removed a synthetic record.");
@@ -173,8 +178,8 @@ internal static class SyntheticMemoryNative {
                 } finally { NativeStallTrace.Disable(scanTrace); }
                 if (!File.ReadAllBytes(traceRecord).SequenceEqual(traceBytes)) throw new IOException("Unrelated synthetic reservation changed.");
                 tracePassed = true;
-            } finally { if (TryDeleteTraceRecord(traceRecord, traceBytes, tracePassed)) retainFixture = false; }
-            if (retainFixture) throw new IOException("Synthetic record cleanup was not verified; fixture retained.");
+            } finally { if (TryDeleteTraceRecord(traceRecord, traceBytes, tracePassed)) retainTraceFixture = false; }
+            if (retainTraceFixture) throw new IOException("Synthetic trace record cleanup was not verified; fixture retained.");
             var scopeMarker = Path.Combine(scope, ".verified-hydration-owner"); var originalScope = File.ReadAllBytes(scopeMarker);
             await PrewarmOwnedAsync(cache, new[] { third });
             if (!File.Exists(Path.Combine(thirdEntry, ".verified-hydration-owner")) || !File.ReadAllBytes(scopeMarker).SequenceEqual(originalScope))
@@ -227,8 +232,8 @@ internal static class SyntheticMemoryNative {
         } finally {
             Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", previousProbe);
             Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", previousBase);
-            if (retainFixture) {
-                Console.Error.WriteLine("Synthetic fixture retained because record cleanup was not verified: " + basePath);
+            if (retainTraceFixture) {
+                Console.Error.WriteLine("Synthetic fixture retained because trace record cleanup was not verified: " + basePath);
             } else {
             File.Delete(Path.Combine(entry, ".hydration.lock")); File.Delete(Path.Combine(entry, ".verified-hydration-owner")); if (Directory.Exists(entry)) Directory.Delete(entry);
             File.Delete(Path.Combine(secondEntry, ".hydration.lock")); File.Delete(Path.Combine(secondEntry, ".verified-hydration-owner")); if (Directory.Exists(secondEntry)) Directory.Delete(secondEntry);
@@ -244,6 +249,10 @@ internal static class SyntheticMemoryNative {
         Console.WriteLine("PASS synthetic actual cache admission, quota, ownership and scope refusals without native registration."); return 0;
     }
     internal static int CleanupEvidenceTests() {
+        if (!TraceRecordAbsent(() => throw new FileNotFoundException()) || TraceRecordAbsent(() => throw new DirectoryNotFoundException()) ||
+            TraceRecordAbsent(() => throw new UnauthorizedAccessException()) || TraceRecordAbsent(() => throw new IOException()) ||
+            TraceRecordAbsent(() => FileAttributes.Normal))
+            throw new IOException("Synthetic trace record absence classification is unsafe.");
         if (PrewarmMode(null) != "off" || PrewarmMode("0") != "off" || PrewarmMode("1") != "entries" || PrewarmMode("2") != "entries+reservation" || PrewarmMode("unexpected") != "invalid")
             throw new IOException("Synthetic prewarm option validation failed.");
         var joined = true;
