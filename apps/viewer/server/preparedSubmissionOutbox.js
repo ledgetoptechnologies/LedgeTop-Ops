@@ -80,6 +80,7 @@ function readIntent(row) {
     viewerAttemptId: row.viewer_attempt_id,
     localJobId: row.local_job_id,
     coordinatorOrigin: row.coordinator_origin,
+    coordinatorAuthorityId: row.coordinator_authority_id || null,
     authenticatedPrincipal: row.authenticated_principal,
     environment: row.environment,
     protocol: row.protocol,
@@ -103,9 +104,10 @@ class PreparedSubmissionOutbox {
     this.database = database;
   }
 
-  persistIntent({ localJobId, owner, origin, principalId, environment, envelope }) {
+  persistIntent({ localJobId, owner, origin, authorityId, principalId, environment, envelope }) {
     if (typeof localJobId !== 'string' || !localJobId || typeof owner !== 'string' || !owner) fail('prepared_outbox_lease_required');
     const coordinatorOrigin = validateOrigin(origin);
+    if (typeof authorityId !== 'string' || !UUID.test(authorityId)) fail('prepared_submission_authority_invalid');
     if (typeof principalId !== 'string' || !ID.test(principalId)) fail('prepared_submission_principal_invalid');
     if (!['staging', 'production'].includes(environment)) fail('prepared_submission_environment_invalid');
     const checked = canonicalEnvelope(envelope);
@@ -125,15 +127,16 @@ class PreparedSubmissionOutbox {
         const prior = readIntent(existing);
         if (prior.submissionId !== envelope.submission.submissionId || prior.viewerTaskId !== envelope.viewerTaskId
             || prior.viewerAttemptId !== attemptId || prior.localJobId !== localJobId
-            || prior.coordinatorOrigin !== coordinatorOrigin || prior.authenticatedPrincipal !== principalId || prior.environment !== environment
+            || prior.coordinatorOrigin !== coordinatorOrigin || prior.coordinatorAuthorityId !== authorityId
+            || prior.authenticatedPrincipal !== principalId || prior.environment !== environment
             || prior.envelopeCanonical !== checked.text || prior.envelopeSha256 !== checked.sha256) fail('prepared_outbox_conflict');
         this.database.exec('COMMIT');
         return prior;
       }
       this.database.prepare(`INSERT INTO viewer_prepared_submission_outbox
-        (submission_id,viewer_task_id,viewer_attempt_id,local_job_id,coordinator_origin,authenticated_principal,environment,protocol,envelope_canonical,envelope_sha256,state,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,'prepared',?,?)`).run(
-        envelope.submission.submissionId, envelope.viewerTaskId, attemptId, localJobId, coordinatorOrigin, principalId, environment, PROTOCOL, checked.text, checked.sha256, now, now);
+        (submission_id,viewer_task_id,viewer_attempt_id,local_job_id,coordinator_origin,coordinator_authority_id,authenticated_principal,environment,protocol,envelope_canonical,envelope_sha256,state,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,'prepared',?,?)`).run(
+        envelope.submission.submissionId, envelope.viewerTaskId, attemptId, localJobId, coordinatorOrigin, authorityId, principalId, environment, PROTOCOL, checked.text, checked.sha256, now, now);
       const created = this.database.prepare('SELECT * FROM viewer_prepared_submission_outbox WHERE submission_id=?').get(envelope.submission.submissionId);
       this.database.exec('COMMIT');
       return readIntent(created);
@@ -166,6 +169,7 @@ class PreparedSubmissionOutbox {
     if (!intent) fail('prepared_outbox_intent_missing');
     if (localJobId !== intent.localJobId) fail('prepared_outbox_intent_mismatch');
     if (!response || Object.getPrototypeOf(response) !== Object.prototype
+        || response.authorityId !== intent.coordinatorAuthorityId || !UUID.test(response.authorityId || '')
         || typeof response.jobId !== 'string' || !ID.test(response.jobId)
         || !Number.isSafeInteger(response.generation) || response.generation < 1
         || response.environment !== environment || response.submissionId !== intent.submissionId
@@ -174,6 +178,7 @@ class PreparedSubmissionOutbox {
       fail('prepared_submission_binding_mismatch');
     }
     const binding = {
+      authorityId: response.authorityId,
       jobId: response.jobId,
       generation: response.generation,
       environment: response.environment,
@@ -238,8 +243,9 @@ async function boundedJson(response) {
 }
 
 class PreparedSubmissionClient {
-  constructor({ origin, bearerToken, principalId, environment, outbox, timeoutMs = 15000, fetchImpl = globalThis.fetch }) {
+  constructor({ origin, authorityId, bearerToken, principalId, environment, outbox, timeoutMs = 15000, fetchImpl = globalThis.fetch }) {
     this.origin = validateOrigin(origin);
+    if (typeof authorityId !== 'string' || !UUID.test(authorityId)) fail('prepared_submission_authority_invalid');
     if (typeof bearerToken !== 'string' || bearerToken.length < 16 || bearerToken.length > 4096
         || /[^\x21-\x7e]/.test(bearerToken)) fail('prepared_submission_credential_invalid');
     if (!['staging', 'production'].includes(environment)) fail('prepared_submission_environment_invalid');
@@ -247,6 +253,7 @@ class PreparedSubmissionClient {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120000) fail('prepared_submission_timeout_invalid');
     if (!(outbox instanceof PreparedSubmissionOutbox) || typeof fetchImpl !== 'function') fail('prepared_submission_client_invalid');
     this.bearerToken = bearerToken;
+    this.authorityId = authorityId;
     this.environment = environment;
     this.principalId = principalId;
     this.timeoutMs = timeoutMs;
@@ -285,7 +292,8 @@ class PreparedSubmissionClient {
     if (!intent || typeof intent.viewerAttemptId !== 'string') fail('prepared_outbox_intent_missing');
     const saved = this.outbox.assertCurrentLease({ attemptId: intent.viewerAttemptId, localJobId: intent.localJobId, owner });
     if (!saved || saved.envelopeCanonical !== intent.envelopeCanonical || saved.envelopeSha256 !== intent.envelopeSha256) fail('prepared_outbox_intent_mismatch');
-    if (saved.coordinatorOrigin !== this.origin || saved.authenticatedPrincipal !== this.principalId || saved.environment !== this.environment) fail('prepared_outbox_authority_changed');
+    if (saved.coordinatorOrigin !== this.origin || saved.coordinatorAuthorityId !== this.authorityId
+        || saved.authenticatedPrincipal !== this.principalId || saved.environment !== this.environment) fail('prepared_outbox_authority_changed');
     if (saved.state === 'accepted') return saved;
     if (saved.state !== 'prepared') fail('prepared_outbox_held');
     let post;

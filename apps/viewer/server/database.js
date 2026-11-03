@@ -2107,6 +2107,12 @@ const MIGRATIONS = [
   {version:44,name:'attempt_bound_gcp_correspondence_evidence',sql:`
     ALTER TABLE processing_attempt_gcp_snapshots ADD COLUMN evidence_json TEXT;
   `},
+  {version:45,name:'pin_prepared_submission_coordinator_authority',sql:`
+    ALTER TABLE viewer_prepared_submission_outbox ADD COLUMN coordinator_authority_id TEXT;
+    CREATE TRIGGER viewer_prepared_submission_authority_immutable
+      BEFORE UPDATE OF coordinator_authority_id ON viewer_prepared_submission_outbox
+      BEGIN SELECT RAISE(ABORT,'prepared submission authority is immutable'); END;
+  `},
 ];
 
 function applyMigrations(database) {

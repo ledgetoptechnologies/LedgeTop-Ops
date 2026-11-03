@@ -21,6 +21,13 @@ before acceptance is recorded. Requests have a bounded timeout even when the
 caller does not supply an abort signal. A target, principal or environment
 change cannot silently replay the saved ID to a different authority.
 
+The outbox also pins the independently provisioned canonical coordinator
+`authorityId` in the immutable intent and authenticated response binding.
+Missing or changed identity fails closed before POST or acceptance; the Viewer
+must never learn authority from the first response. This does not by itself
+fence a cloned or rolled-back coordinator database that retains the same ID.
+That requires Processing-side external fencing evidence.
+
 The current reference-v1 manifest cannot represent the complete Viewer source
 inventory: it has basename-only names, so it cannot preserve nested paths or
 duplicate basenames in different folders. The future source inventory must
@@ -28,6 +35,13 @@ preserve dataset/file IDs, exact path spelling, roles, byte sizes and hashes,
 and the exact per-attempt GCP snapshot plus its source/image provenance. Raw
 GCP CSV files remain retained in the source dataset. No lossy mapping or
 automatic cleanup is authorized by this component.
+
+New GCP snapshots include immutable source-file IDs, hashes and paths, image
+IDs and paths, dimensions, exact correspondence coordinates, and the exact
+generated ODM bytes/hash/count. Historical snapshots and snapshots without a
+linked retained raw source CSV have no trusted evidence. Viewer currently caps
+that evidence at 64 MiB/100,000 correspondences, while the Processing candidate
+uses a lower limit; cases beyond the agreed transfer limits must remain held.
 
 Focused tests are in `test/prepared-submission-outbox.test.js`. They exercise
 canonical bytes, lease-bound durable replay, immutable storage, uncertain POST
