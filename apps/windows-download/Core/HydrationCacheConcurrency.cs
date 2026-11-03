@@ -4,6 +4,9 @@ namespace LedgeTop.WindowsDownload;
 // disposed while another coordinator can still hold or await it. No auth or filesystem effects.
 internal static class HydrationCacheConcurrency
 {
+#if LEDGETOP_CACHE_RACE_TEST
+    internal static Action<string>? BeforeEntryWaitTestHook;
+#endif
     private sealed class Entry { internal readonly SemaphoreSlim Gate = new(1, 1); internal int References; }
     internal const int Capacity = 4;
     private sealed class Root
@@ -54,6 +57,9 @@ internal static class HydrationCacheConcurrency
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
         timeout.CancelAfter(testTimeout ?? TimeSpan.FromMinutes(2));
         try {
+#if LEDGETOP_CACHE_RACE_TEST
+            BeforeEntryWaitTestHook?.Invoke(key);
+#endif
             await entry.Gate.WaitAsync(timeout.Token).ConfigureAwait(false); entered = true;
             // Same-entry waiters never consume a distinct-entry slot.
             await state.Admission.WaitAsync(timeout.Token).ConfigureAwait(false); admission = true;

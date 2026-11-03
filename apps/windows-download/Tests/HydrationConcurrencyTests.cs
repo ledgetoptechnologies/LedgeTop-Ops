@@ -33,6 +33,7 @@ internal static class HydrationConcurrencyTests
         ("hydration concurrency cancellation retains counted owned partial and resumes verified bytes", Partial),
         ("hydration concurrency reservation cleanup cannot mask primary cancellation or source failure", CleanupFailure),
         ("hydration concurrency promoted-cache crash records reconcile on cache hit and offline eviction", PromotedStale),
+        ("corrupted cached bytes are rejected before any native sink write", CorruptCacheHit),
         ("hydration concurrency rejects malformed and foreign durable reservations without deleting them", Reservations),
         ("hydration concurrency excludes legacy leases and does not hold short quota lock over network", Legacy),
         ("hydration concurrency eviction waits matching sink while unrelated entry progresses", Eviction),
@@ -60,8 +61,13 @@ internal static class HydrationConcurrencyTests
         try {
             await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
             Check(File.Exists(reservation)); var bytes = File.ReadAllBytes(reservation);
+            var arrived = Signal(); var arrivals = 0;
+            HydrationCacheConcurrency.BeforeEntryWaitTestHook = key => {
+                if (key == id.ScopeKey + id.CacheKey && Interlocked.Increment(ref arrivals) == 2) arrived.TrySetResult();
+            };
             second = f.Run(0, other, token: cancelHydration.Token);
             eviction = other.EvictVerifiedCacheAsync(id, cancelEviction.Token);
+            await arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Check(!second.IsCompleted && !eviction.IsCompleted);
             Check(await LegacyChild(Path.Combine(root, ".hydration-cache.lock"), "ReadWrite") == 17);
             Check(File.ReadAllBytes(reservation).SequenceEqual(bytes));
@@ -75,6 +81,7 @@ internal static class HydrationConcurrencyTests
             await f.Run(0, other); // normal cache hit remains usable after teardown
         } finally {
             PlaceholderHydrationCoordinator.BeforeReservationReleaseTestHook = null;
+            HydrationCacheConcurrency.BeforeEntryWaitTestHook = null;
             cancelHydration.Cancel(); cancelEviction.Cancel(); resume.Set();
             if (second is not null) { try { await second.WaitAsync(TimeSpan.FromSeconds(10)); } catch (OperationCanceledException) { } }
             if (eviction is not null) { try { await eviction.WaitAsync(TimeSpan.FromSeconds(10)); } catch (OperationCanceledException) { } }
@@ -360,6 +367,15 @@ internal static class HydrationConcurrencyTests
         await f.Run(0); path = ExactRecord(f, 0, 0); resolves = f.Source.Resolves;
         await Reject(offline.EvictVerifiedCacheAsync(Identity(0)));
         Check(File.Exists(path) && Directory.EnumerateFiles(f.Root, Identity(0).FileName, SearchOption.AllDirectories).Any() && f.Source.Resolves == resolves);
+    }
+    private static async Task CorruptCacheHit()
+    {
+        using var f = new Fixture(); await f.Run(0);
+        var file = Directory.EnumerateFiles(f.Root, Identity(0).FileName, SearchOption.AllDirectories).Single();
+        var changed = File.ReadAllBytes(file); changed[0] ^= 0xff; File.WriteAllBytes(file, changed);
+        var writes = 0; var sink = new Sink { BeforeWrite = () => { writes++; return Task.CompletedTask; } };
+        var downloads = f.Source.Downloads; await Reject(f.Run(0, sink: sink));
+        Check(writes == 0 && sink.Complete == 0 && sink.Failed == 1 && f.Source.Downloads == downloads && File.ReadAllBytes(file).SequenceEqual(changed));
     }
     private sealed class PrefixThenWait(TaskCompletionSource waiting) : MemoryStream(Bytes)
     {
