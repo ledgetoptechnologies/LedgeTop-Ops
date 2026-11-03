@@ -145,14 +145,30 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                     NativeStallTrace.Record(NativeStallTrace.Stage.CacheDirectoryEnter);
                     try {
 #endif
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    var scopeExists = TraceCacheValue(NativeStallTrace.Stage.CacheScopeCheckEnter, NativeStallTrace.Stage.CacheScopeCheckExit, () => OwnedExisting(scope));
+                    var entryExists = TraceCacheValue(NativeStallTrace.Stage.CacheEntryCheckEnter, NativeStallTrace.Stage.CacheEntryCheckExit, () => OwnedExisting(entry));
+#else
                     var scopeExists = OwnedExisting(scope); var entryExists = OwnedExisting(entry);
+#endif
                     if (!scopeExists || !entryExists) {
                         var directory = Path.Combine(root, ".hydration-reservations-v2");
+                        var reservationDirectoryExists =
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                            TraceCacheValue(NativeStallTrace.Stage.CacheReservationDirCheckEnter, NativeStallTrace.Stage.CacheReservationDirCheckExit, () => OwnedExisting(directory));
+#else
+                            OwnedExisting(directory);
+#endif
                         var metadata = checked((scopeExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
                             (entryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
-                            (OwnedExisting(directory) ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)));
+                            (reservationDirectoryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)));
                         RequireCapacity(ReservedBytes(directory), checked(identity.Length + Downloader.HydrationStateGrowthBudget(resolved.Spec) + 1024 + metadata));
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                        TraceCacheAction(NativeStallTrace.Stage.CacheScopeOwnEnter, NativeStallTrace.Stage.CacheScopeOwnExit, () => Owned(scope));
+                        TraceCacheAction(NativeStallTrace.Stage.CacheEntryOwnEnter, NativeStallTrace.Stage.CacheEntryOwnExit, () => Owned(entry));
+#else
                         Owned(scope); Owned(entry);
+#endif
                     }
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                     } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheDirectoryExit); }
@@ -379,12 +395,23 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     }
     private void RequireCapacity(long reserved, long growth)
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.CacheCapacityEnter);
+        try {
+#endif
         var used = CacheBytes();
         if (reserved > maximumCacheBytes || used > maximumCacheBytes - reserved || growth > maximumCacheBytes - reserved - used)
             throw new TransferException("Hydration cache capacity exceeded.");
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheCapacityExit); }
+#endif
     }
     private static long ReservedBytes(string directory)
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.CacheReservedBytesEnter);
+        try {
+#endif
         if (!OwnedExisting(directory)) return 0;
         long reserved = 0; var count = 0;
         if (Directory.EnumerateDirectories(directory).Any()) throw new TransferException("Hydration reservation tree is unknown.");
@@ -394,6 +421,9 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             reserved = checked(reserved + ReadReservation(item).Value.Growth);
         }
         return reserved;
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheReservedBytesExit); }
+#endif
     }
     private static (Reservation Value, byte[] Bytes) ReadReservation(string path)
     {
@@ -438,6 +468,10 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     }
     private long CacheBytes()
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.CacheWalkEnter);
+        try {
+#endif
         long size = 0;
         foreach (var file in Walk(root)) {
             RequireSafe(file);
@@ -447,7 +481,22 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             size = checked(size + new FileInfo(file).Length);
         }
         return size;
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheWalkExit); }
+#endif
     }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+    private static T TraceCacheValue<T>(NativeStallTrace.Stage enter, NativeStallTrace.Stage exit, Func<T> action)
+    {
+        NativeStallTrace.Record(enter);
+        try { return action(); } finally { NativeStallTrace.Record(exit); }
+    }
+    private static void TraceCacheAction(NativeStallTrace.Stage enter, NativeStallTrace.Stage exit, Action action)
+    {
+        NativeStallTrace.Record(enter);
+        try { action(); } finally { NativeStallTrace.Record(exit); }
+    }
+#endif
     private static IEnumerable<string> Walk(string directory)
     {
         RequireSafe(directory);
