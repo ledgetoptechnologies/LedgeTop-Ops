@@ -13,6 +13,8 @@ internal sealed class ExperimentalOwnedStream : IDisposable
     private const uint ShareReadWrite = 3, CreateNewMode = 1, OpenExisting = 3;
     private const uint BackupSemantics = 0x02000000, OpenReparsePoint = 0x00200000;
     private readonly object gate = new();
+    private static readonly object QuarantineGate = new();
+    private static readonly HashSet<ExperimentalOwnedStream> Quarantined = [];
     private sealed record DirectoryPin(string Path, SafeFileHandle Handle, Identity Identity);
     private readonly List<DirectoryPin> directories = [];
     private FileStream? stream;
@@ -22,6 +24,7 @@ internal sealed class ExperimentalOwnedStream : IDisposable
     private string? successfulRenameTarget;
     internal static Action? BeforeSealFlushTestHook, BeforeSealHashTestHook, AfterStreamDisposeTestHook;
     internal static Action? AfterSuccessfulNativeRenameTestHook;
+    internal static int QuarantinedCountForTest { get { lock (QuarantineGate) return Quarantined.Count; } }
     internal static Func<nint, int>? SimulatedRenameStatusTestHook;
     internal static Func<uint>? SimulatedWaitTestHook;
     internal readonly record struct Identity(ulong Volume, Guid FileId);
@@ -109,7 +112,10 @@ internal sealed class ExperimentalOwnedStream : IDisposable
                     Marshal.WriteIntPtr(buffer, rootOffset, destinationPins[^1].Handle.DangerousGetHandle());
                     Marshal.WriteInt32(buffer, lengthOffset, bytes.Length); Marshal.Copy(bytes, 0, buffer + nameOffset, bytes.Length);
                     Marshal.WriteIntPtr(io, 0, (nint)0x103); Marshal.WriteIntPtr(io, IntPtr.Size, 0);
-                    inFlight = true;
+                    // Root the owner before issuing native I/O. A caller that
+                    // drops its reference after an ambiguous result must not
+                    // let SafeHandle finalizers close the quarantined handles.
+                    EnterQuarantine(); inFlight = true;
                     var status = SimulatedRenameStatusTestHook?.Invoke(io) ?? NtSetInformationFile(file.SafeFileHandle, io, buffer, checked((uint)size), 10);
                     if (unchecked((uint)status) == 0x103) {
                         while (true) {
@@ -122,19 +128,18 @@ internal sealed class ExperimentalOwnedStream : IDisposable
                     }
                     inFlight = false;
                     if (unchecked((uint)status) == 0xc0000035) {
-                        renameUncertain = true;
                         VerifyPins(directories); VerifyPins(destinationPins);
                         if (GetIdentity(file.SafeFileHandle) != SourceIdentity ||
                             !string.Equals(FinalPath(file.SafeFileHandle), sourcePath, StringComparison.OrdinalIgnoreCase)) {
                             throw new IOException("Experimental collision outcome is uncertain.");
                         }
-                        renameUncertain = false;
+                        LeaveQuarantine();
                         return false;
                     }
                     if (status != 0) { renameUncertain = true; throw new IOException("Experimental rename was refused."); }
                     // From the successful kernel return until every binding is
                     // checked, retain all handles and refuse normal disposal.
-                    moved = true; renameUncertain = true;
+                    moved = true;
                     successfulRenameTarget = Path.Combine(destinationDirectory, leaf);
                     AfterSuccessfulNativeRenameTestHook?.Invoke();
                     VerifyPins(directories); VerifyPins(destinationPins);
@@ -144,7 +149,7 @@ internal sealed class ExperimentalOwnedStream : IDisposable
                     // The promoted source remains owned by this object. Keep
                     // destination ancestry pinned until the owner is disposed.
                     directories.AddRange(destinationPins); destinationPins.Clear();
-                    renameUncertain = false;
+                    LeaveQuarantine();
                     return true;
                 } finally {
                     if (inFlight) ParkUncertain();
@@ -166,6 +171,21 @@ internal sealed class ExperimentalOwnedStream : IDisposable
 
     private static void ParkUncertain() { while (true) { try { Thread.Sleep(Timeout.Infinite); } catch (ThreadInterruptedException) { } } }
 
+    private void EnterQuarantine()
+    {
+        lock (QuarantineGate) {
+            if (!Quarantined.Add(this)) throw new InvalidOperationException("Experimental owner is already quarantined.");
+            renameUncertain = true;
+        }
+    }
+    private void LeaveQuarantine()
+    {
+        lock (QuarantineGate) {
+            if (!Quarantined.Remove(this)) throw new InvalidOperationException("Experimental quarantine ownership was lost.");
+            renameUncertain = false;
+        }
+    }
+
     // Test-only recovery of a known-success return. Never reconstructs ownership
     // from a path or settles any unknown status; no production caller exists.
     internal void ReconcileSuccessfulRenameForTest()
@@ -181,7 +201,7 @@ internal sealed class ExperimentalOwnedStream : IDisposable
             file.Position = 0;
             if (!CryptographicOperations.FixedTimeEquals(SHA256.HashData(file), sealedDigest))
                 throw new IOException("Experimental rename content remains uncertain.");
-            renameUncertain = false;
+            LeaveQuarantine();
         }
     }
 

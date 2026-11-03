@@ -214,6 +214,7 @@ internal static class ReservationHandlePrototype
         try { owned.RenameNoReplace(destination, "promoted.record", digest); } catch (IOException) { failed = true; }
         finally { LedgeTop.WindowsDownload.ExperimentalOwnedStream.AfterSuccessfulNativeRenameTestHook = null; }
         if (!failed) throw new IOException("Injected post-success failure was not observed.");
+        if (LedgeTop.WindowsDownload.ExperimentalOwnedStream.QuarantinedCountForTest != 1) throw new IOException("Uncertain owner was not rooted.");
         var refused = false; try { owned.Dispose(); } catch (InvalidOperationException) { refused = true; }
         if (!refused) throw new IOException("Uncertain owner released its handles.");
         refused = false; try { owned.RenameNoReplace(destination, "again.record", digest); } catch (InvalidOperationException) { refused = true; }
@@ -223,6 +224,7 @@ internal static class ReservationHandlePrototype
         if (!refused || Directory.Exists(moved)) throw new IOException("Uncertain destination ancestry was not held.");
         // Only the test-specific verified settlement may clear quarantine.
         owned.ReconcileSuccessfulRenameForTest(); owned.Dispose();
+        if (LedgeTop.WindowsDownload.ExperimentalOwnedStream.QuarantinedCountForTest != 0) throw new IOException("Settled owner remained rooted.");
         Directory.Move(destination, moved); Directory.Move(moved, destination);
         using var targetDirectory = Open(destination, ReadAttributes | Delete, ShareRead | ShareWrite, BackupSemantics | OpenReparsePoint);
         RequireKind(targetDirectory, isDirectory: true); var targetDirectoryId = Id(targetDirectory);
