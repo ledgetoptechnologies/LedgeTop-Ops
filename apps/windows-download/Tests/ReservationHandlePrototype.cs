@@ -13,6 +13,7 @@ internal static class ReservationHandlePrototype
     private readonly record struct FileId(ulong Volume, Guid Id);
     private static readonly byte[] Owned = "synthetic-owned-reservation-v1\n"u8.ToArray();
     private static readonly byte[] Foreign = "synthetic-foreign-reservation\n"u8.ToArray();
+    private static readonly byte[] Abrupt = "synthetic-abrupt-child-reservation\n"u8.ToArray();
 
     internal static void Run()
     {
@@ -27,6 +28,7 @@ internal static class ReservationHandlePrototype
         var fixture = Path.Combine(root, "reservation-handle-" + Guid.NewGuid().ToString("N"));
         if (!CreateDirectoryW(fixture, 0)) throw new IOException("Cannot create a new test fixture.");
         var record = Path.Combine(fixture, "owned.record"); var foreign = Path.Combine(fixture, "foreign.record");
+        var childRecord = Path.Combine(fixture, "abrupt-child.record");
         var renamed = Path.Combine(fixture, "renamed.record");
         var verified = false; var cleanupComplete = false; var deleteDispositionsApplied = 0;
         try {
@@ -60,12 +62,24 @@ internal static class ReservationHandlePrototype
             }
             if (TryDeleteExact(fixture, directory, directoryId, record, Foreign, ownerId) || TryDeleteExact(fixture, directory, directoryId, record, Owned, foreignId) ||
                 !File.ReadAllBytes(record).SequenceEqual(Owned)) throw new IOException("Foreign identity or contents were accepted.");
+            var childId = RunAbruptChild(fixture, directoryId);
+            VerifyDirectoryBinding(fixture, directory, directoryId);
+            using (var reopened = new FileStream(childRecord, FileMode.Open, FileAccess.Read, FileShare.Read)) {
+                RequireKind(reopened.SafeFileHandle, isDirectory: false);
+                if (childId == ownerId || childId == foreignId || Id(reopened.SafeFileHandle) != childId || !ReadExact(reopened, Abrupt))
+                    throw new IOException("Abrupt child record did not retain its exact identity and bytes.");
+            }
+            if (TryDeleteExact(fixture, directory, directoryId, childRecord, Owned, childId) ||
+                TryDeleteExact(fixture, directory, directoryId, childRecord, Abrupt, ownerId))
+                throw new IOException("Foreign abrupt-child cleanup evidence was accepted.");
             VerifyDirectoryBinding(fixture, directory, directoryId);
             verified = true;
             // Delete each exact owned file only through the verified file handle.
             if (!TryDeleteExact(fixture, directory, directoryId, record, Owned, ownerId)) throw new IOException("Exact synthetic file cleanup was not verified.");
             deleteDispositionsApplied++;
             if (!TryDeleteExact(fixture, directory, directoryId, foreign, Foreign, foreignId)) throw new IOException("Exact synthetic file cleanup was not verified.");
+            deleteDispositionsApplied++;
+            if (!TryDeleteExact(fixture, directory, directoryId, childRecord, Abrupt, childId)) throw new IOException("Exact synthetic child record cleanup was not verified.");
             deleteDispositionsApplied++;
             VerifyDirectoryBinding(fixture, directory, directoryId);
             if (Directory.EnumerateFileSystemEntries(fixture).Any() || Id(directory) != directoryId)
@@ -80,7 +94,70 @@ internal static class ReservationHandlePrototype
         } finally {
             if (!cleanupComplete) Console.Error.WriteLine($"Synthetic fixture cleanup unconfirmed; partial cleanup may have occurred (checksPassed={verified}; deleteDispositionsApplied={deleteDispositionsApplied}): {fixture}");
         }
-        Console.WriteLine("PASS ordinary Windows retained-handle identity, sharing, exact bytes and handle-bound cleanup. No native provider or crash tested.");
+        Console.WriteLine("PASS ordinary Windows retained-handle identity, sharing, abrupt child termination/reopen and exact handle-bound cleanup. No native provider or OS crash tested.");
+    }
+
+    internal static void RunChild(string fixture, string volumeText, string idText)
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
+        var root = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
+        if (string.IsNullOrEmpty(root) || !Path.IsPathFullyQualified(root) || root.StartsWith("\\\\", StringComparison.Ordinal) ||
+            !Path.IsPathFullyQualified(fixture) || fixture.StartsWith("\\\\", StringComparison.Ordinal) ||
+            !ulong.TryParse(volumeText, System.Globalization.NumberStyles.AllowHexSpecifier, System.Globalization.CultureInfo.InvariantCulture, out var volume) ||
+            volumeText.Length != 16 || !Guid.TryParseExact(idText, "N", out var id) || idText != id.ToString("N"))
+            throw new IOException("Invalid synthetic child scope.");
+        root = Path.GetFullPath(root); fixture = Path.GetFullPath(fixture);
+        var name = Path.GetFileName(fixture); const string prefix = "reservation-handle-";
+        if (!string.Equals(Path.GetDirectoryName(fixture), root, StringComparison.OrdinalIgnoreCase) || !name.StartsWith(prefix, StringComparison.Ordinal) ||
+            !Guid.TryParseExact(name[prefix.Length..], "N", out var fixtureId) || name != prefix + fixtureId.ToString("N"))
+            throw new IOException("Synthetic child fixture is outside its explicit root.");
+        CheckAncestors(fixture);
+        using var directory = Open(fixture, ReadAttributes, ShareRead | ShareWrite | 4, BackupSemantics | OpenReparsePoint);
+        RequireKind(directory, isDirectory: true);
+        if (Id(directory) != new FileId(volume, id)) throw new IOException("Synthetic child directory identity changed.");
+        using var record = new FileStream(Path.Combine(fixture, "abrupt-child.record"), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
+        record.Write(Abrupt); record.Flush(true); RequireKind(record.SafeFileHandle, isDirectory: false);
+        if (!ReadExact(record, Abrupt)) throw new IOException("Synthetic child record did not flush.");
+        var recordId = Id(record.SafeFileHandle);
+        Console.WriteLine($"READY {recordId.Volume:X16} {recordId.Id:N}"); Console.Out.Flush();
+        Thread.Sleep(Timeout.Infinite);
+        throw new IOException("Synthetic child was not terminated by its owner.");
+    }
+
+    private static FileId RunAbruptChild(string fixture, FileId directoryId)
+    {
+        var executable = Environment.ProcessPath ?? throw new IOException("Test executable path unavailable.");
+        var start = new System.Diagnostics.ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        if (string.Equals(Path.GetFileNameWithoutExtension(executable), "dotnet", StringComparison.OrdinalIgnoreCase)) {
+            var assembly = System.Reflection.Assembly.GetExecutingAssembly().Location;
+            if (string.IsNullOrEmpty(assembly)) throw new IOException("Test assembly path unavailable.");
+            start.ArgumentList.Add(assembly);
+        }
+        start.ArgumentList.Add("--reservation-handle-prototype-child"); start.ArgumentList.Add(fixture);
+        start.ArgumentList.Add(directoryId.Volume.ToString("X16", System.Globalization.CultureInfo.InvariantCulture)); start.ArgumentList.Add(directoryId.Id.ToString("N"));
+        using var child = System.Diagnostics.Process.Start(start) ?? throw new IOException("Synthetic child did not start.");
+        var stdout = child.StandardOutput.ReadLineAsync(); var stderr = child.StandardError.ReadToEndAsync();
+        try {
+            var line = stdout.WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
+            var parts = line?.Split(' ', StringSplitOptions.None);
+            if (parts is not { Length: 3 } || parts[0] != "READY" || parts[1].Length != 16 ||
+                !ulong.TryParse(parts[1], System.Globalization.NumberStyles.AllowHexSpecifier, System.Globalization.CultureInfo.InvariantCulture, out var volume) ||
+                !Guid.TryParseExact(parts[2], "N", out var id) || parts[2] != id.ToString("N") || id == Guid.Empty)
+                throw new IOException("Synthetic child readiness evidence was invalid.");
+            if (child.HasExited) throw new IOException("Synthetic child exited before controlled termination.");
+            child.Kill();
+            if (!child.WaitForExit(10_000) || child.ExitCode == 0) throw new IOException("Synthetic child termination was not verified.");
+            if (!stderr.Wait(TimeSpan.FromSeconds(3))) throw new IOException("Synthetic child output did not drain.");
+            return new FileId(volume, id);
+        } finally {
+            try {
+                if (!child.HasExited) child.Kill();
+                if (!child.WaitForExit(10_000)) Console.Error.WriteLine($"Synthetic owned child exit unconfirmed; process ID {child.Id}.");
+                _ = stdout.Wait(TimeSpan.FromSeconds(3)); _ = stderr.Wait(TimeSpan.FromSeconds(3));
+            } catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or AggregateException) {
+                Console.Error.WriteLine("Synthetic owned child cleanup could not be confirmed.");
+            }
+        }
     }
 
     private static bool ConfirmedAbsent(Func<FileAttributes> inspect, Action verifyParent)

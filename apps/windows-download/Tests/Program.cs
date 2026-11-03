@@ -5,6 +5,14 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using LedgeTop.WindowsDownload;
 
+if (args.FirstOrDefault() == "--reservation-handle-prototype-child") {
+    if (args.Length != 4) { Environment.ExitCode = 2; return; }
+    try { ReservationHandlePrototype.RunChild(args[1], args[2], args[3]); }
+    catch (Exception error) when (error is IOException or UnauthorizedAccessException or PlatformNotSupportedException or ArgumentException) {
+        Console.Error.WriteLine("Synthetic reservation child refused."); Environment.ExitCode = 2;
+    }
+    return;
+}
 if (args.FirstOrDefault() == "--reservation-handle-prototype-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
 if (args.Length == 1 && args[0] == "--reservation-handle-prototype-only") { ReservationHandlePrototype.Run(); return; }
 if (args.FirstOrDefault() == "--fake-cache-transaction-prototype-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
