@@ -1172,9 +1172,19 @@ internal static class ExperimentalColdDownloaderTests
                 var rejected = false; try { _ = receipt!.StageSyntheticReservationForTest(root, identity, spec with { Length = spec.Length + 1 }, coordinator); } catch (TransferException) { rejected = true; }
                 Check(rejected && !File.Exists(path));
                 Check(!receipt!.StageSyntheticReservationForTest(root, identity, spec, constrained) && !File.Exists(path));
+                source.RewriteResolutionForTest = value => value with { Spec = value.Spec with { ETag = "\"changed\"" } };
+                rejected = false; try { _ = await coordinator.ExperimentalAuthorizeAndStageAsync(identity, receipt); } catch (ResourceUnavailableException) { rejected = true; }
+                Check(rejected && !File.Exists(path)); source.RewriteResolutionForTest = null;
+                source.ResolveFailureForTest = new AccessDeniedException();
+                rejected = false; try { _ = await coordinator.ExperimentalAuthorizeAndStageAsync(identity, receipt); } catch (AccessDeniedException) { rejected = true; }
+                Check(rejected && !File.Exists(path)); source.ResolveFailureForTest = null;
                 File.WriteAllBytes(path, bytes);
                 Check(!receipt.StageSyntheticReservationForTest(root, identity, spec, coordinator) && File.ReadAllBytes(path).SequenceEqual(bytes)); File.Delete(path);
-                Check(receipt.StageSyntheticReservationForTest(root, identity, spec, coordinator)); AssertOtherProcessCannotOpen(path);
+                Check(await coordinator.ExperimentalAuthorizeAndStageAsync(identity, receipt)); AssertOtherProcessCannotOpen(path);
+                source.ResolveFailureForTest = new AccessDeniedException();
+                rejected = false; try { await coordinator.ExperimentalReauthorizeStagedAsync(identity, receipt); } catch (AccessDeniedException) { rejected = true; }
+                Check(rejected); AssertOtherProcessCannotOpen(path);
+                source.ResolveFailureForTest = null; await coordinator.ExperimentalReauthorizeStagedAsync(identity, receipt);
                 rejected = false; try { receipt.Dispose(); } catch (IOException) { rejected = true; } Check(rejected);
                 Check(receipt.InspectCapacityForTest(root, identity.ScopeKey + identity.CacheKey, coordinator, 0));
                 receipt.RemoveSyntheticReservationForTest(root, identity.ScopeKey + identity.CacheKey); Check(!File.Exists(path));
@@ -1703,7 +1713,7 @@ internal static class ExperimentalColdDownloaderTests
         internal static readonly string Principal = "odqp1_" + new string('a', 64);
         internal readonly PlaceholderIdentity Identity = new("pilot", "synthetic", ExperimentalColdDownloaderTests.Origin.GetLeftPart(UriPartial.Authority), Principal,
             "odqr1_test", "oef1_" + new string('b', 64), "v1", Spec.FileName, Spec.Length, Spec.ETag, Spec.Sha256);
-        private readonly Downloader downloader; internal int Downloads, Resolves; internal Func<ResolvedQueuedDownload, ResolvedQueuedDownload>? RewriteResolutionForTest; internal Func<HttpResponseMessage>? ResponseFactory; internal Action<HttpRequestMessage>? InspectRequest;
+        private readonly Downloader downloader; internal int Downloads, Resolves; internal Func<ResolvedQueuedDownload, ResolvedQueuedDownload>? RewriteResolutionForTest; internal Exception? ResolveFailureForTest; internal Func<HttpResponseMessage>? ResponseFactory; internal Action<HttpRequestMessage>? InspectRequest;
         internal CoordinatorSource() => downloader = Engine((request, _) => { Downloads++; InspectRequest?.Invoke(request); return ResponseFactory?.Invoke() ?? Response(Content); });
         public string Alias => "synthetic"; public Uri Origin => ExperimentalColdDownloaderTests.Origin;
         bool IHydrationMutationAwareSource.CoordinatesHydrationMutations => true;
@@ -1711,6 +1721,7 @@ internal static class ExperimentalColdDownloaderTests
         public Task<ResolvedQueuedDownload> ResolveAsync(string reference, CancellationToken token = default) {
             if (reference != Identity.ResourceReference) throw new ResourceUnavailableException();
             Resolves++;
+            if (ResolveFailureForTest is not null) return Task.FromException<ResolvedQueuedDownload>(ResolveFailureForTest);
             var resolved = new ResolvedQueuedDownload(Principal, Identity.LogicalFileId, Identity.RemoteVersion,
                 Spec with { OpaqueIdentity = Identity.LogicalFileId + ":" + Identity.RemoteVersion });
             return Task.FromResult(RewriteResolutionForTest?.Invoke(resolved) ?? resolved);

@@ -192,6 +192,21 @@ internal sealed class ExperimentalReservationOwner
             }
             return result;
         }
+        internal void VerifySyntheticReservationForTest(string root, PlaceholderIdentity identity, DownloadSpec spec, CancellationToken token = default) =>
+            Execute(root, identity.ScopeKey + identity.CacheKey, () => RunQuota(_ => {
+                identity.Encode();
+                if (spec.OpaqueIdentity != identity.LogicalFileId + ":" + identity.RemoteVersion || spec.FileName != identity.FileName ||
+                    spec.Length != identity.Length || spec.ETag != identity.ETag || spec.Sha256 != identity.Sha256 ||
+                    !spec.ContentUri.IsAbsoluteUri || spec.ContentUri.Scheme != "https" || spec.ContentUri.UserInfo.Length != 0 || spec.ContentUri.Fragment.Length != 0 ||
+                    spec.ContentUri.GetLeftPart(UriPartial.Authority) != identity.Origin || !spec.ContentUri.Host.EndsWith(".invalid", StringComparison.OrdinalIgnoreCase))
+                    throw new ResourceUnavailableException();
+                var growth = checked(spec.Length + Downloader.HydrationStateGrowthBudget(spec) + 1024);
+                var expected = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = identity.ScopeKey, Entry = identity.CacheKey, Growth = growth });
+                var expectedPath = Path.Combine(this.root, ".hydration-reservations-v2", identity.ScopeKey + "-" + identity.CacheKey + ".json");
+                if (!stagedVerified || stagedBytes is null || stagedPath is null || !stagedBytes.AsSpan().SequenceEqual(expected) ||
+                    !string.Equals(stagedPath, expectedPath, StringComparison.OrdinalIgnoreCase)) throw new ResourceUnavailableException();
+                VerifyStagedRecord(); return true;
+            }, token));
         private void VerifyStagedRecord()
         {
             if (stagedRecord is null || stagedBytes is null || stagedPath is null ||

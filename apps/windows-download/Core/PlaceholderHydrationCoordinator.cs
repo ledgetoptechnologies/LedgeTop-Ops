@@ -423,14 +423,34 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     // and cannot authorize a later reservation or mutation.
     internal async Task<long> ExperimentalObserveAuthorizedGrowthAsync(PlaceholderIdentity identity, CancellationToken token = default)
     {
+        ExperimentalValidateStagingIdentity(identity);
+        var resolved = await AuthorizeWithRetry(identity, token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        return checked(resolved.Spec.Length + Downloader.HydrationStateGrowthBudget(resolved.Spec) + 1024);
+    }
+    private void ExperimentalValidateStagingIdentity(PlaceholderIdentity identity)
+    {
         identity.Encode();
         if (principal is null || identity.PrincipalId != principal || identity.Channel != channel || identity.SourceAlias != source.Alias ||
             identity.Origin != source.Origin.GetLeftPart(UriPartial.Authority) || identity.Length > maximumFileBytes)
             throw new TransferException("Hydration identity is unavailable.");
         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+    }
+    // Synchronous staging follows the fresh authority result directly. The
+    // result is not exported as a token and remains synthetic-only.
+    internal async Task<bool> ExperimentalAuthorizeAndStageAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt receipt, CancellationToken token = default)
+    {
+        ExperimentalValidateStagingIdentity(identity); ArgumentNullException.ThrowIfNull(receipt);
         var resolved = await AuthorizeWithRetry(identity, token).ConfigureAwait(false);
         token.ThrowIfCancellationRequested();
-        return checked(resolved.Spec.Length + Downloader.HydrationStateGrowthBudget(resolved.Spec) + 1024);
+        return receipt.StageSyntheticReservationForTest(root, identity, resolved.Spec, this, token);
+    }
+    internal async Task ExperimentalReauthorizeStagedAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt receipt, CancellationToken token = default)
+    {
+        ExperimentalValidateStagingIdentity(identity); ArgumentNullException.ThrowIfNull(receipt);
+        var resolved = await AuthorizeWithRetry(identity, token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        receipt.VerifySyntheticReservationForTest(root, identity, resolved.Spec, token);
     }
 #endif
     internal static async Task TransferVerifiedRange(Stream input, long offset, long length, IPlaceholderTransferSink sink, CancellationToken token) {
