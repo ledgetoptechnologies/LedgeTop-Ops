@@ -4,6 +4,7 @@ using System.Text.Json;
 using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
+if (args.Length == 1 && args[0] == "--hydration-activity-tests") return await HydrationActivityTests.RunAsync();
 #if LEDGETOP_NATIVE_DIAGNOSTICS
 if (args.Length == 1 && args[0] == "--synthetic-memory-cache-stage-tests") return await SyntheticMemoryNative.CacheStageTests();
 if (args.Length >= 1 && args[0] == "--synthetic-memory-inspect-tests") return args.Length == 1 ? SyntheticMemoryInspection.Tests() : 2;

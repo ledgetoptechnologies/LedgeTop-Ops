@@ -75,16 +75,15 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                     return;
                 }
 #endif
-                Notice("Downloading " + identity.FileName);
                 try {
-                    await CloudFilesNativeTransfer.HydrateForCallbackAsync(coordinator, identity, context, token,
-                        new TransferNative(value => LastNativeTransferDiagnostic = value), TimeSpan.FromSeconds(20), summary => Notice(summary.ActivityText));
+                    await HydrationActivity.TrackFetchAsync(identity.FileName, () =>
+                        CloudFilesNativeTransfer.HydrateForCallbackAsync(coordinator, identity, context, token,
+                            new TransferNative(value => LastNativeTransferDiagnostic = value), TimeSpan.FromSeconds(20), summary => Notice(summary.ActivityText)), Notice);
                 } catch (TransferException error) when (error.HydrationFailure is { } diagnostic) {
                     Notice(diagnostic.ActivityText); // Bounded enums/statuses only, before the callback's generic WorkFailed notice.
                     try { HydrationFailureObserved?.Invoke(diagnostic); } catch { }
                     throw;
                 }
-                Notice("Available locally: " + identity.FileName);
             }), notice => Notice("Provider: " + notice), normalizeNativeRanges: true);
         availabilityWorkers = new(files.Keys, InspectAvailability, async (relative, intent, token) => {
             if (intent == AvailabilityIntent.Keep) {
