@@ -90,6 +90,25 @@ internal static class SyntheticMemoryNative {
         if (!rejected) throw new IOException("Synthetic marker name escaped the fixture.");
         rejected = false; try { DiagnosticMemoryMarkerIo.Read("shared-marker", "C:\\fixture", "sample-0.bin", _ => "foreign"); } catch (IOException) { rejected = true; }
         if (!rejected) throw new IOException("Foreign synthetic marker was accepted.");
+        rejected = false; try { DiagnosticMemoryMarkerIo.Read("preopened-distinct", "C:\\fixture", "sample-0.bin"); } catch (IOException) { rejected = true; }
+        if (!rejected || DiagnosticMemoryMarkerIo.Mode("preopened-distinct") != "preopened-distinct") throw new IOException("Unbound synthetic handles accepted.");
+        var fixture = Path.Combine(Path.GetTempPath(), "LedgeTop-marker-test-" + Guid.NewGuid().ToString("N"));
+        var directory = Path.Combine(fixture, "synthetic-memory-markers");
+        var one = Path.Combine(directory, "sample-0.bin.marker"); var two = Path.Combine(directory, "sample-1.bin.marker");
+        Directory.CreateDirectory(directory);
+        try {
+            File.WriteAllText(one, DiagnosticMemoryMarkerIo.Marker); File.WriteAllText(two, DiagnosticMemoryMarkerIo.Marker);
+            using (var bound = new DiagnosticMemoryMarkerIo.Preopened(fixture, new[] { "sample-0.bin", "sample-1.bin" })) {
+                DiagnosticMemoryMarkerIo.Read("preopened-distinct", fixture, "sample-0.bin");
+                DiagnosticMemoryMarkerIo.Read("preopened-distinct", fixture, "sample-1.bin");
+                rejected = false; try { DiagnosticMemoryMarkerIo.Read("preopened-distinct", fixture, "sample-2.bin"); } catch (IOException) { rejected = true; }
+                if (!rejected) throw new IOException("Unbound synthetic filename accepted.");
+                rejected = false; try { DiagnosticMemoryMarkerIo.Read("preopened-distinct", Path.GetTempPath(), "sample-0.bin"); } catch (IOException) { rejected = true; }
+                if (!rejected) throw new IOException("Foreign synthetic fixture accepted.");
+            }
+            rejected = false; try { DiagnosticMemoryMarkerIo.Read("preopened-distinct", fixture, "sample-0.bin"); } catch (IOException) { rejected = true; }
+            if (!rejected) throw new IOException("Disposed synthetic binding remained active.");
+        } finally { File.Delete(one); File.Delete(two); Directory.Delete(directory); Directory.Delete(fixture); }
         var capture = NativeStallTrace.Enable();
         try {
             DiagnosticMemoryMarkerIo.Read("shared-marker", "C:\\fixture", "sample-0.bin", Fake);
@@ -129,6 +148,7 @@ internal static class SyntheticMemoryNative {
             }
         }
         NativeRootRegistration? registration = null; NativePlaceholderProvider? provider = null;
+        DiagnosticMemoryMarkerIo.Preopened? preopened = null;
         var readers = new List<Process>(); var readyHandles = new List<EventWaitHandle>(); var success = false;
         var registrationAttempted = false; var readersJoined = true; var disposeCompleted = false;
         var disposeTimedOut = false; var unregisterVerified = false;
@@ -136,6 +156,11 @@ internal static class SyntheticMemoryNative {
         using var start = new EventWaitHandle(false, EventResetMode.ManualReset, startName);
         var trace = NativeStallTrace.Enable();
         try {
+            if (markerMode == "preopened-distinct") {
+                Phase("marker-preopen-start", id);
+                preopened = new DiagnosticMemoryMarkerIo.Preopened(cache, manifest.Keys);
+                Phase("marker-preopen-complete", id);
+            }
             Phase("registration-start", id);
             registrationAttempted = true;
             registration = NativeRootRegistration.Register(root, Encoding.UTF8.GetBytes("LedgeTop.Files.MemoryNativeTest.v1:" + id));
@@ -183,6 +208,10 @@ internal static class SyntheticMemoryNative {
             catch { }
             if (registration is not null && readersJoined && disposeCompleted)
                 try { registration.Unregister(); unregisterVerified = true; } catch { }
+            // A timed-out provider may still be executing callbacks. Retain its
+            // handles instead of closing them while that work may use them.
+            if (disposeCompleted) { preopened?.Dispose(); preopened = null; }
+            Phase(preopened is null ? "preopened-handles-released" : "preopened-handles-retained", id);
             var cleanupVerified = CleanupVerified(registrationAttempted, registration is not null, readersJoined, disposeCompleted, unregisterVerified);
             if (!cleanupVerified) success = false;
             foreach (var item in NativeStallTrace.Snapshot(trace).Where(e => e.Kind is NativeStallTrace.Stage.SyntheticMarkerReadEnter or NativeStallTrace.Stage.SyntheticMarkerReadExit))
