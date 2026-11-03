@@ -183,9 +183,23 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                     && !CryptographicOperations.FixedTimeEquals(await SHA256.HashDataAsync(input, cancellationToken), Convert.FromHexString(identity.Sha256))))
                     throw new TransferException("Hydration cache integrity check failed.");
                 stage = HydrationStage.AuthorizationAfter; timing?.Enter(HydrationTimingStage.AuthorizationAfter);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.AuthorizationAfterEnter);
+                try {
+#endif
                 using (AuthorizationTimingScope.Begin(timing, identity, false)) await Authorize(identity, cancellationToken); // Download/hash may be lengthy; never treat cached bytes as authority.
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                } finally { NativeStallTrace.Record(NativeStallTrace.Stage.AuthorizationAfterExit); }
+#endif
                 stage = HydrationStage.Transfer; timing?.Enter(HydrationTimingStage.NativeTransfer);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.TransferEnter);
+                try {
+#endif
                 await TransferVerifiedRange(input, offset, length, sink, cancellationToken);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                } finally { NativeStallTrace.Record(NativeStallTrace.Stage.TransferExit); }
+#endif
                 cancellationToken.ThrowIfCancellationRequested();
                 // Mark terminal before calling external code; its exception cannot cause a second terminal call.
                 completed = true; await sink.CompleteAsync(cancellationToken);

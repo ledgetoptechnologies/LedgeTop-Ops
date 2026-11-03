@@ -34,6 +34,23 @@ internal static class CloudFilesNativeTransferTests {
         await Run(partial,p,context:Context with{RequiredOffset=147456,RequiredLength=Bytes.Length-147456});
         Assert(p.Successes.Single().Data.SequenceEqual(Bytes.Skip(147456)));
     }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+    internal static async Task TraceBlockedExecuteAsync(){
+        using var f=new Fixture();using var entered=new ManualResetEventSlim();using var release=new ManualResetEventSlim();
+        var b=new Boundary{DuringSuccess=_=>{entered.Set();if(!release.Wait(TimeSpan.FromSeconds(10)))throw new TimeoutException();}};
+        var capture=NativeStallTrace.Enable();Task? running=null;
+        try{
+            running=Task.Run(()=>Run(f,b));
+            if(!entered.Wait(TimeSpan.FromSeconds(10)))throw new Exception("Fake native execute did not start.");
+            var stages=NativeStallTrace.Snapshot(capture).Select(e=>e.Kind).ToArray();
+            if(!stages.Contains(NativeStallTrace.Stage.ExecuteEnter)||stages.Contains(NativeStallTrace.Stage.ExecuteExit))
+                throw new Exception("A held fake native call must expose entry without exit.");
+            release.Set();await running.WaitAsync(TimeSpan.FromSeconds(15));
+            stages=NativeStallTrace.Snapshot(capture).Select(e=>e.Kind).ToArray();
+            if(!stages.Contains(NativeStallTrace.Stage.ExecuteExit))throw new Exception("Released fake native call lacks exit.");
+        }finally{release.Set();if(running is not null)try{await running.WaitAsync(TimeSpan.FromSeconds(15));}catch{}NativeStallTrace.Disable(capture);}
+    }
+#endif
     private static async Task Bounds(){
         using var f=new Fixture();
         foreach(var c in new[]{Context with{FileSize=Bytes.Length+1},Context with{RequiredOffset=-1},Context with{RequiredLength=0},

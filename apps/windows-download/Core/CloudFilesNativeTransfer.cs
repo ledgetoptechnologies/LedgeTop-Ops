@@ -184,11 +184,22 @@ internal static class CloudFilesNativeTransfer {
                 Marshal.StructureToPtr(info, memory, false); Marshal.StructureToPtr(parameters, memory + 48, false);
                 // The native contract is synchronous. Cancellation never releases this pin before Execute returns.
                 int result;
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                // Sample data calls so large files do not immediately exhaust the bounded trace.
+                // Failure settlements, the first and last calls, and roughly every 4 MiB are included.
+                bool traceCall = status != 0 || offset == context.RequiredOffset
+                    || offset + length == context.RequiredOffset + context.RequiredLength
+                    || (offset - context.RequiredOffset) / 65536 % 64 == 0;
+                if (traceCall) NativeStallTrace.Record(NativeStallTrace.Stage.ExecuteEnter);
+#endif
                 try { result = native.Execute(memory, memory + 48); }
                 catch (Exception error) {
                     primaryFailure ??= HydrationFailureDiagnostic.FromException(HydrationStage.NativeTransfer, error);
                     throw new TransferException("Native transfer failed.", primaryFailure);
                 }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                finally { if (traceCall) NativeStallTrace.Record(NativeStallTrace.Stage.ExecuteExit); }
+#endif
                 if (result != 0) {
                     if (status == 0) primaryFailure ??= new(HydrationStage.NativeTransfer, HydrationFailureCategory.Native, nativeHResult: result);
                     else if (primaryFailure is { } primary) primaryFailure = primary.WithSettlement(result);

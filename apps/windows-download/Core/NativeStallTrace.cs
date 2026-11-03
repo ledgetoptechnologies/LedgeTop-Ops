@@ -12,7 +12,9 @@ internal static class NativeStallTrace
         // ProgressExit means the native call returned OR threw; it is not a success receipt.
         ProgressEnter, ProgressExit, AdmissionEnter, AdmissionAcquired,
         AuthorizationEnter, AuthorizationExit, MetadataAttemptEnter,
-        MetadataAttemptExit, MetadataBusy, RetryDelayEnter, RetryDelayExit
+        MetadataAttemptExit, MetadataBusy, RetryDelayEnter, RetryDelayExit,
+        AuthorizationAfterEnter, AuthorizationAfterExit, TransferEnter, TransferExit,
+        ExecuteEnter, ExecuteExit, RejectEnter, RejectExit
     }
     internal readonly record struct Event(long Sequence, long Timestamp, int ThreadId, Stage Kind);
     internal sealed class Capture

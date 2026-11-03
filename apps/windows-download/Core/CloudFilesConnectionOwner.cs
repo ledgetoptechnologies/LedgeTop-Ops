@@ -334,9 +334,17 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
                 && settlements.Count < capacity && settlements.Add(Key(snapshot))) {
                 // Callback admission uses the same gate and sees this terminal claim, including
                 // reentrant fake callbacks. No tuple can be replaced between this check and call.
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.RejectEnter);
+#endif
                 try { native.RejectFetch(c with { RequiredLength = length }, CloudFilesNativeTransfer.Unavailable); }
                 catch { failed = true; }
-                finally { settlements.Remove(Key(snapshot)); }
+                finally {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.RejectExit);
+#endif
+                    settlements.Remove(Key(snapshot));
+                }
             }
             // Retire atomically with terminal settlement, before admission can reacquire this
             // gate. Managed drain still owns the worker/observer, but no longer owns its tuple.

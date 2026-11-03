@@ -44,7 +44,17 @@ internal static class NativeStallTraceTests
         await AssertStageCoverageAsync(CloudFilesNativeTransferTests.Groups.First(g => g.Name.StartsWith("native x64 ABI", StringComparison.Ordinal)).Run,
             NativeStallTrace.Stage.ProgressEnter, NativeStallTrace.Stage.ProgressExit,
             NativeStallTrace.Stage.AdmissionEnter, NativeStallTrace.Stage.AdmissionAcquired,
-            NativeStallTrace.Stage.AuthorizationEnter, NativeStallTrace.Stage.AuthorizationExit);
+            NativeStallTrace.Stage.AuthorizationEnter, NativeStallTrace.Stage.AuthorizationExit,
+            NativeStallTrace.Stage.AuthorizationAfterEnter, NativeStallTrace.Stage.AuthorizationAfterExit,
+            NativeStallTrace.Stage.TransferEnter, NativeStallTrace.Stage.TransferExit,
+            NativeStallTrace.Stage.ExecuteEnter, NativeStallTrace.Stage.ExecuteExit);
+        await CloudFilesNativeTransferTests.TraceBlockedExecuteAsync();
+        await AssertStageCoverageAsync(CloudFilesNativeTransferTests.Groups.First(g => g.Name.StartsWith("native HRESULT and thrown failure", StringComparison.Ordinal)).Run,
+            NativeStallTrace.Stage.ExecuteEnter, NativeStallTrace.Stage.ExecuteExit);
+        await AssertStageCoverageAsync(CloudFilesNativeTransferTests.Groups.First(g => g.Name.StartsWith("native post-download authorization", StringComparison.Ordinal)).Run,
+            NativeStallTrace.Stage.AuthorizationAfterEnter, NativeStallTrace.Stage.AuthorizationAfterExit);
+        await AssertStageCoverageAsync(CloudFilesConnectionTests.Groups.First(g => g.Name.StartsWith("connection rejects malformed", StringComparison.Ordinal)).Run,
+            NativeStallTrace.Stage.RejectEnter, NativeStallTrace.Stage.RejectExit);
         await AssertStageCoverageAsync(CloudFilesNativeTransferTests.Groups.First(g => g.Name.StartsWith("native progress heartbeat", StringComparison.Ordinal)).Run,
             NativeStallTrace.Stage.ProgressEnter, NativeStallTrace.Stage.ProgressExit);
         await AssertStageCoverageAsync(QueuedDownloadSourceTests.Groups.First(g => g.Name.StartsWith("Company resolve bounded busy retry rechecks", StringComparison.Ordinal)).Run,
