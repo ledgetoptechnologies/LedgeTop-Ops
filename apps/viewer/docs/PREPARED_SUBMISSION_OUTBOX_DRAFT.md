@@ -7,7 +7,8 @@ The Processing v3 route and its activation, source authorization, result, and
 accepted-copy retrieval contracts are still inactive; do not enable or wire a
 live deployment from this draft alone.
 
-The outbox stores the exact RFC 8785/JCS bytes before the first network request.
+The outbox stores the exact RFC 8785/JCS bytes, coordinator origin,
+authenticated principal and environment before the first network request.
 Its digest is SHA-256 over the v3 domain separator followed by those bytes.
 The unique task, attempt, and local submit-job identities are checked under the
 current, unexpired Viewer submit lease. The outbox prevents envelope mutation
@@ -15,6 +16,10 @@ and deletion. A POST is followed by an authenticated GET by the stable
 submission ID; the response must match the saved task, attempt, activation,
 environment, and envelope digest before the row can move to `accepted`. A lost
 POST response is treated as uncertain and recovered only by that exact GET.
+The lease and task/attempt state are rechecked transactionally after the GET
+before acceptance is recorded. Requests have a bounded timeout even when the
+caller does not supply an abort signal. A target, principal or environment
+change cannot silently replay the saved ID to a different authority.
 
 The current reference-v1 manifest cannot represent the complete Viewer source
 inventory: it has basename-only names, so it cannot preserve nested paths or

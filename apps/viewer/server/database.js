@@ -2072,6 +2072,9 @@ const MIGRATIONS = [
       viewer_task_id TEXT NOT NULL,
       viewer_attempt_id TEXT NOT NULL,
       local_job_id TEXT NOT NULL,
+      coordinator_origin TEXT NOT NULL,
+      authenticated_principal TEXT NOT NULL,
+      environment TEXT NOT NULL CHECK(environment IN ('staging','production')),
       protocol TEXT NOT NULL CHECK(protocol='ltds-viewer-prepared-envelope-jcs-v3'),
       envelope_canonical TEXT NOT NULL CHECK(json_valid(envelope_canonical)),
       envelope_sha256 TEXT NOT NULL CHECK(length(envelope_sha256)=64 AND envelope_sha256 NOT GLOB '*[^0-9a-f]*'),
@@ -2086,7 +2089,7 @@ const MIGRATIONS = [
     CREATE INDEX viewer_prepared_submission_outbox_state_idx
       ON viewer_prepared_submission_outbox(state,updated_at);
     CREATE TRIGGER viewer_prepared_submission_outbox_identity_immutable
-      BEFORE UPDATE OF submission_id,viewer_task_id,viewer_attempt_id,local_job_id,protocol,envelope_canonical,envelope_sha256,created_at
+      BEFORE UPDATE OF submission_id,viewer_task_id,viewer_attempt_id,local_job_id,coordinator_origin,authenticated_principal,environment,protocol,envelope_canonical,envelope_sha256,created_at
       ON viewer_prepared_submission_outbox
       BEGIN SELECT RAISE(ABORT,'prepared submission envelope is immutable'); END;
     CREATE TRIGGER viewer_prepared_submission_outbox_no_delete
@@ -2096,6 +2099,10 @@ const MIGRATIONS = [
       BEFORE UPDATE OF state ON viewer_prepared_submission_outbox
       WHEN NOT (OLD.state='prepared' AND NEW.state='accepted')
       BEGIN SELECT RAISE(ABORT,'prepared submission outbox state cannot be reset'); END;
+    CREATE TRIGGER viewer_prepared_submission_outbox_binding_immutable
+      BEFORE UPDATE OF remote_binding_json ON viewer_prepared_submission_outbox
+      WHEN OLD.state='accepted' AND NEW.remote_binding_json IS NOT OLD.remote_binding_json
+      BEGIN SELECT RAISE(ABORT,'accepted prepared submission binding is immutable'); END;
   `},
 ];
 

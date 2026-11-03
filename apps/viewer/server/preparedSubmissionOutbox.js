@@ -7,7 +7,7 @@ const DOMAIN = Buffer.from(`${PROTOCOL}\0`, 'ascii');
 const PATH = '/ltds/prepared/v3/submissions';
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const fail = code => { const error = new Error(code); error.code = code; throw error; };
 
@@ -79,6 +79,9 @@ function readIntent(row) {
     viewerTaskId: row.viewer_task_id,
     viewerAttemptId: row.viewer_attempt_id,
     localJobId: row.local_job_id,
+    coordinatorOrigin: row.coordinator_origin,
+    authenticatedPrincipal: row.authenticated_principal,
+    environment: row.environment,
     protocol: row.protocol,
     envelopeCanonical: row.envelope_canonical,
     envelopeSha256: row.envelope_sha256,
@@ -89,14 +92,22 @@ function readIntent(row) {
   };
 }
 
+function liveLease(row) {
+  const expiry = Date.parse(row?.lease_expires_at || '');
+  return Boolean(row && Number.isFinite(expiry) && expiry > Date.now());
+}
+
 class PreparedSubmissionOutbox {
   constructor(database) {
     if (!database || typeof database.prepare !== 'function' || typeof database.exec !== 'function') fail('prepared_outbox_database_required');
     this.database = database;
   }
 
-  persistIntent({ localJobId, owner, envelope }) {
+  persistIntent({ localJobId, owner, origin, principalId, environment, envelope }) {
     if (typeof localJobId !== 'string' || !localJobId || typeof owner !== 'string' || !owner) fail('prepared_outbox_lease_required');
+    const coordinatorOrigin = validateOrigin(origin);
+    if (typeof principalId !== 'string' || !ID.test(principalId)) fail('prepared_submission_principal_invalid');
+    if (!['staging', 'production'].includes(environment)) fail('prepared_submission_environment_invalid');
     const checked = canonicalEnvelope(envelope);
     const attemptId = envelope.viewerAttemptId;
     this.database.exec('BEGIN IMMEDIATE');
@@ -105,22 +116,23 @@ class PreparedSubmissionOutbox {
       const leased = this.database.prepare(`SELECT j.id,j.attempt_id,a.task_id,j.lease_expires_at
         FROM processing_jobs j JOIN processing_attempts a ON a.id=j.attempt_id
         WHERE j.id=? AND j.attempt_id=? AND j.job_type='submit' AND j.status='leased'
-          AND j.lease_owner=? AND j.lease_expires_at>?`).get(localJobId, attemptId, owner, now);
-      if (!leased || leased.task_id !== envelope.viewerTaskId || Date.parse(leased.lease_expires_at) <= Date.now()) fail('prepared_outbox_lease_lost');
+          AND j.lease_owner=? AND j.lease_expires_at>? AND a.status NOT IN ('cancelled','failed','published')`).get(localJobId, attemptId, owner, now);
+      if (!liveLease(leased) || leased.task_id !== envelope.viewerTaskId) fail('prepared_outbox_lease_lost');
       const existing = this.database.prepare(`SELECT * FROM viewer_prepared_submission_outbox
         WHERE submission_id=? OR viewer_attempt_id=? OR local_job_id=?`).get(envelope.submission.submissionId, attemptId, localJobId);
       if (existing) {
         const prior = readIntent(existing);
         if (prior.submissionId !== envelope.submission.submissionId || prior.viewerTaskId !== envelope.viewerTaskId
             || prior.viewerAttemptId !== attemptId || prior.localJobId !== localJobId
+            || prior.coordinatorOrigin !== coordinatorOrigin || prior.authenticatedPrincipal !== principalId || prior.environment !== environment
             || prior.envelopeCanonical !== checked.text || prior.envelopeSha256 !== checked.sha256) fail('prepared_outbox_conflict');
         this.database.exec('COMMIT');
         return prior;
       }
       this.database.prepare(`INSERT INTO viewer_prepared_submission_outbox
-        (submission_id,viewer_task_id,viewer_attempt_id,local_job_id,protocol,envelope_canonical,envelope_sha256,state,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,'prepared',?,?)`).run(
-        envelope.submission.submissionId, envelope.viewerTaskId, attemptId, localJobId, PROTOCOL, checked.text, checked.sha256, now, now);
+        (submission_id,viewer_task_id,viewer_attempt_id,local_job_id,coordinator_origin,authenticated_principal,environment,protocol,envelope_canonical,envelope_sha256,state,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,'prepared',?,?)`).run(
+        envelope.submission.submissionId, envelope.viewerTaskId, attemptId, localJobId, coordinatorOrigin, principalId, environment, PROTOCOL, checked.text, checked.sha256, now, now);
       const created = this.database.prepare('SELECT * FROM viewer_prepared_submission_outbox WHERE submission_id=?').get(envelope.submission.submissionId);
       this.database.exec('COMMIT');
       return readIntent(created);
@@ -134,7 +146,19 @@ class PreparedSubmissionOutbox {
     return readIntent(this.database.prepare('SELECT * FROM viewer_prepared_submission_outbox WHERE viewer_attempt_id=?').get(attemptId));
   }
 
-  acceptRemoteBinding(attemptId, response, { environment }) {
+  assertCurrentLease({ attemptId, localJobId, owner }) {
+    if (typeof owner !== 'string' || !owner || typeof localJobId !== 'string' || !localJobId) fail('prepared_outbox_lease_required');
+    const intent = this.getIntent(attemptId);
+    if (!intent || intent.localJobId !== localJobId) fail('prepared_outbox_intent_missing');
+    const leased = this.database.prepare(`SELECT j.id,j.attempt_id,a.task_id,j.lease_expires_at
+      FROM processing_jobs j JOIN processing_attempts a ON a.id=j.attempt_id
+      WHERE j.id=? AND j.attempt_id=? AND j.job_type='submit' AND j.status='leased'
+        AND j.lease_owner=? AND j.lease_expires_at>? AND a.status NOT IN ('cancelled','failed','published')`).get(localJobId, attemptId, owner, new Date().toISOString());
+    if (!liveLease(leased) || leased.task_id !== intent.viewerTaskId) fail('prepared_outbox_lease_lost');
+    return intent;
+  }
+
+  acceptRemoteBinding(attemptId, response, { environment, localJobId, owner }) {
     const row = this.database.prepare('SELECT * FROM viewer_prepared_submission_outbox WHERE viewer_attempt_id=?').get(attemptId);
     const intent = readIntent(row);
     if (!intent) fail('prepared_outbox_intent_missing');
@@ -161,6 +185,11 @@ class PreparedSubmissionOutbox {
     try {
       const current = this.database.prepare('SELECT state,remote_binding_json FROM viewer_prepared_submission_outbox WHERE submission_id=?').get(intent.submissionId);
       if (!current) fail('prepared_outbox_intent_missing');
+      const leased = this.database.prepare(`SELECT j.id,j.attempt_id,a.task_id,j.lease_expires_at
+        FROM processing_jobs j JOIN processing_attempts a ON a.id=j.attempt_id
+        WHERE j.id=? AND j.attempt_id=? AND j.job_type='submit' AND j.status='leased'
+          AND j.lease_owner=? AND j.lease_expires_at>? AND a.status NOT IN ('cancelled','failed','published')`).get(localJobId, attemptId, owner, new Date().toISOString());
+      if (!liveLease(leased) || leased.task_id !== intent.viewerTaskId) fail('prepared_outbox_lease_lost');
       if (current.state === 'accepted') {
         if (current.remote_binding_json !== encoded) fail('prepared_submission_replay_conflict');
       } else {
@@ -205,20 +234,26 @@ async function boundedJson(response) {
 }
 
 class PreparedSubmissionClient {
-  constructor({ origin, bearerToken, environment, outbox, fetchImpl = globalThis.fetch }) {
+  constructor({ origin, bearerToken, principalId, environment, outbox, timeoutMs = 15000, fetchImpl = globalThis.fetch }) {
     this.origin = validateOrigin(origin);
     if (typeof bearerToken !== 'string' || bearerToken.length < 16 || bearerToken.length > 4096
         || /[^\x21-\x7e]/.test(bearerToken)) fail('prepared_submission_credential_invalid');
     if (!['staging', 'production'].includes(environment)) fail('prepared_submission_environment_invalid');
+    if (typeof principalId !== 'string' || !ID.test(principalId)) fail('prepared_submission_principal_invalid');
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120000) fail('prepared_submission_timeout_invalid');
     if (!(outbox instanceof PreparedSubmissionOutbox) || typeof fetchImpl !== 'function') fail('prepared_submission_client_invalid');
     this.bearerToken = bearerToken;
     this.environment = environment;
+    this.principalId = principalId;
+    this.timeoutMs = timeoutMs;
     this.outbox = outbox;
     this.fetch = fetchImpl;
   }
 
   async request(path, { method, body, signal }) {
     let response;
+    const deadline = AbortSignal.timeout(this.timeoutMs);
+    const requestSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
     try {
       response = await this.fetch(`${this.origin}${path}`, {
         method,
@@ -227,25 +262,26 @@ class PreparedSubmissionClient {
         redirect: 'error',
         cache: 'no-store',
         credentials: 'omit',
-        signal,
+        signal: requestSignal,
       });
     } catch { fail('prepared_submission_transport_uncertain'); }
     if (response.redirected || response.url && new URL(response.url).origin !== this.origin) fail('prepared_submission_redirect_rejected');
     return response;
   }
 
-  async lookup(intent, signal) {
+  async lookup(intent, signal, owner) {
     const response = await this.request(`${PATH}/${encodeURIComponent(intent.submissionId)}`, { method: 'GET', signal });
     if (response.status === 404) { await response.body?.cancel().catch(() => {}); return null; }
     if (response.status !== 200) fail('prepared_submission_lookup_unavailable');
     const body = await boundedJson(response);
-    return this.outbox.acceptRemoteBinding(intent.viewerAttemptId, body, { environment: this.environment });
+    return this.outbox.acceptRemoteBinding(intent.viewerAttemptId, body, { environment: this.environment, localJobId: intent.localJobId, owner });
   }
 
-  async dispatch(intent, { signal } = {}) {
+  async dispatch(intent, { signal, owner } = {}) {
     if (!intent || typeof intent.viewerAttemptId !== 'string') fail('prepared_outbox_intent_missing');
-    const saved = this.outbox.getIntent(intent.viewerAttemptId);
+    const saved = this.outbox.assertCurrentLease({ attemptId: intent.viewerAttemptId, localJobId: intent.localJobId, owner });
     if (!saved || saved.envelopeCanonical !== intent.envelopeCanonical || saved.envelopeSha256 !== intent.envelopeSha256) fail('prepared_outbox_intent_mismatch');
+    if (saved.coordinatorOrigin !== this.origin || saved.authenticatedPrincipal !== this.principalId || saved.environment !== this.environment) fail('prepared_outbox_authority_changed');
     if (saved.state === 'accepted') return saved;
     if (saved.state !== 'prepared') fail('prepared_outbox_held');
     let post;
@@ -261,7 +297,7 @@ class PreparedSubmissionClient {
     await post.body?.cancel().catch(() => {});
     // The POST may commit even if its response is lost. Only the authenticated,
     // exact submission lookup can move the durable outbox to accepted.
-    const accepted = await this.lookup(saved, signal);
+    const accepted = await this.lookup(saved, signal, owner);
     if (!accepted) fail(post.status >= 500 ? 'prepared_submission_transport_uncertain' : 'prepared_submission_not_found');
     return accepted;
   }

@@ -72,12 +72,14 @@ test('JCS canonical bytes use sorted UTF-16 keys and ECMAScript number rendering
 
 test('outbox persists the exact envelope under the current submit lease and rejects changed replay', t => {
   const f = fixture(t), outbox = new PreparedSubmissionOutbox(f.database), body = envelope(f.task.id, f.attempt.id);
-  const first = outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner, envelope: body });
-  const replay = outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner, envelope: body });
+  const context = { localJobId: f.job.id, owner: f.job.lease_owner, origin: 'https://processing.example', principalId: 'viewer-staging', environment: 'staging' };
+  const first = outbox.persistIntent({ ...context, envelope: body });
+  const replay = outbox.persistIntent({ ...context, envelope: body });
   assert.deepEqual(replay, first);
   assert.equal(outbox.getIntent(f.attempt.id).envelopeCanonical, first.envelopeCanonical);
-  assert.throws(() => outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner,
+  assert.throws(() => outbox.persistIntent({ ...context,
     envelope: envelope(f.task.id, f.attempt.id, { activationId: crypto.randomUUID() }) }), { code: 'prepared_outbox_conflict' });
+  assert.throws(() => outbox.persistIntent({ ...context, origin: 'https://other-processing.example', envelope: body }), { code: 'prepared_outbox_conflict' });
   assert.throws(() => f.database.prepare('DELETE FROM viewer_prepared_submission_outbox WHERE submission_id=?').run(first.submissionId), /prepared submission outbox is retained/);
   assert.throws(() => f.database.prepare('UPDATE viewer_prepared_submission_outbox SET envelope_canonical=? WHERE submission_id=?').run('{}', first.submissionId), /prepared submission envelope is immutable/);
   assert.throws(() => f.database.prepare("UPDATE viewer_prepared_submission_outbox SET state='held' WHERE submission_id=?").run(first.submissionId), /prepared submission outbox state cannot be reset/);
@@ -85,17 +87,18 @@ test('outbox persists the exact envelope under the current submit lease and reje
 
 test('outbox requires an unexpired matching submit lease and exact local task and attempt identity', t => {
   const f = fixture(t), outbox = new PreparedSubmissionOutbox(f.database);
-  assert.throws(() => outbox.persistIntent({ localJobId: f.job.id, owner: 'wrong-owner', envelope: envelope(f.task.id, f.attempt.id) }), { code: 'prepared_outbox_lease_lost' });
-  assert.throws(() => outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner, envelope: envelope(crypto.randomUUID(), f.attempt.id) }), { code: 'prepared_outbox_lease_lost' });
+  const context = { localJobId: f.job.id, origin: 'https://processing.example', principalId: 'viewer-staging', environment: 'staging' };
+  assert.throws(() => outbox.persistIntent({ ...context, owner: 'wrong-owner', envelope: envelope(f.task.id, f.attempt.id) }), { code: 'prepared_outbox_lease_lost' });
+  assert.throws(() => outbox.persistIntent({ ...context, owner: f.job.lease_owner, envelope: envelope(crypto.randomUUID(), f.attempt.id) }), { code: 'prepared_outbox_lease_lost' });
   f.database.prepare('UPDATE processing_jobs SET lease_expires_at=? WHERE id=?').run(new Date(Date.now() - 1000).toISOString(), f.job.id);
-  assert.throws(() => outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner, envelope: envelope(f.task.id, f.attempt.id) }), { code: 'prepared_outbox_lease_lost' });
+  assert.throws(() => outbox.persistIntent({ ...context, owner: f.job.lease_owner, envelope: envelope(f.task.id, f.attempt.id) }), { code: 'prepared_outbox_lease_lost' });
 });
 
 test('uncertain POST is recovered only by authenticated exact GET and preserves stored bytes', async t => {
   const f = fixture(t), outbox = new PreparedSubmissionOutbox(f.database);
-  const intent = outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner, envelope: envelope(f.task.id, f.attempt.id) });
+  const intent = outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner, origin: 'https://processing.example', principalId: 'viewer-staging', environment: 'staging', envelope: envelope(f.task.id, f.attempt.id) });
   const calls = [];
-  const client = new PreparedSubmissionClient({ origin: 'https://processing.example', bearerToken: 'synthetic-test-bearer-token-0001', environment: 'staging', outbox,
+  const client = new PreparedSubmissionClient({ origin: 'https://processing.example', bearerToken: 'synthetic-test-bearer-token-0001', principalId: 'viewer-staging', environment: 'staging', outbox,
     fetchImpl: async (url, options) => {
       calls.push({ url, options });
       if (options.method === 'POST') throw new Error('connection closed after remote commit');
@@ -104,7 +107,7 @@ test('uncertain POST is recovered only by authenticated exact GET and preserves 
       return responseJson(remoteBinding(intent));
     },
   });
-  const accepted = await client.dispatch(intent);
+  const accepted = await client.dispatch(intent, { owner: f.job.lease_owner });
   assert.equal(accepted.state, 'accepted');
   assert.equal(accepted.remoteBinding.jobId, 'processing-job-1');
   assert.equal(calls.length, 2);
@@ -114,44 +117,82 @@ test('uncertain POST is recovered only by authenticated exact GET and preserves 
   assert.equal(outbox.getIntent(f.attempt.id).state, 'accepted');
 });
 
+test('authority changes and lease loss after the network read leave the outbox pending', async t => {
+  const f = fixture(t), outbox = new PreparedSubmissionOutbox(f.database);
+  const intent = outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner, origin: 'https://processing.example', principalId: 'viewer-staging', environment: 'staging', envelope: envelope(f.task.id, f.attempt.id) });
+  const reconfigured = new PreparedSubmissionClient({ origin: 'https://other-processing.example', bearerToken: 'synthetic-test-bearer-token-0001', principalId: 'viewer-staging', environment: 'staging', outbox,
+    fetchImpl: async () => { assert.fail('authority mismatch must be rejected before network I/O'); },
+  });
+  await assert.rejects(reconfigured.dispatch(intent, { owner: f.job.lease_owner }), { code: 'prepared_outbox_authority_changed' });
+  const client = new PreparedSubmissionClient({ origin: 'https://processing.example', bearerToken: 'synthetic-test-bearer-token-0001', principalId: 'viewer-staging', environment: 'staging', outbox,
+    fetchImpl: async (_url, options) => {
+      if (options.method === 'POST') return responseJson({}, 201);
+      f.database.prepare("UPDATE processing_jobs SET status='pending',lease_owner=NULL,lease_expires_at=NULL WHERE id=?").run(f.job.id);
+      return responseJson(remoteBinding(intent));
+    },
+  });
+  await assert.rejects(client.dispatch(intent, { owner: f.job.lease_owner }), { code: 'prepared_outbox_lease_lost' });
+  assert.equal(outbox.getIntent(f.attempt.id).state, 'prepared');
+});
+
 test('successful POST still requires the authenticated GET binding before acceptance', async t => {
   const f = fixture(t), outbox = new PreparedSubmissionOutbox(f.database);
-  const intent = outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner, envelope: envelope(f.task.id, f.attempt.id) });
+  const intent = outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner, origin: 'https://processing.example', principalId: 'viewer-staging', environment: 'staging', envelope: envelope(f.task.id, f.attempt.id) });
   const calls = [];
-  const client = new PreparedSubmissionClient({ origin: 'https://processing.example', bearerToken: 'synthetic-test-bearer-token-0001', environment: 'staging', outbox,
+  const client = new PreparedSubmissionClient({ origin: 'https://processing.example', bearerToken: 'synthetic-test-bearer-token-0001', principalId: 'viewer-staging', environment: 'staging', outbox,
     fetchImpl: async (_url, options) => {
       calls.push(options.method);
       return options.method === 'POST' ? responseJson({}, 201) : responseJson(remoteBinding(intent));
     },
   });
-  const accepted = await client.dispatch(intent);
+  const accepted = await client.dispatch(intent, { owner: f.job.lease_owner });
   assert.deepEqual(calls, ['POST', 'GET']);
   assert.equal(accepted.remoteBinding.envelopeSha256, intent.envelopeSha256);
-  assert.equal((await client.dispatch(intent)).state, 'accepted');
+  assert.equal((await client.dispatch(intent, { owner: f.job.lease_owner })).state, 'accepted');
   assert.deepEqual(calls, ['POST', 'GET']);
+  assert.throws(() => f.database.prepare('UPDATE viewer_prepared_submission_outbox SET remote_binding_json=? WHERE submission_id=?').run('{}', intent.submissionId), /accepted prepared submission binding is immutable/);
 });
 
 test('mismatched remote GET cannot mark the durable outbox accepted', async t => {
   const f = fixture(t), outbox = new PreparedSubmissionOutbox(f.database);
-  const intent = outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner, envelope: envelope(f.task.id, f.attempt.id) });
-  const client = new PreparedSubmissionClient({ origin: 'https://processing.example', bearerToken: 'synthetic-test-bearer-token-0001', environment: 'staging', outbox,
+  const intent = outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner, origin: 'https://processing.example', principalId: 'viewer-staging', environment: 'staging', envelope: envelope(f.task.id, f.attempt.id) });
+  const client = new PreparedSubmissionClient({ origin: 'https://processing.example', bearerToken: 'synthetic-test-bearer-token-0001', principalId: 'viewer-staging', environment: 'staging', outbox,
     fetchImpl: async (_url, options) => options.method === 'POST' ? responseJson({}, 201) : responseJson(remoteBinding(intent, { environment: 'production' })),
   });
-  await assert.rejects(client.dispatch(intent), { code: 'prepared_submission_binding_mismatch' });
+  await assert.rejects(client.dispatch(intent, { owner: f.job.lease_owner }), { code: 'prepared_submission_binding_mismatch' });
   assert.equal(outbox.getIntent(f.attempt.id).state, 'prepared');
 });
 
 test('missing authenticated remote lookup keeps submission pending for exact retry', async t => {
   const f = fixture(t), outbox = new PreparedSubmissionOutbox(f.database);
-  const intent = outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner, envelope: envelope(f.task.id, f.attempt.id) });
-  const client = new PreparedSubmissionClient({ origin: 'https://processing.example', bearerToken: 'synthetic-test-bearer-token-0001', environment: 'staging', outbox,
+  const intent = outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner, origin: 'https://processing.example', principalId: 'viewer-staging', environment: 'staging', envelope: envelope(f.task.id, f.attempt.id) });
+  const client = new PreparedSubmissionClient({ origin: 'https://processing.example', bearerToken: 'synthetic-test-bearer-token-0001', principalId: 'viewer-staging', environment: 'staging', outbox,
     fetchImpl: async (_url, options) => options.method === 'POST' ? responseJson({}, 201) : responseJson({ error: 'not_found' }, 404),
   });
-  await assert.rejects(client.dispatch(intent), { code: 'prepared_submission_not_found' });
+  await assert.rejects(client.dispatch(intent, { owner: f.job.lease_owner }), { code: 'prepared_submission_not_found' });
   assert.equal(outbox.getIntent(f.attempt.id).state, 'prepared');
 });
 
 test('prepared client rejects non-HTTPS or non-origin configuration', () => {
-  assert.throws(() => new PreparedSubmissionClient({ origin: 'http://processing.example', bearerToken: 'synthetic-test-bearer-token-0001', environment: 'staging', outbox: {} }), { code: 'prepared_submission_origin_invalid' });
-  assert.throws(() => new PreparedSubmissionClient({ origin: 'https://processing.example/path', bearerToken: 'synthetic-test-bearer-token-0001', environment: 'staging', outbox: {} }), { code: 'prepared_submission_origin_invalid' });
+  const base = { bearerToken: 'synthetic-test-bearer-token-0001', principalId: 'viewer-staging', environment: 'staging', outbox: {} };
+  assert.throws(() => new PreparedSubmissionClient({ ...base, origin: 'http://processing.example' }), { code: 'prepared_submission_origin_invalid' });
+  assert.throws(() => new PreparedSubmissionClient({ ...base, origin: 'https://processing.example/path' }), { code: 'prepared_submission_origin_invalid' });
+  assert.throws(() => canonicalEnvelope({ ...envelope('C957e280-108b-48a9-9c51-c6480a5ff567', '9160ed62-e5e6-4319-b213-fce0b3c5602e') }), { code: 'prepared_envelope_invalid' });
+});
+
+test('HTTP requests have a bounded default timeout when no caller signal is supplied', async t => {
+  const f = fixture(t), outbox = new PreparedSubmissionOutbox(f.database);
+  const intent = outbox.persistIntent({ localJobId: f.job.id, owner: f.job.lease_owner, origin: 'https://processing.example', principalId: 'viewer-staging', environment: 'staging', envelope: envelope(f.task.id, f.attempt.id) });
+  let observedAbort = false;
+  const methods = [];
+  const client = new PreparedSubmissionClient({ origin: 'https://processing.example', bearerToken: 'synthetic-test-bearer-token-0001', principalId: 'viewer-staging', environment: 'staging', timeoutMs: 100, outbox,
+    fetchImpl: (_url, options) => { methods.push(options.method); return options.method === 'GET' ? responseJson({ error: 'not_found' }, 404) : new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve(responseJson(remoteBinding(intent))), 1000);
+      options.signal.addEventListener('abort', () => { observedAbort = true; clearTimeout(timer); reject(new Error('timed out')); }, { once: true });
+    }); },
+  });
+  await assert.rejects(client.dispatch(intent, { owner: f.job.lease_owner }), { code: 'prepared_submission_transport_uncertain' });
+  assert.deepEqual(methods, ['POST', 'GET']);
+  assert.equal(observedAbort, true);
+  assert.equal(outbox.getIntent(f.attempt.id).state, 'prepared');
 });
