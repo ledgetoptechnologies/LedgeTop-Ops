@@ -95,8 +95,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
             .OrderBy(path => path.Count(c => c == Path.DirectorySeparatorChar)).ThenBy(path => path, StringComparer.OrdinalIgnoreCase);
         foreach (var folder in folders) Create(folder, null);
         foreach (var (path, identity) in files) Create(path, identity);
-        scanWake = AvailabilityScanWake.ForRoot(root);
-        pinWorker = Task.Run(PinLoopAsync);
+        StartAvailabilityScanner();
         } catch {
             await DisposeAsync();
             throw;
@@ -124,9 +123,18 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                 System.Text.Encoding.UTF8.GetBytes("LedgeTop.Files.Preview.Directory.v1:" + folder), rootFileId);
         try {
             connection.Connect();
-            scanWake = AvailabilityScanWake.ForRoot(root);
-            pinWorker = Task.Run(PinLoopAsync);
+            StartAvailabilityScanner();
         } catch { await DisposeAsync(); throw; }
+    }
+
+    private void StartAvailabilityScanner()
+    {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        DiagnosticConnectionFlags.StartScanner(Start, Environment.GetEnvironmentVariable("LEDGETOP_TEST_DISABLE_AVAILABILITY_SCANNER") == "1");
+#else
+        Start();
+#endif
+        void Start() { scanWake = AvailabilityScanWake.ForRoot(root); pinWorker = Task.Run(PinLoopAsync); }
     }
 
     private static bool VerifyPlaceholder(string path, byte[] expectedIdentity, long rootFileId, bool allowLocalFile = false)

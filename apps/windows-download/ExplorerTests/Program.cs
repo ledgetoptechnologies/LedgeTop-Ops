@@ -10,6 +10,10 @@ if (args.Length == 1 && args[0] == "--diagnostic-connect-flags-tests") {
     int Fake(uint flags) { calls.Add(flags); return 37; }
     if (DiagnosticConnectionFlags.Connect(Fake, false) != 37 || DiagnosticConnectionFlags.Connect(Fake, true) != 37
         || !calls.SequenceEqual(new uint[] { 4, 12 })) throw new InvalidOperationException("Diagnostic flags did not preserve native call/result semantics.");
+    var starts = 0;
+    DiagnosticConnectionFlags.StartScanner(() => starts++, false);
+    DiagnosticConnectionFlags.StartScanner(() => starts++, true);
+    if (starts != 1) throw new InvalidOperationException("Diagnostic scanner comparison did not preserve default start or suppress the opt-in start.");
     Console.WriteLine("PASS diagnostic native connection flag comparison with fake native call.");
     return 0;
 }
