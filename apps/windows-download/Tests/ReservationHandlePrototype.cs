@@ -85,14 +85,14 @@ internal static class ReservationHandlePrototype
                 if (watchdogId == ownerId || watchdogId == foreignId || watchdogId == childId || Id(reopened.SafeFileHandle) != watchdogId || !ReadExact(reopened, Watchdog))
                     throw new IOException("Watchdog child record did not retain its exact identity and bytes.");
             }
+            PhysicalAccountingControl(fixture, directory, directoryId, childRecord, childId);
+            deleteDispositionsApplied += 2; // active test record and recovered child record
             VerifyDirectoryBinding(fixture, directory, directoryId);
             verified = true;
             // Delete each exact owned file only through the verified file handle.
             if (!TryDeleteExact(fixture, directory, directoryId, record, Owned, ownerId)) throw new IOException("Exact synthetic file cleanup was not verified.");
             deleteDispositionsApplied++;
             if (!TryDeleteExact(fixture, directory, directoryId, foreign, Foreign, foreignId)) throw new IOException("Exact synthetic file cleanup was not verified.");
-            deleteDispositionsApplied++;
-            if (!TryDeleteExact(fixture, directory, directoryId, childRecord, Abrupt, childId)) throw new IOException("Exact synthetic child record cleanup was not verified.");
             deleteDispositionsApplied++;
             if (!TryDeleteExact(fixture, directory, directoryId, watchdogRecord, Watchdog, watchdogId)) throw new IOException("Exact synthetic watchdog record cleanup was not verified.");
             deleteDispositionsApplied++;
@@ -110,6 +110,96 @@ internal static class ReservationHandlePrototype
             if (!cleanupComplete) Console.Error.WriteLine($"Synthetic fixture cleanup unconfirmed; partial cleanup may have occurred (checksPassed={verified}; deleteDispositionsApplied={deleteDispositionsApplied}): {fixture}");
         }
         Console.WriteLine("PASS ordinary Windows retained-handle identity, abrupt child termination, watchdog after parent death, and exact cleanup. No native provider or OS crash tested.");
+    }
+
+    // Isolated feasibility control, not used by the provider. The caller must
+    // already own a stable root directory and an exclusive interprocess lease.
+    // No cancellation, crash-atomic registry, or product recovery is implied.
+    private sealed class PhysicalAccounting(string root, SafeFileHandle directory, FileId directoryId)
+    {
+        private sealed record Row(FileStream Handle, FileId Identity, byte[] Bytes, long Growth);
+        private readonly object gate = new();
+        private readonly Dictionary<string, Row> rows = new(StringComparer.OrdinalIgnoreCase);
+        internal void Register(string path, byte[] expected, long growth, FileId expectedId)
+        {
+            lock (gate) {
+                if (!string.Equals(Path.GetDirectoryName(path), root, StringComparison.OrdinalIgnoreCase) || growth <= 0 || rows.ContainsKey(path))
+                    throw new IOException("Invalid active record.");
+                VerifyDirectoryBinding(root, directory, directoryId);
+                var h = Open(path, GenericRead | Delete, ShareRead, OpenReparsePoint);
+                var input = new FileStream(h, FileAccess.Read);
+                try {
+                    RequireKind(h, isDirectory: false); var id = Id(h);
+                    if (id != expectedId || !ReadExact(input, expected)) throw new IOException("Unexpected active record identity or contents.");
+                    rows.Add(path, new(input, id, expected.ToArray(), growth));
+                } catch { input.Dispose(); throw; }
+            }
+        }
+        internal long Count(string[] paths, Func<string, long> unknown)
+        {
+            lock (gate) {
+                VerifyDirectoryBinding(root, directory, directoryId);
+                long result = 0; var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var path in paths) {
+                    if (!seen.Add(path)) throw new IOException("Duplicate record.");
+                    if (rows.TryGetValue(path, out var row)) {
+                        if (Id(row.Handle.SafeFileHandle) != row.Identity || !ReadExact(row.Handle, row.Bytes))
+                            throw new IOException("Active record changed.");
+                        result = checked(result + row.Growth);
+                    } else result = checked(result + unknown(path));
+                }
+                if (rows.Keys.Any(path => !seen.Contains(path))) throw new IOException("Missing active record.");
+                return result;
+            }
+        }
+        internal bool Release(string path, byte[] expected, bool simulateBeforeDeleteFailure = false)
+        {
+            lock (gate) {
+                if (!rows.TryGetValue(path, out var row) || !row.Bytes.AsSpan().SequenceEqual(expected) ||
+                    Id(row.Handle.SafeFileHandle) != row.Identity || !ReadExact(row.Handle, row.Bytes)) return false;
+                VerifyDirectoryBinding(root, directory, directoryId);
+                if (simulateBeforeDeleteFailure) return false;
+                byte disposition = 1;
+                if (!SetFileInformationByHandle(row.Handle.SafeFileHandle, 4, ref disposition, 1)) return false;
+                // Keep its charge until confirmed absent. If observation fails,
+                // the caller must quarantine the registry rather than reuse it.
+                row.Handle.Dispose();
+                if (!ConfirmedAbsent(() => File.GetAttributes(path), () => VerifyDirectoryBinding(root, directory, directoryId)))
+                    throw new IOException("Delete outcome uncertain; registry remains charged.");
+                rows.Remove(path); return true;
+            }
+        }
+    }
+
+    private static void PhysicalAccountingControl(string root, SafeFileHandle directory, FileId directoryId, string childRecord, FileId childId)
+    {
+        var path = Path.Combine(root, "accounting.record");
+        FileId createdId;
+        using (var created = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read)) { created.Write(Owned); created.Flush(true); createdId = Id(created.SafeFileHandle); }
+        var registry = new PhysicalAccounting(root, directory, directoryId);
+        var mismatchRejected = false;
+        try { registry.Register(path, Owned, 100, childId); } catch (IOException) { mismatchRejected = true; }
+        if (!mismatchRejected) throw new IOException("Foreign record identity was accepted.");
+        registry.Register(path, Owned, 100, createdId);
+        var calls = Enumerable.Range(0, 8).Select(_ => Task.Run(() => registry.Count(new[] { path }, _ => throw new IOException("Unexpected record.")))).ToArray();
+        Task.WaitAll(calls);
+        if (calls.Any(t => t.Result != 100)) throw new IOException("Concurrent accounting disagreed.");
+        if (registry.Release(path, Foreign) || registry.Release(path, Owned, simulateBeforeDeleteFailure: true) ||
+            registry.Count(new[] { path }, _ => throw new IOException("Unexpected record.")) != 100)
+            throw new IOException("Failed delete lost active accounting.");
+        var unknownRejected = false;
+        try { registry.Count(new[] { path, childRecord }, _ => throw new IOException("Unknown record.")); } catch (IOException) { unknownRejected = true; }
+        if (!unknownRejected || registry.Count(new[] { path }, _ => throw new IOException("Unexpected record.")) != 100)
+            throw new IOException("Unknown record was ignored or active charge was lost.");
+        if (!registry.Release(path, Owned)) throw new IOException("Retained-handle delete failed.");
+        if (registry.Count(Array.Empty<string>(), _ => throw new IOException("Unexpected record.")) != 0)
+            throw new IOException("Confirmed delete remained charged.");
+        // The existing separate child process wrote this record and exited
+        // abruptly; rebuild a fresh registry after the child's handle closed.
+        var recovered = new PhysicalAccounting(root, directory, directoryId);
+        recovered.Register(childRecord, Abrupt, 80, childId);
+        if (recovered.Count(new[] { childRecord }, _ => throw new IOException("Unexpected record.")) != 80 ||
+            !recovered.Release(childRecord, Abrupt)) throw new IOException("Child record recovery failed.");
     }
 
     // Narrow test-only accounting model. It deliberately accepts a supplied
