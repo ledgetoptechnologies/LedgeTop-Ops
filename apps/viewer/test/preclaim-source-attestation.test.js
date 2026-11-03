@@ -188,3 +188,34 @@ test('preclaim signer rejects a snapshot after its owning project is inactive', 
     authorityId: AUTHORITY_ID, principalId: 'viewer-staging', environment: 'staging', capabilities: f.capabilities,
   }), { code: 'preclaim_current_source_binding_mismatch' });
 });
+
+test('preclaim signer refuses terminal task and attempt states and pending storage mutations', async t => {
+  const argsFor = f => ({
+    processing: f.processing, outbox: f.outbox, attemptId: f.attempt.id,
+    snapshotPublicKey: f.snapshotKeys.publicKey, expectedSnapshotIssuerId: 'viewer-snapshot-issuer', expectedSnapshotKeyId: 'snapshot-key', signer: f.signer,
+    authorityId: AUTHORITY_ID, principalId: 'viewer-staging', environment: 'staging', capabilities: f.capabilities,
+  });
+  for (const status of ['failed', 'cancelled', 'published']) {
+    await t.test(`task ${status}`, t => {
+      const f = fixture(t);
+      f.processing.database.prepare('UPDATE processing_tasks SET status=? WHERE id=?').run(status, f.task.id);
+      assert.throws(() => createPreclaimSourceAttestation(argsFor(f)), { code: 'preclaim_current_source_binding_mismatch' });
+    });
+  }
+  for (const status of ['failed', 'cancelled', 'published']) {
+    await t.test(`attempt ${status}`, t => {
+      const f = fixture(t);
+      f.processing.database.prepare('UPDATE processing_attempts SET status=? WHERE id=?').run(status, f.attempt.id);
+      assert.throws(() => createPreclaimSourceAttestation(argsFor(f)), { code: 'preclaim_current_source_binding_mismatch' });
+    });
+  }
+  await t.test('dataset storage mutation in progress', t => {
+    const f = fixture(t), timestamp = new Date().toISOString(), trashId = crypto.randomUUID();
+    f.processing.database.prepare(`INSERT INTO storage_mutations
+      (id,mutation_type,entity_type,entity_id,trash_id,source_root_key,source_relative_path,
+       destination_root_key,destination_relative_path,status,actor,created_at,updated_at)
+      VALUES (?,'trash','dataset',?,?,'datasets',?,'trash','dataset/in-flight','fs_applied','ops:test',?,?)`)
+      .run(crypto.randomUUID(), f.dataset.id, trashId, f.dataset.relativePath, timestamp, timestamp);
+    assert.throws(() => createPreclaimSourceAttestation(argsFor(f)), { code: 'preclaim_current_source_binding_mismatch' });
+  });
+});

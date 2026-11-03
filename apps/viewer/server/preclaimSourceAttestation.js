@@ -150,7 +150,7 @@ function buildPreclaimSourceAttestation({
     WHERE entity_type='dataset' AND entity_id=? AND status IN ('intent','fs_applied','failed') LIMIT 1`).get(dataset.id);
   if (!dataset || dataset.storageMode !== 'managed' || dataset.rootKey !== 'datasets'
       || dataset.status !== 'finalized' || dataset.manifestSha256 !== snapshot.datasetManifestSha256 || pendingStorageMutation
-      || !task || task.status === 'archived' || task.purgedAt || task.activeAttemptId !== attemptId
+      || !task || ['archived', 'failed', 'cancelled', 'published'].includes(task.status) || task.purgedAt || task.activeAttemptId !== attemptId
       || task.datasetId !== dataset.id || task.projectId !== dataset.projectId
       || !project || project.status !== 'active'
       || !attempt || attempt.taskId !== task.id || attempt.datasetId !== dataset.id
