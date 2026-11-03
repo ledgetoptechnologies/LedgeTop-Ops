@@ -8,6 +8,7 @@ using LedgeTop.Files.Backends;
 using LedgeTop.Files.Presentation;
 using LedgeTop.WindowsDownload;
 
+if (args.Length == 1 && args[0] == "--argument-parsing-only") { ScreenshotArgumentTests.Run(); Console.WriteLine("PASS screenshot argument parsing"); return 0; }
 if (args.Length == 1 && args[0] == "--hydration-timing-store-only") { await HydrationTimingDiagnosticStoreTests.Run(); Console.WriteLine("PASS hydration timing diagnostic store"); return 0; }
 
 if (args.Length == 2 && args[0] == "--fresh-staging-qualification-only" && args[1] is "--expect-enabled" or "--expect-disabled") {
@@ -32,9 +33,9 @@ if (args.FirstOrDefault() == "--generated-ltp3-child") return await GeneratedLtp
 if (args.FirstOrDefault() == "--folder-launcher-exit-helper") return BackgroundFolderLauncherTests.ExitHelper(args);
 
 // Synthetic UI acceptance for Ledge Top Files: real TransferQueue on temporary folders, demo sources,
-// no network, no sign-in, no installer. Optional first argument: a folder for rendered screenshots
+// no network, no sign-in, no installer. Optional positional argument: a folder for rendered screenshots
 // (otherwise they go to a new temporary folder, which is printed and kept as evidence).
-var screenshots = args.Length > 0 ? args[0] : Path.Combine(Path.GetTempPath(), "ltfiles-screens-" + Guid.NewGuid().ToString("N"));
+var screenshots = ScreenshotArgumentTests.Resolve(args);
 // Keep owned filesystem fixtures alongside this harness's explicit screenshots/artifact root.
 if (Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") is null)
     Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", Path.GetFullPath(screenshots));
