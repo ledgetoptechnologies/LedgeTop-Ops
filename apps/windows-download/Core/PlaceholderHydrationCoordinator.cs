@@ -27,6 +27,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #if LEDGETOP_CACHE_RACE_TEST
     // Synthetic-only deterministic barrier; excluded from normal and staging builds.
     internal static Action<string>? CacheWalkTestHook;
+    internal static Action<string>? CreatedMarkerTestHook;
 #endif
 
     public PlaceholderHydrationCoordinator(IQueuedDownloadSource source, string channel, string applicationStateRoot,
@@ -511,9 +512,17 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         if (!exists) {
             if (TraceCacheValue(NativeStallTrace.Stage.OwnedFileExistsEnter, NativeStallTrace.Stage.OwnedFileExistsExit, () => File.Exists(directory))) throw new TransferException("Hydration cache is unavailable.");
             TraceCacheAction(NativeStallTrace.Stage.OwnedCreateEnter, NativeStallTrace.Stage.OwnedCreateExit, () => Directory.CreateDirectory(directory));
-            using var marker = TraceCacheValue(NativeStallTrace.Stage.OwnedMarkerOpenEnter, NativeStallTrace.Stage.OwnedMarkerOpenExit, () => new FileStream(Path.Combine(directory, Marker), FileMode.CreateNew, FileAccess.Write, FileShare.None));
-            TraceCacheAction(NativeStallTrace.Stage.OwnedMarkerWriteEnter, NativeStallTrace.Stage.OwnedMarkerWriteExit, () => marker.Write(System.Text.Encoding.UTF8.GetBytes(Owner)));
+            var createdPath = Path.Combine(directory, Marker);
+            using var marker = TraceCacheValue(NativeStallTrace.Stage.OwnedMarkerOpenEnter, NativeStallTrace.Stage.OwnedMarkerOpenExit, () => new FileStream(createdPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None));
+            var expected = System.Text.Encoding.UTF8.GetBytes(Owner);
+            TraceCacheAction(NativeStallTrace.Stage.OwnedMarkerWriteEnter, NativeStallTrace.Stage.OwnedMarkerWriteExit, () => marker.Write(expected));
             TraceCacheAction(NativeStallTrace.Stage.OwnedMarkerFlushEnter, NativeStallTrace.Stage.OwnedMarkerFlushExit, () => marker.Flush(true));
+#if LEDGETOP_CACHE_RACE_TEST
+            CreatedMarkerTestHook?.Invoke(createdPath);
+#endif
+            TraceCacheAction(NativeStallTrace.Stage.OwnedMarkerSafeEnter, NativeStallTrace.Stage.OwnedMarkerSafeExit, () => RequireSafe(createdPath));
+            if (!TraceCacheValue(NativeStallTrace.Stage.OwnedMarkerVerifyEnter, NativeStallTrace.Stage.OwnedMarkerVerifyExit, () => VerifyCreatedMarker(marker, expected))) throw new TransferException("Hydration cache is not owned by this application.");
+            return;
         }
         var path = Path.Combine(directory, Marker);
         TraceCacheAction(NativeStallTrace.Stage.OwnedMarkerSafeEnter, NativeStallTrace.Stage.OwnedMarkerSafeExit, () => RequireSafe(path));
@@ -526,12 +535,28 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         if (!Directory.Exists(directory)) {
             if (File.Exists(directory)) throw new TransferException("Hydration cache is unavailable.");
             Directory.CreateDirectory(directory);
-            using var marker = new FileStream(Path.Combine(directory, Marker), FileMode.CreateNew, FileAccess.Write, FileShare.None);
-            marker.Write(System.Text.Encoding.UTF8.GetBytes(Owner)); marker.Flush(true);
+            var createdPath = Path.Combine(directory, Marker);
+            using var marker = new FileStream(createdPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
+            var expected = System.Text.Encoding.UTF8.GetBytes(Owner);
+            marker.Write(expected); marker.Flush(true); RequireSafe(createdPath);
+#if LEDGETOP_CACHE_RACE_TEST
+            CreatedMarkerTestHook?.Invoke(createdPath);
+#endif
+            if (!VerifyCreatedMarker(marker, expected)) throw new TransferException("Hydration cache is not owned by this application.");
+            return;
         }
         var path = Path.Combine(directory, Marker); RequireSafe(path);
         if (!File.Exists(path) || new FileInfo(path).Length > 128 || File.ReadAllText(path) != Owner) throw new TransferException("Hydration cache is not owned by this application.");
 #endif
+    }
+    // The newly created marker is exclusively open through flush, path safety
+    // validation and readback. Verify those same bytes without a second open.
+    private static bool VerifyCreatedMarker(FileStream marker, byte[] expected)
+    {
+        if (expected.Length > 128 || marker.Length != expected.Length) return false;
+        marker.Position = 0;
+        var actual = new byte[expected.Length]; marker.ReadExactly(actual);
+        return actual.AsSpan().SequenceEqual(expected);
     }
     private static bool OwnedExisting(string directory)
     {

@@ -13,6 +13,7 @@ internal static class HydrationConcurrencyTests
         "odqr1_" + i, "ondf1_" + new string((char)('a' + i), 64), "v1", "sample" + i + ".bin", Bytes.Length, "\"v1\"", Sha);
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
 #if LEDGETOP_CACHE_RACE_TEST
+        ("new hydration marker remains exclusively held through verification", CreatedMarkerExclusive),
         ("disappearing cache entry refuses admission without publishing and permits a later explicit retry", CacheDisappears),
         ("cache promotion waits for quota scan while concurrent downloads remain active", () => PromotionWaits(0)),
         ("cancellation while promotion waits does not publish the file", () => PromotionWaits(1)),
@@ -33,12 +34,38 @@ internal static class HydrationConcurrencyTests
         ("hydration concurrency excludes legacy leases and does not hold short quota lock over network", Legacy),
         ("hydration concurrency eviction waits matching sink while unrelated entry progresses", Eviction),
         ("hydration concurrency dispatcher stop drains four active and one queued request exactly once", Drain),
-        ("hydration concurrency metadata growth uses the actual bounded downloader serialization", Metadata)
+        ("hydration concurrency metadata growth uses the actual bounded downloader serialization", Metadata),
+        ("hydration scope rejects foreign and malformed existing ownership markers", ForeignScopeMarkers)
     ];
     private static void Check(bool value) { if (!value) throw new InvalidOperationException("Concurrency assertion failed."); }
     private static async Task Reject(Task task) { try { await task.WaitAsync(TimeSpan.FromSeconds(5)); } catch (Exception e) when (e is TransferException or IOException) { return; } throw new InvalidOperationException("Expected refusal."); }
     private static async Task Cancelled(Task task) { try { await task.WaitAsync(TimeSpan.FromSeconds(5)); } catch (OperationCanceledException) { return; } throw new InvalidOperationException("Expected cancellation."); }
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+#if LEDGETOP_CACHE_RACE_TEST
+    private static async Task CreatedMarkerExclusive()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var f = new Fixture(); var attempted = 0;
+        PlaceholderHydrationCoordinator.CreatedMarkerTestHook = path => {
+            attempted++;
+            try { File.Move(path, path + ".replacement"); throw new InvalidOperationException("Exclusive marker was replaceable."); }
+            catch (IOException) { }
+        };
+        try { await f.Run(0); Check(attempted >= 2); }
+        finally { PlaceholderHydrationCoordinator.CreatedMarkerTestHook = null; }
+    }
+#endif
+    private static async Task ForeignScopeMarkers()
+    {
+        foreach (var contents in new[] { "foreign owner", new string('x', 129), "" }) {
+            using var f = new Fixture();
+            var scope = Path.Combine(f.Root, "verified-hydration-v1", Identity(0).ScopeKey);
+            Directory.CreateDirectory(scope);
+            var marker = Path.Combine(scope, ".verified-hydration-owner"); File.WriteAllText(marker, contents);
+            var sink = new Sink(); await Reject(f.Run(0, sink: sink));
+            Check(sink.Complete == 0 && sink.Failed == 1 && File.ReadAllText(marker) == contents);
+        }
+    }
 #if LEDGETOP_CACHE_RACE_TEST
     private sealed class Unaware(Source source) : IQueuedDownloadSource
     {
