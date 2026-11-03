@@ -94,6 +94,58 @@ internal static class OwnedRootExecutorPrototypeTests
         await Expect<InvalidOperationException>(uncertainQueued);
         await Expect<InvalidOperationException>(uncertain.RunAsync(@"C:\synthetic\X", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
         await Expect<InvalidOperationException>(uncertain.RunAsync(@"C:\synthetic\Y", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
+        // Commit wins the race, then cleanup remains pending past the caller's
+        // deadline. The observation must not report a definitive failure.
+        var committedExecutor = new OwnedRootExecutorPrototype.Registry(1, 1).Create();
+        var committedCounter = new OwnedRootExecutorPrototype.SyntheticCounter();
+        var committedStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var committedRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var committedFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var committedLease = new FakeLease(); bool? duplicate = null;
+        var committed = committedExecutor.RunAsync(@"C:\synthetic\committed", async scope => {
+            try {
+                if (!scope.TryCommit(committedCounter)) throw new IOException("Commit unexpectedly rejected.");
+                committedStarted.SetResult(); await committedRelease.Task;
+                duplicate = scope.TryCommit(committedCounter);
+            } finally { committedLease.Dispose(); committedFinished.SetResult(); }
+            return committedLease.Releases == 1;
+        }, TimeSpan.FromSeconds(1));
+        await committedStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        if (await committed != OwnedRootExecutorPrototype.Observation.CommittedPending || committedCounter.Value != 1 || committedLease.Releases != 0)
+            throw new InvalidOperationException("Committed work was misreported or released early.");
+        await Expect<InvalidOperationException>(committedExecutor.RunAsync(@"C:\synthetic\committed", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
+        committedRelease.SetResult(); await committedFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        if (duplicate != false || committedCounter.Value != 1 || committedLease.Releases != 1 ||
+            await committed != OwnedRootExecutorPrototype.Observation.CommittedPending)
+            throw new InvalidOperationException("Late work changed the terminal observation or committed twice.");
+        // A fault after an irreversible synthetic commit also is not a clean
+        // failure: keep the root quarantined without a cleanup receipt.
+        var failedCommit = new OwnedRootExecutorPrototype.Registry(1, 1).Create();
+        var failedCounter = new OwnedRootExecutorPrototype.SyntheticCounter();
+        var failureObservation = await failedCommit.RunAsync(@"C:\synthetic\failed-commit", scope => {
+            if (!scope.TryCommit(failedCounter)) throw new IOException("Commit unexpectedly rejected.");
+            return Task.FromException<bool>(new IOException("synthetic cleanup failure"));
+        }, TimeSpan.FromSeconds(5));
+        if (failureObservation != OwnedRootExecutorPrototype.Observation.CommittedCleanupUnverified || failedCounter.Value != 1)
+            throw new InvalidOperationException("A post-commit cleanup failure was reported as a clean failure.");
+        await Expect<InvalidOperationException>(failedCommit.RunAsync(@"C:\synthetic\failed-commit", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
+        var cancelAfterCommit = new OwnedRootExecutorPrototype.Registry(1, 1).Create();
+        var cancellationStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancellationRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancellationFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var postCommitCancel = new CancellationTokenSource();
+        var cancellationResult = cancelAfterCommit.RunAsync(@"C:\synthetic\cancel-commit", async scope => {
+            if (!scope.TryCommit(new OwnedRootExecutorPrototype.SyntheticCounter())) throw new IOException("Commit unexpectedly rejected.");
+            cancellationStarted.SetResult(); await cancellationRelease.Task; cancellationFinished.SetResult(); return true;
+        }, TimeSpan.FromSeconds(5), postCommitCancel.Token);
+        await cancellationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5)); postCommitCancel.Cancel();
+        if (await cancellationResult != OwnedRootExecutorPrototype.Observation.CommittedPending)
+            throw new InvalidOperationException("Cancellation after commit was reported as a clean cancellation.");
+        cancellationRelease.SetResult(); await cancellationFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        for (var i = 0; ; i++) {
+            try { await cancelAfterCommit.RunAsync(@"C:\synthetic\cancel-commit", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)); break; }
+            catch (InvalidOperationException) when (i < 100) { await Task.Delay(5); }
+        }
         Console.WriteLine("PASS test-only executor: cancellation, quarantine, unrelated root and late cleanup.");
     }
 }

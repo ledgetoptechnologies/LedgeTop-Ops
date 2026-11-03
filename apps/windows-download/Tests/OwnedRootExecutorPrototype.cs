@@ -6,10 +6,11 @@ internal sealed class OwnedRootExecutorPrototype
     internal sealed class Item(Func<SyntheticCommitScope, Task<bool>> work)
     {
         internal readonly Func<SyntheticCommitScope, Task<bool>> Work = work;
-        internal readonly TaskCompletionSource Done = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource<Observation> Done = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal LinkedListNode<Item>? Node;
         internal bool Running;
         internal bool Abandoned;
+        internal bool Committed;
     }
     internal sealed class Root
     {
@@ -31,6 +32,9 @@ internal sealed class OwnedRootExecutorPrototype
         internal OwnedRootExecutorPrototype Create() => new(this);
     }
     internal sealed class SyntheticCounter { internal int Value; }
+    // CommittedPending is neither a cleanup success nor a definitive failure.
+    // This synthetic model does not map it to any Cloud Files status.
+    internal enum Observation { Completed, CommittedPending, CommittedCleanupUnverified }
     internal sealed class SyntheticCommitScope(Func<SyntheticCounter, bool> commit) {
         // Only a fake in-memory effect is permitted. Never execute arbitrary I/O
         // or native calls while holding the prototype's registry lock.
@@ -44,7 +48,7 @@ internal sealed class OwnedRootExecutorPrototype
         return Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
     }
 
-    internal async Task RunAsync(string key, Func<SyntheticCommitScope, Task<bool>> work, TimeSpan timeout, CancellationToken cancellationToken = default)
+    internal async Task<Observation> RunAsync(string key, Func<SyntheticCommitScope, Task<bool>> work, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(key); ArgumentNullException.ThrowIfNull(work);
         if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromMinutes(10)) throw new ArgumentOutOfRangeException(nameof(timeout));
@@ -61,9 +65,10 @@ internal sealed class OwnedRootExecutorPrototype
             item.Node = root.Queue.AddLast(item);
             StartNextLocked(key, root);
         }
-        try { await item.Done.Task.WaitAsync(timeout, cancellationToken).ConfigureAwait(false); }
+        try { return await item.Done.Task.WaitAsync(timeout, cancellationToken).ConfigureAwait(false); }
         catch (Exception e) when (e is TimeoutException or OperationCanceledException) {
             var completed = false;
+            var committed = false;
             lock (registry.sync) {
                 // A completed operation wins a simultaneous timeout/cancellation.
                 completed = item.Done.Task.IsCompleted;
@@ -71,6 +76,7 @@ internal sealed class OwnedRootExecutorPrototype
                     if (item.Node is not null) { root.Queue.Remove(item.Node); item.Node = null; item.Done.TrySetCanceled(); }
                     else if (item.Running) {
                         item.Abandoned = true;
+                        committed = item.Committed;
                         root.Quarantined = true;
                         while (root.Queue.First is { } node) {
                             root.Queue.RemoveFirst(); node.Value.Node = null;
@@ -79,10 +85,11 @@ internal sealed class OwnedRootExecutorPrototype
                     }
                 }
             }
-            if (completed) { await item.Done.Task.ConfigureAwait(false); return; }
+            if (completed) return await item.Done.Task.ConfigureAwait(false);
             // Observe a fault that occurs after its caller has timed out.
             _ = item.Done.Task.ContinueWith(t => _ = t.Exception, CancellationToken.None,
                 TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            if (committed) return Observation.CommittedPending;
             throw;
         }
     }
@@ -94,9 +101,10 @@ internal sealed class OwnedRootExecutorPrototype
             Exception? failure = null; var cleaned = false;
             var scope = new SyntheticCommitScope(counter => {
                 lock (registry.sync) {
-                    if (counter is null || !item.Running || item.Abandoned || root.Quarantined ||
+                    if (counter is null || !item.Running || item.Abandoned || item.Committed || root.Quarantined ||
                         !registry.roots.TryGetValue(key, out var current) || !ReferenceEquals(root, current) || !ReferenceEquals(root.Running, item)) return false;
                     checked { counter.Value++; }
+                    item.Committed = true;
                     return true;
                 }
             });
@@ -115,7 +123,8 @@ internal sealed class OwnedRootExecutorPrototype
                 if (cleaned && (root.Quarantined || root.Queue.Count == 0)) registry.roots.Remove(key);
                 else if (!root.Quarantined) StartNextLocked(key, root);
                 if (!cleaned && failure is null) failure = new InvalidOperationException("Root cleanup is unverified.");
-                if (failure is null) item.Done.TrySetResult(); else item.Done.TrySetException(failure);
+                if (item.Committed && !cleaned) item.Done.TrySetResult(Observation.CommittedCleanupUnverified);
+                else if (failure is null) item.Done.TrySetResult(Observation.Completed); else item.Done.TrySetException(failure);
             }
         });
     }
