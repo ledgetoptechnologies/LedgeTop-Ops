@@ -270,11 +270,12 @@ internal static class ExperimentalColdDownloaderTests
         finally { if (!transferred) process.Dispose(); }
         await Task.CompletedTask;
     }
-    private static void AssertOtherProcessCannotOpen(string path)
+    private static void AssertOtherProcessCannotOpen(string path) => AssertOtherProcessOpen(path, false);
+    private static void AssertOtherProcessOpen(string path, bool shouldOpen)
     {
         var info = new ProcessStartInfo("powershell.exe") { UseShellExecute = false, CreateNoWindow = true };
         info.ArgumentList.Add("-NoProfile"); info.ArgumentList.Add("-NonInteractive"); info.ArgumentList.Add("-Command");
-        info.ArgumentList.Add("try { $f = [IO.File]::Open($env:LEDGETOP_SYNTHETIC_PART, 'Open', 'ReadWrite', 'ReadWrite'); $f.Dispose(); exit 0 } catch [IO.IOException] { exit 17 } catch { exit 18 }");
+        info.ArgumentList.Add("try { $f = [IO.File]::Open($env:LEDGETOP_SYNTHETIC_PART, 'Open', 'ReadWrite', 'ReadWrite'); $f.Dispose(); exit 0 } catch { $e = $_.Exception; while ($null -ne $e.InnerException) { $e = $e.InnerException }; if ($e -is [IO.IOException] -and (($e.HResult -band 65535) -eq 32)) { exit 17 }; exit 18 }");
         info.Environment["LEDGETOP_SYNTHETIC_PART"] = path;
         var process = Process.Start(info) ?? throw new IOException("Synthetic cross-process test failed to start."); var transferred = false; Task? reaper = null;
         var pid = process.Id; // Capture before a reaper can observe exit and dispose the Process.
@@ -283,7 +284,7 @@ internal static class ExperimentalColdDownloaderTests
             if (!exited) {
                 throw new IOException("Synthetic open observer remains live; preserve fixture and inspect PID " + pid);
             }
-            Check(process.ExitCode == 17);
+            Check(process.ExitCode == (shouldOpen ? 0 : 17));
         } catch { if (reaper is not null) transferred = true; throw; }
         finally { if (!transferred) process.Dispose(); }
     }
@@ -341,7 +342,7 @@ internal static class ExperimentalColdDownloaderTests
         await WithFixture(async fixture => {
             var root = Path.Combine(fixture.Path, "markers"); Directory.CreateDirectory(root);
             const string markerName = ".verified-hydration-owner";
-            var marker = Path.Combine(root, markerName); var expected = "synthetic-owner"u8.ToArray(); File.WriteAllBytes(marker, expected);
+            var marker = Path.Combine(root, markerName); var expected = "LedgeTop.VerifiedHydration/1\n"u8.ToArray(); File.WriteAllBytes(marker, expected);
             var foreignDir = Path.Combine(root, "foreign"); Directory.CreateDirectory(foreignDir);
             File.WriteAllText(Path.Combine(foreignDir, markerName), "foreign");
             var lockPath = Path.Combine(root, ".hydration-cache.lock");
@@ -371,7 +372,7 @@ internal static class ExperimentalColdDownloaderTests
         });
         await WithFixture(async fixture => {
             var root = Path.Combine(fixture.Path, "quarantine"); Directory.CreateDirectory(root);
-            var marker = Path.Combine(root, ".verified-hydration-owner"); var bytes = "synthetic-owner"u8.ToArray(); File.WriteAllBytes(marker, bytes);
+            var marker = Path.Combine(root, ".verified-hydration-owner"); var bytes = "LedgeTop.VerifiedHydration/1\n"u8.ToArray(); File.WriteAllBytes(marker, bytes);
             var lockPath = Path.Combine(root, ".hydration-cache.lock");
             var lease = await HydrationCacheConcurrency.AcquireAsync(root, "one", CancellationToken.None);
             lease.AcquireExclusiveLegacy(lockPath, FileMode.OpenOrCreate); lease.ExperimentalMarkers.ValidateExisting(root, ".verified-hydration-owner", bytes);
@@ -382,6 +383,7 @@ internal static class ExperimentalColdDownloaderTests
             var rejected = false; try { await HydrationCacheConcurrency.AcquireAsync(root, "two", CancellationToken.None); } catch (TransferException) { rejected = true; }
             Check(rejected && File.ReadAllBytes(marker).SequenceEqual(bytes));
             HydrationCacheConcurrency.SettleInjectedMarkerCloseForTest(root);
+            AssertOtherProcessOpen(lockPath, true);
         });
         await AbruptRestartTests();
         await WithFixture(async root => {
