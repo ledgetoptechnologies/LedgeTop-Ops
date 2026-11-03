@@ -476,6 +476,26 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             }
         }
     }
+    // Synthetic downloader session only; it never returns file bytes or writes to a sink.
+    internal async Task<ExperimentalReservationOwner.LeaseReceipt.DownloadSession> ExperimentalStartReceiptDownloadAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt receipt, Downloader downloader, CancellationToken token = default)
+    {
+        ExperimentalValidateStagingIdentity(identity); ArgumentNullException.ThrowIfNull(receipt); ArgumentNullException.ThrowIfNull(downloader);
+        var resolved = await AuthorizeWithRetry(identity, token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        return receipt.StartSyntheticDownloadForTest(root, identity, resolved.Spec, downloader);
+    }
+    // No sink or file bytes are exposed by this synthetic observation.
+    internal async Task ExperimentalWaitReceiptDownloadAuthorizedAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt.DownloadSession session, CancellationToken token = default)
+    {
+        ExperimentalValidateStagingIdentity(identity); ArgumentNullException.ThrowIfNull(session);
+        if (!session.Matches(root, identity)) throw new ResourceUnavailableException();
+        await session.WaitAsync(token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        var resolved = await AuthorizeWithRetry(identity, token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested(); ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        if (!session.Matches(root, identity, resolved.Spec)) throw new ResourceUnavailableException();
+        session.VerifyStagedForTest(root, identity, resolved.Spec, token);
+    }
     internal async Task ExperimentalReauthorizeStagedAsync(PlaceholderIdentity identity, ExperimentalReservationOwner.LeaseReceipt receipt, CancellationToken token = default)
     {
         ExperimentalValidateStagingIdentity(identity); ArgumentNullException.ThrowIfNull(receipt);

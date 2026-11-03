@@ -13,6 +13,7 @@ internal sealed class ExperimentalReservationOwner
     private static readonly object RegistryGate = new();
     private static readonly HashSet<ExperimentalReservationOwner> Registry = [];
     private static readonly HashSet<LeaseReceipt> Receipts = [];
+    private static readonly HashSet<LeaseReceipt.DownloadSession> DownloadSessions = [];
     private static readonly object ReceiptAttachAuthority = new();
     private readonly object gate = new();
     private HydrationCacheConcurrency.Lease lease;
@@ -40,7 +41,7 @@ internal sealed class ExperimentalReservationOwner
     internal static object? ReceiptMarkerFailureTokenTestHook;
     private readonly long growth;
     internal long Growth { get { lock (gate) { if (finished || uncertain) throw new IOException("Reservation owner unavailable."); return growth; } } }
-    internal static int RetainedCount { get { lock (RegistryGate) return Registry.Count + Receipts.Count; } }
+    internal static int RetainedCount { get { lock (RegistryGate) return Registry.Count + Receipts.Count + DownloadSessions.Count; } }
     internal sealed class LeaseReceipt : IDisposable
     {
         private readonly object gate = new();
@@ -85,6 +86,68 @@ internal sealed class ExperimentalReservationOwner
             }
             internal void ValidateEntry() => owner.ValidateDownloadUse(this);
             public void Dispose() => owner.EndDownloadUse(this);
+        }
+        internal sealed class DownloadSession
+        {
+            private readonly LeaseReceipt owner; private readonly DownloadUse use; private readonly Downloader downloader;
+            private readonly DownloadSpec spec; private readonly PlaceholderIdentity identity; private readonly string entryDirectory, expectedPath;
+            private Task? task; private int started;
+            internal DownloadSession(LeaseReceipt owner, DownloadUse use, Downloader downloader, PlaceholderIdentity identity, DownloadSpec spec, string entryDirectory, object authority) {
+                if (!ReferenceEquals(authority, ReceiptAttachAuthority)) throw new InvalidOperationException("Download session authority invalid.");
+                this.owner = owner; this.use = use; this.downloader = downloader; this.identity = identity; this.spec = spec; this.entryDirectory = entryDirectory;
+                expectedPath = Path.Combine(entryDirectory, spec.FileName);
+            }
+            internal void Start() { if (Interlocked.Exchange(ref started, 1) != 0) throw new InvalidOperationException("Synthetic download session already started."); task = Task.Run(RunAsync); _ = task.ContinueWith(completed => _ = completed.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default); }
+            private async Task RunAsync() {
+                var useReleased = false; VerifiedHydrationDownload? download = null;
+                try {
+                    using (HydrationMutationScope.Begin((action, token) => owner.RunDownloadMutation(use, action, token), CancellationToken.None))
+                        download = await downloader.DownloadVerifiedForHydrationAsync(spec, entryDirectory, CancellationToken.None).ConfigureAwait(false);
+                    if (!string.Equals(Path.GetFullPath(download.Path), expectedPath, StringComparison.OrdinalIgnoreCase) || download.Stream.CanWrite || download.Stream.Length != spec.Length)
+                        throw new IOException("Synthetic download result changed.");
+                    if (!download.IntegrityVerified && !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                        await System.Security.Cryptography.SHA256.HashDataAsync(download.Stream).ConfigureAwait(false), Convert.FromHexString(spec.Sha256)))
+                        throw new IOException("Synthetic download integrity failed.");
+                } finally {
+                    if (download is not null) {
+                        try { await download.DisposeAsync().ConfigureAwait(false); }
+                        catch { owner.MarkDownloadUncertain(use); throw; }
+                    }
+                    try { use.Dispose(); useReleased = true; }
+                    finally { if (useReleased) lock (RegistryGate) DownloadSessions.Remove(this); }
+                }
+            }
+            internal bool Matches(string root, PlaceholderIdentity expectedIdentity, DownloadSpec? expectedSpec = null) =>
+                identity == expectedIdentity && (expectedSpec is null || spec == expectedSpec) &&
+                string.Equals(entryDirectory, Path.Combine(root, expectedIdentity.ScopeKey, expectedIdentity.CacheKey), StringComparison.OrdinalIgnoreCase);
+            internal void VerifyStagedForTest(string root, PlaceholderIdentity expectedIdentity, DownloadSpec expectedSpec, CancellationToken token) {
+                if (!Matches(root, expectedIdentity, expectedSpec)) throw new ResourceUnavailableException();
+                owner.VerifySyntheticReservationForTest(root, expectedIdentity, expectedSpec, token);
+            }
+            internal async Task WaitAsync(CancellationToken waitToken = default) {
+                var running = task ?? throw new InvalidOperationException("Synthetic download session did not start.");
+                await running.WaitAsync(waitToken).ConfigureAwait(false);
+            }
+        }
+        internal DownloadSession StartSyntheticDownloadForTest(string requestedRoot, PlaceholderIdentity identity, DownloadSpec spec, Downloader downloader)
+        {
+            ArgumentNullException.ThrowIfNull(downloader);
+            lock (gate) {
+                VerifySyntheticReservationForTest(requestedRoot, identity, spec);
+                var use = BeginSyntheticDownloadUse(requestedRoot, identity.ScopeKey + identity.CacheKey);
+                var session = new DownloadSession(this, use, downloader, identity, spec, Path.Combine(root, identity.ScopeKey, identity.CacheKey), ReceiptAttachAuthority);
+                lock (RegistryGate) DownloadSessions.Add(session);
+                session.Start(); return session;
+            }
+        }
+        private void MarkDownloadUncertain(DownloadUse use) { lock (gate) { if (ReferenceEquals(downloadUse, use)) SetReceiptStatus(newUncertain: true); } }
+        private void RunDownloadMutation(DownloadUse use, Action action, CancellationToken token)
+        {
+            lock (gate) {
+                if (!active || uncertain || !ReferenceEquals(downloadUse, use) || heldLease is null || heldOwnedEntry is null)
+                    throw new IOException("Synthetic download ownership is unavailable.");
+                heldLease.RunExperimentalForEntry(root, key, () => RunQuota(_ => { action(); return true; }, token));
+            }
         }
         internal DownloadUse BeginSyntheticDownloadUse(string requestedRoot, string requestedKey)
         {

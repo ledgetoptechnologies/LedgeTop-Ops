@@ -1157,7 +1157,7 @@ internal static class ExperimentalColdDownloaderTests
                 rejected = false; try { heldReceipt.SettleInjectedMarkerFailureForTest(new object()); } catch (InvalidOperationException) { rejected = true; } Check(rejected);
                 heldReceipt.SettleInjectedMarkerFailureForTest(markerToken); heldReceipt.ValidateEntry(root, scope + key);
                 var exposed = typeof(ExperimentalReservationOwner.LeaseReceipt).GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly).Where(method => method.IsAssembly);
-                Check(exposed.All(method => (method.ReturnType == typeof(void) || method.ReturnType == typeof(long) || method.ReturnType == typeof(bool) || method.ReturnType == typeof(ExperimentalReservationOwner.LeaseReceipt.DownloadUse)) && method.GetParameters().All(parameter => !typeof(Delegate).IsAssignableFrom(parameter.ParameterType))));
+                Check(exposed.All(method => (method.ReturnType == typeof(void) || method.ReturnType == typeof(long) || method.ReturnType == typeof(bool) || method.ReturnType == typeof(ExperimentalReservationOwner.LeaseReceipt.DownloadUse) || method.ReturnType == typeof(ExperimentalReservationOwner.LeaseReceipt.DownloadSession)) && method.GetParameters().All(parameter => !typeof(Delegate).IsAssignableFrom(parameter.ParameterType))));
                 var entered = new ManualResetEventSlim(); var release = new ManualResetEventSlim(); var disposing = new ManualResetEventSlim();
                 Task? operation = null; Task? close = null;
                 try {
@@ -1269,6 +1269,36 @@ internal static class ExperimentalColdDownloaderTests
                 File.WriteAllBytes(path, bytes);
                 Check(!receipt.StageSyntheticReservationForTest(root, identity, spec, coordinator) && File.ReadAllBytes(path).SequenceEqual(bytes)); File.Delete(path);
                 Check(await coordinator.ExperimentalAuthorizeAndStageAsync(identity, receipt)); AssertOtherProcessCannotOpen(path);
+                var blocked = new HeldDownloadStream(Content); var downloader = Engine((_, _) => Response(Content, blocked));
+                ExperimentalReservationOwner.LeaseReceipt.DownloadSession? session = null; var terminal = false;
+                try {
+                    source.ResolveFailureForTest = new AccessDeniedException(); var startDenied = false;
+                    try { _ = await coordinator.ExperimentalStartReceiptDownloadAsync(identity, receipt, downloader); } catch (AccessDeniedException) { startDenied = true; }
+                    Check(startDenied && !blocked.Entered.Task.IsCompleted); source.ResolveFailureForTest = null;
+                    session = await coordinator.ExperimentalStartReceiptDownloadAsync(identity, receipt, downloader);
+                    await blocked.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                    using var cancelledWait = new CancellationTokenSource(); cancelledWait.Cancel(); var waitCancelled = false;
+                    try { await session.WaitAsync(cancelledWait.Token); } catch (OperationCanceledException) { waitCancelled = true; }
+                    Check(waitCancelled);
+                    var refusedWhileDownloading = false; try { _ = receipt.BeginSyntheticDownloadUse(root, identity.ScopeKey + identity.CacheKey); } catch (InvalidOperationException) { refusedWhileDownloading = true; } Check(refusedWhileDownloading);
+                    refusedWhileDownloading = false; try { receipt.Dispose(); } catch (IOException) { refusedWhileDownloading = true; } catch (InvalidOperationException) { refusedWhileDownloading = true; } Check(refusedWhileDownloading);
+                    AssertOtherProcessCannotOpen(Path.Combine(root, ".hydration-cache.lock")); AssertOtherProcessCannotOpen(Path.Combine(entryDir, ".hydration.lock"));
+                    _ = session.WaitAsync(); // Deliberately abandon one waiter; the owned task continues.
+                    blocked.Release.TrySetResult();
+                    await session.WaitAsync().WaitAsync(TimeSpan.FromSeconds(15)); terminal = true;
+                    Check(File.ReadAllBytes(Path.Combine(entryDir, identity.FileName)).SequenceEqual(Content));
+                    source.ResolveFailureForTest = new AccessDeniedException(); var afterDenied = false;
+                    try { await coordinator.ExperimentalWaitReceiptDownloadAuthorizedAsync(identity, session); } catch (AccessDeniedException) { afterDenied = true; }
+                    Check(afterDenied); source.ResolveFailureForTest = null;
+                    await coordinator.ExperimentalWaitReceiptDownloadAuthorizedAsync(identity, session);
+                    var wrongSession = false;
+                    try { await coordinator.ExperimentalWaitReceiptDownloadAuthorizedAsync(identity with { FileName = "other.bin" }, session); } catch (ResourceUnavailableException) { wrongSession = true; }
+                    Check(wrongSession);
+                } finally {
+                    blocked.Release.TrySetResult();
+                    if (session is null || terminal) downloader.Dispose();
+                    else UncertainTestResources.Add((fixture, receipt, session, downloader, blocked));
+                }
                 source.ResolveFailureForTest = new AccessDeniedException();
                 rejected = false; try { await coordinator.ExperimentalReauthorizeStagedAsync(identity, receipt); } catch (AccessDeniedException) { rejected = true; }
                 Check(rejected); AssertOtherProcessCannotOpen(path);
@@ -1768,6 +1798,15 @@ internal static class ExperimentalColdDownloaderTests
         });
         Check(PendingOwnedResources() == 0);
         Console.WriteLine("PASS gated synthetic Downloader: cold and resumed transfers, validation, collision, cancellation and coordinator recovery.");
+    }
+    private sealed class HeldDownloadStream(byte[] data) : MemoryStream(data)
+    {
+        internal TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken token = default) {
+            Entered.TrySetResult(); await Release.Task.WaitAsync(token).ConfigureAwait(false);
+            return await base.ReadAsync(buffer, token).ConfigureAwait(false);
+        }
     }
     private sealed class PrefixStream(byte[] data) : MemoryStream(data)
     {
