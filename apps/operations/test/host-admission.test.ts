@@ -42,7 +42,8 @@ describe("Operations deployed host admission", () => {
     const canonical = "https://ops.ledgetop.app";
     expect(admittedOperationsRequestOrigin(`${canonical}/api/session`, env, canonical)).toBe(canonical);
     expect(admittedOperationsRequestOrigin("https://ops.ledgetopdroneservices.com/api/session", env, canonical))
-      .toBe("https://ops.ledgetopdroneservices.com");
+      .toBeNull();
+    expect(requestHostAllowed("https://ops.ledgetopdroneservices.com/api/session", env)).toBe(false);
     for (const url of ["https://portal.ledgetop.app/api/session", "https://portal.ledgetopdroneservices.com/api/session",
       "https://ops.ledgetopdroneservices.com.evil.test/api/session", "https://unconfigured.example/api/session",
       "http://ops.ledgetopdroneservices.com/api/session"])
@@ -53,6 +54,16 @@ describe("Operations deployed host admission", () => {
       { ...env, OPERATIONS_ORIGINS: "https://ops.ledgetop.app,https://portal.ledgetop.app" }, canonical)).toBeNull();
     expect(admittedOperationsRequestOrigin("https://ops.ledgetop.app/api/session", env,
       "https://ops.ledgetopdroneservices.com")).toBeNull();
+  });
+
+  it("keeps retired production Operations hosts redirect-only even if an override re-adds them", () => {
+    const env = { ENVIRONMENT: "production" as const, EXPECTED_HOST: "ops.ledgetop.app",
+      OPERATIONS_ORIGINS: "https://ops.ledgetop.app,https://ops.ledgetopdroneservices.com,https://ops.ledgetoptechnologies.com" };
+    expect(requestHostAllowed("https://ops.ledgetop.app/administration", env)).toBe(true);
+    expect(requestHostAllowed("https://ops.ledgetopdroneservices.com/api/session", env)).toBe(false);
+    expect(requestHostAllowed("https://ops.ledgetoptechnologies.com/api/session", env)).toBe(false);
+    expect(admittedOperationsRequestOrigin("https://ops.ledgetopdroneservices.com/api/session", env,
+      "https://ops.ledgetop.app")).toBeNull();
   });
 
   it("keeps privileged API origin resolution canonical-only in development", () => {
