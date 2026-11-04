@@ -44,3 +44,6 @@ scripts/native-staff-bootstrap-provisioner.test.mjs text eol=lf
 scripts/native-staff-bootstrap-provisioner.windows.test.mjs text eol=lf
 scripts/native-staff-bootstrap-owner-approval.d.mts text eol=lf
 docs/operations/native-staff-bootstrap-provisioner.md text eol=lf
+scripts/fixtures/*-ops-0226-wrangler-wire-statements.json text eol=lf
+scripts/staging-ops-staff-login-0226-once.mjs text eol=lf
+scripts/production-ops-staff-login-0226-once.mjs text eol=lf
