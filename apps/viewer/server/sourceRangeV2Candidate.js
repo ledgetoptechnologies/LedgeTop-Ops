@@ -12,6 +12,7 @@ const { Readable } = require('node:stream');
 const protocol = require('./referenceProtocol');
 
 const CHUNK_BYTES = 8 * 1024 * 1024;
+const STREAM_READ_BYTES = 1024 * 1024;
 const PREFIX = '/api/processing/source-range/v2/objects/';
 const REQUEST_HEADER = 'x-processing-request-id';
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -19,7 +20,7 @@ const HASH = /^[a-f0-9]{64}$/;
 const PRIVATE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const DB_SCHEMA = [
   `CREATE TABLE source_range_usage (identity_key TEXT PRIMARY KEY, identity_json TEXT NOT NULL, transfer_json TEXT NOT NULL, objects_json TEXT NOT NULL, request_budget INTEGER NOT NULL, byte_budget INTEGER NOT NULL, attempt_budget INTEGER NOT NULL, requests_used INTEGER NOT NULL DEFAULT 0, bytes_used INTEGER NOT NULL DEFAULT 0, attempts_used INTEGER NOT NULL DEFAULT 0)`,
-  `CREATE TABLE source_range_objects (identity_key TEXT NOT NULL, object_id TEXT NOT NULL, source_path TEXT NOT NULL, byte_size INTEGER NOT NULL, object_sha256 TEXT NOT NULL, PRIMARY KEY(identity_key, object_id))`,
+  `CREATE TABLE source_range_objects (identity_key TEXT NOT NULL, object_id TEXT NOT NULL, source_path TEXT NOT NULL, byte_size INTEGER NOT NULL, object_sha256 TEXT NOT NULL, source_dev TEXT NOT NULL, source_ino TEXT NOT NULL, source_mtime_ns TEXT NOT NULL, source_ctime_ns TEXT NOT NULL, PRIMARY KEY(identity_key, object_id))`,
   `CREATE TABLE source_range_grants (id TEXT PRIMARY KEY, identity_key TEXT NOT NULL, token_hash TEXT NOT NULL, expires_ms INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0)`,
   `CREATE INDEX source_range_grants_token ON source_range_grants(token_hash)`,
   `CREATE TABLE source_range_requests (identity_key TEXT NOT NULL, object_id TEXT NOT NULL, request_id TEXT NOT NULL, start_byte INTEGER NOT NULL, byte_length INTEGER NOT NULL, PRIMARY KEY(identity_key, object_id, request_id), UNIQUE(identity_key, object_id, start_byte))`,
@@ -172,7 +173,8 @@ class SourceRangeV2BrokerCandidate {
     for (const row of objects) {
       const parent = useMap.get(row.identity_key);
       if (!parent || typeof row.object_id !== 'string' || !slug(row.object_id) || typeof row.source_path !== 'string'
-        || !Number.isSafeInteger(row.byte_size) || row.byte_size < 0 || !HASH.test(row.object_sha256)) fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
+        || !Number.isSafeInteger(row.byte_size) || row.byte_size < 0 || !HASH.test(row.object_sha256)
+        || !['source_dev', 'source_ino', 'source_mtime_ns', 'source_ctime_ns'].every(key => typeof row[key] === 'string' && /^-?(?:0|[1-9][0-9]*)$/.test(row[key]))) fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
       const identity = parent.identity;
       const expected = parent.objectList.find(object => object.id === row.object_id);
       if (!expected || expected.byteSize !== row.byte_size || expected.sha256 !== row.object_sha256 || !parent.transfer.objectIds.includes(row.object_id)) fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
@@ -229,7 +231,7 @@ class SourceRangeV2BrokerCandidate {
     } catch (error) { if (error instanceof SourceRangeV2Error) throw error; fail('SOURCE_UNAVAILABLE'); }
   }
 
-  mintGrant({ job, resolveSource } = {}) {
+  async mintGrant({ job, resolveSource } = {}) {
     if (!this.grantTokenKey) fail('GRANT_TOKEN_KEY_UNAVAILABLE');
     if (typeof resolveSource !== 'function' || !job || typeof job !== 'object' || Array.isArray(job)) fail('SOURCE_RESOLVER_REQUIRED');
     const transfer = canonicalTransfer(job);
@@ -260,7 +262,10 @@ class SourceRangeV2BrokerCandidate {
         || !Number.isSafeInteger(raw.byteSize) || raw.byteSize < 0 || !HASH.test(raw.sha256) || resolvedById.has(raw.id)) fail('SOURCE_BINDING_MISMATCH');
       const manifestObject = objectById.get(raw.id);
       if (!manifestObject || raw.byteSize !== manifestObject.byteSize || raw.sha256 !== manifestObject.sha256) fail('SOURCE_BINDING_MISMATCH');
-      resolvedById.set(raw.id, { id: raw.id, path: this.#source(raw.path), byteSize: raw.byteSize, sha256: raw.sha256 });
+      const sourcePath = this.#source(raw.path);
+      const stored = this.db.prepare('SELECT source_path,byte_size,object_sha256,source_dev,source_ino,source_mtime_ns,source_ctime_ns FROM source_range_objects WHERE identity_key=? AND object_id=?').get(identityKey, raw.id);
+      const sourceIdentity = await this.#sourceIdentity(sourcePath, raw.byteSize, raw.sha256, stored);
+      resolvedById.set(raw.id, { id: raw.id, path: sourcePath, byteSize: raw.byteSize, sha256: raw.sha256, ...sourceIdentity });
     }
     if (manifestObjects.some(object => !resolvedById.has(object.id))) fail('SOURCE_BINDING_MISMATCH');
     const objectsJson = JSON.stringify(manifestObjects.map(object => ({ id: object.id, byteSize: object.byteSize, sha256: object.sha256 })));
@@ -276,14 +281,17 @@ class SourceRangeV2BrokerCandidate {
           if (old.identity_json !== identityJson || old.transfer_json !== transferJson || old.objects_json !== objectsJson
             || old.request_budget !== transfer.requestBudget || old.byte_budget !== transfer.byteBudget || old.attempt_budget !== transfer.attemptBudget) fail('TRANSFER_BINDING_CONFLICT');
           for (const object of resolvedById.values()) {
-            const stored = this.db.prepare('SELECT source_path,byte_size,object_sha256 FROM source_range_objects WHERE identity_key=? AND object_id=?').get(identityKey, object.id);
-            if (!stored || stored.source_path !== object.path || stored.byte_size !== object.byteSize || stored.object_sha256 !== object.sha256) fail('TRANSFER_BINDING_CONFLICT');
+            const stored = this.db.prepare('SELECT source_path,byte_size,object_sha256,source_dev,source_ino,source_mtime_ns,source_ctime_ns FROM source_range_objects WHERE identity_key=? AND object_id=?').get(identityKey, object.id);
+            if (!stored || stored.source_path !== object.path || stored.byte_size !== object.byteSize || stored.object_sha256 !== object.sha256
+              || stored.source_dev !== object.source_dev || stored.source_ino !== object.source_ino
+              || stored.source_mtime_ns !== object.source_mtime_ns || stored.source_ctime_ns !== object.source_ctime_ns) fail('TRANSFER_BINDING_CONFLICT');
           }
         } else {
           this.db.prepare('INSERT INTO source_range_usage(identity_key,identity_json,transfer_json,objects_json,request_budget,byte_budget,attempt_budget) VALUES(?,?,?,?,?,?,?)')
             .run(identityKey, identityJson, transferJson, objectsJson, transfer.requestBudget, transfer.byteBudget, transfer.attemptBudget);
-          const insertObject = this.db.prepare('INSERT INTO source_range_objects(identity_key,object_id,source_path,byte_size,object_sha256) VALUES(?,?,?,?,?)');
-          for (const object of resolvedById.values()) insertObject.run(identityKey, object.id, object.path, object.byteSize, object.sha256);
+          const insertObject = this.db.prepare('INSERT INTO source_range_objects(identity_key,object_id,source_path,byte_size,object_sha256,source_dev,source_ino,source_mtime_ns,source_ctime_ns) VALUES(?,?,?,?,?,?,?,?,?)');
+          for (const object of resolvedById.values()) insertObject.run(identityKey, object.id, object.path, object.byteSize, object.sha256,
+            object.source_dev, object.source_ino, object.source_mtime_ns, object.source_ctime_ns);
         }
         const active = this.db.prepare('SELECT id,token_hash,expires_ms FROM source_range_grants WHERE identity_key=? AND revoked=0 ORDER BY id LIMIT 2').all(identityKey);
         if (active.length > 1) fail('TRANSFER_ACCOUNTING_UNAVAILABLE');
@@ -328,7 +336,7 @@ class SourceRangeV2BrokerCandidate {
     } catch (error) { if (error instanceof SourceRangeV2Error) throw error; fail('TRANSFER_ACCOUNTING_UNAVAILABLE'); }
     let transfer;
     try { transfer = JSON.parse(grant.transfer_json); } catch { fail('TRANSFER_ACCOUNTING_UNAVAILABLE'); }
-    const object = this.db.prepare('SELECT source_path,byte_size,object_sha256 FROM source_range_objects WHERE identity_key=? AND object_id=?').get(grant.identity_key, objectId);
+    const object = this.db.prepare('SELECT source_path,byte_size,object_sha256,source_dev,source_ino,source_mtime_ns,source_ctime_ns FROM source_range_objects WHERE identity_key=? AND object_id=?').get(grant.identity_key, objectId);
     if (!object) fail('OBJECT_NOT_GRANTED');
     if (typeof range !== 'string' || !/^bytes=(0|[1-9][0-9]*)-(0|[1-9][0-9]*)$/.test(range)) fail('INVALID_RANGE');
     const match = /^bytes=(\d+)-(\d+)$/.exec(range), start = Number(match[1]), end = Number(match[2]);
@@ -354,10 +362,10 @@ class SourceRangeV2BrokerCandidate {
       this.db.prepare('UPDATE source_range_usage SET attempts_used=attempts_used+1 WHERE identity_key=?').run(grant.identity_key);
       return !existing;
     });
-    const { handle, blockHashes, before } = await this.#openAndVerify(object.source_path, item, start, end);
+    const { handle, before } = await this.#openPinnedSource(object.source_path, object);
     let remaining = length, offset = start, reading = false;
     const broker = this;
-    const body = new Readable({ highWaterMark: 65536,
+    const body = new Readable({ highWaterMark: STREAM_READ_BYTES,
       read() {
         if (reading || this.destroyed) return;
         reading = true;
@@ -369,18 +377,23 @@ class SourceRangeV2BrokerCandidate {
           }
           const currentGrant = broker.db.prepare('SELECT revoked,expires_ms FROM source_range_grants WHERE id=?').get(grant.id);
           if (!currentGrant || currentGrant.revoked || currentGrant.expires_ms <= broker.now()) fail('UNAUTHORIZED');
-          broker.#source(object.source_path);
           const stat = await handle.stat({ bigint: true });
           if (!broker.#unchanged(before, stat)) fail('SOURCE_CHANGED');
-          const blockSize = 65536, blockStart = Math.floor(offset / blockSize) * blockSize;
-          const blockLength = Math.min(blockSize, item.byteSize - blockStart), block = Buffer.alloc(blockLength);
+          // The receiving SourceRangeClient verifies the complete object SHA-256
+          // before publishing it to the engine. The broker pins the source file's
+          // inode/timestamps when the grant is minted and checks them around each
+          // bounded read; hashing the complete object again for every 8 MiB range
+          // would turn a 50 GiB transfer into terabytes of redundant disk reads.
+          const chunk = Buffer.alloc(Math.min(STREAM_READ_BYTES, remaining));
           let read = 0;
-          while (read < block.length) { const value = await handle.read(block, read, block.length - read, blockStart + read); if (!value.bytesRead) fail('SOURCE_CHANGED'); read += value.bytesRead; }
-          if (sha256(block) !== blockHashes.get(blockStart)) fail('SOURCE_CHANGED');
-          const within = offset - blockStart, chunk = block.subarray(within, within + Math.min(block.length - within, remaining));
+          while (read < chunk.length) {
+            const value = await handle.read(chunk, read, chunk.length - read, offset + read);
+            if (!value.bytesRead) fail('SOURCE_CHANGED');
+            read += value.bytesRead;
+          }
           const after = await handle.stat({ bigint: true });
           if (!broker.#unchanged(before, after)) fail('SOURCE_CHANGED');
-          offset += chunk.length; remaining -= chunk.length; reading = false;
+          offset += read; remaining -= read; reading = false;
           if (!this.destroyed) this.push(chunk);
         })().catch(error => { reading = false; this.destroy(error instanceof SourceRangeV2Error ? error : new SourceRangeV2Error('SOURCE_UNAVAILABLE')); });
       },
@@ -398,27 +411,58 @@ class SourceRangeV2BrokerCandidate {
     }, body, firstUniqueRequest: newRange };
   }
 
-  async #openAndVerify(sourcePath, object, start, end) {
+  async #sourceIdentity(sourcePath, expectedBytes, expectedSha256, stored) {
+    const source = this.#source(sourcePath);
+    let descriptor;
+    try {
+      descriptor = await fsp.open(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+      const info = await descriptor.stat({ bigint: true });
+      if (!info.isFile() || info.size !== BigInt(expectedBytes)) fail('SOURCE_CHANGED');
+      const identity = { source_dev: info.dev.toString(), source_ino: info.ino.toString(),
+        source_mtime_ns: info.mtimeNs.toString(), source_ctime_ns: info.ctimeNs.toString() };
+      const known = stored && stored.source_path === source && stored.byte_size === expectedBytes
+        && stored.object_sha256 === expectedSha256 && this.#matchesSourceIdentity(info, stored);
+      if (!known) {
+        const digest = createHash('sha256'), buffer = Buffer.allocUnsafe(STREAM_READ_BYTES);
+        let offset = 0;
+        while (offset < expectedBytes) {
+          const wanted = Math.min(buffer.length, expectedBytes - offset);
+          let filled = 0;
+          while (filled < wanted) {
+            const { bytesRead } = await descriptor.read(buffer, filled, wanted - filled, offset + filled);
+            if (!bytesRead) fail('SOURCE_CHANGED');
+            filled += bytesRead;
+          }
+          digest.update(buffer.subarray(0, filled));
+          offset += filled;
+        }
+        const after = await descriptor.stat({ bigint: true });
+        if (!this.#unchanged(info, after) || digest.digest('hex') !== expectedSha256) fail('SOURCE_CHANGED');
+      }
+      this.#source(source);
+      return identity;
+    } catch (error) {
+      if (error instanceof SourceRangeV2Error) throw error;
+      fail('SOURCE_UNAVAILABLE');
+    } finally {
+      await descriptor?.close().catch(() => {});
+    }
+  }
+
+  #matchesSourceIdentity(info, object) {
+    return info.isFile() && info.size === BigInt(object.byte_size)
+      && info.dev.toString() === object.source_dev && info.ino.toString() === object.source_ino
+      && info.mtimeNs.toString() === object.source_mtime_ns && info.ctimeNs.toString() === object.source_ctime_ns;
+  }
+
+  async #openPinnedSource(sourcePath, object) {
     const source = this.#source(sourcePath);
     let handle;
     try {
       handle = await fsp.open(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
       const before = await handle.stat({ bigint: true });
-      if (!before.isFile() || before.size !== BigInt(object.byteSize)) fail('SOURCE_CHANGED');
-      const digest = createHash('sha256'), blockHashes = new Map(), blockSize = 65536;
-      let offset = 0;
-      while (offset < object.byteSize) {
-        const length = Math.min(blockSize, object.byteSize - offset), buffer = Buffer.alloc(length);
-        let filled = 0;
-        while (filled < length) { const result = await handle.read(buffer, filled, length - filled, offset + filled); if (!result.bytesRead) fail('SOURCE_CHANGED'); filled += result.bytesRead; }
-        digest.update(buffer);
-        if (offset <= end && offset + length > start) blockHashes.set(offset, sha256(buffer));
-        offset += length;
-      }
-      const after = await handle.stat({ bigint: true });
-      if (!this.#unchanged(before, after) || digest.digest('hex') !== object.sha256) fail('SOURCE_CHANGED');
-      this.#source(source);
-      return { handle, blockHashes, before };
+      if (!this.#matchesSourceIdentity(before, object)) fail('SOURCE_CHANGED');
+      return { handle, before };
     } catch (error) {
       await handle?.close().catch(() => {});
       if (error instanceof SourceRangeV2Error) throw error;
