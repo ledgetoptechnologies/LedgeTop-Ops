@@ -82,7 +82,7 @@ function browserPage(pathname: string, surface: CanonicalDomainSurface): boolean
   return /^\/portal\/(?:projects|feedback)\/[A-Za-z0-9_-]{1,128}$/.test(path);
 }
 
-function hasOnlyNavigationQuery(url: URL): boolean {
+export function hasOnlyNavigationQuery(url: URL): boolean {
   for (const key of url.searchParams.keys()) {
     // Normal list filters/search and workspace/project selection remain intact.
     // Links carrying login, OAuth or share capabilities need their original

@@ -54,6 +54,15 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     }
     expect(f.prepare).not.toHaveBeenCalled();
   });
+  it("never forwards sensitive or unknown query parameters from retired portal hosts",async()=>{
+    const f=fixture("true");
+    for(const origin of [OLD,LTT]) for(const key of ["token","%74oken","access_code","access%5Fcode","state","code","next","unknown"]) {
+      const response=await f.request(`${origin}/portal/account?tab=profile&${key}=synthetic-secret`);
+      expect(response.status).toBe(404);
+      expect(response.headers.get("Location")).toBeNull();
+    }
+    expect(f.prepare).not.toHaveBeenCalled();
+  });
   it("routes fresh mixed-host public and private entries to their distinct fixed destinations",async()=>{
     const f=fixture("true");
     for(const [origin,path,target] of [[OLD,"/s/synthetic-id?folder=opaque%2Fref&sort=name&sort=date",DELIVERY],

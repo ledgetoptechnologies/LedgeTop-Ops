@@ -1,4 +1,5 @@
 import { HTTPException } from "hono/http-exception";
+import { hasOnlyNavigationQuery } from "../../../../packages/shared/src/canonical-domain-navigation";
 import type { Env } from "./types";
 
 type OriginEnv = Pick<Env,
@@ -183,6 +184,10 @@ export function legacyClientRedirectLocation(requestUrl: string, env: OriginEnv)
   let request: URL;
   try { request = new URL(requestUrl); } catch { return null; }
   if (![...legacy, ...retired].includes(request.origin)) return null;
+  // A generic legacy redirect must never forward callback, auth, share, or
+  // unknown parameters to a different origin. The canonical page redirect
+  // applies the same shared allowlist; keep this fallback equally strict.
+  if (!hasOnlyNavigationQuery(request)) return null;
   // A former combined public/private host may remain an active private alias
   // during the split-origin phase. Its existing private cookie sessions stay
   // local; the separate opt-in fresh-browser policy handles new navigations.
