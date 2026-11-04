@@ -2,7 +2,15 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { isReferenceCoordinatorProvider, isReferenceResultReady, processSubmit } = require('../server/processingWorker');
+const { isReferenceCoordinatorProvider, isReferenceEngineProcessing, isReferenceResultReady, processSubmit } = require('../server/processingWorker');
+
+test('reference jobs stay queued until the durable engine phase is processing',()=>{
+  for(const phase of ['queued','waiting_capacity','awaiting_transfer','fetching','source_receiving','init_pending','initialized','upload_pending','uploaded','commit_pending'])
+    assert.equal(isReferenceEngineProcessing({status:'running',phase,nodeId:'node-a'}),false,`${phase} is not engine processing`);
+  assert.equal(isReferenceEngineProcessing({status:'running',phase:'processing',nodeId:'node-a'}),true);
+  assert.equal(isReferenceEngineProcessing({status:'queued',phase:'processing',nodeId:'node-a'}),false);
+  assert.equal(isReferenceEngineProcessing({status:'running',phase:'processing'}),false);
+});
 
 test('reference result readiness follows awaiting_acceptance and completed phases',()=>{
   assert.equal(isReferenceResultReady({status:'succeeded',phase:'awaiting_acceptance'}),true);
