@@ -17,7 +17,7 @@ const context=vm.createContext({state,gcpNearbyMap:null,groupProjects,canManageH
   // this task-navigation harness. Capability refresh has its own focused tests.
   context.refreshProviderCapabilities=()=>{throw new Error('Task navigation must not refresh node capabilities');};
   vm.runInContext(`let lastProviderEntry=null;\n${source.slice(source.indexOf('function refreshOpenedProvider('),source.indexOf('function providerDetail('))}`,context);
-  vm.runInContext([...names,'taskOutputStage','logPanel','projectSearchText','projectStatusMatches','workspaceBreadcrumb','taskRunsPanel','moreMenu','attemptHistory','attemptLabel','disclosureAttributes','attemptDiagnosticPanel','projectRows','PROCESSING_GROUPS','SUBMISSION_PHASE_LABELS','processing'].map(declaration).join('\n'),context);
+  vm.runInContext([...names,'queueReasonText','taskOutputStage','logPanel','projectSearchText','projectStatusMatches','workspaceBreadcrumb','taskRunsPanel','moreMenu','attemptHistory','attemptLabel','disclosureAttributes','attemptDiagnosticPanel','projectRows','PROCESSING_GROUPS','SUBMISSION_PHASE_LABELS','processing'].map(declaration).join('\n'),context);
   vm.runInContext(source.slice(source.indexOf('function canShareOutput('),source.indexOf('async function openShareModal(')),context);
   vm.runInContext(lines.find(line=>line.startsWith("addEventListener('popstate'")),context);
   const route=lines.find(line=>line.trimStart().startsWith("if(['task-gcp','task-settings','task-files','task-return']"));

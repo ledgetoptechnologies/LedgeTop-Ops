@@ -6,6 +6,7 @@ const path = require('node:path');
 const { sanitizeLogMessage } = require('./processingSecurity');
 
 const STATUS = Object.freeze({ 10: 'queued_upstream', 20: 'running', 30: 'failed', 40: 'completed', 50: 'cancelled' });
+const QUEUE_REASONS = new Set(['waiting_node_capacity', 'earlier_job_pending', 'node_unavailable']);
 
 async function boundedText(response,maxBytes) { const reader=response.body.getReader();const chunks=[];let total=0;try{for(;;){const {done,value}=await reader.read();if(done)break;total+=value.byteLength;if(total>maxBytes){await reader.cancel('provider response exceeds size limit');throw new Error('provider response exceeds size limit');}chunks.push(value);}}finally{reader.releaseLock();}return Buffer.concat(chunks.map((c)=>Buffer.from(c))).toString('utf8'); }
 async function boundedJson(response,maxBytes=1024*1024){if(!String(response.headers.get('content-type')||'').includes('json'))throw new Error('provider returned an unexpected content type');return JSON.parse(await boundedText(response,maxBytes));}
@@ -137,6 +138,8 @@ class NodeOdmProvider {
       progress:Math.max(0,Math.min(1,Number(info.progress||0)/100)), imagesCount:info.imagesCount,
       ...Object.fromEntries(['engine','engineVersion'].filter(key=>typeof info[key]==='string'&&/^[A-Za-z0-9._+ -]{1,120}$/.test(info[key])).map(key=>[key,info[key]])) };
     if (info.ledgetopQueueState === 'waiting_for_dispatch') result.queueState = 'waiting_for_dispatch';
+    const queueReason = info.ledgetopQueueReason ?? info.queueReason;
+    if (typeof queueReason === 'string' && QUEUE_REASONS.has(queueReason)) result.queueReason = queueReason;
     if (typeof info.ledgetopNodeId === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(info.ledgetopNodeId)) result.nodeId = info.ledgetopNodeId;
     if (info.ledgetopHeld === true) result.held = true;
     return result;

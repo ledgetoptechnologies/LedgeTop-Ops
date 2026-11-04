@@ -7,7 +7,7 @@ function fixture(api){
  const task={id:'task',datasetId:'dataset',latestAttempt:{id:'attempt',status:'running',progress:.42}};
  const state={token:'session',tasks:[task],taskDetails:{task:{attempt:task.latestAttempt,logs:[{message:'old tail'}]}},gcpWorkspaces:{},expandedTaskId:null};
  const context=vm.createContext({state,api,ACTIVE:new Set(['running']),can:()=>true,esc:value=>String(value).replaceAll('<','&lt;'),refreshGcpWorkspace:async()=>{},content:{querySelector:()=>null},render:()=>{},CSS:{escape:x=>x}});
- for(const name of ['taskOutputStage','logPanel'])vm.runInContext(source.split(/\r?\n/).find(line=>line.startsWith(`function ${name}(`)),context);
+ for(const name of ['queueReasonText','taskOutputStage','logPanel'])vm.runInContext(source.split(/\r?\n/).find(line=>line.startsWith(`function ${name}(`)),context);
  vm.runInContext(source.slice(source.indexOf('const taskDetailRefreshes='),source.indexOf('async function refreshGcpWorkspace(')),context);
  return{state,context,task};
 }
@@ -24,6 +24,24 @@ test('output displays bounded source progress and escaped text, and obeys read p
  assert.doesNotMatch(context.logPanel(task,{id:'a',status:'running'},[]),/<progress/);
  state.taskDetails.task.logsError=true;assert.match(context.logPanel(task,task.latestAttempt,[]),/could not be refreshed/);
  context.can=()=>false;assert.equal(context.logPanel(task,task.latestAttempt,[]),'');
+});
+
+test('queued upstream reason is humanized and takes precedence over stale processing logs',()=>{
+ const {context,task}=fixture();
+ const attempt={...task.latestAttempt,status:'queued_upstream',providerStatus:{queueState:'waiting_for_dispatch',queueReason:'waiting_node_capacity',nodeId:'node-east-01'}};
+ const html=context.logPanel(task,attempt,[{message:'Running odm_meshing'}]);
+ assert.match(html,/Waiting for an eligible processing node\./);
+ assert.match(html,/Assigned processing node: node-east-01/);
+ assert.doesNotMatch(html,/waiting_node_capacity/);
+ assert.doesNotMatch(html,/Building mesh/);
+});
+
+test('unknown upstream queue reasons are not exposed as raw scheduler text',()=>{
+ const {context,task}=fixture();
+ const attempt={...task.latestAttempt,status:'queued_upstream',providerStatus:{queueReason:'raw-provider-error',queueMessage:'\\\\secret\\share'}};
+ const html=context.logPanel(task,attempt,[]);
+ assert.match(html,/Waiting for processing node/);
+ assert.doesNotMatch(html,/raw-provider-error|secret|queueMessage/);
 });
 test('poll is single-flight and retains prior tail on transient failure',async()=>{
  let release,calls=0;const pending=new Promise(resolve=>release=resolve);

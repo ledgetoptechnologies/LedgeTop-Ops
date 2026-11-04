@@ -22,15 +22,15 @@ test('queued upstream stays queued and persists only validated scheduler state',
   db.prepare(`INSERT INTO processing_jobs(id,attempt_id,job_type,status,available_at,lease_owner,lease_expires_at,created_at,updated_at)
     VALUES ('queue-poll',?,'reconcile','leased',?,'worker',?,?,?)`).run(attempt.id,now,leaseExpiresAt,now,now);
   assert.equal(processing.advanceReconcileJob('queue-poll','worker',{
-    status:'queued_upstream',progress:0,queueState:'waiting_for_dispatch',nodeId:'node-east-01',held:true,
+    status:'queued_upstream',progress:0,queueState:'waiting_for_dispatch',queueReason:'waiting_node_capacity',nodeId:'node-east-01',held:true,
   },leaseExpiresAt),true);
-  assert.deepEqual(processing.getAttempt(attempt.id).providerStatus,{queueState:'waiting_for_dispatch',nodeId:'node-east-01',held:true});
+  assert.deepEqual(processing.getAttempt(attempt.id).providerStatus,{queueState:'waiting_for_dispatch',queueReason:'waiting_node_capacity',nodeId:'node-east-01',held:true});
   assert.equal(processing.getTask(task.id).status,'queued');
 
   const next=db.prepare("SELECT id FROM processing_jobs WHERE attempt_id=? AND job_type='reconcile' AND status='pending'").get(attempt.id);
   db.prepare("UPDATE processing_jobs SET status='leased',lease_owner='worker',lease_expires_at=? WHERE id=?").run(leaseExpiresAt,next.id);
   assert.equal(processing.advanceReconcileJob(next.id,'worker',{
-    status:'running',progress:0.2,nodeId:'node-east-01',queueState:'not-a-supported-state',held:'true',
+    status:'running',progress:0.2,nodeId:'node-east-01',queueState:'not-a-supported-state',queueReason:'raw-provider-error',held:'true',
   },leaseExpiresAt),true);
   const running=processing.getAttempt(attempt.id);
   assert.equal(running.status,'running');assert.equal(processing.getTask(task.id).status,'processing');

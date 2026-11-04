@@ -57,9 +57,11 @@ const BUILT_IN_PRESETS = [
 
 function now() { return new Date().toISOString(); }
 function json(value, fallback = {}) { try { return JSON.parse(value); } catch { return fallback; } }
+const QUEUE_REASONS = new Set(['waiting_node_capacity', 'earlier_job_pending', 'node_unavailable']);
 function providerStatusJson(status) {
   const observed = {};
   if (status?.queueState === 'waiting_for_dispatch') observed.queueState = 'waiting_for_dispatch';
+  if (typeof status?.queueReason === 'string' && QUEUE_REASONS.has(status.queueReason)) observed.queueReason = status.queueReason;
   if (typeof status?.nodeId === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(status.nodeId)) observed.nodeId = status.nodeId;
   if (status?.held === true) observed.held = true;
   return Object.keys(observed).length ? JSON.stringify(observed) : null;
