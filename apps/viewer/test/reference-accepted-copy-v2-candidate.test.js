@@ -24,6 +24,10 @@ test('candidate signs the bound complete result closure in persisted order with 
   assert.deepEqual(receipt.objects.map(object => object.id), receipt.acceptedObjectIds);
   assert.equal(receipt.acceptanceReceiptId, fixture.acceptance.receiptId);
   assert.equal(receipt.acceptanceStorageReceiptId, fixture.acceptance.storageReceiptId);
+  assert.equal(receipt.providerTaskId, fixture.expected.providerTaskId);
+  assert.equal(receipt.providerTaskId, receipt.jobId);
+  for (const field of ['sourceManifestSha256', 'derivedManifestSha256', 'sourceReceiptSha256', 'derivedReceiptSha256'])
+    assert.equal(receipt[field], fixture.expected[field], `${field} is signed into the Viewer ACK`);
   assert.equal(receipt.acceptancePayloadSha256, protocol.sha256(Buffer.concat([
     candidate.ACCEPTANCE_DOMAIN, protocol.canonicalBytes(fixture.acceptance),
   ])));
@@ -65,7 +69,21 @@ test('candidate rejects partial or reordered closure, open acceptance objects, n
   value.expected.viewerPrincipalId = 'viewer-\u2603';
   assert.throws(() => signer(value), { code: 'viewer_receipt_v2_binding_invalid' });
 
-  for (const field of ['coordinatorAuthorityId', 'viewerPrincipalId', 'submissionId', 'activationId', 'viewerTaskId', 'viewerAttemptId', 'jobId']) {
+  for (const field of ['sourceManifestSha256', 'derivedManifestSha256', 'sourceReceiptSha256', 'derivedReceiptSha256']) {
+    value = input();
+    value.expected[field] = 'not-a-hash';
+    assert.throws(() => signer(value), { code: 'viewer_receipt_v2_binding_invalid' }, `${field} must be a SHA-256 digest`);
+  }
+
+  value = input();
+  value.expected.providerTaskId = 'another-job';
+  assert.throws(() => signer(value), { code: 'viewer_receipt_v2_binding_invalid' }, 'providerTaskId must bind to jobId');
+
+  value = input();
+  value.expected.submissionId = '99999999-9999-4999-8999-999999999999';
+  assert.throws(() => signer(value), { code: 'viewer_receipt_v2_binding_invalid' }, 'submissionId must bind to viewerAttemptId');
+
+  for (const field of ['coordinatorAuthorityId', 'viewerPrincipalId', 'submissionId', 'activationId', 'viewerTaskId', 'viewerAttemptId', 'providerTaskId', 'jobId']) {
     value = input();
     value.expected[field] = 42;
     assert.throws(() => signer(value), { code: 'viewer_receipt_v2_binding_invalid' }, `${field} must be a string`);
@@ -84,26 +102,20 @@ test('candidate rejects partial or reordered closure, open acceptance objects, n
 });
 
 const processingIntegrationTest = process.env.PROCESSING_SOURCE ? test : test.skip;
-processingIntegrationTest('actual Node candidate receipt verifies and journals through the disabled Processing verifier', () => {
+processingIntegrationTest('actual Node candidate receipt verifies with the current Processing V2 verifier', () => {
   const source = process.env.PROCESSING_SOURCE;
   const helper = path.join(__dirname, 'helpers', 'accepted-copy-v2-candidate-fixture.js');
   const generated = spawnSync(process.execPath, [helper], { encoding: 'utf8', timeout: 10_000 });
   assert.equal(generated.status, 0, generated.stderr);
-  const script = String.raw`import base64,json,tempfile,uuid
-from pathlib import Path
-from processing import viewer_copy_journal_candidate as journal
+  const script = String.raw`import json
+from processing import viewer_copy_receipt
 value=json.load(__import__('sys').stdin)
-raw=base64.b64decode(value['rawBase64'], validate=True)
-with tempfile.TemporaryDirectory(prefix='ltds-copy-journal-') as folder:
- token=uuid.uuid4().hex
- Path(folder,'.fixture-owner').write_text(token,encoding='ascii')
- db=journal._open_fixture(Path(folder,'journal.sqlite'),token)
- try:
-  args=dict(expected=value['expected'],result_manifest=value['resultManifest'],trusted_keys=value['trustedKeys'])
-  first=journal._journal_fixture(db,raw,**args)
-  replay=journal._journal_fixture(db,raw,**args)
-  print(json.dumps({'first':first,'replay':replay,'records':db.execute('SELECT COUNT(*) FROM fixture_copies').fetchone()[0]}))
- finally: db.close()`;
+expected_fields=viewer_copy_receipt.BINDING_FIELDS
+expected={key:value['expected'][key] for key in expected_fields}
+trust=value['trustedKeys']['viewer-test-key']
+trusted=[{'environment':trust['environment'],'issuerId':trust['issuerId'],'keyId':'viewer-test-key','principalId':trust['viewerPrincipalId'],'publicKeyPem':trust['publicKeyPem']}]
+checked=viewer_copy_receipt.validate_and_verify(value['viewerReceipt'],acceptance=value['acceptance'],result_manifest=value['resultManifest'],expected_binding=expected,trusted_keys=trusted)
+print(json.dumps({'protocol':checked['protocol'],'acceptedObjectIds':checked['acceptedObjectIds']}))`;
   const checked = spawnSync('python', ['-c', script], {
     cwd: source,
     encoding: 'utf8',
@@ -112,5 +124,5 @@ with tempfile.TemporaryDirectory(prefix='ltds-copy-journal-') as folder:
     env: { ...process.env, PYTHONPATH: source },
   });
   assert.equal(checked.status, 0, checked.stderr);
-  assert.deepEqual(JSON.parse(checked.stdout), { first: 'stored', replay: 'replay', records: 1 });
+  assert.deepEqual(JSON.parse(checked.stdout), { protocol: 'ltds-viewer-accepted-copy-v2', acceptedObjectIds: ['object-b', 'object-a'] });
 });

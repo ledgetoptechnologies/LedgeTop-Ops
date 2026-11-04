@@ -105,6 +105,27 @@ const clientPortalBaseUrl = normalizedOrigin(process.env.CLIENT_PORTAL_BASE_URL 
   ? (publicBaseUrl === 'https://viewer.ledgetopdroneservices.com' ? 'https://portal.ledgetop.app' : '')
   : process.env.CLIENT_PORTAL_BASE_URL);
 
+const referenceSourceIntake = {
+  enabled: bool(process.env.VIEWER_REFERENCE_SOURCE_INTAKE_ENABLED, false),
+  environment: String(process.env.VIEWER_REFERENCE_SOURCE_INTAKE_ENVIRONMENT || deploymentEnvironment).trim(),
+  origin: normalizedOrigin(process.env.VIEWER_REFERENCE_COORDINATOR_ORIGIN || ''),
+  bearerToken: String(process.env.VIEWER_REFERENCE_COORDINATOR_BEARER_TOKEN || ''),
+  providerId: String(process.env.VIEWER_REFERENCE_COORDINATOR_PROVIDER_ID || '').trim(),
+  authorityId: String(process.env.VIEWER_REFERENCE_COORDINATOR_AUTHORITY_ID || '').trim(),
+  principalId: String(process.env.VIEWER_REFERENCE_SOURCE_PRINCIPAL_ID || '').trim(),
+  attestationIssuerId: String(process.env.VIEWER_REFERENCE_SOURCE_ATTESTATION_ISSUER_ID || '').trim(),
+  attestationKeyId: String(process.env.VIEWER_REFERENCE_SOURCE_ATTESTATION_KEY_ID || '').trim(),
+  attestationPrivateKeyPem: String(process.env.VIEWER_REFERENCE_SOURCE_ATTESTATION_PRIVATE_KEY_PEM || ''),
+  snapshotIssuerId: String(process.env.VIEWER_SOURCE_SNAPSHOT_ISSUER_ID || '').trim(),
+  snapshotKeyId: String(process.env.VIEWER_SOURCE_SNAPSHOT_KEY_ID || '').trim(),
+  snapshotPrivateKeyPem: String(process.env.VIEWER_SOURCE_SNAPSHOT_PRIVATE_KEY_PEM || ''),
+  snapshotPublicKeyPem: String(process.env.VIEWER_SOURCE_SNAPSHOT_PUBLIC_KEY_PEM || ''),
+  copyIssuerId: String(process.env.VIEWER_REFERENCE_COPY_ISSUER_ID || '').trim(),
+  copyKeyId: String(process.env.VIEWER_REFERENCE_COPY_KEY_ID || '').trim(),
+  copyPrivateKeyPem: String(process.env.VIEWER_REFERENCE_COPY_PRIVATE_KEY_PEM || ''),
+  copyPublicKeyPem: String(process.env.VIEWER_REFERENCE_COPY_PUBLIC_KEY_PEM || ''),
+};
+
 const config = {
   measurementCalculationsEnabled: bool(process.env.MEASUREMENT_CALCULATIONS_ENABLED, true),
   measurementMaxCells: Math.min(16_000_000, positiveInteger(process.env.MEASUREMENT_MAX_CELLS, 2_000_000)),
@@ -174,6 +195,7 @@ const config = {
   referenceAcceptanceReceiptKeyId: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_RECEIPT_KEY_ID || '').trim(),
   referenceAcceptanceReceiptPrivateKeyPem: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_RECEIPT_PRIVATE_KEY_PEM || ''),
   referenceAcceptanceEnvironment: String(process.env.VIEWER_REFERENCE_ACCEPTANCE_ENVIRONMENT || deploymentEnvironment).trim(),
+  referenceSourceIntake,
   processingRoot,
   datasetsMount: process.env.DATASETS_MOUNT || path.join(processingRoot, 'datasets'),
   modelsMount: process.env.MODELS_MOUNT || path.join(processingRoot, 'models'),
@@ -306,6 +328,70 @@ function validate() {
     const database = path.resolve(config.referenceAcceptanceDatabasePath);
     if (root && (database === root || database.startsWith(root + path.sep)))
       problems.push('VIEWER_REFERENCE_ACCEPTANCE_DATABASE_PATH must be outside the accepted-copy root');
+  }
+  if (config.referenceSourceIntake.enabled) {
+    const source = config.referenceSourceIntake;
+    if (!config.processingPlatformEnabled)
+      problems.push('PROCESSING_PLATFORM_ENABLED must be true when Viewer reference source intake is enabled');
+    if (!config.deploymentEnvironmentExplicit)
+      problems.push('VIEWER_DEPLOYMENT_ENVIRONMENT must be set explicitly when Viewer reference source intake is enabled');
+    if (!['staging', 'production'].includes(source.environment)
+        || source.environment !== config.deploymentEnvironment)
+      problems.push('VIEWER_REFERENCE_SOURCE_INTAKE_ENVIRONMENT must match VIEWER_DEPLOYMENT_ENVIRONMENT');
+    if (!source.origin || !/^https:\/\//.test(source.origin))
+      problems.push('VIEWER_REFERENCE_COORDINATOR_ORIGIN must be an exact HTTPS origin');
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(source.providerId))
+      problems.push('VIEWER_REFERENCE_COORDINATOR_PROVIDER_ID must identify the dedicated Processing coordinator provider');
+    if (source.bearerToken.length < 32 || source.bearerToken.length > 4096 || /[^\x21-\x7e]/.test(source.bearerToken))
+      problems.push('VIEWER_REFERENCE_COORDINATOR_BEARER_TOKEN must be a separate bounded printable secret');
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(source.authorityId))
+      problems.push('VIEWER_REFERENCE_COORDINATOR_AUTHORITY_ID must be the pinned Processing authority UUID');
+    for (const [name, value] of [['VIEWER_REFERENCE_SOURCE_PRINCIPAL_ID', source.principalId],
+      ['VIEWER_REFERENCE_SOURCE_ATTESTATION_ISSUER_ID', source.attestationIssuerId],
+      ['VIEWER_REFERENCE_SOURCE_ATTESTATION_KEY_ID', source.attestationKeyId],
+      ['VIEWER_SOURCE_SNAPSHOT_ISSUER_ID', source.snapshotIssuerId], ['VIEWER_SOURCE_SNAPSHOT_KEY_ID', source.snapshotKeyId],
+      ['VIEWER_REFERENCE_COPY_ISSUER_ID', source.copyIssuerId], ['VIEWER_REFERENCE_COPY_KEY_ID', source.copyKeyId]]) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)) problems.push(`${name} must be a valid pinned identifier`);
+    }
+    let attestationPrivateKey = null;
+    try {
+      attestationPrivateKey = crypto.createPrivateKey(source.attestationPrivateKeyPem.replace(/\\n/g, '\n'));
+      if (attestationPrivateKey.asymmetricKeyType !== 'ed25519') throw new Error();
+    } catch { problems.push('VIEWER_REFERENCE_SOURCE_ATTESTATION_PRIVATE_KEY_PEM must be a valid Ed25519 private key'); }
+    let snapshotPublicKey = null, snapshotPrivateKey = null, copyPrivateKey = null, copyPublicKey = null;
+    try {
+      snapshotPrivateKey = crypto.createPrivateKey(source.snapshotPrivateKeyPem.replace(/\\n/g, '\n'));
+      if (snapshotPrivateKey.asymmetricKeyType !== 'ed25519') throw new Error();
+    } catch { problems.push('VIEWER_SOURCE_SNAPSHOT_PRIVATE_KEY_PEM must be a valid Ed25519 private key'); }
+    try {
+      snapshotPublicKey = crypto.createPublicKey(source.snapshotPublicKeyPem.replace(/\\n/g, '\n'));
+      if (snapshotPublicKey.asymmetricKeyType !== 'ed25519') throw new Error();
+    } catch { problems.push('VIEWER_SOURCE_SNAPSHOT_PUBLIC_KEY_PEM must be a valid Ed25519 public key'); }
+    try {
+      copyPrivateKey = crypto.createPrivateKey(source.copyPrivateKeyPem.replace(/\\n/g, '\n'));
+      if (copyPrivateKey.asymmetricKeyType !== 'ed25519') throw new Error();
+    } catch { problems.push('VIEWER_REFERENCE_COPY_PRIVATE_KEY_PEM must be a valid Ed25519 private key'); }
+    try {
+      copyPublicKey = crypto.createPublicKey(source.copyPublicKeyPem.replace(/\\n/g, '\n'));
+      if (copyPublicKey.asymmetricKeyType !== 'ed25519') throw new Error();
+    } catch { problems.push('VIEWER_REFERENCE_COPY_PUBLIC_KEY_PEM must be a valid Ed25519 public key'); }
+    if (attestationPrivateKey && snapshotPublicKey && snapshotPrivateKey && copyPublicKey && copyPrivateKey) {
+      try {
+        const attestationPublic = crypto.createPublicKey(attestationPrivateKey).export({ type: 'spki', format: 'der' });
+        const snapshotPublic = snapshotPublicKey.export({ type: 'spki', format: 'der' });
+        const copyPublic = copyPublicKey.export({ type: 'spki', format: 'der' });
+        if (attestationPublic.equals(snapshotPublic)) problems.push('Viewer source attestation and source snapshot keys must be distinct');
+        if (attestationPublic.equals(copyPublic) || snapshotPublic.equals(copyPublic)) problems.push('Viewer accepted-copy, source attestation, and source snapshot keys must be distinct');
+        const derivedSnapshotPublic = crypto.createPublicKey(snapshotPrivateKey).export({ type: 'spki', format: 'der' });
+        if (!derivedSnapshotPublic.equals(snapshotPublic)) problems.push('VIEWER_SOURCE_SNAPSHOT_PRIVATE_KEY_PEM must match VIEWER_SOURCE_SNAPSHOT_PUBLIC_KEY_PEM');
+        const derivedCopyPublic = crypto.createPublicKey(copyPrivateKey).export({ type: 'spki', format: 'der' });
+        if (!derivedCopyPublic.equals(copyPublic)) problems.push('VIEWER_REFERENCE_COPY_PRIVATE_KEY_PEM must match VIEWER_REFERENCE_COPY_PUBLIC_KEY_PEM');
+      } catch { problems.push('Viewer source attestation, source snapshot, and accepted-copy keys could not be compared'); }
+    }
+    const knownSecrets = [config.serviceAuthSecret, ...Object.values(config.serviceAuthKeys || {}),
+      ...Object.values(config.processingProviderTokens), ...Object.values(config.providerCredentialsKeys)];
+    if (source.bearerToken && knownSecrets.includes(source.bearerToken))
+      problems.push('VIEWER_REFERENCE_COORDINATOR_BEARER_TOKEN must be disjoint from existing credentials');
   }
   if(Boolean(config.viewerEventPreviousKeyId)!==Boolean(config.viewerEventPreviousSecret))problems.push('VIEWER_EVENT_PREVIOUS_KEY_ID and VIEWER_EVENT_PREVIOUS_SECRET must be configured together');
   if(config.viewerEventPreviousSecret&&config.viewerEventPreviousSecret.length<32)problems.push('VIEWER_EVENT_PREVIOUS_SECRET must contain at least 32 characters');

@@ -3,6 +3,8 @@ const test=require('node:test'),assert=require('node:assert/strict'),crypto=requ
 const {openDatabase}=require('../server/database');
 const {ProcessingRepository}=require('../server/processingRepository');
 const {processOne}=require('../server/processingWorker');
+const {PreparedSubmissionOutbox,canonicalizeJcs}=require('../server/preparedSubmissionOutbox');
+const ReferenceProtocol=require('../server/referenceProtocol');
 const sha=value=>crypto.createHash('sha256').update(value).digest('hex');
 
 function fixture(t,attemptCount=0){
@@ -57,6 +59,81 @@ test('first upload failure at retry threshold becomes a durable hold instead of 
   assert.equal(f.processing.hasUnresolvedSubmission(f.attempt.id),true);
   assert.throws(()=>f.processing.cancelAttempt(f.attempt.id,'ops:test'),{code:'provider_execution_unresolved'});
   assert.throws(()=>f.processing.createAttempt({taskId:f.task.id,providerId:f.processing.getProvider(f.attempt.providerId).id}),{code:'provider_execution_unresolved'});
+});
+
+test('configured coordinator runtime unavailability holds submission without consuming retries or falling back to NodeODM',async t=>{
+  const f=fixture(t,4),deps={...f.deps(),config:{referenceSourceIntake:{enabled:true,providerId:f.attempt.providerId}}};
+  assert.equal(await processOne(deps,'worker-coordinator-hold'),true);
+  const attempt=f.processing.getAttempt(f.attempt.id),job=f.db.prepare('SELECT * FROM processing_jobs WHERE id=?').get(f.job.id);
+  assert.equal(f.providerState.statusCalls,0);assert.equal(f.providerState.initializations,0);assert.equal(f.providerState.uploadCalls,0);
+  assert.equal(attempt.errorCode,'reference_coordinator_unavailable');
+  assert.equal(job.error_code,'reference_coordinator_unavailable');assert.equal(job.status,'pending');assert.equal(job.attempt_count,4);
+  assert.equal(f.processing.hasUnresolvedSubmission(f.attempt.id),true);
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM dataset_files WHERE dataset_id=?').get(f.dataset.id).n,1);
+
+  f.reopen();f.db.prepare("UPDATE processing_jobs SET available_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(f.job.id);
+  const resumed={...f.deps(),config:{referenceSourceIntake:{enabled:true,providerId:f.attempt.providerId}}};
+  assert.equal(await processOne(resumed,'worker-coordinator-after-reopen'),true);
+  const resumedAttempt=f.processing.getAttempt(f.attempt.id),resumedJob=f.db.prepare('SELECT * FROM processing_jobs WHERE id=?').get(f.job.id);
+  assert.equal(f.providerState.statusCalls,0);assert.equal(f.providerState.initializations,0);assert.equal(f.providerState.uploadCalls,0);
+  assert.equal(resumedAttempt.errorCode,'reference_coordinator_unavailable');
+  assert.equal(resumedJob.status,'pending');assert.equal(resumedJob.attempt_count,4);
+  assert.equal(f.processing.hasUnresolvedSubmission(f.attempt.id),true);
+});
+
+test('V2 submission persists one immutable coordinator request and resumes after restart without V1 fallback',async t=>{
+  const f=fixture(t),snapshotKeys=crypto.generateKeyPairSync('ed25519'),attestationKeys=crypto.generateKeyPairSync('ed25519');
+  let outbox=new PreparedSubmissionOutbox(f.db),uploadCalls=0,requestBytes=null,adapterCalls=0;
+  const source={enabled:true,providerId:f.attempt.providerId,origin:'https://processing.staging.example',authorityId:'11111111-1111-4111-8111-111111111111',
+    principalId:'viewer-staging',environment:'staging',snapshotIssuerId:'snapshot-staging',snapshotKeyId:'snapshot-v1',attestationIssuerId:'viewer-staging',attestationKeyId:'attestation-v1'};
+  const caps=ReferenceProtocol.createCapabilities('staging');
+  const sourceIntake={enabled:true,maxObjects:10000},viewerAcceptance={enabled:true};
+  const snapshotSigner={issuerId:source.snapshotIssuerId,keyId:source.snapshotKeyId,sign:message=>crypto.sign(null,message,snapshotKeys.privateKey)};
+  const attestationSigner={issuerId:source.attestationIssuerId,keyId:source.attestationKeyId,publicKey:attestationKeys.publicKey,sign:message=>crypto.sign(null,message,attestationKeys.privateKey)};
+  const client={
+    getCapabilities:async()=>({capabilities:caps,sourceIntake,viewerAcceptance}),
+    createOrReplay:async(intent,{localJobId,owner})=>{
+      const saved=outbox.assertCurrentLease({attemptId:f.attempt.id,localJobId,owner});
+      assert.equal(saved.sourceIntakeCanonical,intent.sourceIntakeCanonical);
+      if(requestBytes===null)requestBytes=saved.sourceIntakeCanonical;else assert.equal(saved.sourceIntakeCanonical,requestBytes);
+      if(saved.state==='accepted')return saved.remoteBinding;
+      const request=JSON.parse(saved.sourceIntakeCanonical),response={jobId:request.providerTaskId,attemptId:request.submissionId,providerTaskId:request.providerTaskId,
+        generation:1,environment:'staging',manifestSha256:request.manifest.sha256,pipelineManifestSha256:request.manifest.sha256,
+        sourceManifestSha256:request.sourceManifest.sha256,derivedManifestSha256:request.derivedManifest.sha256,
+        pipelineDigest:request.sourceAttestation.proof.pipelineDigest,status:'queued',phase:'source_receiving',sourceState:'receiving',derivedState:'receiving',
+        sourceReceipt:null,derivedReceipt:null,sourceReceiptSha256:null,derivedReceiptSha256:null};
+      const accepted=outbox.acceptSourceIntakeBinding(f.attempt.id,response,{environment:'staging',localJobId,owner});
+      return accepted.remoteBinding;
+    },
+    uploadClosure:async({binding,manifests,derivedBytes,localJobId,owner,openSourceStream})=>{
+      uploadCalls++;
+      const first=manifests.sourceManifest.objects[0],stream=await openSourceStream(first),chunks=[];
+      for await(const chunk of stream)chunks.push(chunk);
+      assert.equal(Buffer.concat(chunks).toString(),'jpeg');assert.equal(binding.jobId,f.attempt.providerTaskId);
+      assert.equal(derivedBytes.size,0);
+      if(uploadCalls===1)throw Object.assign(new Error('synthetic transport loss after ACK'),{code:'source_intake_upload_uncertain'});
+      const request=JSON.parse(outbox.getIntent(f.attempt.id).sourceIntakeCanonical),digest=value=>crypto.createHash('sha256').update(canonicalizeJcs(value)).digest('hex');
+      const sourceReceipt={receiptType:'source_retention',receiptId:crypto.randomUUID()},derivedReceipt={receiptType:'attempt_derived_input',receiptId:crypto.randomUUID()};
+      return outbox.persistSourceIntakeCompletion(f.attempt.id,{jobId:binding.jobId,attemptId:f.attempt.id,providerTaskId:f.attempt.providerTaskId,
+        generation:binding.generation,environment:'staging',sourceManifestSha256:request.sourceManifest.sha256,derivedManifestSha256:request.derivedManifest.sha256,
+        pipelineManifestSha256:request.manifest.sha256,pipelineDigest:request.sourceAttestation.proof.pipelineDigest,status:'queued',phase:'queued',
+        sourceState:'retained',derivedState:'retained',sourceReceipt,derivedReceipt,sourceReceiptSha256:digest(sourceReceipt),derivedReceiptSha256:digest(derivedReceipt)},
+        {environment:'staging',localJobId,owner});
+    },
+  };
+  const deps=()=>({processing:f.processing,storage:f.deps().storage,config:{referenceSourceIntake:source},providerCredentials:{},
+    sourceIntake:{client,outbox,snapshotPublicKey:snapshotKeys.publicKey,snapshotSigner,attestationSigner},adapterFactory:()=>{adapterCalls++;throw new Error('V1 adapter must not be constructed');}});
+  assert.equal(await processOne(deps(),'worker-v2-first'),true);
+  let attempt=f.processing.getAttempt(f.attempt.id),job=f.db.prepare('SELECT * FROM processing_jobs WHERE id=?').get(f.job.id);
+  assert.equal(attempt.status,'queued_upstream');assert.equal(job.status,'pending');assert.equal(job.attempt_count,0);
+  assert.equal(uploadCalls,1,JSON.stringify(f.processing.listLogs(f.attempt.id)));assert.equal(adapterCalls,0);assert.equal(outbox.getIntent(f.attempt.id).state,'accepted');
+
+  f.reopen();outbox=new PreparedSubmissionOutbox(f.db);f.db.prepare("UPDATE processing_jobs SET available_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(f.job.id);
+  assert.equal(await processOne(deps(),'worker-v2-after-reopen'),true);
+  attempt=f.processing.getAttempt(f.attempt.id);job=f.db.prepare('SELECT * FROM processing_jobs WHERE id=?').get(f.job.id);
+  assert.equal(attempt.status,'queued_upstream');assert.equal(job.status,'complete');assert.equal(job.attempt_count,1);
+  assert.equal(uploadCalls,2);assert.equal(adapterCalls,0);assert.equal(outbox.getIntent(f.attempt.id).sourceIntakeCanonical,requestBytes);
+  assert.ok(f.db.prepare("SELECT 1 FROM processing_jobs WHERE attempt_id=? AND job_type='reconcile' AND status='pending'").get(f.attempt.id));
 });
 
 test('an existing provider task in a new local phase is held instead of removed',async t=>{

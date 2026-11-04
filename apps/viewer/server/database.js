@@ -2333,6 +2333,101 @@ const MIGRATIONS = [
       WHEN NEW.status='released' AND EXISTS(SELECT 1 FROM candidate_selected_source_generations WHERE snapshot_id=OLD.snapshot_id)
       BEGIN SELECT RAISE(ABORT,'candidate generation retained'); END;
   `},
+  {version:71,name:'durable_v2_source_intake_request_outbox',sql:`
+    ALTER TABLE viewer_prepared_submission_outbox ADD COLUMN source_intake_canonical TEXT
+      CHECK(source_intake_canonical IS NULL OR (json_valid(source_intake_canonical) AND length(source_intake_canonical)<=4194304));
+    ALTER TABLE viewer_prepared_submission_outbox ADD COLUMN source_intake_sha256 TEXT
+      CHECK(source_intake_sha256 IS NULL OR (length(source_intake_sha256)=64 AND source_intake_sha256 NOT GLOB '*[^0-9a-f]*'));
+    CREATE TRIGGER viewer_source_intake_request_immutable
+      BEFORE UPDATE OF source_intake_canonical,source_intake_sha256 ON viewer_prepared_submission_outbox
+      WHEN NOT (OLD.state='prepared' AND OLD.source_intake_canonical IS NULL AND OLD.source_intake_sha256 IS NULL
+        AND NEW.source_intake_canonical IS NOT NULL AND NEW.source_intake_sha256 IS NOT NULL)
+        AND (NEW.source_intake_canonical IS NOT OLD.source_intake_canonical
+          OR NEW.source_intake_sha256 IS NOT OLD.source_intake_sha256)
+      BEGIN SELECT RAISE(ABORT,'prepared source intake request is immutable'); END;
+    CREATE TRIGGER viewer_source_intake_request_pair
+      BEFORE UPDATE OF source_intake_canonical,source_intake_sha256 ON viewer_prepared_submission_outbox
+      WHEN (NEW.source_intake_canonical IS NULL) != (NEW.source_intake_sha256 IS NULL)
+      BEGIN SELECT RAISE(ABORT,'source intake request and digest must be stored together'); END;
+  `},
+  {version:72,name:'accepted_v2_source_intake_binding_contract',sql:`
+    CREATE TRIGGER viewer_source_intake_binding_requires_request
+      BEFORE UPDATE OF state,remote_binding_json ON viewer_prepared_submission_outbox
+      WHEN NEW.remote_binding_json IS NOT NULL
+        AND json_extract(NEW.remote_binding_json,'$.protocol')='ltds-viewer-source-intake-binding-v2'
+        AND OLD.source_intake_canonical IS NULL
+      BEGIN SELECT RAISE(ABORT,'source intake binding requires persisted request'); END;
+  `},
+  {version:73,name:'durable_v2_source_intake_receipt_outbox',sql:`
+    ALTER TABLE viewer_prepared_submission_outbox ADD COLUMN source_intake_completion_canonical TEXT
+      CHECK(source_intake_completion_canonical IS NULL OR (json_valid(source_intake_completion_canonical) AND length(source_intake_completion_canonical)<=8388608));
+    ALTER TABLE viewer_prepared_submission_outbox ADD COLUMN source_intake_completion_sha256 TEXT
+      CHECK(source_intake_completion_sha256 IS NULL OR (length(source_intake_completion_sha256)=64 AND source_intake_completion_sha256 NOT GLOB '*[^0-9a-f]*'));
+    CREATE TRIGGER viewer_source_intake_completion_immutable
+      BEFORE UPDATE OF source_intake_completion_canonical,source_intake_completion_sha256 ON viewer_prepared_submission_outbox
+      WHEN NOT (OLD.state='accepted' AND OLD.source_intake_completion_canonical IS NULL AND OLD.source_intake_completion_sha256 IS NULL
+        AND NEW.source_intake_completion_canonical IS NOT NULL AND NEW.source_intake_completion_sha256 IS NOT NULL)
+        AND (NEW.source_intake_completion_canonical IS NOT OLD.source_intake_completion_canonical
+          OR NEW.source_intake_completion_sha256 IS NOT OLD.source_intake_completion_sha256)
+      BEGIN SELECT RAISE(ABORT,'source intake completion is immutable'); END;
+    CREATE TRIGGER viewer_source_intake_completion_pair
+      BEFORE UPDATE OF source_intake_completion_canonical,source_intake_completion_sha256 ON viewer_prepared_submission_outbox
+      WHEN (NEW.source_intake_completion_canonical IS NULL) != (NEW.source_intake_completion_sha256 IS NULL)
+      BEGIN SELECT RAISE(ABORT,'source intake completion and digest must be stored together'); END;
+    CREATE TRIGGER viewer_source_intake_completion_requires_binding
+      BEFORE UPDATE OF source_intake_completion_canonical ON viewer_prepared_submission_outbox
+      WHEN NEW.source_intake_completion_canonical IS NOT NULL
+        AND (NEW.state<>'accepted' OR json_extract(NEW.remote_binding_json,'$.protocol')<>'ltds-viewer-source-intake-binding-v2')
+      BEGIN SELECT RAISE(ABORT,'source intake completion requires accepted V2 binding'); END;
+  `},
+  {version:74,name:'durable_v2_accepted_result_copy_outbox',sql:`
+    ALTER TABLE viewer_prepared_submission_outbox ADD COLUMN result_manifest_canonical TEXT
+      CHECK(result_manifest_canonical IS NULL OR (json_valid(result_manifest_canonical) AND length(result_manifest_canonical)<=16777216));
+    ALTER TABLE viewer_prepared_submission_outbox ADD COLUMN result_manifest_sha256 TEXT
+      CHECK(result_manifest_sha256 IS NULL OR (length(result_manifest_sha256)=64 AND result_manifest_sha256 NOT GLOB '*[^0-9a-f]*'));
+    ALTER TABLE viewer_prepared_submission_outbox ADD COLUMN copy_request_canonical TEXT
+      CHECK(copy_request_canonical IS NULL OR (json_valid(copy_request_canonical) AND length(copy_request_canonical)<=16777216));
+    ALTER TABLE viewer_prepared_submission_outbox ADD COLUMN copy_request_sha256 TEXT
+      CHECK(copy_request_sha256 IS NULL OR (length(copy_request_sha256)=64 AND copy_request_sha256 NOT GLOB '*[^0-9a-f]*'));
+    ALTER TABLE viewer_prepared_submission_outbox ADD COLUMN copy_ack_canonical TEXT
+      CHECK(copy_ack_canonical IS NULL OR (json_valid(copy_ack_canonical) AND length(copy_ack_canonical)<=16777216));
+    ALTER TABLE viewer_prepared_submission_outbox ADD COLUMN copy_ack_sha256 TEXT
+      CHECK(copy_ack_sha256 IS NULL OR (length(copy_ack_sha256)=64 AND copy_ack_sha256 NOT GLOB '*[^0-9a-f]*'));
+    CREATE TRIGGER viewer_source_result_manifest_immutable
+      BEFORE UPDATE OF result_manifest_canonical,result_manifest_sha256 ON viewer_prepared_submission_outbox
+      WHEN NOT (OLD.state='accepted' AND OLD.source_intake_completion_canonical IS NOT NULL
+        AND OLD.result_manifest_canonical IS NULL AND OLD.result_manifest_sha256 IS NULL
+        AND NEW.result_manifest_canonical IS NOT NULL AND NEW.result_manifest_sha256 IS NOT NULL)
+        AND (NEW.result_manifest_canonical IS NOT OLD.result_manifest_canonical
+          OR NEW.result_manifest_sha256 IS NOT OLD.result_manifest_sha256)
+      BEGIN SELECT RAISE(ABORT,'accepted result manifest is immutable'); END;
+    CREATE TRIGGER viewer_source_result_manifest_pair
+      BEFORE UPDATE OF result_manifest_canonical,result_manifest_sha256 ON viewer_prepared_submission_outbox
+      WHEN (NEW.result_manifest_canonical IS NULL) != (NEW.result_manifest_sha256 IS NULL)
+      BEGIN SELECT RAISE(ABORT,'result manifest and digest must be stored together'); END;
+    CREATE TRIGGER viewer_source_copy_request_immutable
+      BEFORE UPDATE OF copy_request_canonical,copy_request_sha256 ON viewer_prepared_submission_outbox
+      WHEN NOT (OLD.state='accepted' AND NEW.result_manifest_canonical IS NOT NULL
+        AND OLD.copy_request_canonical IS NULL AND OLD.copy_request_sha256 IS NULL
+        AND NEW.copy_request_canonical IS NOT NULL AND NEW.copy_request_sha256 IS NOT NULL)
+        AND (NEW.copy_request_canonical IS NOT OLD.copy_request_canonical
+          OR NEW.copy_request_sha256 IS NOT OLD.copy_request_sha256)
+      BEGIN SELECT RAISE(ABORT,'accepted result copy request is immutable'); END;
+    CREATE TRIGGER viewer_source_copy_request_pair
+      BEFORE UPDATE OF copy_request_canonical,copy_request_sha256 ON viewer_prepared_submission_outbox
+      WHEN (NEW.copy_request_canonical IS NULL) != (NEW.copy_request_sha256 IS NULL)
+      BEGIN SELECT RAISE(ABORT,'copy request and digest must be stored together'); END;
+    CREATE TRIGGER viewer_source_copy_ack_immutable
+      BEFORE UPDATE OF copy_ack_canonical,copy_ack_sha256 ON viewer_prepared_submission_outbox
+      WHEN NOT (OLD.copy_request_canonical IS NOT NULL AND OLD.copy_ack_canonical IS NULL
+        AND OLD.copy_ack_sha256 IS NULL AND NEW.copy_ack_canonical IS NOT NULL AND NEW.copy_ack_sha256 IS NOT NULL)
+        AND (NEW.copy_ack_canonical IS NOT OLD.copy_ack_canonical OR NEW.copy_ack_sha256 IS NOT OLD.copy_ack_sha256)
+      BEGIN SELECT RAISE(ABORT,'accepted result copy acknowledgement is immutable'); END;
+    CREATE TRIGGER viewer_source_copy_ack_pair
+      BEFORE UPDATE OF copy_ack_canonical,copy_ack_sha256 ON viewer_prepared_submission_outbox
+      WHEN (NEW.copy_ack_canonical IS NULL) != (NEW.copy_ack_sha256 IS NULL)
+      BEGIN SELECT RAISE(ABORT,'copy acknowledgement and digest must be stored together'); END;
+  `},
 ];
 
 function applyMigrations(database) {

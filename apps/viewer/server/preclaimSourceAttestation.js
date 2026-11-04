@@ -9,10 +9,10 @@ const { canonicalEnvelope, canonicalizeJcs } = require('./preparedSubmissionOutb
 const { PreparedSubmissionOutbox } = require('./preparedSubmissionOutbox');
 const { ProcessingRepository } = require('./processingRepository');
 const { getHeldSourceSnapshot, verifyHeldSourceSnapshot } = require('./heldSourceSnapshot');
-const { captureHeldSourceExport } = require('./viewerPagedSourceExport');
-const { fileFacts } = require('./viewerPagedSourceExport');
+const { captureHeldSourceExport, fileFacts } = require('./viewerPagedSourceExport');
+const { buildSourceIntakeManifests } = require('./sourceIntakeManifestV2');
 
-const PROTOCOL = 'ltds-preclaim-source-attestation-v1';
+const PROTOCOL = 'ltds-preclaim-source-attestation-v2';
 const DOMAIN = Buffer.from(`${PROTOCOL}\0`, 'ascii');
 const MAX_PROOF_BYTES = 8192;
 const MAX_SOURCE_STREAM_BYTES = 12 * 1024 * 1024;
@@ -20,8 +20,9 @@ const PHOTO = /\.(?:jpe?g|png|tiff?|dng|raw|heic)$/i;
 const PROVIDER_INPUT = /\.(?:txt|geojson|json|zip|las|laz)$/i;
 const PROOF_FIELDS = Object.freeze([
   'schemaVersion', 'protocol', 'issuerId', 'keyId', 'authorityId', 'principalId',
-  'environment', 'submissionId', 'viewerTaskId', 'viewerAttemptId', 'activationId',
-  'preparedEnvelopeSha256', 'manifestSha256', 'pipelineDigest', 'sourceSnapshotSha256',
+  'environment', 'submissionId', 'viewerTaskId', 'providerTaskId', 'viewerAttemptId', 'activationId',
+  'preparedEnvelopeSha256', 'sourceSnapshotSha256', 'sourceManifestSha256',
+  'derivedManifestSha256', 'pipelineManifestSha256', 'pipelineDigest',
 ]);
 const SNAPSHOT_FIELDS = Object.freeze([
   'protocol', 'snapshotId', 'issuerId', 'keyId', 'createdAt', 'datasetId',
@@ -194,13 +195,9 @@ function buildPreclaimSourceAttestation({
   if (signerPublicBytes.equals(snapshotPublicBytes)) fail('preclaim_signer_key_reused');
 
   const intent = outbox.getIntent(attemptId);
-  if (!intent || intent.state !== 'accepted' || !intent.remoteBinding) fail('preclaim_submission_not_accepted');
+  if (!intent || intent.state !== 'prepared' || intent.remoteBinding) fail('preclaim_submission_not_prepared');
   if (intent.coordinatorAuthorityId !== authorityId || intent.authenticatedPrincipal !== principalId
       || intent.environment !== environment) fail('preclaim_scope_mismatch');
-  const remote = intent.remoteBinding;
-  if (remote.authorityId !== authorityId || remote.environment !== environment
-      || remote.submissionId !== intent.submissionId || remote.viewerTaskId !== intent.viewerTaskId
-      || remote.viewerAttemptId !== intent.viewerAttemptId) fail('preclaim_remote_binding_mismatch');
 
   const snapshotRow = processing.database.prepare('SELECT snapshot_id FROM viewer_source_snapshots WHERE attempt_id=?').get(attemptId);
   if (!snapshotRow) fail('preclaim_snapshot_unavailable');
@@ -233,42 +230,80 @@ function buildPreclaimSourceAttestation({
   if (!canonical.bytes.equals(envelopeBytes) || canonical.sha256 !== intent.envelopeSha256
       || envelope.viewerTaskId !== intent.viewerTaskId || envelope.viewerAttemptId !== attemptId
       || envelope.submission.submissionId !== intent.submissionId) fail('preclaim_envelope_binding_mismatch');
-  try { ReferenceProtocol.validateSubmission(envelope.submission, { capabilities, trustedLidarEvidence }); }
+  let validatedSubmission;
+  try { validatedSubmission = ReferenceProtocol.validateSubmission(envelope.submission, { capabilities, trustedLidarEvidence }); }
   catch { fail('preclaim_envelope_policy_rejected'); }
   validateSnapshotSelection(snapshot, envelope.submission);
   assertCurrentSnapshotExport(processing, dataset, snapshot);
 
-  const manifestSha256 = envelope.submission.manifest.sha256;
-  // Processing owns the normalized pipeline identity. The exact digest is
-  // taken from the authenticated accepted binding, never re-derived from the
-  // client's raw options or from a Viewer-side approximation.
-  const pipelineDigest = remote.pipelineDigest;
-  if (!isHash(manifestSha256) || !isHash(pipelineDigest)
-      || remote.manifestSha256 !== manifestSha256) fail('preclaim_remote_policy_binding_mismatch');
+  const pipelineManifestSha256 = envelope.submission.manifest.sha256;
+  // The shared wire contract hashes the validated pipeline object; this is
+  // deterministic across retries and is checked again by Processing.
+  const pipelineDigest = crypto.createHash('sha256')
+    .update(canonicalizeJcs(validatedSubmission.pipeline)).digest('hex');
+  if (!isHash(pipelineManifestSha256) || !isHash(pipelineDigest) || !isUuid(attempt.providerTaskId))
+    fail('preclaim_remote_policy_binding_mismatch');
+
+  const manifests = buildSourceIntakeManifests(processing, {
+    dataset, attempt, snapshot, pipelineManifest: envelope.submission.manifest,
+  });
 
   const proof = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     protocol: PROTOCOL,
     issuerId: signer.issuerId,
     keyId: signer.keyId,
     authorityId,
     principalId,
     environment,
-    submissionId: intent.submissionId,
+    submissionId: attempt.id,
     viewerTaskId: intent.viewerTaskId,
+    providerTaskId: attempt.providerTaskId,
     viewerAttemptId: attemptId,
     activationId: envelope.activationId,
     preparedEnvelopeSha256: intent.envelopeSha256,
-    manifestSha256,
+    sourceManifestSha256: manifests.sourceManifestSha256,
+    derivedManifestSha256: manifests.derivedManifestSha256,
+    pipelineManifestSha256: manifests.pipelineManifestSha256,
     pipelineDigest,
-    sourceSnapshotSha256: snapshot.intentSha256,
+    sourceSnapshotSha256: manifests.sourceSnapshotSha256,
   };
   if (Object.keys(proof).sort().join(',') !== [...PROOF_FIELDS].sort().join(',')) fail('preclaim_proof_shape_invalid');
   const raw = canonicalizeJcs(proof, { maxBytes: MAX_PROOF_BYTES });
   const message = Buffer.concat([DOMAIN, raw]);
   const signature = Buffer.from(signer.sign(message));
   if (signature.length !== 64 || !crypto.verify(null, message, signer.publicKey, signature)) fail('preclaim_signature_invalid');
-  return { proof, raw, signature, attestationSha256: crypto.createHash('sha256').update(message).digest('hex') };
+  const attestationSha256 = crypto.createHash('sha256').update(message).digest('hex');
+  const sourceAttestation = { proof, signature: signature.toString('base64url'), attestationSha256 };
+  const sourceIntakeRequest = {
+    schemaVersion: 2,
+    submissionId: attempt.id,
+    viewerTaskId: task.id,
+    providerTaskId: attempt.providerTaskId,
+    sourceManifest: manifests.sourceManifest,
+    derivedManifest: manifests.derivedManifest,
+    manifest: manifests.pipelineManifest,
+    pipeline: validatedSubmission.pipeline,
+    capabilityFingerprint: envelope.submission.capabilityFingerprint,
+    sourceAttestation,
+  };
+  const sourceIntakeCanonical = canonicalizeJcs(sourceIntakeRequest).toString('utf8');
+  return {
+    proof,
+    raw,
+    signature,
+    attestationSha256,
+    sourceAttestation,
+    sourceIntakeRequest,
+    sourceIntakeCanonical,
+    sourceManifest: manifests.sourceManifest,
+    derivedManifest: manifests.derivedManifest,
+    pipelineManifest: manifests.pipelineManifest,
+    sourceManifestSha256: manifests.sourceManifestSha256,
+    derivedManifestSha256: manifests.derivedManifestSha256,
+    pipelineManifestSha256: manifests.pipelineManifestSha256,
+    derivedBytes: manifests.derivedBytes,
+  };
 }
 
 function createPreclaimSourceAttestation(input = {}) {

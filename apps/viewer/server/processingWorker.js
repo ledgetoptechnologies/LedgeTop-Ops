@@ -3,6 +3,7 @@ const crypto=require('node:crypto');
 const fs=require('node:fs');
 const path=require('node:path');
 const {Readable}=require('node:stream');
+const {pipeline:streamPipeline}=require('node:stream/promises');
 const {NodeOdmProvider}=require('./nodeOdmProvider');
 const {captureProcessingArchive,verifyProcessingArchive}=require('./processingArchiveEvidence');
 const {prepareProcessingUnitEvidence}=require('./processingUnitEvidence');
@@ -15,9 +16,18 @@ const {lodDerivativeSpecs}=require('./lodDerivativePolicy');
 const {buildMeshRecoveryManifest}=require('./retainedManifest');
 const {canonicalDerivativeInput}=require('./derivativeInputSnapshot');
 const {verifyRecoveredIngestSources}=require('./processingIngestRecovery');
+const ReferenceProtocol=require('./referenceProtocol');
+const {fileFacts}=require('./viewerPagedSourceExport');
+const {createHeldSourceSnapshot}=require('./heldSourceSnapshot');
+const {createPreclaimSourceAttestation}=require('./preclaimSourceAttestation');
+const {fsyncDirectory}=require('./durableFs');
+const {canonicalizeJcs,PROTOCOL:PREPARED_ENVELOPE_PROTOCOL}=require('./preparedSubmissionOutbox');
 const observationPersistenceError=Symbol('observationPersistenceError');
 
 function adapterFor(provider,config,providerCredentials){return new NodeOdmProvider({endpoint:provider.endpoint,token:providerCredentials.resolve(provider.id),providerType:provider.type,transferTimeoutMs:config.processingProviderTransferTimeoutMs});}
+function isReferenceCoordinatorProvider(provider,sourceIntake){return Boolean(typeof sourceIntake?.providerId==='string'&&sourceIntake.providerId&&provider?.id===sourceIntake.providerId);}
+function isReferenceResultReady(status){return Boolean(status&&['running','succeeded','completed'].includes(status.status)
+  &&['awaiting_acceptance','completed'].includes(status.phase));}
 function transition(processing,job,status,fields){const attempt=processing.transitionAttemptForJob(job.id,job.lease_owner,status,fields);if(!attempt)throw Object.assign(new Error('processing lease was lost or attempt was cancelled'),{code:'lease_lost'});return attempt;}
 function discoverOutputs(root){const candidates={glb:['odm_texturing/odm_textured_model_geo.glb','odm_texturing/textured_model.glb','textured_model.glb'],obj:['odm_texturing/odm_textured_model_geo.obj','odm_texturing/odm_textured_model.obj'],ortho:['odm_orthophoto/odm_orthophoto.tif'],orthoCutline:require('./orthophotoCutline').CUTLINE_PATHS,dsm:['odm_dem/dsm.tif'],dtm:['odm_dem/dtm.tif'],report:['odm_report/report.pdf','odm_report/odm_report.pdf'],pointCloud:['odm_georeferencing/odm_georeferenced_model.laz','odm_georeferencing/odm_georeferenced_model.ply'],ept:['entwine_pointcloud/ept.json'],nativeTiles:['3d_tiles/model/tileset.json']};const assets=[];for(const[kind,choices]of Object.entries(candidates)){const rel=choices.find((p)=>fs.existsSync(path.join(root,...p.split('/')))&&(kind!=='orthoCutline'||require('./orthophotoCutline').validateCutlineFile({relativePath:p,absolutePath:path.join(root,...p.split('/'))})));if(!rel)continue;const absolute=path.join(root,...rel.split('/'));assets.push({kind,relativePath:rel,absolutePath:absolute,format:kind==='nativeTiles'?'3dtiles':kind==='ept'?'ept':path.extname(rel).slice(1).toLowerCase(),contentType:kind==='report'?'application/pdf':undefined,byteSize:fs.statSync(absolute).size});}return assets;}
 
@@ -33,7 +43,235 @@ async function verifyProviderMeshClosure(root,outputs=discoverOutputs(root),{sig
   return manifest;
 }
 
-async function processSubmit(job,{processing,storage,config,providerCredentials,signal,adapterFactory=adapterFor}){
+function coordinatorPipelineManifest(dataset,attempt,options,capabilities,gcpSnapshot){
+  const photo=/\.(?:jpe?g|png|tiff?|dng|raw|heic)$/i,auxiliary=/\.(?:txt|geojson|json|zip|las|laz)$/i,mapped=[];
+  for(const file of dataset.files){
+    const role=file.processingRole||'auto',isPhoto=photo.test(file.relativePath),isAux=auxiliary.test(file.relativePath);
+    if(role==='gcp_source'||role==='administrative'||(role==='auto'&&!isPhoto))continue;
+    if(role==='image'&&!isPhoto)throw Object.assign(new Error('a dataset image role references an unsupported image type'),{code:'unsupported_source_file'});
+    if(role==='provider_input'&&!isAux)throw Object.assign(new Error('a provider input role references an unsupported source type'),{code:'unsupported_source_file'});
+    mapped.push({file,processingRole:role});
+  }
+  if(gcpSnapshot)for(let i=mapped.length-1;i>=0;i--)if(path.basename(mapped[i].file.relativePath).toLowerCase()==='gcp_list.txt')mapped.splice(i,1);
+  const photos=mapped.filter(item=>photo.test(item.file.relativePath)),inputs=mapped.filter(item=>!photo.test(item.file.relativePath));
+  if(!photos.length)throw Object.assign(new Error('dataset has no processable images'),{code:'unsupported_source_file'});
+  const objects=[...photos,...inputs].map(({file})=>{const facts=fileFacts(file);return{id:file.id,name:path.basename(file.relativePath),byteSize:file.byteSize,sha256:file.sha256,kind:facts.kind,mediaType:facts.mediaType};});
+  if(gcpSnapshot)objects.push({id:`gcp_${attempt.id}`,name:'gcp_list.txt',byteSize:gcpSnapshot.content.length,
+    sha256:gcpSnapshot.sha256,kind:'auxiliary',mediaType:'text/plain'});
+  const names=new Set();for(const object of objects){const name=object.name.toLowerCase();if(names.has(name))throw Object.assign(new Error('dataset contains duplicate submitted basenames'),{code:'duplicate_source_basename'});names.add(name);}
+  const totalBytes=objects.reduce((sum,object)=>sum+object.byteSize,0);
+  const manifest={id:dataset.id,revision:Math.max(1,Number(attempt.attemptNumber)||1),totalBytes,objectCount:objects.length,
+    inputCounts:{images:objects.filter(object=>object.kind==='image').length,lidarObjects:objects.filter(object=>object.kind==='lidar').length,points:0},objects};
+  manifest.sha256=ReferenceProtocol.manifestSha256(manifest);
+  const pipeline={odm:{requested:true,options,optionsFingerprint:capabilities.engines.odm.optionsFingerprint},
+    treedar:{requested:false,inputObjectIds:[],provenanceReceiptId:null},gaussian_splat:{requested:false}};
+  return{manifest,pipeline};
+}
+
+async function processSubmitReferenceV2(job,{processing,storage,config,signal,sourceIntake}={}){
+  if(!sourceIntake?.client||!sourceIntake?.outbox||!sourceIntake.snapshotSigner||!sourceIntake.snapshotPublicKey
+      ||!sourceIntake.attestationSigner)throw Object.assign(new Error('Processing coordinator runtime is not fully configured'),{code:'source_intake_runtime_unavailable'});
+  let attempt={...processing.getAttempt(job.attempt_id),...processing.getAttemptSubmission(job.attempt_id)};
+  const task=processing.getTask(attempt.taskId),dataset=processing.getDataset(attempt.datasetId||task.datasetId,true),source=config.referenceSourceIntake;
+  if(!task||!dataset)throw Object.assign(new Error('processing task or dataset is unavailable'),{code:'source_intake_source_unavailable'});
+  const capabilitiesResponse=await sourceIntake.client.getCapabilities({signal}),capabilities=capabilitiesResponse.capabilities;
+  if(capabilities.environment!==source.environment||capabilitiesResponse.sourceIntake.maxObjects>ReferenceProtocol.LIMITS.objects)
+    throw Object.assign(new Error('Processing source-intake capability bounds do not match Viewer policy'),{code:'source_intake_capabilities_invalid'});
+  const gcpSnapshot=processing.getAttemptGcpSnapshot?.(attempt.id)||null;
+  if(gcpSnapshot&&crypto.createHash('sha256').update(gcpSnapshot.content).digest('hex')!==gcpSnapshot.sha256)
+    throw Object.assign(new Error('attempt GCP snapshot failed its integrity check'),{code:'gcp_snapshot_changed'});
+  const existing=sourceIntake.outbox.getIntent(attempt.id);
+  let envelope;
+  if(existing){
+    envelope=JSON.parse(existing.envelopeCanonical);
+    if(envelope.submission.capabilityFingerprint!==capabilities.capabilityFingerprint)
+      throw Object.assign(new Error('Processing capabilities changed after the Viewer intent was prepared'),{code:'source_intake_capabilities_changed'});
+  }else{
+    const {manifest,pipeline}=coordinatorPipelineManifest(dataset,attempt,attempt.options,capabilities,gcpSnapshot);
+    const submission={schemaVersion:1,submissionId:attempt.id,manifest,pipeline,capabilityFingerprint:capabilities.capabilityFingerprint};
+    envelope={protocol:PREPARED_ENVELOPE_PROTOCOL,schemaVersion:3,activationId:crypto.randomUUID(),viewerTaskId:task.id,viewerAttemptId:attempt.id,submission};
+  }
+  let prepared=sourceIntake.outbox.persistIntent({localJobId:job.id,owner:job.lease_owner,origin:source.origin,
+    authorityId:source.authorityId,principalId:source.principalId,environment:source.environment,envelope});
+  let snapshotRow=processing.database.prepare('SELECT snapshot_id FROM viewer_source_snapshots WHERE attempt_id=?').get(attempt.id);
+  if(!snapshotRow)createHeldSourceSnapshot(processing,{datasetId:dataset.id,taskId:task.id,attemptId:attempt.id,signer:sourceIntake.snapshotSigner});
+  prepared=sourceIntake.outbox.getIntent(attempt.id);
+  let request,manifests,derivedBytes;
+  if(prepared.state==='prepared'){
+    const attestation=createPreclaimSourceAttestation({processing,outbox:sourceIntake.outbox,attemptId:attempt.id,
+      snapshotPublicKey:sourceIntake.snapshotPublicKey,expectedSnapshotIssuerId:source.snapshotIssuerId,
+      expectedSnapshotKeyId:source.snapshotKeyId,signer:sourceIntake.attestationSigner,authorityId:source.authorityId,
+      principalId:source.principalId,environment:source.environment,capabilities});
+    prepared=sourceIntake.outbox.persistSourceIntakeRequest(attempt.id,attestation.sourceIntakeCanonical,{localJobId:job.id,owner:job.lease_owner});
+    request=attestation.sourceIntakeRequest;
+    manifests={sourceManifest:attestation.sourceManifest,sourceManifestSha256:attestation.sourceManifestSha256,
+      derivedManifest:attestation.derivedManifest,derivedManifestSha256:attestation.derivedManifestSha256,
+      pipelineManifest:attestation.pipelineManifest,pipelineManifestSha256:attestation.pipelineManifestSha256};
+    derivedBytes=attestation.derivedBytes;
+  }else if(prepared.state==='accepted'&&prepared.sourceIntakeCanonical&&prepared.remoteBinding?.protocol==='ltds-viewer-source-intake-binding-v2'){
+    request=JSON.parse(prepared.sourceIntakeCanonical);
+    manifests={sourceManifest:request.sourceManifest,sourceManifestSha256:request.sourceManifest.sha256,
+      derivedManifest:request.derivedManifest,derivedManifestSha256:request.derivedManifest.sha256,
+      pipelineManifest:request.manifest,pipelineManifestSha256:request.manifest.sha256};
+    derivedBytes=new Map();
+    if(gcpSnapshot){const id=`gcp_${attempt.id}`,derived=manifests.derivedManifest.objects.find(object=>object.id===id);
+      if(!derived||derived.byteSize!==gcpSnapshot.content.length||derived.sha256!==gcpSnapshot.sha256)throw Object.assign(new Error('persisted GCP derived source differs from the current attempt snapshot'),{code:'gcp_snapshot_changed'});
+      derivedBytes.set(id,Buffer.from(gcpSnapshot.content));}
+  }else throw Object.assign(new Error('Processing source-intake outbox is held or inconsistent'),{code:'source_intake_outbox_state_invalid'});
+
+  const intent={...prepared,viewerAttemptId:attempt.id,sourceIntakeCanonical:prepared.sourceIntakeCanonical};
+  const binding=await sourceIntake.client.createOrReplay(intent,{localJobId:job.id,owner:job.lease_owner,signal});
+  const sourceFiles=new Map(dataset.files.map(file=>[file.id,file]));
+  for(const file of dataset.files){
+    const absolute=storage.resolve(dataset.rootKey,`${dataset.relativePath}/${file.relativePath}`,{mustExist:true}),stat=fs.statSync(absolute);
+    if(stat.size!==file.byteSize||await hashFile(absolute,{signal})!==file.sha256)
+      throw Object.assign(new Error('dataset source changed after finalization'),{code:'dataset_source_changed'});
+  }
+  await sourceIntake.client.uploadClosure({binding,manifests,derivedBytes,localJobId:job.id,owner:job.lease_owner,signal,
+    openSourceStream:async(object)=>{const file=sourceFiles.get(object.id);if(!file)throw Object.assign(new Error('source manifest references an unknown dataset object'),{code:'source_intake_manifest_source_mismatch'});const absolute=storage.resolve(dataset.rootKey,`${dataset.relativePath}/${file.relativePath}`,{mustExist:true});return fs.createReadStream(absolute);}});
+  transition(processing,job,'queued_upstream',{progress:0});
+  if(!processing.completeAndEnqueueJob(job.id,job.lease_owner,attempt.id,'reconcile',new Date(Date.now()+5000).toISOString()))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
+}
+
+async function persistReferenceResultClosure({client,binding,manifest,taskId,attemptId,storage,signal}){
+  const total=manifest.objects.reduce((sum,object)=>sum+BigInt(object.byteSize),0n);
+  if(total>BigInt(Number.MAX_SAFE_INTEGER))throw Object.assign(new Error('Processing result closure exceeds Viewer storage limits'),{code:'source_intake_result_too_large'});
+  storage.requireSpace('models',Number(total));
+  const relative=`${taskId}/${attemptId}/reference-v2-results/accepted_objects`;
+  const directory=storage.resolve('models',relative);fs.mkdirSync(directory,{recursive:true});
+  const root=fs.realpathSync.native(storage.roots.models),realDirectory=fs.realpathSync.native(directory);
+  if(realDirectory===root||!realDirectory.startsWith(root+path.sep))throw Object.assign(new Error('Processing result directory escaped managed Viewer storage'),{code:'invalid_storage_location'});
+  // Persist each directory entry in the new task/attempt path before treating
+  // any copied result as durable. This bounded chain stops at the managed root
+  // and does not walk or sync unrelated model directories.
+  for(let current=realDirectory;current===root||current.startsWith(root+path.sep);current=path.dirname(current)){
+    fsyncDirectory(current);
+    if(current===root)break;
+    if(path.dirname(current)===current)throw Object.assign(new Error('Processing result directory has no managed root'),{code:'invalid_storage_location'});
+  }
+  const files=new Map();
+  for(const object of manifest.objects){
+    signal?.throwIfAborted();
+    const destination=storage.resolve('models',`${relative}/${object.id}.bin`);
+    if(fs.existsSync(destination)){
+      const stat=fs.statSync(destination);
+      if(!stat.isFile()||stat.size!==object.byteSize||await hashFile(destination,{signal})!==object.sha256)
+        throw Object.assign(new Error('stored accepted result object changed'),{code:'source_intake_result_object_conflict'});
+      files.set(object.id,destination);continue;
+    }
+    const partial=storage.resolve('models',`${relative}/${object.id}.bin.partial`);
+    const input=await client.openResultObject(binding,manifest,object,{signal});
+    try{await streamPipeline(input,fs.createWriteStream(partial,{flags:'w',mode:0o600}),{signal});}
+    catch(error){throw Object.assign(new Error('Processing result transfer did not complete'),{code:error?.code==='lease_lost'?'lease_lost':'source_intake_result_transfer_uncertain'});}
+    const handle=await fs.promises.open(partial,'r');try{await handle.sync();}finally{await handle.close();}
+    const stat=fs.statSync(partial);
+    if(stat.size!==object.byteSize||await hashFile(partial,{signal})!==object.sha256)
+      throw Object.assign(new Error('Processing result object failed its declared digest'),{code:'source_intake_result_object_integrity_error'});
+    fs.renameSync(partial,destination);fsyncDirectory(realDirectory);files.set(object.id,destination);
+  }
+  return files;
+}
+
+async function acceptReferenceResultClosure({job,attempt,task,processing,config,sourceIntake,binding,intent,status,storage,signal}){
+  if(!sourceIntake?.copySigner||!sourceIntake?.copyPublicKeyPem||!storage)
+    throw Object.assign(new Error('Viewer accepted-copy signer or managed storage is unavailable'),{code:'source_intake_copy_unavailable'});
+  const manifest=await sourceIntake.client.getResultManifest(binding,{signal});
+  if(manifest.resultManifestSha256!==status.resultManifestSha256)
+    throw Object.assign(new Error('Processing result manifest differs from completed status'),{code:'source_intake_result_manifest_binding_mismatch'});
+  await persistReferenceResultClosure({client:sourceIntake.client,binding,manifest,taskId:task.id,attemptId:attempt.id,storage,signal});
+  let current=sourceIntake.outbox.getIntent(attempt.id);
+  if(current.copyRequestCanonical===null){
+    const request=JSON.parse(current.sourceIntakeCanonical),completion=JSON.parse(current.sourceIntakeCompletionCanonical);
+    const objectIds=manifest.objects.map(object=>object.id),acceptance={schemaVersion:1,receiptId:crypto.randomUUID(),
+      storageReceiptId:crypto.randomUUID(),jobId:binding.jobId,generation:binding.generation,environment:binding.environment,
+      inputManifestSha256:request.manifest.sha256,pipelineDigest:binding.pipelineDigest,
+      resultManifestSha256:manifest.resultManifestSha256,acceptedObjectIds:objectIds,
+      acceptedAt:new Date().toISOString(),validationVersion:ReferenceProtocol.PROTOCOL};
+    const expected={coordinatorAuthorityId:binding.coordinatorAuthorityId,viewerPrincipalId:current.authenticatedPrincipal,
+      submissionId:current.submissionId,activationId:JSON.parse(current.envelopeCanonical).activationId,
+      viewerTaskId:task.id,viewerAttemptId:attempt.id,providerTaskId:binding.providerTaskId,
+      preparedEnvelopeSha256:current.envelopeSha256,jobId:binding.jobId,generation:binding.generation,environment:binding.environment,
+      inputManifestSha256:request.manifest.sha256,pipelineDigest:binding.pipelineDigest,resultManifestSha256:manifest.resultManifestSha256,
+      sourceManifestSha256:request.sourceManifest.sha256,derivedManifestSha256:request.derivedManifest.sha256,
+      sourceReceiptSha256:completion.sourceReceiptSha256,derivedReceiptSha256:completion.derivedReceiptSha256};
+    const viewerReceipt=sourceIntake.copySigner({expected,acceptance,resultManifest:manifest});
+    current=sourceIntake.outbox.persistAcceptedResultRequest(attempt.id,manifest,{acceptance,viewerReceipt},
+      {environment:binding.environment,localJobId:job.id,owner:job.lease_owner,issuerId:sourceIntake.copySigner.issuerId,
+        keyId:sourceIntake.copySigner.keyId,publicKeyPem:sourceIntake.copyPublicKeyPem});
+  }else if(current.resultManifestSha256!==crypto.createHash('sha256').update(require('./preparedSubmissionOutbox').canonicalizeJcs(manifest)).digest('hex'))
+    throw Object.assign(new Error('Processing result manifest changed after Viewer acceptance was prepared'),{code:'source_intake_result_manifest_conflict'});
+  if(current.copyAckCanonical===null){
+    const response=await sourceIntake.client.postAcceptedResultCopy(binding,current.copyRequestCanonical,{signal});
+    current=sourceIntake.outbox.persistAcceptedResultAck(attempt.id,response,{environment:binding.environment,localJobId:job.id,owner:job.lease_owner});
+  }
+  if(!current.copyAckCanonical)throw Object.assign(new Error('Processing accepted-copy acknowledgement is not durable'),{code:'source_intake_copy_ack_unavailable'});
+  return current;
+}
+
+async function processReconcileReferenceV2(job,{processing,config,signal,sourceIntake,storage}={}){
+  const attempt=processing.getAttempt(job.attempt_id),task=attempt&&processing.getTask(attempt.taskId),provider=attempt&&processing.getProvider(attempt.providerId);
+  if(!attempt||!task||!isReferenceCoordinatorProvider(provider,config.referenceSourceIntake)||!sourceIntake?.client||!sourceIntake?.outbox)
+    throw Object.assign(new Error('Processing coordinator reconciliation is not configured'),{code:'source_intake_runtime_unavailable'});
+  const intent=sourceIntake.outbox.getIntent(attempt.id),binding=intent?.remoteBinding;
+  if(!intent?.sourceIntakeCanonical||!binding||binding.protocol!=='ltds-viewer-source-intake-binding-v2')
+    throw Object.assign(new Error('durable Processing coordinator binding is unavailable'),{code:'source_intake_binding_missing'});
+  const request=JSON.parse(intent.sourceIntakeCanonical),manifests={sourceManifest:request.sourceManifest,sourceManifestSha256:request.sourceManifest.sha256,
+    derivedManifest:request.derivedManifest,derivedManifestSha256:request.derivedManifest.sha256,
+    pipelineManifest:request.manifest,pipelineManifestSha256:request.manifest.sha256};
+  const status=await sourceIntake.client.getJob(binding.jobId,{signal});
+  if(status.jobId!==binding.jobId||status.attemptId!==attempt.id||status.providerTaskId!==attempt.providerTaskId
+      ||status.generation!==binding.generation||status.environment!==config.referenceSourceIntake.environment
+      ||status.manifestSha256!==manifests.pipelineManifestSha256||status.sourceManifestSha256!==manifests.sourceManifestSha256
+      ||status.derivedManifestSha256!==manifests.derivedManifestSha256||status.pipelineDigest!==request.sourceAttestation.proof.pipelineDigest)
+    throw Object.assign(new Error('Processing coordinator status does not match the durable attempt binding'),{code:'source_intake_status_binding_mismatch'});
+  require('./sourceIntakeClientV2').acknowledgedObjects(status,binding,manifests);
+  try{
+    const logs=await sourceIntake.client.getLogs(binding,{after:attempt.providerOutputCursor||0,limit:200,signal});
+    if(logs.lines.length||logs.nextCursor!==(attempt.providerOutputCursor||0)){
+      const output={lines:logs.lines.map(line=>`${String(line.level||'info').slice(0,32)}: ${String(line.message||'').slice(0,4000)}`),nextLine:logs.nextCursor};
+      if(!processing.persistReconcileObservation(job.id,job.lease_owner,attempt.id,output))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
+    }
+  }catch(error){if(signal?.aborted||error?.code==='lease_lost'||error?.name==='AbortError')throw error;}
+  if(!['queued','running','succeeded','completed','failed','cancelled','held'].includes(status.status))
+    throw Object.assign(new Error('Processing coordinator returned an unknown job state'),{code:'source_intake_status_unknown'});
+  if(status.status==='failed'||status.status==='cancelled'){
+    const code=`provider_${status.status}`,message=`Processing coordinator ${status.status}`;
+    const terminal=processing.failJobTerminal(job.id,job.lease_owner,code,message,{eventId:`processing-failed-${attempt.id}`,
+      schemaVersion:1,type:'processing.failed',projectId:task.projectId,projectDisplayName:processing.getProject(task.projectId)?.displayName||undefined,
+      taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'failed'},{reconcile:true});
+    if(!terminal)throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
+    return;
+  }
+  if(status.status==='held'){
+    const message='Processing coordinator is holding this attempt for operator review';
+    if(!processing.failReconcileJob(job.id,job.lease_owner,'source_intake_upstream_held',message,
+      new Date(Date.now()+5*60_000).toISOString(),{logMessage:message}))
+      throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
+    return;
+  }
+  const claimed=status.status==='running'&&typeof status.nodeId==='string'&&status.nodeId.length>0
+    &&!['queued','waiting_capacity','awaiting_transfer','fetching','source_receiving'].includes(status.phase);
+  // Processing reports status=succeeded with phase=awaiting_acceptance after
+  // durable result delivery; the Viewer ACK advances only the phase to
+  // completed. A completed upstream phase is not Viewer-ready until its exact
+  // result closure is copied and the fully accepted ACK is journaled locally.
+  const localStatus=claimed?'running':'queued_upstream';
+  const progress=claimed&&Number.isFinite(status.progress)?Math.max(0,Math.min(0.9,status.progress)):claimed?attempt.progress:0;
+  transition(processing,job,localStatus,{progress});
+  if(isReferenceResultReady(status)){
+    const accepted=await acceptReferenceResultClosure({job,attempt,task,processing,config,sourceIntake,binding,intent,status,storage,signal});
+    let ack;try{ack=JSON.parse(accepted.copyAckCanonical);}catch{ack=null;}
+    if(!ack||ack.fullyAccepted!==true||ack.job?.phase!=='completed'||ack.job?.jobId!==binding.jobId
+        ||ack.job?.generation!==binding.generation||ack.job?.environment!==binding.environment)
+      throw Object.assign(new Error('Processing has not durably accepted the complete Viewer result copy'),{code:'source_intake_copy_ack_unavailable'});
+    const completedStatus={...status,status:'completed',uuid:attempt.providerTaskId};
+    if(!processing.advanceReconcileJob(job.id,job.lease_owner,completedStatus,new Date().toISOString()))
+      throw Object.assign(new Error('Processing result identity or lease was lost'),{code:'lease_lost'});
+  }else if(!processing.completeAndEnqueueJob(job.id,job.lease_owner,attempt.id,'reconcile',new Date(Date.now()+5000).toISOString()))
+    throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
+}
+
+async function processSubmit(job,{processing,storage,config,providerCredentials,signal,sourceIntake,adapterFactory=adapterFor}){
   let attempt={...processing.getAttempt(job.attempt_id),...processing.getAttemptSubmission(job.attempt_id)};
   const uploadAcceptanceUnknown=attempt.errorCode==='provider_upload_acceptance_unknown'||['uploading','uploading_auxiliary'].includes(attempt.submissionPhase);
   const submissionObservationUnknown=attempt.errorCode==='provider_submission_observation_unavailable'||['uploaded','committing'].includes(attempt.submissionPhase);
@@ -42,7 +280,13 @@ async function processSubmit(job,{processing,storage,config,providerCredentials,
     if(!processing.deferHeldSubmit(job.id,job.lease_owner,30_000,reason))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
     return;
   }
-  const task=processing.getTask(attempt.taskId),dataset=processing.getDataset(attempt.datasetId||task.datasetId,true),provider=processing.getProvider(attempt.providerId),adapter=adapterFactory(provider,config,providerCredentials);
+  const task=processing.getTask(attempt.taskId),dataset=processing.getDataset(attempt.datasetId||task.datasetId,true),provider=processing.getProvider(attempt.providerId);
+  if(isReferenceCoordinatorProvider(provider,config.referenceSourceIntake)){
+    transition(processing,job,'queued_upstream',{progress:0});
+    if(!config.referenceSourceIntake.enabled)throw Object.assign(new Error('dedicated Processing coordinator is selected but source intake is disabled'),{code:'source_intake_runtime_unavailable'});
+    return processSubmitReferenceV2(job,{processing,storage,config,signal,sourceIntake});
+  }
+  const adapter=adapterFactory(provider,config,providerCredentials);
   const photo=/\.(?:jpe?g|png|tiff?|dng|raw|heic)$/i,auxiliary=/\.(?:txt|geojson|json|zip|las|laz)$/i,mapped=[];for(const file of dataset.files){const absolute=storage.resolve(dataset.rootKey,`${dataset.relativePath}/${file.relativePath}`,{mustExist:true}),stat=fs.statSync(absolute);if(stat.size!==file.byteSize||await hashFile(absolute,{signal})!==file.sha256)throw Object.assign(new Error('dataset source changed after finalization'),{code:'dataset_source_changed'});const role=file.processingRole||'auto',isPhoto=photo.test(file.relativePath),isAux=auxiliary.test(file.relativePath);if(role==='gcp_source'||role==='administrative'||(role==='auto'&&!isPhoto))continue;if(role==='image'&&!isPhoto)throw Object.assign(new Error('a dataset image role references an unsupported image type'),{code:'unsupported_source_file'});if(role==='provider_input'&&!isAux)throw Object.assign(new Error('a provider input role references an unsupported source type'),{code:'unsupported_source_file'});mapped.push({relativePath:file.relativePath,absolutePath:absolute,processingRole:role});}
   storage.requireProcessingHeadroom(dataset.byteSize,processing.activeProcessingReservationBytes(attempt.id),processing.activeDerivativeReservationBytes());
   const gcpSnapshot=processing.getAttemptGcpSnapshot?.(attempt.id)||null;
@@ -82,7 +326,7 @@ async function processSubmit(job,{processing,storage,config,providerCredentials,
   transition(processing,job,known?.status==='running'?'running':'queued_upstream',{progress:known?.progress||0});if(!processing.completeAndEnqueueJob(job.id,job.lease_owner,attempt.id,'reconcile',new Date(Date.now()+5000).toISOString()))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
 }
 
-async function processReconcile(job,{processing,config,providerCredentials,signal,adapterFactory=adapterFor}){
+async function processReconcile(job,{processing,storage,config,providerCredentials,signal,sourceIntake,adapterFactory=adapterFor}){
   let attempt,provider;
   try{
     if(processing.settleStaleReconcileJob(job.id,job.lease_owner))return;
@@ -95,6 +339,7 @@ async function processReconcile(job,{processing,config,providerCredentials,signa
     if(signal?.aborted||error?.name==='AbortError'||['ABORT_ERR','lease_lost','provider_adapter_unavailable','provider_attempt_unavailable'].includes(error?.code))throw error;
     throw Object.assign(new Error('Provider observation could not be saved; reconciliation will continue'),{code:'provider_observation_persistence_unavailable'});
   }
+  if(isReferenceCoordinatorProvider(provider,config.referenceSourceIntake))return processReconcileReferenceV2(job,{processing,config,signal,sourceIntake,storage});
   let adapter;
   try{adapter=adapterFactory(provider,config,providerCredentials)}catch(error){
     if(signal?.aborted||error?.name==='AbortError'||['ABORT_ERR','lease_lost'].includes(error?.code))throw error;
@@ -139,17 +384,37 @@ async function processReconcile(job,{processing,config,providerCredentials,signa
   }
 }
 
-async function processIngest(job,{processing,repository,storage,config,providerCredentials,signal}){
+async function processIngest(job,{processing,repository,storage,config,providerCredentials,signal,sourceIntake}){
   const attempt=processing.getAttempt(job.attempt_id),task=processing.getTask(attempt.taskId),project=processing.getProject(task.projectId),provider=processing.getProvider(attempt.providerId);
+  const referenceV2=isReferenceCoordinatorProvider(provider,config.referenceSourceIntake);
+  const sourceIntent=referenceV2?sourceIntake?.outbox?.getIntent(attempt.id):null;
+  if(referenceV2&&(!sourceIntent?.copyAckCanonical||!sourceIntent.resultManifestCanonical||!sourceIntent.remoteBinding))
+    throw Object.assign(new Error('Processing accepted-copy acknowledgement is not durable'),{code:'source_intake_copy_ack_unavailable'});
   const headroom=storage.space('models'),maximumExpansion=Math.max(0,headroom.available-headroom.reserve);
   if(maximumExpansion<1024*1024*1024)throw Object.assign(new Error('insufficient storage for result ingestion'),{code:'insufficient_storage'});
-  const recoveredIngest=await verifyRecoveredIngestSources(processing,storage,job,signal);
-  const relative=`${task.id}/${attempt.id}`,destination=storage.resolve('models',relative);
+  const recoveredIngest=referenceV2?null:await verifyRecoveredIngestSources(processing,storage,job,signal);
+  const relative=referenceV2?`${task.id}/${attempt.id}/reference-v2-results`:`${task.id}/${attempt.id}`;
+  const destination=storage.resolve('models',relative),outputRelative=referenceV2?`${relative}/output`:relative;
+  const outputDestination=storage.resolve('models',outputRelative);
   let archiveReceipt=processing.getAttemptTransferProvenance(attempt.id)?.archive||null;
   // A recovery job must never inherit the historical unreceipted-directory
   // fallback after a crash between filesystem promotion and receipt commit.
   // Recheck in the actual existing-directory branch after source hashing.
-  if(!fs.existsSync(destination)){
+  if(referenceV2){
+    const manifest=JSON.parse(sourceIntent.resultManifestCanonical),archiveObject=manifest.objects.find(object=>object.role==='odm_archive');
+    if(!archiveObject)throw Object.assign(new Error('Processing result closure has no Viewer-ingestible ODM archive'),{code:'source_intake_result_archive_missing'});
+    const archiveRelative=`${relative}/accepted_objects/${archiveObject.id}.bin`,archivePath=storage.resolve('models',archiveRelative,{mustExist:true});
+    const archiveStat=fs.statSync(archivePath);
+    if(archiveStat.size!==archiveObject.byteSize||await hashFile(archivePath,{signal})!==archiveObject.sha256)
+      throw Object.assign(new Error('durably accepted ODM archive changed'),{code:'source_intake_result_object_conflict'});
+    if(!fs.existsSync(outputDestination)){
+      const captured=await captureProcessingArchive(fs.createReadStream(archivePath),outputDestination,
+        {maxEntries:100000,maxBytes:maximumExpansion,maxArchiveBytes:maximumExpansion,maxDiskBytes:maximumExpansion,signal});
+      archiveReceipt=processing.recordAttemptArchiveReceipt(job.id,job.lease_owner,captured);
+      if(!archiveReceipt)throw Object.assign(new Error('processing archive receipt or lease was lost'),{code:'lease_lost'});
+    }else if(archiveReceipt)await verifyProcessingArchive(outputDestination,archiveReceipt,{signal});
+    else throw Object.assign(new Error('recovered accepted result output has no durable archive receipt'),{code:'ingest_recovery_state_changed'});
+  }else if(!fs.existsSync(destination)){
     const adapter=adapterFor(provider,config,providerCredentials);
     const response=await adapter.downloadAll(attempt.providerTaskId,{signal}),declared=Number(response.headers.get('content-length')||0);
     if(declared>maximumExpansion)throw Object.assign(new Error('provider result exceeds available storage'),{code:'insufficient_storage'});
@@ -164,9 +429,10 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   }
   // Ordinary historical jobs retain their existing unreceipted-directory
   // behavior; an audited recovery can never enter that compatibility path.
-  const found=discoverOutputs(destination);if(!found.some((asset)=>['glb','obj','pointCloud','ortho','ept'].includes(asset.kind)))throw Object.assign(new Error('provider archive has no supported outputs'),{code:'missing_required_output'});
+  const outputPrefix=referenceV2?'output/':'';
+  const found=discoverOutputs(outputDestination).map(asset=>({...asset,relativePath:`${outputPrefix}${asset.relativePath}`}));if(!found.some((asset)=>['glb','obj','pointCloud','ortho','ept'].includes(asset.kind)))throw Object.assign(new Error('provider archive has no supported outputs'),{code:'missing_required_output'});
   if(!found.some((asset)=>asset.kind==='ept'))throw Object.assign(new Error('provider did not generate required EPT output'),{code:'missing_required_output'});
-  const meshManifest=await verifyProviderMeshClosure(destination,found,{signal});
+  const meshManifest=await verifyProviderMeshClosure(outputDestination,found,{signal});
   const nativeTiles=found.find((asset)=>asset.kind==='nativeTiles'),candidateAssets=found.filter((asset)=>asset.kind!=='nativeTiles');
   const assets=[];for(const asset of candidateAssets){let integrity;if(asset.kind==='ept'){const tree=await hashTree(path.dirname(asset.absolutePath),{signal}),header=tree.files.find(file=>file.relativePath===path.basename(asset.absolutePath));if(!header)throw Object.assign(new Error('EPT header missing from verified tree'),{code:'invalid_asset_tree'});integrity={sha256:header.sha256,manifestSha256:tree.manifestSha256,manifestFiles:tree.files};}else integrity=await hashFileChunks(asset.absolutePath,{signal});assets.push({...asset,rootKey:'models',relativePath:`${relative}/${asset.relativePath}`,storageMode:'managed',published:false,sourceAttemptId:attempt.id,...integrity});}
   const derivatives=[];
@@ -191,7 +457,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
       trustedInputFilesByType.ept=canonicalDerivativeInput('ept',[{role:'point_cloud_source',rootKey:point.rootKey,relativePath:point.relativePath,byteSize:point.byteSize,sha256:point.sha256}]).files;
     }else if(['mesh_tiles','lod_audit'].includes(spec.type))trustedInputFilesByType[spec.type]=canonicalDerivativeInput(spec.type,meshFiles).files;
   }
-  const odmMetadata=readOdmTaskMetadata(destination);
+  const odmMetadata=readOdmTaskMetadata(outputDestination);
   const provenance=processing.getAttemptProvenance?.(attempt.id)||null;
   const model=repository.upsertModelVersion({provider:'ltds-processing',providerModelId:task.id,providerVersionId:attempt.id,displayName:task.displayName,sourceLocator:{taskId:task.id,attemptId:attempt.id},metadata:{projectId:project.id,projectName:project.displayName},versionMetadata:{sourceDatasetId:attempt.datasetId||task.datasetId,processingMetrics:odmMetadata.processingMetrics,processingProvenance:provenance?{schemaVersion:1,attemptId:attempt.id,submissionSnapshotSha256:provenance.submission?.snapshotSha256||null,providerTaskId:attempt.providerTaskId,hasTaskInfoEvidence:Boolean(provenance.providerResult),producingEngineVerified:false}:null},georef:odmMetadata.georef,pointCount:odmMetadata.pointCount,status:'importing',assets,makeActive:false});
   const version=repository.database.prepare('SELECT id FROM model_versions WHERE model_id=? AND provider_version_id=?').get(model.id,attempt.id);
@@ -199,7 +465,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   const tree=storage.scanAbsolute(destination);processing.registerModelOutput({versionId:version.id,modelId:model.id,taskId:task.id,attemptId:attempt.id,projectId:project.id,relativePath:relative,status:'staged',byteSize:tree.byteSize,assetCount:assets.length});
   const producer=archiveReceipt?processing.getVerifiedAttemptProducerReceipt(attempt.id):null;
   const explicitUnits=await inspectRegisteredSourceUnits({repository,storage,modelId:model.id,modelVersionId:version.id,signal});
-  const unitCandidates=await prepareProcessingUnitEvidence({producer,destination,sourcePrefix:relative,modelId:model.id,modelVersionId:version.id,assets:repository.getModelVersion(model.id,version.id).activeVersion.assets,signal});
+  const unitCandidates=await prepareProcessingUnitEvidence({producer,destination:outputDestination,sourcePrefix:outputRelative,modelId:model.id,modelVersionId:version.id,assets:repository.getModelVersion(model.id,version.id).activeVersion.assets,signal});
   if(explicitUnits.length||unitCandidates.length)processing.transaction(()=>{
     signal?.throwIfAborted();
     if(!processing.provenanceJob(job.id,job.lease_owner,'ingest'))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
@@ -226,7 +492,7 @@ async function processOne(deps,owner=crypto.randomUUID()){
     }
   },20000);heartbeat.unref?.();
   try{const work={...deps,signal:controller.signal};if(job.job_type==='submit')await processSubmit(job,work);else if(job.job_type==='reconcile')await processReconcile(job,work);else if(job.job_type==='ingest')await processIngest(job,work);else throw new Error('unsupported processing job');return true;}
-  catch(error){if(reconcileHeartbeatFailed||error?.code==='submission_observation_deferred')return true;if(job.job_type==='submit'&&!controller.signal.aborted&&!['lease_lost','ABORT_ERR'].includes(error?.code)&&['uploading','uploading_auxiliary'].includes(deps.processing.getAttemptSubmission(job.attempt_id)?.submissionPhase)){deps.processing.deferHeldSubmit(job.id,job.lease_owner,30_000,'upload_ambiguous');return true;}const persistence=Boolean(error?.[observationPersistenceError]||error?.code==='provider_observation_persistence_unavailable'),safe=persistence?'Provider observation could not be saved; reconciliation will continue':sanitizeLogMessage(error.message).slice(0,1000);if(job.job_type==='reconcile'&&(controller.signal.aborted||error?.name==='AbortError'||['ABORT_ERR','lease_lost'].includes(error.code))){deps.processing.failReconcileJob(job.id,job.lease_owner,'processing_interrupted','Processing interrupted; reconciliation will resume',new Date(Date.now()+5000).toISOString());return true;}if(error.code==='insufficient_storage'&&job.job_type==='submit'){deps.processing.deferSubmitAdmission(job.id,job.lease_owner);return true;}if(job.job_type!=='reconcile')deps.processing.appendLog(job.attempt_id,'error',safe);const permanent=new Set(['ingest_recovery_source_changed','ingest_recovery_state_changed','source_changed','duplicate_source_basename','missing_required_output','invalid_storage_location','unsupported_source_file','dataset_source_changed','gcp_snapshot_changed','invalid_asset_tree','provider_image_limit_exceeded','derivative_source_too_large','invalid_derivative_input']).has(error.code),observation=job.job_type==='reconcile'&&(persistence||['provider_observation_unavailable','provider_status_unknown','provider_status_not_found','provider_status_auth_failed','provider_adapter_unavailable','provider_result_identity_mismatch','provider_attempt_unavailable'].includes(error.code)),retry=!permanent&&(observation||job.attempt_count<5)?new Date(Date.now()+Math.min(300000,5000*2**Math.min(job.attempt_count,6))).toISOString():null;if(retry){if(job.job_type==='reconcile')deps.processing.failReconcileJob(job.id,job.lease_owner,persistence?'provider_observation_persistence_unavailable':error.code||'processing_failed',safe,retry,{logMessage:safe});else deps.processing.failJob(job.id,job.lease_owner,persistence?'provider_observation_persistence_unavailable':error.code||'processing_failed',safe,retry);}else{const attempt=deps.processing.getAttempt(job.attempt_id),task=attempt&&deps.processing.getTask(attempt.taskId),project=task&&deps.processing.getProject(task.projectId);deps.processing.failJobTerminal(job.id,job.lease_owner,error.code||'processing_failed',safe,{eventId:`processing-failed-${attempt.id}`,schemaVersion:1,type:'processing.failed',projectId:task.projectId,projectDisplayName:project?.displayName||undefined,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'failed'},job.job_type==='reconcile'?{reconcile:true,logMessage:safe}:undefined);}return true;}
+  catch(error){if(reconcileHeartbeatFailed||error?.code==='submission_observation_deferred')return true;if(job.job_type==='submit'&&String(error?.code||'').startsWith('source_intake_')){deps.processing.appendLog(job.attempt_id,'warn',sanitizeLogMessage(error.message).slice(0,1000));deps.processing.deferHeldSubmit(job.id,job.lease_owner,30_000,'coordinator_unavailable');return true;}if(job.job_type==='submit'&&!controller.signal.aborted&&!['lease_lost','ABORT_ERR'].includes(error?.code)&&['uploading','uploading_auxiliary'].includes(deps.processing.getAttemptSubmission(job.attempt_id)?.submissionPhase)){deps.processing.deferHeldSubmit(job.id,job.lease_owner,30_000,'upload_ambiguous');return true;}const persistence=Boolean(error?.[observationPersistenceError]||error?.code==='provider_observation_persistence_unavailable'),safe=persistence?'Provider observation could not be saved; reconciliation will continue':sanitizeLogMessage(error.message).slice(0,1000);if(job.job_type==='reconcile'&&(controller.signal.aborted||error?.name==='AbortError'||['ABORT_ERR','lease_lost'].includes(error.code))){deps.processing.failReconcileJob(job.id,job.lease_owner,'processing_interrupted','Processing interrupted; reconciliation will resume',new Date(Date.now()+5000).toISOString());return true;}if(error.code==='insufficient_storage'&&job.job_type==='submit'){deps.processing.deferSubmitAdmission(job.id,job.lease_owner);return true;}if(job.job_type!=='reconcile')deps.processing.appendLog(job.attempt_id,'error',safe);const permanent=new Set(['ingest_recovery_source_changed','ingest_recovery_state_changed','source_changed','duplicate_source_basename','missing_required_output','invalid_storage_location','unsupported_source_file','dataset_source_changed','gcp_snapshot_changed','invalid_asset_tree','provider_image_limit_exceeded','derivative_source_too_large','invalid_derivative_input']).has(error.code),observation=job.job_type==='reconcile'&&(persistence||['provider_observation_unavailable','provider_status_unknown','provider_status_not_found','provider_status_auth_failed','provider_adapter_unavailable','provider_result_identity_mismatch','provider_attempt_unavailable'].includes(error.code)||String(error?.code||'').startsWith('source_intake_')),retry=!permanent&&(observation||job.attempt_count<5)?new Date(Date.now()+Math.min(300000,5000*2**Math.min(job.attempt_count,6))).toISOString():null;if(retry){if(job.job_type==='reconcile')deps.processing.failReconcileJob(job.id,job.lease_owner,persistence?'provider_observation_persistence_unavailable':error.code||'processing_failed',safe,retry,{logMessage:safe});else deps.processing.failJob(job.id,job.lease_owner,persistence?'provider_observation_persistence_unavailable':error.code||'processing_failed',safe,retry);}else{const attempt=deps.processing.getAttempt(job.attempt_id),task=attempt&&deps.processing.getTask(attempt.taskId),project=task&&deps.processing.getProject(task.projectId);deps.processing.failJobTerminal(job.id,job.lease_owner,error.code||'processing_failed',safe,{eventId:`processing-failed-${attempt.id}`,schemaVersion:1,type:'processing.failed',projectId:task.projectId,projectDisplayName:project?.displayName||undefined,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'failed'},job.job_type==='reconcile'?{reconcile:true,logMessage:safe}:undefined);}return true;}
   finally{clearInterval(heartbeat);}
 }
-module.exports={adapterFor,discoverOutputs,verifyProviderMeshClosure,processIngest,processOne,processReconcile,processSubmit};
+module.exports={adapterFor,coordinatorPipelineManifest,discoverOutputs,isReferenceCoordinatorProvider,isReferenceResultReady,processIngest,processOne,processReconcile,processSubmit,processSubmitReferenceV2,verifyProviderMeshClosure};

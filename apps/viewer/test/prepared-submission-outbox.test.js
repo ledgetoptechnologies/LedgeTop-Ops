@@ -72,6 +72,21 @@ test('JCS canonical bytes use sorted UTF-16 keys and ECMAScript number rendering
   assert.equal(checked.sha256, crypto.createHash('sha256').update(DOMAIN).update(checked.bytes).digest('hex'));
 });
 
+test('Processing V2 pipeline digest vector matches the shared JCS contract', () => {
+  const pipeline = {
+    gaussian_splat: { requested: false },
+    odm: {
+      options: { decimal: 1.2345678901234567, negativeZero: -0, tiny: 1e-7, tinyBoundary: 1e-6, whole: 1.0 },
+      optionsFingerprint: 'a'.repeat(64),
+      requested: true,
+    },
+    treedar: { inputObjectIds: [], provenanceReceiptId: null, requested: false },
+  };
+  const bytes = canonicalizeJcs(pipeline);
+  assert.equal(bytes.toString(), '{"gaussian_splat":{"requested":false},"odm":{"options":{"decimal":1.2345678901234567,"negativeZero":0,"tiny":1e-7,"tinyBoundary":0.000001,"whole":1},"optionsFingerprint":"' + 'a'.repeat(64) + '","requested":true},"treedar":{"inputObjectIds":[],"provenanceReceiptId":null,"requested":false}}');
+  assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'), 'c32c0ae50e89c62f53279ca36abb377782e06bb7a85fbcfd395b741fa65eb27d');
+});
+
 test('outbox persists the exact envelope under the current submit lease and rejects changed replay', t => {
   const f = fixture(t), outbox = new PreparedSubmissionOutbox(f.database), body = envelope(f.task.id, f.attempt.id);
   const context = { localJobId: f.job.id, owner: f.job.lease_owner, origin: 'https://processing.example', authorityId: AUTHORITY_ID, principalId: 'viewer-staging', environment: 'staging' };
@@ -87,6 +102,55 @@ test('outbox persists the exact envelope under the current submit lease and reje
   assert.throws(() => f.database.prepare('DELETE FROM viewer_prepared_submission_outbox WHERE submission_id=?').run(first.submissionId), /prepared submission outbox is retained/);
   assert.throws(() => f.database.prepare('UPDATE viewer_prepared_submission_outbox SET envelope_canonical=? WHERE submission_id=?').run('{}', first.submissionId), /prepared submission envelope is immutable/);
   assert.throws(() => f.database.prepare("UPDATE viewer_prepared_submission_outbox SET state='held' WHERE submission_id=?").run(first.submissionId), /prepared submission outbox state cannot be reset/);
+});
+
+test('V2 source-intake binding and completion custody response are durably retained under the submit lease', t => {
+  const f = fixture(t), outbox = new PreparedSubmissionOutbox(f.database);
+  const context = { localJobId: f.job.id, owner: f.job.lease_owner, origin: 'https://processing.example',
+    authorityId: AUTHORITY_ID, principalId: 'viewer-staging', environment: 'staging' };
+  const prepared = outbox.persistIntent({ ...context, envelope: envelope(f.task.id, f.attempt.id) });
+  const envelopeBody = JSON.parse(prepared.envelopeCanonical);
+  const manifest = { sha256: 'a'.repeat(64) };
+  const sourceManifest = { sha256: 'b'.repeat(64) };
+  const derivedManifest = { sha256: 'c'.repeat(64) };
+  const proof = { submissionId: f.attempt.id, viewerTaskId: f.task.id, providerTaskId: f.attempt.providerTaskId,
+    viewerAttemptId: f.attempt.id, preparedEnvelopeSha256: prepared.envelopeSha256, activationId: envelopeBody.activationId,
+    sourceManifestSha256: sourceManifest.sha256, derivedManifestSha256: derivedManifest.sha256,
+    pipelineManifestSha256: manifest.sha256, pipelineDigest: 'd'.repeat(64) };
+  const proofBytes = Buffer.concat([Buffer.from('ltds-preclaim-source-attestation-v2\0', 'ascii'), canonicalizeJcs(proof)]);
+  const sourceRequest = { schemaVersion: 2, submissionId: f.attempt.id, viewerTaskId: f.task.id,
+    providerTaskId: f.attempt.providerTaskId, sourceManifest, derivedManifest, manifest,
+    pipeline: envelopeBody.submission.pipeline, capabilityFingerprint: envelopeBody.submission.capabilityFingerprint,
+    sourceAttestation: { proof, signature: 'A'.repeat(86), attestationSha256: crypto.createHash('sha256').update(proofBytes).digest('hex') } };
+  const requestCanonical = canonicalizeJcs(sourceRequest).toString('utf8');
+  outbox.persistSourceIntakeRequest(f.attempt.id, requestCanonical, { localJobId: f.job.id, owner: f.job.lease_owner });
+  const metadataResponse = { jobId: f.attempt.providerTaskId, attemptId: f.attempt.id, providerTaskId: f.attempt.providerTaskId,
+    generation: 1, environment: 'staging', manifestSha256: manifest.sha256, pipelineManifestSha256: manifest.sha256,
+    sourceManifestSha256: sourceManifest.sha256, derivedManifestSha256: derivedManifest.sha256,
+    pipelineDigest: proof.pipelineDigest, status: 'queued', phase: 'source_receiving', sourceState: 'receiving',
+    derivedState: 'receiving', sourceReceipt: null, derivedReceipt: null, sourceReceiptSha256: null, derivedReceiptSha256: null };
+  outbox.acceptSourceIntakeBinding(f.attempt.id, metadataResponse, { ...context, localJobId: f.job.id, owner: f.job.lease_owner });
+  const sourceReceipt = { custody: 'verified' }, derivedReceipt = { custody: 'verified' };
+  const completion = { jobId: f.attempt.providerTaskId, attemptId: f.attempt.id, providerTaskId: f.attempt.providerTaskId,
+    generation: 1, environment: 'staging', sourceManifestSha256: sourceManifest.sha256,
+    derivedManifestSha256: derivedManifest.sha256, pipelineManifestSha256: manifest.sha256,
+    pipelineDigest: proof.pipelineDigest, status: 'queued', phase: 'queued', sourceState: 'retained', derivedState: 'retained',
+    sourceReceipt, sourceReceiptSha256: crypto.createHash('sha256').update(canonicalizeJcs(sourceReceipt)).digest('hex'),
+    derivedReceipt, derivedReceiptSha256: crypto.createHash('sha256').update(canonicalizeJcs(derivedReceipt)).digest('hex') };
+  const saved = outbox.persistSourceIntakeCompletion(f.attempt.id, completion,
+    { environment: 'staging', localJobId: f.job.id, owner: f.job.lease_owner });
+  assert.equal(saved.sourceIntakeCompletionCanonical, canonicalizeJcs(completion).toString('utf8'));
+  assert.equal(outbox.getIntent(f.attempt.id).sourceIntakeCompletionSha256,
+    crypto.createHash('sha256').update(saved.sourceIntakeCompletionCanonical).digest('hex'));
+  const restartedDatabase = openDatabase(path.join(f.root, 'viewer.sqlite'));
+  try {
+    const recovered = new PreparedSubmissionOutbox(restartedDatabase).getIntent(f.attempt.id);
+    assert.equal(recovered.sourceIntakeCanonical, requestCanonical);
+    assert.equal(recovered.sourceIntakeCompletionCanonical, canonicalizeJcs(completion).toString('utf8'));
+    assert.equal(recovered.remoteBinding.generation, 1);
+  } finally { restartedDatabase.close(); }
+  assert.throws(() => outbox.persistSourceIntakeCompletion(f.attempt.id, { ...completion, status: 'failed' },
+    { environment: 'staging', localJobId: f.job.id, owner: f.job.lease_owner }), { code: 'source_intake_completion_binding_mismatch' });
 });
 
 test('outbox requires an unexpired matching submit lease and exact local task and attempt identity', t => {

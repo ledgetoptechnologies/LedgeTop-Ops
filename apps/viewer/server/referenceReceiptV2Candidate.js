@@ -14,8 +14,9 @@ const HASH = /^[a-f0-9]{64}$/;
 const TIME = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
 const BINDING_FIELDS = Object.freeze([
   'coordinatorAuthorityId', 'viewerPrincipalId', 'submissionId', 'activationId',
-  'viewerTaskId', 'viewerAttemptId', 'preparedEnvelopeSha256', 'jobId', 'generation',
+  'viewerTaskId', 'viewerAttemptId', 'providerTaskId', 'preparedEnvelopeSha256', 'jobId', 'generation',
   'environment', 'inputManifestSha256', 'pipelineDigest', 'resultManifestSha256',
+  'sourceManifestSha256', 'derivedManifestSha256', 'sourceReceiptSha256', 'derivedReceiptSha256',
 ]);
 const RECEIPT_FIELDS = Object.freeze([
   'protocol', 'schemaVersion', 'issuerId', 'keyId', 'receiptId', 'storageReceiptId',
@@ -63,15 +64,20 @@ function validateBinding(value) {
       || typeof value.coordinatorAuthorityId !== 'string' || typeof value.viewerPrincipalId !== 'string'
       || typeof value.submissionId !== 'string' || typeof value.activationId !== 'string'
       || typeof value.viewerTaskId !== 'string' || typeof value.viewerAttemptId !== 'string'
+      || typeof value.providerTaskId !== 'string'
       || typeof value.jobId !== 'string' || typeof value.environment !== 'string'
       || !ID.test(value.coordinatorAuthorityId) || !ID.test(value.viewerPrincipalId)
       || !UUID.test(value.submissionId) || !UUID.test(value.activationId)
       || !UUID.test(value.viewerTaskId) || !UUID.test(value.viewerAttemptId)
+      || !ID.test(value.providerTaskId) || value.providerTaskId !== value.jobId
+      || value.submissionId !== value.viewerAttemptId
       || !hash(value.preparedEnvelopeSha256) || !ID.test(value.jobId)
       || !Number.isSafeInteger(value.generation) || value.generation < 1
       || !['staging', 'production'].includes(value.environment)
       || !hash(value.inputManifestSha256) || !hash(value.pipelineDigest)
-      || !hash(value.resultManifestSha256)) fail('viewer_receipt_v2_binding_invalid');
+      || !hash(value.resultManifestSha256) || !hash(value.sourceManifestSha256)
+      || !hash(value.derivedManifestSha256) || !hash(value.sourceReceiptSha256)
+      || !hash(value.derivedReceiptSha256)) fail('viewer_receipt_v2_binding_invalid');
 }
 
 function loadPrivateKey(value) {

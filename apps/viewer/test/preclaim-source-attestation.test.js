@@ -60,7 +60,7 @@ function createSignedIncompleteSnapshot(processing, dataset, task, attempt, sign
   );
 }
 
-function fixture(t, { accept = true, gcp = false, secondPhoto = false, incompleteSelection = false, incompleteSource = false, photoRole = undefined } = {}) {
+function fixture(t, { accept = false, gcp = false, secondPhoto = false, incompleteSelection = false, incompleteSource = false, photoRole = undefined } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-preclaim-attestation-'));
   const database = openDatabase(path.join(root, 'viewer.sqlite'));
   const processing = new ProcessingRepository(database);
@@ -123,10 +123,10 @@ function fixture(t, { accept = true, gcp = false, secondPhoto = false, incomplet
   const attestationKeys = crypto.generateKeyPairSync('ed25519');
   const signer = { issuerId: 'viewer-preclaim-issuer', keyId: 'preclaim-key', publicKey: attestationKeys.publicKey,
     sign: bytes => crypto.sign(null, bytes, attestationKeys.privateKey) };
-  return { processing, outbox, attempt, task, dataset, snapshotKeys, signer, capabilities, response };
+  return { processing, outbox, attempt, task, dataset, snapshotKeys, signer, capabilities, response, pipeline: submission.pipeline };
 }
 
-test('preclaim signer binds accepted envelope to verified held source snapshot and signs the closed v1 claim', t => {
+test('preclaim signer binds a locally prepared envelope to the held source snapshot without a prior V1 job', t => {
   const f = fixture(t);
   const result = createPreclaimSourceAttestation({
     processing: f.processing, outbox: f.outbox, attemptId: f.attempt.id,
@@ -135,9 +135,26 @@ test('preclaim signer binds accepted envelope to verified held source snapshot a
   });
   const canonical = require('../server/preparedSubmissionOutbox').canonicalizeJcs(result.proof);
   assert.deepEqual(result.raw, canonical);
-  assert.equal(Object.keys(result.proof).sort().join(','), 'activationId,authorityId,environment,issuerId,keyId,manifestSha256,pipelineDigest,preparedEnvelopeSha256,principalId,protocol,schemaVersion,sourceSnapshotSha256,submissionId,viewerAttemptId,viewerTaskId');
-  assert.equal(result.proof.manifestSha256, f.response.manifestSha256);
-  assert.equal(result.proof.pipelineDigest, f.response.pipelineDigest);
+  assert.deepEqual(Object.keys(result.sourceAttestation).sort(), ['attestationSha256', 'proof', 'signature']);
+  assert.equal(result.sourceAttestation.signature, result.signature.toString('base64url'));
+  assert.equal(result.sourceAttestation.attestationSha256, result.attestationSha256);
+  assert.equal(Object.keys(result.proof).sort().join(','), 'activationId,authorityId,derivedManifestSha256,environment,issuerId,keyId,pipelineDigest,pipelineManifestSha256,preparedEnvelopeSha256,principalId,protocol,providerTaskId,schemaVersion,sourceManifestSha256,sourceSnapshotSha256,submissionId,viewerAttemptId,viewerTaskId');
+  assert.equal(result.proof.submissionId, f.attempt.id);
+  assert.equal(result.proof.viewerAttemptId, f.attempt.id);
+  assert.equal(result.proof.viewerTaskId, f.task.id);
+  assert.equal(result.proof.providerTaskId, f.attempt.providerTaskId);
+  assert.deepEqual(Object.keys(result.sourceIntakeRequest).sort(), [
+    'capabilityFingerprint', 'derivedManifest', 'manifest', 'pipeline', 'providerTaskId',
+    'schemaVersion', 'sourceAttestation', 'sourceManifest', 'submissionId', 'viewerTaskId',
+  ]);
+  assert.equal(result.sourceIntakeRequest.viewerTaskId, f.task.id);
+  assert.equal(result.sourceIntakeRequest.submissionId, f.attempt.id);
+  assert.equal(result.sourceIntakeRequest.providerTaskId, f.attempt.providerTaskId);
+  assert.equal(result.proof.pipelineManifestSha256, f.response.manifestSha256);
+  assert.equal(result.sourceManifest.sha256, result.proof.sourceManifestSha256);
+  assert.equal(result.derivedManifest.sha256, result.proof.derivedManifestSha256);
+  assert.equal(result.proof.pipelineDigest, crypto.createHash('sha256')
+    .update(require('../server/preparedSubmissionOutbox').canonicalizeJcs(f.pipeline)).digest('hex'));
   assert.throws(() => createPreclaimSourceAttestation({
     processing: f.processing, outbox: f.outbox, attemptId: f.attempt.id,
     snapshotPublicKey: f.snapshotKeys.publicKey, expectedSnapshotIssuerId: 'untrusted-issuer', expectedSnapshotKeyId: 'snapshot-key', signer: f.signer,
@@ -145,15 +162,24 @@ test('preclaim signer binds accepted envelope to verified held source snapshot a
   }), { code: 'preclaim_snapshot_signer_mismatch' });
   assert.equal(crypto.verify(null, Buffer.concat([DOMAIN, result.raw]), f.signer.publicKey, result.signature), true);
   assert.equal(result.attestationSha256, crypto.createHash('sha256').update(Buffer.concat([DOMAIN, result.raw])).digest('hex'));
+  const replay = createPreclaimSourceAttestation({
+    processing: f.processing, outbox: f.outbox, attemptId: f.attempt.id,
+    snapshotPublicKey: f.snapshotKeys.publicKey, expectedSnapshotIssuerId: 'viewer-snapshot-issuer',
+    expectedSnapshotKeyId: 'snapshot-key', signer: f.signer, authorityId: AUTHORITY_ID,
+    principalId: 'viewer-staging', environment: 'staging', capabilities: f.capabilities,
+  });
+  assert.deepEqual(replay.sourceIntakeCanonical, result.sourceIntakeCanonical,
+    'same held source and attempt produce the byte-identical V2 POST body');
   assert.equal(f.processing.hasHeldSourceSnapshot(f.dataset.id), true, 'proof creation must not release held source data');
 });
 
-test('preclaim signer binds attempt GCP evidence while rejecting scope mismatch and unaccepted intents', t => {
+test('preclaim signer uses the prepared intent and retains GCP source plus derived input', t => {
   const pending = fixture(t, { accept: false });
   const pendingArgs = { processing: pending.processing, outbox: pending.outbox, attemptId: pending.attempt.id,
     snapshotPublicKey: pending.snapshotKeys.publicKey, expectedSnapshotIssuerId: 'viewer-snapshot-issuer', expectedSnapshotKeyId: 'snapshot-key', signer: pending.signer,
     authorityId: AUTHORITY_ID, principalId: 'viewer-staging', environment: 'staging', capabilities: pending.capabilities };
-  assert.throws(() => createPreclaimSourceAttestation(pendingArgs), { code: 'preclaim_submission_not_accepted' });
+  assert.equal(pending.outbox.getIntent(pending.attempt.id).state, 'prepared');
+  assert.equal(createPreclaimSourceAttestation(pendingArgs).sourceAttestation.proof.submissionId, pending.attempt.id);
 
   const f = fixture(t, { gcp: true });
   const args = { processing: f.processing, outbox: f.outbox, attemptId: f.attempt.id,
@@ -165,7 +191,11 @@ test('preclaim signer binds attempt GCP evidence while rejecting scope mismatch 
   assert.throws(() => createPreclaimSourceAttestation({ ...args, outbox: new PreparedSubmissionOutbox(otherDatabase) }), { code: 'preclaim_database_mismatch' });
   assert.throws(() => createPreclaimSourceAttestation({ ...args, principalId: 'other-principal' }), { code: 'preclaim_scope_mismatch' });
   const result = createPreclaimSourceAttestation(args);
-  assert.equal(result.proof.manifestSha256, f.response.manifestSha256);
+  assert.equal(result.sourceManifest.objects.find(object => object.id === 'gcp-source').sourceType, 'gcp_source_csv');
+  assert.equal(result.sourceManifest.objects.find(object => object.id === 'gcp-source').retentionClass, 'permanent_viewer_hold');
+  assert.equal(result.derivedManifest.objects.length, 1);
+  assert.equal(result.derivedManifest.objects[0].name, 'gcp_list.txt');
+  assert.equal(result.derivedBytes.get(result.derivedManifest.objects[0].id).toString('utf8'), f.processing.getAttemptGcpSnapshot(f.attempt.id).content);
   assert.equal(f.processing.hasHeldSourceSnapshot(f.dataset.id), true, 'GCP preclaim must keep original source data held');
 });
 

@@ -28,10 +28,11 @@ function createFixture() {
   const expected = {
     coordinatorAuthorityId: 'coord-test',
     viewerPrincipalId: 'viewer-test',
-    submissionId: '55555555-5555-4555-8555-555555555555',
+    submissionId: '88888888-8888-4888-8888-888888888888',
     activationId: '66666666-6666-4666-8666-666666666666',
     viewerTaskId: '77777777-7777-4777-8777-777777777777',
     viewerAttemptId: '88888888-8888-4888-8888-888888888888',
+    providerTaskId: resultManifest.jobId,
     preparedEnvelopeSha256: 'a'.repeat(64),
     jobId: resultManifest.jobId,
     generation: resultManifest.generation,
@@ -39,6 +40,10 @@ function createFixture() {
     inputManifestSha256: 'b'.repeat(64),
     pipelineDigest: resultManifest.pipelineDigest,
     resultManifestSha256: resultManifest.resultManifestSha256,
+    sourceManifestSha256: 'd'.repeat(64),
+    derivedManifestSha256: 'e'.repeat(64),
+    sourceReceiptSha256: 'f'.repeat(64),
+    derivedReceiptSha256: '0'.repeat(64),
   };
   const acceptance = {
     schemaVersion: 1,
