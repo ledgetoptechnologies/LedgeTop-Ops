@@ -7,6 +7,7 @@ const { importWebodmTask } = require('./webodmTaskImport');
 const { cleanupLodRecoveryMaterialization, processLodRecovery } = require('./lodRecovery');
 const { processingReadyEvent } = require('./processingReadyEvent');
 const { copyTaskPhotos } = require('./taskPhotoImports');
+const { autoImportGcpSources } = require('./gcpAutoImport');
 
 async function reconcileCatalogSourceCleanups(processing,storage,limit=20){let cleaned=0;for(const item of processing.pendingCatalogSourceCleanups(limit)){try{const removed=await storage.removeAdoptedSourceIfMatches(item.rootKey,item.relativePath,{fingerprint:item.sourceFingerprint,byteSize:item.sourceByteSize,cleanupId:item.id,sourceDev:item.sourceDev,sourceIno:item.sourceIno,sourceCtimeNs:item.sourceCtimeNs,sourceMtimeNs:item.sourceMtimeNs});if(!removed)continue;processing.clearCatalogSourceCleanup(item.id);cleaned+=1;}catch(error){if(error?.restoredSourceIdentity)processing.refreshCatalogSourceCleanupIdentity(item.id,item,error.restoredSourceIdentity);/* durable journal retries during maintenance */}}return cleaned;}
 function reconcileCatalogAdoptionRecoveries(processing,storage,limit=20){let recovered=0;for(const item of processing.pendingCatalogAdoptionRecoveries(limit)){try{if(!item.datasetId||!processing.getDataset(item.datasetId,true))storage.reconcileAdoptionIntent(item.rootKey,item.relativePath,item.datasetRelative);processing.clearCatalogAdoptionIntent(item.id);recovered+=1;}catch{/* durable intent retries during maintenance */}}return recovered;}
@@ -21,6 +22,7 @@ async function finalizeUpload(operation, { processing, storage }, owner, updateP
   if (!upload) throw Object.assign(new Error('upload session is unavailable'), { code: 'upload_unavailable' });
   const existing = processing.getDataset(upload.datasetId, true);
   if (existing?.status === 'finalized') {
+    await autoImportGcpSources({ processing, storage }, existing.id, upload.subject);
     processing.completeUpload(upload.id);
     storage.cleanupUpload(upload.id);
     return { dataset: existing };
@@ -42,6 +44,7 @@ async function finalizeUpload(operation, { processing, storage }, owner, updateP
     await updateProgress(0.05 + 0.9 * (index + 1) / Math.max(1, upload.files.length));
   }
   const dataset = processing.finalizeDataset(existing.id, files, manifestHash(files));
+  await autoImportGcpSources({ processing, storage }, dataset.id, upload.subject);
   processing.completeUpload(upload.id);
   storage.cleanupUpload(upload.id);
   return { dataset };
@@ -63,6 +66,7 @@ async function adoptImport(operation, { processing, storage }, owner, updateProg
       throw Object.assign(new Error('import authorization was lost'), { code: 'preview_claim_lost' });
   };
   if (existing?.status === 'finalized') {
+    await autoImportGcpSources({ processing, storage }, existing.id, operation.subject);
     finishAuthorizationAndSource();
     return { dataset: existing };
   }
@@ -81,6 +85,7 @@ async function adoptImport(operation, { processing, storage }, owner, updateProg
     metadata: file.metadata || {},
   }));
   const dataset = processing.finalizeDataset(existing.id, files, manifestHash(files));
+  await autoImportGcpSources({ processing, storage }, dataset.id, operation.subject);
   finishAuthorizationAndSource();
   return { dataset };
 }
