@@ -101,6 +101,8 @@ final class LivePilotModel: ObservableObject {
     private var savedTestCleanup: Task<SyntheticAccessSignOut, Never>?
     private var restartSaveTask: Task<Void, Error>?
     private var restartTest: SyntheticAccessRestore?
+    private var liveRestart: ManagedAccessOnlyRestore?
+    private var liveRemovalUnconfirmed = false
     private var pendingRequests: [UUID: @Sendable () -> Void] = [:]
     private let browser = PilotBrowserLogin()
     private var credential: ManagedOAuthCredential?
@@ -126,6 +128,9 @@ final class LivePilotModel: ObservableObject {
                 restartTest = try? SyntheticAccessRestore(pins: pins, store: SyntheticAccessKeychainStore(),
                     verify: { credential in _ = try await api.verifySyntheticProbe(credential: credential) },
                     revoke: { token, client in try await transport.revoke(token: token, clientID: client, hint: .access) })
+            } else if !synthetic, let api {
+                liveRestart = ManagedAccessOnlyRestore(pins: pins, store: ManagedAccessOnlyKeychainStore(pins: pins),
+                    verify: { credential in try await api.identity(credential: credential) })
             }
         }
         // Remove tokens from older pilot builds; managed credentials stay in memory.
@@ -133,6 +138,9 @@ final class LivePilotModel: ObservableObject {
     }
     func openLive() {
         active = true
+        if !isSyntheticProbe, !signedIn, !loading, liveRestart != nil {
+            Task { await restoreLiveSession() }
+        }
         guard isSyntheticProbe, let cleanup = savedTestCleanup else { return }
         let ticket = generation
         Task { [weak self] in
@@ -142,6 +150,29 @@ final class LivePilotModel: ObservableObject {
         }
     }
     func useDemo() { signOut(); active = false }
+    func restoreLiveSession() async {
+        guard !isSyntheticProbe, !loading, !signedIn, let coordinator, let api, let liveRestart else { return }
+        let ticket = generation
+        loading = true; message = nil
+        defer { if generation == ticket { loading = false } }
+        do {
+            guard let restored = try await perform({ try await coordinator.restoreReadOnlySession(from: liveRestart) }) else {
+                message = "No saved read-only session is available. Sign in with Cloudflare Access."
+                return
+            }
+            guard generation == ticket else { return }
+            let page = try await perform { try await api.operations(credential: restored.credential) }
+            guard generation == ticket, restored.credential.expiresAt > Date() else { return }
+            var restoredCollection = MobileOperationCollection()
+            try restoredCollection.append(page, requestedCursor: nil)
+            credential = restored.credential; user = restored.session.user; collection = restoredCollection
+            scheduleReadExpiry(restored.credential, ticket: ticket)
+            message = "Your saved session was checked online. Operations data was refreshed from the server."
+        } catch {
+            guard generation == ticket else { return }
+            message = "The saved session could not be verified online. Connect to the internet and retry, or sign in again. No saved Operations data is shown."
+        }
+    }
     func saveRestartTest() async {
         guard isSyntheticProbe, signedIn, !loading, let coordinator, let restartTest else { return }
         let ticket = generation
@@ -263,14 +294,20 @@ final class LivePilotModel: ObservableObject {
             }
         }
         guard let coordinator else { return }
+        let liveCleanup: Task<Bool, Never>?
+        if !isSyntheticProbe, let liveRestart {
+            liveCleanup = Task { await liveRestart.signOut() }
+        } else { liveCleanup = nil }
         let previous = signOutTask
         let check: (@Sendable (ManagedOAuthCredential) async -> SyntheticRevocationProbeResult)?
         if isSyntheticProbe, let api { check = { await api.checkSyntheticRevocation(credential: $0) } }
         else { check = nil }
         let task = Task { () -> ManagedOAuthSignOutReport in
             let prior = await previous?.value
+            let localRemoval = await liveCleanup?.value ?? true
+            self.liveRemovalUnconfirmed = !localRemoval
             let report = await coordinator.signOutReport(syntheticCheck: check)
-            if prior?.result == .revocationUnconfirmed {
+            if !localRemoval || prior?.result == .revocationUnconfirmed {
                 return ManagedOAuthSignOutReport(result: .revocationUnconfirmed, outcomes: report.outcomes)
             }
             return report
@@ -279,6 +316,10 @@ final class LivePilotModel: ObservableObject {
         Task { [weak self] in
             let report = await task.value
             guard let self, self.generation == ticket, report.result == .revocationUnconfirmed else { return }
+            if self.liveRemovalUnconfirmed {
+                self.message = "Signed out of this app, but Keychain could not confirm removal of the saved session. Keep the iPad unlocked and retry sign out."
+                return
+            }
             let primary = [self.message, ManagedOAuthDiagnostic.revocationOutcomes(report.outcomes)].compactMap { $0 }.joined(separator: " ")
             self.message = ManagedOAuthDiagnostic.withRevocationWarning(primary)
         }
@@ -340,6 +381,10 @@ final class LivePilotModel: ObservableObject {
             let page = try await perform { try await api.operations(credential: authorized) }
             guard generation == ticket, authorized.expiresAt > Date() else { return }
             try collection.append(page, requestedCursor: nil)
+            if let liveRestart {
+                do { try await coordinator.saveReadOnlySession(to: liveRestart, serverSession: identity) }
+                catch { message = "Signed in and loaded Operations. Keychain save failed, so this session will not restore after a restart." }
+            }
         } catch {
             guard generation == ticket else { return }
             signOut(failureMessage: error is CancellationError ? nil : Self.explanation(error))
@@ -480,6 +525,8 @@ struct LivePilotWorkspace: View {
                                 Button("Clear saved test") { model.clearRestartTest() }.disabled(model.loading)
                             } else {
                                 Text("Uses your existing LT Ops staff sign-in. The pilot can only read permitted operations; sessions last up to 15 minutes.").font(.footnote)
+                                Button("Restore saved session") { Task { await model.restoreLiveSession() } }.disabled(model.loading)
+                                Text("Keeps only a short-lived access token in this iPad’s Keychain. Every restart checks your staff access online and reloads Operations; refresh tokens and business data are not saved.").font(.caption)
                             }
                         } else {
                             Text("Live access is not ready in this pilot build yet.")

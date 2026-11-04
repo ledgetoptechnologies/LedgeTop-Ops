@@ -149,6 +149,7 @@ public actor ManagedOAuthCoordinator {
     private var credentialClientID: String?
     private var exchangesInFlight = 0
     private var revocationsInFlight = 0
+    private var persistenceInFlight = 0
     private var grantStatusUncertain = false
 
     public init(pins: ManagedOAuthPins, transport: any ManagedOAuthExchanging, browser: @escaping Browser,
@@ -183,7 +184,7 @@ public actor ManagedOAuthCoordinator {
         let old = credential, client = credentialClientID
         credential = nil
         credentialClientID = nil
-        let uncertain = grantStatusUncertain || exchangesInFlight > 0 || revocationsInFlight > 0
+        let uncertain = grantStatusUncertain || exchangesInFlight > 0 || revocationsInFlight > 0 || persistenceInFlight > 0
         guard let old, let client else {
             return ManagedOAuthSignOutReport(result: uncertain ? .revocationUnconfirmed : .noLocalCredential, outcomes: nil)
         }
@@ -279,6 +280,38 @@ public actor ManagedOAuthCoordinator {
     public func currentDataCredential() -> ManagedOAuthCredential? {
         guard let credential, credential.expiresAt > Date() else { return nil }
         return ManagedOAuthCredential(accessToken: credential.accessToken, refreshToken: nil, expiresAt: credential.expiresAt)
+    }
+    /// Persist a bounded, access-token-only read session after the caller has
+    /// fetched the first permitted Operations page.
+    public func saveReadOnlySession(to store: ManagedAccessOnlyRestore, serverSession: MobilePilotSession) async throws {
+        guard let credential, let client = credentialClientID, credential.expiresAt > Date(),
+              revocationsInFlight == 0 else { throw MobilePilotError.unavailable }
+        let expected = generation
+        persistenceInFlight += 1
+        defer { persistenceInFlight -= 1 }
+        let accessOnly = ManagedOAuthCredential(accessToken: credential.accessToken, refreshToken: nil, expiresAt: credential.expiresAt)
+        let bounded = try ManagedPilotDataAPI.credential(accessOnly, boundedBy: serverSession)
+        try await store.retain(bounded, clientID: client, session: serverSession)
+        if generation != expected || Task.isCancelled {
+            _ = await store.signOut()
+            throw MobilePilotError.signedOut
+        }
+    }
+    /// Restore an online-verified access-only grant into the coordinator so
+    /// normal expiry and sign-out handling still own the session.
+    public func restoreReadOnlySession(from store: ManagedAccessOnlyRestore) async throws -> ManagedAccessOnlyRestored? {
+        guard credential == nil, exchangesInFlight == 0, revocationsInFlight == 0, !grantStatusUncertain else {
+            throw MobilePilotError.unavailable
+        }
+        let expected = generation
+        guard let restored = try await store.restore() else { return nil }
+        try check(expected)
+        guard restored.credential.refreshToken == nil, restored.credential.expiresAt > Date() else {
+            throw MobilePilotError.expired
+        }
+        credential = restored.credential
+        credentialClientID = restored.clientID
+        return restored
     }
     /// Explicit test-only transfer: the refresh grant is never passed to the store.
     /// A racing sign-out is followed by removal of any item this call just saved.
