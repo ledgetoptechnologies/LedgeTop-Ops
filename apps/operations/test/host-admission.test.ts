@@ -38,7 +38,7 @@ describe("Operations deployed host admission", () => {
 
   it("resolves only configured Ops origins for origin-bound API checks", () => {
     const env = { ENVIRONMENT: "production" as const, EXPECTED_HOST: "ops.ledgetop.app",
-      OPERATIONS_ORIGINS: "https://ops.ledgetop.app,https://ops.ledgetopdroneservices.com" };
+      OPERATIONS_ORIGINS: "https://ops.ledgetop.app" };
     const canonical = "https://ops.ledgetop.app";
     expect(admittedOperationsRequestOrigin(`${canonical}/api/session`, env, canonical)).toBe(canonical);
     expect(admittedOperationsRequestOrigin("https://ops.ledgetopdroneservices.com/api/session", env, canonical))
