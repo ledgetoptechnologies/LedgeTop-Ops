@@ -1,5 +1,9 @@
 # Canonical client portal origins
 
+The canonical Operations entry point is `https://ops.ledgetop.app`. Production `OPERATIONS_ORIGINS` admits only that origin for browser APIs, CSRF, and CORS. The former LTDS and LTT Ops hosts are configured separately as `LEGACY_OPERATIONS_REDIRECT_ORIGINS`; they can redirect only ordinary GET/HEAD document navigations from the exact allowlisted page routes. Old-host API, asset, Viewer-capability and unknown requests are denied. No cookies, authorization headers, byte ranges or Origin headers cross the redirect. A single exact Dropbox OAuth callback route remains available on a retired Ops host only to drain previously issued encrypted OAuth state, which expires after 10 minutes.
+
+This source configuration does not change Cloudflare Access, custom-domain routing, or DNS. Keep the retired Worker domains until canonical sign-in, redirects, pending OAuth callbacks, existing public links and the 48-hour browser-asset requirement are independently verified. Before production activation, preserve actual old asset bytes and paths in the active namespace for all releases served within the previous 48 hours. Do not infer this from the Worker asset manifest or rollback capability alone.
+
 The canonical authenticated entry point is `https://portal.ledgetop.app/portal` in production. Staging continues to use `https://portal-staging.ledgetopdroneservices.com/portal`. Production's former Drone Services and Technologies portal hosts are retired for private portal APIs and presentation, while the Drone Services legacy host remains explicitly available for existing public-link routes.
 
 Combined summaries clear before focus, visibility and periodic revalidation. An unavailable or revoked account cannot retain its previously loaded projects or requests. Native hierarchy responses do not prove a project's lifecycle status, and incomplete pagination must be reported rather than presented as a complete list.
