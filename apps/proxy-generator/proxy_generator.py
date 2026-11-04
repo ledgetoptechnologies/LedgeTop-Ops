@@ -10,6 +10,7 @@ import json
 import math
 import os
 import pathlib
+import re
 import signal
 import sqlite3
 import subprocess
@@ -47,7 +48,7 @@ class Config:
     attempts: int = 3
     retry_base: int = 60
     retry_max: int = 3600
-    version: str = "6"
+    version: str = "7"
     scan_dirs: tuple = ("Clients", "Recurring", "Extended", "2024", "2025", "2026")
     include: frozenset = frozenset(("dump", "unedited", "raw", "stabilized"))
     max_height: int = 720
@@ -55,7 +56,7 @@ class Config:
     @property
     def render_version(self):
         # Receipts and retry budgets belong to the complete output profile.
-        return f"{self.version}-prores-proxy-h{self.max_height}"
+        return f"{self.version}-h264-intra-h{self.max_height}"
 
     @classmethod
     def environment(cls):
@@ -69,7 +70,7 @@ class Config:
                 raise JobError("invalid_configuration") from None
         dirs = tuple(os.environ.get("PROXY_SCAN_DIRS", "Clients Recurring Extended 2024 2025 2026").split())
         include = frozenset(os.environ.get("PROXY_INCLUDE_SEGMENTS", "Dump Unedited Raw Stabilized").casefold().split())
-        version = os.environ.get("FORCE_PROXY_REGENERATION_VERSION", "6")
+        version = os.environ.get("FORCE_PROXY_REGENERATION_VERSION", "7")
         max_height = number("PROXY_MAX_HEIGHT", 720, 1080)
         if max_height < 144 or max_height % 2:
             raise JobError("invalid_configuration")
@@ -145,6 +146,29 @@ def run_process(args, timeout, capture=False):
                 process.wait(timeout=5)
 
 
+DROP_FRAME_RATES = frozenset((fractions.Fraction(30000, 1001), fractions.Fraction(60000, 1001)))
+SONY_META_TAIL_BYTES = 256 * 1024
+SONY_LTC = re.compile(rb'<LtcChangeTable\b[^>]*>\s*<LtcChange\b[^>]*\bvalue="([0-9A-Fa-f]{8})"')
+
+
+def sony_drop_frame(path, tc):
+    """Read the drop-frame bit from a Sony clip's trailing NonRealTimeMeta XML.
+
+    The first LtcChange value is SMPTE BCD timecode, frames byte first; bit 0x40 of that
+    byte is the drop-frame flag. It must agree with the probed hours/minutes/seconds.
+    """
+    try:
+        with open(path, "rb") as file:
+            file.seek(max(0, file.seek(0, os.SEEK_END) - SONY_META_TAIL_BYTES))
+            match = SONY_LTC.search(file.read())
+    except OSError:
+        return False
+    if not match:
+        return False
+    frames, seconds, minutes, hours = bytes.fromhex(match.group(1).decode())
+    return bool(frames & 0x40) and f"{hours & 0x3F:02x}:{minutes & 0x7F:02x}:{seconds & 0x7F:02x}" == tc[:8]
+
+
 def probe(path, config):
     try:
         data = json.loads(run_process(["ffprobe", "-v", "error", "-show_entries",
@@ -169,6 +193,10 @@ def probe(path, config):
             tc = next((x.get("tags", {}).get("timecode") for x in streams if x.get("tags", {}).get("timecode")), None)
         tc = tc or data.get("format", {}).get("tags", {}).get("timecode")
         # Preserve actual source drop/non-drop notation rather than guessing from frame rate.
+        # Sony XAVC reports drop-frame timecode with ":" through FFprobe; its embedded
+        # NonRealTimeMeta records the real flag, which Resolve honors when linking proxies.
+        if tc and len(tc) == 11 and tc[8] == ":" and fps in DROP_FRAME_RATES and sony_drop_frame(path, tc):
+            tc = tc[:8] + ";" + tc[9:]
         if tc and (len(tc) != 11 or tc[2] != ":" or tc[5] != ":" or tc[8] not in ":;" or not tc.replace(":", "").replace(";", "").isdigit()):
             raise ValueError()
         return {"video": video, "fps": fps, "duration": duration, "timecode": tc,
@@ -187,7 +215,7 @@ def validate_proxy(source, output, config=None):
     video = output["video"]
     expected_width = int(source["video"]["width"]) * height / int(source["video"]["height"])
     width = int(video["width"])
-    if (video.get("codec_name") != "prores" or video.get("profile") != "Proxy" or video.get("pix_fmt") != "yuv422p10le"
+    if (video.get("codec_name") != "h264" or video.get("pix_fmt") != "yuv420p"
             or int(video["height"]) != height or width % 2 or abs(width - expected_width) > 2):
         return False
     if source["fps"] != output["fps"] or source["audio"] != output["audio"]:
@@ -210,8 +238,10 @@ def validate_proxy(source, output, config=None):
 def encode_args(source, tmp, media, config):
     args = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-n", "-threads", str(config.threads), "-i", str(source),
         "-map", "0:v:0", "-map", "0:a?", "-map_metadata", "0",
-        "-vf", f"scale=-2:{target_height(media, config)},format=yuv422p10le", "-c:v", "prores_ks", "-profile:v", "0", "-vendor", "apl0",
-        "-threads", str(config.threads), "-c:a", "pcm_s16le", "-ar", "48000", "-r", str(media["fps"])]
+        # All-intra H.264 (every frame a keyframe) keeps Resolve scrubbing and frame
+        # stepping smooth at a fraction of ProRes Proxy's size; 8-bit 4:2:0 decodes on GPUs.
+        "-vf", f"scale=-2:{target_height(media, config)},format=yuv420p", "-c:v", "libx264", "-preset", "fast",
+        "-crf", "23", "-g", "1", "-threads", str(config.threads), "-c:a", "pcm_s16le", "-ar", "48000", "-r", str(media["fps"])]
     tb = fractions.Fraction(media["video"].get("time_base", "1/60000"))
     if tb > 0 and tb.denominator <= 2147483647:
         args += ["-video_track_timescale", str(tb.denominator)]
