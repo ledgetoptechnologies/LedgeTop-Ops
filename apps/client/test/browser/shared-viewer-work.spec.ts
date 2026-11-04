@@ -36,6 +36,9 @@ const viewerPage = (workspaceId: string, items: Item[], nextCursor: string | nul
 type Call = {path: string; query: URLSearchParams; method: string; workspace?: string; key?: string; body?: unknown};
 async function mock(page: Page, workspaces: typeof allWorkspaces, viewer: (route: Route, call: Call, workspaceId: string) => Promise<unknown> | undefined) {
   const calls: Call[] = [];
+  // The Viewer is a separate production service. Browser tests should verify
+  // the client redirect/session flow without depending on the external host.
+  await page.context().route(`${viewerOrigin}/**`, route => route.fulfill({status: 200, contentType: "text/html", body: "<!doctype html><title>Viewer test fixture</title>"}));
   await page.context().route("**/api/client/**", async route => {
     const request = route.request(), url = new URL(request.url());
     const call: Call = {path: url.pathname, query: url.searchParams, method: request.method(), workspace: request.headers()["x-ltds-workspace-id"],
