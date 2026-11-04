@@ -240,6 +240,11 @@ test('hand-written controlled Obj2Tiles v3 provenance is publishable but has no 
   assert.equal(controlledViewer.lodProvenanceVerified,false);
   assert.ok(c.processing.publishAttemptAtomic(item.attempt.id,['glb','tiles'],{actorId:'ops:test'}));
 
+  const prior=readyModel(c);
+  c.processing.addModelAsset({versionId:prior.versionId,kind:'tiles',rootKey:'models',relativePath:'prior/tileset.json',format:'3dtiles',contentType:'application/json',byteSize:2,attemptId:prior.attempt.id,sha256:'c'.repeat(64),manifestSha256:'d'.repeat(64),manifestFiles:[{relativePath:'tileset.json',byteSize:2,sha256:'c'.repeat(64)}]});
+  c.db.prepare('UPDATE model_versions SET metadata_json=? WHERE id=?').run(JSON.stringify({lodProvenance:{...provenance,converter:{...provenance.converter,binarySha256:'3577688939806dabdf1f4620cc05debe6e178180a99bf0308f4b8483b8a36725'}}}),prior.versionId);
+  assert.ok(c.processing.publishAttemptAtomic(prior.attempt.id,['glb','tiles'],{actorId:'ops:test'}),'ready-for-review output from the prior Viewer remains publishable');
+
   const next=readyModel(c);
   c.processing.addModelAsset({versionId:next.versionId,kind:'tiles',rootKey:'models',relativePath:'forged/tileset.json',format:'3dtiles',contentType:'application/json',byteSize:2,attemptId:next.attempt.id,sha256:'c'.repeat(64),manifestSha256:'d'.repeat(64),manifestFiles:[{relativePath:'tileset.json',byteSize:2,sha256:'c'.repeat(64)}]});
   c.db.prepare('UPDATE model_versions SET metadata_json=? WHERE id=?').run(JSON.stringify({lodProvenance:{...provenance,converter:{...provenance.converter,version:'latest'}}}),next.versionId);

@@ -9,13 +9,16 @@ function processingJobCounts(database) {
       COALESCE(SUM(CASE WHEN a.status IN ('running','ingesting','derivatives','cancelling') THEN 1 ELSE 0 END),0) AS running,
       COALESCE(SUM(CASE WHEN a.status='ready_for_review' THEN 1 ELSE 0 END),0) AS reviewReady,
       COALESCE(SUM(CASE WHEN a.status='failed' THEN 1 ELSE 0 END),0) AS failed,
-      COALESCE(SUM(CASE WHEN a.status IN ('committed','queued_upstream','running','ingesting') AND EXISTS (
+      COALESCE(SUM(CASE WHEN a.status IN ('pending','admitted','initializing','uploading','committed','queued_upstream','running','ingesting') AND (a.error_code IN ('provider_execution_held','provider_submission_observation_unavailable','staged_commitment_unavailable','provider_observation_unavailable','provider_upload_acceptance_unknown') OR (a.submission_phase IN ('uploading','uploading_auxiliary') AND EXISTS (
+        SELECT 1 FROM processing_jobs interrupted WHERE interrupted.attempt_id=a.id AND interrupted.job_type='submit'
+          AND (interrupted.status='pending' OR (interrupted.status='leased' AND (interrupted.lease_expires_at IS NULL OR interrupted.lease_expires_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now'))))
+      )) OR EXISTS (
         SELECT 1 FROM processing_jobs j WHERE j.attempt_id=a.id AND j.job_type='reconcile'
           AND j.status IN ('pending','leased') AND j.error_code IN (
             'provider_observation_unavailable','provider_status_unknown','provider_status_not_found',
             'provider_status_auth_failed','provider_adapter_unavailable','provider_observation_persistence_unavailable','provider_result_identity_mismatch','provider_attempt_unavailable'
           )
-      ) THEN 1 ELSE 0 END),0) AS observationWarnings
+      )) THEN 1 ELSE 0 END),0) AS observationWarnings
     FROM processing_attempts a
     JOIN processing_tasks t ON t.id=a.task_id AND t.active_attempt_id=a.id
     JOIN projects p ON p.id=t.project_id

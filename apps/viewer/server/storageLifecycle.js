@@ -29,6 +29,7 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
         if(faultAt==='after_filesystem')throw Object.assign(new Error('injected failure after lifecycle filesystem effect'),{code:'fault_injected'});
         markApplied(processing,mutation,{destinationRelativePath:!sourceExists&&!destinationExists?'':mutation.destinationRelativePath});
       }else if(mutation.type==='purge'){
+        if(mutation.entityType==='dataset' && processing.datasetHasRetainedCsv(mutation.entityId)) throw Object.assign(new Error('dataset contains retained CSV source'), {code:'retained_csv'});
         if(exists(storage,mutation.sourceRootKey,mutation.sourceRelativePath)){require('./outputSupersession').requireSupersessionMutationProof(processing,mutation,supersessionProof);storage.removeExact(mutation.sourceRootKey,mutation.sourceRelativePath);}
         if(faultAt==='after_filesystem')throw Object.assign(new Error('injected failure after lifecycle filesystem effect'),{code:'fault_injected'});
         markApplied(processing,mutation);
@@ -57,8 +58,25 @@ function reconcileStorageMutations(processing,storage,limit=20){const results=[]
 
 function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit=20,onPurged=null}={}){
   const results=[];
-  for(const item of processing.expiredTrash().slice(0,Math.max(1,Math.min(Number(limit)||20,100)))){
+  const batchLimit=Math.max(1,Math.min(Number(limit)||20,100));
+  // Rotate through at most 100 expired records per maintenance pass. A
+  // protected prefix cannot cause unbounded scans or starve later records.
+  const leaseOwner=require('node:crypto').randomUUID();
+  if(!processing.acquireTrashScanLease(leaseOwner))return results;
+  try{
+  let cursor=processing.trashScanCursor()||processing.startTrashScan(leaseOwner);
+  let page=processing.expiredTrashPage(cursor.after,cursor.highWater,100);
+  if(!page.length){cursor=processing.startTrashScan(leaseOwner);page=processing.expiredTrashPage(cursor.after,cursor.highWater,100);}
+  if(!page.length)return results;
+  for(const entry of page){
+    if(results.length>=batchLimit)break;
+    processing.renewTrashScanLease(leaseOwner);
+    const item=entry.item;
     try{
+      // Protected entries do not consume the work budget; check containers as
+      // well as standalone datasets before attempting any child purge.
+      if(item.entityType==='dataset'&&processing.datasetHasRetainedCsv(item.entityId))continue;
+      if(['project','task'].includes(item.entityType)&&processing.containerHasRetainedCsv(item.id))continue;
       if(item.entityType==='output'&&require('./outputSupersession').automaticSupersessionTrash(processing,item.id)){results.push({trashId:item.id,status:'deferred',errorCode:'supersession_reverification_required'});continue;}
       if(item.entityType==='project'||item.entityType==='task'){
         const {purgeContainerTrash}=require('./containerLifecycle');
@@ -87,8 +105,10 @@ function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit
       }
       if(processing.getTrash(item.id)?.permanentlyDeletedAt)onPurged?.(item);
     }catch(error){results.push({trashId:item.id,status:'failed',errorCode:error.code||'lifecycle_failed'});}
+    finally{processing.saveTrashScanCursor(leaseOwner,{after:entry.rowId,highWater:cursor.highWater});}
   }
   return results;
+  }finally{processing.releaseTrashScanLease(leaseOwner);}
 }
 
 module.exports={applyStorageMutation,reconcileStorageMutations,purgeExpiredTrash};

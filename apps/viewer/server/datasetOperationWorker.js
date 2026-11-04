@@ -7,6 +7,7 @@ const { importWebodmTask } = require('./webodmTaskImport');
 const { cleanupLodRecoveryMaterialization, processLodRecovery } = require('./lodRecovery');
 const { processingReadyEvent } = require('./processingReadyEvent');
 const { copyTaskPhotos } = require('./taskPhotoImports');
+const { discoverDatasetGcp } = require('./gcpDiscovery');
 
 async function reconcileCatalogSourceCleanups(processing,storage,limit=20){let cleaned=0;for(const item of processing.pendingCatalogSourceCleanups(limit)){try{const removed=await storage.removeAdoptedSourceIfMatches(item.rootKey,item.relativePath,{fingerprint:item.sourceFingerprint,byteSize:item.sourceByteSize,cleanupId:item.id,sourceDev:item.sourceDev,sourceIno:item.sourceIno,sourceCtimeNs:item.sourceCtimeNs,sourceMtimeNs:item.sourceMtimeNs});if(!removed)continue;processing.clearCatalogSourceCleanup(item.id);cleaned+=1;}catch(error){if(error?.restoredSourceIdentity)processing.refreshCatalogSourceCleanupIdentity(item.id,item,error.restoredSourceIdentity);/* durable journal retries during maintenance */}}return cleaned;}
 function reconcileCatalogAdoptionRecoveries(processing,storage,limit=20){let recovered=0;for(const item of processing.pendingCatalogAdoptionRecoveries(limit)){try{if(!item.datasetId||!processing.getDataset(item.datasetId,true))storage.reconcileAdoptionIntent(item.rootKey,item.relativePath,item.datasetRelative);processing.clearCatalogAdoptionIntent(item.id);recovered+=1;}catch{/* durable intent retries during maintenance */}}return recovered;}
@@ -21,6 +22,7 @@ async function finalizeUpload(operation, { processing, storage }, owner, updateP
   if (!upload) throw Object.assign(new Error('upload session is unavailable'), { code: 'upload_unavailable' });
   const existing = processing.getDataset(upload.datasetId, true);
   if (existing?.status === 'finalized') {
+    discoverDatasetGcp({ processing, storage, datasetId: existing.id, actorId: operation.subject });
     processing.completeUpload(upload.id);
     storage.cleanupUpload(upload.id);
     return { dataset: existing };
@@ -42,6 +44,7 @@ async function finalizeUpload(operation, { processing, storage }, owner, updateP
     await updateProgress(0.05 + 0.9 * (index + 1) / Math.max(1, upload.files.length));
   }
   const dataset = processing.finalizeDataset(existing.id, files, manifestHash(files));
+  discoverDatasetGcp({ processing, storage, datasetId: dataset.id, actorId: operation.subject });
   processing.completeUpload(upload.id);
   storage.cleanupUpload(upload.id);
   return { dataset };
@@ -51,18 +54,13 @@ async function adoptImport(operation, { processing, storage }, owner, updateProg
   const payload = JSON.parse(operation.payload_json || '{}');
   const existing = processing.getDataset(operation.dataset_id, true);
   const finishAuthorizationAndSource = () => {
-    if (payload.storageMode === 'adopted' && ['dataset_import', 'terra_import'].includes(payload.rootKey)) {
-      try {
-        const source = storage.resolve(payload.rootKey, payload.relativePath, { mustExist: true });
-        storage.removeAdoptedSource(source);
-      } catch (error) {
-        if (error.code !== 'ENOENT') throw error;
-      }
-    }
+    // Generic imports retain their original tree, even on replay or if the
+    // source pathname was replaced after the copy.
     if (!processing.consumeOperationImportPreview(operation.id, payload.previewId))
       throw Object.assign(new Error('import authorization was lost'), { code: 'preview_claim_lost' });
   };
   if (existing?.status === 'finalized') {
+    discoverDatasetGcp({ processing, storage, datasetId: existing.id, actorId: operation.subject });
     finishAuthorizationAndSource();
     return { dataset: existing };
   }
@@ -70,9 +68,12 @@ async function adoptImport(operation, { processing, storage }, owner, updateProg
   const externalReference = payload.storageMode === 'external_reference';
   const adopted = await storage.adoptImport(payload.rootKey, payload.relativePath, existing.relativePath, {
     externalReference,
+    preserveSource: !externalReference,
     expectedFingerprint: payload.treeFingerprint,
     onProgress: updateProgress,
   });
+  if (externalReference && adopted.scan.files.some(file => /\.csv$/i.test(file.relativePath)))
+    throw Object.assign(new Error('CSV sources require managed adoption so they can be retained'),{code:'retained_csv_external_reference'});
   const files = adopted.scan.files.map((file) => ({
     id: crypto.randomUUID(),
     relativePath: file.relativePath,
@@ -81,6 +82,7 @@ async function adoptImport(operation, { processing, storage }, owner, updateProg
     metadata: file.metadata || {},
   }));
   const dataset = processing.finalizeDataset(existing.id, files, manifestHash(files));
+  discoverDatasetGcp({ processing, storage, datasetId: dataset.id, actorId: operation.subject });
   finishAuthorizationAndSource();
   return { dataset };
 }

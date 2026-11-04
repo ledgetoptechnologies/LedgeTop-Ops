@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {
   ACCEPTED_CONTROLLED_CONVERTER_CONTRACTS,
-  CONTROLLED_CONVERTER_BINARY_SHA256,
+  ACCEPTED_PERSISTED_CONVERTER_BINARY_SHA256,
   CONTROLLED_SURFACE_AUDIT_POLICY_V4,
   stable,
 } = require('../lod-converter-policy.cjs');
@@ -14,7 +14,7 @@ const digestCache = new Map();
 const AUDIT_ALGORITHM = 'ltds-glb-leaf-equivalence-v2';
 const CONTROLLED_AUDIT_ALGORITHM = 'ltds-obj2tiles-surface-equivalence-v3';
 const CONTROLLED_AUDIT_ALGORITHM_V4 = 'ltds-obj2tiles-surface-equivalence-v4';
-const CONTROLLED_CONVERTER_BINARY_SHA256_SET = new Set(CONTROLLED_CONVERTER_BINARY_SHA256);
+const CONTROLLED_CONVERTER_BINARY_SHA256_SET = new Set(ACCEPTED_PERSISTED_CONVERTER_BINARY_SHA256);
 const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 const MAX_AUDIT_ARTIFACTS = 100_000;
 

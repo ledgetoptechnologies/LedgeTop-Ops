@@ -2414,6 +2414,9 @@ test('controlled KTX2 provenance is accepted by the browser policy', () => {
   };
   assert.equal(inspectLodProvenance(serverCurrent, '/assets/p/derivatives/model.glb').verified, false,
     'a legacy/untrusted browser config retains the static fail-closed contract');
+  const historical = { ...serverCurrent, converter: { ...serverCurrent.converter, binarySha256: '3577688939806dabdf1f4620cc05debe6e178180a99bf0308f4b8483b8a36725' } };
+  assert.equal(inspectLodProvenance(historical, '/assets/p/derivatives/model.glb').verified, false, 'historical fork digest does not grant client-side authority by itself');
+  assert.deepEqual(inspectLodProvenance(historical, '/assets/p/derivatives/model.glb', { serverVerified: true }), { verified: true, errors: [] }, 'server-verified historical derivatives remain visible');
   assert.deepEqual(inspectLodProvenance(serverCurrent, '/assets/p/derivatives/model.glb', { serverVerified: true }),
     { verified: true, errors: [] },
     'a current runtime fork accepted by the exact-asset server policy is not rejected by a stale browser allowlist');

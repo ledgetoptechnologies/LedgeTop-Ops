@@ -44,3 +44,4 @@ scripts/native-staff-bootstrap-provisioner.test.mjs text eol=lf
 scripts/native-staff-bootstrap-provisioner.windows.test.mjs text eol=lf
 scripts/native-staff-bootstrap-owner-approval.d.mts text eol=lf
 docs/operations/native-staff-bootstrap-provisioner.md text eol=lf
+apps/viewer/third_party/obj2tiles/v1.6.2-imagesharp-3.2.0.patch text eol=lf

@@ -4,7 +4,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const test=require('node:test');
 const root=path.join(__dirname,'..');
-const source=fs.readFileSync(path.join(root,'workspace-projects.js'),'utf8')+'\n'+fs.readFileSync(path.join(root,'workspace-new-task.mjs'),'utf8');
+const source=fs.readFileSync(path.join(root,'workspace-projects.js'),'utf8')+'\n'+fs.readFileSync(path.join(root,'workspace-new-task.mjs'),'utf8')+'\n'+fs.readFileSync(path.join(root,'workspace-gcp-submission.mjs'),'utf8');
 const api=fs.readFileSync(path.join(root,'server','processingApi.js'),'utf8');
 const server=fs.readFileSync(path.join(root,'server','index.js'),'utf8');
 

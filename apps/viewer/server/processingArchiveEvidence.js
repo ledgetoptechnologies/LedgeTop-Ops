@@ -13,6 +13,20 @@ const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value
 const failure = (code, message) => Object.assign(new Error(message), { code });
 const invalid = () => failure('invalid_archive', 'processing archive evidence is invalid');
 const changed = () => failure('processing_archive_changed', 'processing archive no longer matches its receipt');
+// Optional, provisional provider identity evidence. Legacy responses without the
+// extension remain unchanged; this is not an authenticated custody receipt.
+function providerArchiveExpectation(response) {
+  const value = response.headers.get('x-ledgetop-archive-sha256');
+  if (value === null) return null;
+  const encoding = response.headers.get('content-encoding');
+  const length = response.headers.get('content-length');
+  if (response.status !== 200 || response.redirected || !digest(value) ||
+      (encoding !== null && encoding.toLowerCase() !== 'identity') ||
+      typeof length !== 'string' || !/^(0|[1-9][0-9]*)$/.test(length) ||
+      !Number.isSafeInteger(Number(length)) || Number(length) < 22)
+    throw failure('provider_archive_evidence_invalid', 'Provider archive identity evidence is invalid');
+  return { sha256: value, byteSize: Number(length) };
+}
 function cancelled(signal) { if (signal?.aborted) throw failure('lease_lost', 'processing archive operation cancelled'); }
 function limits(options) {
   const result = { maxEntries: options.maxEntries ?? 100000, maxBytes: options.maxBytes ?? DEFAULT_BYTES, maxArchiveBytes: options.maxArchiveBytes ?? DEFAULT_BYTES, maxDiskBytes: options.maxDiskBytes ?? DEFAULT_BYTES };
@@ -129,6 +143,9 @@ async function captureProcessingArchive(readable, destination, options = {}) {
     } });
     await pipeline(readable, meter, fs.createWriteStream(spool, { flags: 'wx', mode: 0o600 }), ...(signal ? [{ signal }] : []));
     cancelled(signal);
+    const actualHash = archiveHash.digest('hex');
+    if (options.providerExpectation && (actualHash !== options.providerExpectation.sha256 || archiveByteSize !== options.providerExpectation.byteSize))
+      throw failure('provider_archive_evidence_mismatch', 'Provider archive identity evidence does not match received bytes');
     fd = fs.openSync(spool, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC);
     const initial = fs.fstatSync(fd, { bigint: true });
     if (initial.size !== BigInt(archiveByteSize) || !initial.isFile()) throw changed();
@@ -137,10 +154,15 @@ async function captureProcessingArchive(readable, destination, options = {}) {
     await extractZipDescriptor(fd, archiveByteSize, staged, { ...bounds, maxBytes: expansionBytes, signal, workId: 'capture', onProgress });
     if (!same(initial, fs.fstatSync(fd, { bigint: true }))) throw changed();
     const archiveFiles = await inventoryDirectory(staged, { ...bounds, signal });
+    if (options.beforePromotion) {
+      await options.beforePromotion({ archiveSha256:actualHash, archiveByteSize, archiveFiles });
+      cancelled(signal);
+      if (!same(initial, fs.fstatSync(fd, { bigint: true })) || JSON.stringify(await inventoryDirectory(staged, { ...bounds, signal })) !== JSON.stringify(archiveFiles)) throw changed();
+    }
     cancelled(signal);
     const parentNow = fs.lstatSync(parent.resolved, { bigint: true });
     if (fs.existsSync(target) || fs.realpathSync(parent.resolved) !== parent.resolved || parentNow.ino !== parent.stat.ino || parentNow.dev !== parent.stat.dev) throw changed();
-    const receipt = { archiveSha256: archiveHash.digest('hex'), archiveByteSize, archiveFiles, archiveManifestSha256: hash(JSON.stringify(archiveFiles)) };
+    const receipt = { archiveSha256: actualHash, archiveByteSize, archiveFiles, archiveManifestSha256: hash(JSON.stringify(archiveFiles)) };
     fs.renameSync(staged, target);
     return receipt;
   } finally {
@@ -163,4 +185,4 @@ async function verifyProcessingArchive(destination, receipt, options = {}) {
   return true;
 }
 
-module.exports = { captureProcessingArchive, verifyProcessingArchive };
+module.exports = { captureProcessingArchive, verifyProcessingArchive, providerArchiveExpectation };

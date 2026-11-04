@@ -17,6 +17,10 @@ test('server derivative eligibility accepts verified controlled v4 summaries whi
   const v4={...base,schemaVersion:4,audit:{...base.audit,algorithm:'ltds-obj2tiles-surface-equivalence-v4',policyRevision:'ltds-controlled-surface-policy-v4'}};
   assert.equal(verifiedLodProvenance({lodProvenance:v3},assets),v3);
   assert.equal(verifiedLodProvenance({lodProvenance:v4},assets),v4);
+  const historical={...v4,converter:{...v4.converter,binarySha256:'3577688939806dabdf1f4620cc05debe6e178180a99bf0308f4b8483b8a36725'}};
+  assert.equal(verifiedLodProvenance({lodProvenance:historical},assets),historical,'previously released converter remains valid for existing derivatives');
+  const unknown={...v4,converter:{...v4.converter,binarySha256:'f'.repeat(64)}};
+  assert.equal(verifiedLodProvenance({lodProvenance:unknown},assets),null);
   for(const commandSha256 of[CONTROLLED_CONVERTER_COMMAND_SHA256,SERIAL_RETRY_CONVERTER_COMMAND_SHA256]){
     const current={...v4,converter:{...v4.converter,commandSha256}};
     assert.equal(verifiedLodProvenance({lodProvenance:current},assets),current,'the server authority accepts every current controlled execution contract');

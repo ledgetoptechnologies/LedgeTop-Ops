@@ -4,14 +4,14 @@ const fs=require('node:fs');
 const path=require('node:path');
 const test=require('node:test');
 const root=path.join(__dirname,'..');
-const source=fs.readFileSync(path.join(root,'workspace-projects.js'),'utf8')+'\n'+fs.readFileSync(path.join(root,'workspace-new-task.mjs'),'utf8');
+const source=fs.readFileSync(path.join(root,'workspace-projects.js'),'utf8')+'\n'+fs.readFileSync(path.join(root,'workspace-new-task.mjs'),'utf8')+'\n'+fs.readFileSync(path.join(root,'workspace-gcp-submission.mjs'),'utf8');
 const processingApi=fs.readFileSync(path.join(root,'server','processingApi.js'),'utf8');
 const html=fs.readFileSync(path.join(root,'workspace.html'),'utf8');
 const css=fs.readFileSync(path.join(root,'workspace-management.css'),'utf8');
 
 test('workspace is project-first with an instant responsive project filter',()=>{
   assert.match(html,/workspace-projects\.js/);
-  assert.match(source,/\['dashboard','⌂','Dashboard'\]/);
+  assert.match(source,/\['dashboard','⌂','Projects'\]/);
   assert.doesNotMatch(source,/\['review'.*Review/);
   assert.match(source,/id="project-filter"/);
   assert.match(source,/filter\.oninput/);
@@ -19,7 +19,7 @@ test('workspace is project-first with an instant responsive project filter',()=>
   assert.match(source,/function pagedApi/);
   assert.match(css,/\.project-row/);
   assert.match(css,/@media\(max-width:720px\)/);
-  assert.ok(source.indexOf("['dashboard','⌂','Dashboard']")<source.indexOf("['providers','⌁','Providers & nodes']"));
+  assert.ok(source.indexOf("['dashboard','⌂','Projects']")<source.indexOf("['providers','⌁','Providers & nodes']"));
   assert.ok(source.indexOf("['providers','⌁','Providers & nodes']")<source.indexOf("['background','↻','Background work']"));
   assert.ok(source.indexOf("['background','↻','Background work']")<source.indexOf("['trash','♲','Recycle Bin']"));
   assert.ok(source.indexOf("['trash','♲','Recycle Bin']")<source.indexOf("['diagnostics','▤','Diagnostics']"));
@@ -71,7 +71,7 @@ test('project detail owns import processing GCP outputs review and sharing',()=>
 
 test('task details render authoritative metrics and bounded sanitized API log tails',()=>{
   for(const label of ['Average GSD','Surveyed area','Source images','Reconstructed points','Georeferencing CRS','Processing duration','Outputs','Task disk usage'])assert.ok(source.includes(label),label);
-  assert.match(source,/Some survey statistics are not available yet\. These fields are separate from node connection health\./);
+  assert.match(source,/Figures shown as Unavailable were not recorded for this run\./);
   assert.match(source,/class="task-facts"/);
   assert.doesNotMatch(source,/class="task-metrics"/);
   for(const destination of ['Task settings','Processing history','Ground control points','Model files','Task files'])assert.ok(source.includes(destination),destination);
@@ -81,7 +81,7 @@ test('task details render authoritative metrics and bounded sanitized API log ta
   assert.match(source,/logLimit=100/);
   assert.match(source,/\.slice\(-100\)/);
   assert.match(source,/Live output refreshes every five seconds/);
-  assert.match(source,/setInterval\(\(\)=>refreshTaskDetails\(task\.id,true\),5000\)/);
+  assert.match(source,/createWorkspaceTaskPoll\(\{poll:taskId=>refreshTaskDetails\(taskId,true\)\}\)/);
   assert.match(source,/Latest 100 recorded lines/);
   assert.match(source,/taskDetailRefreshes\.has\(taskId\)/);
   assert.match(source,/download-logs/);

@@ -523,7 +523,13 @@ Credential-bearing replay bodies are encrypted at rest and pruned after 24h.
   polling: `GET /api/v1/operations/:id`; preview cancellation:
   `POST /api/v1/operations/:id/cancel`
 - Server import: durable `/api/v1/dataset-imports/preview` and
-  `/api/v1/dataset-imports/adopt` operations
+  `/api/v1/dataset-imports/adopt` operations. Managed adoption copies the
+  selected source tree and leaves the original in place, even on the same
+  filesystem. Allow space for the complete copy in addition to the storage
+  reserve; retained partial copies may require extra space. The preview's
+  `destinationSpace` reports the space check at preview time, not a
+  reservation or guarantee that space will remain available. `sameFilesystem`
+  describes the storage layout; it does not mean that adoption moves the source.
 - WebODM task migration: durable `POST /api/v1/processing/webodm-task-imports`
   accepts a task folder or exported ZIP and reports detected asset capabilities
 - Processing: `/api/v1/processing/providers`, `/presets`, task/attempt detail,

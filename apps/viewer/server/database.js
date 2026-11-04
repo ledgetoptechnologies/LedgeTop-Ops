@@ -2043,19 +2043,105 @@ const MIGRATIONS = [
   }},
   {version:40,name:'direct_client_session_source_authorizations',sql:'SELECT 1;',
     after(database){require('./directClientSourceMigration').migrateDirectClientSources(database);}},
+  {version:41,name:'gcp_odm_crs_confirmations',sql:`CREATE TABLE gcp_odm_crs_confirmations (set_id TEXT PRIMARY KEY REFERENCES gcp_sets(id) ON DELETE CASCADE, source_sha256 TEXT NOT NULL, epsg_code INTEGER NOT NULL, horizontal_unit TEXT NOT NULL, vertical_datum TEXT NOT NULL, validation_sha256 TEXT NOT NULL, confirmed_by TEXT NOT NULL, confirmed_at TEXT NOT NULL);`},
+  {version:42,name:'viewer_workspace_hierarchy',sql:`
+    CREATE TABLE viewer_organizations (
+      id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')),
+      revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>=1)
+    );
+    CREATE TABLE viewer_project_groups (
+      id TEXT PRIMARY KEY, organization_id TEXT NOT NULL REFERENCES viewer_organizations(id) ON DELETE RESTRICT,
+      display_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')),
+      revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>=1), UNIQUE(id,organization_id)
+    );
+    CREATE TABLE viewer_project_hierarchy (
+      project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+      organization_id TEXT REFERENCES viewer_organizations(id) ON DELETE RESTRICT,
+      group_id TEXT REFERENCES viewer_project_groups(id) ON DELETE RESTRICT,
+      revision INTEGER NOT NULL CHECK(revision>=1),
+      CHECK(group_id IS NULL OR organization_id IS NOT NULL),
+      FOREIGN KEY(group_id,organization_id) REFERENCES viewer_project_groups(id,organization_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX viewer_project_groups_org_idx ON viewer_project_groups(organization_id);
+    CREATE INDEX viewer_project_hierarchy_org_idx ON viewer_project_hierarchy(organization_id,group_id);
+  `},
+  {version:44,name:'processing_attempt_reservation_capabilities',sql:`
+    ALTER TABLE processing_attempts ADD COLUMN reservation_required INTEGER NOT NULL DEFAULT 0 CHECK (reservation_required IN (0,1));
+    ALTER TABLE processing_providers ADD COLUMN reservation_required INTEGER NOT NULL DEFAULT 0 CHECK (reservation_required IN (0,1));
+    CREATE TABLE processing_attempt_reservations (
+      attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id),
+      provider_id TEXT NOT NULL REFERENCES processing_providers(id),
+      provider_task_id TEXT NOT NULL,
+      capability_ciphertext TEXT NOT NULL,
+      capability_key_id TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `},
+  {version:45,name:'processing_archive_capture_intents',sql:`
+    CREATE TABLE processing_archive_capture_intents (
+      attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id),
+      provider_task_id TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `},
+  {version:46,name:'processing_staged_byte_ack_outbox',sql:`
+    CREATE TABLE processing_staged_commitments (
+      attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id),
+      commitment_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE processing_staged_byte_ack_outbox (
+      attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id),
+      provider_id TEXT NOT NULL REFERENCES processing_providers(id),
+      staging_commit_id TEXT NOT NULL UNIQUE,
+      assertion_json TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'disabled' CHECK(state='disabled'),
+      created_at TEXT NOT NULL
+    );
+  `},
+  {version:47,name:'processing_staged_ack_delivery',sql:`
+    CREATE TABLE processing_staged_receipt_bindings (
+      attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id),
+      binding_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE processing_staged_ack_delivery (
+      attempt_id TEXT PRIMARY KEY REFERENCES processing_staged_byte_ack_outbox(attempt_id),
+      state TEXT NOT NULL CHECK(state IN ('pending','uncertain','accepted','held')),
+      assertion_sha256 TEXT NOT NULL,
+      binding_version INTEGER NOT NULL DEFAULT 1 CHECK(binding_version=1),
+      expected_origin TEXT,
+      credential_ref TEXT,
+      capability_sha256 TEXT,
+      lease_token TEXT,
+      lease_expires_at INTEGER,
+      next_attempt_at INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+      error_code TEXT,
+      updated_at INTEGER NOT NULL
+    );
+  `},
 ];
 
 function applyMigrations(database) {
-  database.exec(`
+  const {assertProtectedMigrationIdentity}=require('./migrationIdentityGuard');
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    assertProtectedMigrationIdentity(database,MIGRATIONS);
+    database.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY,
       name TEXT NOT NULL,
       applied_at TEXT NOT NULL
     )
-  `);
+    `);
+    database.exec('COMMIT');
+  } catch(error) { database.exec('ROLLBACK'); throw error; }
   for (const migration of MIGRATIONS) {
     database.exec('BEGIN IMMEDIATE');
     try {
+      assertProtectedMigrationIdentity(database,MIGRATIONS);
       // Re-check only after holding SQLite's write reservation. The API and
       // worker can start against the same fresh/upgraded volume concurrently;
       // a pre-lock snapshot would let the waiter apply an already-committed
@@ -2070,6 +2156,7 @@ function applyMigrations(database) {
       database.prepare(
         'INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)',
       ).run(migration.version, migration.name, new Date().toISOString());
+      assertProtectedMigrationIdentity(database,MIGRATIONS);
       database.exec('COMMIT');
     } catch (error) {
       database.exec('ROLLBACK');
@@ -2103,9 +2190,16 @@ function openDatabase(databasePath) {
   // SQLite's journal-mode transition may return SQLITE_BUSY without invoking
   // the configured busy handler during simultaneous first boot. Retry only
   // that bounded initialization transition; migration locking remains native.
-  withBusyRetry(() => database.exec('PRAGMA journal_mode=WAL'));
-  database.exec('PRAGMA synchronous=NORMAL');
-  try { applyMigrations(database); }
+  try {
+    // Detect known collisions before changing the existing database's journal
+    // mode or applying any migration. Recheck under every migration lock.
+    database.exec('BEGIN IMMEDIATE');
+    try {require('./migrationIdentityGuard').assertProtectedMigrationIdentity(database,MIGRATIONS);database.exec('ROLLBACK');}
+    catch(error){database.exec('ROLLBACK');throw error;}
+    withBusyRetry(() => database.exec('PRAGMA journal_mode=WAL'));
+    database.exec('PRAGMA synchronous=NORMAL');
+    applyMigrations(database);
+  }
   catch (error) { database.close(); throw error; }
   return database;
 }

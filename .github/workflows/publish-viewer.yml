@@ -40,6 +40,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install PROJ validation runtime
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-gdal proj-data
+
       - name: Run checks
         run: npm run check
 
@@ -90,10 +93,14 @@ jobs:
           platforms: linux/amd64
           build-args: |
             VIEWER_SOURCE_COMMIT=${{ github.sha }}
+          secrets: |
+            "sixlabors_license=${{ secrets.SIXLABORS_LICENSE }}"
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           load: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
           tags: ${{ steps.candidate.outputs.ref }}
           labels: ${{ steps.meta.outputs.labels }}
+          # License contents do not invalidate BuildKit cache; revalidate at each release.
+          no-cache-filters: obj2tiles
           cache-from: type=gha,scope=viewer
           cache-to: type=gha,scope=viewer,mode=max,ignore-error=true
           # Docker's local image store cannot retain attestation manifests. Push
@@ -110,10 +117,11 @@ jobs:
           IMAGE_NAME: ${{ steps.image.outputs.name }}
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           EXPECTED_REVISION: ${{ github.sha }}
-          EXPECTED_SCHEMA_VERSION: "40"
+          EXPECTED_SCHEMA_VERSION: "47"
           EXPECTED_OBJ2TILES_VERSION: "1.6.2"
           EXPECTED_OBJ2TILES_SOURCE_SHA256: "79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5"
           EXPECTED_OBJ2TILES_PATCH_SHA256: "6d5d99ea1d1e36208e44d0456d35cb0d8c68092dfd4a6ad01288bf85bb67322b"
+          EXPECTED_OBJ2TILES_SECURITY_PATCH_SHA256: "13a9fdc4638dbaa8e19be017f52b2fdd66f17e8b536c893140022341f44efd9b"
           EXPECTED_POTREE_VERSION: "1.8.2"
         run: |
           set -euo pipefail
@@ -173,11 +181,12 @@ jobs:
           docker run --rm --entrypoint node \
             -e EXPECTED_OBJ2TILES_SOURCE_SHA256="$EXPECTED_OBJ2TILES_SOURCE_SHA256" \
             -e EXPECTED_OBJ2TILES_PATCH_SHA256="$EXPECTED_OBJ2TILES_PATCH_SHA256" \
+            -e EXPECTED_OBJ2TILES_SECURITY_PATCH_SHA256="$EXPECTED_OBJ2TILES_SECURITY_PATCH_SHA256" \
             "$VERIFY_IMAGE" -e '
               const crypto=require("node:crypto"),fs=require("node:fs");
               const info=JSON.parse(fs.readFileSync("/opt/obj2tiles/build-info.json","utf8"));
               const binary=crypto.createHash("sha256").update(fs.readFileSync("/opt/obj2tiles/Obj2Tiles")).digest("hex");
-              if(info.schemaVersion!==1||info.sourceVersion!=="v1.6.2"||info.sourceSha256!==process.env.EXPECTED_OBJ2TILES_SOURCE_SHA256||info.patchSha256!==process.env.EXPECTED_OBJ2TILES_PATCH_SHA256||info.binarySha256!==binary)process.exit(1);
+              if(info.schemaVersion!==1||info.sourceVersion!=="v1.6.2"||info.sourceSha256!==process.env.EXPECTED_OBJ2TILES_SOURCE_SHA256||info.patchSha256!==process.env.EXPECTED_OBJ2TILES_PATCH_SHA256||info.securityPatchSha256!==process.env.EXPECTED_OBJ2TILES_SECURITY_PATCH_SHA256||info.binarySha256!==binary)process.exit(1);
             '
           docker run --rm "$VERIFY_IMAGE" node scripts/verify-obj2tiles-runtime.mjs
           docker run --rm --network none "$VERIFY_IMAGE" node scripts/verify-potree-visibility.mjs /app/dist/potree/build/potree/potree.js
@@ -241,7 +250,7 @@ jobs:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           PUBLISHED_IMAGE: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
           EXPECTED_REVISION: ${{ github.sha }}
-          EXPECTED_SCHEMA_VERSION: "40"
+          EXPECTED_SCHEMA_VERSION: "47"
           EXPECTED_OBJ2TILES_VERSION: "1.6.2"
           EXPECTED_POTREE_VERSION: "1.8.2"
           VIEWER_SCHEMA_VERSION: ${{ steps.verify.outputs.schema-version }}

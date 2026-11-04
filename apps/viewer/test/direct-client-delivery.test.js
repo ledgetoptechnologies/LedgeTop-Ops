@@ -15,7 +15,7 @@ const { createClientDeliveryCatalog } = require('../server/clientDeliveryCatalog
 const { signServiceRequest } = require('../server/serviceAuth');
 const { createApiV1 } = require('../server/apiV1');
 
-function fixture(t, through = 40) {
+function fixture(t, through = 44) {
   const database = new DatabaseSync(':memory:');
   database.exec('PRAGMA foreign_keys=ON; CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');
   for (const migration of MIGRATIONS.filter(m => m.version <= through)) {

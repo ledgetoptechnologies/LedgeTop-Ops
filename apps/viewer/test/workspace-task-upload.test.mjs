@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {inspectTaskPhotos,prepareTaskPhotos,uploadTaskPhotos,TASK_PHOTO_LIMITS} from '../workspace-task-upload.mjs';
+import {inspectTaskPhotos,prepareTaskPhotos,uploadTaskPhotos,TASK_PHOTO_LIMITS,providerPhotoLimitWarning} from '../workspace-task-upload.mjs';
 const file=(path,text='photo')=>{const blob=new Blob([text]);return {name:path.split('/').at(-1),webkitRelativePath:path.includes('/')?path:'',size:blob.size,type:'image/jpeg',arrayBuffer:()=>blob.arrayBuffer(),slice:(...args)=>blob.slice(...args)};};
 const selection=()=>[file('flightB/DJI.jpg'),file('flightA/DJI.jpg'),file('flightA/other.JPG'),file('flightA/notes.txt')];
 test('recursive folders preserve photo paths and deterministically disambiguate flat provider names without modifying originals',()=>{
@@ -38,6 +38,17 @@ test('preparation reports local byte/photo progress and rejects oversized manife
   assert.equal(reads,0);
 });
 
+test('20,000 short paths fit the bounded envelope, and byte limits include the wrapper',async()=>{
+  const files=Array.from({length:20000},(_,i)=>file(`flight/photo-${i}.jpg`,'x'));
+  const prepared=await prepareTaskPhotos(files);
+  assert.equal(prepared.manifest.length,20000);
+  const exact=new TextEncoder().encode(JSON.stringify({files:prepared.manifest})).byteLength;
+  assert.ok(exact>2*1024*1024&&exact<TASK_PHOTO_LIMITS.maxManifestBytes);
+  const sample=[file('a.jpg','x')],one=await prepareTaskPhotos(sample),bytes=new TextEncoder().encode(JSON.stringify({files:one.manifest})).byteLength;
+  await prepareTaskPhotos(sample,{limits:{...TASK_PHOTO_LIMITS,maxManifestBytes:bytes}});
+  await assert.rejects(prepareTaskPhotos(sample,{limits:{...TASK_PHOTO_LIMITS,maxManifestBytes:bytes-1}}),/manifest is too large/);
+});
+
 test('upload reports acknowledged progress and average speed excluding resumed bytes',async()=>{
   let clock=1000;const progress=[],f=await transport({now:()=>clock,onChunk:()=>{clock+=1000;},onProgress:value=>progress.push(value)});
   await f.run();
@@ -69,4 +80,25 @@ test('failed chunk or cancelled upload never finalizes and can be resumed by res
   const failure=await transport({rejectChunk:true});await assert.rejects(failure.run(),/503.*resume/);assert.equal(failure.calls.length,1);
   const controller=new AbortController(),f=await transport({signal:controller.signal,onChunk:()=>controller.abort()});await assert.rejects(f.run(),{name:'AbortError'});assert.equal(f.chunks.length,1);assert.equal(f.calls.length,1);
   await assert.rejects(prepareTaskPhotos([file('a.jpg')],{signal:controller.signal}),{name:'AbortError'});
+});
+
+test('photo selection retains raw survey CSV while ignoring unrelated files',async()=>{
+ const prepared=await prepareTaskPhotos([file('photos/a.jpg','photo'),file('photos/survey.csv','raw csv'),file('photos/readme.txt','note')]);
+ assert.equal(prepared.items.length,2);assert.deepEqual(prepared.manifest.map(x=>x.processingRole),['image','gcp_source']);assert.deepEqual(prepared.ignored,['photos/readme.txt']);
+});
+
+test('photo selection accepts up to 256 GiB without reading file bytes',()=>{
+ let reads=0;const make=index=>({name:`image-${index}.jpg`,size:64*1024**2,arrayBuffer(){reads++;throw new Error('unexpected read')}});
+ const files=Array.from({length:4096},(_,i)=>make(i));
+ assert.equal(inspectTaskPhotos(files).totalBytes,256*1024**3);
+ assert.throws(()=>inspectTaskPhotos([...files,make(4096)]),/transfer size limit/);
+ assert.equal(reads,0);
+});
+
+test('node capacity warnings use photo inputs and never assume missing limits',()=>{
+ const files=[{name:'a.jpg',size:6},{name:'b.jpg',size:6},{name:'survey.csv',size:1000}];
+ assert.match(providerPhotoLimitWarning(files,{capabilities:{maxImages:1,ledgetopMaxInputBytes:10}}),/image count and input size/);
+ assert.match(providerPhotoLimitWarning(files,{capabilities:{maxImages:2,ledgetopMaxInputBytes:10}}),/input size/);
+ assert.equal(providerPhotoLimitWarning(files,{capabilities:{maxImages:2,ledgetopMaxInputBytes:12}}),'');
+ assert.equal(providerPhotoLimitWarning(files,{capabilities:{}}),'');
 });

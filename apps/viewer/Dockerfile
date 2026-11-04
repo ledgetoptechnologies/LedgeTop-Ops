@@ -37,20 +37,25 @@ ARG TARGETARCH
 ARG OBJ2TILES_VERSION=1.6.2
 ARG OBJ2TILES_SOURCE_SHA256=79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5
 ARG OBJ2TILES_PATCH_SHA256=6d5d99ea1d1e36208e44d0456d35cb0d8c68092dfd4a6ad01288bf85bb67322b
+ARG OBJ2TILES_SECURITY_PATCH_SHA256=13a9fdc4638dbaa8e19be017f52b2fdd66f17e8b536c893140022341f44efd9b
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 COPY third_party/obj2tiles/v1.6.2-bounded-concurrency.patch /tmp/obj2tiles.patch
+COPY third_party/obj2tiles/v1.6.2-imagesharp-3.2.0.patch /tmp/obj2tiles-security.patch
 COPY third_party/obj2tiles/locks /tmp/obj2tiles-locks
-RUN curl -fsSL -o /tmp/obj2tiles.tar.gz \
+RUN --mount=type=secret,id=sixlabors_license,required=true curl -fsSL -o /tmp/obj2tiles.tar.gz \
       "https://codeload.github.com/OpenDroneMap/Obj2Tiles/tar.gz/refs/tags/v${OBJ2TILES_VERSION}" \
     && echo "${OBJ2TILES_SOURCE_SHA256}  /tmp/obj2tiles.tar.gz" | sha256sum -c - \
     && echo "${OBJ2TILES_PATCH_SHA256}  /tmp/obj2tiles.patch" | sha256sum -c - \
+    && echo "${OBJ2TILES_SECURITY_PATCH_SHA256}  /tmp/obj2tiles-security.patch" | sha256sum -c - \
     && mkdir -p /src/obj2tiles \
     && tar -xzf /tmp/obj2tiles.tar.gz --strip-components=1 -C /src/obj2tiles \
     && cd /src/obj2tiles \
     && git apply --check /tmp/obj2tiles.patch \
     && git apply /tmp/obj2tiles.patch \
+    && git apply --check /tmp/obj2tiles-security.patch \
+    && git apply /tmp/obj2tiles-security.patch \
     && case "$TARGETARCH" in \
       amd64) rid=linux-x64 ;; \
       arm64) rid=linux-arm64 ;; \
@@ -61,13 +66,14 @@ RUN curl -fsSL -o /tmp/obj2tiles.tar.gz \
     done \
     && dotnet restore Obj2Tiles/Obj2Tiles.csproj --locked-mode -r "$rid" \
     && dotnet publish Obj2Tiles/Obj2Tiles.csproj -c Release -r "$rid" --self-contained true --no-restore \
+      -p:SixLaborsLicenseFile=/run/secrets/sixlabors_license \
       -p:PublishSingleFile=true -p:PublishTrimmed=false -p:DebuggerSupport=false -o /opt/obj2tiles \
     && test -x /opt/obj2tiles/Obj2Tiles \
     && /opt/obj2tiles/Obj2Tiles --version 2>&1 | grep -F "${OBJ2TILES_VERSION}" \
     && cp LICENSE.md /opt/obj2tiles/LICENSE.md \
     && binary_sha256="$(sha256sum /opt/obj2tiles/Obj2Tiles | cut -d ' ' -f1)" \
-    && printf '{"schemaVersion":1,"sourceVersion":"v%s","sourceSha256":"%s","patchSha256":"%s","binarySha256":"%s"}\n' \
-      "$OBJ2TILES_VERSION" "$OBJ2TILES_SOURCE_SHA256" "$OBJ2TILES_PATCH_SHA256" "$binary_sha256" \
+    && printf '{"schemaVersion":1,"sourceVersion":"v%s","sourceSha256":"%s","patchSha256":"%s","securityPatchSha256":"%s","binarySha256":"%s"}\n' \
+      "$OBJ2TILES_VERSION" "$OBJ2TILES_SOURCE_SHA256" "$OBJ2TILES_PATCH_SHA256" "$OBJ2TILES_SECURITY_PATCH_SHA256" "$binary_sha256" \
       > /opt/obj2tiles/build-info.json \
     && test "$(sha256sum /opt/obj2tiles/Obj2Tiles | cut -d ' ' -f1)" = "$binary_sha256"
 
@@ -122,7 +128,7 @@ LABEL org.opencontainers.image.revision="${VIEWER_SOURCE_COMMIT}"
 WORKDIR /app
 RUN groupmod --gid 568 node \
     && usermod --uid 568 --gid 568 node
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libpng16-16 libjpeg62-turbo libturbojpeg0 zlib1g \
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libpng16-16 libjpeg62-turbo libturbojpeg0 zlib1g python3-gdal proj-data \
     && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 COPY scripts/patch-3d-tiles-renderer.mjs scripts/install-basis-transcoder.mjs ./scripts/

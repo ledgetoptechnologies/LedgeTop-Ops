@@ -374,3 +374,7 @@ After activation, run `node scripts/production-readiness.mjs --verify-mount-opti
 Processing logs are sanitized, capped per attempt, and retained for a bounded number of days. Client-facing errors never contain credentials, query tokens, absolute server paths, or multiline provider stderr. Terminal callbacks are delivered from a durable outbox with an exact-body HMAC, stable event ID, redirect rejection, bounded responses, and exponential retry. The callback URL must be exactly the configured Ops origin plus `/api/viewer/events` with no credentials, query, or fragment.
 
 See [ODM_PROVIDER_COMPATIBILITY.md](ODM_PROVIDER_COMPATIBILITY.md) for upstream route evidence and option behavior.
+
+### Provisional provider archive identity
+
+For a full, unredirected HTTP 200 ZIP response, a provider may supply `X-LedgeTop-Archive-SHA256` as exactly 64 lowercase hexadecimal characters. When supplied, Viewer requires a single valid `Content-Length` and no content encoding other than identity, and compares both length and SHA-256 with the streamed bytes before extraction and promotion. Invalid or conflicting evidence fails ingestion; it does not authorize retries that could create a new provider task. A response without the extension follows the existing legacy capture behavior. This optional comparison is provider-declared identity evidence, not authenticated provenance, custody acceptance, or permission to delete source or result data. This extension remains a draft pending cross-service agreement.

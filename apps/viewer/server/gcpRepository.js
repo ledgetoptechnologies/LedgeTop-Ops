@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const path = require('node:path');
+const {validateSurveyCrs,surveyValidationHash} = require('./gcpCrsValidation');
 
 const now = () => new Date().toISOString();
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
@@ -21,6 +22,12 @@ function haversineMeters(latitude1, longitude1, latitude2, longitude2) {
   return 6371008.8 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+function odmCrsCandidate(row) {
+  if (row.adapter === 'emlid-all-columns-v1' && row.coordinate_system === 'NAD83(2011) / WISCRS Dodge and Jefferson (ftUS) + NAVD88(GEOID18) height (ftUS)' && row.linear_unit === 'ftUS')
+    return {epsgCode:7600,horizontalUnit:'ftUS',verticalDatum:row.vertical_datum,verticalUnit:'m'};
+  return null;
+}
+
 class GcpRepository {
   constructor(database) { this.database = database; }
 
@@ -31,6 +38,10 @@ class GcpRepository {
   }
 
   set(row) {
+    const candidate = row && odmCrsCandidate(row);
+    const confirmation = row && this.database.prepare('SELECT * FROM gcp_odm_crs_confirmations WHERE set_id=?').get(row.id);
+    const points = row && confirmation ? this.database.prepare('SELECT * FROM gcp_points WHERE set_id=? ORDER BY external_id,id').all(row.id).map(point=>this.point(point)) : [];
+    const verified = Boolean(confirmation && confirmation.source_sha256===row.source_sha256 && confirmation.validation_sha256===surveyValidationHash(row.source_sha256,{epsgCode:confirmation.epsg_code,horizontalUnit:confirmation.horizontal_unit,verticalDatum:confirmation.vertical_datum},points));
     return row && {
       id: row.id, datasetId: row.dataset_id, displayName: row.display_name,
       sourceFormat: row.adapter || row.source_format, sourceFileId: row.source_file_id,
@@ -39,6 +50,7 @@ class GcpRepository {
       provenance: row.adapter ? { adapter: row.adapter, coordinateSystem: row.coordinate_system,
         verticalDatum: row.vertical_datum, linearUnit: row.linear_unit,
         elevationSource: row.elevation_source, geographicCrossCheck: row.geographic_cross_check } : null,
+      odmCrsCandidate: candidate, odmCrsConfirmed: verified, odmCrs: verified ? {epsgCode:confirmation.epsg_code,horizontalUnit:confirmation.horizontal_unit,verticalDatum:confirmation.vertical_datum,verticalUnit:'m'} : null,
       pointCount: Number(row.point_count || 0), createdBy: row.created_by,
       createdAt: row.created_at, updatedAt: row.updated_at,
     };
@@ -107,6 +119,12 @@ class GcpRepository {
       throw Object.assign(new Error('GCP source checksum does not match its content'),{code:'invalid_gcp_input'});
     const id = crypto.randomUUID(), timestamp = now();
     return this.transaction(() => {
+      // Serialize admission with trash/restore/purge intent creation. A status
+      // read before BEGIN IMMEDIATE can become stale before the insert.
+      const currentDataset=this.dataset(datasetId);
+      const pending=this.database.prepare("SELECT 1 FROM storage_mutations WHERE entity_type='dataset' AND entity_id=? AND status IN ('intent','fs_applied','failed') LIMIT 1").get(datasetId);
+      if(!currentDataset || currentDataset.status!=='finalized' || pending)
+        throw Object.assign(new Error('dataset is not available for GCP import'),{code:'dataset_not_available'});
       this.database.prepare(`INSERT INTO gcp_sets(id,dataset_id,display_name,source_format,source_file_id,source_filename,
         source_sha256,source_content,source_byte_size,crs,elevation_units,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
         .run(id, datasetId, bounded(displayName, 160), sourceFormat === 'emlid-all-columns-v1' ? 'generic-csv-v1' : sourceFormat, sourceFileId,
@@ -126,6 +144,8 @@ class GcpRepository {
   updatePoint(id, patch) {
     const current = this.getPoint(id);
     if (!current) return null;
+    if (current.easting !== null && ['latitude','longitude','elevationM'].some(key => patch[key] !== undefined))
+      throw Object.assign(new Error('Projected survey coordinates must be reimported from their source'), {code:'invalid_gcp_point'});
     const next = {
       label: patch.label === undefined ? current.label : bounded(patch.label, 160),
       latitude: patch.latitude === undefined ? current.latitude : patch.latitude,
@@ -142,14 +162,61 @@ class GcpRepository {
     return this.getPoint(id);
   }
 
+  confirmOdmCrs(id, actorId, input={}) {
+    const set=this.getSet(id); if(!set || set.sourceFormat!=='emlid-all-columns-v1') throw Object.assign(new Error('A survey source is required'),{code:'gcp_crs_unmapped'});
+    const c=Object.keys(input).length ? input : set.odmCrsCandidate;
+    if(!c || !Number.isInteger(c.epsgCode) || c.epsgCode<1000 || c.epsgCode>999999 || !['m','ftUS'].includes(c.horizontalUnit) || c.horizontalUnit!==set.provenance.linearUnit || c.verticalDatum!==set.provenance.verticalDatum) throw Object.assign(new Error('Enter the EPSG code and units for the source survey coordinate system and confirm its vertical datum'),{code:'gcp_crs_unmapped'});
+    const points=this.getSet(id,true).points; validateSurveyCrs(c,points);
+    const validationHash=surveyValidationHash(set.sourceSha256,c,points);
+    this.database.prepare(`INSERT INTO gcp_odm_crs_confirmations(set_id,source_sha256,epsg_code,horizontal_unit,vertical_datum,validation_sha256,confirmed_by,confirmed_at) VALUES (?,?,?,?,?,?,?,?)
+      ON CONFLICT(set_id) DO UPDATE SET source_sha256=excluded.source_sha256,epsg_code=excluded.epsg_code,horizontal_unit=excluded.horizontal_unit,vertical_datum=excluded.vertical_datum,validation_sha256=excluded.validation_sha256,confirmed_by=excluded.confirmed_by,confirmed_at=excluded.confirmed_at`).run(id,set.sourceSha256,c.epsgCode,c.horizontalUnit,c.verticalDatum,validationHash,actorId,now());
+    return this.getSet(id);
+  }
+
   deletePoint(id) { return this.database.prepare('DELETE FROM gcp_points WHERE id=?').run(id).changes === 1; }
-  deleteSet(id) { return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1; }
+  deleteSet(id) { const row=this.database.prepare('SELECT sets.source_file_id,datasets.storage_mode FROM gcp_sets sets JOIN datasets ON datasets.id=sets.dataset_id WHERE sets.id=?').get(id); if(row && (!row.source_file_id || row.storage_mode==='external_reference')) throw Object.assign(new Error('GCP source must be retained'), {code:'retained_csv'}); return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1; }
+
+  listRadiusImages(datasetId, selectedPointId, radiusM, limit, offset) {
+    const point = this.database.prepare(`SELECT points.* FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id
+      WHERE points.id=? AND sets.dataset_id=?`).get(selectedPointId, datasetId);
+    if (!point) throw Object.assign(new Error('GCP point is not in this dataset'), { code: 'invalid_gcp_point' });
+    // A latitude band is conservative even at the poles and across the antimeridian.
+    // The haversine score is monotonic with distance; calculate and filter it in
+    // SQLite so only the requested page is materialized in the application.
+    const latitude = Number(point.latitude), longitude = Number(point.longitude);
+    const angular = radiusM / 6371008.8, latDelta = angular * 180 / Math.PI;
+    const scoreLimit = Math.sin(angular / 2) ** 2;
+    const eligible = `FROM dataset_files files WHERE files.dataset_id=?
+      AND files.latitude BETWEEN ? AND ? AND files.longitude IS NOT NULL
+      AND COALESCE(files.mime_type,files.content_type) LIKE 'image/%'
+      AND (sin(radians(files.latitude-?)/2)*sin(radians(files.latitude-?)/2)
+        + cos(radians(?))*cos(radians(files.latitude))*sin(radians(files.longitude-?)/2)*sin(radians(files.longitude-?)/2)) <= ?`;
+    const args = [datasetId, Math.max(-90, latitude-latDelta), Math.min(90, latitude+latDelta),
+      latitude, latitude, latitude, longitude, longitude, scoreLimit];
+    const total = this.database.prepare(`SELECT count(*) total ${eligible}`).get(...args).total;
+    const rows = this.database.prepare(`SELECT files.*,ranking.horizontal_accuracy_m,ranking.footprint_radius_m,
+      (sin(radians(files.latitude-?)/2)*sin(radians(files.latitude-?)/2)
+        + cos(radians(?))*cos(radians(files.latitude))*sin(radians(files.longitude-?)/2)*sin(radians(files.longitude-?)/2)) distance_score
+      ${eligible.replace('FROM dataset_files files', 'FROM dataset_files files LEFT JOIN gcp_image_ranking_metadata ranking ON ranking.dataset_file_id=files.id')}
+      ORDER BY distance_score,files.id LIMIT ? OFFSET ?`).all(latitude, latitude, latitude, longitude, longitude, ...args, limit, offset);
+    const images = rows.map(row => ({
+      id: row.id, datasetId: row.dataset_id, relativePath: row.relative_path,
+      mimeType: row.mime_type || row.content_type, capturedAt: row.captured_at,
+      latitude: Number(row.latitude), longitude: Number(row.longitude),
+      altitudeM: row.altitude_m == null ? null : Number(row.altitude_m),
+      horizontalAccuracyM: row.horizontal_accuracy_m == null ? null : Number(row.horizontal_accuracy_m),
+      footprintRadiusM: row.footprint_radius_m == null ? null : Number(row.footprint_radius_m),
+      width: row.width == null ? null : Number(row.width), height: row.height == null ? null : Number(row.height),
+      distanceM: haversineMeters(latitude, longitude, Number(row.latitude), Number(row.longitude)),
+    }));
+    return { images, selectedPoint: this.point(point), total };
+  }
 
   listRankedImages(datasetId, selectedPointId, limit = 100) {
     const point = selectedPointId ? this.database.prepare(`SELECT points.* FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id
       WHERE points.id=? AND sets.dataset_id=?`).get(selectedPointId, datasetId) : null;
     if (selectedPointId && !point) throw Object.assign(new Error('GCP point is not in this dataset'), { code: 'invalid_gcp_point' });
-    const count = Math.max(1, Math.min(200, Number(limit) || 100));
+    const count = limit === null ? -1 : Math.max(1, Math.min(200, Number(limit) || 100));
     let rows;
     if (point) {
       const longitudeScale = Math.max(0.01, Math.cos(Number(point.latitude) * Math.PI / 180));

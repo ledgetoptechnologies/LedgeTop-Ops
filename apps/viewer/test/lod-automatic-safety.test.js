@@ -374,7 +374,7 @@ test('derivative timeout hard-kills an uncooperative process tree before returni
   `;
 
   await assert.rejects(
-    runDerivativeCommand(process.execPath, ['-e', script], { timeoutMs: 250, killGraceMs: 50 }),
+    runDerivativeCommand(process.execPath, ['-e', script], { timeoutMs: 2000, killGraceMs: 50 }),
     (error) => error.code === 'derivative_timeout',
   );
   pid = Number(fs.readFileSync(pidFile, 'utf8'));

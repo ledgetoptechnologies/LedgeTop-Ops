@@ -54,6 +54,31 @@ class ProviderCredentials {
     return key;
   }
 
+  sealAttemptCapability(providerId, attemptId, providerTaskId, capability) {
+    if (![providerId, attemptId, providerTaskId].every(v => typeof v === 'string' && /^[0-9a-f-]{36}$/.test(v)) ||
+        typeof capability !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(capability) || Buffer.from(capability, 'base64url').toString('base64url') !== capability) throw credentialError('invalid_attempt_capability');
+    const keyId = this.activeKeyId, iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv(ALGORITHM, this.activeKey(), iv);
+    cipher.setAAD(Buffer.from(`ltds-viewer-attempt-capability:v1:${providerId}:${attemptId}:${providerTaskId}:${keyId}`));
+    const data = Buffer.concat([cipher.update(capability, 'utf8'), cipher.final()]);
+    return { keyId, ciphertext: JSON.stringify({ v: 1, alg: 'A256GCM', iv: iv.toString('base64url'), tag: cipher.getAuthTag().toString('base64url'), data: data.toString('base64url') }) };
+  }
+
+  openAttemptCapability(providerId, attemptId, providerTaskId, record) {
+    try {
+      const envelope = JSON.parse(record.ciphertext), keyId = String(record.keyId || ''), key = this.keys.get(keyId);
+      if (!key || envelope?.v !== 1 || envelope?.alg !== 'A256GCM') throw new Error();
+      const iv = Buffer.from(envelope.iv, 'base64url'), tag = Buffer.from(envelope.tag, 'base64url');
+      if (iv.length !== 12 || tag.length !== 16) throw new Error();
+      const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+      decipher.setAAD(Buffer.from(`ltds-viewer-attempt-capability:v1:${providerId}:${attemptId}:${providerTaskId}:${keyId}`));
+      decipher.setAuthTag(tag);
+      const capability = Buffer.concat([decipher.update(Buffer.from(envelope.data, 'base64url')), decipher.final()]).toString('utf8');
+      if (!/^[A-Za-z0-9_-]{43}$/.test(capability) || Buffer.from(capability, 'base64url').toString('base64url') !== capability) throw new Error();
+      return capability;
+    } catch { throw credentialError('attempt_capability_unavailable'); }
+  }
+
   idempotencyFingerprint(method, requestPath, rawBody = Buffer.alloc(0)) {
     // Domain-separate the database-visible fingerprint from the AES key. A
     // database-only attacker cannot use it as an oracle for weak token bodies.
