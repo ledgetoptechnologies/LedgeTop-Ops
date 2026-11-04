@@ -8,6 +8,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { fork, spawn } = require('node:child_process');
 const { once } = require('node:events');
+const { DatabaseSync } = require('node:sqlite');
+const { signServiceRequest } = require('../server/serviceAuth');
 
 const processing = process.env.LTDS_PROCESSING_REPO;
 test('Processing journal and Viewer ledger recover after both processes die following a lost commit', {
@@ -24,7 +26,7 @@ test('Processing journal and Viewer ledger recover after both processes die foll
   });
   const keys = crypto.generateKeyPairSync('ed25519');
   const env = { ...process.env, LTDS_PROCESSING_REPO: processing, LTDS_PROCESSING_STATE: path.join(root, 'processing'),
-    LTDS_LEDGER_ROOT: root, LTDS_VIEWER_ORIGIN: 'https://viewer.synthetic',
+    LTDS_LEDGER_ROOT: root, LTDS_VIEWER_ORIGIN: 'https://viewer.synthetic', SERVICE_AUTH_SKEW_SECONDS: '600',
     LTDS_VIEWER_SERVICE_KEY_ID: 'synthetic-processing-v1',
     LTDS_VIEWER_SERVICE_SECRET: 'synthetic-processing-service-secret-not-a-credential-0001',
     LTDS_VIEWER_RECEIPT_ISSUER_ID: 'viewer-acceptance', LTDS_VIEWER_RECEIPT_KEY_ID: 'viewer-test-2026',
@@ -65,8 +67,27 @@ test('Processing journal and Viewer ledger recover after both processes die foll
   const before = await inspect();
   assert.deepEqual(before.counts, {accepted: 1, intents: 1, objects: 2});
   assert.ok(before.record?.storage?.viewerReceipt);
+  // A previously authenticated request must remain a replay after the
+  // Viewer process restarts, while the sender can recover using a fresh nonce.
+  const receiptPath = `/api/v1/reference/v1/acceptances/${before.record.acceptance.receiptId}`;
+  const signed = signServiceRequest({ secret: env.LTDS_VIEWER_SERVICE_SECRET,
+    keyId: env.LTDS_VIEWER_SERVICE_KEY_ID, method: 'GET', path: receiptPath });
+  assert.equal((await fetch(`http://127.0.0.1:${port}${receiptPath}`, { headers: signed })).status, 200);
   server.kill('SIGKILL'); assert.equal((await once(server, 'exit'))[1], 'SIGKILL'); server = null;
   port = await startServer(); assert.deepEqual(await inspect(), before);
+  const db = new DatabaseSync(path.join(root, 'viewer.sqlite'), { readOnly: true });
+  try {
+    assert.equal(db.prepare('SELECT count(*) AS count FROM service_nonces WHERE key_id=? AND nonce=?')
+      .get(env.LTDS_VIEWER_SERVICE_KEY_ID, signed['X-LTDS-Nonce']).count, 1,
+    'the first authenticated request must leave a durable nonce row');
+  } finally { db.close(); }
+  assert.ok(Math.abs(Math.floor(Date.now() / 1000) - Number(signed['X-LTDS-Timestamp'])) < 600,
+    'the replay must still be inside the explicitly configured authentication window');
+  assert.equal((await fetch(`http://127.0.0.1:${port}${receiptPath}`, { headers: signed })).status, 401,
+    'the real persistent nonce repository must reject replay across restart');
+  const fresh = signServiceRequest({ secret: env.LTDS_VIEWER_SERVICE_SECRET,
+    keyId: env.LTDS_VIEWER_SERVICE_KEY_ID, method: 'GET', path: receiptPath });
+  assert.equal((await fetch(`http://127.0.0.1:${port}${receiptPath}`, { headers: fresh })).status, 200);
   const recovered = await run('recover', port);
   assert.equal(recovered.phase, 'recovered');
   assert.deepEqual(recovered.viewerReceipt, before.record.storage.viewerReceipt);
