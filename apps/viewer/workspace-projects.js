@@ -69,7 +69,7 @@ function canShareOutput(output) {
 }
 async function openShareModal(projectId,onlyOutputId=null){
   state.clientNativeAccess=null;state.clientDirectAccess=null;
-  const context={projectId,onlyOutputId,id:crypto.randomUUID(),mode:'internal',loading:true,clientLoading:can('viewer.client_grants.manage'),clientError:null};
+  const context={projectId,onlyOutputId,id:crypto.randomUUID(),mode:'internal',loading:true,clientLoading:can('viewer.client_grants.manage'),clientError:null,directError:null,directLoading:can('viewer.client_grants.manage')};
   const token=state.token,subject=state.adminSession?.subject;
   const current=()=>Boolean(token)&&state.shareContext===context&&modal.open&&state.token===token&&state.adminSession?.subject===subject
     &&modalContent.querySelector('.share-columns')?.dataset.shareContext===context.id;
@@ -104,10 +104,10 @@ async function openShareModal(projectId,onlyOutputId=null){
   })();
   // Direct sharing has its own authority and must not wait for project lookups.
   if(context.clientLoading)void(async()=>{
-    let access=null;
-    try{access=directClientAccess(await api(directClientsPath(projectId)));}catch{}
+    let access=null,directError=null;
+    try{access=directClientAccess(await api(directClientsPath(projectId)));}catch(error){directError=error}
     if(!current()||!can('viewer.client_grants.manage'))return;
-    state.clientDirectAccess=access;context.directQuery='';
+    state.clientDirectAccess=access;context.directError=directError;context.directLoading=false;context.directQuery='';
     if(context.loading)return;
     const panel=modalContent.querySelector('[data-client-share-panel]');
     if(panel){panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
@@ -717,6 +717,14 @@ function clientSharePanel(output,onlyOutputId){
   const legacy=legacyClientSharePanel(output,onlyOutputId);
   if(state.clientDirectAccess)return directClientShareCard(onlyOutputId)
     +`<details class="share-legacy"><summary>Share through an Operations project instead</summary><div data-legacy-client-share-panel>${legacy}</div></details>`;
+  if(state.shareContext?.directLoading)return card('Share with a client',empty('Checking direct client access… Public links are available separately.'));
+  if(state.shareContext?.directError){
+    const diagnostic=clientAccessDiagnostic(state.shareContext.directError);
+    const details=[diagnostic.status?`HTTP ${diagnostic.status}`:null,diagnostic.code?`Code: ${diagnostic.code}`:null].filter(Boolean).join(' · ');
+    return card('Share with a client',empty('Direct client sharing is temporarily unavailable. Public links are unaffected.')
+      +(details?`<p class="form-note">${esc(details)}</p>`:''))
+      +`<details class="share-legacy"><summary>Legacy Operations project sharing</summary><div data-legacy-client-share-panel>${legacy}</div></details>`;
+  }
   return legacy;
 }
 function legacyClientSharePanel(output,onlyOutputId){
@@ -724,7 +732,7 @@ function legacyClientSharePanel(output,onlyOutputId){
   if(can('viewer.client_grants.manage')&&state.shareContext?.clientError&&!state.clientNativeAccess?.targets?.length){
     const diagnostic=clientAccessDiagnostic(state.shareContext.clientError);
     const details=[diagnostic.status?`HTTP ${diagnostic.status}`:null,diagnostic.code?`Code: ${diagnostic.code}`:null].filter(Boolean).join(' · ');
-    return card('Authenticated client access',empty('Operations client access could not be loaded. Close and reopen Share to retry. Public links are unaffected.')
+    return card('Authenticated client access',empty('Legacy Operations project access could not be loaded. Direct client sharing is separate. Public links are unaffected.')
       +(details?`<p class="form-note">${esc(details)}</p>`:'')
       +`<p class="form-note">${diagnostic.requestId?`Reference: ${esc(diagnostic.requestId)}. Share this reference with your administrator.`:'No proxy reference was returned; this alone does not identify the failure stage.'}</p>`);
   }
