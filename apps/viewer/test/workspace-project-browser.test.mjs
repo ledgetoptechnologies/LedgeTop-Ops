@@ -109,6 +109,8 @@ const fixtures = {
     { id: 'derivative-running', attemptId: 'attempt-running', type: 'lod_audit', status: 'leased', optional: true, result: {}, taskId: 'task-running', taskDisplayName: 'Existing tile audit', projectId: 'project-johnson', projectDisplayName: 'Johnson Road Survey', heartbeatAt: '2026-08-19T13:04:00.000Z', createdAt: '2026-08-19T13:00:00.000Z', updatedAt: '2026-08-19T13:04:00.000Z' },
     { id: 'derivative-queued', attemptId: 'attempt-queued', type: 'mesh_tiles', status: 'pending', optional: true, result: {}, taskId: 'task-queued', taskDisplayName: 'Queued tile model', projectId: 'project-quarry', projectDisplayName: 'Alpha Quarry', createdAt: '2026-08-19T12:00:00.000Z', updatedAt: '2026-08-19T12:00:00.000Z' },
     { id: 'derivative-failed', attemptId: 'attempt-johnson', type: 'mesh_tiles', status: 'failed', optional: true, result: { error: 'Tile conversion failed; the original model remains available.' }, taskId: 'task-johnson', taskDisplayName: 'Johnson task', projectId: 'project-johnson', projectDisplayName: 'Johnson Road Survey', createdAt: '2026-08-19T11:00:00.000Z', updatedAt: '2026-08-19T11:02:00.000Z' },
+    { id: 'derivative-required', attemptId: 'attempt-required', type: 'mesh_tiles', status: 'failed', optional: false, requiredRetryAvailable: true, result: { error: 'Mesh conversion failed.' }, taskId: 'task-johnson', taskDisplayName: 'Required mesh', projectId: 'project-johnson', projectDisplayName: 'Johnson Road Survey', createdAt: '2026-08-19T11:00:00.000Z', updatedAt: '2026-08-19T11:02:00.000Z' },
+    { id: 'derivative-required-ineligible', attemptId: 'attempt-ineligible', type: 'mesh_tiles', status: 'failed', optional: false, requiredRetryAvailable: false, result: { error: 'Cannot retry.' }, taskId: 'task-johnson', taskDisplayName: 'Unavailable mesh', projectId: 'project-johnson', projectDisplayName: 'Johnson Road Survey', createdAt: '2026-08-19T11:00:00.000Z', updatedAt: '2026-08-19T11:02:00.000Z' },
   ],
 };
 
@@ -263,6 +265,10 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/processing/derivatives/derivative-failed/retry' && method === 'POST') {
     runtime.derivatives = runtime.derivatives.map(job => job.id === 'derivative-failed' ? { ...job, status: 'pending', result: {} } : job);
     return json({ derivative: runtime.derivatives.find(job => job.id === 'derivative-failed') }, 202);
+  }
+  if (pathname === '/api/v1/processing/derivatives/derivative-required/retry' && method === 'POST') {
+    runtime.derivatives = runtime.derivatives.map(job => job.id === 'derivative-required' ? { ...job, status: 'pending', requiredRetryAvailable: false, result: {} } : job);
+    return json({ derivative: runtime.derivatives.find(job => job.id === 'derivative-required') }, 202);
   }
   if (pathname === '/api/v1/processing/derivatives/derivative-stale-fallback/retry' && method === 'POST') {
     return json({ derivative: { id: 'derivative-stale-fallback', status: 'pending', manualRetryCount: 1 } }, 202);
@@ -625,6 +631,13 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('[data-action="retry-derivative"][data-id="derivative-failed"]').click()`);
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/derivatives/derivative-failed/retry');
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: failed derivative retry did not settle`);
+    await client.evaluate(`document.querySelector('[data-action="view-all-background"][data-kind="derivatives"]').click()`);
+    await waitFor(client, "document.querySelector('[data-action=\"retry-derivative\"][data-id=\"derivative-required\"]')", `${viewport.name}: eligible required mesh retry missing`);
+    assert.equal(await client.evaluate(`Boolean(document.querySelector('[data-action="retry-derivative"][data-id="derivative-required-ineligible"]'))`), false, `${viewport.name}: ineligible required mesh retry exposed`);
+    await client.evaluate(`document.querySelector('[data-action="retry-derivative"][data-id="derivative-required"]').click()`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/derivatives/derivative-required/retry');
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: required retry did not settle`);
+    assert.equal(runtime.requests.filter(request => request.method === 'POST' && request.path === '/api/v1/processing/derivatives/derivative-required/retry').length, 1);
     await client.evaluate(`document.querySelector('[data-section="dashboard"]').click()`);
 
     const noOverflow = `Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <= window.innerWidth`;
@@ -1061,7 +1074,7 @@ test('companion product restore is explicit, immutable-version scoped, and permi
       runtime.requests = [];
       runtime.permissions = scenario.readOnly ? readOnly : null;
       runtime.rejectCompanionRepair = Boolean(scenario.reject);
-      runtime.derivatives = [];
+      runtime.derivatives = scenario.readOnly ? [structuredClone(fixtures.derivatives.find(job => job.id === 'derivative-required'))] : [];
       runtime.outputs = structuredClone(fixtures.outputs);
       Object.assign(runtime.outputs[0], {
         assetKinds: ['tiles'], lod: { status: 'available' },
@@ -1137,6 +1150,10 @@ test('companion product restore is explicit, immutable-version scoped, and permi
         assert.deepEqual(runtime.outputs[0], originalOutput, 'The source version and its publication must remain unchanged');
         await client.evaluate(`document.querySelector('[data-section="background"]').click()`);
         await waitFor(client, `Boolean(document.querySelector('#import-activity'))`, 'Background work did not load');
+        if (scenario.readOnly) {
+          await waitFor(client, `Boolean(document.querySelector('[data-derivative-id="derivative-required"]'))`, 'Required derivative did not render for the read-only user');
+          assert.equal(await client.evaluate(`Boolean(document.querySelector('[data-action="retry-derivative"][data-id="derivative-required"]'))`), false, 'Read-only users must not see required-derivative retry');
+        }
         if (runtime.operations.length) {
           const row = await client.evaluate(`document.querySelector('[data-operation-id="operation-companion"]')?.textContent`);
           assert.ok(row.includes('Restore missing products'), row);
