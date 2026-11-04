@@ -42,11 +42,15 @@ describe.each(["production", "staging"] as const)("canonical portal migration: %
     for (const method of ["GET", "HEAD"]) {
       const response = await worker.fetch(new Request(`${old}/portal/account?workspace=existing-client`, { method }), env, context);
       expect(response.status).toBe(308);
-      expect(response.headers.get("Location")).toBe(`${configuration.CLIENT_PORTAL_ORIGIN}/portal/account?workspace=existing-client`);
+      expect(response.headers.get("Location")).toBe(`${configuration.CLIENT_PORTAL_ORIGIN}/portal/account`);
     }
     expect(legacyClientRedirectLocation(`${old}/`, configuration)).toBe(`${configuration.CLIENT_PORTAL_ORIGIN}/portal`);
     expect(malformedPortalLaunchRedirect(`${old}/portal%2A?__cf_access_message=logged_out&workspace=existing`, configuration))
-      .toBe(`${configuration.CLIENT_PORTAL_ORIGIN}/portal?workspace=existing`);
+      .toBe(`${configuration.CLIENT_PORTAL_ORIGIN}/portal`);
+    for (const query of ["token=synthetic", "access_code=synthetic", "state=synthetic", "unknown=synthetic"]) {
+      expect(malformedPortalLaunchRedirect(`${old}/portal*?${query}`, configuration))
+        .toBe(`${configuration.CLIENT_PORTAL_ORIGIN}/portal`);
+    }
     for (const path of ["/api/client/session", "/api/client/operations/data/deliveries", "/api/internal/project-alpha/portal-v2"]) {
       for (const method of ["GET", "POST"]) {
         const response = await worker.fetch(new Request(`${old}${path}`, { method,

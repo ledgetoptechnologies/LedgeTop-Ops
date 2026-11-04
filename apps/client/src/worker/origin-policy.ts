@@ -1,5 +1,4 @@
 import { HTTPException } from "hono/http-exception";
-import { hasOnlyNavigationQuery } from "../../../../packages/shared/src/canonical-domain-navigation";
 import type { Env } from "./types";
 
 type OriginEnv = Pick<Env,
@@ -167,8 +166,11 @@ export function malformedPortalLaunchRedirect(requestUrl: string, env: OriginEnv
   if (![...origins, ...legacy, ...retired].includes(request.origin) || (pathname !== "/portal*" && pathname !== "/portal%2a")) return null;
   request.pathname = "/portal";
   request.searchParams.delete("__cf_access_message");
+  // A retired host must not forward query state to the canonical portal. The
+  // Client Portal routes by pathname; public delivery query state uses its own
+  // separately validated route and is not handled here.
   return retired.includes(request.origin)
-    ? new URL(`${request.pathname}${request.search}`, configuredClientPortalOrigin(env)!).toString()
+    ? new URL(request.pathname, configuredClientPortalOrigin(env)!).toString()
     : request.toString();
 }
 
@@ -184,10 +186,6 @@ export function legacyClientRedirectLocation(requestUrl: string, env: OriginEnv)
   let request: URL;
   try { request = new URL(requestUrl); } catch { return null; }
   if (![...legacy, ...retired].includes(request.origin)) return null;
-  // A generic legacy redirect must never forward callback, auth, share, or
-  // unknown parameters to a different origin. The canonical page redirect
-  // applies the same shared allowlist; keep this fallback equally strict.
-  if (!hasOnlyNavigationQuery(request)) return null;
   // A former combined public/private host may remain an active private alias
   // during the split-origin phase. Its existing private cookie sessions stay
   // local; the separate opt-in fresh-browser policy handles new navigations.
@@ -197,7 +195,10 @@ export function legacyClientRedirectLocation(requestUrl: string, env: OriginEnv)
   const targetOrigin = configuredClientPortalOrigin(env);
   if (!targetOrigin) return null;
   if (request.origin === targetOrigin) return null;
-  const target = new URL(request.pathname === "/" ? "/portal" : `${request.pathname}${request.search}`, targetOrigin);
+  // Private Client Portal routes are pathname-based. Never carry a query to a
+  // different host from this generic fallback; public share state is handled
+  // by canonicalDeliveryEntryRedirect above with its own explicit schema.
+  const target = new URL(request.pathname === "/" ? "/portal" : request.pathname, targetOrigin);
   return target.toString();
 }
 

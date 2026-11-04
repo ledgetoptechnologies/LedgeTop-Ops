@@ -48,18 +48,18 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     const f=fixture();
     for(const origin of [OLD,LTT]) {
       const page=await f.request(`${origin}/portal/projects?view=list`);
-      expect(page.status).toBe(308);expect(page.headers.get("Location")).toBe(`${PORTAL}/portal/projects?view=list`);
+      expect(page.status).toBe(308);expect(page.headers.get("Location")).toBe(`${PORTAL}/portal/projects`);
       const api=await f.request(`${origin}/api/client/session`);
       expect(api.status).toBe(404);
     }
     expect(f.prepare).not.toHaveBeenCalled();
   });
-  it("never forwards sensitive or unknown query parameters from retired portal hosts",async()=>{
+  it("drops private portal query parameters when redirecting retired hosts",async()=>{
     const f=fixture("true");
     for(const origin of [OLD,LTT]) for(const key of ["token","%74oken","access_code","access%5Fcode","state","code","next","unknown"]) {
       const response=await f.request(`${origin}/portal/account?tab=profile&${key}=synthetic-secret`);
-      expect(response.status).toBe(404);
-      expect(response.headers.get("Location")).toBeNull();
+      expect(response.status).toBe(308);
+      expect(response.headers.get("Location")).toBe(`${PORTAL}/portal/account`);
     }
     expect(f.prepare).not.toHaveBeenCalled();
   });
@@ -70,12 +70,13 @@ describe("real Client entrypoint canonical navigation mount",()=>{
       [OLD,"/portal/projects?folder=opaque%2Fref&view=list",PORTAL],
       [LTT,"/portal/account?tab=profile",PORTAL]]) for(const method of ["GET","HEAD"]) {
       const response=await f.request(`${origin}${path}#Synthetic_fragment`,{method});
-      expect(response.status).toBe(path?.startsWith("/portal/")?308:302);expect(response.headers.get("Location")).toBe(`${target}${path}`);
+      const expectedPath=path?.startsWith("/portal/")?path.split("?")[0]:path;
+      expect(response.status).toBe(path?.startsWith("/portal/")?308:302);expect(response.headers.get("Location")).toBe(`${target}${expectedPath}`);
       expect(response.headers.get("Cache-Control")).toBe("no-store");
       expect(response.headers.get("Set-Cookie")).toBeNull();
     }
     expect(f.fetch).not.toHaveBeenCalled();expect(f.prepare).not.toHaveBeenCalled();
-    expect((await f.request(`${OLD}/?folder=opaque%2Fref`)).headers.get("Location")).toBe(`${PORTAL}/portal?folder=opaque%2Fref`);
+    expect((await f.request(`${OLD}/?folder=opaque%2Fref`)).headers.get("Location")).toBe(`${PORTAL}/portal`);
   });
   it("ships the guarded canonical navigation opt-in in the production Worker configuration",async()=>{
     const workerConfig=JSON.parse(readFileSync(new URL("../wrangler.jsonc",import.meta.url),"utf8"));
@@ -88,7 +89,8 @@ describe("real Client entrypoint canonical navigation mount",()=>{
       [LTT,"/portal/account?tab=profile",PORTAL],[OLD,"/s/synthetic-id",DELIVERY]] as const) {
       const response=await f.request(`${origin}${path}`);
       expect(response.status).toBe(path.startsWith("/portal/")?308:302);
-      expect(response.headers.get("Location")).toBe(`${target}${path}`);
+      const expectedPath=path.startsWith("/portal/")?path.split("?")[0]:path;
+      expect(response.headers.get("Location")).toBe(`${target}${expectedPath}`);
       expect(response.headers.get("Set-Cookie")).toBeNull();
     }
     expect(f.prepare).not.toHaveBeenCalled();
@@ -99,7 +101,7 @@ describe("real Client entrypoint canonical navigation mount",()=>{
       for(const cookie of ["__Host-ltds_delivery=synthetic","CF_Authorization=synthetic","unrelated=synthetic"]){
         const response=await f.request(`${origin}/portal/account?tab=profile`,{method,headers:{...navigation,Cookie:cookie}});
         expect(response.status).toBe(308);
-        expect(response.headers.get("Location")).toBe(`${PORTAL}/portal/account?tab=profile`);
+        expect(response.headers.get("Location")).toBe(`${PORTAL}/portal/account`);
         expect(response.headers.get("Set-Cookie")).toBeNull();
         expect(response.headers.get("Cache-Control")).toBe("no-store");
       }
