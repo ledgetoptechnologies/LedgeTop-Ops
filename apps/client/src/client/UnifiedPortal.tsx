@@ -66,7 +66,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   useEffect(() => {
     if (!requestPage) return;
     const controller = new AbortController();
-    setInquiries(current => current === "error" ? "loading" : current);
+    setInquiries("loading");
     loadInquiries(controller.signal).then(value => { if (!controller.signal.aborted) setInquiries(value); },
       () => { if (!controller.signal.aborted) setInquiries("error"); });
     return () => controller.abort();
@@ -182,7 +182,10 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   // General requests have no page of their own yet, so they show where they stand and nothing to open.
   const historyProblem = !loading && !historyComplete && <p className="unified-portal-request-note">{failed.length > 0
     ? "Some request history couldn’t be loaded, so this list may be incomplete." : "Requests for some of your work aren’t listed here yet."}</p>;
-  const inquiryProblem = inquiries === "error" && <p className="unified-portal-request-note" role="status">General requests you’ve sent couldn’t be loaded right now. Try again in a moment.</p>;
+  const inquiryProblem = inquiries === "error" && <>
+    <p className="unified-portal-request-note" role="status">General requests you’ve sent couldn’t be loaded right now.</p>
+    <button type="button" className="button-ghost button-small" aria-label="Try loading general requests again" onClick={() => setRetry(value => value + 1)}>Try again</button>
+  </>;
   const inquiryRow = (item: ClientInquiry) => <li key={`inquiry:${item.id}`}>
     <div><strong>{item.title}</strong><small>{`Sent ${new Date(item.createdAt).toLocaleDateString()}`}</small></div>
     <div className="unified-portal-request-actions"><StatusPill tone={inquiryStatus(item.status).tone}>{inquiryStatus(item.status).label}</StatusPill></div>

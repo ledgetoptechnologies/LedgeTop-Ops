@@ -1310,7 +1310,7 @@ test.describe("unified home without business switching", () => {
     await mockQuick(page, undefined, {json: {services: quickServices, unavailable: [], inquiryKinds: ["website"]}});
     await mockInquiries(page, undefined, 503);
     await page.goto("/portal/requests");
-    await expect(page.getByText("General requests you’ve sent couldn’t be loaded right now. Try again in a moment.")).toBeVisible();
+    await expect(page.getByText("General requests you’ve sent couldn’t be loaded right now.")).toBeVisible();
   });
 
   test("home offers general requests and counts them even when no account takes service requests online", async ({page}) => {
@@ -1338,12 +1338,12 @@ test.describe("unified home without business switching", () => {
   });
 
   // Accounts with no service requests, so home's only open question is the general request lookup.
-  const mockHomeInquiries = (page: Page, answer: (route: Route) => Promise<void>, accountContext: (id: string) => unknown = requestContext, failing?: string) => mock(page, (route, call) => {
+  const mockHomeInquiries = (page: Page, answer: (route: Route) => Promise<void>, accountContext: (id: string) => unknown = requestContext, failing: () => string | undefined = () => undefined) => mock(page, (route, call) => {
     if (call.path === "/api/client/request-services") return route.fulfill({json: {services: [], unavailable: [], inquiryKinds: ["other"]}});
     if (call.path === "/api/client/inquiries") return answer(route);
     if (call.path === "/api/client/v2/workspaces") return route.fulfill({json: {workspaces: listed}});
     const match = call.path.match(/^\/api\/client\/v2\/workspaces\/(workspace-[bc])\/(context|hierarchy)$/);
-    if (match && match[1] === failing) return route.fulfill({status: 503, json: {error: "Unavailable"}});
+    if (match && match[1] === failing()) return route.fulfill({status: 503, json: {error: "Unavailable"}});
     if (match?.[2] === "hierarchy") return route.fulfill({json: {...hierarchy(match[1]!), sourceId: sources[match[1]!]}});
     if (match) return route.fulfill({json: {...accountContext(match[1]!) as object, workspace: listed.find(item => item.id === match[1])}});
     return undefined;
@@ -1370,9 +1370,40 @@ test.describe("unified home without business switching", () => {
     await mockHomeInquiries(page, route => route.fulfill({status: 503, json: {error: "Unavailable"}}));
     await page.goto("/portal");
     const activity = recentActivity(page);
-    await expect(activity.getByRole("status")).toHaveText("General requests you’ve sent couldn’t be loaded right now. Try again in a moment.");
+    await expect(activity.getByRole("status")).toHaveText("General requests you’ve sent couldn’t be loaded right now.");
     await expect(activity).not.toContainText("No requests yet");
     await expect(activity).not.toContainText("Checking your requests…");
+  });
+
+  const signage = {id: "inq-1", kind: "other", title: "Office signage", details: "Signs.", location: null, status: "under_review", createdAt: "2026-10-31T12:00:00.000Z"};
+
+  test("a retry never leaves earlier general requests looking current, and the failure note can retry", async ({page}) => {
+    let failing: string | undefined = "workspace-c", reads = 0;
+    const held: Route[] = [];
+    await mockHomeInquiries(page, route => {
+      reads += 1;
+      return reads === 1 ? route.fulfill({json: {inquiries: [signage]}}) : (held.push(route), Promise.resolve());
+    }, requestContext, () => failing);
+    await page.goto("/portal");
+    const activity = recentActivity(page);
+    await expect(activity.locator("li strong")).toHaveText(["Office signage"]);
+    failing = undefined;
+    await page.getByRole("button", {name: "Try again", exact: true}).click();
+    // Pending again: the earlier answer isn't shown as if it were settled.
+    await expect(activity.getByRole("status")).toHaveText("Checking your requests…");
+    await expect(activity).not.toContainText("Office signage");
+    await expect(inProgress(page)).toHaveText("…");
+    await expect.poll(() => held.length).toBe(1);
+    await held[0]!.fulfill({status: 503, json: {error: "Unavailable"}});
+    await expect(activity.getByRole("status")).toHaveText("General requests you’ve sent couldn’t be loaded right now.");
+    await expect(activity).not.toContainText("Office signage");
+    await activity.getByRole("button", {name: "Try loading general requests again"}).click();
+    await expect(activity.getByRole("status")).toHaveText("Checking your requests…");
+    await expect.poll(() => held.length).toBe(2);
+    await held[1]!.fulfill({json: {inquiries: [signage]}});
+    await expect(activity.locator("li strong")).toHaveText(["Office signage"]);
+    await expect(activity.getByRole("button", {name: "Try loading general requests again"})).toHaveCount(0);
+    await expect(inProgress(page)).toHaveText("1");
   });
 
   test("home doesn't call activity empty when an account's request history is hidden", async ({page}) => {
@@ -1385,7 +1416,7 @@ test.describe("unified home without business switching", () => {
   });
 
   test("home doesn't call activity empty when an account's request history failed", async ({page}) => {
-    await mockHomeInquiries(page, route => route.fulfill({json: {inquiries: []}}), requestContext, "workspace-c");
+    await mockHomeInquiries(page, route => route.fulfill({json: {inquiries: []}}), requestContext, () => "workspace-c");
     await page.goto("/portal");
     const activity = recentActivity(page);
     await expect(activity).toContainText("Some request history couldn’t be loaded, so this list may be incomplete.");
@@ -1405,7 +1436,7 @@ test.describe("unified home without business switching", () => {
     await page.goto("/portal");
     await expect(page.locator(".portal-overview-tile").filter({hasText: "Requests in progress"}).locator(".portal-overview-value")).toHaveText("0");
     await expect(page.getByRole("button", {name: "New request"})).toHaveCount(0);
-    await expect(page.getByText("General requests you’ve sent couldn’t be loaded right now. Try again in a moment.")).toHaveCount(0);
+    await expect(page.getByText("General requests you’ve sent couldn’t be loaded right now.")).toHaveCount(0);
   });
 
   test("deliveries are one flat list and feedback one neutral card, with no business or division", async ({page}) => {
@@ -1733,7 +1764,7 @@ test("the requests page keeps failed general requests apart from an empty servic
       ? route.fulfill({json: requestContext(call.path.includes("workspace-c") ? "workspace-c" : "workspace-b")}) : undefined;
   });
   await page.goto("/portal/requests");
-  await expect(page.getByText("General requests you’ve sent couldn’t be loaded right now. Try again in a moment.")).toBeVisible();
+  await expect(page.getByText("General requests you’ve sent couldn’t be loaded right now.")).toBeVisible();
   await expect(page.getByText("No service requests yet")).toBeVisible();
   await expect(page.getByText("No requests yet")).toHaveCount(0);
 });
