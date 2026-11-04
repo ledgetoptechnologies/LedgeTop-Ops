@@ -53,6 +53,39 @@ internal static class LegacyExplorerPreviewCleanupTests
         }
         Require(await LegacyExplorerPreviewCleanup.RunAsync(true,default,() => new Owner(log),
             () => LegacyExplorerPreviewReceiptState.Unknown,() => throw new Exception(),_ => throw new Exception()) == LegacyExplorerPreviewCleanupResult.NeedsOwnershipReview);
+        int recoveryAttempts = 0, recoveredReceiptReads = 0;
+        var recovered = new Session(log);
+        var recoveredResult = await LegacyExplorerPreviewCleanup.RunAsync(true, default, () => new Owner(log),
+            () => ++recoveredReceiptReads == 1 ? LegacyExplorerPreviewReceiptState.Missing : LegacyExplorerPreviewReceiptState.Present,
+            () => recovered, _ => false, () => { recoveryAttempts++; return true; });
+        Require(recoveredResult == LegacyExplorerPreviewCleanupResult.Removed && recoveryAttempts == 1 &&
+            recoveredReceiptReads >= 4 && recovered.Removals == 1);
+        recoveryAttempts = 0;
+        Require(await LegacyExplorerPreviewCleanup.RunAsync(true, default, () => new Owner(log),
+            () => LegacyExplorerPreviewReceiptState.Missing, () => throw new Exception(), _ => false,
+            () => { recoveryAttempts++; return false; }) == LegacyExplorerPreviewCleanupResult.NoKnownReceipt && recoveryAttempts == 1);
+        using (var current = System.Security.Principal.WindowsIdentity.GetCurrent())
+        {
+            var sid = current.User!.Value;
+            var identity = Guid.NewGuid();
+            var id = NativeRootRegistration.ProviderName + "!" + sid + "!" + identity.ToString("N");
+            var context = System.Text.Encoding.UTF8.GetBytes("LedgeTop.Files.ExplorerPreview/1:" + identity.ToString("N"));
+            Require(LegacyExplorerPreviewCleanup.TryMatchLegacyGeneratedIdentity(id, sid, ExplorerRootDisplayName.Legacy,
+                ExplorerBrandIcon.LegacyResource, context, out var matched) && matched == identity);
+            Require(!LegacyExplorerPreviewCleanup.TryMatchLegacyGeneratedIdentity(id, "S-1-5-18", ExplorerRootDisplayName.Legacy,
+                ExplorerBrandIcon.LegacyResource, context, out _));
+            Require(!LegacyExplorerPreviewCleanup.TryMatchLegacyGeneratedIdentity(id, sid, "Other provider",
+                ExplorerBrandIcon.LegacyResource, context, out _));
+            Require(!LegacyExplorerPreviewCleanup.TryMatchLegacyGeneratedIdentity(id, sid, ExplorerRootDisplayName.Legacy,
+                ExplorerBrandIcon.LegacyResource, [.. context, 0], out _));
+            Require(!LegacyExplorerPreviewCleanup.TryMatchLegacyGeneratedIdentity(id, sid, ExplorerRootDisplayName.Legacy,
+                "C:\\untrusted.ico,0", context, out _));
+        }
+        var tempBase = Path.GetFullPath(Path.GetTempPath());
+        var rejectProfile = Path.Combine(tempBase, "lt-recovery-reject-" + Guid.NewGuid().ToString("N"));
+        var unrelatedRoot = Path.Combine(tempBase, "LedgeTop Files Preview (10000)");
+        Require(!OwnedExplorerRootSession.WriteRecoveredGeneratedProfile(rejectProfile, unrelatedRoot, Guid.NewGuid(),
+            ExplorerBrandIcon.LegacyResource, 1, Guid.NewGuid()) && !Directory.Exists(rejectProfile));
         string path = Path.Combine(Path.GetPathRoot(Path.GetFullPath("."))!,"synthetic-profile","profile.json");
         Require(LegacyExplorerPreviewCleanup.ProbeReceipt(path,p => p == path ? FileAttributes.Normal : FileAttributes.Directory) == LegacyExplorerPreviewReceiptState.Present);
         foreach (var bad in new[] { FileAttributes.Directory, FileAttributes.ReparsePoint })

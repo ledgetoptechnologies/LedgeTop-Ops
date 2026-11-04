@@ -1,4 +1,8 @@
 using LedgeTop.Files.Explorer;
+using System.Security.Principal;
+using System.Text;
+using Windows.Security.Cryptography;
+using Windows.Storage.Provider;
 
 namespace LedgeTop.Files;
 
@@ -11,8 +15,9 @@ internal enum LegacyExplorerPreviewReceiptState { Missing, Present, Unknown }
 
 /// <summary>
 /// Fixed generated V2 preview cleanup only. A missing or already-removed receipt is never proof
-/// that an untracked Explorer entry is absent. Does not start a provider, authenticate, delete files,
-/// enumerate registrations, or accept a path from the caller. Caller must preserve its UI context:
+/// that an untracked Explorer entry is absent. Does not start a provider, authenticate, delete user
+/// files, or accept a path from the caller. Only an explicit removal with a missing receipt performs
+/// read-only sync-root enumeration to try to reconstruct the exact legacy owner receipt. Caller preserves its UI context:
 /// the legacy SingleInstance mutex must be released on the same thread that acquired it.
 /// Invoked by packaged-pilot uninstall, explicit repair, and post-activation installation retirement;
 /// ordinary app startup does not invoke cleanup.
@@ -25,7 +30,8 @@ internal static class LegacyExplorerPreviewCleanup
     internal static Task<LegacyExplorerPreviewCleanupResult> RunAsync(bool remove, CancellationToken cancellationToken) =>
         RunAsync(remove, cancellationToken, () => SingleInstance.TryOwn("developer-explorer-demo", () => { }),
             () => ProbeReceipt(ProfilePath, File.GetAttributes), () => new ExplorerPreviewSession(),
-            session => session is ExplorerPreviewSession preview && preview.VerifyRecordedRemovedAbsence());
+            session => session is ExplorerPreviewSession preview && preview.VerifyRecordedRemovedAbsence(),
+            RecoverMissingGeneratedProfile);
 
     internal static LegacyExplorerPreviewReceiptState ProbeReceipt(string path, Func<string, FileAttributes> attributes)
     {
@@ -49,7 +55,7 @@ internal static class LegacyExplorerPreviewCleanup
     // validates schema2, owner, current SID, root variant, context, icon and exact native/Shell pins.
     internal static async Task<LegacyExplorerPreviewCleanupResult> RunAsync(bool remove, CancellationToken cancellationToken,
         Func<IDisposable?> tryOwn, Func<LegacyExplorerPreviewReceiptState> hasReceipt, Func<IExplorerPreviewSession> prepare,
-        Func<IExplorerPreviewSession, bool> verifyRemoved)
+        Func<IExplorerPreviewSession, bool> verifyRemoved, Func<bool>? recoverMissing = null)
     {
         if (cancellationToken.IsCancellationRequested) return LegacyExplorerPreviewCleanupResult.Postponed;
         var result = LegacyExplorerPreviewCleanupResult.NeedsOwnershipReview;
@@ -60,6 +66,8 @@ internal static class LegacyExplorerPreviewCleanup
             try {
                 if (cancellationToken.IsCancellationRequested) return LegacyExplorerPreviewCleanupResult.Postponed;
                 var receipt = hasReceipt();
+                if (receipt == LegacyExplorerPreviewReceiptState.Missing && remove && recoverMissing is not null && recoverMissing())
+                    receipt = hasReceipt();
                 if (receipt == LegacyExplorerPreviewReceiptState.Missing) return LegacyExplorerPreviewCleanupResult.NoKnownReceipt;
                 if (receipt != LegacyExplorerPreviewReceiptState.Present) return LegacyExplorerPreviewCleanupResult.NeedsOwnershipReview;
                 session = prepare(); // Construction reads the exact fixed receipt; never calls Start.
@@ -92,5 +100,59 @@ internal static class LegacyExplorerPreviewCleanup
             }
         } catch { return LegacyExplorerPreviewCleanupResult.NeedsOwnershipReview; }
         return result;
+    }
+
+    /// <summary>
+    /// Reconstruct only a missing receipt for one exact, still-registered legacy generated root.
+    /// Enumeration is read-only; the receipt writer repeats native and shell identity checks before
+    /// persisting anything. The normal session removal then journals and confirms the unregister.
+    /// </summary>
+    private static bool RecoverMissingGeneratedProfile()
+    {
+        using var user = WindowsIdentity.GetCurrent();
+        var sid = user.User?.Value ?? throw new IOException("The current Windows identity is unavailable.");
+        var candidates = new List<(string Root, Guid Identity, string Icon, long FileId, Guid Namespace)>();
+        foreach (var syncRoot in StorageProviderSyncRootManager.GetCurrentSyncRoots())
+        {
+            if (syncRoot is null || syncRoot.IconResource is not { } icon) continue;
+            byte[] context;
+            try { CryptographicBuffer.CopyToByteArray(syncRoot.Context, out context); }
+            catch { continue; }
+            if (!TryMatchLegacyGeneratedIdentity(syncRoot.Id, sid, syncRoot.DisplayNameResource, icon, context, out var identity)) continue;
+            var expectedContext = Encoding.UTF8.GetBytes("LedgeTop.Files.ExplorerPreview/1:" + identity.ToString("N"));
+            var root = syncRoot.Path?.Path;
+            if (string.IsNullOrWhiteSpace(root)) continue;
+            var native = NativeRootRegistration.Inspect(root, expectedContext);
+            if (native.Hresult != 0 || native.RootFileId == 0 || !native.ExpectedContextMatches ||
+                !native.ExpectedNameMatches || !native.ExpectedVersionMatches || native.HydrationPrimary != 2 ||
+                native.HydrationModifier != 0 || native.PopulationPrimary != 3 || native.PopulationModifier != 0 ||
+                native.InSyncPolicy != 1023 || native.HardlinkPolicy != 0) continue;
+            var shell = ShellRegistration.Inspect(root, syncRoot.Id, expectedContext, null, icon, ExplorerRootDisplayName.Legacy);
+            if (!shell.ExactShellMetadataPresent || shell.RootFileId != native.RootFileId || shell.NamespaceClsid == Guid.Empty)
+                continue;
+            candidates.Add((root, identity, icon, native.RootFileId, shell.NamespaceClsid));
+            if (candidates.Count > 1) return false;
+        }
+        if (candidates.Count != 1) return false;
+        var candidate = candidates[0];
+        return OwnedExplorerRootSession.WriteRecoveredGeneratedProfile(ProfilePath,
+            candidate.Root, candidate.Identity, candidate.Icon, candidate.FileId, candidate.Namespace);
+    }
+
+    internal static bool TryMatchLegacyGeneratedIdentity(string? id, string sid, string? displayName,
+        string icon, byte[] context, out Guid identity)
+    {
+        identity = Guid.Empty;
+        if (displayName != ExplorerRootDisplayName.Legacy || !ExplorerBrandIcon.IsKnownResource(icon) ||
+            string.IsNullOrWhiteSpace(sid) || string.IsNullOrEmpty(id) || context is null) return false;
+        var prefix = NativeRootRegistration.ProviderName + "!" + sid + "!";
+        if (!id.StartsWith(prefix, StringComparison.Ordinal) ||
+            !Guid.TryParseExact(id[prefix.Length..], "N", out identity) || identity == Guid.Empty ||
+            id != prefix + identity.ToString("N"))
+        { identity = Guid.Empty; return false; }
+        var expected = Encoding.UTF8.GetBytes("LedgeTop.Files.ExplorerPreview/1:" + identity.ToString("N"));
+        if (context.AsSpan().SequenceEqual(expected)) return true;
+        identity = Guid.Empty;
+        return false;
     }
 }

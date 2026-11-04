@@ -119,6 +119,65 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         });
     }
 
+    /// <summary>
+    /// Rebuilds a missing generated-preview receipt only after the caller positively identified the
+    /// exact old Windows registration. The receipt uses the original deterministic owner/context so
+    /// the normal removal path can revalidate the native and shell identities before unregistering.
+    /// No user files or Windows registrations are changed here.
+    /// </summary>
+    internal static bool WriteRecoveredGeneratedProfile(string profileDirectory, string root, Guid identity,
+        string icon, long rootFileId, Guid namespaceClsid)
+    {
+        if (identity == Guid.Empty || rootFileId == 0 || namespaceClsid == Guid.Empty ||
+            !ExplorerBrandIcon.IsKnownResource(icon)) return false;
+        var directory = CanonicalLocal(profileDirectory);
+        var canonicalRoot = CanonicalLocal(root);
+        var preferredRoot = CanonicalLocal(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "LedgeTop Files Preview"));
+        if (!IsLegacyGeneratedRootVariant(canonicalRoot, preferredRoot)) return false;
+        var context = Encoding.UTF8.GetBytes(GeneratedOwner + ":" + identity.ToString("N"));
+        var native = NativeRootRegistration.Inspect(canonicalRoot, context);
+        if (native.Hresult != 0 || native.RootFileId != rootFileId || !native.ExpectedContextMatches ||
+            !native.ExpectedNameMatches || !native.ExpectedVersionMatches || native.HydrationPrimary != 2 ||
+            native.HydrationModifier != 0 || native.PopulationPrimary != 3 || native.PopulationModifier != 0 ||
+            native.InSyncPolicy != 1023 || native.HardlinkPolicy != 0) return false;
+        var registration = ShellRegistration.Inspect(canonicalRoot, ShellRegistration.CreateId(identity), context,
+            namespaceClsid, icon, ExplorerRootDisplayName.Legacy);
+        if (!registration.ExactShellMetadataPresent || registration.NamespaceClsid != namespaceClsid ||
+            registration.RootFileId != rootFileId) return false;
+
+        ValidateAncestors(directory, includeLeaf: true, allowMissing: true);
+        if (File.Exists(directory)) return false;
+        if (!Directory.Exists(directory)) Directory.CreateDirectory(directory);
+        ValidateAncestors(directory, includeLeaf: true);
+        if (Directory.EnumerateFileSystemEntries(directory).Any()) return false;
+        var profilePath = Path.Combine(directory, "profile.json");
+        if (File.Exists(profilePath) || Directory.Exists(profilePath)) return false;
+        var sid = CurrentSid();
+        var profile = new Profile(2, GeneratedOwner, sid, identity, canonicalRoot,
+            GeneratedOwner + ":" + identity.ToString("N"), icon, rootFileId, Phase.Ready, false, 1,
+            NamespaceClsid: namespaceClsid);
+        using var stream = new FileStream(profilePath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough);
+        JsonSerializer.Serialize(stream, profile, json);
+        stream.Flush(flushToDisk: true);
+        return true;
+    }
+
+    private static bool IsLegacyGeneratedRootVariant(string candidate, string preferred)
+    {
+        if (string.Equals(candidate, preferred, StringComparison.OrdinalIgnoreCase)) return true;
+        var prefix = preferred + " (";
+        if (!candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || !candidate.EndsWith(')')) return false;
+        var suffix = candidate[prefix.Length..^1];
+        return int.TryParse(suffix, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var number) &&
+            number is >= 2 and <= 9999 && suffix == number.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static string CurrentSid()
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        return identity.User?.Value ?? throw new IOException("The current Windows identity is unavailable.");
+    }
+
     private OwnedExplorerRootSession(string profileDirectory, string preferredRoot, bool generated, ExplorerRootScope scope,
         ExplorerRootManifest? initialManifest, Func<ExplorerSourceGate> sourceFactory,
         Func<string>? candidateIcon = null, Action<string>? candidateTestHook = null,

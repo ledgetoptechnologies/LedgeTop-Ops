@@ -13,6 +13,14 @@ updates only through its installer.
 
 ## Current verification — November 3, 2026
 
+- The current worktree contains an unshipped repair for the orphaned legacy
+  Explorer Preview entry. On an explicit removal only, it can recover a missing
+  receipt when the current user's registered sync-root identity, generated
+  context, legacy display/icon, native policies/root file ID, and shell
+  namespace metadata all match exactly. It then uses the normal journaled
+  removal path and preserves local content. Synthetic identity/recovery tests
+  and all 87 AppTests groups pass; this change has not been packaged, installed,
+  or tested against an actual registered Windows root.
 - Commit `187cd89d` fixes the cache ownership-pin disposal race by synchronizing
   pin registration with coordinator disposal, and uses managed ownership checks
   on non-Windows hosts. It is the source for optional candidate 0.5.37. The
