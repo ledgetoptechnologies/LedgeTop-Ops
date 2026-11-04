@@ -506,6 +506,8 @@ export function deploymentAllowsProjectAlphaSource(env: ProjectAlphaConnectorEnv
 export type ProjectAlphaReadSnapshotPlan = ReadonlyArray<{
   readonly entry: DeploymentConfiguredSource;
   readonly draftQuoteFingerprints: { readonly apiKey: string; readonly hmac: string } | null;
+  /** The mobile facade is GET-only and must not depend on draft-quote credentials. */
+  readonly skipDraftQuoteFingerprintCheck?: boolean;
 }>;
 
 export async function prepareProjectAlphaReadSnapshot(env: ProjectAlphaConnectorEnvironment): Promise<ProjectAlphaReadSnapshotPlan> {
@@ -521,6 +523,19 @@ export async function prepareProjectAlphaReadSnapshot(env: ProjectAlphaConnector
     plan.push({ entry, draftQuoteFingerprints: snapshot.draftQuoteFingerprints });
   }
   return plan;
+}
+
+/** Prepare the source/revision fence for a strictly read-only consumer. This
+ * deliberately avoids loading snapshot credentials: those credentials include
+ * write-related draft-quote secrets that the mobile GET facade never uses. */
+export async function prepareProjectAlphaReadOnlySnapshot(env: ProjectAlphaConnectorEnvironment): Promise<ProjectAlphaReadSnapshotPlan> {
+  const configured = deploymentSources(env);
+  if (!configured.length) {
+    if (env.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED === 'true')
+      return fail('credentials_unavailable', 'Deployment source manifest is required');
+    return [];
+  }
+  return configured.map(entry => ({ entry, draftQuoteFingerprints: null, skipDraftQuoteFingerprintCheck: true }));
 }
 
 /** Build both reads against the caller's session. Include these statements in
@@ -558,8 +573,9 @@ export function assertProjectAlphaReadSnapshot(plan: ProjectAlphaReadSnapshotPla
     const revision = revisions.find(value => value.source_id === row.source_id && value.revision === row.active_revision) ?? null;
     if (!revision || !revisionMatchesDeployment(revision, entry))
       return fail('credentials_unavailable', 'Connector event key commitment does not match its deployed revision');
-    if ((item.draftQuoteFingerprints?.apiKey ?? null) !== (revision.draft_quote_api_key_fingerprint ?? null)
-      || (item.draftQuoteFingerprints?.hmac ?? null) !== (revision.draft_quote_hmac_fingerprint ?? null))
+    if (!item.skipDraftQuoteFingerprintCheck
+      && ((item.draftQuoteFingerprints?.apiKey ?? null) !== (revision.draft_quote_api_key_fingerprint ?? null)
+        || (item.draftQuoteFingerprints?.hmac ?? null) !== (revision.draft_quote_hmac_fingerprint ?? null)))
       return fail('credentials_unavailable', 'Connector draft quote configuration does not match its enrolled revision');
   }
   if (connectors.some(row => !declared.has(row.source_id) && (row.read_visible !== 0 || !['suspended', 'retired'].includes(row.state))))

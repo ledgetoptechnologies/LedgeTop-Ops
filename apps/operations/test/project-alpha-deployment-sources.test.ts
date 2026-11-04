@@ -4,7 +4,8 @@ import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import {
   assertDeploymentConfiguredProjectAlphaConnectorsForRead,
-  prepareProjectAlphaReadSnapshot, projectAlphaReadSnapshotStatements, assertProjectAlphaReadSnapshot,
+  prepareProjectAlphaReadSnapshot, prepareProjectAlphaReadOnlySnapshot,
+  projectAlphaReadSnapshotStatements, assertProjectAlphaReadSnapshot,
   ensureDeploymentConfiguredProjectAlphaConnectors, listProjectAlphaConnectors, resolveProjectAlphaConnector,
   type ProjectAlphaConnectorEnvironment,
 } from "../src/worker/project-alpha-connectors";
@@ -74,6 +75,22 @@ describe("deployment-configured Project Alpha sources", () => {
     expect(projectAlphaReadSnapshotStatements(db, empty)).toEqual([]);
     expect(() => assertProjectAlphaReadSnapshot(empty, [], [])).not.toThrow();
     await expect(prepareProjectAlphaReadSnapshot({ ...env, PROJECT_ALPHA_CONNECTOR_SOURCES: undefined,
+      PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED: 'true' })).rejects.toMatchObject({ code: 'credentials_unavailable' });
+  }, 120_000);
+  it('prepares the mobile read-only fence without loading snapshot or quote credentials', async () => {
+    await ensureDeploymentConfiguredProjectAlphaConnectors(env);
+    const plan = await prepareProjectAlphaReadOnlySnapshot({ ...env,
+      PROJECT_ALPHA_CONNECTOR_SNAPSHOT_CREDENTIALS: undefined });
+    expect(plan).toHaveLength(2);
+    expect(JSON.stringify(plan)).not.toContain('private-api-key');
+    const [connectors, revisions] = await db.batch(projectAlphaReadSnapshotStatements(db, plan));
+    const connectorRows = connectors!.results as Parameters<typeof assertProjectAlphaReadSnapshot>[1];
+    const revisionRows = revisions!.results as Parameters<typeof assertProjectAlphaReadSnapshot>[2];
+    expect(() => assertProjectAlphaReadSnapshot(plan,
+      connectorRows, revisionRows)).not.toThrow();
+    const hidden = connectorRows.map(row => row.source_id === secondary ? { ...row, read_visible: 0 } : row);
+    expect(() => assertProjectAlphaReadSnapshot(plan, hidden, revisionRows)).toThrow();
+    await expect(prepareProjectAlphaReadOnlySnapshot({ ...env, PROJECT_ALPHA_CONNECTOR_SOURCES: undefined,
       PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED: 'true' })).rejects.toMatchObject({ code: 'credentials_unavailable' });
   }, 120_000);
   it('validates mobile read configuration without enrolling, reconciling, or writing connector state', async () => {

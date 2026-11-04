@@ -4,7 +4,7 @@ import { paResourceFilter } from './visibility';
 import { localDivisionJoin } from './local-project-division';
 import { base64url, type PilotSession } from './ios-pilot-session';
 import type { Env, GrantRow } from './types';
-import { assertProjectAlphaReadSnapshot, prepareProjectAlphaReadSnapshot, projectAlphaReadSnapshotStatements } from './project-alpha-connectors';
+import { assertProjectAlphaReadSnapshot, prepareProjectAlphaReadOnlySnapshot, projectAlphaReadSnapshotStatements } from './project-alpha-connectors';
 import { preparePilotStaffSnapshot } from './ios-pilot-staff-snapshot';
 
 export type PilotOperation = { id: string; title: string; status: string; scheduledStart: string | null;
@@ -31,7 +31,7 @@ function cursorValue(cursor: string | null): string | null {
   } catch { throw new HTTPException(400, { message: 'Invalid page cursor' }); }
 }
 export async function readPilotOperations(env: Env, session: PilotSession, options: { cursor?: string | null; id?: string }) {
-  const connectorPlan = await prepareProjectAlphaReadSnapshot(env);
+  const connectorPlan = await prepareProjectAlphaReadOnlySnapshot(env);
   const before = await scope(env, session);
   const afterId = cursorValue(options.cursor ?? null);
   if (options.id !== undefined && (!options.id || options.id.length > 512)) throw new HTTPException(404, { message: 'Operation not found' });
