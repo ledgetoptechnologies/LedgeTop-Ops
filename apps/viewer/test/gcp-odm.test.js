@@ -15,12 +15,23 @@ test('canonical WGS84 correspondences serialize in ODM documented coordinate and
 test('ODM GCP list keeps the Emlid NAD83(2011) horizontal datum in its CRS header', () => {
   assert.equal(odmGcpList([{
     longitude: -88.1, latitude: 44.5, elevationM: 250, pixelX: 1, pixelY: 2,
-    relativePath: 'photo.jpg', horizontalCrs: 'EPSG:6318',
-  }]), 'EPSG:6318\n-88.1 44.5 250 1 2 photo.jpg\n');
+    relativePath: 'photo.jpg', horizontalCrs: 'EPSG:6318', verticalDatum: 'NAVD88(GEOID18) height',
+  }]), 'EPSG:6318+5703(GEOID18)\n-88.1 44.5 250 1 2 photo.jpg\n');
+  assert.equal(odmGcpList([{
+    longitude: -88.1, latitude: 44.5, elevationM: 250, pixelX: 1, pixelY: 2,
+    relativePath: 'photo.jpg', horizontalCrs: 'EPSG:6318', verticalDatum: 'Ellipsoidal height',
+  }]), 'EPSG:6319\n-88.1 44.5 250 1 2 photo.jpg\n');
   assert.throws(() => odmGcpList([
     { longitude: -88, latitude: 44, elevationM: 250, pixelX: 1, pixelY: 2, relativePath: 'a.jpg', horizontalCrs: 'EPSG:6318' },
     { longitude: -88, latitude: 44, elevationM: 250, pixelX: 1, pixelY: 2, relativePath: 'b.jpg', horizontalCrs: 'EPSG:4326' },
   ]), /one supported horizontal CRS/);
+});
+
+test('ODM GCP export names EGM vertical datums in the compound CRS header', () => {
+  assert.equal(odmGcpList([{
+    longitude: -88.1, latitude: 44.5, elevationM: 250, pixelX: 1, pixelY: 2,
+    relativePath: 'photo.jpg', horizontalCrs: 'EPSG:4326', verticalDatum: 'EGM96 height',
+  }]), 'EPSG:4326+5773\n-88.1 44.5 250 1 2 photo.jpg\n');
 });
 
 test('ODM serialization fails closed for ambiguous whitespace-delimited image names', () => {

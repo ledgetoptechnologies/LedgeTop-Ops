@@ -586,7 +586,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       if(imageFacts.has(mark.imageDatasetFileId)&&imageFacts.get(mark.imageDatasetFileId)!==imageFact)return null;imageFacts.set(mark.imageDatasetFileId,imageFact);
     }
     try{
-      const content=odmGcpList(evidence.correspondences.map((mark)=>({longitude:mark.longitude,latitude:mark.latitude,elevationM:mark.elevationM,pixelX:mark.pixelX,pixelY:mark.pixelY,relativePath:mark.imageRelativePath})),{horizontalCrs:contract?.horizontalCrs||'EPSG:4326'});
+      const content=odmGcpList(evidence.correspondences.map((mark)=>({longitude:mark.longitude,latitude:mark.latitude,elevationM:mark.elevationM,pixelX:mark.pixelX,pixelY:mark.pixelY,relativePath:mark.imageRelativePath})),{horizontalCrs:contract?.horizontalCrs||'EPSG:4326',verticalSystem:contract?.verticalSystem||null});
       if(content!==row.content_text||crypto.createHash('sha256').update(content).digest('hex')!==row.sha256)return null;
     }catch{return null;}
     return evidence;

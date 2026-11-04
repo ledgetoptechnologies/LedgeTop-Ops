@@ -8,12 +8,32 @@ function scalar(value, field) {
   return Number.isInteger(number) ? String(number) : number.toFixed(8).replace(/0+$/, '').replace(/\.$/, '');
 }
 
-function odmGcpList(rows, { horizontalCrs = null } = {}) {
+function odmCoordinateCrs(horizontalCrs, verticalSystem) {
+  const vertical = String(verticalSystem || '').replace(/[\s_()-]/g, '').toLowerCase();
+  if (/^navd88(?:geoid\d+[a-z]*)?height$/.test(vertical)) {
+    const geoid = String(verticalSystem || '').match(/\(\s*(GEOID\s*\d+[A-Z]*)\s*\)/i)?.[1]?.replace(/\s+/g, '').toUpperCase();
+    if (geoid) return `${horizontalCrs}+5703(${geoid})`;
+    if (horizontalCrs === 'EPSG:6318') return 'EPSG:6349';
+    return `${horizontalCrs}+5703`;
+  }
+  if (/^(?:ellipsoidal?|ellipsoid)height$/.test(vertical)) {
+    if (horizontalCrs === 'EPSG:6318') return 'EPSG:6319';
+    if (horizontalCrs === 'EPSG:4326') return 'EPSG:4979';
+  }
+  if (/^egm96height$/.test(vertical)) return `${horizontalCrs}+5773`;
+  if (/^egm2008height$/.test(vertical)) return `${horizontalCrs}+3855`;
+  return horizontalCrs;
+}
+
+function odmGcpList(rows, { horizontalCrs = null, verticalSystem = null } = {}) {
   if (!Array.isArray(rows) || !rows.length) return null;
   const crsValues = [...new Set(rows.map((row) => row.horizontalCrs || horizontalCrs || 'EPSG:4326'))];
   if (crsValues.length !== 1 || !['EPSG:4326', 'EPSG:6318'].includes(crsValues[0]))
     throw Object.assign(new Error('GCP correspondences require one supported horizontal CRS'), { code: 'invalid_gcp_correspondence' });
-  const lines = [crsValues[0]];
+  const verticalValues = [...new Set(rows.map((row) => row.verticalDatum || verticalSystem).filter(Boolean))];
+  if (verticalValues.length > 1)
+    throw Object.assign(new Error('GCP correspondences require one supported vertical CRS'), { code: 'invalid_gcp_correspondence' });
+  const lines = [odmCoordinateCrs(crsValues[0], verticalValues[0])];
   for (const row of rows) {
     const imageName = path.basename(String(row.relativePath || ''));
     if (!imageName || /\s/.test(imageName))
@@ -28,4 +48,4 @@ function odmGcpList(rows, { horizontalCrs = null } = {}) {
   return `${lines.join('\n')}\n`;
 }
 
-module.exports = { odmGcpList };
+module.exports = { odmGcpList, odmCoordinateCrs };
