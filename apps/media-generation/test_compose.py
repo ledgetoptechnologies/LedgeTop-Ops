@@ -66,7 +66,7 @@ class MediaComposeTests(unittest.TestCase):
             self.assertEqual(self.base[name], self.full[name])
         self.assertEqual(self.base["proxy-generator"]["environment"]["MAX_CONCURRENT"], "6")
         self.assertEqual(self.base["proxy-generator"]["environment"]["PROXY_MAX_HEIGHT"], "720")
-        self.assertEqual(self.base["proxy-generator"]["environment"]["FORCE_PROXY_REGENERATION_VERSION"], "6")
+        self.assertEqual(self.base["proxy-generator"]["environment"]["FORCE_PROXY_REGENERATION_VERSION"], "7")
         self.assertEqual(self.base["queue-renderer"]["environment"]["LTDSTHUMB_WORKER_CONCURRENCY"], "4")
 
     def test_independent_hardened_services(self):
