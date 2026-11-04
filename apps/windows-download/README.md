@@ -8,19 +8,29 @@ routing is unavailable in this release; two-way NAS/R2 sync is not implemented.
 Unsigned, per-user test packages are staged in `S:\LedgeTop Operations\Sync App`.
 Use `CURRENT-STAGING-STATUS.txt` for current package and test status; versioned
 receipts retain historical observations. Authenticode signing is off. The
-in-app update feed is disabled in candidate 0.5.34, so this build updates only
-through its installer.
+in-app update feed is disabled in current candidate 0.5.37, so this build
+updates only through its installer.
 
 ## Current verification — November 3, 2026
 
-- The cache ownership-pin disposal race found in independent review is fixed by
-  synchronizing pin registration with coordinator disposal. A deterministic
-  Windows regression test confirms a pin acquired just before disposal is
-  released. Non-Windows Core runs retain the managed ownership-check path rather
-  than calling Windows-only pin APIs. The full synthetic Core suite passes
-  211/211, and the pilot app compiles with zero warnings or errors. This source
-  is uncommitted and not staged; no connected-file or installer acceptance is
-  claimed for it.
+- Commit `187cd89d` fixes the cache ownership-pin disposal race by synchronizing
+  pin registration with coordinator disposal, and uses managed ownership checks
+  on non-Windows hosts. It is the source for optional candidate 0.5.37. The
+  exact installer was installed and launched in the staging VM, but connected
+  sign-in, real downloads, Explorer actions and tray appearance were not tested.
+- Current uncommitted diagnostics add numeric Activity fields for quota-gate
+  wait/hold, recursive cache-walk time and reservation-scan time. The closed
+  diagnostic parser accepts those exact optional fields while retaining its
+  existing stored schema. The current Core run passed 196/196 groups, the
+  focused timing and quota-gate runs passed 3/3 each, and `git diff --check`
+  passed. Desktop AppTests then passed 87/87 with a short synthetic artifact
+  path. These harnesses do not exercise live sign-in or installed virtual files.
+  This change does not alter cache ownership or capacity checks and is not yet
+  packaged.
+- Source inspection shows each cold miss scans the cache tree and reservation
+  records while holding the shared quota gate. Concurrent cold files therefore
+  serialize these checks; this is a plausible performance contributor, not a
+  proven cause of the remaining VM stall or a measured live-file bottleneck.
 - Diagnostic `899f6320` compares reopening a fixed synthetic marker with
   reading a retained handle while another native request is held pending. Its
   local tests and independent review passed; a VM run was requested. It does

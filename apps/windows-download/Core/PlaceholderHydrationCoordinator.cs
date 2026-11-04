@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Collections.Concurrent;
 using Microsoft.Win32.SafeHandles;
 using System.Text.Json;
+using System.Diagnostics;
 
 namespace LedgeTop.WindowsDownload;
 
@@ -317,7 +318,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                             var metadata = checked((scopeExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
                                 (entryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
                                 (reservationDirectoryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)));
-                            RequireCapacity(ReservedBytes(directory, admission.Quota), checked(identity.Length + Downloader.HydrationStateGrowthBudget(resolved.Spec) + 1024 + metadata));
+                            RequireCapacity(ReservedBytes(directory, admission.Quota, timing), checked(identity.Length + Downloader.HydrationStateGrowthBudget(resolved.Spec) + 1024 + metadata), timing);
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                             TraceCacheAction(NativeStallTrace.Stage.CacheScopeOwnEnter, NativeStallTrace.Stage.CacheScopeOwnExit, () => OwnPinned(scope));
                             TraceCacheAction(NativeStallTrace.Stage.CacheEntryOwnEnter, NativeStallTrace.Stage.CacheEntryOwnExit, () => OwnPinned(entry));
@@ -328,7 +329,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                         } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheDirectoryExit); }
 #endif
-                    }, cancellationToken);
+                    }, cancellationToken, timing);
                     var lockPath = Path.Combine(entry, ".hydration.lock");
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                     TraceCacheAction(NativeStallTrace.Stage.CacheEntryPathSafeEnter, NativeStallTrace.Stage.CacheEntryPathSafeExit, () => RequireSafe(lockPath));
@@ -356,7 +357,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                             NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveEnter);
 #endif
-                            var reservation = Reserve(admission.Quota, identity, resolved.Spec, cancellationToken); Exception? primary = null;
+                            var reservation = Reserve(admission.Quota, identity, resolved.Spec, cancellationToken, timing); Exception? primary = null;
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                             NativeStallTrace.Record(NativeStallTrace.Stage.CacheReserveAcquired);
 #endif
@@ -730,7 +731,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         private Action? action = release;
         public void Dispose() => Interlocked.Exchange(ref action, null)?.Invoke();
     }
-    private void WithQuota(object gate, Action action, CancellationToken cancellationToken = default)
+    private void WithQuota(object gate, Action action, CancellationToken cancellationToken = default, HydrationTiming? timing = null)
     {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         NativeStallTrace.Record(NativeStallTrace.Stage.CacheQuotaEnter);
@@ -748,9 +749,9 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #if LEDGETOP_NATIVE_DIAGNOSTICS
             } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheQuotaExit); }
 #endif
-        }, cancellationToken);
+        }, cancellationToken, observe: timing is null ? null : timing.AddCacheQuotaTime);
     }
-    private IDisposable Reserve(object gate, PlaceholderIdentity identity, DownloadSpec spec, CancellationToken cancellationToken)
+    private IDisposable Reserve(object gate, PlaceholderIdentity identity, DownloadSpec spec, CancellationToken cancellationToken, HydrationTiming? timing = null)
     {
         var directory = Path.Combine(root, ".hydration-reservations-v2");
         var name = identity.ScopeKey + "-" + identity.CacheKey + ".json";
@@ -771,7 +772,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             var directoryExists = OwnedExistingCached(directory); RequireSafe(path);
             RemoveExactStaleReservation(identity, gate);
 #endif
-            RequireCapacity(ReservedBytes(directory, gate), checked(growth + (directoryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner))));
+            RequireCapacity(ReservedBytes(directory, gate, timing), checked(growth + (directoryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner))), timing);
             OwnPinned(directory);
             // Publish a fully-written temporary record atomically. A read-only guard on the
             // temporary file allows the rename; opening the published path with FileShare.Read
@@ -836,7 +837,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 if (File.Exists(temporary)) File.Delete(temporary);
                 throw;
             }
-        }, cancellationToken);
+        }, cancellationToken, timing);
         return new Release(() => {
 #if LEDGETOP_CACHE_RACE_TEST
             BeforeReservationReleaseTestHook?.Invoke();
@@ -847,13 +848,16 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             });
         });
     }
-    private void RequireCapacity(long reserved, long growth)
+    private void RequireCapacity(long reserved, long growth, HydrationTiming? timing = null)
     {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         NativeStallTrace.Record(NativeStallTrace.Stage.CacheCapacityEnter);
         try {
 #endif
-        var used = CacheBytes();
+        var scanStarted = Stopwatch.GetTimestamp();
+        long used;
+        try { used = CacheBytes(); }
+        finally { timing?.AddCacheWalkTime(Stopwatch.GetElapsedTime(scanStarted)); }
         RequireCapacityForUsed(used, reserved, growth);
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheCapacityExit); }
@@ -945,12 +949,13 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         return reserved;
     }
 #endif
-    private long ReservedBytes(string directory, object quota)
+    private long ReservedBytes(string directory, object quota, HydrationTiming? timing = null)
     {
+        var scanStarted = Stopwatch.GetTimestamp();
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         NativeStallTrace.Record(NativeStallTrace.Stage.CacheReservedBytesEnter);
-        try {
 #endif
+        try {
         var activePaths = HydrationCacheConcurrency.ActiveReservationPaths(quota);
         var canonicalDirectory = Path.GetFullPath(directory);
 #if LEDGETOP_NATIVE_DIAGNOSTICS
@@ -992,9 +997,12 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             if (!string.Equals(Path.GetDirectoryName(active), canonicalDirectory, StringComparison.OrdinalIgnoreCase) || !seen.Contains(active))
                 throw new TransferException("Active hydration reservation is missing from the directory.");
         return reserved;
+        } finally {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
-        } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheReservedBytesExit); }
+            NativeStallTrace.Record(NativeStallTrace.Stage.CacheReservedBytesExit);
 #endif
+            timing?.AddReservationScanTime(Stopwatch.GetElapsedTime(scanStarted));
+        }
     }
     private static (Reservation Value, byte[] Bytes) ReadReservation(string path)
     {

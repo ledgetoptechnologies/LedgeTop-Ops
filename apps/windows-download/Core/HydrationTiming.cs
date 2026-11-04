@@ -16,8 +16,10 @@ internal sealed class HydrationTimingSummary
     internal IReadOnlyList<long> AuthorizationMilliseconds { get; }
     internal IReadOnlyList<int> AuthorizationCounts { get; }
     internal IReadOnlyList<long> DownloadMilliseconds { get; }
+    internal IReadOnlyList<long> CacheMilliseconds { get; }
     internal HydrationTimingSummary(HydrationTimingOutcome outcome, bool? cacheHit, long totalMilliseconds, IReadOnlyList<long> phases,
-        IReadOnlyList<long>? authorization = null, IReadOnlyList<int>? authorizationCounts = null, IReadOnlyList<long>? download = null)
+        IReadOnlyList<long>? authorization = null, IReadOnlyList<int>? authorizationCounts = null, IReadOnlyList<long>? download = null,
+        IReadOnlyList<long>? cache = null)
     {
         if (!Enum.IsDefined(outcome) || totalMilliseconds is < 0 or > MaximumMilliseconds || phases.Count != 8 ||
             phases.Any(value => value is < 0 or > MaximumMilliseconds) || phases.Sum() > totalMilliseconds)
@@ -30,6 +32,9 @@ internal sealed class HydrationTimingSummary
         download ??= new long[4];
         if (download.Count != 4 || download.Any(x => x is < 0 or > MaximumMilliseconds)) throw new ArgumentException("Bounded download timings are required.");
         DownloadMilliseconds = Array.AsReadOnly(download.ToArray());
+        cache ??= new long[4];
+        if (cache.Count != 4 || cache.Any(x => x is < 0 or > MaximumMilliseconds)) throw new ArgumentException("Bounded cache timings are required.");
+        CacheMilliseconds = Array.AsReadOnly(cache.ToArray());
     }
     internal string ActivityText => "Hydration timing: outcome=" + Outcome + "; cache=" + (CacheHit is null ? "Unknown" : CacheHit.Value ? "Hit" : "Miss") +
         "; totalMs=" + Number(TotalMilliseconds) + "; contextMs=" + Number(PhaseMilliseconds[0]) + "; queueMs=" + Number(PhaseMilliseconds[1]) +
@@ -41,7 +46,9 @@ internal sealed class HydrationTimingSummary
             "; authBeforeTokenCount=" + Number(AuthorizationCounts[0]) + "; authBeforeHeadersCount=" + Number(AuthorizationCounts[1]) +
             "; authAfterTokenCount=" + Number(AuthorizationCounts[2]) + "; authAfterHeadersCount=" + Number(AuthorizationCounts[3]) +
             "; downloadHeadersMs=" + Number(DownloadMilliseconds[0]) + "; downloadBodyMs=" + Number(DownloadMilliseconds[1]) +
-            "; downloadFlushMs=" + Number(DownloadMilliseconds[2]) + "; downloadHashMs=" + Number(DownloadMilliseconds[3]) : "");
+            "; downloadFlushMs=" + Number(DownloadMilliseconds[2]) + "; downloadHashMs=" + Number(DownloadMilliseconds[3]) : "") +
+        "; cacheQuotaWaitMs=" + Number(CacheMilliseconds[0]) + "; cacheQuotaHeldMs=" + Number(CacheMilliseconds[1]) +
+        "; cacheWalkMs=" + Number(CacheMilliseconds[2]) + "; reservationScanMs=" + Number(CacheMilliseconds[3]);
     private static string Number(long value) => value.ToString(CultureInfo.InvariantCulture);
 }
 
@@ -56,6 +63,7 @@ internal sealed class HydrationTiming : IDisposable
     private readonly long[] authorization = new long[4];
     private readonly int[] authorizationCounts = new int[4];
     private readonly long[] download = new long[4];
+    private readonly long[] cache = new long[4];
     private HydrationTimingStage stage;
     private long elapsed;
     private bool? cacheHit;
@@ -86,11 +94,22 @@ internal sealed class HydrationTiming : IDisposable
         if (phase is < 0 or > 3) throw new ArgumentOutOfRangeException(nameof(phase));
         lock (sync) { if (!completed) download[phase] = Math.Min(HydrationTimingSummary.MaximumMilliseconds, download[phase] + (long)Math.Clamp(elapsedTime.TotalMilliseconds, 0, HydrationTimingSummary.MaximumMilliseconds)); }
     }
+    internal void AddCacheQuotaTime(TimeSpan wait, TimeSpan held)
+    {
+        lock (sync) {
+            if (completed) return;
+            AddCache(0, wait); AddCache(1, held);
+        }
+    }
+    internal void AddCacheWalkTime(TimeSpan elapsedTime) { lock (sync) { if (!completed) AddCache(2, elapsedTime); } }
+    internal void AddReservationScanTime(TimeSpan elapsedTime) { lock (sync) { if (!completed) AddCache(3, elapsedTime); } }
+    private void AddCache(int index, TimeSpan elapsedTime) => cache[index] = Math.Min(HydrationTimingSummary.MaximumMilliseconds,
+        cache[index] + (long)Math.Clamp(elapsedTime.TotalMilliseconds, 0, HydrationTimingSummary.MaximumMilliseconds));
     internal void Complete(HydrationTimingOutcome outcome)
     {
         if (!Enum.IsDefined(outcome)) throw new ArgumentOutOfRangeException(nameof(outcome));
         HydrationTimingSummary summary;
-        lock (sync) { if (completed) return; Advance(); completed = true; summary = new(outcome, cacheHit, elapsed, phases, authorization, authorizationCounts, download); }
+        lock (sync) { if (completed) return; Advance(); completed = true; summary = new(outcome, cacheHit, elapsed, phases, authorization, authorizationCounts, download, cache); }
         try { observer(summary); } catch (Exception) { /* Observers cannot change transfer integrity, cancellation or settlement. */ }
     }
     public void Dispose() => Complete(HydrationTimingOutcome.Failed);

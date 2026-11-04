@@ -12,7 +12,8 @@ internal static class HydrationQuotaGate
     internal static TimeSpan? TestWait;
     internal static Action? BeforeWaitTestHook;
 #endif
-    internal static void Run(object gate, Action action, CancellationToken cancellationToken = default, TimeSpan? wait = null)
+    internal static void Run(object gate, Action action, CancellationToken cancellationToken = default, TimeSpan? wait = null,
+        Action<TimeSpan, TimeSpan>? observe = null)
     {
         ArgumentNullException.ThrowIfNull(gate);
         ArgumentNullException.ThrowIfNull(action);
@@ -29,9 +30,14 @@ internal static class HydrationQuotaGate
         while (true) {
             cancellationToken.ThrowIfCancellationRequested();
             var remaining = limit - Stopwatch.GetElapsedTime(started);
-            if (remaining <= TimeSpan.Zero) throw new TransferException("Hydration cache quota is busy.", TransferFailureReason.LocalCacheBusy);
+            if (remaining <= TimeSpan.Zero) {
+                try { observe?.Invoke(Stopwatch.GetElapsedTime(started), TimeSpan.Zero); } catch { /* Timing is observational only. */ }
+                throw new TransferException("Hydration cache quota is busy.", TransferFailureReason.LocalCacheBusy);
+            }
             var slice = remaining < TimeSpan.FromMilliseconds(50) ? remaining : TimeSpan.FromMilliseconds(50);
             if (!Monitor.TryEnter(gate, slice)) continue;
+            var waited = Stopwatch.GetElapsedTime(started);
+            var heldStarted = Stopwatch.GetTimestamp();
             try {
                 // No mutation starts for a cancellation observed while waiting.
                 cancellationToken.ThrowIfCancellationRequested();
@@ -40,7 +46,11 @@ internal static class HydrationQuotaGate
                 if (Stopwatch.GetElapsedTime(started) >= limit) throw new TransferException("Hydration cache quota is busy.", TransferFailureReason.LocalCacheBusy);
                 action();
                 return;
-            } finally { Monitor.Exit(gate); }
+            } finally {
+                var held = Stopwatch.GetElapsedTime(heldStarted);
+                Monitor.Exit(gate);
+                try { observe?.Invoke(waited, held); } catch { /* Timing is observational only. */ }
+            }
         }
     }
 }

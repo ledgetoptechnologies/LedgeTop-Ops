@@ -15,12 +15,14 @@ internal static class HydrationQuotaGateTests
         var owner = Task.Run(() => { lock (gate) { entered.TrySetResult(); if (!release.Wait(TimeSpan.FromSeconds(10))) throw new TimeoutException("Test owner was not released."); } });
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         var mutations = 0;
+        var observedWait = TimeSpan.Zero; var observedHeld = TimeSpan.Zero;
         try {
             var timeout = await Task.Run(() => {
-                try { HydrationQuotaGate.Run(gate, () => Interlocked.Increment(ref mutations), wait: TimeSpan.FromMilliseconds(120)); return false; }
+                try { HydrationQuotaGate.Run(gate, () => Interlocked.Increment(ref mutations), wait: TimeSpan.FromMilliseconds(120), observe: (waited, held) => { observedWait = waited; observedHeld = held; }); return false; }
                 catch (TransferException error) { return error.Reason == TransferFailureReason.LocalCacheBusy; }
             }).WaitAsync(TimeSpan.FromSeconds(5));
-            if (!timeout || mutations != 0 || owner.IsCompleted) throw new IOException("Quota timeout changed owner or ran mutation.");
+            if (!timeout || mutations != 0 || owner.IsCompleted || observedWait < TimeSpan.FromMilliseconds(100) || observedHeld != TimeSpan.Zero)
+                throw new IOException("Quota timeout changed owner, ran mutation or omitted its wait measurement.");
             var display = HydrationFailureDiagnostic.FromException(HydrationStage.CachePreparation,
                 new TransferException("busy", TransferFailureReason.LocalCacheBusy)).ActivityText;
             if (!display.Contains("local file cache is busy", StringComparison.Ordinal) || !display.Contains("LocalCacheBusy", StringComparison.Ordinal))
