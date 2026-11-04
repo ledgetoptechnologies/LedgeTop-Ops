@@ -27,17 +27,19 @@ function jpeg(){const data=new Uint8Array(174),v=new DataView(data.buffer),base=
 const provider={id:'node',displayName:'Test node',type:'nodeodm',enabled:true,capabilityFingerprint:'fp',lastHealth:'healthy',lastHealthAt:new Date().toISOString(),capabilities:{options:[...['pc-ept','gltf','3d-tiles'].map(name=>({name,type:'bool',value:true})),{name:'auto-boundary',type:'bool',value:true},{name:'crop',type:'float',value:3}]}};
 const basePresets=[{id:'preset',displayName:'Good preset',enabled:true,providerType:'nodeodm',capabilityFingerprint:'fp',options:{crop:2}},{id:'wrong',displayName:'Wrong preset',enabled:true,providerType:'nodeodm',capabilityFingerprint:'other'}];let currentPresets=structuredClone(basePresets);
 const api=async(url,opts={})=>{if(opts.signal?.aborted)throw new DOMException('Cancelled','AbortError');calls.push({url,method:opts.method||'GET',body:opts.body,headers:opts.headers});
+ if(url==='/api/v1/dataset-upload-limits')return{maxManifestBytes:5*1024*1024,maxFiles:20000};
  if(url==='/api/v1/processing/providers/node/capabilities/refresh')return{capabilities:provider.capabilities,fingerprint:window.fixture?.changeCapabilities&&datasetStatus==='finalized'?'changed':'fp'};
  if(url.startsWith('/api/v1/processing/providers'))return{providers:[window.fixture?.changeCapabilities&&datasetStatus==='finalized'?{...provider,capabilityFingerprint:'changed'}:provider]};
  if(url==='/api/v1/processing/presets'){if(!opts.method||opts.method==='GET')return{presets:currentPresets};if(window.fixture.failPreset){window.fixture.failPreset=false;throw new Error('Preset connection interrupted');}const preset={...opts.body,id:'saved-preset',providerType:'nodeodm',capabilityFingerprint:'fp'};currentPresets=[...currentPresets.filter(item=>item.id!==preset.id),preset];return{preset};}
  if(url.startsWith('/api/v1/dataset-imports/browse')){if(window.fixture?.holdBrowse)await new Promise(resolve=>window.fixture.releaseBrowse=resolve);return{path:'raw',parentPath:'',entries:[{name:'flight',relativePath:'raw/flight',kind:'folder'}],nextOffset:null};}
  if(url==='/api/v1/dataset-imports/photo-preview'){if(window.fixture?.holdPreview){window.fixture.previewSignal=opts.signal;await new Promise(resolve=>window.fixture.releasePreview=resolve);}return{points:[{latitude:45.5,longitude:-90.25,name:'Server photo'}],missingGpsCount:0,unscannedCount:0};}
  if(url==='/api/v1/dataset-imports/copy'){datasetStatus='finalizing';return{dataset:{id:'dataset'},operation:{id:'copy',status:'queued'}};}
- if(url==='/api/v1/datasets')return{dataset:{id:'dataset'}};
+ if(url==='/api/v1/datasets'){datasetStatus='draft';return{dataset:{id:'dataset'}};}
  if(url.endsWith('/uploads'))return{uploadToken:'scoped',upload:{id:'upload',datasetId:'dataset',status:'open',chunkSize:2,files:opts.body.files.map(file=>({...file,chunkCount:Math.ceil(file.byteSize/2),missingChunks:Array.from({length:Math.ceil(file.byteSize/2)},(_,i)=>i)}))}};
  if(url.endsWith('/finalize')){datasetStatus='finalizing';return{operation:{id:'assemble',status:'queued'}};}
  if(url.startsWith('/api/v1/operations/')){if(window.fixture.holdOperation){window.fixture.operationSignal=opts.signal;await new Promise(resolve=>window.fixture.releaseOperation=resolve);}if(opts.signal?.aborted)throw new DOMException('Cancelled','AbortError');datasetStatus=mode==='failed'?'draft':'finalized';return{operation:{id:'operation',status:mode==='failed'?'failed':'succeeded',errorMessage:'Copy validation failed'}};}
  if(url==='/api/v1/datasets/dataset')return{dataset:{id:'dataset',projectId:'project',status:datasetStatus}};
+ if(url==='/api/v1/datasets/dataset/gcp-sets/discover')return{sets:[]};
  if(url==='/api/v1/task-submissions'){submitCount++;if(mode==='pc'&&submitCount===1)throw new Error('Temporary submission failure');return{task:{id:'task'}};}
  throw new Error('Unexpected '+url);
 };
@@ -77,10 +79,28 @@ test('New task uses real form controls with isolated upload/copy APIs, retry and
       assert.ok(imageNode.attributes.includes('data-files'));assert.equal(client.choosers[0].mode,'selectMultiple');
       await client.eval("fixture.select(true)");await until(()=>client.eval("/1 photos? located/.test(document.querySelector('[data-photo-map]').textContent)"));
       await click('[data-source=pc]');await until(()=>client.choosers.length===2);await client.eval("document.querySelector('[data-files]').dispatchEvent(new Event('cancel'))");
-      assert.match(await client.eval("document.querySelector('[data-selection]').textContent"),/1 photo selected/);assert.equal(await client.eval("document.querySelector('[data-photo-map]').hidden"),false);
+      assert.match(await client.eval("document.querySelector('[data-selection]').textContent"),/1 photos and 0 CSV/);assert.equal(await client.eval("document.querySelector('[data-photo-map]').hidden"),false);
       await click('[data-choose-folder]');await until(()=>client.choosers.length===3);const folderNode=(await client.command('DOM.describeNode',{backendNodeId:client.choosers[2].backendNodeId})).node;assert.ok(folderNode.attributes.includes('data-folder'));assert.ok(folderNode.attributes.includes('webkitdirectory'));
-      await client.eval("document.querySelector('[data-folder]').dispatchEvent(new Event('cancel'));fixture.mount()");
+      await client.eval("document.querySelector('[data-folder]').dispatchEvent(new Event('cancel'))");
+      await click('[data-add-survey-csv]');await until(()=>client.choosers.length===4);const csvNode=(await client.command('DOM.describeNode',{backendNodeId:client.choosers[3].backendNodeId})).node;assert.ok(csvNode.attributes.includes('data-survey-csv'));
+      await client.eval("document.querySelector('[data-survey-csv]').dispatchEvent(new Event('cancel'))");assert.match(await client.eval("document.querySelector('[data-selection]').textContent"),/1 photos and 0 CSV/);
+      await client.eval('fixture.mount()');
       assert.equal(await client.eval("document.querySelector('[data-preview-photos]')===null"),true);
+    });
+    await t.test('a separately selected CSV preserves folder photos and replaces the prior explicit CSV',async()=>{
+      await delay(80);await client.eval(`{fixture.previewReads=0;const dt=new DataTransfer();for(const [name,path] of [['a.jpg','flight/a.jpg'],['b.jpg','flight/sub/b.jpg']]){const f=new File(['photo'],name,{type:'image/jpeg'});const slice=f.slice.bind(f);f.slice=(...args)=>{fixture.previewReads++;return slice(...args)};Object.defineProperty(f,'webkitRelativePath',{value:path});dt.items.add(f)}const i=document.querySelector('[data-folder]');i.files=dt.files;i.dispatchEvent(new Event('change'));}`);
+      await until(()=>client.eval("document.querySelector('[data-photo-map]').textContent.includes('2 without readable GPS')"));await client.eval("fixture.previewNode=document.querySelector('[data-photo-map]').firstElementChild;fixture.previewReadBaseline=fixture.previewReads");
+      const pick=async(name,content='csv')=>client.eval(`{const dt=new DataTransfer();dt.items.add(new File([${JSON.stringify(content)}],${JSON.stringify(name)}));const i=document.querySelector('[data-survey-csv]');i.files=dt.files;i.dispatchEvent(new Event('change'));}`);
+      await pick('first.csv');await pick('first.csv');await pick('notes.txt');assert.match(await client.eval("document.querySelector('[data-status]').textContent"),/Choose one survey CSV/);await pick('survey.CSV');
+      await delay(400);assert.equal(await client.eval("document.querySelector('[data-photo-map]').firstElementChild===fixture.previewNode"),true);assert.equal(await client.eval('fixture.previewReads===fixture.previewReadBaseline'),true);
+      assert.match(await client.eval("document.querySelector('[data-selection]').textContent"),/2 photos and 1 CSV/);await client.eval('fixture.submit()');await until(()=>client.eval("document.querySelector('[data-status]').textContent.includes('Temporary submission failure')"));await client.eval('fixture.submit()');await until(()=>client.eval('!!fixture.done()'));
+      const calls=await client.eval('fixture.calls'),uploads=calls.filter(x=>x.url.endsWith('/uploads'));assert.equal(uploads.length,1);assert.deepEqual(uploads[0].body.files.map(x=>[x.relativePath,x.processingRole]),[['flight/a.jpg','image'],['flight/sub/b.jpg','image'],['survey.CSV','gcp_source']]);
+      await client.eval('fixture.mount()');
+    });
+    await t.test('changing the CSV after a failed submission starts a new source and idempotency key',async()=>{
+      await delay(80);await client.eval("fixture.mount();fixture.select()");await until(()=>client.eval("document.querySelector('[name=providerId]').value==='node'"));await client.eval('fixture.submit()');await until(()=>client.eval("document.querySelector('[data-status]').textContent.includes('Temporary submission failure')"));
+      await client.eval(`{const dt=new DataTransfer();dt.items.add(new File(['control'],'control.csv'));const i=document.querySelector('[data-survey-csv]');i.files=dt.files;i.dispatchEvent(new Event('change'));fixture.submit();}`);await until(()=>client.eval('!!fixture.done()'));
+      const calls=await client.eval('fixture.calls'),datasets=calls.filter(x=>x.url==='/api/v1/datasets'),uploads=calls.filter(x=>x.url.endsWith('/uploads'));assert.equal(datasets.length,2);assert.notEqual(datasets[0].headers['Idempotency-Key'],datasets[1].headers['Idempotency-Key']);assert.equal(uploads.length,2);assert.equal(uploads[1].body.files.some(x=>x.relativePath==='control.csv'&&x.processingRole==='gcp_source'),true);await client.eval('fixture.mount()');
     });
     await t.test('fresh node refresh, compatible preset, PC upload and succeeded finalization; failed submit retry never reuploads',async()=>{
       await until(()=>client.eval("!!document.querySelector('[aria-label=\"crop\"]')"));

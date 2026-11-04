@@ -322,10 +322,11 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
     ? json({ attempts: [{ id: 'attempt-johnson-old', attemptNumber: 1, providerId: 'provider-nodeodm', providerTaskId: 'nodeodm-41', status: 'failed', errorCode: 'obj2tiles_exit_nonzero', errorMessage: 'Textured tile conversion failed.', createdAt: '2026-08-17T12:00:00.000Z', startedAt: '2026-08-17T12:01:00.000Z', completedAt: '2026-08-17T12:04:00.000Z' }], nextCursor: null })
     : json({ attempts: [fixtures.tasks[0].latestAttempt], nextCursor: 'older-johnson-runs' });
   if (pathname === '/api/v1/tasks/task-quarry/attempts') return json({ attempts: [fixtures.tasks[1].latestAttempt], nextCursor: null });
-  const gcpSet = { id: 'gcp-set-johnson', displayName: 'Rome Dam control', pointCount: 1, crs: 'EPSG:32616', provenance: { coordinateSystem: 'NAD83 / UTM zone 16N', verticalDatum: 'NAVD88', linearUnit: 'ftUS' } };
+  const gcpSet = { id: 'gcp-set-johnson', displayName: 'Rome Dam control', pointCount: 1, crs: 'EPSG:32616', provenance: { coordinateSystem: 'NAD83 / UTM zone 16N', verticalDatum: 'NAVD88', linearUnit: 'ftUS' }, odmCrsCandidate: runtime.manualGcp ? null : { epsgCode:7541, horizontalUnit:'m', verticalDatum:'NAVD88(GEOID18)', verticalUnit:'m' }, odmCrs: runtime.gcpConfirmedCrs, odmCrsConfirmed: Boolean(runtime.gcpCrsConfirmed) };
   const gcpPoint = { id: 'gcp-point-1', externalId: 'ltds-1', label: 'ltds-1', latitude: 44.1, longitude: -88.2, elevationM: 220 };
   if (pathname === '/api/v1/datasets/dataset-johnson/gcp-sets') return json({ sets: [gcpSet] });
   if (pathname === '/api/v1/gcp-sets/gcp-set-johnson') return json({ set: gcpSet, points: [gcpPoint] });
+  if (pathname === '/api/v1/gcp-sets/gcp-set-johnson/odm-crs-confirm' && method === 'POST') { runtime.gcpCrsConfirmed=true; runtime.gcpConfirmedCrs=body.epsgCode?{...body,verticalUnit:'m'}:gcpSet.odmCrsCandidate; return json({ set: {...gcpSet,odmCrs:runtime.gcpConfirmedCrs,odmCrsConfirmed:true} }); }
   if (pathname === '/api/v1/tasks/task-johnson/gcp-correspondences' && method === 'GET') return json({ correspondences: runtime.correspondences });
   if (pathname === '/api/v1/tasks/task-johnson/gcp-correspondences' && method === 'POST') {
     const correspondence = { id: 'gcp-mark-1', ...body };
@@ -340,7 +341,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
     runtime.correspondences = [];
     return { status: 204, body: Buffer.alloc(0), type: 'application/json' };
   }
-  if (pathname === '/api/v1/datasets/dataset-johnson/gcp-images') return json({ images: [{ id: 'image-1', relativePath: 'DJI_0001.JPG', distanceM: 4.2, width: 100, height: 80 }], ranking: { mode: 'auto', notice: 'Adaptive camera spacing', warnings: [] } });
+  if (pathname === '/api/v1/datasets/dataset-johnson/gcp-images') { const next = url.searchParams.get('offset') === '1'; return json({ images: [next ? { id:'image-2', relativePath:'DJI_0002.JPG', distanceM:5,latitude:44.10003,longitude:-88.2,width:100,height:80 } : { id: 'image-1', relativePath: 'DJI_0001.JPG', distanceM: 4.2, latitude:44.10002, longitude:-88.2, width: 100, height: 80 }], pagination: {offset:next?1:0,limit:200,total:2,nextOffset:next?null:1}, ranking: { mode: 'radius', notice: 'Nearby photos', warnings: [] } }); }
   if (pathname === '/api/v1/datasets/dataset-johnson/gcp-images/image-1/content') return { status: 200, body: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="80"><rect width="100" height="80" fill="#555"/></svg>'), type: 'image/svg+xml' };
   if (pathname === '/api/v1/attempts/attempt-johnson') {
     const sequence = ++runtime.logSequence;
@@ -572,6 +573,7 @@ async function confirmAppAction(client, runtime, selector, { title, fields = {},
 }
 
 async function verifyViewport(devTools, origin, viewport, runtime) {
+  runtime.gcpCrsConfirmed = false; runtime.manualGcp = false; runtime.gcpConfirmedCrs = null;
   runtime.archivedProjects.clear();
   runtime.archivedTasks.clear();
   runtime.failNextStorage = false;
@@ -716,8 +718,15 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     await client.evaluate(`document.querySelector('[data-action="task-gcp"]').click()`);
     await waitFor(client, "new URL(location.href).searchParams.get('panel')==='gcp' && document.querySelector('.task-workspace-page') !== null", `${viewport.name}: dedicated GCP page did not open`);
-    await waitFor(client, "document.querySelector('[data-action=\"gcp-open-image\"][data-id=\"image-1\"]') !== null", `${viewport.name}: GCP image candidates did not load`);
-    await client.evaluate(`document.querySelector('[data-action="gcp-open-image"][data-id="image-1"]').click()`);
+    await waitFor(client, "document.querySelector('.gcp-map-camera[data-id=\"image-1\"]') !== null", `${viewport.name}: nearby camera map did not load`);
+    assert.equal(await client.evaluate("document.querySelector('.gcp-candidate-form [name=radiusFeet]').value"), '50');
+    assert.match(await client.evaluate("document.querySelector('.gcp-crs-confirmation').textContent"), /EPSG:7541/);
+    await confirmAppAction(client, runtime, '[data-action="gcp-confirm-crs"]', { title: 'Confirm survey coordinates' });
+    await waitFor(client, "document.querySelector('.gcp-crs-confirmation').textContent.includes('Confirmed')", `${viewport.name}: coordinate confirmation did not persist`);
+    await client.evaluate(`document.querySelector('[data-action="gcp-load-more"]').click()`);
+    await waitFor(client, "document.querySelector('.gcp-map-camera[data-id=\"image-2\"]') !== null", `${viewport.name}: next page of nearby photos did not load`);
+
+    await client.evaluate(`document.querySelector('.gcp-map-camera[data-id="image-1"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
     await waitFor(client, "document.querySelector('.gcp-mark-form') !== null", `${viewport.name}: private GCP image did not open`);
     await client.evaluate(`(() => { const form=document.querySelector('.gcp-mark-form'); form.elements.pixelX.value='12'; form.elements.pixelY.value='14'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
     await waitFor(client, "document.querySelector('.gcp-mark-row')?.textContent.includes('x 12, y 14')", `${viewport.name}: GCP correspondence was not created`);
@@ -725,6 +734,14 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "document.querySelector('.gcp-mark-row')?.textContent.includes('x 13, y 15')", `${viewport.name}: GCP correspondence was not updated`);
     await confirmAppAction(client, runtime, '[data-action="gcp-delete-mark"]', { title: 'Delete image mark', cancelFirst: true });
     await waitFor(client, "document.querySelector('.gcp-mark-row') === null", `${viewport.name}: GCP correspondence was not deleted`);
+    runtime.manualGcp=true; runtime.gcpCrsConfirmed=false; runtime.gcpConfirmedCrs=null;
+    await client.evaluate('location.reload()');
+    await waitFor(client, "document.querySelector('.gcp-crs-form') !== null", `${viewport.name}: manual CRS mapping form missing`);
+    await client.evaluate(`(() => { const form=document.querySelector('.gcp-crs-form'); form.elements.epsgCode.value='7600'; form.elements.horizontalUnit.value='ftUS'; form.elements.verticalDatum.value='NAVD88'; form.querySelector('button').click(); })()`);
+    await waitFor(client, "document.querySelector('.workspace-decision[open]') !== null", `${viewport.name}: CRS confirmation dialog missing`);
+    await client.evaluate(`document.querySelector('.workspace-decision[open] button[type="submit"]').click()`);
+    await waitFor(client, "document.querySelector('.gcp-crs-confirmation').textContent.includes('EPSG:7600') && document.querySelector('.gcp-crs-confirmation').textContent.includes('Confirmed')", `${viewport.name}: manual coordinates not retained`);
+
 
     await client.evaluate(`document.querySelector('[data-action="task-return"]').click()`);
     await waitFor(client, "!new URL(location.href).searchParams.has('panel') && document.querySelector('.task-quick-actions') !== null", `${viewport.name}: GCP Back to task did not restore shortcuts`);
