@@ -164,14 +164,11 @@ export function malformedPortalLaunchRedirect(requestUrl: string, env: OriginEnv
   try { request = new URL(requestUrl); } catch { return null; }
   const pathname = request.pathname.toLocaleLowerCase("en-US");
   if (![...origins, ...legacy, ...retired].includes(request.origin) || (pathname !== "/portal*" && pathname !== "/portal%2a")) return null;
-  request.pathname = "/portal";
-  request.searchParams.delete("__cf_access_message");
-  // A retired host must not forward query state to the canonical portal. The
-  // Client Portal routes by pathname; public delivery query state uses its own
-  // separately validated route and is not handled here.
-  return retired.includes(request.origin)
-    ? new URL(request.pathname, configuredClientPortalOrigin(env)!).toString()
-    : request.toString();
+  // This recovery URL only exists to correct a malformed portal pathname.
+  // Always use the canonical host and drop query/hash state, even for an
+  // otherwise active alias: the portal routes by pathname and the values may
+  // be stale login/OAuth state. Public delivery has its own validated route.
+  return new URL("/portal", configuredClientPortalOrigin(env)!).toString();
 }
 
 /** Redirects non-secret browser entry routes from an explicitly configured
