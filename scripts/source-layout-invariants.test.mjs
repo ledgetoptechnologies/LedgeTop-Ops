@@ -257,6 +257,7 @@ const expectedPublicRoutes = [
   "GET /api/public/shares/:publicId/manifest",
   "GET /client-share/:publicId",
   "GET /health",
+  "GET /ops-sign-in-help",
   "GET /s/:publicId",
   "GET|HEAD /api/public/cloud-transfers/source/:grant",
   "GET|HEAD /api/public/shares/:publicId/bulk-download/:jobId/file",
@@ -335,7 +336,7 @@ test("the checked-in Client deployment keeps reviewed resources, hosts, and port
   // gates, route namespaces, no-email guards and resource checks stay exact.
   // Portal origin retirement changes only the reviewed host/profile bundle;
   // public compatibility hosts and existing resources remain pinned.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "6c5c912a29b9ceb864e5f362b2591bb44f0ba91177a3c812aca8eb826a8df312");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "37c75fa35e35c0c019f076769eb231a4a346bd705e73b408b3590beeb5ef1717");
   assert.equal("CLIENT_PORTAL_INVITATION_FROM_NAME" in readJson("apps/client/wrangler.jsonc").vars, false);
   const config = readJson("apps/client/wrangler.jsonc");
   assert.deepEqual(config.services.filter(service => service.binding === "SHARED_PROFILE_PORTAL"), [{
@@ -373,7 +374,7 @@ test("the checked-in Client deployment keeps reviewed resources, hosts, and port
     binding: "ASSETS",
     directory: "./dist/client",
     not_found_handling: "single-page-application",
-    run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal*", "/onboarding/*", "/assets/*", "/health"],
+    run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal*", "/onboarding/*", "/assets/*", "/health", "/ops-sign-in-help"],
   });
   assert.equal(config.vars.PUBLIC_BASE_URL, "https://delivery.ledgetop.app");
   assert.equal(config.vars.PUBLIC_SHARE_ORIGIN, "https://delivery.ledgetop.app");

@@ -26,25 +26,50 @@ TrueNAS.
 
 ## Output and compatibility
 
-- QuickTime `.mov` using ProRes 422 Proxy, 10-bit 4:2:2, with PCM 48 kHz audio.
-  This preserves the actual supplied script's codec; its older README described
-  an H.264 implementation that the supplied script no longer uses.
+- QuickTime `.mov` using all-intra H.264 (every frame a keyframe, CRF 23),
+  8-bit 4:2:0, with PCM 48 kHz audio. Revision 7 replaced ProRes 422 Proxy
+  after a side-by-side Resolve 21 test on 4K59.94 Sony FX30 and DJI footage:
+  ProRes Proxy at 720p was 23-37% of the originals; all-intra H.264 at 720p is
+  about 5-11%, and still scrubs, reverse-plays and frame-steps smoothly
+  because no frame depends on another. Long-GOP H.264 is smaller again but is
+  deliberately not used: it stutters on reverse play and frame stepping.
+  4:2:0 also keeps NVIDIA hardware decoding available in Resolve.
 - Half the source height, rounded to an even value, capped at 720 by default
   and floored at 144. Width preserves aspect ratio and remains even. A
-  3840x2160 source produces 1280x720. The codec remains the lowest-bitrate
-  ProRes profile; file size still depends on source content, duration, frame
-  rate and audio. Use `PROXY_MAX_HEIGHT=540` for a smaller profile after a
-  synthetic Resolve linking/quality check.
+  3840x2160 source produces 1280x720. File size still depends on source
+  content, duration, frame rate and audio.
 - The first video stream and all available audio streams are mapped. Rational
   frame rate, source timecode notation and video start offset are retained.
   The generator does not infer drop-frame timecode solely from frame rate.
+
+### What Resolve needs to link a proxy
+
+Resolve links an external proxy only when its file name (without extension),
+frame rate and **start timecode, including drop-frame versus non-drop-frame**,
+match the original. A mismatch fails silently: Link Proxy Media does nothing
+and the clip's Proxy column stays "None". Codec and resolution do not matter.
+
+Sony XAVC clips (for example the FX30) record drop-frame timecode at 29.97 and
+59.94 fps, but FFprobe reports it with `:` as if it were non-drop. Revision 6
+copied that notation, so Resolve refused every Sony proxy even though frame
+rate and frame count matched. Sony writes the real flag in the
+`NonRealTimeMeta` XML at the end of the file: the first `LtcChange` value is
+SMPTE BCD timecode, frames byte first, and bit `0x40` of that byte marks drop
+frame (`49565301` is 01:53:56;18 at 59.94p). The generator reads only the last
+256 KiB for that table, uses it only when its hours, minutes and seconds match
+the probed timecode, and only at 29.97 or 59.94 fps. Everything else keeps the
+container's own notation: QuickTime/MP4 `tmcd` and MXF timecode already carry
+`;` for drop frame, and sources without timecode (most DJI drones, phones)
+produce proxies without timecode, which Resolve links on name and frame rate.
+When adding a new camera, link one generated proxy in Resolve and compare the
+original's Start TC column with the proxy's before regenerating a library.
 - A source such as `Raw/clip.mp4` produces `Raw/Proxy/clip.mov`. It uses Resolve's
   sibling-folder convention. Two eligible files with the same case-insensitive
   stem in one folder are skipped because that convention cannot distinguish
   their destinations safely.
 
-An output is probed before publication. The generator checks ProRes Proxy
-profile, pixel format, expected dimensions, frame rate and available frame
+An output is probed before publication. The generator checks the H.264 codec,
+pixel format, expected dimensions, frame rate and available frame
 counts, audio stream count, timecode when present, and bounded duration/start-time differences. Sources whose nominal and average frame rates differ
 are deferred as unsupported rather than silently converted to a different timeline.
 Publication uses an
@@ -69,7 +94,7 @@ These are container environment values; the combined stack exposes most under
 | `SOURCE_STABLE_SECONDS` | `60` | Minimum source age and unchanged observation window |
 | `PROXY_SCAN_DIRS` | `Clients Recurring Extended 2024 2025 2026` | Whitespace-separated top-level directories |
 | `PROXY_INCLUDE_SEGMENTS` | `Dump Unedited Raw Stabilized` | Eligible directory segments, case-insensitive |
-| `FORCE_PROXY_REGENERATION_VERSION` | `6` | Per-file output revision; preserve during ordinary upgrades |
+| `FORCE_PROXY_REGENERATION_VERSION` | `7` | Per-file output revision; preserve during ordinary upgrades |
 | `PROBE_TIMEOUT_SECONDS` | `30` | Deadline for each FFprobe process |
 | `ENCODE_TIMEOUT_SECONDS` | `7200` | Deadline for each FFmpeg encode |
 | `MAX_ATTEMPTS` | `3` | Failed attempts before deferring that source/version |
@@ -111,10 +136,27 @@ without client media paths or FFmpeg command lines. The image healthcheck
 requires a recent supervisor heartbeat, including during idle sleep and
 while waiting for jobs; inspect scan outcome counts and actual media as well.
 
+Nothing is logged when a job starts or succeeds. `scan_complete` appears only
+after every job queued by that pass has finished, so a pass that regenerates
+the library can be silent for hours while it works. Hidden
+`Proxy/.proxy-gen-*.mov` files growing on the share mean encodes are running.
+
+The container runs as `apps` (UID 568) and must be able to create `Proxy`
+folders and files throughout the Jobs dataset. On TrueNAS, grant `apps`
+Modify on the dataset and **apply it recursively**: existing folders keep the
+permissions they were created with, so a top-level change alone leaves every
+job read-only and each file fails within milliseconds with
+`io_or_media_failure`, then is deferred after three attempts. Applying the ACL
+recursively also changes every file's change time, which the generator treats
+as a new source identity, so retry budgets reset by themselves.
+
 ## Adopting existing proxies
 
-The smaller default profile uses `FORCE_PROXY_REGENERATION_VERSION=6`; the
-supplied script used revision five and a 1080 cap. Start migration with a
+The default profile uses `FORCE_PROXY_REGENERATION_VERSION=7` (all-intra
+H.264). Revision six was 720-high ProRes Proxy, and the supplied script used
+revision five and a 1080 cap. Neither can be adopted by revision seven, so the
+first pass after upgrading regenerates every tracked proxy in place; the old
+file stays until its replacement is verified. Start migration with a
 narrow synthetic scan scope and concurrency one, not the entire library.
 On a source's first discovery the generator can adopt an
 existing newer proxy after compatibility checks if the folder has no legacy
