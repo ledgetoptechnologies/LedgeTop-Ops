@@ -13,7 +13,7 @@ private final class PilotProtocolStub: URLProtocol, @unchecked Sendable {
         var status = 200
         var contentType = "application/json"
         var body = "{\"schemaVersion\":1,\"operations\":[],\"nextCursor\":null}"
-        if request.url?.host != "ops-staging.ledgetopdroneservices.com" || request.httpMethod != "GET"
+        if request.url?.host != "ios-pilot-staging.ledgetop.app" || request.httpMethod != "GET"
             || request.value(forHTTPHeaderField: "Accept") != "application/json" || request.value(forHTTPHeaderField: "Cache-Control") != "no-store" {
             status = 500
         } else if auth == "Bearer expired" { status = 401 }
@@ -33,7 +33,7 @@ private final class PilotProtocolStub: URLProtocol, @unchecked Sendable {
 // XCTest owns execution; this class has no mutable test state.
 final class MobilePilotTransportTests: XCTestCase, @unchecked Sendable {
     private func api() throws -> MobilePilotAPI {
-        let config = try MobilePilotConfiguration(enabled: true, origin: "https://ops-staging.ledgetopdroneservices.com")
+        let config = try MobilePilotConfiguration(enabled: true, origin: "https://ios-pilot-staging.ledgetop.app")
         let options = URLSessionConfiguration.ephemeral
         options.protocolClasses = [PilotProtocolStub.self]
         return MobilePilotAPI(configuration: config, testingSession: URLSession(configuration: options))

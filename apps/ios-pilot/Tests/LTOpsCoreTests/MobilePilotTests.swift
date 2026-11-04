@@ -11,14 +11,17 @@ final class MobilePilotTests: XCTestCase {
         return try JSONDecoder().decode(MobileOperationsPage.self, from: JSONSerialization.data(withJSONObject: payload))
     }
     func testLiveConfigurationIsOptInAndExactOriginOnly() throws {
-        XCTAssertThrowsError(try MobilePilotConfiguration(enabled: false, origin: "https://ops.ledgetop.app"))
-        for origin in ["http://ops.ledgetop.app", "https://ops.ledgetop.app.evil.test", "https://ops.ledgetop.app/path", "https://user@ops.ledgetop.app", "https://ops.ledgetop.app/"] {
+        let pilotOrigin = "https://ios-pilot-staging.ledgetop.app"
+        XCTAssertThrowsError(try MobilePilotConfiguration(enabled: false, origin: pilotOrigin))
+        for origin in ["http://ios-pilot-staging.ledgetop.app", "https://ios-pilot-staging.ledgetop.app.evil.test",
+            "https://ios-pilot-staging.ledgetop.app/path", "https://user@ios-pilot-staging.ledgetop.app",
+            "https://ios-pilot-staging.ledgetop.app/", "https://ops.ledgetop.app",
+            "https://ops-staging.ledgetopdroneservices.com"] {
             XCTAssertThrowsError(try MobilePilotConfiguration(enabled: true, origin: origin))
         }
-        let config = try MobilePilotConfiguration(enabled: true, origin: "https://ops.ledgetop.app")
-        XCTAssertNoThrow(try MobilePilotConfiguration(enabled: true, origin: "https://ops-staging.ledgetopdroneservices.com"))
+        let config = try MobilePilotConfiguration(enabled: true, origin: pilotOrigin)
         let url = try config.authorizeURL(state: state, challenge: code)
-        XCTAssertEqual(url.host, "ops.ledgetop.app")
+        XCTAssertEqual(url.host, "ios-pilot-staging.ledgetop.app")
         XCTAssertEqual(url.path, "/api/mobile-pilot/authorize")
         XCTAssertTrue(url.absoluteString.contains("code_challenge_method=S256"))
     }

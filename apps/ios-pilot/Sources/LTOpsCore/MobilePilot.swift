@@ -11,7 +11,7 @@ public enum MobilePilotError: Error, Equatable, Sendable {
 public struct MobilePilotConfiguration: Sendable {
     public static let callback = "com.ledgetoptechnologies.ops.pilot://auth/callback"
     public static let callbackScheme = "com.ledgetoptechnologies.ops.pilot"
-    public static let approvedOrigins = ["https://ops-staging.ledgetopdroneservices.com", "https://ops.ledgetop.app"]
+    public static let approvedOrigins = ["https://ios-pilot-staging.ledgetop.app"]
     public let origin: URL
     public init(enabled: Bool, origin: String) throws {
         // Additional environments require a reviewed source change, not user input.

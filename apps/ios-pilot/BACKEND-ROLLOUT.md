@@ -25,6 +25,29 @@ The Access-protected `/api/mobile-pilot/authorize` issues a short-lived, single-
 
 `IOS_PILOT_ENABLED` is absent/off in deployment configuration. The client also ships with `LTOpsLiveEnabled=false`. Neither switch has been enabled remotely.
 
+## Current pilot status (2026-11-03)
+
+- The existing `LT Ops iPad OAuth Test` Access app protects
+  `ios-pilot-staging.ledgetop.app`; its managed OAuth callback and synthetic
+  identity check have been exercised on the iPad.
+- The existing Ops staging D1 database has schema through migration `0235`; no
+  migration is needed for this reader.
+- Backend PR #389 adds a read-only facade and private service entrypoint. The
+  follow-up staging config keeps that reader separate from both production and
+  the shared Operations staging Worker. Its service Worker has no public route;
+  its public edge preserves the existing synthetic sign-in probe.
+- The isolated reader is configured to require its connector source manifest.
+  The staging registry has active read-visible connectors, but this separate
+  Worker has not yet been provisioned with their approved manifest and secrets;
+  live reads must remain unavailable until that is safely configured and
+  checked against the registry.
+- The client pins the dedicated staging Access resource for the synthetic test.
+  Its source-controlled live endpoint pin list remains empty, and `Info.plist`
+  still selects the synthetic test only. Keep live mode disabled until backend
+  review, deployment, and an authenticated read-only acceptance pass.
+- The iPad is currently disconnected, so live list/detail, permissions, and
+  restart restoration still need a later device check.
+
 ## Activation gates
 
 1. Recheck current release ownership, deployed schema, source revision, and provider settings. The last Hub note reported ledger 225; source migration 0232 is not permission to apply intervening migrations. Review prerequisite tables and the actual migration plan first.

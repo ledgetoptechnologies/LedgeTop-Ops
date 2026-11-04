@@ -8,5 +8,5 @@
     </dict></array>
     <key>LTOpsLiveEnabled</key><false/>
     <key>LTOpsSyntheticProbeEnabled</key><true/>
-    <key>LTOpsOrigin</key><string>https://ops-staging.ledgetopdroneservices.com</string>
+    <key>LTOpsOrigin</key><string>https://ios-pilot-staging.ledgetop.app</string>
 </dict></plist>

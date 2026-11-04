@@ -1,9 +1,9 @@
 # LT Ops iPhone pilot
 
 Native SwiftUI pilot for iOS 17 and newer. This is a separate application in the
-existing LedgeTop-Ops repository, on branch `codex/lt-ops-ios-pilot`.
+existing LedgeTop-Ops repository, on branch `codex/lt-ops-ios-pilot-client`.
 
-Working folder: `C:\Projects\Ledge Top Operations\ios-pilot\apps\ios-pilot`.
+Working folder: `C:\Projects\Ledge Top Operations\ios-pilot-client\apps\ios-pilot`.
 The sibling `Operations` checkout remains untouched. A Git worktree provides a
 separate folder for this branch while sharing the repository history; it is not
 a second unrelated repository. Merge only after review and device validation.
@@ -19,23 +19,24 @@ All three sample clients and training sites are fictional. Refresh/reset restore
 the samples; task changes are intentionally not saved between app launches. The
 app starts in Demo. No flight clearance is inferred from a checklist.
 
-## Read-only connection (implemented, disabled pending activation)
+## Read-only connection (staging activation in progress)
 
-The Pilot tab opens a separate staging read-only workspace. It now uses the
-Managed OAuth client and dedicated read-only facade; this flow is not deployed or
-verified against Cloudflare. `LTOpsLiveEnabled` defaults to false and the
-source-controlled list of approved OAuth endpoint pins is empty, so enabling the
-plist flag alone cannot start sign-in. See [BACKEND-ROLLOUT.md](BACKEND-ROLLOUT.md)
-for the remaining configuration, security, and device-validation gates.
+The Pilot tab has separate demo and managed-Access sign-in paths. The iPad has
+successfully completed the synthetic Cloudflare sign-in test, including an
+Access identity match. That test returns no business data. The read-only backend
+and isolated staging Worker configurations are now in review; the live endpoint
+pin list is empty and live mode remains disabled in `Info.plist` until those
+Workers are deployed and verified.
+See [BACKEND-ROLLOUT.md](BACKEND-ROLLOUT.md) for the remaining gates.
 
-The proposed flow uses `ASWebAuthenticationSession`, OS-generated state and
-PKCE S256, and the registered custom callback
-`com.ledgetoptechnologies.ops.pilot://auth/callback`. Cloudflare's acceptance of
-that callback and the complete device flow still need verification. There is no
-user-entered origin. Tokens and business records stay in memory; requests use
-ephemeral sessions without cookies, disk cache, or redirects. Sign-out clears
-local access immediately and attempts grant revocation, reporting when that
-cannot be confirmed. The browser's separate SSO session may remain signed in.
+The flow uses `ASWebAuthenticationSession`, OS-generated state and PKCE S256,
+and the registered custom callback
+`com.ledgetoptechnologies.ops.pilot://auth/callback`. There is no user-entered
+origin. Access tokens and business records stay in memory; the refresh grant is
+kept in the iOS Keychain for the approved restart flow. Requests use ephemeral
+sessions without cookies, disk cache, or redirects. Sign-out clears local access
+immediately and reports when Cloudflare revocation cannot be confirmed. The
+browser's separate SSO session may remain signed in.
 
 The live screen has no checklist toggles, edits, delivery controls, or files.
 It preserves server statuses and displays only supplied fields. Counts and
