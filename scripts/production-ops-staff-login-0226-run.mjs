@@ -23,19 +23,26 @@ export function parseProductionOps0226RunArgs(args) {
   fail('usage');
 }
 
-function currentMainSource() {
+export function currentMainSource(runGit = execFileSync) {
   let root, branch, changes;
   try {
-    root = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    branch = execFileSync('git', ['branch', '--show-current'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    changes = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    root = runGit('git', ['rev-parse', '--show-toplevel'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    branch = runGit('git', ['branch', '--show-current'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    changes = runGit('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   } catch { fail('git_source_unavailable'); }
   if (path.resolve(root) !== ROOT) fail('repository_root_mismatch');
   if (branch !== 'main') fail('main_branch_required');
   if (changes) fail('working_tree_not_clean');
-  let sourceCommit;
-  try { sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
+  let sourceCommit, remoteMain;
+  try { sourceCommit = runGit('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
   catch { fail('git_source_unavailable'); }
+  try {
+    remoteMain = runGit('git', ['ls-remote', '--exit-code', 'origin', 'refs/heads/main'], {
+      cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000,
+    }).trim().split(/\s+/u)[0];
+  } catch { fail('remote_main_ref_unavailable'); }
+  if (!/^[a-f0-9]{40}$/u.test(sourceCommit) || !/^[a-f0-9]{40}$/u.test(remoteMain)) fail('remote_main_ref_unavailable');
+  if (sourceCommit !== remoteMain) fail('main_branch_stale');
   return sourceCommit;
 }
 
@@ -84,6 +91,8 @@ export async function runProductionOps0226(args, dependencies = {}) {
   const plan = operator.compile(snapshot, { sourceCommit, root: ROOT });
   const preview = safeSummary(plan, options.mode);
   if (options.mode === 'check') return preview;
+  const showPreview = dependencies.showPreview ?? (value => stdout.write(`${JSON.stringify(value)}\n`));
+  showPreview(preview);
   if (!await confirmApply(dependencies.confirm)) return { ...preview, mode: 'cancelled', writesPerformed: 0 };
   const receipt = await operator.executeOnce({ plan, provider, journalPath: options.journalPath });
   return {
