@@ -275,7 +275,7 @@ test('each processing attempt snapshots deterministic private ODM correspondence
   assert.equal(processing.getAttemptGcpEvidence(second.id).correspondences[0].pixelX,121);
 });
 
-test('legacy v1 GCP evidence without a coordinate contract is rejected', (t) => {
+test('legacy v1 GCP evidence remains readable without being reinterpreted as v2', (t) => {
   const { processing,gcp,project,dataset }=datasetFixture(t);
   const set=gcp.importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'generic-csv-v1',sourceFileId:'gcp-file',sourceFilename:'control.csv',sourceSha256:GCP_SOURCE_SHA,
     sourceContent:GCP_SOURCE,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:1',
@@ -289,7 +289,9 @@ test('legacy v1 GCP evidence without a coordinate contract is rejected', (t) => 
   delete legacy.coordinateContract;
   processing.database.exec('DROP TRIGGER processing_attempt_gcp_snapshot_no_update');
   processing.database.prepare('UPDATE processing_attempt_gcp_snapshots SET evidence_json=? WHERE attempt_id=?').run(JSON.stringify(legacy),attempt.id);
-  assert.equal(processing.getAttemptGcpEvidence(attempt.id),null);
+  const retained=processing.getAttemptGcpEvidence(attempt.id);
+  assert.equal(retained.schemaVersion,1);
+  assert.equal(Object.hasOwn(retained,'coordinateContract'),false);
 });
 
 test('GCP snapshots without an immutable raw source file are not trusted transfer evidence', (t) => {

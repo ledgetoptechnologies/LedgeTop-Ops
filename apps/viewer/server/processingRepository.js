@@ -543,11 +543,14 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   getAttemptGcpEvidence(id){
     const row=this.database.prepare('SELECT * FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(id);if(!row?.evidence_json)return null;
     let evidence;try{evidence=JSON.parse(row.evidence_json);}catch{return null;}
-    if(!evidence||evidence.schemaVersion!==2||!evidence.snapshot||!Array.isArray(evidence.correspondences)
+    if(!evidence||![1,2].includes(evidence.schemaVersion)||!evidence.snapshot||!Array.isArray(evidence.correspondences)
       ||evidence.snapshot.snapshotId!==id||evidence.snapshot.sha256!==row.sha256
       ||evidence.snapshot.byteSize!==Buffer.byteLength(row.content_text,'utf8')
       ||evidence.snapshot.correspondenceCount!==Number(row.correspondence_count)
       ||evidence.correspondences.length!==Number(row.correspondence_count))return null;
+    const evidenceKeys=Object.keys(evidence).sort();
+    const expectedEvidenceKeys=evidence.schemaVersion===2?['coordinateContract','correspondences','schemaVersion','snapshot']:['correspondences','schemaVersion','snapshot'];
+    if(JSON.stringify(evidenceKeys)!==JSON.stringify(expectedEvidenceKeys))return null;
     const sources=evidence.correspondences.map((mark)=>mark.sourceGcpDatasetFileId),sourceHashes=evidence.correspondences.map((mark)=>mark.sourceGcpSha256);
     if(sources.some((value)=>typeof value!=='string'||!value)||sourceHashes.some((value)=>typeof value!=='string'||!/^[a-f0-9]{64}$/.test(value))
       ||evidence.correspondences.some((mark)=>typeof mark.sourceGcpRelativePath!=='string'||!mark.sourceGcpRelativePath
@@ -555,9 +558,11 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     const sourceIds=[...new Set(sources)].sort(),imageIds=[...new Set(evidence.correspondences.map((mark)=>mark.imageDatasetFileId))].sort();
     if(JSON.stringify(sourceIds)!==JSON.stringify(evidence.snapshot.sourceGcpDatasetFileIds)||JSON.stringify(imageIds)!==JSON.stringify(evidence.snapshot.imageDatasetFileIds))return null;
     const contract=evidence.coordinateContract;
-    if(!contract||contract.schemaVersion!==1||!['EPSG:4326','EPSG:6318'].includes(contract.horizontalCrs)
+    if(evidence.schemaVersion===2&&(!contract||contract.schemaVersion!==1||!['EPSG:4326','EPSG:6318'].includes(contract.horizontalCrs)
       ||typeof contract.verticalSystem!=='string'||!contract.verticalSystem.trim()||contract.outputZUnit!=='m'
-      ||typeof contract.sourceUnits!=='string'||!contract.sourceUnits.trim()||typeof contract.zSource!=='string'||!contract.zSource.trim())return null;
+      ||typeof contract.sourceUnits!=='string'||!contract.sourceUnits.trim()||typeof contract.zSource!=='string'||!contract.zSource.trim()
+      ||typeof contract.sourceCoordinateSystem!=='string'||!contract.sourceCoordinateSystem.trim()
+      ||typeof contract.parser!=='string'||!contract.parser.trim()))return null;
     const correspondenceIds=new Set(),pointImagePairs=new Set(),sourceFacts=new Map(),imageFacts=new Map();
     for(const mark of evidence.correspondences){
       const numeric=[mark.latitude,mark.longitude,mark.elevationM,mark.pixelX,mark.pixelY];
@@ -574,7 +579,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       if(imageFacts.has(mark.imageDatasetFileId)&&imageFacts.get(mark.imageDatasetFileId)!==imageFact)return null;imageFacts.set(mark.imageDatasetFileId,imageFact);
     }
     try{
-      const content=odmGcpList(evidence.correspondences.map((mark)=>({longitude:mark.longitude,latitude:mark.latitude,elevationM:mark.elevationM,pixelX:mark.pixelX,pixelY:mark.pixelY,relativePath:mark.imageRelativePath})),{horizontalCrs:contract.horizontalCrs});
+      const content=odmGcpList(evidence.correspondences.map((mark)=>({longitude:mark.longitude,latitude:mark.latitude,elevationM:mark.elevationM,pixelX:mark.pixelX,pixelY:mark.pixelY,relativePath:mark.imageRelativePath})),{horizontalCrs:contract?.horizontalCrs||'EPSG:4326'});
       if(content!==row.content_text||crypto.createHash('sha256').update(content).digest('hex')!==row.sha256)return null;
     }catch{return null;}
     return evidence;
