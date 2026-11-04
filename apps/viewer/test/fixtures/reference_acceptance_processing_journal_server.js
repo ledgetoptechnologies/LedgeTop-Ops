@@ -4,11 +4,14 @@ const express = require('express');
 const { ReferenceAcceptanceLedger } = require('../../server/referenceAcceptance');
 const { createReferenceAcceptanceApi, referenceAcceptanceJsonBodyType } = require('../../server/referenceAcceptanceApi');
 const { createViewerReceiptSigner } = require('../../server/referenceReceipt');
+const { openDatabase } = require('../../server/database');
+const { ViewerRepository } = require('../../server/repository');
 
 const root = process.env.LTDS_LEDGER_ROOT;
 const ledger = new ReferenceAcceptanceLedger({ managedRoot: path.join(root, 'accepted'), databasePath: path.join(root, 'acceptance.sqlite') });
-const nonces = new Set();
-const repository = { consumeServiceNonce(id, nonce) { const key = `${id}\0${nonce}`; if (nonces.has(key)) return false; nonces.add(key); return true; } };
+// Use the same persistent nonce repository as the Viewer service, rather than
+// a per-process Set which forgets replay protection after a restart.
+const repository = new ViewerRepository(openDatabase(path.join(root, 'viewer.sqlite')));
 const signer = createViewerReceiptSigner({ issuerId: process.env.LTDS_VIEWER_RECEIPT_ISSUER_ID, keyId: process.env.LTDS_VIEWER_RECEIPT_KEY_ID, privateKeyPem: process.env.LTDS_VIEWER_RECEIPT_PRIVATE_KEY_PEM });
 const app = express();
 const calls = [];

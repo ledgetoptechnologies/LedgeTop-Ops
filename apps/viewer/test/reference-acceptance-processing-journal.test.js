@@ -8,6 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { fork, spawn } = require('node:child_process');
 const { once } = require('node:events');
+const { signServiceRequest } = require('../server/serviceAuth');
 
 const processing = process.env.LTDS_PROCESSING_REPO;
 test('Processing journal and Viewer ledger recover after both processes die following a lost commit', {
@@ -65,8 +66,19 @@ test('Processing journal and Viewer ledger recover after both processes die foll
   const before = await inspect();
   assert.deepEqual(before.counts, {accepted: 1, intents: 1, objects: 2});
   assert.ok(before.record?.storage?.viewerReceipt);
+  // A previously authenticated request must remain a replay after the
+  // Viewer process restarts, while the sender can recover using a fresh nonce.
+  const receiptPath = `/api/v1/reference/v1/acceptances/${before.record.acceptance.receiptId}`;
+  const signed = signServiceRequest({ secret: env.LTDS_VIEWER_SERVICE_SECRET,
+    keyId: env.LTDS_VIEWER_SERVICE_KEY_ID, method: 'GET', path: receiptPath });
+  assert.equal((await fetch(`http://127.0.0.1:${port}${receiptPath}`, { headers: signed })).status, 200);
   server.kill('SIGKILL'); assert.equal((await once(server, 'exit'))[1], 'SIGKILL'); server = null;
   port = await startServer(); assert.deepEqual(await inspect(), before);
+  assert.equal((await fetch(`http://127.0.0.1:${port}${receiptPath}`, { headers: signed })).status, 401,
+    'the real persistent nonce repository must reject replay across restart');
+  const fresh = signServiceRequest({ secret: env.LTDS_VIEWER_SERVICE_SECRET,
+    keyId: env.LTDS_VIEWER_SERVICE_KEY_ID, method: 'GET', path: receiptPath });
+  assert.equal((await fetch(`http://127.0.0.1:${port}${receiptPath}`, { headers: fresh })).status, 200);
   const recovered = await run('recover', port);
   assert.equal(recovered.phase, 'recovered');
   assert.deepEqual(recovered.viewerReceipt, before.record.storage.viewerReceipt);
