@@ -3,11 +3,9 @@
 const crypto = require('node:crypto');
 const { canonicalBytes } = require('./referenceProtocol');
 const { getHeldSourceSnapshot, verifyHeldSourceSnapshot } = require('./heldSourceSnapshot');
-const { fileFacts } = require('./viewerPagedSourceExport');
-const { assertCurrentSnapshotSource } = require('./preclaimSourceAttestation');
+const { assertCurrentSnapshotExport, validateSnapshotSelection } = require('./preclaimSourceAttestation');
 const fail = () => { throw Object.assign(new Error('generation held'), { code: 'GENERATION_HELD' }); };
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
-const records = bytes => Buffer.from(bytes).toString('utf8').trimEnd().split('\n').flatMap(line => JSON.parse(line).records);
 
 function prepareSelectedGeneration(processing, { attemptId, generation, snapshotId, snapshotSha256, publicKey, rootRef, selected } = {}) {
   // rootRef and publicKey are operator-provisioned inputs, never request authority.
@@ -28,33 +26,20 @@ function prepareSelectedGeneration(processing, { attemptId, generation, snapshot
         AND NOT EXISTS(SELECT 1 FROM storage_mutations m WHERE m.entity_type='dataset' AND m.entity_id=d.id AND m.status IN ('intent','fs_applied','failed'))`)
       .get(attemptId, snapshot.taskId, snapshot.datasetId, snapshot.datasetManifestSha256);
     if (!current) fail();
-    try { assertCurrentSnapshotSource(processing.getDataset(snapshot.datasetId, true), snapshot); } catch { fail(); }
-    let source, marks;
-    try { source = records(snapshot.sourceFrames); marks = records(snapshot.selectedFrames); } catch { fail(); }
-    const photo=/\.(?:jpe?g|png|tiff?|dng|raw|heic)$/i,auxiliary=/\.(?:txt|geojson|json|zip|las|laz)$/i;
-    for (const f of source) {
-      if (f.type !== 'dataset_file' || f.processingRole === 'gcp_source'
-          || (f.processingRole === 'image' && !photo.test(f.relativePath))
-          || (f.processingRole === 'provider_input' && !auxiliary.test(f.relativePath))) fail();
-      let checked;try { checked=fileFacts({id:f.datasetFileId,relativePath:f.relativePath,byteSize:f.byteSize,sha256:f.sha256,processingRole:f.processingRole,contentType:f.mediaType}); } catch { fail(); }
-      if (!canonicalBytes(checked).equals(canonicalBytes(f))) fail();
-    }
-    const byId = new Map(source.map(f => [f.datasetFileId, f]));
-    if (byId.size !== source.length || marks.length !== selected.length) fail();
-    const eligible=source.filter(f=>!['gcp_source','administrative'].includes(f.processingRole)
-      && (f.processingRole!=='auto' || photo.test(f.relativePath)));
-    const ordered=[...eligible.filter(f=>photo.test(f.relativePath)),...eligible.filter(f=>!photo.test(f.relativePath))];
-    if (marks.length!==ordered.length || marks.some((m,i)=>m.datasetFileId!==ordered[i].datasetFileId)) fail();
-    const expected = marks.map((m, index) => {
-      const f = byId.get(m.datasetFileId);
-      if (!f || m.type !== 'dataset_file' || m.ordinal !== index || m.pageObjectId !== m.datasetFileId
-          || !Number.isSafeInteger(f.byteSize) || f.byteSize < 1 || !/^[a-f0-9]{64}$/.test(f.sha256)) fail();
-      return { id: m.pageObjectId, relativePath: f.relativePath, byteSize: f.byteSize, sha256: f.sha256 };
-    });
+    let snapshotSelection;
+    try {
+      snapshotSelection = validateSnapshotSelection(snapshot);
+      assertCurrentSnapshotExport(processing, processing.getDataset(snapshot.datasetId, true), snapshot);
+    } catch { fail(); }
+    const expected = snapshotSelection.inputFiles.map((file, index) => ({
+      id: snapshotSelection.mapped[index]?.id,
+      relativePath: file.relativePath,
+      byteSize: file.byteSize,
+      sha256: file.sha256,
+    }));
+    if (expected.some(file => typeof file.id !== 'string')) fail();
     const bytes = canonicalBytes(expected);
     if (bytes.length > 4194304 || !canonicalBytes(selected).equals(bytes)) fail();
-    const input = expected.map(f => ({ relativePath: f.relativePath, byteSize: f.byteSize, sha256: f.sha256 }));
-    if (digest(Buffer.from(JSON.stringify(input))) !== snapshot.inputManifestSha256) fail();
     const row = processing.database.prepare('SELECT * FROM candidate_selected_source_generations WHERE attempt_id=? AND generation=?').get(attemptId, generation);
     const expectedRow = [snapshotId, snapshotSha256, rootRef, bytes.toString('utf8'), digest(bytes)];
     if (row) {

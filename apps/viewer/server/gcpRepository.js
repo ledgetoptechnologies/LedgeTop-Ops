@@ -35,8 +35,9 @@ class GcpRepository {
       id: row.id, datasetId: row.dataset_id, displayName: row.display_name,
       sourceFormat: row.adapter || row.source_format, sourceFileId: row.source_file_id,
       sourceFilename: row.source_filename, sourceSha256: row.source_sha256,
-      crs: row.crs, elevationUnits: row.elevation_units,
+      crs: row.horizontal_crs || row.crs, elevationUnits: row.elevation_units,
       provenance: row.adapter ? { adapter: row.adapter, coordinateSystem: row.coordinate_system,
+        horizontalCrs: row.horizontal_crs || row.crs,
         verticalDatum: row.vertical_datum, linearUnit: row.linear_unit,
         elevationSource: row.elevation_source, geographicCrossCheck: row.geographic_cross_check } : null,
       pointCount: Number(row.point_count || 0), createdBy: row.created_by,
@@ -93,6 +94,9 @@ class GcpRepository {
 
   importSet({ datasetId, displayName, sourceFormat, sourceFileId = null, sourceFilename = null, sourceSha256, sourceContent, crs, elevationUnits, provenance, points, createdBy }) {
     provenance ||= { adapter: sourceFormat, coordinateSystem: crs, verticalDatum: 'unspecified', linearUnit: elevationUnits };
+    const horizontalCrs = provenance.horizontalCrs || crs || 'EPSG:4326';
+    if (!['EPSG:4326', 'EPSG:6318'].includes(horizontalCrs))
+      throw Object.assign(new Error('unsupported GCP horizontal CRS'), { code: 'invalid_gcp_input' });
     const dataset = this.dataset(datasetId);
     if (!dataset || dataset.status !== 'finalized')
       throw Object.assign(new Error('dataset is not available for GCP import'), { code: 'dataset_not_available' });
@@ -133,9 +137,9 @@ class GcpRepository {
         }
       }
       this.database.prepare(`INSERT INTO gcp_sets(id,dataset_id,display_name,source_format,source_file_id,source_filename,
-        source_sha256,source_content,source_byte_size,crs,elevation_units,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        source_sha256,source_content,source_byte_size,crs,elevation_units,created_by,created_at,updated_at,horizontal_crs) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
         .run(id, datasetId, bounded(displayName, 160), sourceFormat === 'emlid-all-columns-v1' ? 'generic-csv-v1' : sourceFormat, sourceFileId,
-          bounded(sourceFilename, 240) || null, sourceSha256,sourceContent,sourceByteSize,crs, elevationUnits, createdBy || null, timestamp, timestamp);
+          bounded(sourceFilename, 240) || null, sourceSha256,sourceContent,sourceByteSize,'EPSG:4326', elevationUnits, createdBy || null, timestamp, timestamp,horizontalCrs);
       if(sourceFileId){
         const source=this.database.prepare('SELECT id,sha256,byte_size FROM dataset_files WHERE id=? AND dataset_id=?').get(sourceFileId,datasetId);
         if(!source||source.sha256!==sourceSha256||source.byte_size!==sourceByteSize)throw Object.assign(new Error('GCP source file metadata changed during import'),{code:'invalid_source_file'});

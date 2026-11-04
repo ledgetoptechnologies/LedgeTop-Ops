@@ -12,6 +12,17 @@ test('canonical WGS84 correspondences serialize in ODM documented coordinate and
   assert.equal(odmGcpList([]), null);
 });
 
+test('ODM GCP list keeps the Emlid NAD83(2011) horizontal datum in its CRS header', () => {
+  assert.equal(odmGcpList([{
+    longitude: -88.1, latitude: 44.5, elevationM: 250, pixelX: 1, pixelY: 2,
+    relativePath: 'photo.jpg', horizontalCrs: 'EPSG:6318',
+  }]), 'EPSG:6318\n-88.1 44.5 250 1 2 photo.jpg\n');
+  assert.throws(() => odmGcpList([
+    { longitude: -88, latitude: 44, elevationM: 250, pixelX: 1, pixelY: 2, relativePath: 'a.jpg', horizontalCrs: 'EPSG:6318' },
+    { longitude: -88, latitude: 44, elevationM: 250, pixelX: 1, pixelY: 2, relativePath: 'b.jpg', horizontalCrs: 'EPSG:4326' },
+  ]), /one supported horizontal CRS/);
+});
+
 test('ODM serialization fails closed for ambiguous whitespace-delimited image names', () => {
   assert.throws(() => odmGcpList([{
     longitude: -88, latitude: 44, elevationM: 1, pixelX: 1, pixelY: 1,

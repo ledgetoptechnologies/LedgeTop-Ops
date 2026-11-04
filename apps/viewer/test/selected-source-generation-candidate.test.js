@@ -2,6 +2,7 @@
 const test=require('node:test'),assert=require('node:assert/strict'),crypto=require('node:crypto'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {openDatabase}=require('../server/database');
 const {ProcessingRepository}=require('../server/processingRepository');
+const {GcpRepository}=require('../server/gcpRepository');
 const {createHeldSourceSnapshot,getHeldSourceSnapshot,verifyHeldSourceSnapshot,acceptHeldSourceSnapshot,releaseHeldSourceSnapshot,SNAPSHOT_DOMAIN}=require('../server/heldSourceSnapshot');
 const {frameStream,SELECTED_VERSION,SELECTED_DOMAIN,SOURCE_VERSION,SOURCE_DOMAIN}=require('../server/viewerPagedSourceExport');
 const {canonicalBytes}=require('../server/referenceProtocol');
@@ -64,6 +65,40 @@ test('held generation binds exact signed selection and survives reopen without a
  const receipt={synthetic:true};acceptHeldSourceSnapshot(p,snapshot.snapshotId,{receipt,verifyAcceptance:()=>true});
  assert.throws(()=>releaseHeldSourceSnapshot(p,snapshot.snapshotId,{verifyAcceptance:()=>true}),/candidate generation retained/);
  assert.throws(()=>prepareSelectedGeneration(p,args),{code:'GENERATION_HELD'});
+});
+
+test('held generation preserves raw GCP custody and binds the generated ODM input',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'generation-gcp-test-')),dbPath=path.join(root,'viewer.sqlite'),db=openDatabase(dbPath);
+ t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
+ const p=new ProcessingRepository(db),gcp=new GcpRepository(db),project=p.createProject({displayName:'Synthetic GCP'});
+ const dataset=p.createDataset({projectId:project.id,displayName:'Synthetic GCP',storageMode:'managed',rootKey:'datasets',relativePath:'synthetic-gcp'});
+ const photoBytes=Buffer.from('synthetic-photo'),csv='point_id,label,latitude,longitude,elevation_m\nGCP-01,Target,44.5,-88.1,244\n';
+ const photoHash=crypto.createHash('sha256').update(photoBytes).digest('hex'),csvHash=crypto.createHash('sha256').update(csv).digest('hex');
+ p.finalizeDataset(dataset.id,[
+  {id:'photo-1',relativePath:'flight/photo.jpg',byteSize:photoBytes.length,sha256:photoHash,contentType:'image/jpeg'},
+  {id:'gcp-source',relativePath:'control.csv',byteSize:Buffer.byteLength(csv),sha256:csvHash,contentType:'text/csv',processingRole:'gcp_source'},
+ ],'d'.repeat(64));
+ const task=p.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Synthetic GCP task'});
+ const set=gcp.importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'generic-csv-v1',sourceFileId:'gcp-source',
+  sourceFilename:'control.csv',sourceSha256:csvHash,sourceContent:csv,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:test',
+  points:[{externalId:'GCP-01',label:'Target',latitude:44.5,longitude:-88.1,elevationM:244,description:null}]});
+ gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'photo-1',pixelX:10,pixelY:20,createdBy:'ops:test'});
+ const provider=p.upsertProvider({type:'nodeodm',displayName:'Synthetic ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
+ const attempt=p.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),keys=crypto.generateKeyPairSync('ed25519');
+ const snapshot=createHeldSourceSnapshot(p,{datasetId:dataset.id,taskId:task.id,attemptId:attempt.id,signer:{issuerId:'issuer',keyId:'key',sign:value=>crypto.sign(null,value,keys.privateKey)}});
+ const generated=p.getAttemptGcpSnapshot(attempt.id);
+ const selected=[
+  {id:'photo-1',relativePath:'flight/photo.jpg',byteSize:photoBytes.length,sha256:photoHash},
+  {id:`gcp_${attempt.id}`,relativePath:'gcp_list.txt',byteSize:Buffer.byteLength(generated.content),sha256:generated.sha256},
+ ];
+ assert.deepEqual(prepareSelectedGeneration(p,{attemptId:attempt.id,generation:1,snapshotId:snapshot.snapshotId,
+  snapshotSha256:snapshot.intentSha256,publicKey:keys.publicKey,rootRef:'operator-root',selected}),
+ {state:'held',replay:false,admissionAvailable:false});
+ const retained=p.database.prepare('SELECT sha256,source_content FROM retained_gcp_sources WHERE dataset_id=?').get(dataset.id);
+ assert.equal(retained.sha256,csvHash);
+ assert.equal(retained.source_content,csv);
+ assert.equal(p.hasHeldSourceSnapshot(dataset.id),true);
+ assert.deepEqual(JSON.parse(p.database.prepare('SELECT selected_json FROM candidate_selected_source_generations WHERE attempt_id=?').get(attempt.id).selected_json),selected);
 });
 
 test('review migration opens an existing database without changing prior rows',t=>{

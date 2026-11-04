@@ -62,6 +62,9 @@ test('Emlid All-columns preserves exact Name and authoritative projected ftUS pr
     declarations: {},
     content: 'Name,Code,Code description,Easting,Northing,Elevation,Description,Longitude,Latitude,Ellipsoidal height,CS name\nltds-1,,,903241.652,549596.746,833.164,Hub,-88.62836667,42.98018648,720.437,NAD83(2011) / WISCRS Dodge and Jefferson (ftUS) + NAVD88(GEOID18) height (ftUS)\n' });
   assert.equal(parsed.points[0].externalId, 'ltds-1');
+  assert.equal(parsed.crs, 'EPSG:6318');
+  assert.equal(parsed.provenance.horizontalCrs, 'EPSG:6318');
+  assert.equal(parsed.provenance.verticalDatum, 'NAVD88(GEOID18) height');
   assert.ok(Math.abs(parsed.points[0].easting - (903241.652 * 1200 / 3937)) < 1e-10);
   assert.ok(Math.abs(parsed.points[0].elevationM - (833.164 * 1200 / 3937)) < 1e-10);
   assert.ok(Math.abs(parsed.points[0].ellipsoidalHeightM - (720.437 * 1200 / 3937)) < 1e-10);
@@ -70,10 +73,12 @@ test('Emlid All-columns preserves exact Name and authoritative projected ftUS pr
   assert.match(confirmationToken(parsed), /^[a-f0-9]{64}$/);
   assert.throws(() => parseGcpInterchange({ format: 'emlid-all-columns-v1', declarations: {}, content:
     'Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,1,2,3,44,-88,2,CRS one (ftUS) + height (ftUS)\nB,1,2,3,44,-88,2,CRS two (ftUS) + height (ftUS)\n' }), /consistent CS name/);
+  assert.throws(() => parseGcpInterchange({ format: 'emlid-all-columns-v1', declarations: { verticalDatum: 'Ellipsoidal height' }, content:
+    'Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,1,2,3,44,-88,2,NAD83(2011) / Projected (m) + NAVD88(GEOID18) height (m)\n' }), /declared verticalDatum does not match/);
 });
 
 test('automatic CSV format detection accepts only complete supported schemas',()=>{
-  const emlid='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nCP-1,1,2,3,44,-88,2,Projected (m) + vertical (m)\n';
+  const emlid='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nCP-1,1,2,3,44,-88,2,NAD83(2011) / Projected (m) + NAVD88 height (m)\n';
   const generic='point_id,label,latitude,longitude,elevation_m\nA,A,44,-88,1\n';
   assert.equal(detectGcpCsvFormat(emlid),'emlid-all-columns-v1');
   assert.equal(detectGcpCsvFormat(`\uFEFF${generic}`),'generic-csv-v1');
@@ -84,15 +89,16 @@ test('automatic CSV format detection accepts only complete supported schemas',()
 test('Emlid metric projected systems remain metric and ambiguous units require confirmation', () => {
   const header = 'Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\n';
   const metric = parseGcpInterchange({ format: 'emlid-all-columns-v1', declarations: {},
-    content: `${header}M-1,500000,4900000,250,44,-88,220,Projected CRS (m) + vertical height (m)\n` });
+    content: `${header}M-1,500000,4900000,250,44,-88,220,NAD83(2011) / Projected CRS (m) + NAVD88 height (m)\n` });
   assert.equal(metric.points[0].easting, 500000);
   assert.equal(metric.points[0].northing, 4900000);
   assert.equal(metric.points[0].elevationM, 250);
   assert.equal(metric.points[0].ellipsoidalHeightM, 220);
   assert.equal(metric.provenance.linearUnit, 'm');
+  assert.equal(metric.provenance.verticalDatum, 'NAVD88 height');
   assert.throws(() => parseGcpInterchange({ format: 'emlid-all-columns-v1', declarations: {},
-    content: `${header}M-1,500000,4900000,250,44,-88,220,Projected CRS\n` }), /preview and confirm/);
+    content: `${header}M-1,500000,4900000,250,44,-88,220,NAD83(2011) / Projected CRS\n` }), /preview and confirm/);
   const confirmed = parseGcpInterchange({ format: 'emlid-all-columns-v1', declarations: { linearUnit: 'm' },
-    content: `${header}M-1,500000,4900000,250,44,-88,220,Projected CRS\n` });
+    content: `${header}M-1,500000,4900000,250,44,-88,220,NAD83(2011) / Projected CRS\n` });
   assert.equal(confirmed.provenance.linearUnit, 'm');
 });

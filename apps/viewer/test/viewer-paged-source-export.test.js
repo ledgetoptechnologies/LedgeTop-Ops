@@ -13,7 +13,7 @@ const { canonicalBytes } = require('../server/referenceProtocol');
 const {
   captureHeldSourceExport, HeldSourceExport, frameStream, gcpEvidenceStream,
   generatedGcpFileStream, MAX_FRAME_BYTES, MAX_GCP_EVIDENCE_BYTES, MAX_GCP_CONTENT_BYTES, MAX_GCP_EVIDENCE_CHUNK_BYTES,
-  GCP_EVIDENCE_DOMAIN, GCP_EVIDENCE_VERSION, GCP_FILE_DOMAIN, GCP_FILE_VERSION, SOURCE_VERSION, SOURCE_DOMAIN, SELECTED_DOMAIN,
+  GCP_EVIDENCE_DOMAIN, GCP_EVIDENCE_VERSION, GCP_EVIDENCE_DOMAIN_V1, GCP_EVIDENCE_VERSION_V1, GCP_FILE_DOMAIN, GCP_FILE_VERSION, SOURCE_VERSION, SOURCE_DOMAIN, SELECTED_DOMAIN,
 } = require('../server/viewerPagedSourceExport');
 
 const rawGcp = 'point_id,label,latitude,longitude,elevation_m\nA,Target,44.5,-88.1,244\n';
@@ -189,7 +189,7 @@ test('source export binds real Viewer rows and attempt GCP evidence in one held 
   assert.equal(value.principal, null);
   assert.equal(value.revocationEpoch, null);
   assert.equal(value.inputManifestSha256, expectedInputHash);
-  assert.equal(value.sourceCount, 4, 'sourceCount counts original dataset files only');
+  assert.equal(value.sourceCount, 5, 'sourceCount includes the retained raw GCP CSV among original dataset files');
   assert.equal(value.selectedCount, 3, 'photo first, LiDAR, then generated GCP; old gcp_list.txt is replaced');
 
   const sourceFrames = assertFrames(value.sourceFrames, SOURCE_DOMAIN, value.sourcePageHashes);
@@ -235,7 +235,7 @@ test('source export frames 16,832 photos with raw and generated GCP records insi
   const f = fixture(t, { imageCount: 16_832 });
   const value = captureHeldSourceExport(f.processing, { datasetId: f.dataset.id, taskId: f.task.id, attemptId: f.attempt.id });
   assert.equal(value.state, 'held_authenticated_source_unavailable');
-  assert.equal(value.sourceCount, 16_835, 'sourceCount excludes the generated GCP object');
+  assert.equal(value.sourceCount, 16_836, 'sourceCount includes the retained raw GCP CSV and excludes the generated GCP object');
   assert.equal(value.selectedCount, 16_834);
   assert.equal(value.sourcePageHashes.length, 33);
   assert.equal(value.selectedPageHashes.length, 33);
@@ -262,6 +262,21 @@ test('attempt without immutable GCP snapshot emits all-null evidence pins', (t) 
   assert.equal(value.gcpFileByteCount, null);
   assert.equal(value.gcpFileSha256, null);
   assert.equal(value.gcpFileFrames, null);
+});
+
+test('legacy v1 attempt evidence stays readable and retains its v1 framing', (t) => {
+  const f=fixture(t);
+  const row=f.database.prepare('SELECT evidence_json FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(f.attempt.id);
+  const legacy=JSON.parse(row.evidence_json);
+  legacy.schemaVersion=1;
+  delete legacy.coordinateContract;
+  f.database.exec('DROP TRIGGER processing_attempt_gcp_snapshot_no_update');
+  f.database.prepare('UPDATE processing_attempt_gcp_snapshots SET evidence_json=? WHERE attempt_id=?').run(JSON.stringify(legacy),f.attempt.id);
+  const value=captureHeldSourceExport(f.processing,{datasetId:f.dataset.id,taskId:f.task.id,attemptId:f.attempt.id});
+  assert.equal(value.gcpEvidenceVersion,GCP_EVIDENCE_VERSION_V1);
+  const frames=assertFrames(value.gcpEvidenceFrames,GCP_EVIDENCE_DOMAIN_V1,value.gcpEvidencePageHashes);
+  assert.ok(frames.every((frame)=>frame.version===GCP_EVIDENCE_VERSION_V1));
+  assert.equal(value.state,'held_authenticated_source_unavailable');
 });
 
 test('source export rejects generated GCP content that no longer matches the attempt input inventory', (t) => {

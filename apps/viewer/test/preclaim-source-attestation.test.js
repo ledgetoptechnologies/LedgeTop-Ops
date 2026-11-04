@@ -42,9 +42,9 @@ function createSignedIncompleteSnapshot(processing, dataset, task, attempt, sign
     datasetId: dataset.id, datasetManifestSha256: exported.datasetManifestSha256,
     taskId: task.id, attemptId: attempt.id,
     inputManifestSha256: crypto.createHash('sha256').update(JSON.stringify(sourceFiles)).digest('hex'),
-    sourceCount, sourcePageHashes,
+    datasetFileCount: processing.getDataset(dataset.id, true).fileCount, sourceCount, sourcePageHashes,
     sourceFrameBytes: sourceFrames.length, selectedCount: 1,
-    selectedPageHashes: [selectedPageHash], selectedFrameBytes: selectedBytes.length,
+    selectedPageHashes: [selectedPageHash], selectedFrameBytes: selectedBytes.length, gcp: null,
   };
   const intentBytes = ReferenceProtocol.canonicalBytes(intent);
   const signature = crypto.sign(null, Buffer.concat([SNAPSHOT_DOMAIN, intentBytes]), privateKey);
@@ -69,10 +69,21 @@ function fixture(t, { accept = true, gcp = false, secondPhoto = false, incomplet
   const dataset = processing.createDataset({ projectId: project.id, displayName: 'Source', storageMode: 'managed', rootKey: 'datasets' });
   const photoHash = crypto.createHash('sha256').update('synthetic-photo-bytes').digest('hex');
   const files = [{ id: 'photo-1', relativePath: 'flight/photo.jpg', byteSize: 21, sha256: photoHash, contentType: 'image/jpeg', ...(photoRole ? { processingRole: photoRole } : {}) }];
+  const gcpContent = 'point_id,label,latitude,longitude,elevation_m\nGCP-01,Target,44.5,-88.1,244\n';
+  const gcpHash = crypto.createHash('sha256').update(gcpContent).digest('hex');
   if (secondPhoto) files.push({ id: 'photo-2', relativePath: 'flight/photo-2.jpg', byteSize: 22, sha256: 'a'.repeat(64), contentType: 'image/jpeg' });
-  if (gcp) files.push({ id: 'gcp-source', relativePath: 'control.csv', byteSize: 12, sha256: 'c'.repeat(64), contentType: 'text/csv', processingRole: 'gcp_source' });
+  if (gcp) files.push({ id: 'gcp-source', relativePath: 'control.csv', byteSize: Buffer.byteLength(gcpContent), sha256: gcpHash, contentType: 'text/csv', processingRole: 'gcp_source' });
   processing.finalizeDataset(dataset.id, files, 'b'.repeat(64));
   const task = processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'ODM task' });
+  if (gcp) {
+    const { GcpRepository } = require('../server/gcpRepository');
+    const repository = new GcpRepository(database);
+    const set = repository.importSet({ datasetId: dataset.id, displayName: 'Control', sourceFormat: 'generic-csv-v1',
+      sourceFileId: 'gcp-source', sourceFilename: 'control.csv', sourceSha256: gcpHash, sourceContent: gcpContent,
+      crs: 'EPSG:4326', elevationUnits: 'm', createdBy: 'ops:test',
+      points: [{ externalId: 'GCP-01', label: 'Target', latitude: 44.5, longitude: -88.1, elevationM: 244, description: null }] });
+    repository.createCorrespondence({ taskId: task.id, pointId: set.points[0].id, imageFileId: 'photo-1', pixelX: 10, pixelY: 20, createdBy: 'ops:test' });
+  }
   const provider = processing.upsertProvider({ type: 'nodeodm', displayName: 'Test ODM', endpoint: 'http://127.0.0.1:3000', enabled: true });
   const attempt = processing.createAttempt({ taskId: task.id, providerId: provider.id, capabilityFingerprint: 'capability-test' });
   const job = processing.claimJob('preclaim-test-owner');
@@ -83,8 +94,12 @@ function fixture(t, { accept = true, gcp = false, secondPhoto = false, incomplet
   else createHeldSourceSnapshot(processing, { datasetId: dataset.id, taskId: task.id, attemptId: attempt.id, signer: snapshotSigner });
 
   const capabilities = ReferenceProtocol.createCapabilities('staging');
-  const sourceObject = { id: 'photo-1', name: 'photo.jpg', byteSize: 21, sha256: photoHash, kind: 'image', mediaType: 'image/jpeg' };
-  const manifest = { id: dataset.id, revision: 1, totalBytes: 21, objectCount: 1, inputCounts: { images: 1, lidarObjects: 0, points: 0 }, objects: [sourceObject], sha256: '0'.repeat(64) };
+  const sourceObjects = [{ id: 'photo-1', name: 'photo.jpg', byteSize: 21, sha256: photoHash, kind: 'image', mediaType: 'image/jpeg' }];
+  const attemptGcp = gcp ? processing.getAttemptGcpSnapshot(attempt.id) : null;
+  if (attemptGcp) sourceObjects.push({ id: `gcp_${attempt.id}`, name: 'gcp_list.txt', byteSize: Buffer.byteLength(attemptGcp.content),
+    sha256: attemptGcp.sha256, kind: 'auxiliary', mediaType: 'text/plain' });
+  const manifest = { id: dataset.id, revision: 1, totalBytes: sourceObjects.reduce((sum, object) => sum + object.byteSize, 0),
+    objectCount: sourceObjects.length, inputCounts: { images: 1, lidarObjects: 0, points: 0 }, objects: sourceObjects, sha256: '0'.repeat(64) };
   manifest.sha256 = ReferenceProtocol.manifestSha256(manifest);
   const submission = {
     schemaVersion: 1, submissionId: attempt.id, manifest,
@@ -133,7 +148,7 @@ test('preclaim signer binds accepted envelope to verified held source snapshot a
   assert.equal(f.processing.hasHeldSourceSnapshot(f.dataset.id), true, 'proof creation must not release held source data');
 });
 
-test('preclaim signer holds GCP, scope mismatch, and an unaccepted outbox intent', t => {
+test('preclaim signer binds attempt GCP evidence while rejecting scope mismatch and unaccepted intents', t => {
   const pending = fixture(t, { accept: false });
   const pendingArgs = { processing: pending.processing, outbox: pending.outbox, attemptId: pending.attempt.id,
     snapshotPublicKey: pending.snapshotKeys.publicKey, expectedSnapshotIssuerId: 'viewer-snapshot-issuer', expectedSnapshotKeyId: 'snapshot-key', signer: pending.signer,
@@ -149,7 +164,9 @@ test('preclaim signer holds GCP, scope mismatch, and an unaccepted outbox intent
   t.after(() => { otherDatabase.close(); fs.rmSync(otherRoot, { recursive: true, force: true }); });
   assert.throws(() => createPreclaimSourceAttestation({ ...args, outbox: new PreparedSubmissionOutbox(otherDatabase) }), { code: 'preclaim_database_mismatch' });
   assert.throws(() => createPreclaimSourceAttestation({ ...args, principalId: 'other-principal' }), { code: 'preclaim_scope_mismatch' });
-  assert.throws(() => createPreclaimSourceAttestation(args), { code: 'preclaim_gcp_extension_unavailable' });
+  const result = createPreclaimSourceAttestation(args);
+  assert.equal(result.proof.manifestSha256, f.response.manifestSha256);
+  assert.equal(f.processing.hasHeldSourceSnapshot(f.dataset.id), true, 'GCP preclaim must keep original source data held');
 });
 
 test('preclaim signer rejects a correctly signed snapshot that omits an eligible photo', t => {

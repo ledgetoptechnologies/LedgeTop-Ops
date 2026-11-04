@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const { canonicalBytes } = require('./referenceProtocol');
 const {
   captureHeldSourceExport, HeldSourceExport, SOURCE_DOMAIN, SELECTED_DOMAIN, SOURCE_VERSION, SELECTED_VERSION,
+  GCP_EVIDENCE_DOMAIN, GCP_FILE_DOMAIN, GCP_EVIDENCE_VERSION, GCP_FILE_VERSION,
 } = require('./viewerPagedSourceExport');
 
 const SNAPSHOT_PROTOCOL = 'ltds-viewer-held-source-snapshot-v1';
@@ -28,6 +29,90 @@ function verifyFrameStream(bytes, pageHashes, domain, expectedVersion) {
     } catch { return false; }
   });
   return valid ? recordCount : false;
+}
+
+function verifyChunkStream(bytes, pageHashes, pageBytes, domain, expectedVersion, attemptId, contentSha256, evidenceSha256 = null) {
+  if (!Buffer.isBuffer(bytes) || !Array.isArray(pageHashes) || !pageHashes.length || !bytes.length || bytes.at(-1) !== 0x0a) return null;
+  if (!Array.isArray(pageBytes) || pageBytes.length !== pageHashes.length) return null;
+  let lines;
+  try { lines = bytes.subarray(0, -1).toString('utf8').split('\n'); } catch { return null; }
+  if (lines.length !== pageHashes.length) return null;
+  let offset = 0, complete = false;
+  const chunks = [];
+  for (let index = 0; index < lines.length; index++) {
+    try {
+      const line = lines[index], frame = JSON.parse(line), canonical = canonicalBytes(frame);
+      if (Buffer.compare(Buffer.from(line, 'utf8'), canonical) !== 0
+          || canonical.length !== pageBytes[index]
+          || frame.version !== expectedVersion || frame.attemptId !== attemptId || frame.index !== index
+          || sha256(Buffer.concat([domain, canonical])) !== pageHashes[index]) return null;
+      if (frame.complete === true) {
+        if (index !== lines.length - 1 || frame.offset !== offset || frame.totalBytes !== offset) return null;
+        if (expectedVersion === GCP_EVIDENCE_VERSION) {
+          if (frame.evidenceSha256 !== contentSha256 || Object.keys(frame).sort().join(',') !== 'attemptId,complete,evidenceSha256,index,offset,totalBytes,version') return null;
+        } else if (frame.fileSha256 !== contentSha256 || frame.evidenceSha256 !== evidenceSha256
+            || Object.keys(frame).sort().join(',') !== 'attemptId,complete,evidenceSha256,fileSha256,index,offset,totalBytes,version') return null;
+        complete = true;
+        continue;
+      }
+      if (complete || frame.offset !== offset || !Number.isSafeInteger(frame.decodedByteCount) || frame.decodedByteCount < 1
+          || typeof frame.data !== 'string' || !/^[A-Za-z0-9_-]+$/.test(frame.data)) return null;
+      if (expectedVersion === GCP_EVIDENCE_VERSION) {
+        if (frame.evidenceSha256 !== contentSha256
+            || Object.keys(frame).sort().join(',') !== 'attemptId,data,decodedByteCount,evidenceSha256,index,offset,version') return null;
+      } else if (frame.fileSha256 !== contentSha256 || frame.evidenceSha256 !== evidenceSha256
+          || Object.keys(frame).sort().join(',') !== 'attemptId,data,decodedByteCount,evidenceSha256,fileSha256,index,offset,version') return null;
+      const decoded = Buffer.from(frame.data, 'base64url');
+      if (!decoded.length || decoded.length !== frame.decodedByteCount || decoded.toString('base64url') !== frame.data) return null;
+      chunks.push(decoded); offset += decoded.length;
+    } catch { return null; }
+  }
+  if (!complete) return null;
+  const content = Buffer.concat(chunks);
+  return sha256(content) === contentSha256 ? content : null;
+}
+
+function snapshotGcp(exported) {
+  const hasEvidence = Buffer.isBuffer(exported.gcpEvidenceFrames);
+  const hasFile = Buffer.isBuffer(exported.gcpFileFrames);
+  if (hasEvidence !== hasFile || Boolean(exported.generatedGcp) !== hasEvidence) fail('snapshot_gcp_extension_incomplete');
+  if (!hasEvidence) return null;
+  if (exported.gcpEvidenceVersion !== GCP_EVIDENCE_VERSION || exported.gcpFileVersion !== GCP_FILE_VERSION
+      || !/^[a-f0-9]{64}$/.test(exported.gcpEvidenceSha256 || '') || !/^[a-f0-9]{64}$/.test(exported.gcpFileSha256 || '')
+      || exported.gcpFileEvidenceSha256 !== exported.gcpEvidenceSha256
+      || !Number.isSafeInteger(exported.gcpEvidenceByteCount) || exported.gcpEvidenceByteCount < 1
+      || !Number.isSafeInteger(exported.gcpFileByteCount) || exported.gcpFileByteCount < 1
+      || exported.gcpEvidenceFrames.length > 24 * 1024 * 1024 || exported.gcpFileFrames.length > 24 * 1024 * 1024
+      || !Array.isArray(exported.gcpEvidencePageHashes) || !Array.isArray(exported.gcpFilePageHashes)
+      || !Array.isArray(exported.gcpEvidencePageBytes) || !Array.isArray(exported.gcpFilePageBytes)
+      || exported.gcpEvidencePageHashes.length !== exported.gcpEvidencePageCount
+      || exported.gcpFilePageHashes.length !== exported.gcpFilePageCount
+      || exported.gcpEvidencePageBytes.length !== exported.gcpEvidencePageCount
+      || exported.gcpFilePageBytes.length !== exported.gcpFilePageCount) fail('snapshot_gcp_extension_invalid');
+  const evidenceBytes = verifyChunkStream(exported.gcpEvidenceFrames, exported.gcpEvidencePageHashes,
+    exported.gcpEvidencePageBytes, GCP_EVIDENCE_DOMAIN, GCP_EVIDENCE_VERSION, exported.attemptId, exported.gcpEvidenceSha256);
+  const fileBytes = verifyChunkStream(exported.gcpFileFrames, exported.gcpFilePageHashes,
+    exported.gcpFilePageBytes, GCP_FILE_DOMAIN, GCP_FILE_VERSION, exported.attemptId, exported.gcpFileSha256, exported.gcpEvidenceSha256);
+  if (!evidenceBytes || !fileBytes || evidenceBytes.length !== exported.gcpEvidenceByteCount
+      || fileBytes.length !== exported.gcpFileByteCount || exported.generatedGcp.byteSize !== fileBytes.length
+      || exported.generatedGcp.sha256 !== exported.gcpFileSha256 || exported.generatedGcp.attemptId !== exported.attemptId) fail('snapshot_gcp_stream_invalid');
+  try { new TextDecoder('utf-8', { fatal: true }).decode(evidenceBytes); new TextDecoder('utf-8', { fatal: true }).decode(fileBytes); }
+  catch { fail('snapshot_gcp_utf8_invalid'); }
+  return {
+    evidenceVersion: exported.gcpEvidenceVersion,
+    evidencePageHashes: exported.gcpEvidencePageHashes,
+    evidencePageBytes: exported.gcpEvidencePageBytes,
+    evidencePageCount: exported.gcpEvidencePageCount,
+    evidenceByteCount: exported.gcpEvidenceByteCount,
+    evidenceSha256: exported.gcpEvidenceSha256,
+    fileVersion: exported.gcpFileVersion,
+    filePageHashes: exported.gcpFilePageHashes,
+    filePageBytes: exported.gcpFilePageBytes,
+    filePageCount: exported.gcpFilePageCount,
+    fileByteCount: exported.gcpFileByteCount,
+    fileSha256: exported.gcpFileSha256,
+    generatedGcp: exported.generatedGcp,
+  };
 }
 
 function validateSigner(signer) {
@@ -53,10 +138,14 @@ function createHeldSourceSnapshot(processing, {
       fail('snapshot_identity_reused');
     }
     const exported = captureHeldSourceExport(processing, { datasetId, taskId, attemptId, joinTransaction: true });
-    // The current Processing candidate does not yet verify the distinct GCP
-    // evidence and generated-file streams as part of its signed intake.
-    if (exported.generatedGcp || exported.gcpEvidenceFrames || exported.gcpFileFrames) fail('snapshot_gcp_extension_unavailable');
     if (!Buffer.isBuffer(exported.sourceFrames) || !Buffer.isBuffer(exported.selectedFrames)) fail('snapshot_frames_unavailable');
+    const gcp = snapshotGcp(exported);
+    const sourceRecords = verifyFrameStream(exported.sourceFrames, exported.sourcePageHashes, SOURCE_DOMAIN, SOURCE_VERSION);
+    if (sourceRecords === false) fail('snapshot_source_frames_invalid');
+    const records = exported.sourceFrames.subarray(0, -1).toString('utf8').split('\n').flatMap(line => JSON.parse(line).records);
+    if (!gcp && records.some(record => record?.type === 'dataset_file' && record.processingRole === 'gcp_source')) {
+      fail('snapshot_gcp_evidence_required');
+    }
 
     const intent = {
       protocol: SNAPSHOT_PROTOCOL,
@@ -70,11 +159,13 @@ function createHeldSourceSnapshot(processing, {
       attemptId: exported.attemptId,
       inputManifestSha256: exported.inputManifestSha256,
       sourceCount: exported.sourceCount,
+      datasetFileCount: exported.datasetFileCount,
       sourcePageHashes: exported.sourcePageHashes,
       sourceFrameBytes: exported.sourceFrames.length,
       selectedCount: exported.selectedCount,
       selectedPageHashes: exported.selectedPageHashes,
       selectedFrameBytes: exported.selectedFrames.length,
+      gcp,
     };
     const intentBytes = canonicalBytes(intent);
     const signature = Buffer.from(signer.sign(Buffer.concat([SNAPSHOT_DOMAIN, intentBytes])));
@@ -84,14 +175,15 @@ function createHeldSourceSnapshot(processing, {
       snapshot_id,dataset_id,task_id,attempt_id,dataset_manifest_sha256,input_manifest_sha256,
       intent_json,intent_sha256,issuer_id,key_id,signature,source_frames,selected_frames,
       source_page_hashes_json,selected_page_hashes_json,source_frame_bytes,selected_frame_bytes,
-      status,created_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, ?,?,'held',?)`).run(
+      gcp_evidence_frames,gcp_file_frames,status,created_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'held',?)`).run(
       snapshotId, exported.datasetId, exported.taskId, exported.attemptId,
       exported.datasetManifestSha256, exported.inputManifestSha256,
       intentBytes.toString('utf8'), intentSha256, signer.issuerId, signer.keyId, signature,
       exported.sourceFrames, exported.selectedFrames,
       JSON.stringify(exported.sourcePageHashes), JSON.stringify(exported.selectedPageHashes),
-      exported.sourceFrames.length, exported.selectedFrames.length, createdAt,
+      exported.sourceFrames.length, exported.selectedFrames.length,
+      gcp ? exported.gcpEvidenceFrames : null, gcp ? exported.gcpFileFrames : null, createdAt,
     );
     return getHeldSourceSnapshot(processing, snapshotId);
   });
@@ -107,6 +199,8 @@ function getHeldSourceSnapshot(processing, snapshotId) {
     status: row.status, intent: JSON.parse(row.intent_json), intentSha256: row.intent_sha256,
     issuerId: row.issuer_id, keyId: row.key_id, signature: Buffer.from(row.signature),
     sourceFrames: Buffer.from(row.source_frames), selectedFrames: Buffer.from(row.selected_frames),
+    gcpEvidenceFrames: row.gcp_evidence_frames === null ? null : Buffer.from(row.gcp_evidence_frames),
+    gcpFileFrames: row.gcp_file_frames === null ? null : Buffer.from(row.gcp_file_frames),
     sourcePageHashes: JSON.parse(row.source_page_hashes_json), selectedPageHashes: JSON.parse(row.selected_page_hashes_json),
     sourceFrameBytes: row.source_frame_bytes, selectedFrameBytes: row.selected_frame_bytes,
     acceptanceReceiptSha256: row.acceptance_receipt_sha256,
@@ -120,6 +214,17 @@ function verifyHeldSourceSnapshot(snapshot, publicKey) {
     const intentBytes = canonicalBytes(snapshot.intent);
     const sourceRecords = verifyFrameStream(snapshot.sourceFrames, snapshot.sourcePageHashes, SOURCE_DOMAIN, SOURCE_VERSION);
     const selectedRecords = verifyFrameStream(snapshot.selectedFrames, snapshot.selectedPageHashes, SELECTED_DOMAIN, SELECTED_VERSION);
+    const gcp = snapshot.intent.gcp;
+    let gcpValid = gcp == null && snapshot.gcpEvidenceFrames === null && snapshot.gcpFileFrames === null;
+    if (gcp && snapshot.gcpEvidenceFrames && snapshot.gcpFileFrames) {
+      const evidence = verifyChunkStream(snapshot.gcpEvidenceFrames, gcp.evidencePageHashes, gcp.evidencePageBytes,
+        GCP_EVIDENCE_DOMAIN, gcp.evidenceVersion, snapshot.attemptId, gcp.evidenceSha256);
+      const file = verifyChunkStream(snapshot.gcpFileFrames, gcp.filePageHashes, gcp.filePageBytes,
+        GCP_FILE_DOMAIN, gcp.fileVersion, snapshot.attemptId, gcp.fileSha256, gcp.evidenceSha256);
+      gcpValid = Boolean(evidence && file && evidence.length === gcp.evidenceByteCount
+        && file.length === gcp.fileByteCount && gcp.generatedGcp?.sha256 === gcp.fileSha256
+        && gcp.generatedGcp?.byteSize === file.length);
+    }
     return snapshot.snapshotId === snapshot.intent.snapshotId
       && snapshot.issuerId === snapshot.intent.issuerId && snapshot.keyId === snapshot.intent.keyId
       && snapshot.createdAt === snapshot.intent.createdAt
@@ -131,6 +236,7 @@ function verifyHeldSourceSnapshot(snapshot, publicKey) {
       && snapshot.sourceFrameBytes === snapshot.intent.sourceFrameBytes
       && snapshot.selectedFrameBytes === snapshot.intent.selectedFrameBytes
       && sourceRecords === snapshot.intent.sourceCount && selectedRecords === snapshot.intent.selectedCount
+      && gcpValid
       && sha256(intentBytes) === snapshot.intentSha256
       && crypto.verify(null, Buffer.concat([SNAPSHOT_DOMAIN, intentBytes]), publicKey, snapshot.signature)
       && snapshot.sourceFrames.length === snapshot.sourceFrameBytes
@@ -170,4 +276,5 @@ function releaseHeldSourceSnapshot(processing, snapshotId, { verifyAcceptance } 
 module.exports = {
   SNAPSHOT_PROTOCOL, SNAPSHOT_DOMAIN, createHeldSourceSnapshot, getHeldSourceSnapshot,
   verifyHeldSourceSnapshot, acceptHeldSourceSnapshot, releaseHeldSourceSnapshot,
+  verifyChunkStream,
 };

@@ -20,10 +20,29 @@ test('transient poll failures must not mark a still-running provider task failed
  for(let i=0;i<5;i++){f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id='poll'").run();await processOne(deps,'poll-worker');}
  assert.equal(f.processing.getAttempt(f.attempt.id).status,'running','transport errors do not establish upstream failure');
  assert.equal(f.db.prepare("SELECT status FROM processing_jobs WHERE id='poll'").get().status,'pending','poll remains eligible for recovery');
- f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id='poll'").run();
+ f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='reconcile' AND status='pending'").run(f.attempt.id);
  await processOne({processing:f.processing,config:{},adapterFactory:()=>({status:async()=>({uuid:f.processing.getAttempt(f.attempt.id).providerTaskId,status:'completed',statusCode:40,progress:1}),output:async()=>({lines:[],nextLine:0})})},'recovered-worker');
  assert.equal(f.processing.getAttempt(f.attempt.id).status,'ingesting');
  assert.equal(f.db.prepare("SELECT count(*) n FROM processing_jobs WHERE attempt_id=? AND job_type='ingest' AND status='pending'").get(f.attempt.id).n,1);
+});
+
+test('upstream queue remains queued in Viewer and persists the validated node assignment',async t=>{
+ const f=fixture(t),adapterFactory=()=>({
+  status:async()=>({uuid:f.processing.getAttempt(f.attempt.id).providerTaskId,status:'queued_upstream',statusCode:10,progress:0,queueState:'waiting_for_dispatch',nodeId:'node-east-01',held:true}),
+  output:async()=>({lines:['waiting for node'],nextLine:1}),
+ });
+ await processOne({processing:f.processing,config:{},adapterFactory},'queue-worker');
+ let attempt=f.processing.getAttempt(f.attempt.id);
+ assert.equal(attempt.status,'queued_upstream');assert.equal(f.processing.getTask(f.task.id).status,'queued');
+ assert.deepEqual(attempt.providerStatus,{queueState:'waiting_for_dispatch',nodeId:'node-east-01',held:true});
+  f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='reconcile' AND status='pending'").run(f.attempt.id);
+ await processOne({processing:f.processing,config:{},adapterFactory:()=>({
+  status:async()=>({uuid:attempt.providerTaskId,status:'running',statusCode:20,progress:.2,nodeId:'node-east-01'}),
+  output:async()=>({lines:['starting odm_meshing'],nextLine:1}),
+ })},'running-worker');
+ attempt=f.processing.getAttempt(f.attempt.id);
+ assert.equal(attempt.status,'running');assert.equal(f.processing.getTask(f.task.id).status,'processing');
+ assert.deepEqual(attempt.providerStatus,{nodeId:'node-east-01'});
 });
 
 test('unknown upstream status must not become a storage constraint error',async t=>{

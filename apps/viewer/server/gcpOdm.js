@@ -8,9 +8,12 @@ function scalar(value, field) {
   return Number.isInteger(number) ? String(number) : number.toFixed(8).replace(/0+$/, '').replace(/\.$/, '');
 }
 
-function odmGcpList(rows) {
+function odmGcpList(rows, { horizontalCrs = null } = {}) {
   if (!Array.isArray(rows) || !rows.length) return null;
-  const lines = ['EPSG:4326'];
+  const crsValues = [...new Set(rows.map((row) => row.horizontalCrs || horizontalCrs || 'EPSG:4326'))];
+  if (crsValues.length !== 1 || !['EPSG:4326', 'EPSG:6318'].includes(crsValues[0]))
+    throw Object.assign(new Error('GCP correspondences require one supported horizontal CRS'), { code: 'invalid_gcp_correspondence' });
+  const lines = [crsValues[0]];
   for (const row of rows) {
     const imageName = path.basename(String(row.relativePath || ''));
     if (!imageName || /\s/.test(imageName))

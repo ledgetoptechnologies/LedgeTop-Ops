@@ -98,6 +98,9 @@ nav.task-page-navigation{display:flex;flex-wrap:nowrap;gap:4px;overflow-x:auto;m
 .processing-row small{color:var(--muted)}
 .processing-meta{display:grid;justify-items:end;gap:3px;text-align:right}
 .processing-group.attention .processing-row{border-color:color-mix(in srgb,var(--red) 40%,transparent)}
+.processing-row.held{border-color:color-mix(in srgb,var(--amber) 58%,transparent);background:color-mix(in srgb,var(--amber) 5%,var(--surface-1))}
+.processing-hold-note{max-width:64ch;color:var(--amber-text)!important}
+.status.held_for_inspection{background:color-mix(in srgb,var(--amber) 14%,transparent);color:var(--amber-text)}
 @media(max-width:720px){.processing-row{grid-template-columns:1fr;gap:8px}.processing-meta{justify-items:start;text-align:left}.processing-row>button{justify-self:start;min-height:44px}}
 
 /* Customers dialog. */
