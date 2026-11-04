@@ -61,6 +61,11 @@ describe("real Client entrypoint canonical navigation mount",()=>{
       expect(response.status).toBe(308);
       expect(response.headers.get("Location")).toBe(`${PORTAL}/portal/account`);
     }
+    for(const origin of [OLD,LTT]) for(const key of ["token","access_code","state","unknown"]) {
+      const response=await f.request(`${origin}/portal*?${key}=synthetic-secret`);
+      expect(response.status).toBe(308);
+      expect(response.headers.get("Location")).toBe(`${PORTAL}/portal`);
+    }
     expect(f.prepare).not.toHaveBeenCalled();
   });
   it("routes fresh mixed-host public and private entries to their distinct fixed destinations",async()=>{
