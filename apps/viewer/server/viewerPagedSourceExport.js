@@ -13,8 +13,8 @@ const SELECTED_VERSION = 'ltds-viewer-selected-frames-v1';
 const SOURCE_DOMAIN = Buffer.from('ltds-viewer-source-frame-v1\0', 'ascii');
 const SELECTED_DOMAIN = Buffer.from('ltds-viewer-selected-frame-v1\0', 'ascii');
 const BINDING_DOMAIN = Buffer.from('ltds-viewer-selected-binding-v1\0', 'ascii');
-const GCP_EVIDENCE_VERSION = 'ltds-viewer-gcp-evidence-chunks-v1';
-const GCP_EVIDENCE_DOMAIN = Buffer.from('ltds-viewer-gcp-evidence-frame-v1\0', 'ascii');
+const GCP_EVIDENCE_VERSION = 'ltds-viewer-gcp-evidence-chunks-v2';
+const GCP_EVIDENCE_DOMAIN = Buffer.from('ltds-viewer-gcp-evidence-frame-v2\0', 'ascii');
 const GCP_FILE_VERSION = 'ltds-viewer-generated-gcp-file-chunks-v1';
 const GCP_FILE_DOMAIN = Buffer.from('ltds-viewer-generated-gcp-file-frame-v1\0', 'ascii');
 const MAX_FRAME_BYTES = 256 * 1024;
@@ -249,7 +249,7 @@ function generatedGcpFileStream(fileBytes, attemptId, evidenceSha256) {
 }
 
 function assertGcpEvidence(evidence, filesById) {
-  if (!evidence || evidence.schemaVersion !== 1 || !Array.isArray(evidence.correspondences)) throw new HeldSourceExport('gcp_evidence_unavailable');
+  if (!evidence || evidence.schemaVersion !== 2 || !evidence.coordinateContract || !Array.isArray(evidence.correspondences)) throw new HeldSourceExport('gcp_evidence_unavailable');
   const refs = new Map();
   for (const mark of evidence.correspondences) {
     const source = filesById.get(mark.sourceGcpDatasetFileId);

@@ -189,7 +189,7 @@ test('source export binds real Viewer rows and attempt GCP evidence in one held 
   assert.equal(value.principal, null);
   assert.equal(value.revocationEpoch, null);
   assert.equal(value.inputManifestSha256, expectedInputHash);
-  assert.equal(value.sourceCount, 4, 'sourceCount counts original dataset files only');
+  assert.equal(value.sourceCount, 5, 'sourceCount includes the retained raw GCP CSV among original dataset files');
   assert.equal(value.selectedCount, 3, 'photo first, LiDAR, then generated GCP; old gcp_list.txt is replaced');
 
   const sourceFrames = assertFrames(value.sourceFrames, SOURCE_DOMAIN, value.sourcePageHashes);
@@ -235,7 +235,7 @@ test('source export frames 16,832 photos with raw and generated GCP records insi
   const f = fixture(t, { imageCount: 16_832 });
   const value = captureHeldSourceExport(f.processing, { datasetId: f.dataset.id, taskId: f.task.id, attemptId: f.attempt.id });
   assert.equal(value.state, 'held_authenticated_source_unavailable');
-  assert.equal(value.sourceCount, 16_835, 'sourceCount excludes the generated GCP object');
+  assert.equal(value.sourceCount, 16_836, 'sourceCount includes the retained raw GCP CSV and excludes the generated GCP object');
   assert.equal(value.selectedCount, 16_834);
   assert.equal(value.sourcePageHashes.length, 33);
   assert.equal(value.selectedPageHashes.length, 33);

@@ -2304,6 +2304,13 @@ const MIGRATIONS = [
     ALTER TABLE processing_attempts ADD COLUMN provider_status_json TEXT
       CHECK(provider_status_json IS NULL OR json_valid(provider_status_json));
   `},
+  {version:50,name:'gcp_source_horizontal_crs',sql:`
+    ALTER TABLE gcp_sets ADD COLUMN horizontal_crs TEXT NOT NULL DEFAULT 'EPSG:4326'
+      CHECK(horizontal_crs IN ('EPSG:4326','EPSG:6318'));
+    UPDATE gcp_sets SET horizontal_crs='EPSG:6318'
+      WHERE id IN (SELECT set_id FROM gcp_import_provenance
+        WHERE adapter='emlid-all-columns-v1' AND upper(coordinate_system) LIKE 'NAD83(2011)%');
+  `},
 ];
 
 function applyMigrations(database) {

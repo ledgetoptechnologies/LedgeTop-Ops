@@ -92,7 +92,7 @@ test('legacy source custody issues block GCP-set deletion with a safe conflict',
 
 test('automatic GCP CSV discovery imports exact Emlid sources idempotently and ignores unrelated CSVs',async(t)=>{
   const {base,dataset,root,database}=await fixture(t),directory=path.join(root,'datasets',dataset.relativePath),createdAt=new Date().toISOString();
-  const valid='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nCP-01,500000,4900000,250,44.5,-88.1,230,Projected (m) + vertical (m)\n';
+  const valid='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nCP-01,500000,4900000,250,44.5,-88.1,230,NAD83(2011) / Projected (m) + NAVD88 height (m)\n';
   const invalid='date,temperature\n2026-01-01,12\n',validPath=path.join(directory,'survey.csv'),invalidPath=path.join(directory,'notes.csv');
   fs.writeFileSync(validPath,valid);fs.writeFileSync(invalidPath,invalid);
   const insert=database.prepare('INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,created_at) VALUES (?,?,?,?,?,?,?)');
@@ -102,6 +102,7 @@ test('automatic GCP CSV discovery imports exact Emlid sources idempotently and i
   const route=`${base}/api/v1/datasets/${dataset.id}/gcp-sets/auto-import`,headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'gcp-auto-import-1'};
   const first=await fetch(route,{method:'POST',headers,body:'{}'});assert.equal(first.status,200);const result=await first.json();
   assert.equal(result.imported,1);assert.equal(result.ignoredInvalid,1);assert.equal(result.sets.length,1);assert.equal(result.sets[0].sourceFileId,validId);
+  assert.equal(result.sets[0].crs,'EPSG:6318');assert.equal(result.sets[0].provenance.horizontalCrs,'EPSG:6318');
   const points=await(await fetch(`${base}/api/v1/gcp-sets/${result.sets[0].id}`,{headers})).json();
   assert.equal(points.points[0].externalId,'CP-01');assert.equal(points.set.provenance.adapter,'emlid-all-columns-v1');
   assert.equal(fs.readFileSync(validPath,'utf8'),valid,'raw source CSV remains byte-for-byte in dataset storage');
