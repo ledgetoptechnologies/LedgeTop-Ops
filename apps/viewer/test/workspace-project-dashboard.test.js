@@ -187,6 +187,8 @@ test('providers are master-detail and diagnostics owns storage health and trash'
   assert.match(source,/API version/);
   assert.match(source,/Processing engine/);
   assert.match(source,/Queue/);
+  assert.match(source,/active or waiting/);
+  assert.match(source,/maximum parallel tasks/);
   assert.match(source,/provider-option-list/);
   assert.match(source,/Processing presets/);
   assert.doesNotMatch(source,/aria-label="Detected processing options"/);
