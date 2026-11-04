@@ -60,6 +60,10 @@ function timestamp(value) {
 function validateBinding(value) {
   closed(value, BINDING_FIELDS, 'viewer_receipt_v2_binding_invalid');
   if (!asciiTree(value)
+      || typeof value.coordinatorAuthorityId !== 'string' || typeof value.viewerPrincipalId !== 'string'
+      || typeof value.submissionId !== 'string' || typeof value.activationId !== 'string'
+      || typeof value.viewerTaskId !== 'string' || typeof value.viewerAttemptId !== 'string'
+      || typeof value.jobId !== 'string' || typeof value.environment !== 'string'
       || !ID.test(value.coordinatorAuthorityId) || !ID.test(value.viewerPrincipalId)
       || !UUID.test(value.submissionId) || !UUID.test(value.activationId)
       || !UUID.test(value.viewerTaskId) || !UUID.test(value.viewerAttemptId)
@@ -116,7 +120,8 @@ function createViewerReceiptV2SignerCandidate({ issuerId, keyId, privateKeyPem, 
     const receiptId = idFactory(), storageReceiptId = idFactory();
     const acceptedAtValue = clock();
     const acceptedAt = acceptedAtValue instanceof Date ? acceptedAtValue.toISOString() : acceptedAtValue;
-    if (!ID.test(receiptId) || !ID.test(storageReceiptId) || !timestamp(acceptedAt)
+    if (typeof receiptId !== 'string' || typeof storageReceiptId !== 'string'
+        || !ID.test(receiptId) || !ID.test(storageReceiptId) || !timestamp(acceptedAt)
         || new Set([receiptId, storageReceiptId, acceptance.receiptId, acceptance.storageReceiptId]).size !== 4)
       fail('viewer_receipt_v2_receipt_identity_invalid');
 

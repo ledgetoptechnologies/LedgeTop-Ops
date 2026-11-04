@@ -32,7 +32,7 @@ test('candidate signs the bound complete result closure in persisted order with 
   assert.equal(crypto.verify(null, Buffer.concat([candidate.DOMAIN, protocol.canonicalBytes(body)]), publicKey, bytes), true);
 });
 
-test('candidate rejects partial or reordered closure, open acceptance objects and non-ASCII bindings', () => {
+test('candidate rejects partial or reordered closure, open acceptance objects, non-ASCII and non-string identities', () => {
   const fixture = createFixture();
   const signer = candidate.createViewerReceiptV2SignerCandidate({
     issuerId: 'viewer-test-issuer',
@@ -64,6 +64,23 @@ test('candidate rejects partial or reordered closure, open acceptance objects an
   value = input();
   value.expected.viewerPrincipalId = 'viewer-\u2603';
   assert.throws(() => signer(value), { code: 'viewer_receipt_v2_binding_invalid' });
+
+  for (const field of ['coordinatorAuthorityId', 'viewerPrincipalId', 'submissionId', 'activationId', 'viewerTaskId', 'viewerAttemptId', 'jobId']) {
+    value = input();
+    value.expected[field] = 42;
+    assert.throws(() => signer(value), { code: 'viewer_receipt_v2_binding_invalid' }, `${field} must be a string`);
+  }
+
+  let idIndex = 0;
+  const numericIdSigner = candidate.createViewerReceiptV2SignerCandidate({
+    issuerId: 'viewer-test-issuer', keyId: 'viewer-test-key',
+    privateKeyPem: crypto.createPrivateKey({
+      key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.from(Array.from({ length: 32 }, (_, i) => i))]),
+      format: 'der', type: 'pkcs8',
+    }).export({ type: 'pkcs8', format: 'pem' }).toString(),
+    idFactory: () => [42, '22222222-2222-4222-8222-222222222222'][idIndex++],
+  });
+  assert.throws(() => numericIdSigner(input()), { code: 'viewer_receipt_v2_receipt_identity_invalid' });
 });
 
 const processingIntegrationTest = process.env.PROCESSING_SOURCE ? test : test.skip;
