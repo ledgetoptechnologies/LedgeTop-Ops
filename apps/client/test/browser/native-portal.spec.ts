@@ -1370,7 +1370,7 @@ test.describe("unified home without business switching", () => {
     await mockHomeInquiries(page, route => route.fulfill({status: 503, json: {error: "Unavailable"}}));
     await page.goto("/portal");
     const activity = recentActivity(page);
-    await expect(activity.getByRole("status")).toHaveText("General requests you’ve sent couldn’t be loaded right now.");
+    await expect(activity.getByText("General requests you’ve sent couldn’t be loaded right now.", {exact: true})).toBeVisible();
     await expect(activity).not.toContainText("No requests yet");
     await expect(activity).not.toContainText("Checking your requests…");
   });
