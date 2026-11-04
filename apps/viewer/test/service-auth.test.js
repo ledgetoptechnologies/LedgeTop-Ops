@@ -1,13 +1,14 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { openDatabase } = require('../server/database');
 const { ViewerRepository } = require('../server/repository');
-const { signServiceRequest, verifyServiceRequest } = require('../server/serviceAuth');
+const { signServiceRequest, verifyServiceRequest, verifyServiceRequestDigest } = require('../server/serviceAuth');
 
 function fixture(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-viewer-auth-test-'));
@@ -52,6 +53,34 @@ test('accepts one correctly signed request and rejects its replay', (t) => {
   };
   assert.deepEqual(verifyServiceRequest(request), { ok: true, keyId: 'ops-v1' });
   assert.deepEqual(verifyServiceRequest(request), { ok: false, code: 'replayed_service_auth' });
+});
+
+test('matches Processing sender auth for the Viewer object-chunk route', (t) => {
+  const repository = fixture(t);
+  const secret = 'synthetic-viewer-service-key-material';
+  const body = Buffer.from('synthetic chunk bytes');
+  const path = '/api/v1/reference/v1/acceptances/receipt-test/objects/result-test?offset=7';
+  const nowMs = 1_793_620_800_000;
+  const bodySha256 = 'cb20255c9267446562175b1bd8518aeaa4aa6538e85371dc6725eef474f0dd3d';
+  assert.equal(crypto.createHash('sha256').update(body).digest('hex'), bodySha256);
+  const headers = {
+    'x-ltds-key-id': 'synthetic-service',
+    'x-ltds-timestamp': '1793620800',
+    'x-ltds-nonce': 'nonce_20261102_0000000000000000',
+    'x-ltds-content-sha256': bodySha256,
+    'x-ltds-signature': 'U71Kj7RkLd3IwyLLuWiJo-eGRrDJnsohjtJl-4FveNA',
+  };
+  assert.deepEqual(verifyServiceRequestDigest({
+    headers,
+    method: 'PUT',
+    path,
+    bodySha256,
+    repository,
+    nowMs,
+    expectedKeyId: 'synthetic-service',
+    secret,
+    skewSeconds: 300,
+  }), { ok: true, keyId: 'synthetic-service' });
 });
 
 test('binds signature to path, body, method, key, and timestamp window', (t) => {

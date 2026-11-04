@@ -2,20 +2,22 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
+import { groupProjects } from '../workspace-hierarchy.mjs';
+import { canManageHierarchy } from '../workspace-hierarchy-controls.mjs';
 
 const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
 const lines=source.split(/\r?\n/);
 function declaration(name){const line=lines.find(line=>line.startsWith(`function ${name}(`)||line.startsWith(`const ${name}=`));assert.ok(line,`Missing shipped declaration ${name}`);return line;}
-const names=['esc','available','empty','field','button','dangerButton','badge','taskFact','datasetActions','activeTaskAction','artifactActions','outputPanel','gcpPanel','taskQuickActions','taskPanel','taskDetail','taskWorkspaceBody','taskWorkspacePage','readWorkspaceView','workspaceView','workspaceUrl','applyWorkspaceView','validateWorkspaceView','syncWorkspaceView','navigateWorkspace','hydrateExpandedTask','render'];
+const names=['esc','available','empty','field','button','dangerButton','badge','taskFact','datasetActions','activeTaskAction','artifactActions','outputPanel','gcpPanel','taskQuickActions','heldSubmission','attemptStatusLabel','taskPanel','taskDetail','taskWorkspaceBody','taskWorkspacePage','readWorkspaceView','workspaceView','workspaceUrl','applyWorkspaceView','validateWorkspaceView','syncWorkspaceView','navigateWorkspace','hydrateExpandedTask','disposeGcpNearbyMap','render'];
 function fixture(permissions=['viewer.gcp.read','viewer.gcp.write','viewer.processing.write','viewer.processing.publish','viewer.shares.create','viewer.storage.purge']){
 const task={id:'task',projectId:'project',datasetId:'dataset',displayName:'Church <test>',createdAt:'2026-09-01',status:'ready_for_review',latestAttempt:{id:'active',status:'ready_for_review',providerId:'provider'},metrics:{sourceImageCount:20}},dataset={id:'dataset',status:'finalized',displayName:'Source'},state={section:'dashboard',selectedProjectId:'project',expandedTaskId:'task',taskPage:null,projects:[{id:'project',displayName:'Site',status:'active'}],tasks:[task],datasets:[dataset],outputs:[],providers:[{id:'provider',displayName:'Processing node'}],presets:[],taskDetails:{task:{task,gcp:{sets:[]},storage:{task:{totalBytes:4096}}}}},events=[],listeners={};
   const content={innerHTML:''},title={textContent:''},location={origin:'https://viewer.test',href:'https://viewer.test/workspace?section=dashboard&project=project&task=task'};
-const context=vm.createContext({state,URL,URLSearchParams,location,history:{pushState:(_state,_unused,url)=>{events.push(['push',url]);location.href=new URL(url,location.origin).href;},replaceState:(_state,_unused,url)=>{events.push(['replace',url]);location.href=new URL(url,location.origin).href;}},WORKSPACE_SECTIONS:new Set(['dashboard','providers','background','trash','diagnostics']),ACTIVE:new Set(['running','queued_upstream','derivatives']),NAV:[['dashboard','x','Dashboard']],can:permission=>permissions.includes(permission),bytes:value=>`${value} B`,dateTime:value=>String(value),duration:attempt=>`runtime:${attempt.id||'none'}`,durationFromMs:value=>`${value} ms`,formatGsd:value=>`${value} GSD`,formatArea:value=>`${value} area`,groupedNumber:value=>String(value),orthophotoPreview:()=>'<figure class="orthophoto-preview">Ortho</figure>',canShareOutput:()=>false,lodAction:()=>'',taskLodNotice:()=>'',gcpWorkspace:()=>({}),gcpPointName:point=>point?.id||'',gcpImageName:image=>image?.id||'',gcpMarkerStyle:()=>'',releaseAllGcpImages:()=>events.push(['release-images']),shell:{classList:{remove:()=>{}}},refreshTaskDetails:taskId=>events.push(['hydrate',taskId]),content,document:{querySelector:selector=>selector==='#page-title'?title:null},renderNav:()=>{},updateActivityIndicator:()=>{},bind:()=>{},bindTaskDisclosures:()=>{},hydrateOrthophotoPreviews:()=>{},storageUsagePoll:{sync:()=>{}},clearInterval:()=>{},setInterval:()=>1,dashboard:()=>'<div>Dashboard</div>',background:()=>'',providers:()=>'',trash:()=>'',diagnostics:()=>'',addEventListener:(name,listener)=>{listeners[name]=listener;}});
+const context=vm.createContext({state,gcpNearbyMap:null,groupProjects,canManageHierarchy,URL,URLSearchParams,location,history:{pushState:(_state,_unused,url)=>{events.push(['push',url]);location.href=new URL(url,location.origin).href;},replaceState:(_state,_unused,url)=>{events.push(['replace',url]);location.href=new URL(url,location.origin).href;}},WORKSPACE_SECTIONS:new Set(['dashboard','providers','background','trash','diagnostics']),ACTIVE:new Set(['running','queued_upstream','derivatives']),PROCESSING_STARTED:new Set(['running','ingesting','derivatives']),NAV:[['dashboard','x','Dashboard']],can:permission=>permissions.includes(permission),bytes:value=>`${value} B`,dateTime:value=>String(value),duration:attempt=>`runtime:${attempt.id||'none'}`,durationFromMs:value=>`${value} ms`,formatGsd:value=>`${value} GSD`,formatArea:value=>`${value} area`,groupedNumber:value=>String(value),orthophotoPreview:()=>'<figure class="orthophoto-preview">Ortho</figure>',canShareOutput:()=>false,lodAction:()=>'',taskLodNotice:()=>'',gcpWorkspace:()=>({}),gcpCrsConfirmation:()=>'<div>Coordinates not confirmed</div>',gcpPointName:point=>point?.id||'',gcpImageName:image=>image?.id||'',gcpMarkerStyle:()=>'',releaseAllGcpImages:()=>events.push(['release-images']),shell:{classList:{remove:()=>{}}},refreshTaskDetails:taskId=>events.push(['hydrate',taskId]),refreshGcpWorkspace:async()=>{},content,document:{querySelector:selector=>selector==='#page-title'?title:null},renderNav:()=>{},updateActivityIndicator:()=>{},bind:()=>{},bindTaskDisclosures:()=>{},hydrateOrthophotoPreviews:()=>{},renderGcpNearbyMap:()=>{},storageUsagePoll:{sync:()=>{}},clearInterval:()=>{},setInterval:()=>1,dashboard:()=>'<div>Dashboard</div>',background:()=>'',providers:()=>'',trash:()=>'',diagnostics:()=>'',addEventListener:(name,listener)=>{listeners[name]=listener;}});
   // Keep the shipped render lifecycle hook, while forbidding node requests in
   // this task-navigation harness. Capability refresh has its own focused tests.
   context.refreshProviderCapabilities=()=>{throw new Error('Task navigation must not refresh node capabilities');};
   vm.runInContext(`let lastProviderEntry=null;\n${source.slice(source.indexOf('function refreshOpenedProvider('),source.indexOf('function providerDetail('))}`,context);
-  vm.runInContext([...names,'taskOutputStage','logPanel'].map(declaration).join('\n'),context);
+  vm.runInContext([...names,'taskOutputStage','logPanel','projectSearchText','projectStatusMatches','workspaceBreadcrumb','taskRunsPanel','moreMenu','attemptHistory','attemptLabel','disclosureAttributes','attemptDiagnosticPanel','projectRows','PROCESSING_GROUPS','SUBMISSION_PHASE_LABELS','processing'].map(declaration).join('\n'),context);
   vm.runInContext(source.slice(source.indexOf('function canShareOutput('),source.indexOf('async function openShareModal(')),context);
   vm.runInContext(lines.find(line=>line.startsWith("addEventListener('popstate'")),context);
   const route=lines.find(line=>line.trimStart().startsWith("if(['task-gcp','task-settings','task-files','task-return']"));
@@ -50,6 +52,25 @@ test('active expanded task exposes live output without forcing a settings detour
   const html=f.context.taskPanel(f.task);assert.match(html,/Task output/);assert.match(html,/Building mesh/);assert.match(html,/25% reported by processing node/);
   f.task.latestAttempt.status='ready_for_review';assert.doesNotMatch(f.context.taskPanel(f.task),/Task output/);
   f.state.taskPage='settings';assert.match(f.context.taskWorkspaceBody(f.task,f.dataset),/Task output/);
+});
+
+test('upstream queued attempt stays visibly queued and exposes its assigned node',()=>{
+  const f=fixture(['viewer.processing.read']);f.task.status='queued';f.task.latestAttempt.status='queued_upstream';
+  f.task.latestAttempt.providerStatus={queueState:'waiting_for_dispatch',nodeId:'node-east-01',held:true};
+  f.state.taskDetails.task.attempt=f.task.latestAttempt;f.state.taskDetails.task.logs=[{message:'Waiting for scheduler'}];
+  const html=f.context.taskPanel(f.task);
+  assert.match(html,/class="status queued">queued<\/span>/);assert.doesNotMatch(html,/queued_upstream/);
+  assert.match(html,/Waiting for processing node/);assert.match(html,/Assigned processing node: node-east-01/);
+  assert.match(html,/Waiting for scheduler dispatch/);assert.match(html,/Processing hold active/);
+});
+
+test('ambiguous provider uploads are listed as held for inspection',()=>{
+  const f=fixture(['viewer.processing.read','viewer.processing.write']);f.task.status='processing';f.task.latestAttempt={id:'ambiguous',status:'uploading',submissionPhase:'uploading',errorCode:'provider_upload_acceptance_unknown',errorMessage:'Upload outcome is unknown; inspect the original task.'};
+  const list=f.context.processing(),card=f.context.taskPanel(f.task);
+  assert.match(list,/processing-group attention/);assert.match(list,/held_for_inspection">held for inspection/);assert.match(list,/Upload outcome is unknown/);assert.doesNotMatch(list,/processing-group preparing/);
+  assert.match(card,/held_for_inspection">held for inspection/);
+  assert.equal(f.context.projectStatusMatches(f.state.projects[0],'attention'),true);
+  f.context.ACTIVE.add('uploading');f.state.taskPage='settings';const settings=f.context.taskWorkspaceBody(f.task,f.dataset);assert.match(settings,/held for inspection/i);assert.match(settings,/data-action="held-attempt"/);assert.doesNotMatch(settings,/data-action="cancel-attempt"/);
 });
 
 test('daily task menu exposes rename but leaves destructive lifecycle actions in Details',()=>{
@@ -114,7 +135,9 @@ test('project summary counts ready tasks once and distinguishes source collectio
   f.state.datasets=[{id:'dataset',projectId:'project',status:'finalized'},{id:'unused',projectId:'project',status:'draft'},{id:'old',projectId:'project',status:'trashed'},{id:'archived',projectId:'project',status:'archived'}];
   f.state.outputs=[{taskId:'task',status:'ready'},{taskId:'task',status:'published',activePublished:true}];
   vm.runInContext(declaration('projectRows'),f.context);
-  const html=f.context.projectRows();assert.match(html,/<strong>1<\/strong><small>ready/);assert.match(html,/<strong>2<\/strong><small>source sets/);assert.doesNotMatch(html,/<small>published/);
+  const html=f.context.projectRows();assert.match(html,/<strong>1<\/strong><small>ready/);assert.match(html,/<strong>2<\/strong><small>datasets/);assert.doesNotMatch(html,/<small>published/);
+  f.task.latestAttempt={id:'queued',status:'queued_upstream'};assert.match(f.context.projectRows(),/<strong>0<\/strong><small>running/);
+  f.task.latestAttempt={id:'running',status:'running'};assert.match(f.context.projectRows(),/<strong>1<\/strong><small>running/);
 });
 
 test('project actions prioritize enabled new task for empty projects and keep secondary actions in More',()=>{
@@ -177,7 +200,7 @@ test('route parsing and validation reject invalid panels, cross-project tasks an
 test('direct task page hydration renders loading before asynchronous details, once only',()=>{
   const f=fixture();delete f.state.taskDetails.task;
   f.context.taskAction('task-gcp','task');
-  assert.match(f.content.innerHTML,/Loading authoritative task details/);assert.doesNotMatch(f.content.innerHTML,/gcp-import-form/);
+  assert.match(f.content.innerHTML,/Loading task details/);assert.doesNotMatch(f.content.innerHTML,/gcp-import-form/);
   assert.equal(f.events.filter(event=>event[0]==='hydrate').length,1);
   f.context.hydrateExpandedTask();assert.equal(f.events.filter(event=>event[0]==='hydrate').length,1);
 });
@@ -238,4 +261,43 @@ test('authoritative active latestAttempt, not newest history failure, selects ta
   const html=f.context.taskDetail(f.task,f.dataset);
   assert.match(html,/data-action="cancel-attempt" data-id="active"/);assert.doesNotMatch(html,/restart-task|retry-attempt|trash-task/);
   f.state.taskPage='files';assert.doesNotMatch(f.context.taskWorkspacePage(),/publish-attempt/);
+});
+
+test('Runs tab offers provider retry only on active tasks in active projects',()=>{
+  const f=fixture();
+  f.state.taskDetails.task={...f.state.taskDetails.task,attempts:[{id:'failed-run',status:'failed',providerId:'provider',attemptNumber:1,createdAt:'2026-09-01'}]};
+  f.state.taskDisclosures={};
+  assert.match(f.context.taskRunsPanel(f.task),/data-action="retry-attempt"/,'active task must keep its retry');
+  f.task.status='archived';
+  assert.doesNotMatch(f.context.taskRunsPanel(f.task),/retry-attempt"/,'archived task must not offer a provider retry');
+  f.task.status='ready_for_review';f.state.projects[0].status='archived';
+  assert.doesNotMatch(f.context.taskRunsPanel(f.task),/retry-attempt"/,'archived project must not offer a provider retry');
+  assert.match(f.context.taskRunsPanel(f.task),/data-action="open-attempt-diagnostics"/,'diagnostics stay readable on archived work');
+});
+
+test('an open project is never hidden by a search left over from the project list',()=>{
+  const f=fixture();
+  f.state.selectedProjectId='project';f.state.projectQuery='no match here';f.state.projectStatus='all';
+  f.context.selectedProject=()=>'<section class="project-detail"></section>';
+  const html=f.context.projectRows();
+  assert.match(html,/class="project-row selected"/);
+  assert.doesNotMatch(html,/class="project-row selected"[^>]*\shidden[\s>]/);
+});
+
+test('Processing groups tasks by their installed run status and never claims delivery',()=>{
+  const f=fixture();
+  f.state.tasks=[
+    {id:'t-failed',projectId:'project',displayName:'Failed run',latestAttempt:{id:'a1',status:'failed'}},
+    {id:'t-upload',projectId:'project',displayName:'Uploading run',latestAttempt:{id:'a2',status:'uploading',submissionPhase:'uploading_auxiliary',providerId:'provider'}},
+    {id:'t-done',projectId:'project',displayName:'Published run',latestAttempt:{id:'a3',status:'published'}},
+  ];
+  const html=f.context.processing();
+  assert.match(html,/id="processing-attention">Needs attention <span>1<\/span>/);
+  assert.match(html,/id="processing-preparing">Uploading and preparing <span>1<\/span>/);
+  assert.match(html,/Uploading other inputs/);
+  assert.match(html,/data-action="task-runs" data-id="t-failed"/);
+  assert.doesNotMatch(html,/Published run/,'finished work is not listed as processing');
+  assert.doesNotMatch(html,/deliver/i,'there is no delivery status to show');
+  f.state.tasks=[];
+  assert.match(f.context.processing(),/Nothing is processing right now/);
 });

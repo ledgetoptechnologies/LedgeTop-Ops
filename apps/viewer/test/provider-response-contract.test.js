@@ -17,6 +17,14 @@ test('task status preserves the explicit held marker for fail-closed cancellatio
   assert.equal((await adapter({uuid:'task',status:{code:50}}).status('task')).ledgetopHeld,false);
 });
 
+test('task status exposes only the validated native scheduler assignment fields',async()=>{
+  const base={uuid:'task',status:{code:10},progress:0};
+  const observed=await adapter({...base,ledgetopQueueState:'waiting_for_dispatch',ledgetopNodeId:'node-east-01',ledgetopHeld:true}).status('task');
+  assert.equal(observed.queueState,'waiting_for_dispatch');assert.equal(observed.nodeId,'node-east-01');assert.equal(observed.held,true);
+  const invalid=await adapter({...base,ledgetopQueueState:'dispatch-now',ledgetopNodeId:'<script>alert(1)</script>',ledgetopHeld:'true'}).status('task');
+  assert.equal(Object.hasOwn(invalid,'queueState'),false);assert.equal(Object.hasOwn(invalid,'nodeId'),false);assert.equal(Object.hasOwn(invalid,'held'),false);
+});
+
 test('ODX output preserves array record boundaries, blank lines and exact cursor',async()=>{
   let requested;const output=await adapter(['stage, setting','', 'next\nembedded'],url=>requested=new URL(url)).output('task',17);
   assert.deepEqual(output,{lines:['stage, setting','','next\nembedded'],nextLine:20});assert.equal(requested.searchParams.get('line'),'17');

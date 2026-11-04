@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
 const MIGRATIONS = [
@@ -2044,6 +2045,295 @@ const MIGRATIONS = [
   {version:40,name:'direct_client_session_source_authorizations',sql:'SELECT 1;',
     after(database){require('./directClientSourceMigration').migrateDirectClientSources(database);}},
   {version:41,name:'gcp_odm_crs_confirmations',sql:`CREATE TABLE gcp_odm_crs_confirmations (set_id TEXT PRIMARY KEY REFERENCES gcp_sets(id) ON DELETE CASCADE, source_sha256 TEXT NOT NULL, epsg_code INTEGER NOT NULL, horizontal_unit TEXT NOT NULL, vertical_datum TEXT NOT NULL, validation_sha256 TEXT NOT NULL, confirmed_by TEXT NOT NULL, confirmed_at TEXT NOT NULL);`},
+  // Version 41 is reserved by the independently reviewed GCP work.
+  {version:42,name:'viewer_workspace_hierarchy',sql:`
+    CREATE TABLE viewer_organizations (
+      id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')),
+      revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>=1)
+    );
+    CREATE TABLE viewer_project_groups (
+      id TEXT PRIMARY KEY, organization_id TEXT NOT NULL REFERENCES viewer_organizations(id) ON DELETE RESTRICT,
+      display_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')),
+      revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>=1), UNIQUE(id,organization_id)
+    );
+    CREATE TABLE viewer_project_hierarchy (
+      project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+      organization_id TEXT REFERENCES viewer_organizations(id) ON DELETE RESTRICT,
+      group_id TEXT REFERENCES viewer_project_groups(id) ON DELETE RESTRICT,
+      revision INTEGER NOT NULL CHECK(revision>=1),
+      CHECK(group_id IS NULL OR organization_id IS NOT NULL),
+      FOREIGN KEY(group_id,organization_id) REFERENCES viewer_project_groups(id,organization_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX viewer_project_groups_org_idx ON viewer_project_groups(organization_id);
+    CREATE INDEX viewer_project_hierarchy_org_idx ON viewer_project_hierarchy(organization_id,group_id);
+  `},
+  {version:43,name:'prepared_submission_exact_envelope_outbox',sql:`
+    CREATE TABLE viewer_prepared_submission_outbox (
+      submission_id TEXT PRIMARY KEY,
+      viewer_task_id TEXT NOT NULL,
+      viewer_attempt_id TEXT NOT NULL,
+      local_job_id TEXT NOT NULL,
+      coordinator_origin TEXT NOT NULL,
+      authenticated_principal TEXT NOT NULL,
+      environment TEXT NOT NULL CHECK(environment IN ('staging','production')),
+      protocol TEXT NOT NULL CHECK(protocol='ltds-viewer-prepared-envelope-jcs-v3'),
+      envelope_canonical TEXT NOT NULL CHECK(json_valid(envelope_canonical)),
+      envelope_sha256 TEXT NOT NULL CHECK(length(envelope_sha256)=64 AND envelope_sha256 NOT GLOB '*[^0-9a-f]*'),
+      state TEXT NOT NULL CHECK(state IN ('prepared','accepted','held')),
+      remote_binding_json TEXT CHECK(remote_binding_json IS NULL OR json_valid(remote_binding_json)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(viewer_attempt_id),
+      UNIQUE(local_job_id),
+      CHECK((state='accepted' AND remote_binding_json IS NOT NULL) OR (state<>'accepted' AND remote_binding_json IS NULL))
+    );
+    CREATE INDEX viewer_prepared_submission_outbox_state_idx
+      ON viewer_prepared_submission_outbox(state,updated_at);
+    CREATE TRIGGER viewer_prepared_submission_outbox_identity_immutable
+      BEFORE UPDATE OF submission_id,viewer_task_id,viewer_attempt_id,local_job_id,coordinator_origin,authenticated_principal,environment,protocol,envelope_canonical,envelope_sha256,created_at
+      ON viewer_prepared_submission_outbox
+      BEGIN SELECT RAISE(ABORT,'prepared submission envelope is immutable'); END;
+    CREATE TRIGGER viewer_prepared_submission_outbox_no_delete
+      BEFORE DELETE ON viewer_prepared_submission_outbox
+      BEGIN SELECT RAISE(ABORT,'prepared submission outbox is retained'); END;
+    CREATE TRIGGER viewer_prepared_submission_outbox_state_monotonic
+      BEFORE UPDATE OF state ON viewer_prepared_submission_outbox
+      WHEN NOT (OLD.state='prepared' AND NEW.state='accepted')
+      BEGIN SELECT RAISE(ABORT,'prepared submission outbox state cannot be reset'); END;
+    CREATE TRIGGER viewer_prepared_submission_outbox_binding_immutable
+      BEFORE UPDATE OF remote_binding_json ON viewer_prepared_submission_outbox
+      WHEN OLD.state='accepted' AND NEW.remote_binding_json IS NOT OLD.remote_binding_json
+      BEGIN SELECT RAISE(ABORT,'accepted prepared submission binding is immutable'); END;
+  `},
+  {version:44,name:'attempt_bound_gcp_correspondence_evidence',sql:`
+    ALTER TABLE processing_attempt_gcp_snapshots ADD COLUMN evidence_json TEXT;
+  `},
+  {version:45,name:'pin_prepared_submission_coordinator_authority',sql:`
+    ALTER TABLE viewer_prepared_submission_outbox ADD COLUMN coordinator_authority_id TEXT;
+    CREATE TRIGGER viewer_prepared_submission_authority_immutable
+      BEFORE UPDATE OF coordinator_authority_id ON viewer_prepared_submission_outbox
+      BEGIN SELECT RAISE(ABORT,'prepared submission authority is immutable'); END;
+  `},
+  {version:46,name:'durable_viewer_source_snapshot_holds',sql:`
+    CREATE TABLE retained_dataset_files (
+      dataset_file_id TEXT PRIMARY KEY REFERENCES dataset_files(id) ON DELETE RESTRICT,
+      dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+      sha256 TEXT NOT NULL CHECK(length(sha256)=64), byte_size INTEGER NOT NULL CHECK(byte_size>=0),
+      retention_reason TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    INSERT OR IGNORE INTO retained_dataset_files(dataset_file_id,dataset_id,sha256,byte_size,retention_reason,created_at)
+      SELECT f.id,f.dataset_id,f.sha256,f.byte_size,'gcp_source',g.created_at
+      FROM gcp_sets g JOIN dataset_files f ON f.id=g.source_file_id AND f.dataset_id=g.dataset_id;
+    CREATE TRIGGER retained_dataset_files_no_insert_replace BEFORE INSERT ON retained_dataset_files
+      WHEN EXISTS(SELECT 1 FROM retained_dataset_files WHERE dataset_file_id=NEW.dataset_file_id)
+      BEGIN SELECT RAISE(ABORT,'retained source file identifiers are never reusable or replaceable'); END;
+    CREATE TRIGGER retained_dataset_files_no_update BEFORE UPDATE ON retained_dataset_files
+      BEGIN SELECT RAISE(ABORT,'retained source file records are immutable'); END;
+    CREATE TRIGGER retained_dataset_files_no_delete BEFORE DELETE ON retained_dataset_files
+      BEGIN SELECT RAISE(ABORT,'retained source file records are permanent'); END;
+    CREATE INDEX retained_dataset_files_dataset_idx ON retained_dataset_files(dataset_id);
+
+    CREATE TABLE viewer_source_snapshots (
+      snapshot_id TEXT PRIMARY KEY,
+      dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+      task_id TEXT NOT NULL, attempt_id TEXT NOT NULL,
+      dataset_manifest_sha256 TEXT NOT NULL CHECK(length(dataset_manifest_sha256)=64),
+      input_manifest_sha256 TEXT NOT NULL CHECK(length(input_manifest_sha256)=64),
+      intent_json TEXT NOT NULL CHECK(json_valid(intent_json)),
+      intent_sha256 TEXT NOT NULL CHECK(length(intent_sha256)=64),
+      issuer_id TEXT NOT NULL, key_id TEXT NOT NULL,
+      signature BLOB NOT NULL,
+      source_frames BLOB NOT NULL, selected_frames BLOB NOT NULL,
+      source_page_hashes_json TEXT NOT NULL CHECK(json_valid(source_page_hashes_json)),
+      selected_page_hashes_json TEXT NOT NULL CHECK(json_valid(selected_page_hashes_json)),
+      source_frame_bytes INTEGER NOT NULL CHECK(source_frame_bytes>0),
+      selected_frame_bytes INTEGER NOT NULL CHECK(selected_frame_bytes>0),
+      status TEXT NOT NULL CHECK(status IN ('held','accepted','released')),
+      acceptance_receipt_sha256 TEXT CHECK(acceptance_receipt_sha256 IS NULL OR length(acceptance_receipt_sha256)=64),
+      acceptance_receipt_json TEXT CHECK(acceptance_receipt_json IS NULL OR json_valid(acceptance_receipt_json)),
+      created_at TEXT NOT NULL, accepted_at TEXT, released_at TEXT
+    );
+    CREATE INDEX viewer_source_snapshots_dataset_idx ON viewer_source_snapshots(dataset_id,status);
+    CREATE UNIQUE INDEX viewer_source_snapshots_attempt_idx ON viewer_source_snapshots(attempt_id);
+    CREATE TRIGGER viewer_source_snapshots_no_insert_replace BEFORE INSERT ON viewer_source_snapshots
+      WHEN EXISTS(SELECT 1 FROM viewer_source_snapshots WHERE snapshot_id=NEW.snapshot_id OR attempt_id=NEW.attempt_id)
+      BEGIN SELECT RAISE(ABORT,'Viewer source snapshot identifiers are never reusable or replaceable'); END;
+    CREATE TRIGGER viewer_source_snapshots_payload_immutable BEFORE UPDATE ON viewer_source_snapshots
+      WHEN NEW.snapshot_id IS NOT OLD.snapshot_id OR NEW.dataset_id IS NOT OLD.dataset_id OR NEW.task_id IS NOT OLD.task_id
+        OR NEW.attempt_id IS NOT OLD.attempt_id OR NEW.dataset_manifest_sha256 IS NOT OLD.dataset_manifest_sha256
+        OR NEW.input_manifest_sha256 IS NOT OLD.input_manifest_sha256 OR NEW.intent_json IS NOT OLD.intent_json
+        OR NEW.intent_sha256 IS NOT OLD.intent_sha256 OR NEW.issuer_id IS NOT OLD.issuer_id OR NEW.key_id IS NOT OLD.key_id
+        OR NEW.signature IS NOT OLD.signature OR NEW.source_frames IS NOT OLD.source_frames OR NEW.selected_frames IS NOT OLD.selected_frames
+        OR NEW.source_page_hashes_json IS NOT OLD.source_page_hashes_json OR NEW.selected_page_hashes_json IS NOT OLD.selected_page_hashes_json
+        OR NEW.source_frame_bytes IS NOT OLD.source_frame_bytes OR NEW.selected_frame_bytes IS NOT OLD.selected_frame_bytes
+        OR NEW.created_at IS NOT OLD.created_at
+        OR ((NEW.acceptance_receipt_sha256 IS NOT OLD.acceptance_receipt_sha256 OR NEW.acceptance_receipt_json IS NOT OLD.acceptance_receipt_json)
+          AND NOT (OLD.status='held' AND NEW.status='accepted' AND OLD.acceptance_receipt_sha256 IS NULL
+            AND OLD.acceptance_receipt_json IS NULL AND NEW.acceptance_receipt_sha256 IS NOT NULL AND NEW.acceptance_receipt_json IS NOT NULL))
+      BEGIN SELECT RAISE(ABORT,'Viewer source snapshot payload is immutable'); END;
+    CREATE TRIGGER viewer_source_snapshots_lifecycle_guard BEFORE UPDATE ON viewer_source_snapshots
+      WHEN NOT (
+        (OLD.status='held' AND NEW.status='accepted' AND OLD.acceptance_receipt_sha256 IS NULL
+          AND NEW.acceptance_receipt_sha256 IS NOT NULL AND length(NEW.acceptance_receipt_sha256)=64
+          AND NEW.acceptance_receipt_sha256 NOT GLOB '*[^a-f0-9]*'
+          AND OLD.acceptance_receipt_json IS NULL AND NEW.acceptance_receipt_json IS NOT NULL
+          AND OLD.accepted_at IS NULL AND NEW.accepted_at IS NOT NULL AND NEW.released_at IS NULL)
+        OR
+        (OLD.status='accepted' AND NEW.status='released' AND OLD.acceptance_receipt_sha256 IS NOT NULL
+          AND NEW.acceptance_receipt_sha256 IS OLD.acceptance_receipt_sha256
+          AND NEW.acceptance_receipt_json IS OLD.acceptance_receipt_json
+          AND NEW.accepted_at IS OLD.accepted_at AND OLD.released_at IS NULL AND NEW.released_at IS NOT NULL)
+      )
+      BEGIN SELECT RAISE(ABORT,'invalid Viewer source snapshot lifecycle transition'); END;
+    CREATE TRIGGER viewer_source_snapshots_no_delete BEFORE DELETE ON viewer_source_snapshots
+      BEGIN SELECT RAISE(ABORT,'Viewer source snapshot identifiers are never reusable'); END;
+  `},
+  {version:47,name:'permanent_gcp_source_csv_custody',sql:`
+    CREATE TABLE retained_gcp_sources (
+      id TEXT PRIMARY KEY,
+      dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+      source_file_id TEXT REFERENCES dataset_files(id) ON DELETE RESTRICT,
+      source_filename TEXT,
+      sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+      byte_size INTEGER NOT NULL CHECK(byte_size>0 AND byte_size<=2097152),
+      source_content TEXT NOT NULL,
+      retention_reason TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX retained_gcp_sources_dataset_sha_idx ON retained_gcp_sources(dataset_id,sha256);
+    CREATE TABLE retained_gcp_source_issues (
+      gcp_set_id TEXT PRIMARY KEY,
+      dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+      issue_code TEXT NOT NULL,
+      expected_sha256 TEXT,
+      observed_sha256 TEXT,
+      expected_byte_size INTEGER,
+      observed_byte_size INTEGER,
+      observed_file_sha256 TEXT,
+      observed_file_byte_size INTEGER,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX retained_gcp_source_issues_dataset_idx ON retained_gcp_source_issues(dataset_id);
+    CREATE TRIGGER retained_gcp_sources_no_insert_replace BEFORE INSERT ON retained_gcp_sources
+      WHEN EXISTS(SELECT 1 FROM retained_gcp_sources WHERE id=NEW.id OR (dataset_id=NEW.dataset_id AND sha256=NEW.sha256))
+      BEGIN SELECT RAISE(ABORT,'retained GCP source identifiers and content are never reusable or replaceable'); END;
+    CREATE TRIGGER retained_gcp_sources_no_update BEFORE UPDATE ON retained_gcp_sources
+      BEGIN SELECT RAISE(ABORT,'retained GCP source records are immutable'); END;
+    CREATE TRIGGER retained_gcp_sources_no_delete BEFORE DELETE ON retained_gcp_sources
+      BEGIN SELECT RAISE(ABORT,'retained GCP source records are permanent'); END;
+    CREATE TRIGGER retained_gcp_source_issues_no_insert_replace BEFORE INSERT ON retained_gcp_source_issues
+      WHEN EXISTS(SELECT 1 FROM retained_gcp_source_issues WHERE gcp_set_id=NEW.gcp_set_id)
+      BEGIN SELECT RAISE(ABORT,'GCP source issue records are immutable'); END;
+    CREATE TRIGGER retained_gcp_source_issues_no_update BEFORE UPDATE ON retained_gcp_source_issues
+      BEGIN SELECT RAISE(ABORT,'GCP source issue records are immutable'); END;
+    CREATE TRIGGER retained_gcp_source_issues_no_delete BEFORE DELETE ON retained_gcp_source_issues
+      BEGIN SELECT RAISE(ABORT,'GCP source issue records are permanent'); END;
+    CREATE TRIGGER gcp_sets_source_issue_delete_guard BEFORE DELETE ON gcp_sets
+      WHEN EXISTS(SELECT 1 FROM retained_gcp_source_issues WHERE gcp_set_id=OLD.id)
+      BEGIN SELECT RAISE(ABORT,'GCP source set is held for source-custody review'); END;
+  `,after(database){
+    const malformedSet=database.prepare("SELECT rowid FROM gcp_sets WHERE id IS NULL OR length(CAST(id AS TEXT))=0 LIMIT 1").get();
+    if(malformedSet)throw Object.assign(new Error(`legacy GCP set has an empty identity at rowid ${malformedSet.rowid}; repair it before migration`),{code:'invalid_legacy_gcp_set_id'});
+    const readPage=database.prepare(`SELECT id,dataset_id,source_file_id,source_filename,source_sha256,
+      typeof(source_content) AS content_type,length(CAST(source_content AS BLOB)) AS content_byte_size,source_byte_size,created_at
+      FROM gcp_sets WHERE id>? ORDER BY id LIMIT 100`);
+    const readContent=database.prepare('SELECT CAST(source_content AS BLOB) AS source_bytes FROM gcp_sets WHERE id=?');
+    const getFile=database.prepare('SELECT sha256,byte_size FROM dataset_files WHERE id=? AND dataset_id=?');
+    const insertSource=database.prepare(`INSERT INTO retained_gcp_sources
+      (id,dataset_id,source_file_id,source_filename,sha256,byte_size,source_content,retention_reason,created_at)
+      VALUES (?,?,?,?,?,?,?,'gcp_source',?)`);
+    const insertIssue=database.prepare(`INSERT INTO retained_gcp_source_issues
+      (gcp_set_id,dataset_id,issue_code,expected_sha256,observed_sha256,expected_byte_size,observed_byte_size,observed_file_sha256,observed_file_byte_size,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`);
+    const existing=database.prepare('SELECT 1 FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?');
+    let lastId='';
+    while(true){
+      const rows=readPage.all(lastId);
+      if(!rows.length)break;
+      for(const row of rows){
+      lastId=row.id;
+      const observedByteSize=Number.isSafeInteger(row.content_byte_size)?row.content_byte_size:null;
+      const sourceBytes=row.content_type==='text'&&observedByteSize!==null&&observedByteSize>0&&observedByteSize<=2097152
+        ?readContent.get(row.id)?.source_bytes:null;
+      const rawBytes=sourceBytes==null?null:Buffer.from(sourceBytes);
+      let content=null;
+      if(rawBytes){
+        try{
+          const decoded=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(rawBytes);
+          if(Buffer.from(decoded,'utf8').equals(rawBytes))content=decoded;
+        }catch{}
+      }
+      const observedSha256=rawBytes==null?null:crypto.createHash('sha256').update(rawBytes).digest('hex');
+      if(typeof content!=='string'||!Number.isSafeInteger(observedByteSize)||observedByteSize<1||observedByteSize>2097152||observedByteSize!==row.source_byte_size||observedSha256!==row.source_sha256){
+        insertIssue.run(row.id,row.dataset_id,'source_content_checksum_or_size_mismatch',row.source_sha256,observedSha256,row.source_byte_size,observedByteSize,null,null,row.created_at);
+        continue;
+      }
+      let sourceFileId=row.source_file_id;
+      if(sourceFileId){
+        const file=getFile.get(sourceFileId,row.dataset_id);
+        if(!file||file.sha256!==row.source_sha256||file.byte_size!==observedByteSize){
+          insertIssue.run(row.id,row.dataset_id,file?'source_file_metadata_mismatch':'source_file_reference_missing',row.source_sha256,observedSha256,row.source_byte_size,observedByteSize,file?.sha256||null,file?.byte_size??null,row.created_at);
+          sourceFileId=null;
+        }
+      }
+      if(!existing.get(row.dataset_id,row.source_sha256))
+        insertSource.run(`retained-gcp-${row.id}`,row.dataset_id,sourceFileId,row.source_filename,row.source_sha256,observedByteSize,content,row.created_at);
+      }
+    }
+  }},
+  {version:48,name:'held_viewer_gcp_snapshot_streams',sql:`
+    ALTER TABLE viewer_source_snapshots ADD COLUMN gcp_evidence_frames BLOB;
+    ALTER TABLE viewer_source_snapshots ADD COLUMN gcp_file_frames BLOB;
+    DROP TRIGGER viewer_source_snapshots_payload_immutable;
+    CREATE TRIGGER viewer_source_snapshots_payload_immutable BEFORE UPDATE ON viewer_source_snapshots
+      WHEN NEW.snapshot_id IS NOT OLD.snapshot_id OR NEW.dataset_id IS NOT OLD.dataset_id OR NEW.task_id IS NOT OLD.task_id
+        OR NEW.attempt_id IS NOT OLD.attempt_id OR NEW.dataset_manifest_sha256 IS NOT OLD.dataset_manifest_sha256
+        OR NEW.input_manifest_sha256 IS NOT OLD.input_manifest_sha256 OR NEW.intent_json IS NOT OLD.intent_json
+        OR NEW.intent_sha256 IS NOT OLD.intent_sha256 OR NEW.issuer_id IS NOT OLD.issuer_id OR NEW.key_id IS NOT OLD.key_id
+        OR NEW.signature IS NOT OLD.signature OR NEW.source_frames IS NOT OLD.source_frames OR NEW.selected_frames IS NOT OLD.selected_frames
+        OR NEW.source_page_hashes_json IS NOT OLD.source_page_hashes_json OR NEW.selected_page_hashes_json IS NOT OLD.selected_page_hashes_json
+        OR NEW.source_frame_bytes IS NOT OLD.source_frame_bytes OR NEW.selected_frame_bytes IS NOT OLD.selected_frame_bytes
+        OR NEW.gcp_evidence_frames IS NOT OLD.gcp_evidence_frames OR NEW.gcp_file_frames IS NOT OLD.gcp_file_frames
+        OR NEW.created_at IS NOT OLD.created_at
+        OR ((NEW.acceptance_receipt_sha256 IS NOT OLD.acceptance_receipt_sha256 OR NEW.acceptance_receipt_json IS NOT OLD.acceptance_receipt_json)
+          AND NOT (OLD.status='held' AND NEW.status='accepted' AND OLD.acceptance_receipt_sha256 IS NULL
+            AND OLD.acceptance_receipt_json IS NULL AND NEW.acceptance_receipt_sha256 IS NOT NULL AND NEW.acceptance_receipt_json IS NOT NULL))
+      BEGIN SELECT RAISE(ABORT,'Viewer source snapshot payload is immutable'); END;
+  `},
+  {version:49,name:'persist_upstream_queue_assignment',sql:`
+    ALTER TABLE processing_attempts ADD COLUMN provider_status_json TEXT
+      CHECK(provider_status_json IS NULL OR json_valid(provider_status_json));
+  `},
+  {version:50,name:'gcp_source_horizontal_crs',sql:`
+    ALTER TABLE gcp_sets ADD COLUMN horizontal_crs TEXT NOT NULL DEFAULT 'EPSG:4326'
+      CHECK(horizontal_crs IN ('EPSG:4326','EPSG:6318'));
+    UPDATE gcp_sets SET horizontal_crs='EPSG:6318'
+      WHERE id IN (SELECT set_id FROM gcp_import_provenance
+        WHERE adapter='emlid-all-columns-v1' AND upper(coordinate_system) LIKE 'NAD83(2011)%');
+  `},
+  {version:70,name:'candidate_selected_source_generation_journal',sql:`
+    CREATE TABLE candidate_selected_source_generations (
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL CHECK(generation>0),
+      snapshot_id TEXT NOT NULL REFERENCES viewer_source_snapshots(snapshot_id) ON DELETE RESTRICT,
+      snapshot_sha256 TEXT NOT NULL CHECK(length(snapshot_sha256)=64),
+      root_ref TEXT NOT NULL,
+      selected_json TEXT NOT NULL CHECK(json_valid(selected_json)),
+      selected_sha256 TEXT NOT NULL CHECK(length(selected_sha256)=64),
+      state TEXT NOT NULL CHECK(state='held'),
+      PRIMARY KEY(attempt_id,generation)
+    );
+    CREATE TRIGGER candidate_generation_insert BEFORE INSERT ON candidate_selected_source_generations
+      WHEN EXISTS(SELECT 1 FROM candidate_selected_source_generations WHERE (attempt_id=NEW.attempt_id AND generation=NEW.generation) OR rowid=NEW.rowid)
+        OR NOT EXISTS(SELECT 1 FROM viewer_source_snapshots WHERE snapshot_id=NEW.snapshot_id AND attempt_id=NEW.attempt_id AND intent_sha256=NEW.snapshot_sha256 AND status='held')
+      BEGIN SELECT RAISE(ABORT,'candidate generation unavailable'); END;
+    CREATE TRIGGER candidate_generation_no_update BEFORE UPDATE ON candidate_selected_source_generations BEGIN SELECT RAISE(ABORT,'candidate generation retained'); END;
+    CREATE TRIGGER candidate_generation_no_delete BEFORE DELETE ON candidate_selected_source_generations BEGIN SELECT RAISE(ABORT,'candidate generation retained'); END;
+    CREATE TRIGGER candidate_generation_snapshot_release BEFORE UPDATE OF status ON viewer_source_snapshots
+      WHEN NEW.status='released' AND EXISTS(SELECT 1 FROM candidate_selected_source_generations WHERE snapshot_id=OLD.snapshot_id)
+      BEGIN SELECT RAISE(ABORT,'candidate generation retained'); END;
+  `},
   {version:71,name:'durable_provider_cancellation_requests',sql:`
     CREATE TABLE processing_cancellation_requests (
       id TEXT PRIMARY KEY,
@@ -2086,7 +2376,18 @@ function applyMigrations(database) {
       // worker can start against the same fresh/upgraded volume concurrently;
       // a pre-lock snapshot would let the waiter apply an already-committed
       // ALTER TABLE a second time.
-      const applied = database.prepare('SELECT 1 FROM schema_migrations WHERE version=?').get(migration.version);
+      // Check all known identities under the write lock before changing any
+      // schema. A reused version must never be mistaken for this migration.
+      const findApplied = database.prepare('SELECT name FROM schema_migrations WHERE version=?');
+      for (const known of MIGRATIONS) {
+        const existing = findApplied.get(known.version);
+        if (existing && existing.name !== known.name) {
+          throw Object.assign(new Error(
+            `Schema migration ${known.version} identity mismatch: database has ${JSON.stringify(existing.name)}, expected ${JSON.stringify(known.name)}. Stop and review the migration history before upgrading.`
+          ), { code: 'schema_migration_identity_mismatch' });
+        }
+      }
+      const applied = findApplied.get(migration.version);
       if (applied) {
         database.exec('COMMIT');
         continue;

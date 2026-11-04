@@ -12,13 +12,17 @@ export async function waitForDevToolsPort(file, {
   read = () => readFileSync(file, 'utf8'),
   now = Date.now,
   sleep = delay,
+  platform = process.platform,
 } = {}) {
+  // Windows can briefly lock the file while Chromium is still writing it (EBUSY/EPERM).
+  // That is "not ready yet", like ENOENT; anything else, including EACCES, is a real failure.
+  const notReady = new Set(platform === 'win32' ? ['ENOENT', 'EBUSY', 'EPERM'] : ['ENOENT']);
   const deadline = now() + timeoutMs;
   while (now() < deadline) {
     check();
     let content = '';
     try { content = read(); }
-    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    catch (error) { if (!notReady.has(error.code)) throw error; }
     const match = /^([1-9]\d{0,4})\r?\n\/devtools\/browser\/[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}\r?\n?$/i.exec(content);
     if (match && Number(match[1]) <= 65535) return Number(match[1]);
     await sleep(Math.min(pollMs, Math.max(0, deadline - now())));

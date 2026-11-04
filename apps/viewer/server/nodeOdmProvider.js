@@ -138,9 +138,13 @@ class NodeOdmProvider {
       throw error;
     }
     if (!info || info.uuid !== uuid || !info.status || !Number.isFinite(Number(info.status.code))) throw new Error('provider returned an incompatible task response');
-    return { uuid:info.uuid, status:STATUS[Number(info.status?.code)] || 'unknown', statusCode:Number(info.status?.code), ledgetopHeld:info.ledgetopHeld===true,
+    const result = { uuid:info.uuid, status:STATUS[Number(info.status?.code)] || 'unknown', statusCode:Number(info.status?.code), ledgetopHeld:info.ledgetopHeld===true,
       progress:Math.max(0,Math.min(1,Number(info.progress||0)/100)), imagesCount:info.imagesCount,
       ...Object.fromEntries(['engine','engineVersion'].filter(key=>typeof info[key]==='string'&&/^[A-Za-z0-9._+ -]{1,120}$/.test(info[key])).map(key=>[key,info[key]])) };
+    if (info.ledgetopQueueState === 'waiting_for_dispatch') result.queueState = 'waiting_for_dispatch';
+    if (typeof info.ledgetopNodeId === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(info.ledgetopNodeId)) result.nodeId = info.ledgetopNodeId;
+    if (info.ledgetopHeld === true) result.held = true;
+    return result;
   }
   async output(uuid, fromLine = 0,{signal=null}={}) {
     if(!Number.isSafeInteger(fromLine)||fromLine<0)throw new Error('invalid provider output cursor');

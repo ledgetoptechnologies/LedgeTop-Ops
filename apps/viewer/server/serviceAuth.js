@@ -54,6 +54,28 @@ function verifyServiceRequest({
   keys = config.serviceAuthKeys,
   skewSeconds = config.serviceAuthSkewSeconds,
 }) {
+  return verifyServiceRequestDigest({
+    headers, method, path, bodySha256: sha256Hex(rawBody), repository, nowMs,
+    expectedKeyId, secret, keys, skewSeconds,
+  });
+}
+
+// Used by bounded streaming endpoints that cannot buffer an entire artifact in
+// memory. The caller must compare the digest of the fully received body with
+// the signed digest before it persists or acknowledges that body.
+function verifyServiceRequestDigest({
+  headers,
+  method,
+  path,
+  bodySha256,
+  repository,
+  nowMs = Date.now(),
+  expectedKeyId = config.serviceAuthKeyId,
+  secret = config.serviceAuthSecret,
+  keys = config.serviceAuthKeys,
+  skewSeconds = config.serviceAuthSkewSeconds,
+}) {
+  if (!/^[a-f0-9]{64}$/.test(bodySha256 || '')) return { ok: false, code: 'invalid_service_auth' };
   const read = (name) => headers.get ? headers.get(name) : headers[name.toLowerCase()] || headers[name];
   const keyId = read('x-ltds-key-id');
   const timestampText = read('x-ltds-timestamp');
@@ -67,9 +89,8 @@ function verifyServiceRequest({
   const timestamp = Number(timestampText);
   const nowSeconds = Math.floor(nowMs / 1000);
   if (Math.abs(nowSeconds - timestamp) > skewSeconds) return { ok: false, code: 'expired_service_auth' };
-  const bodyHash = sha256Hex(rawBody);
-  if (!safeEqual(suppliedBodyHash, bodyHash)) return { ok: false, code: 'invalid_service_auth' };
-  const expectedSignature = signature(selectedSecret, { method, path, timestamp, nonce, bodySha256: bodyHash });
+  if (!safeEqual(suppliedBodyHash, bodySha256)) return { ok: false, code: 'invalid_service_auth' };
+  const expectedSignature = signature(selectedSecret, { method, path, timestamp, nonce, bodySha256 });
   if (!safeEqual(suppliedSignature, expectedSignature)) return { ok: false, code: 'invalid_service_auth' };
   const cutoff = new Date(nowMs - skewSeconds * 2000).toISOString();
   if (!repository.consumeServiceNonce(keyId, nonce, cutoff, new Date(nowMs).toISOString()))
@@ -101,4 +122,5 @@ module.exports = {
   signServiceRequest,
   signature,
   verifyServiceRequest,
+  verifyServiceRequestDigest,
 };

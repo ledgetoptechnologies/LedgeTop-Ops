@@ -30,6 +30,23 @@ function number(value, field, minimum, maximum) {
   return parsed;
 }
 
+function emlidHorizontalCrs(coordinateSystem) {
+  const name = String(coordinateSystem || '').trim();
+  if (/^NAD83\(2011\)(?:\b|\s|\/)/i.test(name)) return 'EPSG:6318';
+  if (/^(?:WGS\s*84|WGS84)(?:\b|\s|\/|\()/i.test(name)) return 'EPSG:4326';
+  throw invalid('Emlid CS name must identify a supported horizontal datum (NAD83(2011) or WGS 84)');
+}
+
+function emlidVerticalDatum(coordinateSystem, declarations) {
+  const declared = text(declarations.verticalDatum, 160, 'verticalDatum');
+  const named = String(coordinateSystem || '').match(/\b(NAVD\s*88(?:\s*\(\s*GEOID\s*\d+[A-Z]*\s*\))?\s+height|ellipsoid(?:al)?\s+height|EGM\s*(?:96|2008)(?:\s+height)?)\b/i);
+  const sourceDatum = named ? named[1].replace(/\s+/g, ' ') : null;
+  const normalize = (value) => String(value || '').replace(/\s+/g, '').toLowerCase();
+  if (sourceDatum && declared && normalize(sourceDatum) !== normalize(declared))
+    throw invalid('declared verticalDatum does not match Emlid CS name');
+  return sourceDatum || declared || String(coordinateSystem || 'unknown vertical system');
+}
+
 function canonicalPoint(value, index) {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw invalid(`point ${index + 1} is invalid`);
@@ -65,6 +82,7 @@ function parseEmlid(source, declarations = {}) {
   const coordinateSystems = new Set(records.map((record) => text(record['cs name'], 300, 'CS name', { required: true })));
   if (coordinateSystems.size !== 1) throw invalid('Emlid CSV rows must use one consistent CS name');
   const coordinateSystem = [...coordinateSystems][0];
+  const crs = emlidHorizontalCrs(coordinateSystem);
   const declaredCoordinateSystem = text(declarations.coordinateSystem, 300, 'coordinateSystem');
   if (declaredCoordinateSystem && declaredCoordinateSystem !== coordinateSystem)
     throw invalid('declared coordinateSystem does not match Emlid CS name');
@@ -78,7 +96,7 @@ function parseEmlid(source, declarations = {}) {
     throw invalid('declared linearUnit does not match Emlid CS name');
   const linearUnit = inferredUnit || declaredUnit;
   if (!linearUnit) throw invalid('Emlid units are not explicit; preview and confirm linearUnit');
-  const verticalDatum = text(declarations.verticalDatum, 160, 'verticalDatum') || coordinateSystem;
+  const verticalDatum = emlidVerticalDatum(coordinateSystem, declarations);
   const sourceToMeters = linearUnit === 'ftUS' ? 1200 / 3937 : 1;
   const points = validatePoints(records.map((record, index) => {
     const elevationM = number(record.elevation, `row ${index + 2} Elevation`, -40000000, 400000000) * sourceToMeters;
@@ -94,7 +112,7 @@ function parseEmlid(source, declarations = {}) {
       description: record.description || null,
     };
   }));
-  return { points, provenance: { adapter: 'emlid-all-columns-v1', coordinateSystem, verticalDatum, linearUnit, elevationSource: 'Elevation', geographicCrossCheck: 'Latitude/Longitude/Ellipsoidal height' } };
+  return { crs, points, provenance: { adapter: 'emlid-all-columns-v1', coordinateSystem, horizontalCrs: crs, verticalDatum, linearUnit, elevationSource: 'Elevation', geographicCrossCheck: 'Latitude/Longitude/Ellipsoidal height' } };
 }
 
 function validatePoints(points) {
@@ -134,6 +152,18 @@ function parseCsvRows(source) {
   row.push(value.replace(/\r$/, ''));
   if (row.some((cell) => cell.trim())) rows.push(row);
   return rows;
+}
+
+function detectGcpCsvFormat(source) {
+  if (typeof source !== 'string' || !source.trim()) return null;
+  let rows;
+  try { rows = parseCsvRows(source.replace(/^\uFEFF/, '')); } catch { return null; }
+  if (!rows.length) return null;
+  const headers=normalizedHeaders(rows[0]),set=new Set(headers);
+  if(new Set(headers).size!==headers.length)return null;
+  if(EMLID_REQUIRED.every((header)=>set.has(header)))return 'emlid-all-columns-v1';
+  if(CSV_REQUIRED.every((header)=>set.has(header))&&headers.every((header)=>[...CSV_REQUIRED,'description'].includes(header)))return 'generic-csv-v1';
+  return null;
 }
 
 function parseCsv(source) {
@@ -193,7 +223,7 @@ function parseGcpInterchange({ format, content, declarations }) {
   const emlid = format === 'emlid-all-columns-v1' ? parseEmlid(content, declarations) : null;
   const points = emlid?.points || (format === 'generic-csv-v1' ? parseCsv(content) : parseGeoJson(content));
   return {
-    crs: 'EPSG:4326',
+    crs: emlid?.crs || 'EPSG:4326',
     elevationUnits: 'm',
     sourceSha256: crypto.createHash('sha256').update(content, 'utf8').digest('hex'),
     points,
@@ -210,6 +240,7 @@ module.exports = {
   MAX_POINTS,
   MAX_SOURCE_BYTES,
   EMLID_REQUIRED,
+  detectGcpCsvFormat,
   parseGcpInterchange,
   confirmationToken,
 };

@@ -110,8 +110,8 @@ test('operation receipt cleanup redacts bulky responses without weakening duplic
   const receipt={subject,key,method:'POST',path:route,requestHash},operation=processing.createImportPreviewOperation({request:{rootKey:'dataset_import',relativePath:'cleanup'},subject,sessionId:null,receipt});
   processing.completeSubjectOperationReceipt(subject,key,202,{operation});
   database.prepare('UPDATE subject_operation_receipts SET created_at=? WHERE subject=? AND client_key=?').run('2020-01-01T00:00:00.000Z',subject,key);
-  assert.deepEqual(processing.pruneSubjectOperationReceipts(7),{redacted:1,removed:0});
+  assert.deepEqual(processing.pruneSubjectOperationReceipts(7),{redacted:1,removed:0,expiredProjectReceipts:0});
   const kept=processing.getSubjectOperationReceipt(subject,key);assert.equal(kept.operationId,operation.id);assert.equal(kept.responseStatus,null);assert.equal(kept.response,null);
   const replay=processing.reserveSubjectOperationReceipt({subject,key,method:'POST',path:route,requestHash});assert.equal(replay.created,false);assert.equal(replay.record.operation_id,operation.id);
-  const validationKey='cleanup-validation-key';processing.reserveSubjectOperationReceipt({subject,key:validationKey,method:'POST',path:route,requestHash});processing.completeSubjectOperationReceipt(subject,validationKey,400,{error:'invalid_import'});database.prepare('UPDATE subject_operation_receipts SET created_at=? WHERE subject=? AND client_key=?').run('2020-01-01T00:00:00.000Z',subject,validationKey);assert.deepEqual(processing.pruneSubjectOperationReceipts(7),{redacted:0,removed:1});
+  const validationKey='cleanup-validation-key';processing.reserveSubjectOperationReceipt({subject,key:validationKey,method:'POST',path:route,requestHash});processing.completeSubjectOperationReceipt(subject,validationKey,400,{error:'invalid_import'});database.prepare('UPDATE subject_operation_receipts SET created_at=? WHERE subject=? AND client_key=?').run('2020-01-01T00:00:00.000Z',subject,validationKey);assert.deepEqual(processing.pruneSubjectOperationReceipts(7),{redacted:0,removed:1,expiredProjectReceipts:0});
 });

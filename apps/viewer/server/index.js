@@ -17,6 +17,7 @@ const { createApiV1 } = require('./apiV1');
 const { ProcessingRepository } = require('./processingRepository');
 const { StorageManager } = require('./storageManager');
 const { createProcessingApi } = require('./processingApi');
+const { createReferenceAcceptanceApi, referenceAcceptanceJsonBodyType } = require('./referenceAcceptanceApi');
 const { sanitizeLogMessage } = require('./processingSecurity');
 const { createProxyGate } = require('./proxyGate');
 const { ProviderCredentials } = require('./providerCredentials');
@@ -141,7 +142,7 @@ app.get('/api/v1/ready', (_req, res) => {
   res.status(missing.length ? 503 : 200).json({ ok: missing.length === 0, missing });
 });
 
-require('./jsonBodyParser').installJsonBodyParsers(app, config, processingRepository);
+require('./jsonBodyParser').installJsonBodyParsers(app, config, processingRepository, config.referenceAcceptanceEnabled ? referenceAcceptanceJsonBodyType : 'application/json');
 app.use((req, res, next) => {
   req.cookies = cookie.parse(req.headers.cookie || '');
   next();
@@ -152,6 +153,31 @@ app.use(shareApi);
 if (processingRepository) app.use(createProjectShareApi({ repository, processing: processingRepository }));
 app.use(createApiV1(repository));
 if (config.processingPlatformEnabled) app.use(createProcessingApi({ repository, processing: processingRepository, storage: storageManager, providerCredentials }));
+let referenceAcceptanceLedger = null;
+if (config.referenceAcceptanceEnabled) {
+  const { ReferenceAcceptanceLedger } = require('./referenceAcceptance');
+  const { createViewerReceiptSigner } = require('./referenceReceipt');
+  const receiptSigner = createViewerReceiptSigner({
+    issuerId: config.referenceAcceptanceReceiptIssuerId,
+    keyId: config.referenceAcceptanceReceiptKeyId,
+    privateKeyPem: config.referenceAcceptanceReceiptPrivateKeyPem,
+  });
+  referenceAcceptanceLedger = new ReferenceAcceptanceLedger({
+    databasePath: config.referenceAcceptanceDatabasePath,
+    managedRoot: config.referenceAcceptanceManagedRoot,
+    maxManagedBytes: config.referenceAcceptanceMaxBytes,
+  });
+  const serviceAuthKeys = config.serviceAuthKeys || { [config.serviceAuthKeyId]: config.serviceAuthSecret };
+  app.use(createReferenceAcceptanceApi({
+    repository,
+    ledger: referenceAcceptanceLedger,
+    serviceKeyId: config.referenceAcceptanceServiceKeyId,
+    serviceAuthKeys,
+    receiptSigner,
+    environment: config.referenceAcceptanceEnvironment,
+    chunkBytes: config.referenceAcceptanceChunkBytes,
+  }));
+}
 app.use(apiRouter);
 app.use(assetsRouter);
 
@@ -228,6 +254,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
     // closing the shared SQLite handle. Docker's stop_grace_period is the outer
     // bound if a client never completes.
     server.close((error) => {
+      try { referenceAcceptanceLedger?.close(); } catch { /* already closed */ }
       try { database.close(); } catch { /* already closed */ }
       process.exit(error ? 1 : 0);
     });

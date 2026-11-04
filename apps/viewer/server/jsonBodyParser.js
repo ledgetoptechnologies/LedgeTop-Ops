@@ -16,7 +16,7 @@ function liveAdmin(processing, req) {
 
 // Larger bodies are accepted only on the manifest-creation route. Keep the
 // original body bytes for service HMAC verification on both parsers.
-function installJsonBodyParsers(app, config, processing) {
+function installJsonBodyParsers(app, config, processing, jsonBodyType = 'application/json') {
   const verify = (req, _res, buffer) => { req.rawBody = Buffer.from(buffer); };
   const upload = express.json({ limit: config.uploadMaxManifestBytes, verify });
   let active = false;
@@ -36,7 +36,7 @@ function installJsonBodyParsers(app, config, processing) {
     }
     return next();
   });
-  app.use(express.json({ limit: config.processingPlatformEnabled ? config.genericJsonMaxBytes : '100kb', verify }));
+  app.use(express.json({ limit: config.processingPlatformEnabled ? config.genericJsonMaxBytes : '100kb', type: jsonBodyType, verify }));
 }
 
 module.exports = { installJsonBodyParsers, presentedAdmin, liveAdmin };

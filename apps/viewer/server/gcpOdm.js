@@ -12,7 +12,10 @@ function odmGcpList(rows, options = {}) {
   if (!Array.isArray(rows) || !rows.length) return null;
   const projected = options.projected === true && Number.isInteger(options.epsgCode) && ['m','ftUS'].includes(options.horizontalUnit);
   const unitScale = options.horizontalUnit === 'ftUS' ? 3937 / 1200 : 1;
-  const lines = [projected ? `EPSG:${options.epsgCode}` : 'EPSG:4326'];
+  const crsValues = [...new Set(rows.map((row) => row.horizontalCrs || options.horizontalCrs || 'EPSG:4326'))];
+  if (!projected && (crsValues.length !== 1 || !['EPSG:4326', 'EPSG:6318'].includes(crsValues[0])))
+    throw Object.assign(new Error('GCP correspondences require one supported horizontal CRS'), { code: 'invalid_gcp_correspondence' });
+  const lines = [projected ? `EPSG:${options.epsgCode}` : crsValues[0]];
   for (const row of rows) {
     const imageName = path.basename(String(row.relativePath || ''));
     if (!imageName || /\s/.test(imageName))

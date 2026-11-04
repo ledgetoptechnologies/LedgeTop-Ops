@@ -8,7 +8,7 @@ const digest=x=>crypto.createHash('sha256').update(x).digest('hex');
 test('discovery recognizes Emlid CSV, ignores unrelated data, preserves exact source and is repeatable',t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-discovery-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
  const p=new ProcessingRepository(db),project=p.createProject({displayName:'Survey'}),dataset=p.createDataset({projectId:project.id,displayName:'Control',storageMode:'managed',rootKey:'datasets',relativePath:'source'});
- const valid='\uFEFFName,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,1,2,100,44,-88,101,Test (ftUS) + height (ftUS)\n',bad='ordinary,table\n1,2\n';
+ const valid='\uFEFFName,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,1,2,100,44,-88,101,NAD83(2011) / Test (ftUS) + height (ftUS)\n',bad='ordinary,table\n1,2\n';
  fs.mkdirSync(path.join(root,'source'));fs.writeFileSync(path.join(root,'source','control.csv'),valid);fs.writeFileSync(path.join(root,'source','other.csv'),bad);
  const records=[['control.csv',valid],['other.csv',bad]].map(([relativePath,body])=>({id:relativePath,relativePath,byteSize:Buffer.byteLength(body),sha256:digest(body)}));
  p.finalizeDataset(dataset.id,records,digest('manifest'));const storage={resolve:(_,r)=>path.join(root,...r.split('/'))};
@@ -43,7 +43,7 @@ test('expired incomplete CSV uploads remain retained and resumable',t=>{
 test('manual CRS mapping requires source units and original vertical datum',t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-mapping-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
  const p=new ProcessingRepository(db),project=p.createProject({displayName:'Survey'}),dataset=p.createDataset({projectId:project.id,displayName:'Flight',storageMode:'managed',rootKey:'datasets',relativePath:'source'});p.finalizeDataset(dataset.id,[],digest('empty'));
- const source='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,1000,2000,100,43,-88.8,110,Local grid (m) + height (m)\n',parsed=require('../server/gcpImport').parseGcpInterchange({format:'emlid-all-columns-v1',content:source}),g=new GcpRepository(db);
+ const source='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,1000,2000,100,43,-88.8,110,WGS 84 / Local grid (m) + height (m)\n',parsed=require('../server/gcpImport').parseGcpInterchange({format:'emlid-all-columns-v1',content:source}),g=new GcpRepository(db);
  const set=g.importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'emlid-all-columns-v1',sourceSha256:parsed.sourceSha256,sourceContent:source,crs:parsed.crs,elevationUnits:'m',provenance:parsed.provenance,points:parsed.points});
  assert.equal(set.odmCrsCandidate,null);assert.throws(()=>g.confirmOdmCrs(set.id,'ops:test'),{code:'gcp_crs_unmapped'});
  assert.throws(()=>g.confirmOdmCrs(set.id,'ops:test',{epsgCode:32616,horizontalUnit:'ftUS',verticalDatum:parsed.provenance.verticalDatum}),{code:'gcp_crs_unmapped'});
@@ -53,7 +53,7 @@ test('manual CRS mapping requires source units and original vertical datum',t=>{
 test('PROJ validates the declared projected CRS, units, every survey coordinate, and confirmation freshness',t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-proj-')),db=openDatabase(path.join(root,'db.sqlite'));t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
  const p=new ProcessingRepository(db),project=p.createProject({displayName:'Survey'}),dataset=p.createDataset({projectId:project.id,displayName:'Flight',storageMode:'managed',rootKey:'datasets',relativePath:'source'});p.finalizeDataset(dataset.id,[],digest('empty'));
- const source='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,500000,0,100,0,-87,110,UTM example (m) + height (m)\n',parsed=require('../server/gcpImport').parseGcpInterchange({format:'emlid-all-columns-v1',content:source}),g=new GcpRepository(db);
+ const source='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,500000,0,100,0,-87,110,WGS 84 / UTM example (m) + height (m)\n',parsed=require('../server/gcpImport').parseGcpInterchange({format:'emlid-all-columns-v1',content:source}),g=new GcpRepository(db);
  const set=g.importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'emlid-all-columns-v1',sourceSha256:parsed.sourceSha256,sourceContent:source,crs:parsed.crs,elevationUnits:'m',provenance:parsed.provenance,points:parsed.points});
  const input={epsgCode:32616,horizontalUnit:'m',verticalDatum:parsed.provenance.verticalDatum};
  for(const epsgCode of [4326,7600,32615])assert.throws(()=>g.confirmOdmCrs(set.id,'ops:test',{...input,epsgCode}),{code:'gcp_crs_unmapped'});

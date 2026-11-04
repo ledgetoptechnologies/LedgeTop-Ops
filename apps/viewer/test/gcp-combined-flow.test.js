@@ -5,11 +5,11 @@ const {ProcessingRepository}=require('../server/processingRepository');
 const {GcpRepository}=require('../server/gcpRepository');
 const {discoverDatasetGcp}=require('../server/gcpDiscovery');
 const digest=value=>crypto.createHash('sha256').update(value).digest('hex');
-test('synthetic retained Emlid CSV leads from draft, nearby photo and mark to immutable ODM attempt snapshot',t=>{
+test('synthetic projected Emlid GCP is held until output evidence binds its CRS and units',t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'gcp-combined-flow-')),db=openDatabase(path.join(root,'viewer.sqlite'));
  t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true})});
  const processing=new ProcessingRepository(db),gcp=new GcpRepository(db),project=processing.createProject({displayName:'Synthetic'}),provider=processing.upsertProvider({type:'nodeodm',displayName:'Fixture',endpoint:'http://127.0.0.1:3000',enabled:true});
- const source='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,500000,0,100,0,-87,110,UTM example (m) + NAVD88 height (m)\n',image=Buffer.from('synthetic-photo');
+ const source='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,500000,0,100,0,-87,110,WGS 84 / UTM zone 16N (m) + NAVD88 height (m)\n',image=Buffer.from('synthetic-photo');
  const dataset=processing.createDataset({projectId:project.id,displayName:'Flight',storageMode:'managed',rootKey:'datasets',relativePath:'source'}),base=path.join(root,'source');fs.mkdirSync(base);fs.writeFileSync(path.join(base,'control.csv'),source);fs.writeFileSync(path.join(base,'photo.jpg'),image);
  processing.finalizeDataset(dataset.id,[{id:'csv',relativePath:'control.csv',byteSize:Buffer.byteLength(source),sha256:digest(source),contentType:'text/csv'},{id:'image',relativePath:'photo.jpg',byteSize:image.length,sha256:digest(image),contentType:'image/jpeg',metadata:{width:100,height:80,gps:{latitude:0.00001,longitude:-87}}}],digest('manifest'));
  const storage={resolve:(_,relative)=>path.join(root,...relative.split('/'))};
@@ -19,9 +19,12 @@ test('synthetic retained Emlid CSV leads from draft, nearby photo and mark to im
  const nearby=gcp.listRankedImages(dataset.id,point.id,null).images;assert.ok(nearby.find(photo=>photo.id==='image').distanceM<15.24);
  gcp.createCorrespondence({taskId:draft.id,pointId:point.id,imageFileId:'image',pixelX:12,pixelY:14,createdBy:'ops:test'});
  assert.throws(()=>processing.createAttempt({taskId:draft.id,providerId:provider.id,options:settings.options}),{code:'gcp_crs_confirmation_required'});
- const mapping={epsgCode:32616,horizontalUnit:'m',verticalDatum:set.provenance.verticalDatum};assert.equal(gcp.confirmOdmCrs(set.id,'ops:test',mapping).odmCrsConfirmed,true);
- const attempt=processing.createAttempt({taskId:draft.id,providerId:provider.id,options:settings.options}),snapshot=processing.getAttemptGcpSnapshot(attempt.id);
- assert.equal(snapshot.correspondenceCount,1);assert.equal(snapshot.content,'EPSG:32616\n500000 0 100 12 14 photo.jpg\n');assert.deepEqual(attempt.options,settings.options);
+ const mapping={epsgCode:32616,horizontalUnit:'m',verticalDatum:set.provenance.verticalDatum};
+ const validationHash=require('../server/gcpCrsValidation').surveyValidationHash(set.sourceSha256,mapping,gcp.getSet(set.id,true).points);
+ db.prepare('INSERT INTO gcp_odm_crs_confirmations VALUES (?,?,?,?,?,?,?,?)').run(set.id,set.sourceSha256,mapping.epsgCode,mapping.horizontalUnit,mapping.verticalDatum,validationHash,'ops:test','2026-01-01');
+ assert.equal(gcp.getSet(set.id).odmCrsConfirmed,true);
+ assert.throws(()=>processing.createAttempt({taskId:draft.id,providerId:provider.id,options:settings.options}),{code:'gcp_output_evidence_binding_required'});
+ assert.equal(processing.listAttemptsPage(draft.id).items.length,0);
  assert.equal(fs.readFileSync(path.join(base,'control.csv'),'utf8'),source);assert.equal(db.prepare('SELECT source_content FROM gcp_sets WHERE id=?').get(set.id).source_content,source);
 });
 
