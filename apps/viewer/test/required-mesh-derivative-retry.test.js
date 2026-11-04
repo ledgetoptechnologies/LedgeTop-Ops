@@ -79,3 +79,36 @@ test('required mesh retry is an atomic derivative-only retry that preserves the 
 
   assert.equal(context.processing.retryRequiredMeshDerivative(ids.jobId, 'ops:required-retry', { meshDerivativesEnabled: true }), null, 'the manual retry allowance is one-shot');
 });
+
+test('required mesh retry HTTP route enforces permissions and queues only one retry', async (t) => {
+  const express = require('express');
+  const auth = require('../server/auth');
+  const { createProcessingApi } = require('../server/processingApi');
+  const { StorageManager } = require('../server/storageManager');
+  const c = fixture(t), ids = failedRequiredMesh(c);
+  for (const name of ['datasets', 'models', 'cache', 'trash', 'imports']) fs.mkdirSync(path.join(c.root, name));
+  const storage = new StorageManager({ datasetsMount: path.join(c.root, 'datasets'), modelsMount: path.join(c.root, 'models'), cacheMount: path.join(c.root, 'cache'), trashMount: path.join(c.root, 'trash'), datasetImportMount: path.join(c.root, 'imports'), storageReserveBytes: 0, storageReservePercent: 0 });
+  storage.initialize();
+  const read = 'read-token-000000000000000000000', write = 'write-token-00000000000000000000';
+  for (const [token, permissions] of [[read, ['viewer.processing.read']], [write, ['viewer.processing.read', 'viewer.processing.write']]]) {
+    c.processing.createAdminSession({ tokenHash: auth.hashToken(token), subject: 'ops:test', permissions, displayUnits: 'imperial', expiresAt: new Date(Date.now() + 60000).toISOString() });
+  }
+  const app = express(); app.use(express.json()); app.use(createProcessingApi({ repository: c.repository, processing: c.processing, storage }));
+  const server = await new Promise((resolve) => { const value = app.listen(0, '127.0.0.1', () => resolve(value)); });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const headers = (token) => ({ authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': crypto.randomUUID() });
+  const listed = await fetch(`${base}/api/v1/processing/derivatives`, { headers: headers(read) });
+  assert.equal(listed.status, 200);
+  assert.equal((await listed.json()).derivatives.find((job) => job.id === ids.jobId).requiredRetryAvailable, true);
+  const route = `${base}/api/v1/processing/derivatives/${ids.jobId}/retry`;
+  assert.equal((await fetch(route, { method: 'POST', headers: headers(read), body: '{}' })).status, 403);
+  const response = await fetch(route, { method: 'POST', headers: headers(write), body: '{}' });
+  assert.equal(response.status, 202);
+  const result = await response.json();
+  assert.equal(result.derivative.id, ids.jobId);
+  assert.equal(result.derivative.status, 'pending');
+  assert.equal(Object.hasOwn(result.derivative, 'retryCleanup'), false);
+  assert.equal((await fetch(route, { method: 'POST', headers: headers(write), body: '{}' })).status, 409);
+  assert.equal(c.database.prepare('SELECT COUNT(*) AS n FROM processing_jobs').get().n, 0);
+});
