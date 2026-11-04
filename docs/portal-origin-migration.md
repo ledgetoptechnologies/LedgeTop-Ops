@@ -1,12 +1,14 @@
 # Canonical client portal origins
 
-The canonical authenticated entry point is `https://portal.ledgetopdroneservices.com/portal` in production and `https://portal-staging.ledgetopdroneservices.com/portal` in staging. This release combines the canonical-origin migration with Claude's unified client dashboard. The header has no workspace switcher; projects and requests from authorized client accounts appear together, while each item opens using its own account and source. Deliveries, feedback and profile details open through their business/account cards. The existing Technologies portal aliases remain supported; this change does not merge client identities or expand their permissions.
+The canonical authenticated entry point is `https://portal.ledgetop.app/portal` in production. Staging continues to use `https://portal-staging.ledgetopdroneservices.com/portal`. Production's former Drone Services and Technologies portal hosts are retired for private portal APIs and presentation, while the Drone Services legacy host remains explicitly available for existing public-link routes.
 
 Combined summaries clear before focus, visibility and periodic revalidation. An unavailable or revoked account cannot retain its previously loaded projects or requests. Native hierarchy responses do not prove a project's lifecycle status, and incomplete pagination must be reported rather than presented as a complete list.
 
-`CLIENT_PORTAL_RETIRED_ORIGINS` contains former authenticated entry hosts. GET/HEAD requests for their portal pages redirect to the primary portal and preserve the selected page and query. Their private APIs fail closed without forwarding request bodies, cookies or authorization headers. Static assets and minimal health responses remain available for compatibility.
+`CLIENT_PORTAL_ORIGINS` contains only `https://portal.ledgetop.app` in production. `CLIENT_PORTAL_RETIRED_ORIGINS` contains the former `portal.ledgetopdroneservices.com`, `portal.ledgetoptechnologies.com` and `client.ledgetopdroneservices.com` origins. GET/HEAD requests for retired portal pages redirect to the primary portal and preserve the selected page and query. Their private APIs fail closed without forwarding request bodies, cookies or authorization headers. Static assets and minimal health responses remain available for compatibility.
 
-`LEGACY_CLIENT_ORIGINS` has a different purpose: it preserves public bearer links and their host-bound download sessions. Production retains `https://client.ledgetopdroneservices.com` in this list. Adding a retired staging portal host must not add it to this public allowlist. Old share URLs, passwords, session signing keys, share versions, DNS and Worker domains stay unchanged.
+`LEGACY_CLIENT_ORIGINS` has a different purpose: it preserves public bearer links and their host-bound download sessions. Production retains `https://portal.ledgetopdroneservices.com` and `https://client.ledgetopdroneservices.com` in this list; the Technologies portal is not a public-share origin. Adding a retired staging portal host must not add it to this public allowlist. Old share URLs, passwords, session signing keys, share versions, DNS and Worker domains stay unchanged.
+
+Production enables `CANONICAL_BROWSER_NAVIGATION_ENABLED` only after the paired public-host acceptance check. Fresh browser navigations from the former portal aliases go to `https://portal.ledgetop.app`; fresh, uncredentialed public-link page navigations go to `https://delivery.ledgetop.app`. Public-link requests carrying cookies, authorization, range headers, origins, or non-navigation methods stay at their original host so existing capabilities and resumable sessions remain host-bound. Retired private-page navigations may redirect, but the old host's cookies are never forwarded; the canonical Access policy authenticates the destination independently. Private APIs and byte routes on retired hosts fail closed. The old Worker custom domains and legacy public-origin entries must remain until old links and resumable sessions are verified; do not remove an Access application or domain as part of this application-only redirect change.
 
 ## Configuration bundle
 
@@ -14,16 +16,16 @@ Apply each environment's bundle to its existing Workers; do not replace live set
 
 | Setting | Production | Staging |
 | --- | --- | --- |
-| Client primary portal | `https://portal.ledgetopdroneservices.com` | `https://portal-staging.ledgetopdroneservices.com` |
-| Client active portal origins | Canonical Drone Services portal and existing Technologies portal | Canonical Drone Services staging portal and existing Technologies staging portal |
-| Client retired portal origin | `https://client.ledgetopdroneservices.com` | `https://client-staging.ledgetopdroneservices.com` |
-| Client public origin / `EXPECTED_HOST` | Keep existing `portal.ledgetopdroneservices.com` | Keep existing `delivery-staging.ledgetopdroneservices.com` |
-| Client legacy public origins | Keep existing `https://client.ledgetopdroneservices.com` | Keep absent |
-| Native enrollment and authority expected hosts | `portal.ledgetopdroneservices.com` | `portal-staging.ledgetopdroneservices.com` |
+| Client primary portal | `https://portal.ledgetop.app` | `https://portal-staging.ledgetopdroneservices.com` |
+| Client active portal origins | `https://portal.ledgetop.app` only | Keep existing canonical staging portal and Technologies staging portal until cutover |
+| Client retired portal origins | `portal.ledgetopdroneservices.com`, `portal.ledgetoptechnologies.com`, and `client.ledgetopdroneservices.com` | `https://client-staging.ledgetopdroneservices.com` |
+| Client public origin / `EXPECTED_HOST` | `https://delivery.ledgetop.app` | Keep existing `delivery-staging.ledgetopdroneservices.com` |
+| Client legacy public origins | Keep `https://portal.ledgetopdroneservices.com` and `https://client.ledgetopdroneservices.com` for existing shares | Keep absent |
+| Native enrollment and authority expected hosts | `portal.ledgetop.app` | `portal-staging.ledgetopdroneservices.com` |
 | Native deployment profile | Exact canonical portal production profile | Keep production profile absent |
-| Ops `DELIVERY_BASE_URL` | Canonical production portal | Canonical staging portal |
+| Ops `DELIVERY_BASE_URL` | `https://delivery.ledgetop.app` | Canonical staging portal |
 
-Client production accepts only its existing canonical Access audience after retirement. Staging retains its existing Access audience while its hostname coverage moves. Keep existing selectors, identity providers and session settings. Ops' origin list also controls Stream playback: retain old public-share video hosts there. This does not admit those hosts to Client private APIs.
+Client production must protect `portal.ledgetop.app` with its existing verified-email policy before retiring old portal Access coverage. Staging retains its existing Access audience while its hostname coverage moves. Keep existing selectors, identity providers and session settings. Ops' origin list also controls Stream playback: retain old public-share video hosts there. This does not admit those hosts to Client private APIs.
 
 The native deployment guard supports the original exact production profile/origin pair for a coordinated rollout or rollback, plus the new exact canonical pair. Mixing a profile with the other origin is rejected. Recipient, publication and file authority checks remain unchanged.
 
