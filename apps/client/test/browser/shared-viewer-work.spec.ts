@@ -33,12 +33,15 @@ const viewerItem = (workspaceId: string, item: Item) => ({workspaceId, sharedAt:
   permissions: {measure: item.scopeType === "task", cameras: false, download: false}, ...item});
 const viewerPage = (workspaceId: string, items: Item[], nextCursor: string | null = null) => ({workspaceId, contextVersion: `viewer-${workspaceId}`, items: items.map(item => viewerItem(workspaceId, item)), nextCursor});
 
+test.beforeEach(async ({page}) => {
+  // Register the fallback before each test body so a test's specialized Viewer
+  // route takes precedence and continues to exercise its own page behavior.
+  await page.context().route(`${viewerOrigin}/**`, route => route.fulfill({status: 200, contentType: "text/html", body: "<!doctype html><title>Viewer test fixture</title>"}));
+});
+
 type Call = {path: string; query: URLSearchParams; method: string; workspace?: string; key?: string; body?: unknown};
 async function mock(page: Page, workspaces: typeof allWorkspaces, viewer: (route: Route, call: Call, workspaceId: string) => Promise<unknown> | undefined) {
   const calls: Call[] = [];
-  // The Viewer is a separate production service. Browser tests should verify
-  // the client redirect/session flow without depending on the external host.
-  await page.context().route(`${viewerOrigin}/**`, route => route.fulfill({status: 200, contentType: "text/html", body: "<!doctype html><title>Viewer test fixture</title>"}));
   await page.context().route("**/api/client/**", async route => {
     const request = route.request(), url = new URL(request.url());
     const call: Call = {path: url.pathname, query: url.searchParams, method: request.method(), workspace: request.headers()["x-ltds-workspace-id"],
@@ -171,21 +174,6 @@ for (const [label, answer] of [["missing (404)", {status: 404, json: {error: "No
 
 test("opening shared work opens a full-page Viewer and renews through the preserved opener", async ({page}) => {
   let viewerLoads = 0;
-  await page.context().route(`${viewerOrigin}/**`, async route => {
-    if (!new URL(route.request().url()).pathname.startsWith("/session/")) return route.fulfill({status: 404, body: "not found"});
-    viewerLoads += 1;
-    await route.fulfill({contentType: "text/html", headers: {"Cross-Origin-Opener-Policy": "unsafe-none"}, body: `<!doctype html><body><div id="loaded">direct model</div><script>
-      const expiresAt = new Date(Date.now() + 10000).toISOString();
-      addEventListener("message", event => {
-        if (event.data?.type !== "ltds-viewer:renew-session") return;
-        document.body.dataset.renewedGrant = event.data.grant;
-        opener.postMessage({version:1,type:"ltds-viewer:session-renewed",modelId:"model-direct",expiresAt:new Date(Date.now()+60000).toISOString()}, "*");
-      });
-      window.sendExpiry = (modelId = "model-direct", type = "ltds-viewer:session-expiring") => opener.postMessage({version:1,type,modelId,expiresAt}, "*");
-      setTimeout(() => opener.postMessage({version:1,type:"ltds-viewer:ready",modelId:"model-direct",expiresAt}, "*"), 50);
-      if (!new URL(location.href).searchParams.has("suppressInitialExpiry")) setTimeout(() => window.sendExpiry(), 100);
-    </script></body>`});
-  });
   await page.context().route("https://evil.example.test/**", route => route.fulfill({contentType: "text/html",
     headers: {"Cross-Origin-Opener-Policy": "unsafe-none"}, body: `<!doctype html><script>
       setTimeout(() => { document.body.dataset.opener = String(Boolean(opener)); if (opener) {
@@ -207,6 +195,24 @@ test("opening shared work opens a full-page Viewer and renews through the preser
         redeemUrl: `${viewerOrigin}/api/v1/sessions/redeem`, embedUrl: `${viewerOrigin}/session/${grant}`}});
     }
     return undefined;
+  });
+  // Playwright gives the most recently registered route first refusal. Register
+  // this specialized session fixture after the beforeEach fallback so the
+  // renewal protocol is exercised instead of serving a blank page.
+  await page.context().route(`${viewerOrigin}/**`, async route => {
+    if (!new URL(route.request().url()).pathname.startsWith("/session/")) return route.fulfill({status: 404, body: "not found"});
+    viewerLoads += 1;
+    await route.fulfill({contentType: "text/html", headers: {"Cross-Origin-Opener-Policy": "unsafe-none"}, body: `<!doctype html><body><div id="loaded">direct model</div><script>
+      const expiresAt = new Date(Date.now() + 10000).toISOString();
+      addEventListener("message", event => {
+        if (event.data?.type !== "ltds-viewer:renew-session") return;
+        document.body.dataset.renewedGrant = event.data.grant;
+        opener.postMessage({version:1,type:"ltds-viewer:session-renewed",modelId:"model-direct",expiresAt:new Date(Date.now()+60000).toISOString()}, "*");
+      });
+      window.sendExpiry = (modelId = "model-direct", type = "ltds-viewer:session-expiring") => opener.postMessage({version:1,type,modelId,expiresAt}, "*");
+      setTimeout(() => opener.postMessage({version:1,type:"ltds-viewer:ready",modelId:"model-direct",expiresAt}, "*"), 50);
+      if (!new URL(location.href).searchParams.has("suppressInitialExpiry")) setTimeout(() => window.sendExpiry(), 100);
+    </script></body>`});
   });
   await page.addInitScript(() => window.addEventListener("message", event => {
     if (event.data?.type === "test-message-barrier") document.documentElement.dataset.testMessageBarrier = event.data.nonce;
