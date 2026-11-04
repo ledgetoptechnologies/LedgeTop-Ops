@@ -1932,22 +1932,26 @@ internal static class ExperimentalColdDownloaderTests
             var record = Directory.EnumerateFiles(retained, "*.json").Single(); var recordBytes = File.ReadAllBytes(record); var recordId = PhysicalId(record);
             using var document = System.Text.Json.JsonDocument.Parse(recordBytes); var growth = document.RootElement.GetProperty("Growth").GetInt64();
             var reservedBytes = typeof(PlaceholderHydrationCoordinator).GetMethod("ReservedBytes", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static) ?? throw new IOException("Quota scan unavailable.");
-            void CheckReservation() {
+            async Task CheckReservation() {
+                using var quota = await HydrationCacheConcurrency.AcquireAsync(coordinator.ExperimentalRootForTest,
+                    "reservation-count-check", CancellationToken.None);
+                long observedGrowth = -1;
+                HydrationQuotaGate.Run(quota.Quota, () => observedGrowth = (long)reservedBytes.Invoke(null, [retained, quota.Quota])!);
                 Check(File.Exists(record) && PhysicalId(record) == recordId && File.ReadAllBytes(record).SequenceEqual(recordBytes) &&
-                    (long)reservedBytes.Invoke(null, [retained])! == growth);
+                    observedGrowth == growth);
             }
-            CheckReservation();
+            await CheckReservation();
             var entry = Path.Combine(root.Path, "verified-hydration-v1", source.Identity.ScopeKey, source.Identity.CacheKey);
             var other = new TestSink(); await ExpectQuarantineStaleGuard(() => coordinator.HydrateAsync(source.Identity, 0, Content.Length, other), entry);
-            Check(other.Failed == 1 && other.Completed == 0 && source.Downloads == 1); CheckReservation();
+            Check(other.Failed == 1 && other.Completed == 0 && source.Downloads == 1); await CheckReservation();
             // Simulate a verified cache file appearing while the same entry's
             // partial owner is still quarantined. Eviction must not remove it
             // or reinterpret the live reservation as stale.
             var cached = Path.Combine(entry, source.Identity.FileName); File.WriteAllBytes(cached, Content);
             var hit = new TestSink(); await ExpectQuarantineStaleGuard(() => coordinator.HydrateAsync(source.Identity, 0, Content.Length, hit), entry);
-            Check(hit.Failed == 1 && hit.Completed == 0 && source.Downloads == 1); CheckReservation();
+            Check(hit.Failed == 1 && hit.Completed == 0 && source.Downloads == 1); await CheckReservation();
             await ExpectQuarantineStaleGuard(() => coordinator.EvictVerifiedCacheAsync(source.Identity), entry);
-            Check(File.ReadAllBytes(cached).SequenceEqual(Content)); CheckReservation();
+            Check(File.ReadAllBytes(cached).SequenceEqual(Content)); await CheckReservation();
             // Exercise the coordinator's real capacity check: with this
             // durable reservation counted, one extra byte is refused.
             var cacheRoot = Path.Combine(root.Path, "verified-hydration-v1");

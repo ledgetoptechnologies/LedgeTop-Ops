@@ -142,9 +142,15 @@ internal static class CloudFilesNativeTransfer {
         , Action? syntheticCommittedCleanupUncertain = null
 #endif
         ) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.HydratorEnter, context.RequestKey);
+#endif
         using var timing = observeTiming is null ? null : new HydrationTiming(observeTiming, timingClock);
         var timingOutcome = HydrationTimingOutcome.Failed;
         AssertAbi();
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.HydratorAbiValidated, context.RequestKey);
+#endif
         // Empty FETCH_DATA requests are deliberately unsupported: no invented zero-byte native completion.
         if (context.FileSize != identity.Length || context.RequiredOffset < 0 || context.RequiredLength <= 0
             || context.RequiredOffset > context.FileSize || context.RequiredLength > context.FileSize - context.RequiredOffset
@@ -153,11 +159,27 @@ internal static class CloudFilesNativeTransfer {
             || heartbeatInterval <= TimeSpan.Zero || heartbeatInterval >= TimeSpan.FromSeconds(60))
             throw new TransferException("Native hydration context is unsupported.",
                 new HydrationFailureDiagnostic(HydrationStage.Context, HydrationFailureCategory.Transfer, TransferFailureReason.InvalidMetadata));
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.HydratorContextValidated, context.RequestKey);
+#endif
         using var sink = new Sink(context, native, token, heartbeatInterval);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.HydratorSinkConstructed, context.RequestKey);
+#endif
         try {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.HydratorProgressStart, context.RequestKey);
+#endif
             sink.StartProgress();
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.HydratorProgressStarted, context.RequestKey);
+            NativeStallTrace.Record(NativeStallTrace.Stage.CoordinatorHydrationEnter, context.RequestKey);
+#endif
             if (timing is null) await coordinator.HydrateAsync(identity, context.RequiredOffset, context.RequiredLength, sink, sink.Token);
             else await coordinator.HydrateTimedAsync(identity, context.RequiredOffset, context.RequiredLength, sink, sink.Token, timing);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.CoordinatorHydrationReturned, context.RequestKey);
+#endif
             timingOutcome = HydrationTimingOutcome.Completed;
         } catch (Exception error) {
             sink.ObservePrimaryFailure(HydrationFailureDiagnostic.FromException(HydrationStage.Context, error));

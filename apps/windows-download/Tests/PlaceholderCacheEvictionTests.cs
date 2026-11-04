@@ -193,8 +193,20 @@ internal static class PlaceholderCacheEvictionTests
         foreach (var level in new[] { 0, 1, 2 }) {
             using var f = new Fixture(); await f.Hydrate();
             var directories = new[] { f.CacheRoot, Path.GetDirectoryName(f.Entry)!, f.Entry };
-            var marker = Path.Combine(directories[level], ".verified-hydration-owner"); File.WriteAllText(marker, "foreign owner");
-            var calls = f.Source.Calls; await Refuse(() => f.Coordinator.EvictVerifiedCacheAsync(Identity));
+            var marker = Path.Combine(directories[level], ".verified-hydration-owner");
+            // Ownership markers are pinned while a coordinator is active so an
+            // external writer cannot replace them underneath a verified cache.
+            // Simulate tampering across process lifetimes by releasing every pin
+            // before changing the marker, then reconnecting to the cache.
+            f.Coordinator.Dispose(); File.WriteAllText(marker, "foreign owner");
+            var calls = f.Source.Calls;
+            try {
+                using var reopened = new PlaceholderHydrationCoordinator(f.Source, "pilot", f.Root, expectedPrincipal: Principal);
+                await Refuse(() => reopened.EvictVerifiedCacheAsync(Identity));
+            } catch (Exception error) when (error is TransferException or IOException or UnauthorizedAccessException) {
+                // A tampered root marker is refused during coordinator creation;
+                // tampered nested markers are refused when the entry is checked.
+            }
             Check(File.ReadAllBytes(f.File).SequenceEqual(Bytes) && File.ReadAllText(marker) == "foreign owner" && f.Source.Calls == calls);
         }
     }

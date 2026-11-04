@@ -36,6 +36,81 @@ internal static class SyntheticMemoryNative {
             !await SyntheticReaderEvidence.SendAsync(pipeName, nonce, Path.GetFileName(path), outcome, hresult).ConfigureAwait(false)) return 2;
         return exit;
     }
+    internal static int MarkerRead(string path, string label) {
+        var basePath = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
+        if (string.IsNullOrWhiteSpace(basePath) || !Path.IsPathFullyQualified(basePath) || basePath.StartsWith("\\\\", StringComparison.Ordinal) ||
+            label is not ("owner" or "sibling-control")) return 2;
+        var full = Path.GetFullPath(path);
+        var fixtureRoot = Path.Combine(Path.GetFullPath(basePath), "memory-native-fixtures");
+        var relative = Path.GetRelativePath(fixtureRoot, full).Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var expectedName = label == "owner" ? ".verified-hydration-owner" : ".synthetic-control-owner";
+        if (relative.Length != 4 || !Guid.TryParseExact(relative[0], "N", out var fixtureId) || relative[0] != fixtureId.ToString("N") ||
+            relative[1] != "Cache" || relative[2] != "verified-hydration-v1" || relative[3] != expectedName) return 2;
+        Console.WriteLine($"Synthetic external marker read: file={label}; stage=started; pid={Environment.ProcessId}"); Console.Out.Flush();
+        RequireLocalDirectory(Path.GetDirectoryName(full)!);
+        Console.WriteLine($"Synthetic external marker read: file={label}; stage=path-validated; pid={Environment.ProcessId}"); Console.Out.Flush();
+        var timer = Stopwatch.StartNew();
+        try {
+            var value = File.ReadAllText(full);
+            var matched = value == "LedgeTop.VerifiedHydration/1\n";
+            Console.WriteLine($"Synthetic external marker read: file={label}; outcome={(matched ? "matched" : "mismatch")}; elapsedMs={timer.Elapsed.TotalMilliseconds:F3}; pid={Environment.ProcessId}");
+            return matched ? 0 : 1;
+        } catch (Exception error) when (error is IOException or UnauthorizedAccessException) {
+            Console.WriteLine($"Synthetic external marker read: file={label}; outcome={error.GetType().Name}; hresult=0x{error.HResult:X8}; elapsedMs={timer.Elapsed.TotalMilliseconds:F3}; pid={Environment.ProcessId}");
+            return 1;
+        }
+    }
+    internal static int MarkerReadScopeTests() {
+        var priorProbe = Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE");
+        var priorRoot = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
+        var basePath = Path.Combine(Path.GetTempPath(), "ltt-marker-reader-tests-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(basePath, "memory-native-fixtures", Guid.NewGuid().ToString("N"), "Cache", "verified-hydration-v1");
+        var owner = Path.Combine(root, ".verified-hydration-owner");
+        var sibling = Path.Combine(root, ".synthetic-control-owner");
+        var outside = Path.Combine(basePath, "outside", ".verified-hydration-owner");
+        try {
+            Directory.CreateDirectory(root); Directory.CreateDirectory(Path.GetDirectoryName(outside)!);
+            File.WriteAllText(owner, "LedgeTop.VerifiedHydration/1\n");
+            File.WriteAllText(sibling, "LedgeTop.VerifiedHydration/1\n");
+            File.WriteAllText(outside, "LedgeTop.VerifiedHydration/1\n");
+            Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", "1");
+            Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", basePath);
+            if (MarkerRead(owner, "owner") != 0 || MarkerRead(sibling, "sibling-control") != 0 ||
+                MarkerRead(owner, "sibling-control") != 2 || MarkerRead(outside, "owner") != 2)
+                throw new IOException("Synthetic marker reader did not enforce the fixture paths or exact marker bytes.");
+            Console.WriteLine("PASS synthetic marker reader exact fixture scope and content checks; no native root or network.");
+            return 0;
+        } finally {
+            Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", priorProbe);
+            Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", priorRoot);
+            if (Directory.Exists(basePath)) Directory.Delete(basePath, recursive: true);
+        }
+    }
+    private static async Task ProbeMarkerFromChildAsync(string executable, string path, string label, List<Process> children) {
+        var info = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        info.ArgumentList.Add("--synthetic-memory-marker-read"); info.ArgumentList.Add(path); info.ArgumentList.Add(label);
+        var child = Process.Start(info) ?? throw new IOException("Synthetic marker helper did not start.");
+        children.Add(child);
+        var output = child.StandardOutput.ReadToEndAsync(); var error = child.StandardError.ReadToEndAsync();
+        try {
+            await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            Console.WriteLine($"Synthetic external marker helper: file={label}; outcome=exited; exit={child.ExitCode}; pid={child.Id}; stdout={(await output.ConfigureAwait(false)).Trim()}; stderr={(await error.ConfigureAwait(false)).Trim()}");
+        } catch (TimeoutException) {
+            var pid = child.Id; var stopped = false;
+            try {
+                child.Kill(entireProcessTree: true);
+                await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                stopped = true;
+            } catch (Exception killError) when (killError is InvalidOperationException or System.ComponentModel.Win32Exception or TimeoutException) {
+                Console.WriteLine($"Synthetic external marker helper cleanup unresolved: file={label}; pid={pid}; error={killError.GetType().Name}");
+            }
+            static async Task<string> Drain(Task<string> stream) {
+                try { return (await stream.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false)).Trim(); }
+                catch (Exception error) when (error is TimeoutException or IOException or ObjectDisposedException) { return "<not-drained:" + error.GetType().Name + ">"; }
+            }
+            Console.WriteLine($"Synthetic external marker helper: file={label}; outcome=timeout; pid={pid}; stopped={stopped}; stdout={await Drain(output).ConfigureAwait(false)}; stderr={await Drain(error).ConfigureAwait(false)}");
+        }
+    }
     private static int ReaderOperation(Func<byte[]> read, Action<string, int> report) {
         try {
             var bytes = read();
@@ -99,17 +174,24 @@ internal static class SyntheticMemoryNative {
         var failFast = SerialMode(get("LEDGETOP_TEST_MEMORY_FAIL_FAST"));
         var processInfo = SerialMode(get("LEDGETOP_TEST_REQUIRE_PROCESS_INFO"));
         var pending = PendingMode(get("LEDGETOP_TEST_PENDING_MARKER"));
-        return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}; prewarm={prewarm}; serial={serial}; failFast={failFast}; processInfo={processInfo}; pendingMarker={pending}";
+        var sameProcessMarkerRead = get("LEDGETOP_TEST_MEMORY_SAME_PROCESS_MARKER_READ") == "1";
+        return $"Synthetic memory options: blockSelf={blockSelf}; disableScanner={disableScanner}; suppressProgress={suppressProgress}; markerIo={markerIo}; cacheStage={cacheStage}; prewarm={prewarm}; serial={serial}; failFast={failFast}; processInfo={processInfo}; pendingMarker={pending}; sameProcessMarkerRead={sameProcessMarkerRead}";
     }
     private static string PendingMode(string? value) => value switch { null or "off" => "off", "reopen" => "reopen", "retained" => "retained", "mutated" => "mutated", "mutated-retained" => "mutated-retained", "mutated-shared-reopen" => "mutated-shared-reopen", _ => "invalid" };
 #if LEDGETOP_CACHE_RACE_TEST
     internal static bool OwnedOptionsValid(string option, int count, bool retry, string marker, string cache, string prewarm, string serial, string failFast, string pending, Func<string, string?> get) =>
-        option == "0" || (option == "1" && count is >= 1 and <= 2 && !retry && marker == "none" && cache == "none" && prewarm == "off" && serial == "off" && failFast == "off" && pending == "off" && RetryOptionsValid(get));
+        option == "0" || (option == "1" && count is >= 1 and <= 2 && !retry && marker == "none" && serial == "off" && failFast == "off" && pending == "off" && RetryOptionsValid(get) &&
+            (get("LEDGETOP_TEST_MEMORY_SAME_PROCESS_MARKER_READ") == "1"
+                ? count == 2 && cache == "quota-reservation" && prewarm == "entries"
+                : cache == "none" && prewarm == "off"));
     internal static bool ReceiptOptionsValid(string receipt, string owned) => receipt == "0" || (receipt == "1" && owned == "1");
     internal static async Task<int> OwnedSourceContractTests() {
         string? Off(string _) => null;
+        string? SameProcessRead(string name) => name == "LEDGETOP_TEST_MEMORY_SAME_PROCESS_MARKER_READ" ? "1" : null;
         if (!ReceiptOptionsValid("1", "1") || ReceiptOptionsValid("1", "0") || ReceiptOptionsValid("bad", "1") ||
             !OwnedOptionsValid("1", 2, false, "none", "none", "off", "off", "off", "off", Off) ||
+            !OwnedOptionsValid("1", 2, false, "none", "quota-reservation", "entries", "off", "off", "off", SameProcessRead) ||
+            OwnedOptionsValid("1", 1, false, "none", "quota-reservation", "entries", "off", "off", "off", SameProcessRead) ||
             OwnedOptionsValid("1", 3, false, "none", "none", "off", "off", "off", "off", Off) ||
             OwnedOptionsValid("1", 1, true, "none", "none", "off", "off", "off", "off", Off) ||
             OwnedOptionsValid("1", 1, false, "none", "quota-only", "off", "off", "off", "off", Off) ||
@@ -664,6 +746,7 @@ internal static class SyntheticMemoryNative {
         var pending = PendingMode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_PENDING_MARKER"));
         var ownedDownloader = Environment.GetEnvironmentVariable("LEDGETOP_TEST_SYNTHETIC_OWNED_DOWNLOADER") ?? "0";
         var receiptTransfer = Environment.GetEnvironmentVariable("LEDGETOP_TEST_SYNTHETIC_RECEIPT_TRANSFER") ?? "0";
+        var sameProcessMarkerRead = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SAME_PROCESS_MARKER_READ") == "1";
 #if LEDGETOP_CACHE_RACE_TEST
         if (!ReceiptOptionsValid(receiptTransfer, ownedDownloader) || !OwnedOptionsValid(ownedDownloader, count, retryProbe, markerMode, cacheStage, prewarm, serial, failFast, pending, Environment.GetEnvironmentVariable)) return 2;
 #else
@@ -677,6 +760,7 @@ internal static class SyntheticMemoryNative {
             (prewarm != "off" && (markerMode != "none" || cacheStage != "quota-reservation")) ||
             !FailFastOptionsValid(count, retryProbe, markerMode, cacheStage, prewarm, serial, failFast, Environment.GetEnvironmentVariable) ||
             !PendingOptionsValid(count, retryProbe, markerMode, cacheStage, prewarm, serial, failFast, pending, Environment.GetEnvironmentVariable)) return 2;
+        if (sameProcessMarkerRead && (count != 2 || ownedDownloader != "1" || cacheStage != "quota-reservation" || prewarm != "entries")) return 2;
         if (retryProbe && (count != 1 || markerMode != "none" || cacheStage != "none" || prewarm != "off" || serial != "off" || failFast != "off" || !RetryOptionsValid(Environment.GetEnvironmentVariable))) return 2;
         if (failFast == "on") Console.WriteLine("Synthetic fail-fast bounds admission semaphore waiting only; the initial global Sync lock and filesystem/native calls are not hard-bounded. Reader evidence uses current-user pipes, which can perturb timing.");
         var basePath = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
@@ -685,7 +769,11 @@ internal static class SyntheticMemoryNative {
         var fixtureBase = Path.Combine(basePath, "memory-native-fixtures");
         if (!Directory.Exists(fixtureBase)) Directory.CreateDirectory(fixtureBase);
         RequireLocalDirectory(fixtureBase);
-        var id = Guid.NewGuid(); var owned = Path.Combine(fixtureBase, id.ToString("N"));
+        var fixtureId = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_FIXTURE_ID");
+        var id = string.IsNullOrEmpty(fixtureId) ? Guid.NewGuid() :
+            Guid.TryParseExact(fixtureId, "N", out var requestedFixtureId) ? requestedFixtureId :
+            throw new IOException("Synthetic fixture ID must be a compact GUID.");
+        var owned = Path.Combine(fixtureBase, id.ToString("N"));
         Phase("fixture-setup-start", id);
         if (Directory.Exists(owned) || File.Exists(owned)) throw new IOException("Test fixture already exists.");
         var root = Path.Combine(owned, "Files"); var cache = Path.Combine(owned, "Cache");
@@ -709,7 +797,7 @@ internal static class SyntheticMemoryNative {
         DiagnosticMemoryMarkerIo.Preopened? preopened = null;
         DiagnosticMemoryMarkerIo.CreateScope? createScope = null;
         DiagnosticPendingMarkerControl.Scope? pendingScope = null;
-        var readers = new List<Process>(); var readerFiles = new Dictionary<int, string>(); var readyHandles = new List<EventWaitHandle>(); var success = false;
+        var readers = new List<Process>(); var markerHelpers = new List<Process>(); var readerFiles = new Dictionary<int, string>(); var readyHandles = new List<EventWaitHandle>(); var success = false;
         var readerPipes = new List<ReaderPipe>(); var readerEvidence = new Dictionary<int, SyntheticReaderEvidence.Classification>();
         var evidenceStop = new CancellationTokenSource();
         var registrationAttempted = false; var readersJoined = true; var disposeCompleted = false;
@@ -739,6 +827,18 @@ internal static class SyntheticMemoryNative {
                 Phase("prewarm-start", id); NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticPrewarmStart);
                 await PrewarmOwnedAsync(cache, manifest.Values.ToArray(), prewarm == "entries+reservation");
                 NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticPrewarmComplete); Phase("prewarm-complete", id);
+            }
+            if (Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SAME_PROCESS_MARKER_READ") == "1") {
+                var ownerDirectory = Path.Combine(cache, "verified-hydration-v1");
+                var ownerMarker = Path.Combine(ownerDirectory, ".verified-hydration-owner");
+                if (!File.Exists(ownerMarker)) throw new IOException("Same-process marker comparison requires a prewarmed owner marker.");
+                RequireLocalDirectory(ownerDirectory);
+                var controlMarker = Path.Combine(ownerDirectory, ".synthetic-control-owner");
+                using (var control = new FileStream(controlMarker, FileMode.CreateNew, FileAccess.Write, FileShare.Read)) {
+                    control.Write(Encoding.UTF8.GetBytes("LedgeTop.VerifiedHydration/1\n"));
+                    control.Flush(true);
+                }
+                Phase("same-process-marker-controls-ready", id);
             }
             if (markerMode == "preopened-distinct") {
                 Phase("marker-preopen-start", id);
@@ -819,6 +919,45 @@ internal static class SyntheticMemoryNative {
             if (!WaitHandle.WaitAll(readyHandles.ToArray(), TimeSpan.FromSeconds(10))) throw new TimeoutException("Synthetic readers did not reach the start gate.");
             start.Set();
             Phase("reader-exit-wait", id);
+            if (sameProcessMarkerRead) {
+                var markerOpenEntered = Stopwatch.StartNew();
+                while (markerOpenEntered.Elapsed < TimeSpan.FromSeconds(5)) {
+                    var observed = NativeStallTrace.Snapshot(trace);
+                    var opens = observed.Count(e => e.Kind == NativeStallTrace.Stage.OwnedVerifyReaderOpenEnter);
+                    var exits = observed.Count(e => e.Kind == NativeStallTrace.Stage.OwnedVerifyReaderOpenExit);
+                    if (opens >= 2 && exits < 2) break;
+                    Thread.Sleep(10);
+                }
+                var markerDirectory = Path.Combine(cache, "verified-hydration-v1");
+                var reads = new (string Label, string Path)[] {
+                    ("owner", Path.Combine(markerDirectory, ".verified-hydration-owner")),
+                    ("sibling-control", Path.Combine(markerDirectory, ".synthetic-control-owner"))
+                };
+                var probes = reads.Select(read => {
+                    var thread = new Thread(() => {
+                        var readClock = Stopwatch.StartNew();
+                        try {
+                            var content = File.ReadAllText(read.Path);
+                            Console.WriteLine($"Synthetic same-process marker read: file={read.Label}; outcome={(content == "LedgeTop.VerifiedHydration/1\n" ? "matched" : "mismatch")}; elapsedMs={readClock.Elapsed.TotalMilliseconds:F3}");
+                        } catch (Exception error) when (error is IOException or UnauthorizedAccessException) {
+                            Console.WriteLine($"Synthetic same-process marker read: file={read.Label}; outcome={error.GetType().Name}; hresult=0x{error.HResult:X8}; elapsedMs={readClock.Elapsed.TotalMilliseconds:F3}");
+                        }
+                        Console.Out.Flush();
+                    }) { IsBackground = true, Name = "Synthetic same-process " + read.Label + " marker read" };
+                    thread.Start();
+                    return (read.Label, thread);
+                }).ToArray();
+                foreach (var probe in probes)
+                    if (!probe.thread.Join(TimeSpan.FromSeconds(5))) {
+                        Console.WriteLine($"Synthetic same-process marker read: file={probe.Label}; outcome=timeout; elapsedMs>=5000");
+                        Console.Out.Flush();
+                    }
+                var helperExecutable = Environment.ProcessPath ?? throw new IOException("Self-contained test apphost required.");
+                if (Path.GetFileNameWithoutExtension(helperExecutable).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("Use the self-contained test apphost.");
+                foreach (var read in reads)
+                    await ProbeMarkerFromChildAsync(helperExecutable, read.Path, read.Label, markerHelpers).ConfigureAwait(false);
+            }
             var clock = Stopwatch.StartNew(); var loggedReaders = new HashSet<int>(); TimeSpan? allExited = null;
             while (true) {
                 foreach (var reader in readers) if (!loggedReaders.Contains(reader.Id) && reader.HasExited) {
@@ -852,7 +991,14 @@ internal static class SyntheticMemoryNative {
                   SyntheticFailFastTraceValid(NativeStallTrace.Snapshot(trace), NativeStallTrace.Attempted(trace), NativeStallTrace.Dropped(trace), false)
                 : readers.All(p => p.ExitCode == 0);
             }
-        } catch (Exception error) { Console.Error.WriteLine($"Synthetic memory native: {error.GetType().Name}: {error.Message}"); Console.Error.Flush(); }
+        } catch (Exception error) {
+            Console.Error.WriteLine($"Synthetic memory native: {error.GetType().Name}: {error.Message}");
+            var failureTrace = NativeStallTrace.Snapshot(trace);
+            var traceStart = failureTrace.Length == 0 ? 0 : failureTrace[0].Timestamp;
+            foreach (var item in failureTrace)
+                Console.Error.WriteLine($"Synthetic failure trace: seq={item.Sequence}; elapsedMs={(traceStart == 0 ? 0 : Stopwatch.GetElapsedTime(traceStart, item.Timestamp).TotalMilliseconds):F3}; thread={item.ThreadId}; callback={item.CallbackId}; stage={item.Kind}");
+            Console.Error.Flush();
+        }
         finally {
             Phase("cleanup-start", id);
             foreach (var reader in readers) {
@@ -862,6 +1008,13 @@ internal static class SyntheticMemoryNative {
                 }
                 catch { readersJoined = false; }
                 reader.Dispose();
+            }
+            foreach (var helper in markerHelpers) {
+                try {
+                    if (!helper.HasExited) { helper.Kill(entireProcessTree: true); await helper.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)); }
+                    Phase($"marker-helper-joined-pid-{helper.Id}-code-{helper.ExitCode}", id);
+                    helper.Dispose();
+                } catch { readersJoined = false; }
             }
             foreach (var ready in readyHandles) ready.Dispose();
             evidenceStop.Cancel();
@@ -924,14 +1077,16 @@ internal static class SyntheticMemoryNative {
             Phase(createScope is null ? "create-scope-released" : "create-scope-retained", id);
             var cleanupVerified = pendingEvidence && ownedEvidence && CleanupVerified(registrationAttempted, registration is not null, readersJoined, disposeCompleted, unregisterVerified, committedCleanupUncertain);
             if (!cleanupVerified) success = false;
-            foreach (var item in NativeStallTrace.Snapshot(trace).Where(e => ownedDownloader == "1" || pending != "off" || cacheStage != "none" || (processInfo == "on" && e.Kind == NativeStallTrace.Stage.WorkerStart && e.CallbackId != 0) || e.Kind is NativeStallTrace.Stage.SyntheticCallbackProcess or NativeStallTrace.Stage.SyntheticMarkerReadEnter or NativeStallTrace.Stage.SyntheticMarkerReadExit
+            var finalTraceEvents = NativeStallTrace.Snapshot(trace);
+            var traceStart = finalTraceEvents.Length == 0 ? 0 : finalTraceEvents[0].Timestamp;
+            foreach (var item in finalTraceEvents.Where(e => ownedDownloader == "1" || pending != "off" || cacheStage != "none" || (processInfo == "on" && e.Kind == NativeStallTrace.Stage.WorkerStart && e.CallbackId != 0) || e.Kind is NativeStallTrace.Stage.SyntheticCallbackProcess or NativeStallTrace.Stage.SyntheticMarkerReadEnter or NativeStallTrace.Stage.SyntheticMarkerReadExit
                 or NativeStallTrace.Stage.SyntheticMarkerCreateEnter or NativeStallTrace.Stage.SyntheticMarkerCreateExit
                 or NativeStallTrace.Stage.SyntheticMarkerWriteEnter or NativeStallTrace.Stage.SyntheticMarkerWriteExit
                 or NativeStallTrace.Stage.SyntheticMarkerFlushEnter or NativeStallTrace.Stage.SyntheticMarkerFlushExit
                 or NativeStallTrace.Stage.SyntheticMarkerCloseEnter or NativeStallTrace.Stage.SyntheticMarkerCloseExit))
                 if (item.Kind == NativeStallTrace.Stage.SyntheticCallbackProcess)
-                    Console.WriteLine($"Synthetic callback trace: seq={item.Sequence}; thread={item.ThreadId}; callback={item.CallbackId}; processInfo={(SyntheticCallbackProcessInfo.Status)item.ProcessInfoStatus}; pid={item.ProcessId}");
-                else Console.WriteLine($"Synthetic marker trace: seq={item.Sequence}; thread={item.ThreadId}; stage={item.Kind}; callback={item.CallbackId}");
+                    Console.WriteLine($"Synthetic callback trace: seq={item.Sequence}; elapsedMs={(traceStart == 0 ? 0 : Stopwatch.GetElapsedTime(traceStart, item.Timestamp).TotalMilliseconds):F3}; thread={item.ThreadId}; callback={item.CallbackId}; processInfo={(SyntheticCallbackProcessInfo.Status)item.ProcessInfoStatus}; pid={item.ProcessId}");
+                else Console.WriteLine($"Synthetic marker trace: seq={item.Sequence}; elapsedMs={(traceStart == 0 ? 0 : Stopwatch.GetElapsedTime(traceStart, item.Timestamp).TotalMilliseconds):F3}; thread={item.ThreadId}; stage={item.Kind}; callback={item.CallbackId}");
             Console.WriteLine($"Synthetic marker trace: attempted={NativeStallTrace.Attempted(trace)}; dropped={NativeStallTrace.Dropped(trace)}");
             NativeStallTrace.Disable(trace);
             Console.WriteLine($"Synthetic memory native: count={count}; success={success}; nativeRegistrationCleanupVerified={cleanupVerified}; committedCleanupUncertain={committedCleanupUncertain}; fixtureDirectoriesRemoved=False; disposeTimedOut={disposeTimedOut}; registrationAttempted={registrationAttempted}; registrationReturned={registration is not null}; root={root}; registrationContext=LedgeTop.Files.MemoryNativeTest.v1:{id}");

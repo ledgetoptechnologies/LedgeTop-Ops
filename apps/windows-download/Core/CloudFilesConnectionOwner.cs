@@ -299,14 +299,43 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
         try {
             CloudFilesCallbackDispatcher? provider; Phase current;
             lock (sync) { provider = dispatcher; current = phase; }
+ #if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.WorkerStateCaptured, snapshot.SyntheticCallbackId);
+ #endif
             if (snapshot.Cookie != cookie || snapshot.Connection != connection || provider is null) {
+ #if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.WorkerUnmapped, snapshot.SyntheticCallbackId);
+ #endif
                 Notice(CloudFilesConnectionNotice.Unmapped); return;
             }
-            if (current != Phase.Connected) { Reject(snapshot, CloudFilesConnectionNotice.Stopping); return; }
-            if (snapshot.CancelRequested.Task.IsCompleted) { Notice(CloudFilesConnectionNotice.CancelledBeforeAdmission); return; }
-            if (snapshot.Identity is null) { Reject(snapshot, CloudFilesConnectionNotice.Malformed); return; }
+            if (current != Phase.Connected) {
+ #if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.WorkerStopping, snapshot.SyntheticCallbackId);
+ #endif
+                Reject(snapshot, CloudFilesConnectionNotice.Stopping); return;
+            }
+            if (snapshot.CancelRequested.Task.IsCompleted) {
+ #if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.WorkerCancelled, snapshot.SyntheticCallbackId);
+ #endif
+                Notice(CloudFilesConnectionNotice.CancelledBeforeAdmission); return;
+            }
+            if (snapshot.Identity is null) {
+ #if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.WorkerMalformed, snapshot.SyntheticCallbackId);
+ #endif
+                Reject(snapshot, CloudFilesConnectionNotice.Malformed); return;
+            }
             Task hydration;
-            try { hydration = provider.FetchDataAsync(snapshot.Identity, snapshot.Context); }
+            try {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.DispatcherFetchEnter, snapshot.SyntheticCallbackId);
+#endif
+                hydration = provider.FetchDataAsync(snapshot.Identity, snapshot.Context);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.DispatcherFetchExit, snapshot.SyntheticCallbackId);
+#endif
+            }
             catch { Reject(snapshot, CloudFilesConnectionNotice.Malformed); return; }
             // The trusted hydrator owns terminal handling once admitted. Never fail an already
             // committed native range again merely because its managed task faults/cancels.

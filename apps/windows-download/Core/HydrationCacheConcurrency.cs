@@ -12,14 +12,17 @@ internal static class HydrationCacheConcurrency
     internal sealed class ExperimentalRootStatus { internal readonly object Gate = new(); internal long Revision; internal bool Poisoned; }
 #endif
     private sealed class Entry { internal readonly SemaphoreSlim Gate = new(1, 1); internal int References; }
+    internal sealed record ActiveReservation(FileStream Stream, byte[] Bytes, long Growth);
+    internal sealed class QuotaState { internal readonly Dictionary<string, ActiveReservation> Reservations = new(StringComparer.OrdinalIgnoreCase); }
     internal const int Capacity = 4;
     private sealed class Root
     {
         internal readonly SemaphoreSlim Slots = new(Capacity, Capacity);
         internal readonly SemaphoreSlim Admission = new(1, 1);
-        internal readonly object Quota = new();
+        internal readonly QuotaState Quota = new();
         internal readonly Dictionary<string, Entry> Entries = new(StringComparer.Ordinal);
         internal FileStream? ExclusiveLegacyLease;
+        internal bool Quarantined;
 #if LEDGETOP_CACHE_RACE_TEST
         internal ExperimentalRootMarkerOwner? ExperimentalMarkerOwner;
         internal readonly ExperimentalRootStatus Status = new();
@@ -125,6 +128,54 @@ internal static class HydrationCacheConcurrency
             Interlocked.Exchange(ref release, null)?.Invoke();
         } }
     }
+    private static QuotaState RequireQuota(object quota)
+    {
+        if (quota is not QuotaState state || !Monitor.IsEntered(state))
+            throw new InvalidOperationException("Hydration quota gate is not held.");
+        return state;
+    }
+    internal static void RegisterReservation(object quota, string path, byte[] bytes, long growth, FileStream stream)
+    {
+        var state = RequireQuota(quota); var key = Path.GetFullPath(path);
+        if (growth < 0 || bytes.Length is <= 0 or > 1024 || !stream.CanRead || stream.Length != bytes.Length)
+            throw new TransferException("Hydration reservation handle is unavailable.");
+        stream.Position = 0; var observed = new byte[bytes.Length]; stream.ReadExactly(observed);
+        if (!observed.AsSpan().SequenceEqual(bytes)) throw new TransferException("Hydration reservation changed.");
+        stream.Position = 0;
+        if (!state.Reservations.TryAdd(key, new(stream, bytes.ToArray(), growth)))
+            throw new TransferException("Hydration reservation already has a live owner.");
+    }
+    internal static bool TryReadReservation(object quota, string path, out long growth)
+    {
+        var state = RequireQuota(quota);
+        if (!state.Reservations.TryGetValue(Path.GetFullPath(path), out var active)) { growth = 0; return false; }
+        var stream = active.Stream;
+        if (!stream.CanRead || stream.Length != active.Bytes.Length) throw new TransferException("Active hydration reservation changed.");
+        // On Windows, the retained read handle was opened with FileShare.Read, which denies
+        // subsequent write/delete opens. The exact record was validated when registered, so a
+        // quota scan need only confirm the handle and enumerated path remain present. Portable
+        // synthetic runs retain the byte comparison because FileShare enforcement varies by OS.
+        if (!OperatingSystem.IsWindows()) {
+            stream.Position = 0; var observed = new byte[active.Bytes.Length]; stream.ReadExactly(observed); stream.Position = 0;
+            if (!observed.AsSpan().SequenceEqual(active.Bytes)) throw new TransferException("Active hydration reservation changed.");
+        }
+        growth = active.Growth; return true;
+    }
+    internal static string[] ActiveReservationPaths(object quota) => RequireQuota(quota).Reservations.Keys.ToArray();
+    internal static void ReleaseReservation(object quota, string path, byte[] expected)
+    {
+        var state = RequireQuota(quota); var key = Path.GetFullPath(path);
+        if (!state.Reservations.TryGetValue(key, out var active) || !active.Bytes.AsSpan().SequenceEqual(expected))
+            throw new TransferException("Active hydration reservation ownership changed.");
+        _ = TryReadReservation(quota, key, out _);
+        active.Stream.Dispose();
+        state.Reservations.Remove(key);
+    }
+    private static void DisposeReservations(QuotaState quota)
+    {
+        foreach (var reservation in quota.Reservations.Values) reservation.Stream.Dispose();
+        quota.Reservations.Clear();
+    }
     internal static async Task<Lease> AcquireAsync(string root, string key, CancellationToken token, bool exclusive = false, TimeSpan? testTimeout = null)
     {
         Root state; Entry entry;
@@ -133,6 +184,7 @@ internal static class HydrationCacheConcurrency
                 if (Roots.Count >= 256) throw new TransferException("Hydration cache admission is at capacity.");
                 Roots.Add(root, state = new());
             }
+            if (state.Quarantined) throw new TransferException("Hydration cache ownership is uncertain.");
 #if LEDGETOP_CACHE_RACE_TEST
             if (state.ExperimentalQuarantined) throw new TransferException("Experimental root ownership is uncertain.");
 #endif
@@ -151,13 +203,21 @@ internal static class HydrationCacheConcurrency
             lock (Sync) {
                 if (--entry.References == 0) { state.Entries.Remove(key); entry.Gate.Dispose(); }
                 if (--state.References == 0) {
+                    try {
+                        DisposeReservations(state.Quota);
 #if LEDGETOP_CACHE_RACE_TEST
-                    try { state.ExperimentalMarkerOwner?.Dispose(); state.ExclusiveLegacyLease?.Dispose(); state.Slots.Dispose(); state.Admission.Dispose(); }
-                    catch { state.ExperimentalQuarantined = true; throw; }
-                    Roots.Remove(root);
+                        state.ExperimentalMarkerOwner?.Dispose(); state.ExclusiveLegacyLease?.Dispose(); state.Slots.Dispose(); state.Admission.Dispose();
 #else
-                    Roots.Remove(root); state.ExclusiveLegacyLease?.Dispose(); state.Slots.Dispose(); state.Admission.Dispose();
+                        state.ExclusiveLegacyLease?.Dispose(); state.Slots.Dispose(); state.Admission.Dispose();
 #endif
+                        Roots.Remove(root);
+                    } catch {
+                        state.Quarantined = true;
+#if LEDGETOP_CACHE_RACE_TEST
+                        state.ExperimentalQuarantined = true;
+#endif
+                        throw;
+                    }
                 }
             }
         }

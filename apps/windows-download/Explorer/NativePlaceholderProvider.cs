@@ -97,10 +97,13 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         connection = new(new NativeConnection(root), key => new CloudFilesCallbackDispatcher(source, channel, principal, key,
             cacheDirectory, async (coordinator, identity, context, token) => {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticHydratorEnter);
                 if (Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") == "1") {
                     if (identity.SourceAlias != "synthetic" || identity.Origin != "https://source.example.invalid" ||
                         identity.PrincipalId != "odqp1_" + new string('f', 64)) throw new IOException("Synthetic probe scope mismatch.");
+                    NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticMarkerIoEnter);
                     DiagnosticMemoryMarkerIo.Read(DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO")), cacheDirectory, identity.FileName);
+                    NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticMarkerIoExit);
                     var cacheStage = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_CACHE_STAGE") ?? "none";
                     var bytes = System.Text.Encoding.UTF8.GetBytes(new string('x', 100_000));
                     var serial = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL") ?? "0";
@@ -112,7 +115,13 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                     if (ownedDownloader is not ("0" or "1")) throw new IOException("Synthetic owned downloader option invalid.");
                     if (receiptTransfer is not ("0" or "1") || (receiptTransfer == "1" && ownedDownloader != "1")) throw new IOException("Synthetic receipt option invalid.");
                     if (ownedDownloader == "1") {
-                        if (source is not IDiagnosticOwnedDownloaderSource diagnosticSource || serial != "0" || failFast != "0" || cacheStage != "none" || pendingMarker != "off" ||
+                        NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticOwnedDownloaderEnter);
+                        // The same-process marker contention comparison prewarms quota entries,
+                        // then exercises the real owned-downloader cache path. It must not run
+                        // the separate synthetic cache-stage shim below.
+                        var sameProcessMarkerRead = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SAME_PROCESS_MARKER_READ") == "1";
+                        var expectedCacheStage = sameProcessMarkerRead ? "quota-reservation" : "none";
+                        if (source is not IDiagnosticOwnedDownloaderSource diagnosticSource || serial != "0" || failFast != "0" || cacheStage != expectedCacheStage || pendingMarker != "off" ||
                             DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO")) != "none")
                             throw new IOException("Synthetic owned downloader scope mismatch.");
                         if (receiptTransfer == "1") {

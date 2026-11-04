@@ -26,6 +26,49 @@ internal static class SyntheticMemoryInspection {
             return 0;
         } catch (Exception error) when (error is IOException or ArgumentException or UnauthorizedAccessException or PlatformNotSupportedException) {
             Console.Error.WriteLine("Read-only synthetic root inspection unavailable: " + error.Message);
+            try {
+                var (root, _) = Scope(Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") ?? "", idText);
+                void DumpPathState(string mode) {
+                    try { Console.Error.WriteLine($"Synthetic root path state ({mode}): directory={Directory.Exists(root)}; attributes={File.GetAttributes(root)}"); }
+                    catch (Exception pathError) when (pathError is IOException or UnauthorizedAccessException or ArgumentException) {
+                        Console.Error.WriteLine($"Synthetic root path state ({mode}): directory={Directory.Exists(root)}; attributesError={pathError.GetType().Name}; hresult=0x{pathError.HResult:X8}");
+                    }
+                }
+                DumpPathState("default");
+                using (PlaceholderVisibility.Expose()) DumpPathState("placeholders-exposed");
+            } catch (Exception pathError) when (pathError is IOException or ArgumentException or UnauthorizedAccessException or PlatformNotSupportedException) {
+                Console.Error.WriteLine("Synthetic root path diagnostics unavailable: " + pathError.GetType().Name);
+            }
+            return 1;
+        }
+    }
+
+    // One-shot cleanup for a fixture whose creation and registration-returned
+    // phase were recorded by this test runner. The caller supplies the observed
+    // root file ID; both the fixed context and ID must match before unregister.
+    internal static int Cleanup(string idText, string fileIdText) {
+        if (Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") != "1" ||
+            !long.TryParse(fileIdText, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var expectedFileId)) return 2;
+        try {
+            var (root, context) = Scope(Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") ?? "", idText);
+            var before = NativeRootRegistration.Inspect(root, context);
+            if (before.Hresult != 0 || before.RootFileId != expectedFileId || !before.ExpectedContextMatches ||
+                !before.ExpectedNameMatches || !before.ExpectedVersionMatches)
+                throw new IOException("Synthetic root identity did not match the recorded cleanup receipt.");
+            var registration = NativeRootRegistration.OpenOwned(root, context);
+            var verified = NativeRootRegistration.Inspect(root, context);
+            if (verified.Hresult != 0 || verified.RootFileId != expectedFileId || !verified.ExpectedContextMatches ||
+                !verified.ExpectedNameMatches || !verified.ExpectedVersionMatches)
+                throw new IOException("Synthetic root changed before cleanup.");
+            registration.Unregister();
+            var after = NativeRootRegistration.Inspect(root, context);
+            if (after.Hresult != unchecked((int)0x80070186))
+                throw new IOException("Synthetic root cleanup did not verify as unregistered.");
+            Console.WriteLine(JsonSerializer.Serialize(new { root, rootFileId = expectedFileId,
+                unregisterHresult = "0x00000000", afterHresult = "0x80070186", cleanupVerified = true }));
+            return 0;
+        } catch (Exception error) when (error is IOException or ArgumentException or UnauthorizedAccessException or PlatformNotSupportedException or InvalidOperationException) {
+            Console.Error.WriteLine("Synthetic root cleanup refused or unverified: " + error.Message);
             return 1;
         }
     }

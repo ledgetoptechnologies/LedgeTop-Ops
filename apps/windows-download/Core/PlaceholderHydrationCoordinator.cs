@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Runtime.InteropServices;
+using System.Collections.Concurrent;
 using Microsoft.Win32.SafeHandles;
 using System.Text.Json;
 
@@ -24,13 +25,33 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     private readonly Func<TimeSpan, CancellationToken, Task> authorizationRetryDelay;
     private readonly TimeProvider authorizationRetryClock;
     private int disposed;
+    private RootOwnerPin? rootOwnerPin;
+    private readonly object ownedDirectoryPinsSync = new();
+    private readonly ConcurrentDictionary<string, RootOwnerPin> ownedDirectoryPins = new(StringComparer.OrdinalIgnoreCase);
+    private int ownedDirectoryPinCount;
+    private const int MaximumOwnedDirectoryPins = 512;
     private const string Marker = ".verified-hydration-owner";
     private const string Owner = "LedgeTop.VerifiedHydration/1\n";
+    // Same-process coordinators can initialize a shared ownership directory at once.
+    // Fixed stripes serialize only marker creation/verification and keep the gate table bounded.
+    private static readonly object[] OwnedDirectoryGates = CreateOwnedDirectoryGates();
+    private static object[] CreateOwnedDirectoryGates()
+    {
+        var gates = new object[64];
+        for (var i = 0; i < gates.Length; i++) gates[i] = new object();
+        return gates;
+    }
 #if LEDGETOP_CACHE_RACE_TEST
     internal string ExperimentalRootForTest => root;
     // Synthetic-only deterministic barrier; excluded from normal and staging builds.
     internal static Action<string>? CacheWalkTestHook;
     internal static Action<string>? CreatedMarkerTestHook;
+    internal static Action<string>? BeforeOwnedDirectoryGateTestHook;
+    internal static Action<string>? BeforeOwnedPinRegistrationTestHook;
+    internal static Action<string>? OwnerMarkerReadTestHook;
+    internal static Action<string>? ReservationCreatedTestHook;
+    internal static Action<string>? AfterReservationMoveTestHook;
+    internal static Action<bool>? ReservationIdentityTestHook;
     internal static Action? BeforeReservationReleaseTestHook;
     internal static Action<string>? QuarantineStaleGuardTestHook;
 #endif
@@ -56,6 +77,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         RequireSafe(applicationStateRoot);
         if (!Directory.Exists(applicationStateRoot)) throw new TransferException("Application state root must already exist.");
         Owned(root);
+        if (OperatingSystem.IsWindows()) rootOwnerPin = RootOwnerPin.AcquireExisting(root);
     }
     /// <summary>Offline exact-cache reclamation after successful native dehydration. Never authenticates or touches placeholders.</summary>
     internal async Task EvictVerifiedCacheAsync(PlaceholderIdentity identity, CancellationToken cancellationToken = default)
@@ -68,11 +90,11 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         using var admission = await HydrationCacheConcurrency.AcquireForReclamationAsync(root, identity.ScopeKey + identity.CacheKey, cancellationToken).ConfigureAwait(false);
         {
             cancellationToken.ThrowIfCancellationRequested(); ValidateSource(identity);
-            if (!OwnedExisting(root)) return;
+            VerifyOwnedRoot();
             var scope = Path.Combine(root, identity.ScopeKey);
-            if (!OwnedExisting(scope)) return;
+            if (!OwnedExistingCached(scope)) return;
             var entry = Path.Combine(scope, identity.CacheKey);
-            if (!OwnedExisting(entry)) return;
+            if (!OwnedExistingCached(entry)) return;
             var file = Path.Combine(entry, identity.FileName); RequireSafe(file);
             if (!File.Exists(file)) { if (Directory.Exists(file)) throw new TransferException("Cache entry changed type."); return; }
             // Missing leases are ambiguous, never create locks/directories during offline eviction.
@@ -82,7 +104,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             admission.AcquireExclusiveLegacy(quotaLock, FileMode.Open);
             var lockPath = Path.Combine(entry, ".hydration.lock"); RequireSafe(lockPath);
             using var held = await OpenEntryLeaseAsync(lockPath, FileMode.Open, cancellationToken, reclamation: true).ConfigureAwait(false);
-            _ = OwnedExisting(root); _ = OwnedExisting(scope); _ = OwnedExisting(entry); RequireSafe(file);
+            VerifyOwnedRoot(); _ = OwnedExistingCached(scope); _ = OwnedExistingCached(entry); RequireSafe(file);
             if (!OperatingSystem.IsWindows()) throw new TransferException("Verified cache reclamation requires Windows.");
             // DELETE access binds deletion to this verified file handle. Writes/rename/replacement are
             // excluded through hashing and setting delete disposition; no hash-close-path-delete race.
@@ -93,13 +115,14 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                     await SHA256.HashDataAsync(input, cancellationToken).ConfigureAwait(false), Convert.FromHexString(identity.Sha256)))
                     throw new TransferException("Modified cache data was preserved.");
                 cancellationToken.ThrowIfCancellationRequested(); ValidateSource(identity);
-                if (!OwnedExisting(root) || !OwnedExisting(scope) || !OwnedExisting(entry))
+                VerifyOwnedRoot();
+                if (!OwnedExistingCached(scope) || !OwnedExistingCached(entry))
                     throw new TransferException("Cache ownership changed during eviction.");
                 // FILE_DISPOSITION_INFO is one BOOLEAN byte, not a four-byte Win32 BOOL.
                 // https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_disposition_info
                 HydrationQuotaGate.Run(admission.Quota, () => {
                     using var quota = modernQuota ? new FileStream(newQuota, FileMode.Open, FileAccess.ReadWrite, FileShare.None) : null;
-                    RemoveExactStaleReservation(identity); // Offline immutable pins only; no source/auth call.
+                    RemoveExactStaleReservation(identity, admission.Quota); // Offline immutable pins only; no source/auth call.
                     byte disposition = 1;
                     if (!CacheNative.SetFileInformationByHandle(handle, 4, ref disposition, 1))
                         throw new IOException("Verified cache deletion was not confirmed.", System.Runtime.InteropServices.Marshal.GetHRForLastWin32Error());
@@ -147,7 +170,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         }
         using var ownedAdmission = admission;
         NativeStallTrace.Record(NativeStallTrace.Stage.AdmissionAcquired);
-        TraceCacheAction(NativeStallTrace.Stage.SyntheticRootPrepareEnter, NativeStallTrace.Stage.SyntheticRootPrepareExit, () => { RequireSafe(root); Owned(root); });
+        TraceCacheAction(NativeStallTrace.Stage.SyntheticRootPrepareEnter, NativeStallTrace.Stage.SyntheticRootPrepareExit, VerifyOwnedRoot);
         var quotaLock = Path.Combine(root, ".hydration-cache.lock"); RequireSafe(quotaLock);
         NativeStallTrace.Record(NativeStallTrace.Stage.CacheLegacyLeaseEnter);
         admission.AcquireExclusiveLegacy(quotaLock, FileMode.OpenOrCreate);
@@ -161,34 +184,34 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             // the quota lock; never use this ordering as a production cache check.
             NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticOutsidePrecheckEnter);
             try {
-                outsideScopeExists = TraceCacheValue(NativeStallTrace.Stage.CacheScopeCheckEnter, NativeStallTrace.Stage.CacheScopeCheckExit, () => OwnedExisting(scope));
-                outsideEntryExists = TraceCacheValue(NativeStallTrace.Stage.CacheEntryCheckEnter, NativeStallTrace.Stage.CacheEntryCheckExit, () => OwnedExisting(entry));
+                outsideScopeExists = TraceCacheValue(NativeStallTrace.Stage.CacheScopeCheckEnter, NativeStallTrace.Stage.CacheScopeCheckExit, () => OwnedExistingCached(scope));
+                outsideEntryExists = TraceCacheValue(NativeStallTrace.Stage.CacheEntryCheckEnter, NativeStallTrace.Stage.CacheEntryCheckExit, () => OwnedExistingCached(entry));
             } finally { NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticOutsidePrecheckExit); }
         }
         WithQuota(admission.Quota, () => {
             if (stage == "reservation-owner-prewarm") {
                 var directory = Path.Combine(root, ".hydration-reservations-v2");
-                var exists = OwnedExisting(directory);
+                var exists = OwnedExistingCached(directory);
                 if (!exists) {
-                    RequireCapacity(ReservedBytes(directory), System.Text.Encoding.UTF8.GetByteCount(Owner));
-                    Owned(directory);
+                    RequireCapacity(ReservedBytes(directory, admission.Quota), System.Text.Encoding.UTF8.GetByteCount(Owner));
+                    OwnPinned(directory);
                 }
             } else if (stage != "quota-only") {
-                var scopeExists = stage == "quota-reservation-precheck" ? outsideScopeExists : TraceCacheValue(NativeStallTrace.Stage.CacheScopeCheckEnter, NativeStallTrace.Stage.CacheScopeCheckExit, () => OwnedExisting(scope));
-                var entryExists = stage == "quota-reservation-precheck" ? outsideEntryExists : TraceCacheValue(NativeStallTrace.Stage.CacheEntryCheckEnter, NativeStallTrace.Stage.CacheEntryCheckExit, () => OwnedExisting(entry));
+                var scopeExists = stage == "quota-reservation-precheck" ? outsideScopeExists : TraceCacheValue(NativeStallTrace.Stage.CacheScopeCheckEnter, NativeStallTrace.Stage.CacheScopeCheckExit, () => OwnedExistingCached(scope));
+                var entryExists = stage == "quota-reservation-precheck" ? outsideEntryExists : TraceCacheValue(NativeStallTrace.Stage.CacheEntryCheckEnter, NativeStallTrace.Stage.CacheEntryCheckExit, () => OwnedExistingCached(entry));
                 // The ownership-only comparison intentionally omits capacity;
                 // later stages run the production capacity path first.
                 if (!scopeExists || !entryExists) {
                     if (stage is "quota-capacity" or "quota-reservation" or "quota-reservation-gap" or "quota-reservation-precheck") {
                         var directory = Path.Combine(root, ".hydration-reservations-v2");
-                        var reservationDirectoryExists = TraceCacheValue(NativeStallTrace.Stage.CacheReservationDirCheckEnter, NativeStallTrace.Stage.CacheReservationDirCheckExit, () => OwnedExisting(directory));
+                        var reservationDirectoryExists = TraceCacheValue(NativeStallTrace.Stage.CacheReservationDirCheckEnter, NativeStallTrace.Stage.CacheReservationDirCheckExit, () => OwnedExistingCached(directory));
                         var metadata = checked((scopeExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
                             (entryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
                             (reservationDirectoryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)));
-                        RequireCapacity(ReservedBytes(directory), checked(identity.Length + Downloader.HydrationStateGrowthBudget(spec) + 1024 + metadata));
+                        RequireCapacity(ReservedBytes(directory, admission.Quota), checked(identity.Length + Downloader.HydrationStateGrowthBudget(spec) + 1024 + metadata));
                     }
-                    TraceCacheAction(NativeStallTrace.Stage.CacheScopeOwnEnter, NativeStallTrace.Stage.CacheScopeOwnExit, () => Owned(scope));
-                    TraceCacheAction(NativeStallTrace.Stage.CacheEntryOwnEnter, NativeStallTrace.Stage.CacheEntryOwnExit, () => Owned(entry));
+                    TraceCacheAction(NativeStallTrace.Stage.CacheScopeOwnEnter, NativeStallTrace.Stage.CacheScopeOwnExit, () => OwnPinned(scope));
+                    TraceCacheAction(NativeStallTrace.Stage.CacheEntryOwnEnter, NativeStallTrace.Stage.CacheEntryOwnExit, () => OwnPinned(entry));
                 }
             }
         }, token);
@@ -259,7 +282,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #endif
                 async Task<(FileStream Held, string File)> PrepareCacheAsync() {
                     stage = HydrationStage.CachePreparation; timing?.Enter(HydrationTimingStage.CachePreparation);
-                    RequireSafe(root); Owned(root);
+                    VerifyOwnedRoot();
                     var quotaLock = Path.Combine(root, ".hydration-cache.lock"); RequireSafe(quotaLock);
                     // One process owns the legacy lease through all its active and queued work;
                     // its two local slots still run concurrently. Other versions/processes refuse.
@@ -278,28 +301,28 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                         try {
 #endif
 #if LEDGETOP_NATIVE_DIAGNOSTICS
-                        var scopeExists = TraceCacheValue(NativeStallTrace.Stage.CacheScopeCheckEnter, NativeStallTrace.Stage.CacheScopeCheckExit, () => OwnedExisting(scope));
-                        var entryExists = TraceCacheValue(NativeStallTrace.Stage.CacheEntryCheckEnter, NativeStallTrace.Stage.CacheEntryCheckExit, () => OwnedExisting(entry));
+                        var scopeExists = TraceCacheValue(NativeStallTrace.Stage.CacheScopeCheckEnter, NativeStallTrace.Stage.CacheScopeCheckExit, () => OwnedExistingCached(scope));
+                        var entryExists = TraceCacheValue(NativeStallTrace.Stage.CacheEntryCheckEnter, NativeStallTrace.Stage.CacheEntryCheckExit, () => OwnedExistingCached(entry));
 #else
-                        var scopeExists = OwnedExisting(scope); var entryExists = OwnedExisting(entry);
+                        var scopeExists = OwnedExistingCached(scope); var entryExists = OwnedExistingCached(entry);
 #endif
                         if (!scopeExists || !entryExists) {
                             var directory = Path.Combine(root, ".hydration-reservations-v2");
                             var reservationDirectoryExists =
 #if LEDGETOP_NATIVE_DIAGNOSTICS
-                                TraceCacheValue(NativeStallTrace.Stage.CacheReservationDirCheckEnter, NativeStallTrace.Stage.CacheReservationDirCheckExit, () => OwnedExisting(directory));
+                            TraceCacheValue(NativeStallTrace.Stage.CacheReservationDirCheckEnter, NativeStallTrace.Stage.CacheReservationDirCheckExit, () => OwnedExistingCached(directory));
 #else
-                                OwnedExisting(directory);
+                                OwnedExistingCached(directory);
 #endif
                             var metadata = checked((scopeExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
                                 (entryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
                                 (reservationDirectoryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)));
-                            RequireCapacity(ReservedBytes(directory), checked(identity.Length + Downloader.HydrationStateGrowthBudget(resolved.Spec) + 1024 + metadata));
+                            RequireCapacity(ReservedBytes(directory, admission.Quota), checked(identity.Length + Downloader.HydrationStateGrowthBudget(resolved.Spec) + 1024 + metadata));
 #if LEDGETOP_NATIVE_DIAGNOSTICS
-                            TraceCacheAction(NativeStallTrace.Stage.CacheScopeOwnEnter, NativeStallTrace.Stage.CacheScopeOwnExit, () => Owned(scope));
-                            TraceCacheAction(NativeStallTrace.Stage.CacheEntryOwnEnter, NativeStallTrace.Stage.CacheEntryOwnExit, () => Owned(entry));
+                            TraceCacheAction(NativeStallTrace.Stage.CacheScopeOwnEnter, NativeStallTrace.Stage.CacheScopeOwnExit, () => OwnPinned(scope));
+                            TraceCacheAction(NativeStallTrace.Stage.CacheEntryOwnEnter, NativeStallTrace.Stage.CacheEntryOwnExit, () => OwnPinned(entry));
 #else
-                            Owned(scope); Owned(entry);
+                        OwnPinned(scope); OwnPinned(entry);
 #endif
                         }
 #if LEDGETOP_NATIVE_DIAGNOSTICS
@@ -379,7 +402,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                         }
                         else {
                             timing?.SetCacheHit(true);
-                            WithQuota(admission.Quota, () => RemoveExactStaleReservation(identity), cancellationToken);
+                            WithQuota(admission.Quota, () => RemoveExactStaleReservation(identity, admission.Quota), cancellationToken);
                         }
                         return (held, file);
                     } catch { held.Dispose(); throw; }
@@ -513,13 +536,13 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             var scope = Path.Combine(root, identity.ScopeKey); var entryPath = Path.Combine(scope, identity.CacheKey);
             var reservations = Path.Combine(root, ".hydration-reservations-v2");
             WithQuota(admission.Quota, () => {
-                var scopeExists = OwnedExisting(scope); var entryExists = OwnedExisting(entryPath); var reservationsExist = OwnedExisting(reservations);
+                var scopeExists = OwnedExistingCached(scope); var entryExists = OwnedExistingCached(entryPath); var reservationsExist = OwnedExistingCached(reservations);
                 if (!scopeExists || !entryExists || !reservationsExist) {
                     var metadata = checked((scopeExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
                         (entryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)) +
                         (reservationsExist ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner)));
-                    RequireCapacity(ReservedBytes(reservations), checked(identity.Length + Downloader.HydrationStateGrowthBudget(resolved.Spec) + 1024 + metadata));
-                    Owned(scope); Owned(entryPath); Owned(reservations);
+                    RequireCapacity(ReservedBytes(reservations, admission.Quota), checked(identity.Length + Downloader.HydrationStateGrowthBudget(resolved.Spec) + 1024 + metadata));
+                    OwnPinned(scope); OwnPinned(entryPath); OwnPinned(reservations);
                 }
             }, token);
             entry = ExperimentalEntryLease.Open(admission, root, identity.ScopeKey, identity.CacheKey);
@@ -662,7 +685,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     private static long ReservationGrowth(PlaceholderIdentity identity) => checked(identity.Length +
         Downloader.HydrationStateGrowthBudget(identity.Length, identity.ETag, identity.Sha256) + 1024);
     // Caller owns this entry exclusively and holds the appropriate root quota/legacy lease.
-    private void RemoveExactStaleReservation(PlaceholderIdentity identity)
+    private void RemoveExactStaleReservation(PlaceholderIdentity identity, object quota)
     {
 #if LEDGETOP_CACHE_RACE_TEST
         // All callers hold the same-entry admission/lease before the quota
@@ -675,12 +698,14 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         }
 #endif
         var directory = Path.Combine(root, ".hydration-reservations-v2");
-        if (!OwnedExisting(directory)) return;
+        if (!OwnedExistingCached(directory)) return;
         var path = Path.Combine(directory, identity.ScopeKey + "-" + identity.CacheKey + ".json"); RequireSafe(path);
         if (!File.Exists(path)) { if (Directory.Exists(path)) throw new TransferException("Hydration reservation changed type."); return; }
         var old = ReadReservation(path);
         if (old.Value.Scope != identity.ScopeKey || old.Value.Entry != identity.CacheKey || old.Value.Growth != ReservationGrowth(identity))
             throw new TransferException("Hydration reservation ownership changed.");
+        if (HydrationCacheConcurrency.TryReadReservation(quota, path, out _))
+            HydrationCacheConcurrency.ReleaseReservation(quota, path, old.Bytes);
         DeleteReservation(path, old.Bytes);
     }
     internal static async Task<FileStream> OpenEntryLeaseAsync(string path, FileMode mode, CancellationToken token, bool reclamation = false, TimeSpan? testTimeout = null)
@@ -715,7 +740,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             NativeStallTrace.Record(NativeStallTrace.Stage.CacheQuotaAcquired);
             try {
 #endif
-            RequireSafe(root); _ = OwnedExisting(root);
+            VerifyOwnedRoot();
             var path = Path.Combine(root, ".hydration-quota-v2.lock"); RequireSafe(path);
             // Cross-process contention is a conservative failure, never an ignored reservation.
             using var held = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
@@ -739,23 +764,87 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         if (bytes.Length > 1024) throw new TransferException("Hydration reservation is outside its storage bound.");
         WithQuota(gate, () => {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
-            var directoryExists = TraceCacheValue(NativeStallTrace.Stage.ReserveOwnerExistsEnter, NativeStallTrace.Stage.ReserveOwnerExistsExit, () => OwnedExisting(directory));
+            var directoryExists = TraceCacheValue(NativeStallTrace.Stage.ReserveOwnerExistsEnter, NativeStallTrace.Stage.ReserveOwnerExistsExit, () => OwnedExistingCached(directory));
             TraceCacheAction(NativeStallTrace.Stage.ReservePathSafeEnter, NativeStallTrace.Stage.ReservePathSafeExit, () => RequireSafe(path));
-            TraceCacheAction(NativeStallTrace.Stage.ReserveStaleEnter, NativeStallTrace.Stage.ReserveStaleExit, () => RemoveExactStaleReservation(identity));
+            TraceCacheAction(NativeStallTrace.Stage.ReserveStaleEnter, NativeStallTrace.Stage.ReserveStaleExit, () => RemoveExactStaleReservation(identity, gate));
 #else
-            var directoryExists = OwnedExisting(directory); RequireSafe(path);
-            RemoveExactStaleReservation(identity);
+            var directoryExists = OwnedExistingCached(directory); RequireSafe(path);
+            RemoveExactStaleReservation(identity, gate);
 #endif
-            RequireCapacity(ReservedBytes(directory), checked(growth + (directoryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner))));
-            Owned(directory);
-            using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-            output.Write(bytes); output.Flush(true);
+            RequireCapacity(ReservedBytes(directory, gate), checked(growth + (directoryExists ? 0 : System.Text.Encoding.UTF8.GetByteCount(Owner))));
+            OwnPinned(directory);
+            // Publish a fully-written temporary record atomically. A read-only guard on the
+            // temporary file allows the rename; opening the published path with FileShare.Read
+            // then denies write/delete/rename before ownership is registered. The final handle
+            // remains read-only so other processes can safely inspect the durable reservation.
+            var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                var output = TraceCacheValue(NativeStallTrace.Stage.ReservationTemporaryOpenEnter, NativeStallTrace.Stage.ReservationTemporaryOpenExit,
+                    () => new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.Read));
+                try {
+                    TraceCacheAction(NativeStallTrace.Stage.ReservationWriteEnter, NativeStallTrace.Stage.ReservationWriteExit, () => output.Write(bytes));
+                    TraceCacheAction(NativeStallTrace.Stage.ReservationFlushEnter, NativeStallTrace.Stage.ReservationFlushExit, () => output.Flush(true));
+                } finally {
+                    TraceCacheAction(NativeStallTrace.Stage.ReservationTemporaryDisposeEnter, NativeStallTrace.Stage.ReservationTemporaryDisposeExit, output.Dispose);
+                }
+                using var publishGuard = TraceCacheValue(NativeStallTrace.Stage.ReservationPublishGuardOpenEnter, NativeStallTrace.Stage.ReservationPublishGuardOpenExit,
+                    () => new FileStream(temporary, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete));
+                TraceCacheAction(NativeStallTrace.Stage.ReservationMoveEnter, NativeStallTrace.Stage.ReservationMoveExit, () => File.Move(temporary, path));
+#else
+                using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.Read)) {
+                    output.Write(bytes); output.Flush(true);
+                }
+                using var publishGuard = new FileStream(temporary, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+                File.Move(temporary, path);
+#endif
+#if LEDGETOP_CACHE_RACE_TEST
+                AfterReservationMoveTestHook?.Invoke(path);
+#endif
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                var held = TraceCacheValue(NativeStallTrace.Stage.ReservationFinalOpenEnter, NativeStallTrace.Stage.ReservationFinalOpenExit,
+                    () => new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read));
+#else
+                var held = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+#endif
+                var registered = false;
+                try {
+                    if (OperatingSystem.IsWindows()) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                        var sameFile = TraceCacheValue(NativeStallTrace.Stage.ReservationIdentityEnter, NativeStallTrace.Stage.ReservationIdentityExit,
+                            () => SameFileIdentity(publishGuard, held));
+#else
+                        var sameFile = SameFileIdentity(publishGuard, held);
+#endif
+#if LEDGETOP_CACHE_RACE_TEST
+                        ReservationIdentityTestHook?.Invoke(sameFile);
+#endif
+                        if (!sameFile) throw new TransferException("Hydration reservation path changed during publication.");
+                    }
+#if LEDGETOP_CACHE_RACE_TEST
+                    ReservationCreatedTestHook?.Invoke(path);
+#endif
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    TraceCacheAction(NativeStallTrace.Stage.ReservationRegisterEnter, NativeStallTrace.Stage.ReservationRegisterExit,
+                        () => HydrationCacheConcurrency.RegisterReservation(gate, path, bytes, growth, held));
+#else
+                    HydrationCacheConcurrency.RegisterReservation(gate, path, bytes, growth, held);
+#endif
+                    registered = true;
+                } finally { if (!registered) held.Dispose(); }
+            } catch {
+                if (File.Exists(temporary)) File.Delete(temporary);
+                throw;
+            }
         }, cancellationToken);
         return new Release(() => {
 #if LEDGETOP_CACHE_RACE_TEST
             BeforeReservationReleaseTestHook?.Invoke();
 #endif
-            WithQuota(gate, () => DeleteReservation(path, bytes));
+            WithQuota(gate, () => {
+                HydrationCacheConcurrency.ReleaseReservation(gate, path, bytes);
+                DeleteReservation(path, bytes);
+            });
         });
     }
     private void RequireCapacity(long reserved, long growth)
@@ -836,9 +925,9 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         lock (status.Gate) if (status.Poisoned || status.Revision != revision) throw new TransferException("Synthetic receipt status changed during the scan.");
         return (used, reserved <= maximumCacheBytes && used <= maximumCacheBytes - reserved && growth <= maximumCacheBytes - reserved - used, revision);
     }
-    private static long ExperimentalReservedBytes(string directory, Dictionary<string, ExperimentalReservationOwner> retained, Dictionary<string, ExperimentalReservationOwner.StagedSnapshot> staged)
+    private long ExperimentalReservedBytes(string directory, Dictionary<string, ExperimentalReservationOwner> retained, Dictionary<string, ExperimentalReservationOwner.StagedSnapshot> staged)
     {
-        if (!OwnedExisting(directory)) {
+        if (!OwnedExistingCached(directory)) {
             if (retained.Count != 0 || staged.Count != 0) throw new TransferException("Retained reservation directory is missing.");
             return 0;
         }
@@ -856,18 +945,29 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         return reserved;
     }
 #endif
-    private static long ReservedBytes(string directory)
+    private long ReservedBytes(string directory, object quota)
     {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         NativeStallTrace.Record(NativeStallTrace.Stage.CacheReservedBytesEnter);
         try {
 #endif
+        var activePaths = HydrationCacheConcurrency.ActiveReservationPaths(quota);
+        var canonicalDirectory = Path.GetFullPath(directory);
 #if LEDGETOP_NATIVE_DIAGNOSTICS
-        if (!TraceCacheValue(NativeStallTrace.Stage.ReservedOwnerCheckEnter, NativeStallTrace.Stage.ReservedOwnerCheckExit, () => OwnedExisting(directory))) return 0;
+        if (!TraceCacheValue(NativeStallTrace.Stage.ReservedOwnerCheckEnter, NativeStallTrace.Stage.ReservedOwnerCheckExit, () => OwnedExistingCached(directory))) {
+            if (activePaths.Any(path => string.Equals(Path.GetDirectoryName(path), canonicalDirectory, StringComparison.OrdinalIgnoreCase)))
+                throw new TransferException("Active hydration reservation directory is missing.");
+            return 0;
+        }
 #else
-        if (!OwnedExisting(directory)) return 0;
+        if (!OwnedExistingCached(directory)) {
+            if (activePaths.Any(path => string.Equals(Path.GetDirectoryName(path), canonicalDirectory, StringComparison.OrdinalIgnoreCase)))
+                throw new TransferException("Active hydration reservation directory is missing.");
+            return 0;
+        }
 #endif
-        long reserved = 0; var count = 0;
+        if (activePaths.Length > 4096) throw new TransferException("Hydration reservation capacity exceeded.");
+        long reserved = 0; var count = 0; var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         if (TraceCacheValue(NativeStallTrace.Stage.ReservedDirectoriesCheckEnter, NativeStallTrace.Stage.ReservedDirectoriesCheckExit, () => Directory.EnumerateDirectories(directory).Any())) throw new TransferException("Hydration reservation tree is unknown.");
         var enumerator = TraceCacheValue(NativeStallTrace.Stage.ReservedFilesEnumeratorEnter, NativeStallTrace.Stage.ReservedFilesEnumeratorExit, () => Directory.EnumerateFiles(directory).GetEnumerator());
@@ -879,12 +979,18 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         foreach (var item in Directory.EnumerateFiles(directory)) {
 #endif
             if (Path.GetFileName(item) == Marker) continue;
-            if (++count > 4096) throw new TransferException("Hydration reservation capacity exceeded.");
-            reserved = checked(reserved + ReadReservation(item).Value.Growth);
+            var canonicalItem = Path.GetFullPath(item);
+            if (++count > 4096 || !seen.Add(canonicalItem)) throw new TransferException("Hydration reservation capacity exceeded.");
+            if (HydrationCacheConcurrency.TryReadReservation(quota, canonicalItem, out var activeGrowth))
+                reserved = checked(reserved + activeGrowth);
+            else reserved = checked(reserved + ReadReservation(item).Value.Growth);
         }
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         } finally { TraceCacheAction(NativeStallTrace.Stage.ReservedFilesDisposeEnter, NativeStallTrace.Stage.ReservedFilesDisposeExit, enumerator.Dispose); }
 #endif
+        foreach (var active in activePaths)
+            if (!string.Equals(Path.GetDirectoryName(active), canonicalDirectory, StringComparison.OrdinalIgnoreCase) || !seen.Contains(active))
+                throw new TransferException("Active hydration reservation is missing from the directory.");
         return reserved;
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheReservedBytesExit); }
@@ -977,6 +1083,27 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     }
     private static void Owned(string directory)
     {
+        var canonical = Path.GetFullPath(directory);
+        var gate = OwnedDirectoryGates[StringComparer.OrdinalIgnoreCase.GetHashCode(canonical) & (OwnedDirectoryGates.Length - 1)];
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.OwnedDirectoryGateEnter);
+#endif
+#if LEDGETOP_CACHE_RACE_TEST
+        BeforeOwnedDirectoryGateTestHook?.Invoke(canonical);
+#endif
+        lock (gate) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.OwnedDirectoryGateAcquired);
+            try {
+#endif
+                OwnedLocked(directory);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            } finally { NativeStallTrace.Record(NativeStallTrace.Stage.OwnedDirectoryGateExit); }
+#endif
+        }
+    }
+    private static void OwnedLocked(string directory)
+    {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         TraceCacheAction(NativeStallTrace.Stage.OwnedSafeEnter, NativeStallTrace.Stage.OwnedSafeExit, () => RequireSafe(directory));
         var exists = TraceCacheValue(NativeStallTrace.Stage.OwnedDirectoryExistsEnter, NativeStallTrace.Stage.OwnedDirectoryExistsExit, () => Directory.Exists(directory));
@@ -1000,7 +1127,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         if (!TraceCacheValue(NativeStallTrace.Stage.OwnedMarkerVerifyEnter, NativeStallTrace.Stage.OwnedMarkerVerifyExit, () =>
             TraceCacheValue(NativeStallTrace.Stage.OwnedVerifyExistsEnter, NativeStallTrace.Stage.OwnedVerifyExistsExit, () => File.Exists(path)) &&
             TraceCacheValue(NativeStallTrace.Stage.OwnedVerifyLengthEnter, NativeStallTrace.Stage.OwnedVerifyLengthExit, () => new FileInfo(path).Length) <= 128 &&
-            TraceCacheValue(NativeStallTrace.Stage.OwnedVerifyReadEnter, NativeStallTrace.Stage.OwnedVerifyReadExit, () => File.ReadAllText(path)) == Owner)) throw new TransferException("Hydration cache is not owned by this application.");
+            TraceCacheValue(NativeStallTrace.Stage.OwnedVerifyReadEnter, NativeStallTrace.Stage.OwnedVerifyReadExit, () => ReadOwnerMarker(path)) == Owner)) throw new TransferException("Hydration cache is not owned by this application.");
 #else
         RequireSafe(directory);
         if (!Directory.Exists(directory)) {
@@ -1020,6 +1147,30 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         if (!File.Exists(path) || new FileInfo(path).Length > 128 || File.ReadAllText(path) != Owner) throw new TransferException("Hydration cache is not owned by this application.");
 #endif
     }
+    private static string ReadOwnerMarker(string path)
+    {
+#if LEDGETOP_CACHE_RACE_TEST
+        OwnerMarkerReadTestHook?.Invoke(path);
+#endif
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        StreamReader? reader = null;
+        try
+        {
+            TraceCacheAction(NativeStallTrace.Stage.OwnedVerifyReaderOpenEnter, NativeStallTrace.Stage.OwnedVerifyReaderOpenExit,
+                () => reader = new StreamReader(path, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true));
+            return TraceCacheValue(NativeStallTrace.Stage.OwnedVerifyContentReadEnter, NativeStallTrace.Stage.OwnedVerifyContentReadExit,
+                () => reader!.ReadToEnd());
+        }
+        finally
+        {
+            if (reader is not null)
+                TraceCacheAction(NativeStallTrace.Stage.OwnedVerifyReaderDisposeEnter, NativeStallTrace.Stage.OwnedVerifyReaderDisposeExit,
+                    reader.Dispose);
+        }
+#else
+        return File.ReadAllText(path);
+#endif
+    }
     // The newly created marker is exclusively open through flush, path safety
     // validation and readback. Verify those same bytes without a second open.
     private static bool VerifyCreatedMarker(FileStream marker, byte[] expected)
@@ -1031,6 +1182,22 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     }
     private static bool OwnedExisting(string directory)
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        TraceCacheAction(NativeStallTrace.Stage.CacheOwnerPathSafeEnter, NativeStallTrace.Stage.CacheOwnerPathSafeExit, () => RequireSafe(directory));
+        if (!TraceCacheValue(NativeStallTrace.Stage.CacheOwnerDirectoryExistsEnter, NativeStallTrace.Stage.CacheOwnerDirectoryExistsExit, () => Directory.Exists(directory))) {
+            if (TraceCacheValue(NativeStallTrace.Stage.CacheOwnerFileExistsEnter, NativeStallTrace.Stage.CacheOwnerFileExistsExit, () => File.Exists(directory)))
+                throw new TransferException("Cache directory changed type.");
+            return false;
+        }
+        var tracedPath = Path.Combine(directory, Marker);
+        TraceCacheAction(NativeStallTrace.Stage.CacheOwnerMarkerPathSafeEnter, NativeStallTrace.Stage.CacheOwnerMarkerPathSafeExit, () => RequireSafe(tracedPath));
+        var markerExists = TraceCacheValue(NativeStallTrace.Stage.CacheOwnerMarkerExistsEnter, NativeStallTrace.Stage.CacheOwnerMarkerExistsExit, () => File.Exists(tracedPath));
+        var markerLength = markerExists ? TraceCacheValue(NativeStallTrace.Stage.CacheOwnerMarkerLengthEnter, NativeStallTrace.Stage.CacheOwnerMarkerLengthExit, () => new FileInfo(tracedPath).Length) : long.MaxValue;
+        var markerContents = markerExists && markerLength <= 128
+            ? TraceCacheValue(NativeStallTrace.Stage.CacheOwnerMarkerReadEnter, NativeStallTrace.Stage.CacheOwnerMarkerReadExit, () => File.ReadAllText(tracedPath))
+            : null;
+        if (!markerExists || markerLength > 128 || markerContents != Owner) throw new TransferException("Cache ownership is unavailable.");
+#else
         RequireSafe(directory);
         if (!Directory.Exists(directory)) {
             if (File.Exists(directory)) throw new TransferException("Cache directory changed type.");
@@ -1039,17 +1206,279 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         var path = Path.Combine(directory, Marker); RequireSafe(path);
         if (!File.Exists(path) || new FileInfo(path).Length > 128 || File.ReadAllText(path) != Owner)
             throw new TransferException("Cache ownership is unavailable.");
+#endif
         return true;
     }
     private static class CacheNative
     {
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct FileIdInfo { internal ulong VolumeSerialNumber, IdLow, IdHigh; }
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
         [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
         internal static extern SafeFileHandle CreateFileW(string path, uint access, uint share, nint security, uint disposition, uint flags, nint template);
         [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
         [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
         [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetFileInformationByHandleEx(SafeFileHandle file, int kind, out FileIdInfo info, uint size);
+        [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool SetFileInformationByHandle(SafeFileHandle file, int kind, ref byte disposition, uint size);
+    }
+    private void VerifyOwnedRoot()
+    {
+        if (rootOwnerPin is { } pin)
+        {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            TraceCacheAction(NativeStallTrace.Stage.RootOwnerPinVerifyEnter, NativeStallTrace.Stage.RootOwnerPinVerifyExit, pin.Verify);
+#else
+            pin.Verify();
+#endif
+            return;
+        }
+        RequireSafe(root); Owned(root);
+    }
+    private bool OwnedExistingCached(string directory)
+    {
+        var canonical = Path.GetFullPath(directory);
+        if (!OperatingSystem.IsWindows()) return OwnedExisting(canonical);
+        if (string.Equals(canonical, root, StringComparison.OrdinalIgnoreCase)) { VerifyOwnedRoot(); return true; }
+        if (ownedDirectoryPins.TryGetValue(canonical, out var cached)) { cached.Verify(); return true; }
+        var gate = OwnedDirectoryGates[StringComparer.OrdinalIgnoreCase.GetHashCode(canonical) & (OwnedDirectoryGates.Length - 1)];
+        lock (gate)
+        {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+            if (ownedDirectoryPins.TryGetValue(canonical, out cached)) { cached.Verify(); return true; }
+            cached = RootOwnerPin.TryAcquireShared(canonical);
+            if (cached is not null)
+            {
+                if (TryCacheOwnedDirectoryPin(canonical, cached)) { cached.Verify(); return true; }
+                cached.Dispose();
+            }
+            if (Volatile.Read(ref ownedDirectoryPinCount) >= MaximumOwnedDirectoryPins) return OwnedExisting(canonical);
+            var pin = RootOwnerPin.TryOpenExisting(canonical);
+            if (pin is null) return false;
+            pin = RootOwnerPin.Register(pin);
+            if (!TryCacheOwnedDirectoryPin(canonical, pin)) pin.Dispose();
+            return true;
+        }
+    }
+    private void OwnPinned(string directory)
+    {
+        var canonical = Path.GetFullPath(directory);
+        if (!OperatingSystem.IsWindows()) { Owned(canonical); return; }
+        if (string.Equals(canonical, root, StringComparison.OrdinalIgnoreCase)) { VerifyOwnedRoot(); return; }
+        if (OwnedExistingCached(canonical)) return;
+        var gate = OwnedDirectoryGates[StringComparer.OrdinalIgnoreCase.GetHashCode(canonical) & (OwnedDirectoryGates.Length - 1)];
+        lock (gate)
+        {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+            if (ownedDirectoryPins.TryGetValue(canonical, out var cached)) { cached.Verify(); return; }
+            cached = RootOwnerPin.TryAcquireShared(canonical);
+            if (cached is not null)
+            {
+                if (TryCacheOwnedDirectoryPin(canonical, cached)) { cached.Verify(); return; }
+                cached.Dispose();
+            }
+            if (Volatile.Read(ref ownedDirectoryPinCount) >= MaximumOwnedDirectoryPins) { Owned(canonical); return; }
+            var pin = RootOwnerPin.AcquireOrCreate(canonical);
+            if (!TryCacheOwnedDirectoryPin(canonical, pin)) pin.Dispose();
+        }
+    }
+    private bool TryCacheOwnedDirectoryPin(string canonical, RootOwnerPin pin)
+    {
+#if LEDGETOP_CACHE_RACE_TEST
+        BeforeOwnedPinRegistrationTestHook?.Invoke(canonical);
+#endif
+        // Serialize registration with Dispose so every successfully cached reference
+        // is either visible to the disposer or rejected and released by its caller.
+        lock (ownedDirectoryPinsSync)
+        {
+            if (Volatile.Read(ref disposed) != 0 || ownedDirectoryPinCount >= MaximumOwnedDirectoryPins ||
+                !ownedDirectoryPins.TryAdd(canonical, pin))
+                return false;
+            ownedDirectoryPinCount++;
+            return true;
+        }
+    }
+#if LEDGETOP_CACHE_RACE_TEST
+    internal string RootOwnershipDirectoryForTest => root;
+    internal bool OwnedExistingCachedForTest(string directory) => OwnedExistingCached(directory);
+#endif
+    private sealed class RootOwnerPin : IDisposable
+    {
+        private static readonly object SharedPinsSync = new();
+        private static readonly Dictionary<string, RootOwnerPin> SharedPins = new(StringComparer.OrdinalIgnoreCase);
+        private readonly string directory, markerPath;
+        private readonly SafeFileHandle directoryHandle;
+        private readonly FileStream markerStream;
+        private readonly CacheNative.FileIdInfo directoryId, markerId;
+        private readonly ReaderWriterLockSlim lifetime = new(LockRecursionPolicy.NoRecursion);
+        private int disposeRequested;
+        private int references = 1;
+        private int handlesClosed;
+        private RootOwnerPin(string directory, string markerPath, SafeFileHandle directoryHandle, FileStream markerStream,
+            CacheNative.FileIdInfo directoryId, CacheNative.FileIdInfo markerId)
+        {
+            this.directory = directory; this.markerPath = markerPath; this.directoryHandle = directoryHandle;
+            this.markerStream = markerStream; this.directoryId = directoryId; this.markerId = markerId;
+        }
+        internal static RootOwnerPin Open(string directory)
+        {
+            var markerPath = Path.Combine(directory, Marker);
+            RequireSafe(directory); RequireSafe(markerPath);
+            SafeFileHandle? directoryHandle = null;
+            FileStream? markerStream = null;
+            try
+            {
+                directoryHandle = CacheNative.CreateFileW(NativeCacheFilePath(directory), 0x80, 1, 0, 3, 0x02200000, 0);
+                if (directoryHandle.IsInvalid) throw new IOException("Hydration cache root identity is unavailable.", Marshal.GetHRForLastWin32Error());
+                var markerHandle = CacheNative.CreateFileW(NativeCacheFilePath(markerPath), 0x81, 1, 0, 3, 0x00200000, 0);
+                if (markerHandle.IsInvalid) { markerHandle.Dispose(); throw new IOException("Hydration owner marker identity is unavailable.", Marshal.GetHRForLastWin32Error()); }
+                markerStream = new FileStream(markerHandle, FileAccess.Read, 128, isAsync: false);
+                if (markerStream.Length > 128) throw new TransferException("Hydration cache is not owned by this application.");
+                var content = new byte[checked((int)markerStream.Length)];
+                markerStream.ReadExactly(content);
+                if (System.Text.Encoding.UTF8.GetString(content) != Owner)
+                    throw new TransferException("Hydration cache is not owned by this application.");
+                markerStream.Position = 0;
+                RequireSafe(directory); RequireSafe(markerPath);
+                var directoryId = GetIdentity(directoryHandle, "Hydration cache root identity is unavailable.");
+                var markerId = GetIdentity(markerStream.SafeFileHandle, "Hydration owner marker identity is unavailable.");
+                return new RootOwnerPin(directory, markerPath, directoryHandle, markerStream, directoryId, markerId);
+            }
+            catch { markerStream?.Dispose(); directoryHandle?.Dispose(); throw; }
+        }
+        internal static RootOwnerPin? TryAcquireShared(string directory)
+        {
+            var canonical = Path.GetFullPath(directory);
+            lock (SharedPinsSync)
+            {
+                if (!SharedPins.TryGetValue(canonical, out var pin)) return null;
+                checked { pin.references++; }
+                return pin;
+            }
+        }
+        internal static RootOwnerPin AcquireExisting(string directory)
+        {
+            var shared = TryAcquireShared(directory);
+            return shared ?? Register(Open(directory));
+        }
+        internal static RootOwnerPin AcquireOrCreate(string directory)
+        {
+            var shared = TryAcquireShared(directory);
+            if (shared is not null) return shared;
+            return Register(TryOpenExisting(directory) ?? Create(directory));
+        }
+        internal static RootOwnerPin Register(RootOwnerPin pin)
+        {
+            var canonical = Path.GetFullPath(pin.directory);
+            lock (SharedPinsSync)
+            {
+                if (SharedPins.TryGetValue(canonical, out var existing))
+                {
+                    checked { existing.references++; }
+                    pin.CloseHandles();
+                    return existing;
+                }
+                SharedPins.Add(canonical, pin);
+                return pin;
+            }
+        }
+        internal static RootOwnerPin? TryOpenExisting(string directory)
+        {
+            RequireSafe(directory);
+            if (!Directory.Exists(directory))
+            {
+                if (File.Exists(directory)) throw new TransferException("Cache directory changed type.");
+                return null;
+            }
+            return Open(directory);
+        }
+        internal static RootOwnerPin Create(string directory)
+        {
+            RequireSafe(directory);
+            if (Directory.Exists(directory)) return Open(directory);
+            if (File.Exists(directory)) throw new TransferException("Cache directory changed type.");
+            Directory.CreateDirectory(directory);
+            var markerPath = Path.Combine(directory, Marker);
+            RequireSafe(directory); RequireSafe(markerPath);
+            var directoryGuard = CacheNative.CreateFileW(NativeCacheFilePath(directory), 0x80, 1, 0, 3, 0x02200000, 0);
+            if (directoryGuard.IsInvalid) throw new IOException("Hydration cache root identity is unavailable.", Marshal.GetHRForLastWin32Error());
+            var directoryId = GetIdentity(directoryGuard, "Hydration cache root identity is unavailable.");
+            FileStream? markerStream = null;
+            try
+            {
+                markerStream = new FileStream(markerPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
+                var expected = System.Text.Encoding.UTF8.GetBytes(Owner);
+                markerStream.Write(expected); markerStream.Flush(true);
+#if LEDGETOP_CACHE_RACE_TEST
+                CreatedMarkerTestHook?.Invoke(markerPath);
+#endif
+                RequireSafe(directory); RequireSafe(markerPath);
+                if (!VerifyCreatedMarker(markerStream, expected)) throw new TransferException("Hydration cache is not owned by this application.");
+                markerStream.Position = 0;
+                var markerId = GetIdentity(markerStream.SafeFileHandle, "Hydration owner marker identity is unavailable.");
+                var pin = new RootOwnerPin(directory, markerPath, directoryGuard, markerStream, directoryId, markerId);
+                directoryGuard.SetHandleAsInvalid();
+                markerStream = null;
+                return pin;
+            }
+            catch { markerStream?.Dispose(); directoryGuard.Dispose(); throw; }
+        }
+        internal void Verify()
+        {
+            if (Volatile.Read(ref disposeRequested) != 0) throw new ObjectDisposedException(nameof(PlaceholderHydrationCoordinator));
+            lifetime.EnterReadLock();
+            try
+            {
+                if (Volatile.Read(ref disposeRequested) != 0) throw new ObjectDisposedException(nameof(PlaceholderHydrationCoordinator));
+                RequireSafe(directory); RequireSafe(markerPath);
+                using var currentDirectory = CacheNative.CreateFileW(NativeCacheFilePath(directory), 0x80, 1, 0, 3, 0x02200000, 0);
+                if (currentDirectory.IsInvalid || !SameIdentity(directoryId, GetIdentity(currentDirectory, "Hydration cache root identity is unavailable.")))
+                    throw new TransferException("Hydration cache root identity changed.");
+                using var currentMarker = CacheNative.CreateFileW(NativeCacheFilePath(markerPath), 0x80, 1, 0, 3, 0x00200000, 0);
+                if (currentMarker.IsInvalid || !SameIdentity(markerId, GetIdentity(currentMarker, "Hydration owner marker identity is unavailable.")))
+                    throw new TransferException("Hydration owner marker identity changed.");
+            }
+            finally { lifetime.ExitReadLock(); }
+        }
+        private static CacheNative.FileIdInfo GetIdentity(SafeFileHandle handle, string message)
+        {
+            var size = (uint)Marshal.SizeOf<CacheNative.FileIdInfo>();
+            if (!CacheNative.GetFileInformationByHandleEx(handle, 18, out var identity, size))
+                throw new TransferException(message);
+            return identity;
+        }
+        private static bool SameIdentity(CacheNative.FileIdInfo left, CacheNative.FileIdInfo right) =>
+            left.VolumeSerialNumber == right.VolumeSerialNumber && left.IdLow == right.IdLow && left.IdHigh == right.IdHigh;
+        public void Dispose()
+        {
+            lock (SharedPinsSync)
+            {
+                if (references <= 0) return;
+                references--;
+                if (references != 0) return;
+                SharedPins.Remove(Path.GetFullPath(directory));
+                Interlocked.Exchange(ref disposeRequested, 1);
+                CloseHandles();
+            }
+        }
+        private void CloseHandles()
+        {
+            if (Interlocked.Exchange(ref handlesClosed, 1) != 0) return;
+            lifetime.EnterWriteLock();
+            try { markerStream.Dispose(); directoryHandle.Dispose(); }
+            finally { lifetime.ExitWriteLock(); }
+        }
+    }
+    private static bool SameFileIdentity(FileStream expected, FileStream actual)
+    {
+        var size = (uint)Marshal.SizeOf<CacheNative.FileIdInfo>();
+        if (!CacheNative.GetFileInformationByHandleEx(expected.SafeFileHandle, 18, out var left, size) ||
+            !CacheNative.GetFileInformationByHandleEx(actual.SafeFileHandle, 18, out var right, size))
+            throw new TransferException("Hydration reservation file identity is unavailable.");
+        return left.VolumeSerialNumber == right.VolumeSerialNumber && left.IdLow == right.IdLow && left.IdHigh == right.IdHigh;
     }
     // Managed file APIs already support the long owned cache hierarchy. The installed apphost need
     // not opt into process-wide Win32 long paths; give this exact native open the same DOS path.
@@ -1069,5 +1498,17 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             catch (FileNotFoundException) { } catch (DirectoryNotFoundException) { }
         }
     }
-    public void Dispose() => Interlocked.Exchange(ref disposed, 1);
+    public void Dispose()
+    {
+        RootOwnerPin[] pins;
+        lock (ownedDirectoryPinsSync)
+        {
+            if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+            pins = ownedDirectoryPins.Values.ToArray();
+            ownedDirectoryPins.Clear();
+            ownedDirectoryPinCount = 0;
+        }
+        rootOwnerPin?.Dispose();
+        foreach (var pin in pins) pin.Dispose();
+    }
 }

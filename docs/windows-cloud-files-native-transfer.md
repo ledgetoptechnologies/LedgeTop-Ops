@@ -1,4 +1,28 @@
-# Cloud Files native transfer boundary (not activated)
+# Cloud Files native transfer boundary — historical design
+
+The design and limitations below describe an earlier, isolated transfer slice.
+The Windows pilot now has a native provider and Explorer registration; consult
+`apps/windows-download/README.md` and the staging status for current evidence.
+The earlier statements that registration and callbacks are not implemented are
+historical and do not describe the current source tree.
+
+## November 3 callback investigation
+
+The current connection owner holds a global settlement gate while it invokes a
+synchronous native rejection. A bounded fake-native diagnostic reproduces a
+lock cycle if that call waits for a callback on another thread. It has not been
+shown that Windows makes that reentrant call or that it caused the VM's
+four-file stall. The opt-in `--observe-cross-thread-rejection` test documents
+the current behavior; it is not a regression test asserting a fix.
+
+Any change must reserve each outstanding request, bound any deferred callbacks,
+preserve cancellation and duplicate handling, and drain in-flight native calls
+before disconnect. A callback with the same opaque keys during settlement may
+be an old duplicate or a new request; do not replay an uncertain completion or
+infer an ordering guarantee from a fake test. Microsoft documents the opaque
+request key and `CfExecute` interface, but these pages do not establish that
+ordering: [callback information](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/ns-cfapi-cf_callback_info),
+[CfExecute](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfexecute).
 
 `Core/CloudFilesNativeTransfer.cs` adds an internal future FETCH_DATA composition
 boundary. It accepts only a verified hydration coordinator, pinned identity and a

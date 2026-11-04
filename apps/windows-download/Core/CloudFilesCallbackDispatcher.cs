@@ -67,14 +67,23 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
     {
         if (borrowedIdentity.Length > 4096) throw new TransferException("Callback identity exceeds native bounds.");
         // Callback-owned memory and mutable caller buffers must not survive into asynchronous work.
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.IdentityDecodeEnter);
+#endif
         var identityBytes = borrowedIdentity.ToArray();
         var identity = PlaceholderIdentity.Decode(identityBytes);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.IdentityDecodeExit);
+#endif
         if (identity.Channel != channel || identity.SourceAlias != alias || identity.Origin != origin || identity.PrincipalId != principal
             || context.ConnectionKey != connection || context.FileSize != identity.Length || context.RequiredOffset < 0
             || context.RequiredOffset > identity.Length) throw new TransferException("Callback does not match this provider context.");
         var length = context.RequiredLength == -1 ? identity.Length - context.RequiredOffset : context.RequiredLength;
         if (length <= 0 || length > identity.Length - context.RequiredOffset || context.RequiredOffset % 4096 != 0
             || (length % 4096 != 0 && length != identity.Length - context.RequiredOffset)) throw new TransferException("Callback range is unsupported.");
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.DispatcherContextValidated);
+#endif
         var ownedContext = context with { RequiredLength = length };
         var key = Key(ownedContext);
         Entry entry;
@@ -90,6 +99,9 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
             entry = new(identityBytes, ownedContext, new(), new(TaskCreationOptions.RunContinuationsAsynchronously));
             requests.Add(key, entry);
         }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.DispatcherRequestRegistered);
+#endif
         _ = RunAsync(entry, identity); // RunAsync catches every outcome and completes the tracked task.
         return entry.Completion.Task;
     }
@@ -139,7 +151,13 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
         var token = entry.Cancellation.Token;
         Exception? failure = null; var cancelled = false;
         try {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.HydrationDelegateEnter);
+#endif
             await hydrate(coordinator, identity, entry.Context, token);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.HydrationDelegateReturned);
+#endif
         } catch (OperationCanceledException) when (entry.Cancellation.IsCancellationRequested) {
             cancelled = true;
         } catch {

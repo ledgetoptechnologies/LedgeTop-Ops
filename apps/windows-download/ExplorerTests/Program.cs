@@ -15,6 +15,10 @@ if (args.Length == 3 && args[0] == "--synthetic-reader-evidence-child")
 if (args.Length == 1 && args[0] == "--synthetic-memory-cache-stage-tests") return await SyntheticMemoryNative.CacheStageTests();
 if (args.Length >= 1 && args[0] == "--synthetic-memory-inspect-tests") return args.Length == 1 ? SyntheticMemoryInspection.Tests() : 2;
 if (args.Length >= 1 && args[0] == "--synthetic-memory-inspect") return args.Length == 2 ? SyntheticMemoryInspection.Run(args[1]) : 2;
+if (args.Length >= 1 && args[0] == "--synthetic-memory-cleanup") return args.Length == 3 ? SyntheticMemoryInspection.Cleanup(args[1], args[2]) : 2;
+if (args.Length == 1 && args[0] == "--synthetic-memory-marker-reader-tests") return SyntheticMemoryNative.MarkerReadScopeTests();
+if (args.Length == 3 && args[0] == "--synthetic-memory-marker-read" && Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") == "1")
+    return SyntheticMemoryNative.MarkerRead(args[1], args[2]);
 if (args.Length == 1 && args[0] == "--synthetic-memory-native-marker-tests") return SyntheticMemoryNative.MarkerIoTests();
 if (args.Length == 1 && args[0] == "--synthetic-memory-native-cleanup-tests") return SyntheticMemoryNative.CleanupEvidenceTests();
 if (args.Length is 4 or 6 && args[0] == "--synthetic-memory-native-reader" && Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") == "1")
