@@ -23,6 +23,7 @@ function text(value, maximum, field, { required = false } = {}) {
 }
 
 function number(value, field, minimum, maximum) {
+  if (typeof value === 'string' && !value.trim()) throw invalid(`${field} is required`);
   const parsed = typeof value === 'number' ? value : Number(String(value).trim());
   if (!Number.isFinite(parsed) || parsed < minimum || parsed > maximum)
     throw invalid(`${field} is outside its accepted range`);

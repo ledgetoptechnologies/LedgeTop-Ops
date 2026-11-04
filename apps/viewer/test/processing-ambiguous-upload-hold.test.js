@@ -67,3 +67,16 @@ test('an existing provider task in a new local phase is held instead of removed'
   assert.equal(job.status,'pending');assert.equal(job.error_code,'provider_submission_observation_unavailable');
   assert.equal(f.db.prepare('SELECT COUNT(*) n FROM dataset_files WHERE dataset_id=?').get(f.dataset.id).n,1);
 });
+
+test('a held submission is not reinitialized after a transient provider not-found response',async t=>{
+  const f=fixture(t);f.providerState.exists=true;assert.equal(await processOne(f.deps(),'worker-existing-task'),true);
+  f.providerState.exists=false;
+  f.db.prepare("UPDATE processing_jobs SET available_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(f.job.id);
+  const before={...f.providerState};assert.equal(await processOne(f.deps(),'worker-after-not-found'),true);
+  const attempt=f.processing.getAttempt(f.attempt.id),job=f.db.prepare('SELECT * FROM processing_jobs WHERE id=?').get(f.job.id);
+  assert.equal(f.providerState.statusCalls,before.statusCalls);
+  assert.equal(f.providerState.initializations,before.initializations);
+  assert.equal(f.providerState.uploadCalls,before.uploadCalls);
+  assert.equal(attempt.submissionPhase,'new');assert.equal(attempt.errorCode,'provider_submission_observation_unavailable');
+  assert.equal(job.status,'pending');assert.equal(job.error_code,'provider_submission_observation_unavailable');
+});

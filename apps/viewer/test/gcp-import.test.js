@@ -86,6 +86,27 @@ test('automatic CSV format detection accepts only complete supported schemas',()
   assert.equal(detectGcpCsvFormat('Name,Latitude,Longitude\nCP-1,44,-88\n'),null);
 });
 
+test('Emlid and generic numeric blanks are rejected instead of becoming zero coordinates', () => {
+  const emlidHeaders = ['Name', 'Easting', 'Northing', 'Elevation', 'Latitude', 'Longitude', 'Ellipsoidal height', 'CS name'];
+  const emlidValues = ['CP-1', '500000', '4900000', '250', '44', '-88', '220', 'NAD83(2011) / Projected CRS (m) + NAVD88 height (m)'];
+  for (const header of ['Easting', 'Northing', 'Elevation', 'Latitude', 'Longitude', 'Ellipsoidal height']) {
+    const values = [...emlidValues];
+    values[emlidHeaders.indexOf(header)] = '';
+    assert.throws(() => parseGcpInterchange({
+      format: 'emlid-all-columns-v1',
+      content: `${emlidHeaders.join(',')}\n${values.join(',')}\n`,
+    }), /is required/, `blank ${header} must be rejected`);
+  }
+  for (const header of ['latitude', 'longitude', 'elevation_m']) {
+    const values = { latitude: '44', longitude: '-88', elevation_m: '250' };
+    values[header] = '';
+    assert.throws(() => parseGcpInterchange({
+      format: 'generic-csv-v1',
+      content: `point_id,label,latitude,longitude,elevation_m\nA,A,${values.latitude},${values.longitude},${values.elevation_m}\n`,
+    }), /is required/, `blank ${header} must be rejected`);
+  }
+});
+
 test('Emlid metric projected systems remain metric and ambiguous units require confirmation', () => {
   const header = 'Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\n';
   const metric = parseGcpInterchange({ format: 'emlid-all-columns-v1', declarations: {},

@@ -35,8 +35,11 @@ async function verifyProviderMeshClosure(root,outputs=discoverOutputs(root),{sig
 
 async function processSubmit(job,{processing,storage,config,providerCredentials,signal,adapterFactory=adapterFor}){
   let attempt={...processing.getAttempt(job.attempt_id),...processing.getAttemptSubmission(job.attempt_id)};
-  if(attempt.errorCode==='provider_upload_acceptance_unknown'||['uploading','uploading_auxiliary'].includes(attempt.submissionPhase)){
-    if(!processing.deferHeldSubmit(job.id,job.lease_owner,30_000,'upload_ambiguous'))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
+  const uploadAcceptanceUnknown=attempt.errorCode==='provider_upload_acceptance_unknown'||['uploading','uploading_auxiliary'].includes(attempt.submissionPhase);
+  const submissionObservationUnknown=attempt.errorCode==='provider_submission_observation_unavailable'||['uploaded','committing'].includes(attempt.submissionPhase);
+  if(uploadAcceptanceUnknown||submissionObservationUnknown){
+    const reason=uploadAcceptanceUnknown?'upload_ambiguous':'task_replacement_unverified';
+    if(!processing.deferHeldSubmit(job.id,job.lease_owner,30_000,reason))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
     return;
   }
   const task=processing.getTask(attempt.taskId),dataset=processing.getDataset(attempt.datasetId||task.datasetId,true),provider=processing.getProvider(attempt.providerId),adapter=adapterFactory(provider,config,providerCredentials);
