@@ -169,8 +169,11 @@ export function validateReviewedExpectedDeploymentVersions(value) {
   return structuredClone(value);
 }
 export function validateInstallation(snapshot, { allowLatest = {}, profile = PROFILE, selectedApp, expectedDeploymentVersions = {},
-  ordinaryFrontendPreflightMode, ordinaryFrontendApp, opsSuccessorReaderContract } = {}) {
-  const preflightDescriptor = ordinaryFrontendPreflightDescriptor(profile, ordinaryFrontendPreflightMode);
+  ordinaryFrontendPreflightMode, ordinaryFrontendApp, ordinaryFrontendPreflightProfile, opsSuccessorReaderContract } = {}) {
+  need(ordinaryFrontendPreflightProfile === undefined || ordinaryFrontendPreflightMode !== undefined,
+    'Ordinary frontend preflight profile requires its explicit reviewed mode');
+  const effectivePreflightProfile = ordinaryFrontendPreflightProfile ?? profile;
+  const preflightDescriptor = ordinaryFrontendPreflightDescriptor(effectivePreflightProfile, ordinaryFrontendPreflightMode);
   need(opsSuccessorReaderContract === undefined || opsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT,
     'Unreviewed Ops successor reader installed-profile contract');
   if (opsSuccessorReaderContract !== undefined) need(selectedApp === undefined || Object.hasOwn(profile.workers, selectedApp),
@@ -232,7 +235,7 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
   } else {
     need(preflightDescriptor.profileSHA256 === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
       'Ordinary frontend profile pin changed');
-    validateOrdinaryFrontendPreflightPreservation(client, ops, profile, ordinaryFrontendPreflightMode);
+    validateOrdinaryFrontendPreflightPreservation(client, ops, effectivePreflightProfile, ordinaryFrontendPreflightMode);
   }
   return snapshot;
 }

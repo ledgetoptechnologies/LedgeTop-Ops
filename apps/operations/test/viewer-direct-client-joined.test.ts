@@ -117,7 +117,9 @@ async function fixture(){
  const request=(path=publicPath,{method='GET',body,key='joined-viewer-idempotency-0001'}:{method?:string;body?:unknown;key?:string}={})=>fetch(`http://127.0.0.1:${address.port}${path}`,{
   method,headers:{'Content-Type':'application/json','Idempotency-Key':key},...(body!==undefined?{body:JSON.stringify(body)}:{})});
  const portal=new Hono<any>();portal.use('*',async(c,next)=>{c.set('clientPrincipal',browserPrincipal);await next();});
- portal.route('/api/client/v2/workspaces',createNativePortalWorkspaceRouter());
+ // Ops and Client resolve Hono through separate workspace dependency trees.
+ // They use the same runtime API here, but their declaration identities differ.
+ portal.route('/api/client/v2/workspaces',createNativePortalWorkspaceRouter() as unknown as Hono);
  const clientEnv={...env,CLIENT_VIEWER_ENABLED:'true',CLIENT_PORTAL_ORIGIN:'https://portal.example.test',CLIENT_PORTAL_ORIGINS:'https://portal.example.test',
   VIEWER_SESSION_ISSUER:{listDirectClientViewerItems:(input:any)=>listDirectClientViewerItems(env,input),
    issueDirectClientViewerSession:(input:any)=>issueDirectClientViewerSession(env,input)}} as unknown as ClientEnv;
