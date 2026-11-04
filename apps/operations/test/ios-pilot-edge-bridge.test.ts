@@ -13,6 +13,7 @@ const op = { id: 'one', title: 'Example', status: 'scheduled', scheduledStart: n
 const binding = () => ({ read: vi.fn(async (_input: string) => envelope(session)) });
 const env = (read = binding()) => ({ ENVIRONMENT: 'staging', IOS_MANAGED_PILOT_ENABLED: 'true',
   IOS_MANAGED_PILOT_ORIGIN: origin, IOS_MANAGED_PILOT_AUDIENCE: 'pilot-audience',
+  IOS_OAUTH_PROBE_ENABLED: 'true', IOS_OAUTH_PROBE_AUDIENCE: 'pilot-audience',
   TEAM_DOMAIN: 'https://synthetic.cloudflareaccess.com', OPERATIONS_AUD: 'web-audience', IOS_PILOT_READ: read });
 const req = (path: string, init: RequestInit = { headers: auth }) => new Request(origin + path, init);
 const access = { aud: 'pilot-audience', getIdentity: async () => ({ user_uuid: 'staff-subject', email: 'staff@example.test' }) };
@@ -45,6 +46,22 @@ describe('isolated pilot edge bridge', () => {
     expect((await actualHandlePilotEdge(request, e, [origin], { aud: 'wrong-audience' })).status).toBe(401);
     expect((await actualHandlePilotEdge(request, { ...e, IOS_MANAGED_PILOT_AUDIENCE: '' }, [origin], { aud: '' })).status).toBe(401);
     expect(e.IOS_PILOT_READ.read).not.toHaveBeenCalled();
+  });
+  it('keeps the diagnostic sign-in probe on the same protected hostname without reading business data', async () => {
+    const e = env();
+    const request = req('/oauth-probe/v1');
+    expect((await actualHandlePilotEdge(request, e, [origin])).status).toBe(401);
+    const verified = await actualHandlePilotEdge(request, e, [origin], access);
+    expect(verified.status).toBe(200);
+    expect(await verified.json()).toEqual({ ok: true, kind: 'synthetic-oauth-probe' });
+    expect(verified.headers.get('X-LT-Ops-Access-Context')).toBe('match');
+    expect(e.IOS_PILOT_READ.read).not.toHaveBeenCalled();
+    const liveDisabled = { ...e, IOS_MANAGED_PILOT_ENABLED: 'false' };
+    expect((await actualHandlePilotEdge(request, liveDisabled, [origin], access)).status).toBe(200);
+    expect((await actualHandlePilotEdge(req('/mobile-pilot/v1/session'), liveDisabled, [origin], access)).status).toBe(404);
+    const reviewedOrigin = 'https://ios-pilot-staging.ledgetop.app';
+    const reviewedRequest = new Request(reviewedOrigin + '/oauth-probe/v1', { headers: auth });
+    expect((await edge.fetch(reviewedRequest, { ...e, IOS_MANAGED_PILOT_ORIGIN: reviewedOrigin }, { access })).status).toBe(200);
   });
   it('rejects missing or mismatched runtime identity without consulting the private service', async () => {
     const e = env(), request = req('/mobile-pilot/v1/session');

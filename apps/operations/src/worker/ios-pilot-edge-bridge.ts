@@ -1,11 +1,10 @@
 import { verifyPilotAccessAssertion } from './ios-pilot-access';
 
-/** A staging-only ingress for the private pilot read service. It carries no D1,
- * connector credentials, or business implementation. This module is not
- * configured or deployed; its source-reviewed hostname list is empty. The
- * direct invocation must have the dedicated Access context and the private
- * service independently verifies its signed assertion and staff permissions. */
-const REVIEWED_ORIGINS: readonly string[] = [];
+/** Staging-only ingress for the private pilot read service and the synthetic
+ * sign-in diagnostic. It carries no D1, connector credentials, or business
+ * implementation. The Access context is checked here and the private service
+ * independently verifies its signed assertion and staff permissions. */
+const REVIEWED_ORIGINS: readonly string[] = ['https://ios-pilot-staging.ledgetop.app'];
 const RESERVED_ORIGINS = new Set(['https://ops.ledgetop.app', 'https://ops.ledgetopdroneservices.com',
   'https://ops.ledgetoptechnologies.com', 'https://ops-staging.ledgetopdroneservices.com']);
 const MAX_REPLY = 1_048_576;
@@ -14,6 +13,7 @@ const headers = { 'Cache-Control': 'no-store', 'Cloudflare-CDN-Cache-Control': '
 type ReadBinding = { read(input: string): Promise<string> };
 type EdgeEnvironment = { ENVIRONMENT?: string; IOS_MANAGED_PILOT_ENABLED?: string;
   IOS_MANAGED_PILOT_ORIGIN?: string; IOS_MANAGED_PILOT_AUDIENCE?: string;
+  IOS_OAUTH_PROBE_ENABLED?: string; IOS_OAUTH_PROBE_AUDIENCE?: string;
   TEAM_DOMAIN?: string; OPERATIONS_AUD?: string; IOS_PILOT_READ?: ReadBinding };
 type AccessContext = { aud?: string; getIdentity?: () => Promise<unknown> };
 const reply = (status: number, body: object) => Response.json(body, { status, headers });
@@ -45,7 +45,7 @@ function validSuccess(body: unknown, kind: 'session' | 'list' | 'detail', detail
 export async function handlePilotEdge(request: Request, env: EdgeEnvironment, reviewed: readonly string[],
   access?: AccessContext): Promise<Response> {
   const origin = env.IOS_MANAGED_PILOT_ORIGIN;
-  if (env.ENVIRONMENT !== 'staging' || env.IOS_MANAGED_PILOT_ENABLED !== 'true' || !origin
+  if (env.ENVIRONMENT !== 'staging' || !origin
     || RESERVED_ORIGINS.has(origin) || !reviewed.includes(origin)) return denied();
   let url: URL;
   try {
@@ -55,6 +55,31 @@ export async function handlePilotEdge(request: Request, env: EdgeEnvironment, re
       || configured.port || configured.pathname !== '/' || configured.search || configured.hash || url.origin !== origin
       || url.username || url.password || url.hash || request.url.length > 9000) return denied();
   } catch { return denied(); }
+  if (url.pathname === '/oauth-probe/v1') {
+    if (request.method !== 'GET' || url.search || !env.IOS_OAUTH_PROBE_ENABLED
+      || env.IOS_OAUTH_PROBE_ENABLED !== 'true' || !env.IOS_OAUTH_PROBE_AUDIENCE
+      || env.IOS_OAUTH_PROBE_AUDIENCE !== env.IOS_MANAGED_PILOT_AUDIENCE)
+      return denied();
+    const assertion = request.headers.get('Cf-Access-Jwt-Assertion') ?? '';
+    if (request.headers.has('Cookie') || request.headers.has('Origin') || assertion.length > 16_384
+      || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(assertion))
+      return reply(401, { error: 'Authentication required' });
+    try {
+      if (access?.aud !== env.IOS_OAUTH_PROBE_AUDIENCE || typeof access.getIdentity !== 'function'
+        || !env.TEAM_DOMAIN || !env.OPERATIONS_AUD) throw new Error('identity unavailable');
+      const identity = await access.getIdentity();
+      const claims = await verifyPilotAccessAssertion(request, { teamDomain: env.TEAM_DOMAIN,
+        pilotAudience: env.IOS_OAUTH_PROBE_AUDIENCE, operationsAudience: env.OPERATIONS_AUD });
+      if (!record(identity) || identity.user_uuid !== claims.subject || typeof identity.email !== 'string'
+        || identity.email.trim().toLowerCase() !== claims.email) throw new Error('identity mismatch');
+    } catch {
+      return reply(401, { error: 'Authentication required' });
+    }
+    return Response.json({ ok: true, kind: 'synthetic-oauth-probe' }, { headers: {
+      ...headers, 'X-LT-Ops-Probe-Stage': 'ok', 'X-LT-Ops-Access-Context': 'match',
+    } });
+  }
+  if (env.IOS_MANAGED_PILOT_ENABLED !== 'true') return denied();
   let kind: 'session' | 'list' | 'detail';
   if (url.pathname === '/mobile-pilot/v1/session') kind = 'session';
   else if (url.pathname === '/mobile-pilot/v1/operations') kind = 'list';
