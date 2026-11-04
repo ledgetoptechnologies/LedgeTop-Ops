@@ -62,7 +62,7 @@ apps/
   client/      React/Vite client UI + Hono Worker API
   ops-sync/    Project Alpha webhook + Cloudflare Access reconciliation Worker
   viewer/      3D Viewer browser app, Node API, worker, and Docker image
-  proxy-generator/  Local Resolve ProRes Proxy generator and Docker image
+  proxy-generator/  Local Resolve all-intra H.264 proxy generator and Docker image
   thumbnail-renderer/  Local prebuilt thumbnails and cloud-job thumbnail renderer
   media-generation/  Proxy Generation: combined TrueNAS deployment
 packages/
