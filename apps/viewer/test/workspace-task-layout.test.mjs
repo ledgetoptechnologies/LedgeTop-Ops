@@ -267,6 +267,7 @@ test('Processing groups tasks by their installed run status and never claims del
   const f=fixture();
   f.state.tasks=[
     {id:'t-failed',projectId:'project',displayName:'Failed run',latestAttempt:{id:'a1',status:'failed'}},
+    {id:'t-trashed',projectId:'project',displayName:'Recycled failed run',status:'archived',latestAttempt:{id:'a2',status:'failed'}},
     {id:'t-upload',projectId:'project',displayName:'Uploading run',latestAttempt:{id:'a2',status:'uploading',submissionPhase:'uploading_auxiliary',providerId:'provider'}},
     {id:'t-done',projectId:'project',displayName:'Published run',latestAttempt:{id:'a3',status:'published'}},
   ];
@@ -275,6 +276,11 @@ test('Processing groups tasks by their installed run status and never claims del
   assert.match(html,/id="processing-preparing">Uploading and preparing <span>1<\/span>/);
   assert.match(html,/Uploading other inputs/);
   assert.match(html,/data-action="task-runs" data-id="t-failed"/);
+  assert.doesNotMatch(html,/Recycled failed run/,'recycled tasks do not need attention');
+  assert.equal(f.context.projectStatusMatches(f.state.projects[0],'attention'),true);
+  f.state.tasks=f.state.tasks.filter(task=>task.status==='archived');
+  assert.equal(f.context.projectStatusMatches(f.state.projects[0],'attention'),false,'recycled failures do not mark a project as needing attention');
+  assert.match(f.context.processing(),/Nothing is processing right now/);
   assert.doesNotMatch(html,/Published run/,'finished work is not listed as processing');
   assert.doesNotMatch(html,/deliver/i,'there is no delivery status to show');
   f.state.tasks=[];
