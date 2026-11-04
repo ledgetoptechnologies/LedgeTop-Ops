@@ -8,7 +8,7 @@ routing is unavailable in this release; two-way NAS/R2 sync is not implemented.
 Unsigned, per-user test packages are staged in `S:\LedgeTop Operations\Sync App`.
 Use `CURRENT-STAGING-STATUS.txt` for current package and test status; versioned
 receipts retain historical observations. Authenticode signing is off. The
-in-app update feed is disabled in current candidate 0.5.37, so this build
+in-app update feed is disabled in current candidate 0.5.38, so this build
 updates only through its installer.
 
 ## Current verification — November 3, 2026
@@ -18,15 +18,15 @@ updates only through its installer.
   on non-Windows hosts. It is the source for optional candidate 0.5.37. The
   exact installer was installed and launched in the staging VM, but connected
   sign-in, real downloads, Explorer actions and tray appearance were not tested.
-- Current uncommitted diagnostics add numeric Activity fields for quota-gate
-  wait/hold, recursive cache-walk time and reservation-scan time. The closed
-  diagnostic parser accepts those exact optional fields while retaining its
-  existing stored schema. The current Core run passed 196/196 groups, the
-  focused timing and quota-gate runs passed 3/3 each, and `git diff --check`
-  passed. Desktop AppTests then passed 87/87 with a short synthetic artifact
-  path. These harnesses do not exercise live sign-in or installed virtual files.
-  This change does not alter cache ownership or capacity checks and is not yet
-  packaged.
+- Commit `c6ed23e2` adds numeric Activity fields for quota-gate wait/hold,
+  recursive cache-walk time and reservation-scan time. The closed diagnostic
+  parser accepts those exact optional fields while retaining its existing
+  stored schema. Core passed 196/196 groups, focused timing and quota-gate runs
+  passed 3/3 each, and desktop AppTests passed 87/87 with a short synthetic
+  artifact path. These harnesses do not exercise live sign-in or installed
+  virtual files. The unsigned 0.5.38.0 diagnostic installer is staged, but has
+  not been installed or tested against live files; it adds measurements only
+  and does not change download behavior.
 - Source inspection shows each cold miss scans the cache tree and reservation
   records while holding the shared quota gate. Concurrent cold files therefore
   serialize these checks; this is a plausible performance contributor, not a
