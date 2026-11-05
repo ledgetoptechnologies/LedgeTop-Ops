@@ -29,9 +29,8 @@ const InvitationAcceptanceApp = lazy(async () => {
   const module = await import("./InvitationAcceptanceApp");
   return { default: module.InvitationAcceptanceApp };
 });
-installAccessAjax();
-
 if (!handoffLegacyPublicShare(window.location, url => window.location.replace(url))) {
+  installAccessAjax();
   const nativeRecipientEnrollmentRoute = consumeOperationsNativeRecipientEnrollmentRoute(window.location, window.history);
   const recipientEnrollmentRoute = consumeClientPortalRecipientEnrollmentRoute(window.location, window.history);
   const portalRoute = parseClientPortalRoute(window.location.pathname);
