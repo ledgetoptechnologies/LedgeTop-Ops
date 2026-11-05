@@ -92,6 +92,7 @@ describe("Operations deployed host admission", () => {
       [`${old}/api/viewer/workspace/session-renewal/challenge`, "POST"],
       ["https://portal.ledgetop.app/api/viewer/admin-grant", "POST"],
       [`${old}/api/viewer/admin-grant?next=1`, "POST"],
+      [`https://user@ops.ledgetopdroneservices.com/api/viewer/admin-grant`, "POST"],
     ] as const) expect(legacyViewerControllerCompatibilityAllowed(url, method, env)).toBe(false);
   });
 

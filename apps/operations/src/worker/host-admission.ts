@@ -62,7 +62,7 @@ export function legacyViewerControllerCompatibilityAllowed(
     || env.OPERATIONS_ORIGINS !== CANONICAL_PRODUCTION_OPERATIONS_ORIGIN) return false;
   try {
     const request = new URL(requestUrl);
-    if (request.protocol !== "https:" || request.port || request.search
+    if (request.protocol !== "https:" || request.port || request.search || request.hash || request.username || request.password
       || !LEGACY_VIEWER_CONTROLLER_ORIGINS.has(request.origin)) return false;
     return LEGACY_VIEWER_CONTROLLER_ROUTES.has(`${method.toUpperCase()} ${request.pathname}`);
   } catch { return false; }
