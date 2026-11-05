@@ -41,6 +41,11 @@ const LEGACY_OPERATIONS_ORIGINS = new Set([
 function configuredLegacyOperationsRedirectOrigins(
   env: Pick<Env, "LEGACY_OPERATIONS_REDIRECT_ORIGINS">,
 ): string[] | null {
+  // Older installations already use the canonical primary host but have no
+  // spare scalar slot for a redirect-only list. Preserve only these two exact
+  // historical browser/callback routes; neither becomes an active API origin.
+  // An explicitly empty list still disables this compatibility path.
+  if (env.LEGACY_OPERATIONS_REDIRECT_ORIGINS === undefined) return [...LEGACY_OPERATIONS_ORIGINS];
   if (!env.LEGACY_OPERATIONS_REDIRECT_ORIGINS) return [];
   const configured = env.LEGACY_OPERATIONS_REDIRECT_ORIGINS.split(",").map(value => value.trim());
   if (!configured.length || configured.length > LEGACY_OPERATIONS_ORIGINS.size
