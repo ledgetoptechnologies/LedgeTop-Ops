@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ApiError, api } from "./api";
-import { formatSessionExpiry } from "@ltds/ui";
+import { ACCESS_LOGOUT, formatSessionExpiry, useAccessSignOut } from "@ltds/ui";
 import { readSessionTiming } from "./session-time";
 
 type Clock = { deadline: number; expiresAt: number };
@@ -10,6 +10,7 @@ export function SessionExpiry({ userId }: { userId: string }) {
   const [clock, setClock] = useState<Clock | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "unavailable" | "expired">("loading");
   const [now, setNow] = useState(() => performance.now());
+  const [signingOut, signOut] = useAccessSignOut();
   useEffect(() => {
     setClock(null);
     setState("loading");
@@ -57,7 +58,9 @@ export function SessionExpiry({ userId }: { userId: string }) {
   }, [clock]);
   const expired = state === "expired" || state === "ready" && clock !== null && now >= clock.deadline;
   return <div className="account-session-status">
-    {expired ? <><strong>Session expired</strong><small>Sign in again to continue.</small></>
+    {expired ? <><strong>Session expired</strong><small>Sign in again to continue.</small>
+      <a role="menuitem" className="account-session-sign-in" href={ACCESS_LOGOUT} onClick={signOut} aria-disabled={signingOut || undefined}>
+        {signingOut ? "Signing out…" : "Sign in again"}</a></>
       : state === "ready" && clock ? <>
         <small>Signed in</small>
         <strong>Expires <time dateTime={new Date(clock.expiresAt).toISOString()}>{formatSessionExpiry(clock.expiresAt)}</time></strong>
