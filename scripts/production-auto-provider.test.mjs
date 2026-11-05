@@ -80,18 +80,22 @@ function setup(fetchImpl = async () => ok({}), overrides = {}) {
   return { provider, intents, persisted };
 }
 async function ownedVerifierFixture(assetFetch, overrides = {}) {
+  const { verifierInitialSubdomain = { enabled: false, previews_enabled: true }, ...providerOverrides } = overrides;
   const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName();
   const entry = { path: "/assets/test.js", size: 1, sha256: hash("x"), contentType: "application/javascript" };
+  let verifierSubdomain = structuredClone(verifierInitialSubdomain);
   const state = setup(async (url, init) => {
     if (url.includes(".workers.dev")) return assetFetch(url, init);
     if (init.method === "PUT") return ok({ id: candidate });
     if (url.endsWith("/settings")) return ok({ bindings: [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }] });
     if (init.method === "DELETE") return ok({});
-    if (url.endsWith("/subdomain") && init.method === "POST") return ok({ enabled: true, previews_enabled: false });
+    if (url.endsWith("/subdomain") && init.method === "POST") {
+      verifierSubdomain = { enabled: true, previews_enabled: false }; return ok(verifierSubdomain);
+    }
     if (url.endsWith("/workers/subdomain")) return ok({ subdomain: "synthetic" });
-    if (url.endsWith("/subdomain")) return ok({ enabled: true, previews_enabled: false });
+    if (url.endsWith("/subdomain")) return ok(verifierSubdomain);
     return Response.json({ success: false }, { status: 404 });
-  }, overrides);
+  }, providerOverrides);
   await state.provider.createVerifier({ name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [entry],
     nonceHash: nonce.nonceHash, versionId: parent });
   return { ...state, nonce, name, entry };

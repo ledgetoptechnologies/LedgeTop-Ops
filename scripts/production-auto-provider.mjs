@@ -358,9 +358,10 @@ export class ProductionCloudflareProvider {
       bindings: expected.bindings };
     const form = new FormData(); form.set("metadata", JSON.stringify(metadata)); form.set("index.js", new Blob([source], { type: "application/javascript+module" }), "index.js");
     await this.#request(`/workers/scripts/${name}`, { method: "PUT", body: form, intent: { phase: "temporary-verifier-create", name, workerName, sourceSHA256: hash(source) } });
-    await this.#readOwnedVerifier(name, { requireEnabled: false });
+    await this.#readOwnedVerifier(name, { rememberInitialSubdomain: true });
     const settings = (await this.#request(`/workers/scripts/${name}/settings`)).result;
     need(same(settings.bindings, metadata.bindings));
+    this.#temporary.get(name).enableSubdomainTarget = { enabled: true, previews_enabled: false };
     const enabled = await this.#request(`/workers/scripts/${name}/subdomain`, { method: "POST", body: JSON.stringify({ enabled: true, previews_enabled: false }),
       headers: { "Content-Type": "application/json", "Cloudflare-Workers-Script-Api-Date": "2025-08-01" }, intent: { phase: "temporary-verifier-enable", name } });
     need(enabled.result?.enabled === true && enabled.result.previews_enabled === false);
@@ -414,13 +415,13 @@ export class ProductionCloudflareProvider {
   async removeVerifier(name) {
     need(TEMP.test(name) && this.#temporary.has(name) && !this.#temporary.get(name).deleteAttempted);
     const owned = this.#temporary.get(name);
-    await this.#readOwnedVerifier(name, { requireEnabled: false });
+    await this.#readOwnedVerifier(name, { cleanupSubdomain: true });
     owned.deleteReadbackVerified = true;
     owned.deleteAttempted = true;
     await this.#request(`/workers/scripts/${name}`, { method: "DELETE", ownedVerifierCleanup: true,
       intent: { phase: "temporary-verifier-delete", name, workerName: owned.workerName, sourceSHA256: owned.sourceSHA256 } });
   }
-  async #readOwnedVerifier(name, { requireEnabled = true } = {}) {
+  async #readOwnedVerifier(name, { requireEnabled = false, rememberInitialSubdomain = false, cleanupSubdomain = false } = {}) {
     const owned = this.#temporary.get(name); need(TEMP.test(name) && owned);
     const listed = (await this.#request(`/workers/scripts/${name}/versions?per_page=1`)).result;
     need(Array.isArray(listed.items) && listed.items.length === 1 && UUID.test(listed.items[0]?.id ?? listed.items[0]?.version_id ?? ""));
@@ -438,8 +439,17 @@ export class ProductionCloudflareProvider {
     const settings = (await this.#request(`/workers/scripts/${name}/settings`)).result;
     need(same(settings.bindings, owned.bindings));
     const subdomain = (await this.#request(`/workers/scripts/${name}/subdomain`)).result;
-    need(typeof subdomain?.enabled === "boolean" && subdomain.previews_enabled === false
-      && (!requireEnabled || subdomain.enabled === true));
+    need(typeof subdomain?.enabled === "boolean" && typeof subdomain.previews_enabled === "boolean");
+    if (rememberInitialSubdomain) owned.initialSubdomainState = structuredClone(subdomain);
+    if (requireEnabled) {
+      need(subdomain.enabled === true && subdomain.previews_enabled === false);
+      owned.enableSubdomainTarget = { enabled: true, previews_enabled: false };
+    }
+    if (cleanupSubdomain) {
+      const priorStates = [owned.initialSubdomainState, owned.enableSubdomainTarget].filter(Boolean);
+      if (priorStates.length === 0) owned.initialSubdomainState = structuredClone(subdomain);
+      else need(priorStates.some(state => same(state, subdomain)));
+    }
     const accountSubdomain = (await this.#request("/workers/subdomain")).result?.subdomain;
     need(typeof accountSubdomain === "string" && /^[a-z0-9][a-z0-9-]{0,62}$/u.test(accountSubdomain));
     const expectedOrigin = `https://${name}.${accountSubdomain}.workers.dev`;
