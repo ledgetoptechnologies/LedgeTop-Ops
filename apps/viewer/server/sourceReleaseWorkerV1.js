@@ -6,6 +6,7 @@ const { verifiedOutputProof } = require('./sourceReleaseReadyProofV1');
 const { getHeldSourceSnapshot, verifyHeldSourceSnapshot, acceptHeldSourceSnapshot,
   releaseHeldSourceSnapshot } = require('./heldSourceSnapshot');
 const { validateCompletionReceipt } = require('./sourceIntakeClientV2');
+const { validateSnapshotSelection } = require('./preclaimSourceAttestation');
 
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 
@@ -53,9 +54,10 @@ function verifiedSnapshot(processing, sourceIntake, intent) {
       || snapshot.issuerId !== sourceIntake.snapshotSigner.issuerId || snapshot.keyId !== sourceIntake.snapshotSigner.keyId
       || !verifyHeldSourceSnapshot(snapshot, sourceIntake.snapshotPublicKey)
       || snapshot.attemptId !== intent.submissionId || snapshot.taskId !== intent.viewerTaskId
-      || snapshot.datasetId !== request.sourceManifest.id || snapshot.inputManifestSha256 !== request.manifest.sha256
+      || snapshot.datasetId !== request.sourceManifest.id
       || snapshot.intentSha256 !== request.sourceAttestation.proof.sourceSnapshotSha256)
     fail('source_release_snapshot_binding_mismatch');
+  validateSnapshotSelection(snapshot, request);
   // Reconstruct only deterministic per-object ACK projections omitted from the
   // compact durable completion; the retained source/derived receipts are checked
   // in full by the same validator used by the real intake client.
