@@ -34,9 +34,13 @@ test('ODM GCP export names EGM vertical datums in the compound CRS header', () =
   }]), 'EPSG:4326+5773\n-88.1 44.5 250 1 2 photo.jpg\n');
 });
 
-test('ODM serialization fails closed for ambiguous whitespace-delimited image names', () => {
+test('ODM serialization fails closed for whitespace-delimited image basenames', () => {
   assert.throws(() => odmGcpList([{
     longitude: -88, latitude: 44, elevationM: 1, pixelX: 1, pixelY: 1,
     relativePath: 'image with spaces.jpg',
+  }]), (error) => error.code === 'invalid_gcp_image_name');
+  assert.throws(() => odmGcpList([{
+    longitude: -88, latitude: 44, elevationM: 1, pixelX: 1, pixelY: 1,
+    relativePath: 'image\tname.jpg',
   }]), (error) => error.code === 'invalid_gcp_image_name');
 });

@@ -11,6 +11,7 @@ const ReferenceProtocol = require('../server/referenceProtocol');
 const { MIGRATIONS, openDatabase } = require('../server/database');
 const { PreparedSubmissionOutbox, MAX_BODY_BYTES, canonicalEnvelope, canonicalizeJcs } = require('../server/preparedSubmissionOutbox');
 const { buildSourceIntakeManifests } = require('../server/sourceIntakeManifestV2');
+const { retentionClosuresFromManifests } = require('../server/sourceReleaseContractV1');
 const {
   MAX_SOURCE_INTAKE_V2_CANONICAL_NODES,
   MAX_SOURCE_INTAKE_V2_METADATA_BYTES,
@@ -45,6 +46,41 @@ function makeScaleFixture(count = MAX_SOURCE_INTAKE_V2_MANIFEST_OBJECTS) {
   const manifests = buildSourceIntakeManifests(processing, { dataset, attempt, snapshot, pipelineManifest });
   return { dataset, pipelineManifest, manifests };
 }
+
+test('release custody closure follows Viewer-built raw GCP CSV retention metadata', () => {
+  const { dataset, pipelineManifest } = makeScaleFixture(1);
+  const csv = Buffer.from('Name,Latitude,Longitude,Elevation\ncontrol,44,-88,250\n', 'utf8');
+  const gcpFile = {
+    id: '00000000-0000-4000-8000-000000000004',
+    name: 'field-control.csv', relativePath: 'raw/field-control.csv', byteSize: csv.length,
+    sha256: sha(csv), processingRole: 'gcp_source', mimeType: 'text/csv',
+  };
+  dataset.files.push(gcpFile);
+  const processing = { database: {
+    isTransaction: true,
+    prepare(sql) {
+      if (sql.includes('retained_dataset_files')) return { all: () => [{
+        dataset_file_id: gcpFile.id, dataset_id: dataset.id, sha256: gcpFile.sha256,
+        byte_size: gcpFile.byteSize, retention_reason: 'gcp_source',
+      }] };
+      return { all: () => [], get: () => undefined };
+    },
+  } };
+  const manifests = buildSourceIntakeManifests(processing, {
+    dataset,
+    attempt: { id: ATTEMPT_ID, taskId: TASK_ID },
+    snapshot: { attemptId: ATTEMPT_ID, datasetId: DATASET_ID, intentSha256: 'f'.repeat(64) },
+    pipelineManifest,
+  });
+
+  const closures = retentionClosuresFromManifests(manifests.sourceManifest, manifests.derivedManifest);
+  assert.deepEqual(closures.eligibleObjects.map(({ id, objectKind }) => [id, objectKind]), [
+    [dataset.files[0].id, 'source'],
+  ]);
+  assert.deepEqual(closures.preservedObjects.map(({ id, objectKind }) => [id, objectKind]), [
+    [gcpFile.id, 'source'],
+  ]);
+});
 
 function applyThroughVersion(database, maxVersion) {
   database.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');
