@@ -5,16 +5,25 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash, createPublicKey } from 'node:crypto';
 import { createProductionAutoReleaseAdapter, productionAutoBuildEnvironment, readProductionAutoTriggerRun,
-  runProductionAutoRelease, validateDeploymentTransitionIntent } from './production-auto-runtime.mjs';
+  productionAutoInstalledPreflight, runProductionAutoRelease, validateDeploymentTransitionIntent } from './production-auto-runtime.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { completeProductionAutoArtifact } from './production-auto-journal-artifact.mjs';
 import { PROFILE, canonical } from './production-deploy.mjs';
 import { ledgerBytes } from './production-auto-assets.mjs';
 import { ProductionCloudflareProvider } from './production-auto-provider.mjs';
 import { loadPinnedProductionAutoRecipient } from './production-auto-journal.mjs';
+import { loadPinnedProductionAutoPost0226PreservationPolicy } from './production-auto-post0226-policy.mjs';
+import { POST0226_STAFF_PRESERVATION_CONTRACT } from './ordinary-frontend-authority-post0226.mjs';
 
 const sourceCommit = 'a'.repeat(40), runId = 456, attempt = 2;
 const hash = value => createHash('sha256').update(value).digest('hex');
+const preservationPolicy = loadPinnedProductionAutoPost0226PreservationPolicy();
+function preservationObservation(commit = sourceCommit, observedAt = new Date().toISOString()) {
+  const baseline = structuredClone(preservationPolicy.baseline);
+  return { schemaVersion: 1, contract: POST0226_STAFF_PRESERVATION_CONTRACT, sourceCommit: commit,
+    accountId: preservationPolicy.accountId, databaseId: preservationPolicy.databaseId, observedAt,
+    ...baseline, schemaSha256: baseline.loginSchemaSha256 };
+}
 function migrationFixture(commit = sourceCommit) {
   return { schemaVersion: 1, sourceCommit: commit, accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
     observedAt: new Date().toISOString(), databases: [
@@ -46,12 +55,44 @@ test('only exact successful same-repository main CI completion is admitted as re
   ]) withEvent(change, env => assert.throws(() => readProductionAutoTriggerRun(env)));
 });
 
+test('runtime selects canonical v4 only from its exact profile digest and preserves the selected app identity', () => {
+  const v4 = JSON.parse(fs.readFileSync(new URL('./test-fixtures/ordinary-frontend-accepted-profile-v4.test.json', import.meta.url), 'utf8'));
+  assert.deepEqual(productionAutoInstalledPreflight(v4, 'operations'), {
+    ordinaryFrontendPreflightMode: 'ordinary-frontend-preserve-installed-canonical-v4', ordinaryFrontendApp: 'operations' });
+  assert.deepEqual(productionAutoInstalledPreflight(v4, 'ops-sync'), {
+    ordinaryFrontendPreflightMode: 'ordinary-frontend-preserve-installed-canonical-v4', ordinaryFrontendApp: 'ops-sync' });
+  const changed = structuredClone(v4); changed.workers.operations.assetsSHA256 = 'f'.repeat(64);
+  assert.deepEqual(productionAutoInstalledPreflight(changed, 'operations'), {},
+    'candidate asset rebasing cannot alter the source profile used to select v4');
+});
+
 test('frontend build child receives no provider, readiness, workflow-output, or Actions credentials', () => {
   const env = productionAutoBuildEnvironment({ PATH: 'safe-path', GITHUB_TOKEN: 'token', CLOUDFLARE_API_TOKEN: 'cf',
     CLOUDFLARE_ACCOUNT_ID: 'account', NATIVE_STAFF_CUTOVER_REVIEW_JSON: 'review', GITHUB_OUTPUT: 'output',
     GITHUB_EVENT_PATH: 'event', ACTIONS_RUNTIME_TOKEN: 'runtime', ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'oidc',
     ACTIONS_ID_TOKEN_REQUEST_URL: 'url', NODE_ENV: 'production' });
   assert.deepEqual(env, { PATH: 'safe-path', NODE_ENV: 'production' });
+});
+
+test('Ops adapter reads the fixed post-0226 contract without the legacy review secret', async () => {
+  const env = { CLOUDFLARE_ACCOUNT_ID: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
+    CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32), GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1',
+    PRODUCTION_AUTO_PREDECESSOR_COMPLETION: 'success', PRODUCTION_AUTO_PREDECESSOR_SOURCE_SHA: sourceCommit,
+    PRODUCTION_AUTO_PREDECESSOR_RELEASE_ID: hash(`ledgetop-clients\n${sourceCommit}`) };
+  let reads = 0;
+  const runtime = createProductionAutoReleaseAdapter({ workerName: 'ledgetop-ops', sourceCommit, env,
+    triggerRun: { sourceCommit, runId, runAttempt: attempt },
+    preservationReader: async ({ sourceCommit: observedSource }) => { reads++; return preservationObservation(observedSource); },
+    ciFactory: () => ({ verify: async () => ({ sourceCommit, passed: true, runId, runAttempt: attempt }) }),
+    providerFactory: () => { throw Error('provider must remain unconstructed'); },
+    journalFactory: () => { throw Error('journal must remain unconstructed'); } });
+  const first = await runtime.adapter.post0226Preservation({ sourceCommit });
+  const second = await runtime.adapter.post0226Preservation({ sourceCommit });
+  assert.equal(reads, 2);
+  assert.equal(first.contract, 'production-auto-post0226-preservation-receipt-v1');
+  assert.equal(first.policySha256, '915025b52c29bc69ad8c92e503f4df2c9084f41157d0b148f4430de67dc91e33');
+  assert.equal(second.stateSha256, first.stateSha256);
+  assert.equal(Object.hasOwn(env, 'NATIVE_STAFF_CUTOVER_REVIEW_JSON'), false);
 });
 
 function fakeReleaseAdapter(workerName, commit, evidence) {

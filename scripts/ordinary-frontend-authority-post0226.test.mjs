@@ -13,7 +13,8 @@ import { readPost0226StaffPreservationObservation } from './ordinary-frontend-au
 import { compileProductionAutoPost0226PreservationPolicy, loadPinnedProductionAutoPost0226PreservationPolicy,
   validateProductionAutoPost0226PreservationObservation, validateProductionAutoPost0226PreservationPolicy,
   validateProductionAutoPost0226PreservationReceipt,
-  validateRepeatedProductionAutoPost0226PreservationReceipts } from './production-auto-post0226-policy.mjs';
+  validateRepeatedProductionAutoPost0226PreservationReceipts,
+  PRODUCTION_AUTO_POST0226_PRESERVATION_POLICY_SHA256 } from './production-auto-post0226-policy.mjs';
 
 const sourceCommit = 'a'.repeat(40), observedAt = '2026-10-31T10:00:00.000Z', now = Date.parse('2026-10-31T10:01:00.000Z');
 const sha = text => createHash('sha256').update(text).digest('hex');
@@ -118,7 +119,7 @@ test('short post-0226 review hashes complete state without returning personal or
   } finally { fixture.db.close(); }
 });
 
-test('offline recurring preservation policy pins qualified state, allows only observation time and source to vary, and stays unprovisioned', async () => {
+test('offline compiler and fixed recurring preservation policy pin qualified state and permit only source/time variation', async () => {
   migrationText ??= await readFile(new URL('../apps/operations/migrations/0226_staff_login_bindings.sql', import.meta.url), 'utf8');
   const fixture = schemaFixture();
   try {
@@ -202,8 +203,15 @@ test('offline recurring preservation policy pins qualified state, allows only ob
 
     const originalPath = process.env.PRODUCTION_AUTO_POST0226_POLICY_PATH;
     process.env.PRODUCTION_AUTO_POST0226_POLICY_PATH = 'C:\\unreviewed\\policy.json';
-    try { assert.throws(() => loadPinnedProductionAutoPost0226PreservationPolicy(), /policy_unprovisioned/u); }
-    finally {
+    try {
+      const pinned = loadPinnedProductionAutoPost0226PreservationPolicy();
+      assert.equal(sha(canonicalStaffReadiness(pinned)), PRODUCTION_AUTO_POST0226_PRESERVATION_POLICY_SHA256);
+      assert.equal(pinned.baseline.baseSnapshotSha256, '23a7e1603789e96d26b07aa60393411bdec3dc09494ad47464294b0ed62f860d');
+      assert.equal(pinned.baseline.nativeControlEnabled, 0);
+      assert.equal(pinned.baseline.preservationOnly, true);
+      assert.throws(() => validateProductionAutoPost0226PreservationPolicy({ ...pinned,
+        databaseId: '7f40a7b7-c3ec-470e-a626-e798867f71f8' }), /policy_invalid/u);
+    } finally {
       if (originalPath === undefined) delete process.env.PRODUCTION_AUTO_POST0226_POLICY_PATH;
       else process.env.PRODUCTION_AUTO_POST0226_POLICY_PATH = originalPath;
     }

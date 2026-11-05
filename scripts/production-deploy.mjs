@@ -162,6 +162,27 @@ function exactDataObject(value, keys) {
     && Object.getOwnPropertyDescriptor(value, key)?.get === undefined
     && Object.getOwnPropertyDescriptor(value, key)?.set === undefined);
 }
+const CANONICAL_ASSET_ASSOCIATION_KEYS = Object.freeze(['config', 'jwt']);
+export function validateCanonicalV4AssetAssociationMetadata(baselineAssets, candidateAssets) {
+  const baselineKeys = baselineAssets && Object.keys(baselineAssets).sort();
+  const candidateKeys = candidateAssets && Object.keys(candidateAssets).sort();
+  need(exactDataObject(baselineAssets, baselineKeys ?? []) && exactDataObject(candidateAssets, candidateKeys ?? [])
+    && baselineKeys.includes('config') && baselineKeys.every(key => CANONICAL_ASSET_ASSOCIATION_KEYS.includes(key))
+    && equal(baselineKeys, candidateKeys) && equal(candidateAssets.config, baselineAssets.config)
+    && (!baselineKeys.includes('jwt') || (typeof baselineAssets.jwt === 'string' && baselineAssets.jwt.length > 0
+      && typeof candidateAssets.jwt === 'string' && candidateAssets.jwt.length > 0)),
+  'Unreviewed canonical v4 asset association');
+  return true;
+}
+export function validateCanonicalV4AssetAssociation({ profile, app, baselineAssets, candidateAssets } = {}) {
+  need(profile && hash(canonical(profile)) === CANONICAL_INSTALLED_PROFILE_V4_SHA256
+    && ['operations', 'client'].includes(app), 'Unreviewed canonical v4 asset profile');
+  const expectedBaseline = profile.workers?.[app]?.assetsSHA256;
+  need(/^[a-f0-9]{64}$/u.test(expectedBaseline ?? '') && hash(canonical(baselineAssets)) === expectedBaseline,
+    'Unreviewed canonical v4 asset baseline');
+  validateCanonicalV4AssetAssociationMetadata(baselineAssets, candidateAssets);
+  return true;
+}
 export function validateReviewedExpectedDeploymentVersions(value) {
   if (value === undefined) return undefined;
   need(exactDataObject(value, ['operations']), 'Unreviewed expected deployment weights');
@@ -179,8 +200,22 @@ export function validateReviewedExpectedDeploymentVersions(value) {
   return structuredClone(value);
 }
 export function validateInstallation(snapshot, { allowLatest = {}, profile = PROFILE, selectedApp, expectedDeploymentVersions = {},
-  ordinaryFrontendPreflightMode, ordinaryFrontendApp, opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId } = {}) {
+  ordinaryFrontendPreflightMode, ordinaryFrontendApp, assetAssociationOverrides = {},
+  opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId } = {}) {
   const preflightDescriptor = ordinaryFrontendPreflightDescriptor(profile, ordinaryFrontendPreflightMode);
+  need(assetAssociationOverrides && Object.getPrototypeOf(assetAssociationOverrides) === Object.prototype,
+    'Unreviewed canonical v4 asset association override');
+  const overrideApps = Object.keys(assetAssociationOverrides ?? {});
+  if (overrideApps.length) {
+    need(ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE
+      && preflightDescriptor.profileSHA256 === CANONICAL_INSTALLED_PROFILE_V4_SHA256
+      && overrideApps.length === 1 && overrideApps[0] === ordinaryFrontendApp
+      && ['operations', 'client'].includes(ordinaryFrontendApp)
+      && (selectedApp === undefined || selectedApp === ordinaryFrontendApp)
+      && exactDataObject(assetAssociationOverrides, [ordinaryFrontendApp])
+      && exactDataObject(assetAssociationOverrides[ordinaryFrontendApp], ['baselineAssets']),
+    'Unreviewed canonical v4 asset association override');
+  }
   need(opsSuccessorReaderContract === undefined || opsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT
     || opsSuccessorReaderContract === OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT,
     'Unreviewed Ops successor reader installed-profile contract');
@@ -243,7 +278,9 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
     need(spec.forbiddenPlainNames.every(x => !Object.hasOwn(vars, x)), `${app}: omitted default flags were reintroduced`);
     need(equal(exactSet(s.schedules.schedules.map(x => x.cron)), spec.crons), `${app}: exact final schedules required; adapter never repairs them`);
     if (app !== 'ops-sync') need(s.modern.assets && typeof s.modern.assets === 'object', `${app}: existing opaque assets required`);
-    need(hash(canonical(s.modern.assets ?? null)) === spec.assetsSHA256, `${app}: unrecognized asset association`);
+    if (Object.hasOwn(assetAssociationOverrides, app)) validateCanonicalV4AssetAssociation({ profile, app,
+      baselineAssets: assetAssociationOverrides[app].baselineAssets, candidateAssets: s.modern.assets });
+    else need(hash(canonical(s.modern.assets ?? null)) === spec.assetsSHA256, `${app}: unrecognized asset association`);
   }
   const ops = varsOf(snapshot.operations); const client = varsOf(snapshot.client);
   for (const name of ['CLIENT_ONBOARDING_ADMIN_ENABLED', 'CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED', 'CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED', 'PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED']) need(ops[name] === 'true', `Final normal onboarding profile missing: ${name}`);

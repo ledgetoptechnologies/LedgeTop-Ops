@@ -11,8 +11,12 @@ import { canonical, capture, deploymentSourceCommit, PROFILE, resourcesShape,
 import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-ci.mjs';
 import { ProductionCloudflareProvider, readCandidateVersionWithVisibilityRetry } from './production-auto-provider.mjs';
 import { readProductionAutoTriggerRun, runBuild, parseProductionAutoLedger,
-  productionAutoControlsSHA256, productionAutoBuildProfileSHA256 } from './production-auto-runtime.mjs';
-import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+  productionAutoControlsSHA256, productionAutoBuildProfileSHA256, productionAutoInstalledPreflight } from './production-auto-runtime.mjs';
+import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+import { readPost0226StaffPreservationObservation } from './ordinary-frontend-authority-post0226-reader.mjs';
+import { loadPinnedProductionAutoPost0226PreservationPolicy,
+  validateProductionAutoPost0226PreservationObservation,
+  validateRepeatedProductionAutoPost0226PreservationReceipts } from './production-auto-post0226-policy.mjs';
 import { validateProductionMigrationAdmission } from './production-auto-migration-readiness.mjs';
 import { loadPinnedAppendOnlyMigrationProfile,
   readProductionMigrationReadiness as readProductionMigrationDiagnostics } from './production-auto-migration-classification.mjs';
@@ -102,7 +106,7 @@ export function verifySyncBackendCandidate({ before, candidate, modern, moduleBy
 export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = readProductionAutoTriggerRun(), env = process.env,
   fetchImpl = fetch, profile = PROFILE, sourceReader = deploymentSourceCommit, ciFactory = options => new ProductionMainCI(options),
   providerFactory = options => new ProductionCloudflareProvider(options), journalFactory = options => new ProductionAutoJournal(options),
-  recipientLoader = loadPinnedProductionAutoRecipient, readinessReader = readNativeStaffCutoverReadiness,
+  recipientLoader = loadPinnedProductionAutoRecipient, preservationReader = readPost0226StaffPreservationObservation,
   buildRunner = runBuild, buildArtifactsReader, migrationReader = readProductionMigrationDiagnostics,
   predecessorReader = readVerifiedProductionAutoPredecessor } = {}) {
   need(COMMIT.test(sourceCommit ?? '') && triggerRun?.sourceCommit === sourceCommit && typeof fetchImpl === 'function'
@@ -112,6 +116,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? '') && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? ''),
   'sync_runtime_identity_or_credentials_invalid');
   const predecessorHandoff = parseProductionAutoPredecessorHandoff(env, { workerName: WORKER, sourceCommit, triggerRun });
+  const post0226Policy = loadPinnedProductionAutoPost0226PreservationPolicy(), preservationReceipts = [];
   need(typeof predecessorReader === 'function', 'sync_predecessor_reader_invalid');
   const ci = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl }), token = env.CLOUDFLARE_API_TOKEN;
   let migrationPins;
@@ -123,12 +128,13 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     migrationPins = pins;
     return observed;
   };
-  let provider, journal, baseline, expected, build, candidateVersionId, readiness, writesAttempted = false;
+  let provider, journal, baseline, expected, build, candidateVersionId, writesAttempted = false;
   let predecessorOwnState;
   let phase = 'sync-prepare';
   const current = async () => {
     const raw = await capture(provider, { selectedApp: APP });
-    const snapshot = validateInstallation(raw, { profile, selectedApp: APP,
+    const preservationPreflight = productionAutoInstalledPreflight(PROFILE, APP);
+    const snapshot = validateInstallation(raw, { profile, selectedApp: APP, ...preservationPreflight,
       allowLatest: candidateVersionId ? { [APP]: candidateVersionId } : {} });
     return { snapshot, state: projectCapture(snapshot, candidateVersionId) };
   };
@@ -152,7 +158,8 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     const raw = await capture(provider, { selectedApp: APP });
     const latest = raw?.[APP]?.latest;
     need(UUID.test(latest ?? ''), 'sync_reconciliation_latest_invalid');
-    const checked = validateInstallation(raw, { profile, selectedApp: APP, allowLatest: { [APP]: latest } });
+    const preservationPreflight = productionAutoInstalledPreflight(PROFILE, APP);
+    const checked = validateInstallation(raw, { profile, selectedApp: APP, ...preservationPreflight, allowLatest: { [APP]: latest } });
     const state = projectCapture(checked, latest);
     return { activeVersionId: state.activeVersionId, latestVersionId: state.latestVersionId,
       deploymentId: state.deploymentId, controlsUnchanged: state.controlsSHA256 === expected?.controlsSHA256 };
@@ -168,17 +175,12 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     return result;
   };
   const checkStaff = async () => {
-    need(typeof env.NATIVE_STAFF_CUTOVER_REVIEW_JSON === 'string' && env.NATIVE_STAFF_CUTOVER_REVIEW_JSON.length <= 1024 * 1024,
-      'sync_staff_review_missing');
-    let review; try { review = JSON.parse(env.NATIVE_STAFF_CUTOVER_REVIEW_JSON); } catch { need(false, 'sync_staff_review_invalid'); }
-    const currentReadiness = exactSyncReady(await readinessReader({ review, sourceCommit, env }), sourceCommit);
-    if (readiness) {
-      const { observedAt: _currentObservedAt, ...currentPins } = currentReadiness;
-      const { observedAt: _priorObservedAt, ...priorPins } = readiness;
-      need(canonical(currentPins) === canonical(priorPins), 'sync_staff_readiness_changed');
-    }
-    else readiness = currentReadiness;
-    return currentReadiness;
+    const observation = await preservationReader({ sourceCommit, env });
+    const receipt = validateProductionAutoPost0226PreservationObservation(post0226Policy, observation, { sourceCommit });
+    preservationReceipts.push(receipt);
+    if (preservationReceipts.length > 1) validateRepeatedProductionAutoPost0226PreservationReceipts(post0226Policy,
+      preservationReceipts, { sourceCommit });
+    return receipt;
   };
   const assertFence = async state => {
     await checkSourceAndCI(); await checkStaff();

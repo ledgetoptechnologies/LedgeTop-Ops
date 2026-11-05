@@ -13,6 +13,8 @@ import {
   canonical,
   ordinaryFrontendPreflightDescriptor,
   validateOrdinaryFrontendPreflightPreservation,
+  validateCanonicalV4AssetAssociation,
+  validateCanonicalV4AssetAssociationMetadata,
   validateInstallation,
   compileConfig,
 } from './production-deploy.mjs';
@@ -236,10 +238,40 @@ test('canonical v4 installed controls admit only an exact ops-sync capture and r
     /limited to Operations or Client UI plans/);
   assert.throws(() => validateInstallation({}, { ...exactV4, selectedApp: 'operations' }),
     /limited to Operations or Client UI plans/);
+  assert.throws(() => validateInstallation({}, { ...exactV4, selectedApp: undefined, ordinaryFrontendApp: 'operations',
+    assetAssociationOverrides: { operations: { baselineAssets: { config: {} } } } }), /Existing complete production installation required/,
+  'asset association rebasing is accepted only after the exact v4 profile pin is validated');
+  assert.throws(() => validateInstallation({}, { ...exactV4, selectedApp: undefined, ordinaryFrontendApp: 'operations',
+    assetAssociationOverrides: { operations: { baselineAssets: { config: {} } } }, profile: { ...acceptedCanonicalV4Profile,
+      onboardingAdminOrigin: 'https://tampered.invalid' } }), /Unreviewed ordinary frontend accepted profile/);
+  assert.throws(() => validateInstallation({}, { ...exactV4, ordinaryFrontendApp: 'operations',
+    assetAssociationOverrides: { client: 'f'.repeat(64) } }), /Unreviewed canonical v4 asset association override/);
 
   const { client, operations } = syntheticPortalVars();
   const installedClient = { ...client }; delete installedClient.CLIENT_PORTAL_OPS_INQUIRIES_ENABLED;
   assert.throws(() => validateOrdinaryFrontendPreflightPreservation(installedClient,
     { ...operations, [hierarchyFlag]: 'false' }, acceptedCanonicalV4Profile,
     ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE), /Operations hierarchy flag differs/);
+});
+
+test('canonical v4 asset rebasing keeps every config control and permits only the pinned jwt association field to vary', () => {
+  const baseline = { config: { base_path: '/', run_worker_first: ['/api/*'], html_handling: 'auto-trailing-slash' }, jwt: 'old-association' };
+  const candidate = { config: clone(baseline.config), jwt: 'candidate-association' };
+  assert.equal(validateCanonicalV4AssetAssociationMetadata(baseline, candidate), true);
+  for (const changed of [
+    { ...candidate, config: { ...candidate.config, run_worker_first: ['/other/*'] } },
+    { ...candidate, config: { ...candidate.config, html_handling: 'none' } },
+    { ...candidate, unexpected: 'unreviewed' },
+    { config: clone(candidate.config) },
+  ]) assert.throws(() => validateCanonicalV4AssetAssociationMetadata(baseline, changed), /asset association/u);
+  assert.throws(() => validateCanonicalV4AssetAssociationMetadata(baseline, { ...candidate, config: {
+    ...candidate.config, run_worker_first: ['/api/*', '/unreviewed/*'] } }), /asset association/u);
+  const profileBaseline = { config: clone(acceptedCanonicalV4Profile.workers.operations.metadata.assets.config) };
+  assert.throws(() => validateCanonicalV4AssetAssociation({ profile: acceptedCanonicalV4Profile, app: 'client',
+    baselineAssets: profileBaseline, candidateAssets: profileBaseline }), /asset baseline/u,
+  'the Operations baseline association cannot be substituted into Client or another worker profile');
+  const alteredProfile = clone(acceptedCanonicalV4Profile); alteredProfile.workers.operations.assetsSHA256 = 'f'.repeat(64);
+  assert.throws(() => validateCanonicalV4AssetAssociation({ profile: alteredProfile, app: 'operations',
+    baselineAssets: profileBaseline, candidateAssets: profileBaseline }), /asset profile/u,
+  'an altered v4 profile never authorizes a candidate rebase');
 });

@@ -7,6 +7,8 @@ import { createProductionAutoSyncAdapter } from './production-auto-sync-runtime.
 import { PROFILE, canonical } from './production-deploy.mjs';
 import { ledgerBytes } from './production-auto-assets.mjs';
 import { productionAutoBuildProfileSHA256, productionAutoControlsSHA256 } from './production-auto-runtime.mjs';
+import { loadPinnedProductionAutoPost0226PreservationPolicy } from './production-auto-post0226-policy.mjs';
+import { POST0226_STAFF_PRESERVATION_CONTRACT } from './ordinary-frontend-authority-post0226.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const parent = '11111111-1111-4111-8111-111111111111';
@@ -15,6 +17,13 @@ const commit = 'a'.repeat(40);
 const nativeTarget = { accountId: '846c924bf17bf4f3dd15c97a4c5d1d51', databaseId: '6ebf7514-d306-4615-ae56-ad869c874dbd' };
 const predecessorEnv = { PRODUCTION_AUTO_PREDECESSOR_COMPLETION: 'success', PRODUCTION_AUTO_PREDECESSOR_SOURCE_SHA: commit,
   PRODUCTION_AUTO_PREDECESSOR_RELEASE_ID: hash(`ledgetop-ops\n${commit}`) };
+const preservationPolicy = loadPinnedProductionAutoPost0226PreservationPolicy();
+function preservationObservation(sourceCommit, changes = {}) {
+  const baseline = structuredClone(preservationPolicy.baseline);
+  return { schemaVersion: 1, contract: POST0226_STAFF_PRESERVATION_CONTRACT, sourceCommit,
+    accountId: preservationPolicy.accountId, databaseId: preservationPolicy.databaseId,
+    observedAt: new Date().toISOString(), ...baseline, schemaSha256: baseline.loginSchemaSha256, ...changes };
+}
 
 test('Sync readiness is exact-source, bounded, and rejects stale or future observations', () => {
   const ready = { schemaVersion: 2, sourceCommit: commit, accountId: '846c924bf17bf4f3dd15c97a4c5d1d51',
@@ -35,10 +44,10 @@ test('Sync migration refusal stops before CI, staff reads, provider construction
   let otherCalls = 0;
   const unexpected = () => { otherCalls++; throw Error('unexpected side effect'); };
   const env = { CLOUDFLARE_ACCOUNT_ID: nativeTarget.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
-    GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', NATIVE_STAFF_CUTOVER_REVIEW_JSON: '{"synthetic":true}', ...predecessorEnv };
+    GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', ...predecessorEnv };
   const runtime = createProductionAutoSyncAdapter({ sourceCommit: commit, triggerRun: { sourceCommit: commit, runId: 678, runAttempt: 3 }, env,
     migrationReader: async () => { throw Error('missing migration'); }, sourceReader: unexpected,
-    ciFactory: () => ({ verify: unexpected }), readinessReader: unexpected, providerFactory: unexpected,
+    ciFactory: () => ({ verify: unexpected }), preservationReader: unexpected, providerFactory: unexpected,
     journalFactory: unexpected, fetchImpl: unexpected });
   await assert.rejects(runtime.adapter.release(), /Ops Sync backend release held; inspect the durable journal/);
   assert.equal(otherCalls, 0);
@@ -109,7 +118,7 @@ function awaitlessRead(relative) {
   return JSON.parse(readFileSync(new URL(`../${relative}`, import.meta.url), 'utf8'));
 }
 
-for (const scenario of ['success', 'first-write-drift', 'activation-drift', 'predecessor-missing-artifact',
+for (const scenario of ['success', 'first-write-drift', 'activation-drift', 'post0226-preservation-drift', 'predecessor-missing-artifact',
   'predecessor-ci-mismatch', 'predecessor-live-drift']) test(
   scenario === 'activation-drift'
     ? 'Sync migration drift at activation intent holds without activation dispatch or retry'
@@ -124,7 +133,7 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift', 'pre
   const sourceMapBytes = Buffer.from(JSON.stringify(sourceMap));
   const triggerRun = { sourceCommit: commit, runId: 678, runAttempt: 3 };
   const env = { CLOUDFLARE_ACCOUNT_ID: nativeTarget.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
-    GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', NATIVE_STAFF_CUTOVER_REVIEW_JSON: '{"synthetic":true}',
+    GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1',
     ...predecessorEnv };
   const operations = fixture.snapshots.operations;
   const opsLedger = JSON.parse(Buffer.from(operations.modern.modules.find(row => row.name === '__ops_release_ledger.json').content_base64, 'base64'));
@@ -236,10 +245,13 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift', 'pre
           { databaseId: nativeTarget.databaseId, sourceInventorySha256: '1'.repeat(64), ledgerNamesSha256: migrationDrift ? '5'.repeat(64) : '2'.repeat(64), migrationCount: 231 },
           { databaseId: '7f40a7b7-c3ec-470e-a626-e798867f71f8', sourceInventorySha256: '3'.repeat(64), ledgerNamesSha256: '4'.repeat(64), migrationCount: 160 },
         ] }; },
-      readinessReader: async ({ review, sourceCommit }) => { readinessCalls++; assert.deepEqual(review, { synthetic: true });
-        return { schemaVersion: 2, sourceCommit, accountId: nativeTarget.accountId, databaseId: nativeTarget.databaseId,
-          reviewSha256: '1'.repeat(64), cohortSha256: '2'.repeat(64), controlPlaneSha256: '3'.repeat(64),
-          observedAt: new Date().toISOString(), staffCount: 3, generation: 8 }; },
+      preservationReader: async ({ sourceCommit }) => {
+        readinessCalls++;
+        const observation = preservationObservation(sourceCommit);
+        if (scenario === 'post0226-preservation-drift' && readinessCalls > 1)
+          observation.baseSnapshotSha256 = 'f'.repeat(64);
+        return observation;
+      },
       buildRunner: () => {}, buildArtifactsReader: () => {
         if (scenario === 'first-write-drift') migrationDrift = true;
         return { moduleBytes, sourceMapBytes };
@@ -252,6 +264,11 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift', 'pre
         assert.equal(events.some(value => value.startsWith('intent:')), false, 'predecessor refusal persists no provider intent');
         assert.equal(journalReceipts.length, 0, 'predecessor refusal happens before claiming the Sync journal');
         assert.equal(events.some(value => ['upload','activate'].includes(value)), false);
+      } else if (scenario === 'post0226-preservation-drift') {
+        assert.equal(candidateExists, false, 'changed fixed preservation state refuses before any upload');
+        assert.equal(activationMethodCalls, 0);
+        assert.equal(events.some(value => value.startsWith('intent:')), false);
+        assert.equal(journalReceipts.length, 0);
       } else if (scenario === 'first-write-drift') {
         assert.equal(candidateExists, false, 'no candidate version is uploaded');
         assert.equal(activationMethodCalls, 0);

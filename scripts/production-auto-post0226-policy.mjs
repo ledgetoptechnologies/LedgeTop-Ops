@@ -1,7 +1,4 @@
-/** Fixed-state policy for recurring Operations staff/login preservation.
- * Policy compilation is offline-only. Production loading stays refused until a
- * real post-release observation is separately reviewed and pinned in source.
- */
+/** Fixed-state policy for recurring Operations staff/login preservation. */
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -12,9 +9,7 @@ import { POST0226_LOGIN_TABLES, POST0226_STAFF_PRESERVATION_CONTRACT } from './o
 
 export const PRODUCTION_AUTO_POST0226_PRESERVATION_POLICY_CONTRACT = 'production-auto-post0226-preservation-policy-v1';
 export const PRODUCTION_AUTO_POST0226_PRESERVATION_RECEIPT_CONTRACT = 'production-auto-post0226-preservation-receipt-v1';
-// Do not replace this sentinel until the root owner supplies a real post-release
-// capsule and independently reviews/pins its source-generated public policy.
-export const PRODUCTION_AUTO_POST0226_PRESERVATION_POLICY_SHA256 = 'UNPROVISIONED';
+export const PRODUCTION_AUTO_POST0226_PRESERVATION_POLICY_SHA256 = '915025b52c29bc69ad8c92e503f4df2c9084f41157d0b148f4430de67dc91e33';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const POLICY_PATH = path.join(ROOT, 'scripts/production-auto-post0226-preservation-policy.json');
 const MAX_AGE_MS = 60_000;
@@ -179,8 +174,7 @@ export function validateRepeatedProductionAutoPost0226PreservationReceipts(polic
     latestObservedAt: receipts.at(-1).observedAt });
 }
 
-/** Production loader has no path/env override. Its only valid state is refusal
- * until a reviewed public policy and exact source pin are checked in. */
+/** Production loader has no path/env override and accepts only the fixed pin. */
 export function loadPinnedProductionAutoPost0226PreservationPolicy() {
   if (!SHA.test(PRODUCTION_AUTO_POST0226_PRESERVATION_POLICY_SHA256)) fail('policy_unprovisioned');
   let stat;

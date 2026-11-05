@@ -6,12 +6,17 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { canonical, capture, deploymentSourceCommit, PROFILE, resourcesShape, validateBuildEnvironment, validateInstallation, varsOf, buildModulePath } from './production-deploy.mjs';
+import { canonical, capture, deploymentSourceCommit, PROFILE, CANONICAL_INSTALLED_PROFILE_V4_SHA256,
+  ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, resourcesShape, validateBuildEnvironment, validateInstallation, varsOf, buildModulePath } from './production-deploy.mjs';
 import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-ci.mjs';
 import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVersionWithVisibilityRetry } from './production-auto-provider.mjs';
 import { collectFrontendAssets, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
 import { ASSET_VERIFICATION_LIMITS, createAssetVerificationNonce, executeAssetVerification } from './production-auto-verify.mjs';
-import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+import { readPost0226StaffPreservationObservation } from './ordinary-frontend-authority-post0226-reader.mjs';
+import { loadPinnedProductionAutoPost0226PreservationPolicy,
+  validateProductionAutoPost0226PreservationObservation,
+  validateRepeatedProductionAutoPost0226PreservationReceipts } from './production-auto-post0226-policy.mjs';
 import { validateProductionMigrationAdmission } from './production-auto-migration-readiness.mjs';
 import { loadPinnedAppendOnlyMigrationProfile,
   readProductionMigrationReadiness as readProductionMigrationDiagnostics } from './production-auto-migration-classification.mjs';
@@ -95,18 +100,26 @@ function controlsProjection(snapshot, selectedApp) {
 export function productionAutoControlsSHA256(snapshot, selectedApp) {
   return hash(Buffer.from(canonical(controlsProjection(snapshot, selectedApp))));
 }
-function validatedCapture(snapshot, workerName, baselineAssetsConfig, candidateVersionId, expectedDeploymentVersions) {
+export function productionAutoInstalledPreflight(profile, app) {
+  return hash(Buffer.from(canonical(profile))) === CANONICAL_INSTALLED_PROFILE_V4_SHA256
+    ? { ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, ordinaryFrontendApp: app } : {};
+}
+function validatedCapture(snapshot, workerName, baselineAssetsConfig, baselineAssets, candidateVersionId, expectedDeploymentVersions) {
   const app = workerName === 'ledgetop-ops' ? 'operations' : 'client';
   const profile = structuredClone(PROFILE);
+  const preservationPreflight = productionAutoInstalledPreflight(PROFILE, app);
+  const exactCanonicalV4 = Object.keys(preservationPreflight).length > 0;
   // The normal profile pins the currently served asset association. Candidate
   // upload intentionally replaces that association; the fixed asset config,
   // every other protected control, and actual served bytes remain pinned.
   const allowLatest = candidateVersionId ? { [app]: candidateVersionId } : {};
-  if (baselineAssetsConfig === undefined) validateInstallation(snapshot, { profile, allowLatest,
+  if (baselineAssetsConfig === undefined) validateInstallation(snapshot, { profile, allowLatest, ...preservationPreflight,
     expectedDeploymentVersions: expectedDeploymentVersions ? { [app]: expectedDeploymentVersions } : {} });
   else {
-    profile.workers[app].assetsSHA256 = hash(Buffer.from(canonical(snapshot[app].modern.assets ?? null)));
-    validateInstallation(snapshot, { profile, allowLatest,
+    const candidateAssetsSHA256 = hash(Buffer.from(canonical(snapshot[app].modern.assets ?? null)));
+    if (!exactCanonicalV4) profile.workers[app].assetsSHA256 = candidateAssetsSHA256;
+    validateInstallation(snapshot, { profile, allowLatest, ...preservationPreflight,
+      ...(exactCanonicalV4 ? { assetAssociationOverrides: { [app]: { baselineAssets } } } : {}),
       expectedDeploymentVersions: expectedDeploymentVersions ? { [app]: expectedDeploymentVersions } : {} });
     need(canonical(snapshot[app].modern.assets?.config) === canonical(baselineAssetsConfig), 'runtime_asset_config_drift');
   }
@@ -156,7 +169,7 @@ export function parseProductionAutoLedger(snapshot, app, workerName, accountId) 
 export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, env = process.env, triggerRun = readProductionAutoTriggerRun(env), fetchImpl = fetch,
   profile = PROFILE, providerFactory = options => new ProductionCloudflareProvider(options), ciFactory = options => new ProductionMainCI(options),
   journalFactory = options => new ProductionAutoJournal(options), recipientLoader = loadPinnedProductionAutoRecipient,
-  readinessReader = readNativeStaffCutoverReadiness, sourceReader = deploymentSourceCommit, buildRunner = runBuild,
+  preservationReader = readPost0226StaffPreservationObservation, sourceReader = deploymentSourceCommit, buildRunner = runBuild,
   buildArtifactsReader, migrationReader = readProductionMigrationDiagnostics,
   assetBootstrapReader = readPinnedAssetInventoryBootstrap, predecessorReader = readVerifiedProductionAutoPredecessor } = {}) {
   need(Object.values(WORKERS).some(row => row.name === workerName) && /^[a-f0-9]{40}$/u.test(sourceCommit ?? '')
@@ -172,6 +185,8 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     ? parseProductionAutoPredecessorHandoff(env, { workerName, sourceCommit, triggerRun }) : null;
   need(typeof predecessorReader === 'function', 'runtime_predecessor_reader_invalid');
   const token = env.CLOUDFLARE_API_TOKEN;
+  const post0226Policy = workerName === 'ledgetop-ops' ? loadPinnedProductionAutoPost0226PreservationPolicy() : null;
+  const preservationReceipts = [];
   let migrationPins;
   const checkMigrations = async () => {
     const observed = validateProductionMigrationAdmission(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl,
@@ -191,6 +206,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     const expectedDeploymentVersions = expectedWeights ? { [app]: expectedWeights } : {};
     const raw = await capture(provider, { selectedApp: app, expectedDeploymentVersions });
     const checked = validatedCapture(raw, workerName, baselineCapture?.[app]?.modern.assets?.config,
+      baselineCapture?.[app]?.modern.assets,
       candidateVersionId, expectedWeights);
     const activeVersionId = activeVersion(checked[app]);
     const latestVersionId = checked[app].latest;
@@ -477,11 +493,14 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
         return journal.receipt(value);
       }
     },
-    ...(workerName === 'ledgetop-ops' ? { staffReadiness: async ({ sourceCommit: expectedSource }) => {
-      need(expectedSource === sourceCommit && typeof env.NATIVE_STAFF_CUTOVER_REVIEW_JSON === 'string'
-        && env.NATIVE_STAFF_CUTOVER_REVIEW_JSON.length <= 1024 * 1024, 'runtime_native_staff_review_missing');
-      let review; try { review = JSON.parse(env.NATIVE_STAFF_CUTOVER_REVIEW_JSON); } catch { need(false, 'runtime_native_staff_review_invalid'); }
-      return readinessReader({ review, sourceCommit, env });
+    ...(workerName === 'ledgetop-ops' ? { post0226Preservation: async ({ sourceCommit: expectedSource }) => {
+      need(expectedSource === sourceCommit, 'runtime_post0226_source_mismatch');
+      const observation = await preservationReader({ sourceCommit, env });
+      const receipt = validateProductionAutoPost0226PreservationObservation(post0226Policy, observation, { sourceCommit });
+      preservationReceipts.push(receipt);
+      if (preservationReceipts.length > 1) validateRepeatedProductionAutoPost0226PreservationReceipts(post0226Policy,
+        preservationReceipts, { sourceCommit });
+      return receipt;
     } } : {}),
   };
   return Object.freeze({ adapter, getJournal: () => journal, getReleaseId: () => hash(`${workerName}\n${sourceCommit}`) });
