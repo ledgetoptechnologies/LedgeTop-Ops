@@ -1,6 +1,10 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const {
+  MAX_SOURCE_INTAKE_V2_CANONICAL_NODES,
+  MAX_SOURCE_INTAKE_V2_METADATA_BYTES,
+} = require('./sourceIntakeLimitsV2');
 
 const PROTOCOL = 'ltds-viewer-prepared-envelope-jcs-v3';
 const DOMAIN = Buffer.from(`${PROTOCOL}\0`, 'ascii');
@@ -96,8 +100,9 @@ function readIntent(row) {
     const sourceDigest = crypto.createHash('sha256').update(sourceBytes).digest('hex');
     let sourceRequest;
     try { sourceRequest = JSON.parse(sourceIntakeCanonical); } catch { fail('prepared_outbox_integrity_error'); }
-    if (sourceBytes.length > MAX_BODY_BYTES || sourceDigest !== sourceIntakeSha256
-        || !canonicalizeJcs(sourceRequest).equals(sourceBytes)) fail('prepared_outbox_integrity_error');
+    if (sourceBytes.length > MAX_SOURCE_INTAKE_V2_METADATA_BYTES || sourceDigest !== sourceIntakeSha256
+        || !canonicalizeJcs(sourceRequest, { maxBytes: MAX_SOURCE_INTAKE_V2_METADATA_BYTES,
+          maxNodes: MAX_SOURCE_INTAKE_V2_CANONICAL_NODES }).equals(sourceBytes)) fail('prepared_outbox_integrity_error');
   }
   if (sourceIntakeCompletionCanonical !== null) {
     const completionBytes = Buffer.from(sourceIntakeCompletionCanonical, 'utf8');
@@ -105,7 +110,8 @@ function readIntent(row) {
     let completion;
     try { completion = JSON.parse(sourceIntakeCompletionCanonical); } catch { fail('prepared_outbox_integrity_error'); }
     if (completionBytes.length > 8 * 1024 * 1024 || completionDigest !== sourceIntakeCompletionSha256
-        || !canonicalizeJcs(completion).equals(completionBytes)) fail('prepared_outbox_integrity_error');
+        || !canonicalizeJcs(completion, { maxBytes: 8 * 1024 * 1024,
+          maxNodes: MAX_SOURCE_INTAKE_V2_CANONICAL_NODES }).equals(completionBytes)) fail('prepared_outbox_integrity_error');
   }
   for (const [canonical, digest, maximum] of [[resultManifestCanonical,resultManifestSha256,16*1024*1024],
     [copyRequestCanonical,copyRequestSha256,16*1024*1024],[copyAckCanonical,copyAckSha256,16*1024*1024]]) {
@@ -113,7 +119,7 @@ function readIntent(row) {
     const bytes=Buffer.from(canonical,'utf8');let value;
     try{value=JSON.parse(canonical);}catch{fail('prepared_outbox_integrity_error');}
     if(bytes.length>maximum||crypto.createHash('sha256').update(bytes).digest('hex')!==digest
-        ||!canonicalizeJcs(value,{maxBytes:maximum}).equals(bytes))fail('prepared_outbox_integrity_error');
+        ||!canonicalizeJcs(value,{maxBytes:maximum,maxNodes:MAX_SOURCE_INTAKE_V2_CANONICAL_NODES}).equals(bytes))fail('prepared_outbox_integrity_error');
   }
   return {
     submissionId: row.submission_id,
@@ -216,14 +222,15 @@ class PreparedSubmissionOutbox {
 
   persistSourceIntakeRequest(attemptId, sourceIntakeCanonical, { localJobId, owner } = {}) {
     if (typeof sourceIntakeCanonical !== 'string' || !sourceIntakeCanonical.length) fail('source_intake_request_missing');
-    if (Buffer.byteLength(sourceIntakeCanonical, 'utf8') > MAX_BODY_BYTES) fail('source_intake_request_too_large');
+    if (Buffer.byteLength(sourceIntakeCanonical, 'utf8') > MAX_SOURCE_INTAKE_V2_METADATA_BYTES) fail('source_intake_request_too_large');
     const intent = this.assertCurrentLease({ attemptId, localJobId, owner });
     if (!intent || intent.state !== 'prepared' || intent.remoteBinding) fail('source_intake_outbox_state_invalid');
     let request;
     try { request = JSON.parse(sourceIntakeCanonical); } catch { fail('source_intake_request_invalid_json'); }
     const preparedEnvelope = JSON.parse(intent.envelopeCanonical);
     const sourceBytes = Buffer.from(sourceIntakeCanonical, 'utf8');
-    if (!canonicalizeJcs(request).equals(sourceBytes)
+    if (!canonicalizeJcs(request, { maxBytes: MAX_SOURCE_INTAKE_V2_METADATA_BYTES,
+      maxNodes: MAX_SOURCE_INTAKE_V2_CANONICAL_NODES }).equals(sourceBytes)
         || Object.keys(request).sort().join(',') !== 'capabilityFingerprint,derivedManifest,manifest,pipeline,providerTaskId,schemaVersion,sourceAttestation,sourceManifest,submissionId,viewerTaskId'
         || request.schemaVersion !== 2 || request.submissionId !== intent.viewerAttemptId
         || request.viewerTaskId !== intent.viewerTaskId || !UUID.test(request.providerTaskId || '')
@@ -231,7 +238,8 @@ class PreparedSubmissionOutbox {
         || request.sourceManifest.sha256 !== request.sourceAttestation?.proof?.sourceManifestSha256
         || request.derivedManifest.sha256 !== request.sourceAttestation?.proof?.derivedManifestSha256
         || request.manifest.sha256 !== request.sourceAttestation?.proof?.pipelineManifestSha256
-        || !canonicalizeJcs(request.pipeline).equals(canonicalizeJcs(preparedEnvelope.submission.pipeline)))
+        || !canonicalizeJcs(request.pipeline, { maxBytes: MAX_SOURCE_INTAKE_V2_METADATA_BYTES,
+          maxNodes: MAX_SOURCE_INTAKE_V2_CANONICAL_NODES }).equals(canonicalizeJcs(preparedEnvelope.submission.pipeline)))
       fail('source_intake_request_binding_invalid');
     const proof = request.sourceAttestation.proof;
     const proofMessage = Buffer.concat([
@@ -356,10 +364,15 @@ class PreparedSubmissionOutbox {
         || !completion.sourceReceipt || !completion.derivedReceipt
         || !/^[a-f0-9]{64}$/.test(completion.sourceReceiptSha256 || '')
         || !/^[a-f0-9]{64}$/.test(completion.derivedReceiptSha256 || '')
-        || crypto.createHash('sha256').update(canonicalizeJcs(completion.sourceReceipt)).digest('hex') !== completion.sourceReceiptSha256
-        || crypto.createHash('sha256').update(canonicalizeJcs(completion.derivedReceipt)).digest('hex') !== completion.derivedReceiptSha256)
+        || crypto.createHash('sha256').update(canonicalizeJcs(completion.sourceReceipt, {
+          maxBytes: MAX_SOURCE_INTAKE_V2_METADATA_BYTES, maxNodes: MAX_SOURCE_INTAKE_V2_CANONICAL_NODES,
+        })).digest('hex') !== completion.sourceReceiptSha256
+        || crypto.createHash('sha256').update(canonicalizeJcs(completion.derivedReceipt, {
+          maxBytes: MAX_SOURCE_INTAKE_V2_METADATA_BYTES, maxNodes: MAX_SOURCE_INTAKE_V2_CANONICAL_NODES,
+        })).digest('hex') !== completion.derivedReceiptSha256)
       fail('source_intake_completion_binding_mismatch');
-    const canonical = canonicalizeJcs(completion, { maxBytes: 8 * 1024 * 1024 }).toString('utf8');
+    const canonical = canonicalizeJcs(completion, { maxBytes: 8 * 1024 * 1024,
+      maxNodes: MAX_SOURCE_INTAKE_V2_CANONICAL_NODES }).toString('utf8');
     const digest = crypto.createHash('sha256').update(canonical, 'utf8').digest('hex');
     this.database.exec('BEGIN IMMEDIATE');
     try {
@@ -440,7 +453,8 @@ class PreparedSubmissionOutbox {
     if(publicKey.asymmetricKeyType!=='ed25519'||!require('node:crypto').verify(null,
       Buffer.concat([receiptCandidate.DOMAIN,ReferenceProtocol.canonicalBytes(receiptBody)]),publicKey,Buffer.from(signature,'base64url')))
       fail('source_intake_copy_signature_invalid');
-    const manifestBytes=canonicalizeJcs(manifest,{maxBytes:16*1024*1024}),requestBytes=canonicalizeJcs(request,{maxBytes:16*1024*1024});
+    const manifestBytes=canonicalizeJcs(manifest,{maxBytes:16*1024*1024,maxNodes:MAX_SOURCE_INTAKE_V2_CANONICAL_NODES}),
+      requestBytes=canonicalizeJcs(request,{maxBytes:16*1024*1024,maxNodes:MAX_SOURCE_INTAKE_V2_CANONICAL_NODES});
     const manifestCanonical=manifestBytes.toString('utf8'),requestCanonical=requestBytes.toString('utf8');
     const manifestDigest=crypto.createHash('sha256').update(manifestBytes).digest('hex'),requestDigest=crypto.createHash('sha256').update(requestBytes).digest('hex');
     this.database.exec('BEGIN IMMEDIATE');
@@ -473,11 +487,13 @@ class PreparedSubmissionOutbox {
         ||response.fullyAccepted!==true||typeof response.created!=='boolean'
         ||!Array.isArray(response.acceptedObjectIds)
         ||JSON.stringify(response.acceptedObjectIds)!==JSON.stringify([...savedRequest.acceptance.acceptedObjectIds].sort())
-        ||!canonicalizeJcs(response.viewerReceipt).equals(canonicalizeJcs(savedRequest.viewerReceipt))
+        ||!canonicalizeJcs(response.viewerReceipt,{maxBytes:16*1024*1024,maxNodes:MAX_SOURCE_INTAKE_V2_CANONICAL_NODES})
+          .equals(canonicalizeJcs(savedRequest.viewerReceipt,{maxBytes:16*1024*1024,maxNodes:MAX_SOURCE_INTAKE_V2_CANONICAL_NODES}))
         ||!response.job||response.job.jobId!==intent.remoteBinding.jobId||response.job.generation!==intent.remoteBinding.generation
         ||response.job.environment!==environment||response.job.phase!=='completed'
         ||!['completed','running','succeeded'].includes(response.job.status))fail('source_intake_copy_ack_binding_invalid');
-    const canonical=canonicalizeJcs(response,{maxBytes:16*1024*1024}).toString('utf8'),digest=crypto.createHash('sha256').update(canonical).digest('hex');
+    const canonical=canonicalizeJcs(response,{maxBytes:16*1024*1024,
+      maxNodes:MAX_SOURCE_INTAKE_V2_CANONICAL_NODES}).toString('utf8'),digest=crypto.createHash('sha256').update(canonical).digest('hex');
     this.database.exec('BEGIN IMMEDIATE');
     try{
       const lease=this.database.prepare(`SELECT j.id,j.attempt_id,a.task_id,j.lease_expires_at FROM processing_jobs j
