@@ -236,6 +236,7 @@ jobs:
         working-directory: apps/operations
         run: >-
           npm exec -- vitest run
+          test/host-admission.test.ts
           test/client-onboarding-staff-routing.test.ts
           test/operations-portal-native-delivery-authority-owner-http.test.ts
           test/operations-portal-native-owner-production-entrypoint.test.ts
