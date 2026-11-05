@@ -20,7 +20,11 @@ const { providerSubmissionState } = require('../server/providerSelection.mjs');
 const source = { enabled: true, environment: 'staging', origin: 'https://processing.example.test',
   providerId: 'processing-coordinator-staging', bearerToken: 'pinned-reference-coordinator-bearer-token-0123456789' };
 const cap = ReferenceProtocol.createCapabilities('staging');
-const options = [...['pc-ept', 'gltf', '3d-tiles'].map(name => ({ name, type: 'bool', value: true })),
+// Match the raw NodeODM /options shape: defaults are strings even for
+// bool/int/float definitions. In particular, "false" must stay false.
+const options = [...['pc-ept', 'gltf', '3d-tiles'].map(name => ({ name, type: 'bool', value: 'false' })),
+  { name: 'feature-count', type: 'int', domain: 'positive int', value: '12' },
+  { name: 'feature-threshold', type: 'float', domain: 'positive float', value: '0.75' },
   { name: 'feature-quality', type: 'enum', domain: ['medium', 'high', 'ultra'], value: 'high' }];
 const optionsBody = { schemaVersion: 1, environment: 'staging', capabilityFingerprint: cap.capabilityFingerprint,
   optionsFingerprint: cap.engines.odm.optionsFingerprint, options };
@@ -45,10 +49,30 @@ test('reference coordinator maps its pinned capabilities/options without NodeODM
   assert.equal(result.capabilities.taskQueueCount, null);
   assert.equal(result.capabilities.providerType, 'nodeodm', 'legacy database type stores ODM engine compatibility');
   assert.equal(result.capabilities.detectionMethod, 'pinned-reference-coordinator');
-  assert.equal(result.capabilities.options.length, 4);
-  assert.equal(result.capabilities.options[3].type, 'string', 'enum options use the Viewer string-plus-domain contract');
-  assert.deepEqual(result.capabilities.options[3].domain, ['medium', 'high', 'ultra']);
+  assert.equal(result.capabilities.options.length, 6);
+  assert.equal(result.capabilities.options[0].value, false, 'string false is normalized as boolean false');
+  assert.equal(result.capabilities.options[0].rawDefault, 'false', 'the raw provider default is retained');
+  assert.equal(result.capabilities.options[3].value, 12, 'integer string defaults are normalized');
+  assert.equal(result.capabilities.options[3].rawDefault, '12');
+  assert.equal(result.capabilities.options[3].domain, 'positive int', 'numeric descriptive domains are preserved');
+  assert.equal(result.capabilities.options[4].value, 0.75, 'float string defaults are normalized');
+  assert.equal(result.capabilities.options[4].rawDefault, '0.75');
+  assert.equal(result.capabilities.options[4].domain, 'positive float');
+  assert.equal(result.capabilities.options[5].type, 'string', 'enum options use the Viewer string-plus-domain contract');
+  assert.deepEqual(result.capabilities.options[5].domain, ['medium', 'high', 'ultra']);
   assert.match(result.fingerprint, /^[a-f0-9]{64}$/);
+});
+
+test('reference coordinator rejects malformed scalar defaults instead of coercing them', () => {
+  for (const item of [
+    ...['yes', 'false ', ''].map(value => ({ name: 'switch', type: 'bool', value })),
+    { name: 'count', type: 'int', value: '1.2' },
+    { name: 'threshold', type: 'float', value: 'Infinity' },
+  ]) {
+    const malformed = { ...optionsBody, options: [...options, item] };
+    assert.throws(() => require('../server/referenceCoordinatorProvider').validateOptionsResponse(malformed, cap),
+      error => error.code === 'reference_provider_options_invalid');
+  }
 });
 
 test('reference coordinator rejects mismatched environment/fingerprints and fails closed on redirects or transport errors', async t => {
@@ -118,6 +142,8 @@ test('HTTP provider setup, probe, enable, refresh, selection and background heal
   assert.equal(result.status, 409, 'coordinator credentials remain configuration managed');
   result = await call(`/api/v1/processing/providers/${source.providerId}`, 'PATCH', 'provider-endpoint-bad', { endpoint: 'https://attacker.example.test' });
   assert.equal(result.status, 409, 'the exact configured provider ID cannot be moved to a different origin');
+  result = await call(`/api/v1/processing/providers/${source.providerId}`, 'PATCH', 'provider-limit-bad', { admissionLimit: 2 });
+  assert.equal(result.status, 409, 'the coordinator owns queue admission; its legacy Viewer limit cannot be edited');
   result = await call(`/api/v1/processing/providers/${source.providerId}/capabilities/probe`, 'POST', 'provider-probe-01');
   assert.equal(result.status, 200);
   result = await call(`/api/v1/processing/providers/${source.providerId}`, 'PATCH', 'provider-enable-01', { enabled: true });
@@ -133,9 +159,9 @@ test('HTTP provider setup, probe, enable, refresh, selection and background heal
   assert.equal(result.status, 201, await result.clone().text());
   const submitted = await result.json();
   assert.equal(submitted.attempt.providerId, source.providerId);
-  assert.equal(submitted.attempt.options['pc-ept'], true);
-  assert.equal(submitted.attempt.options.gltf, true);
-  assert.equal(submitted.attempt.options['3d-tiles'], true);
+  assert.equal(submitted.attempt.options['pc-ept'], false);
+  assert.equal(submitted.attempt.options.gltf, false);
+  assert.equal(submitted.attempt.options['3d-tiles'], false);
   assert.equal(await refreshOneProviderHealth({ processing, providerCredentials: credentials, config: runtimeConfig,
     owner: 'coordinator-health-test', fetchImpl }), true);
   assert.equal(processing.getProvider(source.providerId).runtimeHealth, 'healthy');

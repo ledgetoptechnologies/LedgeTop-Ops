@@ -507,7 +507,9 @@ async function processIngest(job,{processing,repository,storage,config,providerC
 }
 
 async function processOne(deps,owner=crypto.randomUUID()){
-  const job=deps.processing.claimJob(owner);if(!job)return false;
+  const source=deps.config?.referenceSourceIntake;
+  const referenceCoordinatorProviderId=source?.enabled===true&&typeof source.providerId==='string'&&source.providerId?source.providerId:null;
+  const job=deps.processing.claimJob(owner,60,{referenceCoordinatorProviderId});if(!job)return false;
   const controller=new AbortController();let reconcileHeartbeatFailed=false;
   const heartbeat=setInterval(()=>{
     if(reconcileHeartbeatFailed)return;
