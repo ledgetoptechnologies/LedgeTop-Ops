@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
@@ -15,6 +15,33 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const channelId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 const grant = '11111111-2222-4333-8444-555555555555';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function stopBrowserTree(browser) {
+  if (!browser) return;
+  const waitForExit = async timeoutMs => {
+    if (browser.exitCode !== null || browser.signalCode !== null) return true;
+    return new Promise(resolve => {
+      const finish = exited => {
+        clearTimeout(timer);
+        browser.removeListener('exit', onExit);
+        resolve(exited);
+      };
+      const onExit = () => finish(true);
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      browser.once('exit', onExit);
+    });
+  };
+  if (process.platform === 'win32' && browser.pid) {
+    try {
+      execFileSync('taskkill', ['/PID', String(browser.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+    } catch {}
+  } else if (process.platform !== 'win32' && browser.pid) {
+    try { process.kill(-browser.pid, 'SIGTERM'); } catch {}
+  }
+  if (!(await waitForExit(5_000))) {
+    try { browser.kill(process.platform === 'win32' ? 'SIGTERM' : 'SIGKILL'); } catch {}
+    if (!(await waitForExit(2_000))) throw new Error('isolated browser process did not exit after cleanup');
+  }
+}
 const browserPath = () => [process.env.CHROME_PATH, process.env.EDGE_PATH,
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
@@ -169,7 +196,9 @@ test(`published session renews ${proactive ? 'proactively without denied tiles' 
       await new Promise(resolve => portServer.close(resolve));
       browser = spawn(executable, ['--headless=new', '--disable-gpu', '--disable-dev-shm-usage',
         '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-address=127.0.0.1',
-        `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, 'about:blank'], { stdio: 'ignore', windowsHide: true });
+        `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, 'about:blank'], {
+        stdio: 'ignore', windowsHide: true, detached: process.platform !== 'win32',
+      });
       const devtools = `http://127.0.0.1:${port}`, deadline = Date.now() + 30_000;
       while (Date.now() < deadline) {
         try { if ((await fetch(`${devtools}/json/version`)).ok) break; } catch {}
@@ -278,8 +307,8 @@ test(`published session renews ${proactive ? 'proactively without denied tiles' 
         }))`).catch(() => null) }));
       throw error;
     } finally {
-      if (viewer) { try { await viewer.command('Browser.close'); } catch {} }
-      viewer?.close(); controller?.close(); browser?.kill();
+      await stopBrowserTree(browser);
+      viewer?.close(); controller?.close();
       fixture?.server.closeAllConnections?.();
       if (fixture?.server) await new Promise(resolve => fixture.server.close(resolve));
       await fixture?.vite.close();
