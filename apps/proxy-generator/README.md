@@ -141,6 +141,18 @@ after every job queued by that pass has finished, so a pass that regenerates
 the library can be silent for hours while it works. Hidden
 `Proxy/.proxy-gen-*.mov` files growing on the share mean encodes are running.
 
+`skipped-files.json` in the state directory lists every source that has no
+current proxy, with its relative path, reason code, attempt count and whether
+the generator has given up on it. It updates after each failure and at the end
+of each pass, and a file leaves the list once it gets a proxy or is deleted.
+Same-name collisions are listed too. This is the only place client media paths
+are recorded, so keep it private. In the combined stack, read it with
+`cat /app-data/proxy-state/skipped-files.json` in the container shell. Common
+reasons: `process_failed` (usually a damaged original) and
+`variable_frame_rate_unsupported`. Files that gave up before this report
+existed appear after the next scan as `earlier_failure_reason_unknown`, because
+their original reason was never stored.
+
 The container runs as `apps` (UID 568) and must be able to create `Proxy`
 folders and files throughout the Jobs dataset. On TrueNAS, grant `apps`
 Modify on the dataset and **apply it recursively**: existing folders keep the
