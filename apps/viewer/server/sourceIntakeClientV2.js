@@ -239,6 +239,29 @@ class SourceIntakeClientV2 {
     return boundedJson(response, MAX_SOURCE_INTAKE_V2_METADATA_BYTES, MAX_SOURCE_INTAKE_V2_CANONICAL_NODES);
   }
 
+  async findBySubmission(submissionId, { signal } = {}) {
+    if (!UUID.test(submissionId || '')) fail('source_intake_submission_id_invalid');
+    let response;
+    try {
+      response = await this.request(`/ltds/v2/jobs/by-submission/${encodeURIComponent(submissionId)}`, { method: 'GET', signal });
+    } catch {
+      fail('source_intake_admission_unknown');
+    }
+    if (response.status === 404) {
+      let body;
+      try { body = await boundedJson(response, 64 * 1024); } catch { fail('source_intake_admission_unknown'); }
+      if (body.error === 'not_found') return null;
+      fail('source_intake_admission_unknown');
+    }
+    if (response.status !== 200) {
+      await response.body?.cancel().catch(() => {});
+      fail(response.status >= 500 || response.status === 408 || response.status === 429
+        ? 'source_intake_admission_unknown' : 'source_intake_admission_lookup_rejected');
+    }
+    try { return await boundedJson(response, MAX_SOURCE_INTAKE_V2_METADATA_BYTES, MAX_SOURCE_INTAKE_V2_CANONICAL_NODES); }
+    catch { fail('source_intake_admission_unknown'); }
+  }
+
   async getLogs(binding, { after = 0, limit = 200, signal } = {}) {
     if (!binding || binding.environment !== this.environment || !UUID.test(binding.attemptId || '')
         || !Number.isSafeInteger(binding.generation) || binding.generation < 1
@@ -304,13 +327,31 @@ class SourceIntakeClientV2 {
     return boundedJson(response,MAX_SOURCE_INTAKE_V2_METADATA_BYTES,MAX_SOURCE_INTAKE_V2_CANONICAL_NODES);
   }
 
-  async createOrReplay(intent, { localJobId, owner, signal } = {}) {
+  async createOrReplay(intent, { localJobId, owner, capabilityFingerprint, signal } = {}) {
     const saved = this.outbox.assertCurrentLease({ attemptId: intent?.viewerAttemptId, localJobId, owner });
     if (!saved || !saved.sourceIntakeCanonical || saved.sourceIntakeCanonical !== intent.sourceIntakeCanonical)
       fail('source_intake_outbox_state_invalid');
     const request = JSON.parse(saved.sourceIntakeCanonical);
     if (saved.state === 'accepted') return validatePersistedReceivingBinding(saved, request, { environment: this.environment });
     if (saved.state !== 'prepared') fail('source_intake_outbox_state_invalid');
+    const found = await this.findBySubmission(request.submissionId, { signal });
+    if (found) {
+      const binding = validateReceivingBinding(found, request, { environment: this.environment });
+      const accepted = this.outbox.acceptSourceIntakeBinding(intent.viewerAttemptId, binding, {
+        environment: this.environment, localJobId, owner,
+      });
+      return validatePersistedReceivingBinding(accepted, request, { environment: this.environment });
+    }
+    if (!capabilityFingerprint) {
+      const current = await this.getCapabilities({ signal });
+      if (current.capabilities.environment !== this.environment
+          || current.sourceIntake.maxObjects > ReferenceProtocol.LIMITS.objects)
+        fail('source_intake_capabilities_invalid');
+      capabilityFingerprint = current.capabilities.capabilityFingerprint;
+    }
+    const envelope = JSON.parse(saved.envelopeCanonical);
+    if (envelope.submission.capabilityFingerprint !== capabilityFingerprint)
+      fail('source_intake_capabilities_changed');
     const response = await this.request('/ltds/v2/jobs', { method: 'POST', body: saved.sourceIntakeCanonical, signal });
     if (![200, 201].includes(response.status)) {
       await response.body?.cancel().catch(() => {});

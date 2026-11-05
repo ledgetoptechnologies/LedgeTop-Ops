@@ -59,6 +59,7 @@ test('V2 metadata is posted once from immutable outbox bytes and binding is pers
   let posts = 0;
   let accepted = null;
   const saved = { viewerAttemptId: attemptId, sourceIntakeCanonical: exactBody,
+    envelopeCanonical: JSON.stringify({ submission: { capabilityFingerprint: 'a'.repeat(64) } }),
     sourceIntakeSha256: crypto.createHash('sha256').update(exactBody).digest('hex'),
     coordinatorAuthorityId: 'coordinator-staging', state: 'prepared' };
   let current = saved;
@@ -80,6 +81,10 @@ test('V2 metadata is posted once from immutable outbox bytes and binding is pers
   const client = new SourceIntakeClientV2({
     origin: 'https://processing.example', bearerToken: 'test-only', environment: 'staging', outbox,
     fetchImpl: async (url, init) => {
+      if (url.endsWith(`/ltds/v2/jobs/by-submission/${attemptId}`)) {
+        assert.equal(init.method, 'GET');
+        return new Response(JSON.stringify({ error: 'not_found' }), { status: 404, headers: { 'content-type': 'application/json' } });
+      }
       posts++;
       assert.equal(url, 'https://processing.example/ltds/v2/jobs');
       assert.equal(init.method, 'POST');
@@ -87,7 +92,7 @@ test('V2 metadata is posted once from immutable outbox bytes and binding is pers
       return new Response(JSON.stringify(receivingBinding()), { status: 201, headers: { 'content-type': 'application/json' } });
     },
   });
-  const result = await client.createOrReplay({ ...saved, localJobId: 'local-job-1' }, { localJobId: 'local-job-1', owner: 'worker-1' });
+  const result = await client.createOrReplay({ ...saved, localJobId: 'local-job-1' }, { localJobId: 'local-job-1', owner: 'worker-1', capabilityFingerprint: 'a'.repeat(64) });
   assert.deepEqual(result, current.remoteBinding);
   assert.equal(posts, 1);
   assert.equal(accepted.id, attemptId);
