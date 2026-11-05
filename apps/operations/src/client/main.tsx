@@ -1,6 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { AppDialogHost } from "@ltds/ui";
+import { AppDialogHost, installAccessAjax, SessionEndedNotice } from "@ltds/ui";
 import "@ltds/ui/styles.css";
 import "mapbox-gl/dist/mapbox-gl.css";
 import "./styles.css";
@@ -20,6 +20,8 @@ import { ProjectReplayAcceptance } from "./ProjectReplayAcceptance";
 import { isProjectReplayAcceptanceLocation } from "./ProjectReplayAcceptanceRoute";
 import { LinkLoginPage } from "./LinkLoginPage";
 import { LINK_LOGIN_PATH } from "./login-links-api";
+
+installAccessAjax();
 
 const onboardingStaffRoute = window.location.pathname === "/administration/client-onboarding";
 const recipientEnrollmentRoute = window.location.pathname === "/administration/client-portal/recipients";
@@ -57,4 +59,4 @@ createRoot(document.getElementById("root")!).render(<StrictMode>{linkLoginRoute
   ? <ClientPortalRecipientEnrollment />
   : onboardingStaffRoute
   ? <ClientOnboardingStaff />
-  : <OperationsApp />}<AppDialogHost /></StrictMode>);
+  : <OperationsApp />}<AppDialogHost /><SessionEndedNotice /></StrictMode>);

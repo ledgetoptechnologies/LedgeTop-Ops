@@ -8,6 +8,8 @@ import { GetAppDialog } from "./GetAppDialog";
 export { GetAppDialog } from "./GetAppDialog";
 export { ACCESS_LOGOUT, useAccessEmail, useAccessSignOut } from "./access-session";
 export { SignInRecovery } from "./SignInRecovery";
+export { accessAjaxFetch, installAccessAjax } from "./access-ajax";
+export { SessionEndedNotice } from "./SessionEndedNotice";
 import { useAccessSignOut } from "./access-session";
 import { createViewerStartupDiagnostics, VIEWER_DIAGNOSTICS_TTL_MS, type ViewerStartupSnapshot } from "./viewer-startup-diagnostics";
 

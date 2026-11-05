@@ -29,6 +29,8 @@ import { parseProductionAutoPredecessorHandoff, validateLiveProductionAutoPredec
 import { isProviderUtcTimestamp } from './production-auto-time.mjs';
 import { createProductionAutoCloudflarePacer } from './production-auto-cloudflare-pacer.mjs';
 import { assertProductionAutoGitHubQuota } from './production-auto-github-quota.mjs';
+import { formatProductionAutoSyncHold, trackProductionAutoStartupStage,
+  trackProductionAutoStartupStageAsync } from './production-auto-startup-diagnostics.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WORKER = 'ledgetop-ops-sync', APP = 'ops-sync', SHA = /^[a-f0-9]{64}$/u;
@@ -413,22 +415,23 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
 export async function runProductionAutoSyncRelease({ env = process.env, fetchImpl = fetch,
   recipientLoader = loadPinnedProductionAutoRecipient, triggerReader = readProductionAutoTriggerRun,
   sourceReader = deploymentSourceCommit, runtimeFactory = createProductionAutoSyncAdapter } = {}) {
-  need(env.PRODUCTION_AUTO_RELEASE_ENABLED === 'true', 'sync_auto_release_disabled');
-  const recipient = recipientLoader();
-  const triggerRun = triggerReader(env), sourceCommit = sourceReader(ROOT, env);
-  need(triggerRun.sourceCommit === sourceCommit && isExactMainCiWorkflowPath('.github/workflows/ci.yml@main'),
-    'sync_trigger_source_mismatch');
-  const runtime = runtimeFactory({ sourceCommit, triggerRun, env, fetchImpl, recipientLoader: () => recipient, sourceReader });
-  try { return await runtime.adapter.release(); }
-  finally { runtime.close?.(); }
+  trackProductionAutoStartupStage('gate', () => need(env.PRODUCTION_AUTO_RELEASE_ENABLED === 'true', 'sync_auto_release_disabled'));
+  const recipient = trackProductionAutoStartupStage('recipient', () => recipientLoader());
+  const triggerRun = trackProductionAutoStartupStage('trigger_shape', () => triggerReader(env));
+  const sourceCommit = trackProductionAutoStartupStage('source', () => sourceReader(ROOT, env));
+  trackProductionAutoStartupStage('source', () => need(triggerRun.sourceCommit === sourceCommit && isExactMainCiWorkflowPath('.github/workflows/ci.yml@main'),
+    'sync_trigger_source_mismatch'));
+  const runtime = trackProductionAutoStartupStage('adapter', () => runtimeFactory({ sourceCommit, triggerRun, env, fetchImpl, recipientLoader: () => recipient, sourceReader }));
+  return trackProductionAutoStartupStageAsync('coordination', async () => {
+    try { return await runtime.adapter.release(); }
+    finally { runtime.close?.(); }
+  });
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try { console.log(JSON.stringify(await runProductionAutoSyncRelease())); }
   catch (error) {
-    const reason = ['migration_required_pending', 'migration_application_schema_confirmation_required'].includes(error?.code)
-      ? ` (${error.code})` : '';
-    console.error(`Ops Sync automatic backend release held${reason}; inspect the durable journal and reconcile read-only.`);
+    console.error(formatProductionAutoSyncHold(error));
     process.exitCode = 1;
   }
 }
