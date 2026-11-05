@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { nativeDeliveryDeploymentEnabled, NATIVE_DELIVERY_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE,
+  NATIVE_DELIVERY_APP_PORTAL_OVERLAP_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_DELIVERY_OVERLAP_PRODUCTION_PROFILE,
+  nativeDeliveryRequestOriginAllowed,
   type NativeDeliveryDeploymentEnv } from "../src/worker/operations-native-delivery-deployment";
 import { applyOperationsPortalNativeDeliveryAuthority, readOperationsPortalNativeDeliveryAuthorityStatus,
   readOperationsPortalNativeDeliveryAuthorityDisposition, cancelOperationsPortalNativeDeliveryAuthority }
@@ -45,6 +47,24 @@ const denied: NativeDeliveryDeploymentEnv[] = [
 ];
 
 describe("explicit native delivery production deployment admission", () => {
+  it("accepts exact installed overlap metadata without reopening legacy browser access", () => {
+    for (const publicOrigin of ["https://portal.ledgetopdroneservices.com", "https://delivery.ledgetop.app"]) {
+      const profile = publicOrigin === "https://delivery.ledgetop.app"
+        ? NATIVE_DELIVERY_APP_DELIVERY_OVERLAP_PRODUCTION_PROFILE : NATIVE_DELIVERY_APP_PORTAL_OVERLAP_PRODUCTION_PROFILE;
+      const env = { ...deployment, EXPECTED_HOST: new URL(publicOrigin).host,
+        PUBLIC_BASE_URL: publicOrigin, PUBLIC_SHARE_ORIGIN: publicOrigin,
+        CLIENT_PORTAL_ORIGIN: "https://portal.ledgetop.app",
+        CLIENT_PORTAL_ORIGINS: "https://portal.ledgetop.app,https://portal.ledgetopdroneservices.com",
+        CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE: profile };
+      expect(nativeDeliveryDeploymentEnabled(env)).toBe(true);
+      expect(nativeDeliveryRequestOriginAllowed(env, "https://portal.ledgetop.app/portal/data")).toBe(true);
+      for (const origin of ["https://portal.ledgetopdroneservices.com", "https://client.ledgetopdroneservices.com", "https://delivery.ledgetop.app"])
+        expect(nativeDeliveryRequestOriginAllowed(env, origin + "/portal/data")).toBe(false);
+      const changed = JSON.stringify({ ...JSON.parse(profile), databaseId: "unreviewed" });
+      expect(nativeDeliveryDeploymentEnabled({ ...env, CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE: changed })).toBe(false);
+    }
+  });
+
   it("keeps staging admission and requires the exact versioned production profile", () => {
     expect(nativeDeliveryDeploymentEnabled(deployment)).toBe(true);
     expect(nativeDeliveryDeploymentEnabled(deployment, "rpc")).toBe(true);
@@ -124,7 +144,7 @@ describe("exact .app private host overlap", () => {
     const resolvePrincipal=vi.fn(async()=>null), router=createOperationsNativeDeliveryRouter({resolvePrincipal});
     const profile=JSON.parse(NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE);
     for(const change of [{databaseId:"wrong-database"},{privateRequestOrigins:["https://portal.ledgetopdroneservices.com"]},
-      {privateRequestOrigins:[portal,"https://portal.ledgetopdroneservices.com"]}]) {
+      {privateRequestOrigins:[portal,"https://portal.ledgetoptechnologies.com"]}]) {
       const env={...candidate,CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE:JSON.stringify({...profile,...change})};
       for(const surface of ["portal","rpc","publication"] as const) expect(nativeDeliveryDeploymentEnabled(env,surface)).toBe(false);
       expect((await router.fetch(new Request(`${portal}/deliveries`),env as unknown as Env)).status).toBe(404);

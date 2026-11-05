@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { PROFILE, canonical, hash, validateInstallation, varsOf, parseDeploymentArguments } from './production-deploy.mjs';
 import { domainPhaseValues, domainRecognitionProfile, domainRecognitionDiff } from './production-domain-recognition.mjs';
 import { compileDeliveryDomainTransition, compileDeliveryPublicLinkTransition, compileOperationsCanonicalTransition } from './production-delivery-domain-transition.mjs';
-import { NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE, nativeDeliveryDeploymentEnabled } from '../apps/client/src/worker/operations-native-delivery-deployment.ts';
+import { NATIVE_DELIVERY_APP_DELIVERY_OVERLAP_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE, nativeDeliveryDeploymentEnabled } from '../apps/client/src/worker/operations-native-delivery-deployment.ts';
 
 const FROM='portal-entry-canonical', TO='delivery-public-canonical';
 const changed=['EXPECTED_HOST','PUBLIC_BASE_URL','PUBLIC_SHARE_ORIGIN','LEGACY_CLIENT_ORIGINS','CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE'].sort();
@@ -55,7 +55,7 @@ test('delivery recognition changes exactly five Client scalars from portal-entry
   assert.deepEqual(after.workers['ops-sync'],before.workers['ops-sync']);
   const hashes=before.workers.client.plainValueSHA256;
   assert.deepEqual(Object.keys(hashes).filter(name=>hashes[name]!==after.workers.client.plainValueSHA256[name]).sort(),changed);
-  assert.equal(domainPhaseValues(TO).client.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE,NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE);
+  assert.equal(domainPhaseValues(TO).client.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE,NATIVE_DELIVERY_APP_DELIVERY_OVERLAP_PRODUCTION_PROFILE);
   assert.equal(domainPhaseValues(TO).client.CLIENT_PORTAL_ORIGIN,'https://portal.ledgetop.app');
   assert.equal(domainPhaseValues(TO).client.CLIENT_PORTAL_ORIGINS,domainPhaseValues(FROM).client.CLIENT_PORTAL_ORIGINS);
   const left=structuredClone(before),right=structuredClone(after);delete left.workers.client.plainValueSHA256;delete right.workers.client.plainValueSHA256;
