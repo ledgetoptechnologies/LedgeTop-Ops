@@ -9,7 +9,7 @@ import { dispatchOwnerIntelSourceIngest,type OwnerIntelSourceEnvironment } from 
 import { intelDigest,intelSigningBytes,base64url,type ProducerKey } from '../src/worker/competitor-intel-ingest-security';
 import { INTEL_INGEST_PATH } from '../src/worker/competitor-intel-ingest-security';
 import { strictIntelJson,validateIntelObservation } from '../src/worker/competitor-intel-ingest-schema';
-import { registerOwnerIntelRoutes } from '../src/worker/owner-intel';
+import { registerOwnerIntelRoutes,type OwnerIntelSummary } from '../src/worker/owner-intel';
 import { dispatchIntelIngest } from '../src/worker/intel-ingest-routes';
 import type { Env,StaffPrincipal } from '../src/worker/types';
 
@@ -191,6 +191,11 @@ describe('source-only Hermes feed, immutable history and authorized reads',()=>{
   expect(view.coverage.partialReason).toBe('source_stale');expect(view.coverage.lastDataDate).toBe('2026-10-17');
   expect(view.daily).toEqual([]);expect(view.receipt.operationId).toBe(value.operationId);
   expect(await count('owner_intel_source_inbox')).toBe(2);expect(await count('owner_intel_source_projections')).toBe(2);
+  const summaryResponse=await app.request(`https://ops.example.test/api/intel/${routeKey}/summary?range=7d`,{method:'GET'},{OPS_DB:db} as Env);
+  expect(summaryResponse.status).toBe(200);const summary=await summaryResponse.json() as OwnerIntelSummary;
+  expect(summary.business.id).toBe(businessId);expect(summary.range).toBe('7d');
+  expect(summary.sources.find(source=>source.id==='search_console')).toMatchObject({state:'stale',reason:'source_stale',businessId,range:'7d',metrics:null});
+  expect(JSON.stringify(summary)).not.toContain('"clicks":10');expect(summaryResponse.headers.get('cache-control')).toBe('private, no-store');
   await expect(db.prepare("UPDATE owner_intel_source_inbox SET raw_body='{}' WHERE operation_id=?").bind(value.operationId).run()).rejects.toThrow();
   await expect(db.prepare('DELETE FROM owner_intel_source_projections WHERE binding_id=?').bind(bindingId).run()).rejects.toThrow();
   const original=crypto.subtle.digest.bind(crypto.subtle),spy=vi.spyOn(crypto.subtle,'digest').mockImplementationOnce(async(...args)=>{
@@ -243,6 +248,7 @@ describe('source-only Hermes feed, immutable history and authorized reads',()=>{
   const stored=JSON.parse(row!);expect(stored.observation.payload.technical.avgFetchMs).toBe(0);expect(stored.observation.payload.technical.sitemapPageCount.value).toBeNull();
   expect(stored.observation.observationKind).toBe('own_site');expect(receipt.operationId).toBe(value.operationId);
   await expect(db.prepare("UPDATE owner_intel_source_bindings SET reviewed_context_json='{}' WHERE binding_id=? AND observation_kind='own_site'").bind(bindingId).run()).rejects.toThrow();
+  expect((await post(observation('search_console_summary')))?.status).toBe(200);
   const staff='staff-own-site',email='site-owner@example.test',access='access-own-site';
   await db.batch([db.prepare("INSERT INTO staff_users VALUES(?,?,?,'active')").bind(staff,email,access),db.prepare('INSERT INTO native_staff_profiles VALUES(?,?,1)').bind(staff,email),
    db.prepare('INSERT INTO native_staff_admissions VALUES(?,?,1,1)').bind(staff,access),db.prepare("INSERT INTO staff_role_assignments VALUES(?,'role-owner','global')").bind(staff),
@@ -252,5 +258,18 @@ describe('source-only Hermes feed, immutable history and authorized reads',()=>{
   const siteResponse=await app.request(`https://ops.example.test/api/intel/${routeKey}/website?range=7d`,{method:'GET'},{OPS_DB:db} as Env),view=await siteResponse.json() as any;
   expect(siteResponse.status).toBe(200);expect(view.schema).toBe('ops.intel.website-monitor.v1');expect(view.site.canonicalDomain).toBe('ltds.example');
   expect(view.technical.avgFetchMs).toBe(0);expect(view.technical.sitemapPageCount.value).toBeNull();expect(view.totals).toBeUndefined();
+  const summaryResponse=await app.request(`https://ops.example.test/api/intel/${routeKey}/summary?range=7d`,{method:'GET'},{OPS_DB:db} as Env);
+  expect(summaryResponse.status).toBe(200);const summary=await summaryResponse.json() as OwnerIntelSummary;
+  expect(summary.sources.find(source=>source.id==='search_console')).toMatchObject({state:'available',businessId,range:'7d',metrics:{clicks:10,impressions:100,ctr:0.1,position:2}});
+  expect(summary.sources.find(source=>source.id==='own_site')).toMatchObject({state:'available',businessId,range:'7d',metrics:{monitoredPages:1,changesSincePrevious:0}});
+  expect(summary.sources.find(source=>source.id==='ga4')).toMatchObject({state:'unconfigured',metrics:null});
+  const staleSite=observation('own_site','2'),stalePayload=staleSite.payload as any;stalePayload.monitoredPages[0].fetchStatus='not_checked';
+  stalePayload.technical={httpsOk:unknown,sitemapPageCount:unknown,robotsAllowsIndexing:unknown,avgFetchMs:null};
+  stalePayload.provenance={...stalePayload.provenance,asOf:null,lastDataDate:'2026-10-17',dataRange:{start:'2026-10-01',end:'2026-10-17'},partial:true,partialReason:'source_stale',limits:['site monitor has no current sample']};
+  expect((await post(staleSite))?.status).toBe(200);
+  const staleSummaryResponse=await app.request(`https://ops.example.test/api/intel/${routeKey}/summary?range=7d`,{method:'GET'},{OPS_DB:db} as Env);
+  expect(staleSummaryResponse.status).toBe(200);const staleSummary=await staleSummaryResponse.json() as OwnerIntelSummary;
+  expect(staleSummary.sources.find(source=>source.id==='own_site')).toMatchObject({state:'stale',reason:'source_stale',metrics:null});
+  expect(JSON.stringify(staleSummary)).not.toContain('"monitoredPages":1');
  });
 });
