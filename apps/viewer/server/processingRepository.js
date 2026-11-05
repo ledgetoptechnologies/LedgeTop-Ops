@@ -318,7 +318,7 @@ class ProcessingRepository {
   getDataset(id, includeFiles = false) { return this.dataset(this.database.prepare('SELECT * FROM datasets WHERE id=?').get(id), includeFiles); }
   hasHeldSourceSnapshot(datasetId) {
     if (typeof datasetId !== 'string' || !datasetId) return false;
-    return Boolean(this.database.prepare("SELECT 1 FROM viewer_source_snapshots WHERE dataset_id=? AND status='held' LIMIT 1").get(datasetId));
+    return Boolean(this.database.prepare("SELECT 1 FROM viewer_source_snapshots WHERE dataset_id=? AND status IN ('held','accepted') LIMIT 1").get(datasetId));
   }
   listDatasets(projectId) {
     return this.listDatasetsPage({projectId,limit:100}).items;

@@ -3,6 +3,9 @@
 const crypto = require('node:crypto');
 const Contract = require('./sourceReleaseContractV1');
 const { verifiedOutputProof } = require('./sourceReleaseReadyProofV1');
+const { getHeldSourceSnapshot, verifyHeldSourceSnapshot, acceptHeldSourceSnapshot,
+  releaseHeldSourceSnapshot } = require('./heldSourceSnapshot');
+const { validateCompletionReceipt } = require('./sourceIntakeClientV2');
 
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 
@@ -40,12 +43,75 @@ function releaseBinding(intent) {
   return { binding, request, completion, envelope, result, copy, ack };
 }
 
-function snapshotBindingFor(database, intent) {
-  const row = database.prepare(`SELECT snapshot_id,dataset_id,task_id,attempt_id,intent_sha256,status
-    FROM viewer_source_snapshots WHERE attempt_id=?`).get(intent.submissionId);
+function verifiedSnapshot(processing, sourceIntake, intent) {
+  const row = processing.database.prepare('SELECT snapshot_id FROM viewer_source_snapshots WHERE attempt_id=?')
+    .get(intent.submissionId);
   if (!row) fail('source_release_snapshot_missing');
-  return { snapshotId: row.snapshot_id, datasetId: row.dataset_id, taskId: row.task_id,
-    attemptId: row.attempt_id, intentSha256: row.intent_sha256, status: row.status };
+  const snapshot = getHeldSourceSnapshot(processing, row.snapshot_id);
+  const { binding, request, completion } = releaseBinding(intent);
+  if (!sourceIntake.snapshotPublicKey || !sourceIntake.snapshotSigner
+      || snapshot.issuerId !== sourceIntake.snapshotSigner.issuerId || snapshot.keyId !== sourceIntake.snapshotSigner.keyId
+      || !verifyHeldSourceSnapshot(snapshot, sourceIntake.snapshotPublicKey)
+      || snapshot.attemptId !== intent.submissionId || snapshot.taskId !== intent.viewerTaskId
+      || snapshot.datasetId !== request.sourceManifest.id || snapshot.inputManifestSha256 !== request.manifest.sha256
+      || snapshot.intentSha256 !== request.sourceAttestation.proof.sourceSnapshotSha256)
+    fail('source_release_snapshot_binding_mismatch');
+  // Reconstruct only deterministic per-object ACK projections omitted from the
+  // compact durable completion; the retained source/derived receipts are checked
+  // in full by the same validator used by the real intake client.
+  const acks = (manifest, kind) => manifest.objects.map(object => ({ objectId: object.id,
+    objectKind: kind, byteSize: object.byteSize, sha256: object.sha256,
+    generation: binding.generation, manifestSha256: manifest.sha256 }));
+  validateCompletionReceipt({ ...completion,
+    sourceObjectReceipts: acks(request.sourceManifest, 'source'),
+    derivedObjectReceipts: acks(request.derivedManifest, 'derived') }, binding, {
+    sourceManifest: request.sourceManifest, derivedManifest: request.derivedManifest,
+    sourceManifestSha256: request.sourceManifest.sha256, derivedManifestSha256: request.derivedManifest.sha256,
+    pipelineManifestSha256: request.manifest.sha256 });
+  return { snapshot, completion };
+}
+
+function acceptSnapshot(processing, sourceIntake, intent) {
+  let { snapshot, completion } = verifiedSnapshot(processing, sourceIntake, intent);
+  const verify = (candidate, receipt) => {
+    const live = sourceIntake.outbox.getIntent(intent.submissionId);
+    const checked = verifiedSnapshot(processing, sourceIntake, live);
+    return candidate.snapshotId === checked.snapshot.snapshotId
+      && Contract.canonical(receipt).equals(Contract.canonical(checked.completion));
+  };
+  if (snapshot.status === 'held') snapshot = acceptHeldSourceSnapshot(processing, snapshot.snapshotId,
+    { receipt: completion, verifyAcceptance: verify });
+  if (!snapshot || !['accepted', 'released'].includes(snapshot.status)
+      || !verify(snapshot, snapshot.acceptanceReceipt)) fail('source_release_snapshot_binding_mismatch');
+  return { snapshot, binding: { snapshotId: snapshot.snapshotId, datasetId: snapshot.datasetId,
+    taskId: snapshot.taskId, attemptId: snapshot.attemptId, intentSha256: snapshot.intentSha256,
+    status: snapshot.status } };
+}
+
+function retireSnapshot(processing, sourceIntake, sourceRelease, attemptId) {
+    const retained = sourceRelease.outbox.getIntent(attemptId);
+    if (retained?.state !== 'released' || !retained.receipt || !retained.request)
+      fail('source_release_terminal_receipt_missing');
+    Contract.verifySignedRequest(retained.request, sourceRelease.trustedReleaseKeys);
+    Contract.validateTerminalReceipt(retained.receipt, retained.authorization, retained.authorizationSha256,
+      retained.sourceManifest, retained.derivedManifest, retained.snapshotBinding);
+    const intent = sourceIntake.outbox.getIntent(attemptId);
+    const { snapshot, binding } = acceptSnapshot(processing, sourceIntake, intent);
+    if (!Contract.canonical({ ...binding, status: 'accepted' }).equals(Contract.canonical(retained.snapshotBinding)))
+      fail('source_release_snapshot_binding_mismatch');
+    if (snapshot.status === 'released') return snapshot;
+    const released = releaseHeldSourceSnapshot(processing, snapshot.snapshotId, { verifyAcceptance(candidate, receipt) {
+      const live = sourceRelease.outbox.getIntent(attemptId);
+      if (live?.state !== 'released' || live.receiptSha256 !== retained.receiptSha256) return false;
+      Contract.validateTerminalReceipt(live.receipt, live.authorization, live.authorizationSha256,
+        live.sourceManifest, live.derivedManifest, live.snapshotBinding);
+      const current = verifiedSnapshot(processing, sourceIntake, sourceIntake.outbox.getIntent(attemptId));
+      return candidate.intentSha256 === current.snapshot.intentSha256
+        && candidate.snapshotId === snapshot.snapshotId
+        && Contract.canonical(receipt).equals(Contract.canonical(current.completion));
+    } });
+    if (!released) fail('source_release_snapshot_retirement_held');
+    return released;
 }
 
 function sourceReleaseAuthorization({ intent, binding, request, completion, copy, observation, readyProof, snapshotBinding, signer }) {
@@ -85,6 +151,11 @@ async function processSourceReleaseAttempt({ attemptId, processing, storage, sou
   const current = sourceIntake?.outbox?.getIntent(attemptId);
   if (!current) return { status: 'waiting_for_accepted_copy' };
   const { binding, request, completion, copy } = releaseBinding(current);
+  const prior = sourceRelease.outbox.getIntent(attemptId);
+  if (prior?.state === 'released') {
+    retireSnapshot(processing, sourceIntake, sourceRelease, attemptId);
+    return { status: 'released', state: 'released' };
+  }
   const nowIso = now();
   const nowMs = Date.parse(nowIso);
   if (!Number.isFinite(nowMs) || new Date(nowMs).toISOString() !== nowIso) {
@@ -92,8 +163,9 @@ async function processSourceReleaseAttempt({ attemptId, processing, storage, sou
     if (intent) sourceRelease.outbox.hold(attemptId, 'timer_clock_invalid');
     return { status: 'held', reason: 'timer_clock_invalid' };
   }
-  const readyProof = await verifiedOutputProof({ processing, storage, sourceIntake, attemptId, signal, now: () => nowIso });
-  const snapshotBinding = snapshotBindingFor(processing.database, current);
+  const readyProof = prior?.request ? prior.readyProof
+    : await verifiedOutputProof({ processing, storage, sourceIntake, attemptId, signal, now: () => nowIso });
+  const { binding: snapshotBinding } = acceptSnapshot(processing, sourceIntake, current);
   let intent = sourceRelease.outbox.persistReady({ attemptId, binding, readyProof,
     sourceManifest: request.sourceManifest, derivedManifest: request.derivedManifest, snapshotBinding });
   if (intent.state === 'held' || intent.state === 'released') return { status: intent.state, reason: intent.holdReason };
@@ -123,7 +195,10 @@ async function processSourceReleaseAttempt({ attemptId, processing, storage, sou
   }
   if (!status) status = await sourceRelease.client.submit(binding.jobId,
     Contract.canonical(intent.request).toString('utf8'), statusBinding, { signal });
+  if (status.state === 'released') await verifiedOutputProof({ processing, storage, sourceIntake, attemptId,
+    signal, now: () => nowIso });
   intent = sourceRelease.outbox.persistStatus(attemptId, status);
+  if (intent.state === 'released') retireSnapshot(processing, sourceIntake, sourceRelease, attemptId);
   return { status: intent.state, state: intent.status?.state, holdReason: intent.holdReason };
 }
 
@@ -135,7 +210,9 @@ async function reconcileSourceReleaseQueue({ processing, storage, sourceIntake, 
     LEFT JOIN viewer_source_release_outbox r ON r.attempt_id=p.viewer_attempt_id
     WHERE p.source_intake_canonical IS NOT NULL AND p.source_intake_completion_canonical IS NOT NULL
       AND p.result_manifest_canonical IS NOT NULL AND p.copy_request_canonical IS NOT NULL AND p.copy_ack_canonical IS NOT NULL
-      AND (r.attempt_id IS NULL OR r.state IN ('ready','prepared','submitted'))
+      AND (r.attempt_id IS NULL OR r.state IN ('ready','prepared','submitted') OR
+        (r.state='released' AND EXISTS (SELECT 1 FROM viewer_source_snapshots s
+          WHERE s.attempt_id=p.viewer_attempt_id AND s.status<>'released')))
     ORDER BY p.updated_at,p.viewer_attempt_id LIMIT ?`).all(limit);
   const results = [];
   for (const row of rows) {
