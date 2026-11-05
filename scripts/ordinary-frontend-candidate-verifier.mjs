@@ -61,6 +61,7 @@ function planProfile(before, plan, profile, expectedDeploymentVersions) {
     ...(expected === undefined ? {} : { expectedDeploymentVersions: expected }),
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE,
     installedOpsSuccessorReaderContract: plan.installedOpsSuccessorReaderContract,
+    ...(plan.opsSuccessorReaderPromotionContract === undefined ? {} : { opsSuccessorReaderPromotionContract: plan.opsSuccessorReaderPromotionContract }),
   });
   return expected;
 }
@@ -211,7 +212,7 @@ export function verifyOrdinaryFrontendCandidate({ before, plan, candidate, moder
   validateInstallation(before, { profile, selectedApp: plan.application,
     ...(expected === undefined ? {} : { expectedDeploymentVersions: expected }),
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: plan.application,
-    opsSuccessorReaderContract: plan.installedOpsSuccessorReaderContract });
+    opsSuccessorReaderContract: plan.opsSuccessorReaderPromotionContract ?? plan.installedOpsSuccessorReaderContract });
   const app = plan.application;
   const moduleProof = verifyOrdinaryFrontendCandidateModules({ before, plan, candidate, modern });
   const assetProof = verifyOrdinaryFrontendAssetNamespace({ plan, candidateId: candidate.id, baselineVersionId: before[app].version.id, previousLedger,

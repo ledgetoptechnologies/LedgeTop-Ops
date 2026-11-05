@@ -8,7 +8,7 @@ import { capture, CloudflareReader, deploymentSourceCommit, hash, canonical, nee
   preparePrivateProductionDirectory, readStaffCutoverReview, runNativeProductionCommand,
   stableState, validateBuildEnvironment, validateInstallation, validateStaffReadinessReceipt,
   OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
-  ORDINARY_FRONTEND_PREFLIGHT_MODE, resourcesShape } from './production-deploy.mjs';
+  OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT, ORDINARY_FRONTEND_PREFLIGHT_MODE, resourcesShape } from './production-deploy.mjs';
 import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { ORDINARY_FRONTEND_AUTHORITY_CONTRACT, validateOrdinaryFrontendAuthorityObservation } from './ordinary-frontend-authority.mjs';
 import { readOrdinaryFrontendAuthorityObservation } from './ordinary-frontend-authority-reader.mjs';
@@ -328,6 +328,7 @@ function writePrivateJson(directory, name, value) {
 export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinnedPlan, profile, expectedDeploymentVersions, assetVerifierProvider,
   staffAuthorityContract = 'native-staff-cutover-v1', staffCutoverReview, staffReviewPath,
   frontendAuthorityReview, post0226StaffPreservationReview, resumeCandidate, installedOpsSuccessorReaderContract,
+  opsSuccessorReaderPromotionContract,
   readFrontendAuthority = readOrdinaryFrontendAuthorityObservation,
   readPost0226StaffPreservation = readPost0226StaffPreservationObservation,
   reader, cli, journalDirectory, artifactSourceRoot, executorSourceRoot = ROOT, fetchImpl = fetch,
@@ -343,6 +344,10 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     && typeof sourceReader === 'function' && typeof now === 'function' && path.isAbsolute(journalDirectory ?? '')
     && path.isAbsolute(artifactSourceRoot ?? '') && path.isAbsolute(executorSourceRoot ?? ''),
   'Ordinary retained executor inputs invalid');
+  const operationsSuccessorPromotion = opsSuccessorReaderPromotionContract === OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT;
+  needFn(opsSuccessorReaderPromotionContract === undefined || (operationsSuccessorPromotion && app === 'operations'
+    && installedOpsSuccessorReaderContract === undefined && !resumeCandidate),
+  'Operations successor reader promotion requires its exact Operations-only contract');
   const isReviewedSuccessorPlan = app === 'operations' && ordinaryPlan.sourceCommit === REVIEWED_SUCCESSOR_SOURCE_COMMIT
     && ordinaryPlan.release.main.sha256 === REVIEWED_SUCCESSOR_MAIN_SHA256
     && ordinaryPlan.release.sourceMap.sha256 === REVIEWED_SUCCESSOR_MAP_SHA256;
@@ -361,6 +366,11 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   needFn(ordinaryPlan.installedOpsSuccessorReaderContract === installedOpsSuccessorReaderContract
     && pinnedPlan.installedOpsSuccessorReaderContract === installedOpsSuccessorReaderContract,
   'Executor selector must exactly match the read-only Ops contract pinned in both release plans');
+  needFn(ordinaryPlan.opsSuccessorReaderPromotionContract === opsSuccessorReaderPromotionContract
+    && pinnedPlan.opsSuccessorReaderPromotionContract === opsSuccessorReaderPromotionContract,
+  'Executor selector must exactly match the Operations successor promotion contract pinned in both release plans');
+  const baselineOpsReaderContract = operationsSuccessorPromotion
+    ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT : installedOpsSuccessorReaderContract;
   needFn(assetVerifierProvider && ['createVerifier','fetchVerifierAsset','removeVerifier','verifierAbsent']
     .every(name => typeof assetVerifierProvider[name] === 'function'), 'Bounded candidate namespace verifier is required before upload');
   expectedDeploymentVersions ??= ordinaryPlan.expectedDeploymentVersions;
@@ -382,22 +392,27 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
 
   if (app === 'operations') {
     const rows = expectedDeploymentVersions?.operations;
-    needFn(Array.isArray(rows) && rows.length === 2
-      && rows.filter(row => row.percentage === 100).length === 1
-      && rows.filter(row => row.percentage === 0).length === 1,
-    'Operations requires the exact reviewed 0/100 baseline distribution in its pinned plan');
+    if (operationsSuccessorPromotion) needFn(expectedDeploymentVersions === undefined,
+      'Operations successor promotion requires the pinned sole-active-version baseline');
+    else needFn(Array.isArray(rows) && rows.length === 2
+        && rows.filter(row => row.percentage === 100).length === 1
+        && rows.filter(row => row.percentage === 0).length === 1,
+      'Operations requires the exact reviewed 0/100 baseline distribution in its pinned plan');
   }
   const liveAtStart = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions });
   const before = resumeCandidate
     ? validateInstallation(structuredClone(resumeCandidate.originalSnapshot), { profile, selectedApp: app, expectedDeploymentVersions,
       ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app })
     : validateInstallation(liveAtStart, { profile, selectedApp: app, expectedDeploymentVersions,
-      ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app, opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
+      ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app, opsSuccessorReaderContract: baselineOpsReaderContract });
   const baselineVersionId = before[app].version.id;
   const operationsBaselineRows = expectedDeploymentVersions?.operations
     ?? before.operations.deployment.versions.map(row => ({ versionId: row.version_id, percentage: row.percentage }));
-  if (app === 'operations') needFn(expectedDeploymentVersions.operations.some(row => row.versionId === baselineVersionId && row.percentage === 100),
-    'Reviewed Ops 100% baseline differs from captured active version');
+  if (app === 'operations') needFn(operationsSuccessorPromotion
+    ? operationsBaselineRows.length === 1 && operationsBaselineRows[0].versionId === baselineVersionId
+      && operationsBaselineRows[0].percentage === 100
+    : expectedDeploymentVersions.operations.some(row => row.versionId === baselineVersionId && row.percentage === 100),
+  'Reviewed Ops 100% baseline differs from captured active version');
   if (resumeCandidate) assertResumeControls(before, liveAtStart, { app, candidateId: resumeCandidate.candidateId, profile,
     expectedDeploymentVersions, opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
   const bootstrap = app === 'operations' ? prepareOpsLegacyLedgerBootstrap(before) : null;
@@ -483,7 +498,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   needFn(hash(canonical(before)) === ordinaryPlan.baselineSHA256, 'Captured installation differs from exact pinned offline plan baseline');
   validateOrdinaryFrontendRetainedPlan(before, pinnedPlan, { ordinaryPlan, profile, previousLedger,
     previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt,
-    installedOpsSuccessorReaderContract });
+    installedOpsSuccessorReaderContract, ...(operationsSuccessorPromotion ? { opsSuccessorReaderPromotionContract } : {}) });
   writePrivateJson(journalDirectory, 'release-plan.private.json', { schemaVersion: 2, contract: pinnedPlan.contract,
     application: app, sourceCommit, baselineVersionId, ordinaryPlanSHA256: pinnedPlan.ordinaryPlanSHA256,
     ledgerSHA256: pinnedPlan.retentionLedgerSHA256, rollbackVersionId: baselineVersionId,
@@ -500,12 +515,12 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   else {
     validateInstallation(preuploadRaw, { profile, selectedApp: app, expectedDeploymentVersions,
       ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
-      opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
+      opsSuccessorReaderContract: baselineOpsReaderContract });
     needFn(equal(stableState(before, app), stableState(preuploadRaw, app)), 'Production controls changed before native asset/module upload');
   }
   validateOrdinaryFrontendRetainedPlan(before, pinnedPlan, { ordinaryPlan, profile, previousLedger,
     previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt,
-    installedOpsSuccessorReaderContract });
+    installedOpsSuccessorReaderContract, ...(operationsSuccessorPromotion ? { opsSuccessorReaderPromotionContract } : {}) });
   needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before candidate qualification');
   let candidateId;
   if (resumeCandidate) {
@@ -541,7 +556,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const inactive = validateInstallation(await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: candidateExpected }), {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions,
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
-    opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
+    opsSuccessorReaderContract: baselineOpsReaderContract });
   const expectedInactive = structuredClone(before); expectedInactive[app].latest = candidateId;
   needFn(equal(stableState(inactive, app), stableState(expectedInactive, app)), 'Production controls changed after inactive candidate upload');
   if (resumeCandidate) needFn(equal(inactive[app].latestVersion, candidate)
@@ -562,7 +577,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const staged = validateInstallation(await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: stageExpectations }), {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions: stageExpectations,
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
-    opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
+    opsSuccessorReaderContract: baselineOpsReaderContract });
   needFn(equal(deploymentRows(staged, app), [...stageRows].sort((a, b) => a.versionId.localeCompare(b.versionId)))
     && sameExceptSelectedDeployment(inactive, staged, app), 'Candidate namespace stage did not produce exact baseline100/candidate0 with unchanged controls');
   await qualifyStaff('before-candidate-asset-verification');
@@ -582,7 +597,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const preactivation = validateInstallation(await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: stageExpectations }), {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions: stageExpectations,
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
-    opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
+    opsSuccessorReaderContract: baselineOpsReaderContract });
   needFn(equal(deploymentRows(preactivation, app), deploymentRows(staged, app))
     && equal(stableState(staged, app), stableState(preactivation, app)), 'Staged deployment or controls changed immediately before activation');
   needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before activation');
@@ -592,17 +607,16 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   appendIntent(journalDirectory, 'native-version-activate', { sourceCommit, workerName, candidateVersionId: candidateId,
     parentVersionId: baselineVersionId, exactRollbackVersionId: baselineVersionId, percentage: 100 });
   await runNative(cliPath, ['versions', 'deploy', `${candidateId}@100%`, '--yes', '--config', configPath], journalDirectory, 'activate', journalDirectory);
-  const activationExpectations = app === 'operations'
-    ? structuredClone(expectedDeploymentVersions)
-    : expectedDeploymentVersions;
-  if (app === 'operations') delete activationExpectations.operations;
+  const activationExpectations = app === 'operations' ? {} : expectedDeploymentVersions;
   const afterRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: activationExpectations });
   if (namedHandlerProof) verifyExactOpsSuccessorNamedHandlerAddition(before, afterRaw.operations.version, {
     sourceCommit, mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256 });
   const after = validateInstallation(afterRaw, { profile, selectedApp: app,
     expectedDeploymentVersions: activationExpectations,
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
-    opsSuccessorReaderContract: namedHandlerProof ? OPS_SUCCESSOR_READER_INSTALLED_CONTRACT : installedOpsSuccessorReaderContract });
+    opsSuccessorReaderContract: operationsSuccessorPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT
+      : namedHandlerProof ? OPS_SUCCESSOR_READER_INSTALLED_CONTRACT : installedOpsSuccessorReaderContract,
+    ...(operationsSuccessorPromotion ? { opsSuccessorReaderReleaseCandidateId: candidateId } : {}) });
   needFn(activeVersion(after[app]) === candidateId, 'Activation is uncertain; keep candidate and journal for GET-only reconciliation');
   needFn(deploymentRows(after, app)?.length === 1 && deploymentRows(after, app)[0].versionId === candidateId
     && deploymentRows(after, app)[0].percentage === 100, 'Postactivation distribution is not exactly candidate100');
@@ -628,7 +642,9 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const postNamespace = validateInstallation(postNamespaceRaw, {
     profile, selectedApp: app, expectedDeploymentVersions: activationExpectations,
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
-    opsSuccessorReaderContract: namedHandlerProof ? OPS_SUCCESSOR_READER_INSTALLED_CONTRACT : installedOpsSuccessorReaderContract });
+    opsSuccessorReaderContract: operationsSuccessorPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT
+      : namedHandlerProof ? OPS_SUCCESSOR_READER_INSTALLED_CONTRACT : installedOpsSuccessorReaderContract,
+    ...(operationsSuccessorPromotion ? { opsSuccessorReaderReleaseCandidateId: candidateId } : {}) });
   needFn(activeVersion(postNamespace[app]) === candidateId
     && deploymentRows(postNamespace, app)?.length === 1
     && deploymentRows(postNamespace, app)[0].versionId === candidateId
@@ -697,7 +713,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
  * one Operations authority packet matching its explicit contract. */
 export async function executeOrdinaryFrontendRetainedProduction({ app, plan, profile, expectedDeploymentVersions,
   staffAuthorityContract = 'native-staff-cutover-v1', artifactSourceRoot, staffReviewPath,
-  frontendAuthorityReviewPath, post0226StaffPreservationReviewPath, journalDirectory, env = process.env, fetchImpl = fetch } = {}) {
+  frontendAuthorityReviewPath, post0226StaffPreservationReviewPath, opsSuccessorReaderPromotionContract,
+  journalDirectory, env = process.env, fetchImpl = fetch } = {}) {
   needFn(env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
     && typeof env.CLOUDFLARE_API_TOKEN === 'string' && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN),
   'Cloudflare account and API token are required by the explicitly invoked production executor');
@@ -731,6 +748,7 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
   return executeOrdinaryFrontendRetainedRelease({ app, plan, profile, expectedDeploymentVersions,
     assetVerifierProvider, staffAuthorityContract, staffCutoverReview: review, frontendAuthorityReview: frontendReview,
     post0226StaffPreservationReview: post0226Review,
+    opsSuccessorReaderPromotionContract,
     reader, cli: path.join(ROOT, `apps/${app}/node_modules/wrangler/wrangler-dist/cli.js`),
     journalDirectory, artifactSourceRoot, executorSourceRoot: ROOT, fetchImpl,
     runNative: (cli, args, directory, phase, cwd) => runNativeProductionCommand(cli, args, directory, phase, cwd, env),

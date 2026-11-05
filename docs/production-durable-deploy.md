@@ -244,14 +244,28 @@ generations, and audit history. The public observation omits login addresses
 and token hashes. Any login or staff-state change invalidates the short-lived
 review and stops the next release mutation. Operations must select exactly one
 authority packet; Client releases cannot select an Operations packet.
-Neither preservation contract
-does not authorize staff admission, onboarding, cutover, or native control
+Neither preservation contract authorizes staff admission, onboarding, cutover, or native control
 activation. The existing full native-staff cutover contract remains strict and
 still requires enabled, reconciled native control. Packet creation and owner
 review remain external inputs; the executor does not create an approval receipt.
 The separate authority contract does not
 change the retained asset union, live namespace byte verification, rollback,
 deployment-weight, or 48-hour retention gates.
+
+The separate `ops-successor-reader-operations-promotion-fc9bc572-v1` release
+contract covers an Operations frontend release from the exact installed
+`fc9bc572-0b87-4857-8b8a-b0e0f7582c68` successor-reader version. Its preflight
+requires that version to be the sole 100% deployment, checks the pinned runtime
+module bytes and successor export set, and validates the installed runtime,
+resource bindings, settings, and accepted scalar profile. It accepts no
+caller-supplied deployment weights. The executor still stages the captured
+baseline at 100% with the exact uploaded candidate at 0%, verifies candidate
+modules and retained asset bytes, then activates only that candidate at 100%.
+The post-activation capture must show the candidate as the sole 100% version
+while retaining the successor export profile. For this path, the existing
+post-0226 staff preservation packet remains mandatory at every executor
+checkpoint. The existing fixed 0/100 Operations release contract and its
+pre-0226 counterpart remain separate and unchanged.
 
 Cloudflare Builds has a20-minute limit. The complete GitHub CI can take longer,
 so production deployment must be initiated after successful main CI through a
