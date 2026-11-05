@@ -25,6 +25,9 @@ describe("real Operations entrypoint canonical navigation mount",()=>{
       expect((await f.request(`${origin}/api/session`)).status).toBe(404);
     }
     expect((await f.request("https://ops.unrelated.invalid/clients")).status).toBe(404);
+    f.env.EXPECTED_HOST="ops.ledgetopdroneservices.com";
+    expect((await f.request(`${OLD}/api/dropbox-import/oauth/callback`)).status).toBe(404);
+    f.env.EXPECTED_HOST="ops.ledgetop.app";
     f.env.LEGACY_OPERATIONS_REDIRECT_ORIGINS="";
     expect((await f.request(`${OLD}/clients`)).status).toBe(404);
     expect((await f.request(`${OLD}/api/dropbox-import/oauth/callback`)).status).toBe(404);

@@ -23,9 +23,9 @@ export function canonicalOperationsNavigationRedirect(request: Request,
 /** A short-lived OAuth callback may still return to the exact host stored in
  * its signed/encrypted pre-cutover state. No other legacy API is admitted. */
 export function isLegacyOperationsDropboxCallback(request: Request,
-  env: Pick<Env, "ENVIRONMENT" | "PUBLIC_BASE_URL" | "LEGACY_OPERATIONS_REDIRECT_ORIGINS">): boolean {
+  env: Pick<Env, "ENVIRONMENT" | "EXPECTED_HOST" | "PUBLIC_BASE_URL" | "LEGACY_OPERATIONS_REDIRECT_ORIGINS">): boolean {
   if (env.ENVIRONMENT !== "production" || env.PUBLIC_BASE_URL !== CANONICAL_OPERATIONS_ORIGIN
-    || request.method !== "GET") return false;
+    || env.EXPECTED_HOST !== "ops.ledgetop.app" || request.method !== "GET") return false;
   let url: URL;
   try { url = new URL(request.url); } catch { return false; }
   const configured = configuredLegacyOperationsRedirectOrigins(env);
