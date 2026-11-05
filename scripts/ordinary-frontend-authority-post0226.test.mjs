@@ -12,6 +12,7 @@ import { POST0226_LOGIN_TABLES, POST0226_STAFF_LOGIN_MIGRATION_SHA256, POST0226_
 import { readPost0226StaffPreservationObservation } from './ordinary-frontend-authority-post0226-reader.mjs';
 import { compileProductionAutoPost0226PreservationPolicy, loadPinnedProductionAutoPost0226PreservationPolicy,
   validateProductionAutoPost0226PreservationObservation, validateProductionAutoPost0226PreservationPolicy,
+  validateProductionAutoPost0226PreservationReceipt,
   validateRepeatedProductionAutoPost0226PreservationReceipts } from './production-auto-post0226-policy.mjs';
 
 const sourceCommit = 'a'.repeat(40), observedAt = '2026-10-31T10:00:00.000Z', now = Date.parse('2026-10-31T10:01:00.000Z');
@@ -134,10 +135,16 @@ test('offline recurring preservation policy pins qualified state, allows only ob
     assert.equal(JSON.stringify(candidate).includes('owner@example.test'), false);
     assert.equal(JSON.stringify(candidate).includes('access_subject'), false);
 
-    const secondAt = '2026-10-31T10:00:40.000Z', secondNow = Date.parse(secondAt);
+    const secondAt = '2026-10-31T10:15:00.000Z', secondNow = Date.parse(secondAt);
     const second = await qualifyPost0226Snapshot(raw, { sourceCommit:nextSource, observedAt:secondAt, now:secondNow });
     const receipt1 = validateProductionAutoPost0226PreservationObservation(candidate.policy, first,
       { sourceCommit:firstSource, now:firstNow });
+    assert.equal(validateProductionAutoPost0226PreservationReceipt(candidate.policy, receipt1,
+      { sourceCommit:firstSource, now:firstNow }).stateSha256, receipt1.stateSha256);
+    assert.throws(() => validateProductionAutoPost0226PreservationReceipt(candidate.policy, receipt1,
+      { sourceCommit:firstSource, now:firstNow+60_001 }), /receipt_invalid_or_stale/u);
+    assert.throws(() => validateProductionAutoPost0226PreservationReceipt(candidate.policy,
+      { ...receipt1, bridgeMismatchCount:receipt1.bridgeMismatchCount+1 }, { sourceCommit:firstSource, now:firstNow }), /receipt_state_mismatch/u);
     const secondSameSource = await qualifyPost0226Snapshot(raw, { sourceCommit:firstSource, observedAt:secondAt, now:secondNow });
     const receipt2 = validateProductionAutoPost0226PreservationObservation(candidate.policy, secondSameSource,
       { sourceCommit:firstSource, now:secondNow });
@@ -150,6 +157,22 @@ test('offline recurring preservation policy pins qualified state, allows only ob
     const repeated = validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy, [receipt1, receipt2],
       { sourceCommit:firstSource, now:secondNow });
     assert.equal(repeated.count, 2);
+    assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy, [clone(receipt1), clone(receipt2)],
+      { sourceCommit:firstSource, now:secondNow }), /repeated_receipt_not_prevalidated_in_run/u);
+    assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy, [receipt1, receipt2],
+      { sourceCommit:firstSource, now:secondNow+60_001 }), /repeated_receipt_latest_stale/u);
+    const futureLatest = { ...receipt2, observedAt:new Date(secondNow+1_000).toISOString() };
+    assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy, [receipt1, futureLatest],
+      { sourceCommit:firstSource, now:secondNow }), /receipt_invalid_or_stale/u);
+    assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy, [receipt2, receipt1],
+      { sourceCommit:firstSource, now:secondNow }), /repeated_receipt_time_order_invalid/u);
+    const tooLateAt = firstNow + 45 * 60_000 + 1_000;
+    const tooLateObservation = await qualifyPost0226Snapshot(raw, { sourceCommit:firstSource,
+      observedAt:new Date(tooLateAt).toISOString(), now:tooLateAt });
+    const tooLateReceipt = validateProductionAutoPost0226PreservationObservation(candidate.policy, tooLateObservation,
+      { sourceCommit:firstSource, now:tooLateAt });
+    assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy,
+      [receipt1, tooLateReceipt], { sourceCommit:firstSource, now:tooLateAt }), /repeated_receipt_sequence_too_long/u);
 
     const changedRows = clone(raw);
     changedRows.post0226Rows.staff_login_generations[0].generation += 1;
@@ -171,7 +194,11 @@ test('offline recurring preservation policy pins qualified state, allows only ob
       { sourceCommit:nextSource, now:secondNow+60_001 }), /observation_invalid_or_stale/u);
     const driftedReceipt = { ...receipt2, bridgeMismatchCount:receipt2.bridgeMismatchCount+1 };
     assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy,
-      [receipt1, driftedReceipt], { sourceCommit:firstSource, now:secondNow }), /repeated_receipt_drift/u);
+      [receipt1, driftedReceipt], { sourceCommit:firstSource, now:secondNow }), /receipt_state_mismatch/u);
+    const consistentTampering1 = { ...receipt1, bridgeMismatchCount:receipt1.bridgeMismatchCount+1 };
+    const consistentTampering2 = { ...receipt2, bridgeMismatchCount:receipt2.bridgeMismatchCount+1 };
+    assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy,
+      [consistentTampering1, consistentTampering2], { sourceCommit:firstSource, now:secondNow }), /receipt_state_mismatch/u);
 
     const originalPath = process.env.PRODUCTION_AUTO_POST0226_POLICY_PATH;
     process.env.PRODUCTION_AUTO_POST0226_POLICY_PATH = 'C:\\unreviewed\\policy.json';

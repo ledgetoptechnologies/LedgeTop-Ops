@@ -18,10 +18,15 @@ export const PRODUCTION_AUTO_POST0226_PRESERVATION_POLICY_SHA256 = 'UNPROVISIONE
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const POLICY_PATH = path.join(ROOT, 'scripts/production-auto-post0226-preservation-policy.json');
 const MAX_AGE_MS = 60_000;
+// Each automatic worker job has a 45-minute timeout; scope this in-process
+// receipt sequence to that same maximum and cap phase-fence receipts at 32.
+const MAX_RECEIPT_SEQUENCE_MS = 45 * 60_000;
+const MAX_RECEIPTS = 32;
 const MAX_ROWS = 20_000;
 const COMMIT = /^[a-f0-9]{40}$/u, SHA = /^[a-f0-9]{64}$/u;
 const hash = value => createHash('sha256').update(value, 'utf8').digest('hex');
 const same = (a, b) => canonicalStaffReadiness(a) === canonicalStaffReadiness(b);
+const PREVALIDATED_RECEIPTS = new WeakSet();
 const fail = code => { throw Error(`production_auto_post0226_policy:${code}`); };
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.getPrototypeOf(value) === Object.prototype && Reflect.ownKeys(value).length === keys.length
@@ -113,27 +118,62 @@ export function validateProductionAutoPost0226PreservationObservation(policy, ob
   const receipt = { schemaVersion: 1, contract: PRODUCTION_AUTO_POST0226_PRESERVATION_RECEIPT_CONTRACT,
     sourceCommit, accountId: policy.accountId, databaseId: policy.databaseId, observedAt: observation.observedAt,
     policySha256, stateSha256: hash(canonicalStaffReadiness(baseline)), ...structuredClone(baseline) };
+  PREVALIDATED_RECEIPTS.add(receipt);
   return receipt;
 }
 
+function validateReceipt(policy, receipt, { sourceCommit, now = Date.now(), requireFresh } = {}) {
+  if (!Number.isSafeInteger(now) || now < 0 || now > 8.64e15
+    || !exact(receipt, RECEIPT_KEYS) || receipt.schemaVersion !== 1
+    || receipt.contract !== PRODUCTION_AUTO_POST0226_PRESERVATION_RECEIPT_CONTRACT
+    || receipt.sourceCommit !== sourceCommit || !COMMIT.test(sourceCommit ?? '')
+    || receipt.accountId !== policy.accountId || receipt.databaseId !== policy.databaseId
+    || !stamp(receipt.observedAt) || Date.parse(receipt.observedAt) > now
+    || (requireFresh && now - Date.parse(receipt.observedAt) > MAX_AGE_MS)
+    || receipt.policySha256 !== hash(canonicalStaffReadiness(policy))) fail('receipt_invalid_or_stale');
+  const timestamp = Date.parse(receipt.observedAt);
+  const baseline = Object.fromEntries(BASELINE_KEYS.map(key => [key, receipt[key]]));
+  if (!exact(receipt.baseTableCounts, Object.keys(ORDINARY_FRONTEND_AUTHORITY_TABLES))
+    || !exact(receipt.loginRows, Object.keys(POST0226_LOGIN_TABLES))
+    || Object.values(receipt.loginRows).some(value => !exact(value, ['count','sha256']))
+    || !same(baseline, policy.baseline)
+    || receipt.stateSha256 !== hash(canonicalStaffReadiness(baseline))) fail('receipt_state_mismatch');
+  return { receipt: structuredClone(receipt), timestamp };
+}
+
+/** Validate one receipt at the current mutation/read fence. Call this for each
+ * newly observed state; each read must remain no older than 60 seconds. */
+export function validateProductionAutoPost0226PreservationReceipt(policy, receipt,
+  { sourceCommit, now = Date.now() } = {}) {
+  validateProductionAutoPost0226PreservationPolicy(policy);
+  const validated = validateReceipt(policy, receipt, { sourceCommit, now, requireFresh: true }).receipt;
+  PREVALIDATED_RECEIPTS.add(validated);
+  return validated;
+}
+
 /** Require repeat observations during one release to be byte-identical after
- * removing only their timestamp; the caller source-fences every invocation. */
+ * removing only their timestamp. Prior entries are structurally/digest checked
+ * but may be older than 60 seconds; the just-observed receipt must be fresh.
+ * The sequence is monotonic, one source/run, at most32 entries, and at most45m. */
 export function validateRepeatedProductionAutoPost0226PreservationReceipts(policy, receipts,
   { sourceCommit, now = Date.now() } = {}) {
   validateProductionAutoPost0226PreservationPolicy(policy);
   if (!Number.isSafeInteger(now) || now < 0 || now > 8.64e15) fail('repeated_receipt_clock_invalid');
-  if (!Array.isArray(receipts) || receipts.length < 2) fail('repeated_receipts_required');
+  if (!Array.isArray(receipts) || receipts.length < 2 || receipts.length > MAX_RECEIPTS) fail('repeated_receipts_required');
+  const timestamps = [];
   const normalized = receipts.map(receipt => {
-    if (!exact(receipt, RECEIPT_KEYS) || receipt.schemaVersion !== 1
-      || receipt.contract !== PRODUCTION_AUTO_POST0226_PRESERVATION_RECEIPT_CONTRACT
-      || receipt.sourceCommit !== sourceCommit || !COMMIT.test(sourceCommit ?? '')
-      || receipt.accountId !== policy.accountId || receipt.databaseId !== policy.databaseId
-      || !stamp(receipt.observedAt) || Date.parse(receipt.observedAt) > now || now - Date.parse(receipt.observedAt) > MAX_AGE_MS
-      || receipt.policySha256 !== hash(canonicalStaffReadiness(policy))
-      || receipt.stateSha256 !== hash(canonicalStaffReadiness(policy.baseline))) fail('repeated_receipt_invalid_or_stale');
-    const comparable = { ...receipt }; delete comparable.observedAt;
+    const validated = validateReceipt(policy, receipt, { sourceCommit, now, requireFresh: false });
+    if (!PREVALIDATED_RECEIPTS.has(receipt)) fail('repeated_receipt_not_prevalidated_in_run');
+    timestamps.push(validated.timestamp);
+    const comparable = { ...validated.receipt }; delete comparable.observedAt;
     return comparable;
   });
+  if (timestamps.some((timestamp, index) => index > 0 && timestamp < timestamps[index - 1]))
+    fail('repeated_receipt_time_order_invalid');
+  if (timestamps.at(-1) > now || now - timestamps.at(-1) > MAX_AGE_MS)
+    fail('repeated_receipt_latest_stale');
+  if (timestamps.at(-1) - timestamps[0] > MAX_RECEIPT_SEQUENCE_MS)
+    fail('repeated_receipt_sequence_too_long');
   if (normalized.some(receipt => !same(receipt, normalized[0]))) fail('repeated_receipt_drift');
   return Object.freeze({ count: receipts.length, stableStateSha256: normalized[0].stateSha256,
     latestObservedAt: receipts.at(-1).observedAt });

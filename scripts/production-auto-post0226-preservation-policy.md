@@ -42,7 +42,15 @@ synthetic fixture or a `verified`/`approved` boolean.
   (`sourceAndCi`). A later, separately reviewed integration can add a distinct
   preservation-policy adapter that calls the qualified read-only reader and
   validates the pinned public policy at every existing staff-readiness fence.
-  Repeated sanitized receipts must match after removing only `observedAt`.
+  Each new observation and standalone receipt must be fresh within 60 seconds
+  at its mutation fence. Earlier receipts from the same in-process source run
+  may be historical, but the sequence is limited to 32 monotonically timestamped
+  receipts over at most 45 minutes, requires its latest receipt to be fresh
+  within 60 seconds, and compares every field except `observedAt`. The 45-minute
+  bound matches the existing per-worker automatic job timeout; main CI finishes
+  before that release job begins. Receipt sequence checks accept only objects
+  previously returned by this process's observation or standalone receipt
+  validator, then recompute each state digest and compare its baseline fields.
   Native full-cutover readiness and its explicit permissions remain separate.
 - The source main/CI fence remains in `runProductionAutoRelease`,
   `ProductionMainCI`, and `coordinateProductionAutoRelease`. Do not bypass the
