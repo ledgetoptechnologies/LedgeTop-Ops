@@ -25,7 +25,10 @@ const cap = ReferenceProtocol.createCapabilities('staging');
 const options = [...['pc-ept', 'gltf', '3d-tiles'].map(name => ({ name, type: 'bool', value: 'false' })),
   { name: 'feature-count', type: 'int', domain: 'positive int', value: '12' },
   { name: 'feature-threshold', type: 'float', domain: 'positive float', value: '0.75' },
-  { name: 'feature-quality', type: 'enum', domain: ['medium', 'high', 'ultra'], value: 'high' }];
+  { name: 'feature-quality', type: 'enum', domain: ['medium', 'high', 'ultra'], value: 'high' },
+  { name: 'boolean-choice', type: 'bool', domain: [false, true], value: 'false' },
+  { name: 'count-choice', type: 'int', domain: [8, 12], value: '12' },
+  { name: 'threshold-range', type: 'float', domain: { min: 0, max: 1 }, value: '0.75' }];
 const optionsBody = { schemaVersion: 1, environment: 'staging', capabilityFingerprint: cap.capabilityFingerprint,
   optionsFingerprint: cap.engines.odm.optionsFingerprint, options };
 const capabilitiesBody = { ...cap, sourceIntake: { enabled: true }, viewerAcceptance: { enabled: true } };
@@ -49,7 +52,7 @@ test('reference coordinator maps its pinned capabilities/options without NodeODM
   assert.equal(result.capabilities.taskQueueCount, null);
   assert.equal(result.capabilities.providerType, 'nodeodm', 'legacy database type stores ODM engine compatibility');
   assert.equal(result.capabilities.detectionMethod, 'pinned-reference-coordinator');
-  assert.equal(result.capabilities.options.length, 6);
+  assert.equal(result.capabilities.options.length, 9);
   assert.equal(result.capabilities.options[0].value, false, 'string false is normalized as boolean false');
   assert.equal(result.capabilities.options[0].rawDefault, 'false', 'the raw provider default is retained');
   assert.equal(result.capabilities.options[3].value, 12, 'integer string defaults are normalized');
@@ -60,6 +63,9 @@ test('reference coordinator maps its pinned capabilities/options without NodeODM
   assert.equal(result.capabilities.options[4].domain, 'positive float');
   assert.equal(result.capabilities.options[5].type, 'string', 'enum options use the Viewer string-plus-domain contract');
   assert.deepEqual(result.capabilities.options[5].domain, ['medium', 'high', 'ultra']);
+  assert.deepEqual(result.capabilities.options[6].domain, [false, true], 'boolean choice domains are preserved');
+  assert.deepEqual(result.capabilities.options[7].domain, [8, 12], 'integer choice domains are preserved');
+  assert.deepEqual(result.capabilities.options[8].domain, { min: 0, max: 1 }, 'closed numeric range domains are preserved');
   assert.match(result.fingerprint, /^[a-f0-9]{64}$/);
 });
 
@@ -68,6 +74,10 @@ test('reference coordinator rejects malformed scalar defaults instead of coercin
     ...['yes', 'false ', ''].map(value => ({ name: 'switch', type: 'bool', value })),
     { name: 'count', type: 'int', value: '1.2' },
     { name: 'threshold', type: 'float', value: 'Infinity' },
+    { name: 'bad-bool-domain', type: 'bool', domain: [true, 'false'] },
+    { name: 'bad-int-domain', type: 'int', domain: [1, '2'] },
+    { name: 'bad-float-range', type: 'float', domain: { min: 2, max: 1 } },
+    { name: 'bad-domain-key', type: 'float', domain: { min: 0, max: 1, secret: true } },
   ]) {
     const malformed = { ...optionsBody, options: [...options, item] };
     assert.throws(() => require('../server/referenceCoordinatorProvider').validateOptionsResponse(malformed, cap),
