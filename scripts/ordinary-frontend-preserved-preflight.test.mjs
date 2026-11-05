@@ -5,7 +5,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ORDINARY_FRONTEND_PREFLIGHT_MODE,
+  ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
   ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
+  CANONICAL_INSTALLED_PROFILE_V4_SHA256,
   PROFILE,
   hash,
   canonical,
@@ -19,6 +21,7 @@ import { validatePortalReleasePreflight } from '../apps/client/scripts/project-a
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const acceptedProfile = JSON.parse(fs.readFileSync(path.join(HERE, 'test-fixtures/ordinary-frontend-accepted-profile-v3.test.json'), 'utf8'));
+const acceptedCanonicalV4Profile = JSON.parse(fs.readFileSync(path.join(HERE, 'test-fixtures/ordinary-frontend-accepted-profile-v4.test.json'), 'utf8'));
 const declaration = JSON.parse(fs.readFileSync(path.join(HERE, 'client-portal-release-profile.json'), 'utf8'));
 const clone = value => structuredClone(value);
 const viewerFlag = 'CLIENT_VIEWER_ENABLED';
@@ -97,6 +100,19 @@ test('accepted installed profile fixture is hash-only and pins the two retained 
   assert.equal(hasRawValueField(acceptedProfile), false);
 });
 
+test('canonical v4 installed profile is a separately pinned hash-only ordinary preflight profile', () => {
+  assert.equal(hash(canonical(acceptedCanonicalV4Profile)), CANONICAL_INSTALLED_PROFILE_V4_SHA256);
+  for (const [app, name] of [['operations', hierarchyFlag], ['client', viewerFlag]]) {
+    assert.ok(acceptedCanonicalV4Profile.workers[app].plainNames.includes(name));
+    assert.equal(acceptedCanonicalV4Profile.workers[app].plainValueSHA256[name], hash('true'));
+  }
+  const hasRawValueField = value => Array.isArray(value) ? value.some(hasRawValueField)
+    : value && typeof value === 'object'
+      ? Object.entries(value).some(([key, child]) => ['text','secretValue','plainValues','apiToken','accessToken','privateKey'].includes(key) || hasRawValueField(child))
+      : false;
+  assert.equal(hasRawValueField(acceptedCanonicalV4Profile), false);
+});
+
 test('ordinary UI preflight is explicit, statically pinned, and only normalizes a private preflight copy', () => {
   const { client, operations } = syntheticPortalVars();
   const installedClient = { ...client }; delete installedClient.CLIENT_PORTAL_OPS_INQUIRIES_ENABLED;
@@ -114,9 +130,18 @@ test('ordinary UI preflight is explicit, statically pinned, and only normalizes 
     mode: ORDINARY_FRONTEND_PREFLIGHT_MODE,
     profileSHA256: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
   });
+  assert.deepEqual(ordinaryFrontendPreflightDescriptor(acceptedCanonicalV4Profile, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE), {
+    mode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
+    profileSHA256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
+  });
   assert.deepEqual(validateOrdinaryFrontendPreflightPreservation(installedClient, operations, acceptedProfile, ORDINARY_FRONTEND_PREFLIGHT_MODE), {
     mode: ORDINARY_FRONTEND_PREFLIGHT_MODE,
     profileSHA256: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
+  });
+  assert.deepEqual(validateOrdinaryFrontendPreflightPreservation(installedClient, operations, acceptedCanonicalV4Profile,
+    ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE), {
+    mode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
+    profileSHA256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
   });
   assert.deepEqual({ client: installedClient, operations }, before);
   assert.deepEqual(validatePortalReleasePreflight(
@@ -134,9 +159,14 @@ test('ordinary UI compatibility rejects missing, unknown, altered-profile, or ch
   });
   assert.throws(() => ordinaryFrontendPreflightDescriptor(acceptedProfile, 'ordinary-frontend-any-profile'), /Unreviewed ordinary frontend preflight mode/);
   assert.throws(() => ordinaryFrontendPreflightDescriptor(PROFILE, ORDINARY_FRONTEND_PREFLIGHT_MODE), /Unreviewed ordinary frontend accepted profile/);
+  assert.throws(() => ordinaryFrontendPreflightDescriptor(acceptedCanonicalV4Profile, ORDINARY_FRONTEND_PREFLIGHT_MODE), /Unreviewed ordinary frontend accepted profile/);
+  assert.throws(() => ordinaryFrontendPreflightDescriptor(acceptedProfile, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE), /Unreviewed ordinary frontend accepted profile/);
   const mutatedProfile = clone(acceptedProfile);
   mutatedProfile.workers.operations.script.named_handlers.find(row => row.name === 'ViewerSessionIssuer').handlers.pop();
   assert.throws(() => ordinaryFrontendPreflightDescriptor(mutatedProfile, ORDINARY_FRONTEND_PREFLIGHT_MODE), /Unreviewed ordinary frontend accepted profile/);
+  const mutatedV4Profile = clone(acceptedCanonicalV4Profile);
+  mutatedV4Profile.workers.client.plainValueSHA256[viewerFlag] = hash('false');
+  assert.throws(() => ordinaryFrontendPreflightDescriptor(mutatedV4Profile, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE), /Unreviewed ordinary frontend accepted profile/);
   const wrongValueProfile = clone(acceptedProfile);
   wrongValueProfile.workers.client.plainValueSHA256[viewerFlag] = hash('false');
   assert.throws(() => ordinaryFrontendPreflightDescriptor(wrongValueProfile, ORDINARY_FRONTEND_PREFLIGHT_MODE), /Unreviewed ordinary frontend accepted profile/);
@@ -169,4 +199,16 @@ test('generic installation/config compilers reject ordinary mode unless the exac
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE,
     ordinaryFrontendApp: 'operations',
   }), /Existing complete production installation required/);
+  assert.throws(() => validateInstallation({}, {
+    profile: acceptedCanonicalV4Profile,
+    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
+    ordinaryFrontendApp: 'operations',
+  }), /Existing complete production installation required/);
+  assert.throws(() => validateInstallation({}, {
+    profile: acceptedCanonicalV4Profile,
+    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE,
+    ordinaryFrontendApp: 'operations',
+  }), /Unreviewed ordinary frontend accepted profile/);
+  assert.throws(() => compileConfig({}, 'operations', '/not-uploaded/index.js', acceptedCanonicalV4Profile, undefined,
+    ORDINARY_FRONTEND_PREFLIGHT_MODE), /Unreviewed ordinary frontend accepted profile/);
 });

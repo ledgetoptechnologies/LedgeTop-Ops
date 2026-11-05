@@ -11,6 +11,7 @@ export const PROFILE = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts/produ
 const DECLARATION = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts/client-portal-release-profile.json')));
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 export const ORDINARY_FRONTEND_PREFLIGHT_MODE = 'ordinary-frontend-preserve-installed-v3';
+export const ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE = 'ordinary-frontend-preserve-installed-canonical-v4';
 export const OPS_SUCCESSOR_READER_INSTALLED_CONTRACT = 'ops-successor-reader-a0-f4cdefd6';
 export const OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT = 'ops-successor-reader-operations-promotion-fc9bc572-v1';
 const OPS_SUCCESSOR_READER_VERSION_ID = 'fc9bc572-0b87-4857-8b8a-b0e0f7582c68';
@@ -19,6 +20,7 @@ const OPS_SUCCESSOR_READER_MAIN_SHA256 = 'f4cdefd633441df8db18cc5c0b192fc8faa72e
 const OPS_SUCCESSOR_READER_ADDITIONS = Object.freeze(['readWindowsCatalogSuccessorAuthorization',
   'readWindowsDeliverySuccessorAuthorization'].sort());
 export const ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 = '6073b977db48843d9eaecba74cb3863815b92dff87afd4c6f144b5e1dbad48fe';
+export const CANONICAL_INSTALLED_PROFILE_V4_SHA256 = '2ef0f21be881bbe1567e4ea941255ea1f6e1be9a339c1f854174c5ac334a10fd';
 const ORDINARY_FRONTEND_PRESERVED_FLAGS = Object.freeze({
   operations: 'CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED',
   client: 'CLIENT_VIEWER_ENABLED',
@@ -62,9 +64,15 @@ export function varsOf(state) {
 }
 export function ordinaryFrontendPreflightDescriptor(profile, mode) {
   if (mode === undefined) return { mode: 'strict-default', profileSHA256: null };
-  need(mode === ORDINARY_FRONTEND_PREFLIGHT_MODE, 'Unreviewed ordinary frontend preflight mode');
-  need(hash(canonical(profile)) === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
-    'Unreviewed ordinary frontend accepted profile');
+  const expectedProfileSHA256 = mode === ORDINARY_FRONTEND_PREFLIGHT_MODE
+    ? ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256
+    : mode === ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE ? CANONICAL_INSTALLED_PROFILE_V4_SHA256 : null;
+  need(expectedProfileSHA256 !== null, 'Unreviewed ordinary frontend preflight mode');
+  need(profile && typeof profile === 'object' && Object.getPrototypeOf(profile) === Object.prototype,
+    'Unreviewed ordinary frontend accepted profile for selected preflight mode');
+  const profileSHA256 = hash(canonical(profile));
+  need(profileSHA256 === expectedProfileSHA256,
+    'Unreviewed ordinary frontend accepted profile for selected preflight mode');
   const trueHash = hash('true');
   for (const [app, name] of Object.entries(ORDINARY_FRONTEND_PRESERVED_FLAGS)) {
     const worker = profile.workers?.[app];
@@ -72,7 +80,7 @@ export function ordinaryFrontendPreflightDescriptor(profile, mode) {
       && worker.plainValueSHA256?.[name] === trueHash,
     'Ordinary frontend accepted profile does not pin preserved flags');
   }
-  return { mode, profileSHA256: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 };
+  return { mode, profileSHA256 };
 }
 /**
  * Apply the legacy Project Alpha profile checks to a preflight-only copy for
@@ -84,7 +92,8 @@ export function ordinaryFrontendPreflightDescriptor(profile, mode) {
  * changed; no runtime/config value is enabled or written here.
  */
 export function validateOrdinaryFrontendPreflightPreservation(clientVars, operationsVars, profile, mode) {
-  need(mode === ORDINARY_FRONTEND_PREFLIGHT_MODE, 'Unreviewed ordinary frontend preflight mode');
+  need([ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE].includes(mode),
+    'Unreviewed ordinary frontend preflight mode');
   ordinaryFrontendPreflightDescriptor(profile, mode);
   const trueHash = hash('true');
   need(clientVars && Object.getPrototypeOf(clientVars) === Object.prototype
@@ -111,7 +120,7 @@ export function validateOrdinaryFrontendPreflightPreservation(clientVars, operat
     DECLARATION,
   );
   need(errors.length === 0, `Effective production release profile rejected: ${errors.join('; ')}`);
-  return { mode, profileSHA256: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 };
+  return ordinaryFrontendPreflightDescriptor(profile, mode);
 }
 function activeId(state, expectedVersions) {
   const rows = state.deployment.versions;
@@ -244,7 +253,7 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
     const errors = validatePortalReleasePreflight(config('ledgetop-clients', client), config('ledgetop-ops', ops), DECLARATION);
     need(errors.length === 0, `Effective production release profile rejected: ${errors.join('; ')}`);
   } else {
-    need(preflightDescriptor.profileSHA256 === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
+    need(preflightDescriptor.profileSHA256 === hash(canonical(profile)),
       'Ordinary frontend profile pin changed');
     validateOrdinaryFrontendPreflightPreservation(client, ops, profile, ordinaryFrontendPreflightMode);
   }
