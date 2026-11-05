@@ -9,6 +9,9 @@ import { validateOrdinaryFrontendAuthorityObservation } from './ordinary-fronten
 
 export const POST0226_STAFF_PRESERVATION_CONTRACT = 'ordinary-frontend-preserve-native-staff-post0226-v1';
 export const POST0226_STAFF_LOGIN_MIGRATION_SHA256 = 'c25b03f4499c6de80d586a583c0e59b8c39b264248645c59733304ebe751d0c5';
+const POST0226_WIRE_FIXTURE_SHA256 = 'fd02f7220e2afaeb1105a19da0dc14b3c9329c084ac6500b8d0b5e32b440edb3';
+const POST0226_WIRE_STATEMENTS_SHA256 = '29c324b1daa438c532ae050cb4f0d0e1db10b24eb4e876cef7682a9c98e03474';
+const POST0226_WIRE_SCHEMA_SHA256 = '2ec57a1391b2f63a042ff0e85b358e3666b74f4cc366eff7651c7cd4fbe4c729';
 export const POST0226_LOGIN_TABLES = Object.freeze(Object.fromEntries(Object.entries({
   staff_login_binding_control: ['singleton','schema_version'],
   staff_login_generations: ['staff_id','generation'],
@@ -46,6 +49,43 @@ export const POST0226_STAFF_PRESERVATION_QUERY = ORDINARY_FRONTEND_AUTHORITY_SNA
   '\n) AS frontend_authority_snapshot', `${POST0226_SCHEMA_QUERY}\n) AS frontend_authority_snapshot`);
 if (POST0226_STAFF_PRESERVATION_QUERY === ORDINARY_FRONTEND_AUTHORITY_SNAPSHOT_QUERY) fail('query_extension_failed');
 
+async function expectedPost0226WireSchema() {
+  const fixturePath = path.join(ROOT, 'scripts/fixtures/production-ops-0226-wrangler-wire-statements.json');
+  const bytes = await readFile(fixturePath);
+  if (hash(bytes.toString('utf8')) !== POST0226_WIRE_FIXTURE_SHA256) fail('wire_fixture_pin_mismatch');
+  let fixture;
+  try { fixture = JSON.parse(bytes.toString('utf8')); } catch { fail('wire_fixture_invalid'); }
+  if (!exact(fixture, ['schemaVersion','sourceMigrationSha256','wranglerCliSha256','splitterOutputStatementCount',
+    'setupStatements','statementCount','statementsSha256','expectedAddedSchemaSha256','expectedAddedObjectCount','statements'])
+    || fixture.schemaVersion !== 1 || fixture.sourceMigrationSha256 !== POST0226_STAFF_LOGIN_MIGRATION_SHA256
+    || fixture.wranglerCliSha256 !== 'a1a7a98e0b073d39dc3229b1b89f66accb51ae557fb34552250f914f12a81efd'
+    || fixture.splitterOutputStatementCount !== 25 || canonicalStaffReadiness(fixture.setupStatements) !== canonicalStaffReadiness(['PRAGMA foreign_keys = ON'])
+    || fixture.statementCount !== 24 || !Array.isArray(fixture.statements) || fixture.statements.length !== 24
+    || fixture.statements.some(statement => typeof statement !== 'string' || statement.length === 0)
+    || hash(JSON.stringify(fixture.statements)) !== POST0226_WIRE_STATEMENTS_SHA256
+    || fixture.statementsSha256 !== POST0226_WIRE_STATEMENTS_SHA256
+    || fixture.expectedAddedSchemaSha256 !== POST0226_WIRE_SCHEMA_SHA256 || fixture.expectedAddedObjectCount !== 23)
+    fail('wire_fixture_invalid');
+
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec('PRAGMA foreign_keys=ON');
+    db.exec(`CREATE TABLE staff_users(id TEXT PRIMARY KEY,email TEXT NOT NULL,display_name TEXT NOT NULL,access_subject TEXT,status TEXT NOT NULL);
+      CREATE TABLE staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT);
+      CREATE TABLE staff_permission_overrides(staff_id TEXT,permission_key TEXT,effect TEXT,scope TEXT);
+      CREATE TABLE native_staff_profiles(staff_id TEXT PRIMARY KEY,version INTEGER NOT NULL,updated_at TEXT);`);
+    for (const statement of fixture.statements) db.exec(statement);
+    const full = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE sql IS NOT NULL AND substr(name,1,12)='staff_login_' ORDER BY type,name").all();
+    const digest = hash(JSON.stringify(full.map(row => [row.type,row.name,row.tbl_name,row.sql])));
+    if (full.length !== fixture.expectedAddedObjectCount || digest !== POST0226_WIRE_SCHEMA_SHA256)
+      fail('wire_fixture_schema_mismatch');
+    return full.map(({ type, name, sql }) => ({ type, name, sql }));
+  } catch (error) {
+    if (error?.message?.startsWith('post0226_staff_preservation:')) throw error;
+    fail('wire_fixture_schema_generation_failed');
+  } finally { db.close(); }
+}
+
 /** Exact schema contract is pinned to the complete migration object inventory and
  * ordered columns. Unknown objects beneath the staff_login_ prefix fail closed. */
 export async function validatePost0226Schema({ schema, columns, migrationPath = path.join(ROOT, 'apps/operations/migrations/0226_staff_login_bindings.sql') } = {}) {
@@ -64,6 +104,7 @@ export async function validatePost0226Schema({ schema, columns, migrationPath = 
     expected = db.prepare("SELECT type,name,sql FROM sqlite_master WHERE substr(name,1,12)='staff_login_' ORDER BY type,name").all();
   } catch { fail('migration_schema_generation_failed'); }
   finally { db.close(); }
+  const wireExpected = await expectedPost0226WireSchema();
   const objectTypes = new Map([
     ...Object.keys(POST0226_LOGIN_TABLES).map(n => [n,'table']),
     ['staff_login_bindings_active_email','index'], ['staff_login_bindings_active_subject','index'],
@@ -76,7 +117,9 @@ export async function validatePost0226Schema({ schema, columns, migrationPath = 
   const actual = [...schema].sort((a,b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
   if (actual.some(row => !objectTypes.has(row.name) || row.type !== objectTypes.get(row.name))
     || new Set(actual.map(r => r.name)).size !== objectTypes.size || objectTypes.size !== 23) fail('schema_inventory_unknown_or_incomplete');
-  if (canonicalStaffReadiness(actual) !== canonicalStaffReadiness(expected)) fail('schema_definition_mismatch');
+  const actualCanonical = canonicalStaffReadiness(actual);
+  if (actualCanonical !== canonicalStaffReadiness(expected)
+    && actualCanonical !== canonicalStaffReadiness(wireExpected)) fail('schema_definition_mismatch');
   if (!exact(columns, Object.keys(POST0226_LOGIN_TABLES))) fail('schema_columns_invalid');
   for (const [table, expected] of Object.entries(POST0226_LOGIN_TABLES)) {
     const got = columns[table];

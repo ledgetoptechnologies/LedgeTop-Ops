@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { canonicalStaffReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
@@ -14,7 +15,7 @@ const sourceCommit = 'a'.repeat(40), observedAt = '2026-10-31T10:00:00.000Z', no
 const sha = text => createHash('sha256').update(text).digest('hex');
 const clone = value => structuredClone(value);
 
-function schemaFixture() {
+function schemaFixture({ wire = false } = {}) {
   const db = new DatabaseSync(':memory:');
   db.exec(`CREATE TABLE staff_users(id TEXT PRIMARY KEY,email TEXT NOT NULL,display_name TEXT NOT NULL,access_subject TEXT,status TEXT NOT NULL);
     CREATE TABLE staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT);
@@ -22,7 +23,11 @@ function schemaFixture() {
     CREATE TABLE native_staff_profiles(staff_id TEXT PRIMARY KEY,version INTEGER NOT NULL,updated_at TEXT);
     CREATE TABLE native_staff_admissions(staff_id TEXT PRIMARY KEY,version INTEGER NOT NULL,active INTEGER NOT NULL);`);
   const migration = requireMigration();
-  db.exec(migration);
+  if (wire) {
+    const fixture = JSON.parse(readFileSync(new URL('../scripts/fixtures/production-ops-0226-wrangler-wire-statements.json', import.meta.url), 'utf8'));
+    db.exec('PRAGMA foreign_keys=ON');
+    for (const statement of fixture.statements) db.exec(statement);
+  } else db.exec(migration);
   const schema = JSON.parse(JSON.stringify(db.prepare("SELECT type,name,sql FROM sqlite_master WHERE substr(name,1,12)='staff_login_' ORDER BY type,name").all()));
   const columns = Object.fromEntries(Object.entries(POST0226_LOGIN_TABLES).map(([table]) => [table,
     db.prepare(`SELECT name FROM pragma_table_info('${table}') ORDER BY cid`).all().map(row => row.name)]));
@@ -69,6 +74,21 @@ test('migration pin and complete schema definition/inventory are exact', async (
     await assert.rejects(validatePost0226Schema({ ...fixture, schema: altered }), /schema_definition_mismatch/u);
     const partial = clone(fixture.columns); partial.staff_login_bindings.pop();
     await assert.rejects(validatePost0226Schema({ ...fixture, columns: partial }), /schema_columns_mismatch/u);
+  } finally { fixture.db.close(); }
+});
+
+test('accepts only the exact pinned guarded-Wrangler DDL reconstruction and rejects local SQL edits', async () => {
+  migrationText ??= await readFile(new URL('../apps/operations/migrations/0226_staff_login_bindings.sql', import.meta.url), 'utf8');
+  const fixture = schemaFixture({ wire: true });
+  try {
+    assert.match(await validatePost0226Schema(fixture), /^[a-f0-9]{64}$/u);
+    const semanticChange = clone(fixture.schema);
+    const linked = semanticChange.find(row => row.name === 'staff_login_binding_linked');
+    linked.sql = linked.sql.replace('generation=generation+1', 'generation=generation+2');
+    await assert.rejects(validatePost0226Schema({ ...fixture, schema: semanticChange }), /schema_definition_mismatch/u);
+    const arbitraryComment = clone(fixture.schema);
+    arbitraryComment.find(row => row.name === 'staff_login_binding_linked').sql += ' /* additional comment */';
+    await assert.rejects(validatePost0226Schema({ ...fixture, schema: arbitraryComment }), /schema_definition_mismatch/u);
   } finally { fixture.db.close(); }
 });
 
