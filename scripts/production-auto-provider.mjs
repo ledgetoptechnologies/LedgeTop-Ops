@@ -37,6 +37,21 @@ function abortablePause(ms, signal) {
     signal?.addEventListener('abort', abort, { once: true });
   });
 }
+async function cancelVerifierRetryBody(response, signal, timeoutMs, onTimeout) {
+  if (!response.body) return;
+  let timer, onAbort;
+  const cancelled = Promise.resolve().then(() => response.body.cancel()).catch(() => {});
+  const boundary = new Promise((_, reject) => {
+    timer = setTimeout(() => { onTimeout?.(); reject(Error('verifier_readiness_timeout')); }, Math.max(0, timeoutMs));
+    if (signal) {
+      onAbort = () => reject(Error('verifier_fetch_aborted'));
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    }
+  });
+  try { await Promise.race([cancelled, boundary]); }
+  finally { clearTimeout(timer); if (onAbort) signal.removeEventListener('abort', onAbort); }
+}
 const jwt = value => typeof value === "string" && value.length <= 16384 && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u.test(value);
 const prod = name => { need(WORKERS.includes(name)); return name; };
 const version = id => { need(typeof id === "string" && UUID.test(id)); return id; };
@@ -358,7 +373,7 @@ export class ProductionCloudflareProvider {
             headers: { Authorization: "Bearer " + bearer, "Accept-Encoding": "identity" }, signal: requestSignal }), readinessExpired, aborted]);
         } finally { clearTimeout(readinessTimer); requestSignal.removeEventListener('abort', onAbort); }
         if (!retryableVerifierResponse(response, method)) return response;
-        try { await response.body?.cancel(); } catch { /* Discard retry response bodies even when cancellation races. */ }
+        await cancelVerifierRetryBody(response, signal, deadline - performance.now(), () => attemptController.abort());
         if (attempt + 1 >= VERIFIER_READINESS_ATTEMPTS) fail();
         const delay = Math.min(VERIFIER_READINESS_BACKOFF_MS[attempt], deadline - performance.now());
         need(delay > 0);

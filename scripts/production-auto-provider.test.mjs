@@ -19,6 +19,22 @@ function setup(fetchImpl = async () => ok({}), overrides = {}) {
     recordIntent: async value => { intents.push(value); }, persistResponse: async value => { persisted.push(value); }, ...overrides });
   return { provider, intents, persisted };
 }
+async function ownedVerifierFixture(assetFetch, overrides = {}) {
+  const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName();
+  const entry = { path: "/assets/test.js", size: 1, sha256: hash("x"), contentType: "application/javascript" };
+  const state = setup(async (url, init) => {
+    if (url.includes(".workers.dev")) return assetFetch(url, init);
+    if (init.method === "PUT") return ok({ id: candidate });
+    if (url.endsWith("/settings")) return ok({ bindings: [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }] });
+    if (url.endsWith("/subdomain") && init.method === "POST") return ok({ enabled: true, previews_enabled: false });
+    if (url.endsWith("/workers/subdomain")) return ok({ subdomain: "synthetic" });
+    if (url.endsWith("/subdomain")) return ok({ enabled: true, previews_enabled: false });
+    return Response.json({ success: false }, { status: 404 });
+  }, overrides);
+  await state.provider.createVerifier({ name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [entry],
+    nonceHash: nonce.nonceHash, versionId: parent });
+  return { ...state, nonce, name, entry };
+}
 function creation() {
   const js = Buffer.from("export default {fetch(){return new Response('ok')}};\n//# sourceMappingURL=index.js.map\n");
   const map = Buffer.from(JSON.stringify({ version: 3, file: "index.js", sources: ["original.ts"], sourcesContent: ["export default {}"], mappings: "" }));
@@ -291,6 +307,44 @@ test("owned verifier readiness retries do not retry provider mutations or transp
   setTimeout(() => controller.abort(), 5);
   await assert.rejects(read, /no_retry/u);
   assert.equal(hungCalls, 1, "caller cancellation stops readiness even when an injected fetch ignores AbortSignal");
+});
+
+test("owned verifier retry-body cancellation is covered by the readiness deadline", { timeout: 20_000 }, async () => {
+  let calls = 0, cancellationStarted = false, requestSignal;
+  const state = await ownedVerifierFixture(async (_url, init) => {
+    calls++;
+    requestSignal = init.signal;
+    return new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode("platform html")); },
+      cancel() { cancellationStarted = true; return new Promise(() => {}); },
+    }), { status: 404, headers: { "Content-Type": "text/html" } });
+  });
+  await assert.rejects(state.provider.fetchVerifierAsset({ name: state.name, path: state.entry.path,
+    method: "GET", bearer: state.nonce.bearer }), /no_retry/u);
+  assert.equal(cancellationStarted, true, "retry response disposal was attempted");
+  assert.equal(calls, 1, "a stalled cancellation cannot extend readiness or start another read");
+  assert.equal(requestSignal.aborted, true, "deadline abort also releases the underlying response transport");
+});
+
+test("caller abort stops while discarding a retry response body", async () => {
+  let calls = 0, cancellationStarted, requestSignal;
+  const state = await ownedVerifierFixture(async (_url, init) => {
+    calls++;
+    requestSignal = init.signal;
+    return new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode("platform html")); },
+      cancel() { cancellationStarted(); return new Promise(() => {}); },
+    }), { status: 404, headers: { "Content-Type": "text/html" } });
+  });
+  const controller = new AbortController();
+  const cancellation = new Promise(resolve => { cancellationStarted = resolve; });
+  const read = state.provider.fetchVerifierAsset({ name: state.name, path: state.entry.path,
+    method: "GET", bearer: state.nonce.bearer, signal: controller.signal });
+  await cancellation;
+  controller.abort();
+  await assert.rejects(read, /no_retry/u);
+  assert.equal(calls, 1, "caller abort during disposal cannot start another read");
+  assert.equal(requestSignal.aborted, true, "caller abort also releases the underlying response transport");
 });
 
 test("existing or mismatched temporary Worker is never enabled, and ambiguous creation can be cleaned once", async () => {
