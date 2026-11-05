@@ -29,8 +29,9 @@ classifier accepts later source commits only when both complete migration
 inventories and their Git blob bodies still match this profile. New or changed
 migrations, ledger order, or application schema definitions fail closed.
 
-The classification and release-admission helpers are not wired into either
-production runtime. They return held evidence with
+The exact canonical-v4 path in both automatic-release runtime adapters now uses
+these source helpers. The change has not been deployed. Their receipts preserve
+installed schemas without declaring them application-ready, and keep
 `allSourceMigrationsInstalled`, `applicationSchemaReady`, DDL, migration
 authorization, and feature activation all false. `createInstalledSchemaPreservationSession`
 accepts the pinned account, source commit, selected app, v4 profile, and a
@@ -54,8 +55,8 @@ Production freshness uses the system wall clock and monotonic process clock.
 Clock, fetch, and evidence hooks exist only in the explicitly named fake-HTTP
 test factory; its sessions and receipts have separate private brands. The
 production session does not establish source/CI provenance or owner approval.
-Existing runtime source and CI fences must validate those independently before
-future wiring; this held profile is not activation authority. Call `close()`
+Existing runtime source and CI fences validate those independently; this
+preservation profile is not activation authority. Call `close()`
 when finished to clear the session's in-memory token.
 
 Run the focused offline checks with:

@@ -27,6 +27,8 @@ const captureArtifact = JSON.parse(fs.readFileSync(capturePath, 'utf8'));
 const metadataArtifact = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
 need(captureArtifact.observedAt && captureArtifact.sha256 === '3d8dde3b9c7ae611c4eb2922cb3e49b3283820b80e836267c5d5bbcf2ffcdf30',
   'actual final capture receipt identity changed');
+need(createHash('sha256').update(canonical(captureArtifact.snapshot)).digest('hex') === captureArtifact.sha256,
+  'actual final capture body does not match its pinned receipt');
 need(metadataArtifact.accountId === accountId && metadataArtifact.readOnly === true
   && metadataArtifact.executesDDL === false, 'actual metadata receipt identity changed');
 need(canonical(PROFILE) && (await import('node:crypto')).createHash('sha256').update(canonical(PROFILE)).digest('hex')
