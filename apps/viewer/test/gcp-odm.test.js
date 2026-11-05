@@ -23,6 +23,18 @@ test('ODM GCP list emits a valid NAVD88 compound CRS for Emlid NAD83(2011) coord
   }]), 'EPSG:6319\n-88.1 44.5 250 1 2 photo.jpg\n');
   assert.throws(() => odmGcpList([{
     longitude: -88.1, latitude: 44.5, elevationM: 250, pixelX: 1, pixelY: 2,
+    relativePath: 'photo.jpg', horizontalCrs: 'EPSG:6318', verticalDatum: 'NAVD88(GEOID18) height',
+  }], { requireSupportedTransform: true }), (error) => error.code === 'gcp_vertical_transform_unavailable');
+  assert.equal(odmGcpList([{
+    longitude: -88.1, latitude: 44.5, elevationM: 250, ellipsoidalHeightM: 219.6,
+    pixelX: 1, pixelY: 2, relativePath: 'photo.jpg', horizontalCrs: 'EPSG:6318', verticalDatum: 'NAVD88(GEOID18) height',
+  }], { heightSource: 'ellipsoidal', requireSupportedTransform: true }), 'EPSG:6319\n-88.1 44.5 219.6 1 2 photo.jpg\n');
+  assert.throws(() => odmGcpList([{
+    longitude: -88.1, latitude: 44.5, elevationM: 250, ellipsoidalHeightM: null,
+    pixelX: 1, pixelY: 2, relativePath: 'photo.jpg', horizontalCrs: 'EPSG:6318', verticalDatum: 'NAVD88(GEOID18) height',
+  }], { heightSource: 'ellipsoidal', requireSupportedTransform: true }), (error) => error.code === 'gcp_ellipsoidal_height_missing');
+  assert.throws(() => odmGcpList([{
+    longitude: -88.1, latitude: 44.5, elevationM: 250, pixelX: 1, pixelY: 2,
     relativePath: 'photo.jpg', horizontalCrs: 'EPSG:4326', verticalDatum: 'NAVD88(GEOID18) height',
   }]), (error) => error.code === 'invalid_gcp_correspondence', 'fail closed rather than write an invalid or misleading compound CRS');
   assert.throws(() => odmGcpList([

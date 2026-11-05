@@ -129,7 +129,7 @@ function frameStream(records, version, domain) {
 function gcpEvidenceStream(evidenceBytes, attemptId, schemaVersion = 2) {
   if (!Buffer.isBuffer(evidenceBytes) || evidenceBytes.length < 1 || evidenceBytes.length > MAX_GCP_EVIDENCE_BYTES
     || typeof attemptId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(attemptId)
-    || ![1, 2].includes(schemaVersion)) {
+    || ![1, 2, 3].includes(schemaVersion)) {
     throw new HeldSourceExport('gcp_evidence_stream_invalid');
   }
   const version = schemaVersion === 1 ? GCP_EVIDENCE_VERSION_V1 : GCP_EVIDENCE_VERSION;
@@ -255,8 +255,8 @@ function generatedGcpFileStream(fileBytes, attemptId, evidenceSha256) {
 }
 
 function assertGcpEvidence(evidence, filesById) {
-  if (!evidence || ![1, 2].includes(evidence.schemaVersion) || !Array.isArray(evidence.correspondences)
-    || (evidence.schemaVersion === 2 && !evidence.coordinateContract)
+  if (!evidence || ![1, 2, 3].includes(evidence.schemaVersion) || !Array.isArray(evidence.correspondences)
+    || (evidence.schemaVersion >= 2 && !evidence.coordinateContract)
     || (evidence.schemaVersion === 1 && Object.hasOwn(evidence, 'coordinateContract'))) throw new HeldSourceExport('gcp_evidence_unavailable');
   const refs = new Map();
   for (const mark of evidence.correspondences) {
