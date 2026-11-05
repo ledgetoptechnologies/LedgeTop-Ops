@@ -199,20 +199,26 @@ test('Ops default provider and real coordinator finish a 28-bucket release with 
       minimumRetentionHours: 48, automaticPruning: false, allHistoricalAssetsCarried: true,
       moduleSHA256: hash(Buffer.from(clientModule.content_base64, 'base64')), ledgerSHA256: hash(ledgerBytes(clientLedger)) } };
   const intents = [], journalReceipts = [], privateResponses = [], providerCalls = [], verifierVersions = new Map(), activeVerifiers = new Set();
-  const verifiedReads = [], apiBase = `https://api.cloudflare.com/client/v4/accounts/${NATIVE_STAFF_PRODUCTION_TARGET.accountId}`;
+  const verifiedReads = [], verifierSources = new Map(), verifierBindings = new Map();
+  let deploymentHeadReads = 0, exactCiRunReads = 0, mainCommitReads = 0, cloudflareGetReads = 0;
+  const apiBase = `https://api.cloudflare.com/client/v4/accounts/${NATIVE_STAFF_PRODUCTION_TARGET.accountId}`;
   const appByWorker = Object.fromEntries(Object.entries(PROFILE.workers).map(([app, spec]) => [spec.name, app]));
   const okay = (result, status = 200) => Response.json({ success: true, errors: [], result }, { status });
   let bucketCount = 0, bucketPosts = 0, currentLedger, candidateVersion, candidateModern;
   const fetchImpl = async (url, init = {}) => {
     const parsed = new URL(url), method = init.method ?? 'GET'; providerCalls.push({ url, method });
     if (parsed.origin === 'https://api.github.com') {
-      if (parsed.pathname.endsWith('/commits/main')) return Response.json({ sha: source });
-      if (parsed.pathname.endsWith('/actions/workflows/ci.yml/runs')) return Response.json({ total_count: 1, workflow_runs: [ciRun] });
-      if (parsed.pathname.endsWith(`/actions/runs/${ciRun.id}/jobs`)) return Response.json({ total_count: jobs.length, jobs });
+      if (parsed.pathname.endsWith('/commits/main')) { mainCommitReads++; return Response.json({ sha: source }); }
+      if (parsed.pathname.endsWith('/actions/workflows/ci.yml/runs')) { exactCiRunReads++; return Response.json({ total_count: 1, workflow_runs: [ciRun] }); }
+      if (parsed.pathname.endsWith(`/actions/runs/${ciRun.id}/jobs`)) { exactCiRunReads++; return Response.json({ total_count: jobs.length, jobs }); }
       throw Error(`unexpected fake GitHub request ${parsed.pathname}`);
     }
     if (url.startsWith(apiBase)) {
       const suffix = parsed.pathname.slice(new URL(apiBase).pathname.length) + parsed.search;
+      if (method === 'GET') {
+        cloudflareGetReads++;
+        if (Object.values(PROFILE.workers).some(spec => suffix === `/workers/scripts/${spec.name}/deployments?per_page=1`)) deploymentHeadReads++;
+      }
       if (suffix === '/workers/subdomain') return okay({ subdomain: 'synthetic-account' });
       const temporary = suffix.match(/^\/workers\/scripts\/(ops-ui-verify-[a-f0-9]{24})(?:\/(.*))?$/u);
       if (temporary) {
@@ -220,15 +226,22 @@ test('Ops default provider and real coordinator finish a 28-bucket release with 
         if (method === 'GET' && !tail) return activeVerifiers.has(name) ? okay({ id: name })
           : Response.json({ success: false, errors: [{ code: 10007 }] }, { status: 404 });
         if (method === 'PUT') {
-          const workerSource = await init.body.get('index.js').text();
+          const workerSource = await init.body.get('index.js').text(), metadata = JSON.parse(init.body.get('metadata'));
+          verifierSources.set(name, workerSource); verifierBindings.set(name, metadata.bindings);
           verifierVersions.set(name, workerSource.includes(candidateId) ? candidateId : ops.parentId); activeVerifiers.add(name);
           return okay({ id: candidateId });
         }
+        if (tail === 'versions?per_page=1' && method === 'GET') return okay({ items: [{ id: verifierVersions.get(name) }] });
+        const verifierVersion = tail.match(/^versions\/([a-f0-9-]+)$/u);
+        if (verifierVersion && method === 'GET') return okay({ id: verifierVersion[1], resources: { bindings: verifierBindings.get(name) } });
         if (tail === 'settings') return okay({ bindings: [{ name: 'SOURCE_ASSETS', type: 'service', service: 'ledgetop-ops', environment: 'production' }] });
         if (tail === 'subdomain' && method === 'POST') return okay({ enabled: true, previews_enabled: false });
         if (tail === 'subdomain') return okay({ enabled: true, previews_enabled: false });
         if (method === 'DELETE') { activeVerifiers.delete(name); return okay({}); }
       }
+      const temporaryModern = suffix.match(/^\/workers\/workers\/(ops-ui-verify-[a-f0-9]{24})\/versions\/([a-f0-9-]+)\?include=modules$/u);
+      if (temporaryModern && method === 'GET') return okay({ id: temporaryModern[2], modules: [{ name: 'index.js',
+        content_base64: Buffer.from(verifierSources.get(temporaryModern[1])).toString('base64') }] });
       if (suffix === '/workers/scripts/ledgetop-ops/assets-upload-session' && method === 'POST') {
         const manifest = JSON.parse(init.body).manifest, hashes = [...new Set(Object.values(manifest).map(row => row.hash))];
         bucketCount = hashes.length;
@@ -289,7 +302,8 @@ test('Ops default provider and real coordinator finish a 28-bucket release with 
     }
     throw Error(`unexpected fake provider URL ${url}`);
   };
-  let preservationReads = 0;
+  let preservationReads = 0, predecessorReads = 0, initialPreservationObservation = true;
+  const buildDelay = new Int32Array(new SharedArrayBuffer(4));
   const env = { PRODUCTION_AUTO_RELEASE_ENABLED: 'true', PRODUCTION_AUTO_WORKER: 'ledgetop-ops',
     CLOUDFLARE_ACCOUNT_ID: NATIVE_STAFF_PRODUCTION_TARGET.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
     GITHUB_RUN_ID: String(workflowRunId), GITHUB_RUN_ATTEMPT: String(workflowRunAttempt),
@@ -304,14 +318,28 @@ test('Ops default provider and real coordinator finish a 28-bucket release with 
           recordIntent: async value => { intents.push(structuredClone(value)); },
           persistResponse: async value => { privateResponses.push({ method: value.method, status: value.status }); },
         }), migrationReader: async () => migrationFixture(source),
-        preservationReader: async ({ sourceCommit }) => { preservationReads++; return preservationObservation(sourceCommit); },
-        predecessorReader: async () => predecessorProof, buildRunner: () => {}, buildArtifactsReader: () => artifact }) });
+        preservationReader: async ({ sourceCommit }) => {
+          preservationReads++;
+          const observedAt = new Date(Date.now() - (initialPreservationObservation ? 59_000 : 0)).toISOString();
+          initialPreservationObservation = false;
+          return preservationObservation(sourceCommit, observedAt);
+        },
+        predecessorReader: async () => { predecessorReads++; return predecessorProof; },
+        buildRunner: () => { Atomics.wait(buildDelay, 0, 0, 1_200); }, buildArtifactsReader: () => artifact }) });
     const buckets = intents.filter(row => row.phase === 'asset-bucket');
     assert.ok(buckets.length > 25);
     assert.equal(bucketPosts, bucketCount);
     assert.equal(buckets.length, bucketCount);
-    assert.equal(preservationReads, buckets.length + 7);
+    assert.equal(preservationReads, buckets.length + 8,
+      'the aged pre-build preservation receipt is refreshed once at the post-build verifier preparation boundary');
     assert.ok(preservationReads <= 250);
+    assert.equal(deploymentHeadReads % 6, 0, 'each complete stable capture rereads the three deployment heads twice');
+    const fullCaptures = deploymentHeadReads / 6;
+    assert.equal(fullCaptures, 49, 'the joined path uses one full capture per prewrite intent plus lifecycle readbacks');
+    assert.equal(cloudflareGetReads, 1272, 'the joined fixture measured capture, verifier and candidate GETs');
+    assert.equal(exactCiRunReads, 92, '46 exact main-CI run and jobs validations were made');
+    assert.equal(mainCommitReads, 128, 'exact main-CI validation and coordinator source fences were measured');
+    assert.equal(predecessorReads, 1, 'the immutable exact-main predecessor artifact is fetched once per run');
     assert.equal(result.verifiedActive, true);
     assert.equal(journalReceipts.at(-1).status, 'verified');
     assert.ok(verifiedReads.some(row => row.path === '/index.html' && row.version === ops.parentId));
@@ -518,7 +546,7 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
     clientState.version.id = currentActive;
     clientState.modern.id = currentActive;
   }
-  const calls = [], intents = [], publicReceipts = [], privateResponses = [], verifierVersions = new Map();
+  const calls = [], intents = [], publicReceipts = [], privateResponses = [], verifierVersions = new Map(), activeVerifiers = new Set();
   const sourceCommit = 'a'.repeat(40), candidateId = '44444444-4444-4444-8444-444444444444';
   let uploadedLedger;
   const moduleBytes = Buffer.from('export default {fetch(){return new Response("synthetic")}};');
@@ -538,6 +566,7 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
   const appByWorker = Object.fromEntries(Object.entries(PROFILE.workers).map(([app, spec]) => [spec.name, app]));
   const now = () => fixture.snapshots.client;
   let candidateLegacyReadAttempts = 0, candidateVisibility404s = 1, migrationDrift = false, activationMethodCalls = 0, activationDispatches = 0;
+  const verifierSources = new Map(), verifierBindings = new Map();
   const fetchImpl = async (url, init = {}) => {
     const parsed = new URL(url); calls.push({ url, method: init.method ?? 'GET', headers: init.headers });
     if (parsed.origin === 'https://api.github.com') {
@@ -551,18 +580,27 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
       if (suffix === '/workers/subdomain') return ok({ subdomain: 'synthetic-account' });
       const temp = suffix.match(/^\/workers\/scripts\/(ops-ui-verify-[a-f0-9]{24})(?:\/(.*))?$/u);
       if (temp) {
-        const [, name, tail] = temp;
-        if (init.method === 'GET' && !tail) return Response.json({ success: false, errors: [{ code: 10007 }] }, { status: 404 });
+        const [, name, tail = ''] = temp;
+        if (init.method === 'GET' && !tail) return activeVerifiers.has(name) ? ok({ id: name })
+          : Response.json({ success: false, errors: [{ code: 10007 }] }, { status: 404 });
         if (init.method === 'PUT') {
-          const source = await init.body.get('index.js').text();
+          const source = await init.body.get('index.js').text(), metadata = JSON.parse(init.body.get('metadata'));
+          verifierSources.set(name, source); verifierBindings.set(name, metadata.bindings);
           verifierVersions.set(name, source.includes(candidateId) ? candidateId : fixture.snapshots.client.parentId);
+          activeVerifiers.add(name);
           return ok({ id: candidateId });
         }
+        if (tail === 'versions?per_page=1') return ok({ items: [{ id: verifierVersions.get(name) }] });
+        const verifierVersion = tail.match(/^versions\/([a-f0-9-]+)$/u);
+        if (verifierVersion) return ok({ id: verifierVersion[1], resources: { bindings: verifierBindings.get(name) } });
         if (tail === 'settings') return ok({ bindings: [{ name: 'SOURCE_ASSETS', type: 'service', service: 'ledgetop-clients', environment: 'production' }] });
         if (tail === 'subdomain' && init.method === 'POST') return ok({ enabled: true, previews_enabled: false });
         if (tail === 'subdomain') return ok({ enabled: true, previews_enabled: false });
-        if (init.method === 'DELETE') return ok({});
+        if (init.method === 'DELETE') { activeVerifiers.delete(name); return ok({}); }
       }
+      const temporaryModern = suffix.match(/^\/workers\/workers\/(ops-ui-verify-[a-f0-9]{24})\/versions\/([a-f0-9-]+)\?include=modules$/u);
+      if (temporaryModern) return ok({ id: temporaryModern[2], modules: [{ name: 'index.js',
+        content_base64: Buffer.from(verifierSources.get(temporaryModern[1])).toString('base64') }] });
       if (suffix === '/workers/scripts/ledgetop-clients/assets-upload-session' && init.method === 'POST') {
         assert.match(init.headers.Authorization, /^Bearer [A-Za-z0-9_-]{32,}$/u);
         return ok({ jwt: 'synthetic.uploadsession.jwt', buckets: [] });

@@ -31,6 +31,8 @@ import { assetBootstrapVerificationEntries, completeAssetInventoryBootstrap, pre
   readPinnedAssetInventoryBootstrap } from './production-auto-asset-bootstrap.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const INTENT_FENCE_MAX_AGE_MS = 30_000;
+const POST0226_RECEIPT_MAX_AGE_MS = 60_000;
 const SHA = /^[a-f0-9]{64}$/u, UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const WORKERS = Object.freeze({ operations: { name: 'ledgetop-ops', origin: 'https://ops.ledgetop.app' },
   client: { name: 'ledgetop-clients', origin: 'https://portal.ledgetop.app' } });
@@ -226,8 +228,21 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   };
   let provider, journal, build, baselineCapture, expectedCapture, previousLedger, assetBootstrap, candidateVersionId, verifiedCI;
   let durableRuntime = null, candidateReadbackVerified = false;
-  let predecessorOwnState;
+  let predecessorOwnState, predecessorProof;
   let pendingCoordinatorFence = null, pendingTransition = null, verifiedDeploymentVersions = null;
+  let preflightLease = null, dispatchLease = null, verifiedCIStartedMono = null;
+  const ownedVerifierSourceHashes = new Map();
+  const leaseFresh = lease => lease && Number.isFinite(lease.startedMono)
+    && performance.now() >= lease.startedMono && performance.now() - lease.startedMono <= INTENT_FENCE_MAX_AGE_MS;
+  const makePreflightLease = (observed, startedMono) => {
+    need(verifiedCI?.passed === true && verifiedCI.sourceCommit === sourceCommit
+      && verifiedCI.runId === triggerRun.runId && verifiedCI.runAttempt === triggerRun.runAttempt
+      && Number.isFinite(verifiedCIStartedMono) && performance.now() - verifiedCIStartedMono <= INTENT_FENCE_MAX_AGE_MS,
+    'runtime_intent_preflight_ci_stale');
+    preflightLease = { sourceCommit, mainCommit: sourceCommit, runId: verifiedCI.runId, runAttempt: verifiedCI.runAttempt,
+      observed, startedMono: Math.min(startedMono, verifiedCIStartedMono), coordinatorIntent: null };
+    return preflightLease;
+  };
   const currentCapture = async () => {
     const expectedWeights = pendingTransition ? (pendingTransition.versions.length === 2 ? pendingTransition.versions : null)
       : verifiedDeploymentVersions;
@@ -249,15 +264,30 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     if (usesV4SchemaPreservation) need(schemaPreservationAdmissionCheck(latestSchemaAdmission),
       'runtime_schema_preservation_admission_stale');
   };
-  const beforeDispatch = () => {
-    if (post0226Policy) assertProductionAutoPost0226PreservationReceiptFresh(post0226Policy,
-      preservationReceipts.at(-1), { sourceCommit });
+  const beforeDispatch = info => {
+    need(dispatchLease && !dispatchLease.consumed && info && info.requestId === dispatchLease.requestId
+      && (info.workerName === workerName || (info.workerName === undefined
+        && info.phase === 'temporary-verifier-enable' && ownedVerifierSourceHashes.has(info.name)))
+      && info.phase === dispatchLease.phase && info.path === dispatchLease.path
+      && canonical(info.hashes ?? []) === canonical(dispatchLease.hashes)
+      && (info.method === undefined ? dispatchLease.method === 'POST' : info.method === dispatchLease.method)
+      && leaseFresh(dispatchLease), 'runtime_mutation_dispatch_lease_invalid');
+    if (post0226Policy) {
+      assertProductionAutoPost0226PreservationReceiptFresh(post0226Policy,
+        preservationReceipts.at(-1), { sourceCommit });
+    }
     assertSchemaPreservationFresh();
+    need(sourceReader(ROOT, env) === sourceCommit && verifiedCI?.sourceCommit === sourceCommit
+      && verifiedCI.runId === dispatchLease.runId && verifiedCI.runAttempt === dispatchLease.runAttempt
+      && verifiedCI.passed === true, 'runtime_mutation_dispatch_source_stale');
+    dispatchLease.consumed = true;
+    dispatchLease = null;
   };
   const verifyPredecessor = async snapshot => {
     if (!predecessorHandoff) return;
-    const proof = validateProductionAutoPredecessorProof(await predecessorReader({ token: env.GITHUB_TOKEN,
+    predecessorProof ??= validateProductionAutoPredecessorProof(await predecessorReader({ token: env.GITHUB_TOKEN,
       ...predecessorHandoff, fetchImpl }), predecessorHandoff);
+    const proof = predecessorProof;
     need(proof.runtime.profileSha256 === productionAutoBuildProfileSHA256(), 'runtime_predecessor_profile_drift');
     const ledger = parseProductionAutoLedger(snapshot, app === 'operations' ? 'client' : 'operations',
       predecessorHandoff.workerName, accountId);
@@ -273,18 +303,35 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       expectedControlsSHA256: proof.startedReceipt.controlsSHA256 });
   };
   const assertFence = async () => {
+    const fenceStartedMono = performance.now();
     await checkMigrations();
+    verifiedCIStartedMono = performance.now();
     verifiedCI = await mainCI.verify(sourceCommit);
     need(sourceReader(ROOT, env) === sourceCommit && verifiedCI.passed === true,
       'runtime_source_or_main_drift');
     need(verifiedCI.runId === triggerRun.runId && verifiedCI.runAttempt === triggerRun.runAttempt, 'runtime_trigger_ci_run_superseded');
+    const captureStartedMono = performance.now();
     const observed = await currentCapture();
     await verifyPredecessor(observed.raw);
     if (expectedCapture) need(JSON.stringify(observed.value) === JSON.stringify(expectedCapture), 'runtime_capture_fence_drift');
+    makePreflightLease(observed, Math.min(fenceStartedMono, captureStartedMono));
     return observed;
   };
   const createJournalBeforeOldAssetRead = async baseline => {
     await checkMigrations();
+    if (post0226Policy) {
+      const prior = preservationReceipts.at(-1), timestamp = Date.parse(prior?.observedAt), now = Date.now();
+      need(Number.isFinite(timestamp) && timestamp <= now, 'runtime_post0226_preparation_receipt_invalid');
+      if (now - timestamp > POST0226_RECEIPT_MAX_AGE_MS) {
+        const observation = await preservationReader({ sourceCommit, env });
+        const refreshed = validateProductionAutoPost0226PreservationObservation(post0226Policy, observation, { sourceCommit });
+        preservationReceipts.push(refreshed);
+        if (preservationReceipts.length > 1) validateRepeatedProductionAutoPost0226PreservationReceipts(post0226Policy,
+          preservationReceipts, { sourceCommit });
+      }
+      assertProductionAutoPost0226PreservationReceiptFresh(post0226Policy,
+        preservationReceipts.at(-1), { sourceCommit });
+    }
     need(!journal, 'runtime_preparation_journal_already_claimed');
     need(build, 'runtime_preparation_build_missing');
     need(previousLedger, 'runtime_preparation_ledger_missing');
@@ -311,17 +358,57 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     need(journal && durableRuntime && intent && (intent.sourceCommit === undefined || intent.sourceCommit === sourceCommit)
       && (intent.workerName === undefined || intent.workerName === workerName),
       'runtime_mutation_fence_missing');
+    // Operations on the predecessor-backed lane bind the coordinator's exact
+    // current-capture/CI lease. Client and verifier mutations keep the legacy
+    // final runtime fence because they do not participate in that sequence.
+    if (!predecessorHandoff || intent.phase === 'temporary-verifier-enable') await assertFence();
     const sourceFence = pendingCoordinatorFence?.phase === intent.phase ? pendingCoordinatorFence : {
       sourceCommit, workerName, phase: intent.phase, hashes: [], parentVersionId: baselineCapture?.[app]?.version?.id,
       ...(candidateVersionId ? { candidateVersionId } : {}),
     };
     need(UUID.test(sourceFence.parentVersionId ?? ''), 'runtime_mutation_parent_missing');
-    const fenceCapture = await assertFence();
+    const lease = preflightLease;
+    need(leaseFresh(lease) && lease.sourceCommit === sourceCommit && lease.mainCommit === sourceCommit
+      && lease.runId === verifiedCI?.runId && lease.runAttempt === verifiedCI?.runAttempt
+      && lease.runId === triggerRun.runId && lease.runAttempt === triggerRun.runAttempt
+      && lease.observed && JSON.stringify(lease.observed.value) === JSON.stringify(expectedCapture),
+    'runtime_mutation_preflight_lease_stale');
+    if (!['temporary-verifier-create','temporary-verifier-enable'].includes(intent.phase)) {
+      if (predecessorHandoff) {
+        const providerPhase = ({ 'stage-zero': 'stage-zero-percent', activate: 'activate-candidate' })[sourceFence.phase]
+          ?? sourceFence.phase;
+        const requestedCoordinatorIntent = { sourceCommit: sourceFence.sourceCommit, workerName: sourceFence.workerName,
+          phase: providerPhase, hashes: sourceFence.hashes, parentVersionId: sourceFence.parentVersionId,
+          ...(sourceFence.candidateVersionId ? { candidateVersionId: sourceFence.candidateVersionId } : {}) };
+        need(lease.coordinatorIntent && canonical(lease.coordinatorIntent) === canonical(requestedCoordinatorIntent),
+          'runtime_mutation_preflight_intent_mismatch');
+      }
+    } else if (intent.phase === 'temporary-verifier-create') {
+      need(/^ops-ui-verify-[a-f0-9]{24}$/u.test(intent.name ?? '') && intent.workerName === workerName
+        && intent.path === `/workers/scripts/${intent.name}` && intent.method === 'PUT' && SHA.test(intent.sourceSHA256 ?? ''),
+      'runtime_temporary_verifier_create_intent_invalid');
+      ownedVerifierSourceHashes.set(intent.name, intent.sourceSHA256);
+    } else if (intent.phase === 'temporary-verifier-enable') {
+      need(/^ops-ui-verify-[a-f0-9]{24}$/u.test(intent.name ?? '')
+        && intent.path === `/workers/scripts/${intent.name}/subdomain` && intent.method === 'POST'
+        && ownedVerifierSourceHashes.has(intent.name), 'runtime_temporary_verifier_enable_intent_invalid');
+    }
+    const providerPhase = ({ 'stage-zero': 'stage-zero-percent', activate: 'activate-candidate' })[sourceFence.phase]
+      ?? sourceFence.phase;
+    need(intent.phase === providerPhase && canonical(intent.hashes ?? []) === canonical(sourceFence.hashes ?? [])
+      && (intent.parentVersionId === undefined || intent.parentVersionId === sourceFence.parentVersionId)
+      && (intent.candidateVersionId === undefined || intent.candidateVersionId === sourceFence.candidateVersionId),
+    'runtime_mutation_request_intent_mismatch');
+    const fenceCapture = lease.observed;
     const fence = { sourceCommit, workerName, phase: sourceFence.phase, hashes: sourceFence.hashes,
       parentVersionId: sourceFence.parentVersionId, ...(sourceFence.candidateVersionId
         ? { candidateVersionId: sourceFence.candidateVersionId } : {}) };
     need(JSON.stringify(fenceCapture.value) === JSON.stringify(expectedCapture), 'runtime_mutation_expected_state_drift');
     await journal.recordIntent({ ...intent, sourceCommit, coordinatorFence: fence });
+    dispatchLease = { requestId: intent.requestId, method: intent.method ?? 'POST', path: intent.path, phase: intent.phase,
+      hashes: intent.hashes ?? [], workerName: intent.workerName ?? workerName, sourceCommit,
+      runId: lease.runId, runAttempt: lease.runAttempt, startedMono: lease.startedMono, consumed: false };
+    preflightLease = null; pendingCoordinatorFence = null;
     // Arm a narrowly-derived expected deployment transition only after the
     // mutation intent is durable, but before the provider dispatches its POST.
     // Arming earlier would make the pre-dispatch fence expect a write that has
@@ -335,29 +422,75 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     if (provider) return;
     provider = providerFactory({ accountId, token, fetchImpl,
       recordIntent: persistIntent,
+      recordCleanupIntent: async value => {
+        need(journal && durableRuntime && value && Object.keys(value).sort().join(',')
+          === 'automaticRetry,method,name,path,phase,requestId,sourceSHA256,workerName'
+          && UUID.test(value.requestId ?? '') && value.method === 'DELETE'
+          && value.phase === 'temporary-verifier-delete' && value.workerName === workerName
+          && /^ops-ui-verify-[a-f0-9]{24}$/u.test(value.name ?? '')
+          && value.path === `/workers/scripts/${value.name}` && value.automaticRetry === false
+          && SHA.test(value.sourceSHA256 ?? '') && ownedVerifierSourceHashes.get(value.name) === value.sourceSHA256,
+        'runtime_temporary_verifier_cleanup_intent_invalid');
+        await journal.recordIntent({ ...value, sourceCommit });
+      },
       persistResponse: value => { need(journal, 'runtime_journal_not_claimed'); return journal.persistResponse(value); },
       beforeDispatch, profile });
   };
   const adapter = {
     sourceFence: async () => {
+      preflightLease = null;
+      const sourceStartedMono = performance.now();
+      const source = sourceReader(ROOT, env), mainCommit = await mainCI.mainCommit();
       if (predecessorHandoff) {
         await checkMigrations();
         ensureProvider();
+        const captureStartedMono = performance.now();
         const observed = await currentCapture(); await verifyPredecessor(observed.raw);
+        preflightLease = { sourceCommit: source, mainCommit, observed,
+          startedMono: Math.min(sourceStartedMono, captureStartedMono), coordinatorIntent: null };
       }
-      return { sourceCommit: sourceReader(ROOT, env), mainCommit: await mainCI.mainCommit(), clean: true };
+      return { sourceCommit: source, mainCommit, clean: true };
     },
     ciGate: async () => {
+      const ciStartedMono = performance.now();
       await checkMigrations();
       verifiedCI = await mainCI.verify(sourceCommit);
-      need(verifiedCI.runId === triggerRun.runId && verifiedCI.runAttempt === triggerRun.runAttempt, 'runtime_trigger_ci_run_superseded');
+      verifiedCIStartedMono = ciStartedMono;
+      need(verifiedCI.sourceCommit === sourceCommit && verifiedCI.passed === true
+        && verifiedCI.runId === triggerRun.runId && verifiedCI.runAttempt === triggerRun.runAttempt,
+      'runtime_trigger_ci_run_superseded');
       if (predecessorHandoff) {
-        ensureProvider(); const observed = await currentCapture(); await verifyPredecessor(observed.raw);
+        ensureProvider();
+        if (!preflightLease || preflightLease.sourceCommit !== sourceCommit || preflightLease.mainCommit !== sourceCommit
+          || !preflightLease.observed || performance.now() < preflightLease.startedMono
+          || performance.now() - preflightLease.startedMono > INTENT_FENCE_MAX_AGE_MS) {
+          const sourceCheckedMono = performance.now();
+          need(sourceReader(ROOT, env) === sourceCommit, 'runtime_source_or_main_drift');
+          const captureStartedMono = performance.now();
+          const observed = await currentCapture(); await verifyPredecessor(observed.raw);
+          preflightLease = { sourceCommit, mainCommit: sourceCommit, observed,
+            startedMono: Math.min(sourceCheckedMono, ciStartedMono, captureStartedMono), coordinatorIntent: null };
+        }
+        preflightLease.runId = verifiedCI.runId; preflightLease.runAttempt = verifiedCI.runAttempt;
       }
       return verifiedCI;
     },
     capture: async () => {
-      ensureProvider(); const observed = await currentCapture();
+      ensureProvider();
+      let observed;
+      if (preflightLease?.observed && preflightLease.sourceCommit === sourceCommit
+        && preflightLease.runId === verifiedCI?.runId && preflightLease.runAttempt === verifiedCI?.runAttempt
+        && leaseFresh({ startedMono: Math.min(preflightLease.startedMono, verifiedCIStartedMono) })) {
+        observed = preflightLease.observed;
+      } else {
+        need(sourceReader(ROOT, env) === sourceCommit && verifiedCI?.sourceCommit === sourceCommit
+          && verifiedCI.passed === true, 'runtime_capture_source_ci_stale');
+        const captureStartedMono = performance.now();
+        observed = await currentCapture(); await verifyPredecessor(observed.raw);
+        preflightLease = { sourceCommit, mainCommit: sourceCommit, observed,
+          startedMono: Math.min(captureStartedMono, verifiedCIStartedMono),
+          runId: verifiedCI?.runId, runAttempt: verifiedCI?.runAttempt, coordinatorIntent: null };
+      }
       if (!baselineCapture) { baselineCapture = observed.raw; expectedCapture = observed.value; }
       else if (pendingTransition) {
         const transition = pendingTransition; pendingTransition = null;
@@ -421,10 +554,15 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
         ? assetBootstrapVerificationEntries(ledger, verificationLedger)
         : assetVerifierEntries(ledger);
       const result = await executeAssetVerification({ entries: verificationEntries, timeoutMs: 300_000,
-        create: () => provider.createVerifier({ name, workerName, origin: target.origin, entries: verificationEntries,
-          nonceHash: nonce.nonceHash, versionId: baselineCapture[app].version.id }),
+        create: async () => {
+          const proof = await provider.createVerifier({ name, workerName, origin: target.origin, entries: verificationEntries,
+            nonceHash: nonce.nonceHash, versionId: baselineCapture[app].version.id });
+          ownedVerifierSourceHashes.set(name, proof.sourceSHA256);
+          return proof;
+        },
         fetchAsset: ({ path: assetPath }, { method, signal }) => provider.fetchVerifierAsset({ name, path: assetPath, method, bearer: nonce.bearer, signal }),
         remove: () => provider.removeVerifier(name), readAbsent: () => provider.verifierAbsent(name) });
+      ownedVerifierSourceHashes.delete(name);
       await assertFence();
       if (assetBootstrap) previousLedger = completeAssetInventoryBootstrap({ bootstrap: assetBootstrap,
         previous: ledger, verifiedAssets: result.assets, activeVersionId: baselineCapture[app].version.id, workerName, accountId });
@@ -507,9 +645,14 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName(), entries = assetVerifierEntries(ledger);
       const before = await assertFence();
       const result = await executeAssetVerification({ entries, timeoutMs: 300_000,
-        create: () => provider.createVerifier({ name, workerName, origin: target.origin, entries, nonceHash: nonce.nonceHash, versionId }),
+        create: async () => {
+          const proof = await provider.createVerifier({ name, workerName, origin: target.origin, entries, nonceHash: nonce.nonceHash, versionId });
+          ownedVerifierSourceHashes.set(name, proof.sourceSHA256);
+          return proof;
+        },
         fetchAsset: ({ path: assetPath }, { method, signal }) => provider.fetchVerifierAsset({ name, path: assetPath, method, bearer: nonce.bearer, signal }),
         remove: () => provider.removeVerifier(name), readAbsent: () => provider.verifierAbsent(name) });
+      ownedVerifierSourceHashes.delete(name);
       const after = await assertFence();
       need(JSON.stringify(before.value) === JSON.stringify(after.value) && result.assets.size === ledger.assets.length,
         'runtime_asset_proof_capture_drift');
@@ -518,9 +661,16 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
         files: ledger.assets.length, bytes: ledger.assets.reduce((sum, row) => sum + row.size, 0) };
     },
     recordIntent: async value => {
-      const observed = await assertFence();
-      need(expectedCapture && JSON.stringify(observed.value) === JSON.stringify(expectedCapture), 'runtime_coordinator_fence_refused');
+      const lease = preflightLease;
+      need(leaseFresh(lease) && lease.sourceCommit === sourceCommit && lease.mainCommit === sourceCommit
+        && lease.runId === verifiedCI?.runId && lease.runAttempt === verifiedCI?.runAttempt
+        && lease.observed && expectedCapture && JSON.stringify(lease.observed.value) === JSON.stringify(expectedCapture),
+      'runtime_coordinator_fence_refused');
       pendingCoordinatorFence = structuredClone(value);
+      lease.coordinatorIntent = { sourceCommit: value.sourceCommit, workerName: value.workerName,
+        phase: ({ 'stage-zero': 'stage-zero-percent', activate: 'activate-candidate' })[value.phase] ?? value.phase,
+        hashes: [...value.hashes], parentVersionId: value.parentVersionId,
+        ...(value.candidateVersionId ? { candidateVersionId: value.candidateVersionId } : {}) };
     },
     receipt: async value => {
       if (journal) {
