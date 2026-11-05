@@ -68,6 +68,13 @@ class SourceReleaseOutboxV1 {
     return read(this.database.prepare('SELECT * FROM viewer_source_release_outbox WHERE attempt_id=?').get(attemptId));
   }
 
+  noteRetry(attemptId, timestamp = new Date().toISOString()) {
+    if (typeof attemptId !== 'string' || !UUID.test(attemptId) || !Number.isFinite(Date.parse(timestamp))
+        || new Date(timestamp).toISOString() !== timestamp) fail('source_release_timestamp_invalid');
+    this.database.prepare('UPDATE viewer_source_release_outbox SET updated_at=? WHERE attempt_id=?')
+      .run(timestamp, attemptId);
+  }
+
   hold(attemptId, reason) {
     if (!Contract.HOLD_REASONS.has(reason)) fail('source_release_hold_reason_invalid');
     const intent = this.getIntent(attemptId);
