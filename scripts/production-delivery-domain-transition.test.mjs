@@ -7,9 +7,13 @@ import { compileDeliveryDomainTransition, compileDeliveryPublicLinkTransition, c
 import { NATIVE_DELIVERY_APP_DELIVERY_OVERLAP_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE, nativeDeliveryDeploymentEnabled } from '../apps/client/src/worker/operations-native-delivery-deployment.ts';
 
 const FROM='portal-entry-canonical', TO='delivery-public-canonical';
-const changed=['EXPECTED_HOST','PUBLIC_BASE_URL','PUBLIC_SHARE_ORIGIN','LEGACY_CLIENT_ORIGINS','CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE'].sort();
+const profileChanged=['LEGACY_CLIENT_ORIGINS','CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE'].sort();
+const historicalTransitionChanged=['EXPECTED_HOST','PUBLIC_BASE_URL','PUBLIC_SHARE_ORIGIN',...profileChanged].sort();
 function fixture() {
   const base=structuredClone(PROFILE), snapshot={}; let n=0;
+  // The synthetic pre-cutover installation predates the canonical Operations
+  // admin host; bind this fixture to the historical fallback, not v4 state.
+  delete base.onboardingAdminOrigin;
   for(const [app,spec] of Object.entries(base.workers)) {
     const defaults=JSON.parse(fs.readFileSync(new URL(`../apps/${app}/wrangler.jsonc`,import.meta.url))).vars;
     const vars=Object.fromEntries(spec.plainNames.map(name=>[name,defaults[name]??'synthetic-fixture']));
@@ -49,12 +53,12 @@ function patch(snapshot,app,name,text) {
   for(const bindings of [snapshot[app].version.resources.bindings,snapshot[app].settings.bindings]) bindings.find(row=>row.name===name).text=text;
 }
 
-test('delivery recognition changes exactly five Client scalars from portal-entry, preserving all other profiles',()=>{
+test('delivery recognition changes only the remaining Client delivery scalars from canonical portal entry',()=>{
   const before=domainRecognitionProfile(FROM), after=domainRecognitionProfile(TO);
   assert.deepEqual(after.workers.operations,before.workers.operations);
   assert.deepEqual(after.workers['ops-sync'],before.workers['ops-sync']);
   const hashes=before.workers.client.plainValueSHA256;
-  assert.deepEqual(Object.keys(hashes).filter(name=>hashes[name]!==after.workers.client.plainValueSHA256[name]).sort(),changed);
+  assert.deepEqual(Object.keys(hashes).filter(name=>hashes[name]!==after.workers.client.plainValueSHA256[name]).sort(),profileChanged);
   assert.equal(domainPhaseValues(TO).client.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE,NATIVE_DELIVERY_APP_DELIVERY_OVERLAP_PRODUCTION_PROFILE);
   assert.equal(domainPhaseValues(TO).client.CLIENT_PORTAL_ORIGIN,'https://portal.ledgetop.app');
   assert.equal(domainPhaseValues(TO).client.CLIENT_PORTAL_ORIGINS,domainPhaseValues(FROM).client.CLIENT_PORTAL_ORIGINS);
@@ -69,13 +73,13 @@ test('offline transition produces a complete settings draft and mutates no input
   const plan=compileDeliveryDomainTransition(snapshot,base);
   assert.deepEqual(snapshot,original);
   assert.equal(plan.writesPerformed,false);assert.equal(plan.activationEnabled,false);assert.equal(plan.redirectEnabled,false);
-  assert.deepEqual(Object.keys(plan.changes).sort(),changed);
+  assert.deepEqual(Object.keys(plan.changes).sort(),historicalTransitionChanged);
   assert.deepEqual(plan.expected.operations,snapshot.operations);assert.deepEqual(plan.expected['ops-sync'],snapshot['ops-sync']);
   assert.deepEqual(plan.expected.client.modern,snapshot.client.modern);
   assert.deepEqual(plan.expected.client.version.resources.script,snapshot.client.version.resources.script);
   assert.deepEqual(plan.expected.client.schedules,snapshot.client.schedules);
   assert.deepEqual(plan.settingsDraft,plan.expected.client.settings);
-  assert.deepEqual(plan.settingsDraft.bindings.filter(row=>!changed.includes(row.name)),snapshot.client.settings.bindings.filter(row=>!changed.includes(row.name)));
+  assert.deepEqual(plan.settingsDraft.bindings.filter(row=>!historicalTransitionChanged.includes(row.name)),snapshot.client.settings.bindings.filter(row=>!historicalTransitionChanged.includes(row.name)));
   assert.equal(validateInstallation(plan.expected,{profile:plan.afterProfile}),plan.expected);
   assert.equal(nativeDeliveryDeploymentEnabled(varsOf(plan.expected.client)),true);
   assert.throws(()=>validateInstallation(plan.expected,{profile:plan.beforeProfile}),/scalar configuration changed/);

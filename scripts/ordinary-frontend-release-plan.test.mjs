@@ -15,6 +15,14 @@ const reviewedDeploymentVersions = { operations: [
 ] };
 function fixture() {
   const profile = clone(PROFILE), snapshot = {}, phase = domainPhaseValues('portal-entry-canonical');
+  // This is a synthetic historical deployment fixture, not the canonical-v4
+  // installation. Keep its pre-cutover Operations origin expectations local to
+  // the fixture; production profile guards remain unchanged.
+  delete profile.onboardingAdminOrigin;
+  const historicalOpsOrigin = 'https://ops.ledgetopdroneservices.com';
+  profile.workers.operations.plainValueSHA256.CLIENT_ONBOARDING_ADMIN_ORIGIN = hash(historicalOpsOrigin);
+  profile.workers.operations.plainValueSHA256.PUBLIC_BASE_URL = hash(historicalOpsOrigin);
+  profile.workers.operations.plainValueSHA256.EXPECTED_HOST = hash('ops.ledgetopdroneservices.com');
   let index = 1;
   for (const [app, spec] of Object.entries(profile.workers)) {
     const defaults = JSON.parse(fs.readFileSync(new URL(`../apps/${app}/wrangler.jsonc`, import.meta.url))).vars;

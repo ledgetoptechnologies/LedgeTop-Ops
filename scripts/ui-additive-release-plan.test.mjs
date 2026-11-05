@@ -10,6 +10,9 @@ const clone = value => structuredClone(value);
 const omit = 'CLIENT_PORTAL_NOTIFICATION_MIGRATION_MAINTENANCE';
 function fixture() {
   const profile = clone(PROFILE), snapshot = {}, phase = domainPhaseValues('portal-entry-canonical');
+  // This synthetic installation predates the canonical Operations admin host.
+  // Keep that historical expectation explicit without loosening validation.
+  delete profile.onboardingAdminOrigin;
   let index = 1;
   for (const [app, spec] of Object.entries(profile.workers)) {
     const defaults = JSON.parse(fs.readFileSync(new URL(`../apps/${app}/wrangler.jsonc`, import.meta.url))).vars;
@@ -81,7 +84,7 @@ test('offline preparation preserves inputs and exact retained bindings, exports,
     expectedMetadata.config.run_worker_first.push('/_ui', '/_ui/*');
     assert.deepEqual(plan.expectations[app].expectedAssetsMetadata, expectedMetadata);
     assert.equal(plan.expectations[app].assetsConfigSHA256, hash(canonical(cfg.unsafe.metadata.assets.config)));
-    assert.equal(plan.expectations[app].effectiveTextSecretBudget, app === 'operations' ? 128 : 92);
+    assert.equal(plan.expectations[app].effectiveTextSecretBudget, app === 'operations' ? 128 : 93);
   }
   assert.ok(plan.expectedProfile.workers.client.plainNames.includes(omit));
   assert.deepEqual(plan.expectedProfile.workers['ops-sync'], options.profile.workers['ops-sync']);
