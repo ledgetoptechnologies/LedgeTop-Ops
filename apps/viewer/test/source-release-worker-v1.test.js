@@ -98,3 +98,53 @@ test('accepted source snapshots retain the dataset guard until terminal retireme
     }
   } finally { db.close(); }
 });
+
+test('SQLite release reconciliation spaces policy polls and rotates failed attempts', async () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const { reconcileSourceReleaseQueue } = require('../server/sourceReleaseWorkerV1');
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec(`CREATE TABLE viewer_prepared_submission_outbox(viewer_attempt_id TEXT PRIMARY KEY,
+      source_intake_canonical TEXT,source_intake_completion_canonical TEXT,result_manifest_canonical TEXT,
+      copy_request_canonical TEXT,copy_ack_canonical TEXT,updated_at TEXT);
+      CREATE TABLE processing_attempts(id TEXT,task_id TEXT,status TEXT);
+      CREATE TABLE processing_tasks(id TEXT,active_attempt_id TEXT);
+      CREATE TABLE viewer_source_release_outbox(attempt_id TEXT PRIMARY KEY,state TEXT,status_json TEXT,updated_at TEXT);
+      CREATE TABLE viewer_source_snapshots(attempt_id TEXT,status TEXT);`);
+    const timestamp = '2026-11-05T12:00:00.000Z';
+    const at = delta => new Date(Date.parse(timestamp) + delta).toISOString();
+    const ids = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222',
+      '33333333-3333-4333-8333-333333333333'];
+    for (const [index, id] of ids.entries()) {
+      db.prepare("INSERT INTO viewer_prepared_submission_outbox VALUES(?,'{}','{}','{}','{}','{}',?)").run(id, at(-600_000));
+      db.prepare("INSERT INTO processing_attempts VALUES(?,?,'published')").run(id, id);
+      db.prepare('INSERT INTO processing_tasks VALUES(?,?)').run(id, id);
+      db.prepare('INSERT INTO viewer_source_release_outbox VALUES(?,?,?,?)').run(id,
+        index ? 'prepared' : 'submitted', index ? null : JSON.stringify({ state: 'waiting_policy' }),
+        at(index ? -40_000 : -240_000));
+    }
+    db.prepare('DELETE FROM viewer_source_release_outbox WHERE attempt_id=?').run(ids[2]);
+    db.prepare('UPDATE viewer_prepared_submission_outbox SET updated_at=? WHERE viewer_attempt_id=?').run(at(-40_000), ids[2]);
+    const outbox = { getIntent(id) {
+      return db.prepare('SELECT * FROM viewer_source_release_outbox WHERE attempt_id=?').get(id) || null;
+    }, noteRetry(id, value) {
+      db.prepare('UPDATE viewer_source_release_outbox SET updated_at=? WHERE attempt_id=?').run(value, id);
+    } };
+    const dependencies = { processing: { database: db }, sourceIntake: { outbox: { getIntent: () => ({}) } },
+      sourceRelease: { enabled: true, outbox, client: {}, signer: {} }, limit: 1, now: () => timestamp };
+    const first = await reconcileSourceReleaseQueue(dependencies);
+    const second = await reconcileSourceReleaseQueue(dependencies);
+    assert.equal(first.results[0].attemptId, ids[1]);
+    assert.equal(second.results[0].attemptId, ids[2], 'a retained error cannot monopolize the scan window');
+    assert.equal((await reconcileSourceReleaseQueue(dependencies)).scanned, 0, 'recent errors and policy waits are not retried each tick');
+    const later = await reconcileSourceReleaseQueue({ ...dependencies, now: () => at(61_000) });
+    assert.equal(later.results[0].attemptId, ids[0], 'policy status becomes due after five minutes');
+    db.prepare("UPDATE viewer_source_release_outbox SET state='released',status_json=NULL,updated_at=? WHERE attempt_id=?")
+      .run(at(-40_000), ids[1]);
+    db.prepare("INSERT INTO viewer_source_snapshots VALUES(?,'released')").run(ids[1]);
+    assert.equal((await reconcileSourceReleaseQueue(dependencies)).scanned, 0);
+    db.prepare("UPDATE viewer_source_snapshots SET status='accepted' WHERE attempt_id=?").run(ids[1]);
+    assert.equal((await reconcileSourceReleaseQueue(dependencies)).results[0].attemptId, ids[1],
+      'durable terminal receipts with interrupted local retirement remain discoverable');
+  } finally { db.close(); }
+});
