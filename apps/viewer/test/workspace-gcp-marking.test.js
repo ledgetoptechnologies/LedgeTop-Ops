@@ -55,9 +55,10 @@ test('image clicks and numeric fields create update and delete exact corresponde
 test('marking layout is bounded responsive and preserves exact import provenance confirmation', () => {
   for (const selector of ['.gcp-marker-workspace', '.gcp-nearby-map', '.gcp-candidates', '.gcp-image-stage', '.gcp-marker', '.gcp-pixel-fields'])
     assert.ok(css.includes(selector), selector);
-  assert.match(css, /\.gcp-candidates\{[^}]*max-height:360px[^}]*overflow:auto/);
+  assert.match(css, /\.gcp-candidates\{[^}]*max-height:min\(58vh,560px\)[^}]*overflow:auto/);
   assert.match(css, /max-height:min\(62vh,680px\)/);
-  assert.match(css, /height:min\(48vh,460px\)/);
+  assert.match(css, /height:min\(62vh,640px\);min-height:400px/);
+  assert.match(css, /@media\(max-width:1000px\)\{\.gcp-nearby-map\{height:min\(55vh,560px\);min-height:320px/);
   assert.match(css, /max-height:min\(78vh,900px\)/);
   assert.match(css, /@media\(max-width:1000px\)[\s\S]*\.gcp-marker-workspace/);
   assert.match(css, /@media\(max-width:720px\)[\s\S]*\.gcp-pixel-fields/);
