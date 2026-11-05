@@ -15,6 +15,23 @@ function fixture(publicBaseUrl=OLD){
   return {env,request,fetch};
 }
 describe("real Operations entrypoint canonical navigation mount",()=>{
+  it("preserves exact legacy navigation and pending callbacks without an additional scalar",async()=>{
+    const f=fixture(NEW);
+    Reflect.deleteProperty(f.env,"LEGACY_OPERATIONS_REDIRECT_ORIGINS");
+    for(const origin of [OLD,LTT]) {
+      expect((await f.request(`${origin}/clients`)).headers.get("Location")).toBe(`${NEW}/clients`);
+      const callback=await f.request(`${origin}/api/dropbox-import/oauth/callback?state=synthetic&code=synthetic`);
+      expect(callback.status).not.toBe(404);
+      expect((await f.request(`${origin}/api/session`)).status).toBe(404);
+    }
+    expect((await f.request("https://ops.unrelated.invalid/clients")).status).toBe(404);
+    f.env.EXPECTED_HOST="ops.ledgetopdroneservices.com";
+    expect((await f.request(`${OLD}/api/dropbox-import/oauth/callback`)).status).toBe(404);
+    f.env.EXPECTED_HOST="ops.ledgetop.app";
+    f.env.LEGACY_OPERATIONS_REDIRECT_ORIGINS="";
+    expect((await f.request(`${OLD}/clients`)).status).toBe(404);
+    expect((await f.request(`${OLD}/api/dropbox-import/oauth/callback`)).status).toBe(404);
+  });
   it.each([OLD,"https://ops.alternate.invalid"])("preserves existing staff page behavior until canonical PUBLIC_BASE_URL: %s",async baseUrl=>{
     const f=fixture(baseUrl),response=await f.request(`${OLD}/clients?view=list`);
     expect(response.status).toBe(200);expect(response.headers.get("Location")).toBeNull();expect(f.fetch).toHaveBeenCalledOnce();
