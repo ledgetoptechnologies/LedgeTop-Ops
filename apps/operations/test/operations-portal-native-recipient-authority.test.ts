@@ -30,7 +30,10 @@ import { readNativeOperationsRequestCapabilities } from "../../client/src/worker
 import { ensureOperationsNativeRecipientInquiryCapability, operationsNativeInquiryCapabilityOperationId }
   from "../src/worker/operations-portal-native-recipient-inquiry-owner";
 import { listOpsPrincipalInquiries, submitOpsPrincipalInquiry } from "../src/worker/operations-native-principal-inquiries";
+import { OperationsNativePrincipalInquiryIngress } from "../src/worker/operations-native-principal-inquiries-entrypoint";
 import { handleOperationsNativeRecipientOwnerHttp } from "../src/worker/operations-portal-native-recipient-owner-http";
+import { createUnifiedRequestRouter } from "../../client/src/worker/client-portal/unified-request-routes";
+import type { VerifiedClientPrincipal } from "../../client/src/worker/client-portal/types";
 
 const id = (n: number) => `${String(n).padStart(8, "0")}-0000-4000-8000-000000000000`;
 const targetId = id(1), authorityId = id(2), publicationOperationId = id(3), publicationId = id(4), snapshotId = id(5),
@@ -679,18 +682,45 @@ describe("Operations-native recipient authority end-to-end D1", () => {
     const opsInquiryMigration = readFileSync(new URL("../migrations/0235_ops_principal_inquiries.sql", import.meta.url), "utf8");
     await ops.batch(splitD1MigrationStatements(opsInquiryMigration).map(statement => ops.prepare(statement)));
     const inquiriesEnv = { OPS_DB: ops, CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED: "true" } as never;
-    const capabilityProofs = await readNativeOperationsRequestCapabilities(client, { issuer, subject }, true);
-    const listRequest = JSON.stringify({ protocolVersion: 1, proofs: capabilityProofs });
-    expect(JSON.parse(await listOpsPrincipalInquiries(inquiriesEnv, listRequest))).toMatchObject({ ok: true, inquiries: [] });
-    const inquiryInput = { kind: "website", title: "Website request", details: "Please contact us about website work.",
-      location: null, idempotencyKey: "v4-owner-flow-idempotency-1" };
-    const submitRequest = JSON.stringify({ protocolVersion: 1, proofs: capabilityProofs, input: inquiryInput });
-    const created = JSON.parse(await submitOpsPrincipalInquiry(inquiriesEnv, submitRequest));
-    expect(created).toMatchObject({ ok: true, replayed: false, inquiry: { kind: "website", title: "Website request" } });
-    expect(JSON.parse(await submitOpsPrincipalInquiry(inquiriesEnv, submitRequest)))
-      .toMatchObject({ ok: true, replayed: true, inquiry: { id: created.inquiry.id } });
-    expect(JSON.parse(await listOpsPrincipalInquiries(inquiriesEnv, listRequest))).toMatchObject({
-      ok: true, inquiries: [{ id: created.inquiry.id, title: "Website request" }] });
+    // Run the actual Client router with its migrated D1 capability reader and
+    // the actual Ops RPC entrypoint methods. Miniflare provides the two
+    // isolated synthetic D1 databases; this in-process entrypoint adapter
+    // exercises the same typed method boundary without provider/network calls.
+    const rpcIngress = Object.assign(new OperationsNativePrincipalInquiryIngress({} as never, inquiriesEnv), { env: inquiriesEnv });
+    const principal: VerifiedClientPrincipal = { issuer, subject, email: "recipient@example.test" };
+    const origin = "https://client-staging.example.test";
+    const clientRequestEnv = { DELIVERY_DB: client, CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
+      CLIENT_PORTAL_ORIGIN: origin, CLIENT_PORTAL_OPS_INQUIRIES_ENABLED: "true",
+      CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED: "true", CLIENT_PORTAL_REQUEST_V2_ENABLED: "false",
+      OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES: {
+        listNativePrincipalInquiries: rpcIngress.listNativePrincipalInquiries.bind(rpcIngress),
+        submitNativePrincipalInquiry: rpcIngress.submitNativePrincipalInquiry.bind(rpcIngress),
+      } } as never;
+    const clientRouter = createUnifiedRequestRouter({ resolvePrincipal: async () => principal, checkConfiguration: false,
+      discover: async () => [], scopedFetch: async () => new Response("unexpected", { status: 500 }),
+      resolveInquiryAuthority: async () => null, inquirySchemaReady: async () => true, inquiryAuthoritySchemaReady: async () => true });
+    const clientRequest = (path: string, init: RequestInit = {}) => clientRouter.request(origin + path, init, clientRequestEnv);
+    const offered = await clientRequest("/request-services");
+    expect(offered.status).toBe(200);
+    expect(await offered.json()).toEqual({ services: [], inquiryKinds: ["website", "drone", "other"], unavailable: [] });
+    const listedBefore = await clientRequest("/inquiries");
+    expect(listedBefore.status).toBe(200);
+    expect(await listedBefore.json()).toEqual({ inquiries: [] });
+    const submit = (key: string) => clientRequest("/inquiries", { method: "POST", headers: { Origin: origin,
+      "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify({ kind: "website",
+      title: "Website request", details: "Please contact us about website work." }) });
+    const created = await submit("v4-owner-flow-idempotency-1");
+    expect(created.status).toBe(201);
+    const createdBody = await created.json() as { inquiry: { id: string; title: string } };
+    expect(createdBody).toMatchObject({ inquiry: { title: "Website request" } });
+    const replay = await submit("v4-owner-flow-idempotency-1");
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ inquiry: { id: createdBody.inquiry.id } });
+    const listed = await clientRequest("/inquiries");
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toEqual({ inquiries: [expect.objectContaining({
+      id: createdBody.inquiry.id, title: "Website request", kind: "website", status: "received",
+    })] });
     expect(await ops.prepare("SELECT count(*) n FROM operations_native_principal_inquiry_outbox")
       .first<number>("n")).toBe(1);
     expect(await ops.prepare("SELECT count(*) n FROM operations_native_principal_inquiry_audit WHERE action='submitted'")
@@ -703,8 +733,19 @@ describe("Operations-native recipient authority end-to-end D1", () => {
     expect(await pendingRevoke.json()).toMatchObject({ status: "pending", intent: { capabilityStatus: "pending",
       effectivePermissions: [] } });
     expect(await readNativeOperationsRequestCapabilities(client, { issuer, subject }, true)).toEqual([]);
-    expect(JSON.parse(await listOpsPrincipalInquiries(inquiriesEnv, listRequest))).toEqual({ ok: false, code: "unavailable" });
-    expect(JSON.parse(await submitOpsPrincipalInquiry(inquiriesEnv, submitRequest))).toEqual({ ok: false, code: "unavailable" });
+    const withdrawn = await clientRequest("/request-services");
+    expect(withdrawn.status).toBe(200);
+    expect(await withdrawn.json()).toEqual({ services: [], inquiryKinds: [], unavailable: [] });
+    const deniedHistory = await clientRequest("/inquiries");
+    expect(deniedHistory.status).toBe(403);
+    const deniedSubmit = await submit("v4-owner-flow-idempotency-after-revoke");
+    expect(deniedSubmit.status).toBe(403);
+    expect(await ops.prepare("SELECT count(*) n FROM operations_native_principal_inquiries")
+      .first<number>("n")).toBe(1);
+    expect(await ops.prepare("SELECT count(*) n FROM operations_native_principal_inquiry_outbox")
+      .first<number>("n")).toBe(1);
+    expect(await ops.prepare("SELECT count(*) n FROM operations_native_principal_inquiry_audit WHERE action='submitted'")
+      .first<number>("n")).toBe(1);
     const revokeResponse = await handleOperationsNativeRecipientOwnerHttp(ownerRequest(`intents/${issued.review.intentId}/revoke`, "POST",
       csrfToken, revokeBody), ownerDependencies);
     expect(revokeResponse.status).toBe(200);
