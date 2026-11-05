@@ -28,6 +28,7 @@ import { parseProductionAutoPredecessorHandoff, validateLiveProductionAutoPredec
   validateProductionAutoPredecessorProof } from './production-auto-predecessor.mjs';
 import { isProviderUtcTimestamp } from './production-auto-time.mjs';
 import { createProductionAutoCloudflarePacer } from './production-auto-cloudflare-pacer.mjs';
+import { assertProductionAutoGitHubQuota } from './production-auto-github-quota.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WORKER = 'ledgetop-ops-sync', APP = 'ops-sync', SHA = /^[a-f0-9]{64}$/u;
@@ -129,14 +130,23 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   const accountId = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
   const cloudflarePacer = cloudflarePacerFactory ? cloudflarePacerFactory({ fetchImpl, accountId }) : null;
   const apiFetch = cloudflarePacer?.fetchImpl ?? fetchImpl;
-  const ci = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl: apiFetch }), token = env.CLOUDFLARE_API_TOKEN;
+  const githubCoreCalls = { count: 0 };
+  const githubFetch = async (input, init) => {
+    let url;
+    try { url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url); } catch {}
+    if (url?.origin === 'https://api.github.com' && url.pathname !== '/rate_limit') githubCoreCalls.count++;
+    return apiFetch(input, init);
+  };
+  const assertGitHubQuota = () => assertProductionAutoGitHubQuota({ workerName: WORKER, bucketCount: 0,
+    callsMade: githubCoreCalls.count, token: env.GITHUB_TOKEN, fetchImpl: apiFetch });
+  const ci = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl: githubFetch }), token = env.CLOUDFLARE_API_TOKEN;
   let migrationPins, schemaPreservationSession, latestSchemaAdmission, latestSchemaAdmissionOptions;
   const schemaSessionFactory = schemaPreservationSessionFactory ?? createInstalledSchemaPreservationSession;
   const usesV4SchemaPreservation = hash(Buffer.from(canonical(profile))) === CANONICAL_INSTALLED_PROFILE_V4_SHA256;
   const checkMigrations = async () => {
     if (usesV4SchemaPreservation) {
       if (!schemaPreservationSession) schemaPreservationSession = await schemaSessionFactory({
-        sourceCommit, canonicalV4Profile: profile, selectedApp: APP, token, fetchImpl: apiFetch,
+        sourceCommit, canonicalV4Profile: profile, selectedApp: APP, token, fetchImpl: githubFetch,
       });
       const admissionOptions = { allowLatest: candidateVersionId ? { [APP]: candidateVersionId } : {} };
       if (latestSchemaAdmission && canonical(admissionOptions) === canonical(latestSchemaAdmissionOptions)
@@ -147,7 +157,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
         'sync_schema_preservation_admission_refused');
       return latestSchemaAdmission;
     }
-    const observed = validateProductionMigrationAdmission(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl: apiFetch,
+    const observed = validateProductionMigrationAdmission(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl: githubFetch,
       appendOnlyProfile: loadPinnedAppendOnlyMigrationProfile() }), { sourceCommit });
     const { observedAt: _observedAt, ...pins } = observed;
     need(migrationPins === undefined || canonical(pins) === canonical(migrationPins), 'sync_migration_readiness_drift');
@@ -166,6 +176,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
       path: `/client/v4/accounts/${accountId}${info?.path ?? ''}`, method: info?.method ?? 'POST', signal: info?.signal,
     }) : undefined;
     try {
+      await assertGitHubQuota();
       const lease = dispatchLease;
       const { signal: _signal, automaticRetry: _automaticRetry, ...request } = info ?? {};
       const { automaticRetry: _recordedAutomaticRetry, ...expectedRequest } = lease?.request ?? {};
@@ -201,7 +212,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   };
   const verifyPredecessor = async snapshot => {
     const proof = validateProductionAutoPredecessorProof(await predecessorReader({ token: env.GITHUB_TOKEN,
-      ...predecessorHandoff, fetchImpl: apiFetch }), predecessorHandoff);
+      ...predecessorHandoff, fetchImpl: githubFetch }), predecessorHandoff);
     need(proof.runtime.profileSha256 === productionAutoBuildProfileSHA256(), 'sync_predecessor_profile_drift');
     const ledger = parseProductionAutoLedger(snapshot, 'operations', 'ledgetop-ops', NATIVE_STAFF_PRODUCTION_TARGET.accountId);
     need(ledger.sourceCommit === sourceCommit && proof.finalReceipt.parentVersionId === ledger.parentVersionId
@@ -233,8 +244,8 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
       && result.runAttempt === triggerRun.runAttempt, 'sync_main_ci_not_exact_or_current');
     return result;
   };
-  const checkSourceAndCI = async () => {
-    const result = await verifySourceAndCI();
+  const checkSourceAndCI = async ({ migrationsChecked = false } = {}) => {
+    const result = await verifySourceAndCI({ migrationsChecked });
     ensureProvider();
     const live = await current(); await verifyPredecessor(live.snapshot);
     return result;
@@ -296,7 +307,9 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   const adapter = {
     async release() {
       try {
-      await checkSourceAndCI(); await checkStaff(); ensureProvider();
+      await checkMigrations(); await assertGitHubQuota();
+      await checkSourceAndCI({ migrationsChecked: true });
+      await checkStaff(); ensureProvider();
       const start = await current(); baseline = start.snapshot; expected = start.state;
       need(expected.activeVersionId === expected.latestVersionId, 'sync_incomplete_deployment_blocks_release');
       const activeModule = baseline[APP].modern.modules?.find(row => row.name === 'index.js');
@@ -318,13 +331,14 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
       journal = journalFactory({ token: env.GITHUB_TOKEN, workerName: WORKER, releaseKind: 'backend-sync', sourceCommit,
         ciRunId: triggerRun.runId, ciRunAttempt: triggerRun.runAttempt, workflowRunId: Number(env.GITHUB_RUN_ID),
         workflowRunAttempt: Number(env.GITHUB_RUN_ATTEMPT), runtime: { profileSha256: hash(Buffer.from(JSON.stringify(profile))),
-          moduleSha256: moduleSHA256, ledgerSha256: null }, recipient: recipientLoader(), responseDirectory, fetchImpl: apiFetch });
+          moduleSha256: moduleSHA256, ledgerSha256: null }, recipient: recipientLoader(), responseDirectory, fetchImpl: githubFetch });
       await journal.receipt({ schemaVersion: 1, sourceCommit, workerName: WORKER, status: 'started', phase: 'sync-prepare',
         parentVersionId: expected.activeVersionId, controlsSHA256: expected.controlsSHA256, writesAttempted: false });
       await journal.receipt({ schemaVersion: 1, sourceCommit, workerName: WORKER, status: 'prepared', phase: 'sync-prepare',
         parentVersionId: expected.activeVersionId, controlsSHA256: expected.controlsSHA256, moduleSHA256 });
 
       phase = 'sync-upload';
+      await assertGitHubQuota();
       let observed = await assertFence(expected);
       const annotations = { 'workers/message': `Ops Sync backend release ${sourceCommit.slice(0, 12)}`,
         'workers/tag': `auto-${sourceCommit.slice(0, 12)}` };
@@ -347,6 +361,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
         controlsSHA256: expected.controlsSHA256, moduleSHA256 });
 
       phase = 'sync-activate';
+      await assertGitHubQuota();
       await assertFence(expected);
       await provider.activateBackendCandidate({ workerName: WORKER, parentVersionId: baseline[APP].version.id,
         candidateVersionId, message: `Ops Sync backend release ${sourceCommit.slice(0, 12)}` });

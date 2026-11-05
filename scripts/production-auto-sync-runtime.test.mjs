@@ -25,6 +25,12 @@ function preservationObservation(sourceCommit, changes = {}) {
     accountId: preservationPolicy.accountId, databaseId: preservationPolicy.databaseId,
     observedAt: new Date().toISOString(), ...baseline, schemaSha256: baseline.loginSchemaSha256, ...changes };
 }
+function githubRateLimit(remaining = 1_000) {
+  const reset = Math.floor(Date.now() / 1_000) + 3_600;
+  return new Response(JSON.stringify({ resources: { core: { limit: 1_000, used: 1_000 - remaining, remaining, reset } } }),
+    { status: 200, headers: { 'Content-Type': 'application/json', 'X-RateLimit-Resource': 'core',
+      'X-RateLimit-Limit': '1000', 'X-RateLimit-Remaining': String(remaining), 'X-RateLimit-Reset': String(reset) } });
+}
 
 test('Sync readiness is exact-source, bounded, and rejects stale or future observations', () => {
   const ready = { schemaVersion: 2, sourceCommit: commit, accountId: '846c924bf17bf4f3dd15c97a4c5d1d51',
@@ -62,6 +68,10 @@ test('exact v4 Sync runtime uses its selected ops-sync preservation session befo
     GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', ...predecessorEnv };
   const runtime = createProductionAutoSyncAdapter({ sourceCommit: commit,
     triggerRun: { sourceCommit: commit, runId: 678, runAttempt: 3 }, env,
+    cloudflarePacerFactory: () => ({ fetchImpl: async input => {
+      assert.equal(String(input), 'https://api.github.com/rate_limit');
+      return githubRateLimit();
+    } }),
     schemaPreservationSessionFactory: async options => {
       sessionCalls++;
       assert.equal(options.fetchImpl, pacedFetch, 'schema preservation uses the shared paced transport');
@@ -161,12 +171,16 @@ function awaitlessRead(relative) {
   return JSON.parse(readFileSync(new URL(`../${relative}`, import.meta.url), 'utf8'));
 }
 
-for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale', 'dispatch-preflight-delay', 'dispatch-journal-delay',
+for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activation', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale', 'dispatch-preflight-delay', 'dispatch-journal-delay',
   'dispatch-queue-delay', 'dispatch-mismatch-request', 'dispatch-mismatch-phase', 'dispatch-mismatch-path',
   'first-write-drift', 'activation-drift', 'post0226-preservation-drift', 'predecessor-missing-artifact',
   'predecessor-ci-mismatch', 'predecessor-live-drift']) test(
   scenario === 'activation-drift'
     ? 'Sync migration drift at activation intent holds without activation dispatch or retry'
+    : scenario === 'quota-low-at-start'
+      ? 'Sync quota admission holds before source and CI reads when allowance is low'
+      : scenario === 'quota-low-before-activation'
+        ? 'Sync quota re-admission holds before the second mutation when allowance falls'
     : scenario === 'first-write-drift'
       ? 'Sync migration drift before first mutation prevents upload intent and provider write'
       : 'Sync runtime drives readiness, capture, two durable intents, candidate proof and activation in order', async () => {
@@ -219,13 +233,18 @@ for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispat
     persistResponse: async () => { if (exercisePacer) await journalFetch(githubUrl); events.push('response'); },
   };
   let sourceDrift = false;
-  const exercisePacer = ['success', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale',
+  const exercisePacer = ['success', 'quota-low-before-activation', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale',
     'dispatch-preflight-delay', 'dispatch-journal-delay', 'dispatch-queue-delay', 'dispatch-mismatch-request', 'dispatch-mismatch-phase',
     'dispatch-mismatch-path'].includes(scenario);
   const transportCalls = [], cloudflareCalls = [], transport = async (input, init = {}) => {
     const call = { url: String(input), method: String(init.method ?? 'GET').toUpperCase(),
       carriesPermit: Object.hasOwn(init, PRODUCTION_AUTO_CF_DISPATCH_PERMIT) };
     transportCalls.push(call);
+    if (call.url === 'https://api.github.com/rate_limit') {
+      const remaining = scenario === 'quota-low-before-activation' && candidateExists ? 0
+        : scenario === 'quota-low-at-start' ? 87 : 1_000;
+      return githubRateLimit(remaining);
+    }
     if (call.url.startsWith('https://api.cloudflare.com/client/v4/accounts/')) {
       cloudflareCalls.push(call);
       pacerClock += 333;
@@ -330,7 +349,11 @@ for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispat
   });
   try {
     const runtime = createProductionAutoSyncAdapter({ sourceCommit: commit, triggerRun, env,
-      fetchImpl: exercisePacer ? transport : async () => { throw Error('no external calls'); },
+      fetchImpl: exercisePacer ? transport : async input => {
+        if (String(input) === 'https://api.github.com/rate_limit') return githubRateLimit(
+          scenario === 'quota-low-at-start' ? 87 : 1_000);
+        throw Error('no external calls');
+      },
       cloudflarePacerFactory: exercisePacer ? options => {
         const inner = createProductionAutoCloudflarePacer({ ...options, noWait: true, now: () => pacerClock });
         pacer = { ...inner, reserve: async reservation => {
@@ -371,7 +394,22 @@ for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispat
       } });
     if (scenario !== 'success') {
       await assert.rejects(runtime.adapter.release(), /Ops Sync backend release held; inspect the durable journal/);
-      if (scenario.startsWith('predecessor-')) {
+      if (scenario === 'quota-low-at-start') {
+        assert.equal(candidateExists, false);
+        assert.equal(activationMethodCalls, 0);
+        assert.equal(events.some(value => value.startsWith('intent:')), false);
+        assert.equal(journalReceipts.length, 0, 'insufficient allowance holds before build or journal activity');
+        assert.equal(cloudflareCalls.some(call => call.method !== 'GET'), false);
+      } else if (scenario === 'quota-low-before-activation') {
+        assert.equal(candidateExists, true, 'the first inactive upload completed under the initial allowance');
+        assert.equal(activationMethodCalls, 0, 'quota is re-admitted before activation intent and fence work');
+        assert.equal(events.includes('intent:sync-version-upload'), true);
+        assert.equal(events.includes('intent:sync-activate-candidate'), false);
+        assert.equal(activated, false);
+        assert.equal(journalReceipts.at(-1).status, 'held');
+        assert.equal(journalReceipts.at(-1).phase, 'sync-activate');
+        assert.equal(cloudflareCalls.some(call => call.method === 'POST' && call.url.endsWith('/deployments')), false);
+      } else if (scenario.startsWith('predecessor-')) {
         assert.equal(candidateExists, false, 'predecessor refusal occurs before candidate upload');
         assert.equal(activationMethodCalls, 0);
         assert.equal(events.some(value => value.startsWith('intent:')), false, 'predecessor refusal persists no provider intent');

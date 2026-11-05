@@ -18,6 +18,8 @@ test('modeled primary quota covers B1 and B28 for both ordinary frontend lanes',
   assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-ops', bucketCount: 28 }), 592);
   assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-clients', bucketCount: 1 }), 281);
   assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-clients', bucketCount: 28 }), 740);
+  assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-ops-sync', bucketCount: 0 }), 88,
+    'Sync reserves five 8-call source/CI/predecessor checks, journal claim and writes, artifact attachment, and held receipt');
 });
 
 test('quota admission uses the lower authenticated core allowance and only reserves future calls', async () => {
@@ -45,6 +47,9 @@ test('quota admission fails closed when actual B1/B28 remaining is insufficient'
       token: TOKEN, fetchImpl: async () => response({ remaining: modeled - 1 }) }),
     /production_auto_github_quota_insufficient/u);
   }
+  await assert.rejects(assertProductionAutoGitHubQuota({ workerName: 'ledgetop-ops-sync', bucketCount: 0,
+    callsMade: 0, token: TOKEN, fetchImpl: async () => response({ remaining: 87 }) }),
+  /production_auto_github_quota_insufficient/u);
 });
 
 test('rate-limit admission refuses malformed body, weaker/malformed headers, and expired reset', async () => {

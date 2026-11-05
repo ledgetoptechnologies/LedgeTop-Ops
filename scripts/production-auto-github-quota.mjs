@@ -1,8 +1,9 @@
 /**
- * Fail-closed GitHub core-rate admission for one ordinary frontend release.
- * Request projections are source-derived from the joined B=28 Ops runtime
- * fixture and include durable journal writes, the completion artifact job,
- * and one held receipt. `rate_limit` does not consume primary core allowance;
+ * Fail-closed GitHub core-rate admission for ordinary frontend and Sync lanes.
+ * Frontend projections are source-derived from the joined B=28 Ops runtime
+ * fixture; Sync uses its fixed default-build call graph. Both include durable
+ * journal writes, the completion artifact job, and one held receipt.
+ * `rate_limit` does not consume primary core allowance;
  * this does not inspect or guarantee GitHub secondary content-rate limits.
  * It is a point-in-time admission against shared core state and cannot reserve
  * allowance against other jobs or credentials that consume the same bucket.
@@ -14,13 +15,19 @@ const RETAINED_BASE_PER_BUCKET = 13;
 const RETAINED_OPS_FIXED = 228;
 const RETAINED_CLIENT_PER_BUCKET = 17;
 const RETAINED_CLIENT_FIXED = 264;
+// Sync default-build path: five source/CI/predecessor checks × 8 calls = 40;
+// eight journal commit events × 4 plus a max existing-branch claim of 4 = 36;
+// separate artifact completion = 8; one held receipt = 4; total = 88.
+const SYNC_FIXED_CALLS = 88;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const need = (ok, code) => { if (!ok) throw new Error(code); };
 
 export function modeledProductionAutoGitHubCoreCalls({ workerName, bucketCount } = {}) {
-  need(['ledgetop-ops', 'ledgetop-clients'].includes(workerName)
-    && Number.isSafeInteger(bucketCount) && bucketCount >= 0 && bucketCount <= PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS,
+  need(['ledgetop-ops', 'ledgetop-clients', 'ledgetop-ops-sync'].includes(workerName)
+    && Number.isSafeInteger(bucketCount) && bucketCount >= 0
+    && (workerName === 'ledgetop-ops-sync' ? bucketCount === 0 : bucketCount <= PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS),
   'production_auto_github_budget_input_invalid');
+  if (workerName === 'ledgetop-ops-sync') return SYNC_FIXED_CALLS;
   if (workerName === 'ledgetop-ops') return RETAINED_BASE_PER_BUCKET * bucketCount + RETAINED_OPS_FIXED;
   return RETAINED_CLIENT_PER_BUCKET * bucketCount + RETAINED_CLIENT_FIXED;
 }
