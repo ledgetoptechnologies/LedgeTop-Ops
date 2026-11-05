@@ -5,6 +5,37 @@ const path = require('path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
+function expandSourceIntakeOutboxMetadataLimit(database) {
+  const table = 'viewer_prepared_submission_outbox';
+  const replacement = 'viewer_prepared_submission_outbox_v2_metadata_migration';
+  const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table);
+  if (typeof definition?.sql !== 'string') throw new Error('source intake outbox table missing');
+  if (/length\s*\(\s*source_intake_canonical\s*\)\s*<=\s*16777216/i.test(definition.sql)) return;
+  const upgradedSql = definition.sql
+    .replace(/^CREATE TABLE\s+viewer_prepared_submission_outbox\b/i,
+      `CREATE TABLE ${replacement}`)
+    .replace(/(length\s*\(\s*source_intake_canonical\s*\)\s*<=\s*)4194304\b/i,
+      (_match, prefix) => `${prefix}16777216`);
+  if (upgradedSql === definition.sql || !/length\s*\(\s*source_intake_canonical\s*\)\s*<=\s*16777216/i.test(upgradedSql))
+    throw new Error('source intake outbox metadata constraint is not recognized');
+  const columns = database.prepare(`PRAGMA table_info(${table})`).all().map(({ name }) => name);
+  if (!columns.includes('source_intake_canonical')) throw new Error('source intake outbox column missing');
+  const quotedColumns = columns.map((name) => `"${name.replaceAll('"', '""')}"`).join(',');
+  const retainedObjects = database.prepare(`SELECT type,name,sql FROM sqlite_master
+    WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name`).all(table);
+  const beforeCount = database.prepare(`SELECT count(*) AS count FROM ${table}`).get().count;
+
+  database.exec(upgradedSql);
+  database.exec(`INSERT INTO ${replacement} (${quotedColumns}) SELECT ${quotedColumns} FROM ${table}`);
+  const copiedCount = database.prepare(`SELECT count(*) AS count FROM ${replacement}`).get().count;
+  if (copiedCount !== beforeCount) throw new Error('source intake outbox row count changed during migration');
+  database.exec(`DROP TABLE ${table}`);
+  database.exec(`ALTER TABLE ${replacement} RENAME TO ${table}`);
+  for (const object of retainedObjects) database.exec(object.sql);
+  const afterCount = database.prepare(`SELECT count(*) AS count FROM ${table}`).get().count;
+  if (afterCount !== beforeCount) throw new Error('source intake outbox rows were not preserved');
+}
+
 const MIGRATIONS = [
   {
     version: 1,
@@ -2428,6 +2459,7 @@ const MIGRATIONS = [
       WHEN (NEW.copy_ack_canonical IS NULL) != (NEW.copy_ack_sha256 IS NULL)
       BEGIN SELECT RAISE(ABORT,'copy acknowledgement and digest must be stored together'); END;
   `},
+  {version:75,name:'bounded_v2_source_intake_metadata_outbox',sql:'SELECT 1;',after:expandSourceIntakeOutboxMetadataLimit},
 ];
 
 function applyMigrations(database) {

@@ -56,7 +56,7 @@ function validateTransferByteBudget(totalBytes, byteBudget) {
   if (byteBudget < totalBytes || byteBudget > maximum) fail('byteBudget', 'TRANSFER_BUDGET');
   return byteBudget;
 }
-function metadata(v) { let bytes; try { bytes = Buffer.byteLength(JSON.stringify(v), 'utf8'); } catch { fail('metadata'); } if (bytes > LIMITS.metadataBytes) fail('metadata', 'METADATA_LIMIT'); }
+function metadata(v, maxBytes = LIMITS.metadataBytes) { let bytes; try { bytes = Buffer.byteLength(JSON.stringify(v), 'utf8'); } catch { fail('metadata'); } if (bytes > maxBytes) fail('metadata', 'METADATA_LIMIT'); }
 function jsonOptions(v, depth = 0) {
   if (depth > 32) fail('odm.options.depth');
   if (v === null || typeof v === 'boolean' || typeof v === 'string') return;
@@ -70,8 +70,8 @@ function basename(v) {
   if (!/^[\x20-\x7e]+$/.test(v) || /[\\/:<>"|?*]/.test(v) || /[. ]$/.test(v) || v.startsWith('.') || !/^.+\.[^.]+$/.test(v) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(v)) fail('manifest.objects.name');
   return v.toLowerCase();
 }
-function validateManifest(m) {
-  metadata(m);
+function validateManifest(m, { maxBytes = LIMITS.metadataBytes } = {}) {
+  metadata(m, maxBytes);
   record(m, ['id', 'revision', 'sha256', 'totalBytes', 'objectCount', 'inputCounts', 'objects'], 'manifest');
   id(m.id, 'manifest.id'); integer(m.revision, 'manifest.revision'); hash(m.sha256, 'manifest.sha256'); integer(m.totalBytes, 'manifest.totalBytes'); integer(m.objectCount, 'manifest.objectCount');
   record(m.inputCounts, ['images', 'lidarObjects', 'points'], 'manifest.inputCounts'); Object.values(m.inputCounts).forEach(v => integer(v, 'manifest.inputCounts'));

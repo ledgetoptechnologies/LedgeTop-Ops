@@ -5,13 +5,21 @@ const path = require('node:path');
 const ReferenceProtocol = require('./referenceProtocol');
 const { canonicalizeJcs } = require('./preparedSubmissionOutbox');
 const { fileFacts } = require('./viewerPagedSourceExport');
+const {
+  MAX_SOURCE_INTAKE_V2_CANONICAL_NODES,
+  MAX_SOURCE_INTAKE_V2_MANIFEST_OBJECTS,
+  MAX_SOURCE_INTAKE_V2_METADATA_BYTES,
+} = require('./sourceIntakeLimitsV2');
 
-const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
+const MAX_MANIFEST_BYTES = MAX_SOURCE_INTAKE_V2_METADATA_BYTES;
 const fail = (code) => { throw Object.assign(new Error(code), { code }); };
 const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
 
 function canonicalDigest(value) {
-  return sha256(canonicalizeJcs(value, { maxBytes: MAX_MANIFEST_BYTES }));
+  return sha256(canonicalizeJcs(value, {
+    maxBytes: MAX_MANIFEST_BYTES,
+    maxNodes: MAX_SOURCE_INTAKE_V2_CANONICAL_NODES,
+  }));
 }
 
 function withDigest(body) {
@@ -28,6 +36,7 @@ function buildSourceIntakeManifests(processing, { dataset, attempt, snapshot, pi
       || dataset.status !== 'finalized' || dataset.storageMode !== 'managed' || dataset.rootKey !== 'datasets'
       || typeof dataset.manifestSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(dataset.manifestSha256)
       || !Array.isArray(dataset.files) || !dataset.files.length
+      || dataset.files.length > MAX_SOURCE_INTAKE_V2_MANIFEST_OBJECTS
       || typeof attempt.id !== 'string' || typeof attempt.taskId !== 'string'
       || snapshot.attemptId !== attempt.id || snapshot.datasetId !== dataset.id
       || typeof snapshot.intentSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(snapshot.intentSha256)) {
@@ -35,7 +44,7 @@ function buildSourceIntakeManifests(processing, { dataset, attempt, snapshot, pi
   }
 
   let validatedPipeline;
-  try { validatedPipeline = ReferenceProtocol.validateManifest(pipelineManifest); }
+  try { validatedPipeline = ReferenceProtocol.validateManifest(pipelineManifest, { maxBytes: MAX_MANIFEST_BYTES }); }
   catch { fail('source_intake_pipeline_manifest_invalid'); }
 
   const heldRows = database.prepare(`SELECT dataset_file_id,dataset_id,sha256,byte_size,retention_reason
@@ -128,6 +137,8 @@ function buildSourceIntakeManifests(processing, { dataset, attempt, snapshot, pi
     derivedBytes.set(id, contentBytes);
   }
   derivedObjects.sort(byAsciiId);
+  if (derivedObjects.length > MAX_SOURCE_INTAKE_V2_MANIFEST_OBJECTS)
+    fail('source_intake_derived_object_limit');
   if (sourceObjects.some((object) => object.id === `gcp_${attempt.id}`))
     fail('source_intake_derived_id_collision');
   const derivedManifest = withDigest({ schemaVersion: 1, attemptId: attempt.id, objects: derivedObjects });

@@ -3,16 +3,24 @@
 const { MAX_BODY_BYTES, canonicalizeJcs, validateOrigin } = require('./preparedSubmissionOutbox');
 const ReferenceProtocol = require('./referenceProtocol');
 const { Readable } = require('node:stream');
+const {
+  MAX_SOURCE_INTAKE_V2_CANONICAL_NODES,
+  MAX_SOURCE_INTAKE_V2_MANIFEST_OBJECTS,
+  MAX_SOURCE_INTAKE_V2_METADATA_BYTES,
+} = require('./sourceIntakeLimitsV2');
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
-const MAX_COMPLETION_RESPONSE_BYTES = 16 * 1024 * 1024;
+const MAX_COMPLETION_RESPONSE_BYTES = MAX_SOURCE_INTAKE_V2_METADATA_BYTES;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const fail = (code) => { throw Object.assign(new Error(code), { code }); };
 const hash = (value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 
 function receiptDigest(value) {
-  return require('node:crypto').createHash('sha256').update(canonicalizeJcs(value)).digest('hex');
+  return require('node:crypto').createHash('sha256').update(canonicalizeJcs(value, {
+    maxBytes: MAX_SOURCE_INTAKE_V2_METADATA_BYTES,
+    maxNodes: MAX_SOURCE_INTAKE_V2_CANONICAL_NODES,
+  })).digest('hex');
 }
 
 function assertClosed(value, keys) {
@@ -72,26 +80,35 @@ function validateCompletionReceipt(response, binding, manifests) {
   const expectedDerivedAcks = manifests.derivedManifest.objects.map((object) => ({ objectId: object.id,
     objectKind: 'derived', byteSize: object.byteSize, sha256: object.sha256,
     generation: binding.generation, manifestSha256: manifests.derivedManifestSha256 }));
-  if (!canonicalizeJcs(sourceReceipt.objects).equals(canonicalizeJcs(expectedSourceObjects))
-      || !canonicalizeJcs(derivedReceipt.objects).equals(canonicalizeJcs(expectedDerivedObjects))
+  const canonicalOptions = { maxBytes: MAX_SOURCE_INTAKE_V2_METADATA_BYTES,
+    maxNodes: MAX_SOURCE_INTAKE_V2_CANONICAL_NODES };
+  if (!canonicalizeJcs(sourceReceipt.objects, canonicalOptions).equals(canonicalizeJcs(expectedSourceObjects, canonicalOptions))
+      || !canonicalizeJcs(derivedReceipt.objects, canonicalOptions).equals(canonicalizeJcs(expectedDerivedObjects, canonicalOptions))
       || sourceReceipt.objects.some((object) => !assertClosed(object, sourceObjectKeys))
       || derivedReceipt.objects.some((object) => !assertClosed(object, derivedObjectKeys))
       || response.sourceObjectReceipts.some((ack) => !assertClosed(ack, ackKeys))
       || response.derivedObjectReceipts.some((ack) => !assertClosed(ack, ackKeys))
-      || !canonicalizeJcs(response.sourceObjectReceipts).equals(canonicalizeJcs(expectedSourceAcks))
-      || !canonicalizeJcs(response.derivedObjectReceipts).equals(canonicalizeJcs(expectedDerivedAcks)))
+      || !canonicalizeJcs(response.sourceObjectReceipts, canonicalOptions).equals(canonicalizeJcs(expectedSourceAcks, canonicalOptions))
+      || !canonicalizeJcs(response.derivedObjectReceipts, canonicalOptions).equals(canonicalizeJcs(expectedDerivedAcks, canonicalOptions)))
     fail('source_intake_receipt_inventory_mismatch');
   return response;
 }
 
-async function boundedJson(response, limit = MAX_RESPONSE_BYTES) {
+async function boundedJson(response, limit = MAX_RESPONSE_BYTES, maxNodes = 100_000) {
+  const parse = (bytes) => {
+    let value;
+    try { value = JSON.parse(bytes.toString('utf8')); } catch { fail('source_intake_response_invalid'); }
+    try { canonicalizeJcs(value, { maxBytes: limit, maxNodes }); }
+    catch { fail('source_intake_response_invalid'); }
+    return value;
+  };
   const length = Number(response.headers?.get?.('content-length'));
   if (Number.isFinite(length) && length > limit) fail('source_intake_response_too_large');
   const reader = response.body?.getReader?.();
   if (!reader) {
     const bytes = Buffer.from(await response.arrayBuffer());
     if (bytes.length > limit) fail('source_intake_response_too_large');
-    try { return JSON.parse(bytes.toString('utf8')); } catch { fail('source_intake_response_invalid'); }
+    return parse(bytes);
   }
   const chunks = [];
   let total = 0;
@@ -104,7 +121,7 @@ async function boundedJson(response, limit = MAX_RESPONSE_BYTES) {
       chunks.push(Buffer.from(value));
     }
   } finally { reader.releaseLock?.(); }
-  try { return JSON.parse(Buffer.concat(chunks, total).toString('utf8')); } catch { fail('source_intake_response_invalid'); }
+  return parse(Buffer.concat(chunks, total));
 }
 
 function validateReceivingBinding(response, request, { environment }) {
@@ -205,7 +222,7 @@ class SourceIntakeClientV2 {
       await response.body?.cancel().catch(() => {});
       fail(response.status >= 500 ? 'source_intake_status_unavailable' : 'source_intake_status_rejected');
     }
-    return boundedJson(response, 16 * 1024 * 1024);
+    return boundedJson(response, MAX_SOURCE_INTAKE_V2_METADATA_BYTES, MAX_SOURCE_INTAKE_V2_CANONICAL_NODES);
   }
 
   async getLogs(binding, { after = 0, limit = 200, signal } = {}) {
@@ -232,7 +249,7 @@ class SourceIntakeClientV2 {
         ||!Number.isSafeInteger(binding.generation)||binding.generation<1||!hash(binding.pipelineDigest))fail('source_intake_result_binding_invalid');
     const response=await this.request(`/ltds/v1/jobs/${encodeURIComponent(binding.jobId)}/results`,{method:'GET',signal});
     if(response.status!==200){await response.body?.cancel().catch(()=>{});fail(response.status>=500?'source_intake_result_manifest_unavailable':'source_intake_result_manifest_rejected');}
-    const manifest=await boundedJson(response,16*1024*1024);
+    const manifest=await boundedJson(response,MAX_SOURCE_INTAKE_V2_METADATA_BYTES,MAX_SOURCE_INTAKE_V2_CANONICAL_NODES);
     const ids=Array.isArray(manifest?.objects)?manifest.objects.map(object=>object?.id):null;
     try{ReferenceProtocol.validateStoredResultManifest(manifest,{jobId:binding.jobId,generation:binding.generation,
       environment:this.environment,pipelineDigest:binding.pipelineDigest,resultManifestSha256:manifest?.resultManifestSha256,objectIds:ids});}
@@ -270,7 +287,7 @@ class SourceIntakeClientV2 {
       if(response.status>=500||response.status===408||response.status===429)fail('source_intake_copy_post_uncertain');
       fail('source_intake_copy_post_rejected');
     }
-    return boundedJson(response,16*1024*1024);
+    return boundedJson(response,MAX_SOURCE_INTAKE_V2_METADATA_BYTES,MAX_SOURCE_INTAKE_V2_CANONICAL_NODES);
   }
 
   async createOrReplay(intent, { localJobId, owner, signal } = {}) {
@@ -337,7 +354,10 @@ class SourceIntakeClientV2 {
   async uploadClosure({ binding, manifests, openSourceStream, derivedBytes, localJobId, owner, signal } = {}) {
     if (!binding || binding.environment !== this.environment || typeof openSourceStream !== 'function'
         || !(derivedBytes instanceof Map) || !Array.isArray(manifests?.sourceManifest?.objects)
-        || !Array.isArray(manifests?.derivedManifest?.objects)) fail('source_intake_closure_invalid');
+        || !Array.isArray(manifests?.derivedManifest?.objects)
+        || manifests.sourceManifest.objects.length > MAX_SOURCE_INTAKE_V2_MANIFEST_OBJECTS
+        || manifests.derivedManifest.objects.length > MAX_SOURCE_INTAKE_V2_MANIFEST_OBJECTS)
+      fail('source_intake_closure_invalid');
     const allIds = new Set();
     for (const object of manifests.sourceManifest.objects) {
       if (!object || allIds.has(object.id)) fail('source_intake_closure_invalid');
@@ -385,7 +405,8 @@ class SourceIntakeClientV2 {
       if (response.status >= 500 || response.status === 408 || response.status === 429) fail('source_intake_completion_uncertain');
       fail('source_intake_completion_rejected');
     }
-    const verified = validateCompletionReceipt(await boundedJson(response, MAX_COMPLETION_RESPONSE_BYTES), binding, manifests);
+    const verified = validateCompletionReceipt(await boundedJson(response, MAX_COMPLETION_RESPONSE_BYTES,
+      MAX_SOURCE_INTAKE_V2_CANONICAL_NODES), binding, manifests);
     if (typeof this.outbox.persistSourceIntakeCompletion !== 'function') fail('source_intake_completion_store_unavailable');
     const compactCompletion = { ...verified };
     delete compactCompletion.sourceObjectReceipts;
@@ -396,4 +417,13 @@ class SourceIntakeClientV2 {
   }
 }
 
-module.exports = { MAX_COMPLETION_RESPONSE_BYTES, SourceIntakeClientV2, acknowledgedObjects, validateCompletionReceipt, validateReceivingBinding };
+module.exports = {
+  MAX_COMPLETION_RESPONSE_BYTES,
+  MAX_SOURCE_INTAKE_V2_CANONICAL_NODES,
+  MAX_SOURCE_INTAKE_V2_METADATA_BYTES,
+  MAX_SOURCE_INTAKE_V2_MANIFEST_OBJECTS,
+  SourceIntakeClientV2,
+  acknowledgedObjects,
+  validateCompletionReceipt,
+  validateReceivingBinding,
+};
