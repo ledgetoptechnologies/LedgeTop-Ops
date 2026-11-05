@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const ReferenceProtocol = require('./referenceProtocol');
 const { validateOrigin } = require('./preparedSubmissionOutbox');
+const { typedDefault } = require('./nodeOdmProvider');
 
 const HASH = /^[a-f0-9]{64}$/;
 const ALLOWED_OPTION_KEYS = new Set(['name', 'type', 'domain', 'help', 'value']);
@@ -62,13 +63,27 @@ function validateOptionsResponse(body, capabilities) {
       fail('reference_provider_options_invalid');
     seen.add(item.name);
     const type = item.type === 'enum' ? 'string' : item.type || 'string';
-    if (item.value !== undefined && type === 'bool' && typeof item.value !== 'boolean') fail('reference_provider_options_invalid');
-    if (item.value !== undefined && type === 'int' && !Number.isSafeInteger(item.value)) fail('reference_provider_options_invalid');
-    if (item.value !== undefined && type === 'float' && (typeof item.value !== 'number' || !Number.isFinite(item.value))) fail('reference_provider_options_invalid');
+    if (item.value !== undefined && type === 'bool'
+        && typeof item.value !== 'boolean' && !(typeof item.value === 'string' && /^(true|false)$/i.test(item.value)))
+      fail('reference_provider_options_invalid');
+    if (item.value !== undefined && type === 'int'
+        && !(Number.isSafeInteger(item.value) || (typeof item.value === 'string' && /^-?(0|[1-9]\d*)$/.test(item.value)
+          && Number.isSafeInteger(Number(item.value))))) fail('reference_provider_options_invalid');
+    if (item.value !== undefined && type === 'float'
+        && !(typeof item.value === 'number' && Number.isFinite(item.value)
+          || typeof item.value === 'string' && /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(item.value)
+            && Number.isFinite(Number(item.value)))) fail('reference_provider_options_invalid');
     if (item.value !== undefined && type === 'string' && (typeof item.value !== 'string' || item.value.length > 4000)) fail('reference_provider_options_invalid');
+    if (item.value !== undefined && type === 'bool' && typeof item.value === 'string' && item.value.length > 5) fail('reference_provider_options_invalid');
+    if (item.value !== undefined && (type === 'int' || type === 'float') && typeof item.value === 'string' && item.value.length > 64) fail('reference_provider_options_invalid');
     if (item.help !== undefined && (typeof item.help !== 'string' || item.help.length > 4000)) fail('reference_provider_options_invalid');
+    if (item.domain !== undefined && item.domain !== null
+        && !(typeof item.domain === 'string' && item.domain.length <= 4000
+          || Array.isArray(item.domain) && item.domain.length <= 1000
+            && item.domain.every((value) => typeof value === 'string' && value.length <= 4000)))
+      fail('reference_provider_options_invalid');
     return { name: item.name, type, domain: item.domain ?? null, help: item.help || '',
-      value: item.value, rawDefault: item.value };
+      value: item.value === undefined ? undefined : typedDefault(type, item.value), rawDefault: item.value };
   });
   const names = new Set(options.map((item) => item.name));
   if (['pc-ept', 'gltf', '3d-tiles'].some((name) => !names.has(name))) fail('provider_missing_viewer_outputs');
