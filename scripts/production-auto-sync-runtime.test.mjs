@@ -79,6 +79,9 @@ test('Sync candidate proof binds exact API-created code, source map, resources a
 
 function fullSnapshotFixture() {
   const original = structuredClone(PROFILE), profile = structuredClone(PROFILE), snapshots = {};
+  // This synthetic legacy fixture exercises the strict legacy lane, not the
+  // separately pinned canonical-v4 installed-profile acceptance.
+  profile.onboardingAdminOrigin = undefined;
   const parentIds = { operations: '11111111-1111-4111-8111-111111111111', client: '22222222-2222-4222-8222-222222222222',
     'ops-sync': parent };
   for (const [app, spec] of Object.entries(profile.workers)) {

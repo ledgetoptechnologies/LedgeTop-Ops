@@ -350,6 +350,9 @@ function configuredSnapshotFixture() {
   const parentIds = { operations: '11111111-1111-4111-8111-111111111111', client: '22222222-2222-4222-8222-222222222222',
     'ops-sync': '33333333-3333-4333-8333-333333333333' };
   const values = structuredClone(PROFILE), snapshots = {};
+  // This synthetic legacy fixture exercises the strict legacy lane, not the
+  // separately pinned canonical-v4 installed-profile acceptance.
+  values.onboardingAdminOrigin = undefined;
   for (const [app, spec] of Object.entries(values.workers)) {
     const defaults = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'apps', app, 'wrangler.jsonc'), 'utf8')).vars;
     const vars = Object.fromEntries(spec.plainNames.map(key => [key, defaults[key] ?? 'synthetic-fixture']));
