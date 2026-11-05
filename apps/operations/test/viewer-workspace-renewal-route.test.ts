@@ -270,6 +270,13 @@ describe("Viewer workspace renewal Worker routing", () => {
     expect(mocks.createGrant).toHaveBeenCalledWith(expect.objectContaining({ controllerOrigin: oldOrigin }));
     mocks.createGrant.mockClear();
 
+    const currentBucket = Math.floor(Date.now() / (12 * 60 * 60 * 1000));
+    const previousBucketCsrf = await csrfToken(canonicalOnly, principal, currentBucket - 1);
+    const previousBucketGrant = await worker.fetch(makeRequest(oldOrigin, previousBucketCsrf), canonicalOnly, context);
+    expect(previousBucketGrant.status).toBe(201);
+    expect(mocks.createGrant).toHaveBeenCalledWith(expect.objectContaining({ controllerOrigin: oldOrigin }));
+    mocks.createGrant.mockClear();
+
     for (const wrongOrigin of [production.viewerOrigin, "https://attacker.example"]) {
       const response = await worker.fetch(makeRequest(wrongOrigin, validCsrf), canonicalOnly, context);
       expect(response.status).toBe(403);
