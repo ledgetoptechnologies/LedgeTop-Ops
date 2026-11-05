@@ -408,7 +408,8 @@ function verifiedOperationEvidence(op) {
     const stage = findIntent('stage-zero-percent'), activation = findIntent('activate-candidate');
     const responseById = new Map(op.responses.map(response => [response.requestId, response]));
     const correctWriteMethods = op.intents.every(intent => {
-      const expectedMethod = intent.phase === 'temporary-verifier-delete' ? 'DELETE' : 'POST';
+      const expectedMethod = intent.phase === 'temporary-verifier-create' ? 'PUT'
+        : intent.phase === 'temporary-verifier-delete' ? 'DELETE' : 'POST';
       const response = responseById.get(intent.requestId);
       return intent.method === expectedMethod && response?.providerAcknowledged === true
         && (expectedMethod === 'DELETE' ? response.status === 404 : [200,201,202].includes(response.status));

@@ -157,7 +157,7 @@ test('artifact completion verifies only after final proof, activation, verifier 
     const add = (phase, options = {}) => rows.push({ phase, ...options });
     const verifier = suffix => {
       const name = `ops-ui-verify-${suffix.repeat(24)}`;
-      add('temporary-verifier-create', { name, workerName: 'ledgetop-clients', sourceSHA256: 'a'.repeat(64), path: `/workers/scripts/${name}` });
+      add('temporary-verifier-create', { name, method: 'PUT', workerName: 'ledgetop-clients', sourceSHA256: 'a'.repeat(64), path: `/workers/scripts/${name}` });
       add('temporary-verifier-enable', { name, path: `/workers/scripts/${name}/subdomain` });
       add('temporary-verifier-delete', { name, method: 'DELETE', path: `/workers/scripts/${name}` });
     };
@@ -250,6 +250,15 @@ test('artifact completion verifies only after final proof, activation, verifier 
           ciRunId: 101, ciRunAttempt: 2, workflowRunId: 124, workflowRunAttempt: 1, fetchImpl: api.fetchImpl }), phase);
       } finally { restore(); }
     }
+    const wrongCreateMethod = tamperJournalOperation(api, 'ledgetop-clients', operation => {
+      operation.intents.find(row => row.phase === 'temporary-verifier-create').method = 'POST';
+    });
+    try {
+      await assert.rejects(readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32), workerName: 'ledgetop-clients',
+        releaseKind: 'retained-assets', sourceCommit: 'c'.repeat(40), releaseId: run.releaseId,
+        ciRunId: 101, ciRunAttempt: 2, workflowRunId: 124, workflowRunAttempt: 1, fetchImpl: api.fetchImpl }),
+      'temporary verifier creation must retain the provider PUT method');
+    } finally { wrongCreateMethod(); }
     await assert.rejects(readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32), workerName: 'ledgetop-clients',
       releaseKind: 'backend-sync', sourceCommit: 'c'.repeat(40), releaseId: run.releaseId,
       ciRunId: 101, ciRunAttempt: 2, workflowRunId: 124, workflowRunAttempt: 1, fetchImpl: api.fetchImpl }));
