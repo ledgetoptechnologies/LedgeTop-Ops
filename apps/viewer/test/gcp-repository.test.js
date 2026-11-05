@@ -23,7 +23,7 @@ function fixture(t) {
   return { root, database, processing, gcp };
 }
 
-function datasetFixture(t) {
+function datasetFixture(t, { unicodeImage = false } = {}) {
   const context = fixture(t);
   const project = context.processing.createProject({ displayName: 'Survey' });
   const dataset = context.processing.createDataset({
@@ -31,7 +31,7 @@ function datasetFixture(t) {
   });
   const empty = crypto.createHash('sha256').digest('hex');
   context.processing.finalizeDataset(dataset.id, [
-    { id: 'near', relativePath: 'near.jpg', byteSize: 0, sha256: empty, contentType: 'image/jpeg', metadata: { width: 6000, height: 4000, capturedAt: '2026:01:01 01:02:03', gps: { latitude: 44.5001, longitude: -88.1001, altitudeM: 250 } } },
+    { id: 'near', relativePath: unicodeImage ? 'nørth.jpg' : 'near.jpg', byteSize: 0, sha256: empty, contentType: 'image/jpeg', metadata: { width: 6000, height: 4000, capturedAt: '2026:01:01 01:02:03', gps: { latitude: 44.5001, longitude: -88.1001, altitudeM: 250 } } },
     { id: 'far', relativePath: 'far.jpg', byteSize: 0, sha256: empty, contentType: 'image/jpeg', metadata: { width: 6000, height: 4000, capturedAt: '2026:01:01 01:02:04', gps: { latitude: 44.6, longitude: -88.2, altitudeM: 251 } } },
     { id: 'gcp-file', relativePath: 'control.csv', byteSize: Buffer.byteLength(GCP_SOURCE), sha256: GCP_SOURCE_SHA, contentType: 'text/csv' },
   ], empty);
@@ -253,6 +253,10 @@ test('each processing attempt snapshots deterministic private ODM correspondence
   assert.equal(firstSnapshot.correspondenceCount,1);
   assert.equal(firstSnapshot.content,'EPSG:4326\n-88.1 44.5 250 120.5 240.25 near.jpg\n');
   assert.equal(firstSnapshot.sha256,crypto.createHash('sha256').update(firstSnapshot.content).digest('hex'));
+  assert.ok(Buffer.isBuffer(firstSnapshot.contentBytes));
+  assert.equal(firstSnapshot.contentBytes.toString('utf8'),firstSnapshot.content);
+  assert.equal(firstSnapshot.contentBytes.length,Buffer.byteLength(firstSnapshot.content,'utf8'));
+  assert.equal(Object.keys(firstSnapshot).includes('contentBytes'),false,'canonical UTF-8 bytes stay out of JSON provenance');
   const evidence=processing.getAttemptGcpEvidence(first.id);
   assert.equal(evidence.schemaVersion,2);
   assert.deepEqual(evidence.snapshot.sourceGcpDatasetFileIds,['gcp-file']);
@@ -273,6 +277,21 @@ test('each processing attempt snapshots deterministic private ODM correspondence
   assert.notEqual(secondSnapshot.sha256,firstSnapshot.sha256);
   gcp.deleteSet(set.id);
   assert.equal(processing.getAttemptGcpEvidence(second.id).correspondences[0].pixelX,121);
+});
+
+test('retained GCP snapshot exposes byte-accurate UTF-8 for non-ASCII image paths', t => {
+  const {processing,gcp,project,dataset}=datasetFixture(t,{unicodeImage:true});
+  const set=gcp.importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'generic-csv-v1',sourceFileId:'gcp-file',sourceFilename:'control.csv',sourceSha256:GCP_SOURCE_SHA,
+    sourceContent:GCP_SOURCE,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:1',
+    points:[{externalId:'A',label:'A',latitude:44.5,longitude:-88.1,elevationM:250,description:null}]});
+  const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Model'});
+  gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'near',pixelX:120.5,pixelY:240.25,createdBy:'ops:1'});
+  const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
+  const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),snapshot=processing.getAttemptGcpSnapshot(attempt.id);
+  assert.match(snapshot.content,/nørth\.jpg/);
+  assert.ok(snapshot.contentBytes.length>snapshot.content.length,'UTF-8 byte length exceeds JS code-unit length for ø');
+  assert.equal(snapshot.contentBytes.length,Buffer.byteLength(snapshot.content,'utf8'));
+  assert.equal(crypto.createHash('sha256').update(snapshot.contentBytes).digest('hex'),snapshot.sha256);
 });
 
 test('legacy v1 GCP evidence remains readable without being reinterpreted as v2', (t) => {

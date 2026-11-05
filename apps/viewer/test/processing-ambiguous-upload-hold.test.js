@@ -42,7 +42,7 @@ function preparedV2Harness(f, { lookupUnavailable = false, capabilities = null }
   const fetchImpl=async(url,init={})=>{
     const route=new URL(url).pathname;
     if(route==='/ltds/v2/capabilities'){capabilitiesCalls++;return jsonResponse({...currentCapabilities,sourceIntake:{enabled:true,maxObjects:10000},viewerAcceptance:{enabled:true}});}
-    if(route===`/ltds/v2/jobs/by-submission/${f.attempt.id}`&&init.method==='GET'){
+    if(route===`/ltds/v1/jobs/by-submission/${f.attempt.id}`&&init.method==='GET'){
       if(lookupUnavailable==='throw')throw new Error('synthetic admission lookup timeout');
       return lookupUnavailable?jsonResponse({error:'temporarily_unavailable'},503):jsonResponse({error:'not_found'},404);
     }
@@ -130,13 +130,13 @@ test('V2 submission persists one immutable coordinator request and resumes after
   const fetchImpl=async(url,init={})=>{
     const parsed=new URL(url),route=parsed.pathname;
     if(route==='/ltds/v2/capabilities'){capsCalls++;return jsonResponse({... (capabilityDrift?ReferenceProtocol.createCapabilities('staging'):caps),sourceIntake,viewerAcceptance});}
-    if(route===`/ltds/v2/jobs/by-submission/${f.attempt.id}`&&init.method==='GET')
+    if(route===`/ltds/v1/jobs/by-submission/${f.attempt.id}`&&init.method==='GET')
       return remoteJob?jsonResponse(remoteJob):jsonResponse({error:'not_found'},404);
     if(route==='/ltds/v2/jobs'&&init.method==='POST'){
       createCalls++;
       if(requestBytes===null)requestBytes=init.body;else assert.equal(init.body,requestBytes,'replay must submit the exact persisted request bytes');
       sourceRequest=JSON.parse(init.body);
-      remoteJob={jobId:sourceRequest.providerTaskId,attemptId:sourceRequest.submissionId,providerTaskId:sourceRequest.providerTaskId,
+      remoteJob={sourceIntakeVersion:2,jobId:sourceRequest.providerTaskId,attemptId:sourceRequest.submissionId,providerTaskId:sourceRequest.providerTaskId,
         generation:1,environment:'staging',manifestSha256:sourceRequest.manifest.sha256,pipelineManifestSha256:sourceRequest.manifest.sha256,
         sourceManifestSha256:sourceRequest.sourceManifest.sha256,derivedManifestSha256:sourceRequest.derivedManifest.sha256,
         pipelineDigest:sourceRequest.sourceAttestation.proof.pipelineDigest,status:'queued',phase:'source_receiving',sourceState:'receiving',derivedState:'receiving',

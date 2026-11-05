@@ -127,7 +127,7 @@ test('V2 source-intake binding and completion custody response are durably retai
   const metadataResponse = { jobId: f.attempt.providerTaskId, attemptId: f.attempt.id, providerTaskId: f.attempt.providerTaskId,
     generation: 1, environment: 'staging', manifestSha256: manifest.sha256, pipelineManifestSha256: manifest.sha256,
     sourceManifestSha256: sourceManifest.sha256, derivedManifestSha256: derivedManifest.sha256,
-    pipelineDigest: proof.pipelineDigest, status: 'queued', phase: 'source_receiving', sourceState: 'receiving',
+    sourceIntakeVersion: 2, pipelineDigest: proof.pipelineDigest, status: 'queued', phase: 'source_receiving', sourceState: 'receiving',
     derivedState: 'receiving', sourceReceipt: null, derivedReceipt: null, sourceReceiptSha256: null, derivedReceiptSha256: null };
   outbox.acceptSourceIntakeBinding(f.attempt.id, metadataResponse, { ...context, localJobId: f.job.id, owner: f.job.lease_owner });
   const sourceReceipt = { custody: 'verified' }, derivedReceipt = { custody: 'verified' };

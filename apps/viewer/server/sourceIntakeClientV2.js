@@ -126,6 +126,7 @@ async function boundedJson(response, limit = MAX_RESPONSE_BYTES, maxNodes = 100_
 
 function validateReceivingBinding(response, request, { environment }) {
   if (!response || Object.getPrototypeOf(response) !== Object.prototype
+      || response.sourceIntakeVersion !== 2
       || response.jobId !== request.providerTaskId || response.attemptId !== request.submissionId
       || response.providerTaskId !== request.providerTaskId || !Number.isSafeInteger(response.generation)
       || response.generation < 1 || response.environment !== environment
@@ -151,7 +152,7 @@ function validatePersistedReceivingBinding(saved, request, { environment }) {
       || binding.protocol !== 'ltds-viewer-source-intake-binding-v2'
       || binding.coordinatorAuthorityId !== saved.coordinatorAuthorityId
       || binding.requestSha256 !== saved.sourceIntakeSha256) fail('source_intake_binding_missing');
-  validateReceivingBinding({ ...binding, status: 'queued', phase: 'source_receiving', sourceState: 'receiving',
+  validateReceivingBinding({ ...binding, sourceIntakeVersion: 2, status: 'queued', phase: 'source_receiving', sourceState: 'receiving',
     derivedState: 'receiving', sourceReceipt: null, derivedReceipt: null,
     sourceReceiptSha256: null, derivedReceiptSha256: null }, request, { environment });
   return binding;
@@ -243,7 +244,7 @@ class SourceIntakeClientV2 {
     if (!UUID.test(submissionId || '')) fail('source_intake_submission_id_invalid');
     let response;
     try {
-      response = await this.request(`/ltds/v2/jobs/by-submission/${encodeURIComponent(submissionId)}`, { method: 'GET', signal });
+      response = await this.request(`/ltds/v1/jobs/by-submission/${encodeURIComponent(submissionId)}`, { method: 'GET', signal });
     } catch {
       fail('source_intake_admission_unknown');
     }
