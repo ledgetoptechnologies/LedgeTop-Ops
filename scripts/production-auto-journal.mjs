@@ -445,7 +445,7 @@ function verifiedOperationEvidence(op) {
  * not land, the release stops before the corresponding Cloudflare request. */
 export class ProductionAutoJournal {
   #token; #fetch; #runtime; #recipient; #responseDirectory; #identity; #document = null; #head = null; #tree = null;
-  #committedBytes = null; #claimed = false; #writeBusy = false; #writeUncertain = false;
+  #committedBytes = null; #claimed = false; #readBusy = false; #writeBusy = false; #writeUncertain = false;
   constructor({ token, workerName, releaseKind = workerName === 'ledgetop-ops-sync' ? 'backend-sync' : 'retained-assets',
     sourceCommit, ciRunId, ciRunAttempt, workflowRunId, workflowRunAttempt, runtime, recipient, responseDirectory,
     fetchImpl = fetch, now = () => new Date().toISOString() } = {}) {
@@ -462,10 +462,18 @@ export class ProductionAutoJournal {
     this.releaseId = hash(`${workerName}\n${sourceCommit}`);
   }
   #beginWrite() {
-    need(!this.#writeBusy && !this.#writeUncertain);
+    need(!this.#readBusy && !this.#writeBusy && !this.#writeUncertain);
     this.#writeBusy = true;
     let released = false;
     return () => { if (!released) { released = true; this.#writeBusy = false; } };
+  }
+  #beginRead() {
+    // Read-only reconciliation remains available after an uncertain CAS, but
+    // a read may not race a local writer because #load refreshes shared cache.
+    need(!this.#readBusy && !this.#writeBusy);
+    this.#readBusy = true;
+    let released = false;
+    return () => { if (!released) { released = true; this.#readBusy = false; } };
   }
   async #request(suffix, method = 'GET', body = undefined, allow404 = false) {
     need(typeof suffix === 'string' && suffix.startsWith('/') && suffix.length <= 512 && !suffix.includes('..') && !suffix.includes('//')
@@ -582,7 +590,11 @@ export class ProductionAutoJournal {
   }
   /** Read and validate one completed predecessor using only the bounded GitHub
    * journal GET path. This method never claims, writes, or changes the ref. */
-  async readVerifiedPredecessor({ sourceCommit, releaseId, releaseKind, ciRunId, ciRunAttempt, workflowRunId, workflowRunAttempt } = {}) {
+  async readVerifiedPredecessor(value) {
+    const release = this.#beginRead();
+    return this.#readVerifiedPredecessor(value).finally(release);
+  }
+  async #readVerifiedPredecessor({ sourceCommit, releaseId, releaseKind, ciRunId, ciRunAttempt, workflowRunId, workflowRunAttempt } = {}) {
     need(this.#runtime === null && COMMIT.test(sourceCommit ?? '') && SHA.test(releaseId ?? '')
       && releaseId === hash(`${this.#identity.workerName}\n${sourceCommit}`)
       && RELEASE_KINDS.has(releaseKind) && releaseKind === this.#identity.releaseKind

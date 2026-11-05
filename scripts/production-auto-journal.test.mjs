@@ -345,6 +345,25 @@ test('artifact completion verifies only after final proof, activation, verifier 
       releaseKind: 'retained-assets', sourceCommit: 'c'.repeat(40), releaseId: run.releaseId,
       ciRunId: 101, ciRunAttempt: 2, workflowRunId: 124, workflowRunAttempt: 1 }), proof,
     'the exact GET-only journal proof must pass the runtime predecessor validator');
+    let resumeRead, enteredRead; const readGate = new Promise(resolve => { resumeRead = resolve; });
+    const readEntered = new Promise(resolve => { enteredRead = resolve; }); let readCalls = 0;
+    const blockingRead = async (url, init) => {
+      readCalls++;
+      if (readCalls === 1) { enteredRead(); await readGate; }
+      return api.fetchImpl(url, init);
+    };
+    const reader = new ProductionAutoJournal({ token: 'x'.repeat(32), workerName: 'ledgetop-clients', releaseKind: 'retained-assets',
+      sourceCommit: 'c'.repeat(40), ciRunId: 101, ciRunAttempt: 2, workflowRunId: 124, workflowRunAttempt: 1,
+      recipient: recipient(), responseDirectory: dir, fetchImpl: blockingRead, now: () => '2026-10-27T12:00:00.000Z' });
+    const read = reader.readVerifiedPredecessor({ sourceCommit: 'c'.repeat(40), releaseId: run.releaseId,
+      releaseKind: 'retained-assets', ciRunId: 101, ciRunAttempt: 2, workflowRunId: 124, workflowRunAttempt: 1 });
+    await readEntered;
+    const callsBeforeWriter = readCalls, requestsBeforeWriter = api.requests.length;
+    await assert.rejects(reader.attachArtifact({ artifactId: 904, artifactDigest: 'e'.repeat(64), runId: 124, runAttempt: 1,
+      name: `production-auto-${run.releaseId}`, status: 'success', releaseStatus: 'success' }));
+    assert.equal(readCalls, callsBeforeWriter, 'a write may not refresh shared cache while predecessor GETs are in flight');
+    assert.equal(api.requests.length, requestsBeforeWriter);
+    resumeRead(); assert.equal((await read).releaseId, run.releaseId);
     const tamperedArtifactProof = structuredClone(proof);
     tamperedArtifactProof.artifact.releaseStepConclusion = 'failure';
     assert.throws(() => validateProductionAutoPredecessorProof(tamperedArtifactProof, { workerName: 'ledgetop-clients',
@@ -415,6 +434,29 @@ test('artifact completion verifies only after final proof, activation, verifier 
     await assert.rejects(readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32), workerName: 'ledgetop-clients',
       releaseKind: 'backend-sync', sourceCommit: 'c'.repeat(40), releaseId: run.releaseId,
       ciRunId: 101, ciRunAttempt: 2, workflowRunId: 124, workflowRunAttempt: 1, fetchImpl: api.fetchImpl }));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('read-only predecessor lookup is rejected before I/O while a local journal write is active', async () => {
+  const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+  try {
+    let resumeWrite, enteredWrite; const writeGate = new Promise(resolve => { resumeWrite = resolve; });
+    const writeEntered = new Promise(resolve => { enteredWrite = resolve; }); let fetchCalls = 0;
+    const blockingWrite = async (url, init) => {
+      fetchCalls++;
+      if (fetchCalls === 1) { enteredWrite(); await writeGate; }
+      return api.fetchImpl(url, init);
+    };
+    const run = journal(api, dir, { fetchImpl: blockingWrite });
+    const write = run.recordIntent(intent('22222222-2222-4222-8222-222222222222'));
+    await writeEntered;
+    const callsBeforeRead = fetchCalls, requestsBeforeRead = api.requests.length;
+    await assert.rejects(run.readVerifiedPredecessor({ sourceCommit: COMMIT,
+      releaseId: sha(`ledgetop-clients\n${COMMIT}`), releaseKind: 'retained-assets',
+      ciRunId: 100, ciRunAttempt: 2, workflowRunId: 123, workflowRunAttempt: 1 }));
+    assert.equal(fetchCalls, callsBeforeRead, 'a predecessor read may not race a local CAS write');
+    assert.equal(api.requests.length, requestsBeforeRead);
+    resumeWrite(); await write;
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
