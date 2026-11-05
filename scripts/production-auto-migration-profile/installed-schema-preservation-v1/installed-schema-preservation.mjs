@@ -37,6 +37,7 @@ const MAX_SAME_RUN_BASELINE_AGE_MS = 45 * 60_000;
 const PRODUCTION_SESSIONS = new WeakSet();
 const TEST_SESSIONS = new WeakSet();
 const PRODUCTION_ADMISSIONS = new WeakSet();
+const PRODUCTION_ADMISSION_BASELINES = new WeakMap();
 const TEST_ADMISSIONS = new WeakSet();
 
 function fail(code) { throw Object.assign(new Error(code), { code }); }
@@ -475,6 +476,7 @@ async function createSessionCore({ sourceCommit, canonicalV4Profile, selectedApp
           authorizesMigration: false, authorizesFeatureActivation: false,
           ...(testOnly ? { testOnly: true } : { offlineOnly: false }) });
         (testOnly ? TEST_ADMISSIONS : PRODUCTION_ADMISSIONS).add(receipt);
+        if (!testOnly) PRODUCTION_ADMISSION_BASELINES.set(receipt, baselineMonotonic);
         return receipt;
       } catch (error) {
         closed = true; reader.token = '';
@@ -505,11 +507,14 @@ export async function createInstalledSchemaPreservationTestSession(options = {})
 
 export function isProductionInstalledSchemaPreservationSession(value) { return PRODUCTION_SESSIONS.has(value); }
 export function isProductionInstalledSchemaPreservationAdmission(value) {
+  const baselineMonotonic = PRODUCTION_ADMISSION_BASELINES.get(value);
+  const baselineAge = performance.now() - baselineMonotonic;
   return PRODUCTION_ADMISSIONS.has(value) && value.accountId === ACCOUNT_ID
     && iso(value.observedAt) && Date.now() >= Date.parse(value.observedAt)
     && Date.now() - Date.parse(value.observedAt) <= MAX_RELEASE_EVIDENCE_AGE_MS
     && Number.isSafeInteger(value.baselineAgeMs) && value.baselineAgeMs >= 0
-    && value.baselineAgeMs <= MAX_SAME_RUN_BASELINE_AGE_MS;
+    && value.baselineAgeMs <= MAX_SAME_RUN_BASELINE_AGE_MS
+    && Number.isFinite(baselineAge) && baselineAge >= 0 && baselineAge <= MAX_SAME_RUN_BASELINE_AGE_MS;
 }
 export function isTestInstalledSchemaPreservationAdmission(value) { return TEST_ADMISSIONS.has(value); }
 

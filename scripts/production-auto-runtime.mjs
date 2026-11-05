@@ -194,7 +194,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   const token = env.CLOUDFLARE_API_TOKEN;
   const post0226Policy = workerName === 'ledgetop-ops' ? loadPinnedProductionAutoPost0226PreservationPolicy() : null;
   const preservationReceipts = [];
-  let migrationPins, schemaPreservationSession, latestSchemaAdmission;
+  let migrationPins, schemaPreservationSession, latestSchemaAdmission, latestSchemaAdmissionOptions;
   const schemaSessionFactory = schemaPreservationSessionFactory ?? createInstalledSchemaPreservationSession;
   const usesV4SchemaPreservation = isProductionAutoCanonicalV4Profile(profile);
   const checkMigrations = async () => {
@@ -205,10 +205,14 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       });
       const expectedWeights = pendingTransition ? (pendingTransition.versions.length === 2 ? pendingTransition.versions : null)
         : verifiedDeploymentVersions;
-      latestSchemaAdmission = await schemaPreservationSession.observe({
+      const admissionOptions = {
         allowLatest: candidateVersionId ? { [app]: candidateVersionId } : {},
         expectedDeploymentVersions: expectedWeights ? { [app]: expectedWeights } : {},
-      });
+      };
+      if (latestSchemaAdmission && canonical(admissionOptions) === canonical(latestSchemaAdmissionOptions)
+        && schemaPreservationAdmissionCheck(latestSchemaAdmission)) return latestSchemaAdmission;
+      latestSchemaAdmission = await schemaPreservationSession.observe(admissionOptions);
+      latestSchemaAdmissionOptions = admissionOptions;
       need(typeof schemaPreservationAdmissionCheck === 'function' && schemaPreservationAdmissionCheck(latestSchemaAdmission),
         'runtime_schema_preservation_admission_refused');
       return latestSchemaAdmission;

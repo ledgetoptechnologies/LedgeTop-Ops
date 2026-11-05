@@ -71,7 +71,8 @@ test('exact v4 runtime replaces stale migration classification with a live prese
   assert.equal(isProductionAutoCanonicalV4Profile(PROFILE), true);
   const env = { CLOUDFLARE_ACCOUNT_ID: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
     CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32), GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1' };
-  let schemaCalls = 0, migrationCalls = 0, ciCalls = 0, closed = 0;
+  let schemaCalls = 0, observations = 0, migrationCalls = 0, ciCalls = 0, closed = 0;
+  let fakeWall = Date.now();
   const runtime = createProductionAutoReleaseAdapter({ workerName: 'ledgetop-clients', sourceCommit, env,
     triggerRun: { sourceCommit, runId, runAttempt: attempt },
     schemaPreservationSessionFactory: async options => {
@@ -79,21 +80,28 @@ test('exact v4 runtime replaces stale migration classification with a live prese
       assert.equal(options.selectedApp, 'client');
       assert.equal(options.allowAssetAssociationRotation, true);
       assert.equal(options.canonicalV4Profile, PROFILE);
-      return { observe: async () => ({ accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
-        status: 'preserved-installed-schema-with-pending-source-migrations', observedAt: new Date().toISOString(),
-        baselineAgeMs: 5, applicationSchemaReady: false }), close: () => { closed++; } };
+      return { observe: async () => { observations++; return { accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
+        status: 'preserved-installed-schema-with-pending-source-migrations', observedAt: new Date(fakeWall).toISOString(),
+        baselineAgeMs: 5, applicationSchemaReady: false }; }, close: () => { closed++; } };
     },
     schemaPreservationAdmissionCheck: value => value?.status === 'preserved-installed-schema-with-pending-source-migrations'
-      && value.applicationSchemaReady === false,
+      && value.applicationSchemaReady === false && fakeWall >= Date.parse(value.observedAt)
+      && fakeWall - Date.parse(value.observedAt) <= 60_000,
     migrationReader: async () => { migrationCalls++; throw Error('stale classifier must not run for exact v4'); },
     ciFactory: () => ({ verify: async sha => { ciCalls++; return { sourceCommit: sha, passed: true, runId, runAttempt: attempt }; } }),
     providerFactory: () => { throw Error('provider must not be constructed in Client ciGate'); },
     journalFactory: () => { throw Error('journal must not be constructed in Client ciGate'); } });
   try {
     assert.equal((await runtime.adapter.ciGate()).passed, true);
+    assert.equal((await runtime.adapter.ciGate()).passed, true);
     assert.equal(schemaCalls, 1);
+    assert.equal(observations, 1, 'fresh same-session schema evidence is reused without redating');
     assert.equal(migrationCalls, 0);
-    assert.equal(ciCalls, 1);
+    assert.equal(ciCalls, 2);
+    fakeWall += 60_001;
+    assert.equal((await runtime.adapter.ciGate()).passed, true);
+    assert.equal(observations, 2, 'expired schema evidence triggers a real new observation');
+    assert.equal(ciCalls, 3);
   } finally { runtime.close(); }
   assert.equal(closed, 1);
 

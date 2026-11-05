@@ -123,7 +123,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   const post0226Policy = loadPinnedProductionAutoPost0226PreservationPolicy(), preservationReceipts = [];
   need(typeof predecessorReader === 'function', 'sync_predecessor_reader_invalid');
   const ci = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl }), token = env.CLOUDFLARE_API_TOKEN;
-  let migrationPins, schemaPreservationSession, latestSchemaAdmission;
+  let migrationPins, schemaPreservationSession, latestSchemaAdmission, latestSchemaAdmissionOptions;
   const schemaSessionFactory = schemaPreservationSessionFactory ?? createInstalledSchemaPreservationSession;
   const usesV4SchemaPreservation = hash(Buffer.from(canonical(profile))) === CANONICAL_INSTALLED_PROFILE_V4_SHA256;
   const checkMigrations = async () => {
@@ -131,9 +131,11 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
       if (!schemaPreservationSession) schemaPreservationSession = await schemaSessionFactory({
         sourceCommit, canonicalV4Profile: profile, selectedApp: APP, token,
       });
-      latestSchemaAdmission = await schemaPreservationSession.observe({
-        allowLatest: candidateVersionId ? { [APP]: candidateVersionId } : {},
-      });
+      const admissionOptions = { allowLatest: candidateVersionId ? { [APP]: candidateVersionId } : {} };
+      if (latestSchemaAdmission && canonical(admissionOptions) === canonical(latestSchemaAdmissionOptions)
+        && schemaPreservationAdmissionCheck(latestSchemaAdmission)) return latestSchemaAdmission;
+      latestSchemaAdmission = await schemaPreservationSession.observe(admissionOptions);
+      latestSchemaAdmissionOptions = admissionOptions;
       need(typeof schemaPreservationAdmissionCheck === 'function' && schemaPreservationAdmissionCheck(latestSchemaAdmission),
         'sync_schema_preservation_admission_refused');
       return latestSchemaAdmission;

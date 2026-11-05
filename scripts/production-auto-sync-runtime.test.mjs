@@ -55,7 +55,7 @@ test('Sync v4 preservation refusal stops before CI, staff reads, provider constr
 });
 
 test('exact v4 Sync runtime uses its selected ops-sync preservation session before source and CI fences', async () => {
-  let sessionCalls = 0, migrationCalls = 0, sourceCalls = 0, ciCalls = 0, providerCalls = 0, closed = 0;
+  let sessionCalls = 0, observations = 0, migrationCalls = 0, sourceCalls = 0, ciCalls = 0, providerCalls = 0, closed = 0;
   const env = { CLOUDFLARE_ACCOUNT_ID: nativeTarget.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
     GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', ...predecessorEnv };
   const runtime = createProductionAutoSyncAdapter({ sourceCommit: commit,
@@ -65,24 +65,27 @@ test('exact v4 Sync runtime uses its selected ops-sync preservation session befo
       assert.equal(options.selectedApp, 'ops-sync');
       assert.equal(options.allowAssetAssociationRotation, undefined,
         'Sync does not receive the UI asset-association exception');
-      return { observe: async () => ({ status: 'preserved-installed-schema-with-pending-source-migrations',
-        observedAt: new Date().toISOString(), baselineAgeMs: 3, applicationSchemaReady: false }),
-      close: () => { closed++; } };
+      return { observe: async () => { observations++; return { status: 'preserved-installed-schema-with-pending-source-migrations',
+        observedAt: new Date().toISOString(), baselineAgeMs: 3, applicationSchemaReady: false }; },
+        close: () => { closed++; } };
     },
     schemaPreservationAdmissionCheck: value => value?.status === 'preserved-installed-schema-with-pending-source-migrations'
-      && value.applicationSchemaReady === false,
+      && value.applicationSchemaReady === false && Date.now() >= Date.parse(value.observedAt)
+      && Date.now() - Date.parse(value.observedAt) <= 60_000,
     migrationReader: async () => { migrationCalls++; throw Error('stale classifier must not run for exact v4'); },
     sourceReader: () => { sourceCalls++; throw Error('stop after proving schema session passed'); },
     ciFactory: () => ({ verify: async () => { ciCalls++; throw Error('CI must be after source fence'); } }),
     providerFactory: () => { providerCalls++; throw Error('provider must not be constructed before source fence'); },
     journalFactory: () => { throw Error('journal must not be constructed'); } });
   await assert.rejects(runtime.adapter.release(), /Ops Sync backend release held/);
+  await assert.rejects(runtime.adapter.release(), /Ops Sync backend release held/);
   assert.equal(sessionCalls, 1);
+  assert.equal(observations, 1, 'fresh same-session schema evidence is reused across repeated fences');
   assert.equal(migrationCalls, 0);
-  assert.equal(sourceCalls, 1);
+  assert.equal(sourceCalls, 2);
   assert.equal(ciCalls, 0);
   assert.equal(providerCalls, 0);
-  assert.equal(closed, 1);
+  assert.equal(closed, 2);
 });
 
 test('Sync candidate proof binds exact API-created code, source map, resources and opaque assets', () => {
