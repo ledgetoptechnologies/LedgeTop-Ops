@@ -182,7 +182,8 @@ async function processSourceReleaseAttempt({ attemptId, processing, storage, sou
   }
   if (!intent.request) {
     if (prior?.readyProof) {
-      const fresh = await verifiedOutputProof({ processing, storage, sourceIntake, attemptId, signal, now: () => nowIso });
+      const fresh = await verifiedOutputProof({ processing, storage, sourceIntake, attemptId, signal,
+        historicalProof: prior.readyProof, now: () => nowIso });
       if (!Contract.canonical({ ...fresh, verifiedAt: intent.readyProof.verifiedAt }).equals(Contract.canonical(intent.readyProof)))
         fail('source_release_output_binding_changed');
     }
@@ -203,7 +204,8 @@ async function processSourceReleaseAttempt({ attemptId, processing, storage, sou
   if (!status) status = await sourceRelease.client.submit(binding.jobId,
     Contract.canonical(intent.request).toString('utf8'), statusBinding, { signal });
   if (status.state === 'released') {
-    const fresh = await verifiedOutputProof({ processing, storage, sourceIntake, attemptId, signal, now: () => nowIso });
+    const fresh = await verifiedOutputProof({ processing, storage, sourceIntake, attemptId, signal,
+      historicalProof: intent.readyProof, now: () => nowIso });
     if (!Contract.canonical({ ...fresh, verifiedAt: intent.readyProof.verifiedAt }).equals(Contract.canonical(intent.readyProof)))
       fail('source_release_output_binding_changed');
   }
@@ -222,12 +224,13 @@ async function reconcileSourceReleaseQueue({ processing, storage, sourceIntake, 
   const policyDue = new Date(Date.parse(timestamp) - 300_000).toISOString();
   const rows = processing.database.prepare(`SELECT p.viewer_attempt_id AS attempt_id
     FROM viewer_prepared_submission_outbox p
-    JOIN processing_attempts a ON a.id=p.viewer_attempt_id AND a.status IN ('ready_for_review','published')
-    JOIN processing_tasks t ON t.id=a.task_id AND t.active_attempt_id=a.id
+    JOIN processing_attempts a ON a.id=p.viewer_attempt_id
+    JOIN processing_tasks t ON t.id=a.task_id
     LEFT JOIN viewer_source_release_outbox r ON r.attempt_id=p.viewer_attempt_id
     WHERE p.source_intake_canonical IS NOT NULL AND p.source_intake_completion_canonical IS NOT NULL
       AND p.result_manifest_canonical IS NOT NULL AND p.copy_request_canonical IS NOT NULL AND p.copy_ack_canonical IS NOT NULL
-      AND (r.attempt_id IS NULL OR r.state IN ('ready','prepared','submitted') OR
+      AND (((r.attempt_id IS NULL AND t.active_attempt_id=a.id) OR r.state IN ('ready','prepared','submitted'))
+        AND a.status IN ('ready_for_review','published') OR
         (r.state='released' AND EXISTS (SELECT 1 FROM viewer_source_snapshots s
           WHERE s.attempt_id=p.viewer_attempt_id AND s.status<>'released')))
       AND COALESCE(r.updated_at,p.updated_at) <= CASE WHEN json_valid(r.status_json)

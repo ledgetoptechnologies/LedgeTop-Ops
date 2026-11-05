@@ -33,16 +33,20 @@ function requiredOutputState(database, attemptId) {
   return row ? { ...row } : null;
 }
 
-function assertReadyState(state, attemptId) {
-  if (!state || state.attempt_id !== attemptId || state.active_attempt_id !== attemptId
+function assertReadyState(state, attemptId, historicalProof) {
+  if (!state || state.attempt_id !== attemptId
       || !['ready_for_review', 'published'].includes(state.attempt_status)
-      || !['ready_for_review', 'published'].includes(state.task_status)
       || !['ready', 'published'].includes(state.output_status)
       || state.output_attempt_id !== attemptId || state.output_model_id !== state.model_id
       || state.version_model_id !== state.model_id || state.version_status !== 'ready'
-      || state.model_status !== 'ready'
-      || (state.task_status === 'published' && state.active_version_id !== state.version_id)
-      || (state.attempt_status === 'published' && state.active_version_id !== state.version_id))
+      || state.model_status !== 'ready')
+    fail('source_release_outputs_not_ready');
+  if (historicalProof) {
+    if (historicalProof.kind !== 'verified_outputs_ready' || historicalProof.attemptId !== attemptId
+        || historicalProof.modelId !== state.model_id || historicalProof.modelVersionId !== state.version_id)
+      fail('source_release_output_binding_invalid');
+  } else if (state.active_attempt_id !== attemptId || !['ready_for_review', 'published'].includes(state.task_status)
+      || ((state.task_status === 'published' || state.attempt_status === 'published') && state.active_version_id !== state.version_id))
     fail('source_release_outputs_not_ready');
   if (![state.model_id, state.version_id, state.task_id].every((id) => typeof id === 'string' && id.length > 0))
     fail('source_release_output_binding_invalid');
@@ -221,11 +225,12 @@ function openAndHash(absolutePath, expectedSize, expectedSha256, signal) {
   });
 }
 
-async function verifiedOutputProof({ processing, storage, sourceIntake, attemptId, signal, now = () => new Date().toISOString() } = {}) {
+async function verifiedOutputProof({ processing, storage, sourceIntake, attemptId, signal, historicalProof,
+  now = () => new Date().toISOString() } = {}) {
   if (!processing?.database || !storage?.resolve || typeof attemptId !== 'string') fail('source_release_output_context_invalid');
   const database = processing.database;
   const initialState = requiredOutputState(database, attemptId);
-  assertReadyState(initialState, attemptId);
+  assertReadyState(initialState, attemptId, historicalProof);
   const accepted = acceptedResultIntent(sourceIntake, attemptId);
   if (initialState.output_root_key !== 'models'
       || initialState.output_relative_path !== `${initialState.task_id}/${attemptId}/reference-v2-results`)
@@ -281,7 +286,7 @@ async function verifiedOutputProof({ processing, storage, sourceIntake, attemptI
   const currentRegistrations = assetRows(database, initialState.version_id);
   const currentAccepted = acceptedResultIntent(sourceIntake, attemptId);
   const currentClosure = requiredOutputClosure(database, attemptId, initialState.version_id, currentRegistrations, currentState);
-  assertReadyState(currentState, attemptId);
+  assertReadyState(currentState, attemptId, historicalProof);
   if (canonical(currentState).compare(canonical(initialState)) !== 0
       || !sameRegistrations(closure.assets, currentClosure.assets)
       || accepted.intent.resultManifestSha256 !== currentAccepted.intent.resultManifestSha256
