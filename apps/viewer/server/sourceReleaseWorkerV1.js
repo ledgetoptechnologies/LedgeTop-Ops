@@ -240,9 +240,13 @@ async function reconcileSourceReleaseQueue({ processing, storage, sourceIntake, 
       results.push({ attemptId: row.attempt_id, ...(await processSourceReleaseAttempt({ attemptId: row.attempt_id,
         processing, storage, sourceIntake, sourceRelease, signal, now })) });
     } catch (error) {
-      if (sourceRelease.outbox.getIntent(row.attempt_id)) sourceRelease.outbox.noteRetry(row.attempt_id, timestamp);
-      else processing.database.prepare(`UPDATE viewer_prepared_submission_outbox SET updated_at=?
-        WHERE viewer_attempt_id=? AND copy_ack_canonical IS NOT NULL`).run(timestamp, row.attempt_id);
+      // Retry accounting must not parse an already-refused/corrupt release row
+      // again and abort the entire bounded batch.
+      sourceRelease.outbox.noteRetry(row.attempt_id, timestamp);
+      processing.database.prepare(`UPDATE viewer_prepared_submission_outbox SET updated_at=?
+        WHERE viewer_attempt_id=? AND copy_ack_canonical IS NOT NULL AND NOT EXISTS
+          (SELECT 1 FROM viewer_source_release_outbox r WHERE r.attempt_id=viewer_attempt_id)`)
+        .run(timestamp, row.attempt_id);
       results.push({ attemptId: row.attempt_id, status: 'pending', code: String(error?.code || 'source_release_error').slice(0, 80) });
     }
   }
