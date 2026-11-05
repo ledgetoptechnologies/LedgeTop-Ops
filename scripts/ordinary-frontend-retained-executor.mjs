@@ -12,6 +12,8 @@ import { capture, CloudflareReader, deploymentSourceCommit, hash, canonical, nee
 import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { ORDINARY_FRONTEND_AUTHORITY_CONTRACT, validateOrdinaryFrontendAuthorityObservation } from './ordinary-frontend-authority.mjs';
 import { readOrdinaryFrontendAuthorityObservation } from './ordinary-frontend-authority-reader.mjs';
+import { POST0226_STAFF_PRESERVATION_CONTRACT, validatePost0226StaffPreservationReview } from './ordinary-frontend-authority-post0226.mjs';
+import { readPost0226StaffPreservationObservation } from './ordinary-frontend-authority-post0226-reader.mjs';
 import { createAssetVerificationNonce, executeAssetVerification } from './production-auto-verify.mjs';
 import { readCandidateVersionWithVisibilityRetry } from './production-deploy.mjs';
 import { ProductionCloudflareProvider, newTemporaryVerifierName } from './production-auto-provider.mjs';
@@ -325,12 +327,14 @@ function writePrivateJson(directory, name, value) {
  */
 export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinnedPlan, profile, expectedDeploymentVersions, assetVerifierProvider,
   staffAuthorityContract = 'native-staff-cutover-v1', staffCutoverReview, staffReviewPath,
-  frontendAuthorityReview, resumeCandidate, installedOpsSuccessorReaderContract,
+  frontendAuthorityReview, post0226StaffPreservationReview, resumeCandidate, installedOpsSuccessorReaderContract,
   readFrontendAuthority = readOrdinaryFrontendAuthorityObservation,
+  readPost0226StaffPreservation = readPost0226StaffPreservationObservation,
   reader, cli, journalDirectory, artifactSourceRoot, executorSourceRoot = ROOT, fetchImpl = fetch,
   runNative = runNativeProductionCommand, captureFn = capture, readStaffCutover = readNativeStaffCutoverReadiness,
   sourceReader = deploymentSourceCommit, now = () => Date.now() } = {}) {
   frontendAuthorityReview = frontendAuthorityReview ? structuredClone(frontendAuthorityReview) : undefined;
+  post0226StaffPreservationReview = post0226StaffPreservationReview ? structuredClone(post0226StaffPreservationReview) : undefined;
   const ordinaryPlan = pinnedPlan?.ordinaryPlan;
   needFn(['operations', 'client'].includes(app) && pinnedPlan?.schemaVersion === 2
     && pinnedPlan.contract === 'ordinary-frontend-retained-native-module-v2'
@@ -405,9 +409,9 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   needFn(Number.isFinite(observedAt) && observedAt <= now() && (resumeCandidate || now() - observedAt <= 5 * 60_000),
     'Pinned retained plan ledger observation is stale');
 
-  needFn(['native-staff-cutover-v1', ORDINARY_FRONTEND_AUTHORITY_CONTRACT].includes(staffAuthorityContract),
+  needFn(['native-staff-cutover-v1', ORDINARY_FRONTEND_AUTHORITY_CONTRACT, POST0226_STAFF_PRESERVATION_CONTRACT].includes(staffAuthorityContract),
     'Explicit supported Operations staff authority contract required');
-  if (app !== 'operations') needFn(staffAuthorityContract === 'native-staff-cutover-v1' && !frontendAuthorityReview,
+  if (app !== 'operations') needFn(staffAuthorityContract === 'native-staff-cutover-v1' && !frontendAuthorityReview && !post0226StaffPreservationReview,
     'Client release cannot select an Operations-only authority contract');
   if (app === 'operations' && staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT) {
     needFn(frontendAuthorityReview && typeof readFrontendAuthority === 'function'
@@ -415,8 +419,17 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     'Frontend-only release requires its exact reviewed authority packet and separate snapshot reader');
   }
   if (app === 'operations' && staffAuthorityContract === 'native-staff-cutover-v1') {
-    needFn(!frontendAuthorityReview, 'Frontend-only authority packet requires its explicit contract discriminator');
+    needFn(!frontendAuthorityReview && !post0226StaffPreservationReview,
+      'Frontend-only authority packet requires its explicit contract discriminator');
   }
+  if (app === 'operations' && staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT)
+    needFn(!post0226StaffPreservationReview, 'Post-0226 authority packet requires its exact contract discriminator');
+  if (app === 'operations' && staffAuthorityContract === POST0226_STAFF_PRESERVATION_CONTRACT)
+    needFn(post0226StaffPreservationReview && typeof readPost0226StaffPreservation === 'function'
+      && !frontendAuthorityReview && !staffCutoverReview && !staffReviewPath,
+    'Post-0226 frontend release requires only its separate preservation review and reader');
+  if (app === 'operations' && staffAuthorityContract !== POST0226_STAFF_PRESERVATION_CONTRACT)
+    needFn(!post0226StaffPreservationReview, 'Post-0226 authority packet cannot accompany another staff contract');
   const observations = { beforeReadiness: null };
   const review = app === 'operations' && staffAuthorityContract === 'native-staff-cutover-v1'
     ? (staffCutoverReview ?? (staffReviewPath ? readStaffCutoverReview(staffReviewPath) : undefined)) : undefined;
@@ -429,6 +442,16 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
         Object.fromEntries(Object.entries(receipt).filter(([key]) => key !== 'observedAt')),
         Object.fromEntries(Object.entries(observations.beforeReadiness).filter(([key]) => key !== 'observedAt'))),
       'Reviewed frontend-only staff authority changed during release; reconcile without retry');
+      else observations.beforeReadiness = receipt;
+      return receipt;
+    }
+    if (staffAuthorityContract === POST0226_STAFF_PRESERVATION_CONTRACT) {
+      const observed = await readPost0226StaffPreservation({ sourceCommit });
+      const receipt = validatePost0226StaffPreservationReview(post0226StaffPreservationReview, observed, { sourceCommit, now: now() });
+      if (observations.beforeReadiness) needFn(equal(
+        Object.fromEntries(Object.entries(receipt).filter(([key]) => key !== 'observedAt')),
+        Object.fromEntries(Object.entries(observations.beforeReadiness).filter(([key]) => key !== 'observedAt'))),
+      'Reviewed post-0226 staff/login authority changed during release; reconcile without retry');
       else observations.beforeReadiness = receipt;
       return receipt;
     }
@@ -674,7 +697,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
  * one Operations authority packet matching its explicit contract. */
 export async function executeOrdinaryFrontendRetainedProduction({ app, plan, profile, expectedDeploymentVersions,
   staffAuthorityContract = 'native-staff-cutover-v1', artifactSourceRoot, staffReviewPath,
-  frontendAuthorityReviewPath, journalDirectory, env = process.env, fetchImpl = fetch } = {}) {
+  frontendAuthorityReviewPath, post0226StaffPreservationReviewPath, journalDirectory, env = process.env, fetchImpl = fetch } = {}) {
   needFn(env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
     && typeof env.CLOUDFLARE_API_TOKEN === 'string' && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN),
   'Cloudflare account and API token are required by the explicitly invoked production executor');
@@ -685,28 +708,44 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
     && plan.application === app && planSourceCommit === plan.sourceCommit && HEX40.test(planSourceCommit ?? ''),
   'Pinned ordinary retained plan source identity is invalid');
   const reader = new CloudflareReader(env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_API_TOKEN);
-  needFn(staffAuthorityContract === 'native-staff-cutover-v1' || staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT,
+  needFn(staffAuthorityContract === 'native-staff-cutover-v1' || staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT
+    || staffAuthorityContract === POST0226_STAFF_PRESERVATION_CONTRACT,
     'Explicit supported Operations staff authority contract required');
   const review = app === 'operations' && staffAuthorityContract === 'native-staff-cutover-v1'
     ? readStaffCutoverReview(staffReviewPath) : undefined;
   const frontendReview = app === 'operations' && staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT
     ? readStaffCutoverReview(frontendAuthorityReviewPath) : undefined;
-  if (app !== 'operations') needFn(!staffReviewPath && !frontendAuthorityReviewPath,
+  const post0226Review = app === 'operations' && staffAuthorityContract === POST0226_STAFF_PRESERVATION_CONTRACT
+    ? readStaffCutoverReview(post0226StaffPreservationReviewPath) : undefined;
+  if (app !== 'operations') needFn(!staffReviewPath && !frontendAuthorityReviewPath && !post0226StaffPreservationReviewPath,
     'Operations authority packets cannot be supplied for a Client release');
-  if (staffAuthorityContract === 'native-staff-cutover-v1') needFn(!frontendAuthorityReviewPath,
+  if (staffAuthorityContract === 'native-staff-cutover-v1') needFn(!frontendAuthorityReviewPath && !post0226StaffPreservationReviewPath,
     'Frontend-only review packet requires its explicit authority contract');
-  if (staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT) needFn(!staffReviewPath,
+  if (staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT) needFn(!staffReviewPath && !post0226StaffPreservationReviewPath,
     'Native cutover packet cannot be combined with frontend-only authority');
-  needFn(!(review && frontendReview), 'Select exactly one Operations staff authority packet');
+  if (staffAuthorityContract === POST0226_STAFF_PRESERVATION_CONTRACT)
+    needFn(!staffReviewPath && !frontendAuthorityReviewPath, 'Post-0226 preservation review cannot be combined with another authority packet');
+  validateProductionAuthorityPacketSelection({ app, review, frontendReview, post0226Review });
   const assetVerifierProvider = createJournaledAssetVerifierProvider({ accountId: env.CLOUDFLARE_ACCOUNT_ID,
     token: env.CLOUDFLARE_API_TOKEN, fetchImpl, profile: PROFILE, journalDirectory, sourceCommit: planSourceCommit });
   return executeOrdinaryFrontendRetainedRelease({ app, plan, profile, expectedDeploymentVersions,
     assetVerifierProvider, staffAuthorityContract, staffCutoverReview: review, frontendAuthorityReview: frontendReview,
+    post0226StaffPreservationReview: post0226Review,
     reader, cli: path.join(ROOT, `apps/${app}/node_modules/wrangler/wrangler-dist/cli.js`),
     journalDirectory, artifactSourceRoot, executorSourceRoot: ROOT, fetchImpl,
     runNative: (cli, args, directory, phase, cwd) => runNativeProductionCommand(cli, args, directory, phase, cwd, env),
     sourceReader: root => deploymentSourceCommit(root, env),
     readStaffCutover: args => readNativeStaffCutoverReadiness(args) });
+}
+
+/** Operations releases select one authority packet; Client releases select none. */
+export function validateProductionAuthorityPacketSelection({ app, review, frontendReview, post0226Review } = {}) {
+  needFn(app === 'operations' || app === 'client', 'Production authority packet application is invalid');
+  const count = [review, frontendReview, post0226Review].filter(Boolean).length;
+  needFn(app === 'operations' ? count === 1 : count === 0,
+    app === 'operations' ? 'Select exactly one Operations staff authority packet'
+      : 'Client release cannot select an Operations staff authority packet');
+  return true;
 }
 
 /** Bind every temporary verifier mutation intent to the already validated plan. */
