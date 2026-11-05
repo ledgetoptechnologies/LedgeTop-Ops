@@ -2,9 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as deliveryRoute from "../src/client/route";
 
 const calls = vi.hoisted(() => ({ createRoot: vi.fn(), parsePortal: vi.fn(), parseViewer: vi.fn(),
-  invitation: vi.fn(), onboarding: vi.fn(), recipient: vi.fn(), nativeRecipient: vi.fn() }));
+  invitation: vi.fn(), onboarding: vi.fn(), recipient: vi.fn(), nativeRecipient: vi.fn(), installAccessAjax: vi.fn() }));
 vi.mock("react-dom/client", () => ({ createRoot: calls.createRoot }));
-vi.mock("@ltds/ui", () => ({ AppDialogHost: () => null }));
+vi.mock("@ltds/ui", () => ({ AppDialogHost: () => null, SessionEndedNotice: () => null, installAccessAjax: calls.installAccessAjax }));
 vi.mock("../src/client/portal-route", () => ({ parseClientPortalRoute: calls.parsePortal }));
 vi.mock("../src/client/ClientViewerShell", () => ({ parseClientViewerShellRoute: calls.parseViewer }));
 vi.mock("../src/client/invitation-acceptance", () => ({ consumeInvitationToken: calls.invitation }));
@@ -39,5 +39,22 @@ describe("actual Client entry handoff", () => {
     expect(getElementById).not.toHaveBeenCalled();
     for (const operation of Object.values(calls)) expect(operation).not.toHaveBeenCalled();
     consume.mockRestore();
+  });
+
+  it("installs Access recovery before rendering the canonical portal", async () => {
+    const render = vi.fn();
+    calls.createRoot.mockReturnValue({ render });
+    calls.parsePortal.mockReturnValue({ isPortal: true, page: "home" });
+    const replace = vi.fn();
+    vi.stubGlobal("window", { location: { hostname: "portal.ledgetop.app", pathname: "/portal", search: "", hash: "", replace },
+      history: { state: null, replaceState: vi.fn() } });
+    vi.stubGlobal("document", { getElementById: vi.fn(() => ({})) });
+
+    await import("../src/client/main");
+
+    expect(replace).not.toHaveBeenCalled();
+    expect(calls.installAccessAjax).toHaveBeenCalledExactlyOnceWith();
+    expect(render).toHaveBeenCalledOnce();
+    expect(calls.installAccessAjax.mock.invocationCallOrder[0]).toBeLessThan(calls.createRoot.mock.invocationCallOrder[0]!);
   });
 });
