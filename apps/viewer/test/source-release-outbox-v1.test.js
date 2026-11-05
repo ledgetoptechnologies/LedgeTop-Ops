@@ -44,7 +44,9 @@ function releaseFixture(f) {
     intentSha256: 'e'.repeat(64), status: 'accepted' };
   const binding = { protocol: 'ltds-viewer-source-intake-binding-v2', coordinatorAuthorityId: 'coordinator-one',
     attemptId: f.attempt.id, jobId: 'c7e09ee8-2eeb-4fc3-9d3f-28f3638a11fa', providerTaskId: 'c7e09ee8-2eeb-4fc3-9d3f-28f3638a11fa', generation: 1, environment: 'staging',
-    manifestSha256: 'f'.repeat(64), pipelineDigest: '0'.repeat(64), resultManifestSha256: '9'.repeat(64) };
+    manifestSha256: 'f'.repeat(64), pipelineDigest: '0'.repeat(64), resultManifestSha256: '9'.repeat(64),
+    viewerTaskId: f.task.id, activationId: '11111111-1111-4111-8111-111111111111',
+    preparedEnvelopeSha256: '2'.repeat(64), sourceReceiptSha256: '3'.repeat(64), derivedReceiptSha256: '4'.repeat(64) };
   const readyProof = { kind: 'verified_outputs_ready', attemptId: f.attempt.id, modelId: f.project.id, modelVersionId: crypto.randomUUID(),
     outputInventorySha256: '8'.repeat(64), verifiedAt: '2026-11-05T12:00:00.000Z' };
   return { binding, readyProof, sourceManifest, derivedManifest, snapshotBinding };
@@ -59,9 +61,11 @@ function authFor(intent, observation, f) {
     jobId: intent.binding.jobId, generation: intent.binding.generation, environment: intent.binding.environment,
     viewerTaskId: f.task.id, providerTaskId: intent.binding.providerTaskId, viewerAttemptId: f.attempt.id,
     sourceSnapshotId: intent.snapshotBinding.snapshotId, sourceSnapshotSha256: intent.snapshotBinding.intentSha256,
+    activationId: intent.binding.activationId, preparedEnvelopeSha256: intent.binding.preparedEnvelopeSha256,
     inputManifestSha256: intent.binding.manifestSha256, pipelineDigest: intent.binding.pipelineDigest,
     resultManifestSha256: intent.binding.resultManifestSha256, sourceManifestSha256: intent.sourceManifest.sha256,
-    derivedManifestSha256: intent.derivedManifest.sha256, workerObservationId: observation.observationId,
+    derivedManifestSha256: intent.derivedManifest.sha256, sourceReceiptSha256: intent.binding.sourceReceiptSha256,
+    derivedReceiptSha256: intent.binding.derivedReceiptSha256, workerObservationId: observation.observationId,
     workerObservationAckSha256: observation.ackSha256, readyProof: intent.readyProof,
     eligibleObjects: closures.eligibleObjects, eligibleClosureSha256: closures.eligibleClosureSha256,
   });
@@ -97,6 +101,11 @@ test('source release intent survives restart with anchored readyAt and immutable
   const authorization = authFor(intent, observation, f);
   const signedRequest = Contract.signAuthorization(authorization, { ...trusted, privateKeyPem,
     sourceManifest: intent.sourceManifest, derivedManifest: intent.derivedManifest, sourceSnapshotBinding: intent.snapshotBinding });
+  const substitutedAuthorization = { ...authorization, readyProof: { ...authorization.readyProof, outputInventorySha256: '6'.repeat(64) } };
+  const substitutedRequest = Contract.signAuthorization(substitutedAuthorization, { ...trusted, privateKeyPem,
+    sourceManifest: intent.sourceManifest, derivedManifest: intent.derivedManifest, sourceSnapshotBinding: intent.snapshotBinding });
+  assert.throws(() => outbox.persistRequest(f.attempt.id, substitutedAuthorization, substitutedRequest,
+    { trustedReleaseKeys: [trusted] }), { code: 'source_release_outbox_request_invalid' });
   intent = outbox.persistRequest(f.attempt.id, authorization, signedRequest, { trustedReleaseKeys: [trusted] });
   assert.equal(intent.state, 'prepared');
   const exactRequest = Contract.canonical(intent.request);

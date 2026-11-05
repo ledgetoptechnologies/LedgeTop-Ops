@@ -6,6 +6,7 @@ const { canonical, digest, validateReleaseStatus } = require('./sourceReleaseCon
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SLUG = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const fail = (code) => { throw Object.assign(new Error(code), { code }); };
 
@@ -20,9 +21,30 @@ function validateOrigin(value) {
 async function boundedJson(response) {
   const length = Number(response.headers?.get?.('content-length'));
   if (Number.isFinite(length) && length > MAX_RESPONSE_BYTES) fail('source_release_response_too_large');
-  let bytes;
-  try { bytes = Buffer.from(await response.arrayBuffer()); } catch { fail('source_release_response_invalid'); }
-  if (bytes.length > MAX_RESPONSE_BYTES) fail('source_release_response_too_large');
+  const reader = response.body?.getReader?.();
+  if (!reader) fail('source_release_response_invalid');
+  const chunks = [];
+  let total = 0, bytes;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!(value instanceof Uint8Array)) fail('source_release_response_invalid');
+      total += value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => {});
+        fail('source_release_response_too_large');
+      }
+      chunks.push(Buffer.from(value));
+    }
+    bytes = Buffer.concat(chunks, total);
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    if (error?.code?.startsWith('source_release_')) throw error;
+    fail('source_release_response_invalid');
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
   try {
     const result = JSON.parse(bytes.toString('utf8'));
     if (!result || Object.getPrototypeOf(result) !== Object.prototype) fail('source_release_response_invalid');
@@ -83,7 +105,7 @@ class SourceReleaseClientV1 {
   }
 
   async acceptanceObservation(binding, { signal } = {}) {
-    if (!binding || !ID.test(binding.jobId || '') || !UUID.test(binding.coordinatorAuthorityId || '')
+    if (!binding || !ID.test(binding.jobId || '') || !SLUG.test(binding.coordinatorAuthorityId || '')
         || !Number.isSafeInteger(binding.generation) || binding.generation < 1 || binding.environment !== this.environment)
       fail('source_release_binding_invalid');
     const response = await this.request(`/ltds/v2/jobs/${encodeURIComponent(binding.jobId)}/source/acceptance-observation`, { method: 'GET', signal });
@@ -125,4 +147,4 @@ class SourceReleaseClientV1 {
   }
 }
 
-module.exports = { SourceReleaseClientV1, validateObservation };
+module.exports = { MAX_RESPONSE_BYTES, SourceReleaseClientV1, boundedJson, validateObservation };

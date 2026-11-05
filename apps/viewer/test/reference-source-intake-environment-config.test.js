@@ -11,7 +11,8 @@ const probeSource = `
   const { config, validate } = require('./server/config');
   const problems = validate();
   process.stdout.write(JSON.stringify({enabled:config.referenceSourceIntake.enabled, environment:config.referenceSourceIntake.environment,
-    origin:config.referenceSourceIntake.origin, problems:problems.filter(item=>item.includes('SOURCE_INTAKE')||item.includes('COORDINATOR')||item.includes('SOURCE_ATTESTATION')||item.includes('SOURCE_SNAPSHOT')||item.includes('REFERENCE_COPY')||item.includes('PRINCIPAL_ID')||item.includes('reference source intake'))}));
+    origin:config.referenceSourceIntake.origin, sourceReleaseEnabled:config.sourceRelease.enabled,
+    problems:problems.filter(item=>item.includes('SOURCE_INTAKE')||item.includes('COORDINATOR')||item.includes('SOURCE_ATTESTATION')||item.includes('SOURCE_SNAPSHOT')||item.includes('REFERENCE_COPY')||item.includes('SOURCE_RELEASE')||item.includes('PRINCIPAL_ID')||item.includes('reference source intake')||item.includes('source release'))}));
 `;
 
 function probe(overrides = {}, unset = []) {
@@ -35,6 +36,9 @@ test('enabled source intake requires distinct scoped keys and exact staging HTTP
   const signer = crypto.generateKeyPairSync('ed25519');
   const snapshot = crypto.generateKeyPairSync('ed25519');
   const copy = crypto.generateKeyPairSync('ed25519');
+  const release = crypto.generateKeyPairSync('ed25519');
+  const releasePin = [{ issuerId: 'viewer-release', keyId: 'release-v1', principalId: 'viewer-staging',
+    environment: 'staging', publicKeyPem: release.publicKey.export({ type: 'spki', format: 'pem' }) }];
   const state = probe({
     VIEWER_REFERENCE_SOURCE_INTAKE_ENABLED: 'true',
     VIEWER_REFERENCE_SOURCE_INTAKE_ENVIRONMENT: 'staging',
@@ -54,10 +58,20 @@ test('enabled source intake requires distinct scoped keys and exact staging HTTP
     VIEWER_REFERENCE_COPY_KEY_ID: 'accepted-copy-v2',
     VIEWER_REFERENCE_COPY_PRIVATE_KEY_PEM: copy.privateKey.export({ type: 'pkcs8', format: 'pem' }),
     VIEWER_REFERENCE_COPY_PUBLIC_KEY_PEM: copy.publicKey.export({ type: 'spki', format: 'pem' }),
+    VIEWER_SOURCE_RELEASE_ENABLED: 'true',
+    VIEWER_SOURCE_RELEASE_ENVIRONMENT: 'staging',
+    VIEWER_SOURCE_RELEASE_ORIGIN: 'https://processing.staging.example',
+    VIEWER_SOURCE_RELEASE_BEARER_TOKEN: 'd'.repeat(48),
+    VIEWER_SOURCE_RELEASE_ISSUER_ID: 'viewer-release',
+    VIEWER_SOURCE_RELEASE_KEY_ID: 'release-v1',
+    VIEWER_SOURCE_RELEASE_PRINCIPAL_ID: 'viewer-staging',
+    VIEWER_SOURCE_RELEASE_PRIVATE_KEY_PEM: release.privateKey.export({ type: 'pkcs8', format: 'pem' }),
+    VIEWER_SOURCE_RELEASE_TRUSTED_KEYS_JSON: JSON.stringify(releasePin),
   });
   assert.equal(state.enabled, true);
   assert.equal(state.environment, 'staging');
   assert.equal(state.origin, 'https://processing.staging.example');
+  assert.equal(state.sourceReleaseEnabled, true);
   assert.deepEqual(state.problems, []);
 });
 
