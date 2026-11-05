@@ -1,8 +1,9 @@
 'use strict';
 
-// Unmounted candidate only. No runtime route imports this module. It does not
-// prove storage durability, peer authentication, replay persistence, or cleanup
-// authority; those belong to a separately reviewed acceptance service.
+// Used by the configured Viewer source-intake worker to sign accepted-copy V2
+// receipts. Signing alone does not prove storage durability, peer
+// authentication, persisted replay handling, or cleanup authority; those are
+// enforced and verified by the paired Processing acceptance and cleanup path.
 const crypto = require('node:crypto');
 const protocol = require('./referenceProtocol');
 
