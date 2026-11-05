@@ -208,19 +208,6 @@ class SourceIntakeClientV2 {
     return boundedJson(response, 16 * 1024 * 1024);
   }
 
-  async getJobBySubmission(attemptId, { signal } = {}) {
-    if (!UUID.test(attemptId || '')) fail('source_intake_attempt_id_invalid');
-    const response = await this.request(`/ltds/v2/jobs/by-submission/${encodeURIComponent(attemptId)}`, { method: 'GET', signal });
-    if (response.status === 404) { await response.body?.cancel().catch(() => {}); return null; }
-    if (response.status !== 200) {
-      await response.body?.cancel().catch(() => {});
-      fail(response.status >= 500 ? 'source_intake_status_unavailable' : 'source_intake_status_rejected');
-    }
-    const job = await boundedJson(response, 16 * 1024 * 1024);
-    if (job.attemptId !== attemptId) fail('source_intake_status_binding_mismatch');
-    return job;
-  }
-
   async getLogs(binding, { after = 0, limit = 200, signal } = {}) {
     if (!binding || binding.environment !== this.environment || !UUID.test(binding.attemptId || '')
         || !Number.isSafeInteger(binding.generation) || binding.generation < 1
