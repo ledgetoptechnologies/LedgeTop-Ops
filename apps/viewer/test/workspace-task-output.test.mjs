@@ -53,6 +53,12 @@ test('V2 result handoff phases are reported explicitly rather than as queued nod
  assert.equal(context.taskOutputStage({...task.latestAttempt,status:'running',providerStatus:{upstreamPhase:'awaiting_acceptance'}},[]),'Verifying processing results.');
 });
 
+test('processing phase preserves recognized ODM stage details and an honest fallback',()=>{
+ const {context,task}=fixture();
+ const attempt={...task.latestAttempt,status:'running',providerStatus:{upstreamPhase:'processing'}};
+ assert.equal(context.taskOutputStage(attempt,[{message:'Running odm_orthophoto'}]),'Orthophoto');
+ assert.equal(context.taskOutputStage(attempt,[{message:'Finished odm_dem'}]),'Processing — stage not reported in recent output');
+});
 test('queued upstream reason is humanized and takes precedence over stale processing logs',()=>{
  const {context,task}=fixture();
  const attempt={...task.latestAttempt,status:'queued_upstream',providerStatus:{queueState:'waiting_for_dispatch',queueReason:'waiting_node_capacity',nodeId:'node-east-01'}};
