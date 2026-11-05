@@ -2460,6 +2460,78 @@ const MIGRATIONS = [
       BEGIN SELECT RAISE(ABORT,'copy acknowledgement and digest must be stored together'); END;
   `},
   {version:75,name:'bounded_v2_source_intake_metadata_outbox',sql:'SELECT 1;',after:expandSourceIntakeOutboxMetadataLimit},
+  {version:76,name:'durable_v1_viewer_source_release_outbox',sql:`
+    CREATE TABLE viewer_source_release_outbox (
+      attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+      release_id TEXT NOT NULL UNIQUE,
+      binding_json TEXT NOT NULL CHECK(json_valid(binding_json)),
+      binding_sha256 TEXT NOT NULL CHECK(length(binding_sha256)=64 AND binding_sha256 NOT GLOB '*[^0-9a-f]*'),
+      ready_proof_json TEXT NOT NULL CHECK(json_valid(ready_proof_json)),
+      ready_proof_sha256 TEXT NOT NULL CHECK(length(ready_proof_sha256)=64 AND ready_proof_sha256 NOT GLOB '*[^0-9a-f]*'),
+      source_manifest_json TEXT NOT NULL CHECK(json_valid(source_manifest_json)),
+      source_manifest_sha256 TEXT NOT NULL CHECK(length(source_manifest_sha256)=64 AND source_manifest_sha256 NOT GLOB '*[^0-9a-f]*'),
+      derived_manifest_json TEXT NOT NULL CHECK(json_valid(derived_manifest_json)),
+      derived_manifest_sha256 TEXT NOT NULL CHECK(length(derived_manifest_sha256)=64 AND derived_manifest_sha256 NOT GLOB '*[^0-9a-f]*'),
+      snapshot_binding_json TEXT NOT NULL CHECK(json_valid(snapshot_binding_json)),
+      snapshot_binding_sha256 TEXT NOT NULL CHECK(length(snapshot_binding_sha256)=64 AND snapshot_binding_sha256 NOT GLOB '*[^0-9a-f]*'),
+      authorization_json TEXT CHECK(authorization_json IS NULL OR json_valid(authorization_json)),
+      authorization_json_sha256 TEXT CHECK(authorization_json_sha256 IS NULL OR (length(authorization_json_sha256)=64 AND authorization_json_sha256 NOT GLOB '*[^0-9a-f]*')),
+      authorization_sha256 TEXT CHECK(authorization_sha256 IS NULL OR (length(authorization_sha256)=64 AND authorization_sha256 NOT GLOB '*[^0-9a-f]*')),
+      request_json TEXT CHECK(request_json IS NULL OR json_valid(request_json)),
+      request_sha256 TEXT CHECK(request_sha256 IS NULL OR (length(request_sha256)=64 AND request_sha256 NOT GLOB '*[^0-9a-f]*')),
+      observation_json TEXT CHECK(observation_json IS NULL OR json_valid(observation_json)),
+      observation_sha256 TEXT CHECK(observation_sha256 IS NULL OR (length(observation_sha256)=64 AND observation_sha256 NOT GLOB '*[^0-9a-f]*')),
+      status_json TEXT CHECK(status_json IS NULL OR json_valid(status_json)),
+      status_sha256 TEXT CHECK(status_sha256 IS NULL OR (length(status_sha256)=64 AND status_sha256 NOT GLOB '*[^0-9a-f]*')),
+      receipt_json TEXT CHECK(receipt_json IS NULL OR json_valid(receipt_json)),
+      receipt_sha256 TEXT CHECK(receipt_sha256 IS NULL OR (length(receipt_sha256)=64 AND receipt_sha256 NOT GLOB '*[^0-9a-f]*')),
+      state TEXT NOT NULL CHECK(state IN ('ready','prepared','submitted','held','released')),
+      hold_reason TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK((authorization_json IS NULL)=(authorization_json_sha256 IS NULL)),
+      CHECK((authorization_json IS NULL)=(authorization_sha256 IS NULL)),
+      CHECK((request_json IS NULL)=(request_sha256 IS NULL)),
+      CHECK((observation_json IS NULL)=(observation_sha256 IS NULL)),
+      CHECK((status_json IS NULL)=(status_sha256 IS NULL)),
+      CHECK((receipt_json IS NULL)=(receipt_sha256 IS NULL)),
+      CHECK((request_json IS NULL)=(authorization_json IS NULL)),
+      CHECK(receipt_json IS NULL OR status_json IS NOT NULL)
+    );
+    CREATE TRIGGER viewer_source_release_no_delete BEFORE DELETE ON viewer_source_release_outbox
+      BEGIN SELECT RAISE(ABORT,'Viewer source release intent is retained'); END;
+    CREATE TRIGGER viewer_source_release_identity_immutable
+      BEFORE UPDATE OF attempt_id,release_id,binding_json,binding_sha256,ready_proof_json,ready_proof_sha256,
+        source_manifest_json,source_manifest_sha256,derived_manifest_json,derived_manifest_sha256,
+        snapshot_binding_json,snapshot_binding_sha256,created_at ON viewer_source_release_outbox
+      WHEN NEW.attempt_id IS NOT OLD.attempt_id OR NEW.release_id IS NOT OLD.release_id
+        OR NEW.binding_json IS NOT OLD.binding_json OR NEW.binding_sha256 IS NOT OLD.binding_sha256
+        OR NEW.ready_proof_json IS NOT OLD.ready_proof_json
+        OR NEW.ready_proof_sha256 IS NOT OLD.ready_proof_sha256
+        OR NEW.source_manifest_json IS NOT OLD.source_manifest_json OR NEW.source_manifest_sha256 IS NOT OLD.source_manifest_sha256
+        OR NEW.derived_manifest_json IS NOT OLD.derived_manifest_json OR NEW.derived_manifest_sha256 IS NOT OLD.derived_manifest_sha256
+        OR NEW.snapshot_binding_json IS NOT OLD.snapshot_binding_json OR NEW.snapshot_binding_sha256 IS NOT OLD.snapshot_binding_sha256
+        OR NEW.created_at IS NOT OLD.created_at
+      BEGIN SELECT RAISE(ABORT,'Viewer source release identity is immutable'); END;
+    CREATE TRIGGER viewer_source_release_authorization_immutable
+      BEFORE UPDATE OF authorization_json,authorization_json_sha256,authorization_sha256,request_json,request_sha256 ON viewer_source_release_outbox
+      WHEN (OLD.authorization_json IS NOT NULL AND NEW.authorization_json IS NOT OLD.authorization_json)
+        OR (OLD.authorization_json_sha256 IS NOT NULL AND NEW.authorization_json_sha256 IS NOT OLD.authorization_json_sha256)
+        OR (OLD.authorization_sha256 IS NOT NULL AND NEW.authorization_sha256 IS NOT OLD.authorization_sha256)
+        OR (OLD.request_json IS NOT NULL AND NEW.request_json IS NOT OLD.request_json)
+        OR (OLD.request_sha256 IS NOT NULL AND NEW.request_sha256 IS NOT OLD.request_sha256)
+      BEGIN SELECT RAISE(ABORT,'Viewer source release authorization is immutable'); END;
+    CREATE TRIGGER viewer_source_release_observation_immutable
+      BEFORE UPDATE OF observation_json,observation_sha256 ON viewer_source_release_outbox
+      WHEN (OLD.observation_json IS NOT NULL AND NEW.observation_json IS NOT OLD.observation_json)
+        OR (OLD.observation_sha256 IS NOT NULL AND NEW.observation_sha256 IS NOT OLD.observation_sha256)
+      BEGIN SELECT RAISE(ABORT,'Viewer source release observation is immutable'); END;
+    CREATE TRIGGER viewer_source_release_receipt_immutable
+      BEFORE UPDATE OF receipt_json,receipt_sha256 ON viewer_source_release_outbox
+      WHEN (OLD.receipt_json IS NOT NULL AND NEW.receipt_json IS NOT OLD.receipt_json)
+        OR (OLD.receipt_sha256 IS NOT NULL AND NEW.receipt_sha256 IS NOT OLD.receipt_sha256)
+      BEGIN SELECT RAISE(ABORT,'Viewer source release receipt is immutable'); END;
+  `},
 ];
 
 function applyMigrations(database) {
