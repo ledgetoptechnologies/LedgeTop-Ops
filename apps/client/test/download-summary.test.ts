@@ -1,11 +1,88 @@
 import { describe, expect, it, vi } from "vitest";
+import { Miniflare } from "miniflare";
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {} }));
 import worker, { classifyPublicRateLimit } from "../src/worker/index";
-import { listDownloadableObjects, summarizeDownloadableObjects } from "../src/worker/downloadable-files";
+import {
+  createDownloadTombstoneIndex, DOWNLOAD_TOMBSTONES_FOR_SCOPE_SQL, downloadTombstoneScopeBounds,
+  listDownloadableObjects, summarizeDownloadableObjects,
+} from "../src/worker/downloadable-files";
 import { encodeItemRef } from "../src/worker/files";
 import { createSessionCookie } from "../src/worker/security";
 
 describe("authorized download-all summary", () => {
+  it("indexes exact and prefix tombstones without changing their raw-key boundaries", () => {
+    const isTombstoned = createDownloadTombstoneIndex([
+      { physical_key: "Jobs/Clients/Acme/exact.txt", tombstone_kind: "exact" },
+      { physical_key: "Jobs/Clients/Acme/Field/", tombstone_kind: "prefix" },
+      { physical_key: "legacy-prefix", tombstone_kind: "prefix" },
+    ]);
+
+    expect(isTombstoned("Jobs/Clients/Acme/exact.txt")).toBe(true);
+    expect(isTombstoned("Jobs/Clients/Acme/exact.txt/child")).toBe(false);
+    expect(isTombstoned("Jobs/Clients/Acme/Field/flight/photo.jpg")).toBe(true);
+    expect(isTombstoned("Jobs/Clients/Acme/Field-archive/photo.jpg")).toBe(false);
+    expect(isTombstoned("legacy-prefix-sibling.txt")).toBe(true);
+    expect(isTombstoned("Jobs/Other/private.txt")).toBe(false);
+  });
+
+  it("selects scoped tombstones in SQLite for high Unicode descendants and prefix ancestors", async () => {
+    const runtime = new Miniflare({
+      compatibilityDate: "2026-07-16",
+      modules: true,
+      script: "export default {}",
+      d1Databases: { DELIVERY_DB: crypto.randomUUID() },
+    });
+    try {
+      const database = await runtime.getD1Database("DELIVERY_DB");
+      await database.prepare("CREATE TABLE delivery_tombstones (physical_key TEXT NOT NULL, tombstone_kind TEXT NOT NULL, restored_at TEXT)").run();
+      const root = "Jobs/Clients/Acme/";
+      const descendantKeys = [
+        `${root}plain.txt`,
+        `${root}\uffff-high.txt`,
+        `${root}\u{10000}-astral.txt`,
+      ];
+      const rows = [
+        ...descendantKeys.map(key => database.prepare("INSERT INTO delivery_tombstones VALUES(?, 'exact', NULL)").bind(key)),
+        database.prepare("INSERT INTO delivery_tombstones VALUES(?, 'prefix', NULL)").bind("Jobs/Clients/"),
+        database.prepare("INSERT INTO delivery_tombstones VALUES(?, 'prefix', NULL)").bind("Jobs/Clients/Acme-backup/"),
+        database.prepare("INSERT INTO delivery_tombstones VALUES(?, 'exact', NULL)").bind("Jobs/Clients/Acme"),
+        database.prepare("INSERT INTO delivery_tombstones VALUES(?, 'exact', 'restored')").bind(`${root}restored.txt`),
+      ];
+      await database.batch(rows);
+
+      const scope = downloadTombstoneScopeBounds(root);
+      const result = await database.prepare(DOWNLOAD_TOMBSTONES_FOR_SCOPE_SQL)
+        .bind(scope.root, scope.upperExclusive, scope.root).all<{ physical_key: string; tombstone_kind: string }>();
+      expect(result.results.map((row: { physical_key: string }) => row.physical_key).sort()).toEqual([
+        ...descendantKeys,
+        "Jobs/Clients/",
+      ].sort());
+      expect(scope.upperExclusive).toBe("Jobs/Clients/Acme0");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("handles a large tombstone and object set with bounded lookup work", async () => {
+    const root = "Jobs/Clients/Scale/";
+    const tombstones = Array.from({ length: 8_000 }, (_, index) => ({
+      physical_key: `${root}deleted-${index}/`,
+      tombstone_kind: "prefix" as const,
+    }));
+    const visible = Array.from({ length: 8_000 }, (_, index) => ({
+      key: `${root}visible-${index}/photo.jpg`, size: 1, etag: `etag-${index}`, customMetadata: {},
+    }));
+    const deleted = tombstones.map((tombstone, index) => ({
+      key: `${tombstone.physical_key}photo.jpg`, size: 1, etag: `deleted-${index}`, customMetadata: {},
+    }));
+    const bucket = { list: vi.fn(async () => ({ objects: [...visible, ...deleted], truncated: false })) };
+
+    const objects = await listDownloadableObjects(bucket as never, root, tombstones);
+    expect(objects).toHaveLength(visible.length);
+    expect(objects[0]?.key).toBe(`${root}visible-0/photo.jpg`);
+    expect(objects.at(-1)?.key).toBe(`${root}visible-7999/photo.jpg`);
+  });
+
   it("uses the manifest limiter and rejects requests without a share session", async () => {
     expect(classifyPublicRateLimit("GET", "/api/public/shares/public/download-summary"))
       .toEqual({ binding: "PUBLIC_MANIFEST_RATE_LIMITER", scope: "download-summary" });
