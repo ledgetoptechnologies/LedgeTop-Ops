@@ -25,11 +25,12 @@ async function autoImportGcpSources({ processing, storage }, datasetId, createdB
     const stat = fs.statSync(absolutePath);
     if (!stat.isFile() || stat.size !== file.byteSize) throw Object.assign(new Error('GCP source file changed during automatic import'), { code: 'gcp_source_snapshot_mismatch' });
     const bytes = fs.readFileSync(absolutePath);
-    if (!Buffer.from(bytes.toString('utf8'), 'utf8').equals(bytes)
-        || crypto.createHash('sha256').update(bytes).digest('hex') !== file.sha256) {
+    if (crypto.createHash('sha256').update(bytes).digest('hex') !== file.sha256) {
       throw Object.assign(new Error('GCP source file changed during automatic import'), { code: 'gcp_source_snapshot_mismatch' });
     }
-    const content = bytes.toString('utf8');
+    let content;
+    try { content = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+    catch { ignored += 1; continue; }
     const format = detectGcpCsvFormat(content);
     if (!format) { ignored += 1; continue; }
 

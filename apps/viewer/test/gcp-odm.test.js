@@ -12,15 +12,19 @@ test('canonical WGS84 correspondences serialize in ODM documented coordinate and
   assert.equal(odmGcpList([]), null);
 });
 
-test('ODM GCP list keeps the Emlid NAD83(2011) horizontal datum in its CRS header', () => {
+test('ODM GCP list emits a valid NAVD88 compound CRS for Emlid NAD83(2011) coordinates', () => {
   assert.equal(odmGcpList([{
     longitude: -88.1, latitude: 44.5, elevationM: 250, pixelX: 1, pixelY: 2,
     relativePath: 'photo.jpg', horizontalCrs: 'EPSG:6318', verticalDatum: 'NAVD88(GEOID18) height',
-  }]), 'EPSG:6318+5703(GEOID18)\n-88.1 44.5 250 1 2 photo.jpg\n');
+  }]), 'EPSG:6349\n-88.1 44.5 250 1 2 photo.jpg\n');
   assert.equal(odmGcpList([{
     longitude: -88.1, latitude: 44.5, elevationM: 250, pixelX: 1, pixelY: 2,
     relativePath: 'photo.jpg', horizontalCrs: 'EPSG:6318', verticalDatum: 'Ellipsoidal height',
   }]), 'EPSG:6319\n-88.1 44.5 250 1 2 photo.jpg\n');
+  assert.throws(() => odmGcpList([{
+    longitude: -88.1, latitude: 44.5, elevationM: 250, pixelX: 1, pixelY: 2,
+    relativePath: 'photo.jpg', horizontalCrs: 'EPSG:4326', verticalDatum: 'NAVD88(GEOID18) height',
+  }]), (error) => error.code === 'invalid_gcp_correspondence', 'fail closed rather than write an invalid or misleading compound CRS');
   assert.throws(() => odmGcpList([
     { longitude: -88, latitude: 44, elevationM: 250, pixelX: 1, pixelY: 2, relativePath: 'a.jpg', horizontalCrs: 'EPSG:6318' },
     { longitude: -88, latitude: 44, elevationM: 250, pixelX: 1, pixelY: 2, relativePath: 'b.jpg', horizontalCrs: 'EPSG:4326' },

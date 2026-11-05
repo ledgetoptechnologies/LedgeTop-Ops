@@ -11,10 +11,8 @@ function scalar(value, field) {
 function odmCoordinateCrs(horizontalCrs, verticalSystem) {
   const vertical = String(verticalSystem || '').replace(/[\s_()-]/g, '').toLowerCase();
   if (/^navd88(?:geoid\d+[a-z]*)?height$/.test(vertical)) {
-    const geoid = String(verticalSystem || '').match(/\(\s*(GEOID\s*\d+[A-Z]*)\s*\)/i)?.[1]?.replace(/\s+/g, '').toUpperCase();
-    if (geoid) return `${horizontalCrs}+5703(${geoid})`;
     if (horizontalCrs === 'EPSG:6318') return 'EPSG:6349';
-    return `${horizontalCrs}+5703`;
+    throw Object.assign(new Error('NAVD88 GCP elevations require a supported compound horizontal CRS'), { code: 'invalid_gcp_correspondence' });
   }
   if (/^(?:ellipsoidal?|ellipsoid)height$/.test(vertical)) {
     if (horizontalCrs === 'EPSG:6318') return 'EPSG:6319';
