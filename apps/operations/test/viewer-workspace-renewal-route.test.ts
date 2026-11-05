@@ -186,7 +186,8 @@ describe("Viewer workspace renewal Worker routing", () => {
     "binds renewal grants to the actual verified staff URL %s, not the Viewer Origin header or canonical primary",async controllerOrigin=>{
       const production=productionFixture();
       const candidate={...production.env,PUBLIC_BASE_URL:"https://ops.ledgetop.app",EXPECTED_HOST:"ops.ledgetop.app",
-        OPERATIONS_ORIGINS:"https://ops.ledgetop.app,https://ops.ledgetopdroneservices.com"} as Env;
+        OPERATIONS_ORIGINS:controllerOrigin==="https://ops.ledgetopdroneservices.com"
+          ? "https://ops.ledgetop.app" : "https://ops.ledgetop.app,https://ops.ledgetopdroneservices.com"} as Env;
       const makeRequest=(path:string,init:RequestInit={})=>new Request(controllerOrigin+path,{...init,
         headers:{Origin:production.viewerOrigin,...init.headers as Record<string,string>}});
       const challengeResponse=await worker.fetch(makeRequest(`${requestPath}/challenge`),candidate,context);
@@ -201,6 +202,31 @@ describe("Viewer workspace renewal Worker routing", () => {
       expect(denied.status).toBe(404);
       expect(mocks.createGrant).toHaveBeenCalledTimes(1);
     });
+
+  it("keeps only authenticated legacy Viewer renewal routes available after canonical-only retirement", async () => {
+    const production = productionFixture();
+    const canonicalOnly = { ...production.env, EXPECTED_HOST: "ops.ledgetop.app", PUBLIC_BASE_URL: "https://ops.ledgetop.app",
+      OPERATIONS_ORIGINS: "https://ops.ledgetop.app" } as Env;
+    mocks.boundStaff.mockRejectedValue(new HTTPException(401, { message: "Invalid Cloudflare Access authentication" }));
+    const oldChallenge = await worker.fetch(new Request("https://ops.ledgetopdroneservices.com" + requestPath + "/challenge", {
+      headers: { Origin: production.viewerOrigin },
+    }), canonicalOnly, context);
+    expect(oldChallenge.status).toBe(401);
+    expect(mocks.boundStaff).toHaveBeenCalledOnce();
+    const forgedOrigin = await worker.fetch(new Request("https://ops.ledgetopdroneservices.com" + requestPath + "/challenge", {
+      headers: { Origin: "https://attacker.example" },
+    }), canonicalOnly, context);
+    expect(forgedOrigin.status).toBe(403);
+    const portal = await worker.fetch(new Request("https://portal.ledgetop.app" + requestPath + "/challenge", {
+      headers: { Origin: production.viewerOrigin },
+    }), canonicalOnly, context);
+    expect(portal.status).toBe(404);
+    const otherLegacyApi = await worker.fetch(new Request("https://ops.ledgetopdroneservices.com/api/viewer/preferences", {
+      headers: { Origin: production.viewerOrigin },
+    }), canonicalOnly, context);
+    expect(otherLegacyApi.status).toBe(404);
+    expect(mocks.createGrant).not.toHaveBeenCalled();
+  });
 
   it("returns authenticated production failures as exact-origin CORS JSON without minting a grant", async () => {
     const production = productionFixture();

@@ -14,6 +14,15 @@ const ALL_KNOWN_OPERATIONS_ORIGINS = new Set([
   ...PRODUCTION_OPERATIONS_ORIGINS, ...RETIRED_PRODUCTION_OPERATIONS_ORIGINS, ...STAGING_OPERATIONS_ORIGINS,
 ]);
 const NON_OPERATIONS_APP_HOST = /^(?:portal|client|delivery|incoming)(?:-staging)?\.(?:ledgetop\.app|ledgetopdroneservices\.com|ledgetoptechnologies\.com)$/u;
+const CANONICAL_PRODUCTION_OPERATIONS_ORIGIN = "https://ops.ledgetop.app";
+const LEGACY_VIEWER_CONTROLLER_ORIGINS = RETIRED_PRODUCTION_OPERATIONS_ORIGINS;
+
+const LEGACY_VIEWER_CONTROLLER_ROUTES = new Set([
+  "POST /api/viewer/admin-grant",
+  "OPTIONS /api/viewer/workspace/session-renewal",
+  "GET /api/viewer/workspace/session-renewal/challenge",
+  "POST /api/viewer/workspace/session-renewal",
+]);
 
 export function requestHostAllowed(
   requestUrl: string,
@@ -36,6 +45,27 @@ export function requestHostAllowed(
   } catch {
     return false;
   }
+}
+
+/**
+ * Preserve the existing Viewer controller origin only for the authenticated
+ * grant and renewal endpoints after production switches to the exact
+ * canonical-only Operations origin list. All other routes continue to use
+ * requestHostAllowed and deny those retired hosts.
+ */
+export function legacyViewerControllerCompatibilityAllowed(
+  requestUrl: string,
+  method: string,
+  env: Pick<Env, "ENVIRONMENT" | "EXPECTED_HOST" | "OPERATIONS_ORIGINS">,
+): boolean {
+  if (env.ENVIRONMENT !== "production" || env.EXPECTED_HOST !== "ops.ledgetop.app"
+    || env.OPERATIONS_ORIGINS !== CANONICAL_PRODUCTION_OPERATIONS_ORIGIN) return false;
+  try {
+    const request = new URL(requestUrl);
+    if (request.protocol !== "https:" || request.port || request.search
+      || !LEGACY_VIEWER_CONTROLLER_ORIGINS.has(request.origin)) return false;
+    return LEGACY_VIEWER_CONTROLLER_ROUTES.has(`${method.toUpperCase()} ${request.pathname}`);
+  } catch { return false; }
 }
 
 /** Returns the exact admitted Operations origin for browser API and CSRF checks.
