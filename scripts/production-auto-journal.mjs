@@ -464,6 +464,52 @@ export class ProductionAutoJournal {
     if (head === null) return null;
     const doc = await this.#readDocument(head); this.#head = head; this.#document = doc; return doc;
   }
+  /** Read and validate one completed predecessor using only the bounded GitHub
+   * journal GET path. This method never claims, writes, or changes the ref. */
+  async readVerifiedPredecessor({ sourceCommit, releaseId, ciRunId, ciRunAttempt, workflowRunId, workflowRunAttempt } = {}) {
+    need(this.#runtime === null && COMMIT.test(sourceCommit ?? '') && SHA.test(releaseId ?? '')
+      && releaseId === hash(`${this.#identity.workerName}\n${sourceCommit}`)
+      && Number.isSafeInteger(ciRunId) && ciRunId > 0 && Number.isSafeInteger(ciRunAttempt) && ciRunAttempt > 0
+      && Number.isSafeInteger(workflowRunId) && workflowRunId > 0
+      && Number.isSafeInteger(workflowRunAttempt) && workflowRunAttempt > 0);
+    const document = await this.#load();
+    need(document !== null);
+    const matches = document.operations.filter(row => row.releaseId === releaseId);
+    need(matches.length === 1);
+    const op = matches[0];
+    need(op.workerName === this.#identity.workerName && op.sourceCommit === sourceCommit
+      && op.releaseId === hash(`${op.workerName}\n${op.sourceCommit}`)
+      && op.ci.runId === ciRunId && op.ci.runAttempt === ciRunAttempt
+      && op.workflow.runId === workflowRunId && op.workflow.runAttempt === workflowRunAttempt
+      && op.state === 'verified' && op.artifact !== null
+      && op.artifact.runId === workflowRunId && op.artifact.runAttempt === workflowRunAttempt
+      && op.artifact.name === `production-auto-${releaseId}`
+      && op.artifact.uploadStepConclusion === 'success' && op.artifact.releaseStepConclusion === 'success');
+
+    const expectedStatuses = op.releaseKind === 'backend-sync'
+      ? ['started','prepared','inactive-verified','verified']
+      : ['started','prepared','inactive-verified','zero-percent-verified','candidate-assets-verified','verified'];
+    need(JSON.stringify(op.receipts.map(row => row.status)) === JSON.stringify(expectedStatuses));
+    const final = op.receipts.at(-1);
+    if (op.releaseKind === 'backend-sync') {
+      need(op.workerName === 'ledgetop-ops-sync' && final.verifiedActive === true
+        && final.moduleSHA256 === op.runtime.moduleSha256 && UUID.test(final.candidateVersionId ?? '')
+        && UUID.test(final.deploymentId ?? ''));
+    } else {
+      need(final.verifiedActive === true && final.ledgerSHA256 === op.runtime.ledgerSha256
+        && SHA.test(final.ledgerSHA256 ?? '') && UUID.test(final.candidateVersionId ?? '')
+        && UUID.test(final.deploymentId ?? '') && final.minimumRetentionHours === 48
+        && final.automaticPruning === false && final.allHistoricalAssetsCarried === true
+        && isProviderUtcTimestamp(final.cutoverObservedAt)
+        && Number.isFinite(Date.parse(final.earliestPermittedPruningAt ?? ''))
+        && Date.parse(final.earliestPermittedPruningAt) >= Date.parse(minimumRetainedUntil(final.cutoverObservedAt, 48)));
+    }
+    return Object.freeze({ workerName: op.workerName, releaseKind: op.releaseKind, sourceCommit: op.sourceCommit,
+      releaseId: op.releaseId, ci: Object.freeze({ ...op.ci }), workflow: Object.freeze({ ...op.workflow }),
+      runtime: Object.freeze({ ...op.runtime }), artifact: Object.freeze({ artifactId: op.artifact.artifactId,
+        digestSha256: op.artifact.digestSha256, name: op.artifact.name, runId: op.artifact.runId,
+        runAttempt: op.artifact.runAttempt }), finalReceipt: Object.freeze({ ...final }) });
+  }
   async #persist(next) {
     const old = await this.#load();
     need(old && this.#claimed);
@@ -634,4 +680,13 @@ export class ProductionAutoJournal {
     op.updatedAt = this.now(); await this.#persist({ operation: op });
   }
   snapshot() { return this.#document ? structuredClone(this.#document) : null; }
+}
+
+/** Read-only convenience entry point for the workflow handoff. */
+export async function readVerifiedProductionAutoPredecessor({ token, workerName, sourceCommit, releaseId,
+  ciRunId, ciRunAttempt, workflowRunId, workflowRunAttempt, fetchImpl = fetch } = {}) {
+  const journal = new ProductionAutoJournal({ token, workerName, sourceCommit, ciRunId, ciRunAttempt,
+    workflowRunId, workflowRunAttempt, recipient: PRODUCTION_AUTO_JOURNAL_RECIPIENT,
+    responseDirectory: process.cwd(), fetchImpl });
+  return journal.readVerifiedPredecessor({ sourceCommit, releaseId, ciRunId, ciRunAttempt, workflowRunId, workflowRunAttempt });
 }

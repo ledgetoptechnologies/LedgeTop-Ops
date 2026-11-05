@@ -5,13 +5,13 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { ProductionAutoJournal, sealProductionProviderResponse } from './production-auto-journal.mjs';
+import { ProductionAutoJournal, readVerifiedProductionAutoPredecessor, sealProductionProviderResponse } from './production-auto-journal.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const COMMIT = 'a'.repeat(40), RUNTIME = { profileSha256: '1'.repeat(64), moduleSha256: '2'.repeat(64), ledgerSha256: '3'.repeat(64) };
 
 function github() {
-  const refs = new Map(), commits = new Map(), trees = new Map(), blobs = new Map(); let serial = 1;
+  const refs = new Map(), commits = new Map(), trees = new Map(), blobs = new Map(), requests = []; let serial = 1;
   trees.set('b'.repeat(40), { tree: [] });
   commits.set(COMMIT, { sha: COMMIT, tree: { sha: 'b'.repeat(40) }, parents: [] });
   commits.set('c'.repeat(40), { sha: 'c'.repeat(40), tree: { sha: 'b'.repeat(40) }, parents: [COMMIT] });
@@ -20,6 +20,7 @@ function github() {
     headers: { 'content-type': 'application/json' } });
   const fetchImpl = async (url, init = {}) => {
     const u = new URL(url), p = u.pathname.replace('/repos/ledgetoptechnologies/LedgeTop-Ops', ''), method = init.method ?? 'GET';
+    requests.push({ method, path: p });
     const body = init.body ? JSON.parse(init.body) : undefined;
     if (p.startsWith('/git/ref/heads/')) {
       const name = p.slice('/git/ref/heads/'.length);
@@ -35,7 +36,7 @@ function github() {
     if (p.startsWith('/git/blobs/')) { const b = blobs.get(p.split('/').at(-1)); return b ? response(200, { encoding: 'base64', content: b.toString('base64'), size: b.length }) : response(404, {}); }
     return response(500, {});
   };
-  return { fetchImpl, refs, commits, trees, blobs };
+  return { fetchImpl, refs, commits, trees, blobs, requests };
 }
 
 function recipient() {
@@ -126,6 +127,9 @@ test('distinct source release appends and unsuccessful release artifact is durab
     assert.equal(completion.snapshot().operations.at(-1).artifact.digestSha256, 'd'.repeat(64));
     assert.equal(completion.snapshot().operations.at(-1).state, 'held');
     assert.equal(completion.snapshot().operations.at(-1).artifact.releaseStepConclusion, 'failure');
+    await assert.rejects(readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32), workerName: 'ledgetop-clients',
+      sourceCommit: 'c'.repeat(40), releaseId: completion.releaseId, ciRunId: 101, ciRunAttempt: 2,
+      workflowRunId: 124, workflowRunAttempt: 1, fetchImpl: api.fetchImpl }));
     const duplicate = journal(api, dir, { sourceCommit: 'c'.repeat(40), ciRunId: 101, workflowRunId: 124 });
     await assert.rejects(duplicate.attachArtifact({ artifactId: 902, artifactDigest: 'e'.repeat(64), runId: 124, runAttempt: 1,
       name: `production-auto-${duplicate.releaseId}`, status: 'success', releaseStatus: 'success' }));
@@ -168,6 +172,30 @@ test('artifact completion verifies only after final proof, activation, verifier 
     assert.equal(run.snapshot().operations[0].artifact.releaseStepConclusion, 'success');
     assert.equal(run.snapshot().operations[0].responses.at(-1).status, 404);
     assert.equal(run.snapshot().operations[0].responses.at(-1).providerAcknowledged, true);
+    const beforeRead = api.requests.length;
+    const proof = await readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32), workerName: 'ledgetop-clients',
+      sourceCommit: 'c'.repeat(40), releaseId: run.releaseId, ciRunId: 101, ciRunAttempt: 2,
+      workflowRunId: 124, workflowRunAttempt: 1, fetchImpl: api.fetchImpl });
+    assert.deepEqual(api.requests.slice(beforeRead).map(row => row.method), ['GET','GET','GET','GET']);
+    assert.equal(proof.releaseId, run.releaseId);
+    assert.equal(proof.runtime.moduleSha256, RUNTIME.moduleSha256);
+    assert.equal(proof.finalReceipt.candidateVersionId, '22222222-2222-4222-8222-222222222222');
+    assert.equal(proof.finalReceipt.deploymentId, '33333333-3333-4333-8333-333333333333');
+    assert.equal(proof.finalReceipt.minimumRetentionHours, 48);
+    const rejected = [
+      { sourceCommit: 'a'.repeat(40), releaseId: run.releaseId },
+      { sourceCommit: 'c'.repeat(40), releaseId: '0'.repeat(64) },
+      { sourceCommit: 'c'.repeat(40), releaseId: run.releaseId, workflowRunId: 125 },
+      { sourceCommit: 'c'.repeat(40), releaseId: run.releaseId, workflowRunAttempt: 2 },
+      { sourceCommit: 'c'.repeat(40), releaseId: run.releaseId, ciRunId: 102 },
+      { sourceCommit: 'c'.repeat(40), releaseId: run.releaseId, ciRunAttempt: 3 },
+    ];
+    for (const mismatch of rejected) await assert.rejects(readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32),
+      workerName: 'ledgetop-clients', sourceCommit: mismatch.sourceCommit ?? 'c'.repeat(40),
+      releaseId: mismatch.releaseId, ciRunId: mismatch.ciRunId ?? 101, ciRunAttempt: mismatch.ciRunAttempt ?? 2,
+      workflowRunId: mismatch.workflowRunId ?? 124, workflowRunAttempt: mismatch.workflowRunAttempt ?? 1,
+      fetchImpl: api.fetchImpl }));
+    assert.ok(api.requests.slice(beforeRead).every(row => row.method === 'GET'));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
