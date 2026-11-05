@@ -10,6 +10,9 @@ import { POST0226_LOGIN_TABLES, POST0226_STAFF_LOGIN_MIGRATION_SHA256, POST0226_
   POST0226_STAFF_PRESERVATION_QUERY, createPost0226StaffPreservationReview, qualifyPost0226Snapshot, validatePost0226Schema,
   validatePost0226StaffPreservationReview } from './ordinary-frontend-authority-post0226.mjs';
 import { readPost0226StaffPreservationObservation } from './ordinary-frontend-authority-post0226-reader.mjs';
+import { compileProductionAutoPost0226PreservationPolicy, loadPinnedProductionAutoPost0226PreservationPolicy,
+  validateProductionAutoPost0226PreservationObservation, validateProductionAutoPost0226PreservationPolicy,
+  validateRepeatedProductionAutoPost0226PreservationReceipts } from './production-auto-post0226-policy.mjs';
 
 const sourceCommit = 'a'.repeat(40), observedAt = '2026-10-31T10:00:00.000Z', now = Date.parse('2026-10-31T10:01:00.000Z');
 const sha = text => createHash('sha256').update(text).digest('hex');
@@ -111,6 +114,72 @@ test('short post-0226 review hashes complete state without returning personal or
     assert.equal(JSON.stringify(receipt).includes('token_sha256'), false);
     assert.deepEqual(receipt.loginBindingCounts, Object.fromEntries(Object.keys(POST0226_LOGIN_TABLES).map(k => [k, k === 'staff_login_binding_control' || k === 'staff_login_generations' ? 1 : 0])));
     assert.equal(observation.accountId, NATIVE_STAFF_PRODUCTION_TARGET.accountId);
+  } finally { fixture.db.close(); }
+});
+
+test('offline recurring preservation policy pins qualified state, allows only observation time and source to vary, and stays unprovisioned', async () => {
+  migrationText ??= await readFile(new URL('../apps/operations/migrations/0226_staff_login_bindings.sql', import.meta.url), 'utf8');
+  const fixture = schemaFixture();
+  try {
+    const firstAt = '2026-10-31T10:00:00.000Z', firstNow = Date.parse(firstAt);
+    const firstSource = 'a'.repeat(40), nextSource = 'b'.repeat(40);
+    const raw = rawFixture(fixture.schema, fixture.columns);
+    const first = await qualifyPost0226Snapshot(raw, { sourceCommit:firstSource, observedAt:firstAt, now:firstNow });
+    const candidate = compileProductionAutoPost0226PreservationPolicy(first, { sourceCommit:firstSource, now:firstNow });
+    assert.equal(candidate.offlineOnly, true);
+    assert.equal(candidate.activationEnabled, false);
+    assert.equal(candidate.policy.baseline.nativeControlEnabled, 0);
+    assert.equal(candidate.policy.baseline.aliasLinkingAuthorized, false);
+    assert.equal(validateProductionAutoPost0226PreservationPolicy(candidate.policy), candidate.policy);
+    assert.equal(JSON.stringify(candidate).includes('owner@example.test'), false);
+    assert.equal(JSON.stringify(candidate).includes('access_subject'), false);
+
+    const secondAt = '2026-10-31T10:00:40.000Z', secondNow = Date.parse(secondAt);
+    const second = await qualifyPost0226Snapshot(raw, { sourceCommit:nextSource, observedAt:secondAt, now:secondNow });
+    const receipt1 = validateProductionAutoPost0226PreservationObservation(candidate.policy, first,
+      { sourceCommit:firstSource, now:firstNow });
+    const secondSameSource = await qualifyPost0226Snapshot(raw, { sourceCommit:firstSource, observedAt:secondAt, now:secondNow });
+    const receipt2 = validateProductionAutoPost0226PreservationObservation(candidate.policy, secondSameSource,
+      { sourceCommit:firstSource, now:secondNow });
+    const nextSourceReceipt = validateProductionAutoPost0226PreservationObservation(candidate.policy, second,
+      { sourceCommit:nextSource, now:secondNow });
+    assert.equal(receipt1.sourceCommit, firstSource);
+    assert.equal(receipt2.sourceCommit, firstSource);
+    assert.equal(nextSourceReceipt.sourceCommit, nextSource);
+    assert.equal(receipt1.stateSha256, receipt2.stateSha256);
+    const repeated = validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy, [receipt1, receipt2],
+      { sourceCommit:firstSource, now:secondNow });
+    assert.equal(repeated.count, 2);
+
+    const changedRows = clone(raw);
+    changedRows.post0226Rows.staff_login_generations[0].generation += 1;
+    const changedObservation = await qualifyPost0226Snapshot(changedRows, { sourceCommit:nextSource,
+      observedAt:secondAt, now:secondNow });
+    assert.throws(() => validateProductionAutoPost0226PreservationObservation(candidate.policy, changedObservation,
+      { sourceCommit:nextSource, now:secondNow }), /preservation_state_changed/u);
+    for (const changed of [
+      { ...second, sourceCommit:firstSource },
+      { ...second, accountId:'00000000000000000000000000000000' },
+      { ...second, nativeControlEnabled:1 },
+      { ...second, fullStaffCutoverReadiness:true },
+      { ...second, aliasLinkingAuthorized:true },
+      { ...second, loginSchemaSha256:'f'.repeat(64) },
+      { ...second, extraApproval:true },
+    ]) assert.throws(() => validateProductionAutoPost0226PreservationObservation(candidate.policy, changed,
+      { sourceCommit:nextSource, now:secondNow }));
+    assert.throws(() => validateProductionAutoPost0226PreservationObservation(candidate.policy, second,
+      { sourceCommit:nextSource, now:secondNow+60_001 }), /observation_invalid_or_stale/u);
+    const driftedReceipt = { ...receipt2, bridgeMismatchCount:receipt2.bridgeMismatchCount+1 };
+    assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy,
+      [receipt1, driftedReceipt], { sourceCommit:firstSource, now:secondNow }), /repeated_receipt_drift/u);
+
+    const originalPath = process.env.PRODUCTION_AUTO_POST0226_POLICY_PATH;
+    process.env.PRODUCTION_AUTO_POST0226_POLICY_PATH = 'C:\\unreviewed\\policy.json';
+    try { assert.throws(() => loadPinnedProductionAutoPost0226PreservationPolicy(), /policy_unprovisioned/u); }
+    finally {
+      if (originalPath === undefined) delete process.env.PRODUCTION_AUTO_POST0226_POLICY_PATH;
+      else process.env.PRODUCTION_AUTO_POST0226_POLICY_PATH = originalPath;
+    }
   } finally { fixture.db.close(); }
 });
 
