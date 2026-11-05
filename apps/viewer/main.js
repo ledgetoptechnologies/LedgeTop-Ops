@@ -1602,6 +1602,7 @@ function scheduleSessionRenewal(session) {
 
 function applyViewerSession(session, { initialize = false } = {}) {
   const previousTilesUrl = TILES_URL;
+  const wasRenewing = sessionAccessState === 'renewing' || sessionAccessState === 'retrying';
   setDisplayUnits(session.displayUnits);
   if (session.sessionId) sessionStorageKey = `${SESSION_STORAGE_PREFIX}${session.sessionId}`;
   if (session.accessToken && sessionStorageKey) sessionCapabilities.write(sessionStorageKey, session.accessToken);
@@ -1646,6 +1647,9 @@ function applyViewerSession(session, { initialize = false } = {}) {
   sessionRenewalBlocked = false;
   setSessionAccessState('active');
   recoverFailedLodTiles();
+  if (wasRenewing && !lodTileRecoveryPending && state.activeMode === 'model' && tilesRenderer) {
+    dom.lodStatus.textContent = 'LOD: access renewed';
+  }
   pcApi()?.renewAccess?.(EPT_URL);
   viewerProductDownloads?.refresh();
 }
