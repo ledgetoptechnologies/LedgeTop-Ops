@@ -1,6 +1,6 @@
 import { lazy, StrictMode, Suspense } from "react";
 import { createRoot } from "react-dom/client";
-import { AppDialogHost } from "@ltds/ui";
+import { AppDialogHost, installAccessAjax, SessionEndedNotice } from "@ltds/ui";
 import "@ltds/ui/styles.css";
 import "mapbox-gl/dist/mapbox-gl.css";
 import "./styles.css";
@@ -29,6 +29,8 @@ const InvitationAcceptanceApp = lazy(async () => {
   const module = await import("./InvitationAcceptanceApp");
   return { default: module.InvitationAcceptanceApp };
 });
+installAccessAjax();
+
 if (!handoffLegacyPublicShare(window.location, url => window.location.replace(url))) {
   const nativeRecipientEnrollmentRoute = consumeOperationsNativeRecipientEnrollmentRoute(window.location, window.history);
   const recipientEnrollmentRoute = consumeClientPortalRecipientEnrollmentRoute(window.location, window.history);
@@ -71,6 +73,7 @@ if (!handoffLegacyPublicShare(window.location, url => window.location.replace(ur
             : <DeliveryApp initialRoute={deliveryRoute ?? undefined} />}
       </Suspense>
       <AppDialogHost />
+      <SessionEndedNotice />
     </StrictMode>,
   );
 }

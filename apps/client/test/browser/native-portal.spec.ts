@@ -1504,6 +1504,37 @@ test.describe("client header matches Operations", () => {
     await expect(page).toHaveURL(/\/portal$/);
   });
 
+  test("an Access 401 mid-visit offers Sign in again and sends the Access header", async ({page}) => {
+    let header: string | undefined;
+    await mock(page, (route, call) => {
+      if (call.path !== "/api/client/session/status") return undefined;
+      header = route.request().headers()["x-requested-with"];
+      return route.fulfill({status: 401, contentType: "text/html", body: "<html>Access</html>"});
+    });
+    await page.goto("/portal");
+    await page.getByRole("button", {name: /^Account menu for /}).click();
+    const notice = page.getByRole("complementary", {name: "Your sign-in has ended"});
+    await expect(notice.getByRole("link", {name: "Sign in again"})).toHaveAttribute("href", "/cdn-cgi/access/logout");
+    expect(header).toBe("XMLHttpRequest");
+    await expect(page).toHaveURL(/\/portal$/);
+  });
+
+  test("an Access 401 on the first request gets the full sign-in screen, not the notice", async ({page}) => {
+    await page.route("**/api/**", route => route.fulfill({status: 401, contentType: "text/html", body: "<html>Access</html>"}));
+    await page.goto("/portal");
+    await expect(page.getByRole("link", {name: "Sign in again"})).toHaveAttribute("href", "/cdn-cgi/access/logout");
+    await expect(page.locator(".session-ended-notice")).toHaveCount(0);
+    await expect(page).toHaveURL(/\/portal$/);
+  });
+
+  test("a 403 mid-visit is not treated as an ended sign-in", async ({page}) => {
+    await mock(page, (route, call) => call.path === "/api/client/session/status" ? route.fulfill({status: 403, contentType: "text/html", body: "Forbidden"}) : undefined);
+    await page.goto("/portal");
+    await page.getByRole("button", {name: /^Account menu for /}).click();
+    await expect(page.getByRole("menu", {name: "Account"}).locator(".account-session-status small")).toHaveText("Session time unavailable");
+    await expect(page.locator(".session-ended-notice")).toHaveCount(0);
+  });
+
   test("a sign-in that ends while the menu is open switches to Sign in again without a 401", async ({page}) => {
     await page.clock.install({time: new Date("2030-01-01T12:00:00Z")});
     await mock(page, (route, call) => call.path === "/api/client/session/status"
