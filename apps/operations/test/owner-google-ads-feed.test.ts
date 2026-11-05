@@ -7,6 +7,7 @@ import { dispatchIntelIngest } from '../src/worker/intel-ingest-routes';
 import { intelDigest,intelSigningBytes,base64url,type ProducerKey } from '../src/worker/competitor-intel-ingest-security';
 import { INTEL_INGEST_PATH } from '../src/worker/competitor-intel-ingest-security';
 import { registerOwnerIntelRoutes,type OwnerIntelSummary } from '../src/worker/owner-intel';
+import { ownerGoogleAdsReadState,readOwnerGoogleAdsProjection } from '../src/worker/owner-google-ads-ingest';
 import type { Env,StaffPrincipal } from '../src/worker/types';
 
 const TS=new Date().toISOString().replace(/\.\d{3}Z$/,'Z'),NOW=Date.parse(TS),ORIGIN='https://incoming.ledgetopdroneservices.com',PRODUCER='hermes-competitor-intel';
@@ -185,12 +186,15 @@ describe('proposed owner Google Ads source lane',()=>{
 
  it('uses an explicit no-account binding/state and never infers it from missing account data',async()=>{
  await installAdsBinding({accountState:'no_account'});await db.prepare('UPDATE owner_intel_google_ads_control SET enabled=1,storage_accepted=1').run();
+ expect(await ownerGoogleAdsReadState(db,bindingId,1)).toBe('ready');
  const noAccount=observation({accountState:'no_account'});expect((await post(noAccount))?.status).toBe(200);
  const invented=observation({accountState:'no_account'});invented.payload.account=account;invented.payload.currencyCode='USD';invented.payload.period={start:'2026-10-18',end:'2026-10-24',days:7,timeZone:'America/Chicago'};invented.payload.totals={costMicros:'0',impressions:'0',clicks:'0',conversions:'0',state:'observed',reason:null};invented.payload.provenance.sourceAccountRef=account.advertiserCustomerRef;invented.payload.provenance.asOf=TS;
  expect((await post(invented))?.status).toBe(403);
  const summary=await ownerSummary(`/api/intel/${routeKey}/summary?range=7d`,businessId);
  expect(summary.status).toBe(200);const result=await summary.json() as OwnerIntelSummary;
  expect(result.sources.find(source=>source.id==='google_ads')).toMatchObject({state:'unconfigured',reason:'no_account',metrics:null});
+ const detail=await ownerSummary(`/api/intel/${routeKey}/google-ads?range=7d`,businessId);
+ expect(detail.status).toBe(200);expect(await detail.json()).toMatchObject({totals:{state:'no_account',reason:'no_account'}});
  });
 
  it('rejects same operation IDs across Ads, v1 and GSC v2 in both directions after signature verification',async()=>{
@@ -329,22 +333,38 @@ describe('proposed owner Google Ads source lane',()=>{
   const response=await ownerSummary(`/api/intel/${lttKey}/summary?range=7d`,lttBusiness);
   expect(response.status).toBe(200);const result=await response.json() as OwnerIntelSummary;
   expect(result.business).toMatchObject({id:lttBusiness,key:lttKey,name:'Ledge Top Technologies'});
-  expect(result.sources.find(source=>source.id==='google_ads')).toMatchObject({state:'unconfigured',reason:'owner_advertiser_not_confirmed',metrics:null});
+  expect(result.sources.find(source=>source.id==='google_ads')).toMatchObject({state:'unconfigured',reason:'source_binding_not_configured',metrics:null});
   expect(JSON.stringify(result)).not.toContain('7654321');expect(JSON.stringify(result)).not.toContain(managedBusiness);
  });
 
- it('forces LTT own Ads to remain unconfigured even if an MCC-shaped binding exists',async()=>{
-  const old={...account},lttBusiness=`business-ltt-mcc-${serial}`,lttKey=`ltt-mcc-${serial}`,lttBinding=`binding-ltt-mcc-${serial}`;
+ it('blocks manager-only projections from every owner Ads read regardless of business name',async()=>{
+  const old={...account},lttBusiness=`business-ltt-mcc-${serial}`,lttKey=`renamed-owner-${serial}`,lttBinding=`binding-ltt-mcc-${serial}`;
   Object.assign(account,{managerCustomerRef:'4772620878',advertiserCustomerRef:'4772620878'});
   try{
-   await installAdsBinding({binding:lttBinding,business:lttBusiness,alias:lttKey,businessName:'Ledge Top Technologies'});
+   await installAdsBinding({binding:lttBinding,business:lttBusiness,alias:lttKey,businessName:'Renamed Owner'});
    await db.prepare('UPDATE owner_intel_google_ads_control SET enabled=1,storage_accepted=1').run();
    const managerOnly=observation({binding:lttBinding});
    expect((await post(managerOnly))?.status).toBe(200);
+   expect(await ownerGoogleAdsReadState(db,lttBinding,1)).toBe('manager_only');
+   expect(await readOwnerGoogleAdsProjection(db,lttBinding,1,'7d',NOW)).toBeNull();
    const response=await ownerSummary(`/api/intel/${lttKey}/summary?range=7d`,lttBusiness);
    expect(response.status).toBe(200);const result=await response.json() as OwnerIntelSummary;
    expect(result.sources.find(source=>source.id==='google_ads')).toMatchObject({state:'unconfigured',reason:'owner_advertiser_not_confirmed',metrics:null});
-   expect(JSON.stringify(result)).not.toContain('1234567');
+   const detail=await ownerSummary(`/api/intel/${lttKey}/google-ads?range=7d`,lttBusiness);
+   expect(detail.status).toBe(404);expect(JSON.stringify(await detail.json())).not.toContain('1234567');
+  }finally{Object.assign(account,old);}
+ });
+
+ it('allows a distinct advertiser under its manager regardless of LTT display name',async()=>{
+  const old={...account},lttBusiness=`business-ltt-child-${serial}`,lttKey=`ltt-child-${serial}`,lttBinding=`binding-ltt-child-${serial}`;
+  Object.assign(account,{managerCustomerRef:'4772620878',advertiserCustomerRef:'4340088827'});
+  try{
+   await installAdsBinding({binding:lttBinding,business:lttBusiness,alias:lttKey,businessName:'Ledge Top Technologies'});
+   await db.prepare('UPDATE owner_intel_google_ads_control SET enabled=1,storage_accepted=1').run();
+   expect((await post(observation({binding:lttBinding})))?.status).toBe(200);
+   const response=await ownerSummary(`/api/intel/${lttKey}/summary?range=7d`,lttBusiness);
+   expect(response.status).toBe(200);const result=await response.json() as OwnerIntelSummary;
+   expect(result.sources.find(source=>source.id==='google_ads')).toMatchObject({state:'available',metrics:{clicks:'5',costMicros:'1234567'}});
   }finally{Object.assign(account,old);}
  });
 

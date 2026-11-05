@@ -51,11 +51,20 @@ from unconfigured null. Stale source reads are explicitly cleared rather than
 falling back to an earlier projection. GSC and the own-site monitor remain
 separate source IDs; `ga4` is always unconfigured until it has its own reviewed
 binding/read model. The summary does not create source bindings, advertiser
-mappings, OAuth connections, or provider reads. The canonical owner-business name
-`Ledge Top Technologies` is explicitly guarded as Ads-unconfigured until Beau
-confirms a dedicated advertiser; an Ads binding or manager/MCC projection cannot
-override this policy. Changing that guard requires a reviewed source-identity
-update after the advertiser is identified.
+mappings, OAuth connections, or provider reads. Connected owner Ads reads
+require a reviewed advertiser distinct from its manager. A manager-only account
+is reported as `unconfigured` with `owner_advertiser_not_confirmed` in the
+summary, and the standalone Ads route does not return its totals. Eligibility is
+enforced by the shared source read path and does not depend on the business
+display name. An explicit `no_account` binding retains its typed no-account
+state. A confirmed child advertiser may be read under its manager when that
+exact account context is present in the reviewed binding.
+Distinct IDs are necessary but do not prove the child is an advertiser rather
+than another manager. Before activating any feed, verify the exact account's
+advertiser role and manager relationship against Google; no such live check or
+binding activation is performed by this source change. Google's
+[account type model](https://developers.google.com/google-ads/api/docs/concepts/account-types)
+distinguishes manager and advertiser customers.
 
 All responses are private/no-store. Unknown and unauthorized business aliases
 both return 404 `intel_business_not_found`. Missing monitoring returns 404
