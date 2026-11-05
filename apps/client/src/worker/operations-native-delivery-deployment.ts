@@ -36,6 +36,18 @@ export const NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE = JSON.stringify({
   publicShareOrigin: "https://delivery.ledgetop.app",
 });
 
+/** Exact installed overlap profiles remain readable during the canonical-only
+ * rollout. Their historical metadata does not authorize a legacy browser origin:
+ * nativeDeliveryRequestOriginAllowed still admits only portal.ledgetop.app. */
+export const NATIVE_DELIVERY_APP_PORTAL_OVERLAP_PRODUCTION_PROFILE = JSON.stringify({
+  ...JSON.parse(NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE),
+  privateRequestOrigins: ["https://portal.ledgetop.app", "https://portal.ledgetopdroneservices.com"],
+});
+export const NATIVE_DELIVERY_APP_DELIVERY_OVERLAP_PRODUCTION_PROFILE = JSON.stringify({
+  ...JSON.parse(NATIVE_DELIVERY_APP_PORTAL_OVERLAP_PRODUCTION_PROFILE),
+  publicShareOrigin: "https://delivery.ledgetop.app",
+});
+
 export type NativeDeliveryDeploymentEnv = Readonly<{
   ENVIRONMENT?: string;
   EXPECTED_HOST?: string;
@@ -63,8 +75,13 @@ export function nativeDeliveryDeploymentEnabled(env: NativeDeliveryDeploymentEnv
     : env.CLIENT_PORTAL_ORIGIN === "https://portal.ledgetopdroneservices.com"
     ? deliveryCanonical ? null : NATIVE_DELIVERY_PORTAL_PRODUCTION_PROFILE
     : env.CLIENT_PORTAL_ORIGIN === "https://client.ledgetopdroneservices.com" && !deliveryCanonical ? NATIVE_DELIVERY_PRODUCTION_PROFILE : null;
+  const installedOverlapProfile = env.CLIENT_PORTAL_ORIGIN === "https://portal.ledgetop.app"
+    ? deliveryCanonical ? NATIVE_DELIVERY_APP_DELIVERY_OVERLAP_PRODUCTION_PROFILE : NATIVE_DELIVERY_APP_PORTAL_OVERLAP_PRODUCTION_PROFILE
+    : null;
   return env.ENVIRONMENT === "production"
-    && expectedProfile !== null && env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE === expectedProfile
+    && expectedProfile !== null
+    && (env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE === expectedProfile
+      || (installedOverlapProfile !== null && env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE === installedOverlapProfile))
     && env.EXPECTED_HOST === new URL(publicOrigin).host
     && env.PUBLIC_BASE_URL === publicOrigin
     && env.PUBLIC_SHARE_ORIGIN === publicOrigin;
@@ -76,7 +93,8 @@ export function nativeDeliveryRequestOriginAllowed(env: NativeDeliveryDeployment
   if (!nativeDeliveryDeploymentEnabled(env)) return false;
   let origin: string;
   try { origin = new URL(requestUrl).origin; } catch { return false; }
-  if ([NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE]
+  if ([NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE,
+    NATIVE_DELIVERY_APP_PORTAL_OVERLAP_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_DELIVERY_OVERLAP_PRODUCTION_PROFILE]
     .includes(env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE ?? "")) {
     const configured = env.CLIENT_PORTAL_ORIGINS?.split(",").map(value => value.trim()) ?? [];
     if (!configured.length || configured.length > 4 || new Set(configured).size !== configured.length
