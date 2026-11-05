@@ -11,8 +11,9 @@ function fixture() {
     protocol: 'ltds-viewer-source-intake-binding-v2', attemptId: '22222222-2222-4222-8222-222222222222',
     coordinatorAuthorityId: 'coordinator-1', jobId: 'job-1', providerTaskId: 'job-1', generation: 1,
     environment: 'staging', manifestSha256: 'd'.repeat(64), pipelineDigest: 'e'.repeat(64),
-    resultManifestSha256: resultHash,
   };
+  const resultManifestCanonical = JSON.stringify({ resultManifestSha256: resultHash });
+  const viewerReceipt = { resultManifestSha256: resultHash, sourceReceiptSha256: receiptHash, derivedReceiptSha256: derivedHash };
   const intent = {
     submissionId: remoteBinding.attemptId, viewerTaskId: '33333333-3333-4333-8333-333333333333',
     envelopeCanonical: JSON.stringify({ activationId }), envelopeSha256: 'f'.repeat(64), remoteBinding,
@@ -20,10 +21,11 @@ function fixture() {
       sourceAttestation: { proof: { activationId, pipelineDigest: remoteBinding.pipelineDigest } } }),
     sourceIntakeCompletionCanonical: JSON.stringify({ sourceReceipt: {}, derivedReceipt: {}, sourceReceiptSha256: receiptHash,
       derivedReceiptSha256: derivedHash }),
-    resultManifestCanonical: JSON.stringify({ resultManifestSha256: resultHash }),
-    copyRequestCanonical: JSON.stringify({ acceptance: {}, viewerReceipt: { sourceReceiptSha256: receiptHash,
-      derivedReceiptSha256: derivedHash } }),
-    copyAckCanonical: JSON.stringify({ fullyAccepted: true, job: { jobId: 'job-1', generation: 1, phase: 'completed' } }),
+    resultManifestCanonical,
+    resultManifestSha256: require('node:crypto').createHash('sha256').update(resultManifestCanonical, 'utf8').digest('hex'),
+    copyRequestCanonical: JSON.stringify({ acceptance: { resultManifestSha256: resultHash }, viewerReceipt }),
+    copyAckCanonical: JSON.stringify({ fullyAccepted: true, viewerReceipt,
+      job: { jobId: 'job-1', generation: 1, phase: 'completed' } }),
   };
   return { intent, receiptHash, derivedHash };
 }
@@ -33,6 +35,8 @@ test('source-release binding uses receipt hashes from the durable completion rec
   const result = releaseBinding(intent);
   assert.equal(result.binding.sourceReceiptSha256, receiptHash);
   assert.equal(result.binding.derivedReceiptSha256, derivedHash);
+  assert.equal(result.binding.resultManifestSha256, JSON.parse(intent.resultManifestCanonical).resultManifestSha256);
+  assert.equal(Object.hasOwn(intent.remoteBinding, 'resultManifestSha256'), false, 'the admission binding has no result digest field');
   assert.equal(result.binding.viewerTaskId, intent.viewerTaskId);
 });
 

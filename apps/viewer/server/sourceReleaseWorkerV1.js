@@ -16,10 +16,14 @@ function releaseBinding(intent) {
   const result = JSON.parse(intent.resultManifestCanonical);
   const copy = JSON.parse(intent.copyRequestCanonical);
   const ack = JSON.parse(intent.copyAckCanonical);
+  const resultManifestDigest = crypto.createHash('sha256').update(intent.resultManifestCanonical, 'utf8').digest('hex');
   if (ack.fullyAccepted !== true || ack.job?.jobId !== intent.remoteBinding.jobId
       || ack.job?.generation !== intent.remoteBinding.generation || ack.job?.phase !== 'completed'
       || !completion.sourceReceipt || !completion.derivedReceipt || !copy.acceptance || !copy.viewerReceipt
-      || result.resultManifestSha256 !== intent.remoteBinding.resultManifestSha256
+      || resultManifestDigest !== intent.resultManifestSha256
+      || result.resultManifestSha256 !== copy.acceptance.resultManifestSha256
+      || result.resultManifestSha256 !== copy.viewerReceipt.resultManifestSha256
+      || !ack.viewerReceipt || Contract.canonical(ack.viewerReceipt).compare(Contract.canonical(copy.viewerReceipt)) !== 0
       || request.submissionId !== intent.submissionId || envelope.activationId !== request.sourceAttestation.proof.activationId
       || copy.viewerReceipt.sourceReceiptSha256 !== completion.sourceReceiptSha256
       || copy.viewerReceipt.derivedReceiptSha256 !== completion.derivedReceiptSha256)
