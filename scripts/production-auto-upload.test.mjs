@@ -54,6 +54,29 @@ test('only official bounded POSTs; account credential only registers, session JW
   assert.ok(!JSON.stringify(f.intents).includes(API_TOKEN) && !JSON.stringify(f.intents).includes(SESSION));
 });
 
+test('timed-out final dispatch fence cannot send after its deferred callback resumes', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'], now: 0 });
+  const f = fixture({ buckets: [] });
+  let entered, release;
+  const callbackEntered = new Promise(resolve => { entered = resolve; });
+  const deferredFence = new Promise(resolve => { release = resolve; });
+  f.options.beforeDispatch = () => { entered(); return deferredFence; };
+
+  const pending = uploadAssetManifest(f.options);
+  await callbackEntered;
+  assert.deepEqual(f.intents.map(row => row.phase), ['asset-session']);
+  assert.equal(f.calls.length, 0);
+
+  await t.mock.timers.tick(30_001);
+  await assert.rejects(pending, /request failed or is uncertain/u);
+  release();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(f.calls.length, 0, 'the timed-out intent remains held without a provider request');
+  assert.deepEqual(f.intents.map(row => row.phase), ['asset-session']);
+});
+
 test('provider bucket partitions above the journal-safe maximum refuse before resolving or uploading files', async () => {
   const buckets = Array.from({ length: PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS + 1 }, (_, index) =>
     [crypto.createHash('sha256').update(`bucket-${index}`).digest('hex').slice(0, 32)]);

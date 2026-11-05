@@ -83,6 +83,7 @@ async function post(fetchImpl, url, authorization, body, contentType, beforeDisp
   });
   const operation = (async () => {
     await beforeDispatch?.();
+    need(!controller.signal.aborted, 'Asset API request expired before dispatch');
     response = await fetchImpl(url, { method: 'POST', redirect: 'error', signal: controller.signal,
       headers: { Authorization: `Bearer ${authorization}`, ...(contentType ? { 'Content-Type': contentType } : {}) }, body });
     if (controller.signal.aborted) {
