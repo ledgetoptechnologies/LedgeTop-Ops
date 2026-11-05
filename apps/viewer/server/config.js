@@ -70,6 +70,14 @@ let processingProviderTokens = {};
 let processingProviderTokensError = null;
 try { processingProviderTokens = JSON.parse(process.env.PROCESSING_PROVIDER_TOKENS_JSON || '{}'); if(!processingProviderTokens||Array.isArray(processingProviderTokens)||typeof processingProviderTokens!=='object'||Object.values(processingProviderTokens).some((v)=>typeof v!=='string'))throw new Error('must be a JSON object of string values'); }
 catch (error) { processingProviderTokens = {}; processingProviderTokensError=error.message; }
+let sourceReleaseTrustedKeys = [];
+let sourceReleaseTrustedKeysError = null;
+try {
+  sourceReleaseTrustedKeys = JSON.parse(process.env.VIEWER_SOURCE_RELEASE_TRUSTED_KEYS_JSON || '[]');
+  if (!Array.isArray(sourceReleaseTrustedKeys) || sourceReleaseTrustedKeys.some((key) => !key || Array.isArray(key)
+      || typeof key !== 'object' || ['issuerId', 'keyId', 'principalId', 'environment', 'publicKeyPem']
+        .some((field) => typeof key[field] !== 'string'))) throw new Error('must be a JSON array of pinned Viewer source-release public keys');
+} catch (error) { sourceReleaseTrustedKeys = []; sourceReleaseTrustedKeysError = error.message; }
 const providerCredentialsKeyId = String(process.env.PROVIDER_CREDENTIALS_KEY_ID || 'provider-v1').trim();
 let processingProviderAllowedCidrs = [];
 let processingProviderAllowedCidrsError = null;
@@ -124,6 +132,19 @@ const referenceSourceIntake = {
   copyKeyId: String(process.env.VIEWER_REFERENCE_COPY_KEY_ID || '').trim(),
   copyPrivateKeyPem: String(process.env.VIEWER_REFERENCE_COPY_PRIVATE_KEY_PEM || ''),
   copyPublicKeyPem: String(process.env.VIEWER_REFERENCE_COPY_PUBLIC_KEY_PEM || ''),
+};
+
+const sourceRelease = {
+  enabled: bool(process.env.VIEWER_SOURCE_RELEASE_ENABLED, false),
+  environment: String(process.env.VIEWER_SOURCE_RELEASE_ENVIRONMENT || deploymentEnvironment).trim(),
+  origin: normalizedOrigin(process.env.VIEWER_SOURCE_RELEASE_ORIGIN || ''),
+  bearerToken: String(process.env.VIEWER_SOURCE_RELEASE_BEARER_TOKEN || ''),
+  issuerId: String(process.env.VIEWER_SOURCE_RELEASE_ISSUER_ID || '').trim(),
+  keyId: String(process.env.VIEWER_SOURCE_RELEASE_KEY_ID || '').trim(),
+  principalId: String(process.env.VIEWER_SOURCE_RELEASE_PRINCIPAL_ID || '').trim(),
+  privateKeyPem: String(process.env.VIEWER_SOURCE_RELEASE_PRIVATE_KEY_PEM || ''),
+  trustedKeys: sourceReleaseTrustedKeys,
+  trustedKeysError: sourceReleaseTrustedKeysError,
 };
 
 const config = {
@@ -184,6 +205,7 @@ const config = {
 
   processingPlatformEnabled: bool(process.env.PROCESSING_PLATFORM_ENABLED, false),
   processingWorkerEnabled: bool(process.env.PROCESSING_WORKER_ENABLED, false),
+  sourceRelease,
   // Private accepted-copy endpoints are disabled unless explicitly enabled
   // with dedicated durable storage and a dedicated service identity.
   referenceAcceptanceEnabled: bool(process.env.VIEWER_REFERENCE_ACCEPTANCE_ENABLED, false),
@@ -392,6 +414,69 @@ function validate() {
       ...Object.values(config.processingProviderTokens), ...Object.values(config.providerCredentialsKeys)];
     if (source.bearerToken && knownSecrets.includes(source.bearerToken))
       problems.push('VIEWER_REFERENCE_COORDINATOR_BEARER_TOKEN must be disjoint from existing credentials');
+  }
+  if (config.sourceRelease.enabled) {
+    const release = config.sourceRelease, source = config.referenceSourceIntake;
+    if (!config.processingPlatformEnabled || !source.enabled)
+      problems.push('Processing and Viewer reference source intake must be enabled when source release is enabled');
+    if (!config.deploymentEnvironmentExplicit)
+      problems.push('VIEWER_DEPLOYMENT_ENVIRONMENT must be set explicitly when Viewer source release is enabled');
+    if (!['staging', 'production'].includes(release.environment)
+        || release.environment !== config.deploymentEnvironment || release.environment !== source.environment)
+      problems.push('VIEWER_SOURCE_RELEASE_ENVIRONMENT must match the explicit Viewer and Processing environment');
+    if (!release.origin || release.origin !== source.origin)
+      problems.push('VIEWER_SOURCE_RELEASE_ORIGIN must match the pinned Processing coordinator origin');
+    if (release.bearerToken.length < 32 || release.bearerToken.length > 4096 || /[^\x21-\x7e]/.test(release.bearerToken))
+      problems.push('VIEWER_SOURCE_RELEASE_BEARER_TOKEN must be a separate bounded printable secret');
+    for (const [name, value] of [['VIEWER_SOURCE_RELEASE_ISSUER_ID', release.issuerId],
+      ['VIEWER_SOURCE_RELEASE_KEY_ID', release.keyId], ['VIEWER_SOURCE_RELEASE_PRINCIPAL_ID', release.principalId]]) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)) problems.push(`${name} must be a valid pinned identifier`);
+    }
+    if (release.trustedKeysError) problems.push(`VIEWER_SOURCE_RELEASE_TRUSTED_KEYS_JSON ${release.trustedKeysError}`);
+    if (!release.trustedKeys.length) problems.push('VIEWER_SOURCE_RELEASE_TRUSTED_KEYS_JSON must contain the pinned release signing key');
+    let releasePrivateKey = null;
+    try {
+      releasePrivateKey = crypto.createPrivateKey(release.privateKeyPem.replace(/\\n/g, '\n'));
+      if (releasePrivateKey.asymmetricKeyType !== 'ed25519') throw new Error();
+    } catch { problems.push('VIEWER_SOURCE_RELEASE_PRIVATE_KEY_PEM must be a valid Ed25519 private key'); }
+    const trustedIds = new Set(); let matchingKeys = 0;
+    for (const key of release.trustedKeys) {
+      const identity = `${key.environment}\0${key.issuerId}\0${key.keyId}`;
+      if (!['staging', 'production'].includes(key.environment)
+          || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(key.issuerId)
+          || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(key.keyId)
+          || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(key.principalId)
+          || trustedIds.has(identity)) {
+        problems.push('VIEWER_SOURCE_RELEASE_TRUSTED_KEYS_JSON contains an invalid or duplicate signing key');
+        continue;
+      }
+      trustedIds.add(identity);
+      try {
+        const publicKey = crypto.createPublicKey(key.publicKeyPem);
+        if (publicKey.asymmetricKeyType !== 'ed25519') throw new Error();
+        if (key.environment === release.environment && key.issuerId === release.issuerId && key.keyId === release.keyId
+            && key.principalId === release.principalId) {
+          matchingKeys++;
+          if (releasePrivateKey && !crypto.createPublicKey(releasePrivateKey).export({ type: 'spki', format: 'der' })
+            .equals(publicKey.export({ type: 'spki', format: 'der' })))
+            problems.push('VIEWER_SOURCE_RELEASE_PRIVATE_KEY_PEM must match its pinned trusted release public key');
+        }
+      } catch { problems.push('VIEWER_SOURCE_RELEASE_TRUSTED_KEYS_JSON contains an invalid Ed25519 public key'); }
+    }
+    if (matchingKeys !== 1) problems.push('Viewer source-release signer must match exactly one pinned trusted key');
+    const knownSecrets = [config.serviceAuthSecret, ...Object.values(config.serviceAuthKeys || {}),
+      ...Object.values(config.processingProviderTokens), ...Object.values(config.providerCredentialsKeys), source.bearerToken];
+    if (release.bearerToken && knownSecrets.includes(release.bearerToken))
+      problems.push('VIEWER_SOURCE_RELEASE_BEARER_TOKEN must be disjoint from existing credentials');
+    if (releasePrivateKey && source.enabled) {
+      try {
+        const releasePublic = crypto.createPublicKey(releasePrivateKey).export({ type: 'spki', format: 'der' });
+        const otherPublics = [source.attestationPrivateKeyPem, source.snapshotPrivateKeyPem, source.copyPrivateKeyPem]
+          .map((pem) => crypto.createPublicKey(pem.replace(/\\n/g, '\n')).export({ type: 'spki', format: 'der' }));
+        if (otherPublics.some((key) => key.equals(releasePublic)))
+          problems.push('Viewer source-release signing key must be distinct from source-intake signing keys');
+      } catch { problems.push('Viewer source-release signing key could not be compared with source-intake keys'); }
+    }
   }
   if(Boolean(config.viewerEventPreviousKeyId)!==Boolean(config.viewerEventPreviousSecret))problems.push('VIEWER_EVENT_PREVIOUS_KEY_ID and VIEWER_EVENT_PREVIOUS_SECRET must be configured together');
   if(config.viewerEventPreviousSecret&&config.viewerEventPreviousSecret.length<32)problems.push('VIEWER_EVENT_PREVIOUS_SECRET must contain at least 32 characters');

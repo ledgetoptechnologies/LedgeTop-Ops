@@ -68,6 +68,16 @@ class SourceReleaseOutboxV1 {
     return read(this.database.prepare('SELECT * FROM viewer_source_release_outbox WHERE attempt_id=?').get(attemptId));
   }
 
+  hold(attemptId, reason) {
+    if (!Contract.HOLD_REASONS.has(reason)) fail('source_release_hold_reason_invalid');
+    const intent = this.getIntent(attemptId);
+    if (!intent) fail('source_release_outbox_missing');
+    if (intent.state === 'released') return intent;
+    this.database.prepare(`UPDATE viewer_source_release_outbox SET state='held',hold_reason=?,updated_at=? WHERE attempt_id=?`)
+      .run(reason, new Date().toISOString(), attemptId);
+    return this.getIntent(attemptId);
+  }
+
   persistReady({ attemptId, releaseId = crypto.randomUUID(), binding, readyProof, sourceManifest, derivedManifest, snapshotBinding } = {}) {
     if (typeof attemptId !== 'string' || !UUID.test(attemptId) || typeof releaseId !== 'string' || !UUID.test(releaseId)
         || !binding || binding.protocol !== 'ltds-viewer-source-intake-binding-v2'
@@ -134,12 +144,17 @@ class SourceReleaseOutboxV1 {
     Contract.validateAuthorizationManifests(authorization, intent.sourceManifest, intent.derivedManifest, intent.snapshotBinding);
     if (authorization.releaseId !== intent.releaseId || authorization.viewerAttemptId !== attemptId
         || request?.authorization !== authorization || !request.signature || !request.authorizationSha256
+        || !intent.readyProof || !Contract.canonical(authorization.readyProof).equals(Contract.canonical(intent.readyProof))
         || authorization.coordinatorAuthorityId !== intent.binding.coordinatorAuthorityId
         || authorization.jobId !== intent.binding.jobId || authorization.generation !== intent.binding.generation
         || authorization.environment !== intent.binding.environment || authorization.providerTaskId !== intent.binding.providerTaskId
+        || authorization.viewerTaskId !== intent.binding.viewerTaskId || authorization.activationId !== intent.binding.activationId
+        || authorization.preparedEnvelopeSha256 !== intent.binding.preparedEnvelopeSha256
         || authorization.inputManifestSha256 !== intent.binding.manifestSha256
         || authorization.pipelineDigest !== intent.binding.pipelineDigest
         || authorization.resultManifestSha256 !== intent.binding.resultManifestSha256
+        || authorization.sourceReceiptSha256 !== intent.binding.sourceReceiptSha256
+        || authorization.derivedReceiptSha256 !== intent.binding.derivedReceiptSha256
         || authorization.workerObservationId !== intent.observation.observationId
         || authorization.workerObservationAckSha256 !== intent.observation.ackSha256)
       fail('source_release_outbox_request_invalid');
