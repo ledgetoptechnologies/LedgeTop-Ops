@@ -12,6 +12,7 @@ const DECLARATION = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts/client-p
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 export const ORDINARY_FRONTEND_PREFLIGHT_MODE = 'ordinary-frontend-preserve-installed-v3';
 export const OPS_SUCCESSOR_READER_INSTALLED_CONTRACT = 'ops-successor-reader-a0-f4cdefd6';
+export const OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT = 'ops-successor-reader-operations-promotion-fc9bc572-v1';
 const OPS_SUCCESSOR_READER_VERSION_ID = 'fc9bc572-0b87-4857-8b8a-b0e0f7582c68';
 const OPS_SUCCESSOR_READER_SOURCE_COMMIT = 'a0c8fd230d46690a7090c79190e125f5a02f0f35';
 const OPS_SUCCESSOR_READER_MAIN_SHA256 = 'f4cdefd633441df8db18cc5c0b192fc8faa72ebd7b1db730122bd77318164e68';
@@ -169,10 +170,17 @@ export function validateReviewedExpectedDeploymentVersions(value) {
   return structuredClone(value);
 }
 export function validateInstallation(snapshot, { allowLatest = {}, profile = PROFILE, selectedApp, expectedDeploymentVersions = {},
-  ordinaryFrontendPreflightMode, ordinaryFrontendApp, opsSuccessorReaderContract } = {}) {
+  ordinaryFrontendPreflightMode, ordinaryFrontendApp, opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId } = {}) {
   const preflightDescriptor = ordinaryFrontendPreflightDescriptor(profile, ordinaryFrontendPreflightMode);
-  need(opsSuccessorReaderContract === undefined || opsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT,
+  need(opsSuccessorReaderContract === undefined || opsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT
+    || opsSuccessorReaderContract === OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT,
     'Unreviewed Ops successor reader installed-profile contract');
+  if (opsSuccessorReaderContract === OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT) {
+    need(ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_PREFLIGHT_MODE && ordinaryFrontendApp === 'operations'
+      && (opsSuccessorReaderReleaseCandidateId === undefined || UUID.test(opsSuccessorReaderReleaseCandidateId)),
+    'Ops successor reader promotion is limited to its exact Operations release flow');
+  } else need(opsSuccessorReaderReleaseCandidateId === undefined,
+    'Operations release candidate identity requires its exact promotion contract');
   if (opsSuccessorReaderContract !== undefined) need(selectedApp === undefined || Object.hasOwn(profile.workers, selectedApp),
     'Ops successor reader installed-state recognition is limited to a known profile capture');
   if (ordinaryFrontendPreflightMode !== undefined)
@@ -189,19 +197,25 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
     }
     need(equal(without(s.settings, ['bindings', 'annotations']), spec.settings), `${app}: unrecognized production settings`);
     need(equal(named(s.settings.bindings), named(s.version.resources.bindings)), `${app}: settings/version bindings differ`);
-    const expectedScript = opsSuccessorReaderContract !== undefined && app === 'operations'
+    const successorReaderProfile = opsSuccessorReaderContract !== undefined && app === 'operations';
+    const expectedScript = successorReaderProfile
       ? expectedOpsSuccessorReaderScript(spec.script) : scriptShape(spec.script);
-    if (opsSuccessorReaderContract !== undefined && app === 'operations') {
-      need(spec.name === 'ledgetop-ops' && s.version.id === OPS_SUCCESSOR_READER_VERSION_ID
-        && s.modern.id === OPS_SUCCESSOR_READER_VERSION_ID,
-      'Ops successor reader contract is limited to the reviewed candidate version');
+    if (successorReaderProfile) {
+      const promotionCandidate = opsSuccessorReaderContract === OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT
+        && opsSuccessorReaderReleaseCandidateId !== undefined;
+      need(spec.name === 'ledgetop-ops' && (promotionCandidate
+        ? s.version.id === opsSuccessorReaderReleaseCandidateId && s.modern.id === opsSuccessorReaderReleaseCandidateId
+        : s.version.id === OPS_SUCCESSOR_READER_VERSION_ID && s.modern.id === OPS_SUCCESSOR_READER_VERSION_ID),
+      'Ops successor reader contract is limited to the reviewed baseline or exact release candidate');
       const mainModules = s.modern.modules?.filter(module => module?.name === 'index.js') ?? [];
       need(mainModules.length === 1 && typeof mainModules[0].content_base64 === 'string',
         'Ops successor reader active runtime module is missing or ambiguous');
-      const mainBytes = Buffer.from(mainModules[0].content_base64, 'base64');
-      need(mainBytes.length > 0 && mainBytes.toString('base64') === mainModules[0].content_base64
-        && hash(mainBytes) === OPS_SUCCESSOR_READER_MAIN_SHA256,
-      'Ops successor reader contract active runtime bytes differ from reviewed a0 source');
+      if (!promotionCandidate) {
+        const mainBytes = Buffer.from(mainModules[0].content_base64, 'base64');
+        need(mainBytes.length > 0 && mainBytes.toString('base64') === mainModules[0].content_base64
+          && hash(mainBytes) === OPS_SUCCESSOR_READER_MAIN_SHA256,
+        'Ops successor reader contract active runtime bytes differ from reviewed a0 source');
+      }
     }
     need(equal(scriptShape(s.version.resources.script), expectedScript) && equal(s.version.resources.script_runtime, spec.runtime), `${app}: unrecognized exports/runtime/resources`);
     const rows = named(s.version.resources.bindings);

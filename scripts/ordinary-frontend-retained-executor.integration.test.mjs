@@ -7,7 +7,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { hash, canonical, validateInstallation, ORDINARY_FRONTEND_PREFLIGHT_MODE } from './production-deploy.mjs';
+import { hash, canonical, validateInstallation, ORDINARY_FRONTEND_PREFLIGHT_MODE,
+  OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } from './production-deploy.mjs';
 import { compileOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
 import { compileOrdinaryFrontendRetainedPlan } from './ordinary-frontend-retained-plan.mjs';
 import { executeOrdinaryFrontendRetainedRelease, validateProductionAuthorityPacketSelection } from './ordinary-frontend-retained-executor.mjs';
@@ -21,6 +22,7 @@ import { POST0226_LOGIN_TABLES, POST0226_STAFF_PRESERVATION_CONTRACT, createPost
 
 const fixturePath = process.env.LEDGETOP_ORDINARY_FRONTEND_EXECUTOR_PRIVATE_FIXTURE;
 const opsBytePathsPath = process.env.LEDGETOP_ORDINARY_FRONTEND_EXECUTOR_OPS_BYTE_PATHS;
+const opsSuccessorSnapshotPath = process.env.LEDGETOP_ORDINARY_FRONTEND_EXECUTOR_OPS_SUCCESSOR_SNAPSHOT;
 const opsAssetRoot = process.env.LEDGETOP_ORDINARY_FRONTEND_EXECUTOR_OPS_ASSET_ROOT
   ?? 'C:/Users/fstor/.codex/artifacts/ui-retained-packets-b0c99cdd-20261028-v3/operations-packet/assets';
 const HEX40 = /^[a-f0-9]{40}$/u;
@@ -141,17 +143,19 @@ async function syntheticPost0226StaffPreservation(sourceCommit) {
 }
 
 async function harness(t, fixture, app, { failCandidateAssets = false, failStaff = false,
-  frontendAuthority = false, driftFrontendAuthorityAt = 0, post0226Authority = false, driftPost0226At = 0 } = {}) {
-  const before = clone(fixture.snapshot), artifact = assetFiles(t, app), sourceCommit = fixture.artifactSourceCommit;
+  frontendAuthority = false, driftFrontendAuthorityAt = 0, post0226Authority = false, driftPost0226At = 0,
+  opsSuccessorPromotion = false, snapshotOverride } = {}) {
+  const before = clone(snapshotOverride ?? fixture.snapshot), artifact = assetFiles(t, app), sourceCommit = fixture.artifactSourceCommit;
   assert.ok(HEX40.test(sourceCommit)); artifact.release.sourceCommit = sourceCommit;
-  const operationsExpected = { operations: clone(FIXED_OPS_WEIGHTS) };
-  const expectedDeploymentVersions = operationsExpected;
+  const expectedDeploymentVersions = opsSuccessorPromotion ? undefined : { operations: clone(FIXED_OPS_WEIGHTS) };
   let previousLedger, previousAssetBytes, ordinaryPlan, retainedPlan;
   if (failStaff && app === 'operations') {
     ordinaryPlan = { application: app, sourceCommit, expectedDeploymentVersions, baselineSHA256: hash(canonical(before)) };
     retainedPlan = { schemaVersion: 2, contract: 'ordinary-frontend-retained-native-module-v2', sourceCommit,
       ordinaryPlan, retentionLedger: { observedAt: new Date().toISOString() } };
     previousAssetBytes = new Map();
+  } else if (app === 'operations' && opsSuccessorPromotion) {
+    ({ ledger: previousLedger, bytes: previousAssetBytes } = syntheticClientPrior(before, app));
   } else if (app === 'operations') {
     const context = prepareOpsLegacyLedgerBootstrap(before);
     assert.ok(context && context.previousAssetRows.length === 471);
@@ -160,9 +164,11 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
   } else ({ ledger: previousLedger, bytes: previousAssetBytes } = syntheticClientPrior(before, app));
   if (!(failStaff && app === 'operations')) {
     ordinaryPlan = compileOrdinaryFrontendReleasePlan(before, { app, release: artifact.release, profile: fixture.profile,
-      expectedDeploymentVersions, ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE });
+      expectedDeploymentVersions, ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE,
+      ...(opsSuccessorPromotion ? { opsSuccessorReaderPromotionContract: OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } : {}) });
     retainedPlan = compileOrdinaryFrontendRetainedPlan(before, { ordinaryPlan, profile: fixture.profile,
-      previousLedger, previousAssetBytes, observedAt: new Date().toISOString() });
+      previousLedger, previousAssetBytes, observedAt: new Date().toISOString(),
+      ...(opsSuccessorPromotion ? { opsSuccessorReaderPromotionContract: OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } : {}) });
   }
   const targetWorker = appWorker(app), baselineId = before[app].version.id;
   const candidateId = app === 'operations' ? '77777777-7777-4777-8777-777777777777' : '88888888-8888-4888-8888-888888888888';
@@ -236,6 +242,7 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
   const post0226Packet = post0226Authority ? await syntheticPost0226StaffPreservation(sourceCommit) : null;
   const post0226AuthorityPhases = [], post0226ReaderCalls = [];
   const frontendAuthorityPhases = [], options = { app, plan: retainedPlan, profile: fixture.profile, expectedDeploymentVersions,
+    ...(opsSuccessorPromotion ? { opsSuccessorReaderPromotionContract: OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } : {}),
     assetVerifierProvider, ...(post0226Authority ? { staffAuthorityContract:POST0226_STAFF_PRESERVATION_CONTRACT,
       post0226StaffPreservationReview:post0226Packet.review } : frontendAuthority
       ? { staffAuthorityContract: ORDINARY_FRONTEND_AUTHORITY_CONTRACT, frontendAuthorityReview: frontendPacket.review }
@@ -334,6 +341,54 @@ test('private sanitized fixture: separate post-0226 preservation contract accept
     assert.deepEqual(h.staffPhases, [], 'post-0226 preservation does not invoke native cutover readiness');
     assert.deepEqual(h.frontendAuthorityPhases, [], 'post-0226 review is not passed through the pre-0226 reader');
     assert.deepEqual(h.nativeCalls.map(row => row.phase), ['upload','namespace-stage','activate']);
+  });
+
+test('private captured fc9 baseline: Operations promotion keeps sole-100 prestate, post-0226 authority and strict staging',
+  { skip: !fixturePath || !opsSuccessorSnapshotPath }, async t => {
+    const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+    const snapshot = JSON.parse(fs.readFileSync(opsSuccessorSnapshotPath, 'utf8'));
+    assert.deepEqual(Object.keys(snapshot).sort(), ['client','operations','ops-sync']);
+    assert.equal(snapshot.operations.version.id, 'fc9bc572-0b87-4857-8b8a-b0e0f7582c68');
+    assert.deepEqual(snapshot.operations.deployment.versions, [
+      { version_id: 'fc9bc572-0b87-4857-8b8a-b0e0f7582c68', percentage: 100 },
+    ]);
+    const h = await harness(t, fixture, 'operations', { opsSuccessorPromotion:true, snapshotOverride:snapshot, post0226Authority:true });
+    assert.equal(h.ordinaryPlan.expectedDeploymentVersions, undefined,
+      'the new contract uses the validator pinned sole-active fc9 state, not caller-supplied weights');
+    assert.equal(h.ordinaryPlan.opsSuccessorReaderPromotionContract, OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT);
+    assert.throws(() => compileOrdinaryFrontendReleasePlan(snapshot, { app:'operations', release:h.ordinaryPlan.release,
+      profile:fixture.profile, expectedDeploymentVersions:{ operations:clone(FIXED_OPS_WEIGHTS) },
+      ordinaryFrontendPreflightMode:ORDINARY_FRONTEND_PREFLIGHT_MODE,
+      opsSuccessorReaderPromotionContract:OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT }), /sole-active-version capture/u);
+    assert.throws(() => compileOrdinaryFrontendReleasePlan(snapshot, { app:'client',
+      release:{ ...h.ordinaryPlan.release, application:'client' }, profile:fixture.profile,
+      ordinaryFrontendPreflightMode:ORDINARY_FRONTEND_PREFLIGHT_MODE,
+      opsSuccessorReaderPromotionContract:OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT }), /Operations successor-reader promotion requires its exact contract/u);
+    const result = await executeOrdinaryFrontendRetainedRelease(h.options);
+    assert.equal(result.activated, true);
+    assert.deepEqual(h.nativeCalls.map(row => row.phase), ['upload','namespace-stage','activate']);
+    assert.deepEqual(h.nativeCalls[1].args.slice(2, 4), [
+      'fc9bc572-0b87-4857-8b8a-b0e0f7582c68@100%', `${h.candidateId}@0%`,
+    ]);
+    assert.deepEqual(h.active.operations.deployment.versions, [{ version_id:h.candidateId, percentage:100 }]);
+    assert.equal(h.post0226AuthorityPhases.length, 8);
+    assert.deepEqual(h.staffPhases, []);
+    assert.equal(h.providerEvents.filter(row => row[0] === 'create').length, 3);
+    assert.equal(h.providerEvents.filter(row => row[0] === 'remove').length, 3);
+  });
+
+test('private captured fc9 baseline: post-0226 drift prevents successor promotion activation',
+  { skip: !fixturePath || !opsSuccessorSnapshotPath }, async t => {
+    const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+    const snapshot = JSON.parse(fs.readFileSync(opsSuccessorSnapshotPath, 'utf8'));
+    const h = await harness(t, fixture, 'operations', { opsSuccessorPromotion:true, snapshotOverride:snapshot,
+      post0226Authority:true, driftPost0226At:5 });
+    await assert.rejects(executeOrdinaryFrontendRetainedRelease(h.options), /reviewed_staff_login_or_authority_state_changed/u);
+    assert.equal(h.post0226AuthorityPhases.length, 5);
+    assert.deepEqual(h.nativeCalls.map(row => row.phase), ['upload','namespace-stage']);
+    assert.equal(h.nativeCalls.some(row => row.phase === 'activate'), false);
+    assert.equal(h.providerEvents.filter(row => row[0] === 'create').length,
+      h.providerEvents.filter(row => row[0] === 'remove').length, 'temporary asset verifiers are removed after the held release');
   });
 
 test('private sanitized fixture: post-0226 role/profile/login drift holds before activation without retry',
