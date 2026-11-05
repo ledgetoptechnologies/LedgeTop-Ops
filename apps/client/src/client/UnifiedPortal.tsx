@@ -17,6 +17,8 @@ export const UNIFIED_PAGES: ReadonlySet<string> = new Set<UnifiedPage>(["dashboa
 export type OpenInAccount = (workspaceId: string, path: string) => void;
 
 const CLOSED_REQUEST = new Set(["completed", "cancelled", "declined"]);
+const CLOSED_INQUIRY = new Set(["declined", "closed"]);
+const CHECKING_REQUESTS = "Checking your requests…";
 const INQUIRY_STATUS: Record<string, { label: string; tone: "neutral" | "success" | "warning" | "danger" }> = {
   received: { label: "Received", tone: "neutral" }, under_review: { label: "Under review", tone: "warning" },
   declined: { label: "Declined", tone: "danger" }, closed: { label: "Closed", tone: "success" },
@@ -50,30 +52,34 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   const [quickRequest, setQuickRequest] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
   // General requests aren't tied to an account, so they're read once for the client, not per account.
-  // null: not offered here (or not loaded yet); "error": offered but couldn't be read.
-  const [inquiries, setInquiries] = useState<ClientInquiry[] | null | "error">(null);
+  // "loading": not answered yet; null: not offered here; "error": offered but couldn't be read. Only a list or
+  // null is a real answer, so neither of the others may be shown as "no requests".
+  const [inquiries, setInquiries] = useState<ClientInquiry[] | null | "loading" | "error">("loading");
   // What the one-step form offers this client, read once like general requests: a client can have services or
   // general choices even when none of their accounts takes requests online. null: not offered here (an older
   // portal, or no access); "error": couldn't be checked.
   const [offered, setOffered] = useState<RequestServices | null | "loading" | "error">("loading");
   const generation = useRef(0);
+  // Home starts requests and counts them too, so it reads the same two lists as the requests page.
+  const requestPage = page === "requests" || page === "dashboard";
 
   useEffect(() => {
-    if (page !== "requests") return;
+    if (!requestPage) return;
     const controller = new AbortController();
+    setInquiries("loading");
     loadInquiries(controller.signal).then(value => { if (!controller.signal.aborted) setInquiries(value); },
       () => { if (!controller.signal.aborted) setInquiries("error"); });
     return () => controller.abort();
-  }, [page, retry]);
+  }, [requestPage, retry]);
 
   useEffect(() => {
-    if (page !== "requests") return;
+    if (!requestPage) return;
     const controller = new AbortController();
     setOffered("loading");
     loadRequestServices(controller.signal).then(value => { if (!controller.signal.aborted) setOffered(value); },
       (caught: RequestError) => { if (!controller.signal.aborted) setOffered(caught.status === 403 ? null : "error"); });
     return () => controller.abort();
-  }, [page, retry]);
+  }, [requestPage, retry]);
 
   useEffect(() => {
     let active = true, controller: AbortController | null = null, lastStartedAt = -Infinity;
@@ -167,14 +173,24 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
       <span className="portal-project-link">Open project →</span>
     </button>)}
   </div>;
-  const requestRows = (items: UnifiedRequest[]) => <ul className="unified-portal-requests">
-    {items.map(item => <li key={item.key}>
-      <div><strong>{item.request.title}</strong>
-        <small>{[item.projectName, `Updated ${new Date(item.request.updatedAt).toLocaleDateString()}`].filter(Boolean).join(" · ")}</small></div>
-      <div className="unified-portal-request-actions">{renderStatus(item.request)}
-        <button type="button" className="button-ghost button-small" onClick={() => openInAccount(item.account.workspace.id, "/portal/requests")}>View</button></div>
-    </li>)}
-  </ul>;
+  const requestRow = (item: UnifiedRequest) => <li key={item.key}>
+    <div><strong>{item.request.title}</strong>
+      <small>{[item.projectName, `Updated ${new Date(item.request.updatedAt).toLocaleDateString()}`].filter(Boolean).join(" · ")}</small></div>
+    <div className="unified-portal-request-actions">{renderStatus(item.request)}
+      <button type="button" className="button-ghost button-small" onClick={() => openInAccount(item.account.workspace.id, "/portal/requests")}>View</button></div>
+  </li>;
+  // General requests have no page of their own yet, so they show where they stand and nothing to open.
+  const historyProblem = !loading && !historyComplete && <p className="unified-portal-request-note">{failed.length > 0
+    ? "Some request history couldn’t be loaded, so this list may be incomplete." : "Requests for some of your work aren’t listed here yet."}</p>;
+  const inquiryProblem = inquiries === "error" && <>
+    <p className="unified-portal-request-note" role="status">General requests you’ve sent couldn’t be loaded right now.</p>
+    <button type="button" className="button-ghost button-small" aria-label="Try loading general requests again" onClick={() => setRetry(value => value + 1)}>Try again</button>
+  </>;
+  const inquiryRow = (item: ClientInquiry) => <li key={`inquiry:${item.id}`}>
+    <div><strong>{item.title}</strong><small>{`Sent ${new Date(item.createdAt).toLocaleDateString()}`}</small></div>
+    <div className="unified-portal-request-actions"><StatusPill tone={inquiryStatus(item.status).tone}>{inquiryStatus(item.status).label}</StatusPill></div>
+  </li>;
+  const requestRows = (items: UnifiedRequest[]) => <ul className="unified-portal-requests">{items.map(requestRow)}</ul>;
   // The server works out where a request goes from the service picked; the client never chooses.
   const requestChooser = choosingRequest && quickRequest ? <QuickRequest mapboxPublicToken={mapboxPublicToken}
     onSubmitted={requestSent} onCancel={() => setChoosingRequest(false)} onUnavailable={() => {
@@ -229,37 +245,43 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     {requestChooser}{problems}{loadingNote}
     {requests.length > 0 && <RequestProgress requests={requests} />}
     <Card title="Request history">{!loading && requests.length === 0
-      ? historyComplete ? Array.isArray(inquiries) && inquiries.length > 0
+      ? historyComplete ? inquiries === "loading" ? <p className="unified-portal-quiet" role="status">{CHECKING_REQUESTS}</p>
+        : inquiries === "error" || Array.isArray(inquiries) && inquiries.length > 0
         ? <EmptyState title="No service requests yet" detail="Service requests you submit will appear here." />
         : <EmptyState title="No requests yet" detail="Requests you submit will appear here." />
         : failed.length > 0 ? <EmptyState title="Request history couldn’t be loaded" detail="Some of your work didn’t load, so requests may be missing. Try again above." />
         : <EmptyState title="Request history isn’t shown here yet" detail="Past requests for your account aren’t listed here yet." />
-      : <>{requestRows(requests)}{!loading && !historyComplete && <p className="unified-portal-request-note">{failed.length > 0
-        ? "Some request history couldn’t be loaded, so this list may be incomplete." : "Requests for some of your work aren’t listed here yet."}</p>}</>}</Card>
+      : <>{requestRows(requests)}{historyProblem}</>}</Card>
     {Array.isArray(inquiries) && inquiries.length > 0 && <Card title="General requests">
-      <ul className="unified-portal-requests">{inquiries.map(item => <li key={item.id}>
-        <div><strong>{item.title}</strong><small>{`Sent ${new Date(item.createdAt).toLocaleDateString()}`}</small></div>
-        <div className="unified-portal-request-actions"><StatusPill tone={inquiryStatus(item.status).tone}>{inquiryStatus(item.status).label}</StatusPill></div>
-      </li>)}</ul>
+      <ul className="unified-portal-requests">{inquiries.map(inquiryRow)}</ul>
     </Card>}
-    {inquiries === "error" && <p className="unified-portal-request-note" role="status">General requests you’ve sent couldn’t be loaded right now. Try again in a moment.</p>}
+    {inquiryProblem}
   </>;
 
-  const openRequests = requests.filter(item => !CLOSED_REQUEST.has(item.request.status));
+  const general = Array.isArray(inquiries) ? inquiries : [];
+  const openRequests = requests.filter(item => !CLOSED_REQUEST.has(item.request.status)).length
+    + general.filter(item => !CLOSED_INQUIRY.has(item.status)).length;
   const completed = requests.filter(item => item.request.status === "completed");
   const counting = loading && !ready.length;
+  const countingRequests = counting || inquiries === "loading";
+  // Service and general requests in one list, newest first: a client never sorts their work by kind either.
+  const activity = [
+    ...requests.map(item => ({ at: item.request.updatedAt, row: requestRow(item) })),
+    ...general.map(item => ({ at: item.createdAt, row: inquiryRow(item) })),
+  ].sort((left, right) => right.at.localeCompare(left.at)).slice(0, 5);
+  const canStart = requestAvailability === "available";
   // Order on the page: what's happening, what's owed, then projects and activity; the service list and
   // shared files (from the supplement) follow last.
   return <div className="portal-home">
     <section className="portal-welcome portal-welcome-split">
       <div><span className="eyebrow">Client portal</span><h1>Welcome back</h1>
         <p>Your projects, deliveries, requests and invoices in one place.</p></div>
-      {requestAccounts.length > 0 && <button type="button" className="button-orange" onClick={startRequest}>New request</button>}
+      {canStart && <button type="button" className="button-orange" onClick={startRequest}>New request</button>}
     </section>
     {problems}{requestChooser}
     <div className="portal-overview-tiles">
       <OverviewTile icon="projects" value={counting ? "…" : String(projects.length)} label="Projects" action="View projects" onClick={() => navigate("projects")} />
-      <OverviewTile icon="progress" value={counting ? "…" : String(openRequests.length)} label="Requests in progress" action="View requests" onClick={() => navigate("requests")} />
+      <OverviewTile icon="progress" value={countingRequests ? "…" : String(openRequests)} label="Requests in progress" action="View requests" onClick={() => navigate("requests")} />
       <OverviewTile icon="done" value={counting ? "…" : String(completed.length)} label="Completed requests" action="See history" onClick={() => navigate("requests")} />
       <OverviewTile icon="files" value="Files" label="Deliveries" action="Open deliveries" onClick={() => navigate("deliveries")} />
     </div>
@@ -267,8 +289,11 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     {supplement}
     <Card className="portal-home-projects" title="Your projects" action={projects.length > 6 ? <button type="button" className="button-ghost button-small" onClick={() => navigate("projects")}>All projects</button> : undefined}>
       {loadingNote}{!loading && projects.length === 0 ? <EmptyState title="No projects available" detail="No projects are shared with you yet." /> : projectCards(projects.slice(0, 6))}</Card>
-    <Card className="portal-home-activity" title="Recent activity" action={requestAccounts.length > 0 ? <button type="button" className="button-ghost button-small" onClick={startRequest}>New request</button> : undefined}>
-      {requests.length === 0 ? <p className="unified-portal-quiet">No requests yet. When you ask us for something, you’ll follow it here.</p> : requestRows(requests.slice(0, 5))}</Card>
+    <Card className="portal-home-activity" title="Recent activity" action={canStart ? <button type="button" className="button-ghost button-small" onClick={startRequest}>New request</button> : undefined}>
+      {activity.length > 0 ? <ul className="unified-portal-requests">{activity.map(item => item.row)}</ul>
+        : loading || inquiries === "loading" ? <p className="unified-portal-quiet" role="status">{CHECKING_REQUESTS}</p>
+        : historyComplete && inquiries !== "error" && <p className="unified-portal-quiet">No requests yet. When you ask us for something, you’ll follow it here.</p>}
+      {historyProblem}{inquiryProblem}</Card>
   </div>;
 }
 

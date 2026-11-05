@@ -344,9 +344,11 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
     const workerMatch = parsed.hostname.match(/^(ops-ui-verify-[a-f0-9]{24})\.synthetic-account\.workers\.dev$/u);
     if (workerMatch) {
       assert.match(init.headers.Authorization, /^Bearer [A-Za-z0-9_-]{43}$/u);
-      assert.equal(parsed.pathname, '/index.html');
-      const bytes = verifierVersions.get(workerMatch[1]) === candidateId ? newAsset
-        : scenario === 'old-index-mismatch' ? Buffer.from('bad') : Buffer.from('old');
+      assert.match(parsed.pathname, /^\/(?:index\.html|_ui\/client\/[a-f0-9]{40}\/index\.html)$/u);
+      const archivedAsset = parsed.pathname.startsWith('/_ui/client/');
+      const bytes = archivedAsset ? Buffer.from('old')
+        : verifierVersions.get(workerMatch[1]) === candidateId ? newAsset
+          : scenario === 'old-index-mismatch' ? Buffer.from('bad') : Buffer.from('old');
       return new Response(init.method === 'HEAD' ? null : bytes, { status: 200,
         headers: { 'Content-Type': 'text/html', 'Content-Length': String(bytes.length) } });
     }
