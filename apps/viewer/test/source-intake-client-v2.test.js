@@ -58,10 +58,24 @@ test('V2 metadata is posted once from immutable outbox bytes and binding is pers
   const exactBody = canonicalizeJcs(request).toString('utf8');
   let posts = 0;
   let accepted = null;
-  const saved = { viewerAttemptId: attemptId, sourceIntakeCanonical: exactBody, sourceIntakeSha256: 'd'.repeat(64), state: 'prepared' };
+  const saved = { viewerAttemptId: attemptId, sourceIntakeCanonical: exactBody,
+    sourceIntakeSha256: crypto.createHash('sha256').update(exactBody).digest('hex'),
+    coordinatorAuthorityId: 'coordinator-staging', state: 'prepared' };
+  let current = saved;
   const outbox = {
-    assertCurrentLease: () => saved,
-    acceptSourceIntakeBinding: (id, response, options) => { accepted = { id, response, options }; return { state: 'accepted' }; },
+    assertCurrentLease: () => current,
+    acceptSourceIntakeBinding: (id, response, options) => {
+      accepted = { id, response, options };
+      current = { ...saved, state: 'accepted', remoteBinding: {
+        protocol: 'ltds-viewer-source-intake-binding-v2', coordinatorAuthorityId: saved.coordinatorAuthorityId,
+        jobId: response.jobId, attemptId: response.attemptId, providerTaskId: response.providerTaskId,
+        generation: response.generation, environment: response.environment,
+        manifestSha256: response.manifestSha256, pipelineManifestSha256: response.pipelineManifestSha256,
+        sourceManifestSha256: response.sourceManifestSha256, derivedManifestSha256: response.derivedManifestSha256,
+        pipelineDigest: response.pipelineDigest, requestSha256: saved.sourceIntakeSha256,
+      } };
+      return current;
+    },
   };
   const client = new SourceIntakeClientV2({
     origin: 'https://processing.example', bearerToken: 'test-only', environment: 'staging', outbox,
@@ -74,10 +88,13 @@ test('V2 metadata is posted once from immutable outbox bytes and binding is pers
     },
   });
   const result = await client.createOrReplay({ ...saved, localJobId: 'local-job-1' }, { localJobId: 'local-job-1', owner: 'worker-1' });
-  assert.deepEqual(result, { state: 'accepted' });
+  assert.deepEqual(result, current.remoteBinding);
   assert.equal(posts, 1);
   assert.equal(accepted.id, attemptId);
   assert.equal(accepted.response.generation, 2);
+  const replay = await client.createOrReplay({ ...current, localJobId: 'local-job-1' }, { localJobId: 'local-job-1', owner: 'worker-1' });
+  assert.deepEqual(replay, current.remoteBinding);
+  assert.equal(posts, 1, 'accepted replay reuses the persisted binding without another POST');
 });
 
 test('V2 source objects stream with manifest-bound length and digest headers', async () => {
