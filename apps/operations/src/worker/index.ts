@@ -144,6 +144,7 @@ import { maintainAuthenticatedDeliveryChanges } from "./delivery-change-maintena
 import {
   enqueueExpiringNotifications,
   processClientOpsTriageInquiryNotifications,
+  processOperationsPrincipalInquiryNotifications,
   processClientPortalRequestNotifications,
   processDeliveryNotifications,
   processProjectAlphaDeliveryPortalNotifications,
@@ -208,6 +209,8 @@ import { registerBusinessPartyRoutes } from "./business-party-routes";
 import { registerNotificationCenterRoutes } from "./notification-center";
 import { registerStaffInboxRequestRoutes } from "./staff-inbox-requests";
 import { registerNativeDeliveryBindingRoutes } from "./native-delivery-binding-routes";
+import { registerClientDeliveryRecipientRoutes } from "./client-delivery-recipients";
+import { registerClientDeliveryRecipientGrantRoutes } from "./client-delivery-recipient-grants";
 import { dispatchOperationsPortalNativeOwnerRequest } from "./operations-portal-native-owner-routes";
 import { dispatchOperationsUiReleaseRequest } from "./ui-release-routes";
 import { registerInvitationReviewRoutes } from "./invitation-review-routes";
@@ -1841,6 +1844,8 @@ registerBusinessPartyRoutes(app);
 registerNotificationCenterRoutes(app);
 registerStaffInboxRequestRoutes(app);
 registerNativeDeliveryBindingRoutes(app);
+registerClientDeliveryRecipientRoutes(app);
+registerClientDeliveryRecipientGrantRoutes(app);
 registerInvitationReviewRoutes(app);
 registerClientFeedbackRoutes(app);
 registerViewerIntegrationRoutes(app);
@@ -3694,6 +3699,7 @@ async function scheduled(
         ...(notificationMaintenance ? [] : [
           processClientPortalRequestNotifications(env),
           processClientOpsTriageInquiryNotifications(env),
+          processOperationsPrincipalInquiryNotifications(env),
           processClientFolderGrantNotifications(env),
           processClientFolderChangeNotifications(env),
         ]),
@@ -3830,6 +3836,7 @@ export { ViewerSessionIssuer } from "./viewer-session-issuer-entrypoint";
 export { ClientOnboardingRecipientBridge } from "./client-onboarding-recipient-entrypoint";
 export { ClientPortalRecipientEnrollmentBridge } from "./client-portal-recipient-enrollment-entrypoint";
 export { OperationsPortalNativeRecipientEnrollmentIngress } from "./operations-portal-native-recipient-enrollment-entrypoint";
+export { OperationsNativePrincipalInquiryIngress } from "./operations-native-principal-inquiries-entrypoint";
 export { ClientPortalServiceMetadataReader } from "./client-portal-service-metadata-entrypoint";
 export { ClientPortalNativeFinancialReader } from "./client-portal-native-financial-entrypoint";
 export { OperationsPortalNativeDeliveryAuthorizationReader } from "./operations-portal-native-delivery-authorization-entrypoint";

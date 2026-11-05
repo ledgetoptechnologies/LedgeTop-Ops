@@ -265,7 +265,10 @@ export type Env = Omit<
   CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED?: string;
   /** Separate default-off staging manager HTTP surface; no legacy owner inference. */
   CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED?: string;
+  CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED?: string;
   OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED?: string;
+  /** Default-off companion operations.request.create grant dispatch; revocation remains a safety operation. */
+  OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED?: string;
   /** Staging-only private audited grant/revoke transport; not a public HTTP endpoint. */
   OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?: Service & import("./operations-portal-native-recipient-authority-dispatch").OperationsPortalNativeRecipientAuthorityBinding;
   /** Default-off staff owner surface and private Client authority dispatch. */

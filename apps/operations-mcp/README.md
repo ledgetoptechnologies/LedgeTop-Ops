@@ -90,7 +90,7 @@ Hosted/cloud agents cannot directly launch this local stdio server.
 
 ## Tools and authority
 
-Read mode advertises ten tools:
+Read mode advertises eleven tools:
 
 | Tool | Purpose |
 | --- | --- |
@@ -101,6 +101,7 @@ Read mode advertises ten tools:
 | `list_delivery_folder` | Browse authorized folder references |
 | `get_existing_public_link` | Read an already active link for an exact authorized folder/file; never create or renew one |
 | `list_delivery_grants` | Inspect bindings and current grants |
+| `list_viewer_client_grants` | Inspect direct Viewer grants for exact Viewer projects |
 | `find_grant_audiences` | Search authorized recipients for a binding |
 | `preview_delivery_access` | Review recipients, expiry, and context; performs a read-only POST |
 | `get_client_creation_options` | Inspect permitted sources, scopes, and organizations |
@@ -117,6 +118,16 @@ invent its URL or rotate its credential. The returned complete URL contains a
 bearer credential: reveal it only to the requesting authorized user, and exclude
 it from diagnostics, shared agent discussions, and acceptance receipts. An access
 code is never returned.
+
+`list_viewer_client_grants` uses the authenticated staff Viewer endpoint and
+requires the existing global `viewer.view` and `viewer.manage` permissions plus
+the Viewer direct-session feature gates. `viewerProjectId` filters the grants;
+`q`, `cursor`, and `limit` page only the returned client workspace list. Use
+exact returned `sourceId`, `workspaceId`, `viewerProjectId`, and `taskId` values
+as selectors; do not infer identity from names or email. The list may include a
+stored active grant whose `expiresAt` has passed, so it does not establish
+effective current access. It is separate from delivery-folder grants and public
+shares.
 
 Set `LTDS_MCP_ALLOW_WRITES="true"` in a **trusted local connection configuration**
 to additionally advertise `create_client`, `grant_delivery_access`, and

@@ -547,11 +547,11 @@ test("optional Ops gates accept only absence or literal false and never hide exp
   }
 });
 
-test("pins the native portal, the complete Operations 0199 chain, both Client 0199 files, and the 0200-0230 release contract", () => {
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 187);
+test("pins the native portal migration inventories through Delivery 0244 and Operations 0231", () => {
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 218);
   assert.equal(REQUIRED_STAGING_MIGRATIONS.operations[0], "0014_staff_acl_controls.sql");
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0200_native_directory_active_binding_refresh_supersessions.sql");
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-48), [
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0231_owner_google_ads_summary.sql");
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(REQUIRED_STAGING_MIGRATIONS.delivery.indexOf("0184_native_client_feedback.sql")), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
     "0186_delivery_notification_authority_provenance.sql",
@@ -600,6 +600,19 @@ test("pins the native portal, the complete Operations 0199 chain, both Client 01
     "0228_operations_portal_native_content_start_audit.sql",
     "0229_operations_portal_native_delivery_regrant.sql",
     "0230_operations_portal_native_delivery_terminal_cancellations.sql",
+    "0231_portal_primary_private_ingress_authority.sql",
+    "0232_shared_profile_edit_authority.sql",
+    "0233_explicit_primary_workspace_folder_ownership.sql",
+    "0234_pa_principal_reenrollment.sql",
+    "0235_windows_portal_successor_candidates.sql",
+    "0236_windows_portal_successor_content_start_audit.sql",
+    "0237_viewer_direct_client_grants.sql",
+    "0238_viewer_direct_session_intents.sql",
+    "0239_native_project_assignment_proof_v3.sql",
+    "0240_viewer_direct_grant_receipt_immutability.sql",
+    "0241_app_release_pilot.sql",
+    "0242_client_ops_triage_inquiries.sql",
+    "0244_direct_workspace_folder_grants.sql",
   ]);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0123_native_directory_authority_history.sql")), [
     "0123_native_directory_authority_history.sql",
@@ -680,6 +693,37 @@ test("pins the native portal, the complete Operations 0199 chain, both Client 01
     "0198_native_directory_active_binding_revision_refresh.sql",
     "0199_native_directory_profile_binding_continuations.sql",
     "0200_native_directory_active_binding_refresh_supersessions.sql",
+    "0201_native_directory_lifecycle.sql",
+    "0202_reviewed_import_enrollment.sql",
+    "0203_effective_native_directory_enrollment_consumers.sql",
+    "0204_native_project_archive_restore.sql",
+    "0205_native_billing_source_authority.sql",
+    "0206_native_directory_existing_import.sql",
+    "0207_shared_directory_profiles.sql",
+    "0208_shared_profile_portal_authority.sql",
+    "0209_shared_profile_portal_native_writes.sql",
+    "0210_admin_finance_summary_permission.sql",
+    "0211_native_directory_create_observations.sql",
+    "0212_primary_portal_directory_correspondence.sql",
+    "0213_client_onboarding_notification_attempts.sql",
+    "0214_client_onboarding_portal_activation.sql",
+    "0215_local_project_division_authority.sql",
+    "0216_client_onboarding_existing_company.sql",
+    "0217_client_onboarding_shared_company_plans.sql",
+    "0218_client_onboarding_shared_company_approval.sql",
+    "0219_staging_agent_read_authority.sql",
+    "0220_directory_profile_generation_recovery.sql",
+    "0221_portal_correspondence_lifecycle_write_guards.sql",
+    "0222_employee_read_roots.sql",
+    "0223_employee_read_provisioning.sql",
+    "0224_windows_portal_publication_chain_index.sql",
+    "0225_native_staff_lifecycle_bridge.sql",
+    "0226_staff_login_bindings.sql",
+    "0227_owner_intel_reads.sql",
+    "0228_competitor_intel_ingest.sql",
+    "0229_owner_intel_source_feed.sql",
+    "0230_app_release_pilot.sql",
+    "0231_owner_google_ads_summary.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [

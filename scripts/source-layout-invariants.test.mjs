@@ -336,7 +336,7 @@ test("the checked-in Client deployment keeps reviewed resources, hosts, and port
   // gates, route namespaces, no-email guards and resource checks stay exact.
   // Portal origin retirement changes only the reviewed host/profile bundle;
   // public compatibility hosts and existing resources remain pinned.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "5d055a0b623adbdec71b7a2e2e45ed5c0007ada6b334eed1290f2d181c7c1363");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "e8c81a921d6d7692fe84d18b24b27bf7e7f766f03520ee6be274f9b68f00cbc7");
   assert.equal("CLIENT_PORTAL_INVITATION_FROM_NAME" in readJson("apps/client/wrangler.jsonc").vars, false);
   const config = readJson("apps/client/wrangler.jsonc");
   assert.deepEqual(config.services.filter(service => service.binding === "SHARED_PROFILE_PORTAL"), [{
@@ -491,6 +491,11 @@ test("the checked-in Client deployment keeps reviewed resources, hosts, and port
       service: "ledgetop-ops",
       entrypoint: "OperationsPortalNativeRecipientEnrollmentIngress",
     },
+    {
+      binding: "OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES",
+      service: "ledgetop-ops",
+      entrypoint: "OperationsNativePrincipalInquiryIngress",
+    },
   ]);
   assert.equal(config.keep_vars, true);
   assert.equal(readJson("scripts/client-portal-release-profile.json").profile, "primary-explicit-folder-delivery");
@@ -510,7 +515,7 @@ test("the deployed Operations Worker preserves native production transport and e
   // Preserve the current native production transport. Deferred catalog/legacy
   // mutation paths stay disabled and have no production service/workflow binding.
   // New settings are disabled onboarding mail controls and isolated mail/activation crons.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "4fdfd23dfefa3b969407c781138697efac9d928f7ee9b3eaa4ec396b00f6382b");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "098438ae9d841dc58fe41d57ad3efacbe700bbe2c710e33bcfb2dc3068341719");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.equal(config.vars.PUBLIC_BASE_URL,"https://ops.ledgetop.app");
   assert.equal(config.vars.EXPECTED_HOST,"ops.ledgetop.app");
@@ -518,6 +523,8 @@ test("the deployed Operations Worker preserves native production transport and e
   assert.equal(config.vars.OPERATIONS_ORIGINS,"https://ops.ledgetop.app");
   assert.equal(Object.hasOwn(config.vars,"LEGACY_OPERATIONS_REDIRECT_ORIGINS"),false,"fixed legacy redirect compatibility does not require another production scalar");
   assert.deepEqual(config.routes.map(route=>route.pattern),["ops.ledgetop.app","ops.ledgetopdroneservices.com","ops.ledgetoptechnologies.com","incoming.ledgetopdroneservices.com"]);
+  assert.deepEqual(config.services.find(service=>service.binding==="CLIENT_PORTAL_AUTHORITY_V2"),
+    {binding:"CLIENT_PORTAL_AUTHORITY_V2",service:"ledgetop-clients",entrypoint:"ClientPortalAuthorityV2Ingress"});
   assert.deepEqual(config.assets.run_worker_first,["/api/*","/health","/r/*","/","/dashboard","/airspace","/operations","/clients","/clients/*","/delivery","/team","/administration",
     "/viewer","/viewer/models","/viewer/sharing","/viewer/processing","/operations/processing",
     "/intel","/account","/configurations","/notifications","/jobs","/projects","/tasks","/sops",
@@ -581,6 +588,7 @@ test("the deployed Operations Worker preserves native production transport and e
     { binding: "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY", service: "ledgetop-clients", entrypoint: "OperationsPortalNativeDeliveryAuthorityIngress" },
     { binding: "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION", service: "ledgetop-clients", entrypoint: "OperationsPortalWorkspacePublicationIngress" },
     { binding: "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY", service: "ledgetop-clients", entrypoint: "OperationsPortalNativeRecipientAuthorityIngress" },
+    { binding: "CLIENT_PORTAL_AUTHORITY_V2", service: "ledgetop-clients", entrypoint: "ClientPortalAuthorityV2Ingress" },
   ]);
   assert.equal(config.workflows?.find(workflow => workflow.binding === "OPS_CATALOG_PROMOTION_WORKFLOW"), undefined);
   assert.equal(config.workflows?.find((workflow) => workflow.binding === "OPS_CATALOG_PROMOTION_WORKFLOW")?.schedules, undefined);
