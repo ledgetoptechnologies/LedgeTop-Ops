@@ -60,7 +60,7 @@ test('automatically imports a valid, explicit Emlid CSV and retains the untouche
   assert.equal(context.database.prepare('SELECT COUNT(*) AS n FROM gcp_sets WHERE dataset_id=?').get(dataset.id).n, 1);
 });
 
-test('ignores invalid, ambiguous-unit, and unrelated CSVs without removing their retained raw files', async t => {
+test('ignores invalid and unrelated CSV contents while permanently retaining their raw files', async t => {
   const context = fixture(t);
   const invalid = 'date,temperature\n2026-01-01,12\n';
   const ambiguous = 'Name,Easting,Northing,Elevation,Description,Longitude,Latitude,Ellipsoidal height,CS name\nCP-1,903241,549596,833,Hub,-88,42,720,NAD83(2011) / WISCRS Dodge and Jefferson + NAVD88 height\n';
@@ -69,7 +69,11 @@ test('ignores invalid, ambiguous-unit, and unrelated CSVs without removing their
   assert.equal(result.imported.length, 0);
   assert.equal(result.ignored, 2);
   assert.equal(context.database.prepare('SELECT COUNT(*) AS n FROM gcp_sets WHERE dataset_id=?').get(dataset.id).n, 0);
-  assert.equal(context.processing.hasRetainedGcpSource(dataset.id), false, 'unrecognized CSVs do not become GCP retention records');
+  assert.equal(context.processing.hasRetainedGcpSource(dataset.id), true, 'raw CSV source holds exist even when content is not a valid GCP interchange');
+  assert.equal(context.database.prepare('SELECT COUNT(*) AS n FROM retained_dataset_files WHERE dataset_id=? AND retention_reason=\'gcp_source\'').get(dataset.id).n, 2);
+  assert.equal(context.database.prepare('SELECT COUNT(*) AS n FROM retained_gcp_sources WHERE dataset_id=?').get(dataset.id).n, 0,
+    'invalid CSVs do not create imported GCP point sets or parsed source records');
+  assert.equal(context.processing.beginTrashMutation(dataset.id, 'ops:test'), null, 'dataset retention prevents raw source deletion');
   for (const filename of ['unrelated.csv', 'ambiguous.csv'])
     assert.equal(fs.existsSync(path.join(context.mounts.datasets, dataset.relativePath, filename)), true);
 });
