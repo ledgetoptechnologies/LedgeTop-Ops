@@ -1,18 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 import { createHash } from 'node:crypto';
 import {
-  PROFILE, SOURCE_COMMIT, CANONICAL_V4_PROFILE_SHA256, LEDGER_SQL, SCHEMA_SQL,
+  PROFILE, SOURCE_COMMIT, LEDGER_SQL, SCHEMA_SQL,
   readSourceMigrationInventory, summarizeInstalledSchema, validateInstalledSchemaPreservation,
-  validateInstalledSchemaPreservationReleaseAdmission, readInstalledSchemaPreservationMetadata,
+  validateInstalledSchemaPreservationReleaseAdmission, validateInstalledSchemaPreservationReleaseAdmissionOffline,
+  readInstalledSchemaPreservationMetadata,
 } from './installed-schema-preservation.mjs';
+import { CANONICAL_INSTALLED_PROFILE_V4_SHA256 } from '../../production-deploy.mjs';
 
 const HERE = new URL('./', import.meta.url);
 const fixture = JSON.parse(fs.readFileSync(new URL('actual-metadata-evidence.fixture.json', HERE), 'utf8'));
 const hash = value => createHash('sha256').update(value).digest('hex');
 const clone = value => structuredClone(value);
 const fresh = evidence => Date.parse(evidence.observedAt);
+const OFFLINE_ARTIFACTS = 'C:/Projects/Ledge Top Operations/_artifacts/production-release-readback-20261104';
 
 test('sanitized actual metadata classifies the exact installed ledgers and pending source migrations', () => {
   const source = readSourceMigrationInventory(SOURCE_COMMIT);
@@ -127,27 +131,81 @@ test('fresh reader issues only the two pinned SELECT statements per exact produc
     now: () => new Date(fixture.observedAt) }), /preservation_provider_write_metadata_invalid/);
 });
 
-test('release admission requires the pinned canonical v4 profile and unchanged protected-control fingerprint', () => {
+test('hash strings alone cannot admit and release freshness has a fixed sixty-second limit', () => {
   const source = readSourceMigrationInventory(SOURCE_COMMIT);
   const classification = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: SOURCE_COMMIT,
     sourceRows: source.rows, sourceFiles: source.files, now: fresh(fixture) });
-  const controlsSha = CANONICAL_V4_PROFILE_SHA256;
-  const admission = validateInstalledSchemaPreservationReleaseAdmission(classification, {
-    sourceCommit: SOURCE_COMMIT, canonicalV4ProfileSha256: CANONICAL_V4_PROFILE_SHA256,
-    protectedControlsBeforeSha256: controlsSha, protectedControlsAfterSha256: controlsSha,
-    now: fresh(fixture),
-  });
-  assert.equal(admission.status, 'preserved-installed-schema-with-pending-source-migrations');
-  assert.equal(admission.applicationSchemaReady, false);
-  assert.equal(admission.authorizesFeatureActivation, false);
-  assert.throws(() => validateInstalledSchemaPreservationReleaseAdmission(classification, {
-    sourceCommit: SOURCE_COMMIT, canonicalV4ProfileSha256: '0'.repeat(64),
-    protectedControlsBeforeSha256: controlsSha, protectedControlsAfterSha256: controlsSha,
-    now: fresh(fixture),
+  for (const fakeControlSha of [CANONICAL_INSTALLED_PROFILE_V4_SHA256, 'a'.repeat(64)]) {
+    assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
+      sourceCommit: SOURCE_COMMIT, canonicalV4ProfileSha256: fakeControlSha,
+      protectedControlsBeforeSha256: fakeControlSha, protectedControlsAfterSha256: fakeControlSha,
+      now: fresh(fixture),
+    }), /preservation_release_admission_refused/);
+  }
+  assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
+    sourceCommit: SOURCE_COMMIT, canonicalV4ProfileSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
+    protectedControlsBeforeSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
+    protectedControlsAfterSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
+    maxAgeMs: 600_000, now: fresh(fixture),
+  }), /preservation_release_admission_refused/);
+  assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
+    sourceCommit: SOURCE_COMMIT, canonicalV4Profile: PROFILE, selectedApp: 'operations',
+    baselineCapture: {}, currentCapture: {}, now: fresh(fixture) + 60_001,
   }), /preservation_release_admission_refused/);
   assert.throws(() => validateInstalledSchemaPreservationReleaseAdmission(classification, {
-    sourceCommit: SOURCE_COMMIT, canonicalV4ProfileSha256: CANONICAL_V4_PROFILE_SHA256,
-    protectedControlsBeforeSha256: controlsSha, protectedControlsAfterSha256: 'b'.repeat(64),
-    now: fresh(fixture),
+    sourceCommit: SOURCE_COMMIT, canonicalV4Profile: PROFILE, selectedApp: 'operations',
+    baselineCapture: {}, currentCapture: {}, now: fresh(fixture),
   }), /preservation_release_admission_refused/);
+});
+
+test('saved actual snapshot and v4 candidate admit offline under their captured historical clock', {
+  skip: !fs.existsSync(path.join(OFFLINE_ARTIFACTS, 'ops-canonical-execution-2686-20261105-02', 'authenticated-final-capture.private.json'))
+    || !fs.existsSync(path.join(OFFLINE_ARTIFACTS, 'canonical-installed-profile-v4-2686c535-offline-20261105', 'candidate.private.json')),
+}, () => {
+  const savedCapture = JSON.parse(fs.readFileSync(path.join(OFFLINE_ARTIFACTS,
+    'ops-canonical-execution-2686-20261105-02', 'authenticated-final-capture.private.json'), 'utf8'));
+  const candidate = JSON.parse(fs.readFileSync(path.join(OFFLINE_ARTIFACTS,
+    'canonical-installed-profile-v4-2686c535-offline-20261105', 'candidate.private.json'), 'utf8'));
+  assert.equal(candidate.profileSHA256, CANONICAL_INSTALLED_PROFILE_V4_SHA256);
+  const source = readSourceMigrationInventory(SOURCE_COMMIT);
+  const classification = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: SOURCE_COMMIT,
+    sourceRows: source.rows, sourceFiles: source.files, now: fresh(fixture) });
+  for (const app of ['operations', 'client', 'ops-sync']) {
+    const admission = validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
+      sourceCommit: SOURCE_COMMIT, canonicalV4Profile: candidate.profile, selectedApp: app,
+      baselineCapture: savedCapture.snapshot, currentCapture: savedCapture.snapshot, now: fresh(fixture),
+    });
+    assert.equal(admission.status, 'preserved-installed-schema-with-pending-source-migrations');
+    assert.equal(admission.accountId, PROFILE.accountId);
+    assert.equal(admission.observedAt, fixture.observedAt);
+    assert.equal(admission.selectedApp, app);
+    assert.equal(admission.offlineOnly, true);
+    assert.equal(admission.applicationSchemaReady, false);
+    assert.equal(admission.authorizesFeatureActivation, false);
+    assert.match(admission.currentProtectedControlsSha256, /^[a-f0-9]{64}$/u);
+  }
+
+  const alteredProfile = clone(candidate.profile);
+  alteredProfile.workers.operations.plainValueSHA256.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED = '0'.repeat(64);
+  assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
+    sourceCommit: SOURCE_COMMIT, canonicalV4Profile: alteredProfile, selectedApp: 'operations',
+    baselineCapture: savedCapture.snapshot, currentCapture: savedCapture.snapshot, now: fresh(fixture),
+  }), /preservation_release_admission_refused/);
+  assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
+    sourceCommit: SOURCE_COMMIT, canonicalV4Profile: candidate.profile, selectedApp: 'not-a-worker',
+    baselineCapture: savedCapture.snapshot, currentCapture: savedCapture.snapshot, now: fresh(fixture),
+  }), /preservation_release_admission_refused/);
+  const changedCandidate = clone(savedCapture.snapshot);
+  changedCandidate.operations.settings.compatibility_flags.push('unreviewed-candidate-flag');
+  assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
+    sourceCommit: SOURCE_COMMIT, canonicalV4Profile: candidate.profile, selectedApp: 'operations',
+    baselineCapture: savedCapture.snapshot, currentCapture: changedCandidate, now: fresh(fixture),
+  }), /unrecognized production settings/);
+  const changedControls = clone(savedCapture.snapshot);
+  changedControls.operations.version.resources.bindings.find(row => row.name === 'CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED').text = 'false';
+  changedControls.operations.settings.bindings.find(row => row.name === 'CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED').text = 'false';
+  assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
+    sourceCommit: SOURCE_COMMIT, canonicalV4Profile: candidate.profile, selectedApp: 'operations',
+    baselineCapture: savedCapture.snapshot, currentCapture: changedControls, now: fresh(fixture),
+  }), /pinned installed profile|preserved true flag|scalar configuration/u);
 });

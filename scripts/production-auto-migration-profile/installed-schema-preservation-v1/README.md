@@ -32,10 +32,15 @@ migrations, ledger order, or application schema definitions fail closed.
 The classification and release-admission helpers are not wired into either
 production runtime. They return held evidence with
 `allSourceMigrationsInstalled`, `applicationSchemaReady`, DDL, migration
-authorization, and feature activation all false. Release admission also
-requires both before/after protected-control fingerprints to equal the pinned
-canonical v4 profile digest. The caller must obtain each fingerprint from a
-successful full canonical v4 installation check.
+authorization, and feature activation all false. Release admission accepts the
+actual baseline and current full installation captures plus the exact v4
+profile. It calls the existing full installation validator on each capture,
+using the exact selected app, then derives and compares a digest over checked
+settings, resources/bindings, plain-variable hashes, schedules, and asset
+associations. Hash strings alone cannot admit. Production admission uses the
+wall clock with a fixed 60-second evidence age; a separate offline-only helper
+supports saved artifacts under a supplied historical clock and marks its
+receipt `offlineOnly: true`.
 
 Run the focused offline checks with:
 

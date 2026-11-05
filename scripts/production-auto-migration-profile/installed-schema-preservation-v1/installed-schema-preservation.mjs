@@ -3,6 +3,9 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { canonical, hash as sha256Hex, resourcesShape, varsOf, validateInstallation,
+  ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, CANONICAL_INSTALLED_PROFILE_V4_SHA256 }
+  from '../../production-deploy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const PROFILE_PATH = new URL('./profile.json', import.meta.url);
@@ -15,7 +18,6 @@ function deepFreeze(value) {
 }
 export const PROFILE = deepFreeze(JSON.parse(readFileSync(PROFILE_PATH, 'utf8')));
 export const ACCOUNT_ID = '846c924bf17bf4f3dd15c97a4c5d1d51';
-export const CANONICAL_V4_PROFILE_SHA256 = '2ef0f21be881bbe1567e4ea941255ea1f6e1be9a339c1f854174c5ac334a10fd';
 export const SOURCE_COMMIT = '2686c535658398baf746b78a41e8af6b79f04538';
 export const PRODUCTION_DATABASES = Object.freeze({
   operations: '6ebf7514-d306-4615-ae56-ad869c874dbd',
@@ -29,6 +31,7 @@ const COMMIT = /^[a-f0-9]{40}$/u;
 const APP_NAMES = Object.freeze(['operations', 'client']);
 const MAX_QUERY_BYTES = 12 * 1024 * 1024;
 const MAX_QUERY_ROWS = 5_001;
+const MAX_RELEASE_EVIDENCE_AGE_MS = 60_000;
 
 function fail(code) { throw Object.assign(new Error(code), { code }); }
 function hash(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
@@ -45,12 +48,30 @@ function iso(value) {
   const date = Date.parse(value);
   return typeof value === 'string' && Number.isFinite(date) && new Date(date).toISOString() === value;
 }
+
+function protectedControlsFingerprint(snapshot) {
+  const apps = Object.keys(snapshot).sort();
+  const projection = {};
+  for (const app of apps) {
+    const state = snapshot[app];
+    const settings = Object.fromEntries(Object.entries(state.settings).filter(([key]) => !['bindings', 'annotations'].includes(key)));
+    const vars = varsOf(state);
+    projection[app] = {
+      settings,
+      resources: resourcesShape(state.version.resources),
+      varsSha256: sha256Hex(canonical(vars)),
+      crons: state.schedules.schedules.map(row => row.cron).sort(),
+      assetsSha256: sha256Hex(canonical(state.modern.assets ?? null)),
+    };
+  }
+  return sha256Hex(canonical(projection));
+}
 function profileIsPinned(profile) {
   if (!sameJson(profile, PROFILE) || profile.schemaVersion !== 1
     || profile.purpose !== 'installed-schema-preservation-with-pending-source-migrations'
     || profile.status !== 'review-candidate-not-release-authority'
     || profile.accountId !== ACCOUNT_ID || profile.source?.commit !== SOURCE_COMMIT
-    || profile.controls?.canonicalInstalledProfileV4Sha256 !== CANONICAL_V4_PROFILE_SHA256
+    || profile.controls?.canonicalInstalledProfileV4Sha256 !== CANONICAL_INSTALLED_PROFILE_V4_SHA256
     || profile.applicationSchemaReady !== false || profile.executesDdl !== false
     || profile.authorizesMigration !== false || profile.authorizesFeatureActivation !== false) fail('preservation_profile_unpinned');
   for (const app of APP_NAMES) {
@@ -166,7 +187,8 @@ function validateEvidence(evidence, { profile = PROFILE, sourceCommit, sourceRow
       allSourceMigrationsInstalled: false });
   }
   return Object.freeze({ schemaVersion: 1, purpose: 'installed-schema-preservation-with-pending-source-migrations',
-    status: 'installed-schema-preserved-with-pending-source-migrations', sourceCommit, profileSourceCommit: SOURCE_COMMIT,
+    status: 'installed-schema-preserved-with-pending-source-migrations', accountId: ACCOUNT_ID,
+    sourceCommit, profileSourceCommit: SOURCE_COMMIT,
     observedAt: evidence.observedAt, profileSha256: PROFILE_SHA256, databases: Object.freeze(results),
     allSourceMigrationsInstalled: false, applicationSchemaReady: false, executesDdl: false,
     authorizesMigration: false, authorizesFeatureActivation: false });
@@ -178,7 +200,8 @@ export function validateInstalledSchemaPreservation({ evidence, profile = PROFIL
 }
 
 function gitOutput(args, input) {
-  try { return execFileSync('git', args, { cwd: ROOT, input, encoding: null, maxBuffer: 100 * 1024 * 1024, windowsHide: true }); }
+  try { return execFileSync('git', args, { cwd: ROOT, input, encoding: null, maxBuffer: 100 * 1024 * 1024,
+    timeout: 30_000, windowsHide: true }); }
   catch { fail('preservation_git_source_unavailable'); }
 }
 
@@ -254,7 +277,7 @@ function queryResponseRows(payload, databaseId) {
     || meta.changed_db === true || (Object.hasOwn(meta, 'changed_db') && typeof meta.changed_db !== 'boolean')) {
     fail('preservation_provider_write_metadata_invalid');
   }
-  const ids = [payload.result?.database_id, payload.result?.databaseId, payload.result?.uuid,
+  const ids = [result.database_id, result.databaseId, result.uuid,
     meta.database_id, meta.databaseId, meta.uuid].filter(value => value !== undefined);
   if (ids.some(value => typeof value !== 'string' || value.toLowerCase() !== databaseId)) fail('preservation_provider_database_mismatch');
   return result.results;
@@ -295,26 +318,34 @@ export async function readInstalledSchemaPreservationMetadata({ token, fetchImpl
     observedAt, readOnly: true, executesDdl: false, databases: Object.freeze(databases) });
 }
 
-export function validateInstalledSchemaPreservationReleaseAdmission(classification, {
-  sourceCommit, canonicalV4ProfileSha256, protectedControlsBeforeSha256, protectedControlsAfterSha256,
-  now = Date.now(), maxAgeMs = 60_000,
-} = {}) {
+const RELEASE_OPTION_KEYS = Object.freeze(['sourceCommit', 'canonicalV4Profile', 'selectedApp', 'baselineCapture',
+  'currentCapture', 'baselineAllowLatest', 'currentAllowLatest', 'baselineExpectedDeploymentVersions',
+  'currentExpectedDeploymentVersions', 'opsSuccessorReaderContract', 'opsSuccessorReaderReleaseCandidateId']);
+
+function releaseAdmissionAt(classification, options, now, offlineOnly) {
+  if (!isRecord(options) || Reflect.ownKeys(options).some(key => typeof key !== 'string' || !RELEASE_OPTION_KEYS.includes(key))) {
+    fail('preservation_release_admission_refused');
+  }
+  const { sourceCommit, canonicalV4Profile, selectedApp, baselineCapture, currentCapture,
+    baselineAllowLatest = {}, currentAllowLatest = {}, baselineExpectedDeploymentVersions = {},
+    currentExpectedDeploymentVersions = {}, opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId } = options;
   if (!exactKeys(classification, ['schemaVersion', 'purpose', 'status', 'sourceCommit', 'profileSourceCommit', 'observedAt',
-    'profileSha256', 'databases', 'allSourceMigrationsInstalled', 'applicationSchemaReady', 'executesDdl',
+    'accountId', 'profileSha256', 'databases', 'allSourceMigrationsInstalled', 'applicationSchemaReady', 'executesDdl',
     'authorizesMigration', 'authorizesFeatureActivation'])
     || classification.schemaVersion !== 1 || classification.purpose !== 'installed-schema-preservation-with-pending-source-migrations'
     || classification.status !== 'installed-schema-preserved-with-pending-source-migrations'
     || classification.sourceCommit !== sourceCommit || !COMMIT.test(sourceCommit ?? '')
-    || !iso(classification.observedAt) || !Number.isFinite(now) || !Number.isSafeInteger(maxAgeMs) || maxAgeMs < 0
-    || Date.parse(classification.observedAt) > now || now - Date.parse(classification.observedAt) > maxAgeMs
+    || classification.accountId !== ACCOUNT_ID || !iso(classification.observedAt) || !Number.isFinite(now)
+    || Date.parse(classification.observedAt) > now
+    || now - Date.parse(classification.observedAt) > MAX_RELEASE_EVIDENCE_AGE_MS
     || classification.profileSourceCommit !== SOURCE_COMMIT || classification.profileSha256 !== PROFILE_SHA256
     || classification.allSourceMigrationsInstalled !== false || classification.applicationSchemaReady !== false
     || classification.executesDdl !== false || classification.authorizesMigration !== false
     || classification.authorizesFeatureActivation !== false
     || !exactKeys(classification.databases, APP_NAMES)
-    || canonicalV4ProfileSha256 !== CANONICAL_V4_PROFILE_SHA256
-    || protectedControlsBeforeSha256 !== CANONICAL_V4_PROFILE_SHA256
-    || protectedControlsAfterSha256 !== CANONICAL_V4_PROFILE_SHA256) {
+    || !isRecord(canonicalV4Profile) || sha256Hex(canonical(canonicalV4Profile)) !== CANONICAL_INSTALLED_PROFILE_V4_SHA256
+    || !['operations', 'client', 'ops-sync'].includes(selectedApp)
+    || !isRecord(baselineCapture) || !isRecord(currentCapture)) {
     fail('preservation_release_admission_refused');
   }
   for (const app of APP_NAMES) {
@@ -329,11 +360,36 @@ export function validateInstalledSchemaPreservationReleaseAdmission(classificati
       || !Number.isSafeInteger(db.cloudflareInternalRowsObserved) || db.cloudflareInternalRowsObserved < 0
       || db.allSourceMigrationsInstalled !== false) fail('preservation_release_admission_refused');
   }
+  const validateCapture = (snapshot, allowLatest, expectedDeploymentVersions) => validateInstallation(snapshot, {
+    profile: canonicalV4Profile, selectedApp,
+    allowLatest, expectedDeploymentVersions,
+    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
+    ordinaryFrontendApp: selectedApp, opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId,
+  });
+  const checkedBaseline = validateCapture(baselineCapture, baselineAllowLatest, baselineExpectedDeploymentVersions);
+  const checkedCurrent = validateCapture(currentCapture, currentAllowLatest, currentExpectedDeploymentVersions);
+  const baselineControlsSha256 = protectedControlsFingerprint(checkedBaseline);
+  const currentControlsSha256 = protectedControlsFingerprint(checkedCurrent);
+  if (baselineControlsSha256 !== currentControlsSha256) fail('preservation_protected_controls_changed');
   return Object.freeze({ schemaVersion: 1, purpose: 'installed-schema-preservation-release-admission',
-    status: 'preserved-installed-schema-with-pending-source-migrations', sourceCommit,
-    profileSha256: PROFILE_SHA256, canonicalV4ProfileSha256, protectedControlsSha256: protectedControlsBeforeSha256,
+    status: 'preserved-installed-schema-with-pending-source-migrations', accountId: ACCOUNT_ID,
+    sourceCommit, observedAt: classification.observedAt, selectedApp, offlineOnly,
+    profileSha256: PROFILE_SHA256, canonicalV4ProfileSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
+    baselineProtectedControlsSha256: baselineControlsSha256, currentProtectedControlsSha256: currentControlsSha256,
     allSourceMigrationsInstalled: false, applicationSchemaReady: false, executesDdl: false,
     authorizesMigration: false, authorizesFeatureActivation: false });
+}
+
+export function validateInstalledSchemaPreservationReleaseAdmission(classification, options = {}) {
+  if (Object.hasOwn(options ?? {}, 'now')) fail('preservation_release_admission_refused');
+  return releaseAdmissionAt(classification, options, Date.now(), false);
+}
+
+/** Historical-clock admission is restricted to offline saved-artifact review and is labeled in its result. */
+export function validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, options = {}) {
+  if (!isRecord(options) || !Number.isFinite(options.now)) fail('preservation_offline_clock_invalid');
+  const { now, ...admissionOptions } = options;
+  return releaseAdmissionAt(classification, admissionOptions, now, true);
 }
 
 const PINNED_PROFILE_BYTES_SHA256 = '4267e120dd08ef7eb7a405e1e75e8f700b5147cbde4169f27268cc4f09ad821f';
