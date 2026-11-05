@@ -15,7 +15,9 @@ import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from 
 import { validateProductionMigrationAdmission } from './production-auto-migration-readiness.mjs';
 import { loadPinnedAppendOnlyMigrationProfile,
   readProductionMigrationReadiness as readProductionMigrationDiagnostics } from './production-auto-migration-classification.mjs';
-import { ProductionAutoJournal, loadPinnedProductionAutoRecipient } from './production-auto-journal.mjs';
+import { ProductionAutoJournal, loadPinnedProductionAutoRecipient, readVerifiedProductionAutoPredecessor } from './production-auto-journal.mjs';
+import { parseProductionAutoPredecessorHandoff, validateLiveProductionAutoPredecessor,
+  validateProductionAutoPredecessorProof } from './production-auto-predecessor.mjs';
 import { coordinateProductionAutoRelease } from './production-auto-coordinate.mjs';
 import { isProviderUtcTimestamp } from './production-auto-time.mjs';
 import { assetBootstrapVerificationEntries, completeAssetInventoryBootstrap, prepareAssetInventoryBootstrap,
@@ -90,6 +92,9 @@ function controlsProjection(snapshot, selectedApp) {
       deploymentId: state.deployment.id, deploymentVersions: state.deployment.versions }),
   }]));
 }
+export function productionAutoControlsSHA256(snapshot, selectedApp) {
+  return hash(Buffer.from(canonical(controlsProjection(snapshot, selectedApp))));
+}
 function validatedCapture(snapshot, workerName, baselineAssetsConfig, candidateVersionId, expectedDeploymentVersions) {
   const app = workerName === 'ledgetop-ops' ? 'operations' : 'client';
   const profile = structuredClone(PROFILE);
@@ -124,7 +129,7 @@ export function productionAutoBuildEnvironment(source = process.env) {
     'GITHUB_OUTPUT','GITHUB_EVENT_PATH','ACTIONS_RUNTIME_TOKEN','ACTIONS_ID_TOKEN_REQUEST_TOKEN','ACTIONS_ID_TOKEN_REQUEST_URL']) delete result[key];
   return result;
 }
-function buildProfileHash() { return hash(fs.readFileSync(path.join(ROOT, 'scripts/production-deploy-profile.json'))); }
+export function productionAutoBuildProfileSHA256() { return hash(fs.readFileSync(path.join(ROOT, 'scripts/production-deploy-profile.json'))); }
 function ensureAssetsIgnore(directory) {
   const file = path.join(directory, '.assetsignore'), expected = 'wrangler.json\n.dev.vars\n';
   try { need(fs.readFileSync(file, 'utf8').replaceAll('\r\n', '\n') === expected, 'runtime_assets_ignore_drift'); }
@@ -136,7 +141,7 @@ function ensureAssetsIgnore(directory) {
 function assetVerifierEntries(ledger) {
   return ledger.assets.map(row => ({ path: row.path, size: row.size, sha256: row.sha256, contentType: row.mime }));
 }
-function parseLedger(snapshot, app, workerName, accountId) {
+export function parseProductionAutoLedger(snapshot, app, workerName, accountId) {
   const state = snapshot?.[app];
   const activeId = activeVersion(state);
   need(activeId === state.version?.id && state.modern?.id === activeId, 'runtime_active_ledger_version_mismatch');
@@ -153,7 +158,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   journalFactory = options => new ProductionAutoJournal(options), recipientLoader = loadPinnedProductionAutoRecipient,
   readinessReader = readNativeStaffCutoverReadiness, sourceReader = deploymentSourceCommit, buildRunner = runBuild,
   buildArtifactsReader, migrationReader = readProductionMigrationDiagnostics,
-  assetBootstrapReader = readPinnedAssetInventoryBootstrap } = {}) {
+  assetBootstrapReader = readPinnedAssetInventoryBootstrap, predecessorReader = readVerifiedProductionAutoPredecessor } = {}) {
   need(Object.values(WORKERS).some(row => row.name === workerName) && /^[a-f0-9]{40}$/u.test(sourceCommit ?? '')
     && typeof fetchImpl === 'function' && profile === PROFILE, 'runtime_target_or_profile_refused');
   const app = workerName === 'ledgetop-ops' ? 'operations' : 'client', target = WORKERS[app];
@@ -163,6 +168,9 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? '') && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? ''), 'runtime_credentials_or_run_identity_missing');
   const mainCI = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl });
   need(triggerRun.sourceCommit === sourceCommit, 'runtime_trigger_source_mismatch');
+  const predecessorHandoff = workerName === 'ledgetop-ops'
+    ? parseProductionAutoPredecessorHandoff(env, { workerName, sourceCommit, triggerRun }) : null;
+  need(typeof predecessorReader === 'function', 'runtime_predecessor_reader_invalid');
   const token = env.CLOUDFLARE_API_TOKEN;
   let migrationPins;
   const checkMigrations = async () => {
@@ -175,6 +183,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   };
   let provider, journal, build, baselineCapture, expectedCapture, previousLedger, assetBootstrap, candidateVersionId, verifiedCI;
   let durableRuntime = null, candidateReadbackVerified = false;
+  let predecessorOwnState;
   let pendingCoordinatorFence = null, pendingTransition = null, verifiedDeploymentVersions = null;
   const currentCapture = async () => {
     const expectedWeights = pendingTransition ? (pendingTransition.versions.length === 2 ? pendingTransition.versions : null)
@@ -192,6 +201,23 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       deploymentId: deployment.id, deployedAt: deployment.created_on,
       versions: deployment.versions.map(row => ({ versionId: row.version_id, percentage: row.percentage })) } };
   };
+  const verifyPredecessor = async snapshot => {
+    if (!predecessorHandoff) return;
+    const proof = validateProductionAutoPredecessorProof(await predecessorReader({ token: env.GITHUB_TOKEN,
+      ...predecessorHandoff, fetchImpl }), predecessorHandoff);
+    need(proof.runtime.profileSha256 === productionAutoBuildProfileSHA256(), 'runtime_predecessor_profile_drift');
+    const ledger = parseProductionAutoLedger(snapshot, app === 'operations' ? 'client' : 'operations',
+      predecessorHandoff.workerName, accountId);
+    need(ledger.sourceCommit === sourceCommit && proof.finalReceipt.parentVersionId === ledger.parentVersionId
+      && proof.finalReceipt.ledgerSHA256 === hash(Buffer.from(ledgerBytes(ledger))),
+      'runtime_predecessor_ledger_drift');
+    if (predecessorOwnState === undefined) predecessorOwnState = structuredClone(snapshot[app]);
+    // This release may advance its own version. Keep that state pinned to the
+    // pre-mutation capture while hashing the predecessor's cross-worker controls.
+    const controlsSnapshot = { ...snapshot, [app]: predecessorOwnState };
+    validateLiveProductionAutoPredecessor({ proof, snapshot, app: app === 'operations' ? 'client' : 'operations',
+      controlsSHA256: productionAutoControlsSHA256(controlsSnapshot, app === 'operations' ? 'client' : 'operations') });
+  };
   const assertFence = async () => {
     await checkMigrations();
     verifiedCI = await mainCI.verify(sourceCommit);
@@ -199,6 +225,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       'runtime_source_or_main_drift');
     need(verifiedCI.runId === triggerRun.runId && verifiedCI.runAttempt === triggerRun.runAttempt, 'runtime_trigger_ci_run_superseded');
     const observed = await currentCapture();
+    await verifyPredecessor(observed.raw);
     if (expectedCapture) need(JSON.stringify(observed.value) === JSON.stringify(expectedCapture), 'runtime_capture_fence_drift');
     return observed;
   };
@@ -213,7 +240,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     // delete). Claim the release before its first write. The exact candidate
     // ledger is not knowable until those bytes have been checked, so bind that
     // one digest exactly once when the coordinator records `prepared`.
-    durableRuntime = { profileSha256: buildProfileHash(), moduleSha256: build.moduleSHA256, ledgerSha256: null };
+    durableRuntime = { profileSha256: productionAutoBuildProfileSHA256(), moduleSha256: build.moduleSHA256, ledgerSha256: null };
     const releaseId = hash(`${workerName}\n${sourceCommit}`);
     const root = path.join(ROOT, '.backups', 'production-auto-release', workerName, sourceCommit);
     need(verifiedCI && verifiedCI.sourceCommit === sourceCommit && Number.isSafeInteger(verifiedCI.runId)
@@ -257,11 +284,21 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       persistResponse: value => { need(journal, 'runtime_journal_not_claimed'); return journal.persistResponse(value); }, profile });
   };
   const adapter = {
-    sourceFence: async () => ({ sourceCommit: sourceReader(ROOT, env), mainCommit: await mainCI.mainCommit(), clean: true }),
+    sourceFence: async () => {
+      if (predecessorHandoff) {
+        await checkMigrations();
+        ensureProvider();
+        const observed = await currentCapture(); await verifyPredecessor(observed.raw);
+      }
+      return { sourceCommit: sourceReader(ROOT, env), mainCommit: await mainCI.mainCommit(), clean: true };
+    },
     ciGate: async () => {
       await checkMigrations();
       verifiedCI = await mainCI.verify(sourceCommit);
       need(verifiedCI.runId === triggerRun.runId && verifiedCI.runAttempt === triggerRun.runAttempt, 'runtime_trigger_ci_run_superseded');
+      if (predecessorHandoff) {
+        ensureProvider(); const observed = await currentCapture(); await verifyPredecessor(observed.raw);
+      }
       return verifiedCI;
     },
     capture: async () => {
@@ -304,7 +341,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     readLedger: async () => {
       ensureProvider();
       const snapshot = (await currentCapture()).raw;
-      previousLedger = parseLedger(snapshot, app, workerName, accountId);
+      previousLedger = parseProductionAutoLedger(snapshot, app, workerName, accountId);
       assetBootstrap = assetBootstrapReader({ app, workerName, accountId,
         activeVersionId: activeVersion(snapshot[app]) });
       if (assetBootstrap) {

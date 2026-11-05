@@ -5,12 +5,16 @@ import { createHash } from 'node:crypto';
 import { exactSyncReady, verifySyncBackendCandidate } from './production-auto-sync-runtime.mjs';
 import { createProductionAutoSyncAdapter } from './production-auto-sync-runtime.mjs';
 import { PROFILE, canonical } from './production-deploy.mjs';
+import { ledgerBytes } from './production-auto-assets.mjs';
+import { productionAutoBuildProfileSHA256, productionAutoControlsSHA256 } from './production-auto-runtime.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const parent = '11111111-1111-4111-8111-111111111111';
 const candidate = '22222222-2222-4222-8222-222222222222';
 const commit = 'a'.repeat(40);
 const nativeTarget = { accountId: '846c924bf17bf4f3dd15c97a4c5d1d51', databaseId: '6ebf7514-d306-4615-ae56-ad869c874dbd' };
+const predecessorEnv = { PRODUCTION_AUTO_PREDECESSOR_COMPLETION: 'success', PRODUCTION_AUTO_PREDECESSOR_SOURCE_SHA: commit,
+  PRODUCTION_AUTO_PREDECESSOR_RELEASE_ID: hash(`ledgetop-ops\n${commit}`) };
 
 test('Sync readiness is exact-source, bounded, and rejects stale or future observations', () => {
   const ready = { schemaVersion: 2, sourceCommit: commit, accountId: '846c924bf17bf4f3dd15c97a4c5d1d51',
@@ -31,7 +35,7 @@ test('Sync migration refusal stops before CI, staff reads, provider construction
   let otherCalls = 0;
   const unexpected = () => { otherCalls++; throw Error('unexpected side effect'); };
   const env = { CLOUDFLARE_ACCOUNT_ID: nativeTarget.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
-    GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', NATIVE_STAFF_CUTOVER_REVIEW_JSON: '{"synthetic":true}' };
+    GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', NATIVE_STAFF_CUTOVER_REVIEW_JSON: '{"synthetic":true}', ...predecessorEnv };
   const runtime = createProductionAutoSyncAdapter({ sourceCommit: commit, triggerRun: { sourceCommit: commit, runId: 678, runAttempt: 3 }, env,
     migrationReader: async () => { throw Error('missing migration'); }, sourceReader: unexpected,
     ciFactory: () => ({ verify: unexpected }), readinessReader: unexpected, providerFactory: unexpected,
@@ -91,6 +95,12 @@ function fullSnapshotFixture() {
       settings: { ...structuredClone(spec.settings), annotations: { 'workers/message': 'test', 'workers/triggered_by': 'fixture' }, bindings },
       schedules: { schedules: spec.crons.map(cron => ({ cron, created_on: 'synthetic' })) } };
   }
+  const ops = snapshots.operations, ledger = { schemaVersion: 1, workerName: 'ledgetop-ops',
+    accountId: nativeTarget.accountId, sourceCommit: commit, parentVersionId: ops.version.id,
+    observedAt: '2026-10-27T05:00:00.000Z', minimumRetentionHours: 48, automaticPruning: false,
+    assets: [{ path: '/index.html', size: 5, sha256: hash(Buffer.from('index')),
+      mime: 'text/html', providerHash: hash(Buffer.from('index')).slice(0, 32) }] };
+  ops.modern.modules.push({ name: '__ops_release_ledger.json', content_base64: ledgerBytes(ledger).toString('base64') });
   Object.assign(PROFILE, profile);
   return { snapshots, restore: () => Object.assign(PROFILE, original) };
 }
@@ -99,7 +109,8 @@ function awaitlessRead(relative) {
   return JSON.parse(readFileSync(new URL(`../${relative}`, import.meta.url), 'utf8'));
 }
 
-for (const scenario of ['success', 'first-write-drift', 'activation-drift']) test(
+for (const scenario of ['success', 'first-write-drift', 'activation-drift', 'predecessor-missing-artifact',
+  'predecessor-ci-mismatch', 'predecessor-live-drift']) test(
   scenario === 'activation-drift'
     ? 'Sync migration drift at activation intent holds without activation dispatch or retry'
     : scenario === 'first-write-drift'
@@ -113,7 +124,26 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift']) tes
   const sourceMapBytes = Buffer.from(JSON.stringify(sourceMap));
   const triggerRun = { sourceCommit: commit, runId: 678, runAttempt: 3 };
   const env = { CLOUDFLARE_ACCOUNT_ID: nativeTarget.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
-    GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', NATIVE_STAFF_CUTOVER_REVIEW_JSON: '{"synthetic":true}' };
+    GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', NATIVE_STAFF_CUTOVER_REVIEW_JSON: '{"synthetic":true}',
+    ...predecessorEnv };
+  const operations = fixture.snapshots.operations;
+  const opsLedger = JSON.parse(Buffer.from(operations.modern.modules.find(row => row.name === '__ops_release_ledger.json').content_base64, 'base64'));
+  const predecessorProof = { workerName: 'ledgetop-ops', releaseKind: 'retained-assets', sourceCommit: commit,
+    releaseId: env.PRODUCTION_AUTO_PREDECESSOR_RELEASE_ID, ci: { runId: triggerRun.runId, runAttempt: triggerRun.runAttempt },
+    workflow: { runId: 789, runAttempt: 1 }, runtime: { profileSha256: productionAutoBuildProfileSHA256(),
+      moduleSha256: hash(Buffer.from('active')), ledgerSha256: hash(ledgerBytes(opsLedger)) },
+    artifact: { artifactId: 901, digestSha256: 'd'.repeat(64), name: `production-auto-${env.PRODUCTION_AUTO_PREDECESSOR_RELEASE_ID}`,
+      runId: 789, runAttempt: 1, uploadStepConclusion: 'success', releaseStepConclusion: 'success' },
+    finalReceipt: { status: 'verified', sourceCommit: commit, workerName: 'ledgetop-ops', verifiedActive: true,
+      candidateVersionId: operations.version.id, deploymentId: operations.deployment.id,
+      parentVersionId: opsLedger.parentVersionId,
+      minimumRetentionHours: 48, automaticPruning: false, allHistoricalAssetsCarried: true,
+      controlsSHA256: productionAutoControlsSHA256(fixture.snapshots, 'operations'),
+      moduleSHA256: hash(Buffer.from('active')), ledgerSHA256: hash(ledgerBytes(opsLedger)) } };
+  const suppliedProof = structuredClone(predecessorProof);
+  if (scenario === 'predecessor-missing-artifact') suppliedProof.artifact = null;
+  if (scenario === 'predecessor-ci-mismatch') suppliedProof.ci.runAttempt += 1;
+  if (scenario === 'predecessor-live-drift') operations.deployment.id = '99999999-9999-4999-8999-999999999999';
   const events = [], journalReceipts = [], candidateResources = { ...structuredClone(fixture.snapshots['ops-sync'].version.resources),
     script: { ...structuredClone(fixture.snapshots['ops-sync'].version.resources.script), last_deployed_from: 'api' } };
   const latestCandidate = { id: candidateId, resources: candidateResources };
@@ -196,6 +226,8 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift']) tes
     const runtime = createProductionAutoSyncAdapter({ sourceCommit: commit, triggerRun, env, fetchImpl: async () => { throw Error('no external calls'); },
       sourceReader: () => commit, ciFactory: () => ({ verify: async sha => ({ sourceCommit: sha, passed: true,
         runId: triggerRun.runId, runAttempt: triggerRun.runAttempt }) }), providerFactory,
+      predecessorReader: async input => { assert.equal(input.workerName, 'ledgetop-ops'); assert.equal(input.releaseKind, 'retained-assets');
+        assert.equal(input.ciRunId, triggerRun.runId); assert.equal(input.workflowRunId, 789); return suppliedProof; },
       journalFactory: () => journal, recipientLoader: () => ({ synthetic: 'recipient' }),
       migrationReader: async input => { assert.equal(input.token, env.CLOUDFLARE_API_TOKEN); assert.equal(input.sourceCommit, commit);
         migrationCalls++; return { schemaVersion: 1, sourceCommit: commit,
@@ -213,7 +245,13 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift']) tes
       } });
     if (scenario !== 'success') {
       await assert.rejects(runtime.adapter.release(), /Ops Sync backend release held; inspect the durable journal/);
-      if (scenario === 'first-write-drift') {
+      if (scenario.startsWith('predecessor-')) {
+        assert.equal(candidateExists, false, 'predecessor refusal occurs before candidate upload');
+        assert.equal(activationMethodCalls, 0);
+        assert.equal(events.some(value => value.startsWith('intent:')), false, 'predecessor refusal persists no provider intent');
+        assert.equal(journalReceipts.length, 0, 'predecessor refusal happens before claiming the Sync journal');
+        assert.equal(events.some(value => ['upload','activate'].includes(value)), false);
+      } else if (scenario === 'first-write-drift') {
         assert.equal(candidateExists, false, 'no candidate version is uploaded');
         assert.equal(activationMethodCalls, 0);
         assert.equal(events.some(value => value.startsWith('intent:')), false);

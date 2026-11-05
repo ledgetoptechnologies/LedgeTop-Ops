@@ -10,12 +10,16 @@ import { canonical, capture, deploymentSourceCommit, PROFILE, resourcesShape,
   validateInstallation, verifySourceMap } from './production-deploy.mjs';
 import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-ci.mjs';
 import { ProductionCloudflareProvider, readCandidateVersionWithVisibilityRetry } from './production-auto-provider.mjs';
-import { readProductionAutoTriggerRun, runBuild } from './production-auto-runtime.mjs';
+import { readProductionAutoTriggerRun, runBuild, parseProductionAutoLedger,
+  productionAutoControlsSHA256, productionAutoBuildProfileSHA256 } from './production-auto-runtime.mjs';
 import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { validateProductionMigrationAdmission } from './production-auto-migration-readiness.mjs';
 import { loadPinnedAppendOnlyMigrationProfile,
   readProductionMigrationReadiness as readProductionMigrationDiagnostics } from './production-auto-migration-classification.mjs';
-import { ProductionAutoJournal, loadPinnedProductionAutoRecipient } from './production-auto-journal.mjs';
+import { ProductionAutoJournal, loadPinnedProductionAutoRecipient, readVerifiedProductionAutoPredecessor } from './production-auto-journal.mjs';
+import { ledgerBytes } from './production-auto-assets.mjs';
+import { parseProductionAutoPredecessorHandoff, validateLiveProductionAutoPredecessor,
+  validateProductionAutoPredecessorProof } from './production-auto-predecessor.mjs';
 import { isProviderUtcTimestamp } from './production-auto-time.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -99,13 +103,16 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   fetchImpl = fetch, profile = PROFILE, sourceReader = deploymentSourceCommit, ciFactory = options => new ProductionMainCI(options),
   providerFactory = options => new ProductionCloudflareProvider(options), journalFactory = options => new ProductionAutoJournal(options),
   recipientLoader = loadPinnedProductionAutoRecipient, readinessReader = readNativeStaffCutoverReadiness,
-  buildRunner = runBuild, buildArtifactsReader, migrationReader = readProductionMigrationDiagnostics } = {}) {
+  buildRunner = runBuild, buildArtifactsReader, migrationReader = readProductionMigrationDiagnostics,
+  predecessorReader = readVerifiedProductionAutoPredecessor } = {}) {
   need(COMMIT.test(sourceCommit ?? '') && triggerRun?.sourceCommit === sourceCommit && typeof fetchImpl === 'function'
     && profile === PROFILE && env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
     && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN ?? '')
     && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.GITHUB_TOKEN ?? '')
     && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? '') && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? ''),
   'sync_runtime_identity_or_credentials_invalid');
+  const predecessorHandoff = parseProductionAutoPredecessorHandoff(env, { workerName: WORKER, sourceCommit, triggerRun });
+  need(typeof predecessorReader === 'function', 'sync_predecessor_reader_invalid');
   const ci = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl }), token = env.CLOUDFLARE_API_TOKEN;
   let migrationPins;
   const checkMigrations = async () => {
@@ -117,12 +124,28 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     return observed;
   };
   let provider, journal, baseline, expected, build, candidateVersionId, readiness, writesAttempted = false;
+  let predecessorOwnState;
   let phase = 'sync-prepare';
   const current = async () => {
     const raw = await capture(provider, { selectedApp: APP });
     const snapshot = validateInstallation(raw, { profile, selectedApp: APP,
       allowLatest: candidateVersionId ? { [APP]: candidateVersionId } : {} });
     return { snapshot, state: projectCapture(snapshot, candidateVersionId) };
+  };
+  const verifyPredecessor = async snapshot => {
+    const proof = validateProductionAutoPredecessorProof(await predecessorReader({ token: env.GITHUB_TOKEN,
+      ...predecessorHandoff, fetchImpl }), predecessorHandoff);
+    need(proof.runtime.profileSha256 === productionAutoBuildProfileSHA256(), 'sync_predecessor_profile_drift');
+    const ledger = parseProductionAutoLedger(snapshot, 'operations', 'ledgetop-ops', NATIVE_STAFF_PRODUCTION_TARGET.accountId);
+    need(ledger.sourceCommit === sourceCommit && proof.finalReceipt.parentVersionId === ledger.parentVersionId
+      && proof.finalReceipt.ledgerSHA256 === hash(ledgerBytes(ledger)),
+    'sync_predecessor_ledger_drift');
+    if (predecessorOwnState === undefined) predecessorOwnState = structuredClone(snapshot[APP]);
+    // Sync's own candidate advances during this release; compare other controls
+    // to the Ops receipt using the exact pre-mutation Sync capture.
+    const controlsSnapshot = { ...snapshot, [APP]: predecessorOwnState };
+    validateLiveProductionAutoPredecessor({ proof, snapshot, app: 'operations',
+      controlsSHA256: productionAutoControlsSHA256(controlsSnapshot, 'operations') });
   };
   const reconcileReadOnly = async () => {
     const raw = await capture(provider, { selectedApp: APP });
@@ -139,6 +162,8 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     const result = await ci.verify(sourceCommit);
     need(result.sourceCommit === sourceCommit && result.passed === true && result.runId === triggerRun.runId
       && result.runAttempt === triggerRun.runAttempt, 'sync_main_ci_not_exact_or_current');
+    ensureProvider();
+    const live = await current(); await verifyPredecessor(live.snapshot);
     return result;
   };
   const checkStaff = async () => {
