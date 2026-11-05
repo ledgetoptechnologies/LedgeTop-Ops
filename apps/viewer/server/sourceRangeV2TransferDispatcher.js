@@ -19,7 +19,7 @@ function createSourceRangeV2TransferDispatcher({ runtime, outbox, journal } = {}
       const transfer = job.transferRequest;
       let row = outbox.find(claim.attemptId, transfer.reservationId, transfer.generation);
       if (!row) {
-        const grant = runtime.mintGrant({ ...job, submission: { manifest } });
+        const grant = await runtime.mintGrant({ ...job, submission: { manifest } });
         journal.read(claim);
         row = outbox.prepare(claim, { job, reservation: transfer, manifestSha256: manifest.sha256, grant });
       }
