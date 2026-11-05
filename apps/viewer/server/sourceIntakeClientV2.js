@@ -143,6 +143,20 @@ function validateReceivingBinding(response, request, { environment }) {
   return response;
 }
 
+function validatePersistedReceivingBinding(saved, request, { environment }) {
+  const binding = saved?.remoteBinding;
+  const keys = ['protocol','coordinatorAuthorityId','jobId','attemptId','providerTaskId','generation','environment',
+    'manifestSha256','pipelineManifestSha256','sourceManifestSha256','derivedManifestSha256','pipelineDigest','requestSha256'];
+  if (saved?.state !== 'accepted' || !assertClosed(binding, keys)
+      || binding.protocol !== 'ltds-viewer-source-intake-binding-v2'
+      || binding.coordinatorAuthorityId !== saved.coordinatorAuthorityId
+      || binding.requestSha256 !== saved.sourceIntakeSha256) fail('source_intake_binding_missing');
+  validateReceivingBinding({ ...binding, status: 'queued', phase: 'source_receiving', sourceState: 'receiving',
+    derivedState: 'receiving', sourceReceipt: null, derivedReceipt: null,
+    sourceReceiptSha256: null, derivedReceiptSha256: null }, request, { environment });
+  return binding;
+}
+
 function acknowledgedObjects(status, binding, manifests) {
   if (!status || status.jobId !== binding.jobId || status.attemptId !== binding.attemptId
       || status.providerTaskId !== binding.providerTaskId || status.generation !== binding.generation
@@ -295,13 +309,7 @@ class SourceIntakeClientV2 {
     if (!saved || !saved.sourceIntakeCanonical || saved.sourceIntakeCanonical !== intent.sourceIntakeCanonical)
       fail('source_intake_outbox_state_invalid');
     const request = JSON.parse(saved.sourceIntakeCanonical);
-    if (saved.state === 'accepted' && saved.remoteBinding?.protocol === 'ltds-viewer-source-intake-binding-v2') {
-      const binding = saved.remoteBinding;
-      validateReceivingBinding({ ...binding, status: 'queued', phase: 'source_receiving', sourceState: 'receiving',
-        derivedState: 'receiving', sourceReceipt: null, derivedReceipt: null,
-        sourceReceiptSha256: null, derivedReceiptSha256: null }, request, { environment: this.environment });
-      return binding;
-    }
+    if (saved.state === 'accepted') return validatePersistedReceivingBinding(saved, request, { environment: this.environment });
     if (saved.state !== 'prepared') fail('source_intake_outbox_state_invalid');
     const response = await this.request('/ltds/v2/jobs', { method: 'POST', body: saved.sourceIntakeCanonical, signal });
     if (![200, 201].includes(response.status)) {
@@ -311,9 +319,10 @@ class SourceIntakeClientV2 {
     }
     const body = await boundedJson(response);
     const binding = validateReceivingBinding(body, request, { environment: this.environment });
-    return this.outbox.acceptSourceIntakeBinding(intent.viewerAttemptId, binding, {
+    const accepted = this.outbox.acceptSourceIntakeBinding(intent.viewerAttemptId, binding, {
       environment: this.environment, localJobId, owner,
     });
+    return validatePersistedReceivingBinding(accepted, request, { environment: this.environment });
   }
 
   async uploadObject({ jobId, generation, object, openStream, signal } = {}) {
