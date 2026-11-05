@@ -170,8 +170,8 @@ class RuntimeTests(unittest.TestCase):
             if pathlib.Path(target).name == app.SKIPPED_REPORT:
                 raise OSError("disk full")
             real_replace(source, target)
-        with mock.patch.object(app.os, "replace", side_effect=replace):
-            self.assertEqual(self.generator.scan(now=2002)["failed"], 0)
+        with mock.patch.object(app.os, "replace", side_effect=replace), mock.patch.object(self.generator, "render", return_value=("failed", None)):
+            self.assertEqual(self.generator.scan(now=2002)["failed"], 1, "the scan finishes despite the report failure")
         self.assertEqual((self.state / app.SKIPPED_REPORT).read_text(), before)
         self.assertEqual(list(self.state.glob(".skipped-files-*")), [])
 
