@@ -236,9 +236,15 @@ profiles already present. Every executor checkpoint takes a fresh read-only
 snapshot and requires an exact match; it refuses enabled or in-flight native
 control, and any change to the reviewed bridge mismatch/cohort/control-plane
 state. The v1 reader pins the pre-0226 schema and fails closed if any
-`staff_login_*` table, trigger, or index appears; alias/login binding authority
-requires a separately reviewed contract before migration 0226 or its objects
-are introduced. This contract
+`staff_login_*` table, trigger, or index appears. After migration 0226, use the
+separate `ordinary-frontend-preserve-native-staff-post0226-v1` packet. Its
+read-only snapshot verifies the exact migration schema and pins all five login
+tables by row counts and digests, including pending intents, bindings,
+generations, and audit history. The public observation omits login addresses
+and token hashes. Any login or staff-state change invalidates the short-lived
+review and stops the next release mutation. Operations must select exactly one
+authority packet; Client releases cannot select an Operations packet.
+Neither preservation contract
 does not authorize staff admission, onboarding, cutover, or native control
 activation. The existing full native-staff cutover contract remains strict and
 still requires enabled, reconciled native control. Packet creation and owner
