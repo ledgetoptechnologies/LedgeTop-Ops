@@ -336,7 +336,7 @@ test("the checked-in Client deployment keeps reviewed resources, hosts, and port
   // gates, route namespaces, no-email guards and resource checks stay exact.
   // Portal origin retirement changes only the reviewed host/profile bundle;
   // public compatibility hosts and existing resources remain pinned.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "3281ca7dbfd0cee12c4585f8a23772cf62e177d263c3beb7848a669b4940e9ae");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "e8c81a921d6d7692fe84d18b24b27bf7e7f766f03520ee6be274f9b68f00cbc7");
   assert.equal("CLIENT_PORTAL_INVITATION_FROM_NAME" in readJson("apps/client/wrangler.jsonc").vars, false);
   const config = readJson("apps/client/wrangler.jsonc");
   assert.deepEqual(config.services.filter(service => service.binding === "SHARED_PROFILE_PORTAL"), [{
@@ -515,7 +515,7 @@ test("the deployed Operations Worker preserves native production transport and e
   // Preserve the current native production transport. Deferred catalog/legacy
   // mutation paths stay disabled and have no production service/workflow binding.
   // New settings are disabled onboarding mail controls and isolated mail/activation crons.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "32d584f6511b0213526e35a9a925c563bed05f7df7772d4e038d7e9970762ca3");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "098438ae9d841dc58fe41d57ad3efacbe700bbe2c710e33bcfb2dc3068341719");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.equal(config.vars.PUBLIC_BASE_URL,"https://ops.ledgetop.app");
   assert.equal(config.vars.EXPECTED_HOST,"ops.ledgetop.app");
