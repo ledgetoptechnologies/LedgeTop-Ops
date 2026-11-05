@@ -2532,6 +2532,12 @@ const MIGRATIONS = [
         OR (OLD.receipt_sha256 IS NOT NULL AND NEW.receipt_sha256 IS NOT OLD.receipt_sha256)
       BEGIN SELECT RAISE(ABORT,'Viewer source release receipt is immutable'); END;
   `},
+  {version:77,name:'retain_all_raw_gcp_csv_sources',sql:`
+    INSERT INTO retained_dataset_files(dataset_file_id,dataset_id,sha256,byte_size,retention_reason,created_at)
+      SELECT f.id,f.dataset_id,f.sha256,f.byte_size,'gcp_source',f.created_at
+      FROM dataset_files f WHERE f.processing_role='gcp_source'
+        AND NOT EXISTS(SELECT 1 FROM retained_dataset_files retained WHERE retained.dataset_file_id=f.id);
+  `},
 ];
 
 function applyMigrations(database) {

@@ -344,6 +344,10 @@ class ProcessingRepository {
       const timestamp = now(); let bytes = 0;
       for (const file of files) { const indexed=indexedFileMetadata(file);bytes += file.byteSize; insert.run(file.id || crypto.randomUUID(), id, file.relativePath, file.byteSize, file.sha256, file.contentType || null, JSON.stringify(file.metadata || {}), timestamp,
         indexed.mimeType,indexed.capturedAt,indexed.latitude,indexed.longitude,indexed.altitudeM,indexed.width,indexed.height,inferredProcessingRole(file)); }
+      this.database.prepare(`INSERT INTO retained_dataset_files(dataset_file_id,dataset_id,sha256,byte_size,retention_reason,created_at)
+        SELECT id,dataset_id,sha256,byte_size,'gcp_source',created_at FROM dataset_files
+        WHERE dataset_id=? AND processing_role='gcp_source'
+          AND NOT EXISTS(SELECT 1 FROM retained_dataset_files retained WHERE retained.dataset_file_id=dataset_files.id)`).run(id);
       this.database.prepare(`UPDATE datasets SET status='finalized',manifest_sha256=?,file_count=?,byte_size=?,finalized_at=?,updated_at=? WHERE id=?`).run(
         manifestSha256, files.length, bytes, timestamp, timestamp, id);
       this.database.prepare('INSERT INTO audit_events(id,actor_type,actor_id,action,entity_type,entity_id,details_json,created_at) VALUES (?,?,?,?,?,?,?,?)').run(crypto.randomUUID(),'system',current.createdBy,'dataset.finalized','dataset',id,JSON.stringify({fileCount:files.length,byteSize:bytes,manifestSha256}),timestamp);
