@@ -154,6 +154,117 @@ test("temporary verifier creation, exact service readback, temporary-only enable
   await assert.rejects(state.provider.removeVerifier("ledgetop-ops"));
 });
 
+test("owned verifier retries only unmarked platform HTML visibility responses and keeps request identity", async () => {
+  const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName();
+  const entry = { path: "/assets/test.js", size: 1, sha256: hash("x"), contentType: "application/javascript" };
+  const responses = [
+    ...[404, 500, 502, 503, 504].map(status => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode("temporary platform html")); },
+      cancel() { canceledBodies++; },
+    }), { status, headers: { "Content-Type": "text/html; charset=utf-8" } })),
+    new Response("x", { headers: { "Content-Type": "application/javascript" } }),
+  ];
+  const calls = [], pauses = []; let canceledBodies = 0;
+  const state = setup(async (url, init) => {
+    if (!url.includes(".workers.dev")) {
+      if (init.method === "PUT") return ok({ id: candidate });
+      if (url.endsWith("/settings")) return ok({ bindings: [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }] });
+      if (url.endsWith("/subdomain") && init.method === "POST") return ok({ enabled: true, previews_enabled: false });
+      if (url.endsWith("/workers/subdomain")) return ok({ subdomain: "synthetic" });
+      if (url.endsWith("/subdomain")) return ok({ enabled: true, previews_enabled: false });
+      return Response.json({ success: false }, { status: 404 });
+    }
+    calls.push({ url, init });
+    return responses.shift();
+  }, { verifierPause: async ms => { pauses.push(ms); } });
+  await state.provider.createVerifier({ name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [entry],
+    nonceHash: nonce.nonceHash, versionId: parent });
+  const mutationIntentsBeforeReads = state.intents.filter(row => row.method !== "GET").length;
+  const response = await state.provider.fetchVerifierAsset({ name, path: entry.path, method: "HEAD", bearer: nonce.bearer });
+  assert.equal(response.status, 200);
+  assert.equal(calls.length, 6);
+  assert.equal(pauses.length, 5);
+  assert.equal(canceledBodies, 5, "each retry response body is canceled before the next request");
+  for (const { url, init } of calls) {
+    assert.equal(url, `https://${name}.synthetic.workers.dev${entry.path}`);
+    assert.equal(init.method, "HEAD"); assert.equal(init.redirect, "error"); assert.equal(init.cache, "no-store");
+    assert.equal(init.headers.Authorization, `Bearer ${nonce.bearer}`);
+    assert.equal(init.headers["Accept-Encoding"], "identity");
+  }
+  assert.equal(state.intents.filter(row => row.method !== "GET").length, mutationIntentsBeforeReads,
+    "visibility retries use only the owned verifier GET/HEAD endpoint and add no provider mutation intents");
+});
+
+test("verifier readiness never retries GET 404, marked application failures, non-HTML or unlisted statuses", async () => {
+  const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName();
+  const entry = { path: "/assets/test.js", size: 1, sha256: hash("x"), contentType: "application/javascript" };
+  const cases = [
+    ["GET", 404, { "Content-Type": "text/html" }],
+    ["HEAD", 502, { "Content-Type": "text/html", "X-Ops-Static-Check": "upstream" }],
+    ["GET", 503, { "Content-Type": "text/html", "X-Ops-Upstream-Status": "503" }],
+    ["HEAD", 502, { "Content-Type": "application/json" }],
+    ["HEAD", 501, { "Content-Type": "text/html" }],
+  ];
+  let assetCalls = 0;
+  const state = setup(async (url, init) => {
+    if (url.includes(".workers.dev")) { assetCalls++; return new Response("case", { status: cases[assetCalls - 1]?.[1], headers: cases[assetCalls - 1]?.[2] }); }
+    if (init.method === "PUT") return ok({ id: candidate });
+    if (url.endsWith("/settings")) return ok({ bindings: [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }] });
+    if (url.endsWith("/subdomain") && init.method === "POST") return ok({ enabled: true, previews_enabled: false });
+    if (url.endsWith("/workers/subdomain")) return ok({ subdomain: "synthetic" });
+    if (url.endsWith("/subdomain")) return ok({ enabled: true, previews_enabled: false });
+    return Response.json({ success: false }, { status: 404 });
+  }, { verifierPause: async () => assert.fail("ineligible verifier response must not retry") });
+  await state.provider.createVerifier({ name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [entry],
+    nonceHash: nonce.nonceHash, versionId: parent });
+  for (const [method, status] of cases) {
+    const response = await state.provider.fetchVerifierAsset({ name, path: entry.path, method, bearer: nonce.bearer });
+    assert.equal(response.status, status);
+  }
+  assert.equal(assetCalls, cases.length);
+});
+
+test("owned verifier readiness retries do not retry provider mutations or transport failures", async () => {
+  let mutationCalls = 0;
+  const mutation = setup(async () => { mutationCalls++; return new Response("platform", { status: 503, headers: { "Content-Type": "text/html" } }); });
+  await assert.rejects(mutation.provider.activateCandidate({ workerName: "ledgetop-ops", parentVersionId: parent,
+    candidateVersionId: candidate, message: "x" }), /no_retry/u);
+  assert.equal(mutationCalls, 1); assert.equal(mutation.intents.length, 1);
+  let transportCalls = 0;
+  const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName();
+  const entry = { path: "/assets/test.js", size: 1, sha256: hash("x"), contentType: "application/javascript" };
+  const transport = setup(async (url, init) => {
+    if (url.includes(".workers.dev")) { transportCalls++; throw Error("transport failure"); }
+    if (init.method === "PUT") return ok({ id: candidate });
+    if (url.endsWith("/settings")) return ok({ bindings: [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }] });
+    if (url.endsWith("/subdomain") && init.method === "POST") return ok({ enabled: true, previews_enabled: false });
+    if (url.endsWith("/workers/subdomain")) return ok({ subdomain: "synthetic" });
+    if (url.endsWith("/subdomain")) return ok({ enabled: true, previews_enabled: false });
+    return Response.json({ success: false }, { status: 404 });
+  });
+  await transport.provider.createVerifier({ name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [entry],
+    nonceHash: nonce.nonceHash, versionId: parent });
+  await assert.rejects(transport.provider.fetchVerifierAsset({ name, path: entry.path, bearer: nonce.bearer }), /no_retry/u);
+  assert.equal(transportCalls, 1, "transport errors are never retried");
+  let hungCalls = 0;
+  const hung = setup(async (url, init) => {
+    if (url.includes(".workers.dev")) { hungCalls++; return new Promise(() => {}); }
+    if (init.method === "PUT") return ok({ id: candidate });
+    if (url.endsWith("/settings")) return ok({ bindings: [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }] });
+    if (url.endsWith("/subdomain") && init.method === "POST") return ok({ enabled: true, previews_enabled: false });
+    if (url.endsWith("/workers/subdomain")) return ok({ subdomain: "synthetic" });
+    if (url.endsWith("/subdomain")) return ok({ enabled: true, previews_enabled: false });
+    return Response.json({ success: false }, { status: 404 });
+  });
+  await hung.provider.createVerifier({ name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [entry],
+    nonceHash: nonce.nonceHash, versionId: parent });
+  const controller = new AbortController();
+  const read = hung.provider.fetchVerifierAsset({ name, path: entry.path, bearer: nonce.bearer, signal: controller.signal });
+  setTimeout(() => controller.abort(), 5);
+  await assert.rejects(read, /no_retry/u);
+  assert.equal(hungCalls, 1, "caller cancellation stops readiness even when an injected fetch ignores AbortSignal");
+});
+
 test("existing or mismatched temporary Worker is never enabled, and ambiguous creation can be cleaned once", async () => {
   const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName(), args = { name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [{ path: "/assets/x.js", size: 1, sha256: hash("x"), contentType: "application/javascript" }], nonceHash: nonce.nonceHash, versionId: parent };
   let calls = 0; const exists = setup(async () => { calls++; return ok({}); }).provider;

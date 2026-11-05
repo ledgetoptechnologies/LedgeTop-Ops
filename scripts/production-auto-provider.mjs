@@ -17,10 +17,27 @@ const SHA = /^[a-f0-9]{64}$/u, TEMP = /^ops-ui-verify-[a-f0-9]{24}$/u;
 const CANDIDATE_VISIBILITY_ERROR_CODE = 100146;
 const CANDIDATE_VISIBILITY_BACKOFF_MS = Object.freeze([250, 500, 1000, 2000, 3000, 3000, 3000]);
 const CANDIDATE_VISIBILITY_MAX_MS = 15_000;
+const VERIFIER_READINESS_ATTEMPTS = 8, VERIFIER_READINESS_MAX_MS = 15_000;
+const VERIFIER_READINESS_BACKOFF_MS = Object.freeze([250, 500, 1000, 2000, 3000, 3000, 3000]);
 const MAX_RESPONSE = 32 * 1024 * 1024, MAX_MODULE = 32 * 1024 * 1024;
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 const fail = () => { throw Error("production_provider_refused_or_uncertain_no_retry"); };
 const need = value => { if (!value) fail(); };
+function retryableVerifierResponse(response, method) {
+  const type = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+  const unmarkedHtml = type === 'text/html' && !response.headers.has('X-Ops-Static-Check')
+    && !response.headers.has('X-Ops-Upstream-Status');
+  return unmarkedHtml && (method === 'HEAD' && response.status === 404
+    || [500, 502, 503, 504].includes(response.status));
+}
+function abortablePause(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(Error('aborted')); return; }
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, ms);
+    const abort = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); reject(Error('aborted')); };
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
 const jwt = value => typeof value === "string" && value.length <= 16384 && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u.test(value);
 const prod = name => { need(WORKERS.includes(name)); return name; };
 const version = id => { need(typeof id === "string" && UUID.test(id)); return id; };
@@ -89,14 +106,15 @@ export async function readCandidateVersionWithVisibilityRetry(provider, workerNa
 }
 
 export class ProductionCloudflareProvider {
-  #token; #fetch; #intent; #persist; #profile; #timeout; #temporary = new Map();
-  constructor({ accountId, token, fetchImpl = fetch, recordIntent, persistResponse, profile = PROFILE, timeoutMs = 30000 }) {
+  #token; #fetch; #intent; #persist; #profile; #timeout; #verifierPause; #temporary = new Map();
+  constructor({ accountId, token, fetchImpl = fetch, recordIntent, persistResponse, profile = PROFILE, timeoutMs = 30000,
+    verifierPause = abortablePause }) {
     need(typeof accountId === "string" && /^[a-f0-9]{32}$/u.test(accountId)
       && typeof token === "string" && token.length >= 20 && token.length <= 16384 && !/[^\x21-\x7e]/u.test(token)
       && typeof fetchImpl === "function" && typeof recordIntent === "function" && typeof persistResponse === "function"
-      && Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60000);
+      && Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60000 && typeof verifierPause === 'function');
     this.account = accountId; this.#token = token; this.#fetch = fetchImpl; this.#intent = recordIntent;
-    this.#persist = persistResponse; this.#profile = structuredClone(profile); this.#timeout = timeoutMs;
+    this.#persist = persistResponse; this.#profile = structuredClone(profile); this.#timeout = timeoutMs; this.#verifierPause = verifierPause;
   }
   async #request(suffix, { method = "GET", body, intent, allow404 = false, headers = {}, signal, candidateVersionRead = false } = {}) {
     const requestId = randomUUID();
@@ -316,9 +334,38 @@ export class ProductionCloudflareProvider {
     need(owned?.origin && !owned.deleteAttempted && ["GET", "HEAD"].includes(method)
       && owned.entries.some(entry => entry.path === path) && typeof bearer === "string" && /^[A-Za-z0-9_-]{43}$/u.test(bearer)
       && hash(bearer) === owned.nonceHash && !signal?.aborted);
+    const deadline = performance.now() + VERIFIER_READINESS_MAX_MS;
     try {
-      return await this.#fetch(owned.origin + path, { method, redirect: "error", cache: "no-store",
-        headers: { Authorization: "Bearer " + bearer, "Accept-Encoding": "identity" }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(this.#timeout)]) : AbortSignal.timeout(this.#timeout) });
+      for (let attempt = 0; attempt < VERIFIER_READINESS_ATTEMPTS; attempt++) {
+        need(!signal?.aborted);
+        const remaining = deadline - performance.now(); need(remaining > 0);
+        const attemptController = new AbortController();
+        const providerTimeout = AbortSignal.timeout(this.#timeout);
+        const requestSignal = AbortSignal.any([...(signal ? [signal] : []), providerTimeout, attemptController.signal]);
+        let readinessTimer, rejectAbort;
+        let response;
+        const aborted = new Promise((_, reject) => { rejectAbort = reject; });
+        const onAbort = () => rejectAbort(Error('verifier_fetch_aborted'));
+        requestSignal.addEventListener('abort', onAbort, { once: true });
+        if (requestSignal.aborted) onAbort();
+        try {
+          // Native fetch honors the abort signal. The explicit race also bounds
+          // injected fetch implementations that ignore it; such a custom
+          // transport promise may remain pending, which production fetch does not.
+          const readinessExpired = new Promise((_, reject) => {
+            readinessTimer = setTimeout(() => { attemptController.abort(); reject(Error('verifier_readiness_timeout')); }, remaining);
+          });
+          response = await Promise.race([this.#fetch(owned.origin + path, { method, redirect: "error", cache: "no-store",
+            headers: { Authorization: "Bearer " + bearer, "Accept-Encoding": "identity" }, signal: requestSignal }), readinessExpired, aborted]);
+        } finally { clearTimeout(readinessTimer); requestSignal.removeEventListener('abort', onAbort); }
+        if (!retryableVerifierResponse(response, method)) return response;
+        try { await response.body?.cancel(); } catch { /* Discard retry response bodies even when cancellation races. */ }
+        if (attempt + 1 >= VERIFIER_READINESS_ATTEMPTS) fail();
+        const delay = Math.min(VERIFIER_READINESS_BACKOFF_MS[attempt], deadline - performance.now());
+        need(delay > 0);
+        await this.#verifierPause(delay, signal);
+      }
+      fail();
     } catch { fail(); }
   }
   async removeVerifier(name) {
