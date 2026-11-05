@@ -95,6 +95,178 @@ test('Ops adapter reads the fixed post-0226 contract without the legacy review s
   assert.equal(Object.hasOwn(env, 'NATIVE_STAFF_CUTOVER_REVIEW_JSON'), false);
 });
 
+test('Ops default provider and real coordinator finish a 28-bucket release with fresh policy fences', async () => {
+  const fixture = configuredSnapshotFixture(), source = 'a'.repeat(40), candidateId = '44444444-4444-4444-8444-444444444444';
+  const ops = fixture.snapshots.operations, client = fixture.snapshots.client;
+  ops.modern.assets.config.html_handling = 'auto-trailing-slash';
+  assert.deepEqual(Object.keys(ops.modern.assets.config).sort(),
+    ['base_path', 'html_handling', 'not_found_handling', 'run_worker_first']);
+  PROFILE.workers.operations.assetsSHA256 = hash(Buffer.from(canonical(ops.modern.assets)));
+  const oldBytes = new Map([['/index.html', Buffer.from('old-operations-index')],
+    ['/assets/old.js', Buffer.from('old-operations-script')]]);
+  const assetRow = (assetPath, bytes) => ({ path: assetPath, size: bytes.length, sha256: hash(bytes),
+    mime: assetPath.endsWith('.html') ? 'text/html' : 'text/javascript', providerHash: hash(bytes).slice(0, 32) });
+  const opsLedger = { schemaVersion: 1, workerName: 'ledgetop-ops', accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
+    sourceCommit: '9'.repeat(40), parentVersionId: ops.parentId, observedAt: '2026-10-27T05:00:00.000Z',
+    minimumRetentionHours: 48, automaticPruning: false,
+    assets: [...oldBytes].map(([assetPath, bytes]) => assetRow(assetPath, bytes)).sort((a, b) => a.path.localeCompare(b.path)) };
+  ops.ledger = opsLedger;
+  ops.modern.modules.push({ name: '__ops_release_ledger.json', content_base64: ledgerBytes(opsLedger).toString('base64') });
+  client.ledger.sourceCommit = source;
+  client.modern.modules.find(row => row.name === '__ops_release_ledger.json').content_base64 = ledgerBytes(client.ledger).toString('base64');
+  const newAssets = new Map([['/index.html', Buffer.from('new-operations-index')]]);
+  for (let index = 0; index < 26; index++) newAssets.set(`/assets/new-${String(index).padStart(2, '0')}.js`, Buffer.from(`new-asset-${index}`));
+  const newAssetEntries = [...newAssets].map(([assetPath, bytes]) => assetRow(assetPath, bytes)).sort((a, b) => a.path.localeCompare(b.path));
+  const moduleBytes = Buffer.from('export default {fetch(){return new Response("ops")}};');
+  const sourceMap = { version: 3, file: 'index.js', sources: ['ops.ts'], sourcesContent: ['export default {};'], names: [], mappings: 'AAAA' };
+  const sourceMapBytes = Buffer.from(JSON.stringify(sourceMap));
+  const artifact = { moduleBytes, sourceMapBytes, sourceMap, assets: { entries: newAssetEntries, payloads: newAssets } };
+  const triggerRun = { sourceCommit: source, runId: 678, runAttempt: 3 }, workflowRunId = 789, workflowRunAttempt = 1;
+  const ciRun = { id: triggerRun.runId, run_number: 99, run_attempt: triggerRun.runAttempt, name: 'CI', path: '.github/workflows/ci.yml@main',
+    head_sha: source, head_branch: 'main', event: 'push', status: 'completed', conclusion: 'success',
+    repository: { full_name: 'ledgetoptechnologies/LedgeTop-Ops' }, head_repository: { full_name: 'ledgetoptechnologies/LedgeTop-Ops' } };
+  const jobs = (await import('./production-auto-ci.mjs')).REQUIRED_MAIN_JOBS.map(name => ({ name, status: 'completed',
+    conclusion: 'success', run_id: ciRun.id, head_sha: source }));
+  const releaseId = hash(`ledgetop-clients\n${source}`), clientLedger = client.ledger;
+  const clientModule = client.modern.modules.find(row => row.name === 'index.js');
+  const runtime = await import('./production-auto-runtime.mjs');
+  const predecessorProof = { workerName: 'ledgetop-clients', releaseKind: 'retained-assets', sourceCommit: source, releaseId,
+    ci: { runId: triggerRun.runId, runAttempt: triggerRun.runAttempt }, workflow: { runId: workflowRunId, runAttempt: workflowRunAttempt },
+    runtime: { profileSha256: runtime.productionAutoBuildProfileSHA256(), moduleSha256: hash(Buffer.from(clientModule.content_base64, 'base64')),
+      ledgerSha256: hash(ledgerBytes(clientLedger)) },
+    artifact: { artifactId: 901, digestSha256: 'd'.repeat(64), name: `production-auto-${releaseId}`, runId: workflowRunId,
+      runAttempt: workflowRunAttempt, uploadStepConclusion: 'success', releaseStepConclusion: 'success' },
+    startedReceipt: { status: 'started', phase: 'prepare', writesAttempted: false, parentVersionId: clientLedger.parentVersionId,
+      controlsSHA256: runtime.productionAutoControlsSHA256(fixture.snapshots, 'client') },
+    finalReceipt: { status: 'verified', sourceCommit: source, workerName: 'ledgetop-clients', verifiedActive: true,
+      candidateVersionId: client.version.id, deploymentId: client.deployment.id, parentVersionId: clientLedger.parentVersionId,
+      minimumRetentionHours: 48, automaticPruning: false, allHistoricalAssetsCarried: true,
+      moduleSHA256: hash(Buffer.from(clientModule.content_base64, 'base64')), ledgerSHA256: hash(ledgerBytes(clientLedger)) } };
+  const intents = [], journalReceipts = [], privateResponses = [], providerCalls = [], verifierVersions = new Map(), activeVerifiers = new Set();
+  const verifiedReads = [], apiBase = `https://api.cloudflare.com/client/v4/accounts/${NATIVE_STAFF_PRODUCTION_TARGET.accountId}`;
+  const appByWorker = Object.fromEntries(Object.entries(PROFILE.workers).map(([app, spec]) => [spec.name, app]));
+  const okay = (result, status = 200) => Response.json({ success: true, errors: [], result }, { status });
+  let bucketCount = 0, bucketPosts = 0, currentLedger, candidateVersion, candidateModern;
+  const fetchImpl = async (url, init = {}) => {
+    const parsed = new URL(url), method = init.method ?? 'GET'; providerCalls.push({ url, method });
+    if (parsed.origin === 'https://api.github.com') {
+      if (parsed.pathname.endsWith('/commits/main')) return Response.json({ sha: source });
+      if (parsed.pathname.endsWith('/actions/workflows/ci.yml/runs')) return Response.json({ total_count: 1, workflow_runs: [ciRun] });
+      if (parsed.pathname.endsWith(`/actions/runs/${ciRun.id}/jobs`)) return Response.json({ total_count: jobs.length, jobs });
+      throw Error(`unexpected fake GitHub request ${parsed.pathname}`);
+    }
+    if (url.startsWith(apiBase)) {
+      const suffix = parsed.pathname.slice(new URL(apiBase).pathname.length) + parsed.search;
+      if (suffix === '/workers/subdomain') return okay({ subdomain: 'synthetic-account' });
+      const temporary = suffix.match(/^\/workers\/scripts\/(ops-ui-verify-[a-f0-9]{24})(?:\/(.*))?$/u);
+      if (temporary) {
+        const [, name, tail = ''] = temporary;
+        if (method === 'GET' && !tail) return activeVerifiers.has(name) ? okay({ id: name })
+          : Response.json({ success: false, errors: [{ code: 10007 }] }, { status: 404 });
+        if (method === 'PUT') {
+          const workerSource = await init.body.get('index.js').text();
+          verifierVersions.set(name, workerSource.includes(candidateId) ? candidateId : ops.parentId); activeVerifiers.add(name);
+          return okay({ id: candidateId });
+        }
+        if (tail === 'settings') return okay({ bindings: [{ name: 'SOURCE_ASSETS', type: 'service', service: 'ledgetop-ops', environment: 'production' }] });
+        if (tail === 'subdomain' && method === 'POST') return okay({ enabled: true, previews_enabled: false });
+        if (tail === 'subdomain') return okay({ enabled: true, previews_enabled: false });
+        if (method === 'DELETE') { activeVerifiers.delete(name); return okay({}); }
+      }
+      if (suffix === '/workers/scripts/ledgetop-ops/assets-upload-session' && method === 'POST') {
+        const manifest = JSON.parse(init.body).manifest, hashes = [...new Set(Object.values(manifest).map(row => row.hash))];
+        bucketCount = hashes.length;
+        return okay({ jwt: 'aGVhZGVy.c2Vzc2lvbg.c2lnbmF0dXJl', buckets: hashes.map(value => [value]) });
+      }
+      if (suffix === '/workers/assets/upload?base64=true' && method === 'POST') {
+        bucketPosts++;
+        assert.equal([...init.body.entries()].length, 1);
+        return okay({ jwt: bucketPosts === bucketCount ? 'aGVhZGVy.Y29tcGxldGU.c2lnbmF0dXJl' : null }, bucketPosts === bucketCount ? 201 : 200);
+      }
+      if (suffix === '/workers/scripts/ledgetop-ops/versions?bindings_inherit=strict' && method === 'POST') {
+        const metadata = JSON.parse(init.body.get('metadata'));
+        assert.equal(metadata.assets.jwt, 'aGVhZGVy.Y29tcGxldGU.c2lnbmF0dXJl');
+        currentLedger = JSON.parse(await init.body.get('__ops_release_ledger.json').text());
+        ops.latest = candidateId;
+        candidateVersion = { id: candidateId, resources: structuredClone(ops.version.resources) };
+        candidateModern = { id: candidateId, assets: { config: { ...structuredClone(ops.modern.assets.config), ...structuredClone(metadata.assets.config),
+          html_handling: 'auto-trailing-slash', base_path: '/' }, jwt: metadata.assets.jwt }, modules: [
+          { name: 'index.js', content_base64: moduleBytes.toString('base64') },
+          { name: 'index.js.map', content_base64: sourceMapBytes.toString('base64') },
+          { name: '__ops_release_ledger.json', content_base64: ledgerBytes(currentLedger).toString('base64') },
+        ] };
+        return okay({ id: candidateId });
+      }
+      const deployment = suffix.match(/^\/workers\/scripts\/(ledgetop-[a-z-]+)\/deployments$/u);
+      if (deployment && method === 'POST') {
+        const state = fixture.snapshots[appByWorker[deployment[1]]], versions = JSON.parse(init.body).versions;
+        const staged = versions.some(row => row.version_id === candidateId && row.percentage === 0);
+        state.deployment = { id: staged ? '66666666-6666-4666-8666-666666666666' : '77777777-7777-4777-8777-777777777777',
+          created_on: staged ? '2026-10-27T06:00:00.123456Z' : '2026-10-27T07:20:51.938465Z', versions, strategy: 'percentage' };
+        return okay({ id: state.deployment.id });
+      }
+      const match = suffix.match(/^\/workers\/(scripts|workers)\/([^/]+)(?:\/(.*))?$/u);
+      if (!match) throw Error(`unexpected fake Cloudflare endpoint ${suffix}`);
+      const [, family, worker, tail = ''] = match, state = fixture.snapshots[appByWorker[worker]];
+      if (!state) throw Error(`unknown fake Worker ${worker}`);
+      if (family === 'scripts' && tail === 'deployments?per_page=1') return okay({ deployments: [state.deployment] });
+      if (family === 'scripts' && tail === 'versions?per_page=1') return okay({ items: [{ id: state.latest }] });
+      if (family === 'scripts' && tail === 'settings') return okay(state.settings);
+      if (family === 'scripts' && tail === 'schedules') return okay(state.schedules);
+      const versionMatch = tail.match(/^versions\/([a-f0-9-]+)$/u);
+      if (family === 'scripts' && versionMatch) return okay(versionMatch[1] === candidateId ? candidateVersion : state.version);
+      const modernMatch = tail.match(/^versions\/([a-f0-9-]+)\?include=modules$/u);
+      if (family === 'workers' && modernMatch) return okay(modernMatch[1] === candidateId ? candidateModern : state.modern);
+      throw Error(`unexpected fake capture route ${suffix}`);
+    }
+    const verifier = parsed.hostname.match(/^(ops-ui-verify-[a-f0-9]{24})\.synthetic-account\.workers\.dev$/u);
+    if (verifier) {
+      const version = verifierVersions.get(verifier[1]);
+      const bytes = parsed.pathname === '/' || parsed.pathname === '/index.html'
+        ? (version === candidateId ? newAssets.get('/index.html') : oldBytes.get('/index.html'))
+        : parsed.pathname.startsWith('/_ui/operations/') ? oldBytes.get('/index.html') : newAssets.get(parsed.pathname) ?? oldBytes.get(parsed.pathname);
+      assert.ok(bytes, `missing fake static byte for ${parsed.pathname}`);
+      verifiedReads.push({ version, path: parsed.pathname, method, sha256: hash(bytes) });
+      return new Response(method === 'HEAD' ? null : bytes, { status: 200, headers: {
+        'Content-Type': parsed.pathname === '/' || parsed.pathname === '/index.html' || parsed.pathname.startsWith('/_ui/')
+          ? 'text/html' : 'text/javascript', 'Content-Length': String(bytes.length) } });
+    }
+    throw Error(`unexpected fake provider URL ${url}`);
+  };
+  let preservationReads = 0;
+  const env = { PRODUCTION_AUTO_RELEASE_ENABLED: 'true', PRODUCTION_AUTO_WORKER: 'ledgetop-ops',
+    CLOUDFLARE_ACCOUNT_ID: NATIVE_STAFF_PRODUCTION_TARGET.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
+    GITHUB_RUN_ID: String(workflowRunId), GITHUB_RUN_ATTEMPT: String(workflowRunAttempt),
+    PRODUCTION_AUTO_PREDECESSOR_COMPLETION: 'success', PRODUCTION_AUTO_PREDECESSOR_SOURCE_SHA: source,
+    PRODUCTION_AUTO_PREDECESSOR_RELEASE_ID: releaseId };
+  try {
+    const result = await runProductionAutoRelease({ workerName: 'ledgetop-ops', env, fetchImpl,
+      recipientLoader: () => ({ synthetic: true }), triggerReader: () => triggerRun, sourceReader: () => source,
+      runtimeFactory: options => createProductionAutoReleaseAdapter({ ...options, fetchImpl, sourceReader: () => source,
+        recipientLoader: () => ({ synthetic: true }), journalFactory: () => ({
+          receipt: async value => { journalReceipts.push(structuredClone(value)); },
+          recordIntent: async value => { intents.push(structuredClone(value)); },
+          persistResponse: async value => { privateResponses.push({ method: value.method, status: value.status }); },
+        }), migrationReader: async () => migrationFixture(source),
+        preservationReader: async ({ sourceCommit }) => { preservationReads++; return preservationObservation(sourceCommit); },
+        predecessorReader: async () => predecessorProof, buildRunner: () => {}, buildArtifactsReader: () => artifact }) });
+    const buckets = intents.filter(row => row.phase === 'asset-bucket');
+    assert.ok(buckets.length > 25);
+    assert.equal(bucketPosts, bucketCount);
+    assert.equal(buckets.length, bucketCount);
+    assert.equal(preservationReads, buckets.length + 7);
+    assert.ok(preservationReads <= 250);
+    assert.equal(result.verifiedActive, true);
+    assert.equal(journalReceipts.at(-1).status, 'verified');
+    assert.ok(verifiedReads.some(row => row.path === '/index.html' && row.version === ops.parentId));
+    assert.ok(verifiedReads.some(row => row.path === '/index.html' && row.version === candidateId));
+    assert.ok(verifiedReads.some(row => row.path === '/assets/old.js'));
+    assert.ok(verifiedReads.some(row => row.path === '/assets/new-25.js'));
+    assert.ok(privateResponses.length > 0);
+    assert.ok(intents.some(row => row.phase === 'temporary-verifier-delete'));
+  } finally { fixture.restore(); }
+});
+
 function fakeReleaseAdapter(workerName, commit, evidence) {
   const accountId = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
   const parent = '11111111-1111-4111-8111-111111111111', candidate = '22222222-2222-4222-8222-222222222222';

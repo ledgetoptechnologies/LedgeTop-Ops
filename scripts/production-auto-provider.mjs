@@ -80,7 +80,17 @@ function rootAssetConfig(value, requireExplicitRoot = false) {
   need(value && Object.getPrototypeOf(value) === Object.prototype);
   if (requireExplicitRoot || Object.hasOwn(value, "base_path")) need(value.base_path === "/");
   const { base_path, ...config } = value;
+  // Cloudflare documents auto-trailing-slash as the default html_handling.
+  // The modern capture can include the effective default while the direct
+  // upload profile omits it. Normalize only that one documented default;
+  // every other config key and value remains part of the exact comparison.
+  // https://developers.cloudflare.com/workers/static-assets/routing/advanced/html-handling/
+  if (!Object.hasOwn(config, "html_handling")) config.html_handling = "auto-trailing-slash";
   return config;
+}
+export function samePinnedRootAssetConfig(actual, expected) {
+  try { return same(rootAssetConfig(actual, true), rootAssetConfig(expected)); }
+  catch { return false; }
 }
 const candidateVisibilityError = () => Object.assign(new Error("candidate_version_not_visible"), { code: "candidate_version_not_visible" });
 const candidateVisibilityPause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -241,7 +251,7 @@ export class ProductionCloudflareProvider {
     const parentId = version(state?.version?.id);
     need(state.latest === parentId && state.modern?.id === parentId && same(state.deployment?.versions, [{ version_id: parentId, percentage: 100 }])
       && same(state.version.resources?.script_runtime, spec.runtime)
-      && same(rootAssetConfig(state.modern.assets?.config, true), rootAssetConfig(spec.metadata.assets?.config)) && jwt(assetCompletionToken));
+      && samePinnedRootAssetConfig(state.modern.assets?.config, spec.metadata.assets?.config) && jwt(assetCompletionToken));
     need(modules && Object.keys(modules).sort().join() === "js,sourceMap");
     const js = pinnedModule(modules.js), sourceMap = pinnedModule(modules.sourceMap);
     let map; try { map = JSON.parse(sourceMap.toString("utf8")); } catch { fail(); }

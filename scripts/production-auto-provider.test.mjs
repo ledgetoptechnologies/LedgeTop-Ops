@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVersionWithVisibilityRetry } from "./production-auto-provider.mjs";
+import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVersionWithVisibilityRetry,
+  samePinnedRootAssetConfig } from "./production-auto-provider.mjs";
 import { createAssetVerificationNonce } from "./production-auto-verify.mjs";
 import { PROFILE } from "./production-deploy.mjs";
 
@@ -13,6 +14,23 @@ const assets = { base_path: "/", run_worker_first: ["/api/*"], not_found_handlin
 const runtime = { compatibility_date: "2026-07-22", compatibility_flags: ["nodejs_compat"], usage_model: "standard", assets: { synthetic: true } };
 const { base_path, ...uploadAssetsConfig } = assets;
 const profile = { workers: { operations: { name: "ledgetop-ops", runtime, metadata: { usage_model: "standard", assets: { config: uploadAssetsConfig }, exports: { Existing: { type: "worker" } } } } } };
+
+test("root asset config comparison permits only Cloudflare's documented omitted html_handling default", () => {
+  const captured = { html_handling: "auto-trailing-slash", not_found_handling: "single-page-application",
+    run_worker_first: ["/api/*", "/health"], base_path: "/" };
+  const upload = { not_found_handling: "single-page-application", run_worker_first: ["/api/*", "/health"] };
+  assert.equal(samePinnedRootAssetConfig(captured, upload), true);
+  assert.equal(samePinnedRootAssetConfig(captured, { ...upload, html_handling: "auto-trailing-slash" }), true);
+  for (const changed of [
+    { ...upload, html_handling: "drop-trailing-slash" },
+    { ...upload, run_worker_first: ["/api/*"] },
+    { ...upload, not_found_handling: "none" },
+    { ...upload, static_routing: { user_worker: ["/api/*"] } },
+    { ...upload, raw_run_worker_first: ["/api/*"] },
+    { ...upload, serve_directly: true },
+  ]) assert.equal(samePinnedRootAssetConfig(captured, changed), false, JSON.stringify(changed));
+  assert.equal(samePinnedRootAssetConfig({ ...captured, html_handling: "none" }, upload), false);
+});
 function setup(fetchImpl = async () => ok({}), overrides = {}) {
   const intents = [], persisted = [];
   const provider = new ProductionCloudflareProvider({ accountId, token, profile, fetchImpl,
@@ -389,19 +407,24 @@ test("asset upload requires both the coordinator fence and durable provider inte
   assert.throws(() => state.provider.uploadAssets({ ...options, recordIntent: undefined }));
 });
 
-test("committed production metadata root omission is accepted only with explicit observed root base", async () => {
+test("committed production metadata root omission accepts only the documented HTML default and exact routing controls", async () => {
   const spec = PROFILE.workers.operations;
   assert.equal(Object.hasOwn(spec.metadata.assets.config, "base_path"), false);
   const input = creation(); input.state.version.resources.script_runtime = structuredClone(spec.runtime);
-  input.state.modern.assets.config = { ...structuredClone(spec.metadata.assets.config), base_path: "/" };
+  input.state.modern.assets.config = { ...structuredClone(spec.metadata.assets.config), base_path: "/",
+    html_handling: "auto-trailing-slash" };
   let calls = 0;
   const state = setup(async (_url, init) => { calls++; const metadata = JSON.parse(init.body.get("metadata"));
     assert.deepEqual(metadata.assets.config, spec.metadata.assets.config); return ok({ id: candidate }); }, { profile: PROFILE });
   await state.provider.createInactiveVersion(input); assert.equal(calls, 1);
-  for (const bad of [undefined, "/other", ""]) {
+  for (const bad of [undefined, "/other", "", "html", "routing", "raw-routing", "serve-directly"]) {
     const changed = structuredClone(input); changed.modules = input.modules;
     if (bad === undefined) delete changed.state.modern.assets.config.base_path;
-    else changed.state.modern.assets.config.base_path = bad;
+    else if (bad === "/other" || bad === "") changed.state.modern.assets.config.base_path = bad;
+    else if (bad === "html") changed.state.modern.assets.config.html_handling = "none";
+    else if (bad === "routing") changed.state.modern.assets.config.run_worker_first = ["/health"];
+    else if (bad === "raw-routing") changed.state.modern.assets.config.raw_run_worker_first = ["/api/*"];
+    else changed.state.modern.assets.config.serve_directly = true;
     await assert.rejects(state.provider.createInactiveVersion(changed));
   }
   const extra = structuredClone(input); extra.modules = input.modules; extra.state.modern.assets.config.unreviewed = true;
