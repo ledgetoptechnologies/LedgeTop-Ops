@@ -11,11 +11,11 @@ const MAX_REPLY = 1_048_576;
 const headers = { 'Cache-Control': 'no-store', 'Cloudflare-CDN-Cache-Control': 'no-store',
   'Pragma': 'no-cache', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff' };
 type ReadBinding = { read(input: string): Promise<string> };
-type EdgeEnvironment = { ENVIRONMENT?: string; IOS_MANAGED_PILOT_ENABLED?: string;
+export type EdgeEnvironment = { ENVIRONMENT?: string; IOS_MANAGED_PILOT_ENABLED?: string;
   IOS_MANAGED_PILOT_ORIGIN?: string; IOS_MANAGED_PILOT_AUDIENCE?: string;
   IOS_OAUTH_PROBE_ENABLED?: string; IOS_OAUTH_PROBE_AUDIENCE?: string;
   TEAM_DOMAIN?: string; OPERATIONS_AUD?: string; IOS_PILOT_READ?: ReadBinding };
-type AccessContext = { aud?: string; getIdentity?: () => Promise<unknown> };
+export type AccessContext = { aud?: string; getIdentity?: () => Promise<unknown> };
 const reply = (status: number, body: object) => Response.json(body, { status, headers });
 const denied = () => reply(404, { error: 'Not found', code: 'not_found' });
 const unavailable = () => reply(503, { error: 'Pilot temporarily unavailable', code: 'unavailable' });
@@ -40,12 +40,19 @@ function validSuccess(body: unknown, kind: 'session' | 'list' | 'detail', detail
     && body.operations.length <= 50 && body.operations.every(operation) && optional(body.nextCursor);
 }
 
-/** The injectable list is only for local tests. The exported Worker uses the
- * empty source-controlled list, never an allowlist supplied through env. */
+/** The exported staging Worker supplies its fixed source-controlled list;
+ * it never reads an origin allowlist or environment policy from a request. */
 export async function handlePilotEdge(request: Request, env: EdgeEnvironment, reviewed: readonly string[],
   access?: AccessContext): Promise<Response> {
+  return handlePilotEdgeForEnvironment(request, env, reviewed, 'staging', access, true);
+}
+
+/** Only compiled entrypoints select the environment and diagnostic policy.
+ * The production entrypoint always disables the synthetic probe. */
+export async function handlePilotEdgeForEnvironment(request: Request, env: EdgeEnvironment, reviewed: readonly string[],
+  expectedEnvironment: 'staging' | 'production', access?: AccessContext, allowProbe = false): Promise<Response> {
   const origin = env.IOS_MANAGED_PILOT_ORIGIN;
-  if (env.ENVIRONMENT !== 'staging' || !origin
+  if (env.ENVIRONMENT !== expectedEnvironment || !origin
     || RESERVED_ORIGINS.has(origin) || !reviewed.includes(origin)) return denied();
   let url: URL;
   try {
@@ -56,7 +63,7 @@ export async function handlePilotEdge(request: Request, env: EdgeEnvironment, re
       || url.username || url.password || url.hash || request.url.length > 9000) return denied();
   } catch { return denied(); }
   if (url.pathname === '/oauth-probe/v1') {
-    if (request.method !== 'GET' || url.search || !env.IOS_OAUTH_PROBE_ENABLED
+    if (!allowProbe || request.method !== 'GET' || url.search || !env.IOS_OAUTH_PROBE_ENABLED
       || env.IOS_OAUTH_PROBE_ENABLED !== 'true' || !env.IOS_OAUTH_PROBE_AUDIENCE
       || env.IOS_OAUTH_PROBE_AUDIENCE !== env.IOS_MANAGED_PILOT_AUDIENCE)
       return denied();

@@ -18,7 +18,14 @@ const unavailable = JSON.stringify({ version: 1, status: 503, body: { error: 'Pi
  * entrypoint supplies its own fixed origin list and the real read handler. */
 export async function readPilotRpc(input: unknown, env: PilotEnv, reviewedOrigins: readonly string[],
   handler: ReadHandler = handleManagedIosPilot): Promise<string> {
-  if (env.ENVIRONMENT !== 'staging' || env.IOS_MANAGED_PILOT_ENABLED !== 'true'
+  return readPilotRpcForEnvironment(input, env, reviewedOrigins, 'staging', handler);
+}
+
+/** Environment selection is supplied by the compiled entrypoint, never RPC
+ * input or an environment variable. Existing staging callers stay staging-only. */
+export async function readPilotRpcForEnvironment(input: unknown, env: PilotEnv, reviewedOrigins: readonly string[],
+  expectedEnvironment: 'staging' | 'production', handler: ReadHandler = handleManagedIosPilot): Promise<string> {
+  if (env.ENVIRONMENT !== expectedEnvironment || env.IOS_MANAGED_PILOT_ENABLED !== 'true'
     || !env.IOS_MANAGED_PILOT_ORIGIN || !env.IOS_MANAGED_PILOT_AUDIENCE
     || !isReviewedPilotOrigin(env.IOS_MANAGED_PILOT_ORIGIN, env.PUBLIC_BASE_URL, reviewedOrigins)) return denied;
   if (typeof input !== 'string' || input.length > MAX_INPUT) return denied;
