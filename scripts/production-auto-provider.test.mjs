@@ -195,11 +195,39 @@ test("owned verifier retries only unmarked platform HTML visibility responses an
     "visibility retries use only the owned verifier GET/HEAD endpoint and add no provider mutation intents");
 });
 
-test("verifier readiness never retries GET 404, marked application failures, non-HTML or unlisted statuses", async () => {
+test("HEAD 200 followed by GET 404 and GET 200 retries only the exact owned verifier asset", async () => {
+  const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName();
+  const entry = { path: `/_ui/operations/${hash("x").slice(0, 40)}/index.html`, size: 1, sha256: hash("x"), contentType: "text/html" };
+  const responses = [
+    new Response(null, { status: 200, headers: { "Content-Type": "text/html" } }),
+    new Response("platform not ready", { status: 404, headers: { "Content-Type": "text/html" } }),
+    new Response("x", { status: 200, headers: { "Content-Type": "text/html" } }),
+  ];
+  const calls = [], pauses = [];
+  const state = setup(async (url, init) => {
+    if (url.includes(".workers.dev")) { calls.push({ url, method: init.method }); return responses.shift(); }
+    if (init.method === "PUT") return ok({ id: candidate });
+    if (url.endsWith("/settings")) return ok({ bindings: [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }] });
+    if (url.endsWith("/subdomain") && init.method === "POST") return ok({ enabled: true, previews_enabled: false });
+    if (url.endsWith("/workers/subdomain")) return ok({ subdomain: "synthetic" });
+    if (url.endsWith("/subdomain")) return ok({ enabled: true, previews_enabled: false });
+    return Response.json({ success: false }, { status: 404 });
+  }, { verifierPause: async ms => { pauses.push(ms); } });
+  await state.provider.createVerifier({ name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [entry],
+    nonceHash: nonce.nonceHash, versionId: parent });
+  assert.equal((await state.provider.fetchVerifierAsset({ name, path: entry.path, method: "HEAD", bearer: nonce.bearer })).status, 200);
+  assert.equal((await state.provider.fetchVerifierAsset({ name, path: entry.path, method: "GET", bearer: nonce.bearer })).status, 200);
+  assert.deepEqual(calls.map(row => row.method), ["HEAD", "GET", "GET"]);
+  assert(calls.every(row => row.url === `https://${name}.synthetic.workers.dev${entry.path}`));
+  assert.equal(pauses.length, 1);
+});
+
+test("verifier readiness never retries marked or non-HTML GET 404s, marked application failures, or unlisted statuses", async () => {
   const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName();
   const entry = { path: "/assets/test.js", size: 1, sha256: hash("x"), contentType: "application/javascript" };
   const cases = [
-    ["GET", 404, { "Content-Type": "text/html" }],
+    ["GET", 404, { "Content-Type": "text/html", "X-Ops-Static-Check": "missing" }],
+    ["GET", 404, { "Content-Type": "application/json" }],
     ["HEAD", 502, { "Content-Type": "text/html", "X-Ops-Static-Check": "upstream" }],
     ["GET", 503, { "Content-Type": "text/html", "X-Ops-Upstream-Status": "503" }],
     ["HEAD", 502, { "Content-Type": "application/json" }],

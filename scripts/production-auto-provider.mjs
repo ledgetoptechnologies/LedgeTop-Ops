@@ -27,8 +27,7 @@ function retryableVerifierResponse(response, method) {
   const type = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
   const unmarkedHtml = type === 'text/html' && !response.headers.has('X-Ops-Static-Check')
     && !response.headers.has('X-Ops-Upstream-Status');
-  return unmarkedHtml && (method === 'HEAD' && response.status === 404
-    || [500, 502, 503, 504].includes(response.status));
+  return unmarkedHtml && (response.status === 404 || [500, 502, 503, 504].includes(response.status));
 }
 function abortablePause(ms, signal) {
   return new Promise((resolve, reject) => {
