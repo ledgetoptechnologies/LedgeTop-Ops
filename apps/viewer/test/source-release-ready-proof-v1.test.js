@@ -35,7 +35,6 @@ function fixture({ wrongState = null, missingAsset = null, derivativeStatus = {}
   }
   const obj = addFileAsset('obj', 'assets/mesh/model.obj', 'obj-bytes');
   const glb = addFileAsset('glb', 'assets/mesh/model.glb', 'glb-bytes');
-  const point = addFileAsset('pointCloud', 'assets/cloud/model.laz', 'laz-bytes');
   const eptFiles = [
     { relative_path: 'data.bin', byte_size: 8, sha256: sha('ept-data') },
     { relative_path: 'ept.json', byte_size: 8, sha256: sha('ept-json') },
@@ -98,7 +97,7 @@ function fixture({ wrongState = null, missingAsset = null, derivativeStatus = {}
     sourceAsset: path.posix.basename(glb.relative_path), leafGeometricError: 0,
     audit: { algorithm: 'ltds-glb-leaf-equivalence-v2', artifactCount: 2 },
   } };
-  const derivativeRows = ['ept', 'mesh_tiles'].map((type) => ({ id: `job-${type}`, attempt_id: attemptId,
+  const derivativeRows = ['mesh_tiles'].map((type) => ({ id: `job-${type}`, attempt_id: attemptId,
     derivative_type: type, status: derivativeStatus[type] || 'complete', request_json: JSON.stringify({ optional: false }) }));
   const receipt = { id: 'receipt-event', details_json: JSON.stringify({
     attemptId, manifestSha256: tiles.manifest_sha256, policySha256: null, published: false,
@@ -139,7 +138,7 @@ function fixture({ wrongState = null, missingAsset = null, derivativeStatus = {}
   return { root, attemptId, database, storage, sourceIntake, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
 
-test('ready proof hashes accepted ODM archive and the exact required output closure', async (t) => {
+test('ready proof accepts engine-provided EPT without a LAS asset or local EPT derivative', async (t) => {
   const f = fixture({ optionalOutput: true }); t.after(f.cleanup);
   const proof = await verifiedOutputProof({ processing: { database: f.database }, storage: f.storage,
     sourceIntake: f.sourceIntake, attemptId: f.attemptId });
@@ -163,9 +162,9 @@ test('ready proof rejects missing required registered outputs even when output s
     (error) => error.code === 'source_release_required_output_missing');
 });
 
-test('ready proof rejects pending or failed required derivatives', async (t) => {
+test('ready proof rejects pending or failed required mesh derivatives', async (t) => {
   for (const status of ['pending', 'failed']) {
-    const f = fixture({ derivativeStatus: { ept: status } }); t.after(f.cleanup);
+    const f = fixture({ derivativeStatus: { mesh_tiles: status } }); t.after(f.cleanup);
     await assert.rejects(verifiedOutputProof({ processing: { database: f.database }, storage: f.storage,
       sourceIntake: f.sourceIntake, attemptId: f.attemptId }),
       (error) => error.code === 'source_release_required_derivative_not_ready');

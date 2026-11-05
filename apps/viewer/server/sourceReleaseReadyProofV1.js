@@ -11,7 +11,7 @@ const MAX_ASSETS = 256;
 const MAX_FILES = 100_000;
 const MAX_BYTES = Number.MAX_SAFE_INTEGER;
 const REQUIRED_ASSET_KINDS = Object.freeze(['ept', 'glb', 'obj', 'tiles']);
-const REQUIRED_DERIVATIVES = Object.freeze(['ept', 'mesh_tiles']);
+const REQUIRED_DERIVATIVES = Object.freeze(['mesh_tiles']);
 const fail = (code) => { throw Object.assign(new Error(code), { code }); };
 const sameIdentity = (left, right) => left && right
   && left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
@@ -100,15 +100,12 @@ function requiredOutputClosure(database, attemptId, versionId, registrations, st
     items.push(row);
     byKind.set(row.asset.kind, items);
   }
-  const pointClouds = (byKind.get('pointCloud') || []).filter(({ asset }) => /\.(?:las|laz)$/i.test(asset.relative_path || ''));
-  if (pointClouds.length !== 1) fail('source_release_required_output_missing');
   const required = [];
   for (const kind of REQUIRED_ASSET_KINDS) {
     const matches = byKind.get(kind) || [];
     if (matches.length !== 1) fail('source_release_required_output_missing');
     required.push(matches[0]);
   }
-  required.push(pointClouds[0]);
   const derivativeRows = database.prepare(`SELECT id,attempt_id,derivative_type,status,request_json
     FROM derivative_jobs WHERE attempt_id=? ORDER BY derivative_type,id`).all(attemptId);
   const byType = new Map();
