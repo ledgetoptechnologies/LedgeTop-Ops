@@ -373,11 +373,25 @@ function verifiedOperationEvidence(op) {
       || final.verifiedActive !== true || final.moduleSHA256 !== op.runtime.moduleSha256
       || !UUID.test(final.candidateVersionId ?? '') || !UUID.test(final.deploymentId ?? '')) return false;
   } else {
-    const required = ['activate-candidate','temporary-verifier-create','temporary-verifier-enable','temporary-verifier-delete'];
+    const required = ['asset-session','worker-version-upload','stage-zero-percent','activate-candidate'];
     const counts = new Map();
     for (const intent of op.intents) counts.set(intent.phase, (counts.get(intent.phase) ?? 0) + 1);
+    const verifierIntents = op.intents.filter(intent => intent.phase.startsWith('temporary-verifier-'));
+    const lifecycle = new Map();
+    for (const intent of verifierIntents) {
+      const name = intent.temporaryWorkerName;
+      if (!name || !['temporary-verifier-create','temporary-verifier-enable','temporary-verifier-delete'].includes(intent.phase)) return false;
+      const phases = lifecycle.get(name) ?? [];
+      phases.push(intent.phase);
+      lifecycle.set(name, phases);
+    }
     if (!['ledgetop-clients','ledgetop-ops'].includes(op.workerName) || op.intents.length === 0
       || required.some(phase => counts.get(phase) !== 1)
+      || counts.get('asset-bucket') > MAX_INTENTS_PER_RELEASE
+      || lifecycle.size !== 3 || [...lifecycle.values()].some(phases => JSON.stringify(phases)
+        !== JSON.stringify(['temporary-verifier-create','temporary-verifier-enable','temporary-verifier-delete']))
+      || counts.get('temporary-verifier-create') !== 3 || counts.get('temporary-verifier-enable') !== 3
+      || counts.get('temporary-verifier-delete') !== 3
       || final.verifiedActive !== true || final.ledgerSHA256 !== op.runtime.ledgerSha256
       || !SHA.test(final.ledgerSHA256 ?? '') || !UUID.test(final.candidateVersionId ?? '')
       || !UUID.test(final.deploymentId ?? '') || final.minimumRetentionHours !== 48
@@ -385,6 +399,40 @@ function verifiedOperationEvidence(op) {
       || !isProviderUtcTimestamp(final.cutoverObservedAt)
       || !Number.isFinite(Date.parse(final.earliestPermittedPruningAt ?? ''))
       || Date.parse(final.earliestPermittedPruningAt) < Date.parse(minimumRetainedUntil(final.cutoverObservedAt, 48))) return false;
+    const phases = op.intents.map(intent => intent.phase);
+    const index = phase => phases.indexOf(phase);
+    const verifierCreateIndexes = phases.flatMap((phase, i) => phase === 'temporary-verifier-create' ? [i] : []);
+    const bucketIndexes = phases.flatMap((phase, i) => phase === 'asset-bucket' ? [i] : []);
+    const findIntent = phase => op.intents.find(intent => intent.phase === phase);
+    const session = findIntent('asset-session'), upload = findIntent('worker-version-upload');
+    const stage = findIntent('stage-zero-percent'), activation = findIntent('activate-candidate');
+    const responseById = new Map(op.responses.map(response => [response.requestId, response]));
+    const correctWriteMethods = op.intents.every(intent => {
+      const expectedMethod = intent.phase === 'temporary-verifier-delete' ? 'DELETE' : 'POST';
+      const response = responseById.get(intent.requestId);
+      return intent.method === expectedMethod && response?.providerAcknowledged === true
+        && (expectedMethod === 'DELETE' ? response.status === 404 : [200,201,202].includes(response.status));
+    });
+    const parent = stage?.parentVersionId, candidate = stage?.candidateVersionId;
+    if (!(verifierCreateIndexes[0] < index('asset-session')
+      && index('asset-session') < index('worker-version-upload')
+      && index('worker-version-upload') < index('stage-zero-percent')
+      && index('stage-zero-percent') < verifierCreateIndexes[1]
+      && verifierCreateIndexes[1] < index('activate-candidate')
+      && index('activate-candidate') < verifierCreateIndexes[2])
+      || (bucketIndexes.length && (bucketIndexes[0] <= index('asset-session')
+        || bucketIndexes.at(-1) >= index('worker-version-upload')))
+      || !correctWriteMethods
+      || !session.hashes.length || !Array.isArray(upload.hashes)
+      || !UUID.test(parent ?? '') || !UUID.test(candidate ?? '') || parent === candidate
+      || stage.workerName !== op.workerName || activation.workerName !== op.workerName
+      || activation.parentVersionId !== parent || activation.candidateVersionId !== candidate
+      || !Array.isArray(stage.versions) || stage.versions.length !== 2
+      || !stage.versions.some(row => row.versionId === parent && row.percentage === 100)
+      || !stage.versions.some(row => row.versionId === candidate && row.percentage === 0)
+      || !Array.isArray(activation.versions) || activation.versions.length !== 1
+      || activation.versions[0].versionId !== candidate || activation.versions[0].percentage !== 100
+      ) return false;
   }
   return op.intents.every(intent => op.responses.some(response => response.requestId === intent.requestId
     && response.providerAcknowledged === true));

@@ -152,14 +152,34 @@ test('artifact completion verifies only after final proof, activation, verifier 
     const run = journal(api, dir, { sourceCommit: 'c'.repeat(40), ciRunId: 101, workflowRunId: 124 });
     await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit: 'c'.repeat(40), status: 'started',
       phase: 'prepare', parentVersionId: '11111111-1111-4111-8111-111111111111', controlsSHA256: '4'.repeat(64), writesAttempted: false });
-    const phases = ['activate-candidate','temporary-verifier-create','temporary-verifier-enable','temporary-verifier-delete'];
-    for (const [index, phase] of phases.entries()) {
+    const parent = '11111111-1111-4111-8111-111111111111', candidate = '22222222-2222-4222-8222-222222222222';
+    const rows = [];
+    const add = (phase, options = {}) => rows.push({ phase, ...options });
+    const verifier = suffix => {
+      const name = `ops-ui-verify-${suffix.repeat(24)}`;
+      add('temporary-verifier-create', { name, workerName: 'ledgetop-clients', sourceSHA256: 'a'.repeat(64), path: `/workers/scripts/${name}` });
+      add('temporary-verifier-enable', { name, path: `/workers/scripts/${name}/subdomain` });
+      add('temporary-verifier-delete', { name, method: 'DELETE', path: `/workers/scripts/${name}` });
+    };
+    verifier('a'); // Active predecessor byte read.
+    add('asset-session', { path: '/workers/scripts/ledgetop-clients/assets-upload-session', hashes: ['a'.repeat(32)] });
+    add('asset-bucket', { path: '/workers/assets/upload?base64=true', hashes: ['a'.repeat(32)] });
+    add('worker-version-upload', { workerName: 'ledgetop-clients', parentVersionId: parent,
+      modules: { 'index.js': '2'.repeat(64), 'index.js.map': '4'.repeat(64), '__ops_release_ledger.json': '3'.repeat(64) },
+      path: '/workers/scripts/ledgetop-clients/versions' });
+    add('stage-zero-percent', { workerName: 'ledgetop-clients', parentVersionId: parent, candidateVersionId: candidate,
+      versions: [{ version_id: parent, percentage: 100 }, { version_id: candidate, percentage: 0 }], path: '/workers/scripts/ledgetop-clients/deployments' });
+    verifier('b'); // Candidate at zero percent.
+    add('activate-candidate', { workerName: 'ledgetop-clients', parentVersionId: parent, candidateVersionId: candidate,
+      versions: [{ version_id: candidate, percentage: 100 }], path: '/workers/scripts/ledgetop-clients/deployments' });
+    verifier('c'); // Candidate after activation.
+    for (const [index, row] of rows.entries()) {
       const requestId = `${String(index + 10).padStart(8, '0')}-2222-4222-8222-222222222222`;
-      const deletionAbsent = phase === 'temporary-verifier-delete';
-      await run.recordIntent({ ...intent(requestId), phase, ...(deletionAbsent ? { method: 'DELETE' } : {}) });
-      await run.persistResponse({ requestId, method: deletionAbsent ? 'DELETE' : 'POST', path: '/workers/scripts/ledgetop-clients/deployments',
-        status: deletionAbsent ? 404 : 200, rawResponse: deletionAbsent ? Buffer.alloc(0)
-          : Buffer.from(JSON.stringify({ success: true, result: { id: `receipt-${index}` }, errors: [] })) });
+      const method = row.method ?? 'POST', path = row.path;
+      await run.recordIntent({ requestId, method, ...row, automaticRetry: false });
+      const deletionAbsent = method === 'DELETE';
+      await run.persistResponse({ requestId, method, path, status: deletionAbsent ? 404 : 200,
+        rawResponse: deletionAbsent ? Buffer.alloc(0) : Buffer.from(JSON.stringify({ success: true, result: { id: `receipt-${index}` }, errors: [] })) });
     }
     await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit: 'c'.repeat(40), status: 'prepared',
       phase: 'prepare', ledgerSHA256: '3'.repeat(64), files: 1, minimumRetentionHours: 48, automaticPruning: false,
@@ -215,6 +235,19 @@ test('artifact completion verifies only after final proof, activation, verifier 
         await assert.rejects(readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32), workerName: 'ledgetop-clients',
           releaseKind: 'retained-assets', sourceCommit: 'c'.repeat(40), releaseId: run.releaseId,
           ciRunId: 101, ciRunAttempt: 2, workflowRunId: 124, workflowRunAttempt: 1, fetchImpl: api.fetchImpl }));
+      } finally { restore(); }
+    }
+    for (const phase of ['asset-session','worker-version-upload','stage-zero-percent','activate-candidate']) {
+      const restore = tamperJournalOperation(api, 'ledgetop-clients', operation => {
+        const removed = operation.intents.find(row => row.phase === phase);
+        operation.intents = operation.intents.filter(row => row !== removed);
+        operation.intents.forEach((row, index) => { row.sequence = index + 1; });
+        operation.responses = operation.responses.filter(row => row.requestId !== removed.requestId);
+      });
+      try {
+        await assert.rejects(readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32), workerName: 'ledgetop-clients',
+          releaseKind: 'retained-assets', sourceCommit: 'c'.repeat(40), releaseId: run.releaseId,
+          ciRunId: 101, ciRunAttempt: 2, workflowRunId: 124, workflowRunAttempt: 1, fetchImpl: api.fetchImpl }), phase);
       } finally { restore(); }
     }
     await assert.rejects(readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32), workerName: 'ledgetop-clients',
