@@ -150,6 +150,13 @@ test('preclaim signer binds a locally prepared envelope to the held source snaps
   assert.equal(result.sourceIntakeRequest.viewerTaskId, f.task.id);
   assert.equal(result.sourceIntakeRequest.submissionId, f.attempt.id);
   assert.equal(result.sourceIntakeRequest.providerTaskId, f.attempt.providerTaskId);
+  const { MAX_SOURCE_INTAKE_V2_CANONICAL_NODES, MAX_SOURCE_INTAKE_V2_METADATA_BYTES } =
+    require('../server/sourceIntakeLimitsV2');
+  assert.deepEqual(Buffer.from(result.sourceIntakeCanonical, 'utf8'),
+    require('../server/preparedSubmissionOutbox').canonicalizeJcs(result.sourceIntakeRequest, {
+      maxBytes: MAX_SOURCE_INTAKE_V2_METADATA_BYTES,
+      maxNodes: MAX_SOURCE_INTAKE_V2_CANONICAL_NODES,
+    }), 'the actual preclaim producer serializes its POST body under explicit V2 limits');
   assert.equal(result.proof.pipelineManifestSha256, f.response.manifestSha256);
   assert.equal(result.sourceManifest.sha256, result.proof.sourceManifestSha256);
   assert.equal(result.derivedManifest.sha256, result.proof.derivedManifestSha256);

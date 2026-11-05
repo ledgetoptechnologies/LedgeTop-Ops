@@ -80,6 +80,25 @@ test('V2 accepts a 10,000-object closure with maximum legal names while V1 stays
   }), pipelineManifest);
   assert.equal(manifests.sourceManifest.objects.length, 10_000);
 
+  const prepared = (manifest) => canonicalEnvelope({
+    schemaVersion: 3,
+    protocol: 'ltds-viewer-prepared-envelope-jcs-v3',
+    viewerTaskId: TASK_ID,
+    viewerAttemptId: ATTEMPT_ID,
+    activationId: '00000000-0000-4000-8000-000000000007',
+    submission: { submissionId: ATTEMPT_ID, manifest },
+  });
+  assert.throws(() => prepared(pipelineManifest), { code: 'prepared_envelope_too_large' });
+  const ordinaryNameManifest = {
+    ...pipelineManifest,
+    objects: pipelineManifest.objects.map((object, index) => ({ ...object,
+      name: `DJI_${String(index).padStart(5, '0')}_20261104_123456.JPG` })),
+  };
+  ordinaryNameManifest.sha256 = ReferenceProtocol.manifestSha256(ordinaryNameManifest);
+  assert.equal(ordinaryNameManifest.objects[0].name.length, 29);
+  const ordinaryPrepared = prepared(ordinaryNameManifest);
+  assert.ok(ordinaryPrepared.bytes.length < MAX_BODY_BYTES);
+
   const request = {
     schemaVersion: 2, submissionId: ATTEMPT_ID, viewerTaskId: TASK_ID, providerTaskId: PROVIDER_TASK_ID,
     sourceManifest: manifests.sourceManifest, derivedManifest: manifests.derivedManifest,

@@ -11,6 +11,10 @@ const { ProcessingRepository } = require('./processingRepository');
 const { getHeldSourceSnapshot, verifyHeldSourceSnapshot } = require('./heldSourceSnapshot');
 const { captureHeldSourceExport, fileFacts } = require('./viewerPagedSourceExport');
 const { buildSourceIntakeManifests } = require('./sourceIntakeManifestV2');
+const {
+  MAX_SOURCE_INTAKE_V2_CANONICAL_NODES,
+  MAX_SOURCE_INTAKE_V2_METADATA_BYTES,
+} = require('./sourceIntakeLimitsV2');
 
 const PROTOCOL = 'ltds-preclaim-source-attestation-v2';
 const DOMAIN = Buffer.from(`${PROTOCOL}\0`, 'ascii');
@@ -287,7 +291,10 @@ function buildPreclaimSourceAttestation({
     capabilityFingerprint: envelope.submission.capabilityFingerprint,
     sourceAttestation,
   };
-  const sourceIntakeCanonical = canonicalizeJcs(sourceIntakeRequest).toString('utf8');
+  const sourceIntakeCanonical = canonicalizeJcs(sourceIntakeRequest, {
+    maxBytes: MAX_SOURCE_INTAKE_V2_METADATA_BYTES,
+    maxNodes: MAX_SOURCE_INTAKE_V2_CANONICAL_NODES,
+  }).toString('utf8');
   return {
     proof,
     raw,

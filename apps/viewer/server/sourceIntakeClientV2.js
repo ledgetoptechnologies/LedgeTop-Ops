@@ -249,7 +249,7 @@ class SourceIntakeClientV2 {
         ||!Number.isSafeInteger(binding.generation)||binding.generation<1||!hash(binding.pipelineDigest))fail('source_intake_result_binding_invalid');
     const response=await this.request(`/ltds/v1/jobs/${encodeURIComponent(binding.jobId)}/results`,{method:'GET',signal});
     if(response.status!==200){await response.body?.cancel().catch(()=>{});fail(response.status>=500?'source_intake_result_manifest_unavailable':'source_intake_result_manifest_rejected');}
-    const manifest=await boundedJson(response,MAX_SOURCE_INTAKE_V2_METADATA_BYTES,MAX_SOURCE_INTAKE_V2_CANONICAL_NODES);
+    const manifest=await boundedJson(response);
     const ids=Array.isArray(manifest?.objects)?manifest.objects.map(object=>object?.id):null;
     try{ReferenceProtocol.validateStoredResultManifest(manifest,{jobId:binding.jobId,generation:binding.generation,
       environment:this.environment,pipelineDigest:binding.pipelineDigest,resultManifestSha256:manifest?.resultManifestSha256,objectIds:ids});}
