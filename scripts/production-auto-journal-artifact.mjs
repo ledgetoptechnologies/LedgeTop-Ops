@@ -48,7 +48,7 @@ export async function readProductionAutoArtifact({ id, token, fetchImpl = fetch,
 export async function completeProductionAutoArtifact({ env = process.env, fetchImpl = fetch,
   recipientLoader = loadPinnedProductionAutoRecipient, ciFactory = options => new ProductionMainCI(options),
   journalFactory = options => new ProductionAutoJournal(options), triggerReader = readProductionAutoTriggerRun } = {}) {
-  const recipient = recipientLoader(); // Fail closed before token/event/API use if the recipient is unprovisioned.
+  const recipient = recipientLoader(); // Validate the source-pinned encryption recipient before token/event/API use.
   need(env.PRODUCTION_AUTO_RELEASE_ENABLED === 'true' && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.GITHUB_TOKEN ?? '')
     && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? '') && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? ''), 'artifact_completion_disabled');
   const trigger = triggerReader(env), sourceCommit = trigger.sourceCommit;

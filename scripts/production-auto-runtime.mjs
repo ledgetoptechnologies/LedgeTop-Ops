@@ -452,8 +452,8 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
 export async function runProductionAutoRelease({ workerName = process.env.PRODUCTION_AUTO_WORKER, env = process.env,
   fetchImpl = fetch, recipientLoader = loadPinnedProductionAutoRecipient, triggerReader = readProductionAutoTriggerRun,
   sourceReader = deploymentSourceCommit, runtimeFactory = createProductionAutoReleaseAdapter } = {}) {
-  // This reviewed source pin is unprovisioned by design. It refuses before
-  // cloud credentials, GitHub writes, or Cloudflare requests are read/made.
+  // The reviewed source pin supplies encryption only. Independent policy,
+  // identity, CI, migration, authority, and profile checks still gate release.
   const recipient = recipientLoader();
   need(env.PRODUCTION_AUTO_RELEASE_ENABLED === 'true', 'production_auto_release_disabled');
   const triggerRun = triggerReader(env), sourceCommit = sourceReader(ROOT, env);

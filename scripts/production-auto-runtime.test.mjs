@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, createPublicKey } from 'node:crypto';
 import { createProductionAutoReleaseAdapter, productionAutoBuildEnvironment, readProductionAutoTriggerRun,
   runProductionAutoRelease, validateDeploymentTransitionIntent } from './production-auto-runtime.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
@@ -11,6 +11,7 @@ import { completeProductionAutoArtifact } from './production-auto-journal-artifa
 import { PROFILE, canonical } from './production-deploy.mjs';
 import { ledgerBytes } from './production-auto-assets.mjs';
 import { ProductionCloudflareProvider } from './production-auto-provider.mjs';
+import { loadPinnedProductionAutoRecipient } from './production-auto-journal.mjs';
 
 const sourceCommit = 'a'.repeat(40), runId = 456, attempt = 2;
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -494,12 +495,16 @@ test('frontend migration refusal and later ledger drift stop before provider con
   assert.equal(providers, 0); assert.equal(journals, 0);
 });
 
-test('unprovisioned recipient stops release and artifact completion before provider or GitHub requests', async () => {
+test('pinned recipient validates while independent release and artifact policy gates still stop before requests', async () => {
+  const recipient = loadPinnedProductionAutoRecipient();
+  assert.equal(recipient.keyIdSha256, 'a7249feb83c26c1a00c800384b8fc036f421a34dc29e68226a14c40ee71327fa');
+  const publicKey = createPublicKey(recipient.publicKeyPem);
+  assert.equal(publicKey.asymmetricKeyDetails.modulusLength, 3072);
+  assert.equal(createHash('sha256').update(publicKey.export({ type: 'spki', format: 'der' })).digest('hex'), recipient.keyIdSha256);
   let requests = 0;
   const fetchImpl = async () => { requests++; throw Error('must not fetch'); };
-  await assert.rejects(runProductionAutoRelease({ env: { PRODUCTION_AUTO_RELEASE_ENABLED: 'true', CLOUDFLARE_API_TOKEN: 'private-token' }, fetchImpl }),
-    error => !error.message.includes('private-token'));
+  await assert.rejects(runProductionAutoRelease({ env: {}, fetchImpl }), /production_auto_release_disabled/);
   await assert.rejects(completeProductionAutoArtifact({ env: { PRODUCTION_AUTO_RELEASE_ENABLED: 'true', GITHUB_TOKEN: 'private-github-token' }, fetchImpl }),
-    error => !error.message.includes('private-github-token'));
+    error => error.message === 'artifact_completion_disabled' && !error.message.includes('private-github-token'));
   assert.equal(requests, 0);
 });

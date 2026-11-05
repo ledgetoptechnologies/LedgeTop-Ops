@@ -5,8 +5,9 @@
  * operator public key before being written to the run's artifact directory;
  * plaintext bodies never enter the public Git journal or workflow logs.
  *
- * The checked-in recipient pin is intentionally unprovisioned. This module is
- * not a live deployment capability until the reviewed recipient is installed.
+ * The public recipient is pinned in source. Its presence permits encryption
+ * only; separate release policy, authority, readiness, and credential gates
+ * still control whether any production operation can proceed.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -80,7 +81,7 @@ export function sealProductionProviderResponse(plaintext, context, recipient) {
 
 export function loadPinnedProductionAutoRecipient() {
   // No environment override: the public key and fingerprint move together in
-  // a reviewed source change. The current all-zero sentinel always refuses.
+  // a reviewed source change; mismatches fail closed in checkedRecipient.
   const pinned = PRODUCTION_AUTO_JOURNAL_RECIPIENT;
   checkedRecipient(pinned);
   return Object.freeze({
