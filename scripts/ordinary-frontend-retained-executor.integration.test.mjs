@@ -11,6 +11,7 @@ import { hash, canonical, validateInstallation, ORDINARY_FRONTEND_PREFLIGHT_MODE
   OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } from './production-deploy.mjs';
 import { compileOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
 import { compileOrdinaryFrontendRetainedPlan } from './ordinary-frontend-retained-plan.mjs';
+import { compileCanonicalBrowserRetirementTransition } from './ordinary-frontend-canonical-browser-retirement.mjs';
 import { executeOrdinaryFrontendRetainedRelease, validateProductionAuthorityPacketSelection } from './ordinary-frontend-retained-executor.mjs';
 import { mergeAssetLedger, ledgerBytes } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
@@ -87,6 +88,20 @@ function syntheticClientPrior(before, app) {
   return { ledger, bytes };
 }
 
+function syntheticCanonicalClientPredecessor(snapshot, profile, versionId) {
+  const before = clone(snapshot);
+  const transition = compileCanonicalBrowserRetirementTransition(snapshot, { app:'client', profile });
+  for (const [name, value] of Object.entries(transition.targetScalars)) for (const bindings of [
+    before.client.version.resources.bindings, before.client.settings.bindings,
+  ]) bindings.find(row => row.name === name).text = value;
+  before.client.version.id = versionId;
+  before.client.modern.id = versionId;
+  before.client.latest = versionId;
+  delete before.client.latestVersion; delete before.client.latestModern;
+  before.client.deployment.versions = before.client.deployment.versions.map(row => ({ ...row, version_id:versionId }));
+  return before;
+}
+
 function loadOpsPriorAssets(context) {
   assert.ok(opsBytePathsPath && fs.existsSync(opsBytePathsPath), 'Ops private byte-path sidecar must be supplied for the full happy path');
   const sidecar = JSON.parse(fs.readFileSync(opsBytePathsPath, 'utf8'));
@@ -153,7 +168,8 @@ async function syntheticPost0226StaffPreservation(sourceCommit) {
 
 async function harness(t, fixture, app, { failCandidateAssets = false, failStaff = false,
   frontendAuthority = false, driftFrontendAuthorityAt = 0, post0226Authority = false, driftPost0226At = 0,
-  opsSuccessorPromotion = false, canonicalBrowserRetirement = false, snapshotOverride } = {}) {
+  opsSuccessorPromotion = false, canonicalBrowserRetirement = false, canonicalBrowserRetirementClientVersionId,
+  canonicalClientDrift, snapshotOverride } = {}) {
   const before = clone(snapshotOverride ?? fixture.snapshot), artifact = assetFiles(t, app), sourceCommit = fixture.artifactSourceCommit;
   assert.ok(HEX40.test(sourceCommit)); artifact.release.sourceCommit = sourceCommit;
   const expectedDeploymentVersions = opsSuccessorPromotion || canonicalBrowserRetirement
@@ -177,12 +193,14 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
       expectedDeploymentVersions, ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE,
       ...(opsSuccessorPromotion ? { opsSuccessorReaderPromotionContract: OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } : {}),
       ...(canonicalBrowserRetirement ? { canonicalBrowserRetirementSelector: 'canonical-browser-retirement-v1',
-        ...(app === 'client' ? { installedOpsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT } : {}) } : {}) });
+        ...(app === 'client' ? { installedOpsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT }
+          : { canonicalBrowserRetirementClientVersionId }) } : {}) });
     retainedPlan = compileOrdinaryFrontendRetainedPlan(before, { ordinaryPlan, profile: fixture.profile,
       previousLedger, previousAssetBytes, observedAt: new Date().toISOString(),
       ...(opsSuccessorPromotion ? { opsSuccessorReaderPromotionContract: OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } : {}),
       ...(canonicalBrowserRetirement ? { canonicalBrowserRetirementSelector: 'canonical-browser-retirement-v1',
-        ...(app === 'client' ? { installedOpsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT } : {}) } : {}) });
+        ...(app === 'client' ? { installedOpsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT }
+          : { canonicalBrowserRetirementClientVersionId }) } : {}) });
   }
   const targetWorker = appWorker(app), baselineId = before[app].version.id;
   const candidateId = app === 'operations' ? '77777777-7777-4777-8777-777777777777' : '88888888-8888-4888-8888-888888888888';
@@ -237,7 +255,16 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
       controlObservations.push({ phase: nativeCalls.at(-1)?.phase ?? 'before-upload',
         activeVersionId: state[app].version.id, activeScalars: scalars(state[app].version.resources.bindings),
         settingsScalars: scalars(state[app].settings.bindings), latestVersionId: latestCandidate?.id ?? null,
-        latestScalars: latestCandidate ? scalars(latestCandidate.resources.bindings) : null });
+        latestScalars: latestCandidate ? scalars(latestCandidate.resources.bindings) : null,
+        ...(app === 'operations' ? { clientRetirement: {
+          versionId:state.client.version.id, modernId:state.client.modern.id, latest:state.client.latest,
+          deploymentVersions:clone(state.client.deployment.versions),
+          versionScalars:Object.fromEntries(Object.keys(ordinaryPlan.canonicalBrowserRetirementTransition.clientRetirement.targetScalars)
+            .map(name => [name,state.client.version.resources.bindings.find(row => row.name === name)?.text])),
+          settingsScalars:Object.fromEntries(Object.keys(ordinaryPlan.canonicalBrowserRetirementTransition.clientRetirement.targetScalars)
+            .map(name => [name,state.client.settings.bindings.find(row => row.name === name)?.text])),
+          publicShare:state.client.settings.bindings.find(row => row.name === 'PUBLIC_SHARE_ORIGIN')?.text,
+        } } : {}) });
     }
     return state;
   };
@@ -247,6 +274,17 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
       active[app].latest = candidateId; active[app].latestVersion = clone(candidateVersion); active[app].latestModern = clone(candidateModern);
       if (canonicalBrowserRetirement) for (const [name, value] of Object.entries(ordinaryPlan.canonicalBrowserRetirementTransition.targetScalars)) {
         const row = active[app].settings.bindings.find(binding => binding.name === name); assert.ok(row); row.text = value;
+      }
+      if (canonicalClientDrift === 'version') {
+        const changed = '99999999-9999-4999-8999-999999999999';
+        active.client.version.id = changed; active.client.modern.id = changed; active.client.latest = changed;
+        active.client.deployment.versions = active.client.deployment.versions.map(row => ({ ...row, version_id:changed }));
+      } else if (canonicalClientDrift === 'target') {
+        for (const bindings of [active.client.version.resources.bindings, active.client.settings.bindings])
+          bindings.find(row => row.name === 'CLIENT_PORTAL_ORIGINS').text = 'https://portal.ledgetop.app,https://portal.ledgetopdroneservices.com';
+      } else if (canonicalClientDrift === 'unrelated') {
+        for (const bindings of [active.client.version.resources.bindings, active.client.settings.bindings])
+          bindings.find(row => row.name === 'PUBLIC_SHARE_ORIGIN').text = 'https://drift.invalid';
       }
       return `Worker Version ID: ${candidateId}`;
     }
@@ -273,7 +311,8 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
   const frontendAuthorityPhases = [], options = { app, plan: retainedPlan, profile: fixture.profile, expectedDeploymentVersions,
     ...(opsSuccessorPromotion ? { opsSuccessorReaderPromotionContract: OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } : {}),
     ...(canonicalBrowserRetirement ? { canonicalBrowserRetirementSelector: 'canonical-browser-retirement-v1',
-      ...(app === 'client' ? { installedOpsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT } : {}) } : {}),
+      ...(app === 'client' ? { installedOpsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT }
+        : { canonicalBrowserRetirementClientVersionId }) } : {}),
     assetVerifierProvider, ...(post0226Authority ? { staffAuthorityContract:POST0226_STAFF_PRESERVATION_CONTRACT,
       post0226StaffPreservationReview:post0226Packet.review } : frontendAuthority
       ? { staffAuthorityContract: ORDINARY_FRONTEND_AUTHORITY_CONTRACT, frontendAuthorityReview: frontendPacket.review }
@@ -365,6 +404,89 @@ test('private sanitized fixture: canonical Client retirement keeps old active ve
       assert.equal(capture.activeVersionId, h.candidateId);
       assert.deepEqual(capture.activeScalars, target);
       assert.deepEqual(capture.settingsScalars, target);
+    }
+  });
+
+test('private worker-control fixture: canonical Ops retirement preserves exact preceding Client version, tuple, settings split, and rollback',
+  { skip: !fixturePath || !opsSuccessorSnapshotPath || !opsBytePathsPath }, async t => {
+    const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+    const currentOps = JSON.parse(fs.readFileSync(opsSuccessorSnapshotPath, 'utf8'));
+    const clientVersionId = '33333333-3333-4333-8333-333333333333';
+    const afterClient = syntheticCanonicalClientPredecessor(currentOps, fixture.profile, clientVersionId);
+    const h = await harness(t, fixture, 'operations', { canonicalBrowserRetirement:true, opsSuccessorPromotion:true,
+      canonicalBrowserRetirementClientVersionId:clientVersionId, snapshotOverride:afterClient, post0226Authority:true });
+    const transition = h.ordinaryPlan.canonicalBrowserRetirementTransition;
+    assert.equal(transition.clientRetirement.versionId, clientVersionId);
+    assert.equal(h.ordinaryPlan.opsSuccessorReaderPromotionContract, OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT);
+    assert.deepEqual(h.before.operations.deployment.versions, [
+      { version_id:'fc9bc572-0b87-4857-8b8a-b0e0f7582c68', percentage:100 },
+    ]);
+    const source = transition.sourceScalars, target = transition.targetScalars;
+    const result = await executeOrdinaryFrontendRetainedRelease(h.options);
+    assert.equal(result.activated, true);
+    assert.equal(result.rollbackVersionId, h.before.operations.version.id);
+    assert.equal(result.activeNamespaceBytesVerified, true);
+    assert.equal(h.post0226AuthorityPhases.length, 8);
+    assert.deepEqual(h.nativeCalls.map(row => row.phase), ['upload','namespace-stage','activate']);
+    const splitCaptures = h.controlObservations.filter(row => ['upload','namespace-stage'].includes(row.phase));
+    assert.equal(splitCaptures.length, 3, 'inactive, staged, and preactivation checkpoints are all observed');
+    for (const capture of splitCaptures) {
+      assert.equal(capture.activeVersionId, h.before.operations.version.id);
+      assert.deepEqual(capture.activeScalars, source, 'active Ops version keeps the predecessor scalar until activation');
+      assert.deepEqual(capture.settingsScalars, target, 'Ops settings use the exact canonical scalar before activation');
+      assert.deepEqual(capture.latestScalars, target, 'inactive Ops candidate uses the exact canonical scalar');
+      assert.equal(capture.latestVersionId, h.candidateId);
+      assert.equal(capture.clientRetirement.versionId, clientVersionId);
+      assert.equal(capture.clientRetirement.modernId, clientVersionId);
+      assert.equal(capture.clientRetirement.latest, clientVersionId);
+      assert.deepEqual(capture.clientRetirement.deploymentVersions, [{ version_id:clientVersionId, percentage:100 }]);
+      assert.deepEqual(capture.clientRetirement.versionScalars, transition.clientRetirement.targetScalars);
+      assert.deepEqual(capture.clientRetirement.settingsScalars, transition.clientRetirement.targetScalars);
+      assert.equal(capture.clientRetirement.publicShare,
+        h.before.client.settings.bindings.find(row => row.name === 'PUBLIC_SHARE_ORIGIN').text);
+    }
+    const activeCaptures = h.controlObservations.filter(row => row.phase === 'activate');
+    assert.equal(activeCaptures.length, 2, 'postactivation and postnamespace checkpoints are observed');
+    for (const capture of activeCaptures) {
+      assert.equal(capture.activeVersionId, h.candidateId);
+      assert.deepEqual(capture.activeScalars, target);
+      assert.deepEqual(capture.settingsScalars, target);
+      assert.equal(capture.clientRetirement.versionId, clientVersionId);
+      assert.deepEqual(capture.clientRetirement.versionScalars, transition.clientRetirement.targetScalars);
+      assert.deepEqual(capture.clientRetirement.settingsScalars, transition.clientRetirement.targetScalars);
+    }
+    assert.equal(h.providerEvents.filter(row => row[0] === 'create').length, 3);
+    assert.equal(h.providerEvents.filter(row => row[0] === 'remove').length, 3);
+    const activeReceipt = JSON.parse(fs.readFileSync(path.join(h.journalDirectory, 'verified-active.private.json'), 'utf8'));
+    assert.equal(activeReceipt.rollbackVersionId, h.before.operations.version.id);
+    assert.equal(activeReceipt.assetCount, h.retainedPlan.retentionLedger.assets.length);
+    assert.deepEqual(activeReceipt.oldServedWithin48hPaths, h.previousLedger.assets
+      .filter(row => row.path !== '/index.html').map(row => row.path).sort());
+    assert.equal(activeReceipt.automaticPruning, false);
+    assert.ok(Date.parse(activeReceipt.earliestPermittedPruningAt) >= Date.parse(activeReceipt.cutoverAt) + 48 * 60 * 60_000);
+    assert.ok(Date.parse(activeReceipt.earliestPermittedPruningAt) >= Date.parse(activeReceipt.namespaceObservedAt) + 48 * 60 * 60_000);
+  });
+
+test('private worker-control fixture: Client retirement identity or scalar drift holds Ops before namespace stage',
+  { skip: !fixturePath || !opsSuccessorSnapshotPath || !opsBytePathsPath }, async t => {
+    const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+    const currentOps = JSON.parse(fs.readFileSync(opsSuccessorSnapshotPath, 'utf8'));
+    const clientVersionId = '44444444-4444-4444-8444-444444444444';
+    for (const [drift, reason] of [
+      ['version', /Client retirement candidate identity changed/u],
+      ['target', /Canonical Client predecessor tuple changed during Operations release/u],
+      ['unrelated', /client: (?:settings\/version bindings differ|original production scalar configuration changed)/u],
+    ]) {
+      const afterClient = syntheticCanonicalClientPredecessor(currentOps, fixture.profile, clientVersionId);
+      const h = await harness(t, fixture, 'operations', { canonicalBrowserRetirement:true, opsSuccessorPromotion:true,
+        canonicalBrowserRetirementClientVersionId:clientVersionId, canonicalClientDrift:drift,
+        snapshotOverride:afterClient, post0226Authority:true });
+      await assert.rejects(executeOrdinaryFrontendRetainedRelease(h.options), reason, `${drift} drift must hold before the next native mutation`);
+      assert.deepEqual(h.nativeCalls.map(row => row.phase), ['upload'], `${drift} drift cannot stage or activate, and upload is not retried`);
+      assert.equal(h.nativeCalls.some(row => row.phase === 'namespace-stage' || row.phase === 'activate'), false);
+      assert.equal(h.providerEvents.filter(row => row[0] === 'create').length,
+        h.providerEvents.filter(row => row[0] === 'remove').length, 'temporary asset verifier is cleaned after a held release');
+      assert.equal(h.post0226AuthorityPhases.length, 2, 'staff state was qualified before upload and before dispatch only');
     }
   });
 

@@ -173,9 +173,12 @@ function validatePostActivationCapture(raw, before, pinnedPlan, options) {
   const validationSnapshot = transition
     ? normalizeCanonicalBrowserRetirementPoststate(raw, before, transition) : raw;
   validateInstallation(validationSnapshot, options);
-  if (transition?.app === 'operations' && transition.clientRetirement)
-    needFn(equal(stableState(before, 'client'), stableState(raw, 'client')),
-      'Canonical Client retirement controls changed during the Operations release');
+  if (transition?.app === 'operations' && transition.clientRetirement) {
+    const priorClient = stableState(before, 'client').client, currentClient = stableState(raw, 'client').client;
+    const changedControls = Object.keys(priorClient).filter(key => !equal(priorClient[key], currentClient[key]));
+    needFn(changedControls.length === 0,
+      `Canonical Client retirement controls changed during the Operations release (${changedControls.join(',')})`);
+  }
   return raw;
 }
 function validateTransitionControlCapture(raw, before, pinnedPlan, options) {
@@ -184,9 +187,12 @@ function validateTransitionControlCapture(raw, before, pinnedPlan, options) {
     ? normalizeCanonicalBrowserRetirementPoststate(raw, before, transition, { includeSelectedTransition: false,
       allowLatestVersionId: options.allowLatest?.[transition.app] }) : raw;
   validateInstallation(validationSnapshot, options);
-  if (transition?.app === 'operations' && transition.clientRetirement)
-    needFn(equal(stableState(before, 'client'), stableState(raw, 'client')),
-      'Canonical Client retirement controls changed during the Operations release');
+  if (transition?.app === 'operations' && transition.clientRetirement) {
+    const priorClient = stableState(before, 'client').client, currentClient = stableState(raw, 'client').client;
+    const changedControls = Object.keys(priorClient).filter(key => !equal(priorClient[key], currentClient[key]));
+    needFn(changedControls.length === 0,
+      `Canonical Client retirement controls changed during the Operations release (${changedControls.join(',')})`);
+  }
   return raw;
 }
 function sameExceptSelectedDeployment(before, after, app) {
