@@ -574,11 +574,14 @@ export class ProductionAutoJournal {
       && op.artifact.uploadStepConclusion === 'success' && op.artifact.releaseStepConclusion === 'success'
       && verifiedOperationEvidence(op));
     const final = op.receipts.at(-1);
+    const started = op.receipts[0];
     return Object.freeze({ workerName: op.workerName, releaseKind: op.releaseKind, sourceCommit: op.sourceCommit,
       releaseId: op.releaseId, ci: Object.freeze({ ...op.ci }), workflow: Object.freeze({ ...op.workflow }),
-      runtime: Object.freeze({ ...op.runtime }), artifact: Object.freeze({ artifactId: op.artifact.artifactId,
+      runtime: Object.freeze({ ...op.runtime }), startedReceipt: Object.freeze({ ...started }),
+      artifact: Object.freeze({ artifactId: op.artifact.artifactId,
         digestSha256: op.artifact.digestSha256, name: op.artifact.name, runId: op.artifact.runId,
-        runAttempt: op.artifact.runAttempt }), finalReceipt: Object.freeze({ ...final }) });
+        runAttempt: op.artifact.runAttempt, uploadStepConclusion: op.artifact.uploadStepConclusion,
+        releaseStepConclusion: op.artifact.releaseStepConclusion }), finalReceipt: Object.freeze({ ...final }) });
   }
   async #persist(next) {
     const old = await this.#load();

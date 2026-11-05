@@ -44,29 +44,30 @@ export function validateProductionAutoPredecessorProof(proof, expected) {
     && proof.artifact?.name === `production-auto-${expected.releaseId}`
     && proof.artifact?.uploadStepConclusion === 'success' && proof.artifact?.releaseStepConclusion === 'success'
     && proof.finalReceipt?.status === 'verified' && proof.finalReceipt?.verifiedActive === true
-    && proof.finalReceipt?.sourceCommit === expected.sourceCommit
-    && proof.finalReceipt?.workerName === expected.workerName
     && proof.finalReceipt?.ledgerSHA256 === proof.runtime?.ledgerSha256
     && SHA.test(proof.runtime?.profileSha256 ?? '') && SHA.test(proof.runtime?.moduleSha256 ?? '')
     && SHA.test(proof.runtime?.ledgerSha256 ?? '')
+    && proof.startedReceipt?.status === 'started' && proof.startedReceipt?.phase === 'prepare'
+    && proof.startedReceipt?.writesAttempted === false
+    && UUID.test(proof.startedReceipt?.parentVersionId ?? '')
+    && proof.startedReceipt.parentVersionId === proof.finalReceipt?.parentVersionId
+    && SHA.test(proof.startedReceipt?.controlsSHA256 ?? '')
     && proof.finalReceipt?.minimumRetentionHours === 48 && proof.finalReceipt?.automaticPruning === false
     && proof.finalReceipt?.allHistoricalAssetsCarried === true
     && UUID.test(proof.finalReceipt?.parentVersionId ?? '')
-    && proof.finalReceipt?.moduleSHA256 === proof.runtime.moduleSha256
-    && proof.finalReceipt?.controlsSHA256 && SHA.test(proof.finalReceipt.controlsSHA256)
     && UUID.test(proof.finalReceipt?.candidateVersionId ?? '') && UUID.test(proof.finalReceipt?.deploymentId ?? ''),
   'runtime_predecessor_proof_invalid');
   return proof;
 }
 
-export function validateLiveProductionAutoPredecessor({ proof, snapshot, app, controlsSHA256 }) {
+export function validateLiveProductionAutoPredecessor({ proof, snapshot, app, controlsSHA256, expectedControlsSHA256 }) {
   const receipt = proof?.finalReceipt, state = snapshot?.[app];
   const rows = state?.deployment?.versions;
   need(receipt && state?.version?.id === receipt.candidateVersionId
     && state?.modern?.id === receipt.candidateVersionId && state?.latest === receipt.candidateVersionId
     && state?.deployment?.id === receipt.deploymentId && Array.isArray(rows) && rows.length === 1
     && rows[0]?.version_id === receipt.candidateVersionId && rows[0]?.percentage === 100
-    && controlsSHA256 === receipt.controlsSHA256,
+    && controlsSHA256 === expectedControlsSHA256,
   'runtime_predecessor_live_state_drift');
   const moduleRows = state.modern.modules?.filter(row => row?.name === 'index.js') ?? [];
   need(moduleRows.length === 1 && typeof moduleRows[0].content_base64 === 'string', 'runtime_predecessor_module_missing');

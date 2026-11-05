@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ProductionAutoJournal, readVerifiedProductionAutoPredecessor, sealProductionProviderResponse } from './production-auto-journal.mjs';
+import { validateProductionAutoPredecessorProof } from './production-auto-predecessor.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const COMMIT = 'a'.repeat(40), RUNTIME = { profileSha256: '1'.repeat(64), moduleSha256: '2'.repeat(64), ledgerSha256: '3'.repeat(64) };
@@ -190,7 +191,7 @@ test('artifact completion verifies only after final proof, activation, verifier 
     await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit: 'c'.repeat(40), status: 'candidate-assets-verified',
       phase: 'candidate-assets', candidateVersionId: '22222222-2222-4222-8222-222222222222', ledgerSHA256: '3'.repeat(64) });
     await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit: 'c'.repeat(40), status: 'verified',
-      phase: 'complete', verifiedActive: true, candidateVersionId: '22222222-2222-4222-8222-222222222222',
+      phase: 'complete', verifiedActive: true, parentVersionId: parent, candidateVersionId: '22222222-2222-4222-8222-222222222222',
       deploymentId: '33333333-3333-4333-8333-333333333333', ledgerSHA256: '3'.repeat(64), files: 1,
       minimumRetentionHours: 48, automaticPruning: false,
       allHistoricalAssetsCarried: true, cutoverObservedAt: '2026-10-27T12:00:00.000Z',
@@ -208,6 +209,17 @@ test('artifact completion verifies only after final proof, activation, verifier 
     assert.deepEqual(api.requests.slice(beforeRead).map(row => row.method), ['GET','GET','GET','GET']);
     assert.equal(proof.releaseId, run.releaseId);
     assert.equal(proof.runtime.moduleSha256, RUNTIME.moduleSha256);
+    assert.equal(proof.artifact.uploadStepConclusion, 'success');
+    assert.equal(proof.artifact.releaseStepConclusion, 'success');
+    assert.equal(validateProductionAutoPredecessorProof(proof, { workerName: 'ledgetop-clients',
+      releaseKind: 'retained-assets', sourceCommit: 'c'.repeat(40), releaseId: run.releaseId,
+      ciRunId: 101, ciRunAttempt: 2, workflowRunId: 124, workflowRunAttempt: 1 }), proof,
+    'the exact GET-only journal proof must pass the runtime predecessor validator');
+    const tamperedArtifactProof = structuredClone(proof);
+    tamperedArtifactProof.artifact.releaseStepConclusion = 'failure';
+    assert.throws(() => validateProductionAutoPredecessorProof(tamperedArtifactProof, { workerName: 'ledgetop-clients',
+      releaseKind: 'retained-assets', sourceCommit: 'c'.repeat(40), releaseId: run.releaseId,
+      ciRunId: 101, ciRunAttempt: 2, workflowRunId: 124, workflowRunAttempt: 1 }));
     assert.equal(proof.finalReceipt.candidateVersionId, '22222222-2222-4222-8222-222222222222');
     assert.equal(proof.finalReceipt.deploymentId, '33333333-3333-4333-8333-333333333333');
     assert.equal(proof.finalReceipt.minimumRetentionHours, 48);

@@ -134,11 +134,12 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift', 'pre
       moduleSha256: hash(Buffer.from('active')), ledgerSha256: hash(ledgerBytes(opsLedger)) },
     artifact: { artifactId: 901, digestSha256: 'd'.repeat(64), name: `production-auto-${env.PRODUCTION_AUTO_PREDECESSOR_RELEASE_ID}`,
       runId: 789, runAttempt: 1, uploadStepConclusion: 'success', releaseStepConclusion: 'success' },
+    startedReceipt: { status: 'started', phase: 'prepare', writesAttempted: false, parentVersionId: opsLedger.parentVersionId,
+      controlsSHA256: productionAutoControlsSHA256(fixture.snapshots, 'operations') },
     finalReceipt: { status: 'verified', sourceCommit: commit, workerName: 'ledgetop-ops', verifiedActive: true,
       candidateVersionId: operations.version.id, deploymentId: operations.deployment.id,
       parentVersionId: opsLedger.parentVersionId,
       minimumRetentionHours: 48, automaticPruning: false, allHistoricalAssetsCarried: true,
-      controlsSHA256: productionAutoControlsSHA256(fixture.snapshots, 'operations'),
       moduleSHA256: hash(Buffer.from('active')), ledgerSHA256: hash(ledgerBytes(opsLedger)) } };
   const suppliedProof = structuredClone(predecessorProof);
   if (scenario === 'predecessor-missing-artifact') suppliedProof.artifact = null;

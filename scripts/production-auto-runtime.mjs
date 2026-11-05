@@ -216,7 +216,8 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     // pre-mutation capture while hashing the predecessor's cross-worker controls.
     const controlsSnapshot = { ...snapshot, [app]: predecessorOwnState };
     validateLiveProductionAutoPredecessor({ proof, snapshot, app: app === 'operations' ? 'client' : 'operations',
-      controlsSHA256: productionAutoControlsSHA256(controlsSnapshot, app === 'operations' ? 'client' : 'operations') });
+      controlsSHA256: productionAutoControlsSHA256(controlsSnapshot, app === 'operations' ? 'client' : 'operations'),
+      expectedControlsSHA256: proof.startedReceipt.controlsSHA256 });
   };
   const assertFence = async () => {
     await checkMigrations();

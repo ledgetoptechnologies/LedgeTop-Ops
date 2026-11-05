@@ -145,7 +145,8 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     // to the Ops receipt using the exact pre-mutation Sync capture.
     const controlsSnapshot = { ...snapshot, [APP]: predecessorOwnState };
     validateLiveProductionAutoPredecessor({ proof, snapshot, app: 'operations',
-      controlsSHA256: productionAutoControlsSHA256(controlsSnapshot, 'operations') });
+      controlsSHA256: productionAutoControlsSHA256(controlsSnapshot, 'operations'),
+      expectedControlsSHA256: proof.startedReceipt.controlsSHA256 });
   };
   const reconcileReadOnly = async () => {
     const raw = await capture(provider, { selectedApp: APP });

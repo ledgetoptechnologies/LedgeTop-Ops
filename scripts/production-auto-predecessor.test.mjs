@@ -38,8 +38,10 @@ test('Sync predecessor proof rechecks journal, artifact and CI binding fields af
     runtime: { profileSha256: '1'.repeat(64), moduleSha256: '2'.repeat(64), ledgerSha256: '3'.repeat(64) },
     artifact: { artifactId: 12, digestSha256: '4'.repeat(64), name: `production-auto-${expected.releaseId}`,
       runId: 789, runAttempt: 1, uploadStepConclusion: 'success', releaseStepConclusion: 'success' },
-    finalReceipt: { status: 'verified', sourceCommit, workerName: 'ledgetop-ops', verifiedActive: true,
-      moduleSHA256: '2'.repeat(64), ledgerSHA256: '3'.repeat(64), controlsSHA256: '5'.repeat(64),
+    startedReceipt: { status: 'started', phase: 'prepare', writesAttempted: false,
+      parentVersionId: '33333333-3333-4333-8333-333333333333', controlsSHA256: '5'.repeat(64) },
+    finalReceipt: { status: 'verified', verifiedActive: true,
+      moduleSHA256: '2'.repeat(64), ledgerSHA256: '3'.repeat(64),
       minimumRetentionHours: 48, automaticPruning: false, allHistoricalAssetsCarried: true,
       parentVersionId: '33333333-3333-4333-8333-333333333333',
       candidateVersionId: '11111111-1111-4111-8111-111111111111', deploymentId: '22222222-2222-4222-8222-222222222222' } };
