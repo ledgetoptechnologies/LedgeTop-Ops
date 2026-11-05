@@ -8,3 +8,6 @@ export const PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS =
 // Coordinator sourceAndCI runs once initially, once after inactive readback,
 // at each of four non-bucket mutation intents, and once at final acceptance.
 export const PRODUCTION_AUTO_FIXED_OPS_PRESERVATION_FENCES = 1 + 1 + 4 + 1;
+// One additional observation is reserved only when the initial staff receipt
+// ages past 60 seconds during the build, before the first verifier mutation.
+export const PRODUCTION_AUTO_POSTBUILD_PRESERVATION_REFRESHES = 1;

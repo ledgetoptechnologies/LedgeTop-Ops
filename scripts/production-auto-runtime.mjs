@@ -231,6 +231,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   let predecessorOwnState, predecessorProof;
   let pendingCoordinatorFence = null, pendingTransition = null, verifiedDeploymentVersions = null;
   let preflightLease = null, dispatchLease = null, verifiedCIStartedMono = null;
+  let postBuildStaffRefreshUsed = false;
   const ownedVerifierSourceHashes = new Map();
   const leaseFresh = lease => lease && Number.isFinite(lease.startedMono)
     && performance.now() >= lease.startedMono && performance.now() - lease.startedMono <= INTENT_FENCE_MAX_AGE_MS;
@@ -303,8 +304,8 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       expectedControlsSHA256: proof.startedReceipt.controlsSHA256 });
   };
   const assertFence = async () => {
-    const fenceStartedMono = performance.now();
     await checkMigrations();
+    const fenceStartedMono = performance.now();
     verifiedCIStartedMono = performance.now();
     verifiedCI = await mainCI.verify(sourceCommit);
     need(sourceReader(ROOT, env) === sourceCommit && verifiedCI.passed === true,
@@ -319,10 +320,17 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   };
   const createJournalBeforeOldAssetRead = async baseline => {
     await checkMigrations();
+    need(!journal, 'runtime_preparation_journal_already_claimed');
+    need(build, 'runtime_preparation_build_missing');
+    need(previousLedger, 'runtime_preparation_ledger_missing');
+    need(durableRuntime === null, 'runtime_preparation_already_started');
+    need(baseline?.activeVersionId, 'runtime_preparation_parent_missing');
     if (post0226Policy) {
       const prior = preservationReceipts.at(-1), timestamp = Date.parse(prior?.observedAt), now = Date.now();
       need(Number.isFinite(timestamp) && timestamp <= now, 'runtime_post0226_preparation_receipt_invalid');
       if (now - timestamp > POST0226_RECEIPT_MAX_AGE_MS) {
+        need(!postBuildStaffRefreshUsed, 'runtime_post0226_preparation_refresh_reused');
+        postBuildStaffRefreshUsed = true;
         const observation = await preservationReader({ sourceCommit, env });
         const refreshed = validateProductionAutoPost0226PreservationObservation(post0226Policy, observation, { sourceCommit });
         preservationReceipts.push(refreshed);
@@ -332,11 +340,6 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       assertProductionAutoPost0226PreservationReceiptFresh(post0226Policy,
         preservationReceipts.at(-1), { sourceCommit });
     }
-    need(!journal, 'runtime_preparation_journal_already_claimed');
-    need(build, 'runtime_preparation_build_missing');
-    need(previousLedger, 'runtime_preparation_ledger_missing');
-    need(durableRuntime === null, 'runtime_preparation_already_started');
-    need(baseline?.activeVersionId, 'runtime_preparation_parent_missing');
     // Reading old bytes uses a short lived verifier Worker (create, enable,
     // delete). Claim the release before its first write. The exact candidate
     // ledger is not knowable until those bytes have been checked, so bind that
@@ -439,10 +442,10 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   const adapter = {
     sourceFence: async () => {
       preflightLease = null;
+      await checkMigrations();
       const sourceStartedMono = performance.now();
       const source = sourceReader(ROOT, env), mainCommit = await mainCI.mainCommit();
       if (predecessorHandoff) {
-        await checkMigrations();
         ensureProvider();
         const captureStartedMono = performance.now();
         const observed = await currentCapture(); await verifyPredecessor(observed.raw);

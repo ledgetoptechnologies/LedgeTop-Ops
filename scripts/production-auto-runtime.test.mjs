@@ -332,7 +332,7 @@ test('Ops default provider and real coordinator finish a 28-bucket release with 
     assert.equal(buckets.length, bucketCount);
     assert.equal(preservationReads, buckets.length + 8,
       'the aged pre-build preservation receipt is refreshed once at the post-build verifier preparation boundary');
-    assert.ok(preservationReads <= 250);
+    assert.ok(preservationReads <= bucketCount + 8, 'only one post-build refresh can extend the B+7 fixed fence envelope');
     assert.equal(deploymentHeadReads % 6, 0, 'each complete stable capture rereads the three deployment heads twice');
     const fullCaptures = deploymentHeadReads / 6;
     assert.equal(fullCaptures, 49, 'the joined path uses one full capture per prewrite intent plus lifecycle readbacks');

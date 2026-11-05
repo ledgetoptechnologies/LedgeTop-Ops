@@ -7,7 +7,8 @@ import { canonicalStaffReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './nativ
 import { ORDINARY_FRONTEND_AUTHORITY_TABLES } from './ordinary-frontend-authority-reader.mjs';
 import { POST0226_LOGIN_TABLES, POST0226_STAFF_PRESERVATION_CONTRACT } from './ordinary-frontend-authority-post0226.mjs';
 import { PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS,
-  PRODUCTION_AUTO_FIXED_OPS_PRESERVATION_FENCES } from './production-auto-limits.mjs';
+  PRODUCTION_AUTO_FIXED_OPS_PRESERVATION_FENCES,
+  PRODUCTION_AUTO_POSTBUILD_PRESERVATION_REFRESHES } from './production-auto-limits.mjs';
 
 export const PRODUCTION_AUTO_POST0226_PRESERVATION_POLICY_CONTRACT = 'production-auto-post0226-preservation-policy-v1';
 export const PRODUCTION_AUTO_POST0226_PRESERVATION_RECEIPT_CONTRACT = 'production-auto-post0226-preservation-receipt-v1';
@@ -23,9 +24,11 @@ const MAX_RECEIPT_SEQUENCE_MS = 45 * 60_000;
 // preservation reads occur at seven additional fixed coordinator fences:
 // initial source/CI, asset-session, version upload, inactive readback, stage-zero,
 // activation, and final active acceptance. Temporary-verifier fences are
-// separate and do not add sourceAndCi receipts.
+// separate and do not add sourceAndCi receipts. One post-build refresh is
+// additionally reserved if the initial receipt expired during build, before
+// the first temporary verifier mutation; that refresh is one-shot.
 export const PRODUCTION_AUTO_POST0226_MAX_RECEIPTS = PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS
-  + PRODUCTION_AUTO_FIXED_OPS_PRESERVATION_FENCES;
+  + PRODUCTION_AUTO_FIXED_OPS_PRESERVATION_FENCES + PRODUCTION_AUTO_POSTBUILD_PRESERVATION_REFRESHES;
 const MAX_ROWS = 20_000;
 const COMMIT = /^[a-f0-9]{40}$/u, SHA = /^[a-f0-9]{64}$/u;
 const hash = value => createHash('sha256').update(value, 'utf8').digest('hex');

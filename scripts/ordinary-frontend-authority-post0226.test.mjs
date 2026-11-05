@@ -16,10 +16,17 @@ import { compileProductionAutoPost0226PreservationPolicy, loadPinnedProductionAu
   validateRepeatedProductionAutoPost0226PreservationReceipts,
   PRODUCTION_AUTO_POST0226_MAX_RECEIPTS,
   PRODUCTION_AUTO_POST0226_PRESERVATION_POLICY_SHA256 } from './production-auto-post0226-policy.mjs';
+import { PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS, PRODUCTION_AUTO_FIXED_OPS_PRESERVATION_FENCES,
+  PRODUCTION_AUTO_POSTBUILD_PRESERVATION_REFRESHES } from './production-auto-limits.mjs';
 
 const sourceCommit = 'a'.repeat(40), observedAt = '2026-10-31T10:00:00.000Z', now = Date.parse('2026-10-31T10:01:00.000Z');
 const sha = text => createHash('sha256').update(text).digest('hex');
 const clone = value => structuredClone(value);
+test('post-0226 receipt envelope derives from bucket and fixed fences plus one post-build refresh', () => {
+  assert.equal(PRODUCTION_AUTO_POST0226_MAX_RECEIPTS, PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS
+    + PRODUCTION_AUTO_FIXED_OPS_PRESERVATION_FENCES + PRODUCTION_AUTO_POSTBUILD_PRESERVATION_REFRESHES);
+  assert.equal(PRODUCTION_AUTO_POSTBUILD_PRESERVATION_REFRESHES, 1);
+});
 
 function schemaFixture({ wire = false } = {}) {
   const db = new DatabaseSync(':memory:');
