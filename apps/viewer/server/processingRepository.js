@@ -58,11 +58,18 @@ const BUILT_IN_PRESETS = [
 function now() { return new Date().toISOString(); }
 function json(value, fallback = {}) { try { return JSON.parse(value); } catch { return fallback; } }
 const QUEUE_REASONS = new Set(['waiting_node_capacity', 'earlier_job_pending', 'node_unavailable']);
+const UPSTREAM_PHASES = new Set([
+  'queued', 'waiting_capacity', 'awaiting_transfer', 'fetching', 'source_receiving',
+  'init_pending', 'initialized', 'upload_pending', 'uploaded', 'commit_pending',
+  'processing', 'waiting_for_delivery', 'awaiting_acceptance', 'awaiting_failure_acceptance',
+  'completed', 'held', 'cancelled',
+]);
 function providerStatusJson(status) {
   const observed = {};
   if (status?.queueState === 'waiting_for_dispatch') observed.queueState = 'waiting_for_dispatch';
   if (typeof status?.queueReason === 'string' && QUEUE_REASONS.has(status.queueReason)) observed.queueReason = status.queueReason;
   if (typeof status?.nodeId === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(status.nodeId)) observed.nodeId = status.nodeId;
+  if (typeof status?.phase === 'string' && UPSTREAM_PHASES.has(status.phase)) observed.upstreamPhase = status.phase;
   if (status?.held === true) observed.held = true;
   return Object.keys(observed).length ? JSON.stringify(observed) : null;
 }
@@ -719,11 +726,12 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   setAttemptResult(id,modelId,versionId){this.database.prepare('UPDATE processing_attempts SET result_model_id=?,result_model_version_id=?,updated_at=? WHERE id=?').run(modelId,versionId,now(),id);return this.getAttempt(id);}
   setAttemptResultForJob(jobId,owner,modelId,versionId){const t=now();return this.transaction(()=>{const job=this.database.prepare("SELECT attempt_id FROM processing_jobs WHERE id=? AND status='leased' AND lease_owner=? AND lease_expires_at>?").get(jobId,owner,t);if(!job)return null;const changed=this.database.prepare("UPDATE processing_attempts SET result_model_id=?,result_model_version_id=?,updated_at=? WHERE id=? AND status NOT IN ('cancelled','failed','published')").run(modelId,versionId,t,job.attempt_id);return changed.changes===1?this.getAttempt(job.attempt_id):null;});}
   eligibleReconcileJob(jobId,owner){return this.database.prepare("SELECT j.* FROM processing_jobs j JOIN processing_attempts a ON a.id=j.attempt_id JOIN processing_tasks t ON t.id=a.task_id AND t.active_attempt_id=a.id WHERE j.id=? AND j.job_type='reconcile' AND j.status='leased' AND j.lease_owner=? AND j.lease_expires_at>? AND a.status IN ('committed','queued_upstream','running','ingesting')").get(jobId,owner,now());}
-  persistReconcileObservation(jobId,owner,attemptId,output){return this.transaction(()=>{
+  persistReconcileObservation(jobId,owner,attemptId,output,providerStatus){return this.transaction(()=>{
     const job=this.eligibleReconcileJob(jobId,owner);
     if(!job||job.attempt_id!==attemptId)return false;
+    if(providerStatus!==undefined&&this.database.prepare("UPDATE processing_attempts SET provider_status_json=?,updated_at=? WHERE id=? AND status IN ('committed','queued_upstream','running','ingesting')").run(providerStatusJson(providerStatus),now(),attemptId).changes!==1)return false;
     if(output){for(const line of output.lines)this.appendLog(attemptId,'provider',line);this.setOutputCursor(attemptId,output.nextLine);}
-    else this.appendLog(attemptId,'warn','Processing output could not be refreshed. Provider status is still being tracked; the output cursor has not advanced.');
+    else if(output===null)this.appendLog(attemptId,'warn','Processing output could not be refreshed. Provider status is still being tracked; the output cursor has not advanced.');
     return true;
   });}
   setOutputCursor(id,cursor){this.database.prepare('UPDATE processing_attempts SET provider_output_cursor=?,updated_at=? WHERE id=?').run(Math.max(0,Number(cursor)||0),now(),id);}
