@@ -161,6 +161,17 @@ test('parallel tile/cloud authorization failures coalesce and successful renewal
   assert.equal(f.context.sessionAccessGeneration, 1);
 });
 
+test('successful renewal clears stale LOD status when no tile failure needed recovery', async () => {
+  const f = fixture();
+  f.context.lodTileRecoveryPending = false;
+  f.context.dom.lodStatus.textContent = 'LOD: renewing access';
+  assert.equal(f.context.requestSessionRenewal('timer'), true);
+  await f.context.handleSessionRenewalMessage({ version: 1, type: 'ltds-viewer:renew-session',
+    requestId: REQUEST, grant: '11111111-2222-4333-8444-555555555555' }, { reviewChannel: true });
+  assert.equal(f.context.sessionAccessState, 'active');
+  assert.equal(f.context.dom.lodStatus.textContent, 'LOD: access renewed');
+});
+
 test('current-access denial far before expiry is visible without requesting a controller-rejected early grant', () => {
   const f = fixture();
   f.context.activeViewerSession.expiresAt = new Date(Date.now() + 1_800_000).toISOString();
