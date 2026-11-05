@@ -51,20 +51,26 @@ function setup(fetchImpl = async () => ok({}), overrides = {}) {
   const temporary = new Map();
   const { verifierModuleTamper, ...providerOverrides } = overrides;
   const transport = async (url, init) => {
-    const match = new URL(url).pathname.match(/\/workers\/scripts\/(ops-ui-verify-[a-f0-9]{24})(?:\/versions(?:\/([a-f0-9-]+))?)?$/u);
-    if (init.method === "PUT" && match?.[1] && !url.includes("/versions")) {
+    const parsed = new URL(url);
+    const scriptMatch = parsed.pathname.match(/\/workers\/scripts\/(ops-ui-verify-[a-f0-9]{24})(?:\/versions(?:\/([a-f0-9-]+))?)?$/u);
+    const modernMatch = parsed.pathname.match(/\/workers\/workers\/(ops-ui-verify-[a-f0-9]{24})\/versions\/([a-f0-9-]+)$/u);
+    if (init.method === "PUT" && scriptMatch?.[1] && !url.includes("/versions")) {
       const form = init.body, metadata = JSON.parse(form.get("metadata"));
       const bytes = Buffer.from(await form.get("index.js").arrayBuffer());
-      temporary.set(match[1], { bytes, bindings: metadata.bindings });
+      temporary.set(scriptMatch[1], { bytes, bindings: metadata.bindings });
     }
-    if (match?.[1] && url.includes("/versions?per_page=1")) {
-      const row = temporary.get(match[1]); return row ? ok({ items: [{ id: candidate }] }) : Response.json({ success: false }, { status: 404 });
+    if (scriptMatch?.[1] && parsed.pathname.endsWith("/versions") && parsed.search === "?per_page=1") {
+      const row = temporary.get(scriptMatch[1]); return row ? ok({ items: [{ id: candidate }] }) : Response.json({ success: false }, { status: 404 });
     }
-    if (match?.[1] && match[2] && url.includes("?include=modules")) {
-      const row = temporary.get(match[1]);
+    if (scriptMatch?.[1] && scriptMatch[2] && !parsed.search) {
+      const row = temporary.get(scriptMatch[1]);
+      return row ? ok({ id: candidate, resources: { bindings: row.bindings } }) : Response.json({ success: false }, { status: 404 });
+    }
+    if (modernMatch?.[1] && parsed.search === "?include=modules") {
+      const row = temporary.get(modernMatch[1]);
       if (!row) return Response.json({ success: false }, { status: 404 });
       const bytes = verifierModuleTamper ? verifierModuleTamper(Buffer.from(row.bytes)) : row.bytes;
-      return ok({ id: candidate, resources: { bindings: row.bindings }, modules: [{ name: "index.js", content: bytes.toString("base64") }] });
+      return ok({ id: candidate, modules: [{ name: "index.js", content_base64: bytes.toString("base64") }] });
     }
     return fetchImpl(url, init);
   };

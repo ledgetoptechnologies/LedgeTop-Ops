@@ -426,13 +426,15 @@ export class ProductionCloudflareProvider {
     need(Array.isArray(listed.items) && listed.items.length === 1 && UUID.test(listed.items[0]?.id ?? listed.items[0]?.version_id ?? ""));
     const versionId = listed.items[0].id ?? listed.items[0].version_id;
     if (owned.versionId !== undefined) need(owned.versionId === versionId);
-    const version = (await this.#request(`/workers/scripts/${name}/versions/${versionId}?include=modules`)).result;
-    need(version?.id === versionId && Array.isArray(version.modules) && version.modules.length === 1
-      && version.modules[0]?.name === "index.js" && typeof version.modules[0]?.content === "string"
-      && /^[A-Za-z0-9+/]+={0,2}$/u.test(version.modules[0].content));
-    const moduleBytes = Buffer.from(version.modules[0].content, "base64");
-    need(moduleBytes.length > 0 && moduleBytes.toString("base64") === version.modules[0].content
-      && hash(moduleBytes) === owned.sourceSHA256 && same(version.resources?.bindings, owned.bindings));
+    const version = (await this.#request(`/workers/scripts/${name}/versions/${versionId}`)).result;
+    need(version?.id === versionId && same(version.resources?.bindings, owned.bindings));
+    const modern = (await this.#request(`/workers/workers/${name}/versions/${versionId}?include=modules`)).result;
+    need(modern?.id === versionId && Array.isArray(modern.modules) && modern.modules.length === 1
+      && modern.modules[0]?.name === "index.js" && typeof modern.modules[0]?.content_base64 === "string"
+      && /^[A-Za-z0-9+/]+={0,2}$/u.test(modern.modules[0].content_base64));
+    const moduleBytes = Buffer.from(modern.modules[0].content_base64, "base64");
+    need(moduleBytes.length > 0 && moduleBytes.toString("base64") === modern.modules[0].content_base64
+      && hash(moduleBytes) === owned.sourceSHA256);
     const settings = (await this.#request(`/workers/scripts/${name}/settings`)).result;
     need(same(settings.bindings, owned.bindings));
     const subdomain = (await this.#request(`/workers/scripts/${name}/subdomain`)).result;
@@ -442,6 +444,9 @@ export class ProductionCloudflareProvider {
     need(typeof accountSubdomain === "string" && /^[a-z0-9][a-z0-9-]{0,62}$/u.test(accountSubdomain));
     const expectedOrigin = `https://${name}.${accountSubdomain}.workers.dev`;
     if (owned.origin !== undefined) need(owned.origin === expectedOrigin);
+    const latest = (await this.#request(`/workers/scripts/${name}/versions?per_page=1`)).result;
+    need(Array.isArray(latest.items) && latest.items.length === 1
+      && (latest.items[0]?.id ?? latest.items[0]?.version_id) === versionId);
     owned.origin = expectedOrigin;
     owned.versionId = versionId;
     return true;
