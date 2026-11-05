@@ -57,7 +57,7 @@ test('lost V2 acceptance response replays exact bytes after restart and only the
   outbox.acceptSourceIntakeBinding(attempt.id,{jobId:binding.jobId,attemptId:binding.attemptId,providerTaskId:binding.providerTaskId,
     generation:1,environment:'staging',manifestSha256:binding.manifestSha256,pipelineManifestSha256:binding.pipelineManifestSha256,
     sourceManifestSha256:binding.sourceManifestSha256,derivedManifestSha256:binding.derivedManifestSha256,pipelineDigest:binding.pipelineDigest,
-    status:'queued',phase:'source_receiving',sourceState:'receiving',derivedState:'receiving',sourceReceipt:null,derivedReceipt:null,
+    sourceIntakeVersion:2,status:'queued',phase:'source_receiving',sourceState:'receiving',derivedState:'receiving',sourceReceipt:null,derivedReceipt:null,
     sourceReceiptSha256:null,derivedReceiptSha256:null},{environment:'staging',localJobId:submit.id,owner:submit.lease_owner});
   const sourceReceipt={schemaVersion:2,receiptType:'source_retention',receiptId:id(),storageReceiptId:id(),jobId:binding.jobId,
     attemptId:attempt.id,generation:1,environment:'staging',pipelineManifestSha256:pipelineManifest.sha256,

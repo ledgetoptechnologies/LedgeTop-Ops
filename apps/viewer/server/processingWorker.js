@@ -36,6 +36,7 @@ function isReferenceResultReady(status){return Boolean(status&&['running','succe
 function isReferenceEngineProcessing(status){return Boolean(status?.status==='running'&&status.phase==='processing'
   &&typeof status.nodeId==='string'&&status.nodeId.length>0);}
 function transition(processing,job,status,fields){const attempt=processing.transitionAttemptForJob(job.id,job.lease_owner,status,fields);if(!attempt)throw Object.assign(new Error('processing lease was lost or attempt was cancelled'),{code:'lease_lost'});return attempt;}
+function retainedGcpBytes(snapshot){if(!snapshot)return null;if(Buffer.isBuffer(snapshot.contentBytes))return snapshot.contentBytes;if(Buffer.isBuffer(snapshot.content))return snapshot.content;if(typeof snapshot.content==='string')return Buffer.from(snapshot.content,'utf8');throw Object.assign(new Error('attempt GCP snapshot content is invalid'),{code:'gcp_snapshot_changed'});}
 function discoverOutputs(root){const candidates={glb:['odm_texturing/odm_textured_model_geo.glb','odm_texturing/textured_model.glb','textured_model.glb'],obj:['odm_texturing/odm_textured_model_geo.obj','odm_texturing/odm_textured_model.obj'],ortho:['odm_orthophoto/odm_orthophoto.tif'],orthoCutline:require('./orthophotoCutline').CUTLINE_PATHS,dsm:['odm_dem/dsm.tif'],dtm:['odm_dem/dtm.tif'],report:['odm_report/report.pdf','odm_report/odm_report.pdf'],pointCloud:['odm_georeferencing/odm_georeferenced_model.laz','odm_georeferencing/odm_georeferenced_model.ply'],ept:['entwine_pointcloud/ept.json'],nativeTiles:['3d_tiles/model/tileset.json']};const assets=[];for(const[kind,choices]of Object.entries(candidates)){const rel=choices.find((p)=>fs.existsSync(path.join(root,...p.split('/')))&&(kind!=='orthoCutline'||require('./orthophotoCutline').validateCutlineFile({relativePath:p,absolutePath:path.join(root,...p.split('/'))})));if(!rel)continue;const absolute=path.join(root,...rel.split('/'));assets.push({kind,relativePath:rel,absolutePath:absolute,format:kind==='nativeTiles'?'3dtiles':kind==='ept'?'ept':path.extname(rel).slice(1).toLowerCase(),contentType:kind==='report'?'application/pdf':undefined,byteSize:fs.statSync(absolute).size});}return assets;}
 
 async function verifyProviderMeshClosure(root,outputs=discoverOutputs(root),{signal=null}={}){
@@ -63,7 +64,7 @@ function coordinatorPipelineManifest(dataset,attempt,options,capabilities,gcpSna
   const photos=mapped.filter(item=>photo.test(item.file.relativePath)),inputs=mapped.filter(item=>!photo.test(item.file.relativePath));
   if(!photos.length)throw Object.assign(new Error('dataset has no processable images'),{code:'unsupported_source_file'});
   const objects=[...photos,...inputs].map(({file})=>{const facts=fileFacts(file);return{id:file.id,name:path.basename(file.relativePath),byteSize:file.byteSize,sha256:file.sha256,kind:facts.kind,mediaType:facts.mediaType};});
-  if(gcpSnapshot)objects.push({id:`gcp_${attempt.id}`,name:'gcp_list.txt',byteSize:gcpSnapshot.content.length,
+  if(gcpSnapshot)objects.push({id:`gcp_${attempt.id}`,name:'gcp_list.txt',byteSize:retainedGcpBytes(gcpSnapshot).length,
     sha256:gcpSnapshot.sha256,kind:'auxiliary',mediaType:'text/plain'});
   const names=new Set();for(const object of objects){const name=object.name.toLowerCase();if(names.has(name))throw Object.assign(new Error('dataset contains duplicate submitted basenames'),{code:'duplicate_source_basename'});names.add(name);}
   const totalBytes=objects.reduce((sum,object)=>sum+object.byteSize,0);
@@ -84,11 +85,12 @@ function persistedSourceIntakeContext(request, attemptId, gcpSnapshot) {
     pipelineManifest:request.manifest,pipelineManifestSha256:request.manifest.sha256};
   const derivedBytes=new Map(),gcpId=`gcp_${attemptId}`;
   for(const object of request.derivedManifest.objects){
-    if(object.id!==gcpId||!gcpSnapshot||!Buffer.isBuffer(gcpSnapshot.content)
-        ||object.byteSize!==gcpSnapshot.content.length||object.sha256!==gcpSnapshot.sha256
-        ||crypto.createHash('sha256').update(gcpSnapshot.content).digest('hex')!==object.sha256)
+    const bytes=retainedGcpBytes(gcpSnapshot);
+    if(object.id!==gcpId||!gcpSnapshot
+        ||object.byteSize!==bytes.length||object.sha256!==gcpSnapshot.sha256
+        ||crypto.createHash('sha256').update(bytes).digest('hex')!==object.sha256)
       throw Object.assign(new Error('persisted derived source differs from its retained attempt snapshot'),{code:'gcp_snapshot_changed'});
-    derivedBytes.set(object.id,Buffer.from(gcpSnapshot.content));
+    derivedBytes.set(object.id,bytes);
   }
   return {request,manifests,derivedBytes};
 }
@@ -99,6 +101,9 @@ async function processSubmitReferenceV2(job,{processing,storage,config,signal,so
   let attempt={...processing.getAttempt(job.attempt_id),...processing.getAttemptSubmission(job.attempt_id)};
   const task=processing.getTask(attempt.taskId),dataset=processing.getDataset(attempt.datasetId||task.datasetId,true),source=config.referenceSourceIntake;
   if(!task||!dataset)throw Object.assign(new Error('processing task or dataset is unavailable'),{code:'source_intake_source_unavailable'});
+  const gcpSnapshot=processing.getAttemptGcpSnapshot?.(attempt.id)||null,gcpBytes=retainedGcpBytes(gcpSnapshot);
+  if(gcpSnapshot&&crypto.createHash('sha256').update(gcpBytes).digest('hex')!==gcpSnapshot.sha256)
+    throw Object.assign(new Error('attempt GCP snapshot failed its integrity check'),{code:'gcp_snapshot_changed'});
   const existing=sourceIntake.outbox.getIntent(attempt.id);
   let capabilities=null,envelope;
   if(existing){
@@ -120,16 +125,10 @@ async function processSubmitReferenceV2(job,{processing,storage,config,signal,so
     const capabilitiesResponse=await sourceIntake.client.getCapabilities({signal});capabilities=capabilitiesResponse.capabilities;
     if(capabilities.environment!==source.environment||capabilitiesResponse.sourceIntake.maxObjects>ReferenceProtocol.LIMITS.objects)
       throw Object.assign(new Error('Processing source-intake capability bounds do not match Viewer policy'),{code:'source_intake_capabilities_invalid'});
-    const gcpSnapshot=processing.getAttemptGcpSnapshot?.(attempt.id)||null;
-    if(gcpSnapshot&&crypto.createHash('sha256').update(gcpSnapshot.content).digest('hex')!==gcpSnapshot.sha256)
-      throw Object.assign(new Error('attempt GCP snapshot failed its integrity check'),{code:'gcp_snapshot_changed'});
     const {manifest,pipeline}=coordinatorPipelineManifest(dataset,attempt,attempt.options,capabilities,gcpSnapshot);
     const submission={schemaVersion:1,submissionId:attempt.id,manifest,pipeline,capabilityFingerprint:capabilities.capabilityFingerprint};
     envelope={protocol:PREPARED_ENVELOPE_PROTOCOL,schemaVersion:3,activationId:crypto.randomUUID(),viewerTaskId:task.id,viewerAttemptId:attempt.id,submission};
   }
-  const gcpSnapshot=processing.getAttemptGcpSnapshot?.(attempt.id)||null;
-  if(gcpSnapshot&&crypto.createHash('sha256').update(gcpSnapshot.content).digest('hex')!==gcpSnapshot.sha256)
-    throw Object.assign(new Error('attempt GCP snapshot failed its integrity check'),{code:'gcp_snapshot_changed'});
   let prepared=sourceIntake.outbox.persistIntent({localJobId:job.id,owner:job.lease_owner,origin:source.origin,
     authorityId:source.authorityId,principalId:source.principalId,environment:source.environment,envelope});
   let snapshotRow=processing.database.prepare('SELECT snapshot_id FROM viewer_source_snapshots WHERE attempt_id=?').get(attempt.id);
@@ -342,11 +341,11 @@ async function processSubmit(job,{processing,storage,config,providerCredentials,
   const adapter=adapterFactory(provider,config,providerCredentials);
   const photo=/\.(?:jpe?g|png|tiff?|dng|raw|heic)$/i,auxiliary=/\.(?:txt|geojson|json|zip|las|laz)$/i,mapped=[];for(const file of dataset.files){const absolute=storage.resolve(dataset.rootKey,`${dataset.relativePath}/${file.relativePath}`,{mustExist:true}),stat=fs.statSync(absolute);if(stat.size!==file.byteSize||await hashFile(absolute,{signal})!==file.sha256)throw Object.assign(new Error('dataset source changed after finalization'),{code:'dataset_source_changed'});const role=file.processingRole||'auto',isPhoto=photo.test(file.relativePath),isAux=auxiliary.test(file.relativePath);if(role==='gcp_source'||role==='administrative'||(role==='auto'&&!isPhoto))continue;if(role==='image'&&!isPhoto)throw Object.assign(new Error('a dataset image role references an unsupported image type'),{code:'unsupported_source_file'});if(role==='provider_input'&&!isAux)throw Object.assign(new Error('a provider input role references an unsupported source type'),{code:'unsupported_source_file'});mapped.push({relativePath:file.relativePath,absolutePath:absolute,processingRole:role});}
   storage.requireProcessingHeadroom(dataset.byteSize,processing.activeProcessingReservationBytes(attempt.id),processing.activeDerivativeReservationBytes());
-  const gcpSnapshot=processing.getAttemptGcpSnapshot?.(attempt.id)||null;
-  if(gcpSnapshot&&crypto.createHash('sha256').update(gcpSnapshot.content).digest('hex')!==gcpSnapshot.sha256)
+  const gcpSnapshot=processing.getAttemptGcpSnapshot?.(attempt.id)||null,gcpBytes=retainedGcpBytes(gcpSnapshot);
+  if(gcpSnapshot&&crypto.createHash('sha256').update(gcpBytes).digest('hex')!==gcpSnapshot.sha256)
     throw Object.assign(new Error('attempt GCP snapshot failed its integrity check'),{code:'gcp_snapshot_changed'});
   if(gcpSnapshot)for(let i=mapped.length-1;i>=0;i--)if(path.basename(mapped[i].relativePath).toLowerCase()==='gcp_list.txt')mapped.splice(i,1);
-  if(gcpSnapshot)mapped.push({relativePath:'gcp_list.txt',buffer:Buffer.from(gcpSnapshot.content,'utf8')});
+  if(gcpSnapshot)mapped.push({relativePath:'gcp_list.txt',buffer:gcpBytes});
   const basenames=new Set();for(const file of mapped){const name=path.basename(file.relativePath).toLowerCase();if(basenames.has(name))throw Object.assign(new Error('dataset contains duplicate submitted basenames'),{code:'duplicate_source_basename'});basenames.add(name);}const photoFiles=mapped.filter((file)=>photo.test(file.relativePath)),auxiliaryFiles=mapped.filter((file)=>!photo.test(file.relativePath)),files=[...photoFiles,...auxiliaryFiles];if(!photoFiles.length)throw Object.assign(new Error('dataset has no processable images'),{code:'unsupported_source_file'});const maxImages=Number(provider.capabilities?.maxImages);if(Number.isSafeInteger(maxImages)&&maxImages>0&&photoFiles.length>maxImages)throw Object.assign(new Error('dataset exceeds the provider image limit'),{code:'provider_image_limit_exceeded'});
   const sourceFileByPath=new Map(dataset.files.map(file=>[file.relativePath,file]));
   const actualInputFiles=files.map(file=>{const source=sourceFileByPath.get(file.relativePath);return{relativePath:file.relativePath,byteSize:file.buffer?file.buffer.length:source.byteSize,sha256:file.buffer?crypto.createHash('sha256').update(file.buffer).digest('hex'):source.sha256};});

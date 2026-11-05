@@ -553,7 +553,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     const evidence=providerResultEvidence(attempt,status,now());if(!evidence)return false;
     this.database.prepare('UPDATE processing_attempt_provenance SET provider_result_json=? WHERE attempt_id=? AND provider_result_json IS NULL').run(JSON.stringify(evidence),attempt.id);return true;
   });}
-  getAttemptGcpSnapshot(id){const row=this.database.prepare('SELECT * FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(id);return row?{attemptId:row.attempt_id,sha256:row.sha256,content:row.content_text,correspondenceCount:Number(row.correspondence_count),createdAt:row.created_at}:null;}
+  getAttemptGcpSnapshot(id){const row=this.database.prepare('SELECT * FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(id);if(!row)return null;const content=row.content_text,snapshot={attemptId:row.attempt_id,sha256:row.sha256,content,correspondenceCount:Number(row.correspondence_count),createdAt:row.created_at};Object.defineProperty(snapshot,'contentBytes',{value:Buffer.from(content,'utf8')});return snapshot;}
   getAttemptGcpEvidence(id){
     const row=this.database.prepare('SELECT * FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(id);if(!row?.evidence_json)return null;
     let evidence;try{evidence=JSON.parse(row.evidence_json);}catch{return null;}

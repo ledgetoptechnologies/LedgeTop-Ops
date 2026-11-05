@@ -304,6 +304,7 @@ class PreparedSubmissionOutbox {
       requestSha256: intent.sourceIntakeSha256,
     };
     if (!response || Object.getPrototypeOf(response) !== Object.prototype
+        || response.sourceIntakeVersion !== 2
         || response.jobId !== expected.jobId || response.attemptId !== expected.attemptId
         || response.providerTaskId !== expected.providerTaskId
         || !Number.isSafeInteger(response.generation) || response.generation < 1

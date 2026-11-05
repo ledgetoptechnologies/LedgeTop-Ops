@@ -18,6 +18,7 @@ const request = { schemaVersion: 2, submissionId: attemptId, viewerTaskId: taskI
 
 function receivingBinding() {
   return {
+    sourceIntakeVersion: 2,
     jobId: providerTaskId, attemptId, providerTaskId, generation: 2, environment: 'staging',
     manifestSha256: manifest.sha256, pipelineManifestSha256: manifest.sha256,
     sourceManifestSha256: manifest.sha256, derivedManifestSha256: derivedManifest.sha256,
@@ -29,10 +30,24 @@ function receivingBinding() {
 
 test('V2 metadata response is strictly bound to the exact prepared attempt and manifests', () => {
   assert.deepEqual(validateReceivingBinding(receivingBinding(), request, { environment: 'staging' }), receivingBinding());
-  for (const [key, value] of [['providerTaskId', attemptId], ['generation', 0], ['sourceReceipt', {}], ['environment', 'production']]) {
+  for (const [key, value] of [['sourceIntakeVersion', 1], ['providerTaskId', attemptId], ['generation', 0], ['sourceReceipt', {}], ['environment', 'production']]) {
     const changed = { ...receivingBinding(), [key]: value };
     assert.throws(() => validateReceivingBinding(changed, request, { environment: 'staging' }), { code: 'source_intake_binding_mismatch' });
   }
+});
+
+test('admission lookup uses the supported V1 route and returns a V2-bound receiving record', async () => {
+  let requested;
+  const client = new SourceIntakeClientV2({ origin: 'https://processing.example', bearerToken: 'test-only', environment: 'staging', outbox: {},
+    fetchImpl: async url => {
+      requested = new URL(url);
+      return new Response(JSON.stringify(receivingBinding()), { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+  });
+  const found = await client.findBySubmission(attemptId);
+  assert.equal(requested.pathname, `/ltds/v1/jobs/by-submission/${attemptId}`);
+  assert.equal(found.sourceIntakeVersion, 2);
+  assert.doesNotThrow(() => validateReceivingBinding(found, request, { environment: 'staging' }));
 });
 
 test('V2 capabilities are checked against the deployment and complete acceptance gates', async () => {
@@ -81,7 +96,7 @@ test('V2 metadata is posted once from immutable outbox bytes and binding is pers
   const client = new SourceIntakeClientV2({
     origin: 'https://processing.example', bearerToken: 'test-only', environment: 'staging', outbox,
     fetchImpl: async (url, init) => {
-      if (url.endsWith(`/ltds/v2/jobs/by-submission/${attemptId}`)) {
+      if (url.endsWith(`/ltds/v1/jobs/by-submission/${attemptId}`)) {
         assert.equal(init.method, 'GET');
         return new Response(JSON.stringify({ error: 'not_found' }), { status: 404, headers: { 'content-type': 'application/json' } });
       }
