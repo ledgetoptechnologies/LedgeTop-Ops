@@ -177,9 +177,8 @@ test('artifact completion verifies only after final proof, activation, verifier 
       const requestId = `${String(index + 10).padStart(8, '0')}-2222-4222-8222-222222222222`;
       const method = row.method ?? 'POST', path = row.path;
       await run.recordIntent({ requestId, method, ...row, automaticRetry: false });
-      const deletionAbsent = method === 'DELETE';
-      await run.persistResponse({ requestId, method, path, status: deletionAbsent ? 404 : 200,
-        rawResponse: deletionAbsent ? Buffer.alloc(0) : Buffer.from(JSON.stringify({ success: true, result: { id: `receipt-${index}` }, errors: [] })) });
+      await run.persistResponse({ requestId, method, path, status: 200,
+        rawResponse: Buffer.from(JSON.stringify({ success: true, result: { id: `receipt-${index}` }, errors: [] })) });
     }
     await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit: 'c'.repeat(40), status: 'prepared',
       phase: 'prepare', ledgerSHA256: '3'.repeat(64), files: 1, minimumRetentionHours: 48, automaticPruning: false,
@@ -200,7 +199,7 @@ test('artifact completion verifies only after final proof, activation, verifier 
       name: `production-auto-${run.releaseId}`, status: 'success', releaseStatus: 'success' });
     assert.equal(run.snapshot().operations[0].state, 'verified');
     assert.equal(run.snapshot().operations[0].artifact.releaseStepConclusion, 'success');
-    assert.equal(run.snapshot().operations[0].responses.at(-1).status, 404);
+    assert.equal(run.snapshot().operations[0].responses.at(-1).status, 200);
     assert.equal(run.snapshot().operations[0].responses.at(-1).providerAcknowledged, true);
     const beforeRead = api.requests.length;
     const proof = await readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32), workerName: 'ledgetop-clients',
@@ -259,6 +258,18 @@ test('artifact completion verifies only after final proof, activation, verifier 
         ciRunId: 101, ciRunAttempt: 2, workflowRunId: 124, workflowRunAttempt: 1, fetchImpl: api.fetchImpl }),
       'temporary verifier creation must retain the provider PUT method');
     } finally { wrongCreateMethod(); }
+    const wrongDeleteResponse = tamperJournalOperation(api, 'ledgetop-clients', operation => {
+      const deletion = operation.intents.find(row => row.phase === 'temporary-verifier-delete');
+      const response = operation.responses.find(row => row.requestId === deletion.requestId);
+      response.status = 404;
+      response.providerAcknowledged = false;
+    });
+    try {
+      await assert.rejects(readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32), workerName: 'ledgetop-clients',
+        releaseKind: 'retained-assets', sourceCommit: 'c'.repeat(40), releaseId: run.releaseId,
+        ciRunId: 101, ciRunAttempt: 2, workflowRunId: 124, workflowRunAttempt: 1, fetchImpl: api.fetchImpl }),
+      'the separate verifier-absence GET cannot acknowledge a failed DELETE');
+    } finally { wrongDeleteResponse(); }
     await assert.rejects(readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32), workerName: 'ledgetop-clients',
       releaseKind: 'backend-sync', sourceCommit: 'c'.repeat(40), releaseId: run.releaseId,
       ciRunId: 101, ciRunAttempt: 2, workflowRunId: 124, workflowRunAttempt: 1, fetchImpl: api.fetchImpl }));

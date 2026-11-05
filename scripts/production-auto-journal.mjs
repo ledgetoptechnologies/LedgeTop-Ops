@@ -412,7 +412,7 @@ function verifiedOperationEvidence(op) {
         : intent.phase === 'temporary-verifier-delete' ? 'DELETE' : 'POST';
       const response = responseById.get(intent.requestId);
       return intent.method === expectedMethod && response?.providerAcknowledged === true
-        && (expectedMethod === 'DELETE' ? response.status === 404 : [200,201,202].includes(response.status));
+        && [200,201,202].includes(response.status);
     });
     const parent = stage?.parentVersionId, candidate = stage?.candidateVersionId;
     if (!(verifierCreateIndexes[0] < index('asset-session')
