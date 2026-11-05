@@ -4,8 +4,9 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { canonical, hash as sha256Hex, resourcesShape, varsOf, validateInstallation,
-  ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, CANONICAL_INSTALLED_PROFILE_V4_SHA256 }
+  CloudflareReader, capture, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, CANONICAL_INSTALLED_PROFILE_V4_SHA256 }
   from '../../production-deploy.mjs';
+import { performance } from 'node:perf_hooks';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const PROFILE_PATH = new URL('./profile.json', import.meta.url);
@@ -32,6 +33,11 @@ const APP_NAMES = Object.freeze(['operations', 'client']);
 const MAX_QUERY_BYTES = 12 * 1024 * 1024;
 const MAX_QUERY_ROWS = 5_001;
 const MAX_RELEASE_EVIDENCE_AGE_MS = 60_000;
+const MAX_SAME_RUN_BASELINE_AGE_MS = 45 * 60_000;
+const PRODUCTION_SESSIONS = new WeakSet();
+const TEST_SESSIONS = new WeakSet();
+const PRODUCTION_ADMISSIONS = new WeakSet();
+const TEST_ADMISSIONS = new WeakSet();
 
 function fail(code) { throw Object.assign(new Error(code), { code }); }
 function hash(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
@@ -301,7 +307,6 @@ async function readQuery({ token, fetchImpl, databaseId, sql }) {
 }
 
 export async function readInstalledSchemaPreservationMetadata({ token, fetchImpl = fetch, now = () => new Date() } = {}) {
-  const observedAt = now().toISOString();
   const databases = {};
   for (const app of APP_NAMES) {
     const databaseId = PRODUCTION_DATABASES[app];
@@ -314,21 +319,26 @@ export async function readInstalledSchemaPreservationMetadata({ token, fetchImpl
     const schema = summarizeInstalledSchema(schemaRows);
     databases[app] = Object.freeze({ databaseId, ledger: Object.freeze(checkedLedger), schema });
   }
+  const observedAt = now().toISOString();
   return Object.freeze({ schemaVersion: 1, purpose: 'installed-schema-preservation-metadata-evidence', accountId: ACCOUNT_ID,
     observedAt, readOnly: true, executesDdl: false, databases: Object.freeze(databases) });
 }
 
-const RELEASE_OPTION_KEYS = Object.freeze(['sourceCommit', 'canonicalV4Profile', 'selectedApp', 'baselineCapture',
-  'currentCapture', 'baselineAllowLatest', 'currentAllowLatest', 'baselineExpectedDeploymentVersions',
-  'currentExpectedDeploymentVersions', 'opsSuccessorReaderContract', 'opsSuccessorReaderReleaseCandidateId']);
-
-function releaseAdmissionAt(classification, options, now, offlineOnly) {
-  if (!isRecord(options) || Reflect.ownKeys(options).some(key => typeof key !== 'string' || !RELEASE_OPTION_KEYS.includes(key))) {
-    fail('preservation_release_admission_refused');
+function checkCanonicalV4Profile(profile) {
+  if (!isRecord(profile) || sha256Hex(canonical(profile)) !== CANONICAL_INSTALLED_PROFILE_V4_SHA256) {
+    fail('preservation_v4_profile_unpinned');
   }
-  const { sourceCommit, canonicalV4Profile, selectedApp, baselineCapture, currentCapture,
-    baselineAllowLatest = {}, currentAllowLatest = {}, baselineExpectedDeploymentVersions = {},
-    currentExpectedDeploymentVersions = {}, opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId } = options;
+}
+
+function validateCanonicalCapture(snapshot, { profile, selectedApp, allowLatest = {}, expectedDeploymentVersions = {},
+  opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId }) {
+  if (!['operations', 'client', 'ops-sync'].includes(selectedApp)) fail('preservation_selected_app_invalid');
+  return validateInstallation(snapshot, { profile, selectedApp, allowLatest, expectedDeploymentVersions,
+    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
+    ordinaryFrontendApp: selectedApp, opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId });
+}
+
+function checkClassificationFresh(classification, sourceCommit, profile, now) {
   if (!exactKeys(classification, ['schemaVersion', 'purpose', 'status', 'sourceCommit', 'profileSourceCommit', 'observedAt',
     'accountId', 'profileSha256', 'databases', 'allSourceMigrationsInstalled', 'applicationSchemaReady', 'executesDdl',
     'authorizesMigration', 'authorizesFeatureActivation'])
@@ -336,17 +346,12 @@ function releaseAdmissionAt(classification, options, now, offlineOnly) {
     || classification.status !== 'installed-schema-preserved-with-pending-source-migrations'
     || classification.sourceCommit !== sourceCommit || !COMMIT.test(sourceCommit ?? '')
     || classification.accountId !== ACCOUNT_ID || !iso(classification.observedAt) || !Number.isFinite(now)
-    || Date.parse(classification.observedAt) > now
-    || now - Date.parse(classification.observedAt) > MAX_RELEASE_EVIDENCE_AGE_MS
+    || Date.parse(classification.observedAt) > now || now - Date.parse(classification.observedAt) > MAX_RELEASE_EVIDENCE_AGE_MS
     || classification.profileSourceCommit !== SOURCE_COMMIT || classification.profileSha256 !== PROFILE_SHA256
     || classification.allSourceMigrationsInstalled !== false || classification.applicationSchemaReady !== false
     || classification.executesDdl !== false || classification.authorizesMigration !== false
-    || classification.authorizesFeatureActivation !== false
-    || !exactKeys(classification.databases, APP_NAMES)
-    || !isRecord(canonicalV4Profile) || sha256Hex(canonical(canonicalV4Profile)) !== CANONICAL_INSTALLED_PROFILE_V4_SHA256
-    || !['operations', 'client', 'ops-sync'].includes(selectedApp)
-    || !isRecord(baselineCapture) || !isRecord(currentCapture)) {
-    fail('preservation_release_admission_refused');
+    || classification.authorizesFeatureActivation !== false || !exactKeys(classification.databases, APP_NAMES)) {
+    fail('preservation_current_evidence_stale_or_invalid');
   }
   for (const app of APP_NAMES) {
     const db = classification.databases[app], expected = PROFILE.databases[app];
@@ -358,38 +363,163 @@ function releaseAdmissionAt(classification, options, now, offlineOnly) {
       || db.sourceInventorySha256 !== expected.sourceInventorySha256 || !sameJson(db.pendingSourceNames, expected.pendingSourceNames)
       || db.schemaObjectCount !== expected.schema.objectCount || db.schemaObjectsSha256 !== expected.schema.objectsSha256
       || !Number.isSafeInteger(db.cloudflareInternalRowsObserved) || db.cloudflareInternalRowsObserved < 0
-      || db.allSourceMigrationsInstalled !== false) fail('preservation_release_admission_refused');
+      || db.allSourceMigrationsInstalled !== false) fail('preservation_current_evidence_invalid');
   }
-  const validateCapture = (snapshot, allowLatest, expectedDeploymentVersions) => validateInstallation(snapshot, {
-    profile: canonicalV4Profile, selectedApp,
-    allowLatest, expectedDeploymentVersions,
-    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
-    ordinaryFrontendApp: selectedApp, opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId,
-  });
-  const checkedBaseline = validateCapture(baselineCapture, baselineAllowLatest, baselineExpectedDeploymentVersions);
-  const checkedCurrent = validateCapture(currentCapture, currentAllowLatest, currentExpectedDeploymentVersions);
+}
+
+function checkFreshOperation(startMono, finishMono, captureWall, metadata, finishWall) {
+  if (finishMono < startMono || finishMono - startMono > MAX_RELEASE_EVIDENCE_AGE_MS
+    || !Number.isFinite(captureWall) || captureWall > finishWall || finishWall - captureWall > MAX_RELEASE_EVIDENCE_AGE_MS
+    || !iso(metadata.observedAt) || Date.parse(metadata.observedAt) > finishWall
+    || finishWall - Date.parse(metadata.observedAt) > MAX_RELEASE_EVIDENCE_AGE_MS) {
+    fail('preservation_capture_or_metadata_stale');
+  }
+}
+
+function ensureFactoryOptions(options, allowedKeys) {
+  if (!isRecord(options) || Reflect.ownKeys(options).some(key => typeof key !== 'string' || !allowedKeys.includes(key))) {
+    fail('preservation_session_options_invalid');
+  }
+}
+
+async function createSessionCore({ sourceCommit, canonicalV4Profile, selectedApp, token,
+  baselineAllowLatest = {}, baselineExpectedDeploymentVersions = {}, opsSuccessorReaderContract,
+  opsSuccessorReaderReleaseCandidateId, fetchImpl = fetch, testOnly = false, clock,
+  testHooks = {} } = {}) {
+  profileIsPinned(PROFILE);
+  checkCanonicalV4Profile(canonicalV4Profile);
+  if (!COMMIT.test(sourceCommit ?? '') || !['operations', 'client', 'ops-sync'].includes(selectedApp)
+    || typeof token !== 'string' || !/^[\x21-\x7e]{20,16384}$/u.test(token)
+    || typeof fetchImpl !== 'function') fail('preservation_session_target_invalid');
+  const wallNow = testOnly ? clock.wallNow : () => Date.now();
+  const monoNow = testOnly ? clock.monotonicNow : () => performance.now();
+  if (testOnly && (!clock || typeof clock.wallNow !== 'function' || typeof clock.monotonicNow !== 'function')) {
+    fail('preservation_test_clock_invalid');
+  }
+  const source = readSourceMigrationInventory(sourceCommit);
+  const reader = new CloudflareReader(ACCOUNT_ID, token, fetchImpl);
+  const startMono = monoNow();
+  const baselineSnapshot = await capture(reader, { selectedApp, expectedDeploymentVersions: baselineExpectedDeploymentVersions });
+  const baselineCaptureWall = wallNow();
+  const baselineEvidence = await readInstalledSchemaPreservationMetadata({ token, fetchImpl,
+    now: () => new Date(wallNow()) });
+  const baselineEvidenceAfterHook = testOnly && typeof testHooks.afterMetadata === 'function'
+    ? await testHooks.afterMetadata('baseline', baselineEvidence) ?? baselineEvidence : baselineEvidence;
+  const baselineFinishMono = monoNow(), baselineFinishWall = wallNow();
+  checkFreshOperation(startMono, baselineFinishMono, baselineCaptureWall, baselineEvidenceAfterHook, baselineFinishWall);
+  const baselineClassification = validateInstalledSchemaPreservation({ evidence: baselineEvidenceAfterHook,
+    sourceCommit, sourceRows: source.rows, sourceFiles: source.files, now: baselineFinishWall,
+    maxAgeMs: MAX_RELEASE_EVIDENCE_AGE_MS });
+  const checkedBaseline = validateCanonicalCapture(baselineSnapshot, { profile: canonicalV4Profile, selectedApp,
+    allowLatest: baselineAllowLatest, expectedDeploymentVersions: baselineExpectedDeploymentVersions,
+    opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId });
   const baselineControlsSha256 = protectedControlsFingerprint(checkedBaseline);
-  const currentControlsSha256 = protectedControlsFingerprint(checkedCurrent);
-  if (baselineControlsSha256 !== currentControlsSha256) fail('preservation_protected_controls_changed');
-  return Object.freeze({ schemaVersion: 1, purpose: 'installed-schema-preservation-release-admission',
+  // Start the 45-minute session lifetime before the baseline GETs, so validation
+  // or slow metadata reads cannot silently extend the original baseline age.
+  const baselineMonotonic = startMono;
+  let busy = false, closed = false;
+  const session = Object.freeze({
+    accountId: ACCOUNT_ID, sourceCommit, selectedApp,
+    async observe(observeOptions = {}) {
+      ensureFactoryOptions(observeOptions, ['allowLatest', 'expectedDeploymentVersions']);
+      const { allowLatest = {}, expectedDeploymentVersions = {} } = observeOptions;
+      if (closed || busy) fail('preservation_session_closed_or_busy');
+      if (monoNow() - baselineMonotonic > MAX_SAME_RUN_BASELINE_AGE_MS) {
+        closed = true; reader.token = ''; fail('preservation_same_run_baseline_expired');
+      }
+      busy = true;
+      try {
+        const observeStartMono = monoNow();
+        const currentSnapshot = await capture(reader, { selectedApp, expectedDeploymentVersions });
+        const currentCaptureWall = wallNow();
+        const currentEvidence = await readInstalledSchemaPreservationMetadata({ token: reader.token, fetchImpl,
+          now: () => new Date(wallNow()) });
+        const evidenceAfterHook = testOnly && typeof testHooks.afterMetadata === 'function'
+          ? await testHooks.afterMetadata('current', currentEvidence) ?? currentEvidence : currentEvidence;
+        const finishMono = monoNow(), finishWall = wallNow();
+        checkFreshOperation(observeStartMono, finishMono, currentCaptureWall, evidenceAfterHook, finishWall);
+        const classification = validateInstalledSchemaPreservation({ evidence: evidenceAfterHook,
+          sourceCommit, sourceRows: source.rows, sourceFiles: source.files, now: finishWall,
+          maxAgeMs: MAX_RELEASE_EVIDENCE_AGE_MS });
+        checkClassificationFresh(classification, sourceCommit, canonicalV4Profile, finishWall);
+        const checkedCurrent = validateCanonicalCapture(currentSnapshot, { profile: canonicalV4Profile, selectedApp,
+          allowLatest, expectedDeploymentVersions, opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId });
+        const currentControlsSha256 = protectedControlsFingerprint(checkedCurrent);
+        if (currentControlsSha256 !== baselineControlsSha256) fail('preservation_protected_controls_changed');
+        const receipt = Object.freeze({ schemaVersion: 1, purpose: 'installed-schema-preservation-same-run-observation',
+          status: 'preserved-installed-schema-with-pending-source-migrations', accountId: ACCOUNT_ID,
+          sourceCommit, selectedApp, profileSha256: PROFILE_SHA256,
+          canonicalV4ProfileSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
+          baselineObservedAt: baselineEvidence.observedAt, currentCaptureObservedAt: new Date(currentCaptureWall).toISOString(),
+          observedAt: classification.observedAt, baselineAgeMs: Math.floor(finishMono - baselineMonotonic),
+          baselineProtectedControlsSha256: baselineControlsSha256,
+          currentProtectedControlsSha256: currentControlsSha256,
+          allSourceMigrationsInstalled: false, applicationSchemaReady: false, executesDdl: false,
+          authorizesMigration: false, authorizesFeatureActivation: false,
+          ...(testOnly ? { testOnly: true } : { offlineOnly: false }) });
+        (testOnly ? TEST_ADMISSIONS : PRODUCTION_ADMISSIONS).add(receipt);
+        return receipt;
+      } catch (error) {
+        closed = true; reader.token = '';
+        throw error;
+      } finally { busy = false; }
+    },
+    close() { if (!closed) { closed = true; reader.token = ''; } },
+  });
+  (testOnly ? TEST_SESSIONS : PRODUCTION_SESSIONS).add(session);
+  return session;
+}
+
+const PRODUCTION_FACTORY_KEYS = Object.freeze(['sourceCommit', 'canonicalV4Profile', 'selectedApp', 'token',
+  'baselineAllowLatest', 'baselineExpectedDeploymentVersions', 'opsSuccessorReaderContract', 'opsSuccessorReaderReleaseCandidateId']);
+
+export async function createInstalledSchemaPreservationSession(options = {}) {
+  ensureFactoryOptions(options, PRODUCTION_FACTORY_KEYS);
+  return createSessionCore(options);
+}
+
+/** Explicit fake-HTTP boundary for tests; its session and receipts cannot create production admission evidence. */
+export async function createInstalledSchemaPreservationTestSession(options = {}) {
+  ensureFactoryOptions(options, [...PRODUCTION_FACTORY_KEYS, 'fetchImpl', 'clock', 'testHooks']);
+  if (typeof options.fetchImpl !== 'function') fail('preservation_test_fetch_required');
+  return createSessionCore({ ...options, testOnly: true });
+}
+
+export function isProductionInstalledSchemaPreservationSession(value) { return PRODUCTION_SESSIONS.has(value); }
+export function isProductionInstalledSchemaPreservationAdmission(value) {
+  return PRODUCTION_ADMISSIONS.has(value) && value.accountId === ACCOUNT_ID
+    && iso(value.observedAt) && Date.now() >= Date.parse(value.observedAt)
+    && Date.now() - Date.parse(value.observedAt) <= MAX_RELEASE_EVIDENCE_AGE_MS
+    && Number.isSafeInteger(value.baselineAgeMs) && value.baselineAgeMs >= 0
+    && value.baselineAgeMs <= MAX_SAME_RUN_BASELINE_AGE_MS;
+}
+export function isTestInstalledSchemaPreservationAdmission(value) { return TEST_ADMISSIONS.has(value); }
+
+/** Raw saved captures can be checked for offline review only; this never brands production evidence. */
+export function validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, options = {}) {
+  ensureFactoryOptions(options, ['sourceCommit', 'canonicalV4Profile', 'selectedApp', 'baselineCapture',
+    'currentCapture', 'baselineAllowLatest', 'currentAllowLatest', 'baselineExpectedDeploymentVersions',
+    'currentExpectedDeploymentVersions', 'opsSuccessorReaderContract', 'opsSuccessorReaderReleaseCandidateId', 'now']);
+  const { sourceCommit, canonicalV4Profile, selectedApp, baselineCapture, currentCapture,
+    baselineAllowLatest = {}, currentAllowLatest = {}, baselineExpectedDeploymentVersions = {},
+    currentExpectedDeploymentVersions = {}, opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId, now } = options;
+  checkCanonicalV4Profile(canonicalV4Profile);
+  checkClassificationFresh(classification, sourceCommit, canonicalV4Profile, now);
+  const baseline = validateCanonicalCapture(baselineCapture, { profile: canonicalV4Profile, selectedApp,
+    allowLatest: baselineAllowLatest, expectedDeploymentVersions: baselineExpectedDeploymentVersions,
+    opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId });
+  const current = validateCanonicalCapture(currentCapture, { profile: canonicalV4Profile, selectedApp,
+    allowLatest: currentAllowLatest, expectedDeploymentVersions: currentExpectedDeploymentVersions,
+    opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId });
+  const before = protectedControlsFingerprint(baseline), after = protectedControlsFingerprint(current);
+  if (before !== after) fail('preservation_protected_controls_changed');
+  return Object.freeze({ schemaVersion: 1, purpose: 'installed-schema-preservation-offline-check',
     status: 'preserved-installed-schema-with-pending-source-migrations', accountId: ACCOUNT_ID,
-    sourceCommit, observedAt: classification.observedAt, selectedApp, offlineOnly,
+    sourceCommit, selectedApp, observedAt: classification.observedAt, offlineOnly: true,
     profileSha256: PROFILE_SHA256, canonicalV4ProfileSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
-    baselineProtectedControlsSha256: baselineControlsSha256, currentProtectedControlsSha256: currentControlsSha256,
+    baselineProtectedControlsSha256: before, currentProtectedControlsSha256: after,
     allSourceMigrationsInstalled: false, applicationSchemaReady: false, executesDdl: false,
     authorizesMigration: false, authorizesFeatureActivation: false });
-}
-
-export function validateInstalledSchemaPreservationReleaseAdmission(classification, options = {}) {
-  if (Object.hasOwn(options ?? {}, 'now')) fail('preservation_release_admission_refused');
-  return releaseAdmissionAt(classification, options, Date.now(), false);
-}
-
-/** Historical-clock admission is restricted to offline saved-artifact review and is labeled in its result. */
-export function validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, options = {}) {
-  if (!isRecord(options) || !Number.isFinite(options.now)) fail('preservation_offline_clock_invalid');
-  const { now, ...admissionOptions } = options;
-  return releaseAdmissionAt(classification, admissionOptions, now, true);
 }
 
 const PINNED_PROFILE_BYTES_SHA256 = '4267e120dd08ef7eb7a405e1e75e8f700b5147cbde4169f27268cc4f09ad821f';

@@ -6,10 +6,12 @@ import { createHash } from 'node:crypto';
 import {
   PROFILE, SOURCE_COMMIT, LEDGER_SQL, SCHEMA_SQL,
   readSourceMigrationInventory, summarizeInstalledSchema, validateInstalledSchemaPreservation,
-  validateInstalledSchemaPreservationReleaseAdmission, validateInstalledSchemaPreservationReleaseAdmissionOffline,
+  createInstalledSchemaPreservationTestSession, isProductionInstalledSchemaPreservationAdmission,
+  isProductionInstalledSchemaPreservationSession, isTestInstalledSchemaPreservationAdmission,
+  validateInstalledSchemaPreservationReleaseAdmissionOffline,
   readInstalledSchemaPreservationMetadata,
 } from './installed-schema-preservation.mjs';
-import { CANONICAL_INSTALLED_PROFILE_V4_SHA256 } from '../../production-deploy.mjs';
+import { PROFILE as DEPLOY_PROFILE, CANONICAL_INSTALLED_PROFILE_V4_SHA256 } from '../../production-deploy.mjs';
 
 const HERE = new URL('./', import.meta.url);
 const fixture = JSON.parse(fs.readFileSync(new URL('actual-metadata-evidence.fixture.json', HERE), 'utf8'));
@@ -17,6 +19,8 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const clone = value => structuredClone(value);
 const fresh = evidence => Date.parse(evidence.observedAt);
 const OFFLINE_ARTIFACTS = 'C:/Projects/Ledge Top Operations/_artifacts/production-release-readback-20261104';
+const v4Candidate = () => JSON.parse(fs.readFileSync(path.join(OFFLINE_ARTIFACTS,
+  'canonical-installed-profile-v4-2686c535-offline-20261105', 'candidate.private.json'), 'utf8'));
 
 test('sanitized actual metadata classifies the exact installed ledgers and pending source migrations', () => {
   const source = readSourceMigrationInventory(SOURCE_COMMIT);
@@ -131,7 +135,7 @@ test('fresh reader issues only the two pinned SELECT statements per exact produc
     now: () => new Date(fixture.observedAt) }), /preservation_provider_write_metadata_invalid/);
 });
 
-test('hash strings alone cannot admit and release freshness has a fixed sixty-second limit', () => {
+test('caller snapshots and hash-shaped values cannot create production admission', () => {
   const source = readSourceMigrationInventory(SOURCE_COMMIT);
   const classification = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: SOURCE_COMMIT,
     sourceRows: source.rows, sourceFiles: source.files, now: fresh(fixture) });
@@ -140,22 +144,97 @@ test('hash strings alone cannot admit and release freshness has a fixed sixty-se
       sourceCommit: SOURCE_COMMIT, canonicalV4ProfileSha256: fakeControlSha,
       protectedControlsBeforeSha256: fakeControlSha, protectedControlsAfterSha256: fakeControlSha,
       now: fresh(fixture),
-    }), /preservation_release_admission_refused/);
+    }), /preservation_session_options_invalid/);
   }
   assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
     sourceCommit: SOURCE_COMMIT, canonicalV4ProfileSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
     protectedControlsBeforeSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
     protectedControlsAfterSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
     maxAgeMs: 600_000, now: fresh(fixture),
-  }), /preservation_release_admission_refused/);
+  }), /preservation_session_options_invalid/);
+  const profile = fs.existsSync(path.join(OFFLINE_ARTIFACTS, 'canonical-installed-profile-v4-2686c535-offline-20261105', 'candidate.private.json'))
+    ? v4Candidate().profile : null;
   assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
-    sourceCommit: SOURCE_COMMIT, canonicalV4Profile: PROFILE, selectedApp: 'operations',
+    sourceCommit: SOURCE_COMMIT, canonicalV4Profile: profile, selectedApp: 'operations',
     baselineCapture: {}, currentCapture: {}, now: fresh(fixture) + 60_001,
-  }), /preservation_release_admission_refused/);
-  assert.throws(() => validateInstalledSchemaPreservationReleaseAdmission(classification, {
-    sourceCommit: SOURCE_COMMIT, canonicalV4Profile: PROFILE, selectedApp: 'operations',
-    baselineCapture: {}, currentCapture: {}, now: fresh(fixture),
-  }), /preservation_release_admission_refused/);
+  }), /preservation_current_evidence_stale_or_invalid/);
+});
+
+test('fake HTTP same-run session reads actual full capture and D1 metadata and brands only its fresh receipt', {
+  skip: !fs.existsSync(path.join(OFFLINE_ARTIFACTS, 'ops-canonical-execution-2686-20261105-02', 'authenticated-final-capture.private.json'))
+    || !fs.existsSync(path.join(OFFLINE_ARTIFACTS, 'canonical-installed-profile-v4-2686c535-offline-20261105', 'candidate.private.json'))
+    || !fs.existsSync(path.join(OFFLINE_ARTIFACTS, 'actual-installed-metadata-20261105-01.private.json')),
+}, async () => {
+  const savedCapture = JSON.parse(fs.readFileSync(path.join(OFFLINE_ARTIFACTS,
+    'ops-canonical-execution-2686-20261105-02', 'authenticated-final-capture.private.json'), 'utf8'));
+  const candidate = JSON.parse(fs.readFileSync(path.join(OFFLINE_ARTIFACTS,
+    'canonical-installed-profile-v4-2686c535-offline-20261105', 'candidate.private.json'), 'utf8'));
+  const actualMetadata = JSON.parse(fs.readFileSync(path.join(OFFLINE_ARTIFACTS, 'actual-installed-metadata-20261105-01.private.json'), 'utf8'));
+  const appsByWorker = Object.fromEntries(Object.entries(DEPLOY_PROFILE.workers).map(([app, row]) => [row.name, app]));
+  let wall = Date.parse('2026-11-05T15:50:00.000Z'), mono = 1000;
+  const fakeFetch = async (url, init = {}) => {
+    const parsed = new URL(url), workerMatch = /\/workers\/scripts\/([^/]+)(.*)$/u.exec(parsed.pathname);
+    if (parsed.pathname.includes('/d1/database/')) {
+      assert.equal(init.method, 'POST');
+      const dbid = parsed.pathname.match(/\/d1\/database\/([^/]+)\/query/u)[1];
+      const app = Object.keys(actualMetadata.databases).find(key => actualMetadata.databases[key].id.toLowerCase() === dbid.toLowerCase());
+      assert.ok(app);
+      const sql = JSON.parse(init.body).sql, db = actualMetadata.databases[app];
+      const results = sql === LEDGER_SQL ? db.ledger : sql === SCHEMA_SQL ? db.schema : null;
+      assert.ok(results);
+      return new Response(JSON.stringify({ success: true, result: [{ success: true, results,
+        database_id: dbid, meta: { changes: 0, changed_db: false, database_id: dbid } }] }), { status: 200 });
+    }
+    assert.equal(init.method, 'GET');
+    if (!workerMatch) {
+      const modern = /\/workers\/([^/]+)\/versions\/([^/]+)\?include=modules$/u.exec(parsed.pathname + parsed.search);
+      assert.ok(modern, parsed.pathname + parsed.search);
+      const app = appsByWorker[modern[1]], row = savedCapture.snapshot[app];
+      assert.equal(modern[2], row.version.id);
+      return new Response(JSON.stringify({ success: true, result: row.modern }), { status: 200 });
+    }
+    const app = appsByWorker[workerMatch[1]], row = savedCapture.snapshot[app], suffix = workerMatch[2] + parsed.search;
+    assert.ok(row, workerMatch[1]);
+    let result;
+    if (suffix === '/deployments?per_page=1') result = { deployments: [row.deployment] };
+    else if (suffix === '/versions?per_page=1') result = { items: [{ id: row.latest }] };
+    else if (suffix === `/versions/${row.version.id}`) result = row.version;
+    else if (suffix === '/settings') result = row.settings;
+    else if (suffix === '/schedules') result = row.schedules;
+    else if (suffix.startsWith('/versions/')) result = row.latestVersion;
+    assert.ok(result, `${app} ${suffix}`);
+    return new Response(JSON.stringify({ success: true, result }), { status: 200 });
+  };
+  const session = await createInstalledSchemaPreservationTestSession({ sourceCommit: SOURCE_COMMIT,
+    canonicalV4Profile: candidate.profile, selectedApp: 'operations', token: 'fake-test-token-'.padEnd(32, 'x'),
+    fetchImpl: fakeFetch, clock: { wallNow: () => wall += 2, monotonicNow: () => mono += 1 } });
+  assert.equal(isProductionInstalledSchemaPreservationAdmission({}), false);
+  assert.equal(isProductionInstalledSchemaPreservationAdmission(session), false);
+  assert.equal(isProductionInstalledSchemaPreservationSession(session), false);
+  const receipt = await session.observe();
+  assert.equal(receipt.status, 'preserved-installed-schema-with-pending-source-migrations');
+  assert.equal(receipt.offlineOnly, undefined);
+  assert.equal(receipt.testOnly, true);
+  assert.equal(isTestInstalledSchemaPreservationAdmission(receipt), true);
+  assert.equal(isProductionInstalledSchemaPreservationAdmission(receipt), false);
+  assert.equal(isTestInstalledSchemaPreservationAdmission(clone(receipt)), false);
+  assert.equal(receipt.allSourceMigrationsInstalled, false);
+  assert.equal(receipt.applicationSchemaReady, false);
+  assert.equal(receipt.executesDdl, false);
+  await assert.rejects(session.observe({ unreviewedCandidateConfiguration: true }), /preservation_session_options_invalid/);
+  session.close();
+  const makeTestSession = extra => createInstalledSchemaPreservationTestSession({ sourceCommit: SOURCE_COMMIT,
+    canonicalV4Profile: candidate.profile, selectedApp: 'operations', token: 'fake-test-token-'.padEnd(32, 'x'),
+    fetchImpl: fakeFetch, clock: { wallNow: () => wall += 2, monotonicNow: () => mono += 1 }, ...extra });
+  const staleSession = await makeTestSession({ testHooks: { afterMetadata(stage, evidence) {
+    return stage === 'current' ? { ...evidence, observedAt: '2020-01-01T00:00:00.000Z' } : evidence;
+  } } });
+  await assert.rejects(staleSession.observe(), /preservation_capture_or_metadata_stale/);
+  staleSession.close();
+  const expiredSession = await makeTestSession();
+  mono += 45 * 60_000 + 1;
+  await assert.rejects(expiredSession.observe(), /preservation_same_run_baseline_expired/);
+  expiredSession.close();
 });
 
 test('saved actual snapshot and v4 candidate admit offline under their captured historical clock', {
@@ -164,8 +243,7 @@ test('saved actual snapshot and v4 candidate admit offline under their captured 
 }, () => {
   const savedCapture = JSON.parse(fs.readFileSync(path.join(OFFLINE_ARTIFACTS,
     'ops-canonical-execution-2686-20261105-02', 'authenticated-final-capture.private.json'), 'utf8'));
-  const candidate = JSON.parse(fs.readFileSync(path.join(OFFLINE_ARTIFACTS,
-    'canonical-installed-profile-v4-2686c535-offline-20261105', 'candidate.private.json'), 'utf8'));
+  const candidate = v4Candidate();
   assert.equal(candidate.profileSHA256, CANONICAL_INSTALLED_PROFILE_V4_SHA256);
   const source = readSourceMigrationInventory(SOURCE_COMMIT);
   const classification = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: SOURCE_COMMIT,
@@ -190,11 +268,11 @@ test('saved actual snapshot and v4 candidate admit offline under their captured 
   assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
     sourceCommit: SOURCE_COMMIT, canonicalV4Profile: alteredProfile, selectedApp: 'operations',
     baselineCapture: savedCapture.snapshot, currentCapture: savedCapture.snapshot, now: fresh(fixture),
-  }), /preservation_release_admission_refused/);
+  }), /preservation_v4_profile_unpinned/);
   assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
     sourceCommit: SOURCE_COMMIT, canonicalV4Profile: candidate.profile, selectedApp: 'not-a-worker',
     baselineCapture: savedCapture.snapshot, currentCapture: savedCapture.snapshot, now: fresh(fixture),
-  }), /preservation_release_admission_refused/);
+  }), /preservation_selected_app_invalid/);
   const changedCandidate = clone(savedCapture.snapshot);
   changedCandidate.operations.settings.compatibility_flags.push('unreviewed-candidate-flag');
   assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {

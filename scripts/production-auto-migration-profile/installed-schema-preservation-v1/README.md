@@ -32,15 +32,26 @@ migrations, ledger order, or application schema definitions fail closed.
 The classification and release-admission helpers are not wired into either
 production runtime. They return held evidence with
 `allSourceMigrationsInstalled`, `applicationSchemaReady`, DDL, migration
-authorization, and feature activation all false. Release admission accepts the
-actual baseline and current full installation captures plus the exact v4
-profile. It calls the existing full installation validator on each capture,
-using the exact selected app, then derives and compares a digest over checked
-settings, resources/bindings, plain-variable hashes, schedules, and asset
-associations. Hash strings alone cannot admit. Production admission uses the
-wall clock with a fixed 60-second evidence age; a separate offline-only helper
-supports saved artifacts under a supplied historical clock and marks its
-receipt `offlineOnly: true`.
+authorization, and feature activation all false. `createInstalledSchemaPreservationSession`
+accepts the pinned account, source commit, selected app, v4 profile, and a
+caller-provided token. It captures and fully validates the baseline itself,
+then `observe()` captures current installation state and obtains fresh
+read-only D1 metadata itself. Both captures pass the full v4 installation
+validator; the session derives and compares a digest over checked settings,
+resources/bindings, plain-variable hashes, schedules, and asset associations.
+Current capture and metadata must be no more than 60 seconds old. The internally
+captured baseline may remain in the same process session for at most 45 minutes;
+its timestamp is never refreshed. Saved snapshots and caller hashes can only
+use the separate offline helper, which requires a historical clock and marks
+its receipt `offlineOnly: true`.
+
+Production freshness uses the system wall clock and monotonic process clock.
+Clock, fetch, and evidence hooks exist only in the explicitly named fake-HTTP
+test factory; its sessions and receipts have separate private brands. The
+production session does not establish source/CI provenance or owner approval.
+Existing runtime source and CI fences must validate those independently before
+future wiring; this held profile is not activation authority. Call `close()`
+when finished to clear the session's in-memory token.
 
 Run the focused offline checks with:
 
