@@ -12,7 +12,8 @@ const sha = value => createHash('sha256').update(value).digest('hex');
 const COMMIT = 'a'.repeat(40), RUNTIME = { profileSha256: '1'.repeat(64), moduleSha256: '2'.repeat(64), ledgerSha256: '3'.repeat(64) };
 
 function github() {
-  const refs = new Map(), commits = new Map(), trees = new Map(), blobs = new Map(), requests = []; let serial = 1;
+  const refs = new Map(), commits = new Map(), trees = new Map(), blobs = new Map(), requests = [];
+  let serial = 1, patchHook = null, nextPatchMode = null;
   trees.set('b'.repeat(40), { tree: [] });
   commits.set(COMMIT, { sha: COMMIT, tree: { sha: 'b'.repeat(40) }, parents: [] });
   commits.set('c'.repeat(40), { sha: 'c'.repeat(40), tree: { sha: 'b'.repeat(40) }, parents: [COMMIT] });
@@ -27,7 +28,15 @@ function github() {
       const name = p.slice('/git/ref/heads/'.length);
       if (method === 'GET') return refs.has(name) ? response(200, { ref: `refs/heads/${name}`, object: { sha: refs.get(name) } }) : response(404, null);
     }
-    if (p.startsWith('/git/refs/heads/') && method === 'PATCH') { const name = p.slice('/git/refs/heads/'.length); if (!refs.has(name) || body.force !== false) return response(404, {}); refs.set(name, body.sha); return response(200, { object: { sha: body.sha } }); }
+    if (p.startsWith('/git/refs/heads/') && method === 'PATCH') {
+      const name = p.slice('/git/refs/heads/'.length);
+      if (patchHook) await patchHook({ name, body });
+      const current = refs.get(name), candidate = commits.get(body.sha), mode = nextPatchMode; nextPatchMode = null;
+      if (!refs.has(name) || body.force !== false || candidate?.parents?.[0] !== current || mode === 'before-failure') return response(422, {});
+      refs.set(name, body.sha);
+      if (mode === 'after-failure') return response(500, {});
+      return response(200, { object: { sha: body.sha } });
+    }
     if (p === '/git/refs' && method === 'POST') { const name = body.ref.replace('refs/heads/', ''); if (refs.has(name)) return response(422, {}); refs.set(name, body.sha); return response(201, { object: { sha: body.sha } }); }
     if (p === '/git/blobs' && method === 'POST') { const bytes = Buffer.from(body.content, 'base64'), blob = id(); blobs.set(blob, bytes); return response(201, { sha: blob }); }
     if (p === '/git/trees' && method === 'POST') { const tree = id(); trees.set(tree, { tree: body.tree }); return response(201, { sha: tree }); }
@@ -37,7 +46,8 @@ function github() {
     if (p.startsWith('/git/blobs/')) { const b = blobs.get(p.split('/').at(-1)); return b ? response(200, { encoding: 'base64', content: b.toString('base64'), size: b.length }) : response(404, {}); }
     return response(500, {});
   };
-  return { fetchImpl, refs, commits, trees, blobs, requests };
+  return { fetchImpl, refs, commits, trees, blobs, requests,
+    setPatchHook: value => { patchHook = value; }, setNextPatchMode: value => { nextPatchMode = value; } };
 }
 
 function recipient() {
@@ -66,7 +76,7 @@ function journal(api, dir, changes = {}) {
     ciRunId: changes.ciRunId ?? 100, ciRunAttempt: changes.ciRunAttempt ?? 2,
     workflowRunId: changes.workflowRunId ?? 123, workflowRunAttempt: 1,
     runtime: changes.runtime ?? RUNTIME, recipient: changes.recipient ?? recipient(), responseDirectory: dir,
-    fetchImpl: api.fetchImpl, now: () => '2026-10-27T12:00:00.000Z' });
+    fetchImpl: changes.fetchImpl ?? api.fetchImpl, now: () => '2026-10-27T12:00:00.000Z' });
 }
 const intent = requestId => ({ requestId, method: 'POST', phase: 'activate-candidate', path: '/workers/scripts/ledgetop-clients/deployments',
   workerName: 'ledgetop-clients', automaticRetry: false, versions: [{ version_id: '11111111-1111-4111-8111-111111111111', percentage: 100 }] });
@@ -77,10 +87,130 @@ test('journal CAS persists an intent before a provider call and rejects same-rel
     const first = journal(api, dir); await first.recordIntent(intent('22222222-2222-4222-8222-222222222222'));
     assert.equal(first.snapshot().operations[0].intents.length, 1);
     assert.equal(api.refs.size, 1);
+    const beforeRestart = api.requests.length;
     const restarted = journal(api, dir);
     await assert.rejects(restarted.recordIntent(intent('33333333-3333-4333-8333-333333333333')));
+    const restartRequests = api.requests.slice(beforeRestart);
+    assert.equal(restartRequests.length, 4, 'a fresh process fully reloads ref, commit, tree and blob before refusing replay');
+    assert(restartRequests.every(row => row.method === 'GET'), 'duplicate release refusal has no write request');
     assert.equal(first.snapshot().operations[0].intents.length, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('claimed journal reuses its validated committed head and tree while writing every audit commit', async () => {
+  const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+  try {
+    const run = journal(api, dir);
+    await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit: COMMIT, status: 'started',
+      phase: 'prepare', parentVersionId: '11111111-1111-4111-8111-111111111111', controlsSHA256: '4'.repeat(64), writesAttempted: false });
+    assert.equal(api.requests.length, 6, 'initial claim performs one absent-ref read and five Git-data/ref requests');
+    const name = `ops-ui-verify-${'a'.repeat(24)}`, sourceSHA256 = 'b'.repeat(64);
+    const createId = '22222222-2222-4222-8222-222222222222';
+    const createPath = `/workers/scripts/${name}`;
+    const create = { requestId: createId, method: 'PUT', path: createPath, phase: 'temporary-verifier-create', name,
+      workerName: 'ledgetop-clients', sourceSHA256, automaticRetry: false };
+    let from = api.requests.length;
+    await run.recordIntent(create);
+    assert.equal(api.requests.length - from, 4, 'claimed intent uses cached commit/tree and still writes blob, tree, commit and CAS ref');
+    const success = Buffer.from(JSON.stringify({ success: true, result: { id: name }, errors: [] }));
+    from = api.requests.length;
+    await run.persistResponse({ requestId: createId, method: 'PUT', path: createPath, status: 200, rawResponse: success });
+    assert.equal(api.requests.length - from, 4, 'response gets its own immutable audit commit without reload reads');
+    const enableId = '33333333-3333-4333-8333-333333333333';
+    from = api.requests.length;
+    await run.recordIntent({ requestId: enableId, method: 'POST', path: createPath, phase: 'temporary-verifier-enable', name,
+      workerName: 'ledgetop-clients', sourceSHA256, automaticRetry: false });
+    assert.equal(api.requests.length - from, 4, 'next intent retains its separate audit commit');
+    assert.equal(api.requests.filter(row => row.method === 'PATCH').length, 3);
+    assert.equal(run.snapshot().sequence, 4, 'each logical journal event advances the committed document sequence');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('snapshot mutation cannot alter the committed journal cache', async () => {
+  const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+  try {
+    const run = journal(api, dir);
+    await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit: COMMIT, status: 'started',
+      phase: 'prepare', parentVersionId: '11111111-1111-4111-8111-111111111111', controlsSHA256: '4'.repeat(64), writesAttempted: false });
+    const exposed = run.snapshot(); exposed.operations[0].receipts[0].phase = 'tampered';
+    assert.equal(run.snapshot().operations[0].receipts[0].phase, 'prepare');
+    await run.recordIntent(intent('22222222-2222-4222-8222-222222222222'));
+    assert.equal(run.snapshot().operations[0].receipts[0].phase, 'prepare');
+    assert.equal(run.snapshot().operations[0].intents.length, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('same-instance concurrent journal writers are rejected before a second request', async () => {
+  const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+  try {
+    let releaseFetch, enteredFetch; const gate = new Promise(resolve => { releaseFetch = resolve; });
+    const entered = new Promise(resolve => { enteredFetch = resolve; }); let fetchCalls = 0;
+    const fetchImpl = async (url, init) => {
+      fetchCalls++;
+      if (fetchCalls === 1) { enteredFetch(); await gate; }
+      return api.fetchImpl(url, init);
+    };
+    const run = journal(api, dir, { fetchImpl });
+    const first = run.receipt({ schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit: COMMIT, status: 'started',
+      phase: 'prepare', parentVersionId: '11111111-1111-4111-8111-111111111111', controlsSHA256: '4'.repeat(64), writesAttempted: false });
+    await entered;
+    const before = fetchCalls;
+    await assert.rejects(run.receipt({ schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit: COMMIT, status: 'started',
+      phase: 'prepare', parentVersionId: '11111111-1111-4111-8111-111111111111', controlsSHA256: '4'.repeat(64), writesAttempted: false }));
+    assert.equal(fetchCalls, before, 'concurrent operation is refused before it starts transport I/O');
+    releaseFetch(); await first;
+    assert.equal(run.snapshot().operations[0].receipts.length, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('two stale journal snapshots race at non-force CAS and loser never rebases or resends', async () => {
+  const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+  try {
+    const base = journal(api, dir);
+    await base.receipt({ schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit: COMMIT, status: 'started',
+      phase: 'prepare', parentVersionId: '11111111-1111-4111-8111-111111111111', controlsSHA256: '4'.repeat(64), writesAttempted: false });
+    let arrivals = 0, release; const barrier = new Promise(resolve => { release = resolve; });
+    api.setPatchHook(async () => { arrivals++; if (arrivals === 2) release(); await barrier; });
+    const left = journal(api, dir, { sourceCommit: 'd'.repeat(40), ciRunId: 101, workflowRunId: 201 });
+    const right = journal(api, dir, { sourceCommit: 'e'.repeat(40), ciRunId: 102, workflowRunId: 202 });
+    const writes = await Promise.allSettled([
+      left.recordIntent(intent('22222222-2222-4222-8222-222222222222')),
+      right.recordIntent(intent('33333333-3333-4333-8333-333333333333')),
+    ]);
+    assert.equal(arrivals, 2);
+    assert.equal(writes.filter(row => row.status === 'fulfilled').length, 1);
+    assert.equal(writes.filter(row => row.status === 'rejected').length, 1);
+    assert.equal(api.requests.filter(row => row.method === 'PATCH').length, 2, 'one non-force CAS per contender');
+    const loser = writes[0].status === 'rejected' ? left : right;
+    const beforeRetry = api.requests.length;
+    await assert.rejects(loser.recordIntent(intent('44444444-4444-4444-8444-444444444444')));
+    assert.equal(api.requests.length, beforeRetry, 'a failed CAS permanently holds this journal instance without rebase');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('ambiguous CAS is accepted only when exact ref reads back own commit; mismatch stays held', async () => {
+  const successApi = github(), successDir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+  const failureApi = github(), failureDir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+  const requestId = '22222222-2222-4222-8222-222222222222';
+  const body = Buffer.from(JSON.stringify({ success: true, result: { id: 'v1' }, errors: [] }));
+  try {
+    const success = journal(successApi, successDir); await success.recordIntent(intent(requestId));
+    successApi.setNextPatchMode('after-failure');
+    await success.persistResponse({ requestId, method: 'POST', path: '/workers/scripts/ledgetop-clients/deployments', status: 200, rawResponse: body });
+    assert.equal(success.snapshot().operations[0].responses.length, 1);
+    assert.equal(successApi.requests.filter(row => row.method === 'PATCH').length, 1);
+    const successPatchIndex = successApi.requests.findIndex(row => row.method === 'PATCH');
+    assert.equal(successApi.requests[successPatchIndex + 1]?.path, '/git/ref/heads/ltds-production-auto-journal-ledgetop-clients',
+      'ambiguous acknowledged update gets one exact-ref read and no resend');
+
+    const failure = journal(failureApi, failureDir); await failure.recordIntent(intent(requestId));
+    failureApi.setNextPatchMode('before-failure');
+    await assert.rejects(failure.persistResponse({ requestId, method: 'POST', path: '/workers/scripts/ledgetop-clients/deployments', status: 200, rawResponse: body }));
+    assert.equal(failure.snapshot().operations[0].responses.length, 0, 'failed local mutation never contaminates committed cache');
+    const beforeRetry = failureApi.requests.length;
+    await assert.rejects(failure.persistResponse({ requestId, method: 'POST', path: '/workers/scripts/ledgetop-clients/deployments', status: 200, rawResponse: body }));
+    assert.equal(failureApi.requests.length, beforeRetry, 'ambiguous mismatch blocks any later write attempt');
+  } finally { rmSync(successDir, { recursive: true, force: true }); rmSync(failureDir, { recursive: true, force: true }); }
 });
 
 test('release claim is durable before temporary verifier writes and binds candidate ledger once', async () => {

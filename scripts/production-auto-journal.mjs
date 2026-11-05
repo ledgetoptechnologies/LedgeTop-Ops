@@ -444,7 +444,8 @@ function verifiedOperationEvidence(op) {
  * ref conflict is followed only by a read of the exact ref; if the commit did
  * not land, the release stops before the corresponding Cloudflare request. */
 export class ProductionAutoJournal {
-  #token; #fetch; #runtime; #recipient; #responseDirectory; #identity; #document = null; #head = null; #claimed = false;
+  #token; #fetch; #runtime; #recipient; #responseDirectory; #identity; #document = null; #head = null; #tree = null;
+  #committedBytes = null; #claimed = false; #writeBusy = false; #writeUncertain = false;
   constructor({ token, workerName, releaseKind = workerName === 'ledgetop-ops-sync' ? 'backend-sync' : 'retained-assets',
     sourceCommit, ciRunId, ciRunAttempt, workflowRunId, workflowRunAttempt, runtime, recipient, responseDirectory,
     fetchImpl = fetch, now = () => new Date().toISOString() } = {}) {
@@ -459,6 +460,12 @@ export class ProductionAutoJournal {
     this.#runtime = runtime === undefined ? null : safeRuntime(runtime); this.#recipient = recipient; checkedRecipient(recipient);
     this.#responseDirectory = responseDirectory; this.now = now;
     this.releaseId = hash(`${workerName}\n${sourceCommit}`);
+  }
+  #beginWrite() {
+    need(!this.#writeBusy && !this.#writeUncertain);
+    this.#writeBusy = true;
+    let released = false;
+    return () => { if (!released) { released = true; this.#writeBusy = false; } };
   }
   async #request(suffix, method = 'GET', body = undefined, allow404 = false) {
     need(typeof suffix === 'string' && suffix.startsWith('/') && suffix.length <= 512 && !suffix.includes('..') && !suffix.includes('//')
@@ -499,7 +506,12 @@ export class ProductionAutoJournal {
       && Number.isSafeInteger(raw.size) && raw.size > 0 && raw.size <= MAX_STATE);
     const encoded = raw.content.replace(/\s+/gu, ''), bytes = Buffer.from(encoded, 'base64');
     need(bytes.length === raw.size && bytes.length <= MAX_STATE && bytes.toString('base64') === encoded);
-    const value = parseJsonResponse(bytes); need(exact(value, ['schemaVersion','workerName','sequence','operations']) && value.schemaVersion === 1 && value.workerName === this.#identity.workerName
+    const value = parseJsonResponse(bytes);
+    this.#validateDocument(value, bytes);
+    return { document: value, bytes: Buffer.from(bytes), treeSha: commit.tree.sha };
+  }
+  #validateDocument(value, bytes) {
+    need(exact(value, ['schemaVersion','workerName','sequence','operations']) && value.schemaVersion === 1 && value.workerName === this.#identity.workerName
       && Number.isSafeInteger(value.sequence) && value.sequence >= 1 && Array.isArray(value.operations)
       && value.operations.length > 0 && value.operations.length <= MAX_OPERATIONS && Buffer.from(canonical(value)+'\n').equals(bytes));
     const releases = new Set();
@@ -512,43 +524,61 @@ export class ProductionAutoJournal {
   }
   async #commitDocument(document, expectedHead) {
     const bytes = Buffer.from(canonical(document)+'\n'); need(bytes.length <= MAX_STATE);
-    const blob = await this.#request('/git/blobs', 'POST', { content: bytes.toString('base64'), encoding: 'base64' });
-    need(COMMIT.test(blob.sha ?? ''));
+    this.#validateDocument(document, bytes);
     let baseTree;
     if (expectedHead) {
-      const parent = await this.#request(`/git/commits/${expectedHead}`); need(parent.sha === expectedHead && COMMIT.test(parent.tree?.sha ?? ''));
-      baseTree = parent.tree.sha;
+      need(this.#head === expectedHead && COMMIT.test(this.#tree ?? '')
+        && this.#committedBytes?.equals(Buffer.from(canonical(this.#document) + '\n')));
+      baseTree = this.#tree;
     } else {
+      need(this.#head === null && this.#document === null && this.#tree === null && this.#committedBytes === null);
       const parent = await this.#request(`/git/commits/${this.#identity.sourceCommit}`);
       need(parent.sha === this.#identity.sourceCommit && COMMIT.test(parent.tree?.sha ?? '')); baseTree = parent.tree.sha;
     }
+    const blob = await this.#request('/git/blobs', 'POST', { content: bytes.toString('base64'), encoding: 'base64' });
+    need(COMMIT.test(blob.sha ?? ''));
     const tree = await this.#request('/git/trees', 'POST', { base_tree: baseTree, tree: [{ path: JOURNAL_PATH, mode: '100644', type: 'blob', sha: blob.sha }] });
     need(COMMIT.test(tree.sha ?? ''));
     const commit = await this.#request('/git/commits', 'POST', { message: 'Record guarded production frontend release state', tree: tree.sha,
       parents: [expectedHead ?? this.#identity.sourceCommit] });
     need(COMMIT.test(commit.sha ?? ''));
+    let refAcknowledged = false;
     if (!expectedHead) {
       try {
         const created = await this.#request('/git/refs', 'POST', { ref: `refs/heads/ltds-production-auto-journal-${this.#identity.workerName}`, sha: commit.sha });
         need(created.object?.sha === commit.sha);
+        refAcknowledged = true;
       } catch {
-        const observed = await this.#readHead(); if (observed !== commit.sha) throw Error('production_auto_journal_claim_uncertain_no_cloudflare_request');
+        let observed;
+        try { observed = await this.#readHead(); }
+        catch { this.#writeUncertain = true; throw Error('production_auto_journal_claim_uncertain_no_cloudflare_request'); }
+        if (observed !== commit.sha) { this.#writeUncertain = true; throw Error('production_auto_journal_claim_uncertain_no_cloudflare_request'); }
       }
     } else {
       try {
         const updated = await this.#request(this.#updateRef(), 'PATCH', { sha: commit.sha, force: false });
         need(updated.object?.sha === commit.sha);
+        refAcknowledged = true;
       } catch {
-        const observed = await this.#readHead(); if (observed !== commit.sha) throw Error('production_auto_journal_cas_uncertain_no_cloudflare_request');
+        let observed;
+        try { observed = await this.#readHead(); }
+        catch { this.#writeUncertain = true; throw Error('production_auto_journal_cas_uncertain_no_cloudflare_request'); }
+        if (observed !== commit.sha) { this.#writeUncertain = true; throw Error('production_auto_journal_cas_uncertain_no_cloudflare_request'); }
       }
     }
 
-    this.#head = commit.sha; this.#document = document;
+    need(refAcknowledged || this.#head === null || this.#head === expectedHead);
+    this.#head = commit.sha; this.#tree = tree.sha; this.#committedBytes = Buffer.from(bytes); this.#document = structuredClone(document);
   }
   async #load() {
     const head = await this.#readHead();
-    if (head === null) return null;
-    const doc = await this.#readDocument(head); this.#head = head; this.#document = doc; return doc;
+    if (head === null) {
+      this.#head = null; this.#document = null; this.#tree = null; this.#committedBytes = null;
+      return null;
+    }
+    const loaded = await this.#readDocument(head);
+    this.#head = head; this.#document = structuredClone(loaded.document); this.#tree = loaded.treeSha;
+    this.#committedBytes = Buffer.from(loaded.bytes); return structuredClone(loaded.document);
   }
   /** Read and validate one completed predecessor using only the bounded GitHub
    * journal GET path. This method never claims, writes, or changes the ref. */
@@ -585,30 +615,41 @@ export class ProductionAutoJournal {
         releaseStepConclusion: op.artifact.releaseStepConclusion }), finalReceipt: Object.freeze({ ...final }) });
   }
   async #persist(next) {
-    const old = await this.#load();
-    need(old && this.#claimed);
-    next.document = old; next.document.sequence = old.sequence + 1;
+    need(this.#document && this.#claimed && this.#head && COMMIT.test(this.#tree ?? '')
+      && Buffer.isBuffer(this.#committedBytes)
+      && this.#committedBytes.equals(Buffer.from(canonical(this.#document) + '\n')));
+    const old = structuredClone(this.#document);
+    old.sequence += 1;
     const index = old.operations.findIndex(row => row.releaseId === this.releaseId);
     need(index >= 0);
     const op = old.operations[index];
-    const candidateLedgerBind = op.runtime.ledgerSha256 === null && SHA.test(this.#runtime?.ledgerSha256 ?? '')
-      && next.operation.runtime?.ledgerSha256 === this.#runtime.ledgerSha256
+    const candidateLedgerBind = op.runtime.ledgerSha256 === null && SHA.test(next.operation.runtime?.ledgerSha256 ?? '')
+      && next.operation.runtime.ledgerSha256 !== op.runtime.ledgerSha256
       && !op.receipts.some(row => row.status === 'prepared')
       && next.operation.receipts.at(-1)?.status === 'prepared'
-      && next.operation.receipts.at(-1)?.ledgerSHA256 === this.#runtime.ledgerSha256;
+      && next.operation.receipts.at(-1)?.ledgerSHA256 === next.operation.runtime.ledgerSha256;
     need(op.workerName === this.#identity.workerName && op.releaseKind === this.#identity.releaseKind && op.sourceCommit === this.#identity.sourceCommit
       && (canonical(op.runtime) === canonical(this.#runtime) || candidateLedgerBind) && op.ci.runId === this.#identity.ciRunId
       && op.ci.runAttempt === this.#identity.ciRunAttempt && op.workflow.runId === this.#identity.workflowRunId
       && op.workflow.runAttempt === this.#identity.workflowRunAttempt && ['in_progress','held','verified-pending-artifact','verified'].includes(op.state));
-    old.operations[index] = next.operation;
+    old.operations[index] = structuredClone(next.operation);
     await this.#commitDocument(old, this.#head);
+    if (candidateLedgerBind) this.#runtime = safeRuntime(next.operation.runtime);
   }
   #currentOperation() { return this.#document?.operations.find(row => row.releaseId === this.releaseId) ?? null; }
   async recordIntent(value) {
+    const release = this.#beginWrite();
+    return this.#recordIntent(value).finally(release);
+  }
+  async #recordIntent(value) {
     need(this.#runtime !== null);
     const projected = intentProjection(value); need((projected.workerName === undefined || projected.workerName === this.#identity.workerName)
       && (this.#identity.releaseKind === 'backend-sync' ? SYNC_PHASES : RETAINED_PHASES).has(projected.phase));
-    const old = await this.#load();
+    if (this.#claimed) need(this.#document && this.#head && this.#committedBytes
+      && this.#committedBytes.equals(Buffer.from(canonical(this.#document) + '\n')));
+    const old = this.#claimed
+      ? structuredClone(this.#document)
+      : await this.#load();
     if (!old || !old.operations.some(row => row.releaseId === this.releaseId)) {
       need(this.#identity.releaseKind !== 'backend-sync');
       // A release identity is one-shot across workflow reruns. A distinct
@@ -632,7 +673,7 @@ export class ProductionAutoJournal {
       return;
     }
     need(this.#claimed); // A restarted or duplicate run never resumes after a prior durable intent.
-    const operation = this.#currentOperation();
+    const operation = old.operations.find(row => row.releaseId === this.releaseId);
     need(operation && operation.workerName === this.#identity.workerName && operation.releaseKind === this.#identity.releaseKind
       && operation.sourceCommit === this.#identity.sourceCommit
       && canonical(operation.runtime) === canonical(this.#runtime) && operation.state === 'in_progress'
@@ -661,14 +702,22 @@ export class ProductionAutoJournal {
     finally { fs.closeSync(fd); }
   }
   async persistResponse(value) {
+    const release = this.#beginWrite();
+    return this.#persistResponse(value).finally(release);
+  }
+  async #persistResponse(value) {
     need(this.#claimed);
     const op = this.#currentOperation(), intent = op?.intents.at(-1); need(op && intent && intent.requestId === value?.requestId
       && !op.responses.some(row => row.requestId === value.requestId));
     const result = responseProjection(value, intent, this.releaseId, this.#recipient, this.#responseDirectory);
-    op.responses.push(result); op.updatedAt = this.now();
-    await this.#persist({ operation: op });
+    const next = structuredClone(op); next.responses.push(result); next.updatedAt = this.now();
+    await this.#persist({ operation: next });
   }
   async receipt(value) {
+    const release = this.#beginWrite();
+    return this.#receipt(value).finally(release);
+  }
+  async #receipt(value) {
     const projected = safeReceipt(value, this.#identity.workerName, this.#identity.sourceCommit, this.#identity.releaseKind);
     if (this.#identity.releaseKind === 'backend-sync') {
       const existing = this.#currentOperation()?.receipts ?? [];
@@ -697,11 +746,11 @@ export class ProductionAutoJournal {
       }
       this.#claimed = true; this.#emitOutput(this.releaseId); return;
     }
-    const op = this.#currentOperation(); need(op);
+    const current = this.#currentOperation(); need(current);
+    const op = structuredClone(current);
     if (projected.status === 'prepared' && this.#identity.releaseKind === 'retained-assets' && this.#runtime?.ledgerSha256 === null) {
       need(SHA.test(projected.ledgerSHA256 ?? '') && op.runtime.ledgerSha256 === null);
-      this.#runtime = safeRuntime({ ...this.#runtime, ledgerSha256: projected.ledgerSHA256 });
-      op.runtime = this.#runtime;
+      op.runtime = safeRuntime({ ...this.#runtime, ledgerSha256: projected.ledgerSHA256 });
     } else if (projected.status === 'prepared' && this.#identity.releaseKind === 'retained-assets') need(projected.ledgerSHA256 === this.#runtime?.ledgerSha256);
     else if (projected.status === 'prepared') need(projected.moduleSHA256 === this.#runtime?.moduleSha256);
     if (projected.status === 'held') op.state = 'held';
@@ -709,7 +758,11 @@ export class ProductionAutoJournal {
     op.receipts.push({ ...projected, recordedAt: this.now() }); need(op.receipts.length <= 64);
     op.updatedAt = this.now(); await this.#persist({ operation: op });
   }
-  async attachArtifact({ artifactId, artifactDigest, runId, runAttempt, name, status, releaseStatus }) {
+  async attachArtifact(value) {
+    const release = this.#beginWrite();
+    return this.#attachArtifact(value).finally(release);
+  }
+  async #attachArtifact({ artifactId, artifactDigest, runId, runAttempt, name, status, releaseStatus }) {
     need(Number.isSafeInteger(artifactId) && artifactId > 0 && SHA.test(artifactDigest)
       && runId === this.#identity.workflowRunId && runAttempt === this.#identity.workflowRunAttempt
       && name === `production-auto-${this.releaseId}` && ['success','failure','cancelled'].includes(status)
@@ -724,7 +777,9 @@ export class ProductionAutoJournal {
       if (this.#runtime === null) this.#runtime = safeRuntime(existing.runtime);
       this.#claimed = true;
     }
-    const op = this.#currentOperation(); need(op && op.workflow.runId === runId && op.workflow.runAttempt === runAttempt && op.state !== 'verified');
+    const current = this.#currentOperation();
+    need(current && current.workflow.runId === runId && current.workflow.runAttempt === runAttempt && current.state !== 'verified');
+    const op = structuredClone(current);
     need(!op.artifact);
     op.artifact = { artifactId, digestSha256: artifactDigest, name, runId, runAttempt,
       uploadStepConclusion: status, releaseStepConclusion: releaseStatus };
