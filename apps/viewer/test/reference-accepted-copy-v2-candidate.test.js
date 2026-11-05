@@ -108,14 +108,19 @@ processingIntegrationTest('actual Node candidate receipt verifies with the curre
   const generated = spawnSync(process.execPath, [helper], { encoding: 'utf8', timeout: 10_000 });
   assert.equal(generated.status, 0, generated.stderr);
   const script = String.raw`import json
-from processing import viewer_copy_receipt
-value=json.load(__import__('sys').stdin)
-expected_fields=viewer_copy_receipt.BINDING_FIELDS
-expected={key:value['expected'][key] for key in expected_fields}
+import sys
+from processing.viewer_copy_receipt_v2 import verify_viewer_copy_receipt_v2
+value=json.load(sys.stdin)
 trust=value['trustedKeys']['viewer-test-key']
-trusted=[{'environment':trust['environment'],'issuerId':trust['issuerId'],'keyId':'viewer-test-key','principalId':trust['viewerPrincipalId'],'publicKeyPem':trust['publicKeyPem']}]
-checked=viewer_copy_receipt.validate_and_verify(value['viewerReceipt'],acceptance=value['acceptance'],result_manifest=value['resultManifest'],expected_binding=expected,trusted_keys=trusted)
-print(json.dumps({'protocol':checked['protocol'],'acceptedObjectIds':checked['acceptedObjectIds']}))`;
+checked=verify_viewer_copy_receipt_v2(
+    value['viewerReceipt'],
+    acceptance=value['acceptance'],
+    result_manifest=value['resultManifest'],
+    expected=value['expected'],
+    trusted_keys={'viewer-test-key': {'issuerId':trust['issuerId'],'publicKeyPem':trust['publicKeyPem']}},
+)
+receipt=checked.receipt
+print(json.dumps({'protocol':receipt['protocol'],'acceptedObjectIds':receipt['acceptedObjectIds']}))`;
   const checked = spawnSync('python', ['-c', script], {
     cwd: source,
     encoding: 'utf8',
