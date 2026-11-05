@@ -122,6 +122,12 @@ function requiredOutputClosure(database, attemptId, versionId, registrations, st
       fail('source_release_required_derivative_not_ready');
   }
   const meshJob = byType.get('mesh_tiles');
+  const meshRequest = JSON.parse(meshJob.request_json);
+  const meshTilesRoot = `${state.task_id}/${attemptId}/tiles-ktx2-etc1s-${meshJob.id}`;
+  const registeredTiles = byKind.get('tiles') || [];
+  if (registeredTiles.length !== 1 || registeredTiles[0].asset.relative_path !== `${meshTilesRoot}/tileset.json`
+      || (meshRequest.tilesRelativePath != null && meshRequest.tilesRelativePath !== meshTilesRoot))
+    fail('source_release_required_derivative_not_ready');
   const receiptRows = database.prepare(`SELECT id,details_json FROM audit_events
     WHERE action='derivative.tiles_verified' AND entity_type='derivative_job' AND entity_id=? AND actor_type='system' AND actor_id IS NULL`)
     .all(meshJob.id);
@@ -135,7 +141,7 @@ function requiredOutputClosure(database, attemptId, versionId, registrations, st
   });
   if (tilesReceipts.length !== 1 || !receiptVerifiedLodProvenance(metadata, assetValues, tilesReceipts[0], versionId))
     fail('source_release_required_derivative_not_ready');
-  return { assets: required, derivatives: derivativeRows.filter((row) => REQUIRED_DERIVATIVES.includes(row.derivative_type)) };
+  return { assets: required, derivatives: derivativeRows.filter((row) => REQUIRED_DERIVATIVES.includes(row.derivative_type)), meshJob };
 }
 
 function sameRegistrations(left, right) {
@@ -227,9 +233,15 @@ async function verifiedOutputProof({ processing, storage, sourceIntake, attemptI
   const closure = requiredOutputClosure(database, attemptId, initialState.version_id, registrations, initialState);
   const objects = [];
   for (const { asset, files } of closure.assets) {
+    const isGeneratedTiles = asset.kind === 'tiles';
+    const expectedRelativePath = isGeneratedTiles
+      ? `${initialState.task_id}/${attemptId}/tiles-ktx2-etc1s-${closure.meshJob.id}/tileset.json`
+      : null;
     if (asset.root_key !== 'models' || (asset.storage_mode && asset.storage_mode !== 'managed')
         || asset.source_attempt_id !== attemptId || !Number.isSafeInteger(asset.byte_size) || asset.byte_size < 1
-        || !String(asset.relative_path || '').replace(/\\/g, '/').startsWith(`${initialState.output_relative_path}/output/`)
+        || (isGeneratedTiles
+          ? String(asset.relative_path || '').replace(/\\/g, '/') !== expectedRelativePath
+          : !String(asset.relative_path || '').replace(/\\/g, '/').startsWith(`${initialState.output_relative_path}/output/`))
         || !/^[a-f0-9]{64}$/.test(asset.sha256 || '')) fail('source_release_output_inventory_invalid');
     const members = files.length ? files : [{ relative_path: '', byte_size: asset.byte_size, sha256: asset.sha256 }];
     let totalBytes = 0;

@@ -17,7 +17,7 @@ const taskId = '00000000-0000-4000-8000-000000000012';
 const outputPath = `${taskId}/${attemptId}/reference-v2-results`;
 
 function fixture({ wrongState = null, missingAsset = null, derivativeStatus = {}, optionalOutput = false,
-  changeRegistration = false, treedarManifest = false } = {}) {
+  changeRegistration = false, treedarManifest = false, tilesRelativePath = null, requestTilesRelativePath = null } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-source-release-ready-'));
   const assetRoot = path.join(root, outputPath, 'output', 'assets');
   const acceptedRoot = path.join(root, outputPath, 'accepted_objects');
@@ -48,13 +48,15 @@ function fixture({ wrongState = null, missingAsset = null, derivativeStatus = {}
       relativePath: relative_path, byteSize: byte_size, sha256,
     })))), source_attempt_id: attemptId };
   assets.push(ept); filesByAsset.set(ept.id, eptFiles);
+  const derivativeTilesRoot = `${taskId}/${attemptId}/tiles-ktx2-etc1s-job-mesh_tiles`;
+  const tilesRoot = tilesRelativePath || derivativeTilesRoot;
   const tilesFiles = [{ relative_path: 'tileset.json', byte_size: Buffer.byteLength('tileset-json'), sha256: sha('tileset-json') },
     { relative_path: 'tile.b3dm', byte_size: Buffer.byteLength('tile-bytes'), sha256: sha('tile-bytes') }];
-  fs.mkdirSync(path.join(assetRoot, 'tiles'), { recursive: true });
-  fs.writeFileSync(path.join(assetRoot, 'tiles', 'tileset.json'), 'tileset-json');
-  fs.writeFileSync(path.join(assetRoot, 'tiles', 'tile.b3dm'), 'tile-bytes');
+  fs.mkdirSync(path.join(root, tilesRoot), { recursive: true });
+  fs.writeFileSync(path.join(root, tilesRoot, 'tileset.json'), 'tileset-json');
+  fs.writeFileSync(path.join(root, tilesRoot, 'tile.b3dm'), 'tile-bytes');
   const tiles = { id: 'asset-tiles', version_id: versionId, kind: 'tiles', root_key: 'models',
-    relative_path: `${outputPath}/output/assets/tiles/tileset.json`, storage_mode: 'managed', byte_size: Buffer.byteLength('tileset-json'),
+    relative_path: `${tilesRoot}/tileset.json`, storage_mode: 'managed', byte_size: Buffer.byteLength('tileset-json'),
     sha256: sha('tileset-json'), manifest_sha256: sha(JSON.stringify(tilesFiles.map(({ relative_path, byte_size, sha256 }) => ({
       relativePath: relative_path, byteSize: byte_size, sha256,
     })))), source_attempt_id: attemptId };
@@ -98,7 +100,8 @@ function fixture({ wrongState = null, missingAsset = null, derivativeStatus = {}
     audit: { algorithm: 'ltds-glb-leaf-equivalence-v2', artifactCount: 2 },
   } };
   const derivativeRows = ['mesh_tiles'].map((type) => ({ id: `job-${type}`, attempt_id: attemptId,
-    derivative_type: type, status: derivativeStatus[type] || 'complete', request_json: JSON.stringify({ optional: false }) }));
+    derivative_type: type, status: derivativeStatus[type] || 'complete',
+    request_json: JSON.stringify({ optional: false, ...(requestTilesRelativePath ? { tilesRelativePath: requestTilesRelativePath } : {}) }) }));
   const receipt = { id: 'receipt-event', details_json: JSON.stringify({
     attemptId, manifestSha256: tiles.manifest_sha256, policySha256: null, published: false,
     sourceSha256: glb.sha256, versionId,
@@ -146,6 +149,27 @@ test('ready proof accepts engine-provided EPT without a LAS asset or local EPT d
   assert.equal(proof.modelId, modelId);
   assert.equal(proof.modelVersionId, versionId);
   assert.match(proof.outputInventorySha256, /^[a-f0-9]{64}$/);
+});
+
+test('ready proof accepts generated tiles only at their exact attempt and derivative owned path', async (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const proof = await verifiedOutputProof({ processing: { database: f.database }, storage: f.storage,
+    sourceIntake: f.sourceIntake, attemptId: f.attemptId });
+  assert.equal(proof.kind, 'verified_outputs_ready');
+});
+
+test('ready proof rejects tiles registered outside the completed derivative path', async (t) => {
+  const f = fixture({ tilesRelativePath: `${taskId}/${attemptId}/unrelated/tiles` }); t.after(f.cleanup);
+  await assert.rejects(verifiedOutputProof({ processing: { database: f.database }, storage: f.storage,
+    sourceIntake: f.sourceIntake, attemptId: f.attemptId }),
+    (error) => error.code === 'source_release_required_derivative_not_ready');
+});
+
+test('ready proof rejects a derivative request whose recorded tiles path disagrees with its job identity', async (t) => {
+  const f = fixture({ requestTilesRelativePath: `${taskId}/${attemptId}/unrelated/tiles` }); t.after(f.cleanup);
+  await assert.rejects(verifiedOutputProof({ processing: { database: f.database }, storage: f.storage,
+    sourceIntake: f.sourceIntake, attemptId: f.attemptId }),
+    (error) => error.code === 'source_release_required_derivative_not_ready');
 });
 
 test('ready proof rejects a non-current attempt or unpublished output inventory', async (t) => {
