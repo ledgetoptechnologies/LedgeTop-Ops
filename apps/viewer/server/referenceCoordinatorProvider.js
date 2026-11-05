@@ -47,6 +47,24 @@ function isReferenceCoordinatorProvider(provider, source) {
     || provider?.capabilities?.detectionMethod === 'pinned-reference-coordinator';
 }
 
+function validOptionDomain(domain, type) {
+  if (domain === undefined || domain === null) return true;
+  if (typeof domain === 'string') return domain.length <= 4000;
+  if (Array.isArray(domain)) {
+    if (domain.length > 1000) return false;
+    if (type === 'string') return domain.every(value => typeof value === 'string' && value.length <= 4000);
+    if (type === 'bool') return domain.every(value => typeof value === 'boolean');
+    if (type === 'int') return domain.every(value => Number.isSafeInteger(value));
+    if (type === 'float') return domain.every(value => typeof value === 'number' && Number.isFinite(value));
+    return false;
+  }
+  if (type !== 'int' && type !== 'float' || Object.getPrototypeOf(domain) !== Object.prototype) return false;
+  const keys = Object.keys(domain);
+  if (keys.some(key => !['min', 'max'].includes(key))) return false;
+  for (const key of keys) if (typeof domain[key] !== 'number' || !Number.isFinite(domain[key])) return false;
+  return !(Number.isFinite(domain.min) && Number.isFinite(domain.max) && domain.min > domain.max);
+}
+
 function validateOptionsResponse(body, capabilities) {
   if (!body || Object.getPrototypeOf(body) !== Object.prototype
       || body.schemaVersion !== 1 || body.environment !== capabilities.environment
@@ -77,11 +95,7 @@ function validateOptionsResponse(body, capabilities) {
     if (item.value !== undefined && type === 'bool' && typeof item.value === 'string' && item.value.length > 5) fail('reference_provider_options_invalid');
     if (item.value !== undefined && (type === 'int' || type === 'float') && typeof item.value === 'string' && item.value.length > 64) fail('reference_provider_options_invalid');
     if (item.help !== undefined && (typeof item.help !== 'string' || item.help.length > 4000)) fail('reference_provider_options_invalid');
-    if (item.domain !== undefined && item.domain !== null
-        && !(typeof item.domain === 'string' && item.domain.length <= 4000
-          || Array.isArray(item.domain) && item.domain.length <= 1000
-            && item.domain.every((value) => typeof value === 'string' && value.length <= 4000)))
-      fail('reference_provider_options_invalid');
+    if (!validOptionDomain(item.domain, type)) fail('reference_provider_options_invalid');
     return { name: item.name, type, domain: item.domain ?? null, help: item.help || '',
       value: item.value === undefined ? undefined : typedDefault(type, item.value), rawDefault: item.value };
   });
@@ -149,4 +163,4 @@ class ReferenceCoordinatorProvider {
   }
 }
 
-module.exports = { ReferenceCoordinatorProvider, isConfiguredCoordinatorId, isReferenceCoordinatorProvider, validateOptionsResponse, boundedJson };
+module.exports = { ReferenceCoordinatorProvider, isConfiguredCoordinatorId, isReferenceCoordinatorProvider, validateOptionsResponse, validOptionDomain, boundedJson };
