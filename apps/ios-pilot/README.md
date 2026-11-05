@@ -24,16 +24,33 @@ app starts in Demo. No flight clearance is inferred from a checklist.
 The Pilot tab has separate demo and managed-Access sign-in paths. The iPad has
 successfully completed the synthetic Cloudflare sign-in test, including an
 Access identity match. That test returns no business data. The read-only backend
-and isolated staging Worker configurations are now in review; the live endpoint
-pin list is empty and live mode remains disabled in `Info.plist` until those
-Workers are deployed and verified.
+and isolated staging Worker configurations are in review. Resource origins are
+fixed in source; the default `Info.plist` still selects only the staging
+diagnostic. Live mode requires the separately accepted backend deployment.
 See [BACKEND-ROLLOUT.md](BACKEND-ROLLOUT.md) for the remaining gates.
+
+The managed build selects a fixed resource using `LTOpsEnvironment`; it never
+accepts a user-entered URL. The production host is a source candidate, not proof
+that an Access application, policy, database binding or release is approved.
+
+| Build | Environment | Live | Synthetic probe | Production flag |
+| --- | --- | --- | --- | --- |
+| Default diagnostic | `staging` | false | true | false |
+| Accepted staging reads | `staging` | true | false | false |
+| Separately accepted production reads | `production` | true | false | true |
+
+The flags are `LTOpsLiveEnabled`, `LTOpsSyntheticProbeEnabled`, and
+`LTOpsProductionPilotEnabled`. Unknown/missing environment, mixed modes,
+production probe mode and inconsistent production flags configure no network
+client. Changing a build flag never changes server permissions or constitutes
+release approval. The legacy `LTOpsOrigin` key does not select managed OAuth.
 
 The flow uses `ASWebAuthenticationSession`, OS-generated state and PKCE S256,
 and the registered custom callback
 `com.ledgetoptechnologies.ops.pilot://auth/callback`. There is no user-entered
-origin. Access tokens and business records stay in memory; the refresh grant is
-kept in the iOS Keychain for the approved restart flow. Requests use ephemeral
+origin. Business records and refresh grants stay in memory. The wired restart
+flow can save only a bounded access token in device-only Keychain storage;
+restoration verifies staff access online and fetches records again. Requests use ephemeral
 sessions without cookies, disk cache, or redirects. Sign-out clears local access
 immediately and reports when Cloudflare revocation cannot be confirmed. The
 browser's separate SSO session may remain signed in.

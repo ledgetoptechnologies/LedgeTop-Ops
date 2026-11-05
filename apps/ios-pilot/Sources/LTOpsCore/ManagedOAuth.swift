@@ -1,5 +1,40 @@
 import Foundation
 
+public enum ManagedPilotEnvironment: String, Sendable {
+    case staging, production
+}
+
+public struct ManagedPilotBuildSelection: Sendable {
+    public let pins: ManagedOAuthPins
+    public let synthetic: Bool
+    public let environment: ManagedPilotEnvironment
+}
+
+/// Build configuration never grants server authorization. Resources are fixed
+/// in source; production requires separate provider and release acceptance.
+public enum ManagedPilotBuildConfiguration {
+    public static func selected(live: Bool, probe: Bool, environment: String,
+                                productionEnabled: Bool = false) -> ManagedPilotBuildSelection? {
+        guard live != probe, let environment = ManagedPilotEnvironment(rawValue: environment) else { return nil }
+        switch environment {
+        case .staging:
+            guard !productionEnabled else { return nil }
+        case .production:
+            guard live, !probe, productionEnabled else { return nil }
+        }
+        let resource = environment == .staging
+            ? "https://ios-pilot-staging.ledgetop.app"
+            : "https://ios-pilot.ledgetop.app"
+        let issuer = "https://ledgetoptechnologies.cloudflareaccess.com"
+        guard let pins = try? ManagedOAuthPins(resource: resource, issuer: issuer,
+            authorizationEndpoint: issuer + "/cdn-cgi/access/oauth/authorization",
+            tokenEndpoint: issuer + "/cdn-cgi/access/oauth/token",
+            registrationEndpoint: issuer + "/cdn-cgi/access/oauth/registration",
+            revocationEndpoint: issuer + "/cdn-cgi/access/oauth/revoke") else { return nil }
+        return ManagedPilotBuildSelection(pins: pins, synthetic: probe, environment: environment)
+    }
+}
+
 /// Experimental, unmounted wire-format helpers. The deployment must supply
 /// reviewed pins and verify provider behavior before this is used for sign-in.
 /// This type does not perform networking, store credentials, or authorize data.

@@ -60,31 +60,6 @@ private enum PilotKeychain {
     static func clear() { for origin in MobilePilotConfiguration.approvedOrigins { SecItemDelete(query(origin: origin) as CFDictionary) } }
 }
 
-/// Activation requires a reviewed source change to add one exact pilot resource
-/// and the provider endpoint pins. An Info.plist toggle alone cannot enable it.
-private enum ManagedPilotBuildConfiguration {
-    // Both modes use the dedicated staging Access resource and pinned OAuth
-    // endpoints. Business reads remain disabled in Info.plist until the private
-    // reader is deployed and its provider-backed acceptance checks pass.
-    static let approvedPins: [ManagedOAuthPins] = [try? ManagedOAuthPins(
-        resource: "https://ios-pilot-staging.ledgetop.app",
-        issuer: "https://ledgetoptechnologies.cloudflareaccess.com",
-        authorizationEndpoint: "https://ledgetoptechnologies.cloudflareaccess.com/cdn-cgi/access/oauth/authorization",
-        tokenEndpoint: "https://ledgetoptechnologies.cloudflareaccess.com/cdn-cgi/access/oauth/token",
-        registrationEndpoint: "https://ledgetoptechnologies.cloudflareaccess.com/cdn-cgi/access/oauth/registration",
-        revocationEndpoint: "https://ledgetoptechnologies.cloudflareaccess.com/cdn-cgi/access/oauth/revoke"
-    )].compactMap { $0 }
-    // The current staging resource's synthetic endpoint stays available for
-    // sign-in diagnostics without enabling business data reads.
-    static let approvedProbePins = approvedPins
-    static func selected(live: Bool, probe: Bool) -> (ManagedOAuthPins, Bool)? {
-        guard live != probe else { return nil }
-        let pins = probe ? approvedProbePins : approvedPins
-        guard pins.count == 1, let selected = pins.first else { return nil }
-        return (selected, probe)
-    }
-}
-
 @MainActor
 final class LivePilotModel: ObservableObject {
     @Published private(set) var active = false
@@ -112,15 +87,21 @@ final class LivePilotModel: ObservableObject {
     private var coordinator: ManagedOAuthCoordinator?
     private var api: ManagedPilotDataAPI?
     private var isSyntheticProbe = false
+    private var dataEnvironment: ManagedPilotEnvironment = .staging
     var configured: Bool { coordinator != nil && api != nil }
     var syntheticProbe: Bool { isSyntheticProbe }
-    var environmentName: String { isSyntheticProbe ? "Sign-in test" : "Staging" }
+    var environmentName: String { isSyntheticProbe ? "Sign-in test" : (dataEnvironment == .production ? "Live" : "Staging") }
     var signedIn: Bool { credential.map { $0.expiresAt > Date() } == true && (user != nil || probeSucceeded) }
 
     init() {
         let enabled = Bundle.main.infoDictionary?["LTOpsLiveEnabled"] as? Bool == true
         let probe = Bundle.main.infoDictionary?["LTOpsSyntheticProbeEnabled"] as? Bool == true
-        if let (pins, synthetic) = ManagedPilotBuildConfiguration.selected(live: enabled, probe: probe) {
+        let environment = Bundle.main.infoDictionary?["LTOpsEnvironment"] as? String ?? ""
+        let production = Bundle.main.infoDictionary?["LTOpsProductionPilotEnabled"] as? Bool == true
+        if let selection = ManagedPilotBuildConfiguration.selected(live: enabled, probe: probe,
+            environment: environment, productionEnabled: production) {
+            let pins = selection.pins, synthetic = selection.synthetic
+            dataEnvironment = selection.environment
             isSyntheticProbe = synthetic
             let browser = self.browser
             coordinator = ManagedOAuthCoordinator(pins: pins, transport: ManagedOAuthTransport(pins: pins),

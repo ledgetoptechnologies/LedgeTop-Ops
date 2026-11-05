@@ -8,5 +8,7 @@
     </dict></array>
     <key>LTOpsLiveEnabled</key><false/>
     <key>LTOpsSyntheticProbeEnabled</key><true/>
+    <key>LTOpsEnvironment</key><string>staging</string>
+    <key>LTOpsProductionPilotEnabled</key><false/>
     <key>LTOpsOrigin</key><string>https://ios-pilot-staging.ledgetop.app</string>
 </dict></plist>
