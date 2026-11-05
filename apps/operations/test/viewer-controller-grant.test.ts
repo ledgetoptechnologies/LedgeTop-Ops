@@ -22,6 +22,12 @@ describe("initial Viewer controller grant",()=>{
   expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({controllerOrigin:origin,subject:"ops:controlled-staff"}));
   expect(mocks.create.mock.calls[0]![0].targetSessionId).toBeUndefined();
  });
+ it("preserves the exact legacy controller URL after canonical-only host retirement",async()=>{
+  const canonicalOnly={...env,OPERATIONS_ORIGINS:current};
+  const response=await app().fetch(request(old),canonicalOnly);
+  expect(response.status).toBe(201);
+  expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({controllerOrigin:old}));
+ });
  it.each(["https://portal.ledgetop.app","https://ops.ledgetop.app.evil.example"])("rejects non-staff URL %s before minting",async origin=>{
   expect((await app().fetch(request(origin),env)).status).toBe(403);expect(mocks.create).not.toHaveBeenCalled();
  });

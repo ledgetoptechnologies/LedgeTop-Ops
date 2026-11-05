@@ -157,7 +157,7 @@ import { incomingUploadsCapability } from "./incoming-policy";
 import { servePdfSourceFile, serveSourceFile } from "./source-file";
 import { directDeliveryUploadsCapability } from "./direct-upload-policy";
 import { isFrameableOperationsPdfRequest } from "./frame-policy";
-import { requestHostAllowed } from "./host-admission";
+import { legacyViewerControllerCompatibilityAllowed, requestHostAllowed } from "./host-admission";
 import { canonicalOperationsNavigationRedirect, isLegacyOperationsDropboxCallback } from "./canonical-navigation";
 import {
   dropboxImportCapability,
@@ -468,7 +468,9 @@ app.use("*", async (c, next) => {
   if (!machine && !paMachine) {
     const canonicalNavigation = canonicalOperationsNavigationRedirect(c.req.raw, c.env);
     if (canonicalNavigation) return canonicalNavigation;
-    if (!requestHostAllowed(c.req.url, c.env) && !isLegacyOperationsDropboxCallback(c.req.raw, c.env))
+    if (!requestHostAllowed(c.req.url, c.env)
+      && !legacyViewerControllerCompatibilityAllowed(c.req.url, c.req.method, c.env)
+      && !isLegacyOperationsDropboxCallback(c.req.raw, c.env))
       return c.json({ error: "Not found" }, 404);
   }
   await next();

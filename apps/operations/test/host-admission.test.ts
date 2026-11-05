@@ -5,7 +5,7 @@ vi.mock("cloudflare:workers", () => ({
   WorkerEntrypoint: class {},
   WorkflowEntrypoint: class {},
 }));
-import { admittedOperationsRequestOrigin, requestHostAllowed } from "../src/worker/host-admission";
+import { admittedOperationsRequestOrigin, legacyViewerControllerCompatibilityAllowed, requestHostAllowed } from "../src/worker/host-admission";
 
 describe("Operations deployed host admission", () => {
   it.each(["production", "staging"] as const)("requires the exact configured host in %s", (ENVIRONMENT) => {
@@ -56,14 +56,44 @@ describe("Operations deployed host admission", () => {
       "https://ops.ledgetopdroneservices.com")).toBeNull();
   });
 
-  it("keeps retired production Operations hosts redirect-only even if an override re-adds them", () => {
+  it("honors explicitly configured production Ops origins and retires them when removed", () => {
     const env = { ENVIRONMENT: "production" as const, EXPECTED_HOST: "ops.ledgetop.app",
       OPERATIONS_ORIGINS: "https://ops.ledgetop.app,https://ops.ledgetopdroneservices.com,https://ops.ledgetoptechnologies.com" };
     expect(requestHostAllowed("https://ops.ledgetop.app/administration", env)).toBe(true);
-    expect(requestHostAllowed("https://ops.ledgetopdroneservices.com/api/session", env)).toBe(false);
-    expect(requestHostAllowed("https://ops.ledgetoptechnologies.com/api/session", env)).toBe(false);
+    expect(requestHostAllowed("https://ops.ledgetopdroneservices.com/api/session", env)).toBe(true);
+    expect(requestHostAllowed("https://ops.ledgetoptechnologies.com/api/session", env)).toBe(true);
     expect(admittedOperationsRequestOrigin("https://ops.ledgetopdroneservices.com/api/session", env,
+      "https://ops.ledgetop.app")).toBe("https://ops.ledgetopdroneservices.com");
+    expect(admittedOperationsRequestOrigin("https://ops.ledgetoptechnologies.com/api/session", env,
+      "https://ops.ledgetop.app")).toBe("https://ops.ledgetoptechnologies.com");
+    const canonicalOnly = { ...env, OPERATIONS_ORIGINS: "https://ops.ledgetop.app" };
+    expect(requestHostAllowed("https://ops.ledgetopdroneservices.com/api/session", canonicalOnly)).toBe(false);
+    expect(requestHostAllowed("https://ops.ledgetoptechnologies.com/api/session", canonicalOnly)).toBe(false);
+    expect(admittedOperationsRequestOrigin("https://ops.ledgetopdroneservices.com/api/session", env,
+      "https://ops.ledgetop.app")).toBe("https://ops.ledgetopdroneservices.com");
+    expect(admittedOperationsRequestOrigin("https://ops.ledgetopdroneservices.com/api/session", canonicalOnly,
       "https://ops.ledgetop.app")).toBeNull();
+  });
+
+  it("keeps only the exact legacy Viewer controller routes after canonical-only retirement", () => {
+    const env = { ENVIRONMENT: "production" as const, EXPECTED_HOST: "ops.ledgetop.app",
+      OPERATIONS_ORIGINS: "https://ops.ledgetop.app" };
+    const old = "https://ops.ledgetopdroneservices.com";
+    expect(requestHostAllowed(`${old}/api/viewer/admin-grant`, env)).toBe(false);
+    expect(legacyViewerControllerCompatibilityAllowed(`${old}/api/viewer/admin-grant`, "POST", env)).toBe(true);
+    expect(legacyViewerControllerCompatibilityAllowed(`${old}/api/viewer/workspace/session-renewal`, "OPTIONS", env)).toBe(true);
+    expect(legacyViewerControllerCompatibilityAllowed(`${old}/api/viewer/workspace/session-renewal/challenge`, "GET", env)).toBe(true);
+    expect(legacyViewerControllerCompatibilityAllowed(`${old}/api/viewer/workspace/session-renewal`, "POST", env)).toBe(true);
+    expect(legacyViewerControllerCompatibilityAllowed("https://ops.ledgetoptechnologies.com/api/viewer/admin-grant", "POST", env)).toBe(true);
+    for (const [url, method] of [
+      [`${old}/api/viewer/preferences`, "GET"],
+      [`${old}/api/viewer/admin-grant`, "GET"],
+      [`${old}/api/viewer/admin-grant/extra`, "POST"],
+      [`${old}/api/viewer/workspace/session-renewal/challenge`, "POST"],
+      ["https://portal.ledgetop.app/api/viewer/admin-grant", "POST"],
+      [`${old}/api/viewer/admin-grant?next=1`, "POST"],
+      [`https://user@ops.ledgetopdroneservices.com/api/viewer/admin-grant`, "POST"],
+    ] as const) expect(legacyViewerControllerCompatibilityAllowed(url, method, env)).toBe(false);
   });
 
   it("keeps privileged API origin resolution canonical-only in development", () => {
