@@ -50,6 +50,16 @@ function canonical(value) {
   const keys = Object.keys(value).sort();
   return `{${keys.map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
 }
+function tamperJournalOperation(api, workerName, mutate) {
+  const head = api.refs.get(`ltds-production-auto-journal-${workerName}`);
+  const commit = api.commits.get(head), tree = api.trees.get(commit.tree.sha);
+  const entry = tree.tree.find(row => row.path === 'production-auto-journal.json');
+  const original = api.blobs.get(entry.sha);
+  const document = JSON.parse(original.toString('utf8'));
+  mutate(document.operations.find(row => row.workerName === workerName));
+  api.blobs.set(entry.sha, Buffer.from(`${canonical(document)}\n`));
+  return () => api.blobs.set(entry.sha, original);
+}
 function journal(api, dir, changes = {}) {
   return new ProductionAutoJournal({ token: 'x'.repeat(32), workerName: 'ledgetop-clients', sourceCommit: changes.sourceCommit ?? COMMIT,
     ciRunId: changes.ciRunId ?? 100, ciRunAttempt: changes.ciRunAttempt ?? 2,
@@ -128,7 +138,7 @@ test('distinct source release appends and unsuccessful release artifact is durab
     assert.equal(completion.snapshot().operations.at(-1).state, 'held');
     assert.equal(completion.snapshot().operations.at(-1).artifact.releaseStepConclusion, 'failure');
     await assert.rejects(readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32), workerName: 'ledgetop-clients',
-      sourceCommit: 'c'.repeat(40), releaseId: completion.releaseId, ciRunId: 101, ciRunAttempt: 2,
+      releaseKind: 'retained-assets', sourceCommit: 'c'.repeat(40), releaseId: completion.releaseId, ciRunId: 101, ciRunAttempt: 2,
       workflowRunId: 124, workflowRunAttempt: 1, fetchImpl: api.fetchImpl }));
     const duplicate = journal(api, dir, { sourceCommit: 'c'.repeat(40), ciRunId: 101, workflowRunId: 124 });
     await assert.rejects(duplicate.attachArtifact({ artifactId: 902, artifactDigest: 'e'.repeat(64), runId: 124, runAttempt: 1,
@@ -174,7 +184,7 @@ test('artifact completion verifies only after final proof, activation, verifier 
     assert.equal(run.snapshot().operations[0].responses.at(-1).providerAcknowledged, true);
     const beforeRead = api.requests.length;
     const proof = await readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32), workerName: 'ledgetop-clients',
-      sourceCommit: 'c'.repeat(40), releaseId: run.releaseId, ciRunId: 101, ciRunAttempt: 2,
+      releaseKind: 'retained-assets', sourceCommit: 'c'.repeat(40), releaseId: run.releaseId, ciRunId: 101, ciRunAttempt: 2,
       workflowRunId: 124, workflowRunAttempt: 1, fetchImpl: api.fetchImpl });
     assert.deepEqual(api.requests.slice(beforeRead).map(row => row.method), ['GET','GET','GET','GET']);
     assert.equal(proof.releaseId, run.releaseId);
@@ -191,11 +201,25 @@ test('artifact completion verifies only after final proof, activation, verifier 
       { sourceCommit: 'c'.repeat(40), releaseId: run.releaseId, ciRunAttempt: 3 },
     ];
     for (const mismatch of rejected) await assert.rejects(readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32),
-      workerName: 'ledgetop-clients', sourceCommit: mismatch.sourceCommit ?? 'c'.repeat(40),
+      workerName: 'ledgetop-clients', releaseKind: 'retained-assets', sourceCommit: mismatch.sourceCommit ?? 'c'.repeat(40),
       releaseId: mismatch.releaseId, ciRunId: mismatch.ciRunId ?? 101, ciRunAttempt: mismatch.ciRunAttempt ?? 2,
       workflowRunId: mismatch.workflowRunId ?? 124, workflowRunAttempt: mismatch.workflowRunAttempt ?? 1,
       fetchImpl: api.fetchImpl }));
     assert.ok(api.requests.slice(beforeRead).every(row => row.method === 'GET'));
+    for (const tamper of [
+      operation => { operation.intents = []; },
+      operation => { operation.responses[0].providerAcknowledged = false; },
+    ]) {
+      const restore = tamperJournalOperation(api, 'ledgetop-clients', tamper);
+      try {
+        await assert.rejects(readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32), workerName: 'ledgetop-clients',
+          releaseKind: 'retained-assets', sourceCommit: 'c'.repeat(40), releaseId: run.releaseId,
+          ciRunId: 101, ciRunAttempt: 2, workflowRunId: 124, workflowRunAttempt: 1, fetchImpl: api.fetchImpl }));
+      } finally { restore(); }
+    }
+    await assert.rejects(readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32), workerName: 'ledgetop-clients',
+      releaseKind: 'backend-sync', sourceCommit: 'c'.repeat(40), releaseId: run.releaseId,
+      ciRunId: 101, ciRunAttempt: 2, workflowRunId: 124, workflowRunAttempt: 1, fetchImpl: api.fetchImpl }));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -298,6 +322,14 @@ test('Ops Sync backend journal has only upload and activation writes, then verif
     assert.deepEqual(operation.receipts.map(row => row.status), ['started','prepared','inactive-verified','verified']);
     assert.equal(operation.runtime.ledgerSha256, null);
     assert.equal(operation.state, 'verified');
+    const proof = await readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32), workerName: 'ledgetop-ops-sync',
+      releaseKind: 'backend-sync', sourceCommit: COMMIT, releaseId: run.releaseId, ciRunId: 100, ciRunAttempt: 2,
+      workflowRunId: 123, workflowRunAttempt: 1, fetchImpl: api.fetchImpl });
+    assert.equal(proof.finalReceipt.moduleSHA256, runtime.moduleSha256);
+    assert.equal(proof.finalReceipt.candidateVersionId, candidate);
+    await assert.rejects(readVerifiedProductionAutoPredecessor({ token: 'x'.repeat(32), workerName: 'ledgetop-ops-sync',
+      releaseKind: 'retained-assets', sourceCommit: COMMIT, releaseId: run.releaseId, ciRunId: 100, ciRunAttempt: 2,
+      workflowRunId: 123, workflowRunAttempt: 1, fetchImpl: api.fetchImpl }));
     const restarted = new ProductionAutoJournal({ token: 'x'.repeat(32), workerName: 'ledgetop-ops-sync', releaseKind: 'backend-sync',
       sourceCommit: COMMIT, ciRunId: 100, ciRunAttempt: 2, workflowRunId: 123, workflowRunAttempt: 1,
       runtime, recipient: recipient(), responseDirectory: dir, fetchImpl: api.fetchImpl });
