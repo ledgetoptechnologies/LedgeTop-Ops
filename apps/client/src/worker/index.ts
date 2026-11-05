@@ -211,10 +211,16 @@ app.use("*", async (c, next) => {
     ? malformedPortalLaunchRedirect(c.req.url, c.env)
     : null;
   if (malformedLaunch) return c.redirect(malformedLaunch, 308);
-  const legacyRedirect = (c.req.method === "GET" || c.req.method === "HEAD")
+  const redirectSensitiveHeaders = ["Authorization", "Range", "If-Range", "Origin"]
+    .some(name => c.req.raw.headers.has(name));
+  const legacyRedirect = (c.req.method === "GET" || c.req.method === "HEAD") && !redirectSensitiveHeaders
     ? legacyClientRedirectLocation(c.req.url, c.env)
     : null;
-  if (legacyRedirect) return c.redirect(legacyRedirect, 308);
+  if (legacyRedirect) {
+    const response = c.redirect(legacyRedirect, 308);
+    response.headers.set("Cache-Control", "no-store");
+    return response;
+  }
   if (!requestHostAllowed(c.req.url,c.env)) return c.json({ error: "Not found" }, 404);
   await next();
   c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=(self)");

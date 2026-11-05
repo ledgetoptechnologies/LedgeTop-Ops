@@ -299,6 +299,8 @@ export type Env = Omit<
   CLIENT_PORTAL_ORIGINS?: string;
   /** Exact staff-facing origins served by the same Operations deployment. */
   OPERATIONS_ORIGINS?: string;
+  /** Retired staff page hosts that may only redirect ordinary browser navigation to the canonical Ops host. */
+  LEGACY_OPERATIONS_REDIRECT_ORIGINS?: string;
   DELIVERY_TOKEN_SECRET: string;
   DELIVERY_PREVIOUS_TOKEN_SECRET?: string;
   DELIVERY_ACCESS_CODE_PEPPER: string;

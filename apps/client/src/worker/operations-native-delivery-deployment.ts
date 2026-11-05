@@ -25,7 +25,7 @@ export const NATIVE_DELIVERY_PORTAL_PRODUCTION_PROFILE = JSON.stringify({
 export const NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE = JSON.stringify({
   ...JSON.parse(NATIVE_DELIVERY_PRODUCTION_PROFILE),
   portalOrigin: "https://portal.ledgetop.app",
-  privateRequestOrigins: ["https://portal.ledgetop.app", "https://portal.ledgetopdroneservices.com"],
+  privateRequestOrigins: ["https://portal.ledgetop.app"],
 });
 
 /** Separate public delivery origin with the same exact physical deployment.
@@ -70,7 +70,7 @@ export function nativeDeliveryDeploymentEnabled(env: NativeDeliveryDeploymentEnv
     && env.PUBLIC_SHARE_ORIGIN === publicOrigin;
 }
 
-/** The migration profile pins both private browser origins. Arbitrary
+/** The migration profile pins the canonical private browser origin. Arbitrary
  * presentation aliases and public hosts never acquire byte access. */
 export function nativeDeliveryRequestOriginAllowed(env: NativeDeliveryDeploymentEnv, requestUrl: string): boolean {
   if (!nativeDeliveryDeploymentEnabled(env)) return false;
@@ -84,7 +84,7 @@ export function nativeDeliveryRequestOriginAllowed(env: NativeDeliveryDeployment
     try {
       if (configured.some(value => { const url = new URL(value); return url.protocol !== "https:" || url.origin !== value; })) return false;
     } catch { return false; }
-    return ["https://portal.ledgetop.app", "https://portal.ledgetopdroneservices.com"].includes(origin)
+    return origin === "https://portal.ledgetop.app"
       && configured.includes(origin);
   }
   return origin === env.CLIENT_PORTAL_ORIGIN;

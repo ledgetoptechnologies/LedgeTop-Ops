@@ -164,11 +164,11 @@ export function malformedPortalLaunchRedirect(requestUrl: string, env: OriginEnv
   try { request = new URL(requestUrl); } catch { return null; }
   const pathname = request.pathname.toLocaleLowerCase("en-US");
   if (![...origins, ...legacy, ...retired].includes(request.origin) || (pathname !== "/portal*" && pathname !== "/portal%2a")) return null;
-  request.pathname = "/portal";
-  request.searchParams.delete("__cf_access_message");
-  return retired.includes(request.origin)
-    ? new URL(`${request.pathname}${request.search}`, configuredClientPortalOrigin(env)!).toString()
-    : request.toString();
+  // This recovery URL only exists to correct a malformed portal pathname.
+  // Always use the canonical host and drop query/hash state, even for an
+  // otherwise active alias: the portal routes by pathname and the values may
+  // be stale login/OAuth state. Public delivery has its own validated route.
+  return new URL("/portal", configuredClientPortalOrigin(env)!).toString();
 }
 
 /** Redirects non-secret browser entry routes from an explicitly configured
@@ -192,7 +192,10 @@ export function legacyClientRedirectLocation(requestUrl: string, env: OriginEnv)
   const targetOrigin = configuredClientPortalOrigin(env);
   if (!targetOrigin) return null;
   if (request.origin === targetOrigin) return null;
-  const target = new URL(request.pathname === "/" ? "/portal" : `${request.pathname}${request.search}`, targetOrigin);
+  // Private Client Portal routes are pathname-based. Never carry a query to a
+  // different host from this generic fallback; public share state is handled
+  // by canonicalDeliveryEntryRedirect above with its own explicit schema.
+  const target = new URL(request.pathname === "/" ? "/portal" : request.pathname, targetOrigin);
   return target.toString();
 }
 

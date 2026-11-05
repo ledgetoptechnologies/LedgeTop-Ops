@@ -66,7 +66,8 @@
   "vars": {
     "PUBLIC_BASE_URL": "https://ops.ledgetop.app",
     "EXPECTED_HOST": "ops.ledgetop.app",
-    "OPERATIONS_ORIGINS": "https://ops.ledgetop.app,https://ops.ledgetopdroneservices.com,https://ops.ledgetoptechnologies.com",
+    "OPERATIONS_ORIGINS": "https://ops.ledgetop.app",
+    "LEGACY_OPERATIONS_REDIRECT_ORIGINS": "https://ops.ledgetopdroneservices.com,https://ops.ledgetoptechnologies.com",
     "DIRECT_DELIVERY_UPLOADS_ENABLED": "true",
     "INCOMING_BASE_URL": "https://incoming.ledgetopdroneservices.com",
     "INCOMING_EXPECTED_HOST": "incoming.ledgetopdroneservices.com",

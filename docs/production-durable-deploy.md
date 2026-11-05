@@ -236,16 +236,36 @@ profiles already present. Every executor checkpoint takes a fresh read-only
 snapshot and requires an exact match; it refuses enabled or in-flight native
 control, and any change to the reviewed bridge mismatch/cohort/control-plane
 state. The v1 reader pins the pre-0226 schema and fails closed if any
-`staff_login_*` table, trigger, or index appears; alias/login binding authority
-requires a separately reviewed contract before migration 0226 or its objects
-are introduced. This contract
-does not authorize staff admission, onboarding, cutover, or native control
+`staff_login_*` table, trigger, or index appears. After migration 0226, use the
+separate `ordinary-frontend-preserve-native-staff-post0226-v1` packet. Its
+read-only snapshot verifies the exact migration schema and pins all five login
+tables by row counts and digests, including pending intents, bindings,
+generations, and audit history. The public observation omits login addresses
+and token hashes. Any login or staff-state change invalidates the short-lived
+review and stops the next release mutation. Operations must select exactly one
+authority packet; Client releases cannot select an Operations packet.
+Neither preservation contract authorizes staff admission, onboarding, cutover, or native control
 activation. The existing full native-staff cutover contract remains strict and
 still requires enabled, reconciled native control. Packet creation and owner
 review remain external inputs; the executor does not create an approval receipt.
 The separate authority contract does not
 change the retained asset union, live namespace byte verification, rollback,
 deployment-weight, or 48-hour retention gates.
+
+The separate `ops-successor-reader-operations-promotion-fc9bc572-v1` release
+contract covers an Operations frontend release from the exact installed
+`fc9bc572-0b87-4857-8b8a-b0e0f7582c68` successor-reader version. Its preflight
+requires that version to be the sole 100% deployment, checks the pinned runtime
+module bytes and successor export set, and validates the installed runtime,
+resource bindings, settings, and accepted scalar profile. It accepts no
+caller-supplied deployment weights. The executor still stages the captured
+baseline at 100% with the exact uploaded candidate at 0%, verifies candidate
+modules and retained asset bytes, then activates only that candidate at 100%.
+The post-activation capture must show the candidate as the sole 100% version
+while retaining the successor export profile. For this path, the existing
+post-0226 staff preservation packet remains mandatory at every executor
+checkpoint. The existing fixed 0/100 Operations release contract and its
+pre-0226 counterpart remain separate and unchanged.
 
 Cloudflare Builds has a20-minute limit. The complete GitHub CI can take longer,
 so production deployment must be initiated after successful main CI through a

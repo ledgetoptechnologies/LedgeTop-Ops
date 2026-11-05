@@ -81,7 +81,13 @@ export function sealProductionProviderResponse(plaintext, context, recipient) {
 export function loadPinnedProductionAutoRecipient() {
   // No environment override: the public key and fingerprint move together in
   // a reviewed source change. The current all-zero sentinel always refuses.
-  return checkedRecipient(PRODUCTION_AUTO_JOURNAL_RECIPIENT);
+  const pinned = PRODUCTION_AUTO_JOURNAL_RECIPIENT;
+  checkedRecipient(pinned);
+  return Object.freeze({
+    schemaVersion: pinned.schemaVersion,
+    keyIdSha256: pinned.keyIdSha256,
+    publicKeyPem: pinned.publicKeyPem,
+  });
 }
 
 function safeRuntime(value) {

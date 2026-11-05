@@ -8,10 +8,12 @@ import { capture, CloudflareReader, deploymentSourceCommit, hash, canonical, nee
   preparePrivateProductionDirectory, readStaffCutoverReview, runNativeProductionCommand,
   stableState, validateBuildEnvironment, validateInstallation, validateStaffReadinessReceipt,
   OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
-  ORDINARY_FRONTEND_PREFLIGHT_MODE, resourcesShape } from './production-deploy.mjs';
+  OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT, ORDINARY_FRONTEND_PREFLIGHT_MODE, resourcesShape } from './production-deploy.mjs';
 import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { ORDINARY_FRONTEND_AUTHORITY_CONTRACT, validateOrdinaryFrontendAuthorityObservation } from './ordinary-frontend-authority.mjs';
 import { readOrdinaryFrontendAuthorityObservation } from './ordinary-frontend-authority-reader.mjs';
+import { POST0226_STAFF_PRESERVATION_CONTRACT, validatePost0226StaffPreservationReview } from './ordinary-frontend-authority-post0226.mjs';
+import { readPost0226StaffPreservationObservation } from './ordinary-frontend-authority-post0226-reader.mjs';
 import { createAssetVerificationNonce, executeAssetVerification } from './production-auto-verify.mjs';
 import { readCandidateVersionWithVisibilityRetry } from './production-deploy.mjs';
 import { ProductionCloudflareProvider, newTemporaryVerifierName } from './production-auto-provider.mjs';
@@ -325,12 +327,15 @@ function writePrivateJson(directory, name, value) {
  */
 export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinnedPlan, profile, expectedDeploymentVersions, assetVerifierProvider,
   staffAuthorityContract = 'native-staff-cutover-v1', staffCutoverReview, staffReviewPath,
-  frontendAuthorityReview, resumeCandidate, installedOpsSuccessorReaderContract,
+  frontendAuthorityReview, post0226StaffPreservationReview, resumeCandidate, installedOpsSuccessorReaderContract,
+  opsSuccessorReaderPromotionContract,
   readFrontendAuthority = readOrdinaryFrontendAuthorityObservation,
+  readPost0226StaffPreservation = readPost0226StaffPreservationObservation,
   reader, cli, journalDirectory, artifactSourceRoot, executorSourceRoot = ROOT, fetchImpl = fetch,
   runNative = runNativeProductionCommand, captureFn = capture, readStaffCutover = readNativeStaffCutoverReadiness,
   sourceReader = deploymentSourceCommit, now = () => Date.now() } = {}) {
   frontendAuthorityReview = frontendAuthorityReview ? structuredClone(frontendAuthorityReview) : undefined;
+  post0226StaffPreservationReview = post0226StaffPreservationReview ? structuredClone(post0226StaffPreservationReview) : undefined;
   const ordinaryPlan = pinnedPlan?.ordinaryPlan;
   needFn(['operations', 'client'].includes(app) && pinnedPlan?.schemaVersion === 2
     && pinnedPlan.contract === 'ordinary-frontend-retained-native-module-v2'
@@ -339,6 +344,10 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     && typeof sourceReader === 'function' && typeof now === 'function' && path.isAbsolute(journalDirectory ?? '')
     && path.isAbsolute(artifactSourceRoot ?? '') && path.isAbsolute(executorSourceRoot ?? ''),
   'Ordinary retained executor inputs invalid');
+  const operationsSuccessorPromotion = opsSuccessorReaderPromotionContract === OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT;
+  needFn(opsSuccessorReaderPromotionContract === undefined || (operationsSuccessorPromotion && app === 'operations'
+    && installedOpsSuccessorReaderContract === undefined && !resumeCandidate),
+  'Operations successor reader promotion requires its exact Operations-only contract');
   const isReviewedSuccessorPlan = app === 'operations' && ordinaryPlan.sourceCommit === REVIEWED_SUCCESSOR_SOURCE_COMMIT
     && ordinaryPlan.release.main.sha256 === REVIEWED_SUCCESSOR_MAIN_SHA256
     && ordinaryPlan.release.sourceMap.sha256 === REVIEWED_SUCCESSOR_MAP_SHA256;
@@ -357,6 +366,11 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   needFn(ordinaryPlan.installedOpsSuccessorReaderContract === installedOpsSuccessorReaderContract
     && pinnedPlan.installedOpsSuccessorReaderContract === installedOpsSuccessorReaderContract,
   'Executor selector must exactly match the read-only Ops contract pinned in both release plans');
+  needFn(ordinaryPlan.opsSuccessorReaderPromotionContract === opsSuccessorReaderPromotionContract
+    && pinnedPlan.opsSuccessorReaderPromotionContract === opsSuccessorReaderPromotionContract,
+  'Executor selector must exactly match the Operations successor promotion contract pinned in both release plans');
+  const baselineOpsReaderContract = operationsSuccessorPromotion
+    ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT : installedOpsSuccessorReaderContract;
   needFn(assetVerifierProvider && ['createVerifier','fetchVerifierAsset','removeVerifier','verifierAbsent']
     .every(name => typeof assetVerifierProvider[name] === 'function'), 'Bounded candidate namespace verifier is required before upload');
   expectedDeploymentVersions ??= ordinaryPlan.expectedDeploymentVersions;
@@ -378,22 +392,27 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
 
   if (app === 'operations') {
     const rows = expectedDeploymentVersions?.operations;
-    needFn(Array.isArray(rows) && rows.length === 2
-      && rows.filter(row => row.percentage === 100).length === 1
-      && rows.filter(row => row.percentage === 0).length === 1,
-    'Operations requires the exact reviewed 0/100 baseline distribution in its pinned plan');
+    if (operationsSuccessorPromotion) needFn(expectedDeploymentVersions === undefined,
+      'Operations successor promotion requires the pinned sole-active-version baseline');
+    else needFn(Array.isArray(rows) && rows.length === 2
+        && rows.filter(row => row.percentage === 100).length === 1
+        && rows.filter(row => row.percentage === 0).length === 1,
+      'Operations requires the exact reviewed 0/100 baseline distribution in its pinned plan');
   }
   const liveAtStart = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions });
   const before = resumeCandidate
     ? validateInstallation(structuredClone(resumeCandidate.originalSnapshot), { profile, selectedApp: app, expectedDeploymentVersions,
       ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app })
     : validateInstallation(liveAtStart, { profile, selectedApp: app, expectedDeploymentVersions,
-      ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app, opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
+      ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app, opsSuccessorReaderContract: baselineOpsReaderContract });
   const baselineVersionId = before[app].version.id;
   const operationsBaselineRows = expectedDeploymentVersions?.operations
     ?? before.operations.deployment.versions.map(row => ({ versionId: row.version_id, percentage: row.percentage }));
-  if (app === 'operations') needFn(expectedDeploymentVersions.operations.some(row => row.versionId === baselineVersionId && row.percentage === 100),
-    'Reviewed Ops 100% baseline differs from captured active version');
+  if (app === 'operations') needFn(operationsSuccessorPromotion
+    ? operationsBaselineRows.length === 1 && operationsBaselineRows[0].versionId === baselineVersionId
+      && operationsBaselineRows[0].percentage === 100
+    : expectedDeploymentVersions.operations.some(row => row.versionId === baselineVersionId && row.percentage === 100),
+  'Reviewed Ops 100% baseline differs from captured active version');
   if (resumeCandidate) assertResumeControls(before, liveAtStart, { app, candidateId: resumeCandidate.candidateId, profile,
     expectedDeploymentVersions, opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
   const bootstrap = app === 'operations' ? prepareOpsLegacyLedgerBootstrap(before) : null;
@@ -405,9 +424,9 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   needFn(Number.isFinite(observedAt) && observedAt <= now() && (resumeCandidate || now() - observedAt <= 5 * 60_000),
     'Pinned retained plan ledger observation is stale');
 
-  needFn(['native-staff-cutover-v1', ORDINARY_FRONTEND_AUTHORITY_CONTRACT].includes(staffAuthorityContract),
+  needFn(['native-staff-cutover-v1', ORDINARY_FRONTEND_AUTHORITY_CONTRACT, POST0226_STAFF_PRESERVATION_CONTRACT].includes(staffAuthorityContract),
     'Explicit supported Operations staff authority contract required');
-  if (app !== 'operations') needFn(staffAuthorityContract === 'native-staff-cutover-v1' && !frontendAuthorityReview,
+  if (app !== 'operations') needFn(staffAuthorityContract === 'native-staff-cutover-v1' && !frontendAuthorityReview && !post0226StaffPreservationReview,
     'Client release cannot select an Operations-only authority contract');
   if (app === 'operations' && staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT) {
     needFn(frontendAuthorityReview && typeof readFrontendAuthority === 'function'
@@ -415,8 +434,17 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     'Frontend-only release requires its exact reviewed authority packet and separate snapshot reader');
   }
   if (app === 'operations' && staffAuthorityContract === 'native-staff-cutover-v1') {
-    needFn(!frontendAuthorityReview, 'Frontend-only authority packet requires its explicit contract discriminator');
+    needFn(!frontendAuthorityReview && !post0226StaffPreservationReview,
+      'Frontend-only authority packet requires its explicit contract discriminator');
   }
+  if (app === 'operations' && staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT)
+    needFn(!post0226StaffPreservationReview, 'Post-0226 authority packet requires its exact contract discriminator');
+  if (app === 'operations' && staffAuthorityContract === POST0226_STAFF_PRESERVATION_CONTRACT)
+    needFn(post0226StaffPreservationReview && typeof readPost0226StaffPreservation === 'function'
+      && !frontendAuthorityReview && !staffCutoverReview && !staffReviewPath,
+    'Post-0226 frontend release requires only its separate preservation review and reader');
+  if (app === 'operations' && staffAuthorityContract !== POST0226_STAFF_PRESERVATION_CONTRACT)
+    needFn(!post0226StaffPreservationReview, 'Post-0226 authority packet cannot accompany another staff contract');
   const observations = { beforeReadiness: null };
   const review = app === 'operations' && staffAuthorityContract === 'native-staff-cutover-v1'
     ? (staffCutoverReview ?? (staffReviewPath ? readStaffCutoverReview(staffReviewPath) : undefined)) : undefined;
@@ -429,6 +457,16 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
         Object.fromEntries(Object.entries(receipt).filter(([key]) => key !== 'observedAt')),
         Object.fromEntries(Object.entries(observations.beforeReadiness).filter(([key]) => key !== 'observedAt'))),
       'Reviewed frontend-only staff authority changed during release; reconcile without retry');
+      else observations.beforeReadiness = receipt;
+      return receipt;
+    }
+    if (staffAuthorityContract === POST0226_STAFF_PRESERVATION_CONTRACT) {
+      const observed = await readPost0226StaffPreservation({ sourceCommit });
+      const receipt = validatePost0226StaffPreservationReview(post0226StaffPreservationReview, observed, { sourceCommit, now: now() });
+      if (observations.beforeReadiness) needFn(equal(
+        Object.fromEntries(Object.entries(receipt).filter(([key]) => key !== 'observedAt')),
+        Object.fromEntries(Object.entries(observations.beforeReadiness).filter(([key]) => key !== 'observedAt'))),
+      'Reviewed post-0226 staff/login authority changed during release; reconcile without retry');
       else observations.beforeReadiness = receipt;
       return receipt;
     }
@@ -460,7 +498,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   needFn(hash(canonical(before)) === ordinaryPlan.baselineSHA256, 'Captured installation differs from exact pinned offline plan baseline');
   validateOrdinaryFrontendRetainedPlan(before, pinnedPlan, { ordinaryPlan, profile, previousLedger,
     previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt,
-    installedOpsSuccessorReaderContract });
+    installedOpsSuccessorReaderContract, ...(operationsSuccessorPromotion ? { opsSuccessorReaderPromotionContract } : {}) });
   writePrivateJson(journalDirectory, 'release-plan.private.json', { schemaVersion: 2, contract: pinnedPlan.contract,
     application: app, sourceCommit, baselineVersionId, ordinaryPlanSHA256: pinnedPlan.ordinaryPlanSHA256,
     ledgerSHA256: pinnedPlan.retentionLedgerSHA256, rollbackVersionId: baselineVersionId,
@@ -477,12 +515,12 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   else {
     validateInstallation(preuploadRaw, { profile, selectedApp: app, expectedDeploymentVersions,
       ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
-      opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
+      opsSuccessorReaderContract: baselineOpsReaderContract });
     needFn(equal(stableState(before, app), stableState(preuploadRaw, app)), 'Production controls changed before native asset/module upload');
   }
   validateOrdinaryFrontendRetainedPlan(before, pinnedPlan, { ordinaryPlan, profile, previousLedger,
     previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt,
-    installedOpsSuccessorReaderContract });
+    installedOpsSuccessorReaderContract, ...(operationsSuccessorPromotion ? { opsSuccessorReaderPromotionContract } : {}) });
   needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before candidate qualification');
   let candidateId;
   if (resumeCandidate) {
@@ -518,7 +556,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const inactive = validateInstallation(await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: candidateExpected }), {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions,
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
-    opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
+    opsSuccessorReaderContract: baselineOpsReaderContract });
   const expectedInactive = structuredClone(before); expectedInactive[app].latest = candidateId;
   needFn(equal(stableState(inactive, app), stableState(expectedInactive, app)), 'Production controls changed after inactive candidate upload');
   if (resumeCandidate) needFn(equal(inactive[app].latestVersion, candidate)
@@ -539,7 +577,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const staged = validateInstallation(await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: stageExpectations }), {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions: stageExpectations,
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
-    opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
+    opsSuccessorReaderContract: baselineOpsReaderContract });
   needFn(equal(deploymentRows(staged, app), [...stageRows].sort((a, b) => a.versionId.localeCompare(b.versionId)))
     && sameExceptSelectedDeployment(inactive, staged, app), 'Candidate namespace stage did not produce exact baseline100/candidate0 with unchanged controls');
   await qualifyStaff('before-candidate-asset-verification');
@@ -559,7 +597,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const preactivation = validateInstallation(await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: stageExpectations }), {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions: stageExpectations,
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
-    opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
+    opsSuccessorReaderContract: baselineOpsReaderContract });
   needFn(equal(deploymentRows(preactivation, app), deploymentRows(staged, app))
     && equal(stableState(staged, app), stableState(preactivation, app)), 'Staged deployment or controls changed immediately before activation');
   needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before activation');
@@ -569,17 +607,16 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   appendIntent(journalDirectory, 'native-version-activate', { sourceCommit, workerName, candidateVersionId: candidateId,
     parentVersionId: baselineVersionId, exactRollbackVersionId: baselineVersionId, percentage: 100 });
   await runNative(cliPath, ['versions', 'deploy', `${candidateId}@100%`, '--yes', '--config', configPath], journalDirectory, 'activate', journalDirectory);
-  const activationExpectations = app === 'operations'
-    ? structuredClone(expectedDeploymentVersions)
-    : expectedDeploymentVersions;
-  if (app === 'operations') delete activationExpectations.operations;
+  const activationExpectations = app === 'operations' ? {} : expectedDeploymentVersions;
   const afterRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: activationExpectations });
   if (namedHandlerProof) verifyExactOpsSuccessorNamedHandlerAddition(before, afterRaw.operations.version, {
     sourceCommit, mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256 });
   const after = validateInstallation(afterRaw, { profile, selectedApp: app,
     expectedDeploymentVersions: activationExpectations,
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
-    opsSuccessorReaderContract: namedHandlerProof ? OPS_SUCCESSOR_READER_INSTALLED_CONTRACT : installedOpsSuccessorReaderContract });
+    opsSuccessorReaderContract: operationsSuccessorPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT
+      : namedHandlerProof ? OPS_SUCCESSOR_READER_INSTALLED_CONTRACT : installedOpsSuccessorReaderContract,
+    ...(operationsSuccessorPromotion ? { opsSuccessorReaderReleaseCandidateId: candidateId } : {}) });
   needFn(activeVersion(after[app]) === candidateId, 'Activation is uncertain; keep candidate and journal for GET-only reconciliation');
   needFn(deploymentRows(after, app)?.length === 1 && deploymentRows(after, app)[0].versionId === candidateId
     && deploymentRows(after, app)[0].percentage === 100, 'Postactivation distribution is not exactly candidate100');
@@ -605,7 +642,9 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const postNamespace = validateInstallation(postNamespaceRaw, {
     profile, selectedApp: app, expectedDeploymentVersions: activationExpectations,
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
-    opsSuccessorReaderContract: namedHandlerProof ? OPS_SUCCESSOR_READER_INSTALLED_CONTRACT : installedOpsSuccessorReaderContract });
+    opsSuccessorReaderContract: operationsSuccessorPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT
+      : namedHandlerProof ? OPS_SUCCESSOR_READER_INSTALLED_CONTRACT : installedOpsSuccessorReaderContract,
+    ...(operationsSuccessorPromotion ? { opsSuccessorReaderReleaseCandidateId: candidateId } : {}) });
   needFn(activeVersion(postNamespace[app]) === candidateId
     && deploymentRows(postNamespace, app)?.length === 1
     && deploymentRows(postNamespace, app)[0].versionId === candidateId
@@ -674,7 +713,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
  * one Operations authority packet matching its explicit contract. */
 export async function executeOrdinaryFrontendRetainedProduction({ app, plan, profile, expectedDeploymentVersions,
   staffAuthorityContract = 'native-staff-cutover-v1', artifactSourceRoot, staffReviewPath,
-  frontendAuthorityReviewPath, journalDirectory, env = process.env, fetchImpl = fetch } = {}) {
+  frontendAuthorityReviewPath, post0226StaffPreservationReviewPath, opsSuccessorReaderPromotionContract,
+  journalDirectory, env = process.env, fetchImpl = fetch } = {}) {
   needFn(env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
     && typeof env.CLOUDFLARE_API_TOKEN === 'string' && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN),
   'Cloudflare account and API token are required by the explicitly invoked production executor');
@@ -685,28 +725,45 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
     && plan.application === app && planSourceCommit === plan.sourceCommit && HEX40.test(planSourceCommit ?? ''),
   'Pinned ordinary retained plan source identity is invalid');
   const reader = new CloudflareReader(env.CLOUDFLARE_ACCOUNT_ID, env.CLOUDFLARE_API_TOKEN);
-  needFn(staffAuthorityContract === 'native-staff-cutover-v1' || staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT,
+  needFn(staffAuthorityContract === 'native-staff-cutover-v1' || staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT
+    || staffAuthorityContract === POST0226_STAFF_PRESERVATION_CONTRACT,
     'Explicit supported Operations staff authority contract required');
   const review = app === 'operations' && staffAuthorityContract === 'native-staff-cutover-v1'
     ? readStaffCutoverReview(staffReviewPath) : undefined;
   const frontendReview = app === 'operations' && staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT
     ? readStaffCutoverReview(frontendAuthorityReviewPath) : undefined;
-  if (app !== 'operations') needFn(!staffReviewPath && !frontendAuthorityReviewPath,
+  const post0226Review = app === 'operations' && staffAuthorityContract === POST0226_STAFF_PRESERVATION_CONTRACT
+    ? readStaffCutoverReview(post0226StaffPreservationReviewPath) : undefined;
+  if (app !== 'operations') needFn(!staffReviewPath && !frontendAuthorityReviewPath && !post0226StaffPreservationReviewPath,
     'Operations authority packets cannot be supplied for a Client release');
-  if (staffAuthorityContract === 'native-staff-cutover-v1') needFn(!frontendAuthorityReviewPath,
+  if (staffAuthorityContract === 'native-staff-cutover-v1') needFn(!frontendAuthorityReviewPath && !post0226StaffPreservationReviewPath,
     'Frontend-only review packet requires its explicit authority contract');
-  if (staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT) needFn(!staffReviewPath,
+  if (staffAuthorityContract === ORDINARY_FRONTEND_AUTHORITY_CONTRACT) needFn(!staffReviewPath && !post0226StaffPreservationReviewPath,
     'Native cutover packet cannot be combined with frontend-only authority');
-  needFn(!(review && frontendReview), 'Select exactly one Operations staff authority packet');
+  if (staffAuthorityContract === POST0226_STAFF_PRESERVATION_CONTRACT)
+    needFn(!staffReviewPath && !frontendAuthorityReviewPath, 'Post-0226 preservation review cannot be combined with another authority packet');
+  validateProductionAuthorityPacketSelection({ app, review, frontendReview, post0226Review });
   const assetVerifierProvider = createJournaledAssetVerifierProvider({ accountId: env.CLOUDFLARE_ACCOUNT_ID,
     token: env.CLOUDFLARE_API_TOKEN, fetchImpl, profile: PROFILE, journalDirectory, sourceCommit: planSourceCommit });
   return executeOrdinaryFrontendRetainedRelease({ app, plan, profile, expectedDeploymentVersions,
     assetVerifierProvider, staffAuthorityContract, staffCutoverReview: review, frontendAuthorityReview: frontendReview,
+    post0226StaffPreservationReview: post0226Review,
+    opsSuccessorReaderPromotionContract,
     reader, cli: path.join(ROOT, `apps/${app}/node_modules/wrangler/wrangler-dist/cli.js`),
     journalDirectory, artifactSourceRoot, executorSourceRoot: ROOT, fetchImpl,
     runNative: (cli, args, directory, phase, cwd) => runNativeProductionCommand(cli, args, directory, phase, cwd, env),
     sourceReader: root => deploymentSourceCommit(root, env),
     readStaffCutover: args => readNativeStaffCutoverReadiness(args) });
+}
+
+/** Operations releases select one authority packet; Client releases select none. */
+export function validateProductionAuthorityPacketSelection({ app, review, frontendReview, post0226Review } = {}) {
+  needFn(app === 'operations' || app === 'client', 'Production authority packet application is invalid');
+  const count = [review, frontendReview, post0226Review].filter(Boolean).length;
+  needFn(app === 'operations' ? count === 1 : count === 0,
+    app === 'operations' ? 'Select exactly one Operations staff authority packet'
+      : 'Client release cannot select an Operations staff authority packet');
+  return true;
 }
 
 /** Bind every temporary verifier mutation intent to the already validated plan. */

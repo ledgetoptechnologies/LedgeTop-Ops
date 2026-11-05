@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { generateKeyPairSync, createHash, createDecipheriv, privateDecrypt, constants, randomUUID } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ProductionAutoJournal, sealProductionProviderResponse } from './production-auto-journal.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -41,6 +42,12 @@ function recipient() {
   const pair = generateKeyPairSync('rsa', { modulusLength: 3072 });
   const pem = pair.publicKey.export({ type: 'spki', format: 'pem' });
   return { schemaVersion: 1, keyIdSha256: sha(pair.publicKey.export({ type: 'spki', format: 'der' })), publicKeyPem: pem };
+}
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  const keys = Object.keys(value).sort();
+  return `{${keys.map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
 }
 function journal(api, dir, changes = {}) {
   return new ProductionAutoJournal({ token: 'x'.repeat(32), workerName: 'ledgetop-clients', sourceCommit: changes.sourceCommit ?? COMMIT,
@@ -173,6 +180,52 @@ test('seal primitive binds ciphertext to request context and rejects an unpinned
   assert.equal(result.bytes.includes(bytes), false);
   assert.throws(() => sealProductionProviderResponse(bytes, { releaseId: sha('release'), requestId: '22222222-2222-4222-8222-222222222222',
     method: 'POST', pathSha256: sha('/x'), status: 200 }, { schemaVersion: 1, keyIdSha256: '0'.repeat(64), publicKeyPem: '' }));
+});
+
+test('default recipient loader returns the pinned record accepted by journal and seal', async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-loader-'));
+  try {
+    const pair = generateKeyPairSync('rsa', { modulusLength: 3072 });
+    const fixtureRecipient = {
+      schemaVersion: 1,
+      keyIdSha256: sha(pair.publicKey.export({ type: 'spki', format: 'der' })),
+      publicKeyPem: pair.publicKey.export({ type: 'spki', format: 'pem' }),
+    };
+    const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
+    writeFileSync(path.join(directory, 'production-auto-private-recipient.mjs'),
+      `export const PRODUCTION_AUTO_JOURNAL_RECIPIENT = Object.freeze(${JSON.stringify(fixtureRecipient)});\n`);
+    writeFileSync(path.join(directory, 'production-auto-time.mjs'), readFileSync(path.join(sourceDirectory, 'production-auto-time.mjs')));
+    writeFileSync(path.join(directory, 'production-auto-journal.mjs'), readFileSync(path.join(sourceDirectory, 'production-auto-journal.mjs')));
+
+    const fixtureModule = await import(`${pathToFileURL(path.join(directory, 'production-auto-journal.mjs')).href}?fixture=${randomUUID()}`);
+    const loaded = fixtureModule.loadPinnedProductionAutoRecipient();
+    assert.deepEqual(loaded, fixtureRecipient);
+    assert.deepEqual(Reflect.ownKeys(loaded).sort(), ['keyIdSha256', 'publicKeyPem', 'schemaVersion']);
+    assert.equal(Object.getPrototypeOf(loaded), Object.prototype);
+    assert.equal(Object.isFrozen(loaded), true);
+
+    const run = new fixtureModule.ProductionAutoJournal({
+      token: 'x'.repeat(32), workerName: 'ledgetop-clients', sourceCommit: COMMIT,
+      ciRunId: 100, ciRunAttempt: 1, workflowRunId: 123, workflowRunAttempt: 1,
+      recipient: loaded, responseDirectory: directory,
+    });
+    assert.equal(run.snapshot(), null);
+
+    const context = { releaseId: sha('loader-release'), requestId: '22222222-2222-4222-8222-222222222222',
+      method: 'POST', pathSha256: sha('/workers/scripts/ledgetop-clients/deployments'), status: 200 };
+    const plaintext = Buffer.from('ephemeral default-loader roundtrip');
+    const sealed = fixtureModule.sealProductionProviderResponse(plaintext, context, loaded);
+    const envelope = JSON.parse(sealed.bytes.toString('utf8'));
+    const aad = Buffer.from(canonical({ schemaVersion: 1, algorithm: 'RSA-OAEP-256+A256GCM',
+      keyId: fixtureRecipient.keyIdSha256, context }));
+    const dataKey = privateDecrypt({ key: pair.privateKey, oaepHash: 'sha256', padding: constants.RSA_PKCS1_OAEP_PADDING },
+      Buffer.from(envelope.wrappedKey, 'base64'));
+    const decipher = createDecipheriv('aes-256-gcm', dataKey, Buffer.from(envelope.nonce, 'base64'));
+    decipher.setAAD(aad);
+    decipher.setAuthTag(Buffer.from(envelope.tag, 'base64'));
+    const recovered = Buffer.concat([decipher.update(Buffer.from(envelope.ciphertext, 'base64')), decipher.final()]);
+    assert.deepEqual(recovered, plaintext);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('Ops Sync backend journal has only upload and activation writes, then verifies artifact association', async () => {

@@ -2,6 +2,8 @@ import type { Env } from "./types";
 
 const PRODUCTION_OPERATIONS_ORIGINS = new Set([
   "https://ops.ledgetop.app",
+]);
+const RETIRED_PRODUCTION_OPERATIONS_ORIGINS = new Set([
   "https://ops.ledgetopdroneservices.com",
   "https://ops.ledgetoptechnologies.com",
 ]);
@@ -9,7 +11,7 @@ const STAGING_OPERATIONS_ORIGINS = new Set([
   "https://ops-staging.ledgetopdroneservices.com",
 ]);
 const ALL_KNOWN_OPERATIONS_ORIGINS = new Set([
-  ...PRODUCTION_OPERATIONS_ORIGINS, ...STAGING_OPERATIONS_ORIGINS,
+  ...PRODUCTION_OPERATIONS_ORIGINS, ...RETIRED_PRODUCTION_OPERATIONS_ORIGINS, ...STAGING_OPERATIONS_ORIGINS,
 ]);
 const NON_OPERATIONS_APP_HOST = /^(?:portal|client|delivery|incoming)(?:-staging)?\.(?:ledgetop\.app|ledgetopdroneservices\.com|ledgetoptechnologies\.com)$/u;
 
@@ -20,6 +22,12 @@ export function requestHostAllowed(
   if (env.ENVIRONMENT !== "production" && env.ENVIRONMENT !== "staging") return true;
   try {
     const request = new URL(requestUrl);
+    // Once production is configured on the canonical Ledge Top host, the
+    // former division hosts are navigation-redirect-only. Do not let an
+    // accidental OPERATIONS_ORIGINS override reopen their APIs, even though
+    // the Worker may retain those custom domains for redirects and old assets.
+    if (env.ENVIRONMENT === "production" && env.EXPECTED_HOST === "ops.ledgetop.app"
+      && RETIRED_PRODUCTION_OPERATIONS_ORIGINS.has(request.origin)) return false;
     const configured = env.OPERATIONS_ORIGINS
       ? env.OPERATIONS_ORIGINS.split(",").map(value => value.trim())
       : [`https://${env.EXPECTED_HOST}`];
