@@ -165,8 +165,8 @@ async function processSourceReleaseAttempt({ attemptId, processing, storage, sou
     if (intent) sourceRelease.outbox.hold(attemptId, 'timer_clock_invalid');
     return { status: 'held', reason: 'timer_clock_invalid' };
   }
-  const readyProof = prior?.request ? prior.readyProof
-    : await verifiedOutputProof({ processing, storage, sourceIntake, attemptId, signal, now: () => nowIso });
+  const readyProof = prior?.readyProof ||
+    await verifiedOutputProof({ processing, storage, sourceIntake, attemptId, signal, now: () => nowIso });
   const { binding: snapshotBinding } = acceptSnapshot(processing, sourceIntake, current);
   let intent = sourceRelease.outbox.persistReady({ attemptId, binding, readyProof,
     sourceManifest: request.sourceManifest, derivedManifest: request.derivedManifest, snapshotBinding });
@@ -181,6 +181,11 @@ async function processSourceReleaseAttempt({ attemptId, processing, storage, sou
     intent = sourceRelease.outbox.persistObservation(attemptId, observation);
   }
   if (!intent.request) {
+    if (prior?.readyProof) {
+      const fresh = await verifiedOutputProof({ processing, storage, sourceIntake, attemptId, signal, now: () => nowIso });
+      if (!Contract.canonical({ ...fresh, verifiedAt: intent.readyProof.verifiedAt }).equals(Contract.canonical(intent.readyProof)))
+        fail('source_release_output_binding_changed');
+    }
     const signed = sourceReleaseAuthorization({ intent, binding, request, completion, copy,
       observation: intent.observation, readyProof: intent.readyProof, snapshotBinding, signer: sourceRelease.signer });
     intent = sourceRelease.outbox.persistRequest(attemptId, signed.authorization, signed,
@@ -197,8 +202,11 @@ async function processSourceReleaseAttempt({ attemptId, processing, storage, sou
   }
   if (!status) status = await sourceRelease.client.submit(binding.jobId,
     Contract.canonical(intent.request).toString('utf8'), statusBinding, { signal });
-  if (status.state === 'released') await verifiedOutputProof({ processing, storage, sourceIntake, attemptId,
-    signal, now: () => nowIso });
+  if (status.state === 'released') {
+    const fresh = await verifiedOutputProof({ processing, storage, sourceIntake, attemptId, signal, now: () => nowIso });
+    if (!Contract.canonical({ ...fresh, verifiedAt: intent.readyProof.verifiedAt }).equals(Contract.canonical(intent.readyProof)))
+      fail('source_release_output_binding_changed');
+  }
   intent = sourceRelease.outbox.persistStatus(attemptId, status);
   if (intent.state === 'released') retireSnapshot(processing, sourceIntake, sourceRelease, attemptId);
   return { status: intent.state, state: intent.status?.state, holdReason: intent.holdReason };
