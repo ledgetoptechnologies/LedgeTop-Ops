@@ -150,6 +150,59 @@ class RuntimeTests(unittest.TestCase):
             render.assert_not_called()
         self.assertEqual(self.skipped(), [{"path": "2026/Synthetic/Raw/clip.mp4", "reason": "earlier_failure_reason_unknown", "attempts": 3, "gave_up": True}])
 
+    @unittest.skipIf(os.name == "nt", "POSIX modes require Linux")
+    def test_state_and_report_are_owner_only(self):
+        self.state.chmod(0o755)
+        (self.state / "jobs.sqlite").chmod(0o644)
+        store = app.Store(self.state)
+        self.addCleanup(store.close)
+        self.generator.scan(now=2000)
+        mode = lambda path: path.stat().st_mode & 0o777
+        self.assertEqual(mode(self.state), 0o700)
+        self.assertEqual(mode(self.state / "jobs.sqlite"), 0o600)
+        self.assertEqual(mode(self.state / app.SKIPPED_REPORT), 0o600)
+
+    def test_failed_report_write_keeps_the_previous_report_and_the_scan(self):
+        self.generator.scan(now=2000)
+        before = (self.state / app.SKIPPED_REPORT).read_text()
+        real_replace = os.replace
+        def replace(source, target):
+            if pathlib.Path(target).name == app.SKIPPED_REPORT:
+                raise OSError("disk full")
+            real_replace(source, target)
+        with mock.patch.object(app.os, "replace", side_effect=replace):
+            self.assertEqual(self.generator.scan(now=2002)["failed"], 0)
+        self.assertEqual((self.state / app.SKIPPED_REPORT).read_text(), before)
+        self.assertEqual(list(self.state.glob(".skipped-files-*")), [])
+
+    @unittest.skipIf(os.name == "nt", "symlink privilege requires Linux")
+    def test_report_never_writes_through_links(self):
+        outside = pathlib.Path(self.tmp.name) / "outside"
+        outside.write_text("untouched")
+        stale = self.state / ".skipped-files-stale.tmp"
+        stale.symlink_to(outside)
+        (self.state / app.SKIPPED_REPORT).symlink_to(outside)
+        self.generator.write_skipped(2000)
+        self.assertEqual(outside.read_text(), "untouched")
+        self.assertFalse(stale.is_symlink())
+        self.assertFalse((self.state / app.SKIPPED_REPORT).is_symlink())
+        self.assertEqual(self.skipped(), [])
+
+    @unittest.skipIf(os.name == "nt", "symlink privilege requires Linux")
+    def test_unsafe_source_is_not_called_a_collision(self):
+        outside = pathlib.Path(self.tmp.name) / "outside.mp4"
+        outside.write_bytes(b"x")
+        (self.folder / "linked.mp4").symlink_to(outside)
+        self.generator.scan(now=2000)
+        self.assertEqual([(row["path"], row["reason"]) for row in self.skipped()], [("2026/Synthetic/Raw/linked.mp4", "unsafe_path")])
+
+    def test_stored_path_is_removed_after_success(self):
+        self.generator.scan(now=2000)
+        key = app.key_for(self.root, self.path)
+        self.generator.store.failure(key, 2001, self.config, "2026/Synthetic/Raw/clip.mp4", "process_failed")
+        self.generator.store.success(key, self.config.render_version, "proxy")
+        self.assertEqual(self.generator.store.db.execute("SELECT path, error FROM jobs WHERE key=?", (key,)).fetchone(), (None, None))
+
     def test_existing_state_database_gains_report_columns(self):
         state = pathlib.Path(self.tmp.name) / "old-state"
         state.mkdir()

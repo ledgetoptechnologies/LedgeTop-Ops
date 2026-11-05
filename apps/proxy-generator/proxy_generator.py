@@ -256,6 +256,9 @@ def encode_args(source, tmp, media, config):
 
 class Store:
     def __init__(self, state):
+        # Best effort: a shared mount's ACLs can refuse or ignore these modes.
+        with contextlib.suppress(OSError):
+            os.chmod(state, 0o700)
         self.db = sqlite3.connect(state / "jobs.sqlite")
         self.db.execute("CREATE TABLE IF NOT EXISTS jobs (key TEXT PRIMARY KEY, identity TEXT, observed REAL, version TEXT, output_identity TEXT, failures INTEGER DEFAULT 0, retry_at REAL DEFAULT 0, legacy_eligible INTEGER DEFAULT 1)")
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}
@@ -263,17 +266,19 @@ class Store:
             if column not in columns:
                 self.db.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
         self.db.commit()
+        with contextlib.suppress(OSError):
+            os.chmod(state / "jobs.sqlite", 0o600)
 
     def observe(self, key, source_id, now):
         row = self.db.execute("SELECT identity, observed, version, output_identity, failures, retry_at, legacy_eligible FROM jobs WHERE key=?", (key,)).fetchone()
         if not row or row[0] != source_id:
-            self.db.execute("INSERT INTO jobs(key,identity,observed) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET identity=excluded.identity,observed=excluded.observed,version=NULL,output_identity=NULL,failures=0,retry_at=0,legacy_eligible=0", (key, source_id, now))
+            self.db.execute("INSERT INTO jobs(key,identity,observed) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET identity=excluded.identity,observed=excluded.observed,version=NULL,output_identity=NULL,failures=0,retry_at=0,legacy_eligible=0,path=NULL,error=NULL", (key, source_id, now))
             self.db.commit()
             return None
         return row
 
     def success(self, key, version, output_id):
-        self.db.execute("UPDATE jobs SET version=?,output_identity=?,failures=0,retry_at=0,legacy_eligible=0,error=NULL WHERE key=?", (version, output_id, key))
+        self.db.execute("UPDATE jobs SET version=?,output_identity=?,failures=0,retry_at=0,legacy_eligible=0,path=NULL,error=NULL WHERE key=?", (version, output_id, key))
         self.db.commit()
 
     def failure(self, key, now, config, path=None, error=None):
@@ -282,7 +287,7 @@ class Store:
 
     def remember_path(self, key, path):
         # Failures from before the report kept no path; a scan fills it in without retrying them.
-        if self.db.execute("UPDATE jobs SET path=? WHERE key=? AND path IS NULL", (path, key)).rowcount:
+        if self.db.execute("UPDATE jobs SET path=? WHERE key=? AND path IS NULL AND failures>0", (path, key)).rowcount:
             self.db.commit()
 
     def failed(self):
@@ -298,7 +303,7 @@ class Generator:
         self.store = Store(config.state)
         self.health = config.state / "health.json"
         self.failure_codes = {}
-        self.collisions = set()
+        self.scan_skips = {}
 
     def heartbeat(self):
         temp = self.config.state / "health.tmp"
@@ -333,7 +338,7 @@ class Generator:
                         yield path
                     else:
                         log("source_skipped_unsafe_or_collision")
-                        self.collisions.add(path.relative_to(root).as_posix())
+                        self.scan_skips[path.relative_to(root).as_posix()] = "same_name_collision" if counts[path.stem.casefold()] > 1 else "unsafe_path"
 
     def render(self, path, source_id):
         config = self.config
@@ -385,20 +390,38 @@ class Generator:
                     temp.unlink()
 
     def write_skipped(self, now):
-        """Private list of sources without a current proxy. Paths stay in the state folder, never in logs."""
-        root = self.config.root
+        """Private list of sources without a current proxy. Paths stay in the state folder, never in logs.
+
+        A failed write keeps the previous report: reporting must never stop a scan.
+        """
+        root, state = self.config.root, self.config.state
         files = [{"path": path, "reason": error or "earlier_failure_reason_unknown", "attempts": failures, "gave_up": failures >= self.config.attempts}
             for path, error, failures in self.store.failed() if (root / path).is_file()]
-        files += [{"path": path, "reason": "same_name_collision", "attempts": 0, "gave_up": True} for path in sorted(self.collisions)]
-        temp = self.config.state / "skipped-files.tmp"
-        temp.write_text(json.dumps({"updated": now, "files": files}, indent=1))
-        os.replace(temp, self.config.state / SKIPPED_REPORT)
+        files += [{"path": path, "reason": reason, "attempts": 0, "gave_up": True} for path, reason in sorted(self.scan_skips.items())]
+        temp = None
+        try:
+            # The single-instance lock makes any existing temporary a leftover; unlink never follows a link.
+            for stale in state.glob(".skipped-files-*"):
+                stale.unlink(missing_ok=True)
+            # mkstemp is exclusive and owner-only; replacing the name never writes through a link.
+            descriptor, name = tempfile.mkstemp(prefix=".skipped-files-", suffix=".tmp", dir=state)
+            temp = pathlib.Path(name)
+            with os.fdopen(descriptor, "w") as file:
+                json.dump({"updated": now, "files": files}, file, indent=1)
+            os.replace(temp, state / SKIPPED_REPORT)
+            temp = None
+        except OSError:
+            log("skipped_report_failed")
+        finally:
+            if temp is not None:
+                with contextlib.suppress(OSError):
+                    temp.unlink()
 
     def scan(self, now=None):
         config = self.config
         now = time.time() if now is None else now
         self.store_snapshot = {}
-        self.collisions = set()
+        self.scan_skips = {}
         paths = {}
         counts = {"generated": 0, "adopted": 0, "failed": 0, "current": 0, "deferred": 0}
         pending = {}
