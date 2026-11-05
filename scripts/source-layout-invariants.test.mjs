@@ -510,13 +510,13 @@ test("the deployed Operations Worker preserves native production transport and e
   // Preserve the current native production transport. Deferred catalog/legacy
   // mutation paths stay disabled and have no production service/workflow binding.
   // New settings are disabled onboarding mail controls and isolated mail/activation crons.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "2e8577dc157b2fba526aea46607f14dde85e398320ff71554655ea3e895c128d");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "4fdfd23dfefa3b969407c781138697efac9d928f7ee9b3eaa4ec396b00f6382b");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.equal(config.vars.PUBLIC_BASE_URL,"https://ops.ledgetop.app");
   assert.equal(config.vars.EXPECTED_HOST,"ops.ledgetop.app");
   assert.equal(Object.hasOwn(config.vars,"CANONICAL_BROWSER_NAVIGATION_ENABLED"),false,"existing canonical origins activate Ops pages without a new scalar binding");
   assert.equal(config.vars.OPERATIONS_ORIGINS,"https://ops.ledgetop.app");
-  assert.equal(config.vars.LEGACY_OPERATIONS_REDIRECT_ORIGINS,"https://ops.ledgetopdroneservices.com,https://ops.ledgetoptechnologies.com");
+  assert.equal(Object.hasOwn(config.vars,"LEGACY_OPERATIONS_REDIRECT_ORIGINS"),false,"fixed legacy redirect compatibility does not require another production scalar");
   assert.deepEqual(config.routes.map(route=>route.pattern),["ops.ledgetop.app","ops.ledgetopdroneservices.com","ops.ledgetoptechnologies.com","incoming.ledgetopdroneservices.com"]);
   assert.deepEqual(config.assets.run_worker_first,["/api/*","/health","/r/*","/","/dashboard","/airspace","/operations","/clients","/clients/*","/delivery","/team","/administration",
     "/viewer","/viewer/models","/viewer/sharing","/viewer/processing","/operations/processing",
